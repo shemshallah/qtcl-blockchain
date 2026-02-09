@@ -38,6 +38,14 @@ from collections import defaultdict, deque
 from functools import wraps
 import traceback
 
+# ═══════════════════════════════════════════════════════════════════════════
+# NEW: Password hashing, quantum validation, transaction flow
+# ═══════════════════════════════════════════════════════════════════════════
+import secrets
+import bcrypt
+from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister
+from qiskit_aer import AerSimulator
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # DEPENDENCY INSTALLATION
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -55,6 +63,7 @@ def ensure_packages():
         'qiskit_aer': 'qiskit-aer',
         'redis': 'redis',
         'requests': 'requests'
+        'bcrypt': 'bcrypt',
     }
     
     for module, pip_name in packages.items():
@@ -134,6 +143,24 @@ def validate():
     COHERENCE_REFRESH_INTERVAL_SECONDS = 5
     ENTROPY_THRESHOLD_FOR_SUPERPOSITION = 0.8  # Must have 80%+ entropy
     
+# ─────────────────────────────────────────────────────────────────────────
+    # AUTHENTICATION & PASSWORD MANAGEMENT
+    # ─────────────────────────────────────────────────────────────────────────
+    BCRYPT_ROUNDS = 12  # Cost factor for password hashing
+    ACCESS_TOKEN_EXPIRY_HOURS = 24
+    REFRESH_TOKEN_EXPIRY_DAYS = 30
+    PASSWORD_MIN_LENGTH = 8
+    FAILED_LOGIN_ATTEMPTS_LIMIT = 5
+    FAILED_LOGIN_LOCKOUT_MINUTES = 15
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # QUANTUM BLOCK VALIDATION
+    # ─────────────────────────────────────────────────────────────────────────
+    QUANTUM_MIN_ENTROPY = 0.65
+    QUANTUM_MIN_COHERENCE = 0.70
+    QUANTUM_VALIDATORS_REQUIRED = 3
+    QUANTUM_AGREEMENT_THRESHOLD = 0.75
+
     # ─────────────────────────────────────────────────────────────────────────
     # RATE LIMITING
     # ─────────────────────────────────────────────────────────────────────────
@@ -652,6 +679,32 @@ class Block:
             'created_at': self.created_at.isoformat() if self.created_at else None
         }
 
+# ═══════════════════════════════════════════════════════════════════════════
+# PASSWORD MANAGEMENT - BCRYPT
+# ═══════════════════════════════════════════════════════════════════════════
+
+class PasswordManager:
+    """Bcrypt-based password hashing and verification"""
+    
+    @staticmethod
+    def hash_password(password: str) -> str:
+        """Hash password with bcrypt"""
+        if not password or len(password) < Config.PASSWORD_MIN_LENGTH:
+            raise ValueError(f"Password must be at least {Config.PASSWORD_MIN_LENGTH} characters")
+        
+        salt = bcrypt.gensalt(rounds=Config.BCRYPT_ROUNDS)
+        hashed = bcrypt.hashpw(password.encode('utf-8'), salt)
+        return hashed.decode('utf-8')
+    
+    @staticmethod
+    def verify_password(password: str, hashed: str) -> bool:
+        """Verify password against bcrypt hash"""
+        try:
+            return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+        except Exception as e:
+            logger.error(f"Password verification error: {e}")
+            return False
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # JWT AUTHENTICATION & SECURITY
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -663,22 +716,25 @@ class JWTHandler:
     ALGORITHM = Config.JWT_ALGORITHM
     
     @staticmethod
-    def create_token(user_id: str, email: str, role: str, expires_in_hours: int = 24) -> str:
-        """Create JWT token for authenticated user"""
-        now = datetime.utcnow()
-        exp = now + timedelta(hours=expires_in_hours)
-        
-        payload = {
-            'sub': user_id,
-            'email': email,
-            'role': role,
-            'iat': int(now.timestamp()),
-            'exp': int(exp.timestamp())
-        }
-        
-        token = jwt.encode(payload, JWTHandler.SECRET, algorithm=JWTHandler.ALGORITHM)
-        logger.info(f"Created JWT token for user {user_id}")
-        return token
+def create_token(user_id: str, email: str, role: str, expires_in_hours: int = 24, token_type: str = 'access') -> str:
+    """Create JWT token for authenticated user"""
+    now = datetime.utcnow()
+    exp = now + timedelta(hours=expires_in_hours)
+    
+    payload = {
+        'sub': user_id,
+        'email': email,
+        'role': role,
+        'type': token_type,
+        'iat': int(now.timestamp()),
+        'exp': int(exp.timestamp())
+    }
+    
+    token = jwt.encode(payload, JWTHandler.SECRET, algorithm=JWTHandler.ALGORITHM)
+    if isinstance(token, bytes):
+        token = token.decode('utf-8')
+    logger.info(f"Created {token_type} JWT token for user {user_id}")
+    return token
     
     @staticmethod
     def verify_token(token: str) -> Dict:
@@ -722,6 +778,453 @@ class JWTHandler:
         
         decorated.__name__ = f.__name__
         return decorated
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ENHANCED AUTHENTICATION HANDLER
+# ═══════════════════════════════════════════════════════════════════════════
+
+class AuthenticationHandler:
+    """Enhanced auth with password verification and session management"""
+    
+    def __init__(self, db_connection):
+        self.db = db_connection
+    
+    def register_user(self, email: str, password: str, name: str) -> Tuple[bool, Dict]:
+        """Register new user with email and password"""
+        try:
+            email = email.strip().lower()
+            if not email or '@' not in email:
+                return False, {'error': 'Invalid email'}
+            if len(password) < Config.PASSWORD_MIN_LENGTH:
+                return False, {'error': f'Password must be at least {Config.PASSWORD_MIN_LENGTH} characters'}
+            if not name or len(name) < 2:
+                return False, {'error': 'Name required (min 2 chars)'}
+            
+            # Check if user exists
+            existing = self.db.execute_one(
+                "SELECT user_id FROM users WHERE email = %s",
+                (email,)
+            )
+            if existing:
+                return False, {'error': 'User already exists'}
+            
+            # Create user_id as UUID
+            user_id = str(uuid.uuid4())
+            password_hash = PasswordManager.hash_password(password)
+            
+            # Insert user
+            self.db.execute_update(
+                """INSERT INTO users 
+                   (user_id, email, name, password_hash, role, balance, is_active, created_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())""",
+                (user_id, email, name, password_hash, 'user', 0, True)
+            )
+            
+            self._log_auth_event(user_id, 'REGISTRATION_SUCCESS', email, True)
+            logger.info(f"User registered: {email} ({user_id})")
+            
+            return True, {
+                'user_id': user_id,
+                'email': email,
+                'name': name,
+                'message': 'Registration successful'
+            }
+        except Exception as e:
+            logger.error(f"Registration error: {e}")
+            self._log_auth_event(None, 'REGISTRATION_FAILED', email, False, str(e))
+            return False, {'error': 'Registration failed'}
+    
+    def authenticate(self, email: str, password: str) -> Tuple[bool, Dict]:
+        """Authenticate user with email and password"""
+        try:
+            email = email.strip().lower()
+            
+            # Get user
+            user = self.db.execute_one(
+                "SELECT user_id, password_hash, name, role, is_active FROM users WHERE email = %s",
+                (email,)
+            )
+            
+            if not user:
+                logger.warning(f"Login attempt - user not found: {email}")
+                self._log_auth_event(None, 'LOGIN_FAILED_USER_NOT_FOUND', email, False)
+                return False, {'error': 'Invalid credentials'}
+            
+            user_id = user['user_id']
+            
+            if not user['is_active']:
+                logger.warning(f"Login attempt - account inactive: {email}")
+                self._log_auth_event(user_id, 'LOGIN_FAILED_INACTIVE', email, False)
+                return False, {'error': 'Account is inactive'}
+            
+            # Check rate limiting
+            failed_count = self._check_rate_limit(user_id)
+            if failed_count >= Config.FAILED_LOGIN_ATTEMPTS_LIMIT:
+                logger.warning(f"Login rate limit exceeded: {email}")
+                self._log_auth_event(user_id, 'LOGIN_FAILED_RATE_LIMIT', email, False)
+                return False, {'error': 'Too many failed attempts. Try again later'}
+            
+            # Verify password
+            if not PasswordManager.verify_password(password, user['password_hash']):
+                logger.warning(f"Login attempt - password mismatch: {email}")
+                self._log_auth_event(user_id, 'LOGIN_FAILED_WRONG_PASSWORD', email, False)
+                return False, {'error': 'Invalid credentials'}
+            
+            # Generate tokens
+            access_token = JWTHandler.create_token(
+                user_id, email, user['role'], 
+                Config.ACCESS_TOKEN_EXPIRY_HOURS, 'access'
+            )
+            refresh_token = JWTHandler.create_token(
+                user_id, email, user['role'],
+                Config.REFRESH_TOKEN_EXPIRY_DAYS * 24, 'refresh'
+            )
+            
+            # Create session
+            session_id = str(uuid.uuid4())
+            self.db.execute_update(
+                """INSERT INTO sessions 
+                   (session_id, user_id, access_token, refresh_token, expires_at, created_at, last_activity)
+                   VALUES (%s, %s, %s, %s, NOW() + INTERVAL '%d hours', NOW(), NOW())""" % Config.ACCESS_TOKEN_EXPIRY_HOURS,
+                (session_id, user_id, access_token, refresh_token)
+            )
+            
+            # Update last login
+            self.db.execute_update(
+                "UPDATE users SET last_login = NOW() WHERE user_id = %s",
+                (user_id,)
+            )
+            
+            self._clear_failed_attempts(user_id)
+            self._log_auth_event(user_id, 'LOGIN_SUCCESS', email, True)
+            logger.info(f"User logged in: {email}")
+            
+            return True, {
+                'access_token': access_token,
+                'refresh_token': refresh_token,
+                'token_type': 'Bearer',
+                'expires_in': Config.ACCESS_TOKEN_EXPIRY_HOURS * 3600,
+                'session_id': session_id,
+                'user': {
+                    'user_id': user_id,
+                    'email': email,
+                    'name': user['name'],
+                    'role': user['role']
+                }
+            }
+        except Exception as e:
+            logger.error(f"Authentication error: {e}")
+            return False, {'error': 'Authentication failed'}
+    
+    def change_password(self, user_id: str, old_password: str, new_password: str) -> Tuple[bool, Dict]:
+        """Change user password"""
+        try:
+            user = self.db.execute_one(
+                "SELECT email, password_hash FROM users WHERE user_id = %s",
+                (user_id,)
+            )
+            
+            if not user:
+                return False, {'error': 'User not found'}
+            
+            if not PasswordManager.verify_password(old_password, user['password_hash']):
+                self._log_auth_event(user_id, 'PASSWORD_CHANGE_FAILED', user['email'], False)
+                return False, {'error': 'Current password is incorrect'}
+            
+            new_hash = PasswordManager.hash_password(new_password)
+            self.db.execute_update(
+                "UPDATE users SET password_hash = %s WHERE user_id = %s",
+                (new_hash, user_id)
+            )
+            
+            # Invalidate all sessions
+            self.db.execute_update(
+                "DELETE FROM sessions WHERE user_id = %s",
+                (user_id,)
+            )
+            
+            self._log_auth_event(user_id, 'PASSWORD_CHANGED', user['email'], True)
+            logger.info(f"Password changed for user {user_id}")
+            
+            return True, {'message': 'Password changed successfully. Please login again.'}
+        except Exception as e:
+            logger.error(f"Password change error: {e}")
+            return False, {'error': 'Password change failed'}
+    
+    def _check_rate_limit(self, user_id: str) -> int:
+        """Check failed login attempts"""
+        result = self.db.execute_one(
+            """SELECT COUNT(*) as failed_count FROM auth_events
+               WHERE user_id = %s AND event_type = 'LOGIN_FAILED_WRONG_PASSWORD'
+               AND created_at > NOW() - INTERVAL '%d minutes'""" % Config.FAILED_LOGIN_LOCKOUT_MINUTES,
+            (user_id,)
+        )
+        return result['failed_count'] if result else 0
+    
+    def _clear_failed_attempts(self, user_id: str):
+        """Clear failed attempt logs"""
+        self.db.execute_update(
+            """DELETE FROM auth_events
+               WHERE user_id = %s AND event_type LIKE 'LOGIN_FAILED%'""",
+            (user_id,)
+        )
+    
+    def _log_auth_event(self, user_id: Optional[str], event_type: str, 
+                       email: Optional[str], success: bool, details: str = None):
+        """Log auth event for audit"""
+        try:
+            self.db.execute_update(
+                """INSERT INTO auth_events 
+                   (user_id, event_type, email, success, details, created_at)
+                   VALUES (%s, %s, %s, %s, %s, NOW())""",
+                (user_id, event_type, email, success, details)
+            )
+        except Exception as e:
+            logger.error(f"Failed to log auth event: {e}")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TRANSACTION SESSION MANAGER
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TransactionSessionManager:
+    """Manage multi-step transaction sessions"""
+    
+    _sessions = {}
+    SESSION_TIMEOUT = 1800  # 30 minutes
+    
+    @classmethod
+    def create_session(cls, user_id: str) -> str:
+        """Create new transaction session"""
+        session_id = str(uuid.uuid4())
+        cls._sessions[session_id] = {
+            'user_id': user_id,
+            'state': 'menu',
+            'created_at': datetime.utcnow(),
+            'last_activity': datetime.utcnow(),
+            'data': {}
+        }
+        logger.info(f"Created transaction session {session_id[:8]}... for user {user_id[:8]}...")
+        return session_id
+    
+    @classmethod
+    def get_session(cls, session_id: str) -> Optional[Dict]:
+        """Retrieve session if valid"""
+        session = cls._sessions.get(session_id)
+        if not session:
+            return None
+        
+        # Check timeout
+        if (datetime.utcnow() - session['last_activity']).total_seconds() > cls.SESSION_TIMEOUT:
+            del cls._sessions[session_id]
+            return None
+        
+        session['last_activity'] = datetime.utcnow()
+        return session
+    
+    @classmethod
+    def update_session_state(cls, session_id: str, state: str, data: Dict = None):
+        """Update session state"""
+        session = cls.get_session(session_id)
+        if session:
+            session['state'] = state
+            if data:
+                session['data'].update(data)
+    
+    @classmethod
+    def clear_session(cls, session_id: str):
+        """End session"""
+        if session_id in cls._sessions:
+            del cls._sessions[session_id]
+            logger.info(f"Cleared transaction session {session_id[:8]}...")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# QUANTUM BLOCK VALIDATOR
+# ═══════════════════════════════════════════════════════════════════════════
+
+class QuantumBlockValidator:
+    """Validate blocks using quantum measurement"""
+    
+    def __init__(self, db_connection, validator_id: str):
+        self.db = db_connection
+        self.validator_id = validator_id
+        self.simulator = AerSimulator()
+    
+    def measure_block(self, block_hash: str, block_data: Dict) -> Tuple[bool, Dict]:
+        """Measure block with quantum circuit"""
+        try:
+            logger.info(f"[QUANTUM] Measuring block {block_hash[:16]}...")
+            
+            # Build circuit
+            circuit = self._build_block_circuit(block_hash, block_data)
+            
+            # Execute
+            import time
+            start_time = time.time()
+            job = self.simulator.run(circuit, shots=Config.QISKIT_SHOTS)
+            result = job.result()
+            execution_time = (time.time() - start_time) * 1000
+            
+            # Analyze measurements
+            counts = result.get_counts(circuit)
+            measurements = self._analyze_measurements(
+                counts,
+                circuit.decompose().depth(),
+                execution_time
+            )
+            
+            # Store measurement
+            self._store_measurement(block_hash, 'standard', measurements, circuit.decompose().depth(), execution_time)
+            
+            # Validate
+            valid = (
+                measurements['entropy'] >= Config.QUANTUM_MIN_ENTROPY and
+                measurements['coherence'] >= Config.QUANTUM_MIN_COHERENCE
+            )
+            
+            if valid:
+                logger.info(f"[QUANTUM] ✓ Block {block_hash[:16]} validated (entropy: {measurements['entropy']:.2%})")
+            else:
+                logger.warning(f"[QUANTUM] ✗ Block {block_hash[:16]} failed validation")
+            
+            return valid, {
+                'valid': valid,
+                'entropy': measurements['entropy'],
+                'coherence': measurements['coherence'],
+                'state_hash': measurements['state_hash']
+            }
+        
+        except Exception as e:
+            logger.error(f"[QUANTUM] Measurement failed: {e}")
+            return False, {'valid': False, 'reason': str(e)}
+    
+    def check_consensus(self, block_hash: str) -> Tuple[bool, Dict]:
+        """Check if block has validator consensus"""
+        try:
+            measurements = self.db.execute_many(
+                """SELECT * FROM quantum_measurements 
+                   WHERE block_hash = %s AND measurement_type = 'standard'
+                   ORDER BY created_at DESC LIMIT 10""",
+                (block_hash,)
+            )
+            
+            if not measurements:
+                return False, {'reason': 'No measurements yet'}
+            
+            if len(measurements) < Config.QUANTUM_VALIDATORS_REQUIRED:
+                return False, {
+                    'reason': f"Need {Config.QUANTUM_VALIDATORS_REQUIRED} validators, have {len(measurements)}",
+                    'progress': f"{len(measurements)}/{Config.QUANTUM_VALIDATORS_REQUIRED}"
+                }
+            
+            # Check entropy agreement
+            entropy_scores = [m['entropy_score'] for m in measurements]
+            avg_entropy = sum(entropy_scores) / len(entropy_scores)
+            valid_count = sum(1 for e in entropy_scores if e >= Config.QUANTUM_MIN_ENTROPY)
+            agreement = valid_count / len(entropy_scores)
+            
+            if agreement >= Config.QUANTUM_AGREEMENT_THRESHOLD:
+                logger.info(f"[CONSENSUS] ✓ Block {block_hash[:16]} approved ({agreement:.0%} agreement)")
+                
+                # Update block status
+                self.db.execute_update(
+                    """UPDATE blocks 
+                       SET quantum_validation_status = %s,
+                           quantum_measurements_count = %s,
+                           validated_at = NOW(),
+                           validation_entropy_avg = %s
+                       WHERE block_hash = %s""",
+                    ('finalized', len(measurements), float(avg_entropy), block_hash)
+                )
+                
+                return True, {
+                    'consensus': True,
+                    'validators': len(measurements),
+                    'agreement': agreement,
+                    'avg_entropy': avg_entropy
+                }
+            else:
+                logger.warning(f"[CONSENSUS] ✗ Block {block_hash[:16]} rejected ({agreement:.0%} agreement)")
+                return False, {
+                    'consensus': False,
+                    'validators': len(measurements),
+                    'agreement': agreement
+                }
+        
+        except Exception as e:
+            logger.error(f"Consensus check failed: {e}")
+            return False, {'reason': str(e)}
+    
+    def _build_block_circuit(self, block_hash: str, block_data: Dict) -> QuantumCircuit:
+        """Build quantum circuit for block"""
+        qr = QuantumRegister(Config.QISKIT_QUBITS, 'q')
+        cr = ClassicalRegister(Config.QISKIT_QUBITS, 'c')
+        circuit = QuantumCircuit(qr, cr, name='block')
+        
+        # Encode block hash
+        hash_bits = bin(int(block_hash[:16], 16))[2:].zfill(Config.QISKIT_QUBITS)
+        
+        # Initial superposition
+        for i in range(Config.QISKIT_QUBITS):
+            circuit.h(qr[i])
+        
+        # Encode hash
+        for i, bit in enumerate(hash_bits[:Config.QISKIT_QUBITS]):
+            if bit == '1':
+                circuit.rx(np.pi / 4, qr[i])
+        
+        # Entangle
+        for i in range(Config.QISKIT_QUBITS - 1):
+            circuit.cx(qr[i], qr[i + 1])
+        
+        # Measure
+        circuit.measure(qr, cr)
+        
+        return circuit
+    
+    def _analyze_measurements(self, counts: Dict[str, int], 
+                            circuit_depth: int, execution_time: float) -> Dict:
+        """Analyze quantum measurements"""
+        total_shots = sum(counts.values())
+        
+        # Entropy (Shannon)
+        probabilities = [count / total_shots for count in counts.values()]
+        entropy = -sum(p * np.log2(p) if p > 0 else 0 for p in probabilities)
+        entropy_normalized = entropy / Config.QISKIT_QUBITS
+        
+        # Coherence
+        max_count = max(counts.values())
+        min_count = min(counts.values())
+        coherence = 1.0 - (max_count - min_count) / total_shots
+        
+        # State hash
+        sorted_states = sorted(counts.items(), key=lambda x: x[1], reverse=True)
+        state_str = json.dumps(dict(sorted_states[:4]), sort_keys=True)
+        state_hash = hashlib.sha256(state_str.encode()).hexdigest()
+        
+        return {
+            'entropy': entropy_normalized,
+            'coherence': coherence,
+            'state_hash': state_hash,
+            'dominant_states': [state for state, _ in sorted_states[:4]]
+        }
+    
+    def _store_measurement(self, block_hash: str, mtype: str, measurements: Dict, 
+                          circuit_depth: int, execution_time: float):
+        """Store measurement in database"""
+        try:
+            self.db.execute_update(
+                """INSERT INTO quantum_measurements 
+                   (block_hash, measurement_type, entropy_score, coherence_quality,
+                    state_vector_hash, dominant_states, total_shots, validator_id,
+                    circuit_depth, execution_time_ms, created_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())""",
+                (block_hash, mtype, measurements['entropy'], measurements['coherence'],
+                 measurements['state_hash'], json.dumps(measurements['dominant_states']),
+                 Config.QISKIT_SHOTS, self.validator_id, circuit_depth, execution_time)
+            )
+            logger.debug(f"Stored measurement for {block_hash[:16]}")
+        except Exception as e:
+            logger.error(f"Failed to store measurement: {e}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # USER MANAGEMENT
@@ -1606,57 +2109,376 @@ def get_status():
         logger.error(f"Status request error: {e}")
         return jsonify({'error': 'Failed to retrieve status'}), 500
 
-@app.route('/api/v1/auth/login', methods=['POST'])
-def login():
-    """
-    User login endpoint
-    
-    Request JSON:
-    {
-        "email": "user@example.com",
-        "password": "password123" (optional for dev)
-    }
-    
-    Response:
-    {
-        "token": "jwt_token",
-        "user": {user object},
-        "expires_in": 86400
-    }
-    """
+# ═══════════════════════════════════════════════════════════════════════════
+# AUTHENTICATION ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/auth/register', methods=['POST'])
+def register():
+    """Register new user with email and password"""
     try:
         data = request.get_json()
-        if not data or 'email' not in data:
-            return jsonify({'error': 'Email required'}), 400
+        email = data.get('email', '').strip().lower()
+        password = data.get('password', '')
+        name = data.get('name', '').strip()
         
-        email = data['email'].strip().lower()
+        if not all([email, password, name]):
+            return jsonify({'error': 'Email, password, and name required'}), 400
         
-        # Get user by email
-        user = UserManager.get_user_by_email(email)
-        if not user:
-            logger.warning(f"Login attempt for non-existent user: {email}")
-            return jsonify({'error': 'User not found'}), 404
+        success, result = auth_handler.register_user(email, password, name)
+        return jsonify(result), (201 if success else 400)
+    
+    except Exception as e:
+        logger.error(f"Registration error: {e}")
+        return jsonify({'error': 'Registration failed'}), 500
+
+
+@app.route('/api/v1/auth/login', methods=['POST'])
+def login():
+    """Login with email and password"""
+    try:
+        data = request.get_json()
+        email = data.get('email', '').strip().lower()
+        password = data.get('password', '')
         
-        # In production, verify password hash here
-        # For now, allow login if user exists
+        if not email or not password:
+            return jsonify({'error': 'Email and password required'}), 400
         
-        # Create JWT token
-        token = JWTHandler.create_token(user.user_id, user.email, user.role)
+        success, result = auth_handler.authenticate(email, password)
         
-        # Update last login
-        UserManager.update_last_login(user.user_id)
+        if success:
+            # Create transaction session
+            session_id = TransactionSessionManager.create_session(result['user']['user_id'])
+            result['session_id'] = session_id
+            return jsonify(result), 200
+        else:
+            return jsonify(result), 401
+    
+    except Exception as e:
+        logger.error(f"Login error: {e}")
+        return jsonify({'error': 'Login failed'}), 500
+
+
+@app.route('/api/v1/auth/change-password', methods=['POST'])
+@JWTHandler.require_auth
+def change_password():
+    """Change password"""
+    try:
+        user_id = request.user_id
+        data = request.get_json()
+        old_pwd = data.get('old_password', '')
+        new_pwd = data.get('new_password', '')
         
-        logger.info(f"User {email} logged in successfully")
+        if not old_pwd or not new_pwd:
+            return jsonify({'error': 'Both passwords required'}), 400
+        
+        success, result = auth_handler.change_password(user_id, old_pwd, new_pwd)
+        return jsonify(result), (200 if success else 400)
+    
+    except Exception as e:
+        logger.error(f"Password change error: {e}")
+        return jsonify({'error': 'Password change failed'}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TRANSACTION MENU ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/transactions/menu', methods=['GET'])
+@JWTHandler.require_auth
+def transaction_menu():
+    """Get transaction menu"""
+    try:
+        user_id = request.user_id
+        user = db.execute_one(
+            "SELECT user_id, email, name, balance FROM users WHERE user_id = %s",
+            (user_id,)
+        )
+        
+        balance_display = (user['balance'] / Config.TOKEN_WEI_PER_UNIT) if user['balance'] else 0
         
         return jsonify({
-            'token': token,
-            'user': user.to_dict(),
-            'expires_in': 86400
+            'state': 'menu',
+            'user': {
+                'id': user_id,
+                'email': user['email'],
+                'name': user['name'],
+                'balance': balance_display
+            },
+            'menu': {
+                '1': {'option': 'RECEIVE', 'description': 'Receive tokens'},
+                '2': {'option': 'SEND', 'description': 'Send tokens'},
+                '3': {'option': 'CHECK_BALANCE', 'description': 'View balance'},
+                '4': {'option': 'LOGOUT', 'description': 'End session'}
+            },
+            'prompt': 'Select option (1-4):'
         }), 200
     
     except Exception as e:
-        logger.error(f"Login error: {e}\n{traceback.format_exc()}")
-        return jsonify({'error': 'Login failed'}), 500
+        logger.error(f"Menu error: {e}")
+        return jsonify({'error': 'Menu failed'}), 500
+
+
+@app.route('/api/v1/transactions/send-step-1', methods=['POST'])
+@JWTHandler.require_auth
+def send_step_1():
+    """Step 1: Send - get recipient"""
+    try:
+        user_id = request.user_id
+        data = request.get_json()
+        session_id = data.get('session_id')
+        recipient_email = data.get('recipient', '').strip().lower()
+        
+        if not session_id or not recipient_email:
+            return jsonify({'error': 'Session and recipient required'}), 400
+        
+        session = TransactionSessionManager.get_session(session_id)
+        if not session or session['user_id'] != user_id:
+            return jsonify({'error': 'Invalid session'}), 401
+        
+        # Lookup recipient
+        recipient = db.execute_one(
+            "SELECT user_id, name FROM users WHERE email = %s",
+            (recipient_email,)
+        )
+        
+        if not recipient:
+            return jsonify({'error': 'Recipient not found'}), 404
+        if recipient['user_id'] == user_id:
+            return jsonify({'error': 'Cannot send to yourself'}), 400
+        
+        # Update session
+        TransactionSessionManager.update_session_state(
+            session_id, 'sending_step_2',
+            {'recipient_id': recipient['user_id'], 'recipient_name': recipient['name']}
+        )
+        
+        return jsonify({
+            'state': 'sending_step_2',
+            'message': f"Sending to {recipient['name']}",
+            'prompt': 'Enter amount (tokens):'
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"Send step 1 error: {e}")
+        return jsonify({'error': 'Failed'}), 500
+
+
+@app.route('/api/v1/transactions/send-step-2', methods=['POST'])
+@JWTHandler.require_auth
+def send_step_2():
+    """Step 2: Send - get amount"""
+    try:
+        user_id = request.user_id
+        data = request.get_json()
+        session_id = data.get('session_id')
+        amount_str = data.get('amount', '0')
+        
+        session = TransactionSessionManager.get_session(session_id)
+        if not session or session['user_id'] != user_id:
+            return jsonify({'error': 'Invalid session'}), 401
+        
+        try:
+            amount = float(amount_str)
+        except ValueError:
+            return jsonify({'error': 'Invalid amount'}), 400
+        
+        if amount <= 0:
+            return jsonify({'error': 'Amount must be > 0'}), 400
+        
+        # Convert to wei
+        amount_wei = int(amount * Config.TOKEN_WEI_PER_UNIT)
+        
+        # Check balance
+        sender = db.execute_one(
+            "SELECT balance FROM users WHERE user_id = %s",
+            (user_id,)
+        )
+        
+        gas_fee = int(amount_wei * 0.02)
+        total_cost = amount_wei + gas_fee
+        
+        if sender['balance'] < total_cost:
+            return jsonify({
+                'error': f"Insufficient balance. Need {total_cost / Config.TOKEN_WEI_PER_UNIT:.6f}, have {sender['balance'] / Config.TOKEN_WEI_PER_UNIT:.6f}"
+            }), 400
+        
+        # Update session for confirmation
+        TransactionSessionManager.update_session_state(
+            session_id, 'sending_step_3',
+            {
+                'amount': amount,
+                'amount_wei': amount_wei,
+                'gas_fee': gas_fee,
+                'total_cost': total_cost
+            }
+        )
+        
+        return jsonify({
+            'state': 'sending_step_3',
+            'confirmation': {
+                'to': session['data']['recipient_name'],
+                'amount': amount,
+                'fee': gas_fee / Config.TOKEN_WEI_PER_UNIT,
+                'total': total_cost / Config.TOKEN_WEI_PER_UNIT
+            },
+            'prompt': 'Confirm? (yes/no):'
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"Send step 2 error: {e}")
+        return jsonify({'error': 'Failed'}), 500
+
+
+@app.route('/api/v1/transactions/send-step-3', methods=['POST'])
+@JWTHandler.require_auth
+def send_step_3():
+    """Step 3: Send - execute with quantum validation"""
+    try:
+        user_id = request.user_id
+        data = request.get_json()
+        session_id = data.get('session_id')
+        confirm = data.get('confirm', 'no').strip().lower()
+        
+        session = TransactionSessionManager.get_session(session_id)
+        if not session or session['user_id'] != user_id:
+            return jsonify({'error': 'Invalid session'}), 401
+        
+        if confirm != 'yes':
+            TransactionSessionManager.clear_session(session_id)
+            return jsonify({
+                'state': 'cancelled',
+                'message': 'Transaction cancelled'
+            }), 200
+        
+        # Execute transaction
+        tx_id = str(uuid.uuid4())
+        tx_data = session['data']
+        
+        # Quantum measure the transaction block
+        block_data = {
+            'tx_id': tx_id,
+            'from_user': user_id,
+            'to_user': tx_data['recipient_id'],
+            'amount': tx_data['amount_wei']
+        }
+        
+        is_valid, quantum_result = quantum_validator.measure_block(tx_id, block_data)
+        
+        if not is_valid:
+            return jsonify({
+                'error': 'Quantum validation failed',
+                'details': quantum_result.get('reason')
+            }), 400
+        
+        # Record transaction
+        db.execute_update(
+            """INSERT INTO transactions 
+               (transaction_id, from_user_id, to_user_id, amount, tx_type, status, 
+                quantum_state_hash, entropy_score, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())""",
+            (tx_id, user_id, tx_data['recipient_id'], tx_data['amount_wei'],
+             'TRANSFER', 'PENDING', quantum_result['state_hash'], quantum_result['entropy'])
+        )
+        
+        # Update balances
+        db.execute_update(
+            "UPDATE users SET balance = balance - %s WHERE user_id = %s",
+            (tx_data['total_cost'], user_id)
+        )
+        db.execute_update(
+            "UPDATE users SET balance = balance + %s WHERE user_id = %s",
+            (tx_data['amount_wei'], tx_data['recipient_id'])
+        )
+        
+        TransactionSessionManager.clear_session(session_id)
+        logger.info(f"Transaction {tx_id[:8]}... completed")
+        
+        return jsonify({
+            'state': 'completed',
+            'success': True,
+            'transaction': {
+                'id': tx_id,
+                'to': tx_data['recipient_id'],
+                'amount': tx_data['amount'],
+                'fee': tx_data['gas_fee'] / Config.TOKEN_WEI_PER_UNIT,
+                'quantum_entropy': quantum_result['entropy'],
+                'status': 'PENDING_CONFIRMATION'
+            },
+            'message': 'Transaction submitted!'
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"Send step 3 error: {e}")
+        return jsonify({'error': 'Transaction failed'}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# QUANTUM BLOCK VALIDATION ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/blocks/<block_hash>/validate', methods=['POST'])
+def validate_block(block_hash):
+    """Validate block with quantum measurement"""
+    try:
+        block = db.execute_one(
+            "SELECT * FROM blocks WHERE block_hash = %s",
+            (block_hash,)
+        )
+        
+        if not block:
+            return jsonify({'error': 'Block not found'}), 404
+        
+        if block.get('quantum_validation_status') == 'finalized':
+            return jsonify({'error': 'Block already finalized'}), 400
+        
+        # Measure block
+        is_valid, measurement = quantum_validator.measure_block(
+            block_hash,
+            {'parent_hash': block['parent_hash'], 'timestamp': block['timestamp']}
+        )
+        
+        # Check consensus
+        has_consensus, consensus_data = quantum_validator.check_consensus(block_hash)
+        
+        if has_consensus:
+            return jsonify({
+                'valid': True,
+                'consensus': consensus_data,
+                'entropy': measurement['entropy']
+            }), 200
+        else:
+            return jsonify({
+                'valid': is_valid,
+                'entropy': measurement['entropy'],
+                'consensus_status': consensus_data,
+                'status': 'pending_more_validators'
+            }), 202
+    
+    except Exception as e:
+        logger.error(f"Block validation error: {e}")
+        return jsonify({'error': 'Validation failed'}), 500
+
+
+@app.route('/api/v1/blocks/<block_hash>/measurements', methods=['GET'])
+def get_block_measurements(block_hash):
+    """Get all quantum measurements for block"""
+    try:
+        measurements = db.execute_many(
+            """SELECT * FROM quantum_measurements WHERE block_hash = %s
+               ORDER BY created_at DESC""",
+            (block_hash,)
+        )
+        
+        return jsonify({
+            'block_hash': block_hash,
+            'measurement_count': len(measurements),
+            'measurements': measurements
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"Get measurements error: {e}")
+        return jsonify({'error': 'Failed'}), 500
 
 @app.route('/api/v1/auth/verify', methods=['POST'])
 @JWTHandler.require_auth
@@ -2008,6 +2830,20 @@ def setup_api_routes(app):
     app.add_url_rule('/api/transactions/<tx_id>', 'get_transaction_status', get_transaction_status, methods=['GET'])
     app.add_url_rule('/api/transactions/user/<user_id>', 'get_user_transactions', get_user_transactions, methods=['GET'])
     
+# NEW: Enhanced Auth Routes
+    app.add_url_rule('/api/v1/auth/register', 'register', register, methods=['POST'])
+    app.add_url_rule('/api/v1/auth/change-password', 'change_password', change_password, methods=['POST'])
+    
+    # NEW: Transaction Menu Routes
+    app.add_url_rule('/api/v1/transactions/menu', 'transaction_menu', transaction_menu, methods=['GET'])
+    app.add_url_rule('/api/v1/transactions/send-step-1', 'send_step_1', send_step_1, methods=['POST'])
+    app.add_url_rule('/api/v1/transactions/send-step-2', 'send_step_2', send_step_2, methods=['POST'])
+    app.add_url_rule('/api/v1/transactions/send-step-3', 'send_step_3', send_step_3, methods=['POST'])
+    
+    # NEW: Block Validation Routes
+    app.add_url_rule('/api/v1/blocks/<block_hash>/validate', 'validate_block', validate_block, methods=['POST'])
+    app.add_url_rule('/api/v1/blocks/<block_hash>/measurements', 'get_block_measurements', get_block_measurements, methods=['GET'])
+
     # Blocks
     app.add_url_rule('/api/blocks/<int:block_number>', 'get_block', get_block, methods=['GET'])
     
@@ -2052,6 +2888,17 @@ if __name__ == '__main__':
         finally:
             db.return_connection(db_conn)
         
+# NEW: Run database migrations
+        logger.info("Checking database schema...")
+        db.run_migrations()
+        logger.info("✓ Database schema ready")
+        
+        # NEW: Initialize authentication handler
+        global auth_handler, quantum_validator
+        auth_handler = AuthenticationHandler(db)
+        quantum_validator = QuantumBlockValidator(db, validator_id="validator-001")
+        logger.info("✓ Authentication and quantum validators initialized")
+
         # Start Flask app
         logger.info("✓ Starting Flask application...")
         app.run(
