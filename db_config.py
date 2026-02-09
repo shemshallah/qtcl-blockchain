@@ -12,7 +12,7 @@ from psycopg2.extras import RealDictCursor
 from collections import deque
 import threading
 import time
-
+from typing import Optional, Dict, List
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -154,6 +154,153 @@ class DatabaseConnection:
                 return affected
         finally:
             DatabaseConnection.return_connection(conn)
+
+@staticmethod
+    def execute_one(query: str, params: tuple = None):
+        """Execute SELECT query and return first row only"""
+        conn = DatabaseConnection.get_connection()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(query, params or ())
+                result = cur.fetchone()
+                return result
+        finally:
+            DatabaseConnection.return_connection(conn)
+    
+    @staticmethod
+    def execute_many(query: str, params_list: List[tuple] = None) -> int:
+        """Execute multiple INSERT/UPDATE/DELETE queries"""
+        if not params_list:
+            return 0
+        conn = DatabaseConnection.get_connection()
+        try:
+            with conn.cursor() as cur:
+                total = 0
+                for params in params_list:
+                    cur.execute(query, params or ())
+                    total += cur.rowcount
+                return total
+        finally:
+            DatabaseConnection.return_connection(conn)
+
+# ─────────────────────────────────────────────────────────────────────────
+    # SCHEMA MIGRATION RUNNER
+    # ─────────────────────────────────────────────────────────────────────────
+    
+    def run_migrations(self):
+        """Apply schema migrations if not already done"""
+        try:
+            # Check if sessions table exists (indicator that migrations ran)
+            cursor = self._get_cursor()
+            cursor.execute("""
+                SELECT EXISTS(
+                    SELECT 1 FROM information_schema.tables 
+                    WHERE table_name = 'sessions'
+                )
+            """)
+            exists = cursor.fetchone()[0]
+            
+            if exists:
+                logger.info("✓ Database schema already migrated")
+                return True
+            
+            logger.info("Running database migrations...")
+            
+            migrations = [
+                # Add password column
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255) UNIQUE",
+                
+                # Sessions table
+                """CREATE TABLE IF NOT EXISTS sessions (
+                    session_id UUID PRIMARY KEY,
+                    user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                    access_token TEXT NOT NULL,
+                    refresh_token TEXT NOT NULL,
+                    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    last_activity TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                )""",
+                "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)",
+                
+                # Auth events (audit log)
+                """CREATE TABLE IF NOT EXISTS auth_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id UUID REFERENCES users(user_id) ON DELETE SET NULL,
+                    event_type VARCHAR(50) NOT NULL,
+                    email VARCHAR(255),
+                    success BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                )""",
+                "CREATE INDEX IF NOT EXISTS idx_auth_events_user_id ON auth_events(user_id)",
+                
+                # Password resets
+                """CREATE TABLE IF NOT EXISTS password_resets (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                    reset_token VARCHAR(255) NOT NULL UNIQUE,
+                    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                )""",
+                
+                # Quantum measurements
+                """CREATE TABLE IF NOT EXISTS quantum_measurements (
+                    id BIGSERIAL PRIMARY KEY,
+                    block_hash VARCHAR(255) NOT NULL,
+                    measurement_type VARCHAR(50) NOT NULL,
+                    entropy_score NUMERIC(5,4) NOT NULL,
+                    coherence_quality NUMERIC(5,4) NOT NULL,
+                    state_vector_hash VARCHAR(255),
+                    dominant_states JSONB,
+                    total_shots INTEGER,
+                    validator_id VARCHAR(255),
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                )""",
+                "CREATE INDEX IF NOT EXISTS idx_quantum_measurements_block ON quantum_measurements(block_hash)",
+                
+                # Transaction sessions
+                """CREATE TABLE IF NOT EXISTS transaction_sessions (
+                    session_id UUID PRIMARY KEY,
+                    user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                    transaction_state VARCHAR(50),
+                    session_data JSONB,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                )""",
+                
+                # Rate limits
+                """CREATE TABLE IF NOT EXISTS rate_limits (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                    limit_type VARCHAR(50),
+                    count INTEGER DEFAULT 1,
+                    reset_at TIMESTAMP WITH TIME ZONE
+                )""",
+                
+                # Receive codes
+                """CREATE TABLE IF NOT EXISTS receive_codes (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                    code VARCHAR(16) UNIQUE,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                )""",
+                
+                # Enhance blocks
+                "ALTER TABLE blocks ADD COLUMN IF NOT EXISTS quantum_validation_status VARCHAR(50) DEFAULT 'unvalidated'",
+                "ALTER TABLE blocks ADD COLUMN IF NOT EXISTS quantum_measurements_count INTEGER DEFAULT 0",
+            ]
+            
+            for migration in migrations:
+                try:
+                    cursor.execute(migration)
+                    logger.debug(f"✓ Migration: {migration[:60]}...")
+                except Exception as e:
+                    logger.warning(f"Migration partial (may already exist): {e}")
+            
+            logger.info("✓ All migrations completed")
+            return True
+        
+        except Exception as e:
+            logger.error(f"Migration failed: {e}")
+            return False
 
 # ═══════════════════════════════════════════════════════════════════════════
 # SETUP FUNCTIONS FOR WSGI
