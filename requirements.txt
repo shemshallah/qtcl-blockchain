@@ -7,8 +7,8 @@ Flask-CORS==4.0.0
 # Database
 psycopg2-binary==2.9.11
 
-# Numerical Computing
-numpy==2.0.0
+# Numerical Computing (MUST be <2 for qiskit)
+numpy==1.26.4
 
 # Quantum Computing (Latest stable)
 qiskit==1.0.2
