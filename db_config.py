@@ -155,7 +155,7 @@ class DatabaseConnection:
         finally:
             DatabaseConnection.return_connection(conn)
 
-@staticmethod
+    @staticmethod
     def execute_one(query: str, params: tuple = None):
         """Execute SELECT query and return first row only"""
         conn = DatabaseConnection.get_connection()
