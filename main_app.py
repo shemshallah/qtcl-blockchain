@@ -101,12 +101,12 @@ from qiskit_aer import AerSimulator
 class Config:
     """Complete configuration for main application"""
     
-    # Database
-    SUPABASE_HOST = "aws-0-us-west-2.pooler.supabase.com"
-    SUPABASE_USER = "postgres.rslvlsqwkfmdtebqsvtw"
-    SUPABASE_PASSWORD = "$h10j1r1H0w4rd"
-    SUPABASE_PORT = 5432
-    SUPABASE_DB = "postgres"
+    # Database - All from environment variables
+    SUPABASE_HOST = os.getenv('SUPABASE_HOST', '')
+    SUPABASE_USER = os.getenv('SUPABASE_USER', '')
+    SUPABASE_PASSWORD = os.getenv('SUPABASE_PASSWORD', '')
+    SUPABASE_PORT = int(os.getenv('SUPABASE_PORT', '5432'))
+    SUPABASE_DB = os.getenv('SUPABASE_DB', 'postgres')
     DB_POOL_SIZE = 10
     DB_CONNECTION_TIMEOUT = 30
     
@@ -198,6 +198,31 @@ class Config:
             'role': 'founder'
         }
     ]
+
+def _validate_critical_config():
+    """Fail fast if critical credentials missing"""
+    required = [
+        'SUPABASE_HOST',
+        'SUPABASE_USER',
+        'SUPABASE_PASSWORD',
+        'SUPABASE_DB'
+    ]
+    
+    missing = []
+    for var in required:
+        if not getattr(Config, var, ''):
+            missing.append(var)
+    
+    if missing:
+        raise RuntimeError(
+            f"CRITICAL: Missing required environment variables: {missing}\n"
+            f"Set these in .env or system environment before running."
+        )
+    
+    logger.info("✓ Configuration validated - all required variables present")
+
+# Call validation on app startup
+_validate_critical_config()
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # LOGGING SYSTEM

@@ -112,18 +112,26 @@ SUPABASE_USER = os.getenv('SUPABASE_USER', 'postgres.rslvlsqwkfmdtebqsvtw')
 SUPABASE_PASSWORD = os.getenv('SUPABASE_PASSWORD', '')  # NO DEFAULT - FAIL IF NOT SET
 SUPABASE_PORT = int(os.getenv('SUPABASE_PORT', '5432'))
 SUPABASE_DB = os.getenv('SUPABASE_DB', 'postgres')
-SUPABASE_JWT_SECRET = os.getenv('SUPABASE_JWT_SECRET', 'dev-secret-key-change-in-production')
+SUPABASE_JWT_SECRET = os.getenv('SUPABASE_JWT_SECRET', '')
 
 @staticmethod
 def validate():
     """Check required environment variables are set"""
-    if not Config.SUPABASE_PASSWORD:
-        raise RuntimeError("SUPABASE_PASSWORD environment variable not set")
-    if not Config.SUPABASE_USER:
-        raise RuntimeError("SUPABASE_USER environment variable not set")
-    if not Config.SUPABASE_HOST:
-        raise RuntimeError("SUPABASE_HOST environment variable not set")
-    logger.info(f"✓ Supabase config validated: {Config.SUPABASE_HOST}")
+    required = {
+        'SUPABASE_PASSWORD': Config.SUPABASE_PASSWORD,
+        'SUPABASE_USER': Config.SUPABASE_USER,
+        'SUPABASE_HOST': Config.SUPABASE_HOST,
+        'SUPABASE_JWT_SECRET': Config.SUPABASE_JWT_SECRET,
+    }
+    
+    missing = [k for k, v in required.items() if not v]
+    if missing:
+        raise RuntimeError(
+            f"CRITICAL: Missing required env vars: {missing}\n"
+            f"Set these in your .env file or environment before running."
+        )
+    
+    logger.info("✓ API Gateway configuration validated")
 
     # ─────────────────────────────────────────────────────────────────────────
     # API CONFIGURATION

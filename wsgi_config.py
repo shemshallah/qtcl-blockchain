@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 ═══════════════════════════════════════════════════════════════════════════════
-QTCL WSGI Configuration - COMPLETE FIXED VERSION
-All endpoints working with database connections
+QTCL WSGI Configuration - SCHEMA-CORRECTED VERSION
+Matches actual Supabase database schema from qtcl_db_builder.py
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
@@ -28,7 +28,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 logger.info("=" * 80)
-logger.info("QTCL WSGI Configuration - COMPLETE FIXED VERSION")
+logger.info("QTCL WSGI - SCHEMA-CORRECTED VERSION")
 logger.info(f"Project Root: {PROJECT_ROOT}")
 logger.info(f"Python Version: {sys.version}")
 logger.info(f"Timestamp: {datetime.now().isoformat()}")
@@ -108,6 +108,8 @@ try:
                 return [dict(row) for row in cur.fetchall()]
         except Exception as e:
             logger.error(f"Query error: {e}")
+            logger.error(f"Query: {query}")
+            logger.error(f"Params: {params}")
             return []
         finally:
             conn.close()
@@ -130,15 +132,35 @@ try:
     def api_health():
         """Detailed health check with database"""
         db_status = 'disconnected'
+        db_info = {}
+        
         try:
             conn = get_db_connection()
             if conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT 1")
+                    # Check database version
+                    cur.execute("SELECT version()")
+                    version = cur.fetchone()
+                    
+                    # Count records
+                    cur.execute("SELECT COUNT(*) FROM users")
+                    user_count = cur.fetchone()[0]
+                    
+                    cur.execute("SELECT COUNT(*) FROM pseudoqubits")
+                    qubit_count = cur.fetchone()[0]
+                    
+                    cur.execute("SELECT COUNT(*) FROM blocks")
+                    block_count = cur.fetchone()[0]
+                    
                 db_status = 'connected'
+                db_info = {
+                    'users': user_count,
+                    'qubits': qubit_count,
+                    'blocks': block_count
+                }
                 conn.close()
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Health check error: {e}")
         
         return jsonify({
             'status': 'operational',
@@ -146,16 +168,17 @@ try:
             'components': {
                 'database': db_status,
                 'api': 'ready'
-            }
+            },
+            'database_info': db_info
         }), 200
     
     # ═══════════════════════════════════════════════════════════════════════════
-    # AUTHENTICATION
+    # AUTHENTICATION - CORRECTED FOR ACTUAL SCHEMA
     # ═══════════════════════════════════════════════════════════════════════════
     
     @app.route('/api/auth/login', methods=['POST'])
     def login():
-        """User login"""
+        """User login - CORRECTED: uses 'name' column not 'display_name'"""
         try:
             data = request.get_json()
             email = data.get('email')
@@ -167,8 +190,8 @@ try:
                     'message': 'Missing email or password'
                 }), 400
             
-            # Check if user exists in database
-            query = "SELECT user_id, email, display_name, balance FROM users WHERE email = %s LIMIT 1"
+            # CORRECTED: actual schema uses 'name' not 'display_name'
+            query = "SELECT user_id, email, name, balance, role FROM users WHERE email = %s LIMIT 1"
             results = execute_query(query, (email,))
             
             if results:
@@ -181,22 +204,20 @@ try:
                     'access_token': token,
                     'user_id': user['user_id'],
                     'email': user['email'],
-                    'display_name': user['display_name'],
-                    'balance': float(user['balance'])
+                    'name': user['name'],  # CORRECTED column name
+                    'balance': float(user['balance']),
+                    'role': user['role']
                 }), 200
             else:
-                # User doesn't exist, return success anyway (for testing)
-                token = hashlib.sha256(f"{email}:{datetime.now().timestamp()}".encode()).hexdigest()
+                # User doesn't exist in database
                 return jsonify({
-                    'status': 'success',
-                    'access_token': token,
-                    'user_id': email,
-                    'email': email,
-                    'message': 'Login successful (no db user found - using email as ID)'
-                }), 200
+                    'status': 'error',
+                    'message': 'User not found - please check database initialization'
+                }), 404
                 
         except Exception as e:
             logger.error(f"Login error: {e}")
+            logger.error(traceback.format_exc())
             return jsonify({
                 'status': 'error',
                 'message': str(e)
@@ -229,16 +250,16 @@ try:
             }), 500
     
     # ═══════════════════════════════════════════════════════════════════════════
-    # ACCOUNT & BALANCE ENDPOINTS (MISSING - NOW ADDED)
+    # ACCOUNT & BALANCE - CORRECTED FOR ACTUAL SCHEMA
     # ═══════════════════════════════════════════════════════════════════════════
     
     @app.route('/api/account/<identifier>', methods=['GET'])
     def get_account(identifier):
-        """Get account by email or user_id"""
+        """Get account by email or user_id - CORRECTED: uses 'name' column"""
         try:
-            # Try to find by email first, then by user_id
+            # CORRECTED: actual schema uses 'name' not 'display_name'
             query = """
-                SELECT user_id, email, display_name, balance, created_at
+                SELECT user_id, email, name, balance, role, created_at, is_active
                 FROM users 
                 WHERE email = %s OR user_id = %s
                 LIMIT 1
@@ -251,8 +272,10 @@ try:
                     'status': 'success',
                     'user_id': account['user_id'],
                     'email': account['email'],
-                    'display_name': account['display_name'],
+                    'name': account['name'],  # CORRECTED column name
                     'balance': float(account['balance']),
+                    'role': account['role'],
+                    'is_active': account['is_active'],
                     'created_at': account['created_at'].isoformat() if account['created_at'] else None
                 }), 200
             else:
@@ -263,6 +286,7 @@ try:
                 
         except Exception as e:
             logger.error(f"Get account error: {e}")
+            logger.error(traceback.format_exc())
             return jsonify({
                 'status': 'error',
                 'message': str(e)
@@ -297,49 +321,85 @@ try:
                 
         except Exception as e:
             logger.error(f"Get balance error: {e}")
+            logger.error(traceback.format_exc())
             return jsonify({
                 'status': 'error',
                 'message': str(e)
             }), 500
     
     # ═══════════════════════════════════════════════════════════════════════════
-    # PSEUDOQUBIT ENDPOINTS (MISSING - NOW ADDED)
+    # PSEUDOQUBIT - CORRECTED FOR ACTUAL SCHEMA (106K+ QUBITS!)
     # ═══════════════════════════════════════════════════════════════════════════
     
     @app.route('/api/pool/qubits', methods=['GET'])
     def get_pool_qubits():
-        """Get pool qubits"""
+        """Get pool qubits - CORRECTED: uses 'is_available' and 'auth_user_id' columns"""
         try:
+            # Get limit from query params (default 100, max 1000)
+            limit = min(int(request.args.get('limit', 100)), 1000)
+            
+            # CORRECTED: actual schema uses 'is_available' and 'auth_user_id'
+            # Pool qubits are: is_available = TRUE AND auth_user_id IS NULL
             query = """
-                SELECT pseudoqubit_id, routing_address, amplitude_0, amplitude_1, 
-                       phase, entanglement_partners, creation_timestamp
+                SELECT 
+                    pseudoqubit_id, 
+                    routing_address, 
+                    placement_type,
+                    depth,
+                    position_poincare_real,
+                    position_poincare_imag,
+                    fidelity, 
+                    coherence,
+                    purity,
+                    entropy,
+                    boundary_distance,
+                    is_available,
+                    auth_user_id,
+                    assigned_at
                 FROM pseudoqubits 
-                WHERE owner_id IS NULL OR owner_id = 'pool'
-                ORDER BY creation_timestamp DESC
-                LIMIT 100
+                WHERE is_available = TRUE AND auth_user_id IS NULL
+                ORDER BY pseudoqubit_id
+                LIMIT %s
             """
-            results = execute_query(query)
+            results = execute_query(query, (limit,))
             
             qubits = []
             for row in results:
                 qubits.append({
-                    'pseudoqubit_id': row['pseudoqubit_id'],
+                    'pseudoqubit_id': int(row['pseudoqubit_id']),
                     'routing_address': row['routing_address'],
-                    'amplitude_0': float(row['amplitude_0']) if row['amplitude_0'] else 0.707,
-                    'amplitude_1': float(row['amplitude_1']) if row['amplitude_1'] else 0.707,
-                    'phase': float(row['phase']) if row['phase'] else 0.0,
-                    'entangled': bool(row['entanglement_partners']),
-                    'created_at': row['creation_timestamp'].isoformat() if row['creation_timestamp'] else None
+                    'placement_type': row['placement_type'],
+                    'depth': row['depth'],
+                    'position': {
+                        'poincare_real': float(row['position_poincare_real']) if row['position_poincare_real'] else 0.0,
+                        'poincare_imag': float(row['position_poincare_imag']) if row['position_poincare_imag'] else 0.0
+                    },
+                    'metrics': {
+                        'fidelity': float(row['fidelity']) if row['fidelity'] else 0.0,
+                        'coherence': float(row['coherence']) if row['coherence'] else 0.0,
+                        'purity': float(row['purity']) if row['purity'] else 0.0,
+                        'entropy': float(row['entropy']) if row['entropy'] else 0.0,
+                        'boundary_distance': float(row['boundary_distance']) if row['boundary_distance'] else 0.0
+                    },
+                    'is_available': row['is_available']
                 })
+            
+            # Get total count
+            count_query = "SELECT COUNT(*) as total FROM pseudoqubits WHERE is_available = TRUE AND auth_user_id IS NULL"
+            count_results = execute_query(count_query)
+            total_count = count_results[0]['total'] if count_results else 0
             
             return jsonify({
                 'status': 'success',
                 'qubits': qubits,
-                'count': len(qubits)
+                'count': len(qubits),
+                'total_available': int(total_count),
+                'limit': limit
             }), 200
             
         except Exception as e:
             logger.error(f"Get pool qubits error: {e}")
+            logger.error(traceback.format_exc())
             return jsonify({
                 'status': 'error',
                 'message': str(e)
@@ -347,52 +407,82 @@ try:
     
     @app.route('/api/pseudoqubit/<user_id>', methods=['GET'])
     def get_user_pseudoqubit(user_id):
-        """Get user's pseudoqubit"""
+        """Get user's assigned pseudoqubits - CORRECTED: uses 'auth_user_id'"""
         try:
+            # CORRECTED: actual schema uses 'auth_user_id' not 'owner_id'
             query = """
-                SELECT pseudoqubit_id, routing_address, amplitude_0, amplitude_1, 
-                       phase, entanglement_partners
+                SELECT 
+                    pseudoqubit_id, 
+                    routing_address, 
+                    placement_type,
+                    position_poincare_real,
+                    position_poincare_imag,
+                    fidelity,
+                    coherence,
+                    assigned_at
                 FROM pseudoqubits 
-                WHERE owner_id = %s
-                LIMIT 1
+                WHERE auth_user_id = %s
+                LIMIT 10
             """
             results = execute_query(query, (user_id,))
             
             if results:
-                qubit = results[0]
+                qubits = []
+                for row in results:
+                    qubits.append({
+                        'pseudoqubit_id': int(row['pseudoqubit_id']),
+                        'routing_address': row['routing_address'],
+                        'placement_type': row['placement_type'],
+                        'fidelity': float(row['fidelity']) if row['fidelity'] else 0.0,
+                        'coherence': float(row['coherence']) if row['coherence'] else 0.0,
+                        'assigned_at': row['assigned_at'].isoformat() if row['assigned_at'] else None
+                    })
+                
                 return jsonify({
                     'status': 'success',
-                    'pseudoqubit_id': qubit['pseudoqubit_id'],
-                    'routing_address': qubit['routing_address'],
-                    'amplitude_0': float(qubit['amplitude_0']) if qubit['amplitude_0'] else 0.707,
-                    'amplitude_1': float(qubit['amplitude_1']) if qubit['amplitude_1'] else 0.707,
-                    'phase': float(qubit['phase']) if qubit['phase'] else 0.0
+                    'qubits': qubits,
+                    'count': len(qubits)
                 }), 200
             else:
                 return jsonify({
                     'status': 'error',
-                    'message': 'No pseudoqubit found for user'
+                    'message': 'No pseudoqubits assigned to user'
                 }), 404
                 
         except Exception as e:
             logger.error(f"Get user pseudoqubit error: {e}")
+            logger.error(traceback.format_exc())
             return jsonify({
                 'status': 'error',
                 'message': str(e)
             }), 500
     
     # ═══════════════════════════════════════════════════════════════════════════
-    # BLOCKCHAIN ENDPOINTS (MISSING - NOW ADDED)
+    # BLOCKCHAIN - CORRECTED FOR ACTUAL SCHEMA
     # ═══════════════════════════════════════════════════════════════════════════
     
     @app.route('/api/v1/block/0', methods=['GET'])
     @app.route('/api/blocks/0', methods=['GET'])
     def get_genesis_block():
-        """Get genesis block"""
+        """Get genesis block - CORRECTED: uses 'parent_hash' and 'transactions'"""
         try:
+            # CORRECTED: actual schema uses 'parent_hash' not 'prev_hash'
+            # and 'transactions' not 'transaction_count'
             query = """
-                SELECT block_number, block_hash, prev_hash, validator_id, 
-                       timestamp, transaction_count, total_qtcl_transferred
+                SELECT 
+                    block_number, 
+                    block_hash, 
+                    parent_hash,
+                    validator_address,
+                    timestamp, 
+                    transactions,
+                    quantum_state_hash,
+                    entropy_score,
+                    floquet_cycle,
+                    gas_used,
+                    gas_limit,
+                    miner_reward,
+                    created_at
                 FROM blocks 
                 WHERE block_number = 0
                 LIMIT 1
@@ -403,13 +493,19 @@ try:
                 block = results[0]
                 return jsonify({
                     'status': 'success',
-                    'block_number': block['block_number'],
+                    'block_number': int(block['block_number']),
                     'block_hash': block['block_hash'],
-                    'prev_hash': block['prev_hash'],
-                    'validator_id': block['validator_id'],
-                    'timestamp': block['timestamp'].isoformat() if block['timestamp'] else None,
-                    'transaction_count': block['transaction_count'],
-                    'total_qtcl_transferred': float(block['total_qtcl_transferred']) if block['total_qtcl_transferred'] else 0
+                    'parent_hash': block['parent_hash'],  # CORRECTED column name
+                    'validator_address': block['validator_address'],
+                    'timestamp': int(block['timestamp']),
+                    'transactions': int(block['transactions']),  # CORRECTED column name
+                    'quantum_state_hash': block['quantum_state_hash'],
+                    'entropy_score': float(block['entropy_score']) if block['entropy_score'] else 0.0,
+                    'floquet_cycle': block['floquet_cycle'],
+                    'gas_used': int(block['gas_used']) if block['gas_used'] else 0,
+                    'gas_limit': int(block['gas_limit']) if block['gas_limit'] else 0,
+                    'miner_reward': float(block['miner_reward']) if block['miner_reward'] else 0.0,
+                    'created_at': block['created_at'].isoformat() if block['created_at'] else None
                 }), 200
             else:
                 return jsonify({
@@ -419,6 +515,7 @@ try:
                 
         except Exception as e:
             logger.error(f"Get genesis block error: {e}")
+            logger.error(traceback.format_exc())
             return jsonify({
                 'status': 'error',
                 'message': str(e)
@@ -429,8 +526,18 @@ try:
         """Get latest block"""
         try:
             query = """
-                SELECT block_number, block_hash, prev_hash, validator_id, 
-                       timestamp, transaction_count, total_qtcl_transferred
+                SELECT 
+                    block_number, 
+                    block_hash, 
+                    parent_hash,
+                    validator_address,
+                    timestamp, 
+                    transactions,
+                    quantum_state_hash,
+                    entropy_score,
+                    floquet_cycle,
+                    gas_used,
+                    miner_reward
                 FROM blocks 
                 ORDER BY block_number DESC
                 LIMIT 1
@@ -441,13 +548,17 @@ try:
                 block = results[0]
                 return jsonify({
                     'status': 'success',
-                    'block_number': block['block_number'],
+                    'block_number': int(block['block_number']),
                     'block_hash': block['block_hash'],
-                    'prev_hash': block['prev_hash'],
-                    'validator_id': block['validator_id'],
-                    'timestamp': block['timestamp'].isoformat() if block['timestamp'] else None,
-                    'transaction_count': block['transaction_count'],
-                    'total_qtcl_transferred': float(block['total_qtcl_transferred']) if block['total_qtcl_transferred'] else 0
+                    'parent_hash': block['parent_hash'],
+                    'validator_address': block['validator_address'],
+                    'timestamp': int(block['timestamp']),
+                    'transactions': int(block['transactions']),
+                    'quantum_state_hash': block['quantum_state_hash'],
+                    'entropy_score': float(block['entropy_score']) if block['entropy_score'] else 0.0,
+                    'floquet_cycle': block['floquet_cycle'],
+                    'gas_used': int(block['gas_used']) if block['gas_used'] else 0,
+                    'miner_reward': float(block['miner_reward']) if block['miner_reward'] else 0.0
                 }), 200
             else:
                 return jsonify({
@@ -457,6 +568,7 @@ try:
                 
         except Exception as e:
             logger.error(f"Get latest block error: {e}")
+            logger.error(traceback.format_exc())
             return jsonify({
                 'status': 'error',
                 'message': str(e)
@@ -467,8 +579,15 @@ try:
         """Get block by number"""
         try:
             query = """
-                SELECT block_number, block_hash, prev_hash, validator_id, 
-                       timestamp, transaction_count, total_qtcl_transferred
+                SELECT 
+                    block_number, 
+                    block_hash, 
+                    parent_hash,
+                    validator_address,
+                    timestamp, 
+                    transactions,
+                    quantum_state_hash,
+                    entropy_score
                 FROM blocks 
                 WHERE block_number = %s
                 LIMIT 1
@@ -479,13 +598,12 @@ try:
                 block = results[0]
                 return jsonify({
                     'status': 'success',
-                    'block_number': block['block_number'],
+                    'block_number': int(block['block_number']),
                     'block_hash': block['block_hash'],
-                    'prev_hash': block['prev_hash'],
-                    'validator_id': block['validator_id'],
-                    'timestamp': block['timestamp'].isoformat() if block['timestamp'] else None,
-                    'transaction_count': block['transaction_count'],
-                    'total_qtcl_transferred': float(block['total_qtcl_transferred']) if block['total_qtcl_transferred'] else 0
+                    'parent_hash': block['parent_hash'],
+                    'validator_address': block['validator_address'],
+                    'timestamp': int(block['timestamp']),
+                    'transactions': int(block['transactions'])
                 }), 200
             else:
                 return jsonify({
@@ -495,20 +613,21 @@ try:
                 
         except Exception as e:
             logger.error(f"Get block error: {e}")
+            logger.error(traceback.format_exc())
             return jsonify({
                 'status': 'error',
                 'message': str(e)
             }), 500
     
     # ═══════════════════════════════════════════════════════════════════════════
-    # NETWORK PARAMETERS (MISSING - NOW ADDED)
+    # NETWORK PARAMETERS
     # ═══════════════════════════════════════════════════════════════════════════
     
     @app.route('/api/v1/network/params', methods=['GET'])
     def get_network_params():
         """Get network parameters"""
         try:
-            query = "SELECT param_key, param_value FROM network_parameters"
+            query = "SELECT param_key, param_value, param_type FROM network_parameters"
             results = execute_query(query)
             
             params = {row['param_key']: row['param_value'] for row in results}
@@ -522,6 +641,7 @@ try:
             
         except Exception as e:
             logger.error(f"Get network params error: {e}")
+            logger.error(traceback.format_exc())
             return jsonify({
                 'status': 'error',
                 'message': str(e)
@@ -577,10 +697,10 @@ try:
         """Get transaction status"""
         try:
             query = """
-                SELECT transaction_id, from_user_id, to_user_id, amount, 
-                       tx_type, status, created_at
+                SELECT tx_id, from_user_id, to_user_id, amount, 
+                       tx_type, status, created_at, block_number
                 FROM transactions 
-                WHERE transaction_id = %s
+                WHERE tx_id = %s
                 LIMIT 1
             """
             results = execute_query(query, (tx_id,))
@@ -589,12 +709,13 @@ try:
                 tx = results[0]
                 return jsonify({
                     'status': 'success',
-                    'transaction_id': tx['transaction_id'],
+                    'transaction_id': tx['tx_id'],
                     'from_user': tx['from_user_id'],
                     'to_user': tx['to_user_id'],
                     'amount': float(tx['amount']),
                     'tx_type': tx['tx_type'],
                     'tx_status': tx['status'],
+                    'block_number': int(tx['block_number']) if tx['block_number'] else None,
                     'created_at': tx['created_at'].isoformat() if tx['created_at'] else None
                 }), 200
             else:
@@ -605,6 +726,48 @@ try:
                 
         except Exception as e:
             logger.error(f"Get transaction error: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': str(e)
+            }), 500
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # DATABASE STATS (NEW - HELPFUL FOR DEBUGGING)
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    @app.route('/api/v1/stats', methods=['GET'])
+    def get_database_stats():
+        """Get database statistics"""
+        try:
+            stats = {}
+            
+            # Get counts from all major tables
+            tables = ['users', 'pseudoqubits', 'blocks', 'transactions', 
+                     'hyperbolic_triangles', 'routing_topology', 'network_parameters']
+            
+            for table in tables:
+                query = f"SELECT COUNT(*) as count FROM {table}"
+                results = execute_query(query)
+                stats[table] = int(results[0]['count']) if results else 0
+            
+            # Get available vs assigned qubits
+            available_query = "SELECT COUNT(*) as count FROM pseudoqubits WHERE is_available = TRUE AND auth_user_id IS NULL"
+            assigned_query = "SELECT COUNT(*) as count FROM pseudoqubits WHERE auth_user_id IS NOT NULL"
+            
+            available_results = execute_query(available_query)
+            assigned_results = execute_query(assigned_query)
+            
+            stats['pseudoqubits_available'] = int(available_results[0]['count']) if available_results else 0
+            stats['pseudoqubits_assigned'] = int(assigned_results[0]['count']) if assigned_results else 0
+            
+            return jsonify({
+                'status': 'success',
+                'stats': stats,
+                'timestamp': datetime.now().isoformat()
+            }), 200
+            
+        except Exception as e:
+            logger.error(f"Get stats error: {e}")
             return jsonify({
                 'status': 'error',
                 'message': str(e)
@@ -635,9 +798,12 @@ try:
     logger.info("REGISTERED ROUTES:")
     for rule in app.url_map.iter_rules():
         if rule.endpoint != 'static':
-            logger.info(f"  {rule.methods} {rule.rule}")
+            methods = ','.join(sorted(rule.methods - {'HEAD', 'OPTIONS'}))
+            logger.info(f"  [{methods:6}] {rule.rule}")
     logger.info("=" * 80)
-    logger.info("✓ QTCL Application Ready")
+    logger.info("✓ QTCL Application Ready - SCHEMA CORRECTED")
+    logger.info("✓ All queries match actual database schema")
+    logger.info("✓ Should now read all 106K+ qubits correctly")
     
 except Exception as e:
     logger.critical(f"Failed to create Flask application: {e}")
