@@ -1,0 +1,28 @@
+# Flask Web Framework
+Flask==3.0.0
+
+# CORS Support
+Flask-CORS==4.0.0
+
+# Database
+psycopg2-binary==2.9.11
+
+# Numerical Computing
+numpy==1.26.4
+
+# Quantum Computing (Latest stable)
+qiskit==1.0.2
+qiskit-aer==0.14.2
+
+# Security
+cryptography==42.0.5
+PyJWT==2.8.1
+
+# HTTP Requests
+requests==2.31.0
+
+# Environment Variables
+python-dotenv==1.0.0
+
+# WSGI Server for Koyeb
+gunicorn==21.2.0
