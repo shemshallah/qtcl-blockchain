@@ -188,62 +188,7 @@ class TransactionProcessor:
             to_user=tx['to_user_id'],
             amount=tx['amount'],
             metadata=json.loads(tx.get('metadata', '{}'))
-        )
-        
-        if result['status'] == 'success':
-            # Extract quantum results
-            quantum_results = result.get('quantum_results', {})
-            
-            # Update transaction with quantum commitment
-            DatabaseConnection.execute_update(
-                """UPDATE transactions 
-                   SET status = %s, 
-                       quantum_state_hash = %s, 
-                       commitment_hash = %s,
-                       entropy_score = %s,
-                       validator_agreement = %s,
-                       circuit_depth = %s,
-                       circuit_size = %s,
-                       execution_time_ms = %s
-                   WHERE tx_id = %s""",
-                (
-                    'finalized',
-                    quantum_results.get('state_hash'),
-                    quantum_results.get('commitment_hash'),
-                    quantum_results.get('entropy_percent'),
-                    quantum_results.get('validator_agreement_score'),
-                    quantum_results.get('circuit_depth'),
-                    quantum_results.get('circuit_size'),
-                    result.get('quantum_results', {}).get('execution_time_ms', 0),
-                    tx_id
-                )
-            )
-            
-            # Update local queue
-            if tx_id in self.tx_queue:
-                self.tx_queue[tx_id]['status'] = 'finalized'
-                self.tx_queue[tx_id]['quantum_hash'] = quantum_results.get('state_hash')
-                self.tx_queue[tx_id]['entropy'] = quantum_results.get('entropy_percent')
-                self.tx_queue[tx_id]['commitment'] = quantum_results.get('commitment_hash')
-            
-            logger.info(f"[TXN] ✓ Finalized {tx_id} (entropy: {quantum_results.get('entropy_percent', 0):.2f}%, validator_agreement: {quantum_results.get('validator_agreement_score', 0):.4f})")
-        
-        else:
-            # W-state execution failed
-            raise Exception(f"W-state execution failed: {result.get('message')}")
-    
-    except Exception as e:
-        logger.error(f"[TXN] Execution failed for {tx_id}: {e}")
-        
-        # Mark as failed
-        try:
-            DatabaseConnection.execute_update(
-                "UPDATE transactions SET status = %s WHERE tx_id = %s",
-                ('failed', tx_id)
-            )
-        except:
-            pass
-    
+
     def _cleanup_old_transactions(self):
         """Remove old transactions from local queue (keep last 100)"""
         if len(self.tx_queue) > 100:
