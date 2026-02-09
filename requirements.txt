@@ -8,7 +8,7 @@ Flask-CORS==4.0.0
 psycopg2-binary==2.9.11
 
 # Numerical Computing
-numpy==1.26.4
+numpy==2.0.0
 
 # Quantum Computing (Latest stable)
 qiskit==1.0.2
@@ -16,7 +16,7 @@ qiskit-aer==0.14.2
 
 # Security
 cryptography==42.0.5
-PyJWT==2.8.1
+PyJWT==2.11.0
 
 # HTTP Requests
 requests==2.31.0
