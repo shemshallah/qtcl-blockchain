@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-db_config.py - Drop-in database configuration for api_gateway
-Fixes syntax errors and uses environment variables
+db_config.py - CORRECT for qtcl_db_builder.py schema
+Matches actual columns from production build
 """
 
 import os
@@ -16,68 +16,17 @@ import time
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════════
-# CONFIG - ALL FROM ENVIRONMENT VARIABLES
+# CONFIG FROM ENVIRONMENT VARIABLES
 # ═══════════════════════════════════════════════════════════════════════════
 
 class Config:
-    """Production configuration - all from environment"""
+    """Production configuration - reads from environment"""
     
-    SUPABASE_HOST = os.getenv('SUPABASE_HOST', 'aws-0-us-west-2.pooler.supabase.com')
-    SUPABASE_USER = os.getenv('SUPABASE_USER', 'postgres.rslvlsqwkfmdtebqsvtw')
+    SUPABASE_HOST = os.getenv('SUPABASE_HOST', '')
+    SUPABASE_USER = os.getenv('SUPABASE_USER', '')
     SUPABASE_PASSWORD = os.getenv('SUPABASE_PASSWORD', '')
     SUPABASE_PORT = int(os.getenv('SUPABASE_PORT', '5432'))
     SUPABASE_DB = os.getenv('SUPABASE_DB', 'postgres')
-    
-    API_PORT = 5000
-    API_HOST = "0.0.0.0"
-    DEBUG = False
-    TESTING = False
-    MAX_CONTENT_LENGTH = 16 * 1024 * 1024
-    JSONIFY_PRETTYPRINT_REGULAR = True
-    
-    TOKEN_TOTAL_SUPPLY = 1_000_000_000
-    TOKEN_DECIMALS = 18
-    TOKEN_WEI_PER_UNIT = 10 ** TOKEN_DECIMALS
-    
-    QISKIT_SHOTS = 1024
-    QISKIT_QUBITS = 8
-    MAX_CIRCUIT_EXECUTION_TIME_MS = 200
-    SUPERPOSITION_TIMEOUT_SECONDS = 300
-    COHERENCE_REFRESH_INTERVAL_SECONDS = 5
-    ENTROPY_THRESHOLD_FOR_SUPERPOSITION = 0.8
-    
-    MAX_TXS_PER_SECOND = 1000
-    MAX_TXS_PER_USER_PER_MINUTE = 60
-    MAX_TXS_PER_USER_PER_HOUR = 500
-    RATE_LIMIT_WINDOW_SECONDS = 60
-    
-    INITIAL_GAS_PRICE = 1
-    GAS_PER_TRANSFER = 21000
-    GAS_PER_CONTRACT_CALL = 100000
-    GAS_PER_STAKE = 50000
-    BLOCK_GAS_LIMIT = 8_000_000
-    
-    BLOCK_REWARD_EPOCH_1_BLOCKS = 52_560
-    BLOCK_REWARD_EPOCH_1 = 100
-    BLOCK_REWARD_EPOCH_2 = 50
-    BLOCK_REWARD_EPOCH_3 = 25
-    
-    TESSELLATION_TYPE = (8, 3)
-    MAX_TESSELLATION_DEPTH = 10
-    TOTAL_PSEUDOQUBITS_ESTIMATED = 106_496
-    
-    MAX_EUCLIDEAN_DISTANCE_FOR_ROUTE = 0.3
-    BANDWIDTH_SCORE_CALCULATION = "1.0 - (distance / max_distance)"
-    
-    USER_CACHE_TTL_SECONDS = 300
-    QUBIT_CACHE_TTL_SECONDS = 300
-    BLOCK_CACHE_TTL_SECONDS = 600
-    ENABLE_QUERY_CACHING = True
-    
-    JWT_ALGORITHM = 'HS256'
-    JWT_EXPIRATION_HOURS = 24
-    ALLOWED_ORIGINS = ['*']
-    ENABLE_REQUEST_LOGGING = True
     
     DB_POOL_SIZE = 5
     DB_POOL_TIMEOUT = 30
@@ -87,17 +36,24 @@ class Config:
     
     @staticmethod
     def validate():
-        """Validate required config"""
-        if not Config.SUPABASE_PASSWORD:
-            raise RuntimeError("SUPABASE_PASSWORD not set")
-        logger.info(f"✓ Config: {Config.SUPABASE_HOST}:{Config.SUPABASE_PORT}/{Config.SUPABASE_DB}")
+        required = {
+            'SUPABASE_HOST': Config.SUPABASE_HOST,
+            'SUPABASE_USER': Config.SUPABASE_USER,
+            'SUPABASE_PASSWORD': Config.SUPABASE_PASSWORD,
+        }
+        
+        missing = [k for k, v in required.items() if not v]
+        if missing:
+            raise RuntimeError(f"Missing required env vars: {missing}")
+        
+        logger.info(f"✓ Config valid: {Config.SUPABASE_HOST}:{Config.SUPABASE_PORT}/{Config.SUPABASE_DB}")
 
 # ═══════════════════════════════════════════════════════════════════════════
-# DATABASE CONNECTION POOL WITH RETRY
+# DATABASE CONNECTION WITH RETRY LOGIC
 # ═══════════════════════════════════════════════════════════════════════════
 
 class DatabaseConnection:
-    """Thread-safe connection pool with retry logic"""
+    """Connection pool with retry logic"""
     
     _instance = None
     _connections = deque(maxlen=Config.DB_POOL_SIZE)
@@ -110,12 +66,12 @@ class DatabaseConnection:
     
     @staticmethod
     def _get_new_connection():
-        """Create connection with retries"""
+        """Create connection with retry logic"""
         last_error = None
         
         for attempt in range(1, Config.DB_RETRY_ATTEMPTS + 1):
             try:
-                logger.info(f"[DB] Connection attempt {attempt}/{Config.DB_RETRY_ATTEMPTS}")
+                logger.info(f"[DB] Connection attempt {attempt}/{Config.DB_RETRY_ATTEMPTS}...")
                 
                 conn = psycopg2.connect(
                     host=Config.SUPABASE_HOST,
@@ -127,27 +83,28 @@ class DatabaseConnection:
                     application_name='qtcl_api'
                 )
                 conn.set_session(autocommit=True)
-                logger.info(f"[DB] ✓ Connected")
+                logger.info(f"[DB] ✓ Connection established")
                 return conn
                 
             except psycopg2.OperationalError as e:
                 last_error = e
-                logger.warning(f"[DB] Failed: {e}")
+                logger.warning(f"[DB] ✗ Connection failed: {e}")
                 
                 if attempt < Config.DB_RETRY_ATTEMPTS:
                     wait = Config.DB_RETRY_DELAY_SECONDS * attempt
-                    logger.info(f"[DB] Retry in {wait}s...")
+                    logger.info(f"[DB] Retrying in {wait}s...")
                     time.sleep(wait)
                 else:
+                    logger.error(f"[DB] All retry attempts failed")
                     raise last_error
             
             except psycopg2.Error as e:
-                logger.error(f"[DB] Error: {e}")
+                logger.error(f"[DB] Non-retriable error: {e}")
                 raise
     
     @staticmethod
     def get_connection():
-        """Get connection from pool or create new"""
+        """Get connection from pool or create new one"""
         with DatabaseConnection._lock:
             try:
                 conn = DatabaseConnection._connections.popleft()
@@ -163,36 +120,38 @@ class DatabaseConnection:
     
     @staticmethod
     def return_connection(conn):
-        """Return connection to pool"""
+        """Return connection to pool for reuse"""
         if conn and not conn.closed:
             with DatabaseConnection._lock:
                 try:
                     DatabaseConnection._connections.append(conn)
                 except Exception as e:
-                    logger.warning(f"[DB] Pool error: {e}")
+                    logger.warning(f"[DB] Failed to pool connection: {e}")
                     conn.close()
-        else:
-            logger.warning("[DB] Cannot pool closed connection")
     
     @staticmethod
     def execute(query: str, params: tuple = None) -> list:
-        """Execute SELECT"""
+        """Execute SELECT query"""
         conn = DatabaseConnection.get_connection()
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(query, params or ())
-                return cur.fetchall()
+                results = cur.fetchall()
+                logger.debug(f"[DB] Query returned {len(results)} rows")
+                return results
         finally:
             DatabaseConnection.return_connection(conn)
     
     @staticmethod
     def execute_update(query: str, params: tuple = None) -> int:
-        """Execute INSERT/UPDATE/DELETE"""
+        """Execute INSERT/UPDATE/DELETE query"""
         conn = DatabaseConnection.get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute(query, params or ())
-                return cur.rowcount
+                affected = cur.rowcount
+                logger.debug(f"[DB] Query affected {affected} rows")
+                return affected
         finally:
             DatabaseConnection.return_connection(conn)
 
@@ -201,39 +160,91 @@ class DatabaseConnection:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def setup_database(app):
-    """Initialize database"""
+    """Initialize database connection in Flask app"""
     try:
-        logger.info("[INIT] Validating Supabase...")
+        logger.info("[INIT] Validating Supabase configuration...")
         Config.validate()
         
-        logger.info("[INIT] Testing connection...")
-        conn = DatabaseConnection.get_connection()
+        logger.info("[INIT] Testing database connection...")
+        test_conn = DatabaseConnection.get_connection()
         
-        with conn.cursor() as cur:
+        with test_conn.cursor() as cur:
             cur.execute("SELECT now()")
             ts = cur.fetchone()
         
-        DatabaseConnection.return_connection(conn)
+        DatabaseConnection.return_connection(test_conn)
+        
         logger.info(f"[INIT] ✓ Database ready")
         
         app.config['DB'] = DatabaseConnection
+        
         return True
         
     except Exception as e:
-        logger.critical(f"[INIT] ✗ Database failed: {e}")
+        logger.critical(f"[INIT] ✗ Database initialization failed: {e}")
         raise RuntimeError(f"Database error: {e}")
 
 def setup_api_routes(app):
-    """Setup API endpoints"""
+    """Setup Flask routes - CORRECT COLUMNS FOR qtcl_db_builder.py"""
     from flask import jsonify
     
     @app.route('/api/transactions', methods=['GET'])
     def get_transactions():
         try:
+            # Correct columns from transactions table
             results = DatabaseConnection.execute(
-                "SELECT * FROM transactions ORDER BY created_at DESC LIMIT 100"
+                "SELECT tx_id, from_user_id, to_user_id, amount, tx_type, status, "
+                "created_at, entropy_score "
+                "FROM transactions ORDER BY created_at DESC LIMIT 100"
             )
-            return jsonify({'status': 'success', 'count': len(results), 'data': results})
+            
+            transactions = []
+            for t in results:
+                transactions.append({
+                    'tx_id': t['tx_id'],
+                    'from': t['from_user_id'],
+                    'to': t['to_user_id'],
+                    'amount': float(t['amount']) if t['amount'] else 0,
+                    'type': t['tx_type'],
+                    'status': t['status'],
+                    'entropy': float(t['entropy_score']) if t['entropy_score'] else 0,
+                    'created_at': t['created_at'].isoformat() if t['created_at'] else None
+                })
+            
+            return jsonify({
+                'status': 'success',
+                'count': len(transactions),
+                'data': transactions
+            })
+        except Exception as e:
+            logger.error(f"[API] Error fetching transactions: {e}")
+            return jsonify({'status': 'error', 'message': str(e)}), 500
+    
+    @app.route('/api/transactions/<tx_id>', methods=['GET'])
+    def get_transaction(tx_id):
+        try:
+            results = DatabaseConnection.execute(
+                "SELECT tx_id, from_user_id, to_user_id, amount, tx_type, status, "
+                "quantum_state_hash, entropy_score, created_at "
+                "FROM transactions WHERE tx_id = %s",
+                (tx_id,)
+            )
+            
+            if results:
+                t = results[0]
+                return jsonify({
+                    'status': 'found',
+                    'tx_id': t['tx_id'],
+                    'tx_status': t['status'],
+                    'quantum_state_hash': t['quantum_state_hash'],
+                    'entropy_score': float(t['entropy_score']) if t['entropy_score'] else None,
+                    'created_at': t['created_at'].isoformat() if t['created_at'] else None
+                })
+            else:
+                return jsonify({
+                    'status': 'not_found',
+                    'tx_id': tx_id
+                })
         except Exception as e:
             logger.error(f"[API] Error: {e}")
             return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -242,9 +253,28 @@ def setup_api_routes(app):
     def get_blocks():
         try:
             results = DatabaseConnection.execute(
-                "SELECT * FROM blocks ORDER BY block_number DESC LIMIT 50"
+                "SELECT block_number, block_hash, parent_hash, timestamp, "
+                "transactions, entropy_score, created_at "
+                "FROM blocks ORDER BY block_number DESC LIMIT 50"
             )
-            return jsonify({'status': 'success', 'count': len(results), 'data': results})
+            
+            blocks = []
+            for b in results:
+                blocks.append({
+                    'block_number': b['block_number'],
+                    'block_hash': b['block_hash'],
+                    'parent_hash': b['parent_hash'],
+                    'timestamp': b['timestamp'],
+                    'transaction_count': b['transactions'],
+                    'entropy_score': float(b['entropy_score']) if b['entropy_score'] else 0,
+                    'created_at': b['created_at'].strftime('%a, %d %b %Y %H:%M:%S GMT') if b['created_at'] else None
+                })
+            
+            return jsonify({
+                'status': 'success',
+                'count': len(blocks),
+                'data': blocks
+            })
         except Exception as e:
             logger.error(f"[API] Error: {e}")
             return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -252,10 +282,29 @@ def setup_api_routes(app):
     @app.route('/api/users', methods=['GET'])
     def get_users():
         try:
+            # Correct columns from users table (user_id, not id)
+            limit = 50
             results = DatabaseConnection.execute(
-                "SELECT id, username, created_at FROM users LIMIT 50"
+                "SELECT user_id, email, name, balance, role, created_at FROM users LIMIT %s",
+                (limit,)
             )
-            return jsonify({'status': 'success', 'count': len(results), 'data': results})
+            
+            users = []
+            for u in results:
+                users.append({
+                    'id': u['user_id'],
+                    'email': u['email'],
+                    'name': u['name'],
+                    'balance': float(u['balance']) if u['balance'] else 0,
+                    'role': u['role'],
+                    'created_at': u['created_at'].isoformat() if u['created_at'] else None
+                })
+            
+            return jsonify({
+                'status': 'success',
+                'count': len(users),
+                'users': users
+            })
         except Exception as e:
             logger.error(f"[API] Error: {e}")
             return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -263,10 +312,31 @@ def setup_api_routes(app):
     @app.route('/api/quantum', methods=['GET'])
     def get_quantum():
         try:
+            # Correct columns from pseudoqubits table (pseudoqubit_id, not id)
+            limit = 50
             results = DatabaseConnection.execute(
-                "SELECT id, qubit_state, coherence_level FROM pseudoqubits LIMIT 50"
+                "SELECT pseudoqubit_id, fidelity, coherence, purity, entropy, "
+                "concurrence, routing_address FROM pseudoqubits LIMIT %s",
+                (limit,)
             )
-            return jsonify({'status': 'success', 'count': len(results), 'data': results})
+            
+            pseudoqubits = []
+            for pq in results:
+                pseudoqubits.append({
+                    'id': pq['pseudoqubit_id'],
+                    'fidelity': float(pq['fidelity']) if pq['fidelity'] else 0,
+                    'coherence': float(pq['coherence']) if pq['coherence'] else 0,
+                    'purity': float(pq['purity']) if pq['purity'] else 0,
+                    'entropy': float(pq['entropy']) if pq['entropy'] else 0,
+                    'concurrence': float(pq['concurrence']) if pq['concurrence'] else 0,
+                    'routing_address': pq['routing_address'],
+                })
+            
+            return jsonify({
+                'status': 'success',
+                'count': len(pseudoqubits),
+                'pseudoqubits': pseudoqubits
+            })
         except Exception as e:
             logger.error(f"[API] Error: {e}")
             return jsonify({'status': 'error', 'message': str(e)}), 500
