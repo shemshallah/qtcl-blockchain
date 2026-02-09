@@ -85,18 +85,28 @@ import numpy as np
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class Config:
-    """Production configuration for PythonAnywhere deployment"""
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # SUPABASE CONNECTION (from __NOTES.txt)
-    # ─────────────────────────────────────────────────────────────────────────
-    SUPABASE_HOST = "aws-0-us-west-2.pooler.supabase.com"
-    SUPABASE_USER = "postgres.rslvlsqwkfmdtebqsvtw"
-    SUPABASE_PASSWORD = "$h10j1r1H0w4rd"
-    SUPABASE_PORT = 5432
-    SUPABASE_DB = "postgres"
-    SUPABASE_JWT_SECRET = os.getenv('SUPABASE_JWT_SECRET', 'dev-secret-key-change-in-production')
-    
+"""Production configuration - reads from environment variables"""
+# ─────────────────────────────────────────────────────────────────────────
+# SUPABASE CONNECTION - FROM ENVIRONMENT VARIABLES
+# ─────────────────────────────────────────────────────────────────────────
+SUPABASE_HOST = os.getenv('SUPABASE_HOST', 'aws-0-us-west-2.pooler.supabase.com')
+SUPABASE_USER = os.getenv('SUPABASE_USER', 'postgres.rslvlsqwkfmdtebqsvtw')
+SUPABASE_PASSWORD = os.getenv('SUPABASE_PASSWORD', '')  # NO DEFAULT - FAIL IF NOT SET
+SUPABASE_PORT = int(os.getenv('SUPABASE_PORT', '5432'))
+SUPABASE_DB = os.getenv('SUPABASE_DB', 'postgres')
+SUPABASE_JWT_SECRET = os.getenv('SUPABASE_JWT_SECRET', 'dev-secret-key-change-in-production')
+
+@staticmethod
+def validate():
+    """Check required environment variables are set"""
+    if not Config.SUPABASE_PASSWORD:
+        raise RuntimeError("SUPABASE_PASSWORD environment variable not set")
+    if not Config.SUPABASE_USER:
+        raise RuntimeError("SUPABASE_USER environment variable not set")
+    if not Config.SUPABASE_HOST:
+        raise RuntimeError("SUPABASE_HOST environment variable not set")
+    logger.info(f"✓ Supabase config validated: {Config.SUPABASE_HOST}")
+
     # ─────────────────────────────────────────────────────────────────────────
     # API CONFIGURATION
     # ─────────────────────────────────────────────────────────────────────────
@@ -246,10 +256,35 @@ class DatabaseConnection:
         logger.info("Initializing DatabaseConnection singleton")
     
     @staticmethod
-    def _get_new_connection():
-        """Create a new database connection"""
+def _get_new_connection():
+    \"\"\"Create a new database connection\"\"\"
+    # Validate config
+    for attempt in range(1, 4):  # Try 3 times
         try:
+            logger.info(f"Database connection attempt {attempt}/3...")
             conn = psycopg2.connect(
+                host=Config.SUPABASE_HOST,
+                user=Config.SUPABASE_USER,
+                password=Config.SUPABASE_PASSWORD,
+                port=Config.SUPABASE_PORT,
+                database=Config.SUPABASE_DB,
+                connect_timeout=15,  # Increase from 10 to 15
+                application_name='qtcl_api_gateway'
+            )
+            conn.set_session(autocommit=True)
+            logger.info("✓ Database connection established")
+            return conn
+        except psycopg2.Error as e:
+            logger.error(f"Connection failed: {e}")
+            if attempt < 3:
+                wait = 2 * attempt
+                logger.info(f"Retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                raise
+    
+    try:
+        conn = psycopg2.connect(
                 host=Config.SUPABASE_HOST,
                 user=Config.SUPABASE_USER,
                 password=Config.SUPABASE_PASSWORD,
