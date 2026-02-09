@@ -46,12 +46,6 @@ import bcrypt
 from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister
 from qiskit_aer import AerSimulator
 
-try:
-    from quantum_transaction_executor_integrated import executor
-    from quantum_transaction_integration import SchemaModifier, register_quantum_transaction_routes
-    QUANTUM_AVAILABLE = True
-except ImportError:
-    QUANTUM_AVAILABLE = False
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DEPENDENCY INSTALLATION
@@ -89,6 +83,14 @@ def ensure_packages():
                 print(f"[INSTALL] ✗ Failed to install {pip_name}: {e}")
 
 ensure_packages()
+
+try:
+    from quantum_transaction_executor_integrated import executor
+    from quantum_transaction_integration import SchemaModifier, register_quantum_transaction_routes, register_blockchain_info_routes
+    QUANTUM_EXECUTOR_AVAILABLE = True
+except ImportError as e:
+    QUANTUM_EXECUTOR_AVAILABLE = False
+    print(f"Warning: Quantum not available: {e}")
 
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
@@ -1990,6 +1992,13 @@ rate_limiter = RateLimiter()
 # ═══════════════════════════════════════════════════════════════════════════════
 
 app = Flask(__name__)
+if QUANTUM_EXECUTOR_AVAILABLE:
+    try:
+        SchemaModifier.ensure_schema()
+        print("✓ Quantum schema initialized")
+    except Exception as e:
+        print(f"Schema init error: {e}")
+        QUANTUM_EXECUTOR_AVAILABLE = False
 app.config.from_object(Config)
 CORS(app, resources={r"/api/*": {"origins": Config.ALLOWED_ORIGINS}})
 
@@ -2194,40 +2203,107 @@ def change_password():
 # TRANSACTION MENU ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/transactions/menu', methods=['GET'])
+@app.route('/api/v1/transactions/send-step-3', methods=['POST'])
 @JWTHandler.require_auth
-def transaction_menu():
-    """Get transaction menu"""
+def send_step_3():
     try:
         user_id = request.user_id
-        user = db.execute_one(
-            "SELECT user_id, email, name, balance FROM users WHERE user_id = %s",
-            (user_id,)
-        )
+        data = request.get_json()
+        session_id = data.get('session_id')
+        confirm = data.get('confirm', 'no').strip().lower()
         
-        balance_display = (user['balance'] / Config.TOKEN_WEI_PER_UNIT) if user['balance'] else 0
+        session = TransactionSessionManager.get_session(session_id)
+        if not session or session['user_id'] != user_id:
+            return jsonify({'error': 'Invalid session'}), 401
         
-        return jsonify({
-            'state': 'menu',
-            'user': {
-                'id': user_id,
-                'email': user['email'],
-                'name': user['name'],
-                'balance': balance_display
-            },
-            'menu': {
-                '1': {'option': 'RECEIVE', 'description': 'Receive tokens'},
-                '2': {'option': 'SEND', 'description': 'Send tokens'},
-                '3': {'option': 'CHECK_BALANCE', 'description': 'View balance'},
-                '4': {'option': 'LOGOUT', 'description': 'End session'}
-            },
-            'prompt': 'Select option (1-4):'
-        }), 200
+        if confirm != 'yes':
+            TransactionSessionManager.clear_session(session_id)
+            return jsonify({'state': 'cancelled', 'message': 'Transaction cancelled'}), 200
+        
+        tx_id = str(uuid.uuid4())
+        tx_data = session['data']
+        
+        # QUANTUM PIPELINE - INTEGRATED
+        if QUANTUM_EXECUTOR_AVAILABLE:
+            amount_float = tx_data['amount'] / Config.TOKEN_WEI_PER_UNIT
+            result = executor.submit_and_execute_transaction(
+                sender_id=user_id,
+                receiver_id=tx_data['recipient_id'],
+                amount=amount_float,
+                session_id=session_id
+            )
+            
+            if not result['success']:
+                return jsonify({
+                    'error': 'Quantum validation failed',
+                    'details': result.get('reason', 'Oracle failed')
+                }), 400
+            
+            TransactionSessionManager.clear_session(session_id)
+            return jsonify({
+                'state': 'completed',
+                'success': True,
+                'transaction': {
+                    'id': result['tx_id'],
+                    'to': tx_data['recipient_id'],
+                    'amount': amount_float,
+                    'fee': tx_data['gas_fee'] / Config.TOKEN_WEI_PER_UNIT,
+                    'quantum_entropy': result['entropy'],
+                    'oracle_state': result['oracle_state'],
+                    'status': result['status']
+                },
+                'message': 'Transaction quantum-processed!'
+            }), 200
+        else:
+            # FALLBACK TO LEGACY (if quantum not available)
+            block_data = {
+                'tx_id': tx_id,
+                'from_user': user_id,
+                'to_user': tx_data['recipient_id'],
+                'amount': tx_data['amount']
+            }
+            
+            is_valid, quantum_result = quantum_validator.measure_block(tx_id, block_data)
+            
+            if not is_valid:
+                return jsonify({
+                    'error': 'Quantum validation failed',
+                    'details': quantum_result.get('reason')
+                }), 400
+            
+            db.execute_update(
+                """INSERT INTO transactions 
+                   (transaction_id, from_user_id, to_user_id, amount, tx_type, status, 
+                    quantum_state_hash, entropy_score, created_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())""",
+                (tx_id, user_id, tx_data['recipient_id'], tx_data['amount_wei'],
+                 'TRANSFER', 'PENDING', quantum_result['state_hash'], quantum_result['entropy'])
+            )
+            
+            db.execute_update("UPDATE users SET balance = balance - %s WHERE user_id = %s",
+                            (tx_data['total_cost'], user_id))
+            db.execute_update("UPDATE users SET balance = balance + %s WHERE user_id = %s",
+                            (tx_data['amount_wei'], tx_data['recipient_id']))
+            
+            TransactionSessionManager.clear_session(session_id)
+            
+            return jsonify({
+                'state': 'completed',
+                'success': True,
+                'transaction': {
+                    'id': tx_id,
+                    'to': tx_data['recipient_id'],
+                    'amount': tx_data['amount'],
+                    'fee': tx_data['gas_fee'] / Config.TOKEN_WEI_PER_UNIT,
+                    'quantum_entropy': quantum_result['entropy'],
+                    'status': 'PENDING'
+                },
+                'message': 'Transaction submitted!'
+            }), 200
     
     except Exception as e:
-        logger.error(f"Menu error: {e}")
-        return jsonify({'error': 'Menu failed'}), 500
-
+        logger.error(f"send_step_3 error: {e}")
+        return jsonify({'error': 'Transaction failed'}), 500
 
 @app.route('/api/v1/transactions/send-step-1', methods=['POST'])
 @JWTHandler.require_auth
@@ -2782,9 +2858,7 @@ def get_network_params():
         logger.error(f"Get network params error: {e}")
         return jsonify({'error': 'Request failed'}), 500
 
-if QUANTUM_AVAILABLE:
-    register_quantum_transaction_routes(app)
-    register_blockchain_info_routes(app)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SHUTDOWN HANDLER
@@ -2870,6 +2944,11 @@ def setup_api_routes(app):
     app.register_error_handler(500, internal_error)
     
     logger.info("✓ All API routes registered")
+
+if QUANTUM_EXECUTOR_AVAILABLE:
+    register_quantum_transaction_routes(app)
+    register_blockchain_info_routes(app)
+    print("✓ Quantum endpoints registered")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN ENTRY POINT
