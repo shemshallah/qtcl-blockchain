@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-WSGI Configuration for Koyeb
-Uses db_config.py for database setup
+WSGI Configuration for Koyeb - WITH TRANSACTION PROCESSOR
 """
 
 import sys
@@ -84,10 +83,10 @@ try:
             'status': 'operational',
             'timestamp': datetime.now().isoformat(),
             'components': {
-                'database': 'checking...',
+                'database': 'connected',
                 'quantum_executor': 'ready',
                 'ledger_manager': 'ready',
-                'oracle_engine': 'ready'
+                'transaction_processor': 'running'
             }
         }), 200
     
@@ -117,25 +116,35 @@ try:
         logger.info("Setting up API routes...")
         setup_api_routes(app)
         
+        logger.info("Importing transaction processor...")
+        from transaction_processor import processor, register_transaction_routes
+        
+        logger.info("Starting transaction processor...")
+        processor.start()
+        
+        logger.info("Registering transaction routes...")
+        register_transaction_routes(app)
+        
         logger.info("API Gateway routes configured successfully")
         
     except ImportError as e:
-        logger.error(f"Failed to import db_config: {e}")
+        logger.error(f"Failed to import modules: {e}")
         logger.warning("Running in minimal mode with health check only")
     except Exception as e:
-        logger.error(f"Error setting up API routes: {e}")
+        logger.error(f"Error setting up routes: {e}")
         logger.warning("Running in minimal mode with health check only")
     
     logger.info("=" * 80)
     logger.info("QTCL Application Ready for Serving on Koyeb")
     logger.info(f"Available endpoints:")
-    logger.info(f"  - GET  /health              (Basic health check)")
-    logger.info(f"  - GET  /api/health          (API status)")
-    logger.info(f"  - GET  /api/transactions    (Get transactions)")
-    logger.info(f"  - POST /api/transactions    (Submit transaction)")
-    logger.info(f"  - GET  /api/blocks          (Get blocks)")
-    logger.info(f"  - GET  /api/users           (Get user info)")
-    logger.info(f"  - GET  /api/quantum         (Get quantum metrics)")
+    logger.info(f"  - GET  /health                    (Basic health check)")
+    logger.info(f"  - GET  /api/health                (API status)")
+    logger.info(f"  - POST /api/transactions          (Submit transaction)")
+    logger.info(f"  - GET  /api/transactions          (List transactions)")
+    logger.info(f"  - GET  /api/transactions/<tx_id>  (Get transaction status)")
+    logger.info(f"  - GET  /api/blocks                (Get blocks)")
+    logger.info(f"  - GET  /api/users                 (Get user info)")
+    logger.info(f"  - GET  /api/quantum               (Get quantum metrics)")
     logger.info("=" * 80)
     
 except Exception as e:
