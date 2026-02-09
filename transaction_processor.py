@@ -165,59 +165,84 @@ class TransactionProcessor:
         logger.info("[TXN] Worker loop stopped")
     
     def _execute_transaction(self, tx: Dict):
-        """Execute quantum circuit for a transaction"""
-        tx_id = tx['tx_id']
+    """Execute transaction with W-state validator consensus + GHZ-8"""
+    tx_id = tx['tx_id']
+    
+    try:
+        logger.info(f"[TXN] Executing {tx_id} ({tx['tx_type']})")
         
-        try:
-            logger.info(f"[TXN] Executing {tx_id} ({tx['tx_type']})")
+        # Mark as processing
+        DatabaseConnection.execute_update(
+            "UPDATE transactions SET status = %s WHERE tx_id = %s",
+            ('processing', tx_id)
+        )
+        
+        # Import W-state executor
+        from wsv_integration import get_wsv_executor
+        
+        # Execute with W-state validator consensus
+        wsv_executor = get_wsv_executor(DatabaseConnection)
+        result = wsv_executor.execute_transaction(
+            tx_id=tx_id,
+            from_user=tx['from_user_id'],
+            to_user=tx['to_user_id'],
+            amount=tx['amount'],
+            metadata=json.loads(tx.get('metadata', '{}'))
+        )
+        
+        if result['status'] == 'success':
+            # Extract quantum results
+            quantum_results = result.get('quantum_results', {})
             
-            # Mark as processing
-            DatabaseConnection.execute_update(
-                "UPDATE transactions SET status = %s WHERE tx_id = %s",
-                ('processing', tx_id)
-            )
-            
-            # Simulate quantum execution (replace with real quantum_executor call)
-            start_time = time.time()
-            
-            # Generate quantum state hash (deterministic based on tx data)
-            import hashlib
-            state_input = f"{tx_id}{tx['amount']}{tx['from_user_id']}{tx['to_user_id']}"
-            quantum_state_hash = hashlib.sha256(state_input.encode()).hexdigest()
-            
-            # Simulate entropy score
-            entropy_score = min(95 + (hash(tx_id) % 5), 99)  # 95-99%
-            
-            execution_time_ms = (time.time() - start_time) * 1000
-            
-            # Update transaction with quantum results
+            # Update transaction with quantum commitment
             DatabaseConnection.execute_update(
                 """UPDATE transactions 
-                   SET status = %s, quantum_state_hash = %s, entropy_score = %s, 
+                   SET status = %s, 
+                       quantum_state_hash = %s, 
+                       commitment_hash = %s,
+                       entropy_score = %s,
+                       validator_agreement = %s,
+                       circuit_depth = %s,
+                       circuit_size = %s,
                        execution_time_ms = %s
                    WHERE tx_id = %s""",
-                ('finalized', quantum_state_hash, entropy_score, execution_time_ms, tx_id)
+                (
+                    'finalized',
+                    quantum_results.get('state_hash'),
+                    quantum_results.get('commitment_hash'),
+                    quantum_results.get('entropy_percent'),
+                    quantum_results.get('validator_agreement_score'),
+                    quantum_results.get('circuit_depth'),
+                    quantum_results.get('circuit_size'),
+                    result.get('quantum_results', {}).get('execution_time_ms', 0),
+                    tx_id
+                )
             )
             
             # Update local queue
             if tx_id in self.tx_queue:
                 self.tx_queue[tx_id]['status'] = 'finalized'
-                self.tx_queue[tx_id]['quantum_hash'] = quantum_state_hash
-                self.tx_queue[tx_id]['entropy'] = entropy_score
+                self.tx_queue[tx_id]['quantum_hash'] = quantum_results.get('state_hash')
+                self.tx_queue[tx_id]['entropy'] = quantum_results.get('entropy_percent')
+                self.tx_queue[tx_id]['commitment'] = quantum_results.get('commitment_hash')
             
-            logger.info(f"[TXN] ✓ Finalized {tx_id} (entropy: {entropy_score}%)")
+            logger.info(f"[TXN] ✓ Finalized {tx_id} (entropy: {quantum_results.get('entropy_percent', 0):.2f}%, validator_agreement: {quantum_results.get('validator_agreement_score', 0):.4f})")
         
-        except Exception as e:
-            logger.error(f"[TXN] Execution failed for {tx_id}: {e}")
-            
-            # Mark as failed
-            try:
-                DatabaseConnection.execute_update(
-                    "UPDATE transactions SET status = %s WHERE tx_id = %s",
-                    ('failed', tx_id)
-                )
-            except:
-                pass
+        else:
+            # W-state execution failed
+            raise Exception(f"W-state execution failed: {result.get('message')}")
+    
+    except Exception as e:
+        logger.error(f"[TXN] Execution failed for {tx_id}: {e}")
+        
+        # Mark as failed
+        try:
+            DatabaseConnection.execute_update(
+                "UPDATE transactions SET status = %s WHERE tx_id = %s",
+                ('failed', tx_id)
+            )
+        except:
+            pass
     
     def _cleanup_old_transactions(self):
         """Remove old transactions from local queue (keep last 100)"""
