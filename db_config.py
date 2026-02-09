@@ -460,7 +460,7 @@ def setup_api_routes(app):
     def get_quantum():
         try:
             # Correct columns from pseudoqubits table (pseudoqubit_id, not id)
-            limit = 50
+            limit = int(request.args.get('limit', 1000))  # Default to 1000, allow override
             results = DatabaseConnection.execute(
                 "SELECT pseudoqubit_id, fidelity, coherence, purity, entropy, "
                 "concurrence, routing_address FROM pseudoqubits LIMIT %s",

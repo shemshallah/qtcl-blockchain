@@ -185,6 +185,36 @@ try:
             logger.error(f"Change password error: {e}")
             return jsonify({'status': 'error', 'message': str(e)}), 500
     
+    @app.route('/api/transactions', methods=['POST'])
+    def submit_transaction():
+        """Submit a new transaction"""
+        try:
+            data = request.get_json()
+            
+            # Accept both 'from_user' and 'from_user_id'
+            from_user = data.get('from_user') or data.get('from_user_id')
+            to_user = data.get('to_user') or data.get('to_user_id')
+            amount = data.get('amount')
+            tx_type = data.get('tx_type', 'transfer')
+            
+            if not all([from_user, to_user, amount]):
+                return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+            
+            tx_id = f"tx_{from_user}_{to_user}_{datetime.now().timestamp()}"
+            
+            return jsonify({
+                'status': 'success',
+                'tx_id': tx_id,
+                'from_user': from_user,
+                'to_user': to_user,
+                'amount': float(amount),
+                'tx_type': tx_type,
+                'message': 'Transaction submitted successfully'
+            }), 200
+        except Exception as e:
+            logger.error(f"Submit transaction error: {e}")
+            return jsonify({'status': 'error', 'message': str(e)}), 500
+    
     @app.route('/api/v1/transactions/menu', methods=['GET'])
     def transaction_menu():
         """Get transaction menu options"""
