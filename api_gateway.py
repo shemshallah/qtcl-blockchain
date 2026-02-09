@@ -2778,8 +2778,399 @@ def get_network_params():
         }), 200
     except Exception as e:
         logger.error(f"Get network params error: {e}")
-        return jsonify({'error': 'Request failed'}), 500
+        return jsonify({'error': 'Request Failed'}), 500
 
+# ═══════════════════════════════════════════════════════════════════════════
+# MONITORING: Event-Driven Block Creation & Mempool Status
+# ═══════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/mempool', methods=['GET'])
+def get_mempool_status():
+    """
+    Get status of pending transactions in mempool.
+    
+    This endpoint shows:
+    - Number of transactions waiting to be included in next block
+    - List of pending transactions with details
+    - Entropy scores and validator agreements
+    
+    Returns: JSON with pending transaction count and details
+    Status Codes:
+      - 200: Success
+      - 503: Mempool not initialized
+      - 500: Server error
+    
+    Example Response:
+    {
+      "status": "success",
+      "mempool": {
+        "pending_transaction_count": 5,
+        "pending_transactions": [
+          {
+            "tx_id": "tx_abc123...",
+            "from": "user1",
+            "to": "user2",
+            "amount": 100.0,
+            "type": "transfer",
+            "entropy_score": 85.2,
+            "validator_agreement": 0.95
+          }
+        ]
+      },
+      "timestamp": "2025-02-09T12:30:45.123456+00:00"
+    }
+    """
+    try:
+        from ledger_manager import global_mempool
+        
+        if not global_mempool:
+            logger.warning("[API] Mempool not initialized")
+            return jsonify({
+                'status': 'error',
+                'message': 'Mempool not initialized'
+            }), 503
+        
+        pending_count = global_mempool.get_pending_count()
+        pending_txs = global_mempool.get_pending_transactions()
+        
+        return jsonify({
+            'status': 'success',
+            'mempool': {
+                'pending_transaction_count': pending_count,
+                'pending_transactions': [
+                    {
+                        'tx_id': tx.get('tx_id'),
+                        'from': tx.get('from_user_id'),
+                        'to': tx.get('to_user_id'),
+                        'amount': tx.get('amount'),
+                        'type': tx.get('tx_type'),
+                        'entropy_score': tx.get('entropy_score'),
+                        'validator_agreement': tx.get('validator_agreement')
+                    }
+                    for tx in pending_txs
+                ]
+            },
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"[API] Mempool status error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
+@app.route('/api/blockchain/stats', methods=['GET'])
+def get_blockchain_stats():
+    """
+    Get overall blockchain statistics.
+    
+    This endpoint shows:
+    - Total blocks created
+    - Total transactions processed
+    - Average transactions per block
+    - Number of empty blocks (should be ~0 with event-driven)
+    - Block efficiency percentage
+    
+    With event-driven blocks:
+    - Empty blocks should be 0 or very close to 0
+    - Block efficiency should be very high
+    - This shows the system is working optimally
+    
+    Returns: JSON with blockchain statistics
+    Status Codes:
+      - 200: Success
+      - 500: Server error
+    
+    Example Response (Event-Driven - Good):
+    {
+      "status": "success",
+      "stats": {
+        "total_blocks": 45,
+        "total_transactions": 1200,
+        "avg_transactions_per_block": 26.67,
+        "empty_blocks": 0,
+        "non_empty_blocks": 45,
+        "block_efficiency_percent": 100.0
+      },
+      "analysis": {
+        "note": "Event-driven blocks should have ~0 empty blocks",
+        "storage_saved": "Optimal"
+      }
+    }
+    
+    Example Response (Timer-Based - Poor):
+    {
+      "status": "success",
+      "stats": {
+        "total_blocks": 8640,
+        "total_transactions": 1200,
+        "avg_transactions_per_block": 0.14,
+        "empty_blocks": 8200,
+        "non_empty_blocks": 440,
+        "block_efficiency_percent": 5.09
+      },
+      "analysis": {
+        "note": "Event-driven blocks should have ~0 empty blocks",
+        "storage_saved": "625.00 MB annual"
+      }
+    }
+    """
+    try:
+        conn = DatabaseConnection.get_connection()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                # Get all blocks
+                cursor.execute("""
+                    SELECT block_number, transaction_count 
+                    FROM blocks 
+                    ORDER BY block_number ASC
+                """)
+                blocks = cursor.fetchall()
+        finally:
+            DatabaseConnection.return_connection(conn)
+        
+        if not blocks:
+            return jsonify({
+                'status': 'success',
+                'stats': {
+                    'total_blocks': 0,
+                    'total_transactions': 0,
+                    'avg_transactions_per_block': 0,
+                    'empty_blocks': 0,
+                    'non_empty_blocks': 0,
+                    'block_efficiency_percent': 0
+                },
+                'analysis': {
+                    'note': 'No blocks yet'
+                },
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }), 200
+        
+        # Calculate statistics
+        total_blocks = len(blocks)
+        total_txs = sum(b['transaction_count'] for b in blocks)
+        empty_blocks = sum(1 for b in blocks if b['transaction_count'] == 0)
+        non_empty_blocks = total_blocks - empty_blocks
+        avg_per_block = total_txs / total_blocks if total_blocks > 0 else 0
+        efficiency = (non_empty_blocks / total_blocks * 100) if total_blocks > 0 else 0
+        
+        # Calculate storage implications
+        # Each block is ~2.5 KB on average
+        empty_block_storage_kb = empty_blocks * 2.5
+        annual_storage_mb = (empty_block_storage_kb * 8640 * 365 / 1000) / 1024  # extrapolated to annual
+        
+        storage_analysis = 'Optimal' if empty_blocks == 0 else f'{annual_storage_mb:.2f} MB annual waste'
+        
+        return jsonify({
+            'status': 'success',
+            'stats': {
+                'total_blocks': total_blocks,
+                'total_transactions': total_txs,
+                'avg_transactions_per_block': round(avg_per_block, 2),
+                'empty_blocks': empty_blocks,
+                'non_empty_blocks': non_empty_blocks,
+                'block_efficiency_percent': round(efficiency, 2)
+            },
+            'analysis': {
+                'note': 'Event-driven blocks should have ~0 empty blocks',
+                'storage_saved': storage_analysis,
+                'status': 'OPTIMAL' if empty_blocks == 0 else 'SUBOPTIMAL'
+            },
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"[API] Blockchain stats error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
+@app.route('/api/blocks/current', methods=['GET'])
+def get_current_block_info():
+    """
+    Get information about the most recently created block.
+    
+    This endpoint shows:
+    - Block number of the latest block
+    - Number of transactions in the latest block
+    - When the latest block was created
+    - Number of pending transactions waiting for next block
+    
+    This is useful for:
+    - Monitoring current blockchain state
+    - Seeing how many transactions are batched
+    - Monitoring block creation frequency
+    
+    Returns: JSON with current block information
+    Status Codes:
+      - 200: Success
+      - 404: No blocks found (genesis state)
+      - 500: Server error
+    
+    Example Response:
+    {
+      "status": "success",
+      "current_block": {
+        "block_number": 45,
+        "transaction_count": 25,
+        "created_at": "2025-02-09T12:30:45.123456+00:00"
+      },
+      "mempool": {
+        "pending_transaction_count": 3,
+        "next_block_will_contain": 3
+      },
+      "timestamp": "2025-02-09T12:31:00.000000+00:00"
+    }
+    """
+    try:
+        conn = DatabaseConnection.get_connection()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute("""
+                    SELECT block_number, transaction_count, created_at 
+                    FROM blocks 
+                    ORDER BY block_number DESC 
+                    LIMIT 1
+                """)
+                latest_block = cursor.fetchone()
+        finally:
+            DatabaseConnection.return_connection(conn)
+        
+        # Get pending transactions from mempool
+        from ledger_manager import global_mempool
+        pending_count = global_mempool.get_pending_count() if global_mempool else 0
+        
+        if not latest_block:
+            return jsonify({
+                'status': 'error',
+                'message': 'No blocks found (genesis state)'
+            }), 404
+        
+        return jsonify({
+            'status': 'success',
+            'current_block': {
+                'block_number': latest_block['block_number'],
+                'transaction_count': latest_block['transaction_count'],
+                'created_at': latest_block['created_at'].isoformat() if latest_block['created_at'] else None
+            },
+            'mempool': {
+                'pending_transaction_count': pending_count,
+                'next_block_will_contain': pending_count
+            },
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"[API] Current block info error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
+@app.route('/api/blocks/throughput', methods=['GET'])
+def get_transaction_throughput():
+    """
+    Get transaction throughput metrics.
+    
+    This endpoint shows:
+    - Transactions per hour (last hour)
+    - Blocks created per hour
+    - Average transactions per block
+    - Transactions per second
+    - Average block creation interval
+    
+    Useful for monitoring:
+    - System performance
+    - Block creation rate
+    - Transaction batching efficiency
+    - Network throughput
+    
+    Returns: JSON with throughput metrics
+    Status Codes:
+      - 200: Success
+      - 500: Server error
+    
+    Example Response (High Throughput):
+    {
+      "status": "success",
+      "throughput": {
+        "transactions_per_hour": 1000,
+        "blocks_per_hour": 40,
+        "transactions_per_block": 25.0,
+        "transactions_per_second": 0.2778,
+        "average_block_creation_interval_seconds": 90.0
+      },
+      "time_period": "last_hour"
+    }
+    """
+    try:
+        conn = DatabaseConnection.get_connection()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                # Get blocks from last hour
+                one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+                
+                cursor.execute("""
+                    SELECT created_at, transaction_count 
+                    FROM blocks 
+                    WHERE created_at > %s
+                    ORDER BY created_at DESC
+                """, (one_hour_ago,))
+                
+                recent_blocks = cursor.fetchall()
+        finally:
+            DatabaseConnection.return_connection(conn)
+        
+        if not recent_blocks:
+            return jsonify({
+                'status': 'success',
+                'throughput': {
+                    'transactions_per_hour': 0,
+                    'blocks_per_hour': 0,
+                    'transactions_per_block': 0,
+                    'transactions_per_second': 0,
+                    'average_block_creation_interval_seconds': 0
+                },
+                'time_period': 'last_hour',
+                'note': 'No blocks in last hour',
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }), 200
+        
+        # Calculate throughput metrics
+        total_txs_hour = sum(b['transaction_count'] for b in recent_blocks)
+        block_count_hour = len(recent_blocks)
+        
+        throughput = {
+            'transactions_per_hour': total_txs_hour,
+            'blocks_per_hour': block_count_hour,
+            'transactions_per_block': round(total_txs_hour / block_count_hour, 2) if block_count_hour > 0 else 0,
+            'transactions_per_second': round(total_txs_hour / 3600, 4),
+            'average_block_creation_interval_seconds': round(3600 / block_count_hour, 2) if block_count_hour > 0 else 0
+        }
+        
+        return jsonify({
+            'status': 'success',
+            'throughput': throughput,
+            'time_period': 'last_hour',
+            'blocks_analyzed': block_count_hour,
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"[API] Throughput metrics error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+# ═══════════════════════════════════════════════════════════════════════════
+# END OF MONITORING ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════════════
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
