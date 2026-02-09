@@ -46,6 +46,13 @@ import bcrypt
 from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister
 from qiskit_aer import AerSimulator
 
+try:
+    from quantum_transaction_executor_integrated import executor
+    from quantum_transaction_integration import SchemaModifier, register_quantum_transaction_routes
+    QUANTUM_AVAILABLE = True
+except ImportError:
+    QUANTUM_AVAILABLE = False
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # DEPENDENCY INSTALLATION
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1986,6 +1993,9 @@ app = Flask(__name__)
 app.config.from_object(Config)
 CORS(app, resources={r"/api/*": {"origins": Config.ALLOWED_ORIGINS}})
 
+if QUANTUM_AVAILABLE:
+    SchemaModifier.ensure_schema()
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ERROR HANDLERS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2771,6 +2781,10 @@ def get_network_params():
     except Exception as e:
         logger.error(f"Get network params error: {e}")
         return jsonify({'error': 'Request failed'}), 500
+
+if QUANTUM_AVAILABLE:
+    register_quantum_transaction_routes(app)
+    register_blockchain_info_routes(app)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SHUTDOWN HANDLER
