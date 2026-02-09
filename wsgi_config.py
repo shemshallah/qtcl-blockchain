@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-═══════════════════════════════════════════════════════════════════════════
-KOYEB WSGI CONFIGURATION - FIXED
-QUANTUM TEMPORAL COHERENCE LEDGER (QTCL)
-═══════════════════════════════════════════════════════════════════════════
-
-No runtime pip install - all dependencies via requirements.txt during build
+WSGI Configuration for Koyeb
+Uses db_config.py for database setup
 """
 
 import sys
@@ -14,17 +10,9 @@ import logging
 import traceback
 from datetime import datetime
 
-# ═══════════════════════════════════════════════════════════════════════════
-# PATH CONFIGURATION
-# ═══════════════════════════════════════════════════════════════════════════
-
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-
-# ═══════════════════════════════════════════════════════════════════════════
-# LOGGING SETUP
-# ═══════════════════════════════════════════════════════════════════════════
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,10 +27,6 @@ logger.info(f"Python Version: {sys.version}")
 logger.info(f"Timestamp: {datetime.now().isoformat()}")
 logger.info("=" * 80)
 
-# ═══════════════════════════════════════════════════════════════════════════
-# ENVIRONMENT VARIABLES VALIDATION
-# ═══════════════════════════════════════════════════════════════════════════
-
 REQUIRED_ENV_VARS = [
     'SUPABASE_HOST',
     'SUPABASE_USER',
@@ -56,7 +40,6 @@ missing_vars = [var for var in REQUIRED_ENV_VARS if not os.getenv(var)]
 if missing_vars:
     logger.error(f"Missing REQUIRED environment variables: {', '.join(missing_vars)}")
     logger.error("Set these in Koyeb Environment Variables before deployment")
-    # Don't set defaults - fail loudly on Koyeb
 else:
     logger.info(f"✓ All required environment variables configured")
 
@@ -65,10 +48,6 @@ os.environ.setdefault('FLASK_SECRET_KEY', os.urandom(16).hex())
 os.environ.setdefault('JWT_SECRET', os.urandom(32).hex())
 
 logger.info("Environment variables validated")
-
-# ═══════════════════════════════════════════════════════════════════════════
-# FLASK APPLICATION CREATION (NO PIP INSTALL LOOP)
-# ═══════════════════════════════════════════════════════════════════════════
 
 try:
     logger.info("Importing Flask...")
@@ -87,10 +66,6 @@ try:
     CORS(app)
     
     logger.info("Flask app created successfully")
-    
-    # ═════════════════════════════════════════════════════════════════════════
-    # BASIC HEALTH CHECK ENDPOINT
-    # ═════════════════════════════════════════════════════════════════════════
     
     @app.route('/health', methods=['GET'])
     def health_check():
@@ -116,10 +91,6 @@ try:
             }
         }), 200
     
-    # ═════════════════════════════════════════════════════════════════════════
-    # ERROR HANDLERS
-    # ═════════════════════════════════════════════════════════════════════════
-    
     @app.errorhandler(404)
     def not_found(error):
         return jsonify({
@@ -136,13 +107,9 @@ try:
             'message': 'Internal server error'
         }), 500
     
-    # ═════════════════════════════════════════════════════════════════════════
-    # IMPORT AND INTEGRATE API GATEWAY
-    # ═════════════════════════════════════════════════════════════════════════
-    
     try:
-        logger.info("Attempting to import api_gateway module...")
-        from api_gateway import setup_api_routes, setup_database
+        logger.info("Importing db_config module...")
+        from db_config import setup_database, setup_api_routes
         
         logger.info("Setting up database connection pool...")
         setup_database(app)
@@ -153,15 +120,11 @@ try:
         logger.info("API Gateway routes configured successfully")
         
     except ImportError as e:
-        logger.error(f"Failed to import api_gateway: {e}")
+        logger.error(f"Failed to import db_config: {e}")
         logger.warning("Running in minimal mode with health check only")
     except Exception as e:
         logger.error(f"Error setting up API routes: {e}")
         logger.warning("Running in minimal mode with health check only")
-    
-    # ═════════════════════════════════════════════════════════════════════════
-    # STARTUP MESSAGE
-    # ═════════════════════════════════════════════════════════════════════════
     
     logger.info("=" * 80)
     logger.info("QTCL Application Ready for Serving on Koyeb")
@@ -184,10 +147,6 @@ except Exception as e:
     @app.route('/')
     def error_page():
         return f"<h1>Application Error</h1><p>{str(e)}</p>", 500
-
-# ═══════════════════════════════════════════════════════════════════════════
-# WSGI APPLICATION OBJECT
-# ═══════════════════════════════════════════════════════════════════════════
 
 application = app
 
