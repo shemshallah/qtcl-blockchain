@@ -86,6 +86,9 @@ def ensure_packages():
         'websocket': 'websocket-client',
         'requests': 'requests',
         'cryptography': 'cryptography'
+        'bcrypt': 'bcrypt',
+        'flask': 'Flask',
+        'flask_cors': 'Flask-CORS'
     }
     
     for module, pip_name in packages.items():
