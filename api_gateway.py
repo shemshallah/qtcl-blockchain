@@ -3175,6 +3175,15 @@ def require_role(role: str):
         return decorated
     return decorator
 
+def rate_limit(f):
+    """Rate limiting decorator - simple passthrough for now"""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        # Rate limiting can be implemented with Redis later
+        # For now, just pass through
+        return f(*args, **kwargs)
+    return decorated
+
 @app.before_request
 def before_request():
     """Execute before each request"""
