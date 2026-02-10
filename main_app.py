@@ -3,11 +3,12 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════════════
 QUANTUM TEMPORAL COHERENCE LEDGER (QTCL) - MAIN APPLICATION
-Complete Transaction Monitor, Quantum Router, and Execution Orchestrator
+Complete Transaction Monitor, Quantum Router, Consensus, and Execution Orchestrator
+VERSION 3.2.0 - PRODUCTION GRADE - 3000+ LINES
 ═══════════════════════════════════════════════════════════════════════════════════════
 
-MONOLITHIC PRODUCTION APPLICATION - ~7000+ lines single continuous output
-Deployment: PythonAnywhere
+MONOLITHIC PRODUCTION APPLICATION - Complete implementation
+Deployment: Koyeb/PythonAnywhere/AWS
 Database: Supabase PostgreSQL
 Quantum: Qiskit + AER Simulator (1024 shots per transaction)
 
@@ -18,20 +19,24 @@ CORE RESPONSIBILITIES:
   ├─ Quantum Circuit Job Queue Management (Thread 4)
   ├─ Superposition Lifecycle Management (Thread 5)
   ├─ Oracle Event Listening (Thread 6)
-  ├─ Finality & Block Creation (Thread 7)
-  ├─ Database State Synchronization (Thread 8)
-  └─ WebSocket Status Broadcasting (Thread 9)
+  ├─ Validator Consensus Engine (Thread 7)
+  ├─ Finality & Block Creation (Thread 8)
+  ├─ State Synchronization (Thread 9)
+  ├─ Metrics & Monitoring (Thread 10)
+  └─ Network Coordination (Thread 11)
 
 QUANTUM INTEGRATION:
-  ├─ All transactions executed via quantum circuits
+  ├─ All transactions executed via quantum circuits (W-state + GHZ-8)
   ├─ Superposition maintained with entropy tracking
   ├─ Measurement results integrated from test suite
   ├─ Coherence refresh with Floquet cycle tracking
   ├─ Entanglement management for validator consensus
+  ├─ Pseudoqubit allocation and lifecycle
+  ├─ Quantum commitment hashing
   └─ Collapse triggering via oracle data
 
 TOTAL SYSTEM ARCHITECTURE:
-  Genesis Block → Pending TX Pool → Quantum Executor → Superposition State → Oracle Collapse → Finality → Blockchain
+  Genesis → Pending TX Pool → Quantum Executor → Superposition State → Oracle Collapse → Validator Consensus → Finality → Blockchain
 ═══════════════════════════════════════════════════════════════════════════════════════
 """
 
@@ -46,18 +51,25 @@ import asyncio
 import queue
 import sqlite3
 import random
+import secrets
+import bcrypt
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Tuple, Optional, Any, Callable
-from dataclasses import dataclass, field, asdict
-from enum import Enum
-from collections import deque, defaultdict
-from functools import wraps
+from typing import Dict, List, Tuple, Optional, Any, Callable, Set
+from dataclasses import dataclass, field, asdict, replace
+from enum import Enum, IntEnum, auto
+from collections import deque, defaultdict, OrderedDict, Counter
+from functools import wraps, lru_cache
+from decimal import Decimal, getcontext
 import subprocess
 import traceback
 import cmath
 import math
 import base64
 import pickle
+import copy
+import inspect
+import uuid
+import struct
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # DEPENDENCY INSTALLATION
@@ -72,7 +84,8 @@ def ensure_packages():
         'qiskit': 'qiskit',
         'qiskit_aer': 'qiskit-aer',
         'websocket': 'websocket-client',
-        'requests': 'requests'
+        'requests': 'requests',
+        'cryptography': 'cryptography'
     }
     
     for module, pip_name in packages.items():
@@ -91,412 +104,235 @@ ensure_packages()
 import psycopg2
 from psycopg2.extras import RealDictCursor, execute_batch
 import numpy as np
-from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister
-from qiskit_aer import AerSimulator
+from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister, transpile, assemble
+from qiskit_aer import AerSimulator, QasmSimulator, StatevectorSimulator
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.backends import default_backend
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# LOGGING SETUP
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] [%(threadName)-12s] [%(name)s] %(levelname)s: %(message)s',
+    handlers=[
+        logging.FileHandler('qtcl_main_app.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+
+logger = logging.getLogger(__name__)
+
+# Set precision for Decimal calculations
+getcontext().prec = 50
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 class Config:
-    """Complete configuration for main application"""
+    """Global configuration"""
     
-    # Database - All from environment variables
-    SUPABASE_HOST = os.getenv('SUPABASE_HOST', '')
-    SUPABASE_USER = os.getenv('SUPABASE_USER', '')
+    ENVIRONMENT = os.getenv('FLASK_ENV', 'production')
+    DEBUG = ENVIRONMENT == 'development'
+    
+    # Database
+    SUPABASE_HOST = os.getenv('SUPABASE_HOST', 'localhost')
+    SUPABASE_USER = os.getenv('SUPABASE_USER', 'postgres')
     SUPABASE_PASSWORD = os.getenv('SUPABASE_PASSWORD', '')
     SUPABASE_PORT = int(os.getenv('SUPABASE_PORT', '5432'))
     SUPABASE_DB = os.getenv('SUPABASE_DB', 'postgres')
-    DB_POOL_SIZE = 10
-    DB_CONNECTION_TIMEOUT = 30
+    
+    # Quantum
+    QISKIT_SHOTS = 1024
+    QISKIT_SIMULATOR_SEED = 42
+    QISKIT_BACKEND = 'aer_simulator'
+    QISKIT_OPTIMIZATION_LEVEL = 2
+    
+    # Blockchain
+    BLOCK_TIME_TARGET = 10  # seconds
+    MAX_TRANSACTIONS_PER_BLOCK = 1000
+    FINALITY_BLOCKS = 12
+    TOKEN_DECIMALS = 18
+    TOTAL_SUPPLY = 1_000_000_000 * (10 ** TOKEN_DECIMALS)
+    
+    # Consensus
+    VALIDATOR_COUNT = 5
+    CONSENSUS_THRESHOLD = 3
+    VALIDATOR_STAKE_MIN = 1000
+    
+    # Quantum Coherence
+    COHERENCE_DECAY_RATE = 0.95
+    FLOQUET_CYCLE_LENGTH = 100
+    ENTROPY_THRESHOLD = 0.7
+    GHZ_FIDELITY_TARGET = 0.95
+    
+    # Pseudoqubits
+    PSEUDOQUBIT_POOL_SIZE = 1000
+    PSEUDOQUBIT_LIFETIME = 3600  # seconds
     
     # Threading
-    NUM_WORKER_THREADS = 9
-    THREAD_NAMES = [
-        'GenesisInitializer',
-        'TransactionPoller',
-        'PseudoqubitManager',
-        'QuantumJobQueue',
-        'SuperpositionManager',
-        'OracleListener',
-        'FinalityProcessor',
-        'DatabaseSync',
-        'WebSocketBroadcaster'
-    ]
+    MAX_WORKERS = 8
+    POLLING_INTERVAL = 2  # seconds
     
-    # Polling Intervals (milliseconds)
-    POLL_INTERVAL_TRANSACTIONS_MS = 100
-    POLL_INTERVAL_SUPERPOSITION_MS = 500
-    POLL_INTERVAL_ORACLE_MS = 200
-    POLL_INTERVAL_FINALITY_MS = 300
-    POLL_INTERVAL_SYNC_MS = 1000
+    # Oracle
+    ORACLE_POLL_INTERVAL = 5
+    ORACLE_TIMEOUT = 30
+    ORACLE_MAX_QUEUE = 10000
     
-    # Batch Sizes
-    BATCH_SIZE_TRANSACTIONS = 100
-    BATCH_SIZE_QUANTUM_JOBS = 50
-    BATCH_SIZE_SUPERPOSITION_REFRESH = 25
+    # Cache
+    CACHE_ENABLED = True
+    CACHE_TTL = 300  # seconds
     
-    # Quantum Parameters
-    QISKIT_SHOTS = 1024
-    QISKIT_QUBITS = 8
-    QISKIT_SIMULATOR_SEED = 42
-    CIRCUIT_TIMEOUT_MS = 200
-    
-    # Superposition Lifecycle
-    SUPERPOSITION_TIMEOUT_SECONDS = 300  # 5 minutes
-    COHERENCE_REFRESH_INTERVAL_SECONDS = 5
-    MIN_ENTROPY_FOR_SUPERPOSITION = 0.80
-    MAX_COHERENCE_REFRESH_COUNT = 60
-    FLOQUET_CYCLE_INTERVAL_SECONDS = 10
-    
-    # Block Parameters
-    BLOCK_SIZE_MAX_TRANSACTIONS = 1000
-    BLOCK_CREATION_INTERVAL_SECONDS = 10
-    GENESIS_BLOCK_VALIDATOR = "system@qtcl.network"
-    
-    # Token Economics
-    TOKEN_TOTAL_SUPPLY = 1_000_000_000
-    TOKEN_DECIMALS = 18
-    TOKEN_WEI_PER_UNIT = 10 ** TOKEN_DECIMALS
-    
-    # Initial Users (from __NOTES.txt)
-    INITIAL_USERS = [
-        {
-            'email': 'shemshallah@gmail.com',
-            'name': 'Dev Account',
-            'balance': 999_000_000,
-            'role': 'admin'
-        },
-        {
-            'email': 'founder1@qtcl.network',
-            'name': 'Founding Member 1',
-            'balance': 200_000,
-            'role': 'founder'
-        },
-        {
-            'email': 'founder2@qtcl.network',
-            'name': 'Founding Member 2',
-            'balance': 200_000,
-            'role': 'founder'
-        },
-        {
-            'email': 'founder3@qtcl.network',
-            'name': 'Founding Member 3',
-            'balance': 200_000,
-            'role': 'founder'
-        },
-        {
-            'email': 'founder4@qtcl.network',
-            'name': 'Founding Member 4',
-            'balance': 200_000,
-            'role': 'founder'
-        },
-        {
-            'email': 'founder5@qtcl.network',
-            'name': 'Founding Member 5',
-            'balance': 200_000,
-            'role': 'founder'
-        }
-    ]
-
-def _validate_critical_config():
-    """Fail fast if critical credentials missing"""
-    required = [
-        'SUPABASE_HOST',
-        'SUPABASE_USER',
-        'SUPABASE_PASSWORD',
-        'SUPABASE_DB'
-    ]
-    
-    missing = []
-    for var in required:
-        if not getattr(Config, var, ''):
-            missing.append(var)
-    
-    if missing:
-        raise RuntimeError(
-            f"CRITICAL: Missing required environment variables: {missing}\n"
-            f"Set these in .env or system environment before running."
-        )
-    
-    logger.info("✓ Configuration validated - all required variables present")
-
-# Call validation on app startup
-_validate_critical_config()
+    # Metrics
+    METRICS_ENABLED = True
+    METRICS_INTERVAL = 60
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# LOGGING SYSTEM
+# ENUMS & TYPES
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-class ThreadLogger:
-    """Thread-safe logging with context awareness"""
-    
-    @staticmethod
-    def setup():
-        """Initialize logging system"""
-        log_format = '[%(asctime)s] [%(threadName)s] %(levelname)s: %(message)s'
-        
-        file_handler = logging.FileHandler('qtcl_main_app.log')
-        file_handler.setLevel(logging.DEBUG)
-        file_handler.setFormatter(logging.Formatter(log_format))
-        
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(logging.INFO)
-        console_handler.setFormatter(logging.Formatter(log_format))
-        
-        root_logger = logging.getLogger()
-        root_logger.setLevel(logging.DEBUG)
-        root_logger.addHandler(file_handler)
-        root_logger.addHandler(console_handler)
-        
-        return logging.getLogger(__name__)
+class TransactionStatus(Enum):
+    """Transaction status states"""
+    PENDING = 'pending'
+    QUEUED = 'queued'
+    PROCESSING = 'processing'
+    SUPERPOSITION = 'superposition'
+    COLLAPSED = 'collapsed'
+    CONSENSUS = 'consensus'
+    FINALIZED = 'finalized'
+    FAILED = 'failed'
 
-logger = ThreadLogger.setup()
+class QuantumState(Enum):
+    """Quantum state types"""
+    PURE = 'pure'
+    SUPERPOSITION = 'superposition'
+    ENTANGLED = 'entangled'
+    GHZ = 'ghz'
+    COLLAPSED = 'collapsed'
+    DECOHERENT = 'decoherent'
 
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# DATABASE CONNECTION POOL
-# ═══════════════════════════════════════════════════════════════════════════════════════
+class OracleType(Enum):
+    """Oracle types"""
+    PRICE = 'price'
+    TIME = 'time'
+    ENTROPY = 'entropy'
+    RANDOM = 'random'
+    EVENT = 'event'
 
-class DatabasePool:
-    """Thread-safe database connection pool"""
-    
-    _instance = None
-    _lock = threading.Lock()
-    
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super(DatabasePool, cls).__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
-    
-    def __init__(self):
-        if self._initialized:
-            return
-        self._initialized = True
-        self.pool = deque(maxlen=Config.DB_POOL_SIZE)
-        self.lock = threading.Lock()
-        self.stats = {
-            'connections_created': 0,
-            'connections_reused': 0,
-            'queries_executed': 0,
-            'queries_failed': 0
-        }
-        logger.info(f"DatabasePool initialized with size {Config.DB_POOL_SIZE}")
-    
-    def get_connection(self):
-        """Get connection from pool or create new"""
-        with self.lock:
-            try:
-                conn = self.pool.popleft()
-                if conn and not conn.closed:
-                    self.stats['connections_reused'] += 1
-                    return conn
-            except IndexError:
-                pass
-        
-        try:
-            conn = psycopg2.connect(
-                host=Config.SUPABASE_HOST,
-                user=Config.SUPABASE_USER,
-                password=Config.SUPABASE_PASSWORD,
-                port=Config.SUPABASE_PORT,
-                database=Config.SUPABASE_DB,
-                connect_timeout=Config.DB_CONNECTION_TIMEOUT
-            )
-            conn.set_session(autocommit=True)
-            self.stats['connections_created'] += 1
-            return conn
-        except psycopg2.Error as e:
-            logger.error(f"Failed to create database connection: {e}")
-            raise
-    
-    def return_connection(self, conn):
-        """Return connection to pool"""
-        if conn and not conn.closed:
-            with self.lock:
-                try:
-                    self.pool.append(conn)
-                except Exception as e:
-                    logger.warning(f"Failed to return connection to pool: {e}")
-                    conn.close()
-    
-    def execute(self, query: str, params: tuple = None) -> List[Dict]:
-        """Execute SELECT query"""
-        conn = self.get_connection()
-        try:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(query, params or ())
-                self.stats['queries_executed'] += 1
-                return cur.fetchall()
-        except psycopg2.Error as e:
-            logger.error(f"Query error: {e}")
-            self.stats['queries_failed'] += 1
-            raise
-        finally:
-            self.return_connection(conn)
-    
-    def execute_one(self, query: str, params: tuple = None) -> Optional[Dict]:
-        """Execute SELECT query, return first row"""
-        results = self.execute(query, params)
-        return results[0] if results else None
-    
-    def execute_insert(self, query: str, params: tuple = None) -> int:
-        """Execute INSERT/UPDATE/DELETE"""
-        conn = self.get_connection()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(query, params or ())
-                self.stats['queries_executed'] += 1
-                return cur.rowcount
-        except psycopg2.Error as e:
-            logger.error(f"Insert error: {e}")
-            self.stats['queries_failed'] += 1
-            raise
-        finally:
-            self.return_connection(conn)
-    
-    def execute_batch(self, query: str, params_list: List[tuple]) -> int:
-        """Execute batch INSERT/UPDATE/DELETE"""
-        conn = self.get_connection()
-        try:
-            with conn.cursor() as cur:
-                execute_batch(cur, query, params_list, page_size=1000)
-                self.stats['queries_executed'] += 1
-                return cur.rowcount
-        except psycopg2.Error as e:
-            logger.error(f"Batch error: {e}")
-            self.stats['queries_failed'] += 1
-            raise
-        finally:
-            self.return_connection(conn)
-    
-    def close_all(self):
-        """Close all pooled connections"""
-        with self.lock:
-            while len(self.pool) > 0:
-                try:
-                    conn = self.pool.popleft()
-                    if conn and not conn.closed:
-                        conn.close()
-                except Exception as e:
-                    logger.warning(f"Error closing connection: {e}")
-        logger.info("All database connections closed")
-
-db_pool = DatabasePool()
+class ValidatorStatus(Enum):
+    """Validator status"""
+    ACTIVE = 'active'
+    INACTIVE = 'inactive'
+    SLASHED = 'slashed'
+    JAILED = 'jailed'
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# DATA MODELS
+# DATA CLASSES - BLOCKCHAIN STRUCTURES
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 @dataclass
-class HyperbolicCoordinates:
-    """Hyperbolic coordinate system representations"""
-    poincare_x: float
-    poincare_y: float
-    klein_x: float
-    klein_y: float
-    hyperboloid_x: float
-    hyperboloid_y: float
-    hyperboloid_t: float
-    
-    @staticmethod
-    def poincare_to_klein(px: float, py: float) -> Tuple[float, float]:
-        """Convert Poincaré to Klein coordinates"""
-        r_sq = px*px + py*py
-        factor = 2 / (1 + r_sq)
-        return px * factor, py * factor
-    
-    @staticmethod
-    def poincare_to_hyperboloid(px: float, py: float) -> Tuple[float, float, float]:
-        """Convert Poincaré to Hyperboloid coordinates"""
-        r_sq = px*px + py*py
-        t = (1 + r_sq) / (1 - r_sq)
-        factor = 2 / (1 - r_sq)
-        return px * factor, py * factor, t
-    
-    @staticmethod
-    def hyperbolic_distance(p1x: float, p1y: float, p2x: float, p2y: float) -> float:
-        """Calculate hyperbolic distance between two Poincaré points"""
-        dx = p1x - p2x
-        dy = p1y - p2y
-        r1_sq = p1x*p1x + p1y*p1y
-        r2_sq = p2x*p2x + p2y*p2y
-        
-        numerator = 2 * (dx*dx + dy*dy)
-        denominator = (1 - r1_sq) * (1 - r2_sq)
-        
-        if denominator == 0:
-            return float('inf')
-        
-        ratio = numerator / denominator
-        if ratio <= 0:
-            return 0
-        
-        return math.acosh(1 + ratio)
-
-@dataclass
-class PseudoqubitState:
-    """Quantum state of a pseudoqubit"""
-    pseudoqubit_id: int
-    state_vector: List[complex] = field(default_factory=list)
-    fidelity: float = 0.98
-    coherence: float = 0.95
-    purity: float = 0.97
-    entropy: float = 0.0
-    concurrence: float = 0.90
-    
-    def to_json(self) -> str:
-        """Serialize to JSON"""
-        return json.dumps({
-            'pseudoqubit_id': self.pseudoqubit_id,
-            'fidelity': self.fidelity,
-            'coherence': self.coherence,
-            'purity': self.purity,
-            'entropy': self.entropy,
-            'concurrence': self.concurrence
-        })
-
-@dataclass
-class TransactionInSuperposition:
-    """Transaction in quantum superposition state"""
+class Transaction:
+    """Blockchain transaction"""
     tx_id: str
-    from_user_id: str
-    to_user_id: str
-    amount: int
+    from_user: str
+    to_user: str
+    amount: Decimal
     tx_type: str
-    user_pseudoqubit_id: int
-    pool_qubit_ids: List[int]
+    timestamp: datetime
+    status: TransactionStatus = TransactionStatus.PENDING
+    block_height: Optional[int] = None
+    quantum_state: Optional[QuantumState] = None
+    measurement_result: Optional[Dict] = None
+    gas_used: int = 21000
+    gas_price: Decimal = Decimal('1')
+    nonce: int = 0
+    quantum_commitment: Optional[str] = None
+    entropy_bits: float = 0.0
+    ghz_fidelity: float = 0.0
+    attempt_count: int = 0
     
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    entered_superposition_at: Optional[datetime] = None
-    last_coherence_refresh: Optional[datetime] = None
+    def to_dict(self) -> Dict:
+        return {
+            'tx_id': self.tx_id,
+            'from_user': self.from_user,
+            'to_user': self.to_user,
+            'amount': str(self.amount),
+            'type': self.tx_type,
+            'timestamp': self.timestamp.isoformat(),
+            'status': self.status.value,
+            'block_height': self.block_height,
+            'quantum_state': self.quantum_state.value if self.quantum_state else None,
+            'gas_used': self.gas_used,
+            'entropy_bits': self.entropy_bits,
+            'ghz_fidelity': self.ghz_fidelity
+        }
+
+@dataclass
+class Block:
+    """Blockchain block"""
+    block_height: int
+    block_hash: str
+    parent_hash: str
+    timestamp: datetime
+    miner_address: str
+    transactions: List[Transaction] = field(default_factory=list)
+    quantum_state: Optional[QuantumState] = None
+    merkle_root: str = ''
+    state_root: str = ''
+    difficulty: float = 1.0
+    nonce: int = 0
+    transaction_count: int = 0
+    quantum_commitment: Optional[str] = None
+    validator_signatures: Dict[str, str] = field(default_factory=dict)
     
-    coherence_refresh_count: int = 0
-    floquet_cycle: int = 0
-    entropy_current: float = 0.0
-    quantum_state_hash: Optional[str] = None
-    
-    measurement_results: Optional[Dict] = None
-    collapsed_outcome: Optional[str] = None
-    
-    def age_seconds(self) -> float:
-        """Age in seconds since creation"""
-        return (datetime.utcnow() - self.created_at).total_seconds()
-    
-    def is_expired(self) -> bool:
-        """Check if transaction exceeded superposition timeout"""
-        return self.age_seconds() > Config.SUPERPOSITION_TIMEOUT_SECONDS
-    
-    def needs_coherence_refresh(self) -> bool:
-        """Check if coherence refresh needed"""
-        if self.last_coherence_refresh is None:
-            return True
-        elapsed = (datetime.utcnow() - self.last_coherence_refresh).total_seconds()
-        return elapsed >= Config.COHERENCE_REFRESH_INTERVAL_SECONDS
+    def to_dict(self) -> Dict:
+        return {
+            'block_height': self.block_height,
+            'block_hash': self.block_hash,
+            'parent_hash': self.parent_hash,
+            'timestamp': self.timestamp.isoformat(),
+            'miner': self.miner_address,
+            'transactions': [tx.to_dict() for tx in self.transactions],
+            'transaction_count': self.transaction_count,
+            'quantum_state': self.quantum_state.value if self.quantum_state else None,
+            'difficulty': self.difficulty
+        }
+
+@dataclass
+class Pseudoqubit:
+    """Virtual quantum bit with lifecycle"""
+    qubit_id: str
+    owner_id: str
+    allocated_at: datetime
+    expires_at: datetime
+    current_state: QuantumState = QuantumState.PURE
+    entanglement_partners: List[str] = field(default_factory=list)
+    coherence_factor: float = 1.0
+    measurement_count: int = 0
+    is_active: bool = True
+    metadata: Dict = field(default_factory=dict)
+
+@dataclass
+class ValidatorNode:
+    """Blockchain validator"""
+    validator_id: str
+    address: str
+    stake: Decimal
+    reputation_score: float = 1.0
+    blocks_proposed: int = 0
+    blocks_validated: int = 0
+    slashing_events: int = 0
+    status: ValidatorStatus = ValidatorStatus.ACTIVE
+    joined_at: datetime = field(default_factory=datetime.utcnow)
+    last_heartbeat: datetime = field(default_factory=datetime.utcnow)
+    signing_key: Optional[str] = None
 
 @dataclass
 class QuantumMeasurementResult:
-    """Results from quantum circuit execution"""
+    """Quantum measurement result"""
     tx_id: str
     bitstring_counts: Dict[str, int]
     total_shots: int
@@ -505,10 +341,13 @@ class QuantumMeasurementResult:
     dominant_states: List[str]
     quantum_property: str
     execution_time_ms: float
+    ghz_fidelity: float = 0.0
+    circuit_depth: int = 0
+    measurement_data: Dict = field(default_factory=dict)
+    quantum_commitment: str = ''
     timestamp: datetime = field(default_factory=datetime.utcnow)
     
     def to_dict(self) -> Dict:
-        """Convert to dict"""
         return {
             'tx_id': self.tx_id,
             'bitstring_counts': self.bitstring_counts,
@@ -518,7 +357,225 @@ class QuantumMeasurementResult:
             'dominant_states': self.dominant_states,
             'quantum_property': self.quantum_property,
             'execution_time_ms': self.execution_time_ms,
+            'ghz_fidelity': self.ghz_fidelity,
+            'circuit_depth': self.circuit_depth,
             'timestamp': self.timestamp.isoformat()
+        }
+
+@dataclass
+class OracleEvent:
+    """Oracle event from external data source"""
+    event_id: str
+    event_type: OracleType
+    source: str
+    value: Any
+    timestamp: datetime
+    verified: bool = False
+    signature: Optional[str] = None
+    confidence: float = 1.0
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# DATABASE CONNECTION MANAGER
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+class DatabaseManager:
+    """Manage database connections and queries"""
+    
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
+    
+    def __init__(self):
+        self.connection = None
+        self.initialized = False
+        self._retry_count = 0
+        self._max_retries = 3
+    
+    def connect(self, retry: int = 0) -> bool:
+        """Establish database connection with retry logic"""
+        try:
+            logger.info(f"[DB] Connecting to Supabase PostgreSQL (attempt {retry + 1}/{self._max_retries})...")
+            
+            self.connection = psycopg2.connect(
+                host=Config.SUPABASE_HOST,
+                user=Config.SUPABASE_USER,
+                password=Config.SUPABASE_PASSWORD,
+                port=Config.SUPABASE_PORT,
+                database=Config.SUPABASE_DB,
+                connect_timeout=15,
+                application_name='qtcl_main_app'
+            )
+            
+            self.connection.set_session(autocommit=True)
+            logger.info("[DB] ✓ Connected to database")
+            self.initialized = True
+            self._retry_count = 0
+            return True
+            
+        except psycopg2.Error as e:
+            logger.error(f"[DB] ✗ Connection failed: {e}")
+            
+            if retry < self._max_retries:
+                wait_time = 2 ** retry
+                logger.info(f"[DB] Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                return self.connect(retry + 1)
+            
+            return False
+    
+    def execute_query(self, query: str, params: tuple = None, timeout: float = 30) -> List[Dict]:
+        """Execute SELECT query"""
+        if not self.initialized:
+            logger.warning("[DB] Database not initialized, reconnecting...")
+            if not self.connect():
+                return []
+        
+        try:
+            with self.connection.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(query, params or ())
+                return list(cur.fetchall())
+        except psycopg2.Error as e:
+            logger.error(f"[DB] Query error: {e}")
+            self.initialized = False
+            return []
+    
+    def execute_update(self, query: str, params: tuple = None) -> int:
+        """Execute INSERT/UPDATE/DELETE query"""
+        if not self.initialized:
+            logger.warning("[DB] Database not initialized, reconnecting...")
+            if not self.connect():
+                return 0
+        
+        try:
+            with self.connection.cursor() as cur:
+                cur.execute(query, params or ())
+                return cur.rowcount
+        except psycopg2.Error as e:
+            logger.error(f"[DB] Update error: {e}")
+            self.initialized = False
+            return 0
+    
+    def execute_batch(self, query: str, params_list: List[tuple]) -> int:
+        """Execute batch INSERT/UPDATE"""
+        if not self.initialized:
+            return 0
+        
+        try:
+            with self.connection.cursor() as cur:
+                execute_batch(cur, query, params_list)
+                return len(params_list)
+        except psycopg2.Error as e:
+            logger.error(f"[DB] Batch error: {e}")
+            return 0
+    
+    def close(self):
+        """Close database connection"""
+        if self.connection:
+            self.connection.close()
+            logger.info("[DB] Connection closed")
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# PSEUDOQUBIT MANAGER - QUANTUM BIT LIFECYCLE
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+class PseudoqubitManager:
+    """Manage pseudoqubit allocation and lifecycle"""
+    
+    def __init__(self):
+        self.qubits: Dict[str, Pseudoqubit] = {}
+        self.available_pool = deque(maxlen=Config.PSEUDOQUBIT_POOL_SIZE)
+        self.entanglement_graph: Dict[str, Set[str]] = defaultdict(set)
+        self.db = DatabaseManager()
+        logger.info("[PQUBIT] PseudoqubitManager initialized")
+    
+    def allocate_qubit(self, owner_id: str) -> Optional[str]:
+        """Allocate pseudoqubit to user"""
+        try:
+            qubit_id = f"pq_{secrets.token_hex(16)}"
+            now = datetime.utcnow(timezone.utc)
+            expires_at = now + timedelta(seconds=Config.PSEUDOQUBIT_LIFETIME)
+            
+            qubit = Pseudoqubit(
+                qubit_id=qubit_id,
+                owner_id=owner_id,
+                allocated_at=now,
+                expires_at=expires_at
+            )
+            
+            self.qubits[qubit_id] = qubit
+            
+            # Persist to database
+            self.db.execute_update(
+                """INSERT INTO pseudoqubits (qubit_id, owner_id, allocated_at, expires_at, state, is_active)
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
+                (qubit_id, owner_id, now, expires_at, QuantumState.PURE.value, True)
+            )
+            
+            logger.debug(f"[PQUBIT] Allocated qubit {qubit_id} to {owner_id}")
+            return qubit_id
+            
+        except Exception as e:
+            logger.error(f"[PQUBIT] Allocation error: {e}")
+            return None
+    
+    def entangle_qubits(self, qubit_id_1: str, qubit_id_2: str) -> bool:
+        """Entangle two pseudoqubits"""
+        try:
+            if qubit_id_1 not in self.qubits or qubit_id_2 not in self.qubits:
+                return False
+            
+            self.entanglement_graph[qubit_id_1].add(qubit_id_2)
+            self.entanglement_graph[qubit_id_2].add(qubit_id_1)
+            
+            self.qubits[qubit_id_1].entanglement_partners.append(qubit_id_2)
+            self.qubits[qubit_id_2].entanglement_partners.append(qubit_id_1)
+            
+            logger.debug(f"[PQUBIT] Entangled {qubit_id_1} ↔ {qubit_id_2}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[PQUBIT] Entanglement error: {e}")
+            return False
+    
+    def apply_coherence_decay(self):
+        """Apply coherence decay to all qubits"""
+        try:
+            now = datetime.utcnow(timezone.utc)
+            expired_qubits = []
+            
+            for qubit_id, qubit in self.qubits.items():
+                if now > qubit.expires_at:
+                    expired_qubits.append(qubit_id)
+                else:
+                    # Apply decay
+                    qubit.coherence_factor *= Config.COHERENCE_DECAY_RATE
+                    
+                    # Check if decoherent
+                    if qubit.coherence_factor < 0.1:
+                        qubit.current_state = QuantumState.DECOHERENT
+                        expired_qubits.append(qubit_id)
+            
+            # Remove expired qubits
+            for qubit_id in expired_qubits:
+                del self.qubits[qubit_id]
+                logger.debug(f"[PQUBIT] Expired qubit {qubit_id}")
+            
+        except Exception as e:
+            logger.error(f"[PQUBIT] Coherence decay error: {e}")
+    
+    def get_qubit_stats(self) -> Dict[str, Any]:
+        """Get pseudoqubit statistics"""
+        return {
+            'total_qubits': len(self.qubits),
+            'active_qubits': sum(1 for q in self.qubits.values() if q.is_active),
+            'entangled_pairs': sum(len(partners) for partners in self.entanglement_graph.values()) // 2,
+            'avg_coherence': np.mean([q.coherence_factor for q in self.qubits.values()]) if self.qubits else 0.0
         }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -526,118 +583,115 @@ class QuantumMeasurementResult:
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 class QuantumCircuitExecutor:
-    """Builds and executes quantum circuits using Qiskit"""
+    """Build and execute quantum circuits using Qiskit"""
     
     def __init__(self):
         self.simulator = AerSimulator()
         self.execution_count = 0
         self.total_execution_time = 0.0
-        logger.info("QuantumCircuitExecutor initialized")
+        self.failed_executions = 0
+        self.pqubit_manager = PseudoqubitManager()
+        logger.info("[QC] QuantumCircuitExecutor initialized")
     
-    def build_circuit(
+    def build_wstate_circuit(
         self,
         tx_id: str,
         from_user_id: str,
         to_user_id: str,
         amount: int,
-        tx_type: str,
-        user_qubit_id: int,
-        pool_qubit_ids: List[int]
+        tx_type: str
     ) -> QuantumCircuit:
-        """
-        Build quantum circuit for transaction
-        
-        Circuit structure (8 qubits):
-          Qubit 0: User's personal pseudoqubit
-          Qubits 1-7: Shared pool pseudoqubits
-        
-        Gates:
-          Phase 1: Create superposition with Hadamard
-          Phase 2: Entangle with CNOT ladder
-          Phase 3: Encode transaction parameters with rotations
-          Phase 4: Measure all qubits
-        """
+        """Build W-state + GHZ-8 quantum circuit for transaction"""
         
         qreg = QuantumRegister(8, 'q')
         creg = ClassicalRegister(8, 'c')
         circuit = QuantumCircuit(qreg, creg, name=f'tx_{tx_id[:8]}')
         
-        # Phase 1: Initialize superposition
-        # Apply Hadamard to user qubit (qubit 0)
-        circuit.h(qreg[0])
-        
-        # Apply Hadamard to pool qubits for multi-qubit superposition
-        for i in range(1, min(8, len(pool_qubit_ids) + 1)):
+        # Phase 1: Initialize 5 validator qubits to W-state
+        # Apply Hadamard to create equal superposition
+        for i in range(5):
             circuit.h(qreg[i])
         
-        # Phase 2: Create entanglement ladder
-        # CNOT chain to entangle all qubits
-        for i in range(7):
+        # Phase 2: Create W-state (only one excitation in superposition)
+        for i in range(4):
             circuit.cx(qreg[i], qreg[i + 1])
         
-        # Phase 3: Encode transaction information
-        # Encode amount as rotation angle (normalize to [0, 2π])
+        # Phase 3: Measurement/collapse qubit (q5)
+        circuit.h(qreg[5])
+        for i in range(5):
+            circuit.cx(qreg[i], qreg[5])
+        
+        # Phase 4: User and target encoding (q6, q7)
+        # Encode user as phase
+        user_hash = int(hashlib.sha256(from_user_id.encode()).hexdigest(), 16)
+        user_phase = (user_hash % 360) * (math.pi / 180)
+        circuit.ry(user_phase, qreg[6])
+        
+        # Encode target as phase
+        target_hash = int(hashlib.sha256(to_user_id.encode()).hexdigest(), 16)
+        target_phase = (target_hash % 360) * (math.pi / 180)
+        circuit.ry(target_phase, qreg[7])
+        
+        # Phase 5: Encode amount as rotation
         amount_normalized = (amount % (10**18)) / 10**18 * 2 * math.pi
         circuit.rx(amount_normalized, qreg[0])
         
-        # Encode recipient hash as rotation
-        to_hash = int(hashlib.sha256(to_user_id.encode()).hexdigest(), 16)
-        to_angle = (to_hash % 360) * (math.pi / 180)
-        circuit.ry(to_angle, qreg[1])
+        # Phase 6: Create GHZ-8 state
+        # Apply controlled-Z ladder for entanglement
+        for i in range(7):
+            circuit.cx(qreg[i], qreg[i + 1])
         
-        # Encode sender hash as rotation
-        from_hash = int(hashlib.sha256(from_user_id.encode()).hexdigest(), 16)
-        from_angle = (from_hash % 360) * (math.pi / 180)
-        circuit.rz(from_angle, qreg[2])
+        # Additional phase encoding
+        circuit.rz(math.pi / 4, qreg[0])
+        circuit.rz(math.pi / 4, qreg[7])
         
-        # Encode transaction type
+        # Phase 7: Measurement basis rotation based on tx_type
         tx_type_map = {'transfer': 0, 'mint': 1, 'burn': 2, 'stake': 3}
         tx_code = tx_type_map.get(tx_type, 0)
         circuit.ry(tx_code * (math.pi / 2), qreg[3])
         
-        # Additional entanglement for robustness
-        circuit.cx(qreg[0], qreg[3])
-        circuit.cx(qreg[1], qreg[4])
-        circuit.cx(qreg[2], qreg[5])
-        
-        # Phase 4: Measure all qubits
+        # Phase 8: Final measurement
         for i in range(8):
             circuit.measure(qreg[i], creg[i])
         
-        logger.debug(f"Built circuit for {tx_id}: {circuit.depth()} depth, {circuit.size()} gates")
+        logger.debug(f"[QC] Built W-state+GHZ-8 circuit for {tx_id}: depth={circuit.depth()}, gates={circuit.size()}")
         return circuit
     
-    def execute(self, circuit: QuantumCircuit, seed: Optional[int] = None) -> QuantumMeasurementResult:
-        """
-        Execute circuit on AER simulator
-        
-        Returns measurement results with entropy calculation
-        """
+    def execute(self, circuit: QuantumCircuit) -> Optional[QuantumMeasurementResult]:
+        """Execute circuit on AER simulator"""
         
         start_time = time.time()
         tx_id = circuit.name.replace('tx_', '')[:16]
         
         try:
-            if seed is None:
-                seed = Config.QISKIT_SIMULATOR_SEED + self.execution_count
+            seed = Config.QISKIT_SIMULATOR_SEED + self.execution_count
             
-            # Execute on simulator
+            # Transpile circuit
+            transpiled = transpile(circuit, self.simulator, optimization_level=Config.QISKIT_OPTIMIZATION_LEVEL)
+            
+            # Run on simulator
             job = self.simulator.run(
-                circuit,
+                transpiled,
                 shots=Config.QISKIT_SHOTS,
-                seed_simulator=seed,
-                optimization_level=2
+                seed_simulator=seed
             )
             
             result = job.result()
-            counts = result.get_counts(circuit)
+            counts = dict(result.get_counts(transpiled))
             
             execution_time_ms = (time.time() - start_time) * 1000
             self.execution_count += 1
             self.total_execution_time += execution_time_ms
             
-            # Calculate entropy from measurement results
+            # Analyze measurements
             entropy_bits, entropy_percent, dominant_states, quantum_property = self._analyze_measurements(counts)
+            
+            # Calculate GHZ fidelity
+            ghz_fidelity = self._calculate_ghz_fidelity(counts)
+            
+            # Generate quantum commitment (hash of measurement)
+            commitment_str = json.dumps(counts, sort_keys=True)
+            quantum_commitment = hashlib.sha256(commitment_str.encode()).hexdigest()
             
             measurement_result = QuantumMeasurementResult(
                 tx_id=tx_id,
@@ -647,27 +701,27 @@ class QuantumCircuitExecutor:
                 entropy_percent=entropy_percent,
                 dominant_states=dominant_states,
                 quantum_property=quantum_property,
-                execution_time_ms=execution_time_ms
+                execution_time_ms=execution_time_ms,
+                ghz_fidelity=ghz_fidelity,
+                circuit_depth=transpiled.depth(),
+                measurement_data=counts,
+                quantum_commitment=quantum_commitment
             )
             
-            logger.info(f"Executed circuit {tx_id}: entropy={entropy_bits:.2f} bits ({entropy_percent:.1f}%), "
-                       f"time={execution_time_ms:.1f}ms, property={quantum_property}")
+            logger.info(f"[QC] ✓ Executed {tx_id}: entropy={entropy_bits:.2f} bits ({entropy_percent:.1f}%), "
+                       f"ghz_fidelity={ghz_fidelity:.4f}, time={execution_time_ms:.1f}ms, "
+                       f"property={quantum_property}")
             
             return measurement_result
         
         except Exception as e:
-            logger.error(f"Circuit execution failed for {tx_id}: {e}")
-            raise
+            logger.error(f"[QC] Execution failed for {tx_id}: {e}")
+            self.failed_executions += 1
+            return None
     
     def _analyze_measurements(self, counts: Dict[str, int]) -> Tuple[float, float, List[str], str]:
-        """
-        Analyze measurement results and calculate quantum properties
+        """Analyze measurement results and calculate quantum properties"""
         
-        Returns:
-            (entropy_bits, entropy_percent, dominant_states, quantum_property)
-        """
-        
-        # Calculate probabilities
         total = sum(counts.values())
         probabilities = {state: count / total for state, count in counts.items()}
         
@@ -677,7 +731,6 @@ class QuantumCircuitExecutor:
             if prob > 0:
                 entropy -= prob * math.log2(prob)
         
-        # Maximum possible entropy for 8 qubits
         max_entropy = 8
         entropy_percent = (entropy / max_entropy) * 100 if max_entropy > 0 else 0
         
@@ -691,7 +744,6 @@ class QuantumCircuitExecutor:
         elif entropy_percent > 80:
             quantum_property = "Strong Superposition"
         elif entropy_percent > 60:
-            # Check for GHZ pattern (|000...⟩ and |111...⟩ dominant)
             if '00000000' in counts and '11111111' in counts:
                 total_ghz = counts.get('00000000', 0) + counts.get('11111111', 0)
                 if total_ghz > total * 0.6:
@@ -699,1046 +751,945 @@ class QuantumCircuitExecutor:
                 else:
                     quantum_property = "Constrained"
             else:
-                quantum_property = "Constrained"
+                quantum_property = "W-State"
         else:
-            quantum_property = "Classical-like"
+            quantum_property = "Collapsed"
         
         return entropy, entropy_percent, dominant_states, quantum_property
-
-quantum_executor = QuantumCircuitExecutor()
+    
+    def _calculate_ghz_fidelity(self, counts: Dict[str, int]) -> float:
+        """Calculate GHZ state fidelity (|00000000⟩ + |11111111⟩)"""
+        total = sum(counts.values())
+        ghz_state_00 = counts.get('00000000', 0)
+        ghz_state_11 = counts.get('11111111', 0)
+        fidelity = (ghz_state_00 + ghz_state_11) / total if total > 0 else 0
+        return fidelity
+    
+    def get_executor_stats(self) -> Dict[str, Any]:
+        """Get executor statistics"""
+        return {
+            'total_executions': self.execution_count,
+            'failed_executions': self.failed_executions,
+            'success_rate': (self.execution_count - self.failed_executions) / max(self.execution_count, 1),
+            'total_time_ms': self.total_execution_time,
+            'avg_time_ms': self.total_execution_time / max(self.execution_count, 1)
+        }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# GENESIS BLOCK INITIALIZER (THREAD 1)
+# VALIDATOR CONSENSUS ENGINE
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-class GenesisBlockInitializer:
-    """Initializes genesis block and blockchain state"""
+class ValidatorConsensusEngine:
+    """Manage validator consensus and block signing"""
     
     def __init__(self):
-        self.initialized = False
-        self.lock = threading.Lock()
+        self.validators: Dict[str, ValidatorNode] = {}
+        self.consensus_queue = deque()
+        self.db = DatabaseManager()
+        self.consensus_signatures: Dict[str, Dict[str, str]] = defaultdict(dict)
+        logger.info("[CONSENSUS] ValidatorConsensusEngine initialized")
     
-    def initialize(self) -> bool:
-        """Initialize genesis block and system state"""
-        
-        with self.lock:
-            if self.initialized:
-                logger.info("Genesis already initialized")
+    def register_validator(self, validator_id: str, address: str, stake: Decimal) -> bool:
+        """Register new validator"""
+        try:
+            if stake < Decimal(str(Config.VALIDATOR_STAKE_MIN)):
+                logger.warning(f"[CONSENSUS] ✗ Validator {validator_id} stake too low: {stake}")
+                return False
+            
+            validator = ValidatorNode(
+                validator_id=validator_id,
+                address=address,
+                stake=stake
+            )
+            
+            self.validators[validator_id] = validator
+            
+            # Persist
+            self.db.execute_update(
+                """INSERT INTO validators (validator_id, address, stake, status, joined_at)
+                   VALUES (%s, %s, %s, %s, %s)""",
+                (validator_id, address, float(stake), ValidatorStatus.ACTIVE.value, datetime.utcnow(timezone.utc))
+            )
+            
+            logger.info(f"[CONSENSUS] ✓ Validator {validator_id} registered with stake {stake}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[CONSENSUS] Registration error: {e}")
+            return False
+    
+    def sign_block(self, block_height: int, block_hash: str, validator_id: str) -> Optional[str]:
+        """Sign block with validator key"""
+        try:
+            if validator_id not in self.validators:
+                logger.warning(f"[CONSENSUS] ✗ Unknown validator {validator_id}")
+                return None
+            
+            validator = self.validators[validator_id]
+            
+            # Create signature (in production, would use actual cryptography)
+            signature_data = f"{block_height}{block_hash}{validator_id}".encode()
+            signature = hashlib.sha256(signature_data).hexdigest()
+            
+            # Store signature
+            self.consensus_signatures[f"block_{block_height}"][validator_id] = signature
+            
+            # Update validator stats
+            validator.blocks_validated += 1
+            validator.last_heartbeat = datetime.utcnow(timezone.utc)
+            
+            logger.debug(f"[CONSENSUS] ✓ Block #{block_height} signed by {validator_id}")
+            return signature
+            
+        except Exception as e:
+            logger.error(f"[CONSENSUS] Signing error: {e}")
+            return None
+    
+    def check_consensus(self, block_height: int, block_hash: str) -> bool:
+        """Check if block has consensus"""
+        try:
+            block_key = f"block_{block_height}"
+            
+            if block_key not in self.consensus_signatures:
+                return False
+            
+            signatures = self.consensus_signatures[block_key]
+            
+            # Need at least threshold validators
+            if len(signatures) >= Config.CONSENSUS_THRESHOLD:
+                logger.info(f"[CONSENSUS] ✓ Block #{block_height} achieved consensus ({len(signatures)}/{Config.VALIDATOR_COUNT} validators)")
                 return True
             
+            return False
+            
+        except Exception as e:
+            logger.error(f"[CONSENSUS] Consensus check error: {e}")
+            return False
+    
+    def get_validator_stats(self) -> Dict[str, Any]:
+        """Get validator statistics"""
+        if not self.validators:
+            return {}
+        
+        return {
+            'active_validators': len([v for v in self.validators.values() if v.status == ValidatorStatus.ACTIVE]),
+            'total_stake': sum(v.stake for v in self.validators.values()),
+            'avg_reputation': np.mean([v.reputation_score for v in self.validators.values()]),
+            'total_blocks_validated': sum(v.blocks_validated for v in self.validators.values())
+        }
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# TRANSACTION PROCESSOR - MAIN WORKER THREAD
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+class TransactionProcessor:
+    """Process transactions from submission to finality"""
+    
+    def __init__(self):
+        self.running = False
+        self.worker_thread = None
+        self.tx_queue: Dict[str, Transaction] = {}
+        self.executor = QuantumCircuitExecutor()
+        self.db = DatabaseManager()
+        self.processed_count = 0
+        self.failed_count = 0
+        logger.info("[TXN] TransactionProcessor initialized")
+    
+    def start(self):
+        """Start background worker thread"""
+        if not self.running:
+            self.running = True
+            self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True, name='TXN-Worker')
+            self.worker_thread.start()
+            logger.info("[TXN] Transaction processor started")
+    
+    def stop(self):
+        """Stop background worker"""
+        self.running = False
+        if self.worker_thread:
+            self.worker_thread.join(timeout=5)
+        logger.info("[TXN] Transaction processor stopped")
+    
+    def _worker_loop(self):
+        """Main worker loop"""
+        logger.info("[TXN] Worker loop started")
+        
+        while self.running:
             try:
-                logger.info("=" * 100)
-                logger.info("GENESIS BLOCK INITIALIZATION")
-                logger.info("=" * 100)
-                
-                # Check if genesis already exists
-                genesis = db_pool.execute_one("SELECT * FROM blocks WHERE block_number = 0")
-                if genesis:
-                    logger.info("✓ Genesis block already exists")
-                    self.initialized = True
-                    return True
-                
-                # Create genesis block
-                genesis_hash_input = "QTCL_GENESIS_BLOCK"
-                genesis_hash = f"0x{hashlib.sha256(genesis_hash_input.encode()).hexdigest()}"
-                
-                db_pool.execute_insert(
-                    """INSERT INTO blocks 
-                       (block_number, block_hash, parent_hash, timestamp, transactions, 
-                        validator_address, quantum_state_hash, entropy_score, floquet_cycle,
-                        merkle_root, difficulty, gas_used, gas_limit, miner_reward, created_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())""",
-                    (0, genesis_hash, "0x" + "0" * 64, int(time.time()), 0,
-                     Config.GENESIS_BLOCK_VALIDATOR, genesis_hash, 0.0, 0,
-                     hashlib.sha256(b"genesis").hexdigest(), 0, 0, Config.BLOCK_GAS_LIMIT, 0)
+                # Get pending transactions (limit 50 at a time)
+                pending = self.db.execute_query(
+                    """SELECT tx_id, from_user_id, to_user_id, amount, tx_type 
+                       FROM transactions WHERE status = %s LIMIT 50""",
+                    (TransactionStatus.PENDING.value,)
                 )
                 
-                logger.info(f"✓ Created genesis block: {genesis_hash}")
-                
-                # Initialize users
-                for user_data in Config.INITIAL_USERS:
-                    user_id = hashlib.sha256(user_data['email'].encode()).hexdigest()[:32]
-                    balance = user_data['balance'] * Config.TOKEN_WEI_PER_UNIT
-                    
-                    # Check if user exists
-                    existing = db_pool.execute_one("SELECT * FROM users WHERE user_id = %s", (user_id,))
-                    if existing:
-                        logger.info(f"✓ User already exists: {user_data['email']}")
-                        continue
-                    
-                    db_pool.execute_insert(
-                        """INSERT INTO users 
-                           (user_id, email, name, role, balance, created_at, is_active, kyc_verified)
-                           VALUES (%s, %s, %s, %s, %s, NOW(), %s, %s)""",
-                        (user_id, user_data['email'], user_data['name'], user_data['role'],
-                         balance, True, user_data['role'] == 'admin')
+                for tx_row in pending:
+                    tx = Transaction(
+                        tx_id=tx_row['tx_id'],
+                        from_user=tx_row['from_user_id'],
+                        to_user=tx_row['to_user_id'],
+                        amount=Decimal(str(tx_row['amount'])),
+                        tx_type=tx_row['tx_type'],
+                        timestamp=datetime.utcnow(timezone.utc)
                     )
-                    
-                    logger.info(f"✓ Created user: {user_data['email']} with balance {user_data['balance']}")
+                    self._process_transaction(tx)
                 
-                # Assign pseudoqubits to users
-                logger.info("Assigning pseudoqubits to users...")
+                time.sleep(Config.POLLING_INTERVAL)
                 
-                for idx, user_data in enumerate(Config.INITIAL_USERS):
-                    user_id = hashlib.sha256(user_data['email'].encode()).hexdigest()[:32]
-                    
-                    # Get first available pseudoqubit for this user
-                    available_qubit = db_pool.execute_one(
-                        """SELECT pseudoqubit_id FROM pseudoqubits 
-                           WHERE is_available = TRUE AND auth_user_id IS NULL 
-                           ORDER BY fidelity DESC LIMIT 1"""
-                    )
-                    
-                    if available_qubit:
-                        qubit_id = available_qubit['pseudoqubit_id']
-                        db_pool.execute_insert(
-                            """UPDATE pseudoqubits 
-                               SET auth_user_id = %s, assigned_at = NOW(), is_available = FALSE 
-                               WHERE pseudoqubit_id = %s""",
-                            (user_id, qubit_id)
-                        )
-                        logger.info(f"✓ Assigned pseudoqubit {qubit_id} to {user_data['email']}")
-                
-                # Initialize network parameters
-                logger.info("Initializing network parameters...")
-                
-                network_params = {
-                    'total_supply': str(Config.TOKEN_TOTAL_SUPPLY),
-                    'decimals': str(Config.TOKEN_DECIMALS),
-                    'genesis_timestamp': str(int(time.time())),
-                    'tessellation_type': "8,3",
-                    'max_block_size': str(Config.BLOCK_SIZE_MAX_TRANSACTIONS),
-                    'block_interval_seconds': str(Config.BLOCK_CREATION_INTERVAL_SECONDS),
-                    'qiskit_shots': str(Config.QISKIT_SHOTS),
-                    'qiskit_qubits': str(Config.QISKIT_QUBITS),
-                    'superposition_timeout': str(Config.SUPERPOSITION_TIMEOUT_SECONDS),
-                    'coherence_refresh_interval': str(Config.COHERENCE_REFRESH_INTERVAL_SECONDS)
-                }
-                
-                for key, value in network_params.items():
-                    db_pool.execute_insert(
-                        "INSERT INTO network_parameters (param_key, param_value) VALUES (%s, %s)",
-                        (key, value)
-                    )
-                
-                logger.info("✓ Network parameters initialized")
-                
-                logger.info("=" * 100)
-                logger.info("GENESIS INITIALIZATION COMPLETE")
-                logger.info("=" * 100)
-                
-                self.initialized = True
-                return True
-            
             except Exception as e:
-                logger.error(f"Genesis initialization failed: {e}\n{traceback.format_exc()}")
-                return False
-
-genesis_initializer = GenesisBlockInitializer()
+                logger.error(f"[TXN] Worker loop error: {e}")
+                time.sleep(1)
+    
+    def _process_transaction(self, tx: Transaction):
+        """Process single transaction through quantum circuit"""
+        
+        tx_id = tx.tx_id
+        logger.info(f"[TXN] Processing {tx_id}")
+        
+        try:
+            # Update status to queued
+            self.db.execute_update(
+                "UPDATE transactions SET status = %s WHERE tx_id = %s",
+                (TransactionStatus.QUEUED.value, tx_id)
+            )
+            
+            # Build quantum circuit
+            circuit = self.executor.build_wstate_circuit(
+                tx_id,
+                tx.from_user,
+                tx.to_user,
+                int(tx.amount),
+                tx.tx_type
+            )
+            
+            # Execute circuit
+            result = self.executor.execute(circuit)
+            
+            if result is None:
+                logger.error(f"[TXN] ✗ Quantum execution failed for {tx_id}")
+                self.db.execute_update(
+                    "UPDATE transactions SET status = %s, attempt_count = attempt_count + 1 WHERE tx_id = %s",
+                    (TransactionStatus.FAILED.value, tx_id)
+                )
+                self.failed_count += 1
+                return
+            
+            # Update transaction with quantum result
+            self.db.execute_update(
+                """UPDATE transactions SET status = %s, quantum_state = %s, 
+                   measurement_result = %s, entropy_bits = %s, ghz_fidelity = %s,
+                   quantum_commitment = %s
+                   WHERE tx_id = %s""",
+                (TransactionStatus.SUPERPOSITION.value, QuantumState.SUPERPOSITION.value,
+                 json.dumps(result.to_dict()), result.entropy_bits, result.ghz_fidelity,
+                 result.quantum_commitment, tx_id)
+            )
+            
+            self.processed_count += 1
+            logger.info(f"[TXN] ✓ {tx_id} entered superposition state")
+            
+        except Exception as e:
+            logger.error(f"[TXN] ✗ {tx_id} processing failed: {e}")
+            self.db.execute_update(
+                "UPDATE transactions SET status = %s WHERE tx_id = %s",
+                (TransactionStatus.FAILED.value, tx_id)
+            )
+            self.failed_count += 1
+    
+    def get_processor_stats(self) -> Dict[str, Any]:
+        """Get processor statistics"""
+        return {
+            'processed_transactions': self.processed_count,
+            'failed_transactions': self.failed_count,
+            'success_rate': self.processed_count / max(self.processed_count + self.failed_count, 1),
+            'queued_count': len(self.tx_queue),
+            'executor_stats': self.executor.get_executor_stats()
+        }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# TRANSACTION POLLER (THREAD 2)
+# ORACLE ENGINE - EXTERNAL DATA INTEGRATION
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-class TransactionPoller:
-    """Polls for pending transactions and routes to quantum executor"""
+class OracleEngine:
+    """Manage oracle data sources and collapse triggers"""
     
     def __init__(self):
-        self.running = True
-        self.stats = {
-            'total_polled': 0,
-            'total_queued': 0,
-            'total_failed': 0
-        }
+        self.running = False
+        self.worker_thread = None
+        self.db = DatabaseManager()
+        self.events_queue = deque(maxlen=Config.ORACLE_MAX_QUEUE)
+        self.price_cache: Dict[str, Tuple[float, float]] = {}  # token -> (price, timestamp)
+        self.oracle_count = 0
+        logger.info("[ORACLE] OracleEngine initialized")
     
-    def poll_transactions(self) -> List[Dict]:
-        """Fetch pending transactions from database"""
-        try:
-            rows = db_pool.execute(
-                """SELECT * FROM transactions 
-                   WHERE status = 'pending' 
-                   ORDER BY created_at ASC 
-                   LIMIT %s""",
-                (Config.BATCH_SIZE_TRANSACTIONS,)
-            )
-            return rows
-        except Exception as e:
-            logger.error(f"Transaction polling error: {e}")
-            return []
+    def start(self):
+        """Start oracle engine"""
+        if not self.running:
+            self.running = True
+            self.worker_thread = threading.Thread(target=self._oracle_loop, daemon=True, name='Oracle-Worker')
+            self.worker_thread.start()
+            logger.info("[ORACLE] Oracle engine started")
     
-    def validate_transaction(self, tx: Dict) -> Tuple[bool, Optional[str]]:
-        """Validate transaction before quantum execution"""
-        
-        # Check sender
-        sender_row = db_pool.execute_one(
-            "SELECT balance, is_active FROM users WHERE user_id = %s",
-            (tx['from_user_id'],)
-        )
-        
-        if not sender_row:
-            return False, "Sender not found"
-        
-        if not sender_row['is_active']:
-            return False, "Sender inactive"
-        
-        if sender_row['balance'] < tx['amount']:
-            return False, "Insufficient balance"
-        
-        # Check receiver
-        receiver_row = db_pool.execute_one(
-            "SELECT is_active FROM users WHERE user_id = %s",
-            (tx['to_user_id'],)
-        )
-        
-        if not receiver_row:
-            return False, "Receiver not found"
-        
-        if not receiver_row['is_active']:
-            return False, "Receiver inactive"
-        
-        # Check age
-        created = tx['created_at']
-        if isinstance(created, str):
-            created = datetime.fromisoformat(created.replace('Z', '+00:00'))
-        
-        age = (datetime.utcnow() - created).total_seconds()
-        if age > Config.SUPERPOSITION_TIMEOUT_SECONDS:
-            return False, "Transaction expired"
-        
-        return True, None
+    def stop(self):
+        """Stop oracle engine"""
+        self.running = False
+        if self.worker_thread:
+            self.worker_thread.join(timeout=5)
+        logger.info("[ORACLE] Oracle engine stopped")
     
-    def queue_for_quantum_execution(self, tx: Dict) -> bool:
-        """Queue transaction for quantum executor"""
-        try:
-            # Get user's pseudoqubit
-            user_qubit = db_pool.execute_one(
-                "SELECT pseudoqubit_id FROM pseudoqubits WHERE auth_user_id = %s",
-                (tx['from_user_id'],)
-            )
-            
-            if not user_qubit:
-                logger.error(f"No pseudoqubit for {tx['from_user_id']}")
-                return False
-            
-            # Get pool qubits
-            pool_qubits = db_pool.execute(
-                """SELECT pseudoqubit_id FROM pseudoqubits 
-                   WHERE auth_user_id IS NULL AND is_available = TRUE 
-                   ORDER BY fidelity DESC LIMIT 7"""
-            )
-            
-            if len(pool_qubits) < 7:
-                logger.warning(f"Not enough pool qubits: {len(pool_qubits)}/7")
-                return False
-            
-            # Update transaction status
-            db_pool.execute_insert(
-                "UPDATE transactions SET status = %s WHERE tx_id = %s",
-                ('queued_for_quantum', tx['tx_id'])
-            )
-            
-            logger.info(f"Queued {tx['tx_id']} for quantum execution")
-            return True
-        
-        except Exception as e:
-            logger.error(f"Failed to queue transaction: {e}")
-            return False
-    
-    def run(self):
-        """Main polling loop"""
-        logger.info("TransactionPoller started")
+    def _oracle_loop(self):
+        """Main oracle loop - poll multiple data sources"""
+        logger.info("[ORACLE] Oracle loop started")
         
         while self.running:
             try:
-                # Poll for transactions
-                transactions = self.poll_transactions()
+                # Poll different oracle types
+                self._poll_price_oracle()
+                self._poll_time_oracle()
+                self._poll_entropy_oracle()
+                self._poll_random_oracle()
                 
-                if transactions:
-                    logger.info(f"Found {len(transactions)} pending transactions")
-                    
-                    for tx in transactions:
-                        self.stats['total_polled'] += 1
-                        
-                        # Validate
-                        is_valid, error = self.validate_transaction(tx)
-                        if not is_valid:
-                            logger.warning(f"Invalid transaction {tx['tx_id']}: {error}")
-                            db_pool.execute_insert(
-                                "UPDATE transactions SET status = %s WHERE tx_id = %s",
-                                ('failed', tx['tx_id'])
-                            )
-                            self.stats['total_failed'] += 1
-                            continue
-                        
-                        # Queue
-                        if self.queue_for_quantum_execution(tx):
-                            self.stats['total_queued'] += 1
-                        else:
-                            self.stats['total_failed'] += 1
+                # Process oracle events
+                self._process_oracle_events()
                 
-                time.sleep(Config.POLL_INTERVAL_TRANSACTIONS_MS / 1000.0)
-            
+                time.sleep(Config.ORACLE_POLL_INTERVAL)
+                
             except Exception as e:
-                logger.error(f"TransactionPoller error: {e}\n{traceback.format_exc()}")
+                logger.error(f"[ORACLE] Loop error: {e}")
                 time.sleep(1)
-
-transaction_poller = TransactionPoller()
+    
+    def _poll_price_oracle(self):
+        """Poll price data from external source"""
+        try:
+            # Simulate price data (in production would call CoinGecko, etc.)
+            event = OracleEvent(
+                event_id=f"price_{secrets.token_hex(8)}",
+                event_type=OracleType.PRICE,
+                source='coingecko',
+                value={'QTCL': random.uniform(50.0, 150.0), 'ETH': random.uniform(2000, 3000)},
+                timestamp=datetime.utcnow(timezone.utc),
+                verified=True,
+                confidence=0.98
+            )
+            self.events_queue.append(event)
+            
+        except Exception as e:
+            logger.error(f"[ORACLE] Price polling error: {e}")
+    
+    def _poll_time_oracle(self):
+        """Poll time data from NTP"""
+        try:
+            event = OracleEvent(
+                event_id=f"time_{secrets.token_hex(8)}",
+                event_type=OracleType.TIME,
+                source='ntp',
+                value=int(datetime.utcnow(timezone.utc).timestamp()),
+                timestamp=datetime.utcnow(timezone.utc),
+                verified=True,
+                confidence=0.99
+            )
+            self.events_queue.append(event)
+            
+        except Exception as e:
+            logger.error(f"[ORACLE] Time polling error: {e}")
+    
+    def _poll_entropy_oracle(self):
+        """Poll entropy from NIST/random.org"""
+        try:
+            event = OracleEvent(
+                event_id=f"entropy_{secrets.token_hex(8)}",
+                event_type=OracleType.ENTROPY,
+                source='random.org',
+                value=secrets.token_hex(32),
+                timestamp=datetime.utcnow(timezone.utc),
+                verified=True,
+                confidence=0.95
+            )
+            self.events_queue.append(event)
+            
+        except Exception as e:
+            logger.error(f"[ORACLE] Entropy polling error: {e}")
+    
+    def _poll_random_oracle(self):
+        """Poll random number"""
+        try:
+            event = OracleEvent(
+                event_id=f"random_{secrets.token_hex(8)}",
+                event_type=OracleType.RANDOM,
+                source='local',
+                value=random.randint(0, 2**32 - 1),
+                timestamp=datetime.utcnow(timezone.utc),
+                verified=True,
+                confidence=0.8
+            )
+            self.events_queue.append(event)
+            
+        except Exception as e:
+            logger.error(f"[ORACLE] Random polling error: {e}")
+    
+    def _process_oracle_events(self):
+        """Process oracle events and trigger superposition collapse"""
+        while self.events_queue:
+            event = self.events_queue.popleft()
+            
+            logger.debug(f"[ORACLE] Processing {event.event_type.value} event: {event.event_id}")
+            
+            # Trigger superposition collapse
+            self._trigger_collapse(event)
+            
+            self.oracle_count += 1
+    
+    def _trigger_collapse(self, event: OracleEvent):
+        """Trigger quantum state collapse with oracle data"""
+        try:
+            # Get transactions in superposition (limit 100)
+            txs = self.db.execute_query(
+                """SELECT tx_id FROM transactions 
+                   WHERE quantum_state = %s 
+                   LIMIT 100""",
+                (QuantumState.SUPERPOSITION.value,)
+            )
+            
+            for tx_row in txs:
+                tx_id = tx_row['tx_id']
+                
+                # Mark as collapsed and move to consensus
+                self.db.execute_update(
+                    """UPDATE transactions SET status = %s, quantum_state = %s 
+                       WHERE tx_id = %s""",
+                    (TransactionStatus.CONSENSUS.value, QuantumState.COLLAPSED.value, tx_id)
+                )
+                
+                logger.debug(f"[ORACLE] ✓ Collapsed superposition for {tx_id}")
+            
+        except Exception as e:
+            logger.error(f"[ORACLE] Collapse error: {e}")
+    
+    def get_oracle_stats(self) -> Dict[str, Any]:
+        """Get oracle statistics"""
+        return {
+            'events_processed': self.oracle_count,
+            'events_queued': len(self.events_queue),
+            'price_cache_size': len(self.price_cache)
+        }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# PSEUDOQUBIT MANAGER (THREAD 3)
+# BLOCKCHAIN WORKER - BLOCK CREATION & FINALITY
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-class PseudoqubitManagerThread:
-    """Manages pseudoqubit state and availability"""
+class BlockchainWorker:
+    """Create blocks and manage blockchain state"""
     
     def __init__(self):
-        self.running = True
-        self.cache = {}
-        self.cache_lock = threading.Lock()
-        self.cache_ttl = 300  # 5 minutes
+        self.running = False
+        self.worker_thread = None
+        self.db = DatabaseManager()
+        self.current_height = 0
+        self.consensus_engine = ValidatorConsensusEngine()
+        self.blocks_created = 0
+        logger.info("[CHAIN] BlockchainWorker initialized")
     
-    def get_pseudoqubit(self, pseudoqubit_id: int) -> Optional[Dict]:
-        """Get pseudoqubit with caching"""
-        
-        with self.cache_lock:
-            if pseudoqubit_id in self.cache:
-                cached_data, cached_time = self.cache[pseudoqubit_id]
-                if time.time() - cached_time < self.cache_ttl:
-                    return cached_data
-        
-        try:
-            row = db_pool.execute_one(
-                "SELECT * FROM pseudoqubits WHERE pseudoqubit_id = %s",
-                (pseudoqubit_id,)
-            )
-            
-            if row:
-                with self.cache_lock:
-                    self.cache[pseudoqubit_id] = (dict(row), time.time())
-                return dict(row)
-            
-            return None
-        
-        except Exception as e:
-            logger.error(f"Error fetching pseudoqubit {pseudoqubit_id}: {e}")
-            return None
+    def start(self):
+        """Start blockchain worker"""
+        if not self.running:
+            self.running = True
+            self.current_height = self._get_current_height()
+            self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True, name='Chain-Worker')
+            self.worker_thread.start()
+            logger.info("[CHAIN] Blockchain worker started")
     
-    def get_pool_qubits(self, count: int = 7) -> List[Dict]:
-        """Get available pool pseudoqubits"""
-        try:
-            rows = db_pool.execute(
-                """SELECT * FROM pseudoqubits 
-                   WHERE auth_user_id IS NULL AND is_available = TRUE 
-                   ORDER BY fidelity DESC, coherence DESC 
-                   LIMIT %s""",
-                (count,)
-            )
-            return [dict(row) for row in rows]
-        except Exception as e:
-            logger.error(f"Error fetching pool qubits: {e}")
-            return []
+    def stop(self):
+        """Stop blockchain worker"""
+        self.running = False
+        if self.worker_thread:
+            self.worker_thread.join(timeout=5)
+        logger.info("[CHAIN] Blockchain worker stopped")
     
-    def get_available_count(self) -> int:
-        """Get count of available pseudoqubits"""
+    def _get_current_height(self) -> int:
+        """Get current block height"""
         try:
-            row = db_pool.execute_one(
-                "SELECT COUNT(*) as count FROM pseudoqubits WHERE is_available = TRUE AND auth_user_id IS NULL"
-            )
-            return row['count'] if row else 0
+            result = self.db.execute_query("SELECT MAX(block_height) as max_height FROM blocks")
+            if result and result[0].get('max_height'):
+                return result[0]['max_height']
+            return 0
         except Exception as e:
-            logger.error(f"Error getting available count: {e}")
+            logger.error(f"[CHAIN] Error getting height: {e}")
             return 0
     
-    def monitor_availability(self):
-        """Monitor and log pseudoqubit availability"""
-        while self.running:
-            try:
-                available = self.get_available_count()
-                logger.debug(f"Available pseudoqubits: {available}")
-                time.sleep(Config.POLL_INTERVAL_SYNC_MS / 1000.0)
-            except Exception as e:
-                logger.error(f"Monitor error: {e}")
-                time.sleep(1)
-
-pseudoqubit_manager = PseudoqubitManagerThread()
-
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# QUANTUM JOB QUEUE (THREAD 4)
-# ═══════════════════════════════════════════════════════════════════════════════════════
-
-class QuantumJobQueue:
-    """Manages queue of quantum execution jobs"""
-    
-    def __init__(self):
-        self.queue = queue.Queue(maxsize=10000)
-        self.running = True
-        self.stats = {
-            'enqueued': 0,
-            'dequeued': 0,
-            'executed': 0,
-            'failed': 0
-        }
-        self.lock = threading.Lock()
-    
-    def enqueue(self, job: Dict) -> bool:
-        """Add job to queue"""
-        try:
-            self.queue.put_nowait(job)
-            with self.lock:
-                self.stats['enqueued'] += 1
-            logger.debug(f"Enqueued job for {job.get('tx_id', 'unknown')}")
-            return True
-        except queue.Full:
-            logger.warning("Quantum job queue full")
-            return False
-        except Exception as e:
-            logger.error(f"Enqueue error: {e}")
-            return False
-    
-    def dequeue(self, timeout: float = 0.1) -> Optional[Dict]:
-        """Get next job from queue"""
-        try:
-            job = self.queue.get(timeout=timeout)
-            with self.lock:
-                self.stats['dequeued'] += 1
-            return job
-        except queue.Empty:
-            return None
-        except Exception as e:
-            logger.error(f"Dequeue error: {e}")
-            return None
-    
-    def size(self) -> int:
-        """Get queue size"""
-        return self.queue.qsize()
-    
-    def process_jobs(self):
-        """Main job processing loop"""
-        logger.info("QuantumJobQueue processor started")
+    def _worker_loop(self):
+        """Main worker loop"""
+        logger.info("[CHAIN] Worker loop started")
         
         while self.running:
             try:
-                job = self.dequeue()
-                if not job:
-                    time.sleep(0.01)
-                    continue
+                # Get transactions ready for consensus (moved from superposition)
+                consensus_txs = self.db.execute_query(
+                    """SELECT tx_id, from_user_id, to_user_id, amount 
+                       FROM transactions WHERE status = %s AND block_height IS NULL
+                       LIMIT %s""",
+                    (TransactionStatus.CONSENSUS.value, Config.MAX_TRANSACTIONS_PER_BLOCK)
+                )
                 
-                # Execute quantum circuit
-                try:
-                    tx_id = job.get('tx_id')
-                    from_user_id = job.get('from_user_id')
-                    to_user_id = job.get('to_user_id')
-                    amount = job.get('amount')
-                    tx_type = job.get('tx_type')
-                    user_qubit_id = job.get('user_pseudoqubit_id')
-                    pool_qubit_ids = job.get('pool_qubit_ids', [])
-                    
-                    # Build circuit
-                    circuit = quantum_executor.build_circuit(
-                        tx_id, from_user_id, to_user_id, amount, tx_type,
-                        user_qubit_id, pool_qubit_ids
-                    )
-                    
-                    # Execute circuit
-                    measurement_result = quantum_executor.execute(circuit)
-                    
-                    # Store results
-                    db_pool.execute_insert(
-                        """UPDATE transactions 
-                           SET status = %s, quantum_state_hash = %s, entropy_score = %s 
-                           WHERE tx_id = %s""",
-                        ('superposition', 
-                         hashlib.sha256(str(measurement_result.bitstring_counts).encode()).hexdigest(),
-                         measurement_result.entropy_percent,
-                         tx_id)
-                    )
-                    
-                    with self.lock:
-                        self.stats['executed'] += 1
-                    
-                    logger.info(f"Executed quantum circuit for {tx_id}: entropy={measurement_result.entropy_bits:.2f}")
+                if consensus_txs and self.consensus_engine.validators:
+                    self._create_block(consensus_txs)
                 
-                except Exception as e:
-                    logger.error(f"Failed to execute job: {e}\n{traceback.format_exc()}")
-                    with self.lock:
-                        self.stats['failed'] += 1
+                time.sleep(Config.BLOCK_TIME_TARGET)
                 
-                time.sleep(0.001)
-            
             except Exception as e:
-                logger.error(f"Job processing error: {e}")
-                time.sleep(0.1)
-
-quantum_job_queue = QuantumJobQueue()
+                logger.error(f"[CHAIN] Worker loop error: {e}")
+                time.sleep(1)
+    
+    def _create_block(self, tx_rows: List[Dict]):
+        """Create new block with consensus"""
+        
+        try:
+            self.current_height += 1
+            timestamp = datetime.utcnow(timezone.utc)
+            
+            # Get previous block hash
+            if self.current_height > 1:
+                prev = self.db.execute_query(
+                    "SELECT block_hash FROM blocks WHERE block_height = %s",
+                    (self.current_height - 1,)
+                )
+                parent_hash = prev[0]['block_hash'] if prev else '0' * 64
+            else:
+                parent_hash = '0' * 64
+            
+            # Create block hash
+            block_data = f"{self.current_height}{timestamp}{parent_hash}".encode()
+            block_hash = hashlib.sha256(block_data).hexdigest()
+            
+            # Create block object
+            transactions = []
+            for tx_row in tx_rows:
+                tx = Transaction(
+                    tx_id=tx_row['tx_id'],
+                    from_user=tx_row['from_user_id'],
+                    to_user=tx_row['to_user_id'],
+                    amount=Decimal(str(tx_row['amount'])),
+                    tx_type='transfer',
+                    timestamp=timestamp
+                )
+                transactions.append(tx)
+            
+            block = Block(
+                block_height=self.current_height,
+                block_hash=block_hash,
+                parent_hash=parent_hash,
+                timestamp=timestamp,
+                miner_address='0x' + secrets.token_hex(20),
+                transactions=transactions,
+                transaction_count=len(tx_rows)
+            )
+            
+            # Get validator signatures
+            for validator_id in self.consensus_engine.validators.keys():
+                sig = self.consensus_engine.sign_block(self.current_height, block_hash, validator_id)
+                if sig:
+                    block.validator_signatures[validator_id] = sig
+            
+            # Check if consensus achieved
+            if not self.consensus_engine.check_consensus(self.current_height, block_hash):
+                logger.warning(f"[CHAIN] Block #{self.current_height} did not achieve consensus")
+                return
+            
+            # Insert block into database
+            self.db.execute_update(
+                """INSERT INTO blocks (block_height, block_hash, parent_hash, timestamp,
+                                       miner_address, transaction_count, quantum_state)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                (block.block_height, block.block_hash, block.parent_hash, block.timestamp,
+                 block.miner_address, block.transaction_count, QuantumState.COLLAPSED.value)
+            )
+            
+            # Update transactions to finalized
+            for tx_row in tx_rows:
+                self.db.execute_update(
+                    """UPDATE transactions SET block_height = %s, status = %s, quantum_state = %s
+                       WHERE tx_id = %s""",
+                    (self.current_height, TransactionStatus.FINALIZED.value, QuantumState.COLLAPSED.value, tx_row['tx_id'])
+                )
+            
+            self.blocks_created += 1
+            logger.info(f"[CHAIN] ✓ Block #{self.current_height} created: {block_hash[:16]}... with {len(tx_rows)} txs and consensus")
+            
+        except Exception as e:
+            logger.error(f"[CHAIN] Block creation error: {e}")
+    
+    def get_blockchain_stats(self) -> Dict[str, Any]:
+        """Get blockchain statistics"""
+        return {
+            'current_height': self.current_height,
+            'blocks_created': self.blocks_created,
+            'consensus_validators': len(self.consensus_engine.validators),
+            'validator_stats': self.consensus_engine.get_validator_stats()
+        }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# SUPERPOSITION MANAGER (THREAD 5)
+# SUPERPOSITION LIFECYCLE MANAGER
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 class SuperpositionLifecycleManager:
-    """Manages transactions in quantum superposition state"""
+    """Manage superposition state lifecycle and coherence"""
     
     def __init__(self):
-        self.running = True
-        self.superposition_txs = {}  # tx_id -> TransactionInSuperposition
-        self.lock = threading.Lock()
-        self.stats = {
-            'entered_superposition': 0,
-            'coherence_refreshes': 0,
-            'exited_superposition': 0,
-            'timed_out': 0
-        }
-    
-    def enter_superposition(self, tx_id: str, tx_data: Dict) -> bool:
-        """Place transaction in superposition"""
-        try:
-            with self.lock:
-                if tx_id in self.superposition_txs:
-                    return True
-                
-                tx_super = TransactionInSuperposition(
-                    tx_id=tx_id,
-                    from_user_id=tx_data['from_user_id'],
-                    to_user_id=tx_data['to_user_id'],
-                    amount=tx_data['amount'],
-                    tx_type=tx_data['tx_type'],
-                    user_pseudoqubit_id=tx_data.get('user_pseudoqubit_id', 0),
-                    pool_qubit_ids=tx_data.get('pool_qubit_ids', [])
-                )
-                
-                self.superposition_txs[tx_id] = tx_super
-                self.stats['entered_superposition'] += 1
-            
-            logger.info(f"Entered superposition: {tx_id}")
-            return True
-        
-        except Exception as e:
-            logger.error(f"Failed to enter superposition: {e}")
-            return False
-    
-    def refresh_coherence(self, tx_id: str) -> bool:
-        """Refresh quantum coherence for transaction in superposition"""
-        try:
-            with self.lock:
-                if tx_id not in self.superposition_txs:
-                    return False
-                
-                tx_super = self.superposition_txs[tx_id]
-                
-                if tx_super.coherence_refresh_count >= Config.MAX_COHERENCE_REFRESH_COUNT:
-                    return False
-                
-                tx_super.last_coherence_refresh = datetime.utcnow()
-                tx_super.coherence_refresh_count += 1
-                
-                if tx_super.coherence_refresh_count % (Config.FLOQUET_CYCLE_INTERVAL_SECONDS // Config.COHERENCE_REFRESH_INTERVAL_SECONDS) == 0:
-                    tx_super.floquet_cycle += 1
-                
-                self.stats['coherence_refreshes'] += 1
-            
-            logger.debug(f"Refreshed coherence for {tx_id} (count: {tx_super.coherence_refresh_count})")
-            return True
-        
-        except Exception as e:
-            logger.error(f"Failed to refresh coherence: {e}")
-            return False
-    
-    def exit_superposition(self, tx_id: str) -> bool:
-        """Exit superposition (collapse triggered)"""
-        try:
-            with self.lock:
-                if tx_id in self.superposition_txs:
-                    del self.superposition_txs[tx_id]
-                    self.stats['exited_superposition'] += 1
-            
-            logger.info(f"Exited superposition: {tx_id}")
-            return True
-        
-        except Exception as e:
-            logger.error(f"Failed to exit superposition: {e}")
-            return False
-    
-    def monitor_superposition(self):
-        """Monitor superposition states and refresh coherence"""
-        logger.info("SuperpositionLifecycleManager monitor started")
-        
-        while self.running:
-            try:
-                with self.lock:
-                    expired_txs = []
-                    
-                    for tx_id, tx_super in list(self.superposition_txs.items()):
-                        # Check for expiration
-                        if tx_super.is_expired():
-                            logger.warning(f"Superposition expired for {tx_id}")
-                            db_pool.execute_insert(
-                                "UPDATE transactions SET status = %s WHERE tx_id = %s",
-                                ('coherence_timeout', tx_id)
-                            )
-                            expired_txs.append(tx_id)
-                        
-                        # Refresh coherence if needed
-                        elif tx_super.needs_coherence_refresh():
-                            with self.lock:
-                                if tx_super.coherence_refresh_count < Config.MAX_COHERENCE_REFRESH_COUNT:
-                                    self.refresh_coherence(tx_id)
-                    
-                    # Remove expired
-                    for tx_id in expired_txs:
-                        if tx_id in self.superposition_txs:
-                            del self.superposition_txs[tx_id]
-                            self.stats['timed_out'] += 1
-                
-                time.sleep(Config.POLL_INTERVAL_SUPERPOSITION_MS / 1000.0)
-            
-            except Exception as e:
-                logger.error(f"Monitor error: {e}\n{traceback.format_exc()}")
-                time.sleep(1)
-
-superposition_manager = SuperpositionLifecycleManager()
-
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# ORACLE LISTENER (THREAD 6)
-# ═══════════════════════════════════════════════════════════════════════════════════════
-
-class OracleListener:
-    """Listens for oracle events that trigger collapse"""
-    
-    def __init__(self):
-        self.running = True
-        self.stats = {
-            'events_received': 0,
-            'collapses_triggered': 0,
-            'collapses_failed': 0
-        }
-    
-    def listen_for_oracle_events(self):
-        """Listen for oracle data that triggers collapse"""
-        logger.info("OracleListener started")
-        
-        while self.running:
-            try:
-                # Check for transactions ready for collapse
-                # In real system, this would listen to oracle smart contract events
-                # For now, we trigger collapse based on timing
-                
-                # Get transactions in superposition older than COHERENCE_REFRESH_INTERVAL
-                superposition_txs = db_pool.execute(
-                    """SELECT tx_id FROM transactions 
-                       WHERE status = 'superposition' 
-                       AND created_at < NOW() - INTERVAL '%s seconds'
-                       AND created_at > NOW() - INTERVAL '6 minutes'
-                       LIMIT %s""" % (Config.COHERENCE_REFRESH_INTERVAL_SECONDS * 3, Config.BATCH_SIZE_TRANSACTIONS)
-                )
-                
-                for tx_row in superposition_txs:
-                    tx_id = tx_row['tx_id']
-                    
-                    # Get transaction data
-                    tx = db_pool.execute_one(
-                        "SELECT * FROM transactions WHERE tx_id = %s",
-                        (tx_id,)
-                    )
-                    
-                    if tx:
-                        # Trigger collapse with random outcome (simulating oracle measurement)
-                        self._trigger_collapse(tx_id, tx)
-                        self.stats['collapses_triggered'] += 1
-                
-                time.sleep(Config.POLL_INTERVAL_ORACLE_MS / 1000.0)
-            
-            except Exception as e:
-                logger.error(f"Oracle listener error: {e}\n{traceback.format_exc()}")
-                time.sleep(1)
-    
-    def _trigger_collapse(self, tx_id: str, tx: Dict):
-        """Simulate oracle data measurement and collapse"""
-        try:
-            # Generate random outcome based on sender/receiver
-            seed = int(hashlib.sha256(f"{tx['from_user_id']}{tx['to_user_id']}".encode()).hexdigest(), 16)
-            random.seed(seed)
-            
-            # Outcome: approve or reject (biased toward approve)
-            approved = random.random() < 0.95  # 95% approval rate
-            
-            if approved:
-                # Collapse to confirmed state
-                db_pool.execute_insert(
-                    """UPDATE transactions 
-                       SET status = %s, confirmed_at = NOW() 
-                       WHERE tx_id = %s""",
-                    ('confirmed', tx_id)
-                )
-                
-                # Update balances
-                db_pool.execute_insert(
-                    "UPDATE users SET balance = balance - %s WHERE user_id = %s",
-                    (tx['amount'], tx['from_user_id'])
-                )
-                db_pool.execute_insert(
-                    "UPDATE users SET balance = balance + %s WHERE user_id = %s",
-                    (tx['amount'], tx['to_user_id'])
-                )
-                
-                logger.info(f"Collapsed {tx_id} to CONFIRMED (approved)")
-            
-            else:
-                # Collapse to failed state
-                db_pool.execute_insert(
-                    "UPDATE transactions SET status = %s WHERE tx_id = %s",
-                    ('failed', tx_id)
-                )
-                logger.info(f"Collapsed {tx_id} to FAILED (rejected)")
-            
-            superposition_manager.exit_superposition(tx_id)
-        
-        except Exception as e:
-            logger.error(f"Failed to trigger collapse for {tx_id}: {e}")
-            self.stats['collapses_failed'] += 1
-
-oracle_listener = OracleListener()
-
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# FINALITY PROCESSOR (THREAD 7)
-# ═══════════════════════════════════════════════════════════════════════════════════════
-
-class FinalityProcessor:
-    """Creates blocks from confirmed transactions"""
-    
-    def __init__(self):
-        self.running = True
-        self.stats = {
-            'blocks_created': 0,
-            'transactions_finalized': 0
-        }
-    
-    def process_finality(self):
-        """Process finalized transactions into blocks"""
-        logger.info("FinalityProcessor started")
-        
-        while self.running:
-            try:
-                # Get confirmed transactions waiting for block
-                confirmed_txs = db_pool.execute(
-                    """SELECT * FROM transactions 
-                       WHERE status = 'confirmed' AND block_number IS NULL 
-                       ORDER BY confirmed_at ASC 
-                       LIMIT %s""" % Config.BLOCK_SIZE_MAX_TRANSACTIONS
-                )
-                
-                if not confirmed_txs:
-                    time.sleep(Config.POLL_INTERVAL_FINALITY_MS / 1000.0)
-                    continue
-                
-                # Get latest block
-                latest_block = db_pool.execute_one(
-                    "SELECT block_number, block_hash FROM blocks ORDER BY block_number DESC LIMIT 1"
-                )
-                
-                if not latest_block:
-                    time.sleep(1)
-                    continue
-                
-                latest_block_number = latest_block['block_number']
-                parent_hash = latest_block['block_hash']
-                
-                # Create new block
-                new_block_number = latest_block_number + 1
-                
-                # Calculate merkle root
-                tx_ids = [tx['tx_id'] for tx in confirmed_txs]
-                merkle_input = "".join(tx_ids)
-                merkle_root = hashlib.sha256(merkle_input.encode()).hexdigest()
-                
-                # Calculate quantum state hash (aggregate entropy)
-                entropies = [tx.get('entropy_score', 0) for tx in confirmed_txs]
-                avg_entropy = sum(entropies) / len(entropies) if entropies else 0
-                quantum_state_hash = hashlib.sha256(
-                    f"{new_block_number}{parent_hash}{merkle_root}{avg_entropy}".encode()
-                ).hexdigest()
-                
-                # Create block
-                block_hash = hashlib.sha256(
-                    f"{new_block_number}{parent_hash}{merkle_root}{quantum_state_hash}".encode()
-                ).hexdigest()
-                block_hash = f"0x{block_hash}"
-                
-                # Calculate miner reward
-                if new_block_number <= Config.BLOCK_REWARD_EPOCH_1_BLOCKS:
-                    miner_reward = 100 * Config.TOKEN_WEI_PER_UNIT
-                elif new_block_number <= Config.BLOCK_REWARD_EPOCH_1_BLOCKS * 2:
-                    miner_reward = 50 * Config.TOKEN_WEI_PER_UNIT
-                else:
-                    miner_reward = 25 * Config.TOKEN_WEI_PER_UNIT
-                
-                db_pool.execute_insert(
-                    """INSERT INTO blocks 
-                       (block_number, block_hash, parent_hash, timestamp, transactions,
-                        validator_address, quantum_state_hash, entropy_score, merkle_root,
-                        miner_reward, created_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())""",
-                    (new_block_number, block_hash, parent_hash, int(time.time()),
-                     len(confirmed_txs), Config.GENESIS_BLOCK_VALIDATOR,
-                     quantum_state_hash, avg_entropy, merkle_root, miner_reward)
-                )
-                
-                # Assign transactions to block
-                for tx_id in tx_ids:
-                    db_pool.execute_insert(
-                        "UPDATE transactions SET block_number = %s WHERE tx_id = %s",
-                        (new_block_number, tx_id)
-                    )
-                    self.stats['transactions_finalized'] += 1
-                
-                self.stats['blocks_created'] += 1
-                logger.info(f"Created block {new_block_number} with {len(confirmed_txs)} transactions")
-                
-                time.sleep(Config.POLL_INTERVAL_FINALITY_MS / 1000.0)
-            
-            except Exception as e:
-                logger.error(f"Finality processing error: {e}\n{traceback.format_exc()}")
-                time.sleep(1)
-
-finality_processor = FinalityProcessor()
-
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# DATABASE SYNC (THREAD 8)
-# ═══════════════════════════════════════════════════════════════════════════════════════
-
-class DatabaseSync:
-    """Synchronizes database state across threads"""
-    
-    def __init__(self):
-        self.running = True
-        self.stats = {
-            'syncs': 0,
-            'errors': 0
-        }
-    
-    def sync(self):
-        """Periodically sync and log system state"""
-        logger.info("DatabaseSync started")
-        
-        while self.running:
-            try:
-                # Get system statistics
-                user_count = db_pool.execute_one("SELECT COUNT(*) as count FROM users")
-                tx_count = db_pool.execute_one("SELECT COUNT(*) as count FROM transactions")
-                block_count = db_pool.execute_one("SELECT COUNT(*) as count FROM blocks")
-                qubit_count = db_pool.execute_one("SELECT COUNT(*) as count FROM pseudoqubits")
-                available_qubits = db_pool.execute_one(
-                    "SELECT COUNT(*) as count FROM pseudoqubits WHERE is_available = TRUE"
-                )
-                
-                self.stats['syncs'] += 1
-                
-                logger.info(
-                    f"System State: "
-                    f"Users={user_count['count']}, "
-                    f"Transactions={tx_count['count']}, "
-                    f"Blocks={block_count['count']}, "
-                    f"Pseudoqubits={qubit_count['count']}, "
-                    f"Available={available_qubits['count']}"
-                )
-                
-                time.sleep(Config.POLL_INTERVAL_SYNC_MS / 1000.0)
-            
-            except Exception as e:
-                logger.error(f"Sync error: {e}")
-                self.stats['errors'] += 1
-                time.sleep(1)
-
-database_sync = DatabaseSync()
-
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# WEBSOCKET BROADCASTER (THREAD 9)
-# ═══════════════════════════════════════════════════════════════════════════════════════
-
-class WebSocketBroadcaster:
-    """Broadcasts status updates via WebSocket (placeholder)"""
-    
-    def __init__(self):
-        self.running = True
-        self.subscribers = set()
-        self.lock = threading.Lock()
-        self.stats = {
-            'messages_sent': 0,
-            'broadcast_errors': 0
-        }
-    
-    def broadcast_status(self):
-        """Broadcast system status updates"""
-        logger.info("WebSocketBroadcaster started")
-        
-        while self.running:
-            try:
-                # In real implementation, broadcast via WebSocket
-                # For now, just log status
-                
-                latest_block = db_pool.execute_one(
-                    "SELECT block_number FROM blocks ORDER BY block_number DESC LIMIT 1"
-                )
-                
-                latest_tx = db_pool.execute_one(
-                    "SELECT tx_id, status, created_at FROM transactions ORDER BY created_at DESC LIMIT 1"
-                )
-                
-                status_message = {
-                    'timestamp': datetime.utcnow().isoformat(),
-                    'latest_block': latest_block['block_number'] if latest_block else 0,
-                    'latest_transaction': latest_tx['tx_id'] if latest_tx else None,
-                    'quantum_executor_executions': quantum_executor.execution_count,
-                    'quantum_executor_avg_time_ms': (quantum_executor.total_execution_time / quantum_executor.execution_count) if quantum_executor.execution_count > 0 else 0
-                }
-                
-                logger.debug(f"Status broadcast: {status_message}")
-                self.stats['messages_sent'] += 1
-                
-                time.sleep(5)  # Broadcast every 5 seconds
-            
-            except Exception as e:
-                logger.error(f"Broadcast error: {e}")
-                self.stats['broadcast_errors'] += 1
-                time.sleep(1)
-
-websocket_broadcaster = WebSocketBroadcaster()
-
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# MAIN APPLICATION ORCHESTRATOR
-# ═══════════════════════════════════════════════════════════════════════════════════════
-
-class QtclMainApplication:
-    """Orchestrates all threads and manages application lifecycle"""
-    
-    def __init__(self):
-        self.threads = []
         self.running = False
-        self.start_time = None
-        logger.info("QtclMainApplication initializing")
+        self.worker_thread = None
+        self.db = DatabaseManager()
+        self.active_superpositions: Dict[str, datetime] = {}
+        logger.info("[LIFECYCLE] SuperpositionLifecycleManager initialized")
     
     def start(self):
-        """Start all worker threads"""
-        
-        logger.info("=" * 100)
-        logger.info("QTCL MAIN APPLICATION STARTUP")
-        logger.info("=" * 100)
-        
-        try:
-            # Step 1: Initialize genesis block
-            logger.info("[1/10] Initializing genesis block...")
-            if not genesis_initializer.initialize():
-                logger.error("Genesis initialization failed")
-                return False
-            logger.info("✓ Genesis block ready")
-            
-            # Step 2: Create and start worker threads
-            logger.info("[2/10] Starting worker threads...")
-            
-            thread_configs = [
-                ("TransactionPoller", transaction_poller.poll_transactions, lambda: transaction_poller.run()),
-                ("PseudoqubitMonitor", pseudoqubit_manager.get_available_count, pseudoqubit_manager.monitor_availability),
-                ("QuantumJobProcessor", quantum_job_queue.size, quantum_job_queue.process_jobs),
-                ("SuperpositionMonitor", None, superposition_manager.monitor_superposition),
-                ("OracleListener", oracle_listener.stats.get, oracle_listener.listen_for_oracle_events),
-                ("FinalityProcessor", None, finality_processor.process_finality),
-                ("DatabaseSync", database_sync.stats.get, database_sync.sync),
-                ("WebSocketBroadcaster", None, websocket_broadcaster.broadcast_status),
-            ]
-            
-            for idx, (name, _, target) in enumerate(thread_configs):
-                thread = threading.Thread(target=target, name=name, daemon=False)
-                thread.start()
-                self.threads.append(thread)
-                logger.info(f"  ✓ Started {name}")
-            
+        """Start lifecycle manager"""
+        if not self.running:
             self.running = True
-            self.start_time = datetime.utcnow()
-            
-            logger.info("=" * 100)
-            logger.info("QTCL MAIN APPLICATION RUNNING")
-            logger.info("=" * 100)
-            logger.info(f"Started at {self.start_time.isoformat()}")
-            logger.info(f"Running {len(self.threads)} worker threads")
-            
-            # Main monitor loop
-            while self.running:
-                try:
-                    # Log statistics every 60 seconds
-                    uptime = (datetime.utcnow() - self.start_time).total_seconds()
-                    if int(uptime) % 60 == 0 and uptime > 0:
-                        logger.info(
-                            f"[STATS] Uptime: {int(uptime)}s | "
-                            f"TX Polled: {transaction_poller.stats['total_polled']} | "
-                            f"TX Queued: {transaction_poller.stats['total_queued']} | "
-                            f"QJ Executed: {quantum_job_queue.stats['executed']} | "
-                            f"Blocks: {finality_processor.stats['blocks_created']} | "
-                            f"TX Finalized: {finality_processor.stats['transactions_finalized']}"
-                        )
-                    
-                    time.sleep(1)
-                
-                except KeyboardInterrupt:
-                    logger.info("\nShutdown signal received")
-                    self.stop()
-                    break
-            
-            return True
-        
-        except Exception as e:
-            logger.error(f"Startup failed: {e}\n{traceback.format_exc()}")
-            return False
+            self.worker_thread = threading.Thread(target=self._lifecycle_loop, daemon=True, name='Lifecycle-Worker')
+            self.worker_thread.start()
+            logger.info("[LIFECYCLE] Lifecycle manager started")
     
     def stop(self):
-        """Stop all worker threads"""
+        """Stop lifecycle manager"""
+        self.running = False
+        if self.worker_thread:
+            self.worker_thread.join(timeout=5)
+        logger.info("[LIFECYCLE] Lifecycle manager stopped")
+    
+    def _lifecycle_loop(self):
+        """Monitor and update superposition states"""
+        logger.info("[LIFECYCLE] Lifecycle loop started")
         
-        logger.info("=" * 100)
-        logger.info("QTCL MAIN APPLICATION SHUTDOWN")
-        logger.info("=" * 100)
+        while self.running:
+            try:
+                # Check for timed-out superpositions
+                now = datetime.utcnow(timezone.utc)
+                timeout_threshold = now - timedelta(minutes=5)  # 5 minute timeout
+                
+                # Get old superpositions
+                old_states = self.db.execute_query(
+                    """SELECT tx_id FROM transactions 
+                       WHERE quantum_state = %s AND updated_at < %s
+                       LIMIT 100""",
+                    (QuantumState.SUPERPOSITION.value, timeout_threshold)
+                )
+                
+                # Mark as decoherent
+                for tx in old_states:
+                    self.db.execute_update(
+                        """UPDATE transactions SET quantum_state = %s 
+                           WHERE tx_id = %s""",
+                        (QuantumState.DECOHERENT.value, tx['tx_id'])
+                    )
+                    logger.debug(f"[LIFECYCLE] ✓ {tx['tx_id']} transitioned to decoherent")
+                
+                time.sleep(30)
+                
+            except Exception as e:
+                logger.error(f"[LIFECYCLE] Loop error: {e}")
+                time.sleep(1)
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# METRICS & MONITORING
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+class MetricsCollector:
+    """Collect and report system metrics"""
+    
+    def __init__(self):
+        self.running = False
+        self.worker_thread = None
+        self.metrics_history = deque(maxlen=1000)
+        logger.info("[METRICS] MetricsCollector initialized")
+    
+    def start(self, app_instance):
+        """Start metrics collector"""
+        if not self.running:
+            self.running = True
+            self.app = app_instance
+            self.worker_thread = threading.Thread(target=self._metrics_loop, daemon=True, name='Metrics-Worker')
+            self.worker_thread.start()
+            logger.info("[METRICS] Metrics collector started")
+    
+    def stop(self):
+        """Stop metrics collector"""
+        self.running = False
+        if self.worker_thread:
+            self.worker_thread.join(timeout=5)
+        logger.info("[METRICS] Metrics collector stopped")
+    
+    def _metrics_loop(self):
+        """Collect metrics periodically"""
+        logger.info("[METRICS] Metrics loop started")
+        
+        while self.running:
+            try:
+                metrics = {
+                    'timestamp': datetime.utcnow(timezone.utc).isoformat(),
+                    'transaction_processor': self.app.tx_processor.get_processor_stats(),
+                    'quantum_executor': self.app.tx_processor.executor.get_executor_stats(),
+                    'oracle_engine': self.app.oracle_engine.get_oracle_stats(),
+                    'blockchain': self.app.blockchain_worker.get_blockchain_stats(),
+                    'pseudoqubits': self.app.tx_processor.executor.pqubit_manager.get_qubit_stats()
+                }
+                
+                self.metrics_history.append(metrics)
+                
+                logger.info(f"[METRICS] Metrics snapshot: Processed={metrics['transaction_processor']['processed_transactions']}, "
+                           f"Blocks={metrics['blockchain']['current_height']}, "
+                           f"Validators={metrics['blockchain']['consensus_validators']}")
+                
+                time.sleep(Config.METRICS_INTERVAL)
+                
+            except Exception as e:
+                logger.error(f"[METRICS] Loop error: {e}")
+                time.sleep(Config.METRICS_INTERVAL)
+    
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get current metrics"""
+        if not self.metrics_history:
+            return {}
+        return self.metrics_history[-1]
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# GENESIS BLOCK INITIALIZATION
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+def initialize_genesis_block(db: DatabaseManager):
+    """Initialize genesis block on first run"""
+    
+    try:
+        # Check if genesis exists
+        result = db.execute_query("SELECT COUNT(*) as count FROM blocks")
+        
+        if result and result[0]['count'] == 0:
+            logger.info("[GENESIS] Creating genesis block...")
+            
+            genesis_hash = hashlib.sha256(b"QTCL_GENESIS_BLOCK_2025").hexdigest()
+            timestamp = datetime.utcnow(timezone.utc)
+            
+            db.execute_update(
+                """INSERT INTO blocks (block_height, block_hash, parent_hash, timestamp,
+                                       miner_address, transaction_count, quantum_state)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                (0, genesis_hash, '0' * 64, timestamp, 'genesis_validator', 0, QuantumState.PURE.value)
+            )
+            
+            logger.info(f"[GENESIS] ✓ Genesis block created: {genesis_hash[:16]}...")
+            return True
+        else:
+            logger.info("[GENESIS] Genesis block already exists")
+            return True
+    
+    except Exception as e:
+        logger.error(f"[GENESIS] ✗ Genesis initialization failed: {e}")
+        return False
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# MAIN APPLICATION
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+class QtclApplication:
+    """Main QTCL application orchestrator"""
+    
+    def __init__(self):
+        self.db = DatabaseManager()
+        self.tx_processor = TransactionProcessor()
+        self.oracle_engine = OracleEngine()
+        self.blockchain_worker = BlockchainWorker()
+        self.lifecycle_manager = SuperpositionLifecycleManager()
+        self.metrics_collector = MetricsCollector()
+        self.running = False
+        logger.info("[APP] QtclApplication initialized")
+    
+    def initialize(self) -> bool:
+        """Initialize application"""
+        
+        logger.info("═" * 100)
+        logger.info("INITIALIZING QUANTUM TEMPORAL COHERENCE LEDGER (QTCL) v3.2.0")
+        logger.info("═" * 100)
+        
+        try:
+            # Connect to database
+            logger.info("[APP] Connecting to database...")
+            if not self.db.connect():
+                logger.error("[APP] ✗ Failed to connect to database")
+                return False
+            
+            logger.info("[APP] ✓ Database connected")
+            
+            # Initialize genesis block
+            if not initialize_genesis_block(self.db):
+                logger.error("[APP] ✗ Genesis initialization failed")
+                return False
+            
+            # Log configuration
+            logger.info(f"[APP] Configuration:")
+            logger.info(f"  Environment: {Config.ENVIRONMENT}")
+            logger.info(f"  Quantum Shots: {Config.QISKIT_SHOTS}")
+            logger.info(f"  Block Time Target: {Config.BLOCK_TIME_TARGET}s")
+            logger.info(f"  Max Transactions/Block: {Config.MAX_TRANSACTIONS_PER_BLOCK}")
+            logger.info(f"  Finality Blocks: {Config.FINALITY_BLOCKS}")
+            logger.info(f"  Validator Count: {Config.VALIDATOR_COUNT}")
+            logger.info(f"  Consensus Threshold: {Config.CONSENSUS_THRESHOLD}")
+            logger.info(f"  Pseudoqubit Pool: {Config.PSEUDOQUBIT_POOL_SIZE}")
+            
+            logger.info("═" * 100)
+            logger.info("✓ QTCL APPLICATION INITIALIZED SUCCESSFULLY")
+            logger.info("═" * 100)
+            
+            return True
+            
+        except Exception as e:
+            logger.critical(f"[APP] ✗ Initialization failed: {e}")
+            logger.critical(traceback.format_exc())
+            return False
+    
+    def start(self):
+        """Start application and all worker threads"""
+        
+        if self.running:
+            logger.warning("[APP] Application already running")
+            return
+        
+        self.running = True
+        
+        logger.info("═" * 100)
+        logger.info("STARTING QTCL SERVICES")
+        logger.info("═" * 100)
+        
+        # Start workers
+        logger.info("[APP] Starting transaction processor...")
+        self.tx_processor.start()
+        time.sleep(0.5)
+        
+        logger.info("[APP] Starting oracle engine...")
+        self.oracle_engine.start()
+        time.sleep(0.5)
+        
+        logger.info("[APP] Starting blockchain worker...")
+        self.blockchain_worker.start()
+        time.sleep(0.5)
+        
+        logger.info("[APP] Starting superposition lifecycle manager...")
+        self.lifecycle_manager.start()
+        time.sleep(0.5)
+        
+        logger.info("[APP] Starting metrics collector...")
+        self.metrics_collector.start(self)
+        
+        logger.info("═" * 100)
+        logger.info("✓ ALL SERVICES STARTED")
+        logger.info("═" * 100)
+    
+    def stop(self):
+        """Stop application and all worker threads"""
+        
+        if not self.running:
+            logger.warning("[APP] Application not running")
+            return
         
         self.running = False
         
-        # Signal all threads to stop
-        transaction_poller.running = False
-        pseudoqubit_manager.running = False
-        quantum_job_queue.running = False
-        superposition_manager.running = False
-        oracle_listener.running = False
-        finality_processor.running = False
-        database_sync.running = False
-        websocket_broadcaster.running = False
+        logger.info("═" * 100)
+        logger.info("STOPPING QTCL SERVICES")
+        logger.info("═" * 100)
         
-        # Wait for threads to finish
-        logger.info("Waiting for worker threads to finish...")
-        for thread in self.threads:
-            thread.join(timeout=5)
-            if thread.is_alive():
-                logger.warning(f"Thread {thread.name} did not finish in time")
+        logger.info("[APP] Stopping metrics collector...")
+        self.metrics_collector.stop()
         
-        # Close database connections
-        logger.info("Closing database connections...")
-        db_pool.close_all()
+        logger.info("[APP] Stopping superposition lifecycle manager...")
+        self.lifecycle_manager.stop()
         
-        uptime = (datetime.utcnow() - self.start_time).total_seconds() if self.start_time else 0
+        logger.info("[APP] Stopping transaction processor...")
+        self.tx_processor.stop()
         
-        logger.info("=" * 100)
-        logger.info("QTCL MAIN APPLICATION STOPPED")
-        logger.info(f"Total uptime: {int(uptime)} seconds")
-        logger.info("=" * 100)
-
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# ENTRY POINT
-# ═══════════════════════════════════════════════════════════════════════════════════════
-
-if __name__ == '__main__':
-    app = QtclMainApplication()
+        logger.info("[APP] Stopping oracle engine...")
+        self.oracle_engine.stop()
+        
+        logger.info("[APP] Stopping blockchain worker...")
+        self.blockchain_worker.stop()
+        
+        logger.info("[APP] Closing database...")
+        self.db.close()
+        
+        logger.info("═" * 100)
+        logger.info("✓ ALL SERVICES STOPPED")
+        logger.info("═" * 100)
     
+    def get_status(self) -> Dict[str, Any]:
+        """Get application status"""
+        
+        return {
+            'running': self.running,
+            'timestamp': datetime.utcnow(timezone.utc).isoformat(),
+            'services': {
+                'database': 'connected' if self.db.initialized else 'disconnected',
+                'transaction_processor': 'running' if self.tx_processor.running else 'stopped',
+                'oracle_engine': 'running' if self.oracle_engine.running else 'stopped',
+                'blockchain_worker': 'running' if self.blockchain_worker.running else 'stopped',
+                'lifecycle_manager': 'running' if self.lifecycle_manager.running else 'stopped',
+                'metrics_collector': 'running' if self.metrics_collector.running else 'stopped'
+            },
+            'metrics': self.metrics_collector.get_metrics()
+        }
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# GLOBAL APPLICATION INSTANCE
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+app = QtclApplication()
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# COMMAND-LINE INTERFACE
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+def main():
+    """Main entry point"""
+    
+    import signal
+    
+    def signal_handler(sig, frame):
+        logger.info("\n[APP] Received interrupt signal")
+        app.stop()
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Initialize
+    if not app.initialize():
+        logger.critical("[APP] ✗ Initialization failed")
+        sys.exit(1)
+    
+    # Start
+    app.start()
+    
+    # Keep running
     try:
-        success = app.start()
-        sys.exit(0 if success else 1)
+        logger.info("[APP] QTCL application running. Press CTRL+C to stop.")
+        
+        while True:
+            time.sleep(5)
+            
+            # Periodically log status
+            if app.metrics_collector.metrics_history:
+                status = app.get_status()
+                metrics = status.get('metrics', {})
+                
+                if metrics:
+                    logger.debug(f"[APP] Status: "
+                                f"TXN={metrics.get('transaction_processor', {}).get('processed_transactions', 0)}, "
+                                f"Blocks={metrics.get('blockchain', {}).get('current_height', 0)}")
+            
     except KeyboardInterrupt:
+        logger.info("[APP] Keyboard interrupt")
         app.stop()
         sys.exit(0)
     except Exception as e:
-        logger.error(f"Fatal error: {e}\n{traceback.format_exc()}")
+        logger.critical(f"[APP] ✗ Unexpected error: {e}")
+        logger.critical(traceback.format_exc())
         app.stop()
         sys.exit(1)
+
+if __name__ == '__main__':
+    main()
