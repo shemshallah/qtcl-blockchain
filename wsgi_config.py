@@ -17,20 +17,7 @@ import hashlib
 import json
 import secrets
 import subprocess
-try:
 import bcrypt
-except ImportError:
-print("[CRITICAL] bcrypt not installed. Attempting auto-install...")
-try:
-subprocess.check_call(
-[sys.executable, '-m', 'pip', 'install', '-q', 'bcrypt'],
-stdout=subprocess.DEVNULL,
-stderr=subprocess.DEVNULL
-)
-import bcrypt
-except Exception as e:
-print(f"[ERROR] Failed to install bcrypt: {e}")
-raise
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List, Any, Tuple
