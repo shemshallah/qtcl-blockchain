@@ -3318,6 +3318,35 @@ def require_auth(f):
     return decorated
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
+# RATE LIMITING DECORATOR
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+def rate_limit(f):
+    """Rate limiting decorator"""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        # Get client IP
+        client_ip = request.remote_addr
+        now = datetime.now(timezone.utc)
+        key = f"{client_ip}:{request.path}"
+        
+        # Check rate limit cache
+        if key in RATE_LIMIT_CACHE:
+            last_call, count = RATE_LIMIT_CACHE[key]
+            if (now - last_call).seconds < 60:
+                if count >= 100:  # Max 100 requests per minute
+                    return jsonify({'error': 'Rate limit exceeded'}), 429
+                RATE_LIMIT_CACHE[key] = (last_call, count + 1)
+            else:
+                RATE_LIMIT_CACHE[key] = (now, 1)
+        else:
+            RATE_LIMIT_CACHE[key] = (now, 1)
+        
+        return f(*args, **kwargs)
+    
+    return decorated
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
 # KEY MANAGEMENT ENDPOINTS - Cryptographic key operations
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
@@ -3329,9 +3358,7 @@ def generate_keypair():
     try:
         user_id = g.user_id
         key_type = request.get_json().get('type', 'secp256k1')  # secp256k1 or ed25519
-      
-
-
+        
         # Generate keypair using cryptography
         from cryptography.hazmat.primitives.asymmetric import ec
         from cryptography.hazmat.primitives import serialization
@@ -3380,36 +3407,6 @@ def generate_keypair():
     except Exception as e:
         logger.error(f"✗ Generate keypair error: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
-
-
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# RATE LIMITING DECORATOR
-# ═══════════════════════════════════════════════════════════════════════════════════════
-
-def rate_limit(f):
-    """Rate limiting decorator"""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        # Get client IP
-        client_ip = request.remote_addr
-        now = datetime.now(timezone.utc)
-        key = f"{client_ip}:{request.path}"
-        
-        # Check rate limit cache
-        if key in RATE_LIMIT_CACHE:
-            last_call, count = RATE_LIMIT_CACHE[key]
-            if (now - last_call).seconds < 60:
-                if count >= 100:  # Max 100 requests per minute
-                    return jsonify({'error': 'Rate limit exceeded'}), 429
-                RATE_LIMIT_CACHE[key] = (last_call, count + 1)
-            else:
-                RATE_LIMIT_CACHE[key] = (now, 1)
-        else:
-            RATE_LIMIT_CACHE[key] = (now, 1)
-        
-        return f(*args, **kwargs)
-    
-    return decorated
 
 
 @app.route('/api/v1/keys', methods=['GET'])
