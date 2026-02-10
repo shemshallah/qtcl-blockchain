@@ -46,9 +46,6 @@ except ImportError:
     QISKIT_AVAILABLE = False
     logging.warning("Qiskit not available - using simulation mode")
 
-from db_config import DatabaseConnection as DatabaseConnectionManager
-
-
 try:
     from cryptography.hazmat.primitives import hashes, serialization, hmac as crypto_hmac
     from cryptography.hazmat.primitives.asymmetric import rsa, ed25519, ec, dsa, padding
@@ -3129,57 +3126,78 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 application = app
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# INITIALIZE CORE COMPONENTS
-# ═══════════════════════════════════════════════════════════════════════════════════════
-
-# Initialize database connection
-try:
-    logger.info("Initializing database connection...")
-    db = DatabaseConnectionManager()
-    logger.info("✓ Database initialized")
-except Exception as e:
-    logger.error(f"✗ Database init failed: {e}")
-    db = None
-
-# Initialize auth handler
-try:
-    logger.info("Initializing authentication handler...")
-    auth_handler = AdvancedAuthenticationHandler(db)
-    logger.info("✓ Auth handler initialized")
-except Exception as e:
-    logger.error(f"✗ Auth handler init failed: {e}")
-    auth_handler = None
-
-# Initialize transaction processor
-try:
-    logger.info("Initializing transaction processor...")
-    tx_processor = TransactionProcessor(db)
-    logger.info("✓ Transaction processor initialized")
-except Exception as e:
-    logger.error(f"✗ Transaction processor init failed: {e}")
-    tx_processor = None
-
-# Initialize circuit builder
-try:
-    logger.info("Initializing quantum circuit builder...")
-    circuit_builder = QuantumCircuitBuilder()
-    logger.info("✓ Circuit builder initialized")
-except Exception as e:
-    logger.error(f"✗ Circuit builder init failed: {e}")
-    circuit_builder = None
-
-# Initialize oracle engine
-try:
-    logger.info("Initializing oracle engine...")
-    oracle_engine = OracleEngine(db)
-    logger.info("✓ Oracle engine initialized")
-except Exception as e:
-    logger.error(f"✗ Oracle engine init failed: {e}")
-    oracle_engine = None
-
-# ═══════════════════════════════════════════════════════════════════════════════════════
 # KEY MANAGEMENT ENDPOINTS - Cryptographic key operations
 # ═══════════════════════════════════════════════════════════════════════════════════════
+
+def require_auth(f):
+    """Authentication decorator"""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = None
+        
+        if 'Authorization' in request.headers:
+            try:
+                token = request.headers['Authorization'].split(' ')[1]
+            except IndexError:
+                return jsonify({'status': 'error', 'message': 'Invalid authorization header'}), 401
+        
+        if not token:
+            return jsonify({'status': 'error', 'message': 'Missing authentication token'}), 401
+        
+        payload = auth_handler.verify_token(token)
+        if not payload:
+            return jsonify({'status': 'error', 'message': 'Invalid or expired token'}), 401
+        
+        g.user = payload
+        return f(*args, **kwargs)
+    
+    return decorated
+
+def require_role(role: str):
+    """Role-based access control decorator"""
+    def decorator(f):
+        @wraps(f)
+        def decorated(*args, **kwargs):
+            if not hasattr(g, 'user'):
+                return jsonify({'status': 'error', 'message': 'Authentication required'}), 401
+            
+            user_role = g.user.get('role', 'user')
+            
+            # Admin has access to everything
+            if user_role == 'admin':
+                return f(*args, **kwargs)
+            
+            if user_role != role:
+                return jsonify({'status': 'error', 'message': 'Insufficient permissions'}), 403
+            
+            return f(*args, **kwargs)
+        
+        return decorated
+    return decorator
+
+@app.before_request
+def before_request():
+    """Execute before each request"""
+    g.request_start_time = time.time()
+    
+    # Log request
+    logger.debug(f"{request.method} {request.path} from {request.remote_addr}")
+
+@app.after_request
+def after_request(response):
+    """Execute after each request"""
+    # Add security headers
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    
+    # Log response time
+    if hasattr(g, 'request_start_time'):
+        elapsed = (time.time() - g.request_start_time) * 1000
+        logger.debug(f"{request.method} {request.path} completed in {elapsed:.2f}ms")
+    
+    return response
 
 @app.route('/api/v1/keys/generate', methods=['POST'])
 @require_auth
@@ -6763,75 +6781,6 @@ class OracleNetworkEngine:
 # MIDDLEWARE & DECORATORS
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-def require_auth(f):
-    """Authentication decorator"""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        token = None
-        
-        if 'Authorization' in request.headers:
-            try:
-                token = request.headers['Authorization'].split(' ')[1]
-            except IndexError:
-                return jsonify({'status': 'error', 'message': 'Invalid authorization header'}), 401
-        
-        if not token:
-            return jsonify({'status': 'error', 'message': 'Missing authentication token'}), 401
-        
-        payload = auth_handler.verify_token(token)
-        if not payload:
-            return jsonify({'status': 'error', 'message': 'Invalid or expired token'}), 401
-        
-        g.user = payload
-        return f(*args, **kwargs)
-    
-    return decorated
-
-def require_role(role: str):
-    """Role-based access control decorator"""
-    def decorator(f):
-        @wraps(f)
-        def decorated(*args, **kwargs):
-            if not hasattr(g, 'user'):
-                return jsonify({'status': 'error', 'message': 'Authentication required'}), 401
-            
-            user_role = g.user.get('role', 'user')
-            
-            # Admin has access to everything
-            if user_role == 'admin':
-                return f(*args, **kwargs)
-            
-            if user_role != role:
-                return jsonify({'status': 'error', 'message': 'Insufficient permissions'}), 403
-            
-            return f(*args, **kwargs)
-        
-        return decorated
-    return decorator
-
-@app.before_request
-def before_request():
-    """Execute before each request"""
-    g.request_start_time = time.time()
-    
-    # Log request
-    logger.debug(f"{request.method} {request.path} from {request.remote_addr}")
-
-@app.after_request
-def after_request(response):
-    """Execute after each request"""
-    # Add security headers
-    response.headers['X-Content-Type-Options'] = 'nosniff'
-    response.headers['X-Frame-Options'] = 'DENY'
-    response.headers['X-XSS-Protection'] = '1; mode=block'
-    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
-    
-    # Log response time
-    if hasattr(g, 'request_start_time'):
-        elapsed = (time.time() - g.request_start_time) * 1000
-        logger.debug(f"{request.method} {request.path} completed in {elapsed:.2f}ms")
-    
-    return response
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # HEALTH & STATUS ENDPOINTS
