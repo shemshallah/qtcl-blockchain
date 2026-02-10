@@ -120,14 +120,15 @@ class Config:
     SUPABASE_PASSWORD = os.getenv('SUPABASE_PASSWORD', '')
     SUPABASE_PORT = int(os.getenv('SUPABASE_PORT', '5432'))
     SUPABASE_DB = os.getenv('SUPABASE_DB', 'postgres')
-    DB_POOL_MIN_SIZE = int(os.getenv('DB_POOL_MIN_SIZE', '20'))
-    DB_POOL_MAX_SIZE = int(os.getenv('DB_POOL_MAX_SIZE', '150'))
-    DB_CONNECTION_TIMEOUT = int(os.getenv('DB_CONNECTION_TIMEOUT', '30'))
-    DB_RETRY_ATTEMPTS = int(os.getenv('DB_RETRY_ATTEMPTS', '5'))
-    DB_RETRY_DELAY = float(os.getenv('DB_RETRY_DELAY', '1.0'))
-    DB_ENABLE_REPLICATION = os.getenv('DB_ENABLE_REPLICATION', 'true').lower() == 'true'
+    # CRITICAL: Supabase session mode limits connections. Use small pool size!
+    DB_POOL_MIN_SIZE = int(os.getenv('DB_POOL_MIN_SIZE', '1'))
+    DB_POOL_MAX_SIZE = int(os.getenv('DB_POOL_MAX_SIZE', '3'))
+    DB_CONNECTION_TIMEOUT = int(os.getenv('DB_CONNECTION_TIMEOUT', '10'))
+    DB_RETRY_ATTEMPTS = int(os.getenv('DB_RETRY_ATTEMPTS', '3'))
+    DB_RETRY_DELAY = float(os.getenv('DB_RETRY_DELAY', '0.5'))
+    DB_ENABLE_REPLICATION = os.getenv('DB_ENABLE_REPLICATION', 'false').lower() == 'true'
     DB_BACKUP_INTERVAL_HOURS = int(os.getenv('DB_BACKUP_INTERVAL_HOURS', '6'))
-    DB_ENABLE_SHARDING = os.getenv('DB_ENABLE_SHARDING', 'true').lower() == 'true'
+    DB_ENABLE_SHARDING = os.getenv('DB_ENABLE_SHARDING', 'false').lower() == 'true'
     DB_NUM_SHARDS = int(os.getenv('DB_NUM_SHARDS', '16'))
     DB_ENABLE_COMPRESSION = os.getenv('DB_ENABLE_COMPRESSION', 'true').lower() == 'true'
     
@@ -143,7 +144,7 @@ class Config:
     JWT_ALGORITHM = os.getenv('JWT_ALGORITHM', 'HS512')
     JWT_EXPIRATION_HOURS = int(os.getenv('JWT_EXPIRATION_HOURS', '24'))
     JWT_REFRESH_EXPIRATION_DAYS = int(os.getenv('JWT_REFRESH_EXPIRATION_DAYS', '30'))
-    PASSWORD_HASH_ROUNDS = int(os.getenv('PASSWORD_HASH_ROUNDS', '14'))
+    PASSWORD_HASH_ROUNDS = int(os.getenv('PASSWORD_HASH_ROUNDS', '12'))
     PASSWORD_MIN_LENGTH = int(os.getenv('PASSWORD_MIN_LENGTH', '12'))
     PASSWORD_REQUIRE_UPPERCASE = os.getenv('PASSWORD_REQUIRE_UPPERCASE', 'true').lower() == 'true'
     PASSWORD_REQUIRE_LOWERCASE = os.getenv('PASSWORD_REQUIRE_LOWERCASE', 'true').lower() == 'true'
@@ -188,7 +189,7 @@ class Config:
     RATE_LIMIT_REQUESTS_PER_MINUTE = int(os.getenv('RATE_LIMIT_REQUESTS_PER_MINUTE', '1000'))
     RATE_LIMIT_BURST = int(os.getenv('RATE_LIMIT_BURST', '2000'))
     ENABLE_WEBSOCKET = os.getenv('ENABLE_WEBSOCKET', 'true').lower() == 'true'
-    ENABLE_GRAPHQL = os.getenv('ENABLE_GRAPHQL', 'true').lower() == 'true'
+    ENABLE_GRAPHQL = os.getenv('ENABLE_GRAPHQL', 'false').lower() == 'true'
     ENABLE_GRPC = os.getenv('ENABLE_GRPC', 'false').lower() == 'true'
     CORS_ORIGINS = os.getenv('CORS_ORIGINS', '*').split(',')
     
@@ -207,9 +208,9 @@ class Config:
     MAX_STAKE_AMOUNT = int(os.getenv('MAX_STAKE_AMOUNT', '10000000'))
     LOCK_PERIOD_DAYS = int(os.getenv('LOCK_PERIOD_DAYS', '30'))
     SLASHING_PERCENTAGE = float(os.getenv('SLASHING_PERCENTAGE', '10.0'))
-    ENABLE_YIELD_FARMING = os.getenv('ENABLE_YIELD_FARMING', 'true').lower() == 'true'
-    ENABLE_LIQUIDITY_POOLS = os.getenv('ENABLE_LIQUIDITY_POOLS', 'true').lower() == 'true'
-    ENABLE_ATOMIC_SWAPS = os.getenv('ENABLE_ATOMIC_SWAPS', 'true').lower() == 'true'
+    ENABLE_YIELD_FARMING = os.getenv('ENABLE_YIELD_FARMING', 'false').lower() == 'true'
+    ENABLE_LIQUIDITY_POOLS = os.getenv('ENABLE_LIQUIDITY_POOLS', 'false').lower() == 'true'
+    ENABLE_ATOMIC_SWAPS = os.getenv('ENABLE_ATOMIC_SWAPS', 'false').lower() == 'true'
     ENABLE_ESCROW = os.getenv('ENABLE_ESCROW', 'true').lower() == 'true'
     AMM_FEE_PERCENTAGE = float(os.getenv('AMM_FEE_PERCENTAGE', '0.3'))
     LIQUIDITY_MINING_REWARDS_PER_BLOCK = int(os.getenv('LIQUIDITY_MINING_REWARDS_PER_BLOCK', '10'))
@@ -3144,12 +3145,21 @@ def require_auth(f):
         if not token:
             return jsonify({'status': 'error', 'message': 'Missing authentication token'}), 401
         
-        payload = auth_handler.verify_token(token)
-        if not payload:
-            return jsonify({'status': 'error', 'message': 'Invalid or expired token'}), 401
+        # Safe check for auth_handler
+        if not auth_handler:
+            logger.warning("⚠ auth_handler not initialized")
+            return jsonify({'status': 'error', 'message': 'Auth service unavailable'}), 503
         
-        g.user = payload
-        return f(*args, **kwargs)
+        try:
+            payload = auth_handler.verify_token(token)
+            if not payload:
+                return jsonify({'status': 'error', 'message': 'Invalid or expired token'}), 401
+            
+            g.user = payload
+            return f(*args, **kwargs)
+        except Exception as e:
+            logger.error(f"✗ Auth verification error: {e}")
+            return jsonify({'status': 'error', 'message': 'Authentication failed'}), 401
     
     return decorated
 
@@ -3187,24 +3197,28 @@ def rate_limit(f):
 @app.before_request
 def before_request():
     """Execute before each request"""
-    g.request_start_time = time.time()
-    
-    # Log request
-    logger.debug(f"{request.method} {request.path} from {request.remote_addr}")
+    try:
+        g.request_start_time = time.time()
+        logger.debug(f"{request.method} {request.path} from {request.remote_addr}")
+    except Exception as e:
+        logger.error(f"✗ before_request error: {e}")
 
 @app.after_request
 def after_request(response):
     """Execute after each request"""
-    # Add security headers
-    response.headers['X-Content-Type-Options'] = 'nosniff'
-    response.headers['X-Frame-Options'] = 'DENY'
-    response.headers['X-XSS-Protection'] = '1; mode=block'
-    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
-    
-    # Log response time
-    if hasattr(g, 'request_start_time'):
-        elapsed = (time.time() - g.request_start_time) * 1000
-        logger.debug(f"{request.method} {request.path} completed in {elapsed:.2f}ms")
+    try:
+        # Add security headers
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['X-Frame-Options'] = 'DENY'
+        response.headers['X-XSS-Protection'] = '1; mode=block'
+        response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+        
+        # Log response time
+        if hasattr(g, 'request_start_time'):
+            elapsed = (time.time() - g.request_start_time) * 1000
+            logger.debug(f"{request.method} {request.path} completed in {elapsed:.2f}ms")
+    except Exception as e:
+        logger.error(f"✗ after_request error: {e}")
     
     return response
 
@@ -6810,32 +6824,41 @@ def api_status():
     """Comprehensive API status"""
     try:
         # Check database
-        try:
-            conn = db.get_connection()
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-            db.return_connection(conn)
-            db_status = 'healthy'
-        except:
-            db_status = 'unhealthy'
+        db_status = 'initializing'
+        if db:
+            try:
+                conn = db.get_connection()
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                db.return_connection(conn)
+                db_status = 'healthy'
+            except Exception as e:
+                logger.warning(f"DB status check failed: {e}")
+                db_status = 'unhealthy'
         
-        # Get statistics
-        tx_stats = db.execute_query(
-            """
-            SELECT 
-                COUNT(*) as total,
-                COUNT(*) FILTER (WHERE status = 'finalized') as finalized,
-                AVG(CAST(entropy_score AS FLOAT)) as avg_entropy,
-                AVG(CAST(execution_time_ms AS FLOAT)) as avg_execution_time
-            FROM transactions
-            """,
-            use_replica=True
-        )
-        
-        user_stats = db.execute_query(
-            "SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE is_active = TRUE) as active FROM users",
-            use_replica=True
-        )
+        # Get statistics (safe fallback)
+        tx_stats = None
+        user_stats = None
+        if db:
+            try:
+                tx_stats = db.execute_query(
+                    """
+                    SELECT 
+                        COUNT(*) as total,
+                        COUNT(*) FILTER (WHERE status = 'finalized') as finalized,
+                        AVG(CAST(entropy_score AS FLOAT)) as avg_entropy,
+                        AVG(CAST(execution_time_ms AS FLOAT)) as avg_execution_time
+                    FROM transactions
+                    """,
+                    use_replica=True
+                )
+                
+                user_stats = db.execute_query(
+                    "SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE is_active = TRUE) as active FROM users",
+                    use_replica=True
+                )
+            except Exception as e:
+                logger.warning(f"Stats query failed: {e}")
         
         tx_data = tx_stats[0] if tx_stats else {}
         user_data = user_stats[0] if user_stats else {}
@@ -9696,15 +9719,23 @@ def rate_limit_exceeded(error):
 @app.errorhandler(500)
 def internal_error(error):
     """Handle 500 errors"""
-    logger.error(f"✗ Internal server error: {error}")
-    return jsonify({'status': 'error', 'message': 'Internal server error'}), 500
+    logger.error(f"✗ Internal server error: {error}", exc_info=True)
+    return jsonify({
+        'status': 'error', 
+        'message': 'Internal server error',
+        'error': str(error) if Config.DEBUG else None
+    }), 500
 
 
 @app.errorhandler(Exception)
 def handle_exception(error):
     """Handle uncaught exceptions"""
-    logger.error(f"✗ Unhandled exception: {error}")
-    return jsonify({'status': 'error', 'message': str(error)}), 500
+    logger.error(f"✗ Unhandled exception: {error}", exc_info=True)
+    return jsonify({
+        'status': 'error', 
+        'message': 'An error occurred',
+        'error': str(error) if Config.DEBUG else None
+    }), 500
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
