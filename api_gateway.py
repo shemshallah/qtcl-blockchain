@@ -3097,7 +3097,33 @@ class AdvancedTransactionProcessor:
             'is_running': self.running
         }
 
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# FLASK APP INIT — must be defined before any @app.route decorators
+# ═══════════════════════════════════════════════════════════════════════════════════════
 
+app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = Config.MAX_CONTENT_LENGTH
+app.config['JSON_SORT_KEYS'] = False
+app.secret_key = Config.JWT_SECRET
+
+# Enable CORS
+CORS(app, resources={r"/api/*": {"origins": Config.CORS_ORIGINS}})
+
+# Global instances
+db = None
+auth_handler = None
+tx_processor = None
+circuit_builder = None
+circuit_executor = None
+defi_engine = None
+governance_engine = None
+oracle_engine = None
+
+# WebSocket support
+socketio = SocketIO(app, cors_allowed_origins="*")
+
+# WSGI export for gunicorn
+application = app
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # KEY MANAGEMENT ENDPOINTS - Cryptographic key operations
@@ -6680,28 +6706,6 @@ class OracleNetworkEngine:
 # SECTION 14: FLASK APPLICATION & API ROUTES
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-# Initialize Flask app
-app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = Config.MAX_CONTENT_LENGTH
-app.config['JSON_SORT_KEYS'] = False
-app.secret_key = Config.JWT_SECRET
-
-# Enable CORS
-CORS(app, resources={r"/api/*": {"origins": Config.CORS_ORIGINS}})
-
-# Global instances
-db = None
-auth_handler = None
-tx_processor = None
-circuit_builder = None
-circuit_executor = None
-defi_engine = None
-governance_engine = None
-oracle_engine = None
-
-# WebSocket support
-if Config.ENABLE_WEBSOCKET:
-    socketio = SocketIO(app, cors_allowed_origins="*")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # MIDDLEWARE & DECORATORS
