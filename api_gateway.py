@@ -3126,6 +3126,106 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 application = app
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
+# DECORATORS & MIDDLEWARE - MUST BE DEFINED BEFORE ROUTES
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+def require_auth(f):
+    """Authentication decorator"""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = None
+        
+        if 'Authorization' in request.headers:
+            try:
+                token = request.headers['Authorization'].split(' ')[1]
+            except IndexError:
+                return jsonify({'status': 'error', 'message': 'Invalid authorization header'}), 401
+        
+        if not token:
+            return jsonify({'status': 'error', 'message': 'Missing authentication token'}), 401
+        
+        payload = auth_handler.verify_token(token)
+        if not payload:
+            return jsonify({'status': 'error', 'message': 'Invalid or expired token'}), 401
+        
+        g.user = payload
+        return f(*args, **kwargs)
+    
+    return decorated
+
+def require_role(role: str):
+    """Role-based access control decorator"""
+    def decorator(f):
+        @wraps(f)
+        def decorated(*args, **kwargs):
+            if not hasattr(g, 'user'):
+                return jsonify({'status': 'error', 'message': 'Authentication required'}), 401
+            
+            user_role = g.user.get('role', 'user')
+            
+            # Admin has access to everything
+            if user_role == 'admin':
+                return f(*args, **kwargs)
+            
+            if user_role != role:
+                return jsonify({'status': 'error', 'message': 'Insufficient permissions'}), 403
+            
+            return f(*args, **kwargs)
+        
+        return decorated
+    return decorator
+
+def rate_limit(f):
+    """Rate limiting decorator"""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        # Simple rate limit: allow 100 requests per minute per IP
+        ip = request.remote_addr
+        key = f"rate_limit:{ip}"
+        current = getattr(g, 'redis_client', None)
+        
+        if current is None:
+            # If no redis, just proceed (graceful degradation)
+            return f(*args, **kwargs)
+        
+        try:
+            count = current.incr(key)
+            if count == 1:
+                current.expire(key, 60)
+            
+            if count > 100:
+                return jsonify({'status': 'error', 'message': 'Rate limit exceeded'}), 429
+        except Exception as e:
+            logger.warning(f"Rate limit check failed: {e}")
+            # Fail open - allow request if rate limiting fails
+        
+        return f(*args, **kwargs)
+    
+    return decorated
+
+@app.before_request
+def before_request():
+    """Execute before each request"""
+    g.request_start_time = time.time()
+    logger.debug(f"{request.method} {request.path} from {request.remote_addr}")
+
+@app.after_request
+def after_request(response):
+    """Execute after each request"""
+    # Add security headers
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+    
+    # Log response time
+    if hasattr(g, 'request_start_time'):
+        elapsed = (time.time() - g.request_start_time) * 1000
+        logger.debug(f"{request.method} {request.path} completed in {elapsed:.2f}ms")
+    
+    return response
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
 # KEY MANAGEMENT ENDPOINTS - Cryptographic key operations
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
@@ -6706,80 +6806,6 @@ class OracleNetworkEngine:
 # SECTION 14: FLASK APPLICATION & API ROUTES
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# MIDDLEWARE & DECORATORS
-# ═══════════════════════════════════════════════════════════════════════════════════════
-
-def require_auth(f):
-    """Authentication decorator"""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        token = None
-        
-        if 'Authorization' in request.headers:
-            try:
-                token = request.headers['Authorization'].split(' ')[1]
-            except IndexError:
-                return jsonify({'status': 'error', 'message': 'Invalid authorization header'}), 401
-        
-        if not token:
-            return jsonify({'status': 'error', 'message': 'Missing authentication token'}), 401
-        
-        payload = auth_handler.verify_token(token)
-        if not payload:
-            return jsonify({'status': 'error', 'message': 'Invalid or expired token'}), 401
-        
-        g.user = payload
-        return f(*args, **kwargs)
-    
-    return decorated
-
-def require_role(role: str):
-    """Role-based access control decorator"""
-    def decorator(f):
-        @wraps(f)
-        def decorated(*args, **kwargs):
-            if not hasattr(g, 'user'):
-                return jsonify({'status': 'error', 'message': 'Authentication required'}), 401
-            
-            user_role = g.user.get('role', 'user')
-            
-            # Admin has access to everything
-            if user_role == 'admin':
-                return f(*args, **kwargs)
-            
-            if user_role != role:
-                return jsonify({'status': 'error', 'message': 'Insufficient permissions'}), 403
-            
-            return f(*args, **kwargs)
-        
-        return decorated
-    return decorator
-
-@app.before_request
-def before_request():
-    """Execute before each request"""
-    g.request_start_time = time.time()
-    
-    # Log request
-    logger.debug(f"{request.method} {request.path} from {request.remote_addr}")
-
-@app.after_request
-def after_request(response):
-    """Execute after each request"""
-    # Add security headers
-    response.headers['X-Content-Type-Options'] = 'nosniff'
-    response.headers['X-Frame-Options'] = 'DENY'
-    response.headers['X-XSS-Protection'] = '1; mode=block'
-    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
-    
-    # Log response time
-    if hasattr(g, 'request_start_time'):
-        elapsed = (time.time() - g.request_start_time) * 1000
-        logger.debug(f"{request.method} {request.path} completed in {elapsed:.2f}ms")
-    
-    return response
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # HEALTH & STATUS ENDPOINTS
