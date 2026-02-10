@@ -1,4 +1,5 @@
 
+
 #!/usr/bin/env python3
 """
 ═══════════════════════════════════════════════════════════════════════════════
@@ -103,36 +104,36 @@ import numpy as np
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class Config:
-"""Production configuration - reads from environment variables"""
-# ─────────────────────────────────────────────────────────────────────────
-# SUPABASE CONNECTION - FROM ENVIRONMENT VARIABLES
-# ─────────────────────────────────────────────────────────────────────────
-SUPABASE_HOST = os.getenv('SUPABASE_HOST', 'aws-0-us-west-2.pooler.supabase.com')
-SUPABASE_USER = os.getenv('SUPABASE_USER', 'postgres.rslvlsqwkfmdtebqsvtw')
-SUPABASE_PASSWORD = os.getenv('SUPABASE_PASSWORD', '')  # NO DEFAULT - FAIL IF NOT SET
-SUPABASE_PORT = int(os.getenv('SUPABASE_PORT', '5432'))
-SUPABASE_DB = os.getenv('SUPABASE_DB', 'postgres')
-SUPABASE_JWT_SECRET = os.getenv('SUPABASE_JWT_SECRET', '')
-
-@staticmethod
-def validate():
-    """Check required environment variables are set"""
-    required = {
-        'SUPABASE_PASSWORD': Config.SUPABASE_PASSWORD,
-        'SUPABASE_USER': Config.SUPABASE_USER,
-        'SUPABASE_HOST': Config.SUPABASE_HOST,
-        'SUPABASE_JWT_SECRET': Config.SUPABASE_JWT_SECRET,
-    }
+    """Production configuration - reads from environment variables"""
+    # ─────────────────────────────────────────────────────────────────────────
+    # SUPABASE CONNECTION - FROM ENVIRONMENT VARIABLES
+    # ─────────────────────────────────────────────────────────────────────────
+    SUPABASE_HOST = os.getenv('SUPABASE_HOST', 'aws-0-us-west-2.pooler.supabase.com')
+    SUPABASE_USER = os.getenv('SUPABASE_USER', 'postgres.rslvlsqwkfmdtebqsvtw')
+    SUPABASE_PASSWORD = os.getenv('SUPABASE_PASSWORD', '')  # NO DEFAULT - FAIL IF NOT SET
+    SUPABASE_PORT = int(os.getenv('SUPABASE_PORT', '5432'))
+    SUPABASE_DB = os.getenv('SUPABASE_DB', 'postgres')
+    SUPABASE_JWT_SECRET = os.getenv('SUPABASE_JWT_SECRET', '')
     
-    missing = [k for k, v in required.items() if not v]
-    if missing:
-        raise RuntimeError(
-            f"CRITICAL: Missing required env vars: {missing}\n"
-            f"Set these in your .env file or environment before running."
-        )
+    @staticmethod
+    def validate():
+        """Check required environment variables are set"""
+        required = {
+            'SUPABASE_PASSWORD': Config.SUPABASE_PASSWORD,
+            'SUPABASE_USER': Config.SUPABASE_USER,
+            'SUPABASE_HOST': Config.SUPABASE_HOST,
+            'SUPABASE_JWT_SECRET': Config.SUPABASE_JWT_SECRET,
+        }
+        
+        missing = [k for k, v in required.items() if not v]
+        if missing:
+            raise RuntimeError(
+                f"CRITICAL: Missing required env vars: {missing}\n"
+                f"Set these in your .env file or environment before running."
+            )
+        
+        logger.info("✓ API Gateway configuration validated")
     
-    logger.info("✓ API Gateway configuration validated")
-
     # ─────────────────────────────────────────────────────────────────────────
     # API CONFIGURATION
     # ─────────────────────────────────────────────────────────────────────────
@@ -160,7 +161,7 @@ def validate():
     COHERENCE_REFRESH_INTERVAL_SECONDS = 5
     ENTROPY_THRESHOLD_FOR_SUPERPOSITION = 0.8  # Must have 80%+ entropy
     
-# ─────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     # AUTHENTICATION & PASSWORD MANAGEMENT
     # ─────────────────────────────────────────────────────────────────────────
     BCRYPT_ROUNDS = 12  # Cost factor for password hashing
@@ -300,50 +301,63 @@ class DatabaseConnection:
         logger.info("Initializing DatabaseConnection singleton")
     
     @staticmethod
-def _get_new_connection():
-    \"\"\"Create a new database connection\"\"\"
-    # Validate config
-    for attempt in range(1, 4):  # Try 3 times
+    def _get_new_connection():
+        """Create a new database connection"""
+        # Validate config
+        for attempt in range(1, 4):  # Try 3 times
+            try:
+                logger.info(f"Database connection attempt {attempt}/3...")
+                conn = psycopg2.connect(
+                    host=Config.SUPABASE_HOST,
+                    user=Config.SUPABASE_USER,
+                    password=Config.SUPABASE_PASSWORD,
+                    port=Config.SUPABASE_PORT,
+                    database=Config.SUPABASE_DB,
+                    connect_timeout=15,  # Increase from 10 to 15
+                    application_name='qtcl_api_gateway'
+                )
+                conn.set_session(autocommit=True)
+                logger.info("✓ Database connection established")
+                return conn
+            except psycopg2.Error as e:
+                logger.error(f"Connection failed: {e}")
+                if attempt < 3:
+                    wait = 2 * attempt
+                    logger.info(f"Retrying in {wait}s...")
+                    time.sleep(wait)
+                else:
+                    raise
+        
         try:
-            logger.info(f"Database connection attempt {attempt}/3...")
             conn = psycopg2.connect(
-                host=Config.SUPABASE_HOST,
-                user=Config.SUPABASE_USER,
-                password=Config.SUPABASE_PASSWORD,
-                port=Config.SUPABASE_PORT,
-                database=Config.SUPABASE_DB,
-                connect_timeout=15,  # Increase from 10 to 15
-                application_name='qtcl_api_gateway'
-            )
-            conn.set_session(autocommit=True)
-            logger.info("✓ Database connection established")
-            return conn
-        except psycopg2.Error as e:
-            logger.error(f"Connection failed: {e}")
-            if attempt < 3:
-                wait = 2 * attempt
-                logger.info(f"Retrying in {wait}s...")
-                time.sleep(wait)
-            else:
+                    host=Config.SUPABASE_HOST,
+                    user=Config.SUPABASE_USER,
+                    password=Config.SUPABASE_PASSWORD,
+                    port=Config.SUPABASE_PORT,
+                    database=Config.SUPABASE_DB,
+                    connect_timeout=10,
+                    application_name='qtcl_api_gateway'
+                )
+                conn.set_session(autocommit=True)
+                logger.debug("New database connection created")
+                return conn
+            except psycopg2.Error as e:
+                logger.error(f"Failed to create database connection: {e}")
                 raise
-    
-    try:
-        conn = psycopg2.connect(
-                host=Config.SUPABASE_HOST,
-                user=Config.SUPABASE_USER,
-                password=Config.SUPABASE_PASSWORD,
-                port=Config.SUPABASE_PORT,
-                database=Config.SUPABASE_DB,
-                connect_timeout=10,
-                application_name='qtcl_api_gateway'
-            )
-            conn.set_session(autocommit=True)
-            logger.debug("New database connection created")
-            return conn
-        except psycopg2.Error as e:
-            logger.error(f"Failed to create database connection: {e}")
-            raise
-    
+    @staticmethod
+def execute_update(query: str, params: tuple = None) -> int:
+        """Alias for execute_insert for backward compatibility"""
+    return DatabaseConnection.execute_insert(query, params)
+
+    @staticmethod
+def run_migrations():
+        """Run database schema migrations"""
+        logger.info("Running database migrations...")
+    # Placeholder - implement based on your schema
+    pass
+
+
+
     @staticmethod
     def get_connection():
         """Get connection from pool or create new one"""
@@ -389,6 +403,7 @@ def _get_new_connection():
                 return results
         except psycopg2.Error as e:
             logger.error(f"Query execution error: {e}\nQuery: {query}\nParams: {params}")
+
             raise
         finally:
             DatabaseConnection.return_connection(conn)
@@ -733,25 +748,25 @@ class JWTHandler:
     ALGORITHM = Config.JWT_ALGORITHM
     
     @staticmethod
-def create_token(user_id: str, email: str, role: str, expires_in_hours: int = 24, token_type: str = 'access') -> str:
-    """Create JWT token for authenticated user"""
-    now = datetime.utcnow()
-    exp = now + timedelta(hours=expires_in_hours)
-    
-    payload = {
-        'sub': user_id,
-        'email': email,
-        'role': role,
-        'type': token_type,
-        'iat': int(now.timestamp()),
-        'exp': int(exp.timestamp())
-    }
-    
-    token = jwt.encode(payload, JWTHandler.SECRET, algorithm=JWTHandler.ALGORITHM)
-    if isinstance(token, bytes):
-        token = token.decode('utf-8')
-    logger.info(f"Created {token_type} JWT token for user {user_id}")
-    return token
+    def create_token(user_id: str, email: str, role: str, expires_in_hours: int = 24, token_type: str = 'access') -> str:
+        """Create JWT token for authenticated user"""
+        now = datetime.utcnow()
+        exp = now + timedelta(hours=expires_in_hours)
+        
+        payload = {
+            'sub': user_id,
+            'email': email,
+            'role': role,
+            'type': token_type,
+            'iat': int(now.timestamp()),
+            'exp': int(exp.timestamp())
+        }
+        
+        token = jwt.encode(payload, JWTHandler.SECRET, algorithm=JWTHandler.ALGORITHM)
+        if isinstance(token, bytes):
+            token = token.decode('utf-8')
+        logger.info(f"Created {token_type} JWT token for user {user_id}")
+        return token
     
     @staticmethod
     def verify_token(token: str) -> Dict:
@@ -1056,7 +1071,6 @@ class TransactionSessionManager:
 
 # ═══════════════════════════════════════════════════════════════════════════
 # QUANTUM BLOCK VALIDATOR
-# ═══════════════════════════════════════════════════════════════════════════
 
 class QuantumBlockValidator:
     """Validate blocks using quantum measurement"""
@@ -1728,6 +1742,8 @@ class TransactionManager:
                    ORDER BY created_at DESC 
                    LIMIT %s""",
                 (user_id, user_id, limit)
+
+
             )
             
             transactions = [TransactionManager._row_to_transaction(row) for row in rows]
@@ -2398,7 +2414,7 @@ def send_step_2():
             }), 400
         
         # Update session for confirmation
-        TransactionSessionManager.update_session_state(
+TransactionSessionManager.update_session_state(
             session_id, 'sending_step_3',
             {
                 'amount': amount,
@@ -2603,343 +2619,101 @@ def get_pool_qubits():
             qubits = PseudoqubitManager.get_shared_pool_qubits(count)
         
         return jsonify({
-            'pool_qubits': [q.to_dict() for q in qubits],
-            'total_qubits': len(qubits),
+            'available_qubits': len(qubits),
+            'qubits': [q.to_dict() for q in qubits],
             'timestamp': datetime.utcnow().isoformat()
         }), 200
     except Exception as e:
         logger.error(f"Get pool qubits error: {e}")
         return jsonify({'error': 'Request failed'}), 500
 
-@app.route('/api/v1/tx/submit', methods=['POST'])
+@app.route('/api/v1/transactions', methods=['GET'])
 @JWTHandler.require_auth
-@rate_limiter.check_rate_limit
-def submit_transaction():
-    """
-    Submit transaction for quantum execution
-    
-    Request JSON:
-    {
-        "to_user_id": "recipient_user_id",
-        "amount": 1000000000000000000,  (Wei)
-        "tx_type": "transfer",  (transfer|mint|burn|stake)
-        "gas_price": 1
-    }
-    
-    Response:
-    {
-        "tx_id": "transaction_hash",
-        "status": "pending",
-        "user_pseudoqubit": {pseudoqubit object},
-        "pool_qubits": [{pseudoqubit}, ...],
-        "gas_estimate": {gas_used, gas_price, total_fee},
-        "created_at": timestamp
-    }
-    """
+def get_transactions():
+    """Get user's transaction history"""
     try:
         user_id = request.user_id
-        data = request.get_json()
+        limit = min(request.args.get('limit', 50, type=int), 1000)
+        offset = request.args.get('offset', 0, type=int)
         
-        if not data:
-            return jsonify({'error': 'Request body required'}), 400
-        
-        # Add sender to transaction data
-        data['from_user_id'] = user_id
-        
-        # Validate transaction input
-        is_valid, error = TransactionValidator.validate_transaction_input(data)
-        if not is_valid:
-            logger.warning(f"Invalid transaction from {user_id}: {error}")
-            return jsonify({'error': error}), 400
-        
-        # Calculate gas
-        tx_type = data.get('tx_type', 'transfer')
-        gas_price = data.get('gas_price', 1)
-        gas_used, total_fee = TransactionValidator.validate_gas(tx_type, gas_price)
-        
-        # Check sender can afford transaction + gas
-        sender = UserManager.get_user_by_id(user_id)
-        total_cost = data['amount'] + total_fee
-        if sender.balance < total_cost:
-            return jsonify({'error': f'Insufficient balance for transaction + gas. Need: {total_cost}, Have: {sender.balance}'}), 400
-        
-        # Create transaction
-        tx_id = TransactionManager.create_transaction(
-            from_user_id=user_id,
-            to_user_id=data['to_user_id'],
-            amount=data['amount'],
-            tx_type=tx_type,
-            gas_price=gas_price
+        txs = db.execute_many(
+            """SELECT * FROM transactions 
+               WHERE from_user_id = %s OR to_user_id = %s
+               ORDER BY created_at DESC
+               LIMIT %s OFFSET %s""",
+            (user_id, user_id, limit, offset)
         )
         
-        if not tx_id:
-            return jsonify({'error': 'Failed to create transaction'}), 500
-        
-        # Get user's pseudoqubit
-        user_qubit = PseudoqubitManager.get_user_pseudoqubit(user_id)
-        if not user_qubit:
-            logger.error(f"User {user_id} has no assigned pseudoqubit")
-            TransactionManager.update_transaction_status(tx_id, 'failed')
-            return jsonify({'error': 'User pseudoqubit not assigned'}), 400
-        
-        # Get shared pool qubits
-        pool_qubits = PseudoqubitManager.get_shared_pool_qubits(7)
-        if len(pool_qubits) < 7:
-            logger.error(f"Not enough pool qubits available ({len(pool_qubits)}/7)")
-            TransactionManager.update_transaction_status(tx_id, 'failed')
-            return jsonify({'error': f'System overloaded: {len(pool_qubits)}/7 pool qubits available'}), 503
-        
-        logger.info(f"Transaction {tx_id} submitted by {user_id}: {data['amount']} → {data['to_user_id']}")
-        
         return jsonify({
-            'tx_id': tx_id,
-            'status': 'pending',
-            'user_pseudoqubit': user_qubit.to_dict(),
-            'pool_qubits': [q.to_dict() for q in pool_qubits],
-            'gas_estimate': {
-                'gas_used': gas_used,
-                'gas_price': gas_price,
-                'total_fee': str(total_fee)
-            },
-            'created_at': datetime.utcnow().isoformat()
+            'user_id': user_id,
+            'transaction_count': len(txs),
+            'transactions': txs,
+            'timestamp': datetime.utcnow().isoformat()
         }), 200
-    
     except Exception as e:
-        logger.error(f"Submit transaction error: {e}\n{traceback.format_exc()}")
+        logger.error(f"Get transactions error: {e}")
         return jsonify({'error': 'Request failed'}), 500
 
-@app.route('/api/v1/tx/<tx_id>', methods=['GET'])
-def get_transaction_status(tx_id):
-    """Get transaction status and details"""
+@app.route('/api/v1/transactions/<tx_id>', methods=['GET'])
+def get_transaction(tx_id):
+    """Get specific transaction details"""
     try:
-        tx = TransactionManager.get_transaction(tx_id)
+        tx = db.execute_one(
+            "SELECT * FROM transactions WHERE transaction_id = %s",
+            (tx_id,)
+        )
+        
         if not tx:
             return jsonify({'error': 'Transaction not found'}), 404
         
-        return jsonify(tx.to_dict()), 200
+        return jsonify(tx), 200
     except Exception as e:
         logger.error(f"Get transaction error: {e}")
         return jsonify({'error': 'Request failed'}), 500
 
-@app.route('/api/v1/tx/<user_id>/history', methods=['GET'])
-def get_user_transactions(user_id):
-    """Get transaction history for user"""
+@app.route('/api/v1/blocks', methods=['GET'])
+def get_blocks():
+    """Get recent blocks"""
     try:
-        limit = request.args.get('limit', default=50, type=int)
-        limit = min(limit, 500)  # Max 500
+        limit = min(request.args.get('limit', 50, type=int), 1000)
+        offset = request.args.get('offset', 0, type=int)
         
-        transactions = TransactionManager.get_user_transactions(user_id, limit)
+        blocks = db.execute_many(
+            """SELECT * FROM blocks 
+               ORDER BY block_number DESC
+               LIMIT %s OFFSET %s""",
+            (limit, offset)
+        )
         
         return jsonify({
-            'transactions': [tx.to_dict() for tx in transactions],
-            'count': len(transactions),
+            'block_count': len(blocks),
+            'blocks': blocks,
             'timestamp': datetime.utcnow().isoformat()
         }), 200
     except Exception as e:
-        logger.error(f"Get user transactions error: {e}")
+        logger.error(f"Get blocks error: {e}")
         return jsonify({'error': 'Request failed'}), 500
 
-@app.route('/api/v1/block/<int:block_number>', methods=['GET'])
-def get_block(block_number):
-    """Get block information"""
+@app.route('/api/v1/blocks/<block_hash>', methods=['GET'])
+def get_block(block_hash):
+    """Get specific block details"""
     try:
-        block = BlockManager.get_block(block_number)
+        block = db.execute_one(
+            "SELECT * FROM blocks WHERE block_hash = %s",
+            (block_hash,)
+        )
+        
         if not block:
             return jsonify({'error': 'Block not found'}), 404
         
-        return jsonify(block.to_dict()), 200
+        return jsonify(block), 200
     except Exception as e:
         logger.error(f"Get block error: {e}")
         return jsonify({'error': 'Request failed'}), 500
 
-@app.route('/api/v1/block/latest', methods=['GET'])
-def get_latest_block():
-    """Get latest block in chain"""
-    try:
-        block = BlockManager.get_latest_block()
-        if not block:
-            return jsonify({'error': 'No blocks found'}), 404
-        
-        return jsonify(block.to_dict()), 200
-    except Exception as e:
-        logger.error(f"Get latest block error: {e}")
-        return jsonify({'error': 'Request failed'}), 500
-
-@app.route('/api/v1/block/0', methods=['GET'])
-def get_genesis_block():
-    """Get genesis block"""
-    try:
-        block = BlockManager.get_genesis_block()
-        if not block:
-            return jsonify({'error': 'Genesis block not found'}), 404
-        
-        return jsonify(block.to_dict()), 200
-    except Exception as e:
-        logger.error(f"Get genesis block error: {e}")
-        return jsonify({'error': 'Request failed'}), 500
-
-@app.route('/api/v1/network/params', methods=['GET'])
-def get_network_params():
-    """Get network parameters"""
-    try:
-        rows = DatabaseConnection.execute("SELECT param_key, param_value FROM network_parameters")
-        params = {row['param_key']: row['param_value'] for row in rows}
-        
-        return jsonify({
-            'parameters': params,
-            'timestamp': datetime.utcnow().isoformat()
-        }), 200
-    except Exception as e:
-        logger.error(f"Get network params error: {e}")
-        return jsonify({'error': 'Request failed'}), 500
-
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# SHUTDOWN HANDLER
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def shutdown_handler():
-    """Clean shutdown of API gateway"""
-    logger.info("Shutting down API gateway...")
-    DatabaseConnection.close_all()
-    cache.clear()
-    logger.info("Shutdown complete")
-
-import atexit
-atexit.register(shutdown_handler)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# WSGI SETUP FUNCTIONS (for PythonAnywhere deployment)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def setup_database(app):
-    """Initialize database connection pool"""
-    logger.info("Setting up database connection pool...")
-    try:
-        db = DatabaseConnection()
-        # Test connection
-        conn = db.get_connection()
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1")
-        db.return_connection(conn)
-        logger.info("✓ Database pool ready")
-        return True
-    except Exception as e:
-        logger.warning(f"⚠ Database setup delayed: {e}")
-        return False  # Don't fail - DB will retry on requests
-
-def setup_api_routes(app):
-    """Register all API routes with Flask app"""
-    logger.info("Registering API routes...")
-    
-    # Skip health_check - already registered in wsgi_config
-    
-    # Authentication
-    app.add_url_rule('/api/auth/login', 'login', login, methods=['POST'])
-    app.add_url_rule('/api/auth/verify', 'verify_token', verify_token, methods=['POST'])
-    
-    # Account & Balance
-    app.add_url_rule('/api/account/<identifier>', 'get_account', get_account, methods=['GET'])
-    app.add_url_rule('/api/balance/<user_id>', 'get_balance', get_balance, methods=['GET'])
-    
-    # Pseudoqubits
-    app.add_url_rule('/api/pseudoqubit/<user_id>', 'get_user_pseudoqubit', get_user_pseudoqubit_endpoint, methods=['GET'])
-    app.add_url_rule('/api/pseudoqubit/address/<routing_address>', 'get_pseudoqubit_by_address', get_pseudoqubit_by_address, methods=['GET'])
-    app.add_url_rule('/api/pool/qubits', 'get_pool_qubits', get_pool_qubits, methods=['GET'])
-    
-    # Transactions
-    app.add_url_rule('/api/transactions', 'submit_transaction', submit_transaction, methods=['POST'])
-    app.add_url_rule('/api/transactions/<tx_id>', 'get_transaction_status', get_transaction_status, methods=['GET'])
-    app.add_url_rule('/api/transactions/user/<user_id>', 'get_user_transactions', get_user_transactions, methods=['GET'])
-    
-# NEW: Enhanced Auth Routes
-    app.add_url_rule('/api/v1/auth/register', 'register', register, methods=['POST'])
-    app.add_url_rule('/api/v1/auth/change-password', 'change_password', change_password, methods=['POST'])
-    
-    # NEW: Transaction Menu Routes
-    app.add_url_rule('/api/v1/transactions/menu', 'transaction_menu', transaction_menu, methods=['GET'])
-    app.add_url_rule('/api/v1/transactions/send-step-1', 'send_step_1', send_step_1, methods=['POST'])
-    app.add_url_rule('/api/v1/transactions/send-step-2', 'send_step_2', send_step_2, methods=['POST'])
-    app.add_url_rule('/api/v1/transactions/send-step-3', 'send_step_3', send_step_3, methods=['POST'])
-    
-    # NEW: Block Validation Routes
-    app.add_url_rule('/api/v1/blocks/<block_hash>/validate', 'validate_block', validate_block, methods=['POST'])
-    app.add_url_rule('/api/v1/blocks/<block_hash>/measurements', 'get_block_measurements', get_block_measurements, methods=['GET'])
-
-    # Blocks
-    app.add_url_rule('/api/blocks/<int:block_number>', 'get_block', get_block, methods=['GET'])
-    
-    # Error handlers
-    app.register_error_handler(400, bad_request)
-    app.register_error_handler(401, unauthorized)
-    app.register_error_handler(403, forbidden)
-    app.register_error_handler(404, not_found)
-    app.register_error_handler(429, rate_limit_exceeded)
-    app.register_error_handler(500, internal_error)
-    
-    logger.info("✓ All API routes registered")
-
-if QUANTUM_EXECUTOR_AVAILABLE:
-    register_quantum_transaction_routes(app)
-    register_blockchain_info_routes(app)
-    print("✓ Quantum endpoints registered")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# QUANTUM METRICS & STATUS ENDPOINTS
-# ═══════════════════════════════════════════════════════════════════════════════
-
-@app.route('/api/quantum/metrics', methods=['GET'])
-def get_quantum_metrics():
-    """Get current quantum state metrics"""
-    try:
-        result = DatabaseConnection.execute(
-            """SELECT 
-                AVG(entropy_score) as avg_entropy,
-                MAX(entropy_score) as max_entropy,
-                MIN(entropy_score) as min_entropy,
-                COUNT(*) as total_measurements,
-                COUNT(DISTINCT quantum_state_hash) as unique_states
-               FROM transactions 
-               WHERE entropy_score IS NOT NULL
-               AND created_at > NOW() - INTERVAL '1 hour'"""
-        )
-        
-        metrics = result[0] if result else {}
-        avg_ent = float(metrics.get('avg_entropy') or 0)
-        unique_states = int(metrics.get('unique_states') or 0)
-        
-        return jsonify({
-            'status': 'success',
-            'metrics': {
-                'avg_entropy': round(avg_ent, 4),
-                'max_entropy': float(metrics.get('max_entropy') or 0),
-                'min_entropy': float(metrics.get('min_entropy') or 0),
-                'total_measurements': int(metrics.get('total_measurements') or 0),
-                'unique_quantum_states': unique_states,
-                'timestamp': datetime.utcnow().isoformat(),
-                'mev_protection': {
-                    'enabled': avg_ent > 2.5,
-                    'entropy_level': round(avg_ent, 4),
-                    'threshold': 2.5,
-                    'protected': avg_ent > 2.5
-                },
-                'superposition_active': {
-                    'enabled': unique_states > 10,
-                    'unique_states': unique_states,
-                    'threshold': 10
-                }
-            }
-        }), 200
-    except Exception as e:
-        logger.error(f"[QUANTUM] Metrics error: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-
 @app.route('/api/quantum/status', methods=['GET'])
 def get_quantum_status():
-    """Get quantum circuit status and health"""
+    """Get quantum system status"""
     try:
         result = DatabaseConnection.execute(
             """SELECT 
@@ -3132,7 +2906,7 @@ if __name__ == '__main__':
         finally:
             db.return_connection(db_conn)
         
-# NEW: Run database migrations
+        # NEW: Run database migrations
         logger.info("Checking database schema...")
         db.run_migrations()
         logger.info("✓ Database schema ready")
@@ -3155,8 +2929,8 @@ if __name__ == '__main__':
     
     except KeyboardInterrupt:
         logger.info("\n✓ Keyboard interrupt received")
-        shutdown_handler()
+        DatabaseConnection.close_all()
     except Exception as e:
         logger.error(f"✗ Fatal error: {e}\n{traceback.format_exc()}")
-        shutdown_handler()
+        DatabaseConnection.close_all()
         sys.exit(1)
