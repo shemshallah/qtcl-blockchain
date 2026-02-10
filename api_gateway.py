@@ -120,8 +120,8 @@ class Config:
     SUPABASE_PASSWORD = os.getenv('SUPABASE_PASSWORD', '')
     SUPABASE_PORT = int(os.getenv('SUPABASE_PORT', '5432'))
     SUPABASE_DB = os.getenv('SUPABASE_DB', 'postgres')
-    DB_POOL_MIN_SIZE = int(os.getenv('DB_POOL_MIN_SIZE', '20'))
-    DB_POOL_MAX_SIZE = int(os.getenv('DB_POOL_MAX_SIZE', '150'))
+    DB_POOL_MIN_SIZE = int(os.getenv('DB_POOL_MIN_SIZE', '1'))
+    DB_POOL_MAX_SIZE = int(os.getenv('DB_POOL_MAX_SIZE', '3'))
     DB_CONNECTION_TIMEOUT = int(os.getenv('DB_CONNECTION_TIMEOUT', '30'))
     DB_RETRY_ATTEMPTS = int(os.getenv('DB_RETRY_ATTEMPTS', '5'))
     DB_RETRY_DELAY = float(os.getenv('DB_RETRY_DELAY', '1.0'))
@@ -3109,14 +3109,12 @@ app.secret_key = Config.JWT_SECRET
 # Enable CORS
 CORS(app, resources={r"/api/*": {"origins": Config.CORS_ORIGINS}})
 
-# Initialize global instances
-db = DatabaseConnectionManager()
-circuit_builder = QuantumCircuitBuilder()
-circuit_executor = QuantumCircuitExecutor()
-auth_handler = AdvancedAuthenticationHandler(db)
-tx_processor = AdvancedTransactionProcessor(db, circuit_builder, circuit_executor)
-
-# Optional engines (can be None for now)
+# Global instances (initialized lazily on first use)
+db = None
+auth_handler = None
+tx_processor = None
+circuit_builder = None
+circuit_executor = None
 defi_engine = None
 governance_engine = None
 oracle_engine = None
@@ -3124,8 +3122,45 @@ oracle_engine = None
 # Rate limiting cache
 RATE_LIMIT_CACHE = {}
 
-# Start transaction processor
-tx_processor.start()
+# Initialization lock
+_init_lock = threading.Lock()
+_initialized = False
+
+def initialize_globals():
+    """Lazy initialization of global instances"""
+    global db, auth_handler, tx_processor, circuit_builder, circuit_executor, _initialized
+    
+    if _initialized:
+        return
+    
+    with _init_lock:
+        if _initialized:
+            return
+        
+        try:
+            logger.info("Initializing QTCL globals...")
+            
+            # Initialize database
+            db = DatabaseConnectionManager()
+            logger.info("✓ Database pool ready")
+            
+            # Initialize quantum components
+            circuit_builder = QuantumCircuitBuilder()
+            circuit_executor = QuantumCircuitExecutor()
+            
+            # Initialize auth handler
+            auth_handler = AdvancedAuthenticationHandler(db)
+            
+            # Initialize transaction processor
+            tx_processor = AdvancedTransactionProcessor(db, circuit_builder, circuit_executor)
+            tx_processor.start()
+            
+            _initialized = True
+            logger.info("✓ All globals initialized")
+            
+        except Exception as e:
+            logger.error(f"✗ Failed to initialize globals: {e}")
+            raise
 
 # WebSocket support
 socketio = SocketIO(app, cors_allowed_origins="*")
@@ -3141,6 +3176,9 @@ def require_auth(f):
     """Authentication decorator"""
     @wraps(f)
     def decorated(*args, **kwargs):
+        # Lazy init globals
+        initialize_globals()
+        
         token = None
         
         if 'Authorization' in request.headers:
@@ -6831,6 +6869,9 @@ def health_check():
 def api_status():
     """Comprehensive API status"""
     try:
+        # Lazy init globals
+        initialize_globals()
+        
         # Check database
         try:
             conn = db.get_connection()
