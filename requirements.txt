@@ -1,28 +1,33 @@
-# Flask Web Framework
-Flask==3.0.0
+# ═══════════════════════════════════════════════════════════════════════════════
+# QTCL MINIMAL REQUIREMENTS FOR PYTHON 3.9
+# FIXED VERSION CONFLICTS - ALL DEPENDENCIES COMPATIBLE
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# CORS Support
-Flask-CORS==4.0.0
+# Flask Web Framework (REQUIRED)
+Flask==2.2.5
 
-# Database
-psycopg2-binary==2.9.11
+# Database (REQUIRED)
+psycopg2-binary==2.9.9
 
-# Numerical Computing (MUST be <2 for qiskit)
-numpy==1.26.4
+# Numerical Computing (REQUIRED for quantum)
+numpy==1.23.5
 
-# Quantum Computing (Latest stable)
-qiskit==1.0.2
+# Quantum Computing (REQUIRED) - FIXED VERSIONS
+qiskit==0.39.5
+qiskit-aer==0.11.2
 
+# Security (REQUIRED)
+cryptography==38.0.4
+PyJWT==2.6.0
+bcrypt==4.2.0
 
-# Security
-cryptography==42.0.5
-PyJWT==2.11.0
+# HTTP Requests (REQUIRED)
+requests==2.28.2
 
-# HTTP Requests
-requests==2.31.0
+# Environment Variables (REQUIRED)
+python-dotenv==0.21.0
 
-# Environment Variables
-python-dotenv==1.0.0
-
-# WSGI Server for Koyeb
+# CORS Support (REQUIRED for API)
+Flask-CORS==3.0.10
 gunicorn==21.2.0
+flask-socketio==5.3.6
