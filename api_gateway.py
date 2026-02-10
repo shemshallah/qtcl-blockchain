@@ -330,31 +330,31 @@ class DatabaseConnection:
         
         try:
             conn = psycopg2.connect(
-                    host=Config.SUPABASE_HOST,
-                    user=Config.SUPABASE_USER,
-                    password=Config.SUPABASE_PASSWORD,
-                    port=Config.SUPABASE_PORT,
-                    database=Config.SUPABASE_DB,
-                    connect_timeout=10,
-                    application_name='qtcl_api_gateway'
+                host=Config.SUPABASE_HOST,
+                user=Config.SUPABASE_USER,
+                password=Config.SUPABASE_PASSWORD,
+                port=Config.SUPABASE_PORT,
+                database=Config.SUPABASE_DB,
+                connect_timeout=10,
+                application_name='qtcl_api_gateway'
                 )
-                conn.set_session(autocommit=True)
-                logger.debug("New database connection created")
-                return conn
-            except psycopg2.Error as e:
-                logger.error(f"Failed to create database connection: {e}")
-                raise
+            conn.set_session(autocommit=True)
+            logger.debug("New database connection created")
+            return conn
+        except psycopg2.Error as e:
+            logger.error(f"Failed to create database connection: {e}")
+            raise
     @staticmethod
-def execute_update(query: str, params: tuple = None) -> int:
+    def execute_update(query: str, params: tuple = None) -> int:
         """Alias for execute_insert for backward compatibility"""
-    return DatabaseConnection.execute_insert(query, params)
+        return DatabaseConnection.execute_insert(query, params)
 
     @staticmethod
-def run_migrations():
+    def run_migrations():
         """Run database schema migrations"""
         logger.info("Running database migrations...")
-    # Placeholder - implement based on your schema
-    pass
+        # Placeholder - implement based on your schema
+        pass
 
 
 
