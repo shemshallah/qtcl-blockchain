@@ -3144,7 +3144,7 @@ def generate_keypair():
                VALUES (%s, %s, %s, %s, %s, %s, true)""",
             (key_id, user_id, key_type, public_pem, 
              bcrypt.hashpw(private_pem.encode(), bcrypt.gensalt()),
-             datetime.utcnow(timezone.utc))
+             datetime.now(timezone.utc))
         )
         
         logger.info(f"✓ Keypair {key_id} generated for {user_id}")
@@ -3236,7 +3236,7 @@ def sign_message():
                                                signature, key_id, created_at)
                VALUES (%s, %s, %s, %s, %s, %s)""",
             (sig_id, user_id, message_hash, signature, key_id, 
-             datetime.utcnow(timezone.utc))
+             datetime.now(timezone.utc))
         )
         
         logger.info(f"✓ Message signed by {user_id} with key {key_id}")
@@ -3307,7 +3307,7 @@ def generate_address():
             """INSERT INTO user_addresses (address_id, user_id, address, label, 
                                            is_primary, created_at)
                VALUES (%s, %s, %s, %s, %s, %s)""",
-            (addr_id, user_id, address, label, False, datetime.utcnow(timezone.utc))
+            (addr_id, user_id, address, label, False, datetime.now(timezone.utc))
         )
         
         logger.info(f"✓ Address {address} generated for {user_id}")
@@ -3485,7 +3485,7 @@ def register_alias():
         DatabaseConnection.execute_update(
             """INSERT INTO address_aliases (alias_id, user_id, alias, address, created_at)
                VALUES (%s, %s, %s, %s, %s)""",
-            (alias_id, user_id, alias, address, datetime.utcnow(timezone.utc))
+            (alias_id, user_id, alias, address, datetime.now(timezone.utc))
         )
         
         logger.info(f"✓ Alias {alias} registered for {user_id}")
@@ -3767,7 +3767,7 @@ def watch_events():
         DatabaseConnection.execute_update(
             """INSERT INTO event_watches (watch_id, user_id, address, topics, created_at, active)
                VALUES (%s, %s, %s, %s, %s, true)""",
-            (watch_id, user_id, address, json.dumps(topics), datetime.utcnow(timezone.utc))
+            (watch_id, user_id, address, json.dumps(topics), datetime.now(timezone.utc))
         )
         
         return jsonify({
@@ -3965,7 +3965,7 @@ def vote_on_upgrade(upgrade_id):
         DatabaseConnection.execute_update(
             """INSERT INTO upgrade_votes (vote_id, upgrade_id, voter_id, vote, voting_power, created_at)
                VALUES (%s, %s, %s, %s, %s, %s)""",
-            (vote_id, upgrade_id, user_id, vote, float(voting_power), datetime.utcnow(timezone.utc))
+            (vote_id, upgrade_id, user_id, vote, float(voting_power), datetime.now(timezone.utc))
         )
         
         return jsonify({
@@ -4083,7 +4083,7 @@ def get_security_status():
                 'failed_transactions_1h': failed_txs,
                 'slashed_validators': slashed_validators,
                 'issues': issues,
-                'timestamp': datetime.utcnow(timezone.utc).isoformat()
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }
         }), 200
         
@@ -4169,7 +4169,7 @@ def get_threat_alerts():
             'status': 'success',
             'threats': threats,
             'count': len(threats),
-            'timestamp': datetime.utcnow(timezone.utc).isoformat()
+            'timestamp': datetime.now(timezone.utc).isoformat()
         }), 200
         
     except Exception as e:
@@ -4275,7 +4275,7 @@ def retry_transaction(tx_hash):
                 gas_price, nonce, created_at, attempt_count, retry_of)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (retry_tx_hash, from_user, to_address, amount, tx_type, 'pending',
-             float(new_gas_price), nonce, datetime.utcnow(timezone.utc), 
+             float(new_gas_price), nonce, datetime.now(timezone.utc), 
              attempt_count + 1, tx_hash)
         )
         
@@ -4336,7 +4336,7 @@ def speedup_transaction(tx_hash):
         # Update gas price
         DatabaseConnection.execute_update(
             "UPDATE transactions SET gas_price = %s, updated_at = %s WHERE tx_hash = %s",
-            (float(new_gas_price), datetime.utcnow(timezone.utc), tx_hash)
+            (float(new_gas_price), datetime.now(timezone.utc), tx_hash)
         )
         
         logger.info(f"✓ Transaction {tx_hash} sped up: gas_price {old_gas_price} → {new_gas_price}")
@@ -4515,7 +4515,7 @@ def get_fee_burn_rate():
                 'estimated_yearly': float(yearly_burn),
                 'transactions_24h': tx_count,
                 'average_per_transaction': float(avg_burned),
-                'timestamp': datetime.utcnow(timezone.utc).isoformat()
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }
         }), 200
         
@@ -4540,7 +4540,7 @@ def stream_price_updates():
                 for token in tokens:
                     price = oracle_engine.get_token_price(token.strip())
                     if price:
-                        yield f"data: {json.dumps({'token': token.strip(), 'price': float(price), 'timestamp': datetime.utcnow(timezone.utc).isoformat()})}\n\n"
+                        yield f"data: {json.dumps({'token': token.strip(), 'price': float(price), 'timestamp': datetime.now(timezone.utc).isoformat()})}\n\n"
                 
                 time.sleep(5)  # Update every 5 seconds
         
@@ -4593,7 +4593,7 @@ def stream_mempool_updates():
     """Stream mempool transaction updates"""
     try:
         def generate_mempool():
-            last_timestamp = datetime.utcnow(timezone.utc)
+            last_timestamp = datetime.now(timezone.utc)
             
             while True:
                 result = DatabaseConnection.execute_query(
@@ -4661,21 +4661,21 @@ def create_multisig_wallet():
                                              required_signatures, total_owners, created_at)
                VALUES (%s, %s, %s, %s, %s, %s, %s)""",
             (wallet_id, user_id, wallet_address, wallet_name, required_signatures,
-             len(co_owners) + 1, datetime.utcnow(timezone.utc))
+             len(co_owners) + 1, datetime.now(timezone.utc))
         )
         
         # Add owners
         DatabaseConnection.execute_update(
             """INSERT INTO multisig_owners (wallet_id, owner_id, created_at)
                VALUES (%s, %s, %s)""",
-            (wallet_id, user_id, datetime.utcnow(timezone.utc))
+            (wallet_id, user_id, datetime.now(timezone.utc))
         )
         
         for co_owner in co_owners:
             DatabaseConnection.execute_update(
                 """INSERT INTO multisig_owners (wallet_id, owner_id, created_at)
                    VALUES (%s, %s, %s)""",
-                (wallet_id, co_owner, datetime.utcnow(timezone.utc))
+                (wallet_id, co_owner, datetime.now(timezone.utc))
             )
         
         logger.info(f"✓ Multisig wallet {wallet_id} created by {user_id}")
@@ -4723,7 +4723,7 @@ def propose_multisig_transaction(wallet_id):
                                                to_address, amount, status, created_at)
                VALUES (%s, %s, %s, %s, %s, %s, %s)""",
             (proposal_id, wallet_id, user_id, to_address, float(amount),
-             'pending', datetime.utcnow(timezone.utc))
+             'pending', datetime.now(timezone.utc))
         )
         
         # Auto-sign by proposer
@@ -4731,7 +4731,7 @@ def propose_multisig_transaction(wallet_id):
         DatabaseConnection.execute_update(
             """INSERT INTO multisig_signatures (sig_id, proposal_id, signer_id, created_at)
                VALUES (%s, %s, %s, %s)""",
-            (sig_id, proposal_id, user_id, datetime.utcnow(timezone.utc))
+            (sig_id, proposal_id, user_id, datetime.now(timezone.utc))
         )
         
         logger.info(f"✓ Multisig transaction {proposal_id} proposed for {wallet_id}")
@@ -4844,7 +4844,7 @@ def sign_multisig_proposal(proposal_id):
         DatabaseConnection.execute_update(
             """INSERT INTO multisig_signatures (sig_id, proposal_id, signer_id, created_at)
                VALUES (%s, %s, %s, %s)""",
-            (sig_id, proposal_id, user_id, datetime.utcnow(timezone.utc))
+            (sig_id, proposal_id, user_id, datetime.now(timezone.utc))
         )
         
         # Check if we have enough signatures
@@ -4914,7 +4914,7 @@ def execute_multisig_proposal(proposal_id):
                                           tx_type, status, created_at)
                VALUES (%s, %s, %s, %s, %s, %s, %s)""",
             (tx_hash, wallet_id, to_address, float(amount), 'multisig',
-             'pending', datetime.utcnow(timezone.utc))
+             'pending', datetime.now(timezone.utc))
         )
         
         # Mark proposal as executed
@@ -5016,7 +5016,7 @@ def lock_for_bridge():
                                          destination_chain, recipient_address, status, created_at)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
             (lock_id, user_id, float(amount), 'QTCL', destination_chain,
-             recipient_address, 'locked', datetime.utcnow(timezone.utc))
+             recipient_address, 'locked', datetime.now(timezone.utc))
         )
         
         # Deduct from balance
@@ -5160,7 +5160,7 @@ def claim_airdrop(airdrop_id):
         DatabaseConnection.execute_update(
             """INSERT INTO airdrop_claims (claim_id, airdrop_id, user_id, amount, claimed_at)
                VALUES (%s, %s, %s, %s, %s)""",
-            (claim_id, airdrop_id, user_id, float(amount_per_user), datetime.utcnow(timezone.utc))
+            (claim_id, airdrop_id, user_id, float(amount_per_user), datetime.now(timezone.utc))
         )
         
         # Credit user balance
@@ -5229,7 +5229,7 @@ def check_airdrop_eligibility(airdrop_id):
             reasons.append(f'Minimum balance {min_balance} required')
         
         if min_age_days:
-            account_age_days = (datetime.utcnow(timezone.utc) - created_at).days
+            account_age_days = (datetime.now(timezone.utc) - created_at).days
             if account_age_days < min_age_days:
                 is_eligible = False
                 reasons.append(f'Account must be {min_age_days} days old')
@@ -5250,7 +5250,7 @@ def check_airdrop_eligibility(airdrop_id):
             'user_status': {
                 'balance': float(balance),
                 'kyc_verified': kyc_status == 'verified',
-                'account_age_days': (datetime.utcnow(timezone.utc) - created_at).days
+                'account_age_days': (datetime.now(timezone.utc) - created_at).days
             },
             'ineligibility_reasons': reasons
         }), 200
@@ -5296,7 +5296,7 @@ def mobile_dashboard():
                 'to': tx[1][-6:],
                 'amount': float(tx[2]),
                 'status': tx[3],
-                'time': (datetime.utcnow(timezone.utc) - tx[4]).seconds // 60  # minutes ago
+                'time': (datetime.now(timezone.utc) - tx[4]).seconds // 60  # minutes ago
             })
         
         # Get portfolio value
@@ -5324,7 +5324,7 @@ def mobile_dashboard():
                 },
                 'reputation': reputation,
                 'recent_transactions': transactions,
-                'last_updated': datetime.utcnow(timezone.utc).isoformat()
+                'last_updated': datetime.now(timezone.utc).isoformat()
             }
         }), 200
         
@@ -5372,7 +5372,7 @@ def mobile_quick_send():
             """INSERT INTO transactions (tx_hash, from_user_id, to_address, amount, 
                                           status, created_at)
                VALUES (%s, %s, %s, %s, %s, %s)""",
-            (tx_hash, user_id, to_address, float(amount), 'pending', datetime.utcnow(timezone.utc))
+            (tx_hash, user_id, to_address, float(amount), 'pending', datetime.now(timezone.utc))
         )
         
         DatabaseConnection.execute_update(
@@ -5423,7 +5423,7 @@ def mobile_notifications():
                 'body': notif[3],
                 'data': json.loads(notif[4]) if notif[4] else {},
                 'read': notif[5],
-                'time': (datetime.utcnow(timezone.utc) - notif[6]).seconds // 60  # minutes ago
+                'time': (datetime.now(timezone.utc) - notif[6]).seconds // 60  # minutes ago
             })
         
         return jsonify({
@@ -5510,7 +5510,7 @@ def mobile_app_config():
                     'ws': 'wss://api.qtcl.network/ws'
                 },
                 'version': '1.0.0',
-                'timestamp': datetime.utcnow(timezone.utc).isoformat()
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }
         }), 200
         
@@ -7201,7 +7201,7 @@ def execute_quantum_circuit():
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (exec_id, tx_id, user_id, shots, result.circuit_depth, 
              result.ghz_fidelity, json.dumps(result.dominant_states),
-             json.dumps(result.measurement_data), datetime.utcnow(timezone.utc))
+             json.dumps(result.measurement_data), datetime.now(timezone.utc))
         )
         
         logger.info(f"✓ Quantum execution {exec_id}: tx={tx_id}, fidelity={result.ghz_fidelity:.4f}")
@@ -7281,7 +7281,7 @@ def get_quantum_status():
                 'min_fidelity': float(stats[3]) if stats[3] else 0.0,
                 'system_operational': True,
                 'simulator_available': QISKIT_AVAILABLE,
-                'timestamp': datetime.utcnow(timezone.utc).isoformat()
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }
         }), 200
         
@@ -7315,7 +7315,7 @@ def get_mempool_status():
                 'total_size_bytes': size,
                 'max_size_bytes': 10_000_000,
                 'utilization_percent': float(size / 10_000_000 * 100) if size > 0 else 0,
-                'timestamp': datetime.utcnow(timezone.utc).isoformat()
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }
         }), 200
         
@@ -7469,7 +7469,7 @@ def get_gas_prices():
                 'standard': standard,
                 'safe': safe,
                 'fast': safe * 1.5,
-                'timestamp': datetime.utcnow(timezone.utc).isoformat()
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }
         }), 200
         
@@ -7583,7 +7583,7 @@ def join_validators():
                                        status, joined_at)
                VALUES (%s, %s, %s, %s, %s, %s)""",
             (validator_id, user_id, validator_address, float(stake_amount),
-             'active', datetime.utcnow(timezone.utc))
+             'active', datetime.now(timezone.utc))
         )
         
         logger.info(f"✓ Validator {validator_id} created for {user_id}")
@@ -8042,7 +8042,7 @@ def submit_transaction():
         # Create transaction
         tx_id = f"0x{secrets.token_hex(32)}"
         tx_hash = hashlib.sha256(f"{tx_id}{datetime.utcnow()}".encode()).hexdigest()
-        timestamp = datetime.utcnow(timezone.utc)
+        timestamp = datetime.now(timezone.utc)
         nonce = DatabaseConnection.execute_query(
             "SELECT COUNT(*) FROM transactions WHERE from_user_id = %s",
             (from_user,)
@@ -8232,7 +8232,7 @@ def cancel_transaction(tx_hash):
         # Update status
         DatabaseConnection.execute_update(
             "UPDATE transactions SET status = %s, updated_at = %s WHERE tx_hash = %s",
-            ('cancelled', datetime.utcnow(timezone.utc), tx_hash)
+            ('cancelled', datetime.now(timezone.utc), tx_hash)
         )
         
         # Refund gas
@@ -8496,7 +8496,7 @@ def stake_tokens():
         
         # Create stake record
         stake_id = f"stake_{secrets.token_hex(16)}"
-        created_at = datetime.utcnow(timezone.utc)
+        created_at = datetime.now(timezone.utc)
         unlock_at = created_at + timedelta(days=lock_period)
         
         DatabaseConnection.execute_update(
@@ -8557,7 +8557,7 @@ def unstake_tokens():
         if status != 'active':
             return jsonify({'status': 'error', 'message': f'Cannot unstake {status} stake'}), 400
         
-        now = datetime.utcnow(timezone.utc)
+        now = datetime.now(timezone.utc)
         
         # Calculate rewards
         lock_duration = (unlock_at - created_at).days
@@ -8677,7 +8677,7 @@ def swap_tokens():
         
         # Execute swap
         swap_id = f"swap_{secrets.token_hex(16)}"
-        timestamp = datetime.utcnow(timezone.utc)
+        timestamp = datetime.now(timezone.utc)
         
         DatabaseConnection.execute_update(
             """INSERT INTO swaps (swap_id, user_id, from_token, to_token, 
@@ -8739,7 +8739,7 @@ def add_liquidity():
             DatabaseConnection.execute_update(
                 """INSERT INTO liquidity_pools (pool_id, token_a, token_b, reserve_a, reserve_b, total_lp_tokens, created_at)
                    VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                (pool_id, token_a, token_b, float(amount_a), float(amount_b), 0, datetime.utcnow(timezone.utc))
+                (pool_id, token_a, token_b, float(amount_a), float(amount_b), 0, datetime.now(timezone.utc))
             )
             lp_tokens = (amount_a * amount_b).sqrt()
         else:
@@ -8866,7 +8866,7 @@ def create_proposal():
         
         # Create proposal
         proposal_id = f"prop_{secrets.token_hex(16)}"
-        created_at = datetime.utcnow(timezone.utc)
+        created_at = datetime.now(timezone.utc)
         voting_period_days = 7
         voting_ends_at = created_at + timedelta(days=voting_period_days)
         
@@ -8980,7 +8980,7 @@ def vote_on_proposal(proposal_id):
         if status != 'active':
             return jsonify({'status': 'error', 'message': 'Proposal not active'}), 400
         
-        if datetime.utcnow(timezone.utc) > voting_ends_at:
+        if datetime.now(timezone.utc) > voting_ends_at:
             return jsonify({'status': 'error', 'message': 'Voting period ended'}), 400
         
         # Check if already voted
@@ -9003,7 +9003,7 @@ def vote_on_proposal(proposal_id):
         DatabaseConnection.execute_update(
             """INSERT INTO votes (vote_id, proposal_id, voter_id, vote, voting_power, created_at)
                VALUES (%s, %s, %s, %s, %s, %s)""",
-            (vote_id, proposal_id, user_id, vote, float(voting_power), datetime.utcnow(timezone.utc))
+            (vote_id, proposal_id, user_id, vote, float(voting_power), datetime.now(timezone.utc))
         )
         
         # Update proposal vote counts
@@ -9101,7 +9101,7 @@ def get_oracle_prices():
         return jsonify({
             'status': 'success',
             'prices': prices,
-            'timestamp': datetime.utcnow(timezone.utc).isoformat()
+            'timestamp': datetime.now(timezone.utc).isoformat()
         }), 200
         
     except Exception as e:
@@ -9155,7 +9155,7 @@ def subscribe_to_feed():
         DatabaseConnection.execute_update(
             """INSERT INTO oracle_subscriptions (subscription_id, user_id, feed_id, created_at, active)
                VALUES (%s, %s, %s, %s, true)""",
-            (sub_id, user_id, feed_id, datetime.utcnow(timezone.utc))
+            (sub_id, user_id, feed_id, datetime.now(timezone.utc))
         )
         
         return jsonify({
@@ -9193,7 +9193,7 @@ def mint_nft():
         # Create NFT
         nft_id = f"nft_{secrets.token_hex(16)}"
         token_id = uuid.uuid4().hex
-        created_at = datetime.utcnow(timezone.utc)
+        created_at = datetime.now(timezone.utc)
         
         DatabaseConnection.execute_update(
             """INSERT INTO nfts (nft_id, token_id, owner_id, name, description, 
@@ -9281,14 +9281,14 @@ def transfer_nft(nft_id):
         # Transfer
         DatabaseConnection.execute_update(
             "UPDATE nfts SET owner_id = %s, transferred_at = %s WHERE nft_id = %s",
-            (to_user, datetime.utcnow(timezone.utc), nft_id)
+            (to_user, datetime.now(timezone.utc), nft_id)
         )
         
         # Log transfer
         DatabaseConnection.execute_update(
             """INSERT INTO nft_transfers (nft_id, from_user_id, to_user_id, created_at)
                VALUES (%s, %s, %s, %s)""",
-            (nft_id, user_id, to_user, datetime.utcnow(timezone.utc))
+            (nft_id, user_id, to_user, datetime.now(timezone.utc))
         )
         
         logger.info(f"✓ NFT {nft_id} transferred: {user_id} → {to_user}")
@@ -9376,7 +9376,7 @@ def deploy_contract():
         # Deploy contract
         contract_id = f"0x{secrets.token_hex(20)}"
         contract_hash = hashlib.sha256(contract_code.encode()).hexdigest()
-        created_at = datetime.utcnow(timezone.utc)
+        created_at = datetime.now(timezone.utc)
         
         DatabaseConnection.execute_update(
             """INSERT INTO smart_contracts (contract_id, contract_hash, deployer_id, 
@@ -9466,7 +9466,7 @@ def call_contract(contract_id):
                                            params, created_at, status)
                VALUES (%s, %s, %s, %s, %s, %s, %s)""",
             (call_id, contract_id, user_id, function_name, json.dumps(params),
-             datetime.utcnow(timezone.utc), 'pending')
+             datetime.now(timezone.utc), 'pending')
         )
         
         logger.info(f"✓ Contract call {call_id}: {user_id} called {function_name} on {contract_id}")
@@ -9514,7 +9514,7 @@ def get_network_stats():
                 'avg_transaction_size': float(stats[3]) if stats[3] else 0,
                 'total_blocks': block_stats[0],
                 'latest_block_height': block_stats[1],
-                'timestamp': datetime.utcnow(timezone.utc).isoformat()
+                'timestamp': datetime.now(timezone.utc).isoformat()
             }
         }), 200
         
@@ -9635,7 +9635,7 @@ def broadcast_transaction_update(tx_hash, status, block_height=None):
         'tx_hash': tx_hash,
         'status': status,
         'block_height': block_height,
-        'timestamp': datetime.utcnow(timezone.utc).isoformat()
+        'timestamp': datetime.now(timezone.utc).isoformat()
     }, room='channel_transactions')
 
 
@@ -9644,7 +9644,7 @@ def broadcast_price_update(token, price, timestamp=None):
     socketio.emit('price_update', {
         'token': token,
         'price': price,
-        'timestamp': timestamp or datetime.utcnow(timezone.utc).isoformat()
+        'timestamp': timestamp or datetime.now(timezone.utc).isoformat()
     }, room='channel_prices')
 
 
@@ -9653,7 +9653,7 @@ def broadcast_block_update(block_height, block_hash):
     socketio.emit('block_update', {
         'block_height': block_height,
         'block_hash': block_hash,
-        'timestamp': datetime.utcnow(timezone.utc).isoformat()
+        'timestamp': datetime.now(timezone.utc).isoformat()
     }, room='channel_blocks')
 
 
@@ -9777,4 +9777,8 @@ if __name__ == '__main__':
     except Exception as e:
         logger.critical(f"✗ Fatal startup error: {e}")
         traceback.print_exc()
-        sys.exit(1
+        sys.exit(1)
+# ═══════════════════════════════════════════════════════════════════════
+# WSGI EXPORT — required for gunicorn
+# ═══════════════════════════════════════════════════════════════════════
+application = app

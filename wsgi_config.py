@@ -345,7 +345,7 @@ def health_check():
         
         return jsonify({
             'status': 'healthy',
-            'timestamp': datetime.utcnow(timezone.utc).isoformat(),
+            'timestamp': datetime.now(timezone.utc).isoformat(),
             'services': {
                 'api': 'operational',
                 'database': 'operational' if db_healthy else 'degraded',
@@ -370,7 +370,7 @@ def api_status():
             'api': {
                 'version': Config.API_VERSION,
                 'environment': Config.ENVIRONMENT,
-                'timestamp': datetime.utcnow(timezone.utc).isoformat(),
+                'timestamp': datetime.now(timezone.utc).isoformat(),
                 'endpoints': {
                     'authentication': 10,
                     'transactions': 15,
@@ -440,7 +440,7 @@ def register():
             """INSERT INTO users (user_id, email, username, password_hash, 
                                   balance, created_at, kyc_status)
                VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-            (user_id, email, username, password_hash, 1000, datetime.utcnow(timezone.utc), 'pending')
+            (user_id, email, username, password_hash, 1000, datetime.now(timezone.utc), 'pending')
         )
         
         logger.info(f"✓ User registered: {user_id}")
@@ -486,7 +486,7 @@ def login():
         payload = {
             'user_id': user_id,
             'role': role or 'user',
-            'exp': datetime.utcnow(timezone.utc) + timedelta(hours=Config.TOKEN_EXPIRY_HOURS)
+            'exp': datetime.now(timezone.utc) + timedelta(hours=Config.TOKEN_EXPIRY_HOURS)
         }
         
         token = jwt.encode(payload, Config.JWT_SECRET, algorithm=Config.JWT_ALGORITHM)
@@ -494,7 +494,7 @@ def login():
         # Update last login
         DatabaseConnection.execute_update(
             "UPDATE users SET last_login = %s WHERE user_id = %s",
-            (datetime.utcnow(timezone.utc), user_id)
+            (datetime.now(timezone.utc), user_id)
         )
         
         logger.info(f"✓ User logged in: {user_id}")
