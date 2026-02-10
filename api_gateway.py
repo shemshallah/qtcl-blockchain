@@ -3127,6 +3127,102 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 application = app
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
+# LAZY INITIALIZATION - Initialize on first use
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+def init_db():
+    """Initialize database connection"""
+    global db
+    if db is None:
+        try:
+            logger.info("Initializing database...")
+            # Import from db_config if available
+            try:
+                from db_config import DatabaseConnectionManager
+                db = DatabaseConnectionManager()
+            except:
+                # Fallback: create simple connection
+                try:
+                    import psycopg2
+                    from psycopg2.pool import ThreadedConnectionPool
+                    
+                    pool = ThreadedConnectionPool(
+                        minconn=Config.DB_POOL_MIN_SIZE,
+                        maxconn=Config.DB_POOL_MAX_SIZE,
+                        host=Config.SUPABASE_HOST,
+                        user=Config.SUPABASE_USER,
+                        password=Config.SUPABASE_PASSWORD,
+                        database=Config.SUPABASE_DB,
+                        port=Config.SUPABASE_PORT,
+                        connect_timeout=Config.DB_CONNECTION_TIMEOUT
+                    )
+                    
+                    class SimpleDB:
+                        def __init__(self, pool):
+                            self.pool = pool
+                        def get_connection(self):
+                            return self.pool.getconn()
+                        def return_connection(self, conn):
+                            self.pool.putconn(conn)
+                    
+                    db = SimpleDB(pool)
+                    logger.info("✓ Database initialized (simple pool)")
+                except Exception as e:
+                    logger.error(f"✗ Database init failed: {e}")
+                    return False
+            
+            logger.info("✓ Database initialized")
+            return True
+        except Exception as e:
+            logger.error(f"✗ Database init error: {e}")
+            return False
+    return True
+
+def init_auth():
+    """Initialize auth handler"""
+    global auth_handler, db
+    if auth_handler is None:
+        try:
+            logger.info("Initializing auth handler...")
+            # Ensure db exists
+            if not init_db():
+                logger.warning("⚠ DB not available for auth")
+                # Create minimal auth handler anyway
+                class MinimalAuth:
+                    def verify_token(self, token):
+                        return None
+                auth_handler = MinimalAuth()
+                return True
+            
+            # Try to use real auth handler
+            if db:
+                auth_handler = AdvancedAuthenticationHandler(db)
+                logger.info("✓ Auth handler initialized")
+            return True
+        except Exception as e:
+            logger.error(f"✗ Auth init error: {e}")
+            return False
+    return True
+
+@app.before_first_request
+def startup():
+    """Initialize components on first request"""
+    init_db()
+    init_auth()
+
+def require_db():
+    """Ensure database is initialized"""
+    if not init_db():
+        return False, jsonify({'status': 'error', 'message': 'Database unavailable'}), 503
+    return True, None, None
+
+def require_auth_handler():
+    """Ensure auth handler is initialized"""
+    if not init_auth():
+        return False, jsonify({'status': 'error', 'message': 'Auth service unavailable'}), 503
+    return True, None, None
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
 # KEY MANAGEMENT ENDPOINTS - Cryptographic key operations
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
@@ -3134,6 +3230,9 @@ def require_auth(f):
     """Authentication decorator"""
     @wraps(f)
     def decorated(*args, **kwargs):
+        # Initialize auth handler if needed
+        init_auth()
+        
         token = None
         
         if 'Authorization' in request.headers:
