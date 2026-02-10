@@ -251,14 +251,14 @@ class DatabaseManager:
         """Create test admin user for testing (uses SUPABASE_PASSWORD as admin password)"""
         try:
             # Check if admin exists by email
-            result = self.execute_query("SELECT user_id FROM users WHERE email = %s", ('admin@qtcl.local',))
+            result = self.execute_query("SELECT user_id FROM users WHERE email = %s", ('shemshallah@gmail.com,))
             if result:
                 logger.info("[DB] Admin user already exists")
                 return True
             
             # Generate user_id (TEXT) using email hash for consistency
             import hashlib
-            user_id = hashlib.sha256(b'admin@qtcl.local').hexdigest()[:32]
+            user_id = hashlib.sha256(b'shemshallah@gmail.com').hexdigest()[:32]
             
             # NOTE: Password is NOT stored - admin uses SUPABASE_PASSWORD environment variable
             # No need to hash since we don't store it
@@ -268,11 +268,11 @@ class DatabaseManager:
             self.execute_update(
                 """INSERT INTO users (user_id, email, name, role, balance, is_active) 
                    VALUES (%s, %s, %s, %s, %s, %s)""",
-                (user_id, 'admin@qtcl.local', 'Admin User', 'admin', 999_000_000, True)
+                (user_id, 'shemshallah@gmail.com', 'Admin User', 'admin', 999_000_000, True)
             )
             
             logger.info("[DB] ✓ Test admin user created")
-            logger.info(f"[DB]   Email: admin@qtcl.local")
+            logger.info(f"[DB]   Email: shemshallah@gmail.com")
             logger.info(f"[DB]   Password: (uses SUPABASE_PASSWORD env var)")
             return True
             
