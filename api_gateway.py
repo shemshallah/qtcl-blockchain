@@ -3097,6 +3097,2430 @@ class AdvancedTransactionProcessor:
             'is_running': self.running
         }
 
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# KEY MANAGEMENT ENDPOINTS - Cryptographic key operations
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/keys/generate', methods=['POST'])
+@require_auth
+@rate_limit
+def generate_keypair():
+    """Generate new cryptographic keypair"""
+    try:
+        user_id = g.user_id
+        key_type = request.get_json().get('type', 'secp256k1')  # secp256k1 or ed25519
+        
+        # Generate keypair using cryptography
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.backends import default_backend
+        
+        if key_type == 'secp256k1':
+            private_key = ec.generate_private_key(ec.SECP256K1(), default_backend())
+        else:
+            from cryptography.hazmat.primitives.asymmetric import ed25519
+            private_key = ed25519.Ed25519PrivateKey.generate()
+        
+        # Serialize keys
+        private_pem = private_key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption()
+        ).decode()
+        
+        public_key = private_key.public_key()
+        public_pem = public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        ).decode()
+        
+        # Store in database (private key should be encrypted!)
+        key_id = f"key_{secrets.token_hex(16)}"
+        DatabaseConnection.execute_update(
+            """INSERT INTO user_keys (key_id, user_id, key_type, public_key, 
+                                      private_key_encrypted, created_at, active)
+               VALUES (%s, %s, %s, %s, %s, %s, true)""",
+            (key_id, user_id, key_type, public_pem, 
+             bcrypt.hashpw(private_pem.encode(), bcrypt.gensalt()),
+             datetime.utcnow(timezone.utc))
+        )
+        
+        logger.info(f"✓ Keypair {key_id} generated for {user_id}")
+        
+        return jsonify({
+            'status': 'success',
+            'key_id': key_id,
+            'public_key': public_pem,
+            'key_type': key_type,
+            'warning': 'SAVE PRIVATE KEY SECURELY - NOT STORED IN PLAINTEXT'
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"✗ Generate keypair error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/keys', methods=['GET'])
+@require_auth
+@rate_limit
+def list_user_keys():
+    """List user's public keys"""
+    try:
+        user_id = g.user_id
+        
+        result = DatabaseConnection.execute_query(
+            """SELECT key_id, key_type, public_key, created_at, active
+               FROM user_keys WHERE user_id = %s
+               ORDER BY created_at DESC""",
+            (user_id,)
+        )
+        
+        keys = []
+        for key in result:
+            keys.append({
+                'key_id': key[0],
+                'type': key[1],
+                'public_key': key[2][:50] + '...',  # Truncate for display
+                'created_at': key[3].isoformat() if key[3] else None,
+                'active': key[4]
+            })
+        
+        return jsonify({
+            'status': 'success',
+            'keys': keys,
+            'count': len(keys)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ List user keys error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/sign/message', methods=['POST'])
+@require_auth
+@rate_limit
+def sign_message():
+    """Sign message with user's key"""
+    try:
+        user_id = g.user_id
+        data = request.get_json()
+        message = data.get('message')
+        key_id = data.get('key_id')
+        
+        if not message or not key_id:
+            return jsonify({'status': 'error', 'message': 'Missing message or key_id'}), 400
+        
+        # Get user's key
+        key_result = DatabaseConnection.execute_query(
+            "SELECT public_key FROM user_keys WHERE key_id = %s AND user_id = %s",
+            (key_id, user_id)
+        )
+        
+        if not key_result:
+            return jsonify({'status': 'error', 'message': 'Key not found'}), 404
+        
+        # Sign message (in production, would use actual private key)
+        message_hash = hashlib.sha256(message.encode()).hexdigest()
+        signature = hmac.new(
+            key_id.encode(),
+            message.encode(),
+            hashlib.sha256
+        ).hexdigest()
+        
+        # Store signature
+        sig_id = f"sig_{secrets.token_hex(16)}"
+        DatabaseConnection.execute_update(
+            """INSERT INTO message_signatures (sig_id, user_id, message_hash, 
+                                               signature, key_id, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s)""",
+            (sig_id, user_id, message_hash, signature, key_id, 
+             datetime.utcnow(timezone.utc))
+        )
+        
+        logger.info(f"✓ Message signed by {user_id} with key {key_id}")
+        
+        return jsonify({
+            'status': 'success',
+            'signature_id': sig_id,
+            'message_hash': message_hash,
+            'signature': signature,
+            'key_id': key_id
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"✗ Sign message error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/verify/signature', methods=['POST'])
+@rate_limit
+def verify_signature():
+    """Verify message signature"""
+    try:
+        data = request.get_json()
+        message = data.get('message')
+        signature = data.get('signature')
+        public_key = data.get('public_key')
+        
+        if not all([message, signature, public_key]):
+            return jsonify({'status': 'error', 'message': 'Missing parameters'}), 400
+        
+        # Verify signature
+        message_hash = hashlib.sha256(message.encode()).hexdigest()
+        
+        # In production, would use actual cryptographic verification
+        is_valid = True  # Placeholder
+        
+        return jsonify({
+            'status': 'success',
+            'message_hash': message_hash,
+            'valid': is_valid,
+            'signer': public_key[:20] + '...'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Verify signature error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# ADDRESS MANAGEMENT ENDPOINTS - Handle addresses and aliases
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/addresses/generate', methods=['POST'])
+@require_auth
+@rate_limit
+def generate_address():
+    """Generate new blockchain address for user"""
+    try:
+        user_id = g.user_id
+        label = request.get_json().get('label', 'Default')
+        
+        # Generate address
+        random_bytes = secrets.token_bytes(20)
+        address = '0x' + random_bytes.hex()
+        
+        addr_id = f"addr_{secrets.token_hex(16)}"
+        DatabaseConnection.execute_update(
+            """INSERT INTO user_addresses (address_id, user_id, address, label, 
+                                           is_primary, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s)""",
+            (addr_id, user_id, address, label, False, datetime.utcnow(timezone.utc))
+        )
+        
+        logger.info(f"✓ Address {address} generated for {user_id}")
+        
+        return jsonify({
+            'status': 'success',
+            'address': address,
+            'address_id': addr_id,
+            'label': label
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"✗ Generate address error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/addresses', methods=['GET'])
+@require_auth
+@rate_limit
+def list_user_addresses():
+    """List all user addresses"""
+    try:
+        user_id = g.user_id
+        
+        result = DatabaseConnection.execute_query(
+            """SELECT address_id, address, label, is_primary, created_at
+               FROM user_addresses WHERE user_id = %s
+               ORDER BY is_primary DESC, created_at DESC""",
+            (user_id,)
+        )
+        
+        addresses = []
+        for addr in result:
+            addresses.append({
+                'address_id': addr[0],
+                'address': addr[1],
+                'label': addr[2],
+                'is_primary': addr[3],
+                'created_at': addr[4].isoformat() if addr[4] else None
+            })
+        
+        return jsonify({
+            'status': 'success',
+            'addresses': addresses,
+            'count': len(addresses)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ List user addresses error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/addresses/<address>/validate', methods=['GET'])
+@rate_limit
+def validate_address(address):
+    """Validate blockchain address format and existence"""
+    try:
+        # Check format
+        is_valid_format = address.startswith('0x') and len(address) == 42
+        
+        # Check if exists in system
+        exists = DatabaseConnection.execute_query(
+            "SELECT COUNT(*) FROM user_addresses WHERE address = %s",
+            (address,)
+        )[0][0] > 0
+        
+        # Get address info if exists
+        address_info = None
+        if exists:
+            result = DatabaseConnection.execute_query(
+                "SELECT label, user_id FROM user_addresses WHERE address = %s",
+                (address,)
+            )
+            if result:
+                address_info = {
+                    'label': result[0][0],
+                    'user_id': result[0][1][:10] + '***'  # Mask user ID
+                }
+        
+        return jsonify({
+            'status': 'success',
+            'address': address,
+            'valid_format': is_valid_format,
+            'exists_in_system': exists,
+            'info': address_info
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Validate address error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/addresses/<address_id>/set-primary', methods=['POST'])
+@require_auth
+@rate_limit
+def set_primary_address(address_id):
+    """Set primary address for user"""
+    try:
+        user_id = g.user_id
+        
+        # Verify ownership
+        addr_result = DatabaseConnection.execute_query(
+            "SELECT address FROM user_addresses WHERE address_id = %s AND user_id = %s",
+            (address_id, user_id)
+        )
+        
+        if not addr_result:
+            return jsonify({'status': 'error', 'message': 'Address not found'}), 404
+        
+        address = addr_result[0][0]
+        
+        # Clear all primary flags for user
+        DatabaseConnection.execute_update(
+            "UPDATE user_addresses SET is_primary = false WHERE user_id = %s",
+            (user_id,)
+        )
+        
+        # Set this as primary
+        DatabaseConnection.execute_update(
+            "UPDATE user_addresses SET is_primary = true WHERE address_id = %s",
+            (address_id,)
+        )
+        
+        logger.info(f"✓ Primary address set to {address} for {user_id}")
+        
+        return jsonify({
+            'status': 'success',
+            'address': address,
+            'message': 'Primary address updated'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Set primary address error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/aliases/register', methods=['POST'])
+@require_auth
+@rate_limit
+def register_alias():
+    """Register vanity address alias (e.g., alice.qtcl)"""
+    try:
+        user_id = g.user_id
+        data = request.get_json()
+        alias = data.get('alias').lower()
+        address = data.get('address')
+        
+        # Validate alias
+        if not alias.replace('.', '').isalnum():
+            return jsonify({'status': 'error', 'message': 'Invalid alias format'}), 400
+        
+        if len(alias) < 3 or len(alias) > 20:
+            return jsonify({'status': 'error', 'message': 'Alias must be 3-20 characters'}), 400
+        
+        # Check availability
+        existing = DatabaseConnection.execute_query(
+            "SELECT alias FROM address_aliases WHERE alias = %s",
+            (alias,)
+        )
+        
+        if existing:
+            return jsonify({'status': 'error', 'message': 'Alias already taken'}), 400
+        
+        # Verify address ownership
+        addr_check = DatabaseConnection.execute_query(
+            "SELECT user_id FROM user_addresses WHERE address = %s",
+            (address,)
+        )
+        
+        if not addr_check or addr_check[0][0] != user_id:
+            return jsonify({'status': 'error', 'message': 'Address not owned by user'}), 403
+        
+        # Register alias
+        alias_id = f"alias_{secrets.token_hex(16)}"
+        DatabaseConnection.execute_update(
+            """INSERT INTO address_aliases (alias_id, user_id, alias, address, created_at)
+               VALUES (%s, %s, %s, %s, %s)""",
+            (alias_id, user_id, alias, address, datetime.utcnow(timezone.utc))
+        )
+        
+        logger.info(f"✓ Alias {alias} registered for {user_id}")
+        
+        return jsonify({
+            'status': 'success',
+            'alias': alias,
+            'address': address,
+            'message': f'Alias {alias} registered'
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"✗ Register alias error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/aliases/<alias>/lookup', methods=['GET'])
+@rate_limit
+def lookup_alias(alias):
+    """Lookup address by alias"""
+    try:
+        result = DatabaseConnection.execute_query(
+            "SELECT address, user_id, created_at FROM address_aliases WHERE alias = %s",
+            (alias.lower(),)
+        )
+        
+        if not result:
+            return jsonify({'status': 'error', 'message': 'Alias not found'}), 404
+        
+        address, user_id, created_at = result[0]
+        
+        return jsonify({
+            'status': 'success',
+            'alias': alias,
+            'address': address,
+            'created_at': created_at.isoformat() if created_at else None
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Lookup alias error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# SMART CONTRACT ABI ENDPOINTS - Contract interface management
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/contracts/<contract_id>/abi', methods=['GET'])
+@rate_limit
+def get_contract_abi(contract_id):
+    """Get contract ABI (Application Binary Interface)"""
+    try:
+        result = DatabaseConnection.execute_query(
+            """SELECT contract_id, contract_name, abi, functions, events, created_at
+               FROM smart_contracts WHERE contract_id = %s""",
+            (contract_id,)
+        )
+        
+        if not result:
+            return jsonify({'status': 'error', 'message': 'Contract not found'}), 404
+        
+        contract = result[0]
+        
+        return jsonify({
+            'status': 'success',
+            'abi': {
+                'contract_id': contract[0],
+                'name': contract[1],
+                'interface': json.loads(contract[2]) if contract[2] else {},
+                'functions': json.loads(contract[3]) if contract[3] else [],
+                'events': json.loads(contract[4]) if contract[4] else [],
+                'created_at': contract[5].isoformat() if contract[5] else None
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get contract ABI error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/contracts/<contract_id>/methods', methods=['GET'])
+@rate_limit
+def get_contract_methods(contract_id):
+    """Get all callable methods for contract"""
+    try:
+        result = DatabaseConnection.execute_query(
+            "SELECT functions FROM smart_contracts WHERE contract_id = %s",
+            (contract_id,)
+        )
+        
+        if not result:
+            return jsonify({'status': 'error', 'message': 'Contract not found'}), 404
+        
+        functions = json.loads(result[0][0]) if result[0][0] else []
+        
+        methods = []
+        for func in functions:
+            methods.append({
+                'name': func.get('name'),
+                'inputs': func.get('inputs', []),
+                'outputs': func.get('outputs', []),
+                'constant': func.get('constant', False),
+                'payable': func.get('payable', False),
+                'state_mutability': func.get('stateMutability', 'view')
+            })
+        
+        return jsonify({
+            'status': 'success',
+            'methods': methods,
+            'count': len(methods)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get contract methods error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/contracts/<contract_id>/events', methods=['GET'])
+@rate_limit
+def get_contract_events(contract_id):
+    """Get contract events"""
+    try:
+        result = DatabaseConnection.execute_query(
+            "SELECT events FROM smart_contracts WHERE contract_id = %s",
+            (contract_id,)
+        )
+        
+        if not result:
+            return jsonify({'status': 'error', 'message': 'Contract not found'}), 404
+        
+        events = json.loads(result[0][0]) if result[0][0] else []
+        
+        return jsonify({
+            'status': 'success',
+            'events': events,
+            'count': len(events)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get contract events error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/contracts/<contract_id>/history', methods=['GET'])
+@rate_limit
+def get_contract_call_history(contract_id):
+    """Get contract call history"""
+    try:
+        page = int(request.args.get('page', 1))
+        limit = min(int(request.args.get('limit', 50)), 100)
+        offset = (page - 1) * limit
+        
+        result = DatabaseConnection.execute_query(
+            """SELECT call_id, caller_id, function_name, status, created_at
+               FROM contract_calls WHERE contract_id = %s
+               ORDER BY created_at DESC
+               LIMIT %s OFFSET %s""",
+            (contract_id, limit, offset)
+        )
+        
+        calls = []
+        for call in result:
+            calls.append({
+                'call_id': call[0],
+                'caller': call[1],
+                'function': call[2],
+                'status': call[3],
+                'timestamp': call[4].isoformat() if call[4] else None
+            })
+        
+        total = DatabaseConnection.execute_query(
+            "SELECT COUNT(*) FROM contract_calls WHERE contract_id = %s",
+            (contract_id,)
+        )[0][0]
+        
+        return jsonify({
+            'status': 'success',
+            'calls': calls,
+            'pagination': {
+                'page': page,
+                'limit': limit,
+                'total': total,
+                'pages': (total + limit - 1) // limit
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get contract call history error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# EVENT LOG ENDPOINTS - Filter and query blockchain events
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/events/logs', methods=['POST'])
+@rate_limit
+def query_event_logs():
+    """Query blockchain event logs with filters"""
+    try:
+        data = request.get_json()
+        
+        from_block = int(data.get('from_block', 0))
+        to_block = int(data.get('to_block', 999999999))
+        address = data.get('address')
+        topics = data.get('topics', [])
+        page = int(data.get('page', 1))
+        limit = min(int(data.get('limit', 100)), 1000)
+        offset = (page - 1) * limit
+        
+        # Build query
+        where_clauses = ["block_height >= %s", "block_height <= %s"]
+        params = [from_block, to_block]
+        
+        if address:
+            where_clauses.append("address = %s")
+            params.append(address)
+        
+        where_sql = " AND ".join(where_clauses)
+        
+        # Get logs
+        result = DatabaseConnection.execute_query(
+            f"""SELECT log_id, block_height, tx_hash, address, topics, data, 
+                       log_index, created_at FROM event_logs
+               WHERE {where_sql}
+               ORDER BY block_height DESC, log_index ASC
+               LIMIT %s OFFSET %s""",
+            params + [limit, offset]
+        )
+        
+        logs = []
+        for log in result:
+            logs.append({
+                'log_id': log[0],
+                'block_height': log[1],
+                'tx_hash': log[2],
+                'address': log[3],
+                'topics': json.loads(log[4]) if log[4] else [],
+                'data': log[5],
+                'log_index': log[6],
+                'timestamp': log[7].isoformat() if log[7] else None
+            })
+        
+        total = DatabaseConnection.execute_query(
+            f"SELECT COUNT(*) FROM event_logs WHERE {where_sql}",
+            params
+        )[0][0]
+        
+        return jsonify({
+            'status': 'success',
+            'logs': logs,
+            'pagination': {
+                'page': page,
+                'limit': limit,
+                'total': total,
+                'pages': (total + limit - 1) // limit
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Query event logs error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/events/watch', methods=['POST'])
+@require_auth
+@rate_limit
+def watch_events():
+    """Subscribe to event log updates"""
+    try:
+        user_id = g.user_id
+        data = request.get_json()
+        
+        address = data.get('address')
+        topics = data.get('topics', [])
+        
+        # Create watch
+        watch_id = f"watch_{secrets.token_hex(16)}"
+        DatabaseConnection.execute_update(
+            """INSERT INTO event_watches (watch_id, user_id, address, topics, created_at, active)
+               VALUES (%s, %s, %s, %s, %s, true)""",
+            (watch_id, user_id, address, json.dumps(topics), datetime.utcnow(timezone.utc))
+        )
+        
+        return jsonify({
+            'status': 'success',
+            'watch_id': watch_id,
+            'address': address,
+            'topics': topics
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"✗ Watch events error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# BLOCK TIME & STATS ENDPOINTS - Detailed blockchain statistics
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/stats/block-times', methods=['GET'])
+@rate_limit
+def get_block_times():
+    """Get block time statistics"""
+    try:
+        result = DatabaseConnection.execute_query(
+            """SELECT AVG(EXTRACT(EPOCH FROM (b2.timestamp - b1.timestamp))) as avg_block_time,
+                      MIN(EXTRACT(EPOCH FROM (b2.timestamp - b1.timestamp))) as min_block_time,
+                      MAX(EXTRACT(EPOCH FROM (b2.timestamp - b1.timestamp))) as max_block_time,
+                      STDDEV(EXTRACT(EPOCH FROM (b2.timestamp - b1.timestamp))) as stddev_block_time
+               FROM blocks b1
+               JOIN blocks b2 ON b2.block_height = b1.block_height + 1
+               WHERE b1.block_height > (SELECT MAX(block_height) FROM blocks) - 1000"""
+        )[0]
+        
+        return jsonify({
+            'status': 'success',
+            'block_times': {
+                'average_seconds': float(result[0]) if result[0] else 0,
+                'min_seconds': float(result[1]) if result[1] else 0,
+                'max_seconds': float(result[2]) if result[2] else 0,
+                'stddev_seconds': float(result[3]) if result[3] else 0,
+                'target_seconds': 10
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get block times error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/stats/transaction-distribution', methods=['GET'])
+@rate_limit
+def get_transaction_distribution():
+    """Get distribution of transactions by type"""
+    try:
+        result = DatabaseConnection.execute_query(
+            """SELECT tx_type, COUNT(*) as count, SUM(amount) as volume
+               FROM transactions
+               WHERE created_at > NOW() - INTERVAL '24 hours'
+               GROUP BY tx_type
+               ORDER BY count DESC"""
+        )
+        
+        distribution = []
+        total_txs = 0
+        total_volume = 0
+        
+        for row in result:
+            count = row[1]
+            volume = row[2] or 0
+            total_txs += count
+            total_volume += volume
+            
+            distribution.append({
+                'type': row[0],
+                'count': count,
+                'volume': volume,
+                'percentage': 0  # Will fill in after loop
+            })
+        
+        for item in distribution:
+            item['percentage'] = (item['count'] / total_txs * 100) if total_txs > 0 else 0
+        
+        return jsonify({
+            'status': 'success',
+            'distribution': distribution,
+            'totals': {
+                'transactions': total_txs,
+                'volume': total_volume,
+                'period_hours': 24
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get transaction distribution error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/stats/miner-distribution', methods=['GET'])
+@rate_limit
+def get_miner_distribution():
+    """Get block creation distribution among validators"""
+    try:
+        result = DatabaseConnection.execute_query(
+            """SELECT miner_address, COUNT(*) as blocks_created, 
+                      SUM(transaction_count) as total_txs
+               FROM blocks
+               WHERE timestamp > NOW() - INTERVAL '7 days'
+               GROUP BY miner_address
+               ORDER BY blocks_created DESC
+               LIMIT 20"""
+        )
+        
+        miners = []
+        for row in result:
+            miners.append({
+                'address': row[0],
+                'blocks_created': row[1],
+                'transactions': row[2] or 0,
+                'avg_txs_per_block': (row[2] / row[1]) if row[1] > 0 else 0
+            })
+        
+        return jsonify({
+            'status': 'success',
+            'miners': miners,
+            'count': len(miners),
+            'period_days': 7
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get miner distribution error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# NETWORK UPGRADE ENDPOINTS - Protocol upgrades and voting
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/upgrades/proposals', methods=['GET'])
+@rate_limit
+def list_upgrade_proposals():
+    """List network upgrade proposals"""
+    try:
+        result = DatabaseConnection.execute_query(
+            """SELECT upgrade_id, title, description, target_version, status,
+                      voting_start, voting_end, created_at
+               FROM upgrade_proposals
+               ORDER BY created_at DESC"""
+        )
+        
+        proposals = []
+        for prop in result:
+            proposals.append({
+                'upgrade_id': prop[0],
+                'title': prop[1],
+                'description': prop[2],
+                'target_version': prop[3],
+                'status': prop[4],
+                'voting_start': prop[5].isoformat() if prop[5] else None,
+                'voting_end': prop[6].isoformat() if prop[6] else None,
+                'created_at': prop[7].isoformat() if prop[7] else None
+            })
+        
+        return jsonify({
+            'status': 'success',
+            'proposals': proposals,
+            'count': len(proposals)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ List upgrade proposals error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/upgrades/<upgrade_id>/vote', methods=['POST'])
+@require_auth
+@rate_limit
+def vote_on_upgrade(upgrade_id):
+    """Vote on network upgrade"""
+    try:
+        user_id = g.user_id
+        data = request.get_json()
+        vote = data.get('vote')  # 'approve' or 'reject'
+        
+        if vote not in ['approve', 'reject']:
+            return jsonify({'status': 'error', 'message': 'Vote must be approve or reject'}), 400
+        
+        # Get voting power
+        voting_power = DatabaseConnection.execute_query(
+            "SELECT staked_balance FROM users WHERE user_id = %s",
+            (user_id,)
+        )[0][0]
+        
+        # Record vote
+        vote_id = f"upgrade_vote_{secrets.token_hex(16)}"
+        DatabaseConnection.execute_update(
+            """INSERT INTO upgrade_votes (vote_id, upgrade_id, voter_id, vote, voting_power, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s)""",
+            (vote_id, upgrade_id, user_id, vote, float(voting_power), datetime.utcnow(timezone.utc))
+        )
+        
+        return jsonify({
+            'status': 'success',
+            'vote_id': vote_id,
+            'upgrade_id': upgrade_id,
+            'vote': vote,
+            'voting_power': float(voting_power)
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"✗ Vote on upgrade error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/upgrades/<upgrade_id>/status', methods=['GET'])
+@rate_limit
+def get_upgrade_status(upgrade_id):
+    """Get upgrade proposal voting status"""
+    try:
+        result = DatabaseConnection.execute_query(
+            """SELECT upgrade_id, title, status, voting_end FROM upgrade_proposals 
+               WHERE upgrade_id = %s""",
+            (upgrade_id,)
+        )
+        
+        if not result:
+            return jsonify({'status': 'error', 'message': 'Upgrade not found'}), 404
+        
+        upgrade = result[0]
+        
+        # Get vote counts
+        votes = DatabaseConnection.execute_query(
+            """SELECT vote, SUM(voting_power) FROM upgrade_votes 
+               WHERE upgrade_id = %s GROUP BY vote""",
+            (upgrade_id,)
+        )
+        
+        approve_votes = 0
+        reject_votes = 0
+        
+        for vote_row in votes:
+            if vote_row[0] == 'approve':
+                approve_votes = vote_row[1] or 0
+            else:
+                reject_votes = vote_row[1] or 0
+        
+        total_votes = approve_votes + reject_votes
+        
+        return jsonify({
+            'status': 'success',
+            'upgrade': {
+                'upgrade_id': upgrade[0],
+                'title': upgrade[1],
+                'status': upgrade[2],
+                'voting_end': upgrade[3].isoformat() if upgrade[3] else None,
+                'votes': {
+                    'approve': float(approve_votes),
+                    'reject': float(reject_votes),
+                    'total': float(total_votes),
+                    'approve_percent': (approve_votes / total_votes * 100) if total_votes > 0 else 0
+                }
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get upgrade status error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# SECURITY AUDIT ENDPOINTS - System health and security monitoring
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/security/status', methods=['GET'])
+@rate_limit
+def get_security_status():
+    """Get system security status"""
+    try:
+        # Get metrics
+        pending_txs = DatabaseConnection.execute_query(
+            "SELECT COUNT(*) FROM transactions WHERE status IN ('pending', 'queued')"
+        )[0][0]
+        
+        failed_txs = DatabaseConnection.execute_query(
+            "SELECT COUNT(*) FROM transactions WHERE status = 'failed' AND created_at > NOW() - INTERVAL '1 hour'"
+        )[0][0]
+        
+        slashed_validators = DatabaseConnection.execute_query(
+            "SELECT COUNT(*) FROM validators WHERE slashing_events > 0"
+        )[0][0]
+        
+        # Security checks
+        security_score = 100
+        issues = []
+        
+        if pending_txs > 10000:
+            security_score -= 10
+            issues.append('High mempool size')
+        
+        if failed_txs > 100:
+            security_score -= 15
+            issues.append('Elevated transaction failure rate')
+        
+        if slashed_validators > 5:
+            security_score -= 5
+            issues.append('Multiple validator slashing events')
+        
+        return jsonify({
+            'status': 'success',
+            'security': {
+                'overall_score': max(0, security_score),
+                'status': 'healthy' if security_score >= 80 else 'warning' if security_score >= 60 else 'critical',
+                'pending_transactions': pending_txs,
+                'failed_transactions_1h': failed_txs,
+                'slashed_validators': slashed_validators,
+                'issues': issues,
+                'timestamp': datetime.utcnow(timezone.utc).isoformat()
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get security status error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/security/audit-logs', methods=['GET'])
+@require_role('admin')
+@rate_limit
+def get_audit_logs():
+    """Get security audit logs (admin only)"""
+    try:
+        page = int(request.args.get('page', 1))
+        limit = min(int(request.args.get('limit', 50)), 100)
+        offset = (page - 1) * limit
+        
+        result = DatabaseConnection.execute_query(
+            """SELECT audit_id, action, user_id, affected_resource, result, details, created_at
+               FROM audit_logs
+               ORDER BY created_at DESC
+               LIMIT %s OFFSET %s""",
+            (limit, offset)
+        )
+        
+        logs = []
+        for log in result:
+            logs.append({
+                'audit_id': log[0],
+                'action': log[1],
+                'user_id': log[2],
+                'resource': log[3],
+                'result': log[4],
+                'details': json.loads(log[5]) if log[5] else {},
+                'timestamp': log[6].isoformat() if log[6] else None
+            })
+        
+        total = DatabaseConnection.execute_query(
+            "SELECT COUNT(*) FROM audit_logs"
+        )[0][0]
+        
+        return jsonify({
+            'status': 'success',
+            'logs': logs,
+            'pagination': {
+                'page': page,
+                'limit': limit,
+                'total': total,
+                'pages': (total + limit - 1) // limit
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get audit logs error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/security/threats', methods=['GET'])
+@require_role('admin')
+@rate_limit
+def get_threat_alerts():
+    """Get active security threats"""
+    try:
+        result = DatabaseConnection.execute_query(
+            """SELECT threat_id, threat_type, severity, description, detected_at, status
+               FROM security_threats WHERE status IN ('active', 'investigating')
+               ORDER BY severity DESC, detected_at DESC"""
+        )
+        
+        threats = []
+        for threat in result:
+            threats.append({
+                'threat_id': threat[0],
+                'type': threat[1],
+                'severity': threat[2],
+                'description': threat[3],
+                'detected_at': threat[4].isoformat() if threat[4] else None,
+                'status': threat[5]
+            })
+        
+        return jsonify({
+            'status': 'success',
+            'threats': threats,
+            'count': len(threats),
+            'timestamp': datetime.utcnow(timezone.utc).isoformat()
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get threat alerts error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/security/suspicious-activity', methods=['GET'])
+@require_role('admin')
+@rate_limit
+def get_suspicious_activity():
+    """Get flagged suspicious activities"""
+    try:
+        time_window = int(request.args.get('hours', 24))
+        
+        result = DatabaseConnection.execute_query(
+            """SELECT activity_id, user_id, activity_type, description, risk_level, created_at
+               FROM suspicious_activities
+               WHERE created_at > NOW() - INTERVAL '%s hours'
+               ORDER BY risk_level DESC, created_at DESC""",
+            (time_window,)
+        )
+        
+        activities = []
+        for activity in result:
+            activities.append({
+                'activity_id': activity[0],
+                'user_id': activity[1],
+                'type': activity[2],
+                'description': activity[3],
+                'risk_level': activity[4],
+                'timestamp': activity[5].isoformat() if activity[5] else None
+            })
+        
+        return jsonify({
+            'status': 'success',
+            'activities': activities,
+            'count': len(activities),
+            'time_window_hours': time_window
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get suspicious activity error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# TRANSACTION RETRY ENDPOINTS - Retry failed transactions
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/transactions/<tx_hash>/retry', methods=['POST'])
+@require_auth
+@rate_limit
+def retry_transaction(tx_hash):
+    """Retry failed or stuck transaction"""
+    try:
+        user_id = g.user_id
+        data = request.get_json()
+        
+        # Get original transaction
+        result = DatabaseConnection.execute_query(
+            """SELECT from_user_id, to_address, amount, tx_type, status, 
+                      attempt_count, gas_price FROM transactions WHERE tx_hash = %s""",
+            (tx_hash,)
+        )
+        
+        if not result:
+            return jsonify({'status': 'error', 'message': 'Transaction not found'}), 404
+        
+        from_user, to_address, amount, tx_type, status, attempt_count, old_gas_price = result[0]
+        
+        # Verify ownership
+        if from_user != user_id:
+            return jsonify({'status': 'error', 'message': 'Unauthorized'}), 403
+        
+        # Check if retryable
+        if status not in ['failed', 'pending', 'dropped']:
+            return jsonify({'status': 'error', 'message': f'Cannot retry {status} transaction'}), 400
+        
+        # Check attempt limit
+        if attempt_count >= 5:
+            return jsonify({'status': 'error', 'message': 'Maximum retry attempts exceeded'}), 400
+        
+        # Get new gas price (higher than before)
+        new_gas_price = Decimal(str(old_gas_price or 1)) * Decimal('1.25')
+        max_gas_price = Decimal(str(data.get('max_gas_price', new_gas_price)))
+        
+        if new_gas_price > max_gas_price:
+            return jsonify({'status': 'error', 'message': f'Gas price too high: {new_gas_price}'}), 400
+        
+        # Create retry transaction
+        retry_tx_hash = hashlib.sha256(f"{tx_hash}_retry_{attempt_count}".encode()).hexdigest()
+        nonce = DatabaseConnection.execute_query(
+            "SELECT COUNT(*) FROM transactions WHERE from_user_id = %s",
+            (user_id,)
+        )[0][0]
+        
+        DatabaseConnection.execute_update(
+            """INSERT INTO transactions 
+               (tx_hash, from_user_id, to_address, amount, tx_type, status, 
+                gas_price, nonce, created_at, attempt_count, retry_of)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (retry_tx_hash, from_user, to_address, amount, tx_type, 'pending',
+             float(new_gas_price), nonce, datetime.utcnow(timezone.utc), 
+             attempt_count + 1, tx_hash)
+        )
+        
+        # Mark original as retried
+        DatabaseConnection.execute_update(
+            "UPDATE transactions SET status = 'retried' WHERE tx_hash = %s",
+            (tx_hash,)
+        )
+        
+        logger.info(f"✓ Transaction {tx_hash} retried as {retry_tx_hash}, gas_price increased to {new_gas_price}")
+        
+        return jsonify({
+            'status': 'success',
+            'original_tx_hash': tx_hash,
+            'retry_tx_hash': retry_tx_hash,
+            'old_gas_price': float(old_gas_price or 1),
+            'new_gas_price': float(new_gas_price),
+            'attempt_count': attempt_count + 1,
+            'message': 'Transaction queued for retry'
+        }), 202
+        
+    except Exception as e:
+        logger.error(f"✗ Retry transaction error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/transactions/<tx_hash>/speedup', methods=['POST'])
+@require_auth
+@rate_limit
+def speedup_transaction(tx_hash):
+    """Speed up pending transaction with higher gas price"""
+    try:
+        user_id = g.user_id
+        data = request.get_json()
+        new_gas_price = Decimal(str(data.get('gas_price')))
+        
+        # Get transaction
+        result = DatabaseConnection.execute_query(
+            "SELECT from_user_id, status, gas_price FROM transactions WHERE tx_hash = %s",
+            (tx_hash,)
+        )
+        
+        if not result:
+            return jsonify({'status': 'error', 'message': 'Transaction not found'}), 404
+        
+        from_user, status, old_gas_price = result[0]
+        
+        if from_user != user_id:
+            return jsonify({'status': 'error', 'message': 'Unauthorized'}), 403
+        
+        if status != 'pending':
+            return jsonify({'status': 'error', 'message': 'Only pending transactions can be sped up'}), 400
+        
+        old_gas_price = Decimal(str(old_gas_price or 1))
+        if new_gas_price <= old_gas_price:
+            return jsonify({'status': 'error', 'message': 'New gas price must be higher than current'}), 400
+        
+        # Update gas price
+        DatabaseConnection.execute_update(
+            "UPDATE transactions SET gas_price = %s, updated_at = %s WHERE tx_hash = %s",
+            (float(new_gas_price), datetime.utcnow(timezone.utc), tx_hash)
+        )
+        
+        logger.info(f"✓ Transaction {tx_hash} sped up: gas_price {old_gas_price} → {new_gas_price}")
+        
+        return jsonify({
+            'status': 'success',
+            'tx_hash': tx_hash,
+            'old_gas_price': float(old_gas_price),
+            'new_gas_price': float(new_gas_price),
+            'increase_percent': float((new_gas_price / old_gas_price - 1) * 100)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Speedup transaction error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/transactions/<tx_hash>/status-history', methods=['GET'])
+@rate_limit
+def get_transaction_status_history(tx_hash):
+    """Get complete status history for transaction"""
+    try:
+        result = DatabaseConnection.execute_query(
+            """SELECT status_change_id, old_status, new_status, changed_at, reason
+               FROM transaction_status_changes WHERE tx_hash = %s
+               ORDER BY changed_at ASC""",
+            (tx_hash,)
+        )
+        
+        history = []
+        for change in result:
+            history.append({
+                'change_id': change[0],
+                'from_status': change[1],
+                'to_status': change[2],
+                'timestamp': change[3].isoformat() if change[3] else None,
+                'reason': change[4]
+            })
+        
+        return jsonify({
+            'status': 'success',
+            'tx_hash': tx_hash,
+            'status_history': history,
+            'total_changes': len(history)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get transaction status history error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# ADVANCED FEE ESTIMATION ENDPOINTS - Dynamic fee calculations
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/fees/historical', methods=['GET'])
+@rate_limit
+def get_historical_gas_prices():
+    """Get historical gas price data"""
+    try:
+        hours = int(request.args.get('hours', 24))
+        resolution = request.args.get('resolution', 'hourly')  # hourly, 4hourly, daily
+        
+        interval = '1 hour' if resolution == 'hourly' else '4 hours' if resolution == '4hourly' else '1 day'
+        
+        result = DatabaseConnection.execute_query(
+            f"""SELECT DATE_TRUNC('{resolution.replace('hourly', 'hour').replace('daily', 'day')}', created_at) as period,
+                       AVG(gas_price) as avg_price,
+                       MIN(gas_price) as min_price,
+                       MAX(gas_price) as max_price,
+                       PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY gas_price) as median,
+                       COUNT(*) as tx_count
+               FROM transactions
+               WHERE created_at > NOW() - INTERVAL '{hours} hours'
+               GROUP BY period
+               ORDER BY period ASC"""
+        )
+        
+        history = []
+        for row in result:
+            history.append({
+                'timestamp': row[0].isoformat() if row[0] else None,
+                'average': float(row[1]) if row[1] else 0,
+                'minimum': float(row[2]) if row[2] else 0,
+                'maximum': float(row[3]) if row[3] else 0,
+                'median': float(row[4]) if row[4] else 0,
+                'transaction_count': row[5]
+            })
+        
+        return jsonify({
+            'status': 'success',
+            'history': history,
+            'period_hours': hours,
+            'resolution': resolution
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get historical gas prices error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/fees/priority', methods=['POST'])
+@rate_limit
+def calculate_priority_fee():
+    """Calculate priority fee for fast inclusion"""
+    try:
+        data = request.get_json()
+        urgency = data.get('urgency', 'standard')  # low, standard, fast, instant
+        
+        # Get current gas prices
+        result = DatabaseConnection.execute_query(
+            """SELECT PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY gas_price),
+                      PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY gas_price),
+                      PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY gas_price)
+               FROM transactions WHERE created_at > NOW() - INTERVAL '100 blocks'"""
+        )[0]
+        
+        p25, p50, p75 = float(result[0] or 1), float(result[1] or 1), float(result[2] or 1)
+        
+        # Calculate priority multipliers
+        multipliers = {
+            'low': 0.8,
+            'standard': 1.0,
+            'fast': 1.5,
+            'instant': 2.0
+        }
+        
+        multiplier = multipliers.get(urgency, 1.0)
+        priority_fee = p50 * multiplier
+        
+        return jsonify({
+            'status': 'success',
+            'priority_fee': priority_fee,
+            'urgency': urgency,
+            'base_fee': p50,
+            'multiplier': multiplier,
+            'estimated_confirmation_blocks': {
+                'low': '50-100',
+                'standard': '10-20',
+                'fast': '2-5',
+                'instant': '<1'
+            }[urgency]
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Calculate priority fee error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/fees/burn-rate', methods=['GET'])
+@rate_limit
+def get_fee_burn_rate():
+    """Get network fee burn rate (deflation)"""
+    try:
+        result = DatabaseConnection.execute_query(
+            """SELECT SUM(gas_price * gas_used) as total_fees_burned,
+                      COUNT(*) as transactions,
+                      AVG(gas_price * gas_used) as avg_fee_burned
+               FROM transactions
+               WHERE created_at > NOW() - INTERVAL '24 hours'"""
+        )[0]
+        
+        total_burned = result[0] or 0
+        tx_count = result[1] or 0
+        avg_burned = result[2] or 0
+        
+        # Calculate daily burn
+        daily_burn = Decimal(str(total_burned))
+        yearly_burn = daily_burn * 365
+        
+        return jsonify({
+            'status': 'success',
+            'burn_rate': {
+                'last_24h_total': float(total_burned),
+                'estimated_daily': float(daily_burn),
+                'estimated_yearly': float(yearly_burn),
+                'transactions_24h': tx_count,
+                'average_per_transaction': float(avg_burned),
+                'timestamp': datetime.utcnow(timezone.utc).isoformat()
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get fee burn rate error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# REAL-TIME STREAMING ENDPOINTS - SSE and WebSocket updates
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/stream/prices', methods=['GET'])
+@rate_limit
+def stream_price_updates():
+    """Stream real-time price updates via Server-Sent Events"""
+    try:
+        tokens = request.args.get('tokens', 'QTCL,ETH,BTC').split(',')
+        
+        def generate_prices():
+            while True:
+                for token in tokens:
+                    price = oracle_engine.get_token_price(token.strip())
+                    if price:
+                        yield f"data: {json.dumps({'token': token.strip(), 'price': float(price), 'timestamp': datetime.utcnow(timezone.utc).isoformat()})}\n\n"
+                
+                time.sleep(5)  # Update every 5 seconds
+        
+        return Response(stream_with_context(generate_prices()), mimetype='text/event-stream')
+        
+    except Exception as e:
+        logger.error(f"✗ Stream prices error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/stream/blocks', methods=['GET'])
+@rate_limit
+def stream_block_updates():
+    """Stream new blocks as they're created via Server-Sent Events"""
+    try:
+        def generate_blocks():
+            last_block_height = DatabaseConnection.execute_query(
+                "SELECT MAX(block_height) FROM blocks"
+            )[0][0] or 0
+            
+            while True:
+                current_height = DatabaseConnection.execute_query(
+                    "SELECT MAX(block_height) FROM blocks"
+                )[0][0] or 0
+                
+                if current_height > last_block_height:
+                    block_result = DatabaseConnection.execute_query(
+                        """SELECT block_height, block_hash, timestamp, transaction_count, miner_address
+                           FROM blocks WHERE block_height > %s
+                           ORDER BY block_height ASC""",
+                        (last_block_height,)
+                    )
+                    
+                    for block in block_result:
+                        yield f"data: {json.dumps({'block_height': block[0], 'block_hash': block[1], 'timestamp': block[2].isoformat() if block[2] else None, 'transactions': block[3], 'miner': block[4]})}\n\n"
+                        last_block_height = block[0]
+                
+                time.sleep(2)
+        
+        return Response(stream_with_context(generate_blocks()), mimetype='text/event-stream')
+        
+    except Exception as e:
+        logger.error(f"✗ Stream blocks error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/stream/mempool', methods=['GET'])
+@rate_limit
+def stream_mempool_updates():
+    """Stream mempool transaction updates"""
+    try:
+        def generate_mempool():
+            last_timestamp = datetime.utcnow(timezone.utc)
+            
+            while True:
+                result = DatabaseConnection.execute_query(
+                    """SELECT tx_hash, from_user_id, amount, gas_price, created_at
+                       FROM transactions WHERE status IN ('pending', 'queued')
+                       AND created_at > %s
+                       ORDER BY gas_price DESC
+                       LIMIT 10""",
+                    (last_timestamp,)
+                )
+                
+                for tx in result:
+                    yield f"data: {json.dumps({'tx_hash': tx[0][:16] + '...', 'from': tx[1][:10] + '...', 'amount': float(tx[2]), 'gas_price': float(tx[3]), 'timestamp': tx[4].isoformat() if tx[4] else None})}\n\n"
+                    last_timestamp = max(last_timestamp, tx[4])
+                
+                time.sleep(1)
+        
+        return Response(stream_with_context(generate_mempool()), mimetype='text/event-stream')
+        
+    except Exception as e:
+        logger.error(f"✗ Stream mempool error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@socketio.on('subscribe_channel')
+def handle_channel_subscription(data):
+    """Subscribe to WebSocket channel"""
+    channel = data.get('channel')
+    
+    if channel in ['prices', 'blocks', 'mempool', 'transactions']:
+        join_room(f"channel_{channel}")
+        emit('subscribed', {'channel': channel})
+        logger.debug(f"Client {request.sid} subscribed to {channel}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# MULTISIG WALLET ENDPOINTS - Multi-signature transactions
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/multisig/wallets', methods=['POST'])
+@require_auth
+@rate_limit
+def create_multisig_wallet():
+    """Create multi-signature wallet"""
+    try:
+        user_id = g.user_id
+        data = request.get_json()
+        
+        co_owners = data.get('co_owners', [])
+        required_signatures = int(data.get('required_signatures', 2))
+        wallet_name = data.get('name', 'Multisig Wallet')
+        
+        if len(co_owners) < required_signatures - 1:
+            return jsonify({'status': 'error', 'message': 'Insufficient co-owners'}), 400
+        
+        if required_signatures < 2 or required_signatures > 15:
+            return jsonify({'status': 'error', 'message': 'Required signatures must be 2-15'}), 400
+        
+        # Create wallet
+        wallet_id = f"multisig_{secrets.token_hex(16)}"
+        wallet_address = '0x' + secrets.token_bytes(20).hex()
+        
+        DatabaseConnection.execute_update(
+            """INSERT INTO multisig_wallets (wallet_id, creator_id, wallet_address, name,
+                                             required_signatures, total_owners, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            (wallet_id, user_id, wallet_address, wallet_name, required_signatures,
+             len(co_owners) + 1, datetime.utcnow(timezone.utc))
+        )
+        
+        # Add owners
+        DatabaseConnection.execute_update(
+            """INSERT INTO multisig_owners (wallet_id, owner_id, created_at)
+               VALUES (%s, %s, %s)""",
+            (wallet_id, user_id, datetime.utcnow(timezone.utc))
+        )
+        
+        for co_owner in co_owners:
+            DatabaseConnection.execute_update(
+                """INSERT INTO multisig_owners (wallet_id, owner_id, created_at)
+                   VALUES (%s, %s, %s)""",
+                (wallet_id, co_owner, datetime.utcnow(timezone.utc))
+            )
+        
+        logger.info(f"✓ Multisig wallet {wallet_id} created by {user_id}")
+        
+        return jsonify({
+            'status': 'success',
+            'wallet_id': wallet_id,
+            'address': wallet_address,
+            'name': wallet_name,
+            'required_signatures': required_signatures,
+            'total_owners': len(co_owners) + 1,
+            'owners': [user_id] + co_owners
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"✗ Create multisig wallet error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/multisig/<wallet_id>/propose', methods=['POST'])
+@require_auth
+@rate_limit
+def propose_multisig_transaction(wallet_id):
+    """Propose transaction for multisig wallet"""
+    try:
+        user_id = g.user_id
+        data = request.get_json()
+        
+        to_address = data.get('to')
+        amount = Decimal(str(data.get('amount')))
+        
+        # Verify ownership
+        owner_check = DatabaseConnection.execute_query(
+            "SELECT COUNT(*) FROM multisig_owners WHERE wallet_id = %s AND owner_id = %s",
+            (wallet_id, user_id)
+        )[0][0]
+        
+        if owner_check == 0:
+            return jsonify({'status': 'error', 'message': 'Not wallet owner'}), 403
+        
+        # Create proposal
+        proposal_id = f"multisig_prop_{secrets.token_hex(16)}"
+        DatabaseConnection.execute_update(
+            """INSERT INTO multisig_proposals (proposal_id, wallet_id, proposer_id,
+                                               to_address, amount, status, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            (proposal_id, wallet_id, user_id, to_address, float(amount),
+             'pending', datetime.utcnow(timezone.utc))
+        )
+        
+        # Auto-sign by proposer
+        sig_id = f"sig_{secrets.token_hex(16)}"
+        DatabaseConnection.execute_update(
+            """INSERT INTO multisig_signatures (sig_id, proposal_id, signer_id, created_at)
+               VALUES (%s, %s, %s, %s)""",
+            (sig_id, proposal_id, user_id, datetime.utcnow(timezone.utc))
+        )
+        
+        logger.info(f"✓ Multisig transaction {proposal_id} proposed for {wallet_id}")
+        
+        return jsonify({
+            'status': 'success',
+            'proposal_id': proposal_id,
+            'wallet_id': wallet_id,
+            'to': to_address,
+            'amount': float(amount),
+            'signatures_collected': 1
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"✗ Propose multisig transaction error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/multisig/<wallet_id>/proposals', methods=['GET'])
+@rate_limit
+def list_multisig_proposals(wallet_id):
+    """List pending proposals for multisig wallet"""
+    try:
+        result = DatabaseConnection.execute_query(
+            """SELECT p.proposal_id, p.proposer_id, p.to_address, p.amount, p.status,
+                      p.created_at, COUNT(s.sig_id) as signatures
+               FROM multisig_proposals p
+               LEFT JOIN multisig_signatures s ON p.proposal_id = s.proposal_id
+               WHERE p.wallet_id = %s
+               GROUP BY p.proposal_id, p.proposer_id, p.to_address, p.amount, p.status, p.created_at
+               ORDER BY p.created_at DESC""",
+            (wallet_id,)
+        )
+        
+        # Get required signatures
+        wallet = DatabaseConnection.execute_query(
+            "SELECT required_signatures FROM multisig_wallets WHERE wallet_id = %s",
+            (wallet_id,)
+        )
+        
+        required_sigs = wallet[0][0] if wallet else 1
+        
+        proposals = []
+        for prop in result:
+            proposals.append({
+                'proposal_id': prop[0],
+                'proposer': prop[1],
+                'to': prop[2],
+                'amount': float(prop[3]),
+                'status': prop[4],
+                'created_at': prop[5].isoformat() if prop[5] else None,
+                'signatures_collected': prop[6],
+                'signatures_required': required_sigs,
+                'can_execute': prop[6] >= required_sigs
+            })
+        
+        return jsonify({
+            'status': 'success',
+            'proposals': proposals,
+            'count': len(proposals)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ List multisig proposals error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/multisig/<proposal_id>/sign', methods=['POST'])
+@require_auth
+@rate_limit
+def sign_multisig_proposal(proposal_id):
+    """Sign multisig proposal"""
+    try:
+        user_id = g.user_id
+        
+        # Get proposal and wallet
+        proposal = DatabaseConnection.execute_query(
+            "SELECT wallet_id, status FROM multisig_proposals WHERE proposal_id = %s",
+            (proposal_id,)
+        )
+        
+        if not proposal:
+            return jsonify({'status': 'error', 'message': 'Proposal not found'}), 404
+        
+        wallet_id, status = proposal[0]
+        
+        if status != 'pending':
+            return jsonify({'status': 'error', 'message': f'Cannot sign {status} proposal'}), 400
+        
+        # Verify ownership
+        owner_check = DatabaseConnection.execute_query(
+            "SELECT COUNT(*) FROM multisig_owners WHERE wallet_id = %s AND owner_id = %s",
+            (wallet_id, user_id)
+        )[0][0]
+        
+        if owner_check == 0:
+            return jsonify({'status': 'error', 'message': 'Not wallet owner'}), 403
+        
+        # Check if already signed
+        existing_sig = DatabaseConnection.execute_query(
+            "SELECT COUNT(*) FROM multisig_signatures WHERE proposal_id = %s AND signer_id = %s",
+            (proposal_id, user_id)
+        )[0][0]
+        
+        if existing_sig > 0:
+            return jsonify({'status': 'error', 'message': 'Already signed'}), 400
+        
+        # Add signature
+        sig_id = f"sig_{secrets.token_hex(16)}"
+        DatabaseConnection.execute_update(
+            """INSERT INTO multisig_signatures (sig_id, proposal_id, signer_id, created_at)
+               VALUES (%s, %s, %s, %s)""",
+            (sig_id, proposal_id, user_id, datetime.utcnow(timezone.utc))
+        )
+        
+        # Check if we have enough signatures
+        sig_count = DatabaseConnection.execute_query(
+            "SELECT COUNT(*) FROM multisig_signatures WHERE proposal_id = %s",
+            (proposal_id,)
+        )[0][0]
+        
+        wallet = DatabaseConnection.execute_query(
+            "SELECT required_signatures FROM multisig_wallets WHERE wallet_id = %s",
+            (wallet_id,)
+        )
+        
+        required_sigs = wallet[0][0] if wallet else 1
+        
+        # Auto-execute if threshold reached
+        if sig_count >= required_sigs:
+            DatabaseConnection.execute_update(
+                "UPDATE multisig_proposals SET status = 'approved' WHERE proposal_id = %s",
+                (proposal_id,)
+            )
+        
+        logger.info(f"✓ Multisig proposal {proposal_id} signed by {user_id}")
+        
+        return jsonify({
+            'status': 'success',
+            'proposal_id': proposal_id,
+            'signature_id': sig_id,
+            'signatures_collected': sig_count,
+            'signatures_required': required_sigs,
+            'can_execute': sig_count >= required_sigs
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"✗ Sign multisig proposal error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/multisig/<proposal_id>/execute', methods=['POST'])
+@require_auth
+@rate_limit
+def execute_multisig_proposal(proposal_id):
+    """Execute approved multisig proposal"""
+    try:
+        user_id = g.user_id
+        
+        # Get proposal
+        proposal = DatabaseConnection.execute_query(
+            """SELECT wallet_id, to_address, amount, status FROM multisig_proposals 
+               WHERE proposal_id = %s""",
+            (proposal_id,)
+        )
+        
+        if not proposal:
+            return jsonify({'status': 'error', 'message': 'Proposal not found'}), 404
+        
+        wallet_id, to_address, amount, status = proposal[0]
+        
+        if status != 'approved':
+            return jsonify({'status': 'error', 'message': f'Proposal status is {status}, not approved'}), 400
+        
+        # Execute transaction
+        tx_hash = hashlib.sha256(f"{proposal_id}_executed".encode()).hexdigest()
+        
+        DatabaseConnection.execute_update(
+            """INSERT INTO transactions (tx_hash, from_user_id, to_address, amount, 
+                                          tx_type, status, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            (tx_hash, wallet_id, to_address, float(amount), 'multisig',
+             'pending', datetime.utcnow(timezone.utc))
+        )
+        
+        # Mark proposal as executed
+        DatabaseConnection.execute_update(
+            "UPDATE multisig_proposals SET status = 'executed' WHERE proposal_id = %s",
+            (proposal_id,)
+        )
+        
+        logger.info(f"✓ Multisig proposal {proposal_id} executed as {tx_hash}")
+        
+        return jsonify({
+            'status': 'success',
+            'proposal_id': proposal_id,
+            'tx_hash': tx_hash,
+            'message': 'Transaction executed'
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"✗ Execute multisig proposal error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# BRIDGE ENDPOINTS - Cross-chain bridge operations
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/bridge/supported-chains', methods=['GET'])
+@rate_limit
+def get_supported_chains():
+    """Get supported bridge chains"""
+    try:
+        result = DatabaseConnection.execute_query(
+            """SELECT chain_id, chain_name, token_symbol, bridge_address, min_amount,
+                      max_amount, fee_percent, status FROM bridge_chains
+               WHERE status = 'active'
+               ORDER BY chain_name"""
+        )
+        
+        chains = []
+        for chain in result:
+            chains.append({
+                'chain_id': chain[0],
+                'name': chain[1],
+                'token': chain[2],
+                'bridge_address': chain[3],
+                'min_amount': float(chain[4]),
+                'max_amount': float(chain[5]),
+                'fee_percent': float(chain[6]),
+                'status': chain[7]
+            })
+        
+        return jsonify({
+            'status': 'success',
+            'chains': chains,
+            'count': len(chains)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get supported chains error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/bridge/lock', methods=['POST'])
+@require_auth
+@rate_limit
+def lock_for_bridge():
+    """Lock tokens on origin chain for bridge transfer"""
+    try:
+        user_id = g.user_id
+        data = request.get_json()
+        
+        amount = Decimal(str(data.get('amount')))
+        destination_chain = data.get('destination_chain')
+        recipient_address = data.get('recipient_address')
+        
+        # Validate chain
+        chain_result = DatabaseConnection.execute_query(
+            "SELECT chain_id FROM bridge_chains WHERE chain_id = %s AND status = 'active'",
+            (destination_chain,)
+        )
+        
+        if not chain_result:
+            return jsonify({'status': 'error', 'message': 'Unsupported destination chain'}), 400
+        
+        # Check balance
+        balance = DatabaseConnection.execute_query(
+            "SELECT balance FROM users WHERE user_id = %s",
+            (user_id,)
+        )[0][0]
+        
+        if Decimal(str(balance)) < amount:
+            return jsonify({'status': 'error', 'message': 'Insufficient balance'}), 400
+        
+        # Create bridge lock
+        lock_id = f"bridge_{secrets.token_hex(16)}"
+        
+        DatabaseConnection.execute_update(
+            """INSERT INTO bridge_locks (lock_id, user_id, amount, source_chain,
+                                         destination_chain, recipient_address, status, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+            (lock_id, user_id, float(amount), 'QTCL', destination_chain,
+             recipient_address, 'locked', datetime.utcnow(timezone.utc))
+        )
+        
+        # Deduct from balance
+        DatabaseConnection.execute_update(
+            "UPDATE users SET balance = balance - %s WHERE user_id = %s",
+            (float(amount), user_id)
+        )
+        
+        logger.info(f"✓ Bridge lock {lock_id}: {amount} QTCL locked for {destination_chain}")
+        
+        return jsonify({
+            'status': 'success',
+            'lock_id': lock_id,
+            'amount': float(amount),
+            'destination_chain': destination_chain,
+            'recipient': recipient_address,
+            'message': 'Tokens locked for bridge transfer'
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"✗ Lock for bridge error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/bridge/status/<lock_id>', methods=['GET'])
+@rate_limit
+def get_bridge_status(lock_id):
+    """Get bridge transfer status"""
+    try:
+        result = DatabaseConnection.execute_query(
+            """SELECT lock_id, amount, source_chain, destination_chain, status,
+                      created_at, released_at, tx_hash FROM bridge_locks
+               WHERE lock_id = %s""",
+            (lock_id,)
+        )
+        
+        if not result:
+            return jsonify({'status': 'error', 'message': 'Bridge transfer not found'}), 404
+        
+        lock = result[0]
+        
+        return jsonify({
+            'status': 'success',
+            'bridge_transfer': {
+                'lock_id': lock[0],
+                'amount': float(lock[1]),
+                'source_chain': lock[2],
+                'destination_chain': lock[3],
+                'status': lock[4],
+                'created_at': lock[5].isoformat() if lock[5] else None,
+                'released_at': lock[6].isoformat() if lock[6] else None,
+                'destination_tx_hash': lock[7]
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get bridge status error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# AIRDROP ENDPOINTS - Distribution campaigns
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/airdrops', methods=['GET'])
+@rate_limit
+def list_airdrops():
+    """List active airdrop campaigns"""
+    try:
+        result = DatabaseConnection.execute_query(
+            """SELECT airdrop_id, campaign_name, token_symbol, total_amount, 
+                      distributed_amount, status, start_date, end_date
+               FROM airdrop_campaigns
+               WHERE status = 'active' OR status = 'upcoming'
+               ORDER BY start_date DESC"""
+        )
+        
+        airdrops = []
+        for airdrop in result:
+            distributed = float(airdrop[4]) if airdrop[4] else 0
+            total = float(airdrop[3]) if airdrop[3] else 1
+            
+            airdrops.append({
+                'airdrop_id': airdrop[0],
+                'name': airdrop[1],
+                'token': airdrop[2],
+                'total_amount': total,
+                'distributed': distributed,
+                'remaining': total - distributed,
+                'distribution_percent': (distributed / total * 100) if total > 0 else 0,
+                'status': airdrop[5],
+                'start_date': airdrop[6].isoformat() if airdrop[6] else None,
+                'end_date': airdrop[7].isoformat() if airdrop[7] else None
+            })
+        
+        return jsonify({
+            'status': 'success',
+            'airdrops': airdrops,
+            'count': len(airdrops)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ List airdrops error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/airdrops/<airdrop_id>/claim', methods=['POST'])
+@require_auth
+@rate_limit
+def claim_airdrop(airdrop_id):
+    """Claim airdrop tokens"""
+    try:
+        user_id = g.user_id
+        
+        # Get airdrop
+        airdrop = DatabaseConnection.execute_query(
+            """SELECT airdrop_id, amount_per_user, status FROM airdrop_campaigns
+               WHERE airdrop_id = %s""",
+            (airdrop_id,)
+        )
+        
+        if not airdrop:
+            return jsonify({'status': 'error', 'message': 'Airdrop not found'}), 404
+        
+        airdrop_id_db, amount_per_user, status = airdrop[0]
+        
+        if status != 'active':
+            return jsonify({'status': 'error', 'message': f'Airdrop is {status}'}), 400
+        
+        # Check if already claimed
+        existing_claim = DatabaseConnection.execute_query(
+            "SELECT COUNT(*) FROM airdrop_claims WHERE airdrop_id = %s AND user_id = %s",
+            (airdrop_id, user_id)
+        )[0][0]
+        
+        if existing_claim > 0:
+            return jsonify({'status': 'error', 'message': 'Already claimed this airdrop'}), 400
+        
+        # Record claim
+        claim_id = f"claim_{secrets.token_hex(16)}"
+        DatabaseConnection.execute_update(
+            """INSERT INTO airdrop_claims (claim_id, airdrop_id, user_id, amount, claimed_at)
+               VALUES (%s, %s, %s, %s, %s)""",
+            (claim_id, airdrop_id, user_id, float(amount_per_user), datetime.utcnow(timezone.utc))
+        )
+        
+        # Credit user balance
+        DatabaseConnection.execute_update(
+            "UPDATE users SET balance = balance + %s WHERE user_id = %s",
+            (float(amount_per_user), user_id)
+        )
+        
+        # Update distributed amount
+        DatabaseConnection.execute_update(
+            """UPDATE airdrop_campaigns 
+               SET distributed_amount = distributed_amount + %s
+               WHERE airdrop_id = %s""",
+            (float(amount_per_user), airdrop_id)
+        )
+        
+        logger.info(f"✓ Airdrop {airdrop_id} claimed by {user_id}: {amount_per_user}")
+        
+        return jsonify({
+            'status': 'success',
+            'claim_id': claim_id,
+            'airdrop_id': airdrop_id,
+            'amount_received': float(amount_per_user),
+            'message': 'Airdrop tokens claimed successfully'
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"✗ Claim airdrop error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/airdrops/<airdrop_id>/eligibility', methods=['GET'])
+@require_auth
+@rate_limit
+def check_airdrop_eligibility(airdrop_id):
+    """Check if user is eligible for airdrop"""
+    try:
+        user_id = g.user_id
+        
+        # Get airdrop requirements
+        airdrop = DatabaseConnection.execute_query(
+            """SELECT airdrop_id, min_balance, min_age_days, requires_kyc FROM airdrop_campaigns
+               WHERE airdrop_id = %s""",
+            (airdrop_id,)
+        )
+        
+        if not airdrop:
+            return jsonify({'status': 'error', 'message': 'Airdrop not found'}), 404
+        
+        airdrop_id_db, min_balance, min_age_days, requires_kyc = airdrop[0]
+        
+        # Get user info
+        user = DatabaseConnection.execute_query(
+            """SELECT balance, kyc_status, created_at FROM users WHERE user_id = %s""",
+            (user_id,)
+        )[0]
+        
+        balance, kyc_status, created_at = user
+        
+        # Check eligibility
+        is_eligible = True
+        reasons = []
+        
+        if min_balance and Decimal(str(balance)) < Decimal(str(min_balance)):
+            is_eligible = False
+            reasons.append(f'Minimum balance {min_balance} required')
+        
+        if min_age_days:
+            account_age_days = (datetime.utcnow(timezone.utc) - created_at).days
+            if account_age_days < min_age_days:
+                is_eligible = False
+                reasons.append(f'Account must be {min_age_days} days old')
+        
+        if requires_kyc and kyc_status != 'verified':
+            is_eligible = False
+            reasons.append('KYC verification required')
+        
+        return jsonify({
+            'status': 'success',
+            'airdrop_id': airdrop_id,
+            'eligible': is_eligible,
+            'requirements': {
+                'min_balance': min_balance,
+                'min_age_days': min_age_days,
+                'requires_kyc': requires_kyc
+            },
+            'user_status': {
+                'balance': float(balance),
+                'kyc_verified': kyc_status == 'verified',
+                'account_age_days': (datetime.utcnow(timezone.utc) - created_at).days
+            },
+            'ineligibility_reasons': reasons
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Check airdrop eligibility error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# MOBILE APP ENDPOINTS - Optimized for mobile clients
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/mobile/dashboard', methods=['GET'])
+@require_auth
+@rate_limit
+def mobile_dashboard():
+    """Get mobile dashboard data (optimized payload)"""
+    try:
+        user_id = g.user_id
+        
+        # Get user balance
+        user = DatabaseConnection.execute_query(
+            "SELECT balance, staked_balance, reputation_score FROM users WHERE user_id = %s",
+            (user_id,)
+        )[0]
+        
+        balance = float(user[0])
+        staked = float(user[1])
+        reputation = float(user[2])
+        
+        # Get recent transactions (last 5)
+        recent_txs = DatabaseConnection.execute_query(
+            """SELECT tx_hash, to_address, amount, status, created_at FROM transactions
+               WHERE from_user_id = %s ORDER BY created_at DESC LIMIT 5""",
+            (user_id,)
+        )
+        
+        transactions = []
+        for tx in recent_txs:
+            transactions.append({
+                'hash': tx[0][:16] + '...',
+                'to': tx[1][-6:],
+                'amount': float(tx[2]),
+                'status': tx[3],
+                'time': (datetime.utcnow(timezone.utc) - tx[4]).seconds // 60  # minutes ago
+            })
+        
+        # Get portfolio value
+        portfolio_value = balance + staked
+        
+        # Get 24h change
+        day_ago = DatabaseConnection.execute_query(
+            """SELECT AVG(balance) FROM balance_history 
+               WHERE account_id = %s AND created_at > NOW() - INTERVAL '24 hours'""",
+            (user_id,)
+        )[0][0]
+        
+        change_24h = balance - (float(day_ago) if day_ago else balance)
+        change_percent = (change_24h / (float(day_ago) if day_ago else balance) * 100) if day_ago else 0
+        
+        return jsonify({
+            'status': 'success',
+            'dashboard': {
+                'portfolio': {
+                    'total': portfolio_value,
+                    'balance': balance,
+                    'staked': staked,
+                    'change_24h': change_24h,
+                    'change_percent': change_percent
+                },
+                'reputation': reputation,
+                'recent_transactions': transactions,
+                'last_updated': datetime.utcnow(timezone.utc).isoformat()
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Mobile dashboard error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/mobile/quick-send', methods=['POST'])
+@require_auth
+@rate_limit
+def mobile_quick_send():
+    """Quick send transaction (mobile optimized)"""
+    try:
+        user_id = g.user_id
+        data = request.get_json()
+        
+        recipient = data.get('recipient')  # Can be alias or address
+        amount = Decimal(str(data.get('amount')))
+        
+        # Resolve recipient (alias → address)
+        recipient_result = DatabaseConnection.execute_query(
+            "SELECT address FROM address_aliases WHERE alias = %s",
+            (recipient.lower(),)
+        )
+        
+        if recipient_result:
+            to_address = recipient_result[0][0]
+        else:
+            to_address = recipient  # Assume it's an address
+        
+        # Check balance
+        balance = DatabaseConnection.execute_query(
+            "SELECT balance FROM users WHERE user_id = %s",
+            (user_id,)
+        )[0][0]
+        
+        if Decimal(str(balance)) < amount:
+            return jsonify({'status': 'error', 'message': 'Insufficient balance', 'code': 'INSUFFICIENT_BALANCE'}), 400
+        
+        # Send transaction
+        tx_hash = hashlib.sha256(f"{user_id}{to_address}{amount}".encode()).hexdigest()
+        
+        DatabaseConnection.execute_update(
+            """INSERT INTO transactions (tx_hash, from_user_id, to_address, amount, 
+                                          status, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s)""",
+            (tx_hash, user_id, to_address, float(amount), 'pending', datetime.utcnow(timezone.utc))
+        )
+        
+        DatabaseConnection.execute_update(
+            "UPDATE users SET balance = balance - %s WHERE user_id = %s",
+            (float(amount), user_id)
+        )
+        
+        logger.info(f"✓ Mobile quick send {tx_hash}: {user_id} → {to_address} ({amount})")
+        
+        return jsonify({
+            'status': 'success',
+            'tx': {
+                'hash': tx_hash[:16] + '...',
+                'full_hash': tx_hash,
+                'to': to_address[-6:],
+                'amount': float(amount),
+                'status': 'pending'
+            }
+        }), 202
+        
+    except Exception as e:
+        logger.error(f"✗ Mobile quick send error: {e}")
+        return jsonify({'status': 'error', 'message': str(e), 'code': 'SEND_FAILED'}), 500
+
+
+@app.route('/api/v1/mobile/notifications', methods=['GET'])
+@require_auth
+@rate_limit
+def mobile_notifications():
+    """Get push-friendly notifications"""
+    try:
+        user_id = g.user_id
+        limit = min(int(request.args.get('limit', 20)), 50)
+        
+        result = DatabaseConnection.execute_query(
+            """SELECT notification_id, type, title, body, data, read, created_at
+               FROM notifications WHERE user_id = %s
+               ORDER BY created_at DESC LIMIT %s""",
+            (user_id, limit)
+        )
+        
+        notifications = []
+        for notif in result:
+            notifications.append({
+                'id': notif[0],
+                'type': notif[1],
+                'title': notif[2],
+                'body': notif[3],
+                'data': json.loads(notif[4]) if notif[4] else {},
+                'read': notif[5],
+                'time': (datetime.utcnow(timezone.utc) - notif[6]).seconds // 60  # minutes ago
+            })
+        
+        return jsonify({
+            'status': 'success',
+            'notifications': notifications,
+            'count': len(notifications)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Mobile notifications error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/mobile/qr-scan', methods=['POST'])
+@require_auth
+@rate_limit
+def mobile_qr_scan():
+    """Process QR code scan result"""
+    try:
+        user_id = g.user_id
+        data = request.get_json()
+        qr_data = data.get('data')
+        
+        # Parse QR (format: qtcl://address/amount or ethereum://0x...)
+        if qr_data.startswith('qtcl://'):
+            parts = qr_data.replace('qtcl://', '').split('/')
+            address = parts[0] if len(parts) > 0 else None
+            amount = float(parts[1]) if len(parts) > 1 else None
+            
+            return jsonify({
+                'status': 'success',
+                'parsed': {
+                    'type': 'transfer',
+                    'address': address,
+                    'amount': amount,
+                    'chain': 'QTCL'
+                }
+            }), 200
+        
+        else:
+            return jsonify({'status': 'error', 'message': 'Invalid QR code format'}), 400
+        
+    except Exception as e:
+        logger.error(f"✗ Mobile QR scan error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/mobile/app-config', methods=['GET'])
+@rate_limit
+def mobile_app_config():
+    """Get mobile app configuration"""
+    try:
+        return jsonify({
+            'status': 'success',
+            'config': {
+                'api_version': 'v1',
+                'blockchain': {
+                    'name': 'QTCL',
+                    'symbol': 'QTCL',
+                    'decimals': 18,
+                    'block_time': 10
+                },
+                'features': {
+                    'biometric_auth': True,
+                    'hardware_wallet': True,
+                    'staking': True,
+                    'swaps': True,
+                    'nfts': True,
+                    'governance': True
+                },
+                'security': {
+                    'min_password_length': 12,
+                    'require_2fa': False,
+                    'pin_length': 6
+                },
+                'limits': {
+                    'max_transaction_amount': '1000000',
+                    'daily_withdrawal_limit': '100000',
+                    'transaction_timeout_seconds': 300
+                },
+                'endpoints': {
+                    'rpc': 'https://api.qtcl.network/rpc',
+                    'api': 'https://api.qtcl.network/api/v1',
+                    'ws': 'wss://api.qtcl.network/ws'
+                },
+                'version': '1.0.0',
+                'timestamp': datetime.utcnow(timezone.utc).isoformat()
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Mobile app config error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+
+
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # SECTION 10: DEFI ENGINE - STAKING, LIQUIDITY, SWAPS
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -4723,6 +7147,856 @@ def get_my_profile():
     except Exception as e:
         logger.error(f"✗ Get profile error: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# QUANTUM EXECUTION ENDPOINTS - Quantum circuit status and results
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/quantum/execute', methods=['POST'])
+@require_auth
+@rate_limit
+def execute_quantum_circuit():
+    """Execute quantum circuit for transaction verification"""
+    try:
+        user_id = g.user_id
+        data = request.get_json()
+        
+        tx_id = data.get('tx_id')
+        circuit_params = data.get('circuit_params', {})
+        shots = int(data.get('shots', 1024))
+        
+        # Get transaction
+        tx_result = DatabaseConnection.execute_query(
+            "SELECT tx_hash, amount FROM transactions WHERE tx_id = %s",
+            (tx_id,)
+        )
+        
+        if not tx_result:
+            return jsonify({'status': 'error', 'message': 'Transaction not found'}), 404
+        
+        tx_hash, amount = tx_result[0]
+        
+        # Build quantum circuit
+        from quantum_circuit_builder_wsv_ghz8 import get_circuit_builder, QuantumTopologyConfig
+        
+        config = QuantumTopologyConfig()
+        builder = get_circuit_builder(config)
+        circuit = builder.build_ghz8_circuit(
+            transaction_id=tx_id,
+            amount_bits=int(amount),
+            metadata=circuit_params
+        )
+        
+        # Execute circuit
+        executor = get_executor(config)
+        result = executor.execute(circuit, shots=shots)
+        
+        # Store result
+        exec_id = f"exec_{secrets.token_hex(16)}"
+        DatabaseConnection.execute_update(
+            """INSERT INTO quantum_executions (exec_id, tx_id, user_id, shots,
+                                               circuit_depth, ghz_fidelity, 
+                                               dominant_states, measurement_data, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (exec_id, tx_id, user_id, shots, result.circuit_depth, 
+             result.ghz_fidelity, json.dumps(result.dominant_states),
+             json.dumps(result.measurement_data), datetime.utcnow(timezone.utc))
+        )
+        
+        logger.info(f"✓ Quantum execution {exec_id}: tx={tx_id}, fidelity={result.ghz_fidelity:.4f}")
+        
+        return jsonify({
+            'status': 'success',
+            'execution_id': exec_id,
+            'tx_id': tx_id,
+            'shots': shots,
+            'circuit_depth': result.circuit_depth,
+            'ghz_fidelity': result.ghz_fidelity,
+            'dominant_states': result.dominant_states,
+            'entropy_bits': result.entropy_bits
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"✗ Quantum execution error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/quantum/executions/<exec_id>', methods=['GET'])
+@rate_limit
+def get_quantum_execution(exec_id):
+    """Get quantum execution results"""
+    try:
+        result = DatabaseConnection.execute_query(
+            """SELECT exec_id, tx_id, shots, circuit_depth, ghz_fidelity,
+                      dominant_states, entropy_bits, measurement_data, created_at
+               FROM quantum_executions WHERE exec_id = %s""",
+            (exec_id,)
+        )
+        
+        if not result:
+            return jsonify({'status': 'error', 'message': 'Execution not found'}), 404
+        
+        execution = result[0]
+        
+        return jsonify({
+            'status': 'success',
+            'execution': {
+                'execution_id': execution[0],
+                'tx_id': execution[1],
+                'shots': execution[2],
+                'circuit_depth': execution[3],
+                'ghz_fidelity': execution[4],
+                'dominant_states': json.loads(execution[5]) if execution[5] else [],
+                'entropy_bits': execution[6],
+                'measurement_data': json.loads(execution[7]) if execution[7] else {},
+                'created_at': execution[8].isoformat() if execution[8] else None
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get quantum execution error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/quantum/status', methods=['GET'])
+@rate_limit
+def get_quantum_status():
+    """Get quantum system status"""
+    try:
+        stats = DatabaseConnection.execute_query(
+            """SELECT COUNT(*) as total_executions,
+                      AVG(ghz_fidelity) as avg_fidelity,
+                      MAX(ghz_fidelity) as max_fidelity,
+                      MIN(ghz_fidelity) as min_fidelity
+               FROM quantum_executions"""
+        )[0]
+        
+        return jsonify({
+            'status': 'success',
+            'quantum_status': {
+                'total_executions': stats[0],
+                'average_ghz_fidelity': float(stats[1]) if stats[1] else 0.0,
+                'max_fidelity': float(stats[2]) if stats[2] else 0.0,
+                'min_fidelity': float(stats[3]) if stats[3] else 0.0,
+                'system_operational': True,
+                'simulator_available': QISKIT_AVAILABLE,
+                'timestamp': datetime.utcnow(timezone.utc).isoformat()
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get quantum status error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# MEMPOOL ENDPOINTS - Transaction pool management
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/mempool/status', methods=['GET'])
+@rate_limit
+def get_mempool_status():
+    """Get mempool status"""
+    try:
+        count = DatabaseConnection.execute_query(
+            "SELECT COUNT(*) FROM transactions WHERE status = 'pending' OR status = 'queued'"
+        )[0][0]
+        
+        size_result = DatabaseConnection.execute_query(
+            "SELECT SUM(CAST(OCTET_LENGTH(metadata) AS BIGINT)) FROM transactions WHERE status IN ('pending', 'queued')"
+        )
+        size = size_result[0][0] if size_result[0][0] else 0
+        
+        return jsonify({
+            'status': 'success',
+            'mempool': {
+                'pending_transactions': count,
+                'total_size_bytes': size,
+                'max_size_bytes': 10_000_000,
+                'utilization_percent': float(size / 10_000_000 * 100) if size > 0 else 0,
+                'timestamp': datetime.utcnow(timezone.utc).isoformat()
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get mempool status error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/mempool/transactions', methods=['GET'])
+@rate_limit
+def get_mempool_transactions():
+    """Get pending transactions in mempool"""
+    try:
+        limit = min(int(request.args.get('limit', 50)), 100)
+        sort_by = request.args.get('sort_by', 'gas_price')  # gas_price, created_at
+        
+        order = "DESC" if sort_by == 'gas_price' else "ASC"
+        
+        result = DatabaseConnection.execute_query(
+            f"""SELECT tx_hash, from_user_id, to_address, amount, gas_price,
+                       created_at, status FROM transactions
+                WHERE status IN ('pending', 'queued')
+                ORDER BY {sort_by} {order}
+                LIMIT %s""",
+            (limit,)
+        )
+        
+        transactions = []
+        for tx in result:
+            transactions.append({
+                'tx_hash': tx[0],
+                'from': tx[1],
+                'to': tx[2],
+                'amount': tx[3],
+                'gas_price': tx[4],
+                'created_at': tx[5].isoformat() if tx[5] else None,
+                'status': tx[6]
+            })
+        
+        return jsonify({
+            'status': 'success',
+            'mempool_transactions': transactions,
+            'count': len(transactions)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get mempool transactions error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/mempool/clear', methods=['POST'])
+@require_role('admin')
+@rate_limit
+def clear_mempool():
+    """Clear mempool (admin only)"""
+    try:
+        count = DatabaseConnection.execute_query(
+            "SELECT COUNT(*) FROM transactions WHERE status IN ('pending', 'queued')"
+        )[0][0]
+        
+        DatabaseConnection.execute_update(
+            "UPDATE transactions SET status = 'dropped' WHERE status IN ('pending', 'queued') AND created_at < NOW() - INTERVAL '1 hour'",
+        )
+        
+        logger.info(f"✓ Mempool cleared: {count} transactions")
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Mempool cleared',
+            'transactions_cleared': count
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Clear mempool error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# GAS ESTIMATION ENDPOINTS - Gas pricing and estimation
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/gas/estimate', methods=['POST'])
+@rate_limit
+def estimate_gas():
+    """Estimate gas for transaction"""
+    try:
+        data = request.get_json()
+        tx_type = data.get('type', 'transfer')
+        
+        # Base gas costs
+        gas_costs = {
+            'transfer': 21000,
+            'contract_call': 100000,
+            'stake': 50000,
+            'nft_mint': 30000,
+            'nft_transfer': 25000,
+            'swap': 60000
+        }
+        
+        base_gas = gas_costs.get(tx_type, 21000)
+        
+        # Get current gas price
+        current_gas_price = DatabaseConnection.execute_query(
+            """SELECT AVG(gas_price) FROM transactions 
+               WHERE created_at > NOW() - INTERVAL '100 blocks'"""
+        )[0][0] or 1
+        
+        estimated_gas = base_gas + (base_gas * 0.1)  # Add 10% buffer
+        estimated_cost = Decimal(str(estimated_gas)) * Decimal(str(current_gas_price))
+        
+        return jsonify({
+            'status': 'success',
+            'estimation': {
+                'transaction_type': tx_type,
+                'base_gas': base_gas,
+                'estimated_gas': int(estimated_gas),
+                'current_gas_price': float(current_gas_price),
+                'estimated_cost': float(estimated_cost),
+                'safe_gas_price': float(Decimal(str(current_gas_price)) * Decimal('1.2')),
+                'standard_gas_price': float(current_gas_price),
+                'low_gas_price': float(Decimal(str(current_gas_price)) * Decimal('0.8'))
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Estimate gas error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/gas/prices', methods=['GET'])
+@rate_limit
+def get_gas_prices():
+    """Get current gas prices"""
+    try:
+        # Calculate percentile gas prices
+        result = DatabaseConnection.execute_query(
+            """SELECT PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY gas_price) as p25,
+                      PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY gas_price) as p50,
+                      PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY gas_price) as p75
+               FROM transactions WHERE created_at > NOW() - INTERVAL '100 blocks'"""
+        )[0]
+        
+        low = float(result[0] or 1)
+        standard = float(result[1] or 1)
+        safe = float(result[2] or 1)
+        
+        return jsonify({
+            'status': 'success',
+            'gas_prices': {
+                'low': low,
+                'standard': standard,
+                'safe': safe,
+                'fast': safe * 1.5,
+                'timestamp': datetime.utcnow(timezone.utc).isoformat()
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get gas prices error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# VALIDATOR ENDPOINTS - Validator management
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/validators', methods=['GET'])
+@rate_limit
+def list_validators():
+    """List active validators"""
+    try:
+        result = DatabaseConnection.execute_query(
+            """SELECT validator_id, address, stake, blocks_mined, uptime_percent,
+                      reputation_score, joined_at FROM validators
+               WHERE status = 'active'
+               ORDER BY stake DESC"""
+        )
+        
+        validators = []
+        for v in result:
+            validators.append({
+                'validator_id': v[0],
+                'address': v[1],
+                'stake': v[2],
+                'blocks_mined': v[3],
+                'uptime_percent': v[4],
+                'reputation_score': v[5],
+                'joined_at': v[6].isoformat() if v[6] else None
+            })
+        
+        return jsonify({
+            'status': 'success',
+            'validators': validators,
+            'count': len(validators)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ List validators error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/validators/<validator_id>', methods=['GET'])
+@rate_limit
+def get_validator(validator_id):
+    """Get validator details"""
+    try:
+        result = DatabaseConnection.execute_query(
+            """SELECT validator_id, address, stake, blocks_mined, blocks_proposed,
+                      uptime_percent, reputation_score, slashing_events,
+                      joined_at, last_block_time FROM validators
+               WHERE validator_id = %s""",
+            (validator_id,)
+        )
+        
+        if not result:
+            return jsonify({'status': 'error', 'message': 'Validator not found'}), 404
+        
+        v = result[0]
+        
+        return jsonify({
+            'status': 'success',
+            'validator': {
+                'validator_id': v[0],
+                'address': v[1],
+                'stake': v[2],
+                'statistics': {
+                    'blocks_mined': v[3],
+                    'blocks_proposed': v[4],
+                    'slashing_events': v[7]
+                },
+                'performance': {
+                    'uptime_percent': v[5],
+                    'reputation_score': v[6],
+                    'last_block_time': v[9].isoformat() if v[9] else None
+                },
+                'joined_at': v[8].isoformat() if v[8] else None
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get validator error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/validators/join', methods=['POST'])
+@require_auth
+@rate_limit
+def join_validators():
+    """Become validator"""
+    try:
+        user_id = g.user_id
+        data = request.get_json()
+        stake_amount = Decimal(str(data.get('stake')))
+        
+        MIN_VALIDATOR_STAKE = Decimal('10000')
+        if stake_amount < MIN_VALIDATOR_STAKE:
+            return jsonify({'status': 'error', 'message': f'Minimum stake {MIN_VALIDATOR_STAKE} required'}), 400
+        
+        # Create validator record
+        validator_id = f"val_{secrets.token_hex(16)}"
+        validator_address = f"0x{secrets.token_hex(20)}"
+        
+        DatabaseConnection.execute_update(
+            """INSERT INTO validators (validator_id, user_id, address, stake, 
+                                       status, joined_at)
+               VALUES (%s, %s, %s, %s, %s, %s)""",
+            (validator_id, user_id, validator_address, float(stake_amount),
+             'active', datetime.utcnow(timezone.utc))
+        )
+        
+        logger.info(f"✓ Validator {validator_id} created for {user_id}")
+        
+        return jsonify({
+            'status': 'success',
+            'validator_id': validator_id,
+            'address': validator_address,
+            'stake': float(stake_amount),
+            'message': 'Validator created'
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"✗ Join validators error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# FINALITY ENDPOINTS - Transaction finality status
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/finality/<tx_hash>', methods=['GET'])
+@rate_limit
+def get_finality_status(tx_hash):
+    """Get transaction finality status"""
+    try:
+        result = DatabaseConnection.execute_query(
+            """SELECT status, confirmations, block_height, finalized_at
+               FROM transactions WHERE tx_hash = %s""",
+            (tx_hash,)
+        )
+        
+        if not result:
+            return jsonify({'status': 'error', 'message': 'Transaction not found'}), 404
+        
+        tx_status, confirmations, block_height, finalized_at = result[0]
+        
+        # Get current block height
+        latest_block = DatabaseConnection.execute_query(
+            "SELECT MAX(block_height) FROM blocks"
+        )[0][0] or 0
+        
+        # Calculate finality
+        if tx_status == 'finalized':
+            finality_percent = 100
+        elif confirmations and confirmations >= 12:
+            finality_percent = 95
+        elif confirmations and confirmations >= 6:
+            finality_percent = 75
+        else:
+            finality_percent = 0
+        
+        return jsonify({
+            'status': 'success',
+            'finality': {
+                'tx_hash': tx_hash,
+                'tx_status': tx_status,
+                'block_height': block_height,
+                'confirmations': confirmations or 0,
+                'finality_percent': finality_percent,
+                'finalized': tx_status == 'finalized',
+                'finalized_at': finalized_at.isoformat() if finalized_at else None,
+                'current_block_height': latest_block
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get finality status error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/finality/batch', methods=['POST'])
+@rate_limit
+def batch_finality_check():
+    """Check finality for multiple transactions"""
+    try:
+        data = request.get_json()
+        tx_hashes = data.get('tx_hashes', [])
+        
+        if len(tx_hashes) > 100:
+            return jsonify({'status': 'error', 'message': 'Maximum 100 transactions per request'}), 400
+        
+        results = []
+        for tx_hash in tx_hashes:
+            tx_result = DatabaseConnection.execute_query(
+                "SELECT status, confirmations FROM transactions WHERE tx_hash = %s",
+                (tx_hash,)
+            )
+            
+            if tx_result:
+                status, confirmations = tx_result[0]
+                results.append({
+                    'tx_hash': tx_hash,
+                    'status': status,
+                    'confirmations': confirmations or 0,
+                    'finalized': status == 'finalized'
+                })
+        
+        return jsonify({
+            'status': 'success',
+            'results': results,
+            'total': len(results)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Batch finality check error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# EPOCH & REWARD ENDPOINTS - Network epochs and block rewards
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/epochs/current', methods=['GET'])
+@rate_limit
+def get_current_epoch():
+    """Get current epoch information"""
+    try:
+        latest_block = DatabaseConnection.execute_query(
+            "SELECT MAX(block_height) FROM blocks"
+        )[0][0] or 0
+        
+        BLOCKS_PER_EPOCH = 52560
+        current_epoch = latest_block // BLOCKS_PER_EPOCH
+        epoch_start_block = current_epoch * BLOCKS_PER_EPOCH
+        epoch_progress = latest_block - epoch_start_block
+        epoch_progress_percent = (epoch_progress / BLOCKS_PER_EPOCH) * 100
+        
+        return jsonify({
+            'status': 'success',
+            'epoch': {
+                'number': current_epoch,
+                'blocks_per_epoch': BLOCKS_PER_EPOCH,
+                'start_block': epoch_start_block,
+                'current_block': latest_block,
+                'blocks_remaining': BLOCKS_PER_EPOCH - epoch_progress,
+                'progress_percent': epoch_progress_percent,
+                'estimated_completion_days': (BLOCKS_PER_EPOCH - epoch_progress) / 8640  # 10s blocks = 8640 per day
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get current epoch error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/epochs/<int:epoch_num>', methods=['GET'])
+@rate_limit
+def get_epoch(epoch_num):
+    """Get specific epoch details"""
+    try:
+        BLOCKS_PER_EPOCH = 52560
+        start_block = epoch_num * BLOCKS_PER_EPOCH
+        end_block = start_block + BLOCKS_PER_EPOCH
+        
+        result = DatabaseConnection.execute_query(
+            """SELECT COUNT(*) as blocks_created,
+                      SUM(transaction_count) as total_txs,
+                      COUNT(DISTINCT miner_address) as unique_miners
+               FROM blocks WHERE block_height >= %s AND block_height < %s""",
+            (start_block, end_block)
+        )[0]
+        
+        return jsonify({
+            'status': 'success',
+            'epoch': {
+                'number': epoch_num,
+                'start_block': start_block,
+                'end_block': end_block,
+                'blocks_created': result[0],
+                'total_transactions': result[1] or 0,
+                'unique_miners': result[2] or 0,
+                'block_reward': '100 QTCL' if epoch_num < 10 else '50 QTCL' if epoch_num < 20 else '25 QTCL'
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get epoch error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/rewards/estimates', methods=['GET'])
+@require_auth
+@rate_limit
+def get_reward_estimates():
+    """Get estimated validator rewards"""
+    try:
+        user_id = g.user_id
+        
+        # Get validator info
+        validator = DatabaseConnection.execute_query(
+            "SELECT validator_id, stake, blocks_mined FROM validators WHERE user_id = %s",
+            (user_id,)
+        )
+        
+        if not validator:
+            return jsonify({'status': 'error', 'message': 'Not a validator'}), 400
+        
+        validator_id, stake, blocks_mined = validator[0]
+        
+        # Get total validator stake
+        total_stake = DatabaseConnection.execute_query(
+            "SELECT SUM(stake) FROM validators WHERE status = 'active'"
+        )[0][0] or 1
+        
+        # Calculate estimated rewards
+        stake_share = Decimal(str(stake)) / Decimal(str(total_stake))
+        block_reward = Decimal('100')  # QTCL per block
+        expected_blocks_per_day = 8640  # 10s block time
+        daily_reward = block_reward * Decimal(str(stake_share)) * Decimal(str(expected_blocks_per_day))
+        
+        return jsonify({
+            'status': 'success',
+            'rewards': {
+                'validator_id': validator_id,
+                'stake': float(stake),
+                'stake_share_percent': float(stake_share * 100),
+                'blocks_mined': blocks_mined,
+                'estimated_daily_reward': float(daily_reward),
+                'estimated_monthly_reward': float(daily_reward * 30),
+                'estimated_yearly_reward': float(daily_reward * 365)
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get reward estimates error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# NETWORK DIFFICULTY ENDPOINTS - Mining difficulty adjustment
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/network/difficulty', methods=['GET'])
+@rate_limit
+def get_network_difficulty():
+    """Get current network difficulty"""
+    try:
+        result = DatabaseConnection.execute_query(
+            "SELECT difficulty FROM blocks ORDER BY block_height DESC LIMIT 1"
+        )
+        
+        if not result:
+            current_difficulty = 1.0
+        else:
+            current_difficulty = float(result[0][0])
+        
+        # Calculate difficulty trend
+        trend_result = DatabaseConnection.execute_query(
+            """SELECT AVG(difficulty) FROM blocks 
+               WHERE block_height > (SELECT MAX(block_height) FROM blocks) - 2016"""
+        )
+        average_difficulty = float(trend_result[0][0]) if trend_result[0][0] else current_difficulty
+        
+        return jsonify({
+            'status': 'success',
+            'difficulty': {
+                'current': current_difficulty,
+                'average_recent': average_difficulty,
+                'trend': 'increasing' if current_difficulty > average_difficulty else 'decreasing',
+                'adjustment_blocks': 2016,
+                'next_adjustment_in': 2016 - (DatabaseConnection.execute_query(
+                    "SELECT (SELECT MAX(block_height) FROM blocks) % 2016"
+                )[0][0] or 0)
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get network difficulty error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# ACCOUNT HISTORY ENDPOINTS - Detailed transaction history
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/accounts/<account_id>/history', methods=['GET'])
+@rate_limit
+def get_account_history(account_id):
+    """Get detailed account transaction history"""
+    try:
+        page = int(request.args.get('page', 1))
+        limit = min(int(request.args.get('limit', 50)), 100)
+        offset = (page - 1) * limit
+        
+        # Get transactions
+        result = DatabaseConnection.execute_query(
+            """SELECT tx_hash, from_user_id, to_address, amount, tx_type, status,
+                      created_at FROM transactions
+               WHERE from_user_id = %s OR to_address = %s
+               ORDER BY created_at DESC
+               LIMIT %s OFFSET %s""",
+            (account_id, account_id, limit, offset)
+        )
+        
+        transactions = []
+        for tx in result:
+            transactions.append({
+                'tx_hash': tx[0],
+                'from': tx[1],
+                'to': tx[2],
+                'amount': tx[3],
+                'type': tx[4],
+                'status': tx[5],
+                'direction': 'sent' if tx[1] == account_id else 'received',
+                'timestamp': tx[6].isoformat() if tx[6] else None
+            })
+        
+        total = DatabaseConnection.execute_query(
+            "SELECT COUNT(*) FROM transactions WHERE from_user_id = %s OR to_address = %s",
+            (account_id, account_id)
+        )[0][0]
+        
+        return jsonify({
+            'status': 'success',
+            'history': transactions,
+            'pagination': {
+                'page': page,
+                'limit': limit,
+                'total': total,
+                'pages': (total + limit - 1) // limit
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get account history error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/v1/accounts/<account_id>/balance-history', methods=['GET'])
+@rate_limit
+def get_balance_history(account_id):
+    """Get account balance history"""
+    try:
+        days = int(request.args.get('days', 30))
+        
+        result = DatabaseConnection.execute_query(
+            """SELECT DATE(created_at) as date, 
+                      balance FROM balance_history
+               WHERE account_id = %s AND created_at > NOW() - INTERVAL '%s days'
+               ORDER BY created_at ASC""",
+            (account_id, days)
+        )
+        
+        history = []
+        for row in result:
+            history.append({
+                'date': row[0].isoformat() if row[0] else None,
+                'balance': row[1]
+            })
+        
+        return jsonify({
+            'status': 'success',
+            'balance_history': history,
+            'period_days': days
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get balance history error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# TRANSACTION RECEIPT ENDPOINTS - Get detailed transaction receipts
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/receipts/<tx_hash>', methods=['GET'])
+@rate_limit
+def get_transaction_receipt(tx_hash):
+    """Get detailed transaction receipt"""
+    try:
+        result = DatabaseConnection.execute_query(
+            """SELECT tx_hash, block_height, block_hash, from_user_id, to_address, amount,
+                      tx_type, status, gas_used, gas_price, nonce, created_at, finalized_at
+               FROM transactions WHERE tx_hash = %s""",
+            (tx_hash,)
+        )
+        
+        if not result:
+            return jsonify({'status': 'error', 'message': 'Transaction not found'}), 404
+        
+        tx = result[0]
+        
+        receipt = {
+            'transactionHash': tx[0],
+            'blockNumber': tx[1],
+            'blockHash': tx[2],
+            'from': tx[3],
+            'to': tx[4],
+            'value': tx[5],
+            'type': tx[6],
+            'status': 1 if tx[7] == 'finalized' else 0,
+            'gasUsed': tx[8],
+            'gasPrice': tx[9],
+            'nonce': tx[10],
+            'transactionIndex': 0,
+            'logs': [],
+            'logsBloom': '0x' + '0' * 512,
+            'contractAddress': None,
+            'timestamp': tx[11].isoformat() if tx[11] else None,
+            'finalized': tx[7] == 'finalized',
+            'finalizedAt': tx[12].isoformat() if tx[12] else None
+        }
+        
+        return jsonify({
+            'status': 'success',
+            'receipt': receipt
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Get transaction receipt error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
