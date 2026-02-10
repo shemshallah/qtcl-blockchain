@@ -1,33 +1,36 @@
 # ═══════════════════════════════════════════════════════════════════════════════
-# QTCL MINIMAL REQUIREMENTS FOR PYTHON 3.9
-# FIXED VERSION CONFLICTS - ALL DEPENDENCIES COMPATIBLE
+# QTCL REQUIREMENTS - PYTHON 3.11.9 COMPATIBLE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Flask Web Framework (REQUIRED)
+# Flask Web Framework
 Flask==2.2.5
 
-# Database (REQUIRED)
+# Database
 psycopg2-binary==2.9.9
 
-# Numerical Computing (REQUIRED for quantum)
+# Numerical Computing
 numpy==1.23.5
 
-# Quantum Computing (REQUIRED) - FIXED VERSIONS
+# Quantum Computing
 qiskit==0.39.5
 qiskit-aer==0.11.2
 
-# Security (REQUIRED)
+# Security
 cryptography==38.0.4
 PyJWT==2.6.0
 bcrypt==4.2.0
 
-# HTTP Requests (REQUIRED)
+# HTTP Requests
 requests==2.28.2
 
-# Environment Variables (REQUIRED)
+# Environment Variables
 python-dotenv==0.21.0
 
-# CORS Support (REQUIRED for API)
+# CORS Support
 Flask-CORS==3.0.10
-gunicorn==21.2.0
+
+# WebSocket Support
 flask-socketio==5.3.6
+
+# WSGI Server
+gunicorn==21.2.0
