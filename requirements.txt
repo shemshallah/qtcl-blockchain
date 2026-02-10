@@ -34,3 +34,9 @@ flask-socketio==5.3.6
 
 # WSGI Server
 gunicorn==21.2.0
+
+# AIOHTTP
+aiohttp==3.9.3
+
+#REDIS
+redis==5.0.1
