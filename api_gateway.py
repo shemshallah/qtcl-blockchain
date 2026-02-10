@@ -2414,7 +2414,7 @@ def send_step_2():
             }), 400
         
         # Update session for confirmation
-TransactionSessionManager.update_session_state(
+        TransactionSessionManager.update_session_state(
             session_id, 'sending_step_3',
             {
                 'amount': amount,
