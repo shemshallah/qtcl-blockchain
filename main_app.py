@@ -251,7 +251,7 @@ class DatabaseManager:
         """Create test admin user for testing (uses SUPABASE_PASSWORD as admin password)"""
         try:
             # Check if admin exists by email
-            result = self.execute_query("SELECT user_id FROM users WHERE email = %s", ('shemshallah@gmail.com,))
+            result = self.execute_query("SELECT user_id FROM users WHERE email = %s", ('shemshallah@gmail.com',))
             if result:
                 logger.info("[DB] Admin user already exists")
                 return True
