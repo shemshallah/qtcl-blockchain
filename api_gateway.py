@@ -7013,315 +7013,6 @@ def api_status():
         }), 503
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# USER & WALLET ENDPOINTS
-# ═══════════════════════════════════════════════════════════════════════════════════════
-
-@app.route('/api/user/profile', methods=['GET'])
-@require_auth
-def get_user_profile():
-    """Get authenticated user profile"""
-    try:
-        user_id = g.get('user_id')
-        if not user_id:
-            return jsonify({'error': 'Unauthorized'}), 401
-        
-        result = db.execute_query(
-            "SELECT user_id, email, name, role, balance, created_at FROM users WHERE user_id = %s",
-            (user_id,)
-        )
-        
-        if result:
-            user = result[0]
-            return jsonify({
-                'status': 'success',
-                'user': {
-                    'user_id': user.get('user_id'),
-                    'email': user.get('email'),
-                    'name': user.get('name'),
-                    'role': user.get('role'),
-                    'balance': float(user.get('balance', 0)),
-                    'created_at': user.get('created_at').isoformat() if user.get('created_at') else None
-                }
-            }), 200
-        else:
-            return jsonify({'error': 'User not found'}), 404
-    except Exception as e:
-        logger.error(f"Profile fetch error: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/wallet/balance', methods=['GET'])
-@require_auth
-def get_wallet_balance():
-    """Get wallet balance for authenticated user"""
-    try:
-        user_id = g.get('user_id')
-        if not user_id:
-            return jsonify({'error': 'Unauthorized'}), 401
-        
-        result = db.execute_query(
-            "SELECT balance FROM users WHERE user_id = %s",
-            (user_id,)
-        )
-        
-        if result:
-            balance = float(result[0].get('balance', 0))
-            return jsonify({
-                'status': 'success',
-                'balance': balance,
-                'address': f"0x{user_id[:40]}",
-                'currency': 'QTCL',
-                'updated_at': datetime.utcnow().isoformat()
-            }), 200
-        else:
-            return jsonify({'error': 'User not found'}), 404
-    except Exception as e:
-        logger.error(f"Balance fetch error: {e}")
-        return jsonify({'error': str(e)}), 500
-
-# ─────────────────────────────────────────────────────────────────────────────
-# MEMPOOL STATUS
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.route('/api/mempool', methods=['GET'])
-def get_mempool_status():
-    """Get mempool status and pending transactions"""
-    try:
-        result = db.execute_query(
-            """
-            SELECT 
-                COUNT(*) as pending_count,
-                AVG(CAST(gas_price AS FLOAT)) as avg_gas_price,
-                MAX(CAST(gas_price AS FLOAT)) as max_gas_price
-            FROM transactions 
-            WHERE status = 'pending'
-            """
-        )
-        
-        pending_count = 0
-        avg_gas = 0
-        max_gas = 0
-        
-        if result:
-            pending_count = result[0].get('pending_count', 0) or 0
-            avg_gas = float(result[0].get('avg_gas_price', 0) or 0)
-            max_gas = float(result[0].get('max_gas_price', 0) or 0)
-        
-        return jsonify({
-            'status': 'success',
-            'mempool': {
-                'pending_transactions': pending_count,
-                'average_gas_price': avg_gas,
-                'max_gas_price': max_gas,
-                'capacity': 10000,
-                'utilization': min(100, (pending_count / 10000) * 100),
-                'timestamp': datetime.utcnow().isoformat()
-            }
-        }), 200
-    except Exception as e:
-        logger.error(f"Mempool status error: {e}")
-        return jsonify({'error': str(e)}), 500
-
-# ─────────────────────────────────────────────────────────────────────────────
-# VALIDATORS
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.route('/api/validators', methods=['GET'])
-def get_validators():
-    """Get list of active validators"""
-    try:
-        limit = request.args.get('limit', 10, type=int)
-        offset = request.args.get('offset', 0, type=int)
-        
-        result = db.execute_query(
-            """
-            SELECT 
-                validator_id, 
-                address, 
-                stake, 
-                is_active,
-                created_at
-            FROM validators 
-            WHERE is_active = TRUE
-            ORDER BY stake DESC
-            LIMIT %s OFFSET %s
-            """,
-            (limit, offset)
-        )
-        
-        validators = []
-        if result:
-            for v in result:
-                validators.append({
-                    'validator_id': v.get('validator_id'),
-                    'address': v.get('address'),
-                    'stake': float(v.get('stake', 0)),
-                    'is_active': v.get('is_active'),
-                    'joined_at': v.get('created_at').isoformat() if v.get('created_at') else None
-                })
-        
-        return jsonify({
-            'status': 'success',
-            'validators': validators,
-            'total': len(validators),
-            'limit': limit,
-            'offset': offset
-        }), 200
-    except Exception as e:
-        logger.error(f"Validators fetch error: {e}")
-        return jsonify({'error': str(e)}), 500
-
-# ─────────────────────────────────────────────────────────────────────────────
-# BLOCKS
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.route('/api/blocks', methods=['GET'])
-def get_blocks():
-    """Get recent blocks"""
-    try:
-        limit = request.args.get('limit', 10, type=int)
-        offset = request.args.get('offset', 0, type=int)
-        
-        result = db.execute_query(
-            """
-            SELECT 
-                block_id,
-                block_height,
-                block_hash,
-                parent_hash,
-                timestamp,
-                transaction_count,
-                validator_id
-            FROM blocks
-            ORDER BY block_height DESC
-            LIMIT %s OFFSET %s
-            """,
-            (limit, offset)
-        )
-        
-        blocks = []
-        if result:
-            for b in result:
-                blocks.append({
-                    'block_id': b.get('block_id'),
-                    'height': b.get('block_height'),
-                    'hash': b.get('block_hash'),
-                    'parent_hash': b.get('parent_hash'),
-                    'timestamp': b.get('timestamp').isoformat() if b.get('timestamp') else None,
-                    'transactions': b.get('transaction_count', 0),
-                    'validator': b.get('validator_id')
-                })
-        
-        return jsonify({
-            'status': 'success',
-            'blocks': blocks,
-            'total': len(blocks),
-            'limit': limit,
-            'offset': offset
-        }), 200
-    except Exception as e:
-        logger.error(f"Blocks fetch error: {e}")
-        return jsonify({'error': str(e)}), 500
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TRANSACTIONS
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.route('/api/transactions', methods=['GET'])
-def get_transactions():
-    """Get recent transactions"""
-    try:
-        limit = request.args.get('limit', 10, type=int)
-        offset = request.args.get('offset', 0, type=int)
-        status = request.args.get('status', None)
-        
-        query = """
-            SELECT 
-                tx_hash,
-                from_address,
-                to_address,
-                amount,
-                status,
-                created_at,
-                gas_used,
-                gas_price
-            FROM transactions
-        """
-        params = []
-        
-        if status:
-            query += " WHERE status = %s"
-            params.append(status)
-        
-        query += " ORDER BY created_at DESC LIMIT %s OFFSET %s"
-        params.extend([limit, offset])
-        
-        result = db.execute_query(query, tuple(params))
-        
-        transactions = []
-        if result:
-            for tx in result:
-                transactions.append({
-                    'hash': tx.get('tx_hash'),
-                    'from': tx.get('from_address'),
-                    'to': tx.get('to_address'),
-                    'amount': float(tx.get('amount', 0)),
-                    'status': tx.get('status'),
-                    'timestamp': tx.get('created_at').isoformat() if tx.get('created_at') else None,
-                    'gas_used': float(tx.get('gas_used', 0)),
-                    'gas_price': float(tx.get('gas_price', 0))
-                })
-        
-        return jsonify({
-            'status': 'success',
-            'transactions': transactions,
-            'total': len(transactions),
-            'limit': limit,
-            'offset': offset
-        }), 200
-    except Exception as e:
-        logger.error(f"Transactions fetch error: {e}")
-        return jsonify({'error': str(e)}), 500
-
-# ─────────────────────────────────────────────────────────────────────────────
-# NETWORK STATS
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.route('/api/network/stats', methods=['GET'])
-def get_network_stats():
-    """Get network statistics"""
-    try:
-        user_count_result = db.execute_query("SELECT COUNT(*) as count FROM users")
-        tx_count_result = db.execute_query("SELECT COUNT(*) as count FROM transactions")
-        block_count_result = db.execute_query("SELECT COUNT(*) as count FROM blocks")
-        validator_count_result = db.execute_query(
-            "SELECT COUNT(*) as count FROM validators WHERE is_active = TRUE"
-        )
-        
-        user_count = user_count_result[0].get('count', 0) if user_count_result else 0
-        tx_count = tx_count_result[0].get('count', 0) if tx_count_result else 0
-        block_count = block_count_result[0].get('count', 0) if block_count_result else 0
-        validator_count = validator_count_result[0].get('count', 0) if validator_count_result else 0
-        
-        return jsonify({
-            'status': 'success',
-            'network': {
-                'name': 'QTCL',
-                'chain_id': 1,
-                'version': '3.0.0',
-                'users': user_count,
-                'transactions': tx_count,
-                'blocks': block_count,
-                'validators': validator_count,
-                'consensus': 'quantum-poa',
-                'tps': 10000,
-                'timestamp': datetime.utcnow().isoformat()
-            }
-        }), 200
-    except Exception as e:
-        logger.error(f"Network stats error: {e}")
-        return jsonify({'error': str(e)}), 500
-
-# ═══════════════════════════════════════════════════════════════════════════════════════
 # AUTHENTICATION ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
@@ -10149,6 +9840,228 @@ def handle_exception(error):
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # MAIN EXECUTION & STARTUP
 # ═══════════════════════════════════════════════════════════════════════════════════════
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# NEW ENDPOINTS — Added without modifying existing code
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/user/profile', methods=['GET'])
+@require_auth
+def user_profile_endpoint():
+    """Get authenticated user profile"""
+    try:
+        user_id = g.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'Unauthorized'}), 401
+        
+        result = db.execute_query(
+            "SELECT user_id, email, name, role, balance, created_at FROM users WHERE user_id = %s",
+            (user_id,)
+        )
+        
+        if result:
+            user = result[0]
+            return jsonify({
+                'status': 'success',
+                'user': {
+                    'user_id': user.get('user_id'),
+                    'email': user.get('email'),
+                    'name': user.get('name'),
+                    'role': user.get('role'),
+                    'balance': float(user.get('balance', 0)),
+                    'created_at': user.get('created_at').isoformat() if user.get('created_at') else None
+                }
+            }), 200
+        return jsonify({'error': 'User not found'}), 404
+    except Exception as e:
+        logger.error(f"Profile error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/wallet/balance', methods=['GET'])
+@require_auth
+def wallet_balance_endpoint():
+    """Get wallet balance"""
+    try:
+        user_id = g.get('user_id')
+        if not user_id:
+            return jsonify({'error': 'Unauthorized'}), 401
+        
+        result = db.execute_query(
+            "SELECT balance FROM users WHERE user_id = %s",
+            (user_id,)
+        )
+        
+        if result:
+            balance = float(result[0].get('balance', 0))
+            return jsonify({
+                'status': 'success',
+                'balance': balance,
+                'address': f"0x{user_id[:40]}",
+                'currency': 'QTCL',
+                'updated_at': datetime.utcnow().isoformat()
+            }), 200
+        return jsonify({'error': 'User not found'}), 404
+    except Exception as e:
+        logger.error(f"Balance error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/mempool', methods=['GET'])
+def mempool_endpoint():
+    """Get mempool status"""
+    try:
+        result = db.execute_query(
+            "SELECT COUNT(*) as pending_count, AVG(CAST(gas_price AS FLOAT)) as avg_gas_price FROM transactions WHERE status = 'pending'"
+        )
+        
+        pending_count = 0
+        avg_gas = 0
+        if result:
+            pending_count = result[0].get('pending_count', 0) or 0
+            avg_gas = float(result[0].get('avg_gas_price', 0) or 0)
+        
+        return jsonify({
+            'status': 'success',
+            'mempool': {
+                'pending_transactions': pending_count,
+                'average_gas_price': avg_gas,
+                'capacity': 10000,
+                'utilization': min(100, (pending_count / 10000) * 100),
+                'timestamp': datetime.utcnow().isoformat()
+            }
+        }), 200
+    except Exception as e:
+        logger.error(f"Mempool error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/validators', methods=['GET'])
+def validators_endpoint():
+    """Get validators"""
+    try:
+        limit = request.args.get('limit', 10, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        
+        result = db.execute_query(
+            "SELECT validator_id, address, stake, is_active, created_at FROM validators WHERE is_active = TRUE ORDER BY stake DESC LIMIT %s OFFSET %s",
+            (limit, offset)
+        )
+        
+        validators = []
+        if result:
+            for v in result:
+                validators.append({
+                    'validator_id': v.get('validator_id'),
+                    'address': v.get('address'),
+                    'stake': float(v.get('stake', 0)),
+                    'is_active': v.get('is_active'),
+                    'joined_at': v.get('created_at').isoformat() if v.get('created_at') else None
+                })
+        
+        return jsonify({
+            'status': 'success',
+            'validators': validators,
+            'total': len(validators)
+        }), 200
+    except Exception as e:
+        logger.error(f"Validators error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/blocks', methods=['GET'])
+def blocks_endpoint():
+    """Get blocks"""
+    try:
+        limit = request.args.get('limit', 10, type=int)
+        
+        result = db.execute_query(
+            "SELECT block_id, block_height, block_hash, timestamp, transaction_count FROM blocks ORDER BY block_height DESC LIMIT %s",
+            (limit,)
+        )
+        
+        blocks = []
+        if result:
+            for b in result:
+                blocks.append({
+                    'block_id': b.get('block_id'),
+                    'height': b.get('block_height'),
+                    'hash': b.get('block_hash'),
+                    'timestamp': b.get('timestamp').isoformat() if b.get('timestamp') else None,
+                    'transactions': b.get('transaction_count', 0)
+                })
+        
+        return jsonify({
+            'status': 'success',
+            'blocks': blocks,
+            'total': len(blocks)
+        }), 200
+    except Exception as e:
+        logger.error(f"Blocks error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/transactions', methods=['GET'])
+def transactions_endpoint():
+    """Get transactions"""
+    try:
+        limit = request.args.get('limit', 10, type=int)
+        status = request.args.get('status', None)
+        
+        query = "SELECT tx_hash, from_address, to_address, amount, status, created_at FROM transactions"
+        params = []
+        
+        if status:
+            query += " WHERE status = %s"
+            params.append(status)
+        
+        query += " ORDER BY created_at DESC LIMIT %s"
+        params.append(limit)
+        
+        result = db.execute_query(query, tuple(params))
+        
+        transactions = []
+        if result:
+            for tx in result:
+                transactions.append({
+                    'hash': tx.get('tx_hash'),
+                    'from': tx.get('from_address'),
+                    'to': tx.get('to_address'),
+                    'amount': float(tx.get('amount', 0)),
+                    'status': tx.get('status'),
+                    'timestamp': tx.get('created_at').isoformat() if tx.get('created_at') else None
+                })
+        
+        return jsonify({
+            'status': 'success',
+            'transactions': transactions,
+            'total': len(transactions)
+        }), 200
+    except Exception as e:
+        logger.error(f"Transactions error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/network/stats', methods=['GET'])
+def network_stats_endpoint():
+    """Get network stats"""
+    try:
+        user_result = db.execute_query("SELECT COUNT(*) as count FROM users")
+        tx_result = db.execute_query("SELECT COUNT(*) as count FROM transactions")
+        block_result = db.execute_query("SELECT COUNT(*) as count FROM blocks")
+        validator_result = db.execute_query("SELECT COUNT(*) as count FROM validators WHERE is_active = TRUE")
+        
+        return jsonify({
+            'status': 'success',
+            'network': {
+                'name': 'QTCL',
+                'version': '3.0.0',
+                'users': user_result[0].get('count', 0) if user_result else 0,
+                'transactions': tx_result[0].get('count', 0) if tx_result else 0,
+                'blocks': block_result[0].get('count', 0) if block_result else 0,
+                'validators': validator_result[0].get('count', 0) if validator_result else 0,
+                'timestamp': datetime.utcnow().isoformat()
+            }
+        }), 200
+    except Exception as e:
+        logger.error(f"Stats error: {e}")
+        return jsonify({'error': str(e)}), 500
+
 
 if __name__ == '__main__':
     try:
