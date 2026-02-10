@@ -2615,7 +2615,7 @@ def get_pool_qubits():
         else:
             # Legacy behavior: get limited count
             count = request.args.get('count', default=7, type=int)
-            count = min(count, 100)  # Increased from 20 to 100
+            count = min(count, 106496)  # Increased from 20 to 100
             qubits = PseudoqubitManager.get_shared_pool_qubits(count)
         
         return jsonify({
@@ -2716,26 +2716,17 @@ def get_quantum_status():
     """Get quantum system status"""
     try:
         result = DatabaseConnection.execute(
-            """SELECT 
-                COUNT(*) as active_circuits,
-                AVG(CAST(entropy_score AS FLOAT)) as avg_entropy,
-                COUNT(DISTINCT validator_agreement) as validator_diversity,
-                COUNT(*) FILTER (WHERE status = 'finalized') as finalized_count,
-                COUNT(*) FILTER (WHERE status = 'processing') as processing_count
+            """SELECT COUNT(*) as active_circuits,
+                      AVG(CAST(entropy_score AS FLOAT)) as avg_entropy,
+                      COUNT(DISTINCT validator_agreement) as validator_diversity,
+                      COUNT(*) FILTER (WHERE status = 'finalized') as finalized_count,
+                      COUNT(*) FILTER (WHERE status = 'processing') as processing_count
                FROM transactions 
                WHERE created_at > NOW() - INTERVAL '5 minutes'"""
         )
-        
         status_data = result[0] if result else {}
         avg_entropy = float(status_data.get('avg_entropy') or 0)
-        
-        if avg_entropy > 2.5 and status_data.get('finalized_count', 0) > 0:
-            health = 'healthy'
-        elif avg_entropy > 2.0:
-            health = 'degraded'
-        else:
-            health = 'unhealthy'
-        
+        health = 'healthy' if avg_entropy > 2.5 else ('degraded' if avg_entropy > 2.0 else 'unhealthy')
         return jsonify({
             'status': 'success',
             'quantum_status': {
@@ -2745,12 +2736,7 @@ def get_quantum_status():
                 'finalized_transactions': int(status_data.get('finalized_count', 0)),
                 'processing_transactions': int(status_data.get('processing_count', 0)),
                 'health': health,
-                'timestamp': datetime.utcnow().isoformat(),
-                'diagnostics': {
-                    'superposition_quality': 'high' if avg_entropy > 2.8 else ('medium' if avg_entropy > 2.0 else 'low'),
-                    'validator_consensus': 'reached' if status_data.get('validator_diversity', 0) > 1 else 'single',
-                    'finality_progress': f"{status_data.get('finalized_count', 0)} of {status_data.get('active_circuits', 0)}"
-                }
+                'timestamp': datetime.utcnow().isoformat()
             }
         }), 200
     except Exception as e:
@@ -2759,7 +2745,7 @@ def get_quantum_status():
 
 
 @app.route('/api/quantum/entropy', methods=['GET'])
-def get_entropy_stats():
+def get_entropy_distribution():
     """Get entropy distribution statistics"""
     try:
         result = DatabaseConnection.execute(
@@ -2774,11 +2760,9 @@ def get_entropy_stats():
                WHERE entropy_score IS NOT NULL 
                AND created_at > NOW() - INTERVAL '24 hours'"""
         )
-        
         stats = result[0] if result else {}
         median = float(stats.get('median') or 0)
         std_dev = float(stats.get('std_dev') or 0)
-        
         return jsonify({
             'status': 'success',
             'entropy_distribution': {
@@ -2798,13 +2782,13 @@ def get_entropy_stats():
             }
         }), 200
     except Exception as e:
-        logger.error(f"[QUANTUM] Entropy stats error: {e}")
+        logger.error(f"[QUANTUM] Entropy error: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 @app.route('/api/quantum/circuit', methods=['GET'])
-def get_circuit_info():
-    """Get information about current quantum circuit"""
+def get_quantum_circuit_info():
+    """Get quantum circuit configuration"""
     try:
         return jsonify({
             'status': 'success',
@@ -2815,12 +2799,14 @@ def get_circuit_info():
                     'validator_qubits': 5,
                     'measurement_qubits': 1,
                     'user_qubit': 1,
-                    'target_qubit': 1
+                    'target_qubit': 1,
+                    'pseudoqubit_pool': 106496
                 },
                 'circuit_properties': {
                     'max_depth': 50,
                     'entanglement_type': 'Bell-state',
-                    'superposition_type': 'Hadamard-based'
+                    'superposition_type': 'Hadamard-based',
+                    'shots_per_tx': 1024
                 },
                 'quantum_advantages': {
                     'mev_resistant': True,
@@ -2832,10 +2818,12 @@ def get_circuit_info():
             }
         }), 200
     except Exception as e:
+        logger.error(f"[QUANTUM] Circuit error: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+
 @app.route('/api/quantum/circuit/status', methods=['GET'])
-def get_circuit_status():
+def get_quantum_circuit_status():
     """Get quantum circuit status and health"""
     try:
         result = DatabaseConnection.execute(
@@ -2848,17 +2836,9 @@ def get_circuit_status():
                FROM transactions 
                WHERE created_at > NOW() - INTERVAL '5 minutes'"""
         )
-        
         status_data = result[0] if result else {}
         avg_entropy = float(status_data.get('avg_entropy') or 0)
-        
-        if avg_entropy > 2.5 and status_data.get('finalized_count', 0) > 0:
-            health = 'healthy'
-        elif avg_entropy > 2.0:
-            health = 'degraded'
-        else:
-            health = 'unhealthy'
-        
+        health = 'healthy' if avg_entropy > 2.5 else ('degraded' if avg_entropy > 2.0 else 'unhealthy')
         return jsonify({
             'status': 'success',
             'circuit_status': {
@@ -2875,6 +2855,64 @@ def get_circuit_status():
         logger.error(f"[QUANTUM] Circuit status error: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
+
+@app.route('/api/quantum/metrics', methods=['GET'])
+def get_quantum_metrics():
+    """Get comprehensive quantum metrics"""
+    try:
+        qubit_stats = DatabaseConnection.execute(
+            """SELECT 
+                COUNT(*) as total_qubits,
+                COUNT(*) FILTER (WHERE is_available = TRUE) as available_qubits,
+                COUNT(*) FILTER (WHERE auth_user_id IS NOT NULL) as assigned_qubits,
+                AVG(CAST(fidelity AS FLOAT)) as avg_fidelity,
+                AVG(CAST(coherence AS FLOAT)) as avg_coherence,
+                AVG(CAST(purity AS FLOAT)) as avg_purity
+               FROM pseudoqubits"""
+        )
+        
+        tx_stats = DatabaseConnection.execute(
+            """SELECT 
+                COUNT(*) as total_txs,
+                COUNT(*) FILTER (WHERE status = 'finalized') as finalized_txs,
+                COUNT(*) FILTER (WHERE status = 'failed') as failed_txs,
+                AVG(CAST(entropy_score AS FLOAT)) as avg_entropy
+               FROM transactions"""
+        )
+        
+        qubit_data = qubit_stats[0] if qubit_stats else {}
+        tx_data = tx_stats[0] if tx_stats else {}
+        
+        total_qubits = int(qubit_data.get('total_qubits') or 1)
+        assigned_qubits = int(qubit_data.get('assigned_qubits') or 0)
+        total_txs = int(tx_data.get('total_txs') or 1)
+        finalized_txs = int(tx_data.get('finalized_txs') or 0)
+        
+        return jsonify({
+            'status': 'success',
+            'metrics': {
+                'pseudoqubits': {
+                    'total': total_qubits,
+                    'available': int(qubit_data.get('available_qubits') or 0),
+                    'assigned': assigned_qubits,
+                    'utilization_percent': round((assigned_qubits / total_qubits) * 100, 2),
+                    'avg_fidelity': round(float(qubit_data.get('avg_fidelity') or 0), 4),
+                    'avg_coherence': round(float(qubit_data.get('avg_coherence') or 0), 4),
+                    'avg_purity': round(float(qubit_data.get('avg_purity') or 0), 4)
+                },
+                'transactions': {
+                    'total': total_txs,
+                    'finalized': finalized_txs,
+                    'failed': int(tx_data.get('failed_txs') or 0),
+                    'success_rate_percent': round((finalized_txs / total_txs) * 100, 2),
+                    'avg_entropy': round(float(tx_data.get('avg_entropy') or 0), 4)
+                },
+                'timestamp': datetime.utcnow().isoformat()
+            }
+        }), 200
+    except Exception as e:
+        logger.error(f"[QUANTUM] Metrics error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════
