@@ -3109,17 +3109,23 @@ app.secret_key = Config.JWT_SECRET
 # Enable CORS
 CORS(app, resources={r"/api/*": {"origins": Config.CORS_ORIGINS}})
 
-# Global instances
-db = None
-auth_handler = None
-tx_processor = None
-circuit_builder = None
-circuit_executor = None
+# Initialize global instances
+db = DatabaseConnectionManager()
+circuit_builder = QuantumCircuitBuilder()
+circuit_executor = QuantumCircuitExecutor()
+auth_handler = AdvancedAuthenticationHandler(db)
+tx_processor = AdvancedTransactionProcessor(db, circuit_builder, circuit_executor)
+
+# Optional engines (can be None for now)
 defi_engine = None
 governance_engine = None
 oracle_engine = None
+
 # Rate limiting cache
 RATE_LIMIT_CACHE = {}
+
+# Start transaction processor
+tx_processor.start()
 
 # WebSocket support
 socketio = SocketIO(app, cors_allowed_origins="*")
