@@ -104,10 +104,10 @@ class RandomOrgQRNG:
         self.metrics = QRNGMetrics(source=QRNGSource.RANDOM_ORG)
         self.lock = threading.RLock()
     
-    def fetch_random_bytes(self, num_bytes: int = 256) -> Optional[np.ndarray]:
+    def fetch_random_bytes(self, num_bytes: int = 64) -> Optional[np.ndarray]:
         """
         Fetch random bytes from random.org.
-        num_bytes: 0-262144 (we use 256 for efficiency)
+        num_bytes: 0-262144 (we use 64 to avoid rate limiting)
         Returns: numpy array of uint8 or None if failed
         """
         start_time = time.time()
@@ -179,10 +179,11 @@ class ANUQuantumRNG:
         self.metrics = QRNGMetrics(source=QRNGSource.ANU)
         self.lock = threading.RLock()
     
-    def fetch_random_bytes(self, num_bytes: int = 256) -> Optional[np.ndarray]:
+    def fetch_random_bytes(self, num_bytes: int = 64) -> Optional[np.ndarray]:
         """
         Fetch random integers from ANU QRNG.
         Converts to bytes for consistency with other sources.
+        Reduced to 64 bytes to avoid rate limiting.
         """
         start_time = time.time()
         with self.lock:
@@ -247,10 +248,11 @@ class GermanQuantumRNG:
         self.metrics = QRNGMetrics(source=QRNGSource.GERMAN)
         self.lock = threading.RLock()
     
-    def fetch_random_bytes(self, num_bytes: int = 256) -> Optional[np.ndarray]:
+    def fetch_random_bytes(self, num_bytes: int = 50) -> Optional[np.ndarray]:
         """
         Fetch random bytes from German QRNG.
         Returns hex string, converts to bytes.
+        Max 50 bytes (100 hex chars) to avoid rate limiting per API docs.
         """
         start_time = time.time()
         with self.lock:
@@ -323,43 +325,91 @@ class QuantumEntropyEnsemble:
         self.sources = [self.random_org, self.anu, self.german]
         self.source_index = 0
         
-        self.fallback_state = fallback_seed
+        # Use numpy uint64 for proper overflow behavior in fallback PRNG
+        self.fallback_state = np.uint64(fallback_seed)
         self.fallback_enabled = False
         self.fallback_count = 0
         
         self.total_fetches = 0
         self.successful_fetches = 0
+        
+        # Rate limiting: track last fetch time per source
+        self.last_fetch_time = {id(src): 0.0 for src in self.sources}
+        self.min_fetch_interval = 1.0  # Minimum 1 second between fetches per source
+        
         self.lock = threading.RLock()
         
         logger.info("Quantum Entropy Ensemble initialized (3 sources + fallback)")
     
     def _xorshift64(self) -> np.uint64:
         """Deterministic Xorshift64* fallback PRNG"""
-        x = self.fallback_state
-        x ^= x >> 12
-        x ^= x << 25
-        x ^= x >> 27
+        x = np.uint64(self.fallback_state)
+        x = np.uint64(x ^ (x >> np.uint64(12)))
+        x = np.uint64(x ^ (x << np.uint64(25)))
+        x = np.uint64(x ^ (x >> np.uint64(27)))
         self.fallback_state = x
-        return np.uint64((x * 0x2545F4914F6CDD1D) >> 32)
+        # Multiply with proper uint64 handling
+        result = np.uint64(x * np.uint64(0x2545F4914F6CDD1D))
+        return result
     
-    def fetch_quantum_bytes(self, num_bytes: int = 256) -> np.ndarray:
+    def fetch_quantum_bytes(self, num_bytes: int = 64) -> np.ndarray:
         """
         Fetch quantum random bytes with intelligent fallback.
         Always returns num_bytes, guaranteed.
+        Reduced default from 256 to 64 to avoid rate limiting.
         """
         with self.lock:
             self.total_fetches += 1
         
+        # Try each source with rate limiting
         for i in range(3):
             source = self.sources[(self.source_index + i) % 3]
-            random_data = source.fetch_random_bytes(num_bytes)
+            source_id = id(source)
             
-            if random_data is not None:
+            # Check rate limit
+            current_time = time.time()
+            time_since_last = current_time - self.last_fetch_time.get(source_id, 0)
+            
+            if time_since_last < self.min_fetch_interval:
+                # Skip this source due to rate limit
+                logger.debug(f"Skipping {source.__class__.__name__} due to rate limit")
+                continue
+            
+            # Fetch smaller amount to avoid rate limiting (max 100 bytes)
+            fetch_size = min(num_bytes, 100)
+            random_data = source.fetch_random_bytes(fetch_size)
+            
+            # Update last fetch time
+            with self.lock:
+                self.last_fetch_time[source_id] = current_time
+            
+            if random_data is not None and len(random_data) >= fetch_size:
+                # Pad if needed
+                if len(random_data) < num_bytes:
+                    # Use fallback to pad
+                    padding_needed = num_bytes - len(random_data)
+                    padding = np.array([
+                        int((self._xorshift64() >> np.uint64(i % 8 * 8)) & np.uint64(0xFF))
+                        for i in range(padding_needed)
+                    ], dtype=np.uint8)
+                    random_data = np.concatenate([random_data, padding])
+                
+                # Optionally XOR with next source for extra randomness
                 if i < 2:
                     next_source = self.sources[(self.source_index + i + 1) % 3]
-                    next_data = next_source.fetch_random_bytes(num_bytes)
-                    if next_data is not None:
-                        random_data = np.bitwise_xor(random_data, next_data)
+                    next_id = id(next_source)
+                    next_time_since = time.time() - self.last_fetch_time.get(next_id, 0)
+                    
+                    if next_time_since >= self.min_fetch_interval:
+                        next_data = next_source.fetch_random_bytes(fetch_size)
+                        if next_data is not None and len(next_data) >= fetch_size:
+                            with self.lock:
+                                self.last_fetch_time[next_id] = time.time()
+                            # XOR first fetch_size bytes
+                            random_data[:fetch_size] = np.bitwise_xor(
+                                random_data[:fetch_size], 
+                                next_data[:fetch_size]
+                            )
                 
                 self.source_index = (self.source_index + 1) % 3
                 with self.lock:
@@ -367,16 +417,18 @@ class QuantumEntropyEnsemble:
                     self.fallback_enabled = False
                 
                 logger.debug(f"Entropy ensemble: fetched from {source.__class__.__name__}")
-                return random_data
+                return random_data[:num_bytes]
         
-        logger.warning(f"All quantum sources failed, using Xorshift64* fallback")
+        # All sources failed or rate limited - use fallback
+        logger.debug(f"All quantum sources failed or rate limited, using Xorshift64* fallback")
         with self.lock:
             self.fallback_enabled = True
             self.fallback_count += 1
         
+        # Generate fallback data with proper uint8 conversion
         fallback_data = np.array([
-            (self._xorshift64() >> (8 * (j % 8))) & 0xFF
-            for j in range(num_bytes)
+            int((self._xorshift64() >> np.uint64(i % 8 * 8)) & np.uint64(0xFF))
+            for i in range(num_bytes)
         ], dtype=np.uint8)
         
         return fallback_data
