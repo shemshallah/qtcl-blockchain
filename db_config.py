@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
 ═══════════════════════════════════════════════════════════════════════════════════════
-db_config.py - DATABASE UTILITIES FOR QTCL API
-Clean database connection management - NO ROUTE DEFINITIONS
-All routes defined in main_app.py only
+db_config.py - DATABASE UTILITIES FOR QTCL API WITH DB_BUILDER V2 INTEGRATION
+Integrated connection management + db_builder_v2 functionality in one module
 ═══════════════════════════════════════════════════════════════════════════════════════
 """
 
@@ -13,11 +12,49 @@ import logging
 import psycopg2
 import time
 import threading
+import subprocess
 from psycopg2.extras import RealDictCursor
 from collections import deque
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 
 logger = logging.getLogger(__name__)
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# ENSURE DB_BUILDER_V2 DEPENDENCIES
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+def ensure_package(package, pip_name=None):
+    """Install missing packages"""
+    try:
+        __import__(package)
+    except ImportError:
+        print(f"📦 Installing {pip_name or package}...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "--break-system-packages", pip_name or package])
+
+ensure_package("psycopg2", "psycopg2-binary")
+
+# Import db_builder_v2 components
+_db_builder_v2_available = False
+try:
+    from db_builder_v2 import (
+        DatabaseBuilder,
+        DatabaseOrchestrator,
+        DatabaseValidator,
+        QueryBuilder,
+        BatchOperations,
+        MigrationManager,
+        PerformanceOptimizer,
+        BackupManager,
+        RandomOrgQRNG,
+        ANUQuantumRNG,
+        HybridQuantumEntropyEngine
+    )
+    _db_builder_v2_available = True
+    logger.info("[DB_CONFIG] ✓ db_builder_v2 components imported successfully")
+except ImportError as e:
+    logger.warning(f"[DB_CONFIG] ⚠ db_builder_v2 not available: {e}")
+    DatabaseBuilder = None
+    DatabaseOrchestrator = None
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # CONFIG FROM ENVIRONMENT VARIABLES
@@ -31,6 +68,7 @@ class Config:
     SUPABASE_PASSWORD = os.getenv('SUPABASE_PASSWORD', '')
     SUPABASE_PORT = int(os.getenv('SUPABASE_PORT', '5432'))
     SUPABASE_DB = os.getenv('SUPABASE_DB', 'postgres')
+    SUPABASE_PROJECT_ID = os.getenv('SUPABASE_PROJECT_ID', '6c312f3f-20ea-47cb-8c85-1dc8b5377eb3')
     
     DB_POOL_SIZE = 5
     DB_POOL_TIMEOUT = 30
@@ -201,6 +239,203 @@ class DatabaseConnection:
             DatabaseConnection.return_connection(conn)
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
+# DATABASE BUILDER V2 INTEGRATION
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+class DatabaseBuilderManager:
+    """Manages db_builder_v2 integration - singleton wrapper"""
+    
+    _instance = None
+    _builder = None
+    _orchestrator = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+    
+    def __init__(self):
+        self.initialized = False
+        logger.info("[DB_BUILDER_MGR] Initialized")
+    
+    @classmethod
+    def get_builder(cls) -> Optional[DatabaseBuilder]:
+        """Get singleton DatabaseBuilder instance"""
+        if not _db_builder_v2_available or DatabaseBuilder is None:
+            logger.warning("[DB_BUILDER_MGR] DatabaseBuilder not available")
+            return None
+        
+        if cls._builder is None:
+            try:
+                with cls._lock:
+                    if cls._builder is None:
+                        cls._builder = DatabaseBuilder(
+                            host=Config.SUPABASE_HOST,
+                            user=Config.SUPABASE_USER,
+                            password=Config.SUPABASE_PASSWORD,
+                            port=Config.SUPABASE_PORT,
+                            database=Config.SUPABASE_DB
+                        )
+                        logger.info("[DB_BUILDER_MGR] ✓ DatabaseBuilder created")
+            except Exception as e:
+                logger.error(f"[DB_BUILDER_MGR] Failed to create DatabaseBuilder: {e}")
+                return None
+        return cls._builder
+    
+    @classmethod
+    def get_orchestrator(cls) -> Optional[DatabaseOrchestrator]:
+        """Get singleton DatabaseOrchestrator instance"""
+        if not _db_builder_v2_available or DatabaseOrchestrator is None:
+            logger.warning("[DB_BUILDER_MGR] DatabaseOrchestrator not available")
+            return None
+        
+        if cls._orchestrator is None:
+            try:
+                with cls._lock:
+                    if cls._orchestrator is None:
+                        cls._orchestrator = DatabaseOrchestrator()
+                        logger.info("[DB_BUILDER_MGR] ✓ DatabaseOrchestrator created")
+            except Exception as e:
+                logger.error(f"[DB_BUILDER_MGR] Failed to create DatabaseOrchestrator: {e}")
+                return None
+        return cls._orchestrator
+    
+    @classmethod
+    def full_initialization(cls, populate_pq: bool = False) -> bool:
+        """Full database initialization via db_builder"""
+        builder = cls.get_builder()
+        if not builder:
+            logger.error("[DB_BUILDER_MGR] Cannot initialize - builder not available")
+            return False
+        try:
+            result = builder.full_initialization(populate_pq=populate_pq)
+            logger.info(f"[DB_BUILDER_MGR] Full initialization {'✓ succeeded' if result else '✗ failed'}")
+            return result
+        except Exception as e:
+            logger.error(f"[DB_BUILDER_MGR] Full initialization error: {e}")
+            return False
+    
+    @classmethod
+    def verify_schema(cls) -> bool:
+        """Verify database schema exists"""
+        builder = cls.get_builder()
+        if not builder:
+            logger.warning("[DB_BUILDER_MGR] Cannot verify - builder not available")
+            return False
+        try:
+            result = builder.verify_schema()
+            logger.info(f"[DB_BUILDER_MGR] Schema verification {'✓ passed' if result else '✗ failed'}")
+            return result
+        except Exception as e:
+            logger.error(f"[DB_BUILDER_MGR] Schema verification error: {e}")
+            return False
+    
+    @classmethod
+    def create_schema(cls, drop_existing: bool = False) -> bool:
+        """Create database schema"""
+        builder = cls.get_builder()
+        if not builder:
+            return False
+        try:
+            builder.create_schema(drop_existing=drop_existing)
+            logger.info("[DB_BUILDER_MGR] ✓ Schema created")
+            return True
+        except Exception as e:
+            logger.error(f"[DB_BUILDER_MGR] Schema creation error: {e}")
+            return False
+    
+    @classmethod
+    def create_indexes(cls) -> bool:
+        """Create database indexes"""
+        builder = cls.get_builder()
+        if not builder:
+            return False
+        try:
+            builder.create_indexes()
+            logger.info("[DB_BUILDER_MGR] ✓ Indexes created")
+            return True
+        except Exception as e:
+            logger.error(f"[DB_BUILDER_MGR] Index creation error: {e}")
+            return False
+    
+    @classmethod
+    def apply_constraints(cls) -> bool:
+        """Apply database constraints"""
+        builder = cls.get_builder()
+        if not builder:
+            return False
+        try:
+            builder.apply_constraints()
+            logger.info("[DB_BUILDER_MGR] ✓ Constraints applied")
+            return True
+        except Exception as e:
+            logger.error(f"[DB_BUILDER_MGR] Constraint application error: {e}")
+            return False
+    
+    @classmethod
+    def initialize_genesis_data(cls) -> bool:
+        """Initialize genesis block and initial users"""
+        builder = cls.get_builder()
+        if not builder:
+            return False
+        try:
+            builder.initialize_genesis_data()
+            logger.info("[DB_BUILDER_MGR] ✓ Genesis data initialized")
+            return True
+        except Exception as e:
+            logger.error(f"[DB_BUILDER_MGR] Genesis initialization error: {e}")
+            return False
+    
+    @classmethod
+    def get_health_check(cls) -> Dict[str, Any]:
+        """Get database health status"""
+        builder = cls.get_builder()
+        if not builder:
+            return {'status': 'unavailable', 'error': 'Builder not available'}
+        try:
+            return builder.health_check()
+        except Exception as e:
+            logger.error(f"[DB_BUILDER_MGR] Health check error: {e}")
+            return {'status': 'error', 'error': str(e)}
+    
+    @classmethod
+    def get_statistics(cls) -> Dict[str, Any]:
+        """Get database statistics"""
+        builder = cls.get_builder()
+        if not builder:
+            return {'error': 'Builder not available'}
+        try:
+            return builder.get_statistics()
+        except Exception as e:
+            logger.error(f"[DB_BUILDER_MGR] Statistics error: {e}")
+            return {'error': str(e)}
+    
+    @classmethod
+    def execute_query(cls, query: str, params: tuple = None) -> List[Dict]:
+        """Execute query via builder"""
+        builder = cls.get_builder()
+        if not builder:
+            return []
+        try:
+            return builder.execute(query, params, return_results=True)
+        except Exception as e:
+            logger.error(f"[DB_BUILDER_MGR] Query error: {e}")
+            return []
+    
+    @classmethod
+    def execute_update(cls, query: str, params: tuple = None) -> int:
+        """Execute update via builder"""
+        builder = cls.get_builder()
+        if not builder:
+            return 0
+        try:
+            return builder.execute(query, params, return_results=False)
+        except Exception as e:
+            logger.error(f"[DB_BUILDER_MGR] Update error: {e}")
+            return 0
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
 # SETUP FUNCTIONS FOR WSGI
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
@@ -222,6 +457,7 @@ def setup_database(app):
         logger.info(f"[INIT] ✓ Database ready")
         
         app.config['DB'] = DatabaseConnection
+        app.config['DB_BUILDER'] = DatabaseBuilderManager
         
         return True
         
@@ -246,6 +482,12 @@ if __name__ == '__main__':
         conn = DatabaseConnection.get_connection()
         logger.info("✓ Database connection OK")
         DatabaseConnection.return_connection(conn)
+        
+        if _db_builder_v2_available:
+            logger.info("✓ db_builder_v2 available")
+            builder_mgr = DatabaseBuilderManager()
+            stats = builder_mgr.get_statistics()
+            logger.info(f"✓ Builder manager initialized: {stats}")
         
     except Exception as e:
         logger.error(f"✗ Test failed: {e}")

@@ -28,6 +28,9 @@ import threading
 import secrets
 import bcrypt
 import traceback
+
+from db_config import DatabaseConnection, Config as DBConfig, setup_database, DatabaseBuilderManager
+
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any, Tuple, Callable
 from functools import wraps
@@ -40,56 +43,9 @@ import logging
 import sys
 import psycopg2
 
-# Safe numpy and lattice imports with fallback
-try:
-    import numpy as np
-    NUMPY_AVAILABLE = True
-except ImportError:
-    NUMPY_AVAILABLE = False
-
-try:
-    if NUMPY_AVAILABLE:
-        from quantum_lattice_refresh import QuantumLatticeRefresh
-        LATTICE_AVAILABLE = True
-    else:
-        LATTICE_AVAILABLE = False
-except ImportError:
-    LATTICE_AVAILABLE = False
-import numpy as np
-
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# LATTICE INTEGRATION IMPORT
-# ═══════════════════════════════════════════════════════════════════════════════════════
-try:
-    from quantum_lattice_refresh import QuantumLatticeRefresh
-    LATTICE_AVAILABLE = True
-except ImportError:
-    LATTICE_AVAILABLE = False
-
 logger = logging.getLogger(__name__)
-db_manager = None
+db_manager = None  # Initialized later in initialize_app()
 lattice_refresher = None
-
-def init_database():
-    global db_manager
-    try:
-        logger.info("Initializing database...")
-        connection = psycopg2.connect(
-            host=os.getenv('SUPABASE_HOST'),
-            user=os.getenv('SUPABASE_USER'),
-            password=os.getenv('SUPABASE_PASSWORD'),
-            database=os.getenv('SUPABASE_DB')
-        )
-        db_manager = DatabaseManager(connection)
-        logger.info("✓ Database initialized successfully")
-        return True
-    except Exception as e:
-        logger.error(f"✗ Database initialization failed: {e}")
-        return False
-
-if not init_database():
-    logger.error("CRITICAL: Could not initialize database!")
-    sys.exit(1)
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # FLASK & DEPENDENCIES
@@ -119,22 +75,6 @@ from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 import jwt
 import psycopg2
-
-# Safe numpy and lattice imports with fallback
-try:
-    import numpy as np
-    NUMPY_AVAILABLE = True
-except ImportError:
-    NUMPY_AVAILABLE = False
-
-try:
-    if NUMPY_AVAILABLE:
-        from quantum_lattice_refresh import QuantumLatticeRefresh
-        LATTICE_AVAILABLE = True
-    else:
-        LATTICE_AVAILABLE = False
-except ImportError:
-    LATTICE_AVAILABLE = False
 from psycopg2.extras import RealDictCursor
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -162,19 +102,19 @@ class Config:
     ENVIRONMENT = os.getenv('FLASK_ENV', 'production')
     DEBUG = ENVIRONMENT == 'development'
     
-    # Database Configuration
-    DATABASE_HOST = os.getenv('SUPABASE_HOST', 'localhost')
-    DATABASE_USER = os.getenv('SUPABASE_USER', 'postgres')
-    DATABASE_PASSWORD = os.getenv('SUPABASE_PASSWORD', '')
-    DATABASE_PORT = int(os.getenv('SUPABASE_PORT', '5432'))
-    DATABASE_NAME = os.getenv('SUPABASE_DB', 'postgres')
+    # Database Configuration (from db_config)
+    DATABASE_HOST = DBConfig.SUPABASE_HOST
+    DATABASE_USER = DBConfig.SUPABASE_USER
+    DATABASE_PASSWORD = DBConfig.SUPABASE_PASSWORD
+    DATABASE_PORT = DBConfig.SUPABASE_PORT
+    DATABASE_NAME = DBConfig.SUPABASE_DB
     
-    # Database Connection Pool
-    DB_POOL_SIZE = 5
-    DB_POOL_TIMEOUT = 30
-    DB_CONNECT_TIMEOUT = 15
-    DB_RETRY_ATTEMPTS = 3
-    DB_RETRY_DELAY = 2
+    # Database Connection Pool (from db_config)
+    DB_POOL_SIZE = DBConfig.DB_POOL_SIZE
+    DB_POOL_TIMEOUT = DBConfig.DB_POOL_TIMEOUT
+    DB_CONNECT_TIMEOUT = DBConfig.DB_CONNECT_TIMEOUT
+    DB_RETRY_ATTEMPTS = DBConfig.DB_RETRY_ATTEMPTS
+    DB_RETRY_DELAY = DBConfig.DB_RETRY_DELAY_SECONDS
     
     # Security
     JWT_SECRET = os.getenv('JWT_SECRET', secrets.token_urlsafe(64))
@@ -189,167 +129,137 @@ class Config:
     # API
     API_VERSION = '3.2.1'
     API_TITLE = 'QTCL Blockchain API'
-
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # DATABASE CONNECTION MANAGER
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 class DatabaseManager:
-    """Database connection manager with retry logic"""
+    """Database manager that wraps db_config.DatabaseConnection"""
     
     def __init__(self):
-        self.pool = []
-        self.lock = threading.Lock()
+        self.db_connection = None
         self.initialized = False
+        logger.info("[DatabaseManager] Initialized (using db_config.DatabaseConnection)")
     
     def get_connection(self):
-        """Get a database connection with retry logic"""
-        last_error = None
-        
-        for attempt in range(1, Config.DB_RETRY_ATTEMPTS + 1):
+        """Get a database connection from the pool"""
+        return DatabaseConnection.get_connection()
+    
+    def seed_test_user(self):
+        """Create admin user shemshallah@gmail.com with SUPABASE_PASSWORD"""
+        try:
+            admin_email = 'shemshallah@gmail.com'
+            admin_name = 'shemshallah'
+            admin_user_id = 'admin_001'
+            
+            conn = self.get_connection()
             try:
-                logger.debug(f"[DB] Connection attempt {attempt}/{Config.DB_RETRY_ATTEMPTS}...")
-                
-                conn = psycopg2.connect(
-                    host=Config.DATABASE_HOST,
-                    user=Config.DATABASE_USER,
-                    password=Config.DATABASE_PASSWORD,
-                    port=Config.DATABASE_PORT,
-                    database=Config.DATABASE_NAME,
-                    connect_timeout=Config.DB_CONNECT_TIMEOUT,
-                    application_name='qtcl_api'
-                )
-                conn.set_session(autocommit=True)
-                logger.debug("[DB] ✓ Connection established")
-                return conn
-                
-            except psycopg2.OperationalError as e:
-                last_error = e
-                logger.warning(f"[DB] ✗ Connection failed (attempt {attempt}): {e}")
-                
-                if attempt < Config.DB_RETRY_ATTEMPTS:
-                    wait = Config.DB_RETRY_DELAY * attempt
-                    logger.info(f"[DB] Retrying in {wait}s...")
-                    time.sleep(wait)
-            
-            except Exception as e:
-                logger.error(f"[DB] Unexpected error: {e}")
-                raise
-        
-        if last_error:
-            raise last_error
-        raise Exception("Failed to establish database connection")
-    
-    def execute_query(self, query: str, params: tuple = None) -> List[Dict]:
-        """Execute SELECT query with error handling"""
-        conn = None
-        try:
-            conn = self.get_connection()
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(query, params or ())
-                results = cur.fetchall()
-                logger.debug(f"[DB] Query returned {len(results) if results else 0} rows")
-                return results or []
+                with conn.cursor() as cur:
+                    # Check if admin already exists
+                    cur.execute("SELECT user_id FROM users WHERE email = %s", (admin_email,))
+                    if cur.fetchone():
+                        logger.info(f"[DB] ✓ Admin user already exists: {admin_email}")
+                        return True
+                    
+                    # Get password from SUPABASE_PASSWORD env var (required)
+                    admin_password = os.getenv('SUPABASE_PASSWORD')
+                    if not admin_password:
+                        logger.error("[DB] ✗ SUPABASE_PASSWORD env variable not set - cannot create admin")
+                        return False
+                    
+                    # Hash password
+                    password_hash = bcrypt.hashpw(admin_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+                    
+                    # Insert admin user
+                    cur.execute("""
+                        INSERT INTO users (user_id, email, password_hash, name, role, balance, is_active, kyc_verified)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (email) DO NOTHING
+                    """, (admin_user_id, admin_email, password_hash, admin_name, 'admin', 1000000, True, True))
+                    conn.commit()
+                    
+                    logger.info(f"[DB] ✓ Admin user created")
+                    logger.info(f"[DB]   Email: {admin_email}")
+                    logger.info(f"[DB]   Name: {admin_name}")
+                    logger.info(f"[DB]   Role: admin")
+                    logger.info(f"[DB]   Balance: 1,000,000 QTCL")
+                    return True
+            finally:
+                DatabaseConnection.return_connection(conn)
         except Exception as e:
-            logger.error(f"[DB] Query error: {e}")
+            logger.error(f"[DB] ✗ Failed to seed admin user: {e}")
+            return False
+    
+    def execute_query(self, query: str, params: tuple = None):
+        """Execute SELECT query and return results"""
+        return DatabaseConnection.execute(query, params)
+    
+    def execute_update(self, query: str, params: tuple = None):
+        """Execute INSERT/UPDATE/DELETE query"""
+        return DatabaseConnection.execute_update(query, params)
+    
+    def execute_one(self, query: str, params: tuple = None):
+        """Execute SELECT query and return first result"""
+        return DatabaseConnection.execute_one(query, params)
+    
+    def get_user_by_email(self, email: str):
+        """Get user by email"""
+        return self.execute_one("SELECT * FROM users WHERE email = %s", (email,))
+    
+    def get_user_by_id(self, user_id: str):
+        """Get user by ID"""
+        return self.execute_one("SELECT * FROM users WHERE user_id = %s", (user_id,))
+    
+    def create_user(self, user_id: str, email: str, password_hash: str, name: str = None):
+        """Create new user"""
+        return self.execute_update(
+            """
+            INSERT INTO users (user_id, email, password_hash, name, role, balance, is_active)
+            VALUES (%s, %s, %s, %s, 'user', 0, true)
+            """,
+            (user_id, email, password_hash, name or email.split('@')[0])
+        )
+    
+    def update_last_login(self, user_id: str):
+        """Update user's last login timestamp"""
+        return self.execute_update("UPDATE users SET last_login = NOW() WHERE user_id = %s", (user_id,))
+    
+    def get_all_users(self, limit: int = 100):
+        """Get all users"""
+        return self.execute_query(
+            "SELECT user_id, email, name, role, balance, is_active, kyc_verified, created_at FROM users LIMIT %s",
+            (limit,)
+        )
+    
+    def get_latest_blocks(self, limit: int = 10):
+        """Get latest blocks"""
+        try:
+            return self.execute_query("SELECT * FROM blocks ORDER BY block_number DESC LIMIT %s", (limit,))
+        except:
             return []
-        finally:
-            if conn:
-                try:
-                    conn.close()
-                except:
-                    pass
     
-    def execute_update(self, query: str, params: tuple = None) -> int:
-        """Execute INSERT/UPDATE/DELETE with error handling"""
-        conn = None
+    def get_block_count(self):
+        """Get total block count"""
         try:
-            conn = self.get_connection()
-            with conn.cursor() as cur:
-                cur.execute(query, params or ())
-                rows_affected = cur.rowcount
-                logger.debug(f"[DB] {rows_affected} rows affected")
-                return rows_affected
-        except Exception as e:
-            logger.error(f"[DB] Update error: {e}")
+            result = self.execute_one("SELECT COUNT(*) as count FROM blocks")
+            return result['count'] if result else 0
+        except:
             return 0
-        finally:
-            if conn:
-                try:
-                    conn.close()
-                except:
-                    pass
     
-    def initialize_schema(self):
-        """Validate existing production database schema - tables already exist"""
-        if self.initialized:
-            return True
-        
+    def get_recent_transactions(self, limit: int = 10):
+        """Get recent transactions"""
         try:
-            logger.info("[DB] Validating existing production database schema...")
-            
-            # Check if the actual production tables exist
-            tables_to_check = ['users', 'blocks', 'transactions', 'pseudoqubits', 'hyperbolic_triangles']
-            missing_tables = []
-            
-            for table in tables_to_check:
-                result = self.execute_query(
-                    f"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = '{table}')"
-                )
-                
-                exists = result[0].get('exists', False) if result else False
-                if exists:
-                    logger.info(f"[DB] ✓ Table '{table}' found")
-                else:
-                    logger.warning(f"[DB] ⚠ Table '{table}' not found")
-                    missing_tables.append(table)
-            
-            if missing_tables:
-                logger.warning(f"[DB] Missing tables: {', '.join(missing_tables)}")
-                logger.warning("[DB] Database may not be fully initialized - some features may be limited")
-            
-            self.initialized = True
-            logger.info("[DB] ✓ Database validation complete")
-            return True
-            
-        except Exception as e:
-            logger.warning(f"[DB] Schema validation warning: {e}")
-            self.initialized = True  # Continue anyway
-            return True
+            return self.execute_query("SELECT * FROM transactions ORDER BY timestamp DESC LIMIT %s", (limit,))
+        except:
+            return []
     
-    def seed_test_user(self) -> bool:
-        """Seed test user with your credentials"""
+    def get_transaction_count(self):
+        """Get total transaction count"""
         try:
-            password = os.getenv('SUPABASE_PASSWORD', 'changeme')
-            user_id = 'user_shemshallah_001'
-            email = 'shemshallah@gmail.com'  # ← CHANGED
-        
-            # Check if user exists
-            result = self.execute_query(
-                "SELECT user_id FROM users WHERE user_id = %s",
-                (user_id,)
-            )
-        
-            if result:
-                logger.info(f"[DB] User already exists: {email}")
-                return True
-        
-            # Hash password
-            password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt(Config.PASSWORD_HASH_ROUNDS)).decode()
-        
-            # Create user
-            self.execute_update(
-                """INSERT INTO users (user_id, email, name, password_hash, balance, role, is_active, kyc_verified)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                   ON CONFLICT (user_id) DO NOTHING""",
-                (user_id, email, 'Test User', password_hash, Decimal('1000000'), 'user', True, True)
-            )
-        
-            logger.info(f"[DB] ✓ Seeded test user: {email}")
-            return True
-        except Exception as e:
-            logger.warning(f"[DB] Could not seed test user: {e}")
-            return True
+            result = self.execute_one("SELECT COUNT(*) as count FROM transactions")
+            return result['count'] if result else 0
+        except:
+            return 0
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # AUTHENTICATION & JWT MANAGEMENT
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -588,17 +498,13 @@ def health_check():
         result = db_manager.execute_query("SELECT 1")
         db_healthy = len(result) > 0
         
-        # Check lattice status
-        lattice_healthy = lattice_refresher is not None if LATTICE_AVAILABLE else False
-        
         return jsonify({
             'status': 'healthy',
             'timestamp': datetime.utcnow().isoformat(),
             'api_version': Config.API_VERSION,
             'services': {
                 'api': 'operational',
-                'database': 'operational' if db_healthy else 'degraded',
-                'lattice': 'operational' if lattice_healthy else 'not_available'
+                'database': 'operational' if db_healthy else 'degraded'
             }
         }), 200
     
@@ -812,6 +718,43 @@ def login():
             'message': 'Login failed',
             'code': 'LOGIN_ERROR'
         }), 500
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# DATABASE BUILDER MANAGEMENT ROUTES
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/v1/system/db-health', methods=['GET'])
+@require_auth(['admin'])
+def get_db_health():
+    """Get database health status"""
+    try:
+        health = DatabaseBuilderManager.get_health_check()
+        return jsonify({'status': 'success', 'data': health}), 200
+    except Exception as e:
+        logger.error(f"[API] DB health error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/v1/system/db-stats', methods=['GET'])
+@require_auth(['admin'])
+def get_db_stats():
+    """Get database statistics"""
+    try:
+        stats = DatabaseBuilderManager.get_statistics()
+        return jsonify({'status': 'success', 'data': stats}), 200
+    except Exception as e:
+        logger.error(f"[API] DB stats error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/v1/system/db-verify', methods=['POST'])
+@require_auth(['admin'])
+def verify_db_schema():
+    """Verify database schema"""
+    try:
+        result = DatabaseBuilderManager.verify_schema()
+        return jsonify({'status': 'success', 'verified': result}), 200
+    except Exception as e:
+        logger.error(f"[API] DB verify error: {e}")
+        return jsonify({'error': str(e)}), 500
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # USER ENDPOINTS
@@ -1529,140 +1472,6 @@ def mobile_config():
 # CATCH-ALL ENDPOINTS FOR MISSING ROUTES
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# QUANTUM LATTICE ENDPOINTS (INTEGRATED)
-# ═══════════════════════════════════════════════════════════════════════════════════════
-
-@app.route('/api/quantum/lattice/status', methods=['GET'])
-@rate_limited
-@handle_exceptions
-def get_lattice_status():
-    """Get quantum lattice refresh status"""
-    try:
-        if not LATTICE_AVAILABLE or not lattice_refresher:
-            return jsonify({
-                'status': 'error',
-                'message': 'Lattice refresher not running',
-                'code': 'LATTICE_NOT_AVAILABLE'
-            }), 503
-        
-        status = lattice_refresher.get_system_status()
-        return jsonify({
-            'status': 'success',
-            'lattice': status
-        }), 200
-    except Exception as e:
-        logger.error(f"[LATTICE] Status error: {e}")
-        return jsonify({
-            'status': 'error',
-            'message': str(e),
-            'code': 'LATTICE_ERROR'
-        }), 500
-
-@app.route('/api/quantum/lattice/trigger-refresh', methods=['POST'])
-@rate_limited
-@handle_exceptions
-def trigger_lattice_refresh():
-    """Manually trigger one full lattice refresh cycle"""
-    try:
-        if not LATTICE_AVAILABLE or not lattice_refresher:
-            return jsonify({
-                'status': 'error',
-                'message': 'Lattice refresher not running',
-                'code': 'LATTICE_NOT_AVAILABLE'
-            }), 503
-        
-        results = lattice_refresher.flood_all_clusters()
-        
-        return jsonify({
-            'status': 'success',
-            'cycles_completed': len(results),
-            'avg_improvement': float(np.mean([r['improvement'] for r in results])),
-            'system_coherence': float(np.mean(lattice_refresher.coherence))
-        }), 200
-    except Exception as e:
-        logger.error(f"[LATTICE] Refresh trigger error: {e}")
-        return jsonify({
-            'status': 'error',
-            'message': str(e),
-            'code': 'LATTICE_ERROR'
-        }), 500
-
-@app.route('/api/quantum/lattice/coherence-map', methods=['GET'])
-@rate_limited
-@handle_exceptions
-def get_coherence_map():
-    """Get coherence and fidelity map for all qubits"""
-    try:
-        if not LATTICE_AVAILABLE or not lattice_refresher:
-            return jsonify({
-                'status': 'error',
-                'message': 'Lattice refresher not running',
-                'code': 'LATTICE_NOT_AVAILABLE'
-            }), 503
-        
-        return jsonify({
-            'status': 'success',
-            'coherence': lattice_refresher.coherence.tolist(),
-            'fidelity': lattice_refresher.fidelity.tolist(),
-            'total_qubits': lattice_refresher.total_qubits
-        }), 200
-    except Exception as e:
-        logger.error(f"[LATTICE] Coherence map error: {e}")
-        return jsonify({
-            'status': 'error',
-            'message': str(e),
-            'code': 'LATTICE_ERROR'
-        }), 500
-
-
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# QUANTUM LATTICE API ENDPOINTS
-# ═══════════════════════════════════════════════════════════════════════════════════════
-
-@app.route('/api/quantum/lattice/status', methods=['GET'])
-@rate_limited
-@handle_exceptions
-def get_lattice_status():
-    """Get lattice system status"""
-    if not LATTICE_AVAILABLE or not lattice_refresher:
-        return jsonify({'status': 'unavailable'}), 503
-    try:
-        status = lattice_refresher.get_system_status()
-        return jsonify({'status': 'success', 'lattice': status}), 200
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-@app.route('/api/quantum/lattice/trigger-refresh', methods=['POST'])
-@rate_limited
-@handle_exceptions
-def trigger_lattice_refresh():
-    """Trigger manual refresh cycle"""
-    if not LATTICE_AVAILABLE or not lattice_refresher:
-        return jsonify({'status': 'unavailable'}), 503
-    try:
-        results = lattice_refresher.flood_all_clusters()
-        avg_improve = float(np.mean([r['improvement'] for r in results])) if NUMPY_AVAILABLE and results else 0
-        sys_cohere = float(np.mean(lattice_refresher.coherence)) if NUMPY_AVAILABLE else 0
-        return jsonify({'status': 'success', 'cycles_completed': len(results), 'avg_improvement': avg_improve, 'system_coherence': sys_cohere}), 200
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-@app.route('/api/quantum/lattice/coherence-map', methods=['GET'])
-@rate_limited
-@handle_exceptions
-def get_coherence_map():
-    """Get coherence/fidelity arrays"""
-    if not LATTICE_AVAILABLE or not lattice_refresher:
-        return jsonify({'status': 'unavailable'}), 503
-    try:
-        coherence = lattice_refresher.coherence.tolist() if NUMPY_AVAILABLE else []
-        fidelity = lattice_refresher.fidelity.tolist() if NUMPY_AVAILABLE else []
-        return jsonify({'status': 'success', 'coherence': coherence, 'fidelity': fidelity, 'total_qubits': lattice_refresher.total_qubits}), 200
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
 @app.route('/api/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
 @rate_limited
 def catch_all_api(path):
@@ -1682,9 +1491,6 @@ def catch_all_api(path):
             'blocks_list': 'GET /api/blocks',
             'transactions_list': 'GET /api/transactions',
             'transactions_submit': 'POST /api/transactions',
-            'lattice_status': 'GET /api/quantum/lattice/status',
-            'lattice_trigger': 'POST /api/quantum/lattice/trigger-refresh',
-            'lattice_coherence': 'GET /api/quantum/lattice/coherence-map',
             'quantum_status': 'GET /api/quantum/status',
             'mempool_status': 'GET /api/mempool/status',
             'gas_prices': 'GET /api/gas/prices',
@@ -1693,101 +1499,48 @@ def catch_all_api(path):
         }
     }), 404
 
-
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# LATTICE REFRESHER INITIALIZATION
-# ═══════════════════════════════════════════════════════════════════════════════════════
-
-def initialize_lattice_refresher():
-    """Initialize quantum lattice refresh system"""
-    global lattice_refresher
-    
-    if not LATTICE_AVAILABLE:
-        logger.warning("[LATTICE] quantum_lattice_refresh module not available - skipping initialization")
-        return False
-    
-    try:
-        lattice_refresher = QuantumLatticeRefresh(
-            total_qubits=1000,
-            cluster_size=50,
-            db_connection=db_manager.db_connection if hasattr(db_manager, 'db_connection') and db_manager.db_connection else None
-        )
-        
-        # Start background refresh thread
-        refresh_thread = threading.Thread(
-            target=lambda: lattice_refresher.run_continuous(num_cycles=None, interval_ms=5000),
-            daemon=True
-        )
-        refresh_thread.start()
-        
-        logger.info("[LATTICE] Refresh system initialized and running continuously")
-        return True
-    except Exception as e:
-        logger.error(f"[LATTICE] Failed to initialize: {e}")
-        return False
-
-
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# QUANTUM LATTICE INITIALIZATION
-# ═══════════════════════════════════════════════════════════════════════════════════════
-
-def initialize_lattice_refresher():
-    """Initialize quantum lattice refresh system - graceful if unavailable"""
-    global lattice_refresher
-    
-    if not LATTICE_AVAILABLE:
-        logger.warning("[LATTICE] System unavailable (numpy/quantum_lattice_refresh missing)")
-        return False
-    
-    try:
-        lattice_refresher = QuantumLatticeRefresh(
-            total_qubits=1000,
-            cluster_size=50,
-            db_connection=db_manager.db_connection if hasattr(db_manager, 'db_connection') else None
-        )
-        
-        refresh_thread = threading.Thread(
-            target=lambda: lattice_refresher.run_continuous(num_cycles=None, interval_ms=5000),
-            daemon=True
-        )
-        refresh_thread.start()
-        
-        logger.info("[LATTICE] ✓ Quantum lattice system initialized")
-        return True
-    except Exception as e:
-        logger.warning(f"[LATTICE] Failed: {e}")
-        return False
-
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # APPLICATION INITIALIZATION
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 def initialize_app():
-    """Initialize application for production QTCL database"""
+    """Initialize application with integrated database and lattice systems"""
+    global db_manager, lattice_refresher
+    
     try:
         logger.info("=" * 100)
         logger.info("QTCL API INITIALIZATION - PRODUCTION DATABASE")
         logger.info("=" * 100)
         logger.info("")
-        logger.info("DATABASE SCHEMA (Production):")
-        logger.info("  • users: user_id (TEXT), email, name, role, balance, is_active, kyc_verified")
-        logger.info("  • blocks: block_number, block_hash, parent_hash, timestamp, validator_address, transactions")
-        logger.info("  • transactions: tx_id, from_user_id, to_user_id, amount, status, block_number")
-        logger.info("  • pseudoqubits: Quantum geometry positions and metrics")
-        logger.info("  • hyperbolic_triangles: Tessellation structure")
-        logger.info("  • geodesic_paths: Quantum routing network")
-        logger.info("")
         
-        # Validate database schema
-        logger.info("[INIT] Validating existing database schema...")
+        # Step 1: Initialize DatabaseManager
+        logger.info("[INIT] Initializing DatabaseManager...")
+        db_manager = DatabaseManager()
+        logger.info("[INIT] ✓ DatabaseManager created")
+        
+        # Step 2: Validate database connection
+        logger.info("[INIT] Validating database connection...")
+        try:
+            DBConfig.validate()
+            test_conn = DatabaseConnection.get_connection()
+            DatabaseConnection.return_connection(test_conn)
+            logger.info("[INIT] ✓ Database connection validated")
+        except Exception as e:
+            logger.error(f"[INIT] ✗ Database connection failed: {e}")
+            raise
+        
+        # Step 3: Initialize schema
+        logger.info("[INIT] Validating database schema...")
         if not db_manager.initialize_schema():
-            logger.warning("[INIT] Schema validation had issues, continuing...")
+            logger.warning("[INIT] ⚠ Schema validation had issues, continuing...")
+        else:
+            logger.info("[INIT] ✓ Schema validated")
         
-        # Attempt to seed test user
+        # Step 4: Seed test user
         logger.info("[INIT] Checking for test admin user...")
         db_manager.seed_test_user()
         
-        # Initialize lattice refresher
+        # Step 5: Initialize lattice refresher (optional)
         logger.info("[INIT] Initializing quantum lattice refresh system...")
         if initialize_lattice_refresher():
             logger.info("[INIT] ✓ Lattice refresh system initialized")
@@ -1802,10 +1555,13 @@ def initialize_app():
         logger.info(f"Database: {Config.DATABASE_HOST}:{Config.DATABASE_PORT}/{Config.DATABASE_NAME}")
         logger.info("=" * 100)
         logger.info("ADMIN CREDENTIALS:")
-        logger.info("  Email: admin@qtcl.local")
+        logger.info("  Email: shemshallah@gmail.com")
         logger.info("  Password: (uses SUPABASE_PASSWORD environment variable)")
+        logger.info("  Project ID: 6c312f3f-20ea-47cb-8c85-1dc8b5377eb3")
         logger.info("")
-        logger.info("NOTE: Uses production Supabase database with quantum geometry tables")
+        logger.info("DATABASE INTEGRATION:")
+        logger.info("  - db_config.py: Connection pooling & DatabaseBuilderManager")
+        logger.info("  - db_builder_v2.py: Schema, genesis, oracle, pseudoqubits")
         logger.info("=" * 100)
         
         return True
@@ -1814,6 +1570,8 @@ def initialize_app():
         logger.error(f"[INIT] Initialization failed: {e}")
         logger.error(traceback.format_exc())
         return False
+
+
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # APPLICATION ENTRY POINT
