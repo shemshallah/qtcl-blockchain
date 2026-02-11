@@ -1,6 +1,9 @@
 # QTCL Blockchain API - Production Dependencies
 # Python 3.9+
 
+qiskit-aer
+numpy
+
 # Web Framework
 Flask==2.3.2
 Flask-CORS==4.0.0
@@ -17,6 +20,6 @@ bcrypt==4.0.1
 requests==2.31.0
 
 # Optional: For advanced features
-# redis==5.0.0  # For caching/sessions
-# Flask-SocketIO==5.3.4  # For WebSocket support
-# qiskit==0.43.0  # For quantum computing features
+redis==5.0.0  # For caching/sessions
+Flask-SocketIO==5.3.4  # For WebSocket support
+qiskit==0.43.0  # For quantum computing features
