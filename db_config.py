@@ -1,23 +1,27 @@
 #!/usr/bin/env python3
 """
-db_config.py - CORRECT for qtcl_db_builder.py schema
-Matches actual columns from production build
+═══════════════════════════════════════════════════════════════════════════════════════
+db_config.py - DATABASE UTILITIES FOR QTCL API
+Clean database connection management - NO ROUTE DEFINITIONS
+All routes defined in main_app.py only
+═══════════════════════════════════════════════════════════════════════════════════════
 """
 
 import os
 import sys
 import logging
 import psycopg2
+import time
+import threading
 from psycopg2.extras import RealDictCursor
 from collections import deque
-import threading
-import time
 from typing import Optional, Dict, List
+
 logger = logging.getLogger(__name__)
 
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════════════
 # CONFIG FROM ENVIRONMENT VARIABLES
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════════════
 
 class Config:
     """Production configuration - reads from environment"""
@@ -36,6 +40,7 @@ class Config:
     
     @staticmethod
     def validate():
+        """Validate required environment variables"""
         required = {
             'SUPABASE_HOST': Config.SUPABASE_HOST,
             'SUPABASE_USER': Config.SUPABASE_USER,
@@ -48,12 +53,12 @@ class Config:
         
         logger.info(f"✓ Config valid: {Config.SUPABASE_HOST}:{Config.SUPABASE_PORT}/{Config.SUPABASE_DB}")
 
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════════════
 # DATABASE CONNECTION WITH RETRY LOGIC
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════════════
 
 class DatabaseConnection:
-    """Connection pool with retry logic"""
+    """Singleton connection pool with retry logic"""
     
     _instance = None
     _connections = deque(maxlen=Config.DB_POOL_SIZE)
@@ -137,8 +142,11 @@ class DatabaseConnection:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(query, params or ())
                 results = cur.fetchall()
-                logger.debug(f"[DB] Query returned {len(results)} rows")
-                return results
+                logger.debug(f"[DB] Query returned {len(results) if results else 0} rows")
+                return results or []
+        except Exception as e:
+            logger.error(f"[DB] Query error: {e}")
+            return []
         finally:
             DatabaseConnection.return_connection(conn)
     
@@ -152,6 +160,9 @@ class DatabaseConnection:
                 affected = cur.rowcount
                 logger.debug(f"[DB] Query affected {affected} rows")
                 return affected
+        except Exception as e:
+            logger.error(f"[DB] Update error: {e}")
+            return 0
         finally:
             DatabaseConnection.return_connection(conn)
 
@@ -164,6 +175,9 @@ class DatabaseConnection:
                 cur.execute(query, params or ())
                 result = cur.fetchone()
                 return result
+        except Exception as e:
+            logger.error(f"[DB] Query error: {e}")
+            return None
         finally:
             DatabaseConnection.return_connection(conn)
     
@@ -180,131 +194,15 @@ class DatabaseConnection:
                     cur.execute(query, params or ())
                     total += cur.rowcount
                 return total
+        except Exception as e:
+            logger.error(f"[DB] Batch error: {e}")
+            return 0
         finally:
             DatabaseConnection.return_connection(conn)
 
-# ─────────────────────────────────────────────────────────────────────────
-    # SCHEMA MIGRATION RUNNER
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    def run_migrations(self):
-        """Apply schema migrations if not already done"""
-        try:
-            # Check if sessions table exists (indicator that migrations ran)
-            cursor = self._get_cursor()
-            cursor.execute("""
-                SELECT EXISTS(
-                    SELECT 1 FROM information_schema.tables 
-                    WHERE table_name = 'sessions'
-                )
-            """)
-            exists = cursor.fetchone()[0]
-            
-            if exists:
-                logger.info("✓ Database schema already migrated")
-                return True
-            
-            logger.info("Running database migrations...")
-            
-            migrations = [
-                # Add password column
-                "ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255) UNIQUE",
-                
-                # Sessions table
-                """CREATE TABLE IF NOT EXISTS sessions (
-                    session_id UUID PRIMARY KEY,
-                    user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                    access_token TEXT NOT NULL,
-                    refresh_token TEXT NOT NULL,
-                    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                    last_activity TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                )""",
-                "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)",
-                
-                # Auth events (audit log)
-                """CREATE TABLE IF NOT EXISTS auth_events (
-                    id BIGSERIAL PRIMARY KEY,
-                    user_id UUID REFERENCES users(user_id) ON DELETE SET NULL,
-                    event_type VARCHAR(50) NOT NULL,
-                    email VARCHAR(255),
-                    success BOOLEAN DEFAULT FALSE,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                )""",
-                "CREATE INDEX IF NOT EXISTS idx_auth_events_user_id ON auth_events(user_id)",
-                
-                # Password resets
-                """CREATE TABLE IF NOT EXISTS password_resets (
-                    id BIGSERIAL PRIMARY KEY,
-                    user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                    reset_token VARCHAR(255) NOT NULL UNIQUE,
-                    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                )""",
-                
-                # Quantum measurements
-                """CREATE TABLE IF NOT EXISTS quantum_measurements (
-                    id BIGSERIAL PRIMARY KEY,
-                    block_hash VARCHAR(255) NOT NULL,
-                    measurement_type VARCHAR(50) NOT NULL,
-                    entropy_score NUMERIC(5,4) NOT NULL,
-                    coherence_quality NUMERIC(5,4) NOT NULL,
-                    state_vector_hash VARCHAR(255),
-                    dominant_states JSONB,
-                    total_shots INTEGER,
-                    validator_id VARCHAR(255),
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                )""",
-                "CREATE INDEX IF NOT EXISTS idx_quantum_measurements_block ON quantum_measurements(block_hash)",
-                
-                # Transaction sessions
-                """CREATE TABLE IF NOT EXISTS transaction_sessions (
-                    session_id UUID PRIMARY KEY,
-                    user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                    transaction_state VARCHAR(50),
-                    session_data JSONB,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                )""",
-                
-                # Rate limits
-                """CREATE TABLE IF NOT EXISTS rate_limits (
-                    id BIGSERIAL PRIMARY KEY,
-                    user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                    limit_type VARCHAR(50),
-                    count INTEGER DEFAULT 1,
-                    reset_at TIMESTAMP WITH TIME ZONE
-                )""",
-                
-                # Receive codes
-                """CREATE TABLE IF NOT EXISTS receive_codes (
-                    id BIGSERIAL PRIMARY KEY,
-                    user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-                    code VARCHAR(16) UNIQUE,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-                )""",
-                
-                # Enhance blocks
-                "ALTER TABLE blocks ADD COLUMN IF NOT EXISTS quantum_validation_status VARCHAR(50) DEFAULT 'unvalidated'",
-                "ALTER TABLE blocks ADD COLUMN IF NOT EXISTS quantum_measurements_count INTEGER DEFAULT 0",
-            ]
-            
-            for migration in migrations:
-                try:
-                    cursor.execute(migration)
-                    logger.debug(f"✓ Migration: {migration[:60]}...")
-                except Exception as e:
-                    logger.warning(f"Migration partial (may already exist): {e}")
-            
-            logger.info("✓ All migrations completed")
-            return True
-        
-        except Exception as e:
-            logger.error(f"Migration failed: {e}")
-            return False
-
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════════════
 # SETUP FUNCTIONS FOR WSGI
-# ═══════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════════════
 
 def setup_database(app):
     """Initialize database connection in Flask app"""
@@ -331,167 +229,24 @@ def setup_database(app):
         logger.critical(f"[INIT] ✗ Database initialization failed: {e}")
         raise RuntimeError(f"Database error: {e}")
 
-def setup_api_routes(app):
-    """Setup Flask routes - CORRECT COLUMNS FOR qtcl_db_builder.py"""
-    from flask import jsonify
-    
-    @app.route('/api/transactions', methods=['GET'])
-    def get_transactions():
-        try:
-            # Correct columns from transactions table
-            results = DatabaseConnection.execute(
-                "SELECT tx_id, from_user_id, to_user_id, amount, tx_type, status, "
-                "created_at, entropy_score "
-                "FROM transactions ORDER BY created_at DESC LIMIT 100"
-            )
-            
-            transactions = []
-            for t in results:
-                transactions.append({
-                    'tx_id': t['tx_id'],
-                    'from': t['from_user_id'],
-                    'to': t['to_user_id'],
-                    'amount': float(t['amount']) if t['amount'] else 0,
-                    'type': t['tx_type'],
-                    'status': t['status'],
-                    'entropy': float(t['entropy_score']) if t['entropy_score'] else 0,
-                    'created_at': t['created_at'].isoformat() if t['created_at'] else None
-                })
-            
-            return jsonify({
-                'status': 'success',
-                'count': len(transactions),
-                'data': transactions
-            })
-        except Exception as e:
-            logger.error(f"[API] Error fetching transactions: {e}")
-            return jsonify({'status': 'error', 'message': str(e)}), 500
-    
-    @app.route('/api/transactions/<tx_id>', methods=['GET'])
-    def get_transaction(tx_id):
-        try:
-            results = DatabaseConnection.execute(
-                "SELECT tx_id, from_user_id, to_user_id, amount, tx_type, status, "
-                "quantum_state_hash, entropy_score, created_at "
-                "FROM transactions WHERE tx_id = %s",
-                (tx_id,)
-            )
-            
-            if results:
-                t = results[0]
-                return jsonify({
-                    'status': 'found',
-                    'tx_id': t['tx_id'],
-                    'tx_status': t['status'],
-                    'quantum_state_hash': t['quantum_state_hash'],
-                    'entropy_score': float(t['entropy_score']) if t['entropy_score'] else None,
-                    'created_at': t['created_at'].isoformat() if t['created_at'] else None
-                })
-            else:
-                return jsonify({
-                    'status': 'not_found',
-                    'tx_id': tx_id
-                })
-        except Exception as e:
-            logger.error(f"[API] Error: {e}")
-            return jsonify({'status': 'error', 'message': str(e)}), 500
-    
-    @app.route('/api/blocks', methods=['GET'])
-    def get_blocks():
-        try:
-            results = DatabaseConnection.execute(
-                "SELECT block_number, block_hash, parent_hash, timestamp, "
-                "transactions, entropy_score, created_at "
-                "FROM blocks ORDER BY block_number DESC LIMIT 50"
-            )
-            
-            blocks = []
-            for b in results:
-                blocks.append({
-                    'block_number': b['block_number'],
-                    'block_hash': b['block_hash'],
-                    'parent_hash': b['parent_hash'],
-                    'timestamp': b['timestamp'],
-                    'transaction_count': b['transactions'],
-                    'entropy_score': float(b['entropy_score']) if b['entropy_score'] else 0,
-                    'created_at': b['created_at'].strftime('%a, %d %b %Y %H:%M:%S GMT') if b['created_at'] else None
-                })
-            
-            return jsonify({
-                'status': 'success',
-                'count': len(blocks),
-                'data': blocks
-            })
-        except Exception as e:
-            logger.error(f"[API] Error: {e}")
-            return jsonify({'status': 'error', 'message': str(e)}), 500
-    
-    @app.route('/api/users', methods=['GET'])
-    def get_users():
-        try:
-            # Correct columns from users table (user_id, not id)
-            limit = 50
-            results = DatabaseConnection.execute(
-                "SELECT user_id, email, name, balance, role, created_at FROM users LIMIT %s",
-                (limit,)
-            )
-            
-            users = []
-            for u in results:
-                users.append({
-                    'id': u['user_id'],
-                    'email': u['email'],
-                    'name': u['name'],
-                    'balance': float(u['balance']) if u['balance'] else 0,
-                    'role': u['role'],
-                    'created_at': u['created_at'].isoformat() if u['created_at'] else None
-                })
-            
-            return jsonify({
-                'status': 'success',
-                'count': len(users),
-                'users': users
-            })
-        except Exception as e:
-            logger.error(f"[API] Error: {e}")
-            return jsonify({'status': 'error', 'message': str(e)}), 500
-    
-    @app.route('/api/quantum', methods=['GET'])
-    def get_quantum():
-        try:
-            # Correct columns from pseudoqubits table (pseudoqubit_id, not id)
-            limit = int(request.args.get('limit', 1000))  # Default to 1000, allow override
-            results = DatabaseConnection.execute(
-                "SELECT pseudoqubit_id, fidelity, coherence, purity, entropy, "
-                "concurrence, routing_address FROM pseudoqubits LIMIT %s",
-                (limit,)
-            )
-            
-            pseudoqubits = []
-            for pq in results:
-                pseudoqubits.append({
-                    'id': pq['pseudoqubit_id'],
-                    'fidelity': float(pq['fidelity']) if pq['fidelity'] else 0,
-                    'coherence': float(pq['coherence']) if pq['coherence'] else 0,
-                    'purity': float(pq['purity']) if pq['purity'] else 0,
-                    'entropy': float(pq['entropy']) if pq['entropy'] else 0,
-                    'concurrence': float(pq['concurrence']) if pq['concurrence'] else 0,
-                    'routing_address': pq['routing_address'],
-                })
-            
-            return jsonify({
-                'status': 'success',
-                'count': len(pseudoqubits),
-                'pseudoqubits': pseudoqubits
-            })
-        except Exception as e:
-            logger.error(f"[API] Error: {e}")
-            return jsonify({'status': 'error', 'message': str(e)}), 500
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# STANDALONE TEST FUNCTIONS
+# ═══════════════════════════════════════════════════════════════════════════════════════
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
-    Config.validate()
-    conn = DatabaseConnection.get_connection()
-    print("✓ Database connection OK")
-    DatabaseConnection.return_connection(conn)
+    
+    logger.info("Testing database configuration...")
+    
+    try:
+        Config.validate()
+        logger.info("✓ Configuration valid")
+        
+        conn = DatabaseConnection.get_connection()
+        logger.info("✓ Database connection OK")
+        DatabaseConnection.return_connection(conn)
+        
+    except Exception as e:
+        logger.error(f"✗ Test failed: {e}")
+        sys.exit(1)
