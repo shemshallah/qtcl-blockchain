@@ -39,7 +39,6 @@ import subprocess
 import logging
 import sys
 import psycopg2
-import numpy as np
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # LATTICE INTEGRATION IMPORT
