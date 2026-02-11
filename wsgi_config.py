@@ -65,19 +65,14 @@ try:
     logger.info("Importing main application...")
     
     # Import factory functions from main_app.py
-    from main_app import create_app, setup_routes, initialize_app
+    from main_app import create_app, initialize_app
     
     logger.info("✓ Main application factory imported successfully")
     
-    # Create app instance
+    # Create app instance (routes are registered in the factory)
     logger.info("Creating Flask application instance...")
     app = create_app()
-    logger.info("✓ Flask app created")
-    
-    # Register routes once
-    logger.info("Registering routes...")
-    setup_routes(app)
-    logger.info("✓ Routes registered")
+    logger.info(f"✓ Flask app created with {len(list(app.url_map.iter_rules()))} routes")
     
     # Initialize the application
     logger.info("Initializing application...")

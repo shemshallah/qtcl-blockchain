@@ -455,11 +455,15 @@ def handle_exceptions(f):
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 def create_app():
-    """Factory function - creates Flask app once"""
+    """Factory function - creates Flask app with all routes registered"""
     app = Flask(__name__)
     CORS(app, resources={r"/api/*": {"origins": "*"}})
     app.config['JSON_SORT_KEYS'] = False
     app.config['SECRET_KEY'] = Config.JWT_SECRET
+    
+    # Register all routes on this app instance (happens once per app creation)
+    setup_routes(app)
+    
     return app
 
 app = None  # Will be initialized by wsgi_config
