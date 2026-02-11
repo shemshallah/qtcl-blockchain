@@ -2407,8 +2407,34 @@ SCHEMA_DEFINITIONS = {
             error_message TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
+    """,
+    
+    'witness_chains': """
+        CREATE TABLE IF NOT EXISTS witness_chains (
+            chain_id UUID PRIMARY KEY,
+            block_number BIGINT REFERENCES blocks(block_number) ON DELETE CASCADE,
+            chain_data JSONB NOT NULL,
+            chain_hash VARCHAR(256) NOT NULL,
+            witness_count INTEGER DEFAULT 0,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            UNIQUE(block_number)
+        )
+    """,
+    
+    'block_witnesses': """
+        CREATE TABLE IF NOT EXISTS block_witnesses (
+            witness_id UUID PRIMARY KEY,
+            block_number BIGINT REFERENCES blocks(block_number) ON DELETE CASCADE,
+            witness_data JSONB NOT NULL,
+            cycle_number INTEGER,
+            coherence DOUBLE PRECISION,
+            fidelity DOUBLE PRECISION,
+            sigma DOUBLE PRECISION,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
     """
 }
+
 
 logger.info(f"\n{C.BOLD}{C.G}==================================================================={C.E}")
 logger.info(f"{C.BOLD}{C.G}RESPONSE 3/8 PART 1: Core database schema definitions loaded{C.E}")
@@ -3267,6 +3293,17 @@ class DatabaseBuilder:
                 'CREATE INDEX IF NOT EXISTS idx_contract_tx ON contract_interactions(tx_id)',
                 'CREATE INDEX IF NOT EXISTS idx_contract_address ON contract_interactions(contract_address)',
                 'CREATE INDEX IF NOT EXISTS idx_contract_function ON contract_interactions(function_name)',
+            ],
+            'witness_chains': [
+                'CREATE INDEX IF NOT EXISTS idx_witness_chain_block ON witness_chains(block_number)',
+                'CREATE INDEX IF NOT EXISTS idx_witness_chain_hash ON witness_chains(chain_hash)',
+                'CREATE INDEX IF NOT EXISTS idx_witness_chain_created ON witness_chains(created_at)',
+            ],
+            'block_witnesses': [
+                'CREATE INDEX IF NOT EXISTS idx_block_witness_block ON block_witnesses(block_number)',
+                'CREATE INDEX IF NOT EXISTS idx_block_witness_cycle ON block_witnesses(cycle_number)',
+                'CREATE INDEX IF NOT EXISTS idx_block_witness_created ON block_witnesses(created_at)',
+                'CREATE INDEX IF NOT EXISTS idx_block_witness_coherence ON block_witnesses(coherence)',
             ],
             'session_management': [
                 'CREATE INDEX IF NOT EXISTS idx_session_user ON session_management(user_id)',

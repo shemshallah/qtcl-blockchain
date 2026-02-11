@@ -51,6 +51,15 @@ db_manager = None  # Initialized later in initialize_app()
 quantum_system = None  # CHANGED: Renamed from lattice_refresher to quantum_system
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
+# QUANTUM BLOCK SYSTEM (Approach 3 + 5)
+# ═══════════════════════════════════════════════════════════════════════════════════════
+entropy_pool = None  # Shared entropy deque
+quantum_oracle = None  # Post-formation block enhancement
+quantum_witness_aggregator = None  # Witness chain during TX accumulation
+tx_pool = None  # Transaction pool for block formation
+tx_pool_lock = None  # Lock for thread-safe TX pool access
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
 # FLASK & DEPENDENCIES
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
@@ -1349,7 +1358,102 @@ def setup_routes(flask_app):
     # CATCH-ALL ENDPOINTS FOR MISSING ROUTES
     # ═══════════════════════════════════════════════════════════════════════════════════════
     
-    @flask_app.route('/api/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
+    
+    # ═════════════════════════════════════════════════════════════════════════════════════
+    # QUANTUM BLOCKS API ROUTES (Approach 3 + 5)
+    # ═════════════════════════════════════════════════════════════════════════════════════
+    
+    @flask_app.route('/api/blocks/submit_transaction', methods=['POST'])
+    @handle_errors
+    def submit_transaction_to_block():
+        """Submit transaction to quantum block pool"""
+        global tx_pool, tx_pool_lock
+        
+        if tx_pool is None:
+            return jsonify({'error': 'Block system not available'}), 503
+        
+        try:
+            data = request.get_json()
+            if not data:
+                return jsonify({'error': 'No JSON payload'}), 400
+            
+            tx_id = str(uuid.uuid4())
+            
+            with tx_pool_lock:
+                tx_pool.append({
+                    'tx_id': tx_id,
+                    'data': data,
+                    'added_at': datetime.now().isoformat(),
+                })
+                pool_size = len(tx_pool)
+            
+            return jsonify({
+                'status': 'queued',
+                'tx_id': tx_id,
+                'pool_size': pool_size,
+            }), 202
+        
+        except Exception as e:
+            logger.error(f'[BLOCKS] TX submission error: {e}')
+            return jsonify({'error': str(e)}), 500
+    
+    @flask_app.route('/api/blocks/pool_status', methods=['GET'])
+    @handle_errors
+    def get_block_pool_status():
+        """Get quantum block pool status"""
+        global tx_pool, tx_pool_lock, quantum_oracle, quantum_witness_aggregator
+        
+        try:
+            with tx_pool_lock:
+                pool_size = len(tx_pool) if tx_pool else 0
+            
+            oracle_metrics = quantum_oracle.get_metrics() if quantum_oracle else {}
+            aggregator_metrics = quantum_witness_aggregator.get_metrics() if quantum_witness_aggregator else {}
+            
+            return jsonify({
+                'tx_pool_size': pool_size,
+                'tx_pool_max': 5000,
+                'oracle': oracle_metrics,
+                'aggregator': aggregator_metrics,
+                'timestamp': datetime.now().isoformat(),
+            }), 200
+        
+        except Exception as e:
+            logger.error(f'[BLOCKS] Pool status error: {e}')
+            return jsonify({'error': str(e)}), 500
+    
+    @flask_app.route('/api/blocks/<int:block_number>/witnesses', methods=['GET'])
+    @handle_errors
+    def get_block_witnesses(block_number):
+        """Get witness chain for a block"""
+        try:
+            conn = DatabaseConnection.get_connection()
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            
+            cursor.execute("""
+                SELECT witness_data FROM block_witnesses
+                WHERE block_number = %s
+                ORDER BY created_at ASC
+            """, (block_number,))
+            
+            witnesses = cursor.fetchall()
+            cursor.close()
+            DatabaseConnection.return_connection(conn)
+            
+            if not witnesses:
+                return jsonify({'error': 'No witnesses found'}), 404
+            
+            return jsonify({
+                'block_number': block_number,
+                'witness_count': len(witnesses),
+                'witnesses': [json.loads(w['witness_data']) if isinstance(w['witness_data'], str) else w['witness_data'] for w in witnesses],
+            }), 200
+        
+        except Exception as e:
+            logger.error(f'[BLOCKS] Witness retrieval error: {e}')
+            return jsonify({'error': str(e)}), 500
+    
+    @flask_app.route('/api/blocks/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
     @rate_limited
     def catch_all_api(path):
         """Catch-all for unimplemented API endpoints"""
@@ -1366,6 +1470,9 @@ def setup_routes(flask_app):
                 'users_list': 'GET /api/users',
                 'blocks_latest': 'GET /api/blocks/latest',
                 'blocks_list': 'GET /api/blocks',
+                'blocks_submit_tx': 'POST /api/blocks/submit_transaction',
+                'blocks_pool_status': 'GET /api/blocks/pool_status',
+                'blocks_witnesses': 'GET /api/blocks/<block_number>/witnesses',
                 'transactions_list': 'GET /api/transactions',
                 'transactions_submit': 'POST /api/transactions',
                 'quantum_status': 'GET /api/quantum/status',
@@ -1378,6 +1485,10 @@ def setup_routes(flask_app):
                 'mobile_config': 'GET /api/mobile/config'
             }
         }), 404
+    
+    @flask_app.route('/api/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
+    @rate_limited
+    def catch_all_root(path):
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # FLASK APPLICATION FACTORY
@@ -1430,9 +1541,228 @@ def register_error_handlers(flask_app):
 # APPLICATION INITIALIZATION
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
+def initialize_quantum_blocks():
+    """
+    Initialize Quantum Block System (Approach 3 + 5).
+    Oracle: Post-formation block enhancement with witness signatures
+    Aggregator: Witness chain during transaction accumulation
+    """
+    global entropy_pool, quantum_oracle, quantum_witness_aggregator, tx_pool, tx_pool_lock
+    
+    try:
+        from collections import deque
+        import threading
+        import hmac
+        import hashlib
+        import secrets
+        import uuid
+        
+        # Create shared entropy pool
+        entropy_pool = deque(maxlen=10000)
+        tx_pool = deque(maxlen=5000)
+        tx_pool_lock = threading.Lock()
+        
+        logger.info("[BLOCKS] Initializing Oracle (post-formation enhancement)...")
+        
+        # Initialize quantum oracle (Approach 3)
+        class QuantumOracleInline:
+            def __init__(self, db_params, entropy_pool, metrics_fn):
+                self.db_params = db_params
+                self.entropy_pool = entropy_pool
+                self.get_metrics = metrics_fn
+                self.running = False
+                self.witnesses_generated = 0
+                self.blocks_locked = 0
+                self.lock = threading.Lock()
+                
+            def start(self):
+                if self.running:
+                    return
+                self.running = True
+                self.thread = threading.Thread(target=self._oracle_loop, daemon=True, name="QuantumOracle")
+                self.thread.start()
+            
+            def stop(self):
+                self.running = False
+                if hasattr(self, 'thread'):
+                    self.thread.join(timeout=5)
+            
+            def _oracle_loop(self):
+                while self.running:
+                    try:
+                        metrics = self.get_metrics()
+                        if not metrics:
+                            time.sleep(2)
+                            continue
+                        
+                        conn = psycopg2.connect(**self.db_params)
+                        cursor = conn.cursor(cursor_factory=RealDictCursor)
+                        
+                        cursor.execute("""
+                            SELECT block_number, block_hash FROM blocks 
+                            WHERE finalized = FALSE LIMIT 50
+                        """)
+                        
+                        blocks = cursor.fetchall()
+                        
+                        for block in blocks:
+                            try:
+                                witness_id = str(uuid.uuid4())
+                                entropy_nonce = secrets.token_hex(16) if len(self.entropy_pool) < 32 else bytes(list(self.entropy_pool)[:32]).hex()
+                                
+                                witness_data = (
+                                    block['block_hash'] +
+                                    f"{metrics.get('coherence', 0):.6f}" +
+                                    f"{metrics.get('fidelity', 0):.6f}" +
+                                    entropy_nonce
+                                )
+                                
+                                signature = hmac.new(
+                                    entropy_nonce.encode(),
+                                    witness_data.encode(),
+                                    hashlib.sha256
+                                ).hexdigest()
+                                
+                                cursor.execute("""
+                                    INSERT INTO block_witnesses (
+                                        witness_id, block_number, witness_data, cycle_number, 
+                                        coherence, fidelity, sigma
+                                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                                """, (
+                                    witness_id,
+                                    block['block_number'],
+                                    json.dumps({
+                                        'signature': signature,
+                                        'entropy_nonce': entropy_nonce,
+                                        'coherence': metrics.get('coherence', 0),
+                                        'fidelity': metrics.get('fidelity', 0),
+                                    }),
+                                    metrics.get('cycle', 0),
+                                    metrics.get('coherence', 0),
+                                    metrics.get('fidelity', 0),
+                                    metrics.get('sigma', 0),
+                                ))
+                                
+                                with self.lock:
+                                    self.witnesses_generated += 1
+                            
+                            except Exception as e:
+                                logger.error(f"[ORACLE] Witness generation error: {e}")
+                        
+                        conn.commit()
+                        cursor.close()
+                        conn.close()
+                        time.sleep(10)
+                    
+                    except Exception as e:
+                        logger.error(f"[ORACLE] Loop error: {e}")
+                        time.sleep(5)
+            
+            def get_metrics(self):
+                with self.lock:
+                    return {
+                        'witnesses_generated': self.witnesses_generated,
+                        'blocks_locked': self.blocks_locked,
+                    }
+        
+        # Initialize witness aggregator (Approach 5)
+        logger.info("[BLOCKS] Initializing Witness Aggregator (chain during TX fill)...")
+        
+        class QuantumWitnessAggregatorInline:
+            def __init__(self, db_params, entropy_pool, metrics_fn):
+                self.db_params = db_params
+                self.entropy_pool = entropy_pool
+                self.get_metrics = metrics_fn
+                self.running = False
+                self.current_chain_id = None
+                self.witnesses_in_chain = 0
+                self.chains_created = 0
+                self.lock = threading.Lock()
+            
+            def start(self):
+                if self.running:
+                    return
+                self.running = True
+                self.thread = threading.Thread(target=self._aggregator_loop, daemon=True, name="WitnessAggregator")
+                self.thread.start()
+            
+            def stop(self):
+                self.running = False
+                if hasattr(self, 'thread'):
+                    self.thread.join(timeout=5)
+            
+            def _aggregator_loop(self):
+                last_cycle = 0
+                while self.running:
+                    try:
+                        metrics = self.get_metrics()
+                        if not metrics or metrics.get('cycle', 0) == last_cycle:
+                            time.sleep(1)
+                            continue
+                        
+                        last_cycle = metrics.get('cycle', 0)
+                        
+                        with self.lock:
+                            if not self.current_chain_id:
+                                self.current_chain_id = str(uuid.uuid4())
+                                self.chains_created += 1
+                                self.witnesses_in_chain = 0
+                        
+                        entropy_nonce = secrets.token_hex(16) if len(self.entropy_pool) < 32 else bytes(list(self.entropy_pool)[:32]).hex()
+                        witness_sig = hmac.new(
+                            entropy_nonce.encode(),
+                            json.dumps(metrics).encode(),
+                            hashlib.sha256
+                        ).hexdigest()
+                        
+                        with self.lock:
+                            self.witnesses_in_chain += 1
+                        
+                        logger.debug(f"[AGGREGATOR] Added witness to chain (total: {self.witnesses_in_chain})")
+                        time.sleep(1)
+                    
+                    except Exception as e:
+                        logger.error(f"[AGGREGATOR] Loop error: {e}")
+                        time.sleep(2)
+            
+            def get_metrics(self):
+                with self.lock:
+                    return {
+                        'chains_created': self.chains_created,
+                        'current_chain_witnesses': self.witnesses_in_chain,
+                    }
+        
+        # Get DB params
+        db_params = {
+            'host': Config.DATABASE_HOST,
+            'port': Config.DATABASE_PORT,
+            'database': Config.DATABASE_NAME,
+            'user': Config.DATABASE_USER,
+            'password': Config.DATABASE_PASSWORD,
+        }
+        
+        # Create oracle and aggregator
+        metrics_fn = lambda: quantum_system.get_oracle_metrics() if quantum_system else {}
+        
+        quantum_oracle = QuantumOracleInline(db_params, entropy_pool, metrics_fn)
+        quantum_oracle.start()
+        
+        quantum_witness_aggregator = QuantumWitnessAggregatorInline(db_params, entropy_pool, metrics_fn)
+        quantum_witness_aggregator.start()
+        
+        logger.info("[BLOCKS] ✓ Oracle started")
+        logger.info("[BLOCKS] ✓ Witness Aggregator started")
+        
+        return True
+    
+    except Exception as e:
+        logger.error(f"[BLOCKS] Initialization failed: {e}")
+        logger.error(traceback.format_exc())
+        return False
+
 def initialize_app():
     """Initialize application with integrated database and quantum systems"""
-    global db_manager, quantum_system
+    global db_manager, quantum_system, entropy_pool, quantum_oracle, quantum_witness_aggregator
     
     try:
         logger.info("=" * 100)
@@ -1474,6 +1804,11 @@ def initialize_app():
         else:
             logger.warning("[INIT] ⚠ Quantum system not available")
         
+        # Step 6: Initialize Quantum Block System (Approach 3 + 5)
+        logger.info("[INIT] Initializing Quantum Block System (Oracle + Witness Aggregation)...")
+        initialize_quantum_blocks()
+        logger.info("[INIT] ✓ Quantum block system initialized")
+        
         logger.info("")
         logger.info("[INIT] ✓ Application initialized successfully")
         logger.info("=" * 100)
@@ -1490,6 +1825,7 @@ def initialize_app():
         logger.info("  - db_config.py: Connection pooling & DatabaseBuilderManager")
         logger.info("  - db_builder_v2.py: Schema, genesis, oracle, pseudoqubits")
         logger.info("  - quantum_lattice_control_live_complete.py: V5 Quantum System")
+        logger.info("  - QUANTUM BLOCKS: Approach 3+5 (Oracle + Witness Aggregation)")
         logger.info("=" * 100)
         
         return True

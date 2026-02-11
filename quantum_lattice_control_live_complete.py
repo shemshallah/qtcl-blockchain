@@ -1667,6 +1667,36 @@ class QuantumLatticeControlLiveV5:
                 'analytics': self.analytics.get_dashboard(),
                 'checkpoint_dir': str(self.checkpoint_mgr.checkpoint_dir)
             }
+    
+    def get_oracle_metrics(self) -> Dict:
+        """
+        Get metrics optimized for quantum oracle (block system integration).
+        Used by Approach 3 + 5: Oracle witness generation and aggregator.
+        Returns only what's needed for quantum block signatures.
+        APPROACH 3+5: Witness Chain Aggregation During TX Fill
+        """
+        try:
+            with self.lock:
+                anomalies = self.analytics.detect_anomalies()
+                
+                return {
+                    'cycle': self.cycle_count,
+                    'coherence': float(np.mean(self.noise_bath.coherence)),
+                    'fidelity': float(np.mean(self.noise_bath.fidelity)),
+                    'sigma': float(np.mean(self.sigma_controller.sigma_values)),
+                    'anomalies': anomalies,
+                    'timestamp': datetime.now().isoformat(),
+                }
+        except Exception as e:
+            logger.error(f"Error in get_oracle_metrics: {e}")
+            return {
+                'cycle': 0,
+                'coherence': 0.0,
+                'fidelity': 0.0,
+                'sigma': 0.0,
+                'anomalies': [],
+                'timestamp': datetime.now().isoformat(),
+            }
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PRODUCTION ENTRY POINT
