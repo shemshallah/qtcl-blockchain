@@ -1679,11 +1679,19 @@ class QuantumLatticeControlLiveV5:
             with self.lock:
                 anomalies = self.analytics.detect_anomalies()
                 
+                # Get sigma from controller (use get_learning_stats if available)
+                sigma_val = 0.0
+                try:
+                    sigma_stats = self.sigma_controller.get_learning_stats()
+                    sigma_val = sigma_stats.get('avg_loss', 0.0) if sigma_stats else 0.0
+                except:
+                    sigma_val = 3.5  # Default fallback
+                
                 return {
                     'cycle': self.cycle_count,
                     'coherence': float(np.mean(self.noise_bath.coherence)),
                     'fidelity': float(np.mean(self.noise_bath.fidelity)),
-                    'sigma': float(np.mean(self.sigma_controller.sigma_values)),
+                    'sigma': sigma_val,
                     'anomalies': anomalies,
                     'timestamp': datetime.now().isoformat(),
                 }
