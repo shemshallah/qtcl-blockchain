@@ -40,6 +40,23 @@ import logging
 import sys
 import psycopg2
 
+# Safe numpy and lattice imports with fallback
+try:
+    import numpy as np
+    NUMPY_AVAILABLE = True
+except ImportError:
+    NUMPY_AVAILABLE = False
+
+try:
+    if NUMPY_AVAILABLE:
+        from quantum_lattice_refresh import QuantumLatticeRefresh
+        LATTICE_AVAILABLE = True
+    else:
+        LATTICE_AVAILABLE = False
+except ImportError:
+    LATTICE_AVAILABLE = False
+import numpy as np
+
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # LATTICE INTEGRATION IMPORT
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -102,6 +119,22 @@ from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 import jwt
 import psycopg2
+
+# Safe numpy and lattice imports with fallback
+try:
+    import numpy as np
+    NUMPY_AVAILABLE = True
+except ImportError:
+    NUMPY_AVAILABLE = False
+
+try:
+    if NUMPY_AVAILABLE:
+        from quantum_lattice_refresh import QuantumLatticeRefresh
+        LATTICE_AVAILABLE = True
+    else:
+        LATTICE_AVAILABLE = False
+except ImportError:
+    LATTICE_AVAILABLE = False
 from psycopg2.extras import RealDictCursor
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -1583,6 +1616,53 @@ def get_coherence_map():
             'code': 'LATTICE_ERROR'
         }), 500
 
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# QUANTUM LATTICE API ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/quantum/lattice/status', methods=['GET'])
+@rate_limited
+@handle_exceptions
+def get_lattice_status():
+    """Get lattice system status"""
+    if not LATTICE_AVAILABLE or not lattice_refresher:
+        return jsonify({'status': 'unavailable'}), 503
+    try:
+        status = lattice_refresher.get_system_status()
+        return jsonify({'status': 'success', 'lattice': status}), 200
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/quantum/lattice/trigger-refresh', methods=['POST'])
+@rate_limited
+@handle_exceptions
+def trigger_lattice_refresh():
+    """Trigger manual refresh cycle"""
+    if not LATTICE_AVAILABLE or not lattice_refresher:
+        return jsonify({'status': 'unavailable'}), 503
+    try:
+        results = lattice_refresher.flood_all_clusters()
+        avg_improve = float(np.mean([r['improvement'] for r in results])) if NUMPY_AVAILABLE and results else 0
+        sys_cohere = float(np.mean(lattice_refresher.coherence)) if NUMPY_AVAILABLE else 0
+        return jsonify({'status': 'success', 'cycles_completed': len(results), 'avg_improvement': avg_improve, 'system_coherence': sys_cohere}), 200
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/quantum/lattice/coherence-map', methods=['GET'])
+@rate_limited
+@handle_exceptions
+def get_coherence_map():
+    """Get coherence/fidelity arrays"""
+    if not LATTICE_AVAILABLE or not lattice_refresher:
+        return jsonify({'status': 'unavailable'}), 503
+    try:
+        coherence = lattice_refresher.coherence.tolist() if NUMPY_AVAILABLE else []
+        fidelity = lattice_refresher.fidelity.tolist() if NUMPY_AVAILABLE else []
+        return jsonify({'status': 'success', 'coherence': coherence, 'fidelity': fidelity, 'total_qubits': lattice_refresher.total_qubits}), 200
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 @app.route('/api/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
 @rate_limited
 def catch_all_api(path):
@@ -1644,6 +1724,38 @@ def initialize_lattice_refresher():
         return True
     except Exception as e:
         logger.error(f"[LATTICE] Failed to initialize: {e}")
+        return False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# QUANTUM LATTICE INITIALIZATION
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+def initialize_lattice_refresher():
+    """Initialize quantum lattice refresh system - graceful if unavailable"""
+    global lattice_refresher
+    
+    if not LATTICE_AVAILABLE:
+        logger.warning("[LATTICE] System unavailable (numpy/quantum_lattice_refresh missing)")
+        return False
+    
+    try:
+        lattice_refresher = QuantumLatticeRefresh(
+            total_qubits=1000,
+            cluster_size=50,
+            db_connection=db_manager.db_connection if hasattr(db_manager, 'db_connection') else None
+        )
+        
+        refresh_thread = threading.Thread(
+            target=lambda: lattice_refresher.run_continuous(num_cycles=None, interval_ms=5000),
+            daemon=True
+        )
+        refresh_thread.start()
+        
+        logger.info("[LATTICE] ✓ Quantum lattice system initialized")
+        return True
+    except Exception as e:
+        logger.warning(f"[LATTICE] Failed: {e}")
         return False
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
