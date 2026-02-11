@@ -352,36 +352,43 @@ class RateLimiter:
 # DECORATORS
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-def require_auth(f):
-    """Decorator to require authentication"""
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        auth_header = request.headers.get('Authorization')
+def require_auth(required_roles=['user']):
+    """Decorator for authentication check"""
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            try:
+                auth_header = request.headers.get('Authorization')
+            except RuntimeError:
+                # Outside request context - allow in non-request code
+                logger.warning("[AUTH] Called outside request context")
+                return f(*args, **kwargs)
+            
+            if not auth_header:
+                return jsonify({'error': 'Missing authorization header'}), 401
+            
+            try:
+                token = auth_header.split(' ')[1]
+                payload = AuthManager.verify_token(token)
+                if not payload:
+                    return jsonify({'error': 'Invalid token'}), 401
+                
+                user_role = payload.get('role', 'user')
+                if user_role not in required_roles:
+                    return jsonify({'error': 'Insufficient permissions'}), 403
+                
+                g.user_id = payload.get('user_id')
+                g.user_role = user_role
+                return f(*args, **kwargs)
+            
+            except IndexError:
+                return jsonify({'error': 'Invalid authorization header'}), 401
+            except Exception as e:
+                logger.error(f"[AUTH] Error: {e}")
+                return jsonify({'error': 'Authentication failed'}), 401
         
-        if not auth_header:
-            return jsonify({'status': 'error', 'message': 'Missing Authorization header', 'code': 'MISSING_AUTH'}), 401
-        
-        try:
-            parts = auth_header.split()
-            if len(parts) != 2 or parts[0] != 'Bearer':
-                return jsonify({'status': 'error', 'message': 'Invalid Authorization format', 'code': 'INVALID_AUTH_FORMAT'}), 401
-            
-            token = parts[1]
-            payload = AuthManager.verify_token(token)
-            
-            if not payload:
-                return jsonify({'status': 'error', 'message': 'Invalid or expired token', 'code': 'INVALID_TOKEN'}), 401
-            
-            g.user_id = payload.get('user_id')
-            g.role = payload.get('role', 'user')
-            
-            return f(*args, **kwargs)
-            
-        except Exception as e:
-            logger.error(f"[AUTH] Decorator error: {e}")
-            return jsonify({'status': 'error', 'message': 'Authentication error', 'code': 'AUTH_ERROR'}), 401
-    
-    return decorated_function
+        return decorated_function
+    return decorator
 
 def rate_limited(f):
     """Decorator for rate limiting"""
