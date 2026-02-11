@@ -374,8 +374,8 @@ def create_lattice_refresher(app, db_manager) -> QuantumLatticeRefresh:
         conn = None
     
     refresher = QuantumLatticeRefresh(
-        total_qubits=1000,
-        cluster_size=50,
+        total_qubits=106496,
+        cluster_size=100,
         db_connection=conn
     )
     
@@ -406,8 +406,8 @@ if __name__ == '__main__':
     
     # Create without database (for demo)
     lattice = QuantumLatticeRefresh(
-        total_qubits=1000,
-        cluster_size=50,
+        total_qubits=106496,
+        cluster_size=100,
         db_connection=None
     )
     
