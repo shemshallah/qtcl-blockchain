@@ -96,14 +96,108 @@ class C:
     CYAN = '\033[96m'  # ADD THIS LINE
 
 # ===============================================================================
-# DATABASE CONNECTION CONFIGURATION
+# DATABASE CONNECTION CONFIGURATION - SUPABASE AUTH INTEGRATION
 # ===============================================================================
 
-POOLER_HOST = "aws-0-us-west-2.pooler.supabase.com"
-POOLER_USER = "postgres.rslvlsqwkfmdtebqsvtw"
-POOLER_PASSWORD = "$h10j1r1H0w4rd"
-POOLER_PORT = 5432
-POOLER_DB = "postgres"
+import os
+from pathlib import Path
+
+def _verify_admin_and_load_credentials():
+    """
+    Load Supabase credentials securely and verify admin email authentication.
+    Supports environment variables, .env files, and Supabase auth tokens.
+    """
+    admin_email = os.getenv('ADMIN_EMAIL', 'shemshallah@gmail.com')
+    
+    # Try three credential sources in order of preference:
+    # 1. Environment variables (production)
+    # 2. .env file (development)
+    # 3. Supabase auth token with email verification
+    
+    password = os.getenv('SUPABASE_PASSWORD')
+    host = os.getenv('SUPABASE_HOST')
+    user = os.getenv('SUPABASE_USER')
+    
+    # Fallback to .env file if env vars not set
+    if not password or not host or not user:
+        env_path = Path('.env')
+        if env_path.exists():
+            try:
+                with open(env_path) as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith('SUPABASE_PASSWORD='):
+                            password = line.split('=', 1)[1].strip().strip("'\"")
+                        elif line.startswith('SUPABASE_HOST='):
+                            host = line.split('=', 1)[1].strip().strip("'\"")
+                        elif line.startswith('SUPABASE_USER='):
+                            user = line.split('=', 1)[1].strip().strip("'\"")
+                        elif line.startswith('ADMIN_EMAIL='):
+                            admin_email = line.split('=', 1)[1].strip().strip("'\"")
+            except Exception as e:
+                logger.warning(f"Could not read .env file: {e}")
+    
+    # Fallback to auth token-based verification
+    auth_token = os.getenv('SUPABASE_AUTH_TOKEN')
+    if auth_token and not password:
+        try:
+            # Verify token is valid for admin email via Supabase auth
+            import requests
+            supabase_url = os.getenv('SUPABASE_URL', '')
+            headers = {'Authorization': f'Bearer {auth_token}'}
+            response = requests.get(f"{supabase_url}/auth/v1/user", headers=headers)
+            
+            if response.status_code == 200:
+                user_data = response.json()
+                token_email = user_data.get('email', '')
+                if token_email.lower() == admin_email.lower():
+                    logger.info(f"✓ Admin authentication verified for {admin_email}")
+                    password = auth_token  # Use token as session auth
+                else:
+                    raise ValueError(f"Token email {token_email} does not match admin email {admin_email}")
+            else:
+                raise ValueError(f"Auth token validation failed: {response.text}")
+        except Exception as e:
+            logger.warning(f"Auth token verification failed: {e}")
+    
+    # Final validation
+    if not password:
+        raise RuntimeError(
+            f"\n{'='*80}\n"
+            f"❌ SUPABASE_PASSWORD not configured!\n"
+            f"{'='*80}\n\n"
+            f"Admin Email: {admin_email}\n\n"
+            f"Setup Instructions:\n"
+            f"1. Set environment variable:\n"
+            f"   export SUPABASE_PASSWORD='<your_postgres_password>'\n\n"
+            f"2. OR create .env file in project root with:\n"
+            f"   SUPABASE_HOST=aws-0-us-west-2.pooler.supabase.com\n"
+            f"   SUPABASE_USER=postgres.rslvlsqwkfmdtebqsvtw\n"
+            f"   SUPABASE_PASSWORD=<your_postgres_password>\n"
+            f"   ADMIN_EMAIL=shemshallah@gmail.com\n\n"
+            f"3. OR use Supabase auth token:\n"
+            f"   export SUPABASE_AUTH_TOKEN='<session_token>'\n"
+            f"   export SUPABASE_URL='https://your-project.supabase.co'\n\n"
+            f"Get credentials from: https://app.supabase.com/project/_/settings/database\n"
+            f"{'='*80}\n"
+        )
+    
+    return {
+        'password': password,
+        'host': host or "aws-0-us-west-2.pooler.supabase.com",
+        'user': user or "postgres.rslvlsqwkfmdtebqsvtw",
+        'admin_email': admin_email
+    }
+
+# Load and verify credentials at module import time
+_creds = _verify_admin_and_load_credentials()
+
+POOLER_HOST = _creds['host']
+POOLER_USER = _creds['user']
+POOLER_PASSWORD = _creds['password']
+ADMIN_EMAIL = _creds['admin_email']
+POOLER_PORT = int(os.getenv('SUPABASE_PORT', '5432'))
+POOLER_DB = os.getenv('SUPABASE_DB', 'postgres')
 CONNECTION_TIMEOUT = 30
 DB_POOL_MIN_CONNECTIONS = 2
 DB_POOL_MAX_CONNECTIONS = 10
