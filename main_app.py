@@ -484,33 +484,22 @@ def initialize_quantum_system():
     """Initialize Quantum Lattice Control Live V5 system (ONE-TIME ONLY across all workers)"""
     global quantum_system
     
-    # ✅ GUARD 1: Check if already initialized in THIS process
-    if quantum_system is not None:
-        logger.info("[QUANTUM] ✓ Quantum system already initialized in this worker, skipping...")
-        return True
-    
-    # ✅ GUARD 2: Use file-based lock to prevent initialization race condition across workers
+    # ✅ GUARD: Use file-based lock to prevent initialization race condition across forked workers
     lock_file = '/tmp/qtcl_quantum_init.lock'
+    
     try:
-        # Try to create lock file exclusively (fails if exists)
+        # Try to create lock file exclusively (fails if exists = another worker got here first)
         import os
         fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         os.close(fd)
         is_first_worker = True
     except FileExistsError:
-        is_first_worker = False
-        # Wait for first worker to complete initialization
-        for _ in range(30):  # Wait max 30 seconds
-            time.sleep(0.1)
-            if quantum_system is not None:
-                logger.info("[QUANTUM] ✓ Another worker initialized quantum system, using shared instance")
-                return True
-        logger.warning("[QUANTUM] ⚠ Timeout waiting for quantum system initialization")
-        return False
+        # Lock file exists = another worker is initializing or already initialized
+        # This worker should SKIP initialization entirely
+        logger.info("[QUANTUM] ✓ Another worker is initializing/initialized quantum system, skipping...")
+        return True  # ✅ Don't initialize, just return success
     
-    if not is_first_worker:
-        return True
-    
+    # Only FIRST worker reaches here
     try:
         logger.info("[QUANTUM] Attempting to import quantum_lattice_control_live_complete...")
         
