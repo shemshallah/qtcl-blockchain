@@ -1489,6 +1489,12 @@ def setup_routes(flask_app):
     @flask_app.route('/api/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
     @rate_limited
     def catch_all_root(path):
+        """Catch-all for unimplemented API endpoints"""
+        return jsonify({
+            'status': 'error',
+            'message': f'Endpoint not implemented: /api/{path}',
+            'code': 'NOT_IMPLEMENTED'
+        }), 404
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # FLASK APPLICATION FACTORY
