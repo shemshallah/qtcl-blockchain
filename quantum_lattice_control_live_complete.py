@@ -42,6 +42,8 @@ from collections import deque, defaultdict
 from dataclasses import dataclass
 from enum import Enum
 import hashlib
+import uuid
+import secrets
 import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -833,16 +835,20 @@ class RealTimeMetricsStreamer:
             with conn.cursor() as cur:
                 execute_batch(cur, """
                     INSERT INTO quantum_measurements
-                    (batch_id, ghz_fidelity, w_state_fidelity, coherence_quality,
-                     measurement_time, extra_data)
-                    VALUES (%(batch_id)s, %(ghz)s, %(w_state)s, %(coherence)s, NOW(), %(meta)s)
+                    (batch_id, tx_id, ghz_fidelity, w_state_fidelity, coherence_quality,
+                     measurement_time, extra_data, pseudoqubit_id, metadata)
+                    VALUES (%(batch_id)s, %(tx_id)s, %(ghz)s, %(w_state)s, %(coherence)s, 
+                            NOW(), %(meta)s, %(pq_id)s, %(metadata)s)
                 """, [
                     {
                         'batch_id': m.get('batch_id', 0),
+                        'tx_id': m.get('tx_id') or f"batch_{m.get('batch_id', 0)}_meas_{secrets.token_hex(8)}",
                         'ghz': m.get('ghz_fidelity', 0.91),
                         'w_state': m.get('w_state_fidelity', 0.90),
                         'coherence': m.get('coherence_quality', 0.90),
-                        'meta': json.dumps(m.get('metadata', {}))
+                        'meta': json.dumps(m.get('measurement_data', {})),
+                        'pq_id': m.get('pseudoqubit_id', 1),
+                        'metadata': json.dumps(m.get('metadata', {}))
                     }
                     for m in measurements
                 ], page_size=self.batch_size)

@@ -1723,7 +1723,7 @@ SCHEMA_DEFINITIONS = {
         CREATE TABLE IF NOT EXISTS quantum_measurements (
             measurement_id BIGSERIAL PRIMARY KEY,
             batch_id BIGINT DEFAULT 0,
-            tx_id VARCHAR(255) UNIQUE NOT NULL,
+            tx_id VARCHAR(255) DEFAULT (gen_random_uuid()::TEXT),
             circuit_name VARCHAR(255),
             num_qubits INT DEFAULT 8,
             num_validators INT DEFAULT 5,
@@ -1754,7 +1754,7 @@ SCHEMA_DEFINITIONS = {
             execution_time_ms NUMERIC(10,2),
             aer_backend VARCHAR(50),
             optimization_level INTEGER,
-            pseudoqubit_id BIGINT NOT NULL REFERENCES pseudoqubits(pseudoqubit_id) ON DELETE CASCADE,
+            pseudoqubit_id BIGINT DEFAULT 1 REFERENCES pseudoqubits(pseudoqubit_id) ON DELETE SET DEFAULT,
             circuit_id TEXT,
             measurement_basis VARCHAR(50),
             collapse_value VARCHAR(255),
