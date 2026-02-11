@@ -894,8 +894,15 @@ class RealTimeMetricsStreamer:
                 execute_batch(cur, """
                     UPDATE pseudoqubits
                     SET fidelity = %(fidelity)s, coherence = %(coherence)s, updated_at = NOW()
-                    WHERE qubit_id = %(qubit_id)s
-                """, updates, page_size=self.batch_size)
+                    WHERE pseudoqubit_id = %(pseudoqubit_id)s
+                """, [
+                    {
+                        'fidelity': u.get('fidelity', 0.93),
+                        'coherence': u.get('coherence', 0.92),
+                        'pseudoqubit_id': u.get('qubit_id') or u.get('pseudoqubit_id', 0)
+                    }
+                    for u in updates
+                ], page_size=self.batch_size)
             conn.commit()
             conn.close()
             return True

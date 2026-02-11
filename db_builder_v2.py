@@ -37,27 +37,40 @@ import uuid
 import re
 import traceback
 def ensure_package(package, pip_name=None):
+    """Attempt to import a package, but don't fail if it's not available"""
     try:
         __import__(package)
+        return True
     except ImportError:
-        print(f"📦 Installing {pip_name or package}...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "--break-system-packages", pip_name or package])
+        print(f"⚠️  Package '{pip_name or package}' not available (should be pre-installed)")
+        return False
 
-# Essential packages
+# Try to import essential packages (should be pre-installed via requirements.txt)
 ensure_package("psycopg2", "psycopg2-binary")
-ensure_package("mpmath")
-ensure_package("numpy")
-ensure_package("requests")
+numpy_available = ensure_package("numpy")
+mpmath_available = ensure_package("mpmath")
 
 import psycopg2
 from psycopg2.extras import execute_values, RealDictCursor, Json
 from psycopg2.pool import ThreadedConnectionPool
 from psycopg2 import sql, errors as psycopg2_errors
-import numpy as np
-from mpmath import mp, mpf, sqrt, pi, cos, sin, exp, log, tanh, sinh, cosh, acosh
 
-# Set mpmath to 150 decimal precision
-mp.dps = 150
+# Lazy-load numpy (required for some features)
+np = None
+mp = None
+if numpy_available:
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
+        
+if mpmath_available:
+    try:
+        from mpmath import mp, mpf, sqrt, pi, cos, sin, exp, log, tanh, sinh, cosh, acosh
+        # Set mpmath to 150 decimal precision
+        mp.dps = 150
+    except ImportError:
+        mp = None
 
 # ===============================================================================
 # LOGGING CONFIGURATION
@@ -1637,7 +1650,8 @@ SCHEMA_DEFINITIONS = {
             measurement_count BIGINT DEFAULT 0,
             error_count BIGINT DEFAULT 0,
             status VARCHAR(50) DEFAULT 'idle',
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """,
     
@@ -1708,6 +1722,7 @@ SCHEMA_DEFINITIONS = {
     'quantum_measurements': """
         CREATE TABLE IF NOT EXISTS quantum_measurements (
             measurement_id BIGSERIAL PRIMARY KEY,
+            batch_id BIGINT DEFAULT 0,
             tx_id VARCHAR(255) UNIQUE NOT NULL,
             circuit_name VARCHAR(255),
             num_qubits INT DEFAULT 8,
@@ -1745,6 +1760,8 @@ SCHEMA_DEFINITIONS = {
             collapse_value VARCHAR(255),
             outcome_probability FLOAT,
             measurement_valid BOOLEAN,
+            measurement_time TIMESTAMP WITH TIME ZONE,
+            extra_data JSONB,
             metadata JSONB,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -1821,6 +1838,7 @@ SCHEMA_DEFINITIONS = {
             tx_id VARCHAR(255),
             error_type VARCHAR(100),
             error_rate FLOAT,
+            mitigation_method VARCHAR(100),
             mitigation_strategy VARCHAR(100),
             pre_mitigation_fidelity FLOAT,
             post_mitigation_fidelity FLOAT,
