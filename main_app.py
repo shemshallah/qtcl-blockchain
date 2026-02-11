@@ -481,8 +481,35 @@ def handle_exceptions(f):
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 def initialize_quantum_system():
-    """Initialize Quantum Lattice Control Live V5 system"""
+    """Initialize Quantum Lattice Control Live V5 system (ONE-TIME ONLY across all workers)"""
     global quantum_system
+    
+    # ✅ GUARD 1: Check if already initialized in THIS process
+    if quantum_system is not None:
+        logger.info("[QUANTUM] ✓ Quantum system already initialized in this worker, skipping...")
+        return True
+    
+    # ✅ GUARD 2: Use file-based lock to prevent initialization race condition across workers
+    lock_file = '/tmp/qtcl_quantum_init.lock'
+    try:
+        # Try to create lock file exclusively (fails if exists)
+        import os
+        fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        is_first_worker = True
+    except FileExistsError:
+        is_first_worker = False
+        # Wait for first worker to complete initialization
+        for _ in range(30):  # Wait max 30 seconds
+            time.sleep(0.1)
+            if quantum_system is not None:
+                logger.info("[QUANTUM] ✓ Another worker initialized quantum system, using shared instance")
+                return True
+        logger.warning("[QUANTUM] ⚠ Timeout waiting for quantum system initialization")
+        return False
+    
+    if not is_first_worker:
+        return True
     
     try:
         logger.info("[QUANTUM] Attempting to import quantum_lattice_control_live_complete...")
@@ -565,6 +592,12 @@ def initialize_quantum_system():
         logger.info("[QUANTUM]   ✓ System analytics with anomaly detection")
         logger.info("[QUANTUM]   ✓ Automatic checkpointing and recovery")
         logger.info("[QUANTUM]   Background refresh: ACTIVE")
+        
+        # ✅ CLEANUP: Remove lock file so other workers can proceed
+        try:
+            os.remove(lock_file)
+        except:
+            pass
         
         return True
     
