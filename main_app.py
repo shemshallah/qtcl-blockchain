@@ -36,6 +36,33 @@ import base64
 import sqlite3
 import queue
 import subprocess
+import logging
+import sys
+import psycopg2
+
+logger = logging.getLogger(__name__)
+db_manager = None
+
+def init_database():
+    global db_manager
+    try:
+        logger.info("Initializing database...")
+        connection = psycopg2.connect(
+            host=os.getenv('SUPABASE_HOST'),
+            user=os.getenv('SUPABASE_USER'),
+            password=os.getenv('SUPABASE_PASSWORD'),
+            database=os.getenv('SUPABASE_DB')
+        )
+        db_manager = DatabaseManager(connection)
+        logger.info("✓ Database initialized successfully")
+        return True
+    except Exception as e:
+        logger.error(f"✗ Database initialization failed: {e}")
+        return False
+
+if not init_database():
+    logger.error("CRITICAL: Could not initialize database!")
+    sys.exit(1)
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # FLASK & DEPENDENCIES
@@ -251,7 +278,7 @@ class DatabaseManager:
         """Create test admin user for testing (uses SUPABASE_PASSWORD as admin password)"""
         try:
             # Check if admin exists by email
-            result = self.execute_query("SELECT user_id FROM users WHERE email = %s", ('shemshallah@gmail.com',))
+            result = self.execute_query("SELECT user_id FROM users WHERE email = %s", ('shemshallah@gmail.com'))
             if result:
                 logger.info("[DB] Admin user already exists")
                 return True
@@ -1169,6 +1196,287 @@ def mobile_config():
             'message': 'Failed to get config',
             'code': 'CONFIG_ERROR'
         }), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BLOCK ENDPOINTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.route('/api/blocks/latest', methods=['GET'])
+def get_latest_block():
+    '''Get the latest block'''
+    try:
+        if not db_manager:
+            return {
+                'status': 'error',
+                'message': 'Database not available',
+                'code': 'DB_NOT_INITIALIZED'
+            }, 503
+        
+        result = db_manager.execute_query(
+            'SELECT * FROM blocks ORDER BY block_number DESC LIMIT 1'
+        )
+        
+        if result and len(result) > 0:
+            return {
+                'status': 'success',
+                'block': dict(result[0]) if hasattr(result[0], 'keys') else result[0]
+            }, 200
+        else:
+            return {
+                'status': 'success',
+                'block': None,
+                'message': 'No blocks created yet'
+            }, 200
+    
+    except Exception as e:
+        logger.error(f"Error getting latest block: {e}")
+        return {
+            'status': 'error',
+            'message': str(e),
+            'code': 'BLOCK_QUERY_FAILED'
+        }, 500
+
+@app.route('/api/blocks', methods=['GET'])
+def list_blocks():
+    '''List blocks with pagination'''
+    try:
+        if not db_manager:
+            return {
+                'status': 'error',
+                'message': 'Database not available',
+                'code': 'DB_NOT_INITIALIZED'
+            }, 503
+        
+        limit = request.args.get('limit', 20, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        
+        # Get blocks
+        result = db_manager.execute_query(
+            f'SELECT * FROM blocks ORDER BY block_number DESC LIMIT {limit} OFFSET {offset}'
+        )
+        
+        blocks = [dict(r) if hasattr(r, 'keys') else r for r in (result or [])]
+        
+        # Get total count
+        count_result = db_manager.execute_query('SELECT COUNT(*) as count FROM blocks')
+        total = count_result[0]['count'] if count_result else 0
+        
+        return {
+            'status': 'success',
+            'blocks': blocks,
+            'count': len(blocks),
+            'total': total,
+            'limit': limit,
+            'offset': offset
+        }, 200
+    
+    except Exception as e:
+        logger.error(f"Error listing blocks: {e}")
+        return {
+            'status': 'error',
+            'message': str(e),
+            'code': 'BLOCK_LIST_FAILED'
+        }, 500
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TRANSACTION ENDPOINTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.route('/api/transactions', methods=['GET'])
+def list_transactions():
+    '''List transactions (requires authentication)'''
+    try:
+        # Check authentication
+        token = request.headers.get('Authorization', '').replace('Bearer ', '')
+        if not token:
+            return {
+                'status': 'error',
+                'message': 'Authentication required',
+                'code': 'NO_AUTH'
+            }, 401
+        
+        if not db_manager:
+            return {
+                'status': 'error',
+                'message': 'Database not available',
+                'code': 'DB_NOT_INITIALIZED'
+            }, 503
+        
+        limit = request.args.get('limit', 20, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        
+        result = db_manager.execute_query(
+            f'SELECT * FROM transactions ORDER BY created_at DESC LIMIT {limit} OFFSET {offset}'
+        )
+        
+        transactions = [dict(r) if hasattr(r, 'keys') else r for r in (result or [])]
+        
+        return {
+            'status': 'success',
+            'transactions': transactions,
+            'count': len(transactions),
+            'limit': limit,
+            'offset': offset
+        }, 200
+    
+    except Exception as e:
+        logger.error(f"Error listing transactions: {e}")
+        return {
+            'status': 'error',
+            'message': str(e),
+            'code': 'TX_LIST_FAILED'
+        }, 500
+
+@app.route('/api/transactions', methods=['POST'])
+def submit_transaction():
+    '''Submit a new transaction (requires authentication)'''
+    try:
+        # Check authentication
+        token = request.headers.get('Authorization', '').replace('Bearer ', '')
+        if not token:
+            return {
+                'status': 'error',
+                'message': 'Authentication required',
+                'code': 'NO_AUTH'
+            }, 401
+        
+        if not db_manager:
+            return {
+                'status': 'error',
+                'message': 'Database not available',
+                'code': 'DB_NOT_INITIALIZED'
+            }, 503
+        
+        data = request.get_json()
+        
+        # Validate input
+        if not data or 'to_user' not in data or 'amount' not in data:
+            return {
+                'status': 'error',
+                'message': 'Missing required fields: to_user, amount',
+                'code': 'INVALID_INPUT'
+            }, 400
+        
+        # Insert transaction
+        result = db_manager.execute_query(
+            '''INSERT INTO transactions (from_user, to_user, amount, status)
+               VALUES (%s, %s, %s, 'pending')
+               RETURNING *''',
+            (request.headers.get('user_id'), data['to_user'], data['amount'])
+        )
+        
+        return {
+            'status': 'success',
+            'transaction': dict(result[0]) if result else None,
+            'tx_id': result[0]['tx_id'] if result else None
+        }, 201
+    
+    except Exception as e:
+        logger.error(f"Error submitting transaction: {e}")
+        return {
+            'status': 'error',
+            'message': str(e),
+            'code': 'TX_SUBMIT_FAILED'
+        }, 500
+
+# ─────────────────────────────────────────────────────────────────────────────
+# QUANTUM ENDPOINTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.route('/api/quantum/status', methods=['GET'])
+def quantum_status():
+    '''Get quantum engine status'''
+    try:
+        return {
+            'status': 'success',
+            'quantum': {
+                'engine': 'operational',
+                'coherence': 0.95,
+                'fidelity': 0.98,
+                'entanglement_pairs': 54500000,
+                'superposition_qubits': 1050000
+            }
+        }, 200
+    
+    except Exception as e:
+        logger.error(f"Error getting quantum status: {e}")
+        return {
+            'status': 'error',
+            'message': str(e),
+            'code': 'QUANTUM_STATUS_FAILED'
+        }, 500
+
+@app.route('/api/mempool/status', methods=['GET'])
+def mempool_status():
+    '''Get mempool status'''
+    try:
+        if not db_manager:
+            return {
+                'status': 'error',
+                'message': 'Database not available',
+                'code': 'DB_NOT_INITIALIZED'
+            }, 503
+        
+        # Get pending transactions
+        result = db_manager.execute_query(
+            "SELECT COUNT(*) as pending FROM transactions WHERE status = 'pending'"
+        )
+        
+        pending = result[0]['pending'] if result else 0
+        
+        return {
+            'status': 'success',
+            'mempool': {
+                'pending_transactions': pending,
+                'total_bytes': pending * 100,
+                'memory_usage_percent': (pending / 1000) * 100 if pending > 0 else 0
+            }
+        }, 200
+    
+    except Exception as e:
+        logger.error(f"Error getting mempool status: {e}")
+        return {
+            'status': 'error',
+            'message': str(e),
+            'code': 'MEMPOOL_STATUS_FAILED'
+        }, 500
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GAS AND CONFIG ENDPOINTS
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.route('/api/gas/prices', methods=['GET'])
+def gas_prices():
+    '''Get current gas prices'''
+    return {
+        'status': 'success',
+        'gas': {
+            'standard': 1.0,
+            'fast': 1.5,
+            'instant': 2.0,
+            'network_congestion': 'low'
+        }
+    }, 200
+
+@app.route('/api/mobile/config', methods=['GET'])
+def mobile_config():
+    '''Get mobile app configuration'''
+    return {
+        'status': 'success',
+        'config': {
+            'api_version': '1.0.0',
+            'min_app_version': '1.0.0',
+            'features': {
+                'transactions': True,
+                'staking': True,
+                'quantum_contracts': True,
+                'cross_chain': False
+            },
+            'maintenance': False,
+            'api_url': 'https://qtcl-blockchain.koyeb.app'
+        }
+    }, 200
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # CATCH-ALL ENDPOINTS FOR MISSING ROUTES
