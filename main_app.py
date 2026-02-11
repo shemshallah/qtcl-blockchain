@@ -461,28 +461,16 @@ def create_app():
     app.config['JSON_SORT_KEYS'] = False
     app.config['SECRET_KEY'] = Config.JWT_SECRET
     
+    # Register error handlers directly on app
+    register_error_handlers(app)
+    
     # Register all routes on this app instance (happens once per app creation)
     setup_routes(app)
     
     return app
 
-app = None  # Will be initialized by wsgi_config
-
-def initialize_lattice_refresher():
-    """Initialize lattice refresh system (optional)"""
-    try:
-        return True
-    except:
-        return False
-
-def setup_routes(flask_app):
-    """Register all routes on app instance (called once by WSGI entry point)"""
-    global db_manager
-    
-    # ═══════════════════════════════════════════════════════════════════════════════════════
-    # GLOBAL ERROR HANDLERS
-    # ═══════════════════════════════════════════════════════════════════════════════════════
-    
+def register_error_handlers(flask_app):
+    """Register error handlers on Flask app"""
     @flask_app.errorhandler(400)
     def bad_request(error):
         """Handle 400 Bad Request"""
@@ -522,12 +510,28 @@ def setup_routes(flask_app):
     @flask_app.errorhandler(500)
     def internal_error(error):
         """Handle 500 Internal Server Error"""
-        logger.error(f"[API] 500 error: {error}")
         return jsonify({
             'status': 'error',
             'message': 'Internal server error',
             'code': 'INTERNAL_ERROR'
         }), 500
+
+app = None  # Will be initialized by wsgi_config
+
+def initialize_lattice_refresher():
+    """Initialize lattice refresh system (optional)"""
+    try:
+        return True
+    except:
+        return False
+
+def setup_routes(flask_app):
+    """Register all routes on app instance (error handlers registered in create_app)"""
+    global db_manager
+    
+    # Note: Error handlers are now registered separately in register_error_handlers()
+    # called from create_app() to prevent duplicate registration
+    
     
     @flask_app.before_request
     def before_request():
