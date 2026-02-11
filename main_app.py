@@ -582,11 +582,9 @@ def initialize_quantum_system():
         logger.info("[QUANTUM]   ✓ Automatic checkpointing and recovery")
         logger.info("[QUANTUM]   Background refresh: ACTIVE")
         
-        # ✅ CLEANUP: Remove lock file so other workers can proceed
-        try:
-            os.remove(lock_file)
-        except:
-            pass
+        # ✅ IMPORTANT: DO NOT REMOVE LOCK FILE
+        # Keep it for entire process lifetime to prevent other workers from initializing
+        logger.info("[QUANTUM] Lock file retained for process lifetime - only ONE quantum system will run")
         
         return True
     
