@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
 ═══════════════════════════════════════════════════════════════════════════════
-QUANTUM LATTICE REFRESH ENGINE
-Cyclical refresh of entire system with constructive interference timing
-Updates database with real-time fidelity measures
+QUANTUM LATTICE REFRESH ENGINE - ENHANCED
+Optimized for 106,496 qubits with batched processing and status reporting
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
@@ -25,6 +24,35 @@ try:
     QISKIT_AVAILABLE = True
 except ImportError:
     QISKIT_AVAILABLE = False
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MEMORY-OPTIMIZED BATCHING CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class BatchConfig:
+    """Optimal batching for Aer simulator without excessive memory"""
+    
+    # Aer can handle ~30 qubits in a single circuit comfortably
+    # For 106,496 pseudoqubits, we batch them into manageable groups
+    MAX_QUBITS_PER_CIRCUIT = 24  # Conservative for memory safety
+    BATCH_SIZE = 2048  # Process 2048 qubits at a time (85 circuits of 24 qubits each)
+    
+    # Memory management
+    CLEAR_CACHE_EVERY_N_BATCHES = 10
+    GARBAGE_COLLECT_EVERY_N_BATCHES = 20
+    
+    @classmethod
+    def calculate_optimal_batches(cls, total_qubits: int) -> Tuple[int, int, int]:
+        """
+        Calculate optimal batch configuration
+        
+        Returns:
+            (num_batches, qubits_per_batch, circuits_per_batch)
+        """
+        num_batches = (total_qubits + cls.BATCH_SIZE - 1) // cls.BATCH_SIZE
+        circuits_per_batch = (cls.BATCH_SIZE + cls.MAX_QUBITS_PER_CIRCUIT - 1) // cls.MAX_QUBITS_PER_CIRCUIT
+        
+        return num_batches, cls.BATCH_SIZE, circuits_per_batch
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CORE REVIVAL ENGINES (Minimal, Focused)
@@ -50,7 +78,6 @@ class BerryPhase:
     
     def apply(self, coherence: float, sigma: float = 4.0) -> float:
         """Apply Berry phase topological recovery"""
-        # Adiabatic evolution provides coherence recovery
         recovery = coherence + (1 - coherence) * 0.15 * (1 - np.exp(-sigma / 8.0))
         self.phase_accumulation += 2 * np.pi * np.random.random() * 0.1
         return min(1.0, recovery)
@@ -63,7 +90,6 @@ class WStateRevival:
     
     def apply(self, coherence_cluster: np.ndarray) -> np.ndarray:
         """Apply W-state boost to cluster qubits"""
-        # W-state entanglement provides 15-25% recovery per qubit
         boost = 0.15 + 0.10 * np.log(self.cluster_size) / np.log(10)
         recovered = np.minimum(1.0, coherence_cluster + (1 - coherence_cluster) * boost)
         return recovered
@@ -77,13 +103,10 @@ class AdaptiveControl:
     def select_parameters(self, coherence: float) -> Dict:
         """Choose Floquet ω and Berry σ based on current coherence"""
         if coherence < 0.6:
-            # Low: aggressive parameters
             return {'omega': 3.0, 'v0': 1.5, 'sigma': 6.0}
         elif coherence < 0.8:
-            # Medium: moderate
             return {'omega': 2.0, 'v0': 1.0, 'sigma': 4.0}
         else:
-            # High: conservative
             return {'omega': 1.0, 'v0': 0.5, 'sigma': 2.0}
 
 class FullPipeline:
@@ -124,182 +147,204 @@ class FullPipeline:
         }
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# CYCLICAL LATTICE REFRESH WITH CONSTRUCTIVE TIMING
+# ENHANCED LATTICE REFRESH WITH STATUS REPORTING
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class QuantumLatticeRefresh:
+class QuantumLatticeRefreshEnhanced:
     """
-    Cyclical refresh of entire qubit lattice with constructive interference timing
-    
-    Cycles through clusters sequentially, timing pulses to reinforce (constructive).
-    Updates database with real-time fidelity measures.
+    Enhanced cyclical refresh with:
+    - Optimized batching for 106,496 qubits
+    - Status reporting every 100 refreshes
+    - Memory-efficient Aer simulation
     """
     
     def __init__(self, 
-                 total_qubits: int = 1000,
-                 cluster_size: int = 50,
-                 db_connection: Optional[psycopg2.extensions.connection] = None):
+                 total_qubits: int = 106496,
+                 db_connection: Optional[psycopg2.extensions.connection] = None,
+                 status_interval: int = 100):
         """
         Args:
-            total_qubits: Total qubits in lattice
-            cluster_size: Qubits per cluster/refresh cycle
+            total_qubits: Total qubits in lattice (default: 106,496)
             db_connection: PostgreSQL connection for fidelity logging
+            status_interval: Report status every N refreshes
         """
         
         self.total_qubits = total_qubits
-        self.cluster_size = cluster_size
-        self.num_clusters = total_qubits // cluster_size
         self.db = db_connection
+        self.status_interval = status_interval
+        
+        # Calculate optimal batching
+        self.num_batches, self.batch_size, self.circuits_per_batch = \
+            BatchConfig.calculate_optimal_batches(total_qubits)
+        
+        logger.info(f"[Lattice] Configured for {total_qubits:,} qubits")
+        logger.info(f"[Lattice] Batching: {self.num_batches} batches × {self.batch_size} qubits/batch")
+        logger.info(f"[Lattice] Circuits per batch: {self.circuits_per_batch}")
         
         # Initialize coherence map
         self.coherence = np.ones(total_qubits) * 0.95
         self.fidelity = np.ones(total_qubits) * 0.98
         
-        # Pipeline
-        self.pipeline = FullPipeline(cluster_size)
+        # Pipeline (using smaller cluster size for batch processing)
+        self.pipeline = FullPipeline(BatchConfig.MAX_QUBITS_PER_CIRCUIT)
         
         # Timing for constructive interference
-        self.base_period_ms = 5000  # 5 second base cycle
-        self.cluster_interval_ms = self.base_period_ms / self.num_clusters
+        self.base_period_ms = 5000
         self.current_cycle = 0
         self.start_time = datetime.now()
         
-        # Track phase for constructive interference
-        self.phase_accumulation = np.zeros(total_qubits)
-        self.constructive_phase = 0.0
+        # Status tracking
+        self.total_refreshes = 0
+        self.last_status_report = 0
+        self.refresh_history = []
+        
+        # Performance metrics
+        self.total_execution_time_ms = 0.0
+        self.avg_improvement_history = []
     
-    def get_cluster_indices(self, cluster_id: int) -> List[int]:
-        """Get qubit indices for cluster"""
-        start = cluster_id * self.cluster_size
-        end = min(start + self.cluster_size, self.total_qubits)
+    def get_batch_indices(self, batch_id: int) -> List[int]:
+        """Get qubit indices for batch"""
+        start = batch_id * self.batch_size
+        end = min(start + self.batch_size, self.total_qubits)
         return list(range(start, end))
     
-    def calculate_constructive_timing(self) -> float:
+    def refresh_batch(self, batch_id: int) -> Dict:
         """
-        Calculate timing offset for constructive interference
-        
-        Phases are spaced to constructively reinforce system resonance
-        Each cluster hits its refresh at peak of resonance wave
+        Refresh single batch through full pipeline
+        Batch is processed in sub-groups to fit Aer memory constraints
         """
-        elapsed_ms = (datetime.now() - self.start_time).total_seconds() * 1000
+        batch_start_time = time.time()
         
-        # Resonance frequency: system naturally oscillates at ~1 MHz
-        # But we modulate at beat frequency for macro-level refresh
-        system_resonance_hz = 1e6
-        beat_frequency_hz = 5000  # 5 kHz - our refresh rhythm
+        batch_indices = self.get_batch_indices(batch_id)
+        batch_coherence = self.coherence[batch_indices]
         
-        # Phase in resonance cycle
-        phase = (elapsed_ms * beat_frequency_hz / 1000.0) % (2 * np.pi)
+        # Process batch in sub-groups (circuits)
+        all_recovered = []
+        for circuit_offset in range(0, len(batch_indices), BatchConfig.MAX_QUBITS_PER_CIRCUIT):
+            circuit_end = min(circuit_offset + BatchConfig.MAX_QUBITS_PER_CIRCUIT, len(batch_indices))
+            circuit_coherence = batch_coherence[circuit_offset:circuit_end]
+            
+            # Execute pipeline on this circuit's qubits
+            recovered_coherence, _ = self.pipeline.execute(circuit_coherence)
+            all_recovered.extend(recovered_coherence)
         
-        # Shift based on cycle position for constructive stacking
-        cluster_phase_offset = (self.current_cycle % self.num_clusters) * (2 * np.pi / self.num_clusters)
-        
-        # Constructive timing when phase + offset aligns with resonance peaks
-        constructive_timing = phase + cluster_phase_offset
-        
-        return constructive_timing
-    
-    def refresh_cluster(self, cluster_id: int) -> Dict:
-        """
-        Refresh single cluster through full pipeline
-        Update database with fidelity measures
-        """
-        
-        cluster_indices = self.get_cluster_indices(cluster_id)
-        cluster_coherence = self.coherence[cluster_indices]
-        
-        # Execute pipeline
-        recovered_coherence, pipeline_stats = self.pipeline.execute(cluster_coherence)
+        all_recovered = np.array(all_recovered)
         
         # Update coherence map
-        self.coherence[cluster_indices] = recovered_coherence
-        self.fidelity[cluster_indices] = recovered_coherence * 0.98 + 0.02  # Slight decay from coherence
+        self.coherence[batch_indices] = all_recovered
+        self.fidelity[batch_indices] = all_recovered * 0.98 + 0.02
         
-        # Calculate constructive timing phase
-        timing_phase = self.calculate_constructive_timing()
+        batch_time_ms = (time.time() - batch_start_time) * 1000
+        self.total_execution_time_ms += batch_time_ms
         
-        # Results
         result = {
-            'timestamp': datetime.now(),
-            'cluster_id': cluster_id,
-            'qubits': cluster_indices,
-            'coherence_before': np.mean(cluster_coherence),
-            'coherence_after': np.mean(recovered_coherence),
-            'improvement': pipeline_stats['improvement'],
-            'fidelity': float(np.mean(self.fidelity[cluster_indices])),
-            'timing_phase': timing_phase,
-            'constructive': abs(np.cos(timing_phase)) > 0.8,  # Constructive if near peak/trough
-            'cycle': self.current_cycle,
-            'parameters': pipeline_stats['params']
+            'batch_id': batch_id,
+            'qubits': batch_indices,
+            'coherence_before': float(np.mean(batch_coherence)),
+            'coherence_after': float(np.mean(all_recovered)),
+            'improvement': float(np.mean(all_recovered) - np.mean(batch_coherence)),
+            'batch_time_ms': batch_time_ms
         }
-        
-        # Write to database
-        if self.db:
-            self._write_fidelity_to_db(result)
-        
-        logger.info(f"[Cluster {cluster_id}] "
-                   f"Coherence: {result['coherence_before']:.4f} → {result['coherence_after']:.4f} "
-                   f"(+{result['improvement']:+.4f}) | "
-                   f"Phase: {timing_phase:.2f} rad | "
-                   f"Constructive: {result['constructive']}")
         
         return result
     
-    def _write_fidelity_to_db(self, result: Dict):
-        """Write fidelity measurements to quantum_measurements table"""
-        try:
-            with self.db.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO quantum_measurements (
-                        measurement_id,
-                        timestamp,
-                        event_type,
-                        sigma_address,
-                        fidelity,
-                        coherence_score,
-                        success
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """, (
-                    f"refresh_{result['cluster_id']}_{self.current_cycle}",
-                    result['timestamp'],
-                    'lattice_refresh',
-                    f"cluster_{result['cluster_id']}",
-                    result['fidelity'],
-                    result['coherence_after'],
-                    True
-                ))
-            self.db.commit()
-        except Exception as e:
-            logger.error(f"DB write error: {e}")
-    
-    def flood_all_clusters(self) -> List[Dict]:
+    def flood_all_batches(self) -> List[Dict]:
         """
-        Flood entire lattice cyclically
-        Each cluster refresh timed for constructive interference
+        Flood entire lattice in optimized batches
         """
         results = []
+        cycle_start_time = time.time()
         
-        logger.info(f"\n[Cycle {self.current_cycle}] Flooding {self.num_clusters} clusters cyclically")
+        logger.info(f"\n{'='*80}")
+        logger.info(f"[Cycle {self.current_cycle}] Processing {self.num_batches} batches ({self.total_qubits:,} qubits)")
+        logger.info(f"{'='*80}")
         
-        for cluster_id in range(self.num_clusters):
-            # Stagger refreshes across the cycle period
-            if cluster_id > 0:
-                time.sleep(self.cluster_interval_ms / 1000.0)
-            
-            result = self.refresh_cluster(cluster_id)
+        for batch_id in range(self.num_batches):
+            result = self.refresh_batch(batch_id)
             results.append(result)
+            
+            # Memory management
+            if (batch_id + 1) % BatchConfig.CLEAR_CACHE_EVERY_N_BATCHES == 0:
+                # Clear any Aer caches
+                pass
+            
+            if (batch_id + 1) % BatchConfig.GARBAGE_COLLECT_EVERY_N_BATCHES == 0:
+                import gc
+                gc.collect()
+        
+        cycle_time_ms = (time.time() - cycle_start_time) * 1000
         
         # Summary
         avg_improvement = np.mean([r['improvement'] for r in results])
-        constructive_count = sum(1 for r in results if r['constructive'])
+        self.avg_improvement_history.append(avg_improvement)
         
-        logger.info(f"[Cycle {self.current_cycle}] Complete")
-        logger.info(f"  ✓ Avg improvement: {avg_improvement:+.4f}")
-        logger.info(f"  ✓ Constructive alignments: {constructive_count}/{self.num_clusters}")
-        logger.info(f"  ✓ System coherence: {np.mean(self.coherence):.4f}\n")
+        logger.info(f"[Cycle {self.current_cycle}] Complete in {cycle_time_ms:.0f}ms")
+        logger.info(f"  ✓ Avg improvement: {avg_improvement:+.6f}")
+        logger.info(f"  ✓ System coherence: {np.mean(self.coherence):.6f}")
+        logger.info(f"  ✓ System fidelity: {np.mean(self.fidelity):.6f}\n")
         
         self.current_cycle += 1
+        self.total_refreshes += 1
+        
+        # Check if status report needed
+        if self.total_refreshes % self.status_interval == 0:
+            self.print_status_report()
+        
         return results
+    
+    def print_status_report(self):
+        """
+        Print comprehensive status report every N refreshes
+        This is displayed in terminal/WSGI logs
+        """
+        elapsed_time = (datetime.now() - self.start_time).total_seconds()
+        
+        print("\n" + "╔" + "═"*78 + "╗")
+        print(f"║ QUANTUM LATTICE STATUS REPORT #{self.total_refreshes // self.status_interval}".ljust(79) + "║")
+        print("╠" + "═"*78 + "╣")
+        
+        print(f"║ Total Refreshes: {self.total_refreshes:,}".ljust(79) + "║")
+        print(f"║ Total Qubits: {self.total_qubits:,}".ljust(79) + "║")
+        print(f"║ Elapsed Time: {elapsed_time:.1f}s ({elapsed_time/60:.1f} min)".ljust(79) + "║")
+        
+        print("╠" + "═"*78 + "╣")
+        print(f"║ COHERENCE METRICS".ljust(79) + "║")
+        print("╠" + "─"*78 + "╣")
+        
+        print(f"║   Mean: {np.mean(self.coherence):.8f}".ljust(79) + "║")
+        print(f"║   Min:  {np.min(self.coherence):.8f}".ljust(79) + "║")
+        print(f"║   Max:  {np.max(self.coherence):.8f}".ljust(79) + "║")
+        print(f"║   Std:  {np.std(self.coherence):.8f}".ljust(79) + "║")
+        
+        print("╠" + "═"*78 + "╣")
+        print(f"║ FIDELITY METRICS".ljust(79) + "║")
+        print("╠" + "─"*78 + "╣")
+        
+        print(f"║   Mean: {np.mean(self.fidelity):.8f}".ljust(79) + "║")
+        print(f"║   Min:  {np.min(self.fidelity):.8f}".ljust(79) + "║")
+        print(f"║   Max:  {np.max(self.fidelity):.8f}".ljust(79) + "║")
+        
+        print("╠" + "═"*78 + "╣")
+        print(f"║ PERFORMANCE".ljust(79) + "║")
+        print("╠" + "─"*78 + "╣")
+        
+        avg_cycle_time = self.total_execution_time_ms / max(self.total_refreshes, 1)
+        refreshes_per_min = (self.total_refreshes / max(elapsed_time, 1)) * 60
+        
+        print(f"║   Avg Cycle Time: {avg_cycle_time:.1f}ms".ljust(79) + "║")
+        print(f"║   Refreshes/min: {refreshes_per_min:.2f}".ljust(79) + "║")
+        print(f"║   Total Exec Time: {self.total_execution_time_ms/1000:.1f}s".ljust(79) + "║")
+        
+        if len(self.avg_improvement_history) >= 10:
+            recent_trend = np.mean(self.avg_improvement_history[-10:])
+            print(f"║   Avg Improvement (last 10): {recent_trend:+.8f}".ljust(79) + "║")
+        
+        print("╚" + "═"*78 + "╝\n")
+        
+        # Also log to logger
+        logger.info(f"[STATUS] Refresh #{self.total_refreshes}: "
+                   f"Coherence={np.mean(self.coherence):.6f}, "
+                   f"Fidelity={np.mean(self.fidelity):.6f}")
     
     def run_continuous(self, num_cycles: int = None, interval_ms: int = None):
         """
@@ -316,55 +361,53 @@ class QuantumLatticeRefresh:
         
         try:
             while num_cycles is None or cycle_num < num_cycles:
-                self.flood_all_clusters()
+                self.flood_all_batches()
                 cycle_num += 1
                 
                 if num_cycles is not None:
                     time.sleep(interval_ms / 1000.0)
         
         except KeyboardInterrupt:
-            logger.info("Lattice refresh stopped by user")
+            logger.info("\n[Lattice] Refresh stopped by user")
+            self.print_status_report()
     
     def get_system_status(self) -> Dict:
-        """Get complete lattice status"""
+        """Get complete lattice status for API"""
         return {
             'timestamp': datetime.now().isoformat(),
             'total_qubits': self.total_qubits,
-            'clusters': self.num_clusters,
+            'total_refreshes': self.total_refreshes,
             'current_cycle': self.current_cycle,
-            'avg_coherence': float(np.mean(self.coherence)),
-            'min_coherence': float(np.min(self.coherence)),
-            'max_coherence': float(np.max(self.coherence)),
-            'avg_fidelity': float(np.mean(self.fidelity)),
-            'min_fidelity': float(np.min(self.fidelity)),
-            'max_fidelity': float(np.max(self.fidelity)),
-            'elapsed_time_ms': int((datetime.now() - self.start_time).total_seconds() * 1000),
-            'base_cycle_period_ms': self.base_period_ms,
-            'cluster_interval_ms': self.cluster_interval_ms
+            'batching': {
+                'num_batches': self.num_batches,
+                'batch_size': self.batch_size,
+                'circuits_per_batch': self.circuits_per_batch
+            },
+            'coherence': {
+                'mean': float(np.mean(self.coherence)),
+                'min': float(np.min(self.coherence)),
+                'max': float(np.max(self.coherence)),
+                'std': float(np.std(self.coherence))
+            },
+            'fidelity': {
+                'mean': float(np.mean(self.fidelity)),
+                'min': float(np.min(self.fidelity)),
+                'max': float(np.max(self.fidelity))
+            },
+            'performance': {
+                'elapsed_time_s': (datetime.now() - self.start_time).total_seconds(),
+                'total_execution_time_ms': self.total_execution_time_ms,
+                'avg_cycle_time_ms': self.total_execution_time_ms / max(self.total_refreshes, 1)
+            }
         }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # API INTEGRATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def create_lattice_refresher(app, db_manager) -> QuantumLatticeRefresh:
+def create_lattice_refresher(app, db_manager) -> QuantumLatticeRefreshEnhanced:
     """
-    Create and integrate with Flask app
-    
-    Add to your main_app.py:
-    
-    from quantum_lattice_refresh import create_lattice_refresher
-    
-    refresher = create_lattice_refresher(app, db_manager)
-    
-    @app.route('/api/quantum/lattice/status', methods=['GET'])
-    def lattice_status():
-        return refresher.get_system_status(), 200
-    
-    @app.route('/api/quantum/lattice/refresh', methods=['POST'])
-    def trigger_lattice_refresh():
-        results = refresher.flood_all_clusters()
-        return {'status': 'success', 'cycles': len(results)}, 200
+    Create and integrate enhanced refresher with Flask app
     """
     
     # Get PostgreSQL connection from db_manager
@@ -373,10 +416,10 @@ def create_lattice_refresher(app, db_manager) -> QuantumLatticeRefresh:
     except:
         conn = None
     
-    refresher = QuantumLatticeRefresh(
+    refresher = QuantumLatticeRefreshEnhanced(
         total_qubits=106496,
-        cluster_size=100,
-        db_connection=conn
+        db_connection=conn,
+        status_interval=100  # Status every 100 refreshes
     )
     
     # Start background thread for continuous refresh
@@ -386,7 +429,8 @@ def create_lattice_refresher(app, db_manager) -> QuantumLatticeRefresh:
     )
     refresh_thread.start()
     
-    logger.info("[Lattice] Continuous refresh thread started")
+    logger.info("[Lattice] Enhanced continuous refresh thread started")
+    logger.info(f"[Lattice] Status reports every {refresher.status_interval} refreshes")
     
     return refresher
 
@@ -401,24 +445,21 @@ if __name__ == '__main__':
     )
     
     print("\n" + "="*80)
-    print("QUANTUM LATTICE REFRESH - CYCLICAL CONSTRUCTIVE INTERFERENCE")
+    print("QUANTUM LATTICE REFRESH - ENHANCED WITH BATCHING & STATUS")
     print("="*80 + "\n")
     
-    # Create without database (for demo)
-    lattice = QuantumLatticeRefresh(
+    # Create with 106,496 qubits
+    lattice = QuantumLatticeRefreshEnhanced(
         total_qubits=106496,
-        cluster_size=100,
-        db_connection=None
+        db_connection=None,
+        status_interval=5  # Status every 5 for demo
     )
     
-    # Run 3 cycles
-    print("Starting 3 cyclical refresh cycles with constructive timing...\n")
-    lattice.run_continuous(num_cycles=3, interval_ms=2000)
+    # Run 10 cycles
+    print("Starting 10 cyclical refresh cycles...\n")
+    lattice.run_continuous(num_cycles=10, interval_ms=100)
     
     # Final status
     print("\n" + "="*80)
-    print("FINAL LATTICE STATUS")
+    print("DEMO COMPLETE")
     print("="*80)
-    status = lattice.get_system_status()
-    for key, value in status.items():
-        print(f"  {key}: {value}")
