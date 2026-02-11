@@ -286,38 +286,38 @@ class DatabaseManager:
             return True
     
     def seed_test_user(self) -> bool:
-    """Seed test user with your credentials"""
-    try:
-        password = os.getenv('SUPABASE_PASSWORD', 'changeme')
-        user_id = 'user_shemshallah_001'
-        email = 'shemshallah@gmail.com'  # ← CHANGED
+        """Seed test user with your credentials"""
+        try:
+            password = os.getenv('SUPABASE_PASSWORD', 'changeme')
+            user_id = 'user_shemshallah_001'
+            email = 'shemshallah@gmail.com'  # ← CHANGED
         
-        # Check if user exists
-        result = self.execute_query(
-            "SELECT user_id FROM users WHERE user_id = %s",
-            (user_id,)
-        )
+            # Check if user exists
+            result = self.execute_query(
+                "SELECT user_id FROM users WHERE user_id = %s",
+                (user_id,)
+            )
         
-        if result:
-            logger.info(f"[DB] User already exists: {email}")
+            if result:
+                logger.info(f"[DB] User already exists: {email}")
+                return True
+        
+            # Hash password
+            password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt(Config.PASSWORD_HASH_ROUNDS)).decode()
+        
+            # Create user
+            self.execute_update(
+                """INSERT INTO users (user_id, email, name, password_hash, balance, role, is_active, kyc_verified)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (user_id) DO NOTHING""",
+                (user_id, email, 'Test User', password_hash, Decimal('1000000'), 'user', True, True)
+            )
+        
+            logger.info(f"[DB] ✓ Seeded test user: {email}")
             return True
-        
-        # Hash password
-        password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt(Config.PASSWORD_HASH_ROUNDS)).decode()
-        
-        # Create user
-        self.execute_update(
-            """INSERT INTO users (user_id, email, name, password_hash, balance, role, is_active, kyc_verified)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-               ON CONFLICT (user_id) DO NOTHING""",
-            (user_id, email, 'Test User', password_hash, Decimal('1000000'), 'user', True, True)
-        )
-        
-        logger.info(f"[DB] ✓ Seeded test user: {email}")
-        return True
-    except Exception as e:
-        logger.warning(f"[DB] Could not seed test user: {e}")
-        return True
+        except Exception as e:
+            logger.warning(f"[DB] Could not seed test user: {e}")
+            return True
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # AUTHENTICATION & JWT MANAGEMENT
 # ═══════════════════════════════════════════════════════════════════════════════════════
