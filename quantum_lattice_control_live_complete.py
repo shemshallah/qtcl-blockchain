@@ -697,23 +697,37 @@ class AdaptiveSigmaController:
         """Backpropagation: learn from prediction error."""
         loss = (predicted_sigma - target_sigma) ** 2
         
-        grad_output = 2 * (predicted_sigma - target_sigma) / 8.0
+        # ✅ FIXED: Proper scalar handling with sigmoid derivative
+        output_raw = cache['z3'][0]  # Raw sigmoid input (scalar)
+        sigmoid_prime = self.sigmoid(output_raw) * (1.0 - self.sigmoid(output_raw))  # Sigmoid derivative
+        
+        # Gradient flowing back through sigmoid and 8.0 scaling factor
+        grad_output = 2 * (predicted_sigma - target_sigma) * sigmoid_prime / 8.0
         
         # Layer 3 gradients: a2 (4,) → w3 (4, 1)
-        grad_w3 = np.outer(cache['a2'], grad_output)  # (4, 1)
-        grad_b3 = np.array([grad_output])  # (1,)
+        # ✅ FIXED: Reshape grad_output (scalar) to (1,) for outer product
+        grad_w3 = np.outer(cache['a2'], np.atleast_1d(grad_output))  # (4, 1)
+        grad_b3 = np.atleast_1d(grad_output)  # (1,) - consistent with bias shape
         grad_a2 = grad_output * self.w3.flatten()  # (4,)
         
         # Layer 2 gradients: a1 (8,) → w2 (8, 4)
         grad_z2 = grad_a2 * self.relu_grad(cache['z2'])  # (4,)
         grad_w2 = np.outer(cache['a1'], grad_z2)  # (8, 4)
-        grad_b2 = grad_z2  # (4,)
+        grad_b2 = grad_z2.copy()  # (4,)
         grad_a1 = np.dot(self.w2, grad_z2)  # (8,)
         
         # Layer 1 gradients: x (4,) → w1 (4, 8)
         grad_z1 = grad_a1 * self.relu_grad(cache['z1'])  # (8,)
         grad_w1 = np.outer(cache['x'], grad_z1)  # (4, 8)
-        grad_b1 = grad_z1  # (8,)
+        grad_b1 = grad_z1.copy()  # (8,)
+        
+        # ✅ NEW: Gradient clipping to prevent explosion
+        grad_w1 = np.clip(grad_w1, -1.0, 1.0)
+        grad_w2 = np.clip(grad_w2, -1.0, 1.0)
+        grad_w3 = np.clip(grad_w3, -1.0, 1.0)
+        grad_b1 = np.clip(grad_b1, -1.0, 1.0)
+        grad_b2 = np.clip(grad_b2, -1.0, 1.0)
+        grad_b3 = np.clip(grad_b3, -1.0, 1.0)
         
         with self.lock:
             self.w1 -= self.lr * grad_w1
@@ -826,12 +840,21 @@ class RealTimeMetricsStreamer:
             logger.warning("Adaptation queue full")
     
     def _flush_measurements(self, measurements: List[Dict]) -> bool:
-        """Flush measurements to database"""
+        """Flush measurements to database with timeout protection"""
         if not measurements:
             return True
         
         try:
-            conn = psycopg2.connect(**self.db_config, connect_timeout=10)
+            # ✅ FIXED: Add timeout and connection error handling
+            conn = psycopg2.connect(
+                **self.db_config, 
+                connect_timeout=3,  # Reduced from 10 to prevent long hangs
+                keepalives=1,
+                keepalives_idle=5,
+                keepalives_interval=2
+            )
+            conn.set_session(autocommit=True)
+            
             with conn.cursor() as cur:
                 execute_batch(cur, """
                     INSERT INTO quantum_measurements
@@ -852,20 +875,31 @@ class RealTimeMetricsStreamer:
                     }
                     for m in measurements
                 ], page_size=self.batch_size)
-            conn.commit()
             conn.close()
             return True
+        except psycopg2.OperationalError as e:
+            logger.warning(f"⚠️  DB connection failed (will retry): {type(e).__name__}")
+            return False
         except Exception as e:
             logger.error(f"Failed to flush measurements: {e}")
             return False
     
     def _flush_mitigations(self, mitigations: List[Dict]) -> bool:
-        """Flush error mitigation records"""
+        """Flush error mitigation records with timeout protection"""
         if not mitigations:
             return True
         
         try:
-            conn = psycopg2.connect(**self.db_config, connect_timeout=10)
+            # ✅ FIXED: Add timeout protection
+            conn = psycopg2.connect(
+                **self.db_config, 
+                connect_timeout=3,
+                keepalives=1,
+                keepalives_idle=5,
+                keepalives_interval=2
+            )
+            conn.set_session(autocommit=True)
+            
             with conn.cursor() as cur:
                 execute_batch(cur, """
                     INSERT INTO quantum_error_mitigation
@@ -882,20 +916,31 @@ class RealTimeMetricsStreamer:
                     }
                     for m in mitigations
                 ], page_size=self.batch_size)
-            conn.commit()
             conn.close()
             return True
+        except psycopg2.OperationalError as e:
+            logger.warning(f"⚠️  DB connection failed (will retry): {type(e).__name__}")
+            return False
         except Exception as e:
             logger.error(f"Failed to flush mitigations: {e}")
             return False
     
     def _flush_pseudoqubits(self, updates: List[Dict]) -> bool:
-        """Batch update pseudoqubit states"""
+        """Batch update pseudoqubit states with timeout protection"""
         if not updates:
             return True
         
         try:
-            conn = psycopg2.connect(**self.db_config, connect_timeout=10)
+            # ✅ FIXED: Add timeout protection
+            conn = psycopg2.connect(
+                **self.db_config, 
+                connect_timeout=3,
+                keepalives=1,
+                keepalives_idle=5,
+                keepalives_interval=2
+            )
+            conn.set_session(autocommit=True)
+            
             with conn.cursor() as cur:
                 execute_batch(cur, """
                     UPDATE pseudoqubits
@@ -909,9 +954,11 @@ class RealTimeMetricsStreamer:
                     }
                     for u in updates
                 ], page_size=self.batch_size)
-            conn.commit()
             conn.close()
             return True
+        except psycopg2.OperationalError as e:
+            logger.warning(f"⚠️  DB connection failed (will retry): {type(e).__name__}")
+            return False
         except Exception as e:
             logger.error(f"Failed to update pseudoqubits: {e}")
             return False
@@ -1494,6 +1541,21 @@ class QuantumLatticeControlLiveV5:
         """
         Execute complete system cycle (all 52 batches).
         This is where the magic happens.
+        
+        ✅ IMPORTANT ARCHITECTURE NOTE:
+        If you parallelize with ThreadPoolExecutor, ALL WORKERS MUST SHARE
+        A SINGLE NonMarkovianNoiseBath instance, not create their own!
+        
+        ❌ WRONG:
+        def worker(batch_id):
+            noise_bath = NonMarkovianNoiseBath()  # Each worker creates its own!
+            ...
+        
+        ✅ CORRECT:
+        shared_noise_bath = NonMarkovianNoiseBath()  # Created ONCE
+        def worker(batch_id):
+            # Uses shared_noise_bath
+        executor.map(worker, batch_ids)
         """
         if not self.running:
             logger.error("System not running")
