@@ -713,18 +713,21 @@ class AdaptiveSigmaController:
         
         grad_output = 2 * (predicted_sigma - target_sigma) / 8.0
         
-        grad_w3 = np.outer(cache['a2'], grad_output)
-        grad_b3 = grad_output
-        grad_a2 = np.dot(grad_output, self.w3.T)
+        # Layer 3 gradients: a2 (4,) → w3 (4, 1)
+        grad_w3 = np.outer(cache['a2'], grad_output)  # (4, 1)
+        grad_b3 = np.array([grad_output])  # (1,)
+        grad_a2 = grad_output * self.w3.flatten()  # (4,)
         
-        grad_z2 = grad_a2 * self.relu_grad(cache['z2'])
-        grad_w2 = np.dot(cache['a1'].T, grad_z2)
-        grad_b2 = np.sum(grad_z2, axis=0)
-        grad_a1 = np.dot(grad_z2, self.w2.T)
+        # Layer 2 gradients: a1 (8,) → w2 (8, 4)
+        grad_z2 = grad_a2 * self.relu_grad(cache['z2'])  # (4,)
+        grad_w2 = np.outer(cache['a1'], grad_z2)  # (8, 4)
+        grad_b2 = grad_z2  # (4,)
+        grad_a1 = np.dot(self.w2, grad_z2)  # (8,)
         
-        grad_z1 = grad_a1 * self.relu_grad(cache['z1'])
-        grad_w1 = np.dot(cache['x'].reshape(-1, 1), grad_z1)
-        grad_b1 = np.sum(grad_z1, axis=0)
+        # Layer 1 gradients: x (4,) → w1 (4, 8)
+        grad_z1 = grad_a1 * self.relu_grad(cache['z1'])  # (8,)
+        grad_w1 = np.outer(cache['x'], grad_z1)  # (4, 8)
+        grad_b1 = grad_z1  # (8,)
         
         with self.lock:
             self.w1 -= self.lr * grad_w1
