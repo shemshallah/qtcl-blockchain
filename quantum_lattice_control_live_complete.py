@@ -1459,6 +1459,38 @@ class NeuralNetworkCheckpoint:
             return False
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# NOISE REFRESH HEARTBEAT - Cycle monitoring and tracking
+# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+class NoiseRefreshHeartbeat:
+    """
+    Tracks and monitors noise refresh cycles in the quantum system.
+    Provides heartbeat pinging on cycle completion for system monitoring.
+    """
+    def __init__(self):
+        self.cycle_count = 0
+        self.last_cycle_time = datetime.now()
+        self.cycles_processed = []
+        self.lock = threading.Lock()
+    
+    def on_noise_cycle_complete(self, cycle_num: int, metrics: Dict) -> None:
+        """
+        Called when a noise cycle completes.
+        Tracks cycle completion for monitoring and diagnostics.
+        """
+        with self.lock:
+            self.cycle_count += 1
+            self.last_cycle_time = datetime.now()
+            self.cycles_processed.append({
+                'cycle_num': cycle_num,
+                'timestamp': self.last_cycle_time,
+                'metrics': metrics
+            })
+            # Keep only last 1000 cycles to avoid memory bloat
+            if len(self.cycles_processed) > 1000:
+                self.cycles_processed = self.cycles_processed[-1000:]
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # MAIN SYSTEM ORCHESTRATOR
 # The heart of the quantum lattice control system
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
