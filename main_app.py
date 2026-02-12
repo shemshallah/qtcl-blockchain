@@ -1842,14 +1842,14 @@ def initialize_app():
         return False
 
 @flask_app.route('/api/keep-alive', methods=['GET', 'POST'])
-    def keep_alive_endpoint():
-        from datetime import datetime
-        return jsonify({
-            'status': 'alive',
-            'timestamp': datetime.now().isoformat(),
-            'source': 'quantum_lattice_noise_refresh',
-            'message': 'Quantum lattice active, instance is awake'
-        }), 200
+def keep_alive_endpoint():
+    from datetime import datetime
+    return jsonify({
+        'status': 'alive',
+        'timestamp': datetime.now().isoformat(),
+        'source': 'quantum_lattice_noise_refresh',
+        'message': 'Quantum lattice active, instance is awake'
+    }), 200
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # APPLICATION ENTRY POINT
