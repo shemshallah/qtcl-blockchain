@@ -114,6 +114,18 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────────────────────
 logger = logging.getLogger('quantum_engine')
 
+# ─────────────────────────────────────────────────────────────────────────────
+# HEARTBEAT MONITOR (Global Instance)
+# ─────────────────────────────────────────────────────────────────────────────
+_heartbeat_monitor = None
+
+def initialize_heartbeat(app_url: str) -> None:
+    """Initialize the heartbeat monitor with app URL."""
+    global _heartbeat_monitor
+    if _heartbeat_monitor is None:
+        _heartbeat_monitor = NoiseRefreshHeartbeat(app_url=app_url)
+        logger.info(f"💓 Heartbeat monitor initialized → {app_url}/api/keep-alive")
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # SECTION 1: DATA STRUCTURES
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -791,8 +803,12 @@ class NoiseRefreshHeartbeat:
             except Exception as e:
                 logger.debug(f"❌ [Cycle {cycle_number}] Heartbeat error: {e}")
         
-        # Send in background thread (non-blocking)
-        thread = threading.Thread(target=_send, daemon=True)
+        # Send in background thread (non-blocking, but ensure completion)
+        thread = threading.Thread(
+            target=_send,
+            daemon=False,  # ✅ Don't exit if main thread exits - ensure heartbeat completes
+            name=f"heartbeat-cycle-{cycle_number}"
+        )
         thread.start()
 
 
@@ -1115,8 +1131,12 @@ class WStateTransactionProcessorAdapter:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def register_quantum_routes(app) -> None:
-    """Register all quantum/transaction API routes with Flask app."""
+    """Register all quantum/transaction API routes with Flask app and initialize heartbeat."""
     from flask import request, jsonify
+    
+    # ✅ Initialize heartbeat monitor with app URL
+    app_url = os.getenv('APP_URL', f'http://localhost:{os.getenv("PORT", "5000")}')
+    initialize_heartbeat(app_url)
     
     processor = get_transaction_processor()
 

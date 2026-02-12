@@ -142,6 +142,10 @@ class Config:
     # API
     API_VERSION = '3.2.1'
     API_TITLE = 'QTCL Blockchain API'
+    
+    # ✅ APP_URL for heartbeat callbacks (quantum engine)
+    PORT = os.getenv('PORT', '5000')
+    APP_URL = os.getenv('APP_URL', f'http://localhost:{PORT}')
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # DATABASE CONNECTION MANAGER
 # ═══════════════════════════════════════════════════════════════════════════════════════
