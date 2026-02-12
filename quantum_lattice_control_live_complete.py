@@ -1517,6 +1517,43 @@ class NoiseRefreshHeartbeat:
             if self.cycle_count % 100 == 0:
                 self._send_http_heartbeat(cycle_num, metrics)
     
+    def get_heartbeat_status(self) -> Dict:
+        """Get current heartbeat status and metrics (called every cycle)"""
+        with self.lock:
+            recent_count = min(100, len(self.cycles_processed))
+            
+            if recent_count == 0:
+                return {
+                    'cycles_tracked': 0,
+                    'heartbeat_status': '⏳',
+                    'avg_sigma': 0.0,
+                    'avg_coherence': 0.0,
+                    'avg_fidelity': 0.0
+                }
+            
+            recent_cycles = self.cycles_processed[-recent_count:]
+            
+            avg_sigma = np.mean([c['metrics'].get('sigma', 0) for c in recent_cycles if 'sigma' in c['metrics']]) if recent_cycles else 0
+            avg_coherence = np.mean([c['metrics'].get('coherence_after', 0) for c in recent_cycles if 'coherence_after' in c['metrics']]) if recent_cycles else 0
+            avg_fidelity = np.mean([c['metrics'].get('fidelity_after', 0) for c in recent_cycles if 'fidelity_after' in c['metrics']]) if recent_cycles else 0
+            
+            # Heartbeat status indicator: 💓 = healthy, 💗 = good, ⚠️ = degraded
+            if avg_coherence > 0.9 and avg_fidelity > 0.9:
+                status = '💓'
+            elif avg_coherence > 0.8 and avg_fidelity > 0.8:
+                status = '💗'
+            else:
+                status = '⚠️'
+            
+            return {
+                'cycles_tracked': recent_count,
+                'heartbeat_status': status,
+                'avg_sigma': float(avg_sigma),
+                'avg_coherence': float(avg_coherence),
+                'avg_fidelity': float(avg_fidelity),
+                'heartbeat_due': (self.cycle_count % 100 == 0)
+            }
+    
     def _send_http_heartbeat(self, cycle_num: int, metrics: Dict) -> None:
         """Send HTTP keep-alive heartbeat to server (asynchronous)"""
         def _send():
@@ -1746,13 +1783,32 @@ class QuantumLatticeControlLiveV5:
                 self.get_status()
             )
         
-        logger.info(
+        # Get heartbeat status
+        hb_status = self.heartbeat.get_heartbeat_status() if hasattr(self, 'heartbeat') else None
+        
+        # Build main metrics line with neural net data
+        main_log = (
             f"[Cycle {self.cycle_count}] ✓ Complete ({cycle_time:.1f}s) | "
             f"σ={avg_sigma:.2f} | C={avg_coh:.6f} | F={avg_fid:.6f} | "
             f"ΔC={avg_change:+.6f} | L={avg_loss:.6f} | "
             f"A={len(anomalies)}"
         )
         
+        # Add heartbeat metrics if available
+        if hb_status and hb_status['cycles_tracked'] > 0:
+            heartbeat_line = (
+                f" | {hb_status['heartbeat_status']} HB: "
+                f"σ_hb={hb_status['avg_sigma']:.2f} | "
+                f"C_hb={hb_status['avg_coherence']:.6f} | "
+                f"F_hb={hb_status['avg_fidelity']:.6f}"
+            )
+            if hb_status['heartbeat_due']:
+                heartbeat_line += " [SENDING]"
+            main_log += heartbeat_line
+        else:
+            main_log += " | ⏳ Heartbeat: Initializing..."
+        
+        logger.info(main_log)
 
         # Send heartbeat on cycle completion
         cycle_metrics = {
