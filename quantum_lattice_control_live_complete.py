@@ -107,12 +107,8 @@ class RandomOrgQRNG:
         self.timeout = timeout
         self.metrics = QRNGMetrics(source=QRNGSource.RANDOM_ORG)
         self.lock = threading.RLock()
-        self.heartbeat = NoiseRefreshHeartbeat() 
 
-self.noise_bath.set_heartbeat_callback(self.on_cycle_complete)
 
-    def on_cycle_complete(self, cycle_num: int, metrics: Dict) -> None:
-        self.heartbeat.on_noise_cycle_complete(cycle_num, metrics)
 
 
     def fetch_random_bytes(self, num_bytes: int = 64) -> Optional[np.ndarray]:
@@ -1508,6 +1504,10 @@ class QuantumLatticeControlLiveV5:
         self.total_time_compute = 0.0
         
         self.lock = threading.RLock()
+
+        # Initialize heartbeat for noise refresh cycle pinging
+        self.heartbeat = NoiseRefreshHeartbeat()
+        self.noise_bath.set_heartbeat_callback(self.on_cycle_complete)
         
         logger.info("╔════════════════════════════════════════════════════════╗")
         logger.info("║  QUANTUM LATTICE CONTROL LIVE v5.1 - INITIALIZED      ║")
@@ -1534,6 +1534,12 @@ class QuantumLatticeControlLiveV5:
         
         logger.info("✓ Quantum lattice control system LIVE")
     
+
+    def on_cycle_complete(self, cycle_num: int, metrics: Dict) -> None:
+        """Callback when cycle completes - sends heartbeat"""
+        if hasattr(self, "heartbeat"):
+            self.heartbeat.on_noise_cycle_complete(cycle_num, metrics)
+
     def stop(self):
         """Stop the system gracefully"""
         if not self.running:
@@ -1625,6 +1631,16 @@ class QuantumLatticeControlLiveV5:
             f"A={len(anomalies)}"
         )
         
+
+        # Send heartbeat on cycle completion
+        cycle_metrics = {
+            'sigma': float(avg_sigma),
+            'coherence_after': float(avg_coh),
+            'fidelity_after': float(avg_fid),
+            'cycle_time': cycle_time
+        }
+        self.on_cycle_complete(self.cycle_count, cycle_metrics)
+
         return {
             'cycle': self.cycle_count,
             'duration': cycle_time,
@@ -1649,13 +1665,6 @@ class QuantumLatticeControlLiveV5:
             while datetime.now() - start_time < target_duration and self.running:
                 self.execute_cycle()
                 time.sleep(0.1)
-        cycle_metrics = {
-        'sigma': float(avg_sigma),
-        'coherence_after': float(avg_coh),
-        'fidelity_after': float(avg_fid),
-        'cycle_time': cycle_time
-    }
-    self.on_cycle_complete(self.cycle_count, cycle_metrics)
 
         except KeyboardInterrupt:
             logger.info("Interrupted by user")
