@@ -1280,17 +1280,43 @@ class WSVTransactionProcessorAdapter:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 11: HEARTBEAT INITIALIZATION (Flask routes are in main_app.py)
+# SECTION 11: QUANTUM ROUTES REGISTRATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def register_quantum_routes(app) -> None:
-    """Initialize heartbeat monitor - Flask routes are registered in main_app.py to avoid conflicts"""
+    """Register quantum endpoints and initialize heartbeat"""
+    from flask import request, jsonify
     
     # ✅ Initialize heartbeat monitor with app URL
     app_url = os.getenv('APP_URL', f'http://localhost:{os.getenv("PORT", "5000")}')
     initialize_heartbeat(app_url)
     
-    logger.info("[QUANTUM] Heartbeat initialized - routes are in main_app.py (no conflicts)")
+    # ✅ Register ONLY the /api/quantum/stats endpoint (other routes in main_app.py)
+    @app.route('/api/quantum/stats', methods=['GET'])
+    def quantum_stats():
+        """Quantum system statistics endpoint"""
+        try:
+            executor = get_quantum_executor()
+            stats = executor.get_stats()
+            w = executor.w_bus.get_current_state()
+            return jsonify({
+                'status': 'success',
+                'quantum_stats': stats,
+                'w_state_bus': {
+                    'validators': w.validator_ids,
+                    'cycle_count': w.cycle_count,
+                    'cumulative_agreement': w.cumulative_agreement,
+                    'last_collapse': w.last_collapse_outcome,
+                }
+            }), 200
+        except Exception as exc:
+            logger.error(f"[QUANTUM_STATS] Error: {exc}")
+            return jsonify({
+                'status': 'error',
+                'message': str(exc)
+            }), 500
+    
+    logger.info("[QUANTUM] ✓ Quantum stats endpoint registered (/api/quantum/stats)")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
