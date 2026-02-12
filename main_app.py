@@ -1554,8 +1554,8 @@ def setup_routes(flask_app):
     # QUANTUM TRANSACTION PROCESSOR ROUTES (gas-free W-state + GHZ-8 finality)
     # ─────────────────────────────────────────────────────────────────────────
     try:
-        from transaction_processor import register_transaction_routes
-        register_transaction_routes(flask_app)
+        from quantum_engine import register_quantum_routes
+        register_quantum_routes(flask_app)
         logger.info("[ROUTES] ✓ Quantum transaction routes registered (gas-free)")
     except Exception as _txn_route_err:
         logger.warning(f"[ROUTES] Could not register quantum transaction routes: {_txn_route_err}")
@@ -1907,7 +1907,9 @@ def initialize_app():
         # Step 7: Start quantum transaction processor (gas-free W-state + GHZ-8 finality)
         logger.info("[INIT] Starting quantum transaction processor (gas-free)...")
         try:
-            from transaction_processor import processor as _tx_processor
+            from quantum_engine import get_transaction_processor
+            _tx_processor = get_transaction_processor()
+            _tx_processor.set_database_connection(DatabaseConnection)
             _tx_processor.start()
             logger.info("[INIT] ✓ Quantum transaction processor started (gas-free W-state + GHZ-8)")
         except Exception as _tp_err:
