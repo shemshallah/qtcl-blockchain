@@ -486,6 +486,10 @@ def handle_exceptions(f):
     
     return decorated_function
 
+# Alias for compatibility
+handle_errors = handle_exceptions
+
+
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # QUANTUM LATTICE INITIALIZATION (INTEGRATION DROPS SECTION 2 & 3)
 # ═══════════════════════════════════════════════════════════════════════════════════════
