@@ -645,13 +645,29 @@ def setup_routes(flask_app):
             result = db_manager.execute_query("SELECT 1")
             db_healthy = len(result) > 0
             
+            # Check for quantum routes
+            quantum_routes_found = any(
+                'quantum' in str(rule) for rule in flask_app.url_map.iter_rules()
+            )
+            
             return jsonify({
                 'status': 'healthy',
                 'timestamp': datetime.utcnow().isoformat(),
                 'api_version': Config.API_VERSION,
                 'services': {
                     'api': 'operational',
-                    'database': 'operational' if db_healthy else 'degraded'
+                    'database': 'operational' if db_healthy else 'degraded',
+                    'quantum_routes': 'registered' if quantum_routes_found else 'not_registered'
+                },
+                'public_endpoints': {
+                    'health': 'GET /health',
+                    'keep_alive': 'GET/POST /api/keep-alive',
+                    'auth_token': 'POST /api/auth/token',
+                    'auth_login': 'POST /api/auth/login',
+                    'auth_register': 'POST /api/auth/register',
+                    'transactions_test': 'POST /api/transactions/test',
+                    'quantum_status': 'GET /api/quantum/status',
+                    'quantum_stats': 'GET /api/quantum/stats' if quantum_routes_found else 'GET /api/quantum/stats (fallback)'
                 }
             }), 200
         except Exception as e:
@@ -799,6 +815,96 @@ def setup_routes(flask_app):
                 'status': 'error',
                 'message': 'Registration failed',
                 'code': 'REGISTRATION_ERROR'
+            }), 500
+    
+    @flask_app.route('/api/auth/token', methods=['POST'])
+    @rate_limited
+    @handle_exceptions
+    def generate_auth_token():
+        """Generate JWT token for authentication (public endpoint for testing/integration)"""
+        try:
+            data = request.get_json() or {}
+            
+            user_id = data.get('user_id', '').strip()
+            role = data.get('role', 'user').strip()
+            
+            if not user_id:
+                user_id = f'user_{hashlib.md5(str(time.time()).encode()).hexdigest()[:12]}'
+            
+            if role not in ['user', 'admin', 'guest']:
+                role = 'user'
+            
+            token = generate_token(user_id, role)
+            
+            logger.info(f"[AUTH] Token generated for user: {user_id}, role: {role}")
+            
+            return jsonify({
+                'status': 'success',
+                'token': token,
+                'expires_in': 86400,
+                'user_id': user_id,
+                'role': role,
+                'token_type': 'Bearer',
+                'expires_at': (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+            }), 200
+        
+        except Exception as e:
+            logger.error(f"[AUTH] Token generation error: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to generate token',
+                'code': 'TOKEN_GENERATION_FAILED'
+            }), 500
+    
+    @flask_app.route('/api/transactions/test', methods=['POST'])
+    @rate_limited
+    @handle_exceptions
+    def submit_transaction_test():
+        """Test transaction submission endpoint (no authentication required)"""
+        try:
+            data = request.get_json() or {}
+            
+            receiver_id = data.get('receiver_id', '').strip()
+            amount = float(data.get('amount', 0))
+            from_user = data.get('from_user', f'test_{int(time.time())}')
+            
+            if not receiver_id or amount <= 0:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Invalid receiver or amount',
+                    'code': 'INVALID_INPUT'
+                }), 400
+            
+            tx_id, error = db_manager.submit_transaction(from_user, receiver_id, amount)
+            
+            if error:
+                return jsonify({
+                    'status': 'error',
+                    'message': error,
+                    'code': 'TRANSACTION_FAILED'
+                }), 400
+            
+            logger.info(f"[API] Test transaction submitted: {tx_id} from {from_user}")
+            
+            return jsonify({
+                'status': 'success',
+                'message': 'Transaction submitted (test endpoint)',
+                'transaction_id': tx_id
+            }), 201
+        
+        except ValueError:
+            return jsonify({
+                'status': 'error',
+                'message': 'Invalid amount format',
+                'code': 'INVALID_AMOUNT'
+            }), 400
+        
+        except Exception as e:
+            logger.error(f"[API] Test transaction error: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to submit transaction',
+                'code': 'SUBMISSION_ERROR'
             }), 500
     
     # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -1543,12 +1649,57 @@ def setup_routes(flask_app):
     # ─────────────────────────────────────────────────────────────────────────
     # QUANTUM TRANSACTION PROCESSOR ROUTES (gas-free W-state + GHZ-8 finality)
     # ─────────────────────────────────────────────────────────────────────────
+    quantum_routes_registered = False
     try:
+        logger.info("[ROUTES] Attempting to import and register quantum transaction routes...")
         from quantum_engine import register_quantum_routes
+        
+        logger.info("[ROUTES] Calling register_quantum_routes(flask_app)...")
         register_quantum_routes(flask_app)
-        logger.info("[ROUTES] ✓ Quantum transaction routes registered (gas-free)")
+        quantum_routes_registered = True
+        
+        logger.info("[ROUTES] ✓ Quantum transaction routes registered successfully (gas-free W-state + GHZ-8)")
+        logger.info("[ROUTES] Available quantum endpoints:")
+        logger.info("[ROUTES]   - POST /api/transactions (quantum-enabled)")
+        logger.info("[ROUTES]   - GET /api/transactions/<tx_id>")
+        logger.info("[ROUTES]   - GET /api/quantum/stats")
+    
+    except ImportError as _import_err:
+        logger.error(f"[ROUTES] ImportError: quantum_engine module failed to import")
+        logger.error(f"[ROUTES] Details: {_import_err}")
+        logger.error(f"[ROUTES] This typically means: missing dependency, syntax error, or circular import")
+        logger.debug(f"[ROUTES] Full traceback: {traceback.format_exc()}")
+    
+    except AttributeError as _attr_err:
+        logger.error(f"[ROUTES] AttributeError: register_quantum_routes not found or dependency missing")
+        logger.error(f"[ROUTES] Details: {_attr_err}")
+        logger.debug(f"[ROUTES] Full traceback: {traceback.format_exc()}")
+    
     except Exception as _txn_route_err:
-        logger.warning(f"[ROUTES] Could not register quantum transaction routes: {_txn_route_err}")
+        logger.error(f"[ROUTES] Exception registering quantum routes: {type(_txn_route_err).__name__}: {_txn_route_err}")
+        logger.debug(f"[ROUTES] Full traceback: {traceback.format_exc()}")
+    
+    # Add fallback quantum stats endpoint if quantum routes failed
+    if not quantum_routes_registered:
+        logger.warning("[ROUTES] Registering fallback quantum endpoints (degraded mode)")
+        
+        @flask_app.route('/api/quantum/stats', methods=['GET'])
+        @rate_limited
+        @handle_exceptions
+        def quantum_stats_fallback():
+            """Fallback quantum stats endpoint (active when quantum engine initialization fails)"""
+            return jsonify({
+                'status': 'degraded',
+                'message': 'Quantum system not fully initialized',
+                'warning': 'Check server logs for initialization errors',
+                'endpoints': {
+                    'health': 'GET /health',
+                    'keep_alive': 'GET/POST /api/keep-alive',
+                    'auth': 'POST /api/auth/token',
+                    'transactions': 'POST /api/transactions/test (no auth)'
+                },
+                'fallback_mode': True
+            }), 200
 
     # Catch-all route for unimplemented endpoints (MUST be last!)
     @flask_app.route('/api/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
