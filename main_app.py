@@ -49,6 +49,7 @@ import psycopg2
 logger = logging.getLogger(__name__)
 db_manager = None  # Initialized later in initialize_app()
 quantum_system = None  # CHANGED: Renamed from lattice_refresher to quantum_system
+latest_quantum_metrics = None  # Stores latest heartbeat metrics for API queries
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # QUANTUM BLOCK SYSTEM (Approach 3 + 5)
@@ -1486,20 +1487,89 @@ def setup_routes(flask_app):
             }
         }), 404
     
-
+    # Keep-alive endpoint for quantum lattice heartbeat (MUST be before catch-all!)
     @flask_app.route('/api/keep-alive', methods=['GET', 'POST'])
     def keep_alive_endpoint():
+        """Heartbeat endpoint - receives quantum lattice cycle metrics"""
         from datetime import datetime
-        return jsonify({
+        from flask import request
+        
+        # Base response
+        response_data = {
             'status': 'alive',
             'timestamp': datetime.now().isoformat(),
-            'source': 'quantum_lattice_noise_refresh',
-            'message': 'Quantum lattice active, instance is awake'
-        }), 200
+            'source': 'quantum_lattice_heartbeat'
+        }
+        
+        # If POST request with metrics, include them in response
+        if request.method == 'POST' and request.is_json:
+            try:
+                heartbeat_data = request.get_json()
+                
+                # Extract quantum metrics from heartbeat
+                cycle = heartbeat_data.get('cycle')
+                metrics = heartbeat_data.get('metrics', {})
+                
+                # Add quantum metrics to response
+                response_data.update({
+                    'cycle': cycle,
+                    'quantum_metrics': {
+                        'sigma': metrics.get('sigma'),
+                        'coherence': metrics.get('coherence'),
+                        'fidelity': metrics.get('fidelity', 1.0)
+                    },
+                    'message': f'💓 Cycle {cycle} heartbeat received - Coherence: {metrics.get("coherence", 0):.6f}, Fidelity: {metrics.get("fidelity", 1.0):.6f}'
+                })
+                
+                # Log the heartbeat with metrics
+                logger.info(f"💓 [Cycle {cycle}] Heartbeat: σ={metrics.get('sigma', 0):.2f} | "
+                           f"C={metrics.get('coherence', 0):.6f} | F={metrics.get('fidelity', 1.0):.6f}")
+                
+                # Store latest metrics globally for query endpoint
+                global latest_quantum_metrics
+                latest_quantum_metrics = {
+                    'cycle': cycle,
+                    'timestamp': datetime.now().isoformat(),
+                    'metrics': metrics
+                }
+                
+            except Exception as e:
+                logger.warning(f"Failed to parse heartbeat metrics: {e}")
+                response_data['message'] = 'Heartbeat received (metrics parse failed)'
+        else:
+            # GET request or no JSON data
+            response_data['message'] = 'Instance awake and responsive'
+        
+        return jsonify(response_data), 200
+    
+    @flask_app.route('/api/quantum/status', methods=['GET'])
+    def quantum_status():
+        """Get latest quantum system metrics from heartbeat"""
+        global latest_quantum_metrics
+        
+        if 'latest_quantum_metrics' in globals() and latest_quantum_metrics:
+            return jsonify({
+                'status': 'active',
+                'latest_cycle': latest_quantum_metrics.get('cycle'),
+                'last_heartbeat': latest_quantum_metrics.get('timestamp'),
+                'quantum_metrics': latest_quantum_metrics.get('metrics', {}),
+                'message': f"Latest data from cycle {latest_quantum_metrics.get('cycle')}"
+            }), 200
+        else:
+            return jsonify({
+                'status': 'waiting',
+                'message': 'No quantum metrics received yet (waiting for first cycle)'
+            }), 200
+    
+    # Catch-all route for unimplemented endpoints (MUST be last!)
     @flask_app.route('/api/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
     @rate_limited
     def catch_all_root(path):
         """Catch-all for unimplemented API endpoints"""
+        # Exclude keep-alive endpoint (it's registered separately above)
+        if path == 'keep-alive':
+            return keep_alive_endpoint()
+        
         return jsonify({
             'status': 'error',
             'message': f'Endpoint not implemented: /api/{path}',

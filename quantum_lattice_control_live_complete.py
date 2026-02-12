@@ -783,11 +783,11 @@ class RealTimeMetricsStreamer:
         self.db_config = db_config
         self.batch_size = batch_size
         
-        self.fidelity_queue = queue.Queue(maxsize=5000)
-        self.measurement_queue = queue.Queue(maxsize=5000)
-        self.mitigation_queue = queue.Queue(maxsize=5000)
-        self.pseudoqubit_queue = queue.Queue(maxsize=5000)
-        self.adaptation_queue = queue.Queue(maxsize=5000)
+        self.fidelity_queue = queue.Queue(maxsize=10000)  # Increased for long-running operations
+        self.measurement_queue = queue.Queue(maxsize=10000)
+        self.mitigation_queue = queue.Queue(maxsize=10000)
+        self.pseudoqubit_queue = queue.Queue(maxsize=10000)
+        self.adaptation_queue = queue.Queue(maxsize=20000)  # Largest - most frequent
         
         self.writer_thread = None
         self.running = False
@@ -847,7 +847,13 @@ class RealTimeMetricsStreamer:
             with self.lock:
                 self.total_queued += 1
         except queue.Full:
-            logger.warning("Adaptation queue full")
+            # Only log warning every 100 times to avoid log spam
+            with self.lock:
+                if not hasattr(self, '_adaptation_full_count'):
+                    self._adaptation_full_count = 0
+                self._adaptation_full_count += 1
+                if self._adaptation_full_count % 100 == 1:
+                    logger.warning(f"Adaptation queue full (dropped {self._adaptation_full_count} items)")
     
     def _flush_measurements(self, measurements: List[Dict]) -> bool:
         """Flush measurements to database with timeout protection"""
