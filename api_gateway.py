@@ -3115,6 +3115,7 @@ auth_handler = None
 tx_processor = None
 circuit_builder = None
 circuit_executor = None
+quantum_engine = None  # W-state transaction executor for quantum-only finality
 defi_engine = None
 governance_engine = None
 oracle_engine = None
@@ -3128,7 +3129,7 @@ _initialized = False
 
 def initialize_globals():
     """Lazy initialization of global instances"""
-    global db, auth_handler, tx_processor, circuit_builder, circuit_executor, _initialized
+    global db, auth_handler, tx_processor, circuit_builder, circuit_executor, quantum_engine, _initialized
     
     if _initialized:
         return
@@ -3143,6 +3144,16 @@ def initialize_globals():
             # Initialize database
             db = DatabaseConnectionManager()
             logger.info("✓ Database pool ready")
+            
+            # Initialize quantum engine - W-state finality processor
+            from quantum_engine import get_quantum_executor, WStateTransactionExecutorWrapper
+            try:
+                executor = get_quantum_executor(db)
+                quantum_engine = WStateTransactionExecutorWrapper(executor, db)
+                logger.info("✓ Quantum engine (W-state/GHZ-8) ready")
+            except Exception as qe:
+                logger.warning(f"⚠ Quantum engine init failed, using fallback: {qe}")
+                quantum_engine = None
             
             # Initialize quantum components
             circuit_builder = QuantumCircuitBuilder()
@@ -8090,11 +8101,67 @@ def get_transaction_receipt(tx_hash):
 # TRANSACTION ENDPOINTS - Core blockchain transaction operations
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
+@app.route('/api/transactions', methods=['POST'])
+@rate_limit
+def submit_transaction_simple():
+    """Simple quantum transaction submission - unversioned endpoint for testing"""
+    try:
+        data = request.get_json()
+        
+        # Validate required fields
+        required = ['to_address', 'amount']
+        if not all(k in data for k in required):
+            return jsonify({'status': 'error', 'message': 'Missing required fields: to_address, amount'}), 400
+        
+        # For testing: use header user or default test user
+        from_user = request.headers.get('X-User-ID', 'test_user')
+        to_address = data['to_address']
+        amount = float(data['amount'])
+        tx_type = data.get('tx_type', 'transfer')
+        metadata = data.get('metadata', {})
+        
+        # Validation
+        if amount <= 0:
+            return jsonify({'status': 'error', 'message': 'Amount must be positive'}), 400
+        
+        # ══════════════════════════════════════════════════════════════════════════════════
+        # QUANTUM-ONLY TRANSACTION PROCESSING - PURE QUANTUM PATH
+        # ══════════════════════════════════════════════════════════════════════════════════
+        
+        # Create transaction ID
+        tx_id = f"0x{secrets.token_hex(32)}"
+        timestamp = datetime.now(timezone.utc)
+        
+        # Route directly to quantum engine for coherent processing
+        quantum_result = quantum_engine.execute_quantum_transaction(
+            tx_id=tx_id,
+            from_user=from_user,
+            to_address=to_address,
+            amount=amount,
+            tx_type=tx_type,
+            metadata=metadata,
+            timestamp=timestamp
+        )
+        
+        if not quantum_result or quantum_result.get('status') != 'finalized':
+            logger.error(f"✗ Quantum execution failed for {tx_id}")
+            return jsonify(quantum_result or {'status': 'error', 'message': 'Quantum execution failed'}), 500
+        
+        # FINALITY IS INSTANTANEOUS - measurement → confirmation
+        logger.info(f"⚛️ QUANTUM FINALITY: {tx_id[:16]}... | Fidelity: {quantum_result.get('ghz_fidelity', 0):.4f} | Epoch: {quantum_result.get('quantum_epoch', 0)}")
+        
+        return jsonify(quantum_result), 200
+        
+    except Exception as e:
+        logger.error(f"✗ Quantum transaction error: {e}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 @app.route('/api/v1/transactions/submit', methods=['POST'])
 @require_auth
 @rate_limit
 def submit_transaction():
-    """Submit new quantum transaction for processing"""
+    """Submit new quantum transaction for QUANTUM-ONLY processing (no classical mempool)"""
     try:
         data = request.get_json()
         
@@ -8103,12 +8170,10 @@ def submit_transaction():
         if not all(k in data for k in required):
             return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
         
-        from_user = g.user_id
+        from_user = g.user.get('user_id', g.user.get('sub'))
         to_address = data['to_address']
         amount = Decimal(str(data['amount']))
         tx_type = data['tx_type']
-        gas_limit = int(data.get('gas_limit', 21000))
-        gas_price = Decimal(str(data.get('gas_price', '1')))
         metadata = data.get('metadata', {})
         
         # Validation
@@ -8126,10 +8191,43 @@ def submit_transaction():
         if not balance or Decimal(str(balance[0][0])) < amount:
             return jsonify({'status': 'error', 'message': 'Insufficient balance'}), 400
         
-        # Create transaction
+        # ══════════════════════════════════════════════════════════════════════════════════
+        # QUANTUM-ONLY TRANSACTION PROCESSING - NO CLASSICAL MEMPOOL
+        # ══════════════════════════════════════════════════════════════════════════════════
+        
+        # Create transaction ID
         tx_id = f"0x{secrets.token_hex(32)}"
-        tx_hash = hashlib.sha256(f"{tx_id}{datetime.utcnow()}".encode()).hexdigest()
         timestamp = datetime.now(timezone.utc)
+        
+        # CRITICAL: Route directly to quantum engine for coherent processing
+        # Quantum engine will:
+        #  1. Build 8-qubit circuit (W-state validators + user/target qubits)
+        #  2. Phase-encode from_user into q[6], to_address into q[7]
+        #  3. Execute GHZ-8 entanglement
+        #  4. Measure and collapse → finality proof
+        #  5. Store quantum measurement result (NOT 'pending', immediately 'finalized')
+        
+        quantum_result = quantum_engine.execute_quantum_transaction(
+            tx_id=tx_id,
+            from_user=from_user,
+            to_address=to_address,
+            amount=float(amount),
+            tx_type=tx_type,
+            metadata=metadata,
+            timestamp=timestamp
+        )
+        
+        if not quantum_result or quantum_result.get('status') != 'finalized':
+            logger.error(f"✗ Quantum execution failed for {tx_id}")
+            return jsonify({'status': 'error', 'message': 'Quantum execution failed'}), 500
+        
+        # Transaction is NOW FINALIZED - quantum measurement completed
+        commitment_hash = quantum_result.get('commitment_hash')
+        ghz_fidelity = quantum_result.get('ghz_fidelity')
+        measurement_outcome = quantum_result.get('measurement_outcome')
+        quantum_epoch = quantum_result.get('quantum_epoch')
+        
+        # Store ONLY in database with finalization proof
         nonce = DatabaseConnection.execute_query(
             "SELECT COUNT(*) FROM transactions WHERE from_user_id = %s",
             (from_user,)
@@ -8137,28 +8235,30 @@ def submit_transaction():
         
         DatabaseConnection.execute_update(
             """INSERT INTO transactions 
-               (tx_hash, tx_id, from_user_id, to_address, amount, tx_type, status, 
-                gas_limit, gas_price, nonce, metadata, created_at, quantum_state)
+               (tx_id, from_user_id, to_address, amount, tx_type, status, 
+                metadata, created_at, commitment_hash, ghz_fidelity, 
+                measurement_outcome, quantum_epoch, nonce)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-            (tx_hash, tx_id, from_user, to_address, float(amount), tx_type, 'pending',
-             gas_limit, float(gas_price), nonce, json.dumps(metadata), timestamp, 'superposition')
+            (tx_id, from_user, to_address, float(amount), tx_type, 'finalized',
+             json.dumps(metadata), timestamp, commitment_hash, ghz_fidelity,
+             measurement_outcome, quantum_epoch, nonce)
         )
         
-        # Submit to transaction processor
-        tx_processor.submit_transaction(from_user, to_address, float(amount), tx_type, metadata)
-        
-        logger.info(f"✓ Transaction submitted {tx_hash[:16]}... by {from_user}")
+        # FINALITY IS INSTANTANEOUS - measurement → confirmation
+        logger.info(f"⚛️ QUANTUM FINALITY: {tx_id[:16]}... | Fidelity: {ghz_fidelity:.4f} | Epoch: {quantum_epoch}")
         
         return jsonify({
-            'status': 'success',
-            'tx_hash': tx_hash,
+            'status': 'finalized',  # Not 'success', but immediate FINALITY
             'tx_id': tx_id,
-            'nonce': nonce,
-            'message': 'Transaction queued for quantum processing'
-        }), 202
+            'commitment_hash': commitment_hash,
+            'ghz_fidelity': ghz_fidelity,
+            'quantum_epoch': quantum_epoch,
+            'measurement_outcome': measurement_outcome,
+            'message': '⚛️ Quantum finality achieved - transaction irreversible'
+        }), 200
         
     except Exception as e:
-        logger.error(f"✗ Submit transaction error: {e}")
+        logger.error(f"✗ Quantum transaction error: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 

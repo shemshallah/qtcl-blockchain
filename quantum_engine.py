@@ -1102,11 +1102,83 @@ class WStateTransactionExecutor:
             logger.error(f"[WSV] execute_transaction failed for {tx_id}: {exc}")
             return {'status': 'error', 'tx_id': tx_id, 'message': str(exc)}
 
+    def execute_quantum_transaction(self, tx_id: str, from_user: str, to_address: str,
+                                   amount: float, tx_type: str, metadata: Optional[Dict] = None,
+                                   timestamp: Optional[Any] = None) -> Dict[str, Any]:
+        """
+        Execute transaction through PURE QUANTUM pipeline - returns finalized proof immediately.
+        No classical mempool, no pending state - direct measurement → finality.
+        """
+        try:
+            # Execute transaction through quantum pipeline
+            proof: QuantumFinalityProof = self._executor.execute_transaction(
+                tx_id=tx_id, user_id=from_user, target_id=to_address,
+                amount=amount, metadata=metadata)
+            
+            # Update database with finalization proof
+            if self.db_connection:
+                try:
+                    self.db_connection.execute_update(
+                        """UPDATE transactions SET
+                               status              = %s,
+                               quantum_state_hash  = %s,
+                               commitment_hash     = %s,
+                               entropy_score       = %s,
+                               validator_agreement = %s,
+                               ghz_fidelity        = %s,
+                               measurement_outcome = %s,
+                               quantum_epoch       = %s,
+                               finalized_at        = %s
+                           WHERE tx_id = %s""",
+                        (
+                            'finalized',
+                            proof.state_hash,
+                            proof.commitment_hash,
+                            proof.entropy_normalized * 100,
+                            proof.validator_agreement_score,
+                            proof.ghz_fidelity,
+                            proof.dominant_bitstring,
+                            self._executor.quantum_epoch,
+                            datetime.utcnow(),
+                            tx_id
+                        ))
+                except Exception as db_exc:
+                    logger.warning(f"[QUANTUM_TX] DB update skipped: {db_exc}")
+            
+            # Return FINALIZED proof - no pending state
+            return {
+                'status': 'finalized',  # CRITICAL: NOT 'success', but FINALIZED
+                'tx_id': tx_id,
+                'from_user': from_user,
+                'to_address': to_address,
+                'amount': amount,
+                'tx_type': tx_type,
+                'timestamp': timestamp.isoformat() if timestamp else datetime.utcnow().isoformat(),
+                'commitment_hash': proof.commitment_hash,
+                'ghz_fidelity': proof.ghz_fidelity,
+                'measurement_outcome': proof.dominant_bitstring,
+                'quantum_epoch': self._executor.quantum_epoch,
+                'entropy_score': proof.entropy_normalized * 100,
+                'validator_agreement': proof.validator_agreement_score,
+                'mev_proof_score': proof.mev_proof_score,
+                'state_hash': proof.state_hash,
+                'circuit_depth': proof.circuit_depth,
+                'circuit_size': proof.circuit_size,
+                'execution_time_ms': proof.execution_time_ms,
+                'is_valid_finality': proof.is_valid_finality,
+                'noise_source': proof.noise_source,
+                'message': f'⚛️ Quantum finality achieved - GHZ fidelity: {proof.ghz_fidelity:.4f}'
+            }
+        except Exception as exc:
+            logger.error(f"[QUANTUM_TX] execute_quantum_transaction failed for {tx_id}: {exc}", exc_info=True)
+            return {
+                'status': 'error',
+                'tx_id': tx_id,
+                'message': str(exc)
+            }
+
     def get_stats(self) -> Dict[str, Any]:
         return self._executor.get_stats()
-
-
-class WStateTransactionProcessorAdapter:
     """Adapter for legacy transaction_processor integration."""
 
     def __init__(self, wsv_executor: WStateTransactionExecutor):
