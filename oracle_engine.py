@@ -1731,9 +1731,9 @@ class OutcomeInterpreter:
             outcome = CollapseOutcome.APPROVED
             reason = f"Quantum approval: {ones_in_approval}/4 bits"
         
-        # Calculate fee from fee bits
-        fee_value = int(fee_bits, 2)  # 0-15 range
-        gas_fee = fee_value * 1000  # Scale to reasonable gas amount
+        # Gas-free mode: no fees calculated from quantum state
+        fee_value = int(fee_bits, 2)  # 0-15 range (retained for analysis only)
+        gas_fee = 0  # GAS-FREE: quantum commitment hash replaces economic finality
         
         interpretation = {
             'outcome': outcome,

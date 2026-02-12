@@ -7251,47 +7251,57 @@ def execute_quantum_circuit():
         
         if not tx_result:
             return jsonify({'status': 'error', 'message': 'Transaction not found'}), 404
-        
+
         tx_hash, amount = tx_result[0]
-        
-        # Build quantum circuit
-        from quantum_circuit_builder_wsv_ghz8 import get_circuit_builder, QuantumTopologyConfig
-        
-        config = QuantumTopologyConfig()
-        builder = get_circuit_builder(config)
-        circuit = builder.build_ghz8_circuit(
-            transaction_id=tx_id,
-            amount_bits=int(amount),
+
+        # ── Execute via quantum_engine (W-state + GHZ-8, gas-free) ──────────
+        from quantum_engine import get_quantum_executor
+        executor = get_quantum_executor()
+
+        # Use tx_id as user, tx_hash as target for quantum encoding
+        proof = executor.execute_transaction(
+            tx_id=tx_id,
+            user_id=str(user_id),
+            target_id=str(tx_hash or tx_id),
+            amount=float(amount or 0),
             metadata=circuit_params
         )
-        
-        # Execute circuit
-        executor = get_executor(config)
-        result = executor.execute(circuit, shots=shots)
-        
+
         # Store result
         exec_id = f"exec_{secrets.token_hex(16)}"
-        DatabaseConnection.execute_update(
-            """INSERT INTO quantum_executions (exec_id, tx_id, user_id, shots,
-                                               circuit_depth, ghz_fidelity, 
-                                               dominant_states, measurement_data, created_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-            (exec_id, tx_id, user_id, shots, result.circuit_depth, 
-             result.ghz_fidelity, json.dumps(result.dominant_states),
-             json.dumps(result.measurement_data), datetime.now(timezone.utc))
-        )
-        
-        logger.info(f"✓ Quantum execution {exec_id}: tx={tx_id}, fidelity={result.ghz_fidelity:.4f}")
-        
+        try:
+            DatabaseConnection.execute_update(
+                """INSERT INTO quantum_executions
+                   (exec_id, tx_id, user_id, shots, circuit_depth, ghz_fidelity,
+                    dominant_states, measurement_data, created_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (exec_id, tx_id, user_id, proof.shots,
+                 proof.circuit_depth, proof.ghz_fidelity,
+                 json.dumps([proof.dominant_bitstring]),
+                 json.dumps(proof.to_dict(), default=str),
+                 datetime.now(timezone.utc))
+            )
+        except Exception as _db_err:
+            logger.warning(f"quantum_executions insert skipped: {_db_err}")
+
+        logger.info(
+            f"✓ Quantum execution {exec_id}: tx={tx_id}, "
+            f"fidelity={proof.ghz_fidelity:.4f}, "
+            f"entropy={proof.entropy_normalized:.3f}")
+
         return jsonify({
             'status': 'success',
             'execution_id': exec_id,
             'tx_id': tx_id,
-            'shots': shots,
-            'circuit_depth': result.circuit_depth,
-            'ghz_fidelity': result.ghz_fidelity,
-            'dominant_states': result.dominant_states,
-            'entropy_bits': result.entropy_bits
+            'shots': proof.shots,
+            'circuit_depth': proof.circuit_depth,
+            'ghz_fidelity': proof.ghz_fidelity,
+            'dominant_states': [proof.dominant_bitstring],
+            'entropy_normalized': proof.entropy_normalized,
+            'commitment_hash': proof.commitment_hash,
+            'mev_proof_score': proof.mev_proof_score,
+            'is_valid_finality': proof.is_valid_finality,
+            'gas': None,
         }), 201
         
     except Exception as e:

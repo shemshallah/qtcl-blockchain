@@ -73,16 +73,17 @@ QTCL_DECIMALS = 18
 QTCL_WEI_PER_QTCL = 10 ** QTCL_DECIMALS
 GENESIS_SUPPLY = TOTAL_SUPPLY_QTCL * QTCL_WEI_PER_QTCL
 
-# Gas configuration
-BASE_GAS_PRICE = 1  # 1 QTCL wei
-GAS_TRANSFER = 21_000
-GAS_CONTRACT_CALL = 100_000
-GAS_STAKE = 50_000
-GAS_MINT = 30_000
-GAS_BURN = 25_000
-GAS_LIMIT_PER_BLOCK = 10_000_000
-MAX_GAS_PRICE = 1000  # Maximum gas price
-MIN_GAS_PRICE = 1  # Minimum gas price
+# Gas configuration — GAS-FREE MODE: all gas values disabled
+# Quantum finality (GHZ-8 commitment hash) replaces economic finality
+BASE_GAS_PRICE      = 0  # GAS-FREE
+GAS_TRANSFER        = 0  # GAS-FREE
+GAS_CONTRACT_CALL   = 0  # GAS-FREE
+GAS_STAKE           = 0  # GAS-FREE
+GAS_MINT            = 0  # GAS-FREE
+GAS_BURN            = 0  # GAS-FREE
+GAS_LIMIT_PER_BLOCK = 0  # GAS-FREE
+MAX_GAS_PRICE       = 0  # GAS-FREE
+MIN_GAS_PRICE       = 0  # GAS-FREE
 
 # Block configuration
 BLOCK_TIME_TARGET_SECONDS = 10  # 10 second block time

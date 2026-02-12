@@ -1107,7 +1107,7 @@ def setup_routes(flask_app):
                 'mempool': {
                     'pending_count': pending[0]['count'] if pending else 0,
                     'size_bytes': 0,
-                    'avg_fee': 0.001
+                    'gas_free': True,
                 }
             }), 200
         
@@ -1120,32 +1120,21 @@ def setup_routes(flask_app):
             }), 500
     
     # ═══════════════════════════════════════════════════════════════════════════════════════
-    # GAS PRICES ENDPOINT
+    # GAS-FREE NOTICE ENDPOINT  (QTCL is gas-free — quantum finality replaces economic fees)
     # ═══════════════════════════════════════════════════════════════════════════════════════
-    
+
     @flask_app.route('/api/gas/prices', methods=['GET'])
     @rate_limited
     @handle_exceptions
     def gas_prices():
-        """Get current gas prices"""
-        try:
-            return jsonify({
-                'status': 'success',
-                'gas_prices': {
-                    'slow': 0.001,
-                    'standard': 0.002,
-                    'fast': 0.005,
-                    'unit': 'QTCL'
-                }
-            }), 200
-        
-        except Exception as e:
-            logger.error(f"[API] Gas prices error: {e}")
-            return jsonify({
-                'status': 'error',
-                'message': 'Failed to get gas prices',
-                'code': 'GAS_ERROR'
-            }), 500
+        """QTCL is gas-free. Quantum commitment hash replaces economic finality."""
+        return jsonify({
+            'status': 'success',
+            'gas_free': True,
+            'message': 'QTCL uses quantum finality — no gas required. '
+                       'Transaction commitment is the GHZ-8 collapse proof.',
+            'gas_prices': None,
+        }), 200
     
     # ═══════════════════════════════════════════════════════════════════════════════════════
     # SIGNATURE VERIFICATION ENDPOINT
@@ -1561,6 +1550,16 @@ def setup_routes(flask_app):
                 'message': 'No quantum metrics received yet (waiting for first cycle)'
             }), 200
     
+    # ─────────────────────────────────────────────────────────────────────────
+    # QUANTUM TRANSACTION PROCESSOR ROUTES (gas-free W-state + GHZ-8 finality)
+    # ─────────────────────────────────────────────────────────────────────────
+    try:
+        from transaction_processor import register_transaction_routes
+        register_transaction_routes(flask_app)
+        logger.info("[ROUTES] ✓ Quantum transaction routes registered (gas-free)")
+    except Exception as _txn_route_err:
+        logger.warning(f"[ROUTES] Could not register quantum transaction routes: {_txn_route_err}")
+
     # Catch-all route for unimplemented endpoints (MUST be last!)
     @flask_app.route('/api/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
     @rate_limited
@@ -1878,6 +1877,16 @@ def initialize_app():
             logger.warning("[INIT] ⚠ Schema validation had issues, continuing...")
         else:
             logger.info("[INIT] ✓ Schema validated")
+
+        # Step 3b: Run quantum-specific schema migrations (idempotent)
+        logger.info("[INIT] Running quantum schema migrations...")
+        try:
+            from quantum_schema_migration import run_migrations
+            from db_config import DatabaseConnection
+            run_migrations(DatabaseConnection)
+            logger.info("[INIT] ✓ Quantum schema migrations complete")
+        except Exception as _mig_err:
+            logger.warning(f"[INIT] ⚠ Schema migration warning (non-fatal): {_mig_err}")
         
         # Step 4: Seed test user
         logger.info("[INIT] Checking for test admin user...")
@@ -1894,6 +1903,15 @@ def initialize_app():
         logger.info("[INIT] Initializing Quantum Block System (Oracle + Witness Aggregation)...")
         initialize_quantum_blocks()
         logger.info("[INIT] ✓ Quantum block system initialized")
+
+        # Step 7: Start quantum transaction processor (gas-free W-state + GHZ-8 finality)
+        logger.info("[INIT] Starting quantum transaction processor (gas-free)...")
+        try:
+            from transaction_processor import processor as _tx_processor
+            _tx_processor.start()
+            logger.info("[INIT] ✓ Quantum transaction processor started (gas-free W-state + GHZ-8)")
+        except Exception as _tp_err:
+            logger.warning(f"[INIT] ⚠ Quantum transaction processor failed to start: {_tp_err}")
         
         logger.info("")
         logger.info("[INIT] ✓ Application initialized successfully")
