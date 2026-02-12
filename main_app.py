@@ -1590,6 +1590,9 @@ def create_app():
     # Register error handlers
     register_error_handlers(flask_app)
     
+    # Register all routes (CRITICAL: must happen in create_app for WSGI/production deployment)
+    setup_routes(flask_app)
+    
     return flask_app
 
 def register_error_handlers(flask_app):
@@ -1949,9 +1952,8 @@ def initialize_app():
 if __name__ == '__main__':
     logger.info(f"Starting QTCL API Server on {os.getenv('API_HOST', '0.0.0.0')}:{os.getenv('API_PORT', '5000')}")
     
-    # Initialize app
+    # Initialize app (routes are now registered in create_app)
     app = create_app()
-    setup_routes(app)
     
     if initialize_app():
         app.run(
