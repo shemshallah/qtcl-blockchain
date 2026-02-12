@@ -1280,101 +1280,17 @@ class WSVTransactionProcessorAdapter:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SECTION 11: FLASK ROUTES
+# SECTION 11: HEARTBEAT INITIALIZATION (Flask routes are in main_app.py)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def register_quantum_routes(app) -> None:
-    """Register all quantum/transaction API routes with Flask app and initialize heartbeat."""
-    from flask import request, jsonify
+    """Initialize heartbeat monitor - Flask routes are registered in main_app.py to avoid conflicts"""
     
     # ✅ Initialize heartbeat monitor with app URL
     app_url = os.getenv('APP_URL', f'http://localhost:{os.getenv("PORT", "5000")}')
     initialize_heartbeat(app_url)
     
-    processor = get_transaction_processor()
-
-    @app.route('/api/transactions', methods=['POST'])
-    def submit_transaction():
-        try:
-            data = request.get_json(force=True) or {}
-            required = ['from_user', 'to_user', 'amount']
-            missing = [f for f in required if f not in data]
-            if missing:
-                return jsonify({'status': 'error',
-                                'message': f"Missing: {missing}"}), 400
-            result = processor.submit_transaction(
-                from_user=data['from_user'], to_user=data['to_user'],
-                amount=float(data['amount']),
-                tx_type=data.get('tx_type', 'transfer'),
-                metadata=data.get('metadata', {}))
-            return jsonify(result), 202 if result['status'] == 'success' else 400
-        except Exception as exc:
-            logger.error(f"[API] POST /transactions: {exc}", exc_info=True)
-            return jsonify({'status': 'error', 'message': 'Internal server error'}), 500
-
-    @app.route('/api/transactions/<tx_id>', methods=['GET'])
-    def get_transaction(tx_id):
-        try:
-            return jsonify(processor.get_transaction_status(tx_id)), 200
-        except Exception as exc:
-            return jsonify({'status': 'error', 'message': str(exc)}), 500
-
-    @app.route('/api/transactions', methods=['GET'])
-    def list_transactions():
-        try:
-            db = None
-            if hasattr(app, '_db_conn'):
-                db = app._db_conn
-            if not db:
-                return jsonify({'status': 'error', 'message': 'Database not available'}), 500
-            
-            limit = min(request.args.get('limit', 50, type=int), 500)
-            status_filter = request.args.get('status')
-            sql = ("SELECT tx_id, from_user_id, to_user_id, amount, tx_type, status, "
-                   "created_at, entropy_score, validator_agreement, commitment_hash "
-                   "FROM transactions")
-            params = []
-            if status_filter:
-                sql += " WHERE status = %s"
-                params.append(status_filter)
-            sql += " ORDER BY created_at DESC LIMIT %s"
-            params.append(limit)
-            rows = db.execute(sql, tuple(params))
-            return jsonify({
-                'status': 'success', 'count': len(rows),
-                'transactions': [{
-                    'tx_id': t['tx_id'], 'from': t['from_user_id'],
-                    'to': t['to_user_id'], 'amount': float(t['amount']),
-                    'type': t['tx_type'], 'status': t['status'],
-                    'entropy_score': float(t['entropy_score']) if t['entropy_score'] else None,
-                    'validator_agreement': float(t['validator_agreement']) if t['validator_agreement'] else None,
-                    'commitment_hash': t['commitment_hash'],
-                    'created_at': t['created_at'].isoformat() if t['created_at'] else None,
-                    'gas': None,
-                } for t in rows]
-            }), 200
-        except Exception as exc:
-            logger.error(f"[API] GET /transactions: {exc}", exc_info=True)
-            return jsonify({'status': 'error', 'message': str(exc)}), 500
-
-    @app.route('/api/quantum/stats', methods=['GET'])
-    def quantum_stats():
-        try:
-            executor = get_quantum_executor()
-            stats = executor.get_stats()
-            w = executor.w_bus.get_current_state()
-            return jsonify({
-                'status': 'success', 'quantum_stats': stats,
-                'w_state_bus': {
-                    'validators': w.validator_ids,
-                    'cycle_count': w.cycle_count,
-                    'cumulative_agreement': w.cumulative_agreement,
-                    'last_collapse': w.last_collapse_outcome,
-                }}), 200
-        except Exception as exc:
-            return jsonify({'status': 'error', 'message': str(exc)}), 500
-
-    logger.info("[API] Quantum routes registered (gas-free, MEV-proof finality)")
+    logger.info("[QUANTUM] Heartbeat initialized - routes are in main_app.py (no conflicts)")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
