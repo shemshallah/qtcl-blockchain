@@ -2287,7 +2287,7 @@ class QuantumRecoveryManager:
         
         return None
 
-class QuantumEntropyEnsemble:
+class QuantumEntropyMetricsTracker:
     """Manages ensemble of quantum entropy sources for block signatures"""
     
     def __init__(self):
@@ -2435,7 +2435,7 @@ class QuantumSystemWrapperExtended(QuantumSystemWrapper):
         super().__init__(quantum_engine)
         self.analytics = QuantumSystemAnalytics()
         self.recovery_manager = QuantumRecoveryManager()
-        self.entropy_ensemble = QuantumEntropyEnsemble()
+        self.entropy_ensemble = QuantumEntropyMetricsTracker()
         self.transaction_manager = QuantumGaslessTransactionManager()
         self.monitor = QuantumSystemMonitor()
     
