@@ -1882,7 +1882,7 @@ def initialize_app():
         logger.info("[INIT] Running quantum schema migrations...")
         try:
             from quantum_schema_migration import run_migrations
-            from db_config import DatabaseConnection
+            # DatabaseConnection already imported at module level — use global
             run_migrations(DatabaseConnection)
             logger.info("[INIT] ✓ Quantum schema migrations complete")
         except Exception as _mig_err:
