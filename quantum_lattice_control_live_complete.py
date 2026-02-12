@@ -33,6 +33,8 @@ import threading
 import time
 import logging
 import json
+from quantum_lattice_heartbeat_integrated import NoiseRefreshHeartbeat
+
 import queue
 import psycopg2
 from psycopg2.extras import execute_batch, RealDictCursor
@@ -105,7 +107,14 @@ class RandomOrgQRNG:
         self.timeout = timeout
         self.metrics = QRNGMetrics(source=QRNGSource.RANDOM_ORG)
         self.lock = threading.RLock()
-    
+        self.heartbeat = NoiseRefreshHeartbeat() 
+
+self.noise_bath.set_heartbeat_callback(self.on_cycle_complete)
+
+    def on_cycle_complete(self, cycle_num: int, metrics: Dict) -> None:
+        self.heartbeat.on_noise_cycle_complete(cycle_num, metrics)
+
+
     def fetch_random_bytes(self, num_bytes: int = 64) -> Optional[np.ndarray]:
         """
         Fetch random bytes from random.org.
@@ -421,7 +430,8 @@ class NonMarkovianNoiseBath:
     
     def __init__(self, entropy_ensemble: QuantumEntropyEnsemble):
         self.entropy = entropy_ensemble
-        
+        self.heartbeat_callback: Optional[Callable] = None
+
         self.coherence = np.ones(self.TOTAL_QUBITS) * 0.92
         self.fidelity = np.ones(self.TOTAL_QUBITS) * 0.91
         self.sigma_applied = np.ones(self.TOTAL_QUBITS) * 4.0
@@ -443,6 +453,10 @@ class NonMarkovianNoiseBath:
                    f"{self.TOTAL_QUBITS} qubits, κ={self.MEMORY_KERNEL}, "
                    f"T1={self.T1_CYCLES}, T2={self.T2_CYCLES}")
     
+    def set_heartbeat_callback(self, callback: Optional[Callable]) -> None:
+        self.heartbeat_callback = callback
+
+
     def _get_quantum_noise(self, num_values: int) -> np.ndarray:
         """Generate quantum noise from entropy ensemble."""
         random_bytes = self.entropy.fetch_quantum_bytes(num_values)
@@ -1635,7 +1649,14 @@ class QuantumLatticeControlLiveV5:
             while datetime.now() - start_time < target_duration and self.running:
                 self.execute_cycle()
                 time.sleep(0.1)
-        
+        cycle_metrics = {
+        'sigma': float(avg_sigma),
+        'coherence_after': float(avg_coh),
+        'fidelity_after': float(avg_fid),
+        'cycle_time': cycle_time
+    }
+    self.on_cycle_complete(self.cycle_count, cycle_metrics)
+
         except KeyboardInterrupt:
             logger.info("Interrupted by user")
         finally:
