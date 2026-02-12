@@ -1459,28 +1459,51 @@ class NeuralNetworkCheckpoint:
             return False
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-# NOISE REFRESH HEARTBEAT - Cycle monitoring and tracking
+# NOISE REFRESH HEARTBEAT - HTTP Keep-Alive to Server
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 class NoiseRefreshHeartbeat:
     """
-    Tracks and monitors noise refresh cycles in the quantum system.
-    Provides heartbeat pinging on cycle completion for system monitoring.
+    HTTP Keep-Alive heartbeat for quantum system.
+    Pings the server every 100 cycles to maintain connection and signal system health.
     """
-    def __init__(self):
+    def __init__(self, app_url: str = None):
         self.cycle_count = 0
         self.last_cycle_time = datetime.now()
         self.cycles_processed = []
         self.lock = threading.Lock()
+        
+        # HTTP endpoint configuration
+        self.app_url = app_url or os.getenv('APP_URL', 'http://localhost:5000')
+        self.heartbeat_endpoint = f"{self.app_url}/api/keep-alive"
+        
+        # Metrics aggregation
+        self.sigma_history = []
+        self.coherence_history = []
+        self.fidelity_history = []
+        self.cycle_time_history = []
+        
+        logger.info(f"💓 NoiseRefreshHeartbeat configured: {self.heartbeat_endpoint}")
     
     def on_noise_cycle_complete(self, cycle_num: int, metrics: Dict) -> None:
         """
         Called when a noise cycle completes.
-        Tracks cycle completion for monitoring and diagnostics.
+        Sends HTTP heartbeat every 100 cycles to keep server alive.
         """
         with self.lock:
             self.cycle_count += 1
             self.last_cycle_time = datetime.now()
+            
+            # Record metrics
+            if 'sigma' in metrics:
+                self.sigma_history.append(metrics['sigma'])
+            if 'coherence_after' in metrics:
+                self.coherence_history.append(metrics['coherence_after'])
+            if 'fidelity_after' in metrics:
+                self.fidelity_history.append(metrics['fidelity_after'])
+            if 'cycle_time' in metrics:
+                self.cycle_time_history.append(metrics['cycle_time'])
+            
             self.cycles_processed.append({
                 'cycle_num': cycle_num,
                 'timestamp': self.last_cycle_time,
@@ -1489,6 +1512,66 @@ class NoiseRefreshHeartbeat:
             # Keep only last 1000 cycles to avoid memory bloat
             if len(self.cycles_processed) > 1000:
                 self.cycles_processed = self.cycles_processed[-1000:]
+            
+            # Send HTTP heartbeat every 100 cycles
+            if self.cycle_count % 100 == 0:
+                self._send_http_heartbeat(cycle_num, metrics)
+    
+    def _send_http_heartbeat(self, cycle_num: int, metrics: Dict) -> None:
+        """Send HTTP keep-alive heartbeat to server (asynchronous)"""
+        def _send():
+            try:
+                # Calculate aggregated metrics for last 100 cycles
+                recent_count = min(100, len(self.cycles_processed))
+                recent_cycles = self.cycles_processed[-recent_count:]
+                
+                avg_sigma = np.mean([c['metrics'].get('sigma', 0) for c in recent_cycles if 'sigma' in c['metrics']]) if recent_cycles else 0
+                avg_coherence = np.mean([c['metrics'].get('coherence_after', 0) for c in recent_cycles if 'coherence_after' in c['metrics']]) if recent_cycles else 0
+                avg_fidelity = np.mean([c['metrics'].get('fidelity_after', 0) for c in recent_cycles if 'fidelity_after' in c['metrics']]) if recent_cycles else 0
+                
+                payload = {
+                    'cycle': cycle_num,
+                    'timestamp': datetime.now().isoformat(),
+                    'metrics': {
+                        'sigma': float(avg_sigma),
+                        'coherence': float(avg_coherence),
+                        'fidelity': float(avg_fidelity),
+                        'cycles_aggregated': recent_count
+                    }
+                }
+                
+                response = requests.post(
+                    self.heartbeat_endpoint,
+                    json=payload,
+                    timeout=5,
+                    headers={'User-Agent': 'QuantumLatticeHeartbeat/1.0'}
+                )
+                
+                if response.status_code == 200:
+                    logger.info("╔════════════════════════════════════════════════════════════════╗")
+                    logger.info(f"║  💓 HEARTBEAT SENT: Cycle {cycle_num:>6d} | Keep-Alive Signal ║")
+                    logger.info("╠════════════════════════════════════════════════════════════════╣")
+                    logger.info(f"║  Avg Sigma (σ):        {avg_sigma:>10.6f}                        ║")
+                    logger.info(f"║  Avg Coherence:        {avg_coherence:>10.6f}                        ║")
+                    logger.info(f"║  Avg Fidelity:         {avg_fidelity:>10.6f}                        ║")
+                    logger.info(f"║  Cycles Aggregated:    {recent_count:>10d}                        ║")
+                    logger.info(f"║  Server Response:      HTTP {response.status_code}                           ║")
+                    logger.info("╚════════════════════════════════════════════════════════════════╝")
+                else:
+                    logger.warning(f"⚠ [Cycle {cycle_num}] Heartbeat HTTP {response.status_code}: {response.text[:100]}")
+            
+            except requests.exceptions.Timeout:
+                logger.warning(f"⏱ [Cycle {cycle_num}] Heartbeat timeout - server may be slow")
+            except requests.exceptions.ConnectionError:
+                logger.warning(f"🔴 [Cycle {cycle_num}] Cannot reach server: {self.heartbeat_endpoint}")
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"⚠ [Cycle {cycle_num}] Heartbeat request failed: {type(e).__name__}")
+            except Exception as e:
+                logger.error(f"❌ [Cycle {cycle_num}] Heartbeat error: {e}")
+        
+        # Send in background thread (non-blocking)
+        thread = threading.Thread(target=_send, daemon=True, name=f"HeartbeatThread-{cycle_num}")
+        thread.start()
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # MAIN SYSTEM ORCHESTRATOR
@@ -1512,8 +1595,9 @@ class QuantumLatticeControlLiveV5:
     This is what everyone will use. Full stop.
     """
     
-    def __init__(self, db_config: Dict, checkpoint_dir: str = './nn_checkpoints'):
+    def __init__(self, db_config: Dict, checkpoint_dir: str = './nn_checkpoints', app_url: str = None):
         self.db_config = db_config
+        self.app_url = app_url or os.getenv('APP_URL', 'http://localhost:5000')
         
         logger.info("Initializing quantum systems...")
         self.entropy_ensemble = QuantumEntropyEnsemble()
@@ -1543,8 +1627,8 @@ class QuantumLatticeControlLiveV5:
         
         self.lock = threading.RLock()
 
-        # Initialize heartbeat for noise refresh cycle pinging
-        self.heartbeat = NoiseRefreshHeartbeat()
+        # Initialize HTTP keep-alive heartbeat for noise refresh cycle pinging
+        self.heartbeat = NoiseRefreshHeartbeat(app_url=self.app_url)
         self.noise_bath.set_heartbeat_callback(self.on_cycle_complete)
         
         logger.info("╔════════════════════════════════════════════════════════╗")
