@@ -1535,24 +1535,6 @@ def setup_routes(flask_app):
         
         return jsonify(response_data), 200
     
-    @flask_app.route('/api/quantum/status', methods=['GET'])
-    def quantum_status():
-        """Get latest quantum system metrics from heartbeat"""
-        global latest_quantum_metrics
-        
-        if 'latest_quantum_metrics' in globals() and latest_quantum_metrics:
-            return jsonify({
-                'status': 'active',
-                'latest_cycle': latest_quantum_metrics.get('cycle'),
-                'last_heartbeat': latest_quantum_metrics.get('timestamp'),
-                'quantum_metrics': latest_quantum_metrics.get('metrics', {}),
-                'message': f"Latest data from cycle {latest_quantum_metrics.get('cycle')}"
-            }), 200
-        else:
-            return jsonify({
-                'status': 'waiting',
-                'message': 'No quantum metrics received yet (waiting for first cycle)'
-            }), 200
     
     # ─────────────────────────────────────────────────────────────────────────
     # QUANTUM TRANSACTION PROCESSOR ROUTES (gas-free W-state + GHZ-8 finality)
