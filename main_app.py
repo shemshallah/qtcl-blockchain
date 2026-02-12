@@ -1486,6 +1486,16 @@ def setup_routes(flask_app):
             }
         }), 404
     
+
+    @flask_app.route('/api/keep-alive', methods=['GET', 'POST'])
+    def keep_alive_endpoint():
+        from datetime import datetime
+        return jsonify({
+            'status': 'alive',
+            'timestamp': datetime.now().isoformat(),
+            'source': 'quantum_lattice_noise_refresh',
+            'message': 'Quantum lattice active, instance is awake'
+        }), 200
     @flask_app.route('/api/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
     @rate_limited
     def catch_all_root(path):
@@ -1841,15 +1851,6 @@ def initialize_app():
         logger.error(traceback.format_exc())
         return False
 
-@flask_app.route('/api/keep-alive', methods=['GET', 'POST'])
-def keep_alive_endpoint():
-    from datetime import datetime
-    return jsonify({
-        'status': 'alive',
-        'timestamp': datetime.now().isoformat(),
-        'source': 'quantum_lattice_noise_refresh',
-        'message': 'Quantum lattice active, instance is awake'
-    }), 200
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # APPLICATION ENTRY POINT
