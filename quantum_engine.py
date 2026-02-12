@@ -1177,19 +1177,100 @@ class WStateTransactionExecutor:
                 'message': str(exc)
             }
 
-    def get_stats(self) -> Dict[str, Any]:
-        return self._executor.get_stats()
+    def set_database_connection(self, db_connection):
+        """Set or update database connection"""
+        self.db_connection = db_connection
+        logger.info("[WSV] Database connection updated")
+    
+    def start(self):
+        """Start the transaction executor (no-op, uses on-demand execution)"""
+        logger.info("[WSV] WStateTransactionExecutor started (on-demand mode)")
+        return True
+    
+    def stop(self):
+        """Stop the transaction executor"""
+        logger.info("[WSV] WStateTransactionExecutor stopped")
+        return True
+    
+    def is_running(self) -> bool:
+        """Check if executor is running"""
+        return True  # Always operational for on-demand execution
+    
+    def get_pending_transactions(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Get pending transactions from database"""
+        try:
+            if not self.db_connection:
+                return []
+            
+            results = self.db_connection.execute(
+                """SELECT tx_id, from_user_id, to_user_id, amount, tx_type, metadata
+                   FROM transactions WHERE status = %s LIMIT %s""",
+                ('pending', limit))
+            
+            return [dict(r) for r in results] if results else []
+        except Exception as e:
+            logger.warning(f"[WSV] Failed to get pending transactions: {e}")
+            return []
+    
+    def process_pending_transactions(self) -> Dict[str, Any]:
+        """Process all pending transactions in quantum pipeline"""
+        pending = self.get_pending_transactions(limit=100)
+        
+        if not pending:
+            return {'status': 'success', 'processed': 0, 'message': 'No pending transactions'}
+        
+        results = {
+            'status': 'success',
+            'processed': 0,
+            'finalized': 0,
+            'failed': 0,
+            'transactions': []
+        }
+        
+        for tx in pending:
+            try:
+                result = self.execute_quantum_transaction(
+                    tx_id=tx['tx_id'],
+                    from_user=tx['from_user_id'],
+                    to_address=tx['to_user_id'],
+                    amount=float(tx['amount']),
+                    tx_type=tx.get('tx_type', 'transfer'),
+                    metadata=json.loads(tx.get('metadata', '{}')) if tx.get('metadata') else {}
+                )
+                
+                results['processed'] += 1
+                if result['status'] == 'finalized':
+                    results['finalized'] += 1
+                    results['transactions'].append(result)
+                else:
+                    results['failed'] += 1
+                    
+            except Exception as e:
+                logger.error(f"[WSV] Failed to process {tx['tx_id']}: {e}")
+                results['failed'] += 1
+        
+        return results
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 10B: LEGACY WSV ADAPTER (for backward compatibility)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class WSVTransactionProcessorAdapter:
     """Adapter for legacy transaction_processor integration."""
 
     def __init__(self, wsv_executor: WStateTransactionExecutor):
         self.wsv_executor = wsv_executor
+        logger.info("[ADAPTER] WSV Transaction Processor Adapter initialized")
 
     def execute_transaction_with_fallback(self, tx: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute transaction with fallback to classic pipeline if quantum fails"""
         meta = {}
         try:
             meta = json.loads(tx.get('metadata') or '{}')
         except Exception:
             pass
+        
         return self.wsv_executor.execute_transaction(
             tx_id=tx['tx_id'],
             from_user=tx['from_user_id'],
