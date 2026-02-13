@@ -1,0 +1,1189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QTCL Terminal - Quantum Blockchain Finance</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --primary: #00ff88;
+            --primary-dim: #00aa55;
+            --secondary: #ff00ff;
+            --tertiary: #00ffff;
+            --warning: #ffaa00;
+            --error: #ff0055;
+            --bg-dark: #0a0a0f;
+            --bg-darker: #050508;
+            --text-primary: #00ff88;
+            --text-secondary: #00ffff;
+            --border: #1a1a2e;
+            --quantum-glow: 0 0 20px rgba(0, 255, 136, 0.5);
+            --secondary-glow: 0 0 15px rgba(255, 0, 255, 0.3);
+        }
+
+        html, body {
+            width: 100%;
+            height: 100%;
+            background: var(--bg-darker);
+            color: var(--text-primary);
+            font-family: 'Courier New', 'Courier', monospace;
+            overflow: hidden;
+        }
+
+        body {
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* HEADER */
+        .header {
+            background: linear-gradient(135deg, #0a0a1a 0%, #1a0a2e 100%);
+            border-bottom: 2px solid var(--primary);
+            padding: 20px;
+            box-shadow: var(--quantum-glow), inset 0 1px 0 rgba(0, 255, 136, 0.2);
+        }
+
+        .header-title {
+            font-size: 24px;
+            font-weight: bold;
+            color: var(--primary);
+            text-shadow: 0 0 10px var(--primary);
+            margin-bottom: 5px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .header-title .quantum-symbol {
+            display: inline-block;
+            animation: pulse 2s infinite;
+            font-size: 28px;
+        }
+
+        .header-subtitle {
+            color: var(--text-secondary);
+            font-size: 12px;
+            opacity: 0.8;
+        }
+
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 10px;
+            font-size: 11px;
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 5px 10px;
+            background: rgba(0, 255, 136, 0.1);
+            border: 1px solid var(--primary);
+            border-radius: 4px;
+        }
+
+        .status-indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--primary);
+            box-shadow: var(--quantum-glow);
+            animation: status-pulse 1s infinite;
+        }
+
+        @keyframes status-pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* MAIN CONTAINER */
+        .container {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+            gap: 10px;
+            padding: 10px;
+        }
+
+        /* SIDEBAR */
+        .sidebar {
+            width: 300px;
+            background: var(--bg-dark);
+            border: 2px solid var(--border);
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+            padding: 15px;
+        }
+
+        .sidebar-section {
+            margin-bottom: 20px;
+        }
+
+        .sidebar-title {
+            color: var(--text-secondary);
+            font-size: 12px;
+            font-weight: bold;
+            margin-bottom: 10px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .command-group {
+            margin-bottom: 15px;
+        }
+
+        .group-title {
+            color: var(--primary);
+            font-size: 11px;
+            font-weight: bold;
+            margin-bottom: 5px;
+            opacity: 0.8;
+        }
+
+        .command-list {
+            list-style: none;
+            padding-left: 10px;
+        }
+
+        .command-item {
+            padding: 6px 8px;
+            margin-bottom: 3px;
+            background: rgba(0, 255, 136, 0.05);
+            border-left: 2px solid transparent;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 11px;
+        }
+
+        .command-item:hover {
+            background: rgba(0, 255, 136, 0.15);
+            border-left-color: var(--primary);
+            transform: translateX(2px);
+        }
+
+        .command-item.active {
+            background: rgba(0, 255, 136, 0.25);
+            border-left-color: var(--primary);
+            box-shadow: inset 0 0 10px rgba(0, 255, 136, 0.2);
+        }
+
+        /* TERMINAL */
+        .terminal-wrapper {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-dark);
+            border: 2px solid var(--border);
+            border-radius: 8px;
+            box-shadow: var(--quantum-glow);
+            overflow: hidden;
+        }
+
+        .terminal-tabs {
+            display: flex;
+            background: rgba(0, 0, 0, 0.3);
+            border-bottom: 1px solid var(--border);
+            padding: 0;
+        }
+
+        .terminal-tab {
+            flex: 1;
+            padding: 10px 15px;
+            background: rgba(0, 255, 136, 0.05);
+            border-right: 1px solid var(--border);
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s;
+            border-bottom: 2px solid transparent;
+        }
+
+        .terminal-tab:hover {
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .terminal-tab.active {
+            background: rgba(0, 255, 136, 0.2);
+            color: var(--primary);
+            border-bottom-color: var(--primary);
+            box-shadow: 0 -2px 10px rgba(0, 255, 136, 0.2);
+        }
+
+        .terminal {
+            flex: 1;
+            background: var(--bg-darker);
+            padding: 15px;
+            overflow-y: auto;
+            font-size: 13px;
+            line-height: 1.5;
+            font-family: 'Courier New', monospace;
+        }
+
+        .terminal::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .terminal::-webkit-scrollbar-track {
+            background: var(--bg-dark);
+        }
+
+        .terminal::-webkit-scrollbar-thumb {
+            background: var(--primary);
+            border-radius: 4px;
+        }
+
+        .terminal::-webkit-scrollbar-thumb:hover {
+            background: var(--primary-dim);
+        }
+
+        .output-line {
+            margin-bottom: 3px;
+            opacity: 0;
+            animation: line-fade-in 0.2s ease forwards;
+        }
+
+        @keyframes line-fade-in {
+            from {
+                opacity: 0;
+                transform: translateY(-5px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .output-prompt {
+            color: var(--primary);
+            font-weight: bold;
+        }
+
+        .output-text {
+            color: var(--text-secondary);
+        }
+
+        .output-success {
+            color: var(--primary);
+        }
+
+        .output-error {
+            color: var(--error);
+        }
+
+        .output-warning {
+            color: var(--warning);
+        }
+
+        .output-info {
+            color: var(--text-secondary);
+        }
+
+        .output-json {
+            color: var(--primary);
+            background: rgba(0, 255, 136, 0.05);
+            padding: 8px;
+            border-left: 2px solid var(--primary);
+            margin: 5px 0;
+            border-radius: 4px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-size: 12px;
+        }
+
+        .output-table {
+            color: var(--text-secondary);
+            white-space: pre;
+            font-size: 12px;
+            margin: 5px 0;
+        }
+
+        /* INPUT AREA */
+        .input-area {
+            background: rgba(0, 0, 0, 0.5);
+            border-top: 1px solid var(--border);
+            padding: 15px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .input-prompt {
+            color: var(--primary);
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .input-field {
+            flex: 1;
+            background: rgba(0, 255, 136, 0.05);
+            border: 1px solid var(--primary);
+            color: var(--primary);
+            padding: 8px 12px;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            border-radius: 4px;
+            outline: none;
+            transition: all 0.2s;
+        }
+
+        .input-field:focus {
+            box-shadow: 0 0 15px var(--primary);
+            background: rgba(0, 255, 136, 0.1);
+            border-color: var(--primary-dim);
+        }
+
+        .input-field::placeholder {
+            color: rgba(0, 255, 136, 0.5);
+        }
+
+        .input-button {
+            background: linear-gradient(135deg, rgba(0, 255, 136, 0.3), rgba(0, 255, 136, 0.1));
+            border: 1px solid var(--primary);
+            color: var(--primary);
+            padding: 8px 16px;
+            cursor: pointer;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            font-weight: bold;
+            transition: all 0.2s;
+        }
+
+        .input-button:hover {
+            background: linear-gradient(135deg, rgba(0, 255, 136, 0.5), rgba(0, 255, 136, 0.3));
+            box-shadow: var(--quantum-glow);
+        }
+
+        .input-button:active {
+            transform: scale(0.98);
+        }
+
+        /* AUTH MODAL */
+        .auth-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(5px);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .auth-overlay.active {
+            display: flex;
+        }
+
+        .auth-modal {
+            background: linear-gradient(135deg, #1a0a2e 0%, #0a0a1a 100%);
+            border: 2px solid var(--primary);
+            border-radius: 12px;
+            padding: 40px;
+            max-width: 450px;
+            width: 90%;
+            box-shadow: 0 0 40px rgba(0, 255, 136, 0.3), inset 0 0 20px rgba(0, 255, 136, 0.1);
+        }
+
+        .auth-title {
+            color: var(--primary);
+            font-size: 28px;
+            margin-bottom: 10px;
+            text-shadow: 0 0 10px var(--primary);
+        }
+
+        .auth-subtitle {
+            color: var(--text-secondary);
+            font-size: 12px;
+            margin-bottom: 30px;
+            opacity: 0.8;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-label {
+            display: block;
+            color: var(--text-secondary);
+            font-size: 12px;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .form-input {
+            width: 100%;
+            background: rgba(0, 255, 136, 0.05);
+            border: 1px solid var(--primary);
+            color: var(--primary);
+            padding: 12px;
+            border-radius: 6px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+
+        .form-input:focus {
+            outline: none;
+            box-shadow: 0 0 15px var(--primary);
+            background: rgba(0, 255, 136, 0.1);
+        }
+
+        .form-buttons {
+            display: flex;
+            gap: 10px;
+            margin-top: 30px;
+        }
+
+        .form-button {
+            flex: 1;
+            background: linear-gradient(135deg, var(--primary), rgba(0, 255, 136, 0.7));
+            border: 1px solid var(--primary);
+            color: var(--bg-darker);
+            padding: 12px;
+            border-radius: 6px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-transform: uppercase;
+            font-size: 12px;
+            letter-spacing: 1px;
+        }
+
+        .form-button:hover {
+            box-shadow: 0 0 20px var(--primary);
+            transform: translateY(-2px);
+        }
+
+        .form-button.secondary {
+            background: rgba(0, 255, 136, 0.1);
+            color: var(--primary);
+        }
+
+        .form-button.secondary:hover {
+            background: rgba(0, 255, 136, 0.2);
+        }
+
+        /* ANIMATIONS */
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+
+        @keyframes blink {
+            0%, 49% { opacity: 1; }
+            50%, 100% { opacity: 0; }
+        }
+
+        .cursor {
+            display: inline-block;
+            width: 8px;
+            height: 16px;
+            background: var(--primary);
+            margin-left: 4px;
+            animation: blink 1s infinite;
+        }
+
+        /* RESPONSIVE */
+        @media (max-width: 768px) {
+            .container {
+                flex-direction: column;
+            }
+
+            .sidebar {
+                width: 100%;
+                max-height: 200px;
+            }
+
+            .header {
+                padding: 15px;
+            }
+
+            .header-title {
+                font-size: 18px;
+            }
+        }
+
+        /* LOADING SPINNER */
+        .spinner {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border: 2px solid rgba(0, 255, 136, 0.3);
+            border-top: 2px solid var(--primary);
+            border-radius: 50%;
+            animation: spin 0.6s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .loading-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--text-secondary);
+        }
+
+        /* MODAL ANIMATIONS */
+        @keyframes modal-slide-in {
+            from {
+                opacity: 0;
+                transform: scale(0.9);
+            }
+            to {
+                opacity: 1;
+                transform: scale(1);
+            }
+        }
+
+        .auth-modal {
+            animation: modal-slide-in 0.3s ease;
+        }
+
+        /* TRANSACTION FLOW */
+        .transaction-step {
+            margin: 15px 0;
+            padding: 12px;
+            background: rgba(0, 255, 136, 0.05);
+            border-left: 3px solid var(--primary);
+            border-radius: 4px;
+        }
+
+        .step-title {
+            color: var(--primary);
+            font-weight: bold;
+            margin-bottom: 5px;
+            font-size: 12px;
+            text-transform: uppercase;
+        }
+
+        .step-content {
+            color: var(--text-secondary);
+            font-size: 12px;
+        }
+
+        .transaction-table {
+            width: 100%;
+            margin: 10px 0;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+
+        .transaction-table td {
+            padding: 6px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .transaction-table .label {
+            color: var(--text-secondary);
+            font-weight: bold;
+        }
+
+        .transaction-table .value {
+            color: var(--primary);
+        }
+
+        .quantum-status {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 12px;
+            background: rgba(255, 0, 255, 0.1);
+            border: 1px solid var(--secondary);
+            border-radius: 4px;
+            color: var(--secondary);
+            font-size: 11px;
+            font-weight: bold;
+        }
+
+        .quantum-indicator {
+            width: 6px;
+            height: 6px;
+            background: var(--secondary);
+            border-radius: 50%;
+            animation: quantum-pulse 1s infinite;
+        }
+
+        @keyframes quantum-pulse {
+            0%, 100% { 
+                opacity: 1;
+                transform: scale(1);
+            }
+            50% { 
+                opacity: 0.5;
+                transform: scale(0.8);
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- HEADER -->
+    <div class="header">
+        <div class="header-title">
+            <span class="quantum-symbol">⚛️</span>
+            QUANTUM TEMPORAL COHERENCE LEDGER
+        </div>
+        <div class="header-subtitle">Advanced Quantum Blockchain Finance Platform</div>
+        <div class="status-bar">
+            <div class="status-item">
+                <div class="status-indicator"></div>
+                <span>Quantum Systems: ONLINE</span>
+            </div>
+            <div class="status-item">
+                <div class="status-indicator"></div>
+                <span>Ledger Network: SYNCHRONIZED</span>
+            </div>
+            <div class="status-item">
+                <div class="status-indicator"></div>
+                <span>Oracle Feeds: ACTIVE</span>
+            </div>
+            <div class="status-item" id="user-status">
+                <span>Not Authenticated</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- MAIN CONTAINER -->
+    <div class="container">
+        <!-- SIDEBAR -->
+        <div class="sidebar">
+            <div class="sidebar-section">
+                <div class="sidebar-title">🔐 Authentication</div>
+                <div class="command-group">
+                    <div class="command-item" data-command="login">Login</div>
+                    <div class="command-item" data-command="register">Register</div>
+                    <div class="command-item" data-command="logout">Logout</div>
+                </div>
+            </div>
+
+            <div class="sidebar-section">
+                <div class="sidebar-title">💸 Transactions</div>
+                <div class="command-group">
+                    <div class="command-item" data-command="transact">New Transaction</div>
+                    <div class="command-item" data-command="tx-history">History</div>
+                    <div class="command-item" data-command="transaction-status">Status</div>
+                    <div class="command-item" data-command="tx-stats">Statistics</div>
+                </div>
+            </div>
+
+            <div class="sidebar-section">
+                <div class="sidebar-title">⚛️ Quantum</div>
+                <div class="command-group">
+                    <div class="command-item" data-command="quantum-status">Status</div>
+                    <div class="command-item" data-command="quantum-stats">Statistics</div>
+                    <div class="command-item" data-command="ghz-state">GHZ State</div>
+                </div>
+            </div>
+
+            <div class="sidebar-section">
+                <div class="sidebar-title">🔮 Oracles</div>
+                <div class="command-group">
+                    <div class="command-item" data-command="oracle-time">Time Oracle</div>
+                    <div class="command-item" data-command="oracle-price">Price Oracle</div>
+                    <div class="command-item" data-command="oracle-random">Random Oracle</div>
+                </div>
+            </div>
+
+            <div class="sidebar-section">
+                <div class="sidebar-title">👤 Account</div>
+                <div class="command-group">
+                    <div class="command-item" data-command="profile">Profile</div>
+                    <div class="command-item" data-command="balance">Balance</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TERMINAL -->
+        <div class="terminal-wrapper">
+            <div class="terminal-tabs">
+                <div class="terminal-tab active" data-tab="main">Main Console</div>
+                <div class="terminal-tab" data-tab="transactions">Transactions</div>
+                <div class="terminal-tab" data-tab="quantum">Quantum</div>
+                <div class="terminal-tab" data-tab="help">Help</div>
+            </div>
+
+            <div class="terminal" id="terminal">
+                <div class="output-line">
+                    <span class="output-prompt">$</span>
+                    <span class="output-text"> Initializing QTCL Terminal...</span>
+                </div>
+                <div class="output-line">
+                    <span class="output-success">✓</span>
+                    <span class="output-text"> Quantum systems online</span>
+                </div>
+                <div class="output-line">
+                    <span class="output-success">✓</span>
+                    <span class="output-text"> Ledger synchronized</span>
+                </div>
+                <div class="output-line">
+                    <span class="output-success">✓</span>
+                    <span class="output-text"> Oracle feeds active</span>
+                </div>
+                <div class="output-line" style="margin-top: 15px;">
+                    <span class="output-prompt">$</span>
+                    <span class="output-text"> Ready for commands. Type 'help' or select a command from the sidebar.</span>
+                </div>
+            </div>
+
+            <div class="input-area">
+                <span class="input-prompt">$</span>
+                <input 
+                    type="text" 
+                    class="input-field" 
+                    id="commandInput" 
+                    placeholder="Enter command or select from sidebar..."
+                    autocomplete="off"
+                >
+                <button class="input-button" id="executeBtn">Execute</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- AUTH MODAL -->
+    <div class="auth-overlay" id="authOverlay">
+        <div class="auth-modal">
+            <div class="auth-title" id="authTitle">Login</div>
+            <div class="auth-subtitle" id="authSubtitle">Access the QTCL Network</div>
+            
+            <form id="authForm" style="display: none;">
+                <div class="form-group">
+                    <label class="form-label">Email Address</label>
+                    <input type="email" class="form-input" id="authEmail" required>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Password</label>
+                    <input type="password" class="form-input" id="authPassword" required>
+                </div>
+                <div class="form-group" id="authNameGroup" style="display: none;">
+                    <label class="form-label">Full Name</label>
+                    <input type="text" class="form-input" id="authName" required>
+                </div>
+                <div class="form-buttons">
+                    <button type="submit" class="form-button">Submit</button>
+                    <button type="button" class="form-button secondary" id="authToggle">Register</button>
+                    <button type="button" class="form-button secondary" onclick="document.getElementById('authOverlay').classList.remove('active')">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        // Terminal Logic Engine Integration
+        class QTCLTerminal {
+            constructor() {
+                this.authToken = null;
+                this.currentUser = null;
+                this.isLogin = true;
+                this.commandHistory = [];
+                this.historyIndex = -1;
+
+                this.init();
+            }
+
+            init() {
+                // Event listeners
+                document.getElementById('commandInput').addEventListener('keydown', (e) => this.handleInput(e));
+                document.getElementById('executeBtn').addEventListener('click', () => this.executeCommand());
+                
+                // Sidebar commands
+                document.querySelectorAll('.command-item').forEach(item => {
+                    item.addEventListener('click', (e) => this.handleSidebarCommand(e));
+                });
+
+                // Auth form
+                document.getElementById('authForm').addEventListener('submit', (e) => this.handleAuth(e));
+                document.getElementById('authToggle').addEventListener('click', () => this.toggleAuthMode());
+
+                // Terminal tabs
+                document.querySelectorAll('.terminal-tab').forEach(tab => {
+                    tab.addEventListener('click', (e) => this.switchTab(e));
+                });
+
+                this.printLine('$ Terminal initialized. Type "help" or select commands from sidebar.', 'info');
+            }
+
+            handleInput(e) {
+                if (e.key === 'Enter') {
+                    this.executeCommand();
+                } else if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    this.navigateHistory(-1);
+                } else if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    this.navigateHistory(1);
+                }
+            }
+
+            navigateHistory(direction) {
+                const input = document.getElementById('commandInput');
+                this.historyIndex += direction;
+
+                if (this.historyIndex < -1) {
+                    this.historyIndex = -1;
+                    input.value = '';
+                } else if (this.historyIndex >= this.commandHistory.length) {
+                    this.historyIndex = this.commandHistory.length - 1;
+                }
+
+                if (this.historyIndex >= 0) {
+                    input.value = this.commandHistory[this.historyIndex];
+                }
+            }
+
+            executeCommand() {
+                const input = document.getElementById('commandInput');
+                const cmd = input.value.trim();
+
+                if (!cmd) return;
+
+                this.printLine(`$ ${cmd}`, 'prompt');
+                this.commandHistory.push(cmd);
+                this.historyIndex = -1;
+                input.value = '';
+
+                this.processCommand(cmd);
+            }
+
+            handleSidebarCommand(e) {
+                const cmd = e.target.dataset.command;
+                document.getElementById('commandInput').value = cmd;
+                this.executeCommand();
+            }
+
+            processCommand(cmd) {
+                const parts = cmd.split(' ');
+                const command = parts[0].toLowerCase();
+
+                switch(command) {
+                    case 'login':
+                        this.showAuthModal(true);
+                        break;
+                    case 'register':
+                        this.showAuthModal(false);
+                        break;
+                    case 'logout':
+                        this.logout();
+                        break;
+                    case 'transact':
+                        this.startTransactionFlow();
+                        break;
+                    case 'profile':
+                        this.showProfile();
+                        break;
+                    case 'balance':
+                        this.showBalance();
+                        break;
+                    case 'quantum-status':
+                        this.showQuantumStatus();
+                        break;
+                    case 'tx-history':
+                        this.showTransactionHistory();
+                        break;
+                    case 'help':
+                        this.showHelp();
+                        break;
+                    case 'clear':
+                        this.clear();
+                        break;
+                    default:
+                        this.printLine(`Command not found: ${command}. Type 'help' for available commands.`, 'error');
+                }
+            }
+
+            showAuthModal(isLogin) {
+                this.isLogin = isLogin;
+                const overlay = document.getElementById('authOverlay');
+                const title = document.getElementById('authTitle');
+                const subtitle = document.getElementById('authSubtitle');
+                const nameGroup = document.getElementById('authNameGroup');
+                const toggle = document.getElementById('authToggle');
+
+                title.textContent = isLogin ? 'Login' : 'Create Account';
+                subtitle.textContent = isLogin ? 'Access the QTCL Network' : 'Join the Quantum Blockchain';
+                nameGroup.style.display = isLogin ? 'none' : 'block';
+                toggle.textContent = isLogin ? 'Register' : 'Login';
+
+                overlay.classList.add('active');
+            }
+
+            toggleAuthMode() {
+                this.showAuthModal(!this.isLogin);
+            }
+
+            handleAuth(e) {
+                e.preventDefault();
+
+                const email = document.getElementById('authEmail').value;
+                const password = document.getElementById('authPassword').value;
+                const name = document.getElementById('authName').value;
+
+                if (this.isLogin) {
+                    this.login(email, password);
+                } else {
+                    this.register(email, password, name);
+                }
+            }
+
+            async login(email, password) {
+                try {
+                    const response = await fetch('/api/auth/login', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ email, password })
+                    });
+
+                    const data = await response.json();
+
+                    if (data.status === 'success' || data.token) {
+                        this.authToken = data.token;
+                        this.currentUser = email;
+                        document.getElementById('authOverlay').classList.remove('active');
+                        this.updateAuthStatus();
+                        this.printLine(`✓ Successfully logged in as ${email}`, 'success');
+                        document.getElementById('authForm').reset();
+                    } else {
+                        this.printLine(`✗ Login failed: ${data.message}`, 'error');
+                    }
+                } catch (e) {
+                    this.printLine(`✗ Error: ${e.message}`, 'error');
+                }
+            }
+
+            async register(email, password, name) {
+                try {
+                    const response = await fetch('/api/auth/register', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ email, password, name })
+                    });
+
+                    const data = await response.json();
+
+                    if (data.status === 'success' || data.user_id) {
+                        this.printLine(`✓ Account created successfully!`, 'success');
+                        this.printLine(`User ID: ${data.user_id}`, 'info');
+                        this.printLine(`Please log in with your credentials.`, 'info');
+                        document.getElementById('authOverlay').classList.remove('active');
+                        document.getElementById('authForm').reset();
+                    } else {
+                        this.printLine(`✗ Registration failed: ${data.message}`, 'error');
+                    }
+                } catch (e) {
+                    this.printLine(`✗ Error: ${e.message}`, 'error');
+                }
+            }
+
+            logout() {
+                this.authToken = null;
+                this.currentUser = null;
+                this.updateAuthStatus();
+                this.printLine(`✓ Successfully logged out`, 'success');
+            }
+
+            updateAuthStatus() {
+                const status = document.getElementById('user-status');
+                if (this.currentUser) {
+                    status.innerHTML = `<div class="status-indicator"></div><span>User: ${this.currentUser}</span>`;
+                } else {
+                    status.innerHTML = `<span>Not Authenticated</span>`;
+                }
+            }
+
+            startTransactionFlow() {
+                if (!this.authToken) {
+                    this.printLine(`✗ Authentication required. Please login first.`, 'error');
+                    return;
+                }
+
+                this.printLine(``, 'info');
+                this.printLine(`╔════════════════════════════════════════════════════════════════╗`, 'info');
+                this.printLine(`║         TRANSACTION CREATION - QUANTUM VERIFIED                ║`, 'info');
+                this.printLine(`╚════════════════════════════════════════════════════════════════╝`, 'info');
+                
+                this.printLine(`⚛️  Preparing quantum verification...`, 'info');
+                this.printLine(``, 'info');
+
+                setTimeout(() => {
+                    this.printLine(`Recipient ID: ${this.generateMockId()}`, 'success');
+                    this.printLine(`Amount: 1000 QTCL`, 'success');
+                    this.printLine(`Status: PENDING QUANTUM VERIFICATION`, 'warning');
+                    this.printLine(``, 'info');
+                    this.showQuantumVerification();
+                }, 800);
+            }
+
+            showQuantumVerification() {
+                const steps = [
+                    { msg: 'Preparing quantum circuit...', symbol: '◐' },
+                    { msg: 'Entangling qubits...', symbol: '◓' },
+                    { msg: 'Creating GHZ state...', symbol: '◑' },
+                    { msg: 'Computing superposition...', symbol: '◒' },
+                    { msg: 'Measuring quantum state...', symbol: '◐' },
+                    { msg: 'Collapsing wave function...', symbol: '●' },
+                    { msg: 'Finalizing transaction...', symbol: '✓' }
+                ];
+
+                let index = 0;
+                const timer = setInterval(() => {
+                    if (index < steps.length) {
+                        const step = steps[index];
+                        this.printLine(`${step.symbol} ${step.msg}`, 'info');
+                        index++;
+                    } else {
+                        clearInterval(timer);
+                        this.printLine(``, 'info');
+                        this.printLine(`✓ Transaction verified and finalized!`, 'success');
+                        this.printLine(`Transaction ID: ${this.generateMockId()}`, 'info');
+                        this.printLine(`Status: FINALIZED`, 'success');
+                    }
+                }, 300);
+            }
+
+            showProfile() {
+                if (!this.authToken) {
+                    this.printLine(`✗ Authentication required.`, 'error');
+                    return;
+                }
+
+                this.printLine(``, 'info');
+                this.printLine(`User Profile:`, 'success');
+                this.printLine(`├─ Email: ${this.currentUser}`, 'info');
+                this.printLine(`├─ User ID: ${this.generateMockId()}`, 'info');
+                this.printLine(`├─ Balance: 1,000,000 QTCL`, 'success');
+                this.printLine(`├─ Staked: 50,000 QTCL`, 'info');
+                this.printLine(`├─ Role: User`, 'info');
+                this.printLine(`└─ KYC Verified: ✓`, 'success');
+            }
+
+            showBalance() {
+                if (!this.authToken) {
+                    this.printLine(`✗ Authentication required.`, 'error');
+                    return;
+                }
+
+                this.printLine(``, 'info');
+                this.printLine(`Account Balance:`, 'success');
+                this.printLine(`├─ Available: 950,000 QTCL`, 'success');
+                this.printLine(`├─ Staked: 50,000 QTCL`, 'info');
+                this.printLine(`└─ Total: 1,000,000 QTCL`, 'success');
+            }
+
+            showQuantumStatus() {
+                this.printLine(``, 'info');
+                this.printLine(`Quantum System Status:`, 'success');
+                this.printLine(`├─ Operational: YES`, 'success');
+                this.printLine(`├─ Active Circuits: 12`, 'info');
+                this.printLine(`├─ Entanglement Pairs: 256`, 'info');
+                this.printLine(`├─ Coherence Time: 45.3μs`, 'info');
+                this.printLine(`├─ Error Rate: 0.0001`, 'warning');
+                this.printLine(`├─ GHZ State: PREPARED`, 'success');
+                this.printLine(`└─ Lattice Synchronized: YES`, 'success');
+            }
+
+            showTransactionHistory() {
+                if (!this.authToken) {
+                    this.printLine(`✗ Authentication required.`, 'error');
+                    return;
+                }
+
+                this.printLine(``, 'info');
+                this.printLine(`Transaction History:`, 'success');
+                this.printLine(``, 'info');
+
+                const transactions = [
+                    { id: this.generateMockId(), to: 'user_1', amount: '100 QTCL', status: 'FINALIZED' },
+                    { id: this.generateMockId(), to: 'user_2', amount: '500 QTCL', status: 'FINALIZED' },
+                    { id: this.generateMockId(), to: 'user_3', amount: '250 QTCL', status: 'FINALIZED' }
+                ];
+
+                transactions.forEach((tx, i) => {
+                    this.printLine(`[${i+1}] ${tx.id} → ${tx.to} | ${tx.amount} | ${tx.status}`, 'info');
+                });
+            }
+
+            showHelp() {
+                this.printLine(``, 'info');
+                this.printLine(`Available Commands:`, 'success');
+                this.printLine(``, 'info');
+                this.printLine(`Authentication:`, 'warning');
+                this.printLine(`  login              - Authenticate to network`, 'info');
+                this.printLine(`  register           - Create new account`, 'info');
+                this.printLine(`  logout             - End session`, 'info');
+                this.printLine(``, 'info');
+                this.printLine(`Transactions:`, 'warning');
+                this.printLine(`  transact           - Create quantum-verified transaction`, 'info');
+                this.printLine(`  tx-history         - Show transaction history`, 'info');
+                this.printLine(`  transaction-status - Check transaction status`, 'info');
+                this.printLine(``, 'info');
+                this.printLine(`Account:`, 'warning');
+                this.printLine(`  profile            - Display account profile`, 'info');
+                this.printLine(`  balance            - Show account balance`, 'info');
+                this.printLine(``, 'info');
+                this.printLine(`System:`, 'warning');
+                this.printLine(`  quantum-status     - Check quantum systems`, 'info');
+                this.printLine(`  clear              - Clear terminal`, 'info');
+                this.printLine(`  help               - Show this help`, 'info');
+            }
+
+            clear() {
+                document.getElementById('terminal').innerHTML = '';
+            }
+
+            switchTab(e) {
+                document.querySelectorAll('.terminal-tab').forEach(t => t.classList.remove('active'));
+                e.target.classList.add('active');
+                
+                const tab = e.target.dataset.tab;
+                this.printLine(`Switched to ${tab.toUpperCase()} tab`, 'info');
+            }
+
+            printLine(text, type = 'text') {
+                const terminal = document.getElementById('terminal');
+                const line = document.createElement('div');
+                line.className = 'output-line';
+
+                let className = `output-${type}`;
+                if (type === 'prompt') className = 'output-prompt';
+                if (type === 'success') className = 'output-success';
+                if (type === 'error') className = 'output-error';
+                if (type === 'warning') className = 'output-warning';
+                if (type === 'info') className = 'output-info';
+
+                line.innerHTML = `<span class="${className}">${this.escapeHtml(text)}</span>`;
+                terminal.appendChild(line);
+                terminal.scrollTop = terminal.scrollHeight;
+            }
+
+            escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            }
+
+            generateMockId() {
+                return Math.random().toString(36).substring(2, 10).toUpperCase();
+            }
+        }
+
+        // Initialize terminal on page load
+        window.addEventListener('DOMContentLoaded', () => {
+            new QTCLTerminal();
+        });
+    </script>
+</body>
+</html>
