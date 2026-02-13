@@ -50,13 +50,13 @@ from db_config import DatabaseConnection, Config as DBConfig, setup_database, Da
 
 # Import terminal logic for dynamic command list
 try:
-    from terminal_logic import TerminalOrchestrator, CommandRegistry, CommandMeta
+    from terminal_logic import TerminalEngine, CommandRegistry, CommandMeta
     TERMINAL_ORCHESTRATOR_AVAILABLE = True
-    logger.info("[Import] ✓ Terminal orchestrator imported successfully")
+    logger.info("[Import] ✓ Terminal logic imported successfully (TerminalEngine)")
 except ImportError as import_error:
     TERMINAL_ORCHESTRATOR_AVAILABLE = False
-    logger.warning(f"[Import] ⚠ Terminal orchestrator import failed: {import_error}")
-    logger.warning("[Import] Commands endpoint will return empty list")
+    logger.warning(f"[Import] ⚠ Terminal logic import failed: {import_error}")
+    logger.warning("[Import] Commands endpoint will return fallback commands")
 except Exception as import_error:
     TERMINAL_ORCHESTRATOR_AVAILABLE = False
     logger.error(f"[Import] ✗ Unexpected error importing terminal_logic: {import_error}", exc_info=True)
@@ -2329,7 +2329,7 @@ def setup_routes(app):
         """Get all available terminal commands dynamically from terminal_logic"""
         try:
             if not TERMINAL_ORCHESTRATOR_AVAILABLE:
-                logger.warning("[API/Commands] ⚠ Terminal orchestrator not available - using fallback commands")
+                logger.warning("[API/Commands] ⚠ Terminal logic not available - using fallback commands")
                 # Fallback commands when terminal_logic is unavailable
                 fallback_commands = [
                     {'name': 'login', 'category': 'auth', 'description': 'Login to QTCL system', 'requires_auth': False, 'requires_admin': False, 'args': []},
@@ -2347,16 +2347,17 @@ def setup_routes(app):
                 }), 200
             
             try:
-                logger.debug("[API/Commands] Initializing TerminalOrchestrator...")
-                orchestrator = TerminalOrchestrator()
-                all_commands = orchestrator.registry.list_all()
-                logger.info(f"[API/Commands] ✓ Found {len(all_commands)} commands")
+                logger.debug("[API/Commands] Initializing TerminalEngine...")
+                engine = TerminalEngine()
+                all_commands = engine.registry.list_all()
+                logger.info(f"[API/Commands] ✓ Found {len(all_commands)} commands from TerminalEngine")
             except Exception as init_error:
-                logger.error(f"[API/Commands] ✗ Failed to initialize TerminalOrchestrator: {init_error}", exc_info=True)
+                logger.error(f"[API/Commands] ✗ Failed to initialize TerminalEngine: {init_error}", exc_info=True)
+                # Fall back to hardcoded commands on error
                 return jsonify({
                     'status': 'error',
-                    'message': f'Failed to initialize terminal orchestrator: {str(init_error)}',
-                    'code': 'ORCHESTRATOR_INIT_ERROR',
+                    'message': f'Failed to initialize terminal engine: {str(init_error)}',
+                    'code': 'ENGINE_INIT_ERROR',
                     'total': 0,
                     'commands': []
                 }), 500
@@ -2387,7 +2388,7 @@ def setup_routes(app):
                 'commands': commands_list
             }), 200
         except Exception as e:
-            logger.error(f"[API/Commands] ✗ Error fetching commands: {e}", exc_info=True)
+            logger.error(f"[API/Commands] ✗ Unexpected error: {e}", exc_info=True)
             return jsonify({
                 'status': 'error',
                 'message': f'Failed to fetch commands: {str(e)}',
