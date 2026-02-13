@@ -299,6 +299,9 @@ class DatabaseManager:
     def verify_password(self, password: str, password_hash: str) -> bool:
         """Verify password against hash"""
         try:
+            if not password_hash:
+                logger.warning("[DB] Password verification skipped: password_hash is None or empty")
+                return False
             return bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
         except Exception as e:
             logger.error(f"[DB] Password verification error: {e}")
@@ -579,6 +582,26 @@ def handle_exceptions(f):
                 'code': 'INTERNAL_ERROR'
             }), 500
     return decorated_function
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# TIMESTAMP UTILITY
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+def _ts_to_iso(ts) -> str:
+    """Convert a DB timestamp to ISO-8601 string.
+
+    Handles three cases returned by psycopg2 / SQLAlchemy:
+      - datetime / date  → call .isoformat() directly
+      - int / float      → treat as Unix epoch seconds
+      - None             → return None
+    """
+    if ts is None:
+        return None
+    if isinstance(ts, (int, float)):
+        return datetime.utcfromtimestamp(ts).isoformat()
+    # Already a datetime-like object (psycopg2 default for TIMESTAMPTZ columns)
+    return ts.isoformat()
+
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # FLASK APPLICATION FACTORY
@@ -1613,7 +1636,7 @@ def setup_routes(app):
                     'block_number': block.get('block_number'),
                     'block_hash': block.get('block_hash'),
                     'previous_hash': block.get('previous_hash'),
-                    'timestamp': block.get('timestamp').isoformat() if block.get('timestamp') else None,
+                    'timestamp': _ts_to_iso(block.get('timestamp')),
                     'transaction_count': block.get('transaction_count', 0),
                     'quantum_signature': block.get('quantum_signature')
                 }
@@ -1653,7 +1676,7 @@ def setup_routes(app):
                     'block_number': block.get('block_number'),
                     'block_hash': block.get('block_hash'),
                     'previous_hash': block.get('previous_hash'),
-                    'timestamp': block.get('timestamp').isoformat() if block.get('timestamp') else None,
+                    'timestamp': _ts_to_iso(block.get('timestamp')),
                     'transaction_count': block.get('transaction_count', 0),
                     'quantum_signature': block.get('quantum_signature')
                 }
@@ -1690,7 +1713,7 @@ def setup_routes(app):
                     'block_number': b.get('block_number'),
                     'block_hash': b.get('block_hash'),
                     'previous_hash': b.get('previous_hash'),
-                    'timestamp': b.get('timestamp').isoformat() if b.get('timestamp') else None,
+                    'timestamp': _ts_to_iso(b.get('timestamp')),
                     'transaction_count': b.get('transaction_count', 0)
                 } for b in blocks]
             }), 200

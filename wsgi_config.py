@@ -76,7 +76,7 @@ try:
     
     # Initialize the application
     logger.info("Initializing application...")
-    if initialize_app():
+    if initialize_app(app):
         logger.info("✓ Application initialized successfully")
     else:
         logger.warning("⚠ Application initialization returned False, but continuing...")
