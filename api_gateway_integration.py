@@ -118,7 +118,7 @@ def register_advanced_features(app, db_manager=None):
         try:
             logger.info("[Quantum] Registering quantum circuit endpoints...")
             
-            @app.route('/api/v1/quantum/circuits', methods=['POST'])
+            @app.route('/api/quantum/circuits', methods=['POST'])
             def create_quantum_circuit():
                 """Create a new quantum circuit"""
                 return {
@@ -138,31 +138,31 @@ def register_advanced_features(app, db_manager=None):
         try:
             logger.info("[Crypto] Registering advanced cryptography endpoints...")
             
-            @app.route('/api/v1/keys/generate', methods=['POST'])
+            @app.route('/api/keys/generate', methods=['POST'])
             def generate_keypair():
                 """Generate cryptographic keypair"""
                 return {
                     'status': 'success',
                     'message': 'Keypair generation available',
-                    'endpoint': '/api/v1/keys/generate'
+                    'endpoint': '/api/keys/generate'
                 }, 200
             
-            @app.route('/api/v1/sign/message', methods=['POST'])
+            @app.route('/api/sign/message', methods=['POST'])
             def sign_message():
                 """Sign a message with private key"""
                 return {
                     'status': 'success',
                     'message': 'Message signing available',
-                    'endpoint': '/api/v1/sign/message'
+                    'endpoint': '/api/sign/message'
                 }, 200
             
-            @app.route('/api/v1/verify/signature', methods=['POST'])
+            @app.route('/api/verify/signature', methods=['POST'])
             def verify_signature_advanced():
                 """Verify digital signatures"""
                 return {
                     'status': 'success',
                     'message': 'Signature verification available',
-                    'endpoint': '/api/v1/verify/signature'
+                    'endpoint': '/api/verify/signature'
                 }, 200
             
             logger.info("✓ [Crypto] Advanced cryptography endpoints registered")
@@ -176,13 +176,13 @@ def register_advanced_features(app, db_manager=None):
         try:
             logger.info("[MultiSig] Registering multisig wallet endpoints...")
             
-            @app.route('/api/v1/multisig/wallets', methods=['POST'])
+            @app.route('/api/multisig/wallets', methods=['POST'])
             def create_multisig_wallet():
                 """Create multisig wallet"""
                 return {
                     'status': 'success',
                     'message': 'Multisig wallet creation available',
-                    'endpoint': '/api/v1/multisig/wallets'
+                    'endpoint': '/api/multisig/wallets'
                 }, 200
             
             logger.info("✓ [MultiSig] Multisig wallet endpoints registered")
@@ -196,7 +196,7 @@ def register_advanced_features(app, db_manager=None):
         try:
             logger.info("[DeFi] Registering DeFi engine endpoints...")
             
-            @app.route('/api/v1/defi/pools', methods=['GET'])
+            @app.route('/api/defi/pools', methods=['GET'])
             def list_liquidity_pools():
                 """List all liquidity pools"""
                 return {
@@ -205,13 +205,13 @@ def register_advanced_features(app, db_manager=None):
                     'pools': []
                 }, 200
             
-            @app.route('/api/v1/defi/stake', methods=['POST'])
+            @app.route('/api/defi/stake', methods=['POST'])
             def stake_tokens():
                 """Stake tokens in liquidity pool"""
                 return {
                     'status': 'success',
                     'message': 'Staking available',
-                    'endpoint': '/api/v1/defi/stake'
+                    'endpoint': '/api/defi/stake'
                 }, 200
             
             logger.info("✓ [DeFi] DeFi engine endpoints registered")
@@ -225,7 +225,7 @@ def register_advanced_features(app, db_manager=None):
         try:
             logger.info("[Oracle] Registering price oracle endpoints...")
             
-            @app.route('/api/v1/oracle/prices', methods=['GET'])
+            @app.route('/api/oracle/prices', methods=['GET'])
             def get_oracle_prices():
                 """Get prices from oracle network"""
                 return {
@@ -245,7 +245,7 @@ def register_advanced_features(app, db_manager=None):
         try:
             logger.info("[Governance] Registering governance endpoints...")
             
-            @app.route('/api/v1/governance/proposals', methods=['GET'])
+            @app.route('/api/governance/proposals', methods=['GET'])
             def list_proposals():
                 """List governance proposals"""
                 return {
@@ -254,13 +254,13 @@ def register_advanced_features(app, db_manager=None):
                     'proposals': []
                 }, 200
             
-            @app.route('/api/v1/governance/vote', methods=['POST'])
+            @app.route('/api/governance/vote', methods=['POST'])
             def vote_on_proposal():
                 """Vote on governance proposal"""
                 return {
                     'status': 'success',
                     'message': 'Governance voting available',
-                    'endpoint': '/api/v1/governance/vote'
+                    'endpoint': '/api/governance/vote'
                 }, 200
             
             logger.info("✓ [Governance] Governance endpoints registered")
@@ -274,7 +274,7 @@ def register_advanced_features(app, db_manager=None):
         try:
             logger.info("[Bridge] Registering cross-chain bridge endpoints...")
             
-            @app.route('/api/v1/bridge/chains', methods=['GET'])
+            @app.route('/api/bridge/chains', methods=['GET'])
             def get_supported_chains():
                 """Get supported chains for bridge"""
                 return {
@@ -283,13 +283,13 @@ def register_advanced_features(app, db_manager=None):
                     'chains': []
                 }, 200
             
-            @app.route('/api/v1/bridge/lock', methods=['POST'])
+            @app.route('/api/bridge/lock', methods=['POST'])
             def lock_for_bridge():
                 """Lock tokens for bridge"""
                 return {
                     'status': 'success',
                     'message': 'Bridge locking available',
-                    'endpoint': '/api/v1/bridge/lock'
+                    'endpoint': '/api/bridge/lock'
                 }, 200
             
             logger.info("✓ [Bridge] Cross-chain bridge endpoints registered")
@@ -303,7 +303,7 @@ def register_advanced_features(app, db_manager=None):
         try:
             logger.info("[Mobile] Registering mobile dashboard endpoints...")
             
-            @app.route('/api/v1/mobile/dashboard', methods=['GET'])
+            @app.route('/api/mobile/dashboard', methods=['GET'])
             def mobile_dashboard():
                 """Mobile dashboard data"""
                 return {
@@ -312,13 +312,13 @@ def register_advanced_features(app, db_manager=None):
                     'dashboard': {}
                 }, 200
             
-            @app.route('/api/v1/mobile/quick-send', methods=['POST'])
+            @app.route('/api/mobile/quick-send', methods=['POST'])
             def mobile_quick_send():
                 """Quick send for mobile"""
                 return {
                     'status': 'success',
                     'message': 'Mobile quick send available',
-                    'endpoint': '/api/v1/mobile/quick-send'
+                    'endpoint': '/api/mobile/quick-send'
                 }, 200
             
             logger.info("✓ [Mobile] Mobile dashboard endpoints registered")
@@ -332,7 +332,7 @@ def register_advanced_features(app, db_manager=None):
         try:
             logger.info("[Analytics] Registering analytics endpoints...")
             
-            @app.route('/api/v1/stats/block-times', methods=['GET'])
+            @app.route('/api/stats/block-times', methods=['GET'])
             def get_block_times():
                 """Get block time statistics"""
                 return {
