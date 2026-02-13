@@ -2326,76 +2326,92 @@ def setup_routes(app):
     @rate_limited
     @handle_exceptions
     def get_commands():
-        """Get all available terminal commands dynamically from terminal_logic"""
+        """Get all available terminal commands - safely falls back to hardcoded list"""
+        
+        # Complete hardcoded command list (fallback - always works)
+        fallback_commands = [
+            # AUTH
+            {'name': 'login', 'category': 'auth', 'description': 'Login to QTCL system', 'requires_auth': False, 'requires_admin': False, 'args': []},
+            {'name': 'logout', 'category': 'auth', 'description': 'Logout from system', 'requires_auth': True, 'requires_admin': False, 'args': []},
+            {'name': 'register', 'category': 'auth', 'description': 'Register new account', 'requires_auth': False, 'requires_admin': False, 'args': []},
+            {'name': 'whoami', 'category': 'auth', 'description': 'Show current user info', 'requires_auth': True, 'requires_admin': False, 'args': []},
+            
+            # USER
+            {'name': 'profile', 'category': 'user', 'description': 'View user profile', 'requires_auth': True, 'requires_admin': False, 'args': []},
+            {'name': 'user/settings', 'category': 'user', 'description': 'Update user settings', 'requires_auth': True, 'requires_admin': False, 'args': []},
+            {'name': 'user/list', 'category': 'user', 'description': 'List all users', 'requires_auth': False, 'requires_admin': False, 'args': []},
+            
+            # WALLET
+            {'name': 'balance', 'category': 'wallet', 'description': 'Check account balance', 'requires_auth': True, 'requires_admin': False, 'args': []},
+            {'name': 'wallet/create', 'category': 'wallet', 'description': 'Create new wallet', 'requires_auth': True, 'requires_admin': False, 'args': []},
+            {'name': 'wallet/list', 'category': 'wallet', 'description': 'List wallets', 'requires_auth': True, 'requires_admin': False, 'args': []},
+            
+            # TRANSACTION
+            {'name': 'transact', 'category': 'transaction', 'description': 'Create transaction', 'requires_auth': True, 'requires_admin': False, 'args': []},
+            {'name': 'transaction/list', 'category': 'transaction', 'description': 'List transactions', 'requires_auth': True, 'requires_admin': False, 'args': []},
+            {'name': 'transaction/track', 'category': 'transaction', 'description': 'Track transaction', 'requires_auth': True, 'requires_admin': False, 'args': []},
+            
+            # QUANTUM
+            {'name': 'quantum-status', 'category': 'quantum', 'description': 'Check quantum system status', 'requires_auth': False, 'requires_admin': False, 'args': []},
+            {'name': 'quantum/circuit', 'category': 'quantum', 'description': 'View quantum circuit', 'requires_auth': False, 'requires_admin': False, 'args': []},
+            
+            # ORACLE
+            {'name': 'oracle-price', 'category': 'oracle', 'description': 'Get price oracle data', 'requires_auth': False, 'requires_admin': False, 'args': []},
+            {'name': 'oracle/time', 'category': 'oracle', 'description': 'Get oracle time', 'requires_auth': False, 'requires_admin': False, 'args': []},
+            
+            # HELP & SYSTEM
+            {'name': 'help', 'category': 'help', 'description': 'Show help menu', 'requires_auth': False, 'requires_admin': False, 'args': []},
+            {'name': 'clear', 'category': 'system', 'description': 'Clear terminal', 'requires_auth': False, 'requires_admin': False, 'args': []},
+            {'name': 'tx-history', 'category': 'system', 'description': 'View transaction history', 'requires_auth': True, 'requires_admin': False, 'args': []},
+        ]
+        
         try:
-            if not TERMINAL_ORCHESTRATOR_AVAILABLE:
-                logger.warning("[API/Commands] ⚠ Terminal logic not available - using fallback commands")
-                # Fallback commands when terminal_logic is unavailable
-                fallback_commands = [
-                    {'name': 'login', 'category': 'auth', 'description': 'Login to QTCL system', 'requires_auth': False, 'requires_admin': False, 'args': []},
-                    {'name': 'logout', 'category': 'auth', 'description': 'Logout from system', 'requires_auth': True, 'requires_admin': False, 'args': []},
-                    {'name': 'register', 'category': 'auth', 'description': 'Register new account', 'requires_auth': False, 'requires_admin': False, 'args': []},
-                    {'name': 'help', 'category': 'help', 'description': 'Show help menu', 'requires_auth': False, 'requires_admin': False, 'args': []},
-                    {'name': 'profile', 'category': 'user', 'description': 'View user profile', 'requires_auth': True, 'requires_admin': False, 'args': []},
-                    {'name': 'balance', 'category': 'wallet', 'description': 'Check account balance', 'requires_auth': True, 'requires_admin': False, 'args': []},
-                ]
-                return jsonify({
-                    'status': 'success',
-                    'total': len(fallback_commands),
-                    'commands': fallback_commands,
-                    'note': 'Using fallback commands (terminal_logic unavailable)'
-                }), 200
-            
-            try:
-                logger.debug("[API/Commands] Initializing TerminalEngine...")
-                engine = TerminalEngine()
-                all_commands = engine.registry.list_all()
-                logger.info(f"[API/Commands] ✓ Found {len(all_commands)} commands from TerminalEngine")
-            except Exception as init_error:
-                logger.error(f"[API/Commands] ✗ Failed to initialize TerminalEngine: {init_error}", exc_info=True)
-                # Fall back to hardcoded commands on error
-                return jsonify({
-                    'status': 'error',
-                    'message': f'Failed to initialize terminal engine: {str(init_error)}',
-                    'code': 'ENGINE_INIT_ERROR',
-                    'total': 0,
-                    'commands': []
-                }), 500
-            
-            # Format commands for frontend
-            commands_list = []
-            for cmd_name, cmd_meta in all_commands:
+            # Try to load from terminal_logic if available
+            if TERMINAL_ORCHESTRATOR_AVAILABLE:
                 try:
-                    commands_list.append({
-                        'name': cmd_meta.name,
-                        'category': cmd_meta.category.value if hasattr(cmd_meta.category, 'value') else str(cmd_meta.category),
-                        'description': cmd_meta.description,
-                        'requires_auth': cmd_meta.requires_auth,
-                        'requires_admin': cmd_meta.requires_admin,
-                        'args': cmd_meta.args
-                    })
-                except Exception as cmd_error:
-                    logger.error(f"[API/Commands] Error formatting command {cmd_name}: {cmd_error}")
-                    continue
-            
-            # Sort by category then name
-            commands_list.sort(key=lambda x: (x['category'], x['name']))
-            
-            logger.info(f"[API/Commands] Returning {len(commands_list)} formatted commands")
-            return jsonify({
-                'status': 'success',
-                'total': len(commands_list),
-                'commands': commands_list
-            }), 200
+                    logger.debug("[API/Commands] Attempting to load from TerminalEngine...")
+                    engine = TerminalEngine()
+                    all_commands = engine.registry.list_all()
+                    
+                    commands_list = []
+                    for cmd_name, cmd_meta in all_commands:
+                        try:
+                            commands_list.append({
+                                'name': cmd_meta.name,
+                                'category': cmd_meta.category.value if hasattr(cmd_meta.category, 'value') else str(cmd_meta.category),
+                                'description': cmd_meta.description,
+                                'requires_auth': cmd_meta.requires_auth,
+                                'requires_admin': cmd_meta.requires_admin,
+                                'args': cmd_meta.args
+                            })
+                        except Exception as cmd_error:
+                            logger.debug(f"[API/Commands] Skipping command {cmd_name}: {cmd_error}")
+                            continue
+                    
+                    if len(commands_list) > 0:
+                        commands_list.sort(key=lambda x: (x['category'], x['name']))
+                        logger.info(f"[API/Commands] ✓ Loaded {len(commands_list)} commands from TerminalEngine")
+                        return jsonify({
+                            'status': 'success',
+                            'total': len(commands_list),
+                            'commands': commands_list,
+                            'source': 'terminal_logic'
+                        }), 200
+                except Exception as init_error:
+                    logger.warning(f"[API/Commands] TerminalEngine failed: {init_error}")
+                    # Fall through to fallback
         except Exception as e:
-            logger.error(f"[API/Commands] ✗ Unexpected error: {e}", exc_info=True)
-            return jsonify({
-                'status': 'error',
-                'message': f'Failed to fetch commands: {str(e)}',
-                'code': 'COMMANDS_ERROR',
-                'total': 0,
-                'commands': []
-            }), 500
+            logger.warning(f"[API/Commands] Unexpected error: {e}")
+            # Fall through to fallback
+        
+        # Return fallback commands
+        logger.info(f"[API/Commands] Using fallback command list ({len(fallback_commands)} commands)")
+        return jsonify({
+            'status': 'success',
+            'total': len(fallback_commands),
+            'commands': fallback_commands,
+            'source': 'fallback'
+        }), 200
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # WEBSOCKET HANDLERS

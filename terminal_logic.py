@@ -267,7 +267,7 @@ class UI:
         for i,opt in enumerate(options,1):print(f"{Fore.CYAN}{i}){Style.RESET_ALL} {opt}")
         choice=UI.prompt(f"Select (1-{len(options)})")
         try:idx=int(choice)-1;return options[idx] if 0<=idx<len(options) else options[0]
-        except:(ValueError,IndexError):return options[0]
+        except (ValueError,IndexError):return options[0]
     
     @staticmethod
     def confirm(msg:str,default:bool=False)->bool:
