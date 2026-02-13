@@ -245,6 +245,40 @@ if app is None:
             }), 503
         return jsonify({'status': 'healthy'}), 200
 
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# ADD HTML TERMINAL SERVING AT ROOT
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+def _load_html_terminal():
+    """Load index.html terminal UI"""
+    try:
+        html_path = os.path.join(PROJECT_ROOT, 'index.html')
+        if os.path.exists(html_path):
+            with open(html_path, 'r', encoding='utf-8') as f:
+                return f.read()
+    except Exception as e:
+        logger.error(f"[HTML] Error loading index.html: {e}")
+    return None
+
+_HTML_CONTENT = _load_html_terminal()
+
+if app is not None:
+    @app.route('/', methods=['GET'])
+    def serve_html_terminal():
+        """Serve HTML terminal UI at root"""
+        if _HTML_CONTENT:
+            return _HTML_CONTENT, 200, {'Content-Type': 'text/html; charset=utf-8'}
+        else:
+            return """<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>QTCL Terminal</title>
+<style>body{background:#0a0a0f;color:#00ff88;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}.box{text-align:center;padding:30px;border:2px solid #00ff88;border-radius:8px;background:rgba(0,255,136,0.1);box-shadow:0 0 20px rgba(0,255,136,0.3)}h1{color:#00ff88;text-shadow:0 0 10px #00ff88;margin:0}p{color:#00ffff;margin:8px 0}</style>
+</head>
+<body><div class="box"><h1>⚛️ QTCL Terminal</h1><p>Quantum Blockchain Interface</p><hr style="border-color:#00ff88;margin:15px 0"><p>⚠️ Terminal UI not available</p><p style="font-size:11px;opacity:0.7">Ensure index.html is deployed</p></div></body>
+</html>""", 200, {'Content-Type': 'text/html; charset=utf-8'}
+    
+    logger.info("[HTML] ✓ HTML terminal route registered at /")
+
 # Export Flask app as WSGI application (this is what Gunicorn looks for)
 application = app
 
