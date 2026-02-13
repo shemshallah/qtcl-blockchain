@@ -48,6 +48,13 @@ from psycopg2.extras import RealDictCursor
 # Import database configuration
 from db_config import DatabaseConnection, Config as DBConfig, setup_database, DatabaseBuilderManager
 
+# Import terminal logic for dynamic command list
+try:
+    from terminal_logic import TerminalOrchestrator
+    TERMINAL_ORCHESTRATOR_AVAILABLE = True
+except ImportError:
+    TERMINAL_ORCHESTRATOR_AVAILABLE = False
+
 # Quantum system is initialized globally in wsgi_config.py
 # All workers share the same SINGLETON instance via lock file
 QUANTUM_SYSTEM_MANAGER_AVAILABLE = True
@@ -2279,6 +2286,51 @@ def setup_routes(app):
             'status': 'alive',
             'timestamp': datetime.utcnow().isoformat()
         }), 200
+
+    @app.route('/api/commands', methods=['GET'])
+    @rate_limited
+    @handle_exceptions
+    def get_commands():
+        """Get all available terminal commands dynamically from terminal_logic"""
+        try:
+            if not TERMINAL_ORCHESTRATOR_AVAILABLE:
+                logger.warning("[API] Terminal orchestrator not available, returning cached commands")
+                return jsonify({
+                    'status': 'success',
+                    'commands': []
+                }), 200
+            
+            # Initialize TerminalOrchestrator to get command registry
+            orchestrator = TerminalOrchestrator()
+            all_commands = orchestrator.registry.list_all()
+            
+            # Format commands for frontend
+            commands_list = []
+            for cmd_name, cmd_meta in all_commands:
+                commands_list.append({
+                    'name': cmd_meta.name,
+                    'category': cmd_meta.category.value if hasattr(cmd_meta.category, 'value') else str(cmd_meta.category),
+                    'description': cmd_meta.description,
+                    'requires_auth': cmd_meta.requires_auth,
+                    'requires_admin': cmd_meta.requires_admin,
+                    'args': cmd_meta.args
+                })
+            
+            # Sort by category then name
+            commands_list.sort(key=lambda x: (x['category'], x['name']))
+            
+            return jsonify({
+                'status': 'success',
+                'total': len(commands_list),
+                'commands': commands_list
+            }), 200
+        except Exception as e:
+            logger.error(f"[API] Error fetching commands: {e}", exc_info=True)
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to fetch commands',
+                'code': 'COMMANDS_ERROR'
+            }), 500
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # WEBSOCKET HANDLERS

@@ -319,6 +319,7 @@
                 this.historyIndex = -1;
                 this.promptState = PROMPT_STATES.NONE;
                 this.tempData = {};
+                this.availableCommands = [];
 
                 this.init();
             }
@@ -327,6 +328,25 @@
                 const input = document.getElementById('commandInput');
                 input.addEventListener('keydown', (e) => this.handleInput(e));
                 input.focus();
+                this.loadCommands();
+            }
+
+            async loadCommands() {
+                try {
+                    const response = await fetch(`${API_URL}/commands`);
+                    const data = await response.json();
+                    
+                    if (data.status === 'success' && data.commands) {
+                        this.availableCommands = data.commands;
+                        logger.debug(`[Terminal] Loaded ${data.total} commands from API`);
+                    } else {
+                        this.availableCommands = [];
+                        this.printLine('⚠ Warning: Could not load command list', 'warning');
+                    }
+                } catch (e) {
+                    logger.error(`[Terminal] Failed to load commands: ${e.message}`);
+                    this.availableCommands = [];
+                }
             }
 
             handleInput(e) {
@@ -626,24 +646,35 @@
 
             showHelp() {
                 this.printLine('', 'info');
-                this.printLine('🚀 QTCL TERMINAL v5.0 - 81+ COMMANDS', 'warning');
+                this.printLine('🚀 QTCL TERMINAL - AVAILABLE COMMANDS', 'warning');
                 this.printLine('', 'info');
-                this.printLine('AUTH (6): login, logout, register, whoami, auth/2fa/setup, auth/token/refresh', 'text');
-                this.printLine('USER (4): user/profile, user/settings, user/list, user/details', 'text');
-                this.printLine('TRANSACTION (7): transaction/create, track, list, cancel, analyze, export, stats', 'text');
-                this.printLine('WALLET (8): wallet/create, list, balance, import, export, multisig/create, sign', 'text');
-                this.printLine('BLOCK (4): block/list, details, explorer, stats', 'text');
-                this.printLine('QUANTUM (5): quantum/status, circuit, entropy, validator, finality', 'text');
-                this.printLine('ORACLE (5): oracle/time, price, random, event, feed', 'text');
-                this.printLine('DEFI (6): defi/stake, unstake, borrow, repay, yield, pool', 'text');
-                this.printLine('GOVERNANCE (4): governance/vote, proposal, delegate, stats', 'text');
-                this.printLine('NFT (5): nft/mint, transfer, burn, metadata, collection', 'text');
-                this.printLine('CONTRACT (4): contract/deploy, execute, compile, state', 'text');
-                this.printLine('BRIDGE (4): bridge/initiate, status, history, wrapped', 'text');
-                this.printLine('👑 ADMIN (6): admin/users, approval, monitoring, settings, audit, emergency', 'text');
-                this.printLine('SYSTEM (5): system/status, health, config, backup, restore', 'text');
-                this.printLine('PARALLEL (3): parallel/execute, batch, monitor', 'text');
-                this.printLine('HELP (5): help, help/admin, help/search, help/commands, help/examples', 'text');
+                
+                if (!this.availableCommands || this.availableCommands.length === 0) {
+                    this.printLine('No commands available (failed to load from server)', 'error');
+                    this.printLine('', 'info');
+                    return;
+                }
+                
+                // Group commands by category
+                const grouped = {};
+                this.availableCommands.forEach(cmd => {
+                    if (!grouped[cmd.category]) {
+                        grouped[cmd.category] = [];
+                    }
+                    grouped[cmd.category].push(cmd);
+                });
+                
+                // Display commands grouped by category
+                Object.keys(grouped).sort().forEach(category => {
+                    const categoryName = category.charAt(0).toUpperCase() + category.slice(1);
+                    const commands = grouped[category];
+                    const commandNames = commands.map(c => c.name).join(', ');
+                    this.printLine(`${categoryName.toUpperCase()} (${commands.length}): ${commandNames}`, 'text');
+                });
+                
+                this.printLine('', 'info');
+                this.printLine(`Total: ${this.availableCommands.length} commands available`, 'info');
+                this.printLine('Use "help <command>" for detailed information', 'info');
                 this.printLine('', 'info');
             }
 
