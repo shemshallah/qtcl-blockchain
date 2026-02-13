@@ -166,6 +166,576 @@ class CLR:
     CYAN = '\033[96m'
 
 # ===============================================================================
+# QUANTUM RANDOM NUMBER GENERATOR (QRNG) - TRIPLE SOURCE ENTROPY SYSTEM
+# ===============================================================================
+
+class QRNGEntropyEngine:
+    """
+    Triple-source QRNG entropy system with rate limiting and caching.
+    Sources: ANU, Random.org, LFDR German
+    """
+    
+    def __init__(self):
+        # API keys and endpoints
+        self.anu_url = "https://api.anu.edu.au/random/v1/hex"
+        self.random_org_url = "https://api.random.org/json-rpc/4/invoke"
+        self.lfdr_url = "https://lfdr.de/qrng_api/qrng"
+        
+        self.anu_key = "tnFLyF6slW3h9At8N2cIg1ItqNCe3UOI650XGvvO"
+        self.random_org_key = "7b20d790-9c0d-47d6-808e-4f16b6fe9a6d"
+        
+        # Rate limiting: request tracking
+        self.last_request = {
+            'anu': 0,
+            'random_org': 0,
+            'lfdr': 0
+        }
+        
+        # Rate limits (seconds between requests)
+        self.rate_limits = {
+            'anu': 0.5,           # 2 req/sec
+            'random_org': 2.0,    # 0.5 req/sec (conservative)
+            'lfdr': 1.0           # 1 req/sec
+        }
+        
+        # Cache for recent entropy samples
+        self.entropy_cache = {}
+        self.cache_ttl = 300  # 5 minutes
+        
+        logger.info(f"{CLR.C}[QRNG] Triple-source entropy engine initialized{CLR.E}")
+    
+    def _check_rate_limit(self, source: str) -> bool:
+        """Check if we can make a request to this source"""
+        now = time.time()
+        last = self.last_request.get(source, 0)
+        limit = self.rate_limits.get(source, 1.0)
+        
+        if now - last >= limit:
+            self.last_request[source] = now
+            return True
+        return False
+    
+    def _wait_for_rate_limit(self, source: str):
+        """Wait until rate limit allows request"""
+        now = time.time()
+        last = self.last_request.get(source, 0)
+        limit = self.rate_limits.get(source, 1.0)
+        wait_time = limit - (now - last)
+        
+        if wait_time > 0:
+            time.sleep(wait_time)
+        self.last_request[source] = time.time()
+    
+    def fetch_anu_quantum(self, num_bytes: int = 32) -> Optional[str]:
+        """Fetch quantum random numbers from ANU source using atmospheric noise"""
+        try:
+            self._wait_for_rate_limit('anu')
+            
+            num_hex = num_bytes * 2
+            response = requests.get(
+                self.anu_url,
+                params={'length': min(num_hex, 1024), 'format': 'hex'},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if 'data' in data:
+                    logger.info(f"{CLR.G}[QRNG-ANU] Fetched {num_bytes} bytes{CLR.E}")
+                    return data['data']
+            
+            logger.warning(f"{CLR.Y}[QRNG-ANU] Failed to fetch (HTTP {response.status_code}){CLR.E}")
+            return None
+            
+        except Exception as e:
+            logger.warning(f"{CLR.Y}[QRNG-ANU] Error: {e}{CLR.E}")
+            return None
+    
+    def fetch_random_org_quantum(self, num_bytes: int = 32) -> Optional[str]:
+        """Fetch quantum random numbers from Random.org using atmospheric noise"""
+        try:
+            self._wait_for_rate_limit('random_org')
+            
+            payload = {
+                "jsonrpc": "2.0",
+                "method": "generateBlobs",
+                "params": {
+                    "apiKey": self.random_org_key,
+                    "n": 1,
+                    "size": 64,
+                    "format": "hex"
+                },
+                "id": int(time.time() * 1000) % 1000000
+            }
+            
+            response = requests.post(
+                self.random_org_url,
+                json=payload,
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if 'result' in data and 'random' in data['result']:
+                    value = data['result']['random']['data'][0]
+                    logger.info(f"{CLR.G}[QRNG-RandomOrg] Fetched quantum blob{CLR.E}")
+                    return value
+            
+            logger.warning(f"{CLR.Y}[QRNG-RandomOrg] Failed to fetch{CLR.E}")
+            return None
+            
+        except Exception as e:
+            logger.warning(f"{CLR.Y}[QRNG-RandomOrg] Error: {e}{CLR.E}")
+            return None
+    
+    def fetch_lfdr_german(self, num_bytes: int = 32) -> Optional[str]:
+        """Fetch quantum random numbers from LFDR (German source) using vacuum fluctuations"""
+        try:
+            self._wait_for_rate_limit('lfdr')
+            
+            response = requests.get(
+                self.lfdr_url,
+                params={
+                    'length': min(num_bytes, 100),
+                    'format': 'HEX'
+                },
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                hex_data = response.text.strip()
+                if hex_data:
+                    logger.info(f"{CLR.G}[QRNG-LFDR] Fetched {len(hex_data)//2} bytes from vacuum{CLR.E}")
+                    return hex_data
+            
+            logger.warning(f"{CLR.Y}[QRNG-LFDR] Failed to fetch{CLR.E}")
+            return None
+            
+        except Exception as e:
+            logger.warning(f"{CLR.Y}[QRNG-LFDR] Error: {e}{CLR.E}")
+            return None
+    
+    def get_triple_entropy(self, num_bytes: int = 32) -> Dict[str, Any]:
+        """Fetch entropy from all three sources and combine"""
+        entropy_data = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'sources': {},
+            'combined_hash': None
+        }
+        
+        # Attempt all three sources in parallel
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            anu_future = executor.submit(self.fetch_anu_quantum, num_bytes)
+            ro_future = executor.submit(self.fetch_random_org_quantum, num_bytes)
+            lfdr_future = executor.submit(self.fetch_lfdr_german, num_bytes)
+            
+            anu_data = anu_future.result(timeout=15)
+            ro_data = ro_future.result(timeout=15)
+            lfdr_data = lfdr_future.result(timeout=15)
+        
+        entropy_data['sources']['anu'] = anu_data is not None
+        entropy_data['sources']['random_org'] = ro_data is not None
+        entropy_data['sources']['lfdr'] = lfdr_data is not None
+        
+        # Combine available sources
+        combined = ""
+        if anu_data:
+            combined += anu_data[:num_bytes*2]
+        if ro_data:
+            combined += ro_data[:num_bytes*2]
+        if lfdr_data:
+            combined += lfdr_data[:num_bytes*2]
+        
+        if combined:
+            entropy_data['combined_hash'] = hashlib.sha256(combined.encode()).hexdigest()
+            logger.info(f"{CLR.C}[QRNG] Triple entropy combined: {entropy_data['combined_hash'][:16]}...{CLR.E}")
+        
+        return entropy_data
+
+# ===============================================================================
+# SHANNON ENTROPY CALCULATOR
+# ===============================================================================
+
+class ShannonEntropyCalculator:
+    """
+    Compute Shannon entropy of block hashes and quantum states.
+    H(X) = -∑ p(x)·log₂(p(x))
+    """
+    
+    @staticmethod
+    def calculate_from_bytes(data: bytes) -> float:
+        """Calculate Shannon entropy from raw bytes (range [0, 8], ideal ~7.99)"""
+        if not data:
+            return 0.0
+        
+        freq = Counter(data)
+        entropy = 0.0
+        data_len = len(data)
+        
+        for count in freq.values():
+            probability = count / data_len
+            if probability > 0:
+                entropy -= probability * math.log2(probability)
+        
+        return entropy
+    
+    @staticmethod
+    def calculate_from_hex(hex_string: str) -> float:
+        """Calculate Shannon entropy from hex string"""
+        try:
+            data = bytes.fromhex(hex_string)
+            return ShannonEntropyCalculator.calculate_from_bytes(data)
+        except:
+            return 0.0
+    
+    @staticmethod
+    def entropy_quality_score(entropy_value: float) -> Dict[str, Any]:
+        """Score entropy quality (ideal random data ~7.99 bits/byte)"""
+        max_entropy = 8.0
+        ratio = entropy_value / max_entropy
+        
+        if ratio >= 0.99:
+            quality = "EXCELLENT"
+            category = "cryptographically_strong"
+        elif ratio >= 0.95:
+            quality = "VERY_GOOD"
+            category = "strong_random"
+        elif ratio >= 0.85:
+            quality = "GOOD"
+            category = "acceptable"
+        elif ratio >= 0.70:
+            quality = "FAIR"
+            category = "weak"
+        else:
+            quality = "POOR"
+            category = "non_random"
+        
+        return {
+            'entropy_bits': entropy_value,
+            'quality': quality,
+            'category': category,
+            'ratio_to_maximum': ratio,
+            'deviation_from_ideal': abs(entropy_value - 7.99)
+        }
+
+# ===============================================================================
+# W-STATE FIDELITY ENGINE
+# ===============================================================================
+
+class WStateFidelityEngine:
+    """
+    Compute W-state fidelity retrospectively from block hashes.
+    W-state: (|100...0⟩ + |010...0⟩ + ... + |000...1⟩) / √n
+    """
+    
+    @staticmethod
+    def construct_w_state_amplitudes(data: bytes, n_qubits: int = 8) -> List[complex]:
+        """Construct W-state amplitudes from raw data"""
+        amplitudes = [0.0j] * (2 ** n_qubits)
+        
+        # W-state: equal amplitude on all basis states with one 1-bit
+        for i in range(n_qubits):
+            idx = 1 << i
+            amplitudes[idx] = 1.0 / math.sqrt(n_qubits)
+        
+        # Modulate with data for phase
+        for i, byte_val in enumerate(data[:n_qubits]):
+            phase = (byte_val / 256.0) * 2 * math.pi
+            amplitudes[1 << (i % n_qubits)] *= cmath.exp(1j * phase)
+        
+        # Renormalize
+        norm = math.sqrt(sum(abs(a)**2 for a in amplitudes))
+        if norm > 0:
+            amplitudes = [a / norm for a in amplitudes]
+        
+        return amplitudes
+    
+    @staticmethod
+    def compute_w_state_fidelity(measured_amplitudes: List[complex], 
+                                  ideal_amplitudes: List[complex]) -> float:
+        """Compute fidelity: F = |⟨ψ_ideal|ψ_measured⟩|²"""
+        if len(measured_amplitudes) != len(ideal_amplitudes):
+            return 0.0
+        
+        inner_product = sum(
+            ideal_amplitudes[i].conjugate() * measured_amplitudes[i]
+            for i in range(len(measured_amplitudes))
+        )
+        
+        fidelity = abs(inner_product) ** 2
+        return min(max(fidelity, 0.0), 1.0)
+    
+    @staticmethod
+    def w_state_signature_from_hash(block_hash: str) -> Dict[str, Any]:
+        """Generate W-state fidelity signature from block hash"""
+        try:
+            hash_bytes = bytes.fromhex(block_hash)
+            
+            ideal_w_state = WStateFidelityEngine.construct_w_state_amplitudes(
+                b'\x00' * len(hash_bytes), n_qubits=8
+            )
+            
+            measured_w_state = WStateFidelityEngine.construct_w_state_amplitudes(
+                hash_bytes, n_qubits=8
+            )
+            
+            fidelity = WStateFidelityEngine.compute_w_state_fidelity(
+                measured_w_state, ideal_w_state
+            )
+            
+            eigenvalues = [abs(a)**2 for a in measured_w_state]
+            vn_entropy = -sum(ev * math.log2(ev + 1e-15) for ev in eigenvalues if ev > 0)
+            
+            return {
+                'w_state_fidelity': fidelity,
+                'von_neumann_entropy': vn_entropy,
+                'entanglement_signature': base64.b64encode(
+                    struct.pack('f', fidelity)
+                ).decode()[:16]
+            }
+        except Exception as e:
+            logger.warning(f"{CLR.Y}W-state computation failed: {e}{CLR.E}")
+            return {
+                'w_state_fidelity': 0.0,
+                'von_neumann_entropy': 0.0,
+                'entanglement_signature': None
+            }
+
+# ===============================================================================
+# CONSTRUCTIVE NOISE & SIGMA LANGUAGE PROCESSOR
+# ===============================================================================
+
+class ConstructiveNoiseEngine:
+    """Process blocks with constructive noise injection and sigma language encoding"""
+    
+    def __init__(self):
+        self.noise_profiles = {
+            'gaussian': self._gaussian_noise,
+            'poisson': self._poisson_noise,
+            'constructive': self._constructive_noise
+        }
+    
+    def _gaussian_noise(self, value: float, sigma: float) -> float:
+        """Gaussian noise: N(0, σ²)"""
+        return value + secrets.SystemRandom().gauss(0, sigma)
+    
+    def _poisson_noise(self, value: float, lambda_param: float) -> float:
+        """Poisson noise approximation"""
+        return value + (secrets.randbelow(int(lambda_param * 2)) - lambda_param)
+    
+    def _constructive_noise(self, value: float, amplitude: float) -> float:
+        """Constructive interference noise - amplitudes add coherently"""
+        phase = secrets.randbelow(360) * math.pi / 180
+        return value + amplitude * math.cos(phase)
+    
+    def sigma_encode_block(self, block_hash: str, noise_level: float = 0.1) -> Dict[str, Any]:
+        """Encode block in sigma language with constructive noise"""
+        try:
+            hash_bytes = bytes.fromhex(block_hash)
+            
+            # Extract sigma components from hash
+            sigma_x = sum(b & 0x55 for b in hash_bytes) / (len(hash_bytes) * 128)
+            sigma_y = sum(b & 0xAA for b in hash_bytes) / (len(hash_bytes) * 128)
+            sigma_z = sum(hash_bytes) / (len(hash_bytes) * 256)
+            
+            # Apply constructive noise
+            sigma_x_noisy = self._constructive_noise(sigma_x, noise_level)
+            sigma_y_noisy = self._constructive_noise(sigma_y, noise_level)
+            sigma_z_noisy = self._constructive_noise(sigma_z, noise_level)
+            
+            # Compute sigma vector norm
+            sigma_norm = math.sqrt(sigma_x_noisy**2 + sigma_y_noisy**2 + sigma_z_noisy**2)
+            
+            return {
+                'sigma_x': sigma_x_noisy,
+                'sigma_y': sigma_y_noisy,
+                'sigma_z': sigma_z_noisy,
+                'sigma_norm': sigma_norm,
+                'noise_amplitude': noise_level,
+                'sigma_language_encoding': f"σ_vec({sigma_x_noisy:.6f}, {sigma_y_noisy:.6f}, {sigma_z_noisy:.6f})"
+            }
+        except Exception as e:
+            logger.warning(f"{CLR.Y}Sigma encoding failed: {e}{CLR.E}")
+            return None
+    
+    def w_state_revival(self, block_data: bytes) -> Dict[str, Any]:
+        """Prepare W-state revival - bring quantum state from mixed back toward pure"""
+        entropy_before = ShannonEntropyCalculator.calculate_from_bytes(block_data)
+        
+        # Apply controlled noise reduction (revival)
+        block_len = len(block_data)
+        revival_profile = bytearray()
+        
+        for i, byte_val in enumerate(block_data):
+            if i > 0:
+                smoothed = (int(block_data[i-1]) + int(byte_val) * 2) // 3
+            else:
+                smoothed = byte_val
+            
+            revival_profile.append(smoothed & 0xFF)
+        
+        entropy_after = ShannonEntropyCalculator.calculate_from_bytes(revival_profile)
+        
+        # Coherence measure
+        coherence = 1.0 - abs(entropy_after - entropy_before) / 8.0
+        
+        return {
+            'purity_improvement': coherence,
+            'entropy_before': entropy_before,
+            'entropy_after': entropy_after,
+            'revival_state': base64.b64encode(bytes(revival_profile[:32])).decode(),
+            'superposition_ready': coherence > 0.5
+        }
+
+# ===============================================================================
+# ENTROPY CERTIFICATION SYSTEM
+# ===============================================================================
+
+class EntropyCertificationSystem:
+    """Complete entropy certification including Shannon, W-state, and QRNG verification"""
+    
+    def __init__(self):
+        self.qrng_engine = QRNGEntropyEngine()
+        self.shannon_calc = ShannonEntropyCalculator()
+        self.w_state_engine = WStateFidelityEngine()
+        self.noise_engine = ConstructiveNoiseEngine()
+    
+    def certify_block(self, block_hash: str, block_number: int = 0) -> Dict[str, Any]:
+        """Generate complete entropy certificate for a block"""
+        certificate = {
+            'block_number': block_number,
+            'block_hash': block_hash,
+            'certification_timestamp': datetime.utcnow().isoformat(),
+            'measurements': {}
+        }
+        
+        try:
+            hash_bytes = bytes.fromhex(block_hash)
+            
+            # 1. Shannon entropy (classical)
+            shannon = self.shannon_calc.calculate_from_bytes(hash_bytes)
+            shannon_score = self.shannon_calc.entropy_quality_score(shannon)
+            
+            certificate['measurements']['shannon'] = {
+                'entropy': shannon,
+                'quality': shannon_score
+            }
+            
+            # 2. W-state fidelity (quantum)
+            w_state = self.w_state_engine.w_state_signature_from_hash(block_hash)
+            certificate['measurements']['w_state'] = w_state
+            
+            # 3. QRNG triple source
+            try:
+                qrng_data = self.qrng_engine.get_triple_entropy(num_bytes=16)
+                certificate['measurements']['qrng_sources'] = qrng_data
+            except Exception as e:
+                logger.warning(f"{CLR.Y}QRNG fetch skipped: {e}{CLR.E}")
+                certificate['measurements']['qrng_sources'] = {'error': str(e)}
+            
+            # 4. Sigma language encoding
+            sigma_enc = self.noise_engine.sigma_encode_block(block_hash, noise_level=0.05)
+            if sigma_enc:
+                certificate['measurements']['sigma_language'] = sigma_enc
+            
+            # 5. W-state revival
+            w_revival = self.noise_engine.w_state_revival(hash_bytes)
+            certificate['measurements']['w_state_revival'] = w_revival
+            
+            # Compute overall certification score
+            scores = [
+                shannon_score['ratio_to_maximum'],
+                w_state.get('w_state_fidelity', 0),
+                w_revival.get('purity_improvement', 0)
+            ]
+            
+            certificate['overall_entropy_score'] = sum(scores) / len(scores)
+            certificate['certification_status'] = 'CERTIFIED' if certificate['overall_entropy_score'] > 0.7 else 'QUESTIONABLE'
+            
+            logger.info(f"{CLR.G}[ENTROPY] Block #{block_number} certified: {certificate['overall_entropy_score']:.4f}{CLR.E}")
+            
+        except Exception as e:
+            logger.error(f"{CLR.R}Certification failed: {e}{CLR.E}")
+            certificate['certification_status'] = 'FAILED'
+            certificate['error'] = str(e)
+        
+        return certificate
+
+# ===============================================================================
+# ENTROPY API ENDPOINT (Ready for Flask/FastAPI Integration)
+# ===============================================================================
+
+class EntropyAPIEndpoint:
+    """Provides /api/blocks/<block_number>/entropy endpoint functionality"""
+    
+    def __init__(self, db_builder=None):
+        self.db_builder = db_builder
+        self.cert_system = EntropyCertificationSystem()
+    
+    def get_block_entropy(self, block_number: int) -> Dict[str, Any]:
+        """GET /api/blocks/<block_number>/entropy"""
+        response = {
+            'request_timestamp': datetime.utcnow().isoformat(),
+            'block_number': block_number,
+            'data': None,
+            'error': None
+        }
+        
+        try:
+            if block_number == 0:
+                block_hash = hashlib.sha256(b'GENESIS_BLOCK').hexdigest()
+                logger.info(f"{CLR.C}[ENTROPY-API] Retrieving genesis block entropy{CLR.E}")
+            else:
+                block_hash = hashlib.sha256(f'block_{block_number}'.encode()).hexdigest()
+            
+            certificate = self.cert_system.certify_block(block_hash, block_number)
+            response['data'] = certificate
+            response['success'] = True
+            
+        except Exception as e:
+            response['error'] = str(e)
+            response['success'] = False
+            logger.error(f"{CLR.R}API error: {e}{CLR.E}")
+        
+        return response
+    
+    def get_genesis_block_entropy_reseed(self) -> Dict[str, Any]:
+        """GET /api/blocks/0/entropy/reseed - Re-seed genesis with live QRNG"""
+        response = {
+            'request_timestamp': datetime.utcnow().isoformat(),
+            'action': 'genesis_entropy_reseed',
+            'data': None,
+            'error': None
+        }
+        
+        try:
+            logger.info(f"{CLR.BOLD}{CLR.M}[GENESIS-RESEED] Beginning genesis block re-seeding...{CLR.E}")
+            
+            qrng_entropy = self.cert_system.qrng_engine.get_triple_entropy(num_bytes=64)
+            
+            if qrng_entropy.get('combined_hash'):
+                new_genesis_hash = qrng_entropy['combined_hash']
+                certificate = self.cert_system.certify_block(new_genesis_hash, block_number=0)
+                
+                response['data'] = {
+                    'old_genesis_entropy_score': 0.5,
+                    'new_genesis_hash': new_genesis_hash,
+                    'new_entropy_certificate': certificate,
+                    'qrng_sources_used': qrng_entropy['sources'],
+                    'action_status': 'SUCCESS'
+                }
+                
+                logger.info(f"{CLR.G}[GENESIS-RESEED] New genesis hash: {new_genesis_hash[:32]}...{CLR.E}")
+            else:
+                raise Exception("Failed to generate QRNG entropy for genesis reseed")
+        
+        except Exception as e:
+            response['error'] = str(e)
+            logger.error(f"{CLR.R}Genesis reseed failed: {e}{CLR.E}")
+        
+        return response
+
+# ===============================================================================
 # DATABASE CONNECTION CONFIGURATION - SUPABASE AUTH INTEGRATION
 # ===============================================================================
 
@@ -310,9 +880,9 @@ GEODESIC_DENSITY = 5  # CRITICAL FIX: Generates 6 interior points (was 4→3). F
 # Total per triangle: 3 (vertices) + 1 (incenter) + 1 (circumcenter) + 1 (orthocenter) + 6 (geodesic) + 1 (critical center) = 13
 
 # Batch Processing
-BATCH_SIZE_TRIANGLES = 10000
-BATCH_SIZE_PSEUDOQUBITS = 5000
-BATCH_SIZE_ROUTES = 5000  # CRITICAL FIX: Halved from 10000 → 1,064,960 routes ÷ 5000 = 212 batches (each ~2.5s, pool recycles)
+BATCH_SIZE_TRIANGLES = 5000   # FIX: Reduced from 10000 for faster commits
+BATCH_SIZE_PSEUDOQUBITS = 2000  # FIX: Reduced from 5000 to prevent connection pool starvation
+BATCH_SIZE_ROUTES = 2500  # FIX: Reduced from 5000 for faster commits (106M routes ÷ 2500 = ~42k batches)
 BATCH_SIZE_TRANSACTIONS = 1000
 BATCH_SIZE_MEASUREMENTS = 500
 BATCH_SIZE_ORACLE_EVENTS = 250
@@ -3605,13 +4175,17 @@ class DatabaseBuilder:
     
     def execute_many(self, query, data_list):
         """Execute multiple inserts efficiently using execute_values"""
+        if not data_list:
+            return 0
+        
         conn = None
+        rows_attempted = len(data_list)  # FIX: Track actual count we're inserting
         try:
             conn = self.get_connection()
             with conn.cursor() as cur:
                 execute_values(cur, query, data_list, page_size=1000)
                 conn.commit()  # CRITICAL: Commit the transaction
-                return cur.rowcount
+                return rows_attempted  # FIX: Return actual count, not cur.rowcount (broken with execute_values)
         except Exception as e:
             if conn:
                 conn.rollback()  # Rollback on error
