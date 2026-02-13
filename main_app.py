@@ -675,6 +675,35 @@ def create_app():
     if Config.ENABLE_WEBSOCKET and socketio:
         setup_websocket_handlers(socketio)
     
+    # CRITICAL: Initialize database and app components for WSGI servers
+    # This MUST run for both dev (if __name__) and production (gunicorn)
+    @app.before_first_request
+    def _initialize():
+        """Initialize database and application components on first request"""
+        global db_manager
+        
+        # Prevent multiple initializations
+        if getattr(app, '_initialized', False):
+            return
+        app._initialized = True
+        
+        try:
+            logger.info("=" * 100)
+            logger.info("INITIALIZING QTCL UNIFIED APPLICATION (FIRST REQUEST)")
+            logger.info("=" * 100)
+            
+            # Initialize database
+            logger.info("[Init] Setting up database...")
+            setup_database(app)
+            
+            # Seed admin user
+            logger.info("[Init] Seeding admin user...")
+            db_manager.seed_test_user()
+            
+            logger.info("[Init] ✓ Database initialization complete")
+        except Exception as e:
+            logger.error(f"[Init] ✗ Initialization failed: {e}", exc_info=True)
+    
     logger.info(f"[App] Flask application created - Version {Config.API_VERSION}")
     
     return app
@@ -2369,78 +2398,13 @@ def setup_websocket_handlers(socketio_instance):
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # APPLICATION INITIALIZATION
 # ═══════════════════════════════════════════════════════════════════════════════════════
-
-def initialize_app(app):
-    """Initialize application components"""
-    global db_manager, quantum_system
-    
-    try:
-        logger.info("=" * 100)
-        logger.info("INITIALIZING QTCL UNIFIED APPLICATION")
-        logger.info("=" * 100)
-        
-        # Initialize database
-        logger.info("[Init] Setting up database...")
-        setup_database(app)
-        
-        # Seed admin user
-        logger.info("[Init] Seeding admin user...")
-        db_manager.seed_test_user()
-        
-        # Get quantum system instance (pre-initialized by wsgi_config as SINGLETON)
-        if Config.ENABLE_QUANTUM:
-            try:
-                logger.info("[Init] Retrieving GLOBAL quantum system instance (SINGLETON)...")
-                
-                if QUANTUM_SYSTEM_MANAGER_AVAILABLE:
-                    # Import from wsgi_config where it was pre-initialized
-                    from wsgi_config import get_quantum_system
-                    quantum_system = get_quantum_system()
-                    
-                    if quantum_system:
-                        logger.info("[Init] ✓ Using pre-initialized SINGLETON quantum system")
-                    else:
-                        logger.warning("[Init] ⚠ Quantum system not yet initialized")
-                else:
-                    logger.error("[Init] ✗ Quantum system manager not available")
-            
-            except Exception as e:
-                logger.error(f"[Init] ✗ Failed to get quantum system: {e}")
-                import traceback
-                logger.error(traceback.format_exc())
-                quantum_system = None
-        
-        # START QUANTUM DAEMON THREAD (after Flask is fully initialized)
-        if quantum_system:
-            try:
-                logger.info("[Init] Starting quantum system daemon thread...")
-                from wsgi_config import start_quantum_daemon
-                start_quantum_daemon()
-            except Exception as e:
-                logger.warning(f"[Init] ⚠ Failed to start quantum daemon: {e}")
-        
-        logger.info("=" * 100)
-        logger.info("✓ APPLICATION INITIALIZED SUCCESSFULLY")
-        logger.info("=" * 100)
-        
-        return True
-    except Exception as e:
-        logger.error(f"[Init] Initialization failed: {e}", exc_info=True)
-        return False
-
-# ═══════════════════════════════════════════════════════════════════════════════════════
 # MAIN ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 if __name__ == '__main__':
     try:
-        # Create application
+        # Create application (database will initialize on first request)
         app = create_app()
-        
-        # Initialize components
-        if not initialize_app(app):
-            logger.error("[Main] Failed to initialize application")
-            sys.exit(1)
         
         # Log startup info
         logger.info("=" * 100)
@@ -2482,4 +2446,5 @@ if __name__ == '__main__':
         sys.exit(1)
 
 # WSGI export for production servers (gunicorn, uwsgi)
+# Database initialization happens on first request via @app.before_first_request
 application = create_app()
