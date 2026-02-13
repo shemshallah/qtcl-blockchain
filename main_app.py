@@ -48,6 +48,15 @@ from psycopg2.extras import RealDictCursor
 # Import database configuration
 from db_config import DatabaseConnection, Config as DBConfig, setup_database, DatabaseBuilderManager
 
+# Import Quantum Lattice Control (integrated with heartbeat system)
+try:
+    from quantum_lattice_control_live_complete import QuantumLatticeControlLiveV5
+    QUANTUM_LATTICE_AVAILABLE = True
+except ImportError:
+    QUANTUM_LATTICE_AVAILABLE = False
+    logger_early = logging.getLogger(__name__)
+    logger_early.warning("[Import] Quantum lattice control not available - heartbeat only via HTTP client")
+
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # ENSURE REQUIRED PACKAGES
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -837,6 +846,45 @@ def setup_routes(app):
         
         status_code = 200 if health_status['status'] == 'healthy' else 503
         return jsonify(health_status), status_code
+    
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    # HEARTBEAT ENDPOINT - Receives heartbeats from quantum system and external clients
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    
+    @app.route('/api/heartbeat', methods=['POST', 'GET'])
+    def heartbeat():
+        """
+        Heartbeat endpoint for keeping server alive.
+        POST: Receive heartbeat from quantum system or external heartbeat client
+        GET: Check current heartbeat status
+        """
+        try:
+            if request.method == 'POST':
+                data = request.get_json() or {}
+                source = data.get('source', 'quantum_lattice')
+                cycle = data.get('cycle', 0)
+                metrics = data.get('metrics', {})
+                
+                logger.debug(f"[Heartbeat] POST from {source} (cycle {cycle})")
+                
+                return jsonify({
+                    'status': 'heartbeat_received',
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'source': source,
+                    'cycle': cycle
+                }), 200
+            
+            else:  # GET
+                # Return heartbeat status
+                return jsonify({
+                    'status': 'healthy',
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'quantum_system_running': quantum_system is not None and getattr(quantum_system, 'running', False)
+                }), 200
+        
+        except Exception as e:
+            logger.error(f"[Heartbeat] Error: {e}")
+            return jsonify({'status': 'error', 'message': str(e)}), 500
     
     # ═══════════════════════════════════════════════════════════════════════════════════
     # AUTHENTICATION

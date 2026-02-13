@@ -1496,7 +1496,7 @@ class NoiseRefreshHeartbeat:
         
         # HTTP endpoint configuration
         self.app_url = app_url or os.getenv('APP_URL', 'http://localhost:5000')
-        self.heartbeat_endpoint = f"{self.app_url}/api/keep-alive"
+        self.heartbeat_endpoint = f"{self.app_url}/api/heartbeat"
         
         # Metrics aggregation
         self.sigma_history = []
