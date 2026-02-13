@@ -886,6 +886,37 @@ def setup_routes(app):
             logger.error(f"[Heartbeat] Error: {e}")
             return jsonify({'status': 'error', 'message': str(e)}), 500
     
+    @app.route('/api/keepalive', methods=['POST', 'GET'])
+    def keepalive():
+        """
+        Lightweight keepalive endpoint for independent heartbeat system.
+        Simple ping endpoint - just returns 200 OK.
+        Used by lightweight_heartbeat.py for persistent connection maintenance.
+        """
+        try:
+            if request.method == 'POST':
+                data = request.get_json() or {}
+                ping_num = data.get('ping', 0)
+                source = data.get('source', 'keepalive')
+                
+                logger.debug(f"[Keepalive] POST #{ping_num} from {source}")
+                
+                return jsonify({
+                    'status': 'alive',
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'ping': ping_num
+                }), 200
+            
+            else:  # GET
+                return jsonify({
+                    'status': 'alive',
+                    'timestamp': datetime.utcnow().isoformat()
+                }), 200
+        
+        except Exception as e:
+            logger.error(f"[Keepalive] Error: {e}")
+            return jsonify({'status': 'error', 'message': str(e)}), 500
+    
     # ═══════════════════════════════════════════════════════════════════════════════════
     # AUTHENTICATION
     # ═══════════════════════════════════════════════════════════════════════════════════
