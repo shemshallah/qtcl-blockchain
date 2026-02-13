@@ -61,11 +61,7 @@ def ensure_packages():
         'psycopg2': 'psycopg2-binary',
         'jwt': 'PyJWT',
         'bcrypt': 'bcrypt',
-        'requests': 'requests',
-        'redis': 'redis',
-        'cryptography': 'cryptography',
-        'pyotp': 'pyotp',
-        'qrcode': 'qrcode[pil]'
+        'requests': 'requests'
     }
     
     for module, pip_name in packages.items():
@@ -81,19 +77,33 @@ from flask import Flask, request, jsonify, g, Response, stream_with_context
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room, leave_room
 import jwt
-import pyotp
-import qrcode
-from io import BytesIO
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa, ed25519, ec, padding
-from cryptography.hazmat.backends import default_backend
-from cryptography.fernet import Fernet
 
+# Optional imports with graceful fallback
 try:
     import redis
     REDIS_AVAILABLE = True
 except ImportError:
     REDIS_AVAILABLE = False
+    logger.info("[Import] Redis not available - caching disabled")
+
+try:
+    import pyotp
+    import qrcode
+    from io import BytesIO
+    TOTP_AVAILABLE = True
+except ImportError:
+    TOTP_AVAILABLE = False
+    logger.info("[Import] TOTP libraries not available - 2FA disabled")
+
+try:
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa, ed25519, ec, padding
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.fernet import Fernet
+    CRYPTO_AVAILABLE = True
+except ImportError:
+    CRYPTO_AVAILABLE = False
+    logger.info("[Import] Cryptography not available - advanced crypto features disabled")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # LOGGING CONFIGURATION
@@ -179,6 +189,9 @@ class Config:
     ENABLE_BRIDGE = os.getenv('ENABLE_BRIDGE', 'true').lower() == 'true'
     ENABLE_MULTISIG = os.getenv('ENABLE_MULTISIG', 'true').lower() == 'true'
     ENABLE_ORACLE = os.getenv('ENABLE_ORACLE', 'true').lower() == 'true'
+
+# Update ENABLE_2FA based on library availability
+Config.ENABLE_2FA = Config.ENABLE_2FA and TOTP_AVAILABLE
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # GLOBAL STATE
@@ -1041,10 +1054,10 @@ def setup_routes(app):
     @handle_exceptions
     def setup_2fa():
         """Setup 2FA for user"""
-        if not Config.ENABLE_2FA:
+        if not Config.ENABLE_2FA or not TOTP_AVAILABLE:
             return jsonify({
                 'status': 'error',
-                'message': '2FA is not enabled on this server',
+                'message': '2FA is not available on this server',
                 'code': 'FEATURE_DISABLED'
             }), 400
         
@@ -1092,10 +1105,10 @@ def setup_routes(app):
     @handle_exceptions
     def enable_2fa():
         """Enable 2FA after verifying TOTP code"""
-        if not Config.ENABLE_2FA:
+        if not Config.ENABLE_2FA or not TOTP_AVAILABLE:
             return jsonify({
                 'status': 'error',
-                'message': '2FA is not enabled on this server',
+                'message': '2FA is not available on this server',
                 'code': 'FEATURE_DISABLED'
             }), 400
         
@@ -1922,7 +1935,7 @@ def setup_websocket_handlers(socketio_instance):
 # APPLICATION INITIALIZATION
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-def initialize_app():
+def initialize_app(app):
     """Initialize application components"""
     global db_manager, quantum_system
     
@@ -1933,7 +1946,7 @@ def initialize_app():
         
         # Initialize database
         logger.info("[Init] Setting up database...")
-        setup_database()
+        setup_database(app)
         
         # Seed admin user
         logger.info("[Init] Seeding admin user...")
@@ -1970,7 +1983,7 @@ if __name__ == '__main__':
         app = create_app()
         
         # Initialize components
-        if not initialize_app():
+        if not initialize_app(app):
             logger.error("[Main] Failed to initialize application")
             sys.exit(1)
         
