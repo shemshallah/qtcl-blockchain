@@ -1,1 +1,1 @@
-web: gunicorn -w 4 -b 0.0.0.0:${PORT:-5000} --timeout 60 wsgi_config:application
+web: gunicorn --bind 0.0.0.0:$PORT --workers 4 --timeout 120 --access-logfile - wsgi_config:application
