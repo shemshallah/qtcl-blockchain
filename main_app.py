@@ -1979,9 +1979,16 @@ def initialize_app(app):
         if Config.ENABLE_QUANTUM:
             try:
                 logger.info("[Init] Initializing quantum system...")
-                from quantum_lattice_control_live_complete import QuantumLatticeControlLive
-                quantum_system = QuantumLatticeControlLive(app_url=Config.APP_URL)
-                quantum_system.start_monitoring()
+                from quantum_lattice_control_live_complete import QuantumLatticeControlLiveV5
+                _q_db_config = {
+                    'host': Config.DATABASE_HOST,
+                    'port': Config.DATABASE_PORT,
+                    'database': Config.DATABASE_NAME,
+                    'user': Config.DATABASE_USER,
+                    'password': Config.DATABASE_PASSWORD,
+                }
+                quantum_system = QuantumLatticeControlLiveV5(db_config=_q_db_config, app_url=Config.APP_URL)
+                quantum_system.start()
                 logger.info("[Init] ✓ Quantum system initialized")
             except Exception as e:
                 logger.warning(f"[Init] Quantum system initialization failed: {e}")
