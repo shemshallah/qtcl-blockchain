@@ -1526,13 +1526,11 @@ class BatchExecutionPipeline:
         
         # ═══════════════════════════════════════════════════════════════════════════════════
         # CONTINUOUS W-STATE NOISE GATES (σ = 2.0, 4.4, 8.0)
-        # Applied to EVERY batch for constant information flow preservation
+        # ONLY applied every 5 cycles (not every batch!)
         # ═══════════════════════════════════════════════════════════════════════════════════
         
-        w_state_sigmas = [2.0, 4.4, 8.0]  # Noise resonance points
-        for w_sigma in w_state_sigmas:
-            # Apply W-state preserving noise gate at this sigma
-            self.noise_bath.apply_noise_cycle(batch_id, w_sigma)
+        # SKIP W-state gates per-batch - they are applied during cycle 5 W-state refresh instead
+        # Removed: w_state_sigmas loop that was running 3x apply_noise_cycle per batch
         
         # Stage 4: Apply error correction
         batch_coh_after_noise = self.noise_bath.coherence[start_idx:end_idx]
