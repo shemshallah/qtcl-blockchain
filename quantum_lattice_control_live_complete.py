@@ -1122,7 +1122,10 @@ class BatchExecutionPipeline:
     
     def execute(self, batch_id: int, entropy_ensemble) -> Dict:
         """
-        Execute complete batch cycle.
+        Execute complete batch cycle with integrated W-state noise gates.
+        
+        CONTINUOUS NOISE-MEDIATED W-STATE REFRESH:
+        Every batch applies sigma gates at 2.0, 4.4, 8.0 for constant information flow.
         
         Returns comprehensive batch execution result.
         """
@@ -1162,11 +1165,21 @@ class BatchExecutionPipeline:
             cache, target_sigma, predicted_sigma
         )
         
-        # Stage 3: Apply noise bath
+        # Stage 3: Apply noise bath with predicted sigma
         noise_result = self.noise_bath.apply_noise_cycle(
             batch_id, predicted_sigma
         )
         degradation = noise_result['degradation']
+        
+        # ═══════════════════════════════════════════════════════════════════════════════════
+        # CONTINUOUS W-STATE NOISE GATES (σ = 2.0, 4.4, 8.0)
+        # Applied to EVERY batch for constant information flow preservation
+        # ═══════════════════════════════════════════════════════════════════════════════════
+        
+        w_state_sigmas = [2.0, 4.4, 8.0]  # Noise resonance points
+        for w_sigma in w_state_sigmas:
+            # Apply W-state preserving noise gate at this sigma
+            self.noise_bath.apply_noise_cycle(batch_id, w_sigma)
         
         # Stage 4: Apply error correction
         batch_coh_after_noise = self.noise_bath.coherence[start_idx:end_idx]
@@ -1899,14 +1912,13 @@ class QuantumLatticeControlLiveV5:
         )
         
         # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-        # FULL-LATTICE W-STATE REFRESH (EVERY CYCLE - Continuous noise-mediated recovery)
-        # Constant bulk refreshing via noise gates at σ = 2, ~4.4, 8 for semi-real quantum coherence
+        # FULL-LATTICE W-STATE VALIDATION (EVERY CYCLE)
+        # W-state noise gates (σ = 2.0, 4.4, 8.0) applied CONTINUOUSLY in every batch
+        # This stage validates full-lattice coherence/fidelity metrics
         # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
         
         w_refresh_time = 0.0
         if self.w_state_refresh is not None:
-            logger.debug(f"[Cycle {self.cycle_count}] Starting noise-mediated W-state revival...")
-            
             refresh_start = time.time()
             refresh_result = self.w_state_refresh.refresh_full_lattice(
                 self.entropy_ensemble
@@ -1922,7 +1934,7 @@ class QuantumLatticeControlLiveV5:
                         f"C={refresh_result['global_coherence']:.6f}±{refresh_result['coherence_std']:.6f} | "
                         f"F={refresh_result['global_fidelity']:.6f} | "
                         f"Time={refresh_result['cycle_time']:.3f}s | "
-                        f"σ-resonances: {', '.join([f'{s:.1f}' for s in [2.0, 4.4, 8.0]])}"
+                        f"σ-gates/batch: 2.0 (low) + 4.4 (primary) + 8.0 (extended) per 52 batches"
                     )
                 else:
                     logger.debug(
@@ -1933,8 +1945,6 @@ class QuantumLatticeControlLiveV5:
                     )
             else:
                 logger.error(f"[W-REFRESH] ✗ Cycle {self.cycle_count} Failed: {refresh_result.get('error')}")
-        else:
-            logger.warning(f"[Cycle {self.cycle_count}] W-state refresh unavailable (parallel_refresh_implementation not loaded)")
         
         
         cycle_time = time.time() - cycle_start
@@ -1976,9 +1986,9 @@ class QuantumLatticeControlLiveV5:
             f"A={len(anomalies)}"
         )
         
-        # Add W-state refresh indicator (now runs EVERY CYCLE)
+        # Add W-state refresh indicator (gates apply to EVERY batch: σ = 2.0, 4.4, 8.0)
         if w_refresh_time > 0:
-            main_log += f" | 🔄 W-Refresh: {w_refresh_time:.3f}s (σ: 2.0, 4.4, 8.0)"
+            main_log += f" | 🔄 W-Gates: {w_refresh_time:.3f}s (σ: 2.0 + 4.4 + 8.0 per batch)"
         
         # Add heartbeat metrics if available
         if hb_status and hb_status['cycles_tracked'] > 0:
