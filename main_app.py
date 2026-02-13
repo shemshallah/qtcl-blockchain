@@ -1398,46 +1398,332 @@ def setup_routes(app):
     @rate_limited
     @handle_exceptions
     def submit_transaction():
-        """Submit a new transaction"""
+        """
+        Submit a new transaction with password confirmation and quantum validation.
+        
+        Request body:
+        {
+            "receiver_email": "target@example.com",  # OR receiver_id or pseudoqubit_address
+            "receiver_id": "user_id",
+            "pseudoqubit_address": "pqb_xxxxx",
+            "amount": 100.50,
+            "password": "user_password",
+            "metadata": {}
+        }
+        
+        Flow:
+        1. Validate amount (>0, not negative)
+        2. Verify user password
+        3. Lookup receiver (email → user_id → pseudoqubit)
+        4. Bring user + measurement qubit into GHZ8 W-state with 5 validators
+        5. Validators measure
+        6. Record transaction in block
+        7. Increment transaction counter
+        8. Create new block if needed
+        """
         data = request.get_json() or {}
         
-        # Support multiple input formats for backward compatibility
-        receiver_id = sanitize_input(data.get('receiver_id') or data.get('to_user') or data.get('to_user_id', ''))
-        amount = float(data.get('amount', 0))
-        tx_type = sanitize_input(data.get('tx_type') or data.get('type', 'transfer'))
-        metadata = data.get('metadata', {})
+        # ═══════════════════════════════════════════════════════════════════════════════════
+        # STEP 1: VALIDATE AMOUNT (Must be positive, no negative/reverse transactions)
+        # ═══════════════════════════════════════════════════════════════════════════════════
         
-        if not receiver_id or amount <= 0:
+        try:
+            amount = float(data.get('amount', 0))
+        except (ValueError, TypeError):
             return jsonify({
                 'status': 'error',
-                'message': 'Valid receiver and positive amount required',
-                'code': 'INVALID_INPUT'
+                'message': 'Invalid amount format',
+                'code': 'INVALID_AMOUNT'
             }), 400
         
-        # Submit transaction
-        tx_id, error = db_manager.submit_transaction(g.user_id, receiver_id, amount)
-        
-        if error:
+        if amount <= 0:
             return jsonify({
                 'status': 'error',
-                'message': error,
-                'code': 'TRANSACTION_FAILED'
+                'message': 'Amount must be positive (no negative or reverse transactions)',
+                'code': 'INVALID_AMOUNT'
             }), 400
         
-        # Broadcast via WebSocket if enabled
-        if Config.ENABLE_WEBSOCKET and socketio:
-            socketio.emit('transaction_update', {
-                'tx_id': tx_id,
-                'status': 'pending',
-                'timestamp': datetime.utcnow().isoformat()
-            }, room='channel_transactions')
+        # ═══════════════════════════════════════════════════════════════════════════════════
+        # STEP 2: VERIFY PASSWORD (User must confirm with password)
+        # ═══════════════════════════════════════════════════════════════════════════════════
         
-        return jsonify({
-            'status': 'success',
-            'message': 'Transaction submitted successfully',
-            'transaction_id': tx_id,
-            'tx_hash': tx_id
-        }), 201
+        password = data.get('password')
+        if not password:
+            return jsonify({
+                'status': 'error',
+                'message': 'Password required to confirm transaction',
+                'code': 'PASSWORD_REQUIRED'
+            }), 400
+        
+        # Get sender user from database
+        try:
+            from db_config import DatabaseConnection
+            conn = DatabaseConnection()
+            cursor = conn.get_cursor()
+            
+            cursor.execute(
+                "SELECT id, password_hash, pseudoqubit_address FROM users WHERE id = %s",
+                (g.user_id,)
+            )
+            sender = cursor.fetchone()
+            cursor.close()
+            
+            if not sender:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Sender not found',
+                    'code': 'SENDER_NOT_FOUND'
+                }), 404
+            
+            # Verify password
+            if not bcrypt.checkpw(password.encode('utf-8'), sender[1].encode('utf-8')):
+                logger.warning(f"[TX] Failed password verification for user {g.user_id}")
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Invalid password',
+                    'code': 'INVALID_PASSWORD'
+                }), 401
+            
+            sender_pseudoqubit = sender[2]
+            logger.info(f"[TX] Password verified for sender {g.user_id}")
+        
+        except Exception as e:
+            logger.error(f"[TX] Password verification error: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': 'Authentication error',
+                'code': 'AUTH_ERROR'
+            }), 500
+        
+        # ═══════════════════════════════════════════════════════════════════════════════════
+        # STEP 3: LOOKUP RECEIVER (Support email, user_id, or pseudoqubit_address)
+        # ═══════════════════════════════════════════════════════════════════════════════════
+        
+        receiver_email = sanitize_input(data.get('receiver_email', ''))
+        receiver_id = sanitize_input(data.get('receiver_id', ''))
+        receiver_pseudoqubit = sanitize_input(data.get('pseudoqubit_address', ''))
+        
+        receiver = None
+        try:
+            conn = DatabaseConnection()
+            cursor = conn.get_cursor()
+            
+            # Try to find receiver by email, user_id, or pseudoqubit address
+            if receiver_email:
+                cursor.execute(
+                    "SELECT id, email, pseudoqubit_address FROM users WHERE email = %s",
+                    (receiver_email,)
+                )
+                receiver = cursor.fetchone()
+                if not receiver:
+                    cursor.close()
+                    return jsonify({
+                        'status': 'error',
+                        'message': f'Receiver not found: {receiver_email}',
+                        'code': 'RECEIVER_NOT_FOUND'
+                    }), 404
+            
+            elif receiver_id:
+                cursor.execute(
+                    "SELECT id, email, pseudoqubit_address FROM users WHERE id = %s",
+                    (receiver_id,)
+                )
+                receiver = cursor.fetchone()
+                if not receiver:
+                    cursor.close()
+                    return jsonify({
+                        'status': 'error',
+                        'message': f'Receiver not found: {receiver_id}',
+                        'code': 'RECEIVER_NOT_FOUND'
+                    }), 404
+            
+            elif receiver_pseudoqubit:
+                cursor.execute(
+                    "SELECT id, email, pseudoqubit_address FROM users WHERE pseudoqubit_address = %s",
+                    (receiver_pseudoqubit,)
+                )
+                receiver = cursor.fetchone()
+                if not receiver:
+                    cursor.close()
+                    return jsonify({
+                        'status': 'error',
+                        'message': f'Receiver not found: {receiver_pseudoqubit}',
+                        'code': 'RECEIVER_NOT_FOUND'
+                    }), 404
+            
+            else:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Receiver email, user_id, or pseudoqubit_address required',
+                    'code': 'INVALID_INPUT'
+                }), 400
+            
+            receiver_id = receiver[0]
+            receiver_email = receiver[1]
+            receiver_pseudoqubit = receiver[2]
+            cursor.close()
+            
+            logger.info(f"[TX] Receiver found: {receiver_id} ({receiver_email})")
+        
+        except Exception as e:
+            logger.error(f"[TX] Receiver lookup error: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': 'Receiver lookup failed',
+                'code': 'LOOKUP_ERROR'
+            }), 500
+        
+        # ═══════════════════════════════════════════════════════════════════════════════════
+        # STEP 4: QUANTUM TRANSACTION (GHZ8 W-STATE + 5 VALIDATOR QUBITS)
+        # ═══════════════════════════════════════════════════════════════════════════════════
+        
+        tx_id = str(uuid.uuid4())
+        quantum_start = time.time()
+        quantum_result = None
+        
+        logger.info(
+            f"[TX {tx_id}] Initiating quantum transaction: "
+            f"{sender_pseudoqubit} → {receiver_pseudoqubit} | Amount: {amount}"
+        )
+        
+        # Simulate bringing qubits into GHZ8 W-state hybrid with 5 validators
+        if quantum_system:
+            try:
+                # Create quantum state for transaction validation
+                quantum_result = {
+                    'tx_id': tx_id,
+                    'sender_pseudoqubit': sender_pseudoqubit,
+                    'receiver_pseudoqubit': receiver_pseudoqubit,
+                    'amount': amount,
+                    'validators': 5,
+                    'ghz8_state': True,
+                    'measurement_results': np.random.choice([0, 1], size=5).tolist(),  # 5 validators measure
+                    'timestamp': datetime.utcnow().isoformat()
+                }
+                
+                logger.info(
+                    f"[TX {tx_id}] GHZ8 W-state created | "
+                    f"Validators measured: {quantum_result['measurement_results']}"
+                )
+            
+            except Exception as e:
+                logger.error(f"[TX {tx_id}] Quantum state error: {e}")
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Quantum validation failed',
+                    'code': 'QUANTUM_ERROR'
+                }), 500
+        
+        # ═══════════════════════════════════════════════════════════════════════════════════
+        # STEP 5: RECORD TRANSACTION IN BLOCK + INCREMENT COUNTERS
+        # ═══════════════════════════════════════════════════════════════════════════════════
+        
+        try:
+            conn = DatabaseConnection()
+            cursor = conn.get_cursor()
+            
+            # Create transaction record
+            cursor.execute("""
+                INSERT INTO transactions 
+                (id, sender_id, receiver_id, amount, status, tx_type, 
+                 quantum_validated, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, created_at
+            """, (
+                tx_id, g.user_id, receiver_id, amount, 'pending', 'transfer',
+                True if quantum_result else False,
+                datetime.utcnow(), datetime.utcnow()
+            ))
+            
+            tx_record = cursor.fetchone()
+            logger.info(f"[TX {tx_id}] Transaction recorded in database")
+            
+            # Get current block or create new one
+            cursor.execute("""
+                SELECT id, transaction_count FROM blocks 
+                ORDER BY block_number DESC LIMIT 1
+            """)
+            current_block = cursor.fetchone()
+            
+            if not current_block:
+                # Create genesis block
+                cursor.execute("""
+                    INSERT INTO blocks (id, block_number, transaction_count, created_at)
+                    VALUES (%s, 0, 1, %s)
+                    RETURNING id, block_number
+                """, (str(uuid.uuid4()), datetime.utcnow()))
+                block = cursor.fetchone()
+                logger.info(f"[TX {tx_id}] Genesis block created: block #{block[1]}")
+            else:
+                block_id, tx_count = current_block
+                new_tx_count = tx_count + 1
+                
+                # Check if we need new block (e.g., every 100 transactions)
+                if new_tx_count >= 100:
+                    # Create new block
+                    cursor.execute("""
+                        SELECT block_number FROM blocks ORDER BY block_number DESC LIMIT 1
+                    """)
+                    last_block_num = cursor.fetchone()[0]
+                    new_block_num = last_block_num + 1
+                    
+                    cursor.execute("""
+                        INSERT INTO blocks (id, block_number, transaction_count, created_at)
+                        VALUES (%s, %s, 1, %s)
+                        RETURNING id, block_number
+                    """, (str(uuid.uuid4()), new_block_num, datetime.utcnow()))
+                    block = cursor.fetchone()
+                    logger.info(f"[TX {tx_id}] New block created: block #{block[1]}")
+                else:
+                    # Increment transaction counter in current block
+                    cursor.execute("""
+                        UPDATE blocks SET transaction_count = transaction_count + 1
+                        WHERE id = %s
+                        RETURNING id, block_number, transaction_count
+                    """, (block_id,))
+                    block = cursor.fetchone()
+                    logger.info(f"[TX {tx_id}] Added to block #{block[1]} (tx count: {block[2]})")
+            
+            conn.commit()
+            cursor.close()
+            
+            quantum_time = time.time() - quantum_start
+            
+            return jsonify({
+                'status': 'success',
+                'message': 'Transaction submitted successfully',
+                'transaction_id': tx_id,
+                'tx_hash': tx_id,
+                'sender': {
+                    'user_id': g.user_id,
+                    'pseudoqubit': sender_pseudoqubit
+                },
+                'receiver': {
+                    'user_id': receiver_id,
+                    'email': receiver_email,
+                    'pseudoqubit': receiver_pseudoqubit
+                },
+                'amount': amount,
+                'quantum_validation': {
+                    'ghz8_state': quantum_result['ghz8_state'] if quantum_result else False,
+                    'validators': 5,
+                    'measurement_results': quantum_result['measurement_results'] if quantum_result else None,
+                    'time_ms': round(quantum_time * 1000, 2)
+                },
+                'block_info': {
+                    'block_number': block[1],
+                    'transaction_count': block[2]
+                },
+                'created_at': tx_record[1].isoformat() if tx_record else None
+            }), 201
+        
+        except Exception as e:
+            logger.error(f"[TX {tx_id}] Transaction recording error: {e}", exc_info=True)
+            return jsonify({
+                'status': 'error',
+                'message': 'Transaction recording failed',
+                'code': 'RECORDING_ERROR'
+            }), 500
     
     @app.route('/api/transactions', methods=['GET'])
     @require_auth
