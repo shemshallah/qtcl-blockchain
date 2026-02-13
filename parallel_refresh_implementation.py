@@ -303,21 +303,24 @@ class NoiseAloneWStateRefresh:
             )
             
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            # PHASE 4: VECTORIZED RESONANCE TUNING (OPTIMIZED)
-            # Instead of 44 sequential calls, batch apply with adaptive steps
+            # PHASE 4: VECTORIZED RESONANCE TUNING (SKIP IN FAST MODE)
+            # In fast mode: skip entirely for maximum speed
+            # In normal mode: 5 vectorized iterations (not 44)
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             
             sigma_control = self.config.primary_resonance
             
-            # Adaptive step count: use config or compute based on target
-            steps = self.config.resonance_hold_steps
-            
-            # Apply batched noise evolution (vectorized, not per-step)
-            for step in range(steps):
-                self.noise_bath.apply_noise_cycle(
-                    batch_id=-1,
-                    sigma=sigma_control
-                )
+            if self.config.fast_mode:
+                # FAST MODE: Skip resonance tuning entirely
+                logger.debug("[W-REFRESH] Fast mode: skipping resonance tuning (0 iterations)")
+            else:
+                # NORMAL MODE: Minimal resonance tuning (5 iterations max)
+                steps = self.config.resonance_hold_steps
+                for step in range(steps):
+                    self.noise_bath.apply_noise_cycle(
+                        batch_id=-1,
+                        sigma=sigma_control
+                    )
             
             # Check revival once at end (not per 4.4 steps)
             revival_fidelity = self._measure_w_state_revival(w_state_amplitudes)

@@ -2084,13 +2084,12 @@ class QuantumLatticeControlLiveV5:
         )
         
         # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-        # FULL-LATTICE W-STATE VALIDATION (EVERY CYCLE)
-        # W-state noise gates (σ = 2.0, 4.4, 8.0) applied CONTINUOUSLY in every batch
-        # This stage validates full-lattice coherence/fidelity metrics
+        # FULL-LATTICE W-STATE VALIDATION (EVERY 5 CYCLES - NOT EVERY CYCLE)
+        # W-state noise gates (σ = 2.0, 4.4, 8.0) validate coherence periodically
         # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
         
         w_refresh_time = 0.0
-        if self.w_state_refresh is not None:
+        if self.w_state_refresh is not None and self.cycle_count % 5 == 0:
             refresh_start = time.time()
             refresh_result = self.w_state_refresh.refresh_full_lattice(
                 self.entropy_ensemble
@@ -2098,20 +2097,11 @@ class QuantumLatticeControlLiveV5:
             w_refresh_time = time.time() - refresh_start
             
             if refresh_result['success']:
-                # Log full details every 5 cycles to avoid log spam
-                if self.cycle_count % 5 == 0:
+                # Log details
+                if self.cycle_count % 10 == 0:
                     logger.info(
                         f"[W-REFRESH {refresh_result['refresh_id']:04d}] ✓ Cycle {self.cycle_count} | "
-                        f"Qubits={refresh_result['qubits_refreshed']} | "
                         f"C={refresh_result['global_coherence']:.6f}±{refresh_result['coherence_std']:.6f} | "
-                        f"F={refresh_result['global_fidelity']:.6f} | "
-                        f"Time={refresh_result['cycle_time']:.3f}s | "
-                        f"σ-gates/batch: 2.0 (low) + 4.4 (primary) + 8.0 (extended) per 52 batches"
-                    )
-                else:
-                    logger.debug(
-                        f"[W-REFRESH] ✓ Cycle {self.cycle_count} | "
-                        f"C={refresh_result['global_coherence']:.6f} | "
                         f"F={refresh_result['global_fidelity']:.6f} | "
                         f"Time={refresh_result['cycle_time']:.3f}s"
                     )
