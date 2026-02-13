@@ -383,20 +383,32 @@ class NoiseAloneWStateRefresh:
         Fetch synchronized QRNG block for entire lattice.
         Single request instead of multiple per-batch requests.
         """
-        # Request from best available source
-        if hasattr(entropy_ensemble, 'fetch_bytes'):
-            # Assume 8 bytes per random double
-            bytes_needed = size * 8
-            raw_bytes = entropy_ensemble.fetch_bytes(bytes_needed)
-            # Convert bytes to float array
-            qrng_vector = np.frombuffer(raw_bytes, dtype=np.float64)[:size]
-        else:
-            # Fallback: use Xorshift64*
-            qrng_vector = np.array([
-                entropy_ensemble.xorshift64star() for _ in range(size)
-            ]) / (2**64)  # Normalize to [0, 1)
+        try:
+            # Try fetch_random_bytes first (correct method in QuantumEntropyEnsemble)
+            if hasattr(entropy_ensemble, 'fetch_random_bytes'):
+                bytes_needed = size * 8  # 8 bytes per float64
+                raw_bytes = entropy_ensemble.fetch_random_bytes(bytes_needed)
+                if raw_bytes is not None and len(raw_bytes) > 0:
+                    # Convert bytes to float array
+                    qrng_vector = np.frombuffer(raw_bytes, dtype=np.float64)[:size]
+                    return np.clip(qrng_vector, 0, 1)
+            
+            # Fallback: use fetch_bytes if available
+            if hasattr(entropy_ensemble, 'fetch_bytes'):
+                bytes_needed = size * 8
+                raw_bytes = entropy_ensemble.fetch_bytes(bytes_needed)
+                qrng_vector = np.frombuffer(raw_bytes, dtype=np.float64)[:size]
+                return np.clip(qrng_vector, 0, 1)
+            
+            # Final fallback: generate locally with numpy
+            logger.warning("No QRNG source available, using numpy.random fallback")
+            qrng_vector = np.random.random(size)
+            return np.clip(qrng_vector, 0, 1)
         
-        return np.clip(qrng_vector, 0, 1)  # Ensure [0, 1]
+        except Exception as e:
+            logger.error(f"Entropy fetch failed: {e}, using numpy fallback")
+            qrng_vector = np.random.random(size)
+            return np.clip(qrng_vector, 0, 1)
     
     def _compute_nonmarkovian_kernel(self,
                                     qrng_vector: np.ndarray,

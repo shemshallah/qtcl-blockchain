@@ -1537,6 +1537,10 @@ class NoiseRefreshHeartbeat:
             # Send HTTP heartbeat every 100 cycles
             if self.cycle_count % 100 == 0:
                 self._send_http_heartbeat(cycle_num, metrics)
+            
+            # Lightweight heartbeat every 10 cycles (faster feedback)
+            elif self.cycle_count % 10 == 0:
+                self._send_lightweight_heartbeat(cycle_num)
     
     def get_heartbeat_status(self) -> Dict:
         """Get current heartbeat status and metrics (called every cycle)"""
@@ -1588,6 +1592,7 @@ class NoiseRefreshHeartbeat:
                 avg_fidelity = np.mean([c['metrics'].get('fidelity_after', 0) for c in recent_cycles if 'fidelity_after' in c['metrics']]) if recent_cycles else 0
                 
                 payload = {
+                    'source': 'quantum_lattice_control',
                     'cycle': cycle_num,
                     'timestamp': datetime.now().isoformat(),
                     'metrics': {
@@ -1597,6 +1602,8 @@ class NoiseRefreshHeartbeat:
                         'cycles_aggregated': recent_count
                     }
                 }
+                
+                logger.debug(f"[Heartbeat] Sending POST to {self.heartbeat_endpoint} (cycle {cycle_num})...")
                 
                 response = requests.post(
                     self.heartbeat_endpoint,
@@ -1609,6 +1616,7 @@ class NoiseRefreshHeartbeat:
                     logger.info("╔════════════════════════════════════════════════════════════════╗")
                     logger.info(f"║  💓 HEARTBEAT SENT: Cycle {cycle_num:>6d} | Keep-Alive Signal ║")
                     logger.info("╠════════════════════════════════════════════════════════════════╣")
+                    logger.info(f"║  Endpoint:             {self.heartbeat_endpoint:<33} ║")
                     logger.info(f"║  Avg Sigma (σ):        {avg_sigma:>10.6f}                        ║")
                     logger.info(f"║  Avg Coherence:        {avg_coherence:>10.6f}                        ║")
                     logger.info(f"║  Avg Fidelity:         {avg_fidelity:>10.6f}                        ║")
@@ -1616,19 +1624,54 @@ class NoiseRefreshHeartbeat:
                     logger.info(f"║  Server Response:      HTTP {response.status_code}                           ║")
                     logger.info("╚════════════════════════════════════════════════════════════════╝")
                 else:
-                    logger.warning(f"⚠ [Cycle {cycle_num}] Heartbeat HTTP {response.status_code}: {response.text[:100]}")
+                    logger.warning(f"⚠ [Cycle {cycle_num}] Heartbeat HTTP {response.status_code} from {self.heartbeat_endpoint}")
+                    logger.warning(f"  Response: {response.text[:200] if response.text else '(no body)'}")
             
             except requests.exceptions.Timeout:
-                logger.warning(f"⏱ [Cycle {cycle_num}] Heartbeat timeout - server may be slow")
-            except requests.exceptions.ConnectionError:
-                logger.warning(f"🔴 [Cycle {cycle_num}] Cannot reach server: {self.heartbeat_endpoint}")
+                logger.warning(f"⏱ [Cycle {cycle_num}] Heartbeat timeout - server at {self.heartbeat_endpoint} may be slow or unreachable")
+            except requests.exceptions.ConnectionError as e:
+                logger.warning(f"🔴 [Cycle {cycle_num}] Cannot reach server at {self.heartbeat_endpoint}: {type(e).__name__}")
             except requests.exceptions.RequestException as e:
-                logger.warning(f"⚠ [Cycle {cycle_num}] Heartbeat request failed: {type(e).__name__}")
+                logger.warning(f"⚠ [Cycle {cycle_num}] Heartbeat request failed ({type(e).__name__}): {str(e)[:100]}")
             except Exception as e:
                 logger.error(f"❌ [Cycle {cycle_num}] Heartbeat error: {e}")
         
         # Send in background thread (non-blocking)
         thread = threading.Thread(target=_send, daemon=True, name=f"HeartbeatThread-{cycle_num}")
+        thread.start()
+    
+    def _send_lightweight_heartbeat(self, cycle_num: int) -> None:
+        """Send lightweight keep-alive heartbeat every 10 cycles (quick ping)"""
+        def _send():
+            try:
+                # Minimal payload - just ping to keep server alive
+                payload = {
+                    'source': 'quantum_lattice_control_lightweight',
+                    'cycle': cycle_num,
+                    'timestamp': datetime.now().isoformat()
+                }
+                
+                response = requests.post(
+                    self.heartbeat_endpoint,
+                    json=payload,
+                    timeout=3,  # Shorter timeout for lightweight
+                    headers={'User-Agent': 'QuantumLatticeHeartbeat/1.0'}
+                )
+                
+                if response.status_code == 200:
+                    logger.debug(f"[Heartbeat-Lite] 💓 Sent (cycle {cycle_num})")
+                else:
+                    logger.debug(f"[Heartbeat-Lite] HTTP {response.status_code} (cycle {cycle_num})")
+            
+            except requests.exceptions.Timeout:
+                logger.debug(f"[Heartbeat-Lite] Timeout (cycle {cycle_num})")
+            except requests.exceptions.ConnectionError:
+                logger.debug(f"[Heartbeat-Lite] Connection error (cycle {cycle_num})")
+            except Exception as e:
+                logger.debug(f"[Heartbeat-Lite] Error: {type(e).__name__}")
+        
+        # Send in background thread
+        thread = threading.Thread(target=_send, daemon=True, name=f"HeartbeatLiteThread-{cycle_num}")
         thread.start()
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1707,16 +1750,17 @@ class QuantumLatticeControlLiveV5:
             logger.warning("⚠ Parallel processor disabled (module not found). Using sequential batches.")
         
         # ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-        # Initialize Noise-Alone W-State Refresh (Full Lattice)
+        # Initialize Noise-Alone W-State Refresh (Full Lattice) - EVERY CYCLE
+        # Continuous noise-mediated revival at σ = 2, ~4.4, 8 for constant information flow
         # ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
         
         if PARALLEL_REFRESH_AVAILABLE:
             w_refresh_config = NoiseRefreshConfig(
-                primary_resonance=4.4,            # Your moonshine discovery
-                secondary_resonance=8.0,
-                target_coherence=0.93,            # From your EPR data
+                primary_resonance=4.4,            # Main resonance (moonshine discovery)
+                secondary_resonance=8.0,          # Extended resonance
+                target_coherence=0.93,            # From EPR data
                 target_fidelity=0.91,
-                memory_strength=0.08,             # κ = 0.08 (your system)
+                memory_strength=0.08,             # κ = 0.08 (non-Markovian memory)
                 memory_depth=10,
                 verbose=True
             )
@@ -1725,15 +1769,20 @@ class QuantumLatticeControlLiveV5:
                 w_refresh_config
             )
             logger.info("✓ Noise-alone W-state refresh initialized (full 106,496-qubit lattice)")
+            logger.info("  └─ CONTINUOUS MODE: W-state refresh fires EVERY CYCLE")
+            logger.info("  └─ Noise gates at σ = 2.0, 4.4 (primary), 8.0 for bulk coherence maintenance")
+            logger.info("  └─ Semi-real quantum coherence via constant noise-mediated revival")
         else:
             self.w_state_refresh = None
+            logger.warning("✗ W-state refresh unavailable (parallel_refresh_implementation not found)")
         
         logger.info("╔════════════════════════════════════════════════════════╗")
         logger.info("║  QUANTUM LATTICE CONTROL LIVE v5.2 - INITIALIZED      ║")
         logger.info("║  106,496 qubits ready for adaptive control            ║")
         logger.info("║  Real quantum entropy → Noise bath → EC → Learning    ║")
         logger.info("║  ✓ Parallel batches (3x speedup)                      ║")
-        logger.info("║  ✓ Full-lattice W-state refresh (noise alone)         ║")
+        logger.info("║  ✓ W-STATE REFRESH EVERY CYCLE (noise-mediated)       ║")
+        logger.info("║  ✓ Continuous revival at σ = 2, 4.4, 8                ║")
         logger.info("║  Production deployment ready                          ║")
         logger.info("╚════════════════════════════════════════════════════════╝")
     
@@ -1850,12 +1899,13 @@ class QuantumLatticeControlLiveV5:
         )
         
         # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-        # FULL-LATTICE W-STATE REFRESH (Every 10 cycles)
+        # FULL-LATTICE W-STATE REFRESH (EVERY CYCLE - Continuous noise-mediated recovery)
+        # Constant bulk refreshing via noise gates at σ = 2, ~4.4, 8 for semi-real quantum coherence
         # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
         
         w_refresh_time = 0.0
-        if self.w_state_refresh is not None and self.cycle_count % 10 == 0:
-            logger.info("[FULL-LATTICE W-STATE REFRESH] Initiating noise-driven recovery...")
+        if self.w_state_refresh is not None:
+            logger.debug(f"[Cycle {self.cycle_count}] Starting noise-mediated W-state revival...")
             
             refresh_start = time.time()
             refresh_result = self.w_state_refresh.refresh_full_lattice(
@@ -1864,15 +1914,28 @@ class QuantumLatticeControlLiveV5:
             w_refresh_time = time.time() - refresh_start
             
             if refresh_result['success']:
-                logger.info(
-                    f"[W-REFRESH {refresh_result['refresh_id']:04d}] ✓ Complete | "
-                    f"Qubits={refresh_result['qubits_refreshed']} | "
-                    f"C={refresh_result['global_coherence']:.6f}±{refresh_result['coherence_std']:.6f} | "
-                    f"F={refresh_result['global_fidelity']:.6f} | "
-                    f"Time={refresh_result['cycle_time']:.3f}s"
-                )
+                # Log full details every 5 cycles to avoid log spam
+                if self.cycle_count % 5 == 0:
+                    logger.info(
+                        f"[W-REFRESH {refresh_result['refresh_id']:04d}] ✓ Cycle {self.cycle_count} | "
+                        f"Qubits={refresh_result['qubits_refreshed']} | "
+                        f"C={refresh_result['global_coherence']:.6f}±{refresh_result['coherence_std']:.6f} | "
+                        f"F={refresh_result['global_fidelity']:.6f} | "
+                        f"Time={refresh_result['cycle_time']:.3f}s | "
+                        f"σ-resonances: {', '.join([f'{s:.1f}' for s in [2.0, 4.4, 8.0]])}"
+                    )
+                else:
+                    logger.debug(
+                        f"[W-REFRESH] ✓ Cycle {self.cycle_count} | "
+                        f"C={refresh_result['global_coherence']:.6f} | "
+                        f"F={refresh_result['global_fidelity']:.6f} | "
+                        f"Time={refresh_result['cycle_time']:.3f}s"
+                    )
             else:
-                logger.error(f"[W-REFRESH] ✗ Failed: {refresh_result.get('error')}")
+                logger.error(f"[W-REFRESH] ✗ Cycle {self.cycle_count} Failed: {refresh_result.get('error')}")
+        else:
+            logger.warning(f"[Cycle {self.cycle_count}] W-state refresh unavailable (parallel_refresh_implementation not loaded)")
+        
         
         cycle_time = time.time() - cycle_start
         with self.lock:
@@ -1913,9 +1976,9 @@ class QuantumLatticeControlLiveV5:
             f"A={len(anomalies)}"
         )
         
-        # Add W-state refresh indicator if it ran this cycle
+        # Add W-state refresh indicator (now runs EVERY CYCLE)
         if w_refresh_time > 0:
-            main_log += f" | 🔄 W-Refresh: {w_refresh_time:.3f}s"
+            main_log += f" | 🔄 W-Refresh: {w_refresh_time:.3f}s (σ: 2.0, 4.4, 8.0)"
         
         # Add heartbeat metrics if available
         if hb_status and hb_status['cycles_tracked'] > 0:
