@@ -10,6 +10,9 @@ import sys
 import os
 import logging
 import traceback
+import threading
+import time
+import fcntl
 from datetime import datetime
 
 # Setup project path
@@ -33,6 +36,112 @@ logger.info("QTCL WSGI - PRODUCTION DEPLOYMENT INITIALIZATION")
 logger.info(f"Project Root: {PROJECT_ROOT}")
 logger.info(f"Python Version: {sys.version}")
 logger.info(f"Timestamp: {datetime.now().isoformat()}")
+logger.info("=" * 100)
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# GLOBAL QUANTUM SYSTEM SINGLETON WITH LOCK FILE (NO EXTERNAL MODULE)
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+_QUANTUM_SYSTEM_INSTANCE = None
+_QUANTUM_SYSTEM_LOCK = threading.RLock()
+_QUANTUM_SYSTEM_INITIALIZED = False
+_LOCK_FILE_PATH = '/tmp/quantum_system.lock'
+_LOCK_FILE = None
+
+def _acquire_lock_file(timeout: int = 30) -> bool:
+    """Acquire filesystem lock (process-level synchronization)"""
+    global _LOCK_FILE
+    start_time = time.time()
+    
+    while True:
+        try:
+            _LOCK_FILE = open(_LOCK_FILE_PATH, 'w')
+            fcntl.flock(_LOCK_FILE.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            logger.debug("[QuantumSystem] Lock file acquired")
+            return True
+        except (IOError, OSError):
+            if time.time() - start_time > timeout:
+                logger.warning(f"[QuantumSystem] Lock timeout after {timeout}s")
+                return False
+            time.sleep(0.1)
+
+def _release_lock_file() -> None:
+    """Release filesystem lock"""
+    global _LOCK_FILE
+    if _LOCK_FILE:
+        try:
+            fcntl.flock(_LOCK_FILE.fileno(), fcntl.LOCK_UN)
+            _LOCK_FILE.close()
+            _LOCK_FILE = None
+            logger.debug("[QuantumSystem] Lock file released")
+        except Exception as e:
+            logger.warning(f"[QuantumSystem] Error releasing lock: {e}")
+
+def initialize_quantum_system() -> None:
+    """Initialize SINGLE global quantum system (process-safe with lock file)"""
+    global _QUANTUM_SYSTEM_INSTANCE, _QUANTUM_SYSTEM_INITIALIZED
+    
+    with _QUANTUM_SYSTEM_LOCK:
+        if _QUANTUM_SYSTEM_INITIALIZED:
+            return
+        
+        _QUANTUM_SYSTEM_INITIALIZED = True
+        
+        try:
+            from quantum_lattice_control_live_complete import QuantumLatticeControlLiveV5
+            
+            # Acquire lock file (process-level sync)
+            if not _acquire_lock_file(timeout=30):
+                logger.error("[QuantumSystem] Failed to acquire lock")
+                return
+            
+            try:
+                db_config = {
+                    'host': os.getenv('SUPABASE_HOST', 'localhost'),
+                    'port': int(os.getenv('SUPABASE_PORT', '5432')),
+                    'database': os.getenv('SUPABASE_DB', 'postgres'),
+                    'user': os.getenv('SUPABASE_USER', 'postgres'),
+                    'password': os.getenv('SUPABASE_PASSWORD', 'postgres'),
+                }
+                app_url = os.getenv('APP_URL', 'http://localhost:5000')
+                
+                logger.info("[QuantumSystem] Creating SINGLE global quantum system...")
+                _QUANTUM_SYSTEM_INSTANCE = QuantumLatticeControlLiveV5(
+                    db_config=db_config,
+                    app_url=app_url
+                )
+                logger.info("[QuantumSystem] ✓ Global quantum system initialized (SINGLETON)")
+                
+                # Start daemon thread
+                import threading as _threading
+                _cycle_thread = _threading.Thread(
+                    target=_QUANTUM_SYSTEM_INSTANCE.run_continuous,
+                    kwargs={'duration_hours': 87600},
+                    daemon=True,
+                    name='QuantumCycleThread'
+                )
+                _cycle_thread.start()
+                logger.info("[QuantumSystem] ✓ Cycle daemon thread started")
+            
+            finally:
+                _release_lock_file()
+        
+        except Exception as e:
+            logger.error(f"[QuantumSystem] Failed: {e}")
+            logger.error(traceback.format_exc())
+
+def get_quantum_system():
+    """Get the initialized quantum system instance"""
+    return _QUANTUM_SYSTEM_INSTANCE
+
+# Pre-initialize quantum system ONCE at module load
+logger.info("Pre-initializing GLOBAL quantum system (SINGLETON with lock file)...")
+initialize_quantum_system()
+if _QUANTUM_SYSTEM_INSTANCE:
+    logger.info("✓ GLOBAL quantum system pre-initialized at module load")
+else:
+    logger.warning("⚠ Quantum system not initialized")
+
 logger.info("=" * 100)
 
 # ═══════════════════════════════════════════════════════════════════════════════════════

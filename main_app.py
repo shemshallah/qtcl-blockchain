@@ -48,14 +48,9 @@ from psycopg2.extras import RealDictCursor
 # Import database configuration
 from db_config import DatabaseConnection, Config as DBConfig, setup_database, DatabaseBuilderManager
 
-# Import Quantum Lattice Control (integrated with heartbeat system)
-try:
-    from quantum_lattice_control_live_complete import QuantumLatticeControlLiveV5
-    QUANTUM_LATTICE_AVAILABLE = True
-except ImportError:
-    QUANTUM_LATTICE_AVAILABLE = False
-    logger_early = logging.getLogger(__name__)
-    logger_early.warning("[Import] Quantum lattice control not available - heartbeat only via HTTP client")
+# Quantum system is initialized globally in wsgi_config.py
+# All workers share the same SINGLETON instance via lock file
+QUANTUM_SYSTEM_MANAGER_AVAILABLE = True
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # ENSURE REQUIRED PACKAGES
@@ -2054,33 +2049,27 @@ def initialize_app(app):
         logger.info("[Init] Seeding admin user...")
         db_manager.seed_test_user()
         
-        # Initialize quantum system if enabled
+        # Get quantum system instance (pre-initialized by wsgi_config as SINGLETON)
         if Config.ENABLE_QUANTUM:
             try:
-                logger.info("[Init] Initializing quantum system...")
-                from quantum_lattice_control_live_complete import QuantumLatticeControlLiveV5
-                _q_db_config = {
-                    'host': Config.DATABASE_HOST,
-                    'port': Config.DATABASE_PORT,
-                    'database': Config.DATABASE_NAME,
-                    'user': Config.DATABASE_USER,
-                    'password': Config.DATABASE_PASSWORD,
-                }
-                quantum_system = QuantumLatticeControlLiveV5(db_config=_q_db_config, app_url=Config.APP_URL)
-                # run_continuous() calls start() internally then loops execute_cycle()
-                # The heartbeat fires every 100 cycles from inside that loop.
-                # Must run as a daemon thread so Gunicorn can still fork/shutdown cleanly.
-                import threading as _threading
-                _cycle_thread = _threading.Thread(
-                    target=quantum_system.run_continuous,
-                    kwargs={'duration_hours': 87600},  # ~10 years / effectively forever
-                    daemon=True,
-                    name='QuantumCycleThread'
-                )
-                _cycle_thread.start()
-                logger.info("[Init] ✓ Quantum system initialized")
+                logger.info("[Init] Retrieving GLOBAL quantum system instance (SINGLETON)...")
+                
+                if QUANTUM_SYSTEM_MANAGER_AVAILABLE:
+                    # Import from wsgi_config where it was pre-initialized
+                    from wsgi_config import get_quantum_system
+                    quantum_system = get_quantum_system()
+                    
+                    if quantum_system:
+                        logger.info("[Init] ✓ Using pre-initialized SINGLETON quantum system")
+                    else:
+                        logger.warning("[Init] ⚠ Quantum system not yet initialized")
+                else:
+                    logger.error("[Init] ✗ Quantum system manager not available")
+            
             except Exception as e:
-                logger.warning(f"[Init] Quantum system initialization failed: {e}")
+                logger.error(f"[Init] ✗ Failed to get quantum system: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
                 quantum_system = None
         
         logger.info("=" * 100)
