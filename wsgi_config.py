@@ -78,7 +78,7 @@ def _release_lock_file() -> None:
             logger.warning(f"[QuantumSystem] Error releasing lock: {e}")
 
 def initialize_quantum_system() -> None:
-    """Initialize SINGLE global quantum system (process-safe with lock file)"""
+    """Initialize SINGLE global quantum system (process-safe with lock file) - NO DAEMON THREAD YET"""
     global _QUANTUM_SYSTEM_INSTANCE, _QUANTUM_SYSTEM_INITIALIZED
     
     with _QUANTUM_SYSTEM_LOCK:
@@ -111,17 +111,7 @@ def initialize_quantum_system() -> None:
                     app_url=app_url
                 )
                 logger.info("[QuantumSystem] ✓ Global quantum system initialized (SINGLETON)")
-                
-                # Start daemon thread
-                import threading as _threading
-                _cycle_thread = _threading.Thread(
-                    target=_QUANTUM_SYSTEM_INSTANCE.run_continuous,
-                    kwargs={'duration_hours': 87600},
-                    daemon=True,
-                    name='QuantumCycleThread'
-                )
-                _cycle_thread.start()
-                logger.info("[QuantumSystem] ✓ Cycle daemon thread started")
+                logger.info("[QuantumSystem] ⚠ Daemon thread will start after Flask app initialization")
             
             finally:
                 _release_lock_file()
@@ -133,6 +123,28 @@ def initialize_quantum_system() -> None:
 def get_quantum_system():
     """Get the initialized quantum system instance"""
     return _QUANTUM_SYSTEM_INSTANCE
+
+def start_quantum_daemon():
+    """Start the quantum system daemon thread (call after Flask is initialized)"""
+    global _QUANTUM_SYSTEM_INSTANCE
+    
+    if not _QUANTUM_SYSTEM_INSTANCE:
+        logger.error("[QuantumSystem] Cannot start daemon - quantum system not initialized")
+        return
+    
+    try:
+        import threading as _threading
+        _cycle_thread = _threading.Thread(
+            target=_QUANTUM_SYSTEM_INSTANCE.run_continuous,
+            kwargs={'duration_hours': 87600},
+            daemon=True,
+            name='QuantumCycleThread'
+        )
+        _cycle_thread.start()
+        logger.info("[QuantumSystem] ✓ Cycle daemon thread started after Flask initialization")
+    except Exception as e:
+        logger.error(f"[QuantumSystem] Failed to start daemon: {e}")
+        logger.error(traceback.format_exc())
 
 # Pre-initialize quantum system ONCE at module load
 logger.info("Pre-initializing GLOBAL quantum system (SINGLETON with lock file)...")

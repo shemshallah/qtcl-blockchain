@@ -2072,6 +2072,15 @@ def initialize_app(app):
                 logger.error(traceback.format_exc())
                 quantum_system = None
         
+        # START QUANTUM DAEMON THREAD (after Flask is fully initialized)
+        if quantum_system:
+            try:
+                logger.info("[Init] Starting quantum system daemon thread...")
+                from wsgi_config import start_quantum_daemon
+                start_quantum_daemon()
+            except Exception as e:
+                logger.warning(f"[Init] ⚠ Failed to start quantum daemon: {e}")
+        
         logger.info("=" * 100)
         logger.info("✓ APPLICATION INITIALIZED SUCCESSFULLY")
         logger.info("=" * 100)
