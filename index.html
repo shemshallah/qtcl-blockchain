@@ -39,7 +39,6 @@
             flex-direction: column;
         }
 
-        /* HEADER */
         .header {
             background: linear-gradient(135deg, #1a1a2e 0%, #0f0f1e 100%);
             border-bottom: 1px solid var(--border);
@@ -112,7 +111,6 @@
             50% { opacity: 0.5; }
         }
 
-        /* MAIN CONTAINER */
         .container {
             display: flex;
             flex: 1;
@@ -120,7 +118,6 @@
             padding: 16px;
         }
 
-        /* TERMINAL */
         .terminal-wrapper {
             flex: 1;
             display: flex;
@@ -201,7 +198,6 @@
             color: var(--text-secondary);
         }
 
-        /* INPUT AREA */
         .input-area {
             background: var(--bg-dark);
             border-top: 1px solid var(--border);
@@ -238,10 +234,14 @@
         .input-field::placeholder {
             color: var(--text-secondary);
         }
+
+        .input-field.password {
+            font-size: 20px;
+            letter-spacing: 4px;
+        }
     </style>
 </head>
 <body>
-    <!-- HEADER -->
     <div class="header">
         <div class="header-top">
             <div>
@@ -267,9 +267,7 @@
         </div>
     </div>
 
-    <!-- MAIN CONTAINER -->
     <div class="container">
-        <!-- TERMINAL -->
         <div class="terminal-wrapper">
             <div class="terminal" id="terminal">
                 <div class="output-line">
@@ -300,6 +298,18 @@
     </div>
 
     <script>
+        const API_URL = '/api';
+        const PROMPT_STATES = {
+            NONE: 'none',
+            LOGIN_USERNAME: 'login_username',
+            LOGIN_PASSWORD: 'login_password',
+            REGISTER_EMAIL: 'register_email',
+            REGISTER_PASSWORD: 'register_password',
+            REGISTER_NAME: 'register_name',
+            TRANSACT_RECIPIENT: 'transact_recipient',
+            TRANSACT_AMOUNT: 'transact_amount'
+        };
+
         class QTCLTerminal {
             constructor() {
                 this.authToken = null;
@@ -307,6 +317,8 @@
                 this.isAuthenticated = false;
                 this.commandHistory = [];
                 this.historyIndex = -1;
+                this.promptState = PROMPT_STATES.NONE;
+                this.tempData = {};
 
                 this.init();
             }
@@ -320,13 +332,17 @@
             handleInput(e) {
                 if (e.key === 'Enter') {
                     const input = document.getElementById('commandInput');
-                    const cmd = input.value.trim();
+                    const value = input.value.trim();
                     
-                    if (cmd) {
-                        this.printLine(`$ ${cmd}`, 'prompt');
-                        this.commandHistory.push(cmd);
-                        this.historyIndex = -1;
-                        this.executeCommand(cmd);
+                    if (value || this.promptState !== PROMPT_STATES.NONE) {
+                        if (this.promptState === PROMPT_STATES.NONE) {
+                            this.printLine(`$ ${value}`, 'prompt');
+                            this.commandHistory.push(value);
+                            this.historyIndex = -1;
+                            this.executeCommand(value);
+                        } else {
+                            this.handlePromptInput(value);
+                        }
                     }
                     input.value = '';
                 } else if (e.key === 'ArrowUp') {
@@ -348,76 +364,256 @@
                 input.value = this.historyIndex >= 0 ? this.commandHistory[this.historyIndex] : '';
             }
 
+            handlePromptInput(value) {
+                switch(this.promptState) {
+                    case PROMPT_STATES.LOGIN_USERNAME:
+                        this.tempData.username = value;
+                        this.printLine(value, 'text');
+                        this.promptState = PROMPT_STATES.LOGIN_PASSWORD;
+                        this.printLine('', 'info');
+                        this.printLine('Password:', 'warning');
+                        break;
+
+                    case PROMPT_STATES.LOGIN_PASSWORD:
+                        this.tempData.password = value;
+                        this.printLine('••••••••', 'text');
+                        this.performLogin(this.tempData.username, this.tempData.password);
+                        this.promptState = PROMPT_STATES.NONE;
+                        this.tempData = {};
+                        break;
+
+                    case PROMPT_STATES.REGISTER_EMAIL:
+                        this.tempData.email = value;
+                        this.printLine(value, 'text');
+                        this.promptState = PROMPT_STATES.REGISTER_PASSWORD;
+                        this.printLine('', 'info');
+                        this.printLine('Password:', 'warning');
+                        break;
+
+                    case PROMPT_STATES.REGISTER_PASSWORD:
+                        this.tempData.password = value;
+                        this.printLine('••••••••', 'text');
+                        this.promptState = PROMPT_STATES.REGISTER_NAME;
+                        this.printLine('', 'info');
+                        this.printLine('Full Name:', 'warning');
+                        break;
+
+                    case PROMPT_STATES.REGISTER_NAME:
+                        this.tempData.name = value;
+                        this.printLine(value, 'text');
+                        this.performRegister(this.tempData.email, this.tempData.password, this.tempData.name);
+                        this.promptState = PROMPT_STATES.NONE;
+                        this.tempData = {};
+                        break;
+
+                    case PROMPT_STATES.TRANSACT_RECIPIENT:
+                        this.tempData.recipient = value;
+                        this.printLine(value, 'text');
+                        this.validateRecipient(value);
+                        break;
+
+                    case PROMPT_STATES.TRANSACT_AMOUNT:
+                        this.tempData.amount = value;
+                        this.printLine(value, 'text');
+                        this.executeTransaction(this.tempData.recipient, this.tempData.amount);
+                        this.promptState = PROMPT_STATES.NONE;
+                        this.tempData = {};
+                        break;
+                }
+            }
+
+            async performLogin(username, password) {
+                this.printLine('', 'info');
+                this.printLine('Authenticating...', 'warning');
+
+                try {
+                    const response = await fetch(`${API_URL}/auth/login`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ email: username, password })
+                    });
+
+                    const data = await response.json();
+
+                    if (response.ok && data.token) {
+                        this.authToken = data.token;
+                        this.currentUser = username;
+                        this.isAuthenticated = true;
+
+                        this.printLine('✓ Authentication successful', 'success');
+                        this.printLine(`✓ User: ${username}`, 'success');
+                        this.printLine(`✓ Token issued`, 'success');
+
+                        document.getElementById('auth-status').innerHTML = `<span style="color: #86efac;">✓ Authenticated (${username})</span>`;
+
+                        this.printLine('', 'info');
+                        this.showHelp();
+                    } else {
+                        this.printLine(`✗ Authentication failed: ${data.message || 'Invalid credentials'}`, 'error');
+                        this.promptState = PROMPT_STATES.NONE;
+                        this.tempData = {};
+                    }
+                } catch (e) {
+                    this.printLine(`✗ Error: ${e.message}`, 'error');
+                    this.promptState = PROMPT_STATES.NONE;
+                    this.tempData = {};
+                }
+            }
+
+            async performRegister(email, password, name) {
+                this.printLine('', 'info');
+                this.printLine('Creating account...', 'warning');
+
+                try {
+                    const response = await fetch(`${API_URL}/auth/register`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ email, password, name })
+                    });
+
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        this.printLine('✓ Account created successfully', 'success');
+                        this.printLine(`✓ User ID: ${data.user_id || 'Generated'}`, 'success');
+                        this.printLine('Type "login" to authenticate', 'info');
+                    } else {
+                        this.printLine(`✗ Registration failed: ${data.message || 'Unknown error'}`, 'error');
+                    }
+                } catch (e) {
+                    this.printLine(`✗ Error: ${e.message}`, 'error');
+                }
+            }
+
+            async validateRecipient(recipient) {
+                try {
+                    const response = await fetch(`${API_URL}/users/${recipient}`, {
+                        headers: { 'Authorization': `Bearer ${this.authToken}` }
+                    });
+
+                    if (response.ok) {
+                        const data = await response.json();
+                        this.printLine(`✓ Recipient valid: ${data.name || data.email}`, 'success');
+                        this.printLine('', 'info');
+                        this.printLine('Amount (QTCL):', 'warning');
+                        this.promptState = PROMPT_STATES.TRANSACT_AMOUNT;
+                    } else {
+                        this.printLine(`✗ Recipient not found`, 'error');
+                        this.promptState = PROMPT_STATES.NONE;
+                        this.tempData = {};
+                    }
+                } catch (e) {
+                    this.printLine(`✗ Error: ${e.message}`, 'error');
+                    this.promptState = PROMPT_STATES.NONE;
+                    this.tempData = {};
+                }
+            }
+
+            async executeTransaction(recipient, amount) {
+                this.printLine('', 'info');
+                this.printLine('Processing transaction...', 'warning');
+
+                try {
+                    const response = await fetch(`${API_URL}/transactions`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${this.authToken}`
+                        },
+                        body: JSON.stringify({ recipient, amount: parseFloat(amount) })
+                    });
+
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        this.printLine(`✓ Transaction created`, 'success');
+                        this.printLine(`✓ TX ID: ${data.tx_id || data.id}`, 'success');
+                        this.printLine(`✓ Amount: ${amount} QTCL to ${recipient}`, 'success');
+                        this.printLine('Status: Quantum verification in progress...', 'info');
+                        this.printLine('', 'info');
+                    } else {
+                        this.printLine(`✗ Transaction failed: ${data.message || 'Unknown error'}`, 'error');
+                    }
+                } catch (e) {
+                    this.printLine(`✗ Error: ${e.message}`, 'error');
+                }
+            }
+
             executeCommand(cmd) {
                 const parts = cmd.split(' ');
                 const command = parts[0].toLowerCase();
 
                 switch(command) {
                     case 'login':
-                        this.loginFlow();
+                        if (this.isAuthenticated) {
+                            this.printLine('✗ Already authenticated', 'error');
+                            break;
+                        }
+                        this.printLine('', 'info');
+                        this.printLine('Username/Email:', 'warning');
+                        this.promptState = PROMPT_STATES.LOGIN_USERNAME;
                         break;
+
                     case 'register':
-                        this.registerFlow();
+                        if (this.isAuthenticated) {
+                            this.printLine('✗ Already authenticated', 'error');
+                            break;
+                        }
+                        this.printLine('', 'info');
+                        this.printLine('Email:', 'warning');
+                        this.promptState = PROMPT_STATES.REGISTER_EMAIL;
                         break;
+
                     case 'logout':
                         this.logout();
                         break;
+
                     case 'help':
                         this.showHelp();
                         break;
+
                     case 'profile':
                         this.showProfile();
                         break;
+
                     case 'balance':
                         this.showBalance();
                         break;
+
                     case 'transact':
-                        this.transactionFlow();
+                        this.startTransact();
                         break;
+
                     case 'quantum-status':
                         this.quantumStatus();
                         break;
+
                     case 'tx-history':
                         this.txHistory();
                         break;
+
                     case 'oracle-price':
                         this.oraclePrice();
                         break;
+
                     case 'clear':
                         document.getElementById('terminal').innerHTML = '';
                         break;
+
                     default:
                         this.printLine(`✗ Unknown command: ${command}`, 'error');
                         this.printLine(`Type 'help' for commands`, 'info');
                 }
             }
 
-            loginFlow() {
+            startTransact() {
+                if (!this.isAuthenticated) {
+                    this.printLine('✗ Authentication required', 'error');
+                    return;
+                }
                 this.printLine('', 'info');
-                this.printLine('Authenticating...', 'warning');
-                
-                setTimeout(() => {
-                    this.authToken = 'qtcl_' + Math.random().toString(36).substring(2, 10);
-                    this.currentUser = 'user@quantum.eth';
-                    this.isAuthenticated = true;
-                    
-                    this.printLine('✓ Authentication successful', 'success');
-                    this.printLine(`✓ User: ${this.currentUser}`, 'success');
-                    
-                    document.getElementById('auth-status').innerHTML = '<span style="color: #86efac;">✓ Authenticated</span>';
-                    this.printLine('', 'info');
-                }, 300);
-            }
-
-            registerFlow() {
-                this.printLine('', 'info');
-                this.printLine('Creating account...', 'warning');
-                
-                setTimeout(() => {
-                    this.printLine('✓ Account created', 'success');
-                    this.printLine('✓ User ID: ' + Math.random().toString(36).substring(2, 10).toUpperCase(), 'success');
-                    this.printLine('Type "login" to authenticate', 'info');
-                }, 300);
+                this.printLine('Recipient (Qubit ID, Email, or UID):', 'warning');
+                this.promptState = PROMPT_STATES.TRANSACT_RECIPIENT;
             }
 
             logout() {
@@ -432,15 +628,15 @@
                 this.printLine('', 'info');
                 this.printLine('COMMANDS', 'warning');
                 this.printLine('', 'info');
-                this.printLine('login              Authenticate', 'text');
-                this.printLine('register           Create account', 'text');
+                this.printLine('login              Authenticate to network', 'text');
+                this.printLine('register           Create new account', 'text');
                 this.printLine('logout             End session', 'text');
-                this.printLine('profile            User profile', 'text');
-                this.printLine('balance            Account balance', 'text');
-                this.printLine('transact           Create transaction', 'text');
-                this.printLine('tx-history         Transaction history', 'text');
-                this.printLine('quantum-status     System status', 'text');
-                this.printLine('oracle-price       Price data', 'text');
+                this.printLine('profile            Display account profile', 'text');
+                this.printLine('balance            Check account balance', 'text');
+                this.printLine('transact           Create quantum-verified transaction', 'text');
+                this.printLine('tx-history         Show transaction history', 'text');
+                this.printLine('quantum-status     Check quantum systems', 'text');
+                this.printLine('oracle-price       Get price oracle data', 'text');
                 this.printLine('clear              Clear terminal', 'text');
                 this.printLine('', 'info');
             }
@@ -454,9 +650,8 @@
                 this.printLine('USER PROFILE', 'warning');
                 this.printLine('', 'info');
                 this.printLine(`User: ${this.currentUser}`, 'text');
-                this.printLine(`Balance: 1,000,000 QTCL`, 'success');
-                this.printLine(`Staked: 50,000 QTCL`, 'text');
-                this.printLine(`KYC: Verified`, 'success');
+                this.printLine(`Balance: Loading...`, 'text');
+                this.printLine(`Status: Active`, 'success');
                 this.printLine('', 'info');
             }
 
@@ -468,43 +663,8 @@
                 this.printLine('', 'info');
                 this.printLine('ACCOUNT BALANCE', 'warning');
                 this.printLine('', 'info');
-                this.printLine(`Available: 950,000 QTCL`, 'success');
-                this.printLine(`Staked: 50,000 QTCL`, 'text');
-                this.printLine(`Total: 1,000,000 QTCL`, 'success');
+                this.printLine(`Loading balance...`, 'info');
                 this.printLine('', 'info');
-            }
-
-            transactionFlow() {
-                if (!this.isAuthenticated) {
-                    this.printLine('✗ Authentication required', 'error');
-                    return;
-                }
-                this.printLine('', 'info');
-                const txId = Math.random().toString(36).substring(2, 8).toUpperCase();
-                this.printLine(`TX ID: ${txId}`, 'success');
-                this.printLine('Status: Quantum verification', 'warning');
-                this.printLine('', 'info');
-                
-                const steps = [
-                    'Preparing circuit...',
-                    'Entangling qubits...',
-                    'GHZ state...',
-                    'Superposition...',
-                    'Wave collapse...',
-                    'Finalized'
-                ];
-                
-                let delay = 0;
-                steps.forEach((step, i) => {
-                    setTimeout(() => {
-                        if (i === steps.length - 1) {
-                            this.printLine(`✓ ${step}`, 'success');
-                        } else {
-                            this.printLine(`→ ${step}`, 'info');
-                        }
-                    }, delay);
-                    delay += 300;
-                });
             }
 
             quantumStatus() {
@@ -527,9 +687,7 @@
                 this.printLine('', 'info');
                 this.printLine('TRANSACTION HISTORY', 'warning');
                 this.printLine('', 'info');
-                this.printLine('TX001 | 100 QTCL  | Finalized', 'text');
-                this.printLine('TX002 | 500 QTCL  | Finalized', 'text');
-                this.printLine('TX003 | 250 QTCL  | Finalized', 'text');
+                this.printLine('Loading transactions...', 'info');
                 this.printLine('', 'info');
             }
 
