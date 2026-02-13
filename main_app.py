@@ -50,10 +50,16 @@ from db_config import DatabaseConnection, Config as DBConfig, setup_database, Da
 
 # Import terminal logic for dynamic command list
 try:
-    from terminal_logic import TerminalOrchestrator
+    from terminal_logic import TerminalOrchestrator, CommandRegistry, CommandMeta
     TERMINAL_ORCHESTRATOR_AVAILABLE = True
-except ImportError:
+    logger.info("[Import] ✓ Terminal orchestrator imported successfully")
+except ImportError as import_error:
     TERMINAL_ORCHESTRATOR_AVAILABLE = False
+    logger.warning(f"[Import] ⚠ Terminal orchestrator import failed: {import_error}")
+    logger.warning("[Import] Commands endpoint will return empty list")
+except Exception as import_error:
+    TERMINAL_ORCHESTRATOR_AVAILABLE = False
+    logger.error(f"[Import] ✗ Unexpected error importing terminal_logic: {import_error}", exc_info=True)
 
 # Quantum system is initialized globally in wsgi_config.py
 # All workers share the same SINGLETON instance via lock file
@@ -2323,42 +2329,71 @@ def setup_routes(app):
         """Get all available terminal commands dynamically from terminal_logic"""
         try:
             if not TERMINAL_ORCHESTRATOR_AVAILABLE:
-                logger.warning("[API] Terminal orchestrator not available, returning cached commands")
+                logger.warning("[API/Commands] ⚠ Terminal orchestrator not available - using fallback commands")
+                # Fallback commands when terminal_logic is unavailable
+                fallback_commands = [
+                    {'name': 'login', 'category': 'auth', 'description': 'Login to QTCL system', 'requires_auth': False, 'requires_admin': False, 'args': []},
+                    {'name': 'logout', 'category': 'auth', 'description': 'Logout from system', 'requires_auth': True, 'requires_admin': False, 'args': []},
+                    {'name': 'register', 'category': 'auth', 'description': 'Register new account', 'requires_auth': False, 'requires_admin': False, 'args': []},
+                    {'name': 'help', 'category': 'help', 'description': 'Show help menu', 'requires_auth': False, 'requires_admin': False, 'args': []},
+                    {'name': 'profile', 'category': 'user', 'description': 'View user profile', 'requires_auth': True, 'requires_admin': False, 'args': []},
+                    {'name': 'balance', 'category': 'wallet', 'description': 'Check account balance', 'requires_auth': True, 'requires_admin': False, 'args': []},
+                ]
                 return jsonify({
                     'status': 'success',
-                    'commands': []
+                    'total': len(fallback_commands),
+                    'commands': fallback_commands,
+                    'note': 'Using fallback commands (terminal_logic unavailable)'
                 }), 200
             
-            # Initialize TerminalOrchestrator to get command registry
-            orchestrator = TerminalOrchestrator()
-            all_commands = orchestrator.registry.list_all()
+            try:
+                logger.debug("[API/Commands] Initializing TerminalOrchestrator...")
+                orchestrator = TerminalOrchestrator()
+                all_commands = orchestrator.registry.list_all()
+                logger.info(f"[API/Commands] ✓ Found {len(all_commands)} commands")
+            except Exception as init_error:
+                logger.error(f"[API/Commands] ✗ Failed to initialize TerminalOrchestrator: {init_error}", exc_info=True)
+                return jsonify({
+                    'status': 'error',
+                    'message': f'Failed to initialize terminal orchestrator: {str(init_error)}',
+                    'code': 'ORCHESTRATOR_INIT_ERROR',
+                    'total': 0,
+                    'commands': []
+                }), 500
             
             # Format commands for frontend
             commands_list = []
             for cmd_name, cmd_meta in all_commands:
-                commands_list.append({
-                    'name': cmd_meta.name,
-                    'category': cmd_meta.category.value if hasattr(cmd_meta.category, 'value') else str(cmd_meta.category),
-                    'description': cmd_meta.description,
-                    'requires_auth': cmd_meta.requires_auth,
-                    'requires_admin': cmd_meta.requires_admin,
-                    'args': cmd_meta.args
-                })
+                try:
+                    commands_list.append({
+                        'name': cmd_meta.name,
+                        'category': cmd_meta.category.value if hasattr(cmd_meta.category, 'value') else str(cmd_meta.category),
+                        'description': cmd_meta.description,
+                        'requires_auth': cmd_meta.requires_auth,
+                        'requires_admin': cmd_meta.requires_admin,
+                        'args': cmd_meta.args
+                    })
+                except Exception as cmd_error:
+                    logger.error(f"[API/Commands] Error formatting command {cmd_name}: {cmd_error}")
+                    continue
             
             # Sort by category then name
             commands_list.sort(key=lambda x: (x['category'], x['name']))
             
+            logger.info(f"[API/Commands] Returning {len(commands_list)} formatted commands")
             return jsonify({
                 'status': 'success',
                 'total': len(commands_list),
                 'commands': commands_list
             }), 200
         except Exception as e:
-            logger.error(f"[API] Error fetching commands: {e}", exc_info=True)
+            logger.error(f"[API/Commands] ✗ Error fetching commands: {e}", exc_info=True)
             return jsonify({
                 'status': 'error',
-                'message': 'Failed to fetch commands',
-                'code': 'COMMANDS_ERROR'
+                'message': f'Failed to fetch commands: {str(e)}',
+                'code': 'COMMANDS_ERROR',
+                'total': 0,
+                'commands': []
             }), 500
 
 # ═══════════════════════════════════════════════════════════════════════════════════════

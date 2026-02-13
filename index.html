@@ -333,19 +333,28 @@
 
             async loadCommands() {
                 try {
+                    console.log('[Terminal] Fetching commands from /api/commands...');
                     const response = await fetch(`${API_URL}/commands`);
                     const data = await response.json();
                     
-                    if (data.status === 'success' && data.commands) {
+                    console.log('[Terminal] Commands response:', data);
+                    
+                    if (data.status === 'success' && Array.isArray(data.commands)) {
                         this.availableCommands = data.commands;
-                        logger.debug(`[Terminal] Loaded ${data.total} commands from API`);
+                        console.log(`[Terminal] ✓ Loaded ${data.total || data.commands.length} commands from API`);
+                        
+                        if (data.commands.length === 0) {
+                            this.printLine('⚠ Warning: No commands available from server (terminal_logic may not be available)', 'warning');
+                        }
                     } else {
+                        console.error('[Terminal] Invalid response format:', data);
                         this.availableCommands = [];
-                        this.printLine('⚠ Warning: Could not load command list', 'warning');
+                        this.printLine(`⚠ Error: ${data.message || 'Could not load command list'}`, 'error');
                     }
                 } catch (e) {
-                    logger.error(`[Terminal] Failed to load commands: ${e.message}`);
+                    console.error(`[Terminal] Failed to load commands:`, e);
                     this.availableCommands = [];
+                    this.printLine(`✗ Failed to load commands: ${e.message}`, 'error');
                 }
             }
 
