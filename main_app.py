@@ -1988,7 +1988,17 @@ def initialize_app(app):
                     'password': Config.DATABASE_PASSWORD,
                 }
                 quantum_system = QuantumLatticeControlLiveV5(db_config=_q_db_config, app_url=Config.APP_URL)
-                quantum_system.start()
+                # run_continuous() calls start() internally then loops execute_cycle()
+                # The heartbeat fires every 100 cycles from inside that loop.
+                # Must run as a daemon thread so Gunicorn can still fork/shutdown cleanly.
+                import threading as _threading
+                _cycle_thread = _threading.Thread(
+                    target=quantum_system.run_continuous,
+                    kwargs={'duration_hours': 87600},  # ~10 years / effectively forever
+                    daemon=True,
+                    name='QuantumCycleThread'
+                )
+                _cycle_thread.start()
                 logger.info("[Init] ✓ Quantum system initialized")
             except Exception as e:
                 logger.warning(f"[Init] Quantum system initialization failed: {e}")
