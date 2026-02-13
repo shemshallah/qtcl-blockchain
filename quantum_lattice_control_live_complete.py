@@ -1955,9 +1955,10 @@ class QuantumLatticeControlLiveV5:
                 w_refresh_config
             )
             logger.info("✓ Noise-alone W-state refresh initialized (full 106,496-qubit lattice)")
-            logger.info("  └─ CONTINUOUS MODE: W-state refresh fires EVERY CYCLE")
+            logger.info("  └─ PERIODIC MODE: W-state refresh fires every 5 cycles (not every cycle)")
+            logger.info("  └─ Cycles 1-4: Batch processing only (~10-15s)")
+            logger.info("  └─ Cycle 5: Batch + W-state validation (~20s)")
             logger.info("  └─ Noise gates at σ = 2.0, 4.4 (primary), 8.0 for bulk coherence maintenance")
-            logger.info("  └─ Semi-real quantum coherence via constant noise-mediated revival")
         else:
             self.w_state_refresh = None
             logger.warning("✗ W-state refresh unavailable (parallel_refresh_implementation not found)")
@@ -2052,24 +2053,33 @@ class QuantumLatticeControlLiveV5:
         # EXECUTE BATCHES (Parallel if available, sequential fallback)
         # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
         
-        if self.parallel_processor is not None:
-            # Parallel execution (3x speedup with 3 workers)
-            batch_results = self.parallel_processor.execute_all_batches_parallel(
-                self.batch_pipeline,
-                self.entropy_ensemble,
-                total_batches=self.noise_bath.NUM_BATCHES
-            )
-        else:
-            # Fallback: Sequential execution (same as before)
+        try:
+            if self.parallel_processor is not None:
+                # Parallel execution (3x speedup with 3 workers)
+                logger.debug(f"[Cycle {self.cycle_count}] Using parallel batch processor...")
+                batch_results = self.parallel_processor.execute_all_batches_parallel(
+                    self.batch_pipeline,
+                    self.entropy_ensemble,
+                    total_batches=self.noise_bath.NUM_BATCHES
+                )
+                logger.debug(f"[Cycle {self.cycle_count}] ✓ Parallel batches completed ({len(batch_results)} results)")
+            else:
+                # Fallback: Sequential execution (same as before)
+                logger.debug(f"[Cycle {self.cycle_count}] Using sequential batch execution (no parallel processor)...")
+                batch_results = []
+                for batch_id in range(self.noise_bath.NUM_BATCHES):
+                    result = self.batch_pipeline.execute(batch_id, self.entropy_ensemble)
+                    batch_results.append(result)
+                    
+                    if (batch_id + 1) % 13 == 0:
+                        logger.debug(f"  Progress: {batch_id + 1}/{self.noise_bath.NUM_BATCHES}")
+                logger.debug(f"[Cycle {self.cycle_count}] ✓ Sequential batches completed ({len(batch_results)} results)")
+        except Exception as e:
+            logger.error(f"[Cycle {self.cycle_count}] ✗ Batch execution failed: {e}", exc_info=True)
             batch_results = []
-            for batch_id in range(self.noise_bath.NUM_BATCHES):
-                result = self.batch_pipeline.execute(batch_id, self.entropy_ensemble)
-                batch_results.append(result)
-                
-                if (batch_id + 1) % 13 == 0:
-                    logger.debug(f"  Progress: {batch_id + 1}/{self.noise_bath.NUM_BATCHES}")
         
         batch_time = time.time() - batch_start
+        logger.info(f"[Cycle {self.cycle_count}] Batches complete: {batch_time:.2f}s ({len(batch_results)} batches)")
         
         # Record analytics for each batch
         for batch_id, result in enumerate(batch_results):
@@ -2089,24 +2099,27 @@ class QuantumLatticeControlLiveV5:
         # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
         
         w_refresh_time = 0.0
+        w_refresh_status = ""
+        
         if self.w_state_refresh is not None and self.cycle_count % 5 == 0:
+            logger.info(f"[Cycle {self.cycle_count}] Running W-state validation (every 5 cycles)...")
             refresh_start = time.time()
-            refresh_result = self.w_state_refresh.refresh_full_lattice(
-                self.entropy_ensemble
-            )
-            w_refresh_time = time.time() - refresh_start
-            
-            if refresh_result['success']:
-                # Log details
-                if self.cycle_count % 10 == 0:
-                    logger.info(
-                        f"[W-REFRESH {refresh_result['refresh_id']:04d}] ✓ Cycle {self.cycle_count} | "
-                        f"C={refresh_result['global_coherence']:.6f}±{refresh_result['coherence_std']:.6f} | "
-                        f"F={refresh_result['global_fidelity']:.6f} | "
-                        f"Time={refresh_result['cycle_time']:.3f}s"
-                    )
-            else:
-                logger.error(f"[W-REFRESH] ✗ Cycle {self.cycle_count} Failed: {refresh_result.get('error')}")
+            try:
+                refresh_result = self.w_state_refresh.refresh_full_lattice(
+                    self.entropy_ensemble
+                )
+                w_refresh_time = time.time() - refresh_start
+                
+                if refresh_result['success']:
+                    w_refresh_status = f"✓ W-REFRESH | C={refresh_result['global_coherence']:.6f} | F={refresh_result['global_fidelity']:.6f} | {w_refresh_time:.2f}s"
+                    logger.info(f"[Cycle {self.cycle_count}] {w_refresh_status}")
+                else:
+                    logger.error(f"[Cycle {self.cycle_count}] ✗ W-REFRESH Failed: {refresh_result.get('error')}")
+            except Exception as e:
+                logger.error(f"[Cycle {self.cycle_count}] ✗ W-state validation error: {e}", exc_info=True)
+        else:
+            if self.cycle_count % 5 != 0:
+                logger.debug(f"[Cycle {self.cycle_count}] Skipping W-state (runs every 5 cycles, next at cycle {((self.cycle_count // 5 + 1) * 5)})")
         
         
         cycle_time = time.time() - cycle_start
@@ -2150,6 +2163,7 @@ class QuantumLatticeControlLiveV5:
             main_log += f" | 🔄 W-Gates: {w_refresh_time:.3f}s"
         
         logger.info(main_log)
+        logger.info(f"[Cycle {self.cycle_count}] ═══════════════════════════════════════════════════════════════════════════")
 
         return {
             'cycle': self.cycle_count,
