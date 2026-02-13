@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 """
 ═══════════════════════════════════════════════════════════════════════════════════════
-QUANTUM TEMPORAL COHERENCE LEDGER (QTCL) - COMPLETE FIXED API v3.2.1
-PRODUCTION-READY FIX FOR ALL 500 & 401 ERRORS
-Complete monolithic application with comprehensive error handling
-INTEGRATED WITH QUANTUM LATTICE CONTROL LIVE V5
+QUANTUM TEMPORAL COHERENCE LEDGER (QTCL) - UNIFIED API v4.0.0
+PRODUCTION-READY CONSOLIDATED APPLICATION
+Complete standardization: All routes use /api/* (no v1/v2 versioning)
+Merged authentication systems, eliminated duplicates, full production implementation
 ═══════════════════════════════════════════════════════════════════════════════════════
 
-FIXES APPLIED:
-✓ Syntax errors corrected
-✓ Global error handlers added
-✓ Authentication system initialized
-✓ Database initialization with retry logic
-✓ All routes wrapped with exception handlers
-✓ JWT token generation endpoints
-✓ Service initialization with fallbacks
-✓ Health check for all dependencies
-✓ Gunicorn worker route duplication fixed via factory pattern
-✓ Quantum Lattice Control Live V5 integrated (replaces old refresh system)
+CONSOLIDATION CHANGES:
+✓ All endpoints standardized to /api/* (removed /api/v1/*, /api/v2/*)
+✓ Unified authentication system (JWT + optional 2FA)
+✓ Single health endpoint (/health)
+✓ Merged transaction APIs into one comprehensive system
+✓ Production-grade error handling throughout
+✓ Full input validation and sanitization
+✓ Comprehensive logging and monitoring
+✓ Rate limiting on all endpoints
+✓ CORS properly configured
+✓ Security headers enforced
+✓ Request/response middleware
 ════════════════════════════════════════════════════════════════════════════════════════
 """
 
@@ -31,37 +32,24 @@ import threading
 import secrets
 import bcrypt
 import traceback
-
-from db_config import DatabaseConnection, Config as DBConfig, setup_database, DatabaseBuilderManager
-
+import re
+import hmac
+import base64
+import uuid
+from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any, Tuple, Callable
 from functools import wraps
 from decimal import Decimal, getcontext
-import base64
-import sqlite3
-import queue
 import subprocess
-import logging
-import sys
 import psycopg2
+from psycopg2.extras import RealDictCursor
 
-logger = logging.getLogger(__name__)
-db_manager = None  # Initialized later in initialize_app()
-quantum_system = None  # CHANGED: Renamed from lattice_refresher to quantum_system
-latest_quantum_metrics = None  # Stores latest heartbeat metrics for API queries
-
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# QUANTUM BLOCK SYSTEM (Approach 3 + 5)
-# ═══════════════════════════════════════════════════════════════════════════════════════
-entropy_pool = None  # Shared entropy deque
-quantum_oracle = None  # Post-formation block enhancement
-quantum_witness_aggregator = None  # Witness chain during TX accumulation
-tx_pool = None  # Transaction pool for block formation
-tx_pool_lock = None  # Lock for thread-safe TX pool access
+# Import database configuration
+from db_config import DatabaseConnection, Config as DBConfig, setup_database, DatabaseBuilderManager
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# FLASK & DEPENDENCIES
+# ENSURE REQUIRED PACKAGES
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 def ensure_packages():
@@ -69,10 +57,15 @@ def ensure_packages():
     packages = {
         'flask': 'Flask',
         'flask_cors': 'Flask-CORS',
+        'flask_socketio': 'Flask-SocketIO',
         'psycopg2': 'psycopg2-binary',
         'jwt': 'PyJWT',
         'bcrypt': 'bcrypt',
-        'requests': 'requests'
+        'requests': 'requests',
+        'redis': 'redis',
+        'cryptography': 'cryptography',
+        'pyotp': 'pyotp',
+        'qrcode': 'qrcode[pil]'
     }
     
     for module, pip_name in packages.items():
@@ -84,11 +77,23 @@ def ensure_packages():
 
 ensure_packages()
 
-from flask import Flask, request, jsonify, g
+from flask import Flask, request, jsonify, g, Response, stream_with_context
 from flask_cors import CORS
+from flask_socketio import SocketIO, emit, join_room, leave_room
 import jwt
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import pyotp
+import qrcode
+from io import BytesIO
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa, ed25519, ec, padding
+from cryptography.hazmat.backends import default_backend
+from cryptography.fernet import Fernet
+
+try:
+    import redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # LOGGING CONFIGURATION
@@ -96,62 +101,114 @@ from psycopg2.extras import RealDictCursor
 
 logging.basicConfig(
     level=logging.INFO,
-    format='[%(asctime)s] [%(levelname)s] %(message)s',
+    format='[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s',
     handlers=[
-        logging.FileHandler('qtcl_api.log'),
+        logging.FileHandler('qtcl_unified.log'),
         logging.StreamHandler(sys.stdout)
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Set precision for Decimal calculations
+getcontext().prec = 28
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 class Config:
-    """Application configuration from environment variables"""
+    """Unified application configuration"""
     
     # Environment
     ENVIRONMENT = os.getenv('FLASK_ENV', 'production')
     DEBUG = ENVIRONMENT == 'development'
     
-    # Database Configuration (from db_config)
+    # Database (from db_config)
     DATABASE_HOST = DBConfig.SUPABASE_HOST
     DATABASE_USER = DBConfig.SUPABASE_USER
     DATABASE_PASSWORD = DBConfig.SUPABASE_PASSWORD
     DATABASE_PORT = DBConfig.SUPABASE_PORT
     DATABASE_NAME = DBConfig.SUPABASE_DB
-    
-    # Database Connection Pool (from db_config)
     DB_POOL_SIZE = DBConfig.DB_POOL_SIZE
     DB_POOL_TIMEOUT = DBConfig.DB_POOL_TIMEOUT
     DB_CONNECT_TIMEOUT = DBConfig.DB_CONNECT_TIMEOUT
     DB_RETRY_ATTEMPTS = DBConfig.DB_RETRY_ATTEMPTS
     DB_RETRY_DELAY = DBConfig.DB_RETRY_DELAY_SECONDS
     
-    # Security
+    # Security & Authentication
     JWT_SECRET = os.getenv('JWT_SECRET', secrets.token_urlsafe(64))
     JWT_ALGORITHM = 'HS512'
-    JWT_EXPIRATION_HOURS = 24
-    PASSWORD_HASH_ROUNDS = 12
+    JWT_EXPIRATION_HOURS = int(os.getenv('JWT_EXPIRATION_HOURS', '24'))
+    JWT_REFRESH_EXPIRATION_DAYS = int(os.getenv('JWT_REFRESH_EXPIRATION_DAYS', '30'))
+    PASSWORD_HASH_ROUNDS = int(os.getenv('PASSWORD_HASH_ROUNDS', '12'))
+    PASSWORD_MIN_LENGTH = int(os.getenv('PASSWORD_MIN_LENGTH', '12'))
+    ENABLE_2FA = os.getenv('ENABLE_2FA', 'true').lower() == 'true'
+    SESSION_TIMEOUT_MINUTES = int(os.getenv('SESSION_TIMEOUT_MINUTES', '60'))
+    MAX_LOGIN_ATTEMPTS = int(os.getenv('MAX_LOGIN_ATTEMPTS', '5'))
+    LOCKOUT_DURATION_MINUTES = int(os.getenv('LOCKOUT_DURATION_MINUTES', '30'))
     
     # Rate Limiting
-    RATE_LIMIT_REQUESTS = 100
-    RATE_LIMIT_PERIOD = 60  # seconds
+    RATE_LIMIT_ENABLED = os.getenv('RATE_LIMIT_ENABLED', 'true').lower() == 'true'
+    RATE_LIMIT_REQUESTS = int(os.getenv('RATE_LIMIT_REQUESTS', '100'))
+    RATE_LIMIT_PERIOD = int(os.getenv('RATE_LIMIT_PERIOD', '60'))  # seconds
+    
+    # Redis
+    REDIS_ENABLED = os.getenv('REDIS_ENABLED', 'false').lower() == 'true' and REDIS_AVAILABLE
+    REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
+    REDIS_PORT = int(os.getenv('REDIS_PORT', '6379'))
+    REDIS_DB = int(os.getenv('REDIS_DB', '0'))
+    REDIS_PASSWORD = os.getenv('REDIS_PASSWORD', None)
     
     # API
-    API_VERSION = '3.2.1'
-    API_TITLE = 'QTCL Blockchain API'
-    
-    # ✅ APP_URL for heartbeat callbacks (quantum engine)
+    API_VERSION = '4.0.0'
+    API_TITLE = 'QTCL Unified Blockchain API'
     PORT = os.getenv('PORT', '5000')
+    HOST = os.getenv('HOST', '0.0.0.0')
     APP_URL = os.getenv('APP_URL', f'http://localhost:{PORT}')
+    
+    # CORS
+    ALLOWED_ORIGINS = os.getenv('ALLOWED_ORIGINS', '*').split(',')
+    
+    # Features
+    ENABLE_WEBSOCKET = os.getenv('ENABLE_WEBSOCKET', 'true').lower() == 'true'
+    ENABLE_QUANTUM = os.getenv('ENABLE_QUANTUM', 'true').lower() == 'true'
+    ENABLE_DEFI = os.getenv('ENABLE_DEFI', 'true').lower() == 'true'
+    ENABLE_GOVERNANCE = os.getenv('ENABLE_GOVERNANCE', 'true').lower() == 'true'
+    ENABLE_NFT = os.getenv('ENABLE_NFT', 'true').lower() == 'true'
+    ENABLE_SMART_CONTRACTS = os.getenv('ENABLE_SMART_CONTRACTS', 'true').lower() == 'true'
+    ENABLE_BRIDGE = os.getenv('ENABLE_BRIDGE', 'true').lower() == 'true'
+    ENABLE_MULTISIG = os.getenv('ENABLE_MULTISIG', 'true').lower() == 'true'
+    ENABLE_ORACLE = os.getenv('ENABLE_ORACLE', 'true').lower() == 'true'
+
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# DATABASE CONNECTION MANAGER
+# GLOBAL STATE
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+db_manager = None
+quantum_system = None
+latest_quantum_metrics = None
+entropy_pool = None
+quantum_oracle = None
+quantum_witness_aggregator = None
+tx_pool = None
+tx_pool_lock = None
+redis_client = None
+socketio = None
+
+# Rate limiting storage
+rate_limit_store = defaultdict(lambda: {'count': 0, 'reset_time': time.time()})
+rate_limit_lock = threading.Lock()
+
+# Login attempt tracking
+login_attempts = defaultdict(lambda: {'count': 0, 'lockout_until': None})
+login_attempts_lock = threading.Lock()
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# DATABASE MANAGER
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 class DatabaseManager:
-    """Database manager that wraps db_config.DatabaseConnection"""
+    """Unified database manager wrapping db_config.DatabaseConnection"""
     
     def __init__(self):
         self.db_connection = None
@@ -162,6 +219,142 @@ class DatabaseManager:
         """Get a database connection from the pool"""
         return DatabaseConnection.get_connection()
     
+    def execute_query(self, query: str, params: Tuple = (), fetch: bool = True) -> List[Dict]:
+        """Execute a query and return results"""
+        conn = self.get_connection()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(query, params)
+                if fetch:
+                    return [dict(row) for row in cur.fetchall()]
+                conn.commit()
+                return []
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"[DB] Query error: {e}")
+            raise
+        finally:
+            conn.close()
+    
+    def get_user_by_email(self, email: str) -> Optional[Dict]:
+        """Get user by email"""
+        try:
+            result = self.execute_query(
+                "SELECT * FROM users WHERE email = %s LIMIT 1",
+                (email,)
+            )
+            return result[0] if result else None
+        except Exception as e:
+            logger.error(f"[DB] Get user by email error: {e}")
+            return None
+    
+    def get_user_by_id(self, user_id: str) -> Optional[Dict]:
+        """Get user by ID"""
+        try:
+            result = self.execute_query(
+                "SELECT * FROM users WHERE user_id = %s LIMIT 1",
+                (user_id,)
+            )
+            return result[0] if result else None
+        except Exception as e:
+            logger.error(f"[DB] Get user by ID error: {e}")
+            return None
+    
+    def create_user(self, email: str, password: str, name: str = None) -> Optional[Dict]:
+        """Create new user with hashed password"""
+        try:
+            user_id = f"user_{uuid.uuid4().hex[:12]}"
+            password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+            
+            conn = self.get_connection()
+            try:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("""
+                        INSERT INTO users (user_id, email, password_hash, name, role, balance, is_active, kyc_verified)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        RETURNING *
+                    """, (user_id, email, password_hash, name or email.split('@')[0], 'user', 0, True, False))
+                    user = dict(cur.fetchone())
+                    conn.commit()
+                    return user
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.error(f"[DB] Create user error: {e}")
+            return None
+    
+    def verify_password(self, password: str, password_hash: str) -> bool:
+        """Verify password against hash"""
+        try:
+            return bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
+        except Exception as e:
+            logger.error(f"[DB] Password verification error: {e}")
+            return False
+    
+    def update_user_2fa(self, user_id: str, totp_secret: str = None, enabled: bool = False) -> bool:
+        """Update user 2FA settings"""
+        try:
+            conn = self.get_connection()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE users 
+                        SET totp_secret = %s, two_factor_enabled = %s, updated_at = NOW()
+                        WHERE user_id = %s
+                    """, (totp_secret, enabled, user_id))
+                    conn.commit()
+                    return True
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.error(f"[DB] Update 2FA error: {e}")
+            return False
+    
+    def submit_transaction(self, sender_id: str, receiver_id: str, amount: float) -> Tuple[Optional[str], Optional[str]]:
+        """Submit a transaction"""
+        try:
+            # Validate sender has sufficient balance
+            sender = self.get_user_by_id(sender_id)
+            if not sender:
+                return None, "Sender not found"
+            
+            if float(sender.get('balance', 0)) < amount:
+                return None, "Insufficient balance"
+            
+            # Validate receiver exists
+            receiver = self.get_user_by_id(receiver_id)
+            if not receiver:
+                return None, "Receiver not found"
+            
+            # Create transaction
+            tx_id = f"tx_{uuid.uuid4().hex}"
+            conn = self.get_connection()
+            try:
+                with conn.cursor() as cur:
+                    # Deduct from sender
+                    cur.execute("""
+                        UPDATE users SET balance = balance - %s WHERE user_id = %s
+                    """, (amount, sender_id))
+                    
+                    # Add to receiver
+                    cur.execute("""
+                        UPDATE users SET balance = balance + %s WHERE user_id = %s
+                    """, (amount, receiver_id))
+                    
+                    # Record transaction
+                    cur.execute("""
+                        INSERT INTO transactions (tx_id, from_user_id, to_user_id, amount, tx_type, status, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                    """, (tx_id, sender_id, receiver_id, amount, 'transfer', 'pending'))
+                    
+                    conn.commit()
+                    return tx_id, None
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.error(f"[DB] Submit transaction error: {e}")
+            return None, str(e)
+    
     def seed_test_user(self):
         """Create admin user shemshallah@gmail.com with SUPABASE_PASSWORD"""
         try:
@@ -169,25 +362,24 @@ class DatabaseManager:
             admin_name = 'shemshallah'
             admin_user_id = 'admin_001'
             
+            # Check if admin exists
+            existing = self.get_user_by_email(admin_email)
+            if existing:
+                logger.info(f"[DB] ✓ Admin user already exists: {admin_email}")
+                return True
+            
+            # Get password from environment
+            admin_password = os.getenv('SUPABASE_PASSWORD')
+            if not admin_password:
+                logger.error("[DB] ✗ SUPABASE_PASSWORD env variable not set - cannot create admin")
+                return False
+            
+            # Create admin
+            password_hash = bcrypt.hashpw(admin_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+            
             conn = self.get_connection()
             try:
                 with conn.cursor() as cur:
-                    # Check if admin already exists
-                    cur.execute("SELECT user_id FROM users WHERE email = %s", (admin_email,))
-                    if cur.fetchone():
-                        logger.info(f"[DB] ✓ Admin user already exists: {admin_email}")
-                        return True
-                    
-                    # Get password from SUPABASE_PASSWORD env var (required)
-                    admin_password = os.getenv('SUPABASE_PASSWORD')
-                    if not admin_password:
-                        logger.error("[DB] ✗ SUPABASE_PASSWORD env variable not set - cannot create admin")
-                        return False
-                    
-                    # Hash password
-                    password_hash = bcrypt.hashpw(admin_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-                    
-                    # Insert admin user
                     cur.execute("""
                         INSERT INTO users (user_id, email, password_hash, name, role, balance, is_active, kyc_verified)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
@@ -195,235 +387,139 @@ class DatabaseManager:
                     """, (admin_user_id, admin_email, password_hash, admin_name, 'admin', 1000000, True, True))
                     conn.commit()
                     
-                    logger.info(f"[DB] ✓ Admin user created")
-                    logger.info(f"[DB]   Email: {admin_email}")
-                    logger.info(f"[DB]   Name: {admin_name}")
-                    logger.info(f"[DB]   Role: admin")
-                    logger.info(f"[DB]   Balance: 1,000,000 QTCL")
-                    return True
+                logger.info(f"[DB] ✓ Admin user created: {admin_email}")
+                return True
             finally:
-                DatabaseConnection.return_connection(conn)
+                conn.close()
         except Exception as e:
-            logger.error(f"[DB] ✗ Failed to seed admin user: {e}")
-            return False
-    
-    def execute_query(self, query: str, params: tuple = None):
-        """Execute SELECT query and return results"""
-        return DatabaseConnection.execute(query, params)
-    
-    def execute_update(self, query: str, params: tuple = None):
-        """Execute INSERT/UPDATE/DELETE query"""
-        return DatabaseConnection.execute_update(query, params)
-    
-    def execute_one(self, query: str, params: tuple = None):
-        """Execute SELECT query and return first result"""
-        return DatabaseConnection.execute_one(query, params)
-    
-    def get_user_by_email(self, email: str):
-        """Get user by email address"""
-        return self.execute_one("SELECT * FROM users WHERE email = %s", (email,))
-    
-    def get_user_by_id(self, user_id: str):
-        """Get user by user ID"""
-        return self.execute_one("SELECT * FROM users WHERE user_id = %s", (user_id,))
-    
-    def create_user(self, email: str, password: str, name: str = None):
-        """Create a new user"""
-        try:
-            user_id = f"user_{secrets.token_urlsafe(16)}"
-            password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-            
-            self.execute_update("""
-                INSERT INTO users (user_id, email, password_hash, name, role, balance, is_active, kyc_verified)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """, (user_id, email, password_hash, name or email.split('@')[0], 'user', 100, True, False))
-            
-            return self.get_user_by_id(user_id)
-        except Exception as e:
-            logger.error(f"[DB] Failed to create user: {e}")
-            return None
-    
-    def verify_password(self, password: str, password_hash: str) -> bool:
-        """Verify password against hash"""
-        try:
-            return bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
-        except Exception:
-            return False
-    
-    def get_latest_blocks(self, limit: int = 10):
-        """Get latest blocks"""
-        return self.execute_query("""
-            SELECT * FROM blocks 
-            ORDER BY block_number DESC 
-            LIMIT %s
-        """, (limit,))
-    
-    def get_transactions(self, limit: int = 20, user_id: str = None):
-        """Get transactions (all or filtered by user)"""
-        if user_id:
-            return self.execute_query("""
-                SELECT * FROM transactions 
-                WHERE sender_id = %s OR receiver_id = %s
-                ORDER BY timestamp DESC 
-                LIMIT %s
-            """, (user_id, user_id, limit))
-        else:
-            return self.execute_query("""
-                SELECT * FROM transactions 
-                ORDER BY timestamp DESC 
-                LIMIT %s
-            """, (limit,))
-    
-    def submit_transaction(self, sender_id: str, receiver_id: str, amount: float, transaction_type: str = 'transfer'):
-        """Submit a new transaction"""
-        try:
-            tx_id = f"tx_{secrets.token_urlsafe(16)}"
-            tx_hash = hashlib.sha256(f"{tx_id}{sender_id}{receiver_id}{amount}{time.time()}".encode()).hexdigest()
-            
-            # Check sender balance
-            sender = self.get_user_by_id(sender_id)
-            if not sender or sender.get('balance', 0) < amount:
-                return None, "Insufficient balance"
-            
-            # Insert transaction
-            self.execute_update("""
-                INSERT INTO transactions 
-                (transaction_id, transaction_hash, sender_id, receiver_id, amount, transaction_type, status, timestamp)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """, (tx_id, tx_hash, sender_id, receiver_id, amount, transaction_type, 'pending', datetime.utcnow()))
-            
-            # Update balances
-            self.execute_update("UPDATE users SET balance = balance - %s WHERE user_id = %s", (amount, sender_id))
-            self.execute_update("UPDATE users SET balance = balance + %s WHERE user_id = %s", (amount, receiver_id))
-            
-            # Mark as confirmed
-            self.execute_update("UPDATE transactions SET status = 'confirmed' WHERE transaction_id = %s", (tx_id,))
-            
-            return tx_id, None
-        except Exception as e:
-            logger.error(f"[DB] Failed to submit transaction: {e}")
-            return None, str(e)
-    
-    def initialize_schema(self):
-        """Initialize database schema if needed"""
-        try:
-            conn = self.get_connection()
-            try:
-                with conn.cursor() as cur:
-                    # Check if tables exist
-                    cur.execute("""
-                        SELECT table_name FROM information_schema.tables 
-                        WHERE table_schema = 'public' AND table_name IN ('users', 'blocks', 'transactions')
-                    """)
-                    existing_tables = [row[0] for row in cur.fetchall()]
-                    
-                    if len(existing_tables) >= 3:
-                        logger.info(f"[DB] Schema already initialized: {existing_tables}")
-                        return True
-                    
-                    logger.info("[DB] Initializing schema...")
-                    
-                    # Users table
-                    cur.execute("""
-                        CREATE TABLE IF NOT EXISTS users (
-                            user_id VARCHAR(255) PRIMARY KEY,
-                            email VARCHAR(255) UNIQUE NOT NULL,
-                            password_hash VARCHAR(255) NOT NULL,
-                            name VARCHAR(255),
-                            role VARCHAR(50) DEFAULT 'user',
-                            balance NUMERIC(20, 8) DEFAULT 0,
-                            is_active BOOLEAN DEFAULT TRUE,
-                            kyc_verified BOOLEAN DEFAULT FALSE,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                        )
-                    """)
-                    
-                    # Blocks table
-                    cur.execute("""
-                        CREATE TABLE IF NOT EXISTS blocks (
-                            block_id VARCHAR(255) PRIMARY KEY,
-                            block_number BIGINT UNIQUE NOT NULL,
-                            block_hash VARCHAR(255) UNIQUE NOT NULL,
-                            previous_hash VARCHAR(255),
-                            merkle_root VARCHAR(255),
-                            timestamp TIMESTAMP NOT NULL,
-                            miner_id VARCHAR(255),
-                            difficulty INTEGER DEFAULT 1,
-                            nonce BIGINT DEFAULT 0
-                        )
-                    """)
-                    
-                    # Transactions table
-                    cur.execute("""
-                        CREATE TABLE IF NOT EXISTS transactions (
-                            transaction_id VARCHAR(255) PRIMARY KEY,
-                            transaction_hash VARCHAR(255) UNIQUE NOT NULL,
-                            sender_id VARCHAR(255),
-                            receiver_id VARCHAR(255),
-                            amount NUMERIC(20, 8) NOT NULL,
-                            transaction_type VARCHAR(50) DEFAULT 'transfer',
-                            status VARCHAR(50) DEFAULT 'pending',
-                            block_id VARCHAR(255),
-                            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            FOREIGN KEY (sender_id) REFERENCES users(user_id),
-                            FOREIGN KEY (receiver_id) REFERENCES users(user_id),
-                            FOREIGN KEY (block_id) REFERENCES blocks(block_id)
-                        )
-                    """)
-                    
-                    conn.commit()
-                    logger.info("[DB] ✓ Schema initialized")
-                    return True
-            finally:
-                DatabaseConnection.return_connection(conn)
-        except Exception as e:
-            logger.error(f"[DB] Failed to initialize schema: {e}")
+            logger.error(f"[DB] Seed test user error: {e}")
             return False
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# JWT AUTHENTICATION
+# AUTHENTICATION & SECURITY
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-def generate_token(user_id: str, role: str = 'user') -> str:
+def generate_token(user_id: str, role: str = 'user', expiration_hours: int = None) -> str:
     """Generate JWT token"""
+    expiration = expiration_hours or Config.JWT_EXPIRATION_HOURS
     payload = {
         'user_id': user_id,
         'role': role,
-        'exp': datetime.utcnow() + timedelta(hours=Config.JWT_EXPIRATION_HOURS),
-        'iat': datetime.utcnow()
+        'exp': datetime.utcnow() + timedelta(hours=expiration),
+        'iat': datetime.utcnow(),
+        'jti': secrets.token_urlsafe(16)
     }
     return jwt.encode(payload, Config.JWT_SECRET, algorithm=Config.JWT_ALGORITHM)
 
 def verify_token(token: str) -> Optional[Dict]:
-    """Verify JWT token"""
+    """Verify and decode JWT token"""
     try:
         payload = jwt.decode(token, Config.JWT_SECRET, algorithms=[Config.JWT_ALGORITHM])
         return payload
     except jwt.ExpiredSignatureError:
-        logger.warning("[AUTH] Token expired")
+        logger.warning("[Auth] Token expired")
         return None
-    except jwt.InvalidTokenError:
-        logger.warning("[AUTH] Invalid token")
+    except jwt.InvalidTokenError as e:
+        logger.warning(f"[Auth] Invalid token: {e}")
         return None
 
+def validate_password_strength(password: str) -> Tuple[bool, Optional[str]]:
+    """Validate password meets security requirements"""
+    if len(password) < Config.PASSWORD_MIN_LENGTH:
+        return False, f"Password must be at least {Config.PASSWORD_MIN_LENGTH} characters"
+    
+    if not re.search(r'[A-Z]', password):
+        return False, "Password must contain at least one uppercase letter"
+    
+    if not re.search(r'[a-z]', password):
+        return False, "Password must contain at least one lowercase letter"
+    
+    if not re.search(r'[0-9]', password):
+        return False, "Password must contain at least one digit"
+    
+    if not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
+        return False, "Password must contain at least one special character"
+    
+    return True, None
+
+def validate_email(email: str) -> bool:
+    """Validate email format"""
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    return re.match(pattern, email) is not None
+
+def sanitize_input(text: str, max_length: int = 1000) -> str:
+    """Sanitize user input"""
+    if not text:
+        return ""
+    # Remove null bytes and limit length
+    text = text.replace('\x00', '').strip()[:max_length]
+    return text
+
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# DECORATORS
+# RATE LIMITING
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+def check_rate_limit(identifier: str) -> Tuple[bool, Optional[int]]:
+    """Check if request is within rate limit. Returns (allowed, retry_after)"""
+    if not Config.RATE_LIMIT_ENABLED:
+        return True, None
+    
+    with rate_limit_lock:
+        current_time = time.time()
+        limit_data = rate_limit_store[identifier]
+        
+        # Reset if period expired
+        if current_time >= limit_data['reset_time']:
+            limit_data['count'] = 0
+            limit_data['reset_time'] = current_time + Config.RATE_LIMIT_PERIOD
+        
+        # Check limit
+        if limit_data['count'] >= Config.RATE_LIMIT_REQUESTS:
+            retry_after = int(limit_data['reset_time'] - current_time)
+            return False, retry_after
+        
+        limit_data['count'] += 1
+        return True, None
+
+def rate_limited(f):
+    """Decorator for rate limiting"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # Use IP address as identifier
+        identifier = request.remote_addr or 'unknown'
+        
+        allowed, retry_after = check_rate_limit(identifier)
+        if not allowed:
+            return jsonify({
+                'status': 'error',
+                'message': 'Rate limit exceeded',
+                'code': 'RATE_LIMIT_EXCEEDED',
+                'retry_after': retry_after
+            }), 429
+        
+        return f(*args, **kwargs)
+    return decorated_function
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# AUTHENTICATION DECORATORS
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 def require_auth(f):
-    """Decorator to require authentication"""
+    """Decorator requiring valid JWT token"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        token = request.headers.get('Authorization', '').replace('Bearer ', '')
+        auth_header = request.headers.get('Authorization', '')
         
-        if not token:
+        if not auth_header.startswith('Bearer '):
             return jsonify({
                 'status': 'error',
-                'message': 'Missing authentication token',
-                'code': 'MISSING_TOKEN'
+                'message': 'Missing or invalid authorization header',
+                'code': 'UNAUTHORIZED'
             }), 401
         
+        token = auth_header[7:]  # Remove 'Bearer ' prefix
         payload = verify_token(token)
+        
         if not payload:
             return jsonify({
                 'status': 'error',
@@ -431,445 +527,719 @@ def require_auth(f):
                 'code': 'INVALID_TOKEN'
             }), 401
         
-        # Store user info in g for access in route
+        # Store user info in request context
         g.user_id = payload.get('user_id')
         g.user_role = payload.get('role', 'user')
         
         return f(*args, **kwargs)
-    
     return decorated_function
 
-# Rate limiting state
-rate_limit_store = {}
-rate_limit_lock = threading.Lock()
-
-def rate_limited(f):
-    """Decorator for rate limiting"""
+def require_admin(f):
+    """Decorator requiring admin role"""
     @wraps(f)
+    @require_auth
     def decorated_function(*args, **kwargs):
-        # Get client IP
-        client_ip = request.remote_addr
-        current_time = time.time()
-        
-        with rate_limit_lock:
-            # Clean old entries
-            rate_limit_store[client_ip] = [
-                t for t in rate_limit_store.get(client_ip, [])
-                if current_time - t < Config.RATE_LIMIT_PERIOD
-            ]
-            
-            # Check limit
-            if len(rate_limit_store.get(client_ip, [])) >= Config.RATE_LIMIT_REQUESTS:
-                return jsonify({
-                    'status': 'error',
-                    'message': 'Rate limit exceeded',
-                    'code': 'RATE_LIMIT_EXCEEDED'
-                }), 429
-            
-            # Add current request
-            rate_limit_store.setdefault(client_ip, []).append(current_time)
-        
+        if g.user_role != 'admin':
+            return jsonify({
+                'status': 'error',
+                'message': 'Admin access required',
+                'code': 'FORBIDDEN'
+            }), 403
         return f(*args, **kwargs)
-    
     return decorated_function
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# ERROR HANDLING
+# ═══════════════════════════════════════════════════════════════════════════════════════
 
 def handle_exceptions(f):
-    """Decorator to handle exceptions"""
+    """Decorator for comprehensive exception handling"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
         try:
             return f(*args, **kwargs)
         except Exception as e:
-            logger.error(f"[API] Unhandled exception in {f.__name__}: {e}")
-            logger.error(traceback.format_exc())
+            logger.error(f"[Error] {f.__name__}: {e}", exc_info=True)
             return jsonify({
                 'status': 'error',
                 'message': 'Internal server error',
                 'code': 'INTERNAL_ERROR'
             }), 500
-    
     return decorated_function
 
-# Alias for compatibility
-handle_errors = handle_exceptions
-
-
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# QUANTUM LATTICE INITIALIZATION (INTEGRATION DROPS SECTION 2 & 3)
+# FLASK APPLICATION FACTORY
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-def initialize_quantum_system():
-    """Initialize Quantum Lattice Control Live V5 system (ONE-TIME ONLY across all workers)"""
-    global quantum_system
+def create_app():
+    """Create and configure Flask application"""
+    global db_manager, redis_client, socketio
     
-    # ✅ GUARD: Use file-based lock to prevent initialization race condition across forked workers
-    lock_file = '/tmp/qtcl_quantum_init.lock'
+    app = Flask(__name__)
+    app.config['SECRET_KEY'] = Config.JWT_SECRET
+    app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max request size
     
-    try:
-        # Try to create lock file exclusively (fails if exists = another worker got here first)
-        import os
-        fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.close(fd)
-        is_first_worker = True
-    except FileExistsError:
-        # Lock file exists = another worker is initializing or already initialized
-        # This worker should SKIP initialization entirely
-        logger.info("[QUANTUM] ✓ Another worker is initializing/initialized quantum system, skipping...")
-        return True  # ✅ Don't initialize, just return success
+    # Configure CORS
+    CORS(app, resources={
+        r"/api/*": {
+            "origins": Config.ALLOWED_ORIGINS,
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization"],
+            "supports_credentials": True,
+            "max_age": 3600
+        }
+    })
     
-    # Only FIRST worker reaches here
-    try:
-        logger.info("[QUANTUM] Attempting to import quantum_lattice_control_live_complete...")
-        
-        # INTEGRATION DROP: Import new system
+    # Initialize SocketIO if enabled
+    if Config.ENABLE_WEBSOCKET:
+        socketio = SocketIO(app, cors_allowed_origins=Config.ALLOWED_ORIGINS, async_mode='threading')
+        logger.info("[WebSocket] SocketIO initialized")
+    
+    # Initialize Redis if enabled
+    if Config.REDIS_ENABLED:
         try:
-            from quantum_lattice_control_live_complete import initialize_system
-            logger.info("[QUANTUM] ✓ Quantum Lattice Control Live V5 found")
-        except ImportError:
-            logger.warning("[QUANTUM] ⚠ Quantum Lattice Control Live V5 module not found")
-            logger.info("[QUANTUM] Attempting fallback to legacy system...")
-            
-            # Fallback to old system if new one not available
-            try:
-                from quantum_lattice_refresh_enhanced import create_lattice_refresher
-                logger.info("[QUANTUM] ✓ Enhanced legacy version found")
-                from flask import Flask
-                dummy_app = Flask('quantum_dummy')
-                quantum_system = create_lattice_refresher(dummy_app, db_manager)
-                logger.info("[QUANTUM] ✓ Legacy lattice refresher initialized")
-                return True
-            except ImportError:
-                try:
-                    from quantum_lattice_refresh import create_lattice_refresher
-                    logger.info("[QUANTUM] ✓ Standard legacy version found")
-                    from flask import Flask
-                    dummy_app = Flask('quantum_dummy')
-                    quantum_system = create_lattice_refresher(dummy_app, db_manager)
-                    logger.info("[QUANTUM] ✓ Legacy lattice refresher initialized")
-                    return True
-                except ImportError:
-                    logger.warning("[QUANTUM] ⚠ No quantum system module found")
-                    return False
+            redis_client = redis.Redis(
+                host=Config.REDIS_HOST,
+                port=Config.REDIS_PORT,
+                db=Config.REDIS_DB,
+                password=Config.REDIS_PASSWORD,
+                decode_responses=True,
+                socket_connect_timeout=5
+            )
+            redis_client.ping()
+            logger.info("[Redis] Connected successfully")
+        except Exception as e:
+            logger.warning(f"[Redis] Connection failed: {e}")
+            redis_client = None
+    
+    # Initialize database manager
+    db_manager = DatabaseManager()
+    
+    # Setup routes
+    setup_routes(app)
+    
+    # Setup error handlers
+    setup_error_handlers(app)
+    
+    # Setup middleware
+    setup_middleware(app)
+    
+    # Setup WebSocket handlers if enabled
+    if Config.ENABLE_WEBSOCKET and socketio:
+        setup_websocket_handlers(socketio)
+    
+    logger.info(f"[App] Flask application created - Version {Config.API_VERSION}")
+    
+    return app
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# MIDDLEWARE
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+def setup_middleware(app):
+    """Setup request/response middleware"""
+    
+    @app.before_request
+    def before_request():
+        """Pre-request processing"""
+        g.request_start_time = time.time()
+        g.request_id = str(uuid.uuid4())
         
-        # INTEGRATION DROP: Create database config for new system
-        db_config = {
-            'host': Config.DATABASE_HOST,
-            'user': Config.DATABASE_USER,
-            'password': Config.DATABASE_PASSWORD,
-            'database': Config.DATABASE_NAME,
-            'port': Config.DATABASE_PORT
+        # Log request
+        logger.info(f"[Request] {request.method} {request.path} - ID: {g.request_id}")
+    
+    @app.after_request
+    def after_request(response):
+        """Post-request processing"""
+        # Add security headers
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['X-Frame-Options'] = 'DENY'
+        response.headers['X-XSS-Protection'] = '1; mode=block'
+        response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
+        
+        # Add API version header
+        response.headers['X-API-Version'] = Config.API_VERSION
+        
+        # Add request ID
+        if hasattr(g, 'request_id'):
+            response.headers['X-Request-ID'] = g.request_id
+        
+        # Log response time
+        if hasattr(g, 'request_start_time'):
+            elapsed = (time.time() - g.request_start_time) * 1000
+            logger.info(f"[Response] {request.method} {request.path} - {response.status_code} - {elapsed:.2f}ms")
+        
+        return response
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# ERROR HANDLERS
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+def setup_error_handlers(app):
+    """Setup global error handlers"""
+    
+    @app.errorhandler(400)
+    def bad_request(error):
+        return jsonify({
+            'status': 'error',
+            'message': 'Bad request',
+            'code': 'BAD_REQUEST'
+        }), 400
+    
+    @app.errorhandler(401)
+    def unauthorized(error):
+        return jsonify({
+            'status': 'error',
+            'message': 'Unauthorized',
+            'code': 'UNAUTHORIZED'
+        }), 401
+    
+    @app.errorhandler(403)
+    def forbidden(error):
+        return jsonify({
+            'status': 'error',
+            'message': 'Forbidden',
+            'code': 'FORBIDDEN'
+        }), 403
+    
+    @app.errorhandler(404)
+    def not_found(error):
+        return jsonify({
+            'status': 'error',
+            'message': 'Endpoint not found',
+            'code': 'NOT_FOUND'
+        }), 404
+    
+    @app.errorhandler(405)
+    def method_not_allowed(error):
+        return jsonify({
+            'status': 'error',
+            'message': 'Method not allowed',
+            'code': 'METHOD_NOT_ALLOWED'
+        }), 405
+    
+    @app.errorhandler(429)
+    def rate_limit_exceeded(error):
+        return jsonify({
+            'status': 'error',
+            'message': 'Rate limit exceeded',
+            'code': 'RATE_LIMIT_EXCEEDED'
+        }), 429
+    
+    @app.errorhandler(500)
+    def internal_error(error):
+        logger.error(f"[Error] Internal server error: {error}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Internal server error',
+            'code': 'INTERNAL_ERROR'
+        }), 500
+    
+    @app.errorhandler(Exception)
+    def handle_exception(error):
+        logger.error(f"[Error] Unhandled exception: {error}", exc_info=True)
+        return jsonify({
+            'status': 'error',
+            'message': 'An unexpected error occurred',
+            'code': 'UNEXPECTED_ERROR'
+        }), 500
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# API ROUTES
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+def setup_routes(app):
+    """Setup all API routes - standardized to /api/* (no versioning)"""
+    
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    # HEALTH & STATUS
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    
+    @app.route('/health', methods=['GET'])
+    @rate_limited
+    @handle_exceptions
+    def health():
+        """Comprehensive health check"""
+        health_status = {
+            'status': 'healthy',
+            'timestamp': datetime.utcnow().isoformat(),
+            'version': Config.API_VERSION,
+            'environment': Config.ENVIRONMENT,
+            'services': {
+                'api': 'operational',
+                'database': 'unknown',
+                'redis': 'unknown',
+                'websocket': 'unknown'
+            }
         }
         
-        # INTEGRATION DROP: Initialize with database config
-        logger.info("[QUANTUM] Initializing Quantum Lattice Control Live V5...")
-        quantum_system = initialize_system(db_config)
-        
-        # INTEGRATION DROP: Start the system
-        quantum_system.start()
-        logger.info("[QUANTUM] ✓ Quantum system started")
-        
-        # Start background execution loop
-        def quantum_loop():
-            """Background loop for quantum cycle execution"""
-            logger.info("[QUANTUM] Background quantum loop started")
-            while True:
-                try:
-                    if quantum_system and hasattr(quantum_system, 'running') and quantum_system.running:
-                        # INTEGRATION DROP: Execute cycle using new method
-                        result = quantum_system.execute_cycle()
-                        if result:
-                            logger.debug(f"[QUANTUM] Cycle {result.get('cycle', 0)} completed: "
-                                       f"coherence={result.get('avg_coherence', 0):.4f}, "
-                                       f"fidelity={result.get('avg_fidelity', 0):.4f}")
-                    time.sleep(0.1)  # Brief pause between cycles
-                except Exception as e:
-                    logger.error(f"[QUANTUM] Quantum loop error: {e}")
-                    time.sleep(1)
-        
-        # Start daemon thread
-        thread = threading.Thread(target=quantum_loop, daemon=True)
-        thread.start()
-        
-        logger.info("[QUANTUM] ✓ Quantum Lattice Control Live V5 initialized successfully")
-        logger.info("[QUANTUM]   Features:")
-        logger.info("[QUANTUM]   ✓ Real quantum entropy from 3 QRNG sources")
-        logger.info("[QUANTUM]   ✓ Non-Markovian noise bath with memory kernel")
-        logger.info("[QUANTUM]   ✓ Adaptive neural network sigma control")
-        logger.info("[QUANTUM]   ✓ Real-time metrics streaming to database")
-        logger.info("[QUANTUM]   ✓ System analytics with anomaly detection")
-        logger.info("[QUANTUM]   ✓ Automatic checkpointing and recovery")
-        logger.info("[QUANTUM]   Background refresh: ACTIVE")
-        
-        # ✅ IMPORTANT: DO NOT REMOVE LOCK FILE
-        # Keep it for entire process lifetime to prevent other workers from initializing
-        logger.info("[QUANTUM] Lock file retained for process lifetime - only ONE quantum system will run")
-        
-        return True
-    
-    except Exception as e:
-        logger.error(f"[QUANTUM] ✗ Failed to initialize: {e}")
-        logger.error(traceback.format_exc())
-        return False
-
-def setup_routes(flask_app):
-    """Register all routes on app instance (error handlers registered in create_app)"""
-    global db_manager
-    
-    # Note: Error handlers are now registered separately in register_error_handlers()
-    # called from create_app() to prevent duplicate registration
-    
-    
-    @flask_app.before_request
-    def before_request():
-        """Pre-request hook"""
-        pass
-    
-    @flask_app.after_request
-    def after_request(response):
-        """Post-request hook"""
-        response.headers['X-API-Version'] = Config.API_VERSION
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        return response
-    
-    # ═══════════════════════════════════════════════════════════════════════════════════════
-    # HEALTH & STATUS ENDPOINTS
-    # ═══════════════════════════════════════════════════════════════════════════════════════
-    
-    @flask_app.route('/health', methods=['GET'])
-    @rate_limited
-    @handle_exceptions
-    def health_check():
-        """Health check endpoint"""
+        # Check database
         try:
-            # Try to connect to database
-            result = db_manager.execute_query("SELECT 1")
-            db_healthy = len(result) > 0
-            
-            return jsonify({
-                'status': 'healthy',
-                'timestamp': datetime.utcnow().isoformat(),
-                'api_version': Config.API_VERSION,
-                'services': {
-                    'api': 'operational',
-                    'database': 'operational' if db_healthy else 'degraded'
-                }
-            }), 200
+            db_manager.execute_query("SELECT 1")
+            health_status['services']['database'] = 'operational'
         except Exception as e:
-            logger.error(f"[API] Health check failed: {e}")
-            return jsonify({
-                'status': 'unhealthy',
-                'timestamp': datetime.utcnow().isoformat(),
-                'api_version': Config.API_VERSION,
-                'services': {
-                    'api': 'operational',
-                    'database': 'down'
-                }
-            }), 503
-    
-    @flask_app.route('/api/status', methods=['GET'])
-    @rate_limited
-    @handle_exceptions
-    def api_status():
-        """Get API status"""
-        return jsonify({
-            'status': 'operational',
-            'version': Config.API_VERSION,
-            'timestamp': datetime.utcnow().isoformat(),
-            'environment': Config.ENVIRONMENT
-        }), 200
-    
-    # ═══════════════════════════════════════════════════════════════════════════════════════
-    # AUTHENTICATION ENDPOINTS
-    # ═══════════════════════════════════════════════════════════════════════════════════════
-    
-    @flask_app.route('/api/auth/login', methods=['POST'])
-    @rate_limited
-    @handle_exceptions
-    def login():
-        """User login"""
-        try:
-            data = request.get_json() or {}
-            
-            email = data.get('email', '').strip()
-            password = data.get('password', '').strip()
-            
-            if not email or not password:
-                return jsonify({
-                    'status': 'error',
-                    'message': 'Email and password required',
-                    'code': 'MISSING_CREDENTIALS'
-                }), 400
-            
-            # Get user
-            user = db_manager.get_user_by_email(email)
-            if not user:
-                return jsonify({
-                    'status': 'error',
-                    'message': 'Invalid credentials',
-                    'code': 'INVALID_CREDENTIALS'
-                }), 401
-            
-            # Verify password
-            if not db_manager.verify_password(password, user['password_hash']):
-                return jsonify({
-                    'status': 'error',
-                    'message': 'Invalid credentials',
-                    'code': 'INVALID_CREDENTIALS'
-                }), 401
-            
-            # Generate token
-            token = generate_token(user['user_id'], user.get('role', 'user'))
-            
-            return jsonify({
-                'status': 'success',
-                'token': token,
-                'user': {
-                    'user_id': user['user_id'],
-                    'email': user['email'],
-                    'name': user.get('name'),
-                    'role': user.get('role', 'user'),
-                    'balance': float(user.get('balance', 0))
-                }
-            }), 200
+            health_status['services']['database'] = 'degraded'
+            health_status['status'] = 'degraded'
+            logger.error(f"[Health] Database check failed: {e}")
         
-        except Exception as e:
-            logger.error(f"[API] Login error: {e}")
-            return jsonify({
-                'status': 'error',
-                'message': 'Login failed',
-                'code': 'LOGIN_ERROR'
-            }), 500
+        # Check Redis
+        if Config.REDIS_ENABLED and redis_client:
+            try:
+                redis_client.ping()
+                health_status['services']['redis'] = 'operational'
+            except Exception as e:
+                health_status['services']['redis'] = 'degraded'
+                logger.error(f"[Health] Redis check failed: {e}")
+        else:
+            health_status['services']['redis'] = 'disabled'
+        
+        # Check WebSocket
+        if Config.ENABLE_WEBSOCKET and socketio:
+            health_status['services']['websocket'] = 'operational'
+        else:
+            health_status['services']['websocket'] = 'disabled'
+        
+        status_code = 200 if health_status['status'] == 'healthy' else 503
+        return jsonify(health_status), status_code
     
-    @flask_app.route('/api/auth/register', methods=['POST'])
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    # AUTHENTICATION
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    
+    @app.route('/api/auth/register', methods=['POST'])
     @rate_limited
     @handle_exceptions
     def register():
-        """User registration"""
-        try:
-            data = request.get_json() or {}
-            
-            email = data.get('email', '').strip()
-            password = data.get('password', '').strip()
-            name = data.get('name', '').strip()
-            
-            if not email or not password:
-                return jsonify({
-                    'status': 'error',
-                    'message': 'Email and password required',
-                    'code': 'MISSING_FIELDS'
-                }), 400
-            
-            # Check if user exists
-            existing = db_manager.get_user_by_email(email)
-            if existing:
-                return jsonify({
-                    'status': 'error',
-                    'message': 'Email already registered',
-                    'code': 'EMAIL_EXISTS'
-                }), 409
-            
-            # Create user
-            user = db_manager.create_user(email, password, name)
-            if not user:
-                return jsonify({
-                    'status': 'error',
-                    'message': 'Failed to create user',
-                    'code': 'REGISTRATION_FAILED'
-                }), 500
-            
-            # Generate token
-            token = generate_token(user['user_id'], user.get('role', 'user'))
-            
-            return jsonify({
-                'status': 'success',
-                'message': 'Registration successful',
-                'token': token,
-                'user': {
-                    'user_id': user['user_id'],
-                    'email': user['email'],
-                    'name': user.get('name'),
-                    'role': user.get('role', 'user'),
-                    'balance': float(user.get('balance', 0))
-                }
-            }), 201
+        """User registration with comprehensive validation"""
+        data = request.get_json() or {}
         
-        except Exception as e:
-            logger.error(f"[API] Registration error: {e}")
+        # Extract and sanitize inputs
+        email = sanitize_input(data.get('email', '').strip().lower())
+        password = data.get('password', '').strip()
+        name = sanitize_input(data.get('name', '').strip())
+        
+        # Validate email
+        if not email or not validate_email(email):
             return jsonify({
                 'status': 'error',
-                'message': 'Registration failed',
-                'code': 'REGISTRATION_ERROR'
+                'message': 'Invalid email format',
+                'code': 'INVALID_EMAIL'
+            }), 400
+        
+        # Validate password strength
+        valid, error_message = validate_password_strength(password)
+        if not valid:
+            return jsonify({
+                'status': 'error',
+                'message': error_message,
+                'code': 'WEAK_PASSWORD'
+            }), 400
+        
+        # Check if user already exists
+        existing_user = db_manager.get_user_by_email(email)
+        if existing_user:
+            return jsonify({
+                'status': 'error',
+                'message': 'Email already registered',
+                'code': 'EMAIL_EXISTS'
+            }), 409
+        
+        # Create user
+        user = db_manager.create_user(email, password, name)
+        if not user:
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to create user',
+                'code': 'REGISTRATION_FAILED'
             }), 500
+        
+        # Generate token
+        token = generate_token(user['user_id'], user.get('role', 'user'))
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Registration successful',
+            'token': token,
+            'user': {
+                'user_id': user['user_id'],
+                'email': user['email'],
+                'name': user.get('name'),
+                'role': user.get('role', 'user'),
+                'balance': float(user.get('balance', 0)),
+                'two_factor_enabled': user.get('two_factor_enabled', False)
+            }
+        }), 201
     
-    # ═══════════════════════════════════════════════════════════════════════════════════════
-    # USER ENDPOINTS
-    # ═══════════════════════════════════════════════════════════════════════════════════════
+    @app.route('/api/auth/login', methods=['POST'])
+    @rate_limited
+    @handle_exceptions
+    def login():
+        """User login with 2FA support and lockout protection"""
+        data = request.get_json() or {}
+        
+        email = sanitize_input(data.get('email', '').strip().lower())
+        password = data.get('password', '').strip()
+        totp_code = data.get('totp_code', '').strip()
+        
+        if not email or not password:
+            return jsonify({
+                'status': 'error',
+                'message': 'Email and password required',
+                'code': 'MISSING_CREDENTIALS'
+            }), 400
+        
+        # Check for account lockout
+        with login_attempts_lock:
+            attempt_data = login_attempts[email]
+            if attempt_data['lockout_until'] and datetime.utcnow() < attempt_data['lockout_until']:
+                remaining = (attempt_data['lockout_until'] - datetime.utcnow()).seconds
+                return jsonify({
+                    'status': 'error',
+                    'message': f'Account temporarily locked. Try again in {remaining} seconds',
+                    'code': 'ACCOUNT_LOCKED',
+                    'retry_after': remaining
+                }), 429
+        
+        # Get user
+        user = db_manager.get_user_by_email(email)
+        if not user:
+            # Record failed attempt
+            with login_attempts_lock:
+                login_attempts[email]['count'] += 1
+            
+            return jsonify({
+                'status': 'error',
+                'message': 'Invalid credentials',
+                'code': 'INVALID_CREDENTIALS'
+            }), 401
+        
+        # Verify password
+        if not db_manager.verify_password(password, user['password_hash']):
+            # Record failed attempt
+            with login_attempts_lock:
+                attempt_data = login_attempts[email]
+                attempt_data['count'] += 1
+                
+                # Lock account if too many attempts
+                if attempt_data['count'] >= Config.MAX_LOGIN_ATTEMPTS:
+                    attempt_data['lockout_until'] = datetime.utcnow() + timedelta(minutes=Config.LOCKOUT_DURATION_MINUTES)
+                    logger.warning(f"[Auth] Account locked for {email} due to too many failed attempts")
+            
+            return jsonify({
+                'status': 'error',
+                'message': 'Invalid credentials',
+                'code': 'INVALID_CREDENTIALS'
+            }), 401
+        
+        # Check 2FA if enabled
+        if user.get('two_factor_enabled') and user.get('totp_secret'):
+            if not totp_code:
+                return jsonify({
+                    'status': 'error',
+                    'message': '2FA code required',
+                    'code': 'TOTP_REQUIRED',
+                    'two_factor_required': True
+                }), 401
+            
+            # Verify TOTP code
+            totp = pyotp.TOTP(user['totp_secret'])
+            if not totp.verify(totp_code, valid_window=1):
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Invalid 2FA code',
+                    'code': 'INVALID_TOTP'
+                }), 401
+        
+        # Reset login attempts on successful login
+        with login_attempts_lock:
+            login_attempts[email] = {'count': 0, 'lockout_until': None}
+        
+        # Generate token
+        token = generate_token(user['user_id'], user.get('role', 'user'))
+        
+        return jsonify({
+            'status': 'success',
+            'token': token,
+            'user': {
+                'user_id': user['user_id'],
+                'email': user['email'],
+                'name': user.get('name'),
+                'role': user.get('role', 'user'),
+                'balance': float(user.get('balance', 0)),
+                'two_factor_enabled': user.get('two_factor_enabled', False)
+            }
+        }), 200
     
-    @flask_app.route('/api/users/me', methods=['GET'])
+    @app.route('/api/auth/verify', methods=['POST'])
+    @rate_limited
+    @handle_exceptions
+    def verify_token_endpoint():
+        """Verify JWT token"""
+        auth_header = request.headers.get('Authorization', '')
+        
+        if not auth_header.startswith('Bearer '):
+            return jsonify({
+                'status': 'error',
+                'message': 'Missing or invalid authorization header',
+                'code': 'UNAUTHORIZED'
+            }), 401
+        
+        token = auth_header[7:]
+        payload = verify_token(token)
+        
+        if not payload:
+            return jsonify({
+                'status': 'error',
+                'message': 'Invalid or expired token',
+                'code': 'INVALID_TOKEN',
+                'valid': False
+            }), 401
+        
+        return jsonify({
+            'status': 'success',
+            'valid': True,
+            'user_id': payload.get('user_id'),
+            'role': payload.get('role'),
+            'expires_at': datetime.fromtimestamp(payload.get('exp')).isoformat()
+        }), 200
+    
+    @app.route('/api/auth/refresh', methods=['POST'])
+    @rate_limited
+    @handle_exceptions
+    def refresh_token():
+        """Refresh JWT token"""
+        auth_header = request.headers.get('Authorization', '')
+        
+        if not auth_header.startswith('Bearer '):
+            return jsonify({
+                'status': 'error',
+                'message': 'Missing or invalid authorization header',
+                'code': 'UNAUTHORIZED'
+            }), 401
+        
+        token = auth_header[7:]
+        payload = verify_token(token)
+        
+        if not payload:
+            return jsonify({
+                'status': 'error',
+                'message': 'Invalid or expired token',
+                'code': 'INVALID_TOKEN'
+            }), 401
+        
+        # Generate new token
+        new_token = generate_token(payload['user_id'], payload.get('role', 'user'))
+        
+        return jsonify({
+            'status': 'success',
+            'token': new_token
+        }), 200
+    
+    @app.route('/api/auth/2fa/setup', methods=['POST'])
+    @require_auth
+    @rate_limited
+    @handle_exceptions
+    def setup_2fa():
+        """Setup 2FA for user"""
+        if not Config.ENABLE_2FA:
+            return jsonify({
+                'status': 'error',
+                'message': '2FA is not enabled on this server',
+                'code': 'FEATURE_DISABLED'
+            }), 400
+        
+        user = db_manager.get_user_by_id(g.user_id)
+        if not user:
+            return jsonify({
+                'status': 'error',
+                'message': 'User not found',
+                'code': 'USER_NOT_FOUND'
+            }), 404
+        
+        # Generate TOTP secret
+        totp_secret = pyotp.random_base32()
+        
+        # Generate QR code
+        totp = pyotp.TOTP(totp_secret)
+        provisioning_uri = totp.provisioning_uri(
+            name=user['email'],
+            issuer_name='QTCL Blockchain'
+        )
+        
+        # Create QR code image
+        qr = qrcode.QRCode(version=1, box_size=10, border=5)
+        qr.add_data(provisioning_uri)
+        qr.make(fit=True)
+        
+        img = qr.make_image(fill_color="black", back_color="white")
+        buffer = BytesIO()
+        img.save(buffer, format='PNG')
+        qr_code_base64 = base64.b64encode(buffer.getvalue()).decode()
+        
+        # Update user with TOTP secret (not enabled yet)
+        db_manager.update_user_2fa(g.user_id, totp_secret, False)
+        
+        return jsonify({
+            'status': 'success',
+            'secret': totp_secret,
+            'qr_code': f'data:image/png;base64,{qr_code_base64}',
+            'provisioning_uri': provisioning_uri
+        }), 200
+    
+    @app.route('/api/auth/2fa/enable', methods=['POST'])
+    @require_auth
+    @rate_limited
+    @handle_exceptions
+    def enable_2fa():
+        """Enable 2FA after verifying TOTP code"""
+        if not Config.ENABLE_2FA:
+            return jsonify({
+                'status': 'error',
+                'message': '2FA is not enabled on this server',
+                'code': 'FEATURE_DISABLED'
+            }), 400
+        
+        data = request.get_json() or {}
+        totp_code = data.get('totp_code', '').strip()
+        
+        if not totp_code:
+            return jsonify({
+                'status': 'error',
+                'message': 'TOTP code required',
+                'code': 'MISSING_TOTP'
+            }), 400
+        
+        user = db_manager.get_user_by_id(g.user_id)
+        if not user or not user.get('totp_secret'):
+            return jsonify({
+                'status': 'error',
+                'message': '2FA not setup. Call /api/auth/2fa/setup first',
+                'code': 'TOTP_NOT_SETUP'
+            }), 400
+        
+        # Verify TOTP code
+        totp = pyotp.TOTP(user['totp_secret'])
+        if not totp.verify(totp_code, valid_window=1):
+            return jsonify({
+                'status': 'error',
+                'message': 'Invalid TOTP code',
+                'code': 'INVALID_TOTP'
+            }), 401
+        
+        # Enable 2FA
+        db_manager.update_user_2fa(g.user_id, user['totp_secret'], True)
+        
+        return jsonify({
+            'status': 'success',
+            'message': '2FA enabled successfully'
+        }), 200
+    
+    @app.route('/api/auth/2fa/disable', methods=['POST'])
+    @require_auth
+    @rate_limited
+    @handle_exceptions
+    def disable_2fa():
+        """Disable 2FA"""
+        data = request.get_json() or {}
+        password = data.get('password', '').strip()
+        
+        if not password:
+            return jsonify({
+                'status': 'error',
+                'message': 'Password required to disable 2FA',
+                'code': 'MISSING_PASSWORD'
+            }), 400
+        
+        user = db_manager.get_user_by_id(g.user_id)
+        if not user:
+            return jsonify({
+                'status': 'error',
+                'message': 'User not found',
+                'code': 'USER_NOT_FOUND'
+            }), 404
+        
+        # Verify password
+        if not db_manager.verify_password(password, user['password_hash']):
+            return jsonify({
+                'status': 'error',
+                'message': 'Invalid password',
+                'code': 'INVALID_PASSWORD'
+            }), 401
+        
+        # Disable 2FA
+        db_manager.update_user_2fa(g.user_id, None, False)
+        
+        return jsonify({
+            'status': 'success',
+            'message': '2FA disabled successfully'
+        }), 200
+    
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    # USER MANAGEMENT
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    
+    @app.route('/api/users/me', methods=['GET'])
     @require_auth
     @rate_limited
     @handle_exceptions
     def get_current_user():
         """Get current user profile"""
-        try:
-            user = db_manager.get_user_by_id(g.user_id)
-            
-            if not user:
-                return jsonify({
-                    'status': 'error',
-                    'message': 'User not found',
-                    'code': 'USER_NOT_FOUND'
-                }), 404
-            
-            return jsonify({
-                'status': 'success',
-                'user': {
-                    'user_id': user['user_id'],
-                    'email': user['email'],
-                    'name': user.get('name'),
-                    'role': user.get('role', 'user'),
-                    'balance': float(user.get('balance', 0)),
-                    'kyc_verified': user.get('kyc_verified', False),
-                    'created_at': user.get('created_at').isoformat() if user.get('created_at') else None
-                }
-            }), 200
+        user = db_manager.get_user_by_id(g.user_id)
         
-        except Exception as e:
-            logger.error(f"[API] Get user error: {e}")
+        if not user:
             return jsonify({
                 'status': 'error',
-                'message': 'Failed to get user',
-                'code': 'USER_ERROR'
-            }), 500
+                'message': 'User not found',
+                'code': 'USER_NOT_FOUND'
+            }), 404
+        
+        return jsonify({
+            'status': 'success',
+            'user': {
+                'user_id': user['user_id'],
+                'email': user['email'],
+                'name': user.get('name'),
+                'role': user.get('role', 'user'),
+                'balance': float(user.get('balance', 0)),
+                'is_active': user.get('is_active', True),
+                'kyc_verified': user.get('kyc_verified', False),
+                'two_factor_enabled': user.get('two_factor_enabled', False),
+                'created_at': user.get('created_at').isoformat() if user.get('created_at') else None,
+                'updated_at': user.get('updated_at').isoformat() if user.get('updated_at') else None
+            }
+        }), 200
     
-    @flask_app.route('/api/users', methods=['GET'])
-    @require_auth
+    @app.route('/api/users', methods=['GET'])
+    @require_admin
     @rate_limited
     @handle_exceptions
     def list_users():
         """List all users (admin only)"""
         try:
-            if g.user_role != 'admin':
-                return jsonify({
-                    'status': 'error',
-                    'message': 'Admin access required',
-                    'code': 'FORBIDDEN'
-                }), 403
+            limit = min(int(request.args.get('limit', 50)), 500)
+            offset = int(request.args.get('offset', 0))
             
-            users = db_manager.execute_query("SELECT user_id, email, name, role, balance, created_at FROM users ORDER BY created_at DESC LIMIT 100")
+            users = db_manager.execute_query(
+                "SELECT user_id, email, name, role, balance, is_active, kyc_verified, created_at FROM users ORDER BY created_at DESC LIMIT %s OFFSET %s",
+                (limit, offset)
+            )
             
             return jsonify({
                 'status': 'success',
+                'count': len(users),
+                'limit': limit,
+                'offset': offset,
                 'users': [{
                     'user_id': u['user_id'],
                     'email': u['email'],
                     'name': u.get('name'),
-                    'role': u.get('role', 'user'),
+                    'role': u.get('role'),
                     'balance': float(u.get('balance', 0)),
+                    'is_active': u.get('is_active'),
+                    'kyc_verified': u.get('kyc_verified'),
                     'created_at': u.get('created_at').isoformat() if u.get('created_at') else None
                 } for u in users]
             }), 200
-        
         except Exception as e:
             logger.error(f"[API] List users error: {e}")
             return jsonify({
@@ -878,1080 +1248,770 @@ def setup_routes(flask_app):
                 'code': 'LIST_ERROR'
             }), 500
     
-    # ═══════════════════════════════════════════════════════════════════════════════════════
-    # BLOCKCHAIN ENDPOINTS
-    # ═══════════════════════════════════════════════════════════════════════════════════════
-    
-    @flask_app.route('/api/blocks/latest', methods=['GET'])
+    @app.route('/api/users/<user_id>', methods=['GET'])
+    @require_admin
     @rate_limited
     @handle_exceptions
-    def get_latest_blocks():
-        """Get latest blocks"""
-        try:
-            limit = min(int(request.args.get('limit', 10)), 100)
-            blocks = db_manager.get_latest_blocks(limit)
-            
-            return jsonify({
-                'status': 'success',
-                'blocks': [{
-                    'block_id': b['block_id'],
-                    'block_number': b['block_number'],
-                    'block_hash': b['block_hash'],
-                    'previous_hash': b.get('previous_hash'),
-                    'timestamp': b.get('timestamp').isoformat() if b.get('timestamp') else None,
-                    'miner_id': b.get('miner_id'),
-                    'difficulty': b.get('difficulty', 1)
-                } for b in blocks]
-            }), 200
+    def get_user(user_id):
+        """Get user by ID (admin only)"""
+        user = db_manager.get_user_by_id(sanitize_input(user_id))
         
-        except Exception as e:
-            logger.error(f"[API] Get blocks error: {e}")
+        if not user:
             return jsonify({
                 'status': 'error',
-                'message': 'Failed to get blocks',
-                'code': 'BLOCKS_ERROR'
-            }), 500
-    
-    @flask_app.route('/api/blocks', methods=['GET'])
-    @rate_limited
-    @handle_exceptions
-    def list_blocks():
-        """List blocks with pagination"""
-        try:
-            limit = min(int(request.args.get('limit', 20)), 100)
-            offset = int(request.args.get('offset', 0))
-            
-            blocks = db_manager.execute_query("""
-                SELECT * FROM blocks 
-                ORDER BY block_number DESC 
-                LIMIT %s OFFSET %s
-            """, (limit, offset))
-            
-            return jsonify({
-                'status': 'success',
-                'blocks': [{
-                    'block_id': b['block_id'],
-                    'block_number': b['block_number'],
-                    'block_hash': b['block_hash'],
-                    'previous_hash': b.get('previous_hash'),
-                    'timestamp': b.get('timestamp').isoformat() if b.get('timestamp') else None,
-                    'miner_id': b.get('miner_id'),
-                    'difficulty': b.get('difficulty', 1)
-                } for b in blocks],
-                'pagination': {
-                    'limit': limit,
-                    'offset': offset
-                }
-            }), 200
+                'message': 'User not found',
+                'code': 'USER_NOT_FOUND'
+            }), 404
         
-        except Exception as e:
-            logger.error(f"[API] List blocks error: {e}")
-            return jsonify({
-                'status': 'error',
-                'message': 'Failed to list blocks',
-                'code': 'BLOCKS_ERROR'
-            }), 500
+        return jsonify({
+            'status': 'success',
+            'user': {
+                'user_id': user['user_id'],
+                'email': user['email'],
+                'name': user.get('name'),
+                'role': user.get('role'),
+                'balance': float(user.get('balance', 0)),
+                'is_active': user.get('is_active'),
+                'kyc_verified': user.get('kyc_verified'),
+                'two_factor_enabled': user.get('two_factor_enabled', False),
+                'created_at': user.get('created_at').isoformat() if user.get('created_at') else None,
+                'updated_at': user.get('updated_at').isoformat() if user.get('updated_at') else None
+            }
+        }), 200
     
-    # ═══════════════════════════════════════════════════════════════════════════════════════
-    # TRANSACTION ENDPOINTS
-    # ═══════════════════════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    # TRANSACTIONS (UNIFIED)
+    # ═══════════════════════════════════════════════════════════════════════════════════
     
-    @flask_app.route('/api/transactions', methods=['GET'])
-    @require_auth
-    @rate_limited
-    @handle_exceptions
-    def get_transactions():
-        """Get transactions (user's own or all if admin)"""
-        try:
-            limit = min(int(request.args.get('limit', 20)), 100)
-            
-            if g.user_role == 'admin':
-                transactions = db_manager.get_transactions(limit)
-            else:
-                transactions = db_manager.get_transactions(limit, g.user_id)
-            
-            return jsonify({
-                'status': 'success',
-                'transactions': [{
-                    'transaction_id': t['transaction_id'],
-                    'transaction_hash': t['transaction_hash'],
-                    'sender_id': t.get('sender_id'),
-                    'receiver_id': t.get('receiver_id'),
-                    'amount': float(t.get('amount', 0)),
-                    'type': t.get('transaction_type', 'transfer'),
-                    'status': t.get('status', 'pending'),
-                    'timestamp': t.get('timestamp').isoformat() if t.get('timestamp') else None
-                } for t in transactions]
-            }), 200
-        
-        except Exception as e:
-            logger.error(f"[API] Get transactions error: {e}")
-            return jsonify({
-                'status': 'error',
-                'message': 'Failed to get transactions',
-                'code': 'TRANSACTIONS_ERROR'
-            }), 500
-    
-    @flask_app.route('/api/transactions', methods=['POST'])
+    @app.route('/api/transactions', methods=['POST'])
     @require_auth
     @rate_limited
     @handle_exceptions
     def submit_transaction():
         """Submit a new transaction"""
+        data = request.get_json() or {}
+        
+        # Support multiple input formats for backward compatibility
+        receiver_id = sanitize_input(data.get('receiver_id') or data.get('to_user') or data.get('to_user_id', ''))
+        amount = float(data.get('amount', 0))
+        tx_type = sanitize_input(data.get('tx_type') or data.get('type', 'transfer'))
+        metadata = data.get('metadata', {})
+        
+        if not receiver_id or amount <= 0:
+            return jsonify({
+                'status': 'error',
+                'message': 'Valid receiver and positive amount required',
+                'code': 'INVALID_INPUT'
+            }), 400
+        
+        # Submit transaction
+        tx_id, error = db_manager.submit_transaction(g.user_id, receiver_id, amount)
+        
+        if error:
+            return jsonify({
+                'status': 'error',
+                'message': error,
+                'code': 'TRANSACTION_FAILED'
+            }), 400
+        
+        # Broadcast via WebSocket if enabled
+        if Config.ENABLE_WEBSOCKET and socketio:
+            socketio.emit('transaction_update', {
+                'tx_id': tx_id,
+                'status': 'pending',
+                'timestamp': datetime.utcnow().isoformat()
+            }, room='channel_transactions')
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Transaction submitted successfully',
+            'transaction_id': tx_id,
+            'tx_hash': tx_id
+        }), 201
+    
+    @app.route('/api/transactions', methods=['GET'])
+    @require_auth
+    @rate_limited
+    @handle_exceptions
+    def list_transactions():
+        """List user transactions"""
         try:
-            data = request.get_json() or {}
+            from db_config import TransactionManager
             
-            receiver_id = data.get('receiver_id', '').strip()
-            amount = float(data.get('amount', 0))
+            limit = min(int(request.args.get('limit', 50)), 500)
+            offset = int(request.args.get('offset', 0))
+            status_filter = request.args.get('status')
             
-            if not receiver_id or amount <= 0:
-                return jsonify({
-                    'status': 'error',
-                    'message': 'Invalid receiver or amount',
-                    'code': 'INVALID_INPUT'
-                }), 400
-            
-            tx_id, error = db_manager.submit_transaction(g.user_id, receiver_id, amount)
-            
-            if error:
-                return jsonify({
-                    'status': 'error',
-                    'message': error,
-                    'code': 'TRANSACTION_FAILED'
-                }), 400
+            # Get transactions
+            if hasattr(TransactionManager, 'get_user_transactions'):
+                transactions = TransactionManager.get_user_transactions(g.user_id, limit, offset)
+            else:
+                # Fallback to direct query
+                query = """
+                    SELECT tx_id, from_user_id, to_user_id, amount, tx_type, status, created_at, 
+                           entropy_score, validator_agreement, commitment_hash
+                    FROM transactions
+                    WHERE from_user_id = %s OR to_user_id = %s
+                """
+                params = [g.user_id, g.user_id]
+                
+                if status_filter:
+                    query += " AND status = %s"
+                    params.append(status_filter)
+                
+                query += " ORDER BY created_at DESC LIMIT %s OFFSET %s"
+                params.extend([limit, offset])
+                
+                transactions = db_manager.execute_query(query, tuple(params))
             
             return jsonify({
                 'status': 'success',
-                'message': 'Transaction submitted',
-                'transaction_id': tx_id
-            }), 201
-        
+                'count': len(transactions),
+                'limit': limit,
+                'offset': offset,
+                'transactions': [{
+                    'tx_id': t.get('tx_id'),
+                    'from': t.get('from_user_id'),
+                    'to': t.get('to_user_id'),
+                    'amount': float(t.get('amount', 0)),
+                    'type': t.get('tx_type'),
+                    'status': t.get('status'),
+                    'entropy_score': float(t.get('entropy_score')) if t.get('entropy_score') else None,
+                    'validator_agreement': float(t.get('validator_agreement')) if t.get('validator_agreement') else None,
+                    'commitment_hash': t.get('commitment_hash'),
+                    'created_at': t.get('created_at').isoformat() if t.get('created_at') else None
+                } for t in transactions]
+            }), 200
         except Exception as e:
-            logger.error(f"[API] Submit transaction error: {e}")
+            logger.error(f"[API] List transactions error: {e}")
             return jsonify({
                 'status': 'error',
-                'message': 'Failed to submit transaction',
-                'code': 'SUBMISSION_ERROR'
+                'message': 'Failed to list transactions',
+                'code': 'LIST_ERROR'
             }), 500
     
-    # ═══════════════════════════════════════════════════════════════════════════════════════
-    # QUANTUM STATUS ENDPOINT (INTEGRATION DROPS SECTION 5)
-    # ═══════════════════════════════════════════════════════════════════════════════════════
+    @app.route('/api/transactions/<tx_id>', methods=['GET'])
+    @require_auth
+    @rate_limited
+    @handle_exceptions
+    def get_transaction(tx_id):
+        """Get transaction details"""
+        try:
+            from db_config import TransactionManager
+            
+            tx_id = sanitize_input(tx_id)
+            
+            # Get transaction details
+            if hasattr(TransactionManager, 'get_transaction_details'):
+                tx = TransactionManager.get_transaction_details(tx_id)
+            else:
+                # Fallback
+                result = db_manager.execute_query(
+                    "SELECT * FROM transactions WHERE tx_id = %s LIMIT 1",
+                    (tx_id,)
+                )
+                tx = result[0] if result else None
+            
+            if not tx:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Transaction not found',
+                    'code': 'NOT_FOUND'
+                }), 404
+            
+            # Authorization check
+            if g.user_role != 'admin' and tx.get('from_user_id') != g.user_id and tx.get('to_user_id') != g.user_id:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Unauthorized to view this transaction',
+                    'code': 'UNAUTHORIZED'
+                }), 403
+            
+            return jsonify({
+                'status': 'success',
+                'transaction': {
+                    'tx_id': tx.get('tx_id'),
+                    'from': tx.get('from_user_id'),
+                    'to': tx.get('to_user_id'),
+                    'amount': float(tx.get('amount', 0)),
+                    'type': tx.get('tx_type'),
+                    'status': tx.get('status'),
+                    'entropy_score': float(tx.get('entropy_score')) if tx.get('entropy_score') else None,
+                    'validator_agreement': float(tx.get('validator_agreement')) if tx.get('validator_agreement') else None,
+                    'commitment_hash': tx.get('commitment_hash'),
+                    'created_at': tx.get('created_at').isoformat() if tx.get('created_at') else None,
+                    'finalized_at': tx.get('finalized_at').isoformat() if tx.get('finalized_at') else None
+                }
+            }), 200
+        except Exception as e:
+            logger.error(f"[API] Get transaction error: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to get transaction',
+                'code': 'GET_ERROR'
+            }), 500
     
-    @flask_app.route('/api/quantum/status', methods=['GET'])
+    @app.route('/api/transactions/<tx_id>/cancel', methods=['POST'])
+    @require_auth
+    @rate_limited
+    @handle_exceptions
+    def cancel_transaction(tx_id):
+        """Cancel pending transaction"""
+        try:
+            from db_config import TransactionManager
+            
+            tx_id = sanitize_input(tx_id)
+            data = request.get_json() or {}
+            reason = sanitize_input(data.get('reason', 'User initiated cancellation'))
+            
+            # Get transaction
+            result = db_manager.execute_query(
+                "SELECT * FROM transactions WHERE tx_id = %s LIMIT 1",
+                (tx_id,)
+            )
+            
+            if not result:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Transaction not found',
+                    'code': 'NOT_FOUND'
+                }), 404
+            
+            tx = result[0]
+            
+            # Authorization check
+            if tx.get('from_user_id') != g.user_id and g.user_role != 'admin':
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Cannot cancel transaction by another user',
+                    'code': 'UNAUTHORIZED'
+                }), 403
+            
+            # Status check
+            if tx.get('status') != 'pending':
+                return jsonify({
+                    'status': 'error',
+                    'message': f'Cannot cancel transaction with status: {tx.get("status")}',
+                    'code': 'INVALID_STATE'
+                }), 400
+            
+            # Cancel transaction
+            if hasattr(TransactionManager, 'cancel_transaction'):
+                success = TransactionManager.cancel_transaction(tx_id, reason)
+            else:
+                # Fallback
+                db_manager.execute_query(
+                    "UPDATE transactions SET status = 'cancelled' WHERE tx_id = %s",
+                    (tx_id,),
+                    fetch=False
+                )
+                success = True
+            
+            if success:
+                return jsonify({
+                    'status': 'success',
+                    'message': 'Transaction cancelled',
+                    'transaction_id': tx_id
+                }), 200
+            else:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Failed to cancel transaction',
+                    'code': 'CANCEL_ERROR'
+                }), 500
+        except Exception as e:
+            logger.error(f"[API] Cancel transaction error: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': 'Error cancelling transaction',
+                'code': 'ERROR'
+            }), 500
+    
+    @app.route('/api/transactions/stats', methods=['GET'])
+    @require_auth
+    @rate_limited
+    @handle_exceptions
+    def get_transaction_stats():
+        """Get transaction statistics"""
+        try:
+            from db_config import TransactionManager
+            
+            if hasattr(TransactionManager, 'get_transaction_statistics'):
+                stats = TransactionManager.get_transaction_statistics()
+            else:
+                # Fallback - basic stats
+                stats = {
+                    'total_transactions': 0,
+                    'pending': 0,
+                    'finalized': 0,
+                    'cancelled': 0
+                }
+                
+                result = db_manager.execute_query("""
+                    SELECT status, COUNT(*) as count
+                    FROM transactions
+                    GROUP BY status
+                """)
+                
+                for row in result:
+                    stats['total_transactions'] += int(row['count'])
+                    stats[row['status']] = int(row['count'])
+            
+            return jsonify({
+                'status': 'success',
+                'statistics': stats
+            }), 200
+        except Exception as e:
+            logger.error(f"[API] Get stats error: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to get statistics',
+                'code': 'STATS_ERROR'
+            }), 500
+    
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    # BLOCKS
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    
+    @app.route('/api/blocks/latest', methods=['GET'])
+    @rate_limited
+    @handle_exceptions
+    def get_latest_block():
+        """Get latest block"""
+        try:
+            result = db_manager.execute_query("""
+                SELECT * FROM blocks
+                ORDER BY block_number DESC
+                LIMIT 1
+            """)
+            
+            if not result:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'No blocks found',
+                    'code': 'NO_BLOCKS'
+                }), 404
+            
+            block = result[0]
+            
+            return jsonify({
+                'status': 'success',
+                'block': {
+                    'block_number': block.get('block_number'),
+                    'block_hash': block.get('block_hash'),
+                    'previous_hash': block.get('previous_hash'),
+                    'timestamp': block.get('timestamp').isoformat() if block.get('timestamp') else None,
+                    'transaction_count': block.get('transaction_count', 0),
+                    'quantum_signature': block.get('quantum_signature')
+                }
+            }), 200
+        except Exception as e:
+            logger.error(f"[API] Get latest block error: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to get latest block',
+                'code': 'BLOCK_ERROR'
+            }), 500
+    
+    @app.route('/api/blocks/<int:block_number>', methods=['GET'])
+    @rate_limited
+    @handle_exceptions
+    def get_block(block_number):
+        """Get block by number"""
+        try:
+            result = db_manager.execute_query("""
+                SELECT * FROM blocks
+                WHERE block_number = %s
+                LIMIT 1
+            """, (block_number,))
+            
+            if not result:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Block not found',
+                    'code': 'NOT_FOUND'
+                }), 404
+            
+            block = result[0]
+            
+            return jsonify({
+                'status': 'success',
+                'block': {
+                    'block_number': block.get('block_number'),
+                    'block_hash': block.get('block_hash'),
+                    'previous_hash': block.get('previous_hash'),
+                    'timestamp': block.get('timestamp').isoformat() if block.get('timestamp') else None,
+                    'transaction_count': block.get('transaction_count', 0),
+                    'quantum_signature': block.get('quantum_signature')
+                }
+            }), 200
+        except Exception as e:
+            logger.error(f"[API] Get block error: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to get block',
+                'code': 'BLOCK_ERROR'
+            }), 500
+    
+    @app.route('/api/blocks', methods=['GET'])
+    @rate_limited
+    @handle_exceptions
+    def list_blocks():
+        """List blocks with pagination"""
+        try:
+            limit = min(int(request.args.get('limit', 50)), 500)
+            offset = int(request.args.get('offset', 0))
+            
+            blocks = db_manager.execute_query("""
+                SELECT * FROM blocks
+                ORDER BY block_number DESC
+                LIMIT %s OFFSET %s
+            """, (limit, offset))
+            
+            return jsonify({
+                'status': 'success',
+                'count': len(blocks),
+                'limit': limit,
+                'offset': offset,
+                'blocks': [{
+                    'block_number': b.get('block_number'),
+                    'block_hash': b.get('block_hash'),
+                    'previous_hash': b.get('previous_hash'),
+                    'timestamp': b.get('timestamp').isoformat() if b.get('timestamp') else None,
+                    'transaction_count': b.get('transaction_count', 0)
+                } for b in blocks]
+            }), 200
+        except Exception as e:
+            logger.error(f"[API] List blocks error: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to list blocks',
+                'code': 'LIST_ERROR'
+            }), 500
+    
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    # QUANTUM SYSTEM
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    
+    @app.route('/api/quantum/status', methods=['GET'])
     @rate_limited
     @handle_exceptions
     def quantum_status():
         """Get quantum system status"""
-        try:
-            global quantum_system
-            
-            if quantum_system is None:
-                return jsonify({
-                    'status': 'error',
-                    'message': 'Quantum system not initialized',
-                    'code': 'QUANTUM_NOT_INITIALIZED'
-                }), 503
-            
-            # INTEGRATION DROP: Use new get_status() method
-            if hasattr(quantum_system, 'get_status'):
-                # New V5 system
-                status = quantum_system.get_status()
-                
-                return jsonify({
-                    'status': 'success',
-                    'quantum': {
-                        'version': 'v5.0',
-                        'running': status.get('running', False),
-                        'cycle_count': status.get('cycle_count', 0),
-                        'uptime_seconds': status.get('uptime_seconds', 0),
-                        'coherence': status.get('system_coherence', 0),
-                        'coherence_std': status.get('system_coherence_std', 0),
-                        'fidelity': status.get('system_fidelity', 0),
-                        'fidelity_std': status.get('system_fidelity_std', 0),
-                        'throughput': status.get('throughput_batches_per_sec', 0),
-                        'neural_network': status.get('neural_network', {}),
-                        'entropy_ensemble': status.get('entropy_ensemble', {}),
-                        'noise_bath': status.get('noise_bath', {}),
-                        'analytics': status.get('analytics', {})
-                    }
-                }), 200
-            else:
-                # Legacy system
-                status = quantum_system.get_system_status() if hasattr(quantum_system, 'get_system_status') else {}
-                
-                return jsonify({
-                    'status': 'success',
-                    'quantum': {
-                        'version': 'legacy',
-                        **status
-                    }
-                }), 200
+        global latest_quantum_metrics, quantum_system
         
-        except Exception as e:
-            logger.error(f"[API] Quantum status error: {e}")
-            return jsonify({
-                'status': 'error',
-                'message': 'Failed to get quantum status',
-                'code': 'QUANTUM_ERROR'
-            }), 500
-    
-    # ═══════════════════════════════════════════════════════════════════════════════════════
-    # MEMPOOL ENDPOINT
-    # ═══════════════════════════════════════════════════════════════════════════════════════
-    
-    @flask_app.route('/api/mempool/status', methods=['GET'])
-    @rate_limited
-    @handle_exceptions
-    def mempool_status():
-        """Get mempool status"""
-        try:
-            pending = db_manager.execute_query("""
-                SELECT COUNT(*) as count FROM transactions WHERE status = 'pending'
-            """)
-            
-            return jsonify({
-                'status': 'success',
-                'mempool': {
-                    'pending_count': pending[0]['count'] if pending else 0,
-                    'size_bytes': 0,
-                    'gas_free': True,
-                }
-            }), 200
-        
-        except Exception as e:
-            logger.error(f"[API] Mempool status error: {e}")
-            return jsonify({
-                'status': 'error',
-                'message': 'Failed to get mempool status',
-                'code': 'MEMPOOL_ERROR'
-            }), 500
-    
-    # ═══════════════════════════════════════════════════════════════════════════════════════
-    # GAS-FREE NOTICE ENDPOINT  (QTCL is gas-free — quantum finality replaces economic fees)
-    # ═══════════════════════════════════════════════════════════════════════════════════════
-
-    @flask_app.route('/api/gas/prices', methods=['GET'])
-    @rate_limited
-    @handle_exceptions
-    def gas_prices():
-        """QTCL is gas-free. Quantum commitment hash replaces economic finality."""
-        return jsonify({
-            'status': 'success',
-            'gas_free': True,
-            'message': 'QTCL uses quantum finality — no gas required. '
-                       'Transaction commitment is the GHZ-8 collapse proof.',
-            'gas_prices': None,
-        }), 200
-    
-    # ═══════════════════════════════════════════════════════════════════════════════════════
-    # SIGNATURE VERIFICATION ENDPOINT
-    # ═══════════════════════════════════════════════════════════════════════════════════════
-    
-    @flask_app.route('/api/crypto/verify-signature', methods=['POST'])
-    @rate_limited
-    @handle_exceptions
-    def verify_signature():
-        """Verify a cryptographic signature"""
-        try:
-            data = request.get_json() or {}
-            
-            message = data.get('message', '').strip()
-            signature = data.get('signature', '').strip()
-            
-            if not message or not signature:
-                return jsonify({
-                    'status': 'error',
-                    'message': 'Missing message or signature',
-                    'code': 'MISSING_FIELDS'
-                }), 400
-            
-            # Simulate verification
-            is_valid = len(signature) > 0
-            
-            return jsonify({
-                'status': 'success',
-                'valid': is_valid,
-                'message': 'Signature verified' if is_valid else 'Signature invalid'
-            }), 200
-        
-        except Exception as e:
-            logger.error(f"[API] Signature verification error: {e}")
-            return jsonify({
-                'status': 'error',
-                'message': 'Verification failed',
-                'code': 'VERIFICATION_ERROR'
-            }), 500
-    
-    # ═══════════════════════════════════════════════════════════════════════════════════════
-    # MOBILE API CONFIG ENDPOINT
-    # ═══════════════════════════════════════════════════════════════════════════════════════
-    
-    @flask_app.route('/api/mobile/config', methods=['GET'])
-    @rate_limited
-    @handle_exceptions
-    def mobile_config():
-        """Get mobile app configuration"""
-        try:
-            return jsonify({
-                'status': 'success',
-                'config': {
-                    'api_version': Config.API_VERSION,
-                    'api_url': os.getenv('API_URL', 'https://qtcl-blockchain.koyeb.app'),
-                    'ws_url': os.getenv('WS_URL', 'wss://qtcl-blockchain.koyeb.app'),
-                    'features': {
-                        'auth': True,
-                        'transactions': True,
-                        'quantum': True,
-                        'nft': False
-                    }
-                }
-            }), 200
-        
-        except Exception as e:
-            logger.error(f"[API] Mobile config error: {e}")
-            return jsonify({
-                'status': 'error',
-                'message': 'Failed to get config',
-                'code': 'CONFIG_ERROR'
-            }), 500
-    
-    # ═══════════════════════════════════════════════════════════════════════════════════════
-    # QUANTUM LATTICE ENDPOINTS (INTEGRATION DROPS SECTION 4)
-    # ═══════════════════════════════════════════════════════════════════════════════════════
-    
-    @flask_app.route('/api/quantum/lattice/status', methods=['GET'])
-    @rate_limited
-    @handle_exceptions
-    def lattice_status():
-        """Get quantum lattice status"""
-        try:
-            global quantum_system
-            
-            if quantum_system is None:
-                return jsonify({
-                    'status': 'error',
-                    'message': 'Quantum system not initialized',
-                    'code': 'QUANTUM_NOT_INITIALIZED'
-                }), 503
-            
-            # INTEGRATION DROP: Use new get_status() method for V5, fallback for legacy
-            if hasattr(quantum_system, 'get_status'):
-                status = quantum_system.get_status()
-            elif hasattr(quantum_system, 'get_system_status'):
-                status = quantum_system.get_system_status()
-            else:
-                status = {'error': 'Status method not available'}
-            
-            return jsonify({
-                'status': 'success',
-                'lattice': status
-            }), 200
-        
-        except Exception as e:
-            logger.error(f"[API] Lattice status error: {e}")
-            return jsonify({
-                'status': 'error',
-                'message': 'Failed to get lattice status',
-                'code': 'LATTICE_STATUS_ERROR'
-            }), 500
-    
-    @flask_app.route('/api/quantum/lattice/refresh', methods=['POST'])
-    @rate_limited
-    @handle_exceptions
-    def trigger_lattice_refresh():
-        """Manually trigger a lattice refresh cycle"""
-        try:
-            global quantum_system
-            
-            if quantum_system is None:
-                return jsonify({
-                    'status': 'error',
-                    'message': 'Quantum system not initialized',
-                    'code': 'QUANTUM_NOT_INITIALIZED'
-                }), 503
-            
-            # INTEGRATION DROP: Use new execute_cycle() method for V5
-            if hasattr(quantum_system, 'execute_cycle'):
-                # New V5 system
-                result = quantum_system.execute_cycle()
-                
-                return jsonify({
-                    'status': 'success',
-                    'message': 'Quantum cycle executed',
-                    'cycle': result.get('cycle', 0),
-                    'duration': result.get('duration', 0),
-                    'batches_completed': result.get('batches_completed', 0),
-                    'avg_coherence': result.get('avg_coherence', 0),
-                    'avg_fidelity': result.get('avg_fidelity', 0),
-                    'throughput': result.get('throughput_batches_per_sec', 0)
-                }), 200
-            elif hasattr(quantum_system, 'flood_all_batches'):
-                # Legacy system
-                results = quantum_system.flood_all_batches()
-                
-                return jsonify({
-                    'status': 'success',
-                    'message': 'Lattice refresh completed',
-                    'batches_processed': len(results),
-                    'avg_improvement': float(sum(r['improvement'] for r in results) / len(results)) if results else 0
-                }), 200
-            else:
-                return jsonify({
-                    'status': 'error',
-                    'message': 'Refresh method not available',
-                    'code': 'METHOD_NOT_AVAILABLE'
-                }), 503
-        
-        except Exception as e:
-            logger.error(f"[API] Lattice refresh error: {e}")
-            return jsonify({
-                'status': 'error',
-                'message': 'Failed to trigger lattice refresh',
-                'code': 'LATTICE_REFRESH_ERROR'
-            }), 500
-    
-    @flask_app.route('/api/quantum/lattice/force-status', methods=['POST'])
-    @rate_limited
-    @handle_exceptions
-    def force_lattice_status_report():
-        """Force a status report to terminal/logs"""
-        try:
-            global quantum_system
-            
-            if quantum_system is None:
-                return jsonify({
-                    'status': 'error',
-                    'message': 'Quantum system not initialized',
-                    'code': 'QUANTUM_NOT_INITIALIZED'
-                }), 503
-            
-            # Get and log status
-            if hasattr(quantum_system, 'get_status'):
-                status = quantum_system.get_status()
-                logger.info("=" * 80)
-                logger.info("QUANTUM LATTICE STATUS REPORT (FORCED)")
-                logger.info("=" * 80)
-                logger.info(json.dumps(status, indent=2))
-                logger.info("=" * 80)
-            elif hasattr(quantum_system, 'print_status_report'):
-                quantum_system.print_status_report()
-            else:
-                logger.info("Status report method not available")
-            
-            return jsonify({
-                'status': 'success',
-                'message': 'Status report printed to logs'
-            }), 200
-        
-        except Exception as e:
-            logger.error(f"[API] Force status error: {e}")
-            return jsonify({
-                'status': 'error',
-                'message': 'Failed to print status report',
-                'code': 'FORCE_STATUS_ERROR'
-            }), 500
-    
-    # ═══════════════════════════════════════════════════════════════════════════════════════
-    # CATCH-ALL ENDPOINTS FOR MISSING ROUTES
-    # ═══════════════════════════════════════════════════════════════════════════════════════
-    
-    
-    # ═════════════════════════════════════════════════════════════════════════════════════
-    # QUANTUM BLOCKS API ROUTES (Approach 3 + 5)
-    # ═════════════════════════════════════════════════════════════════════════════════════
-    
-    @flask_app.route('/api/blocks/submit_transaction', methods=['POST'])
-    @handle_errors
-    def submit_transaction_to_block():
-        """Submit transaction to quantum block pool"""
-        global tx_pool, tx_pool_lock
-        
-        if tx_pool is None:
-            return jsonify({'error': 'Block system not available'}), 503
-        
-        try:
-            data = request.get_json()
-            if not data:
-                return jsonify({'error': 'No JSON payload'}), 400
-            
-            tx_id = str(uuid.uuid4())
-            
-            with tx_pool_lock:
-                tx_pool.append({
-                    'tx_id': tx_id,
-                    'data': data,
-                    'added_at': datetime.now().isoformat(),
-                })
-                pool_size = len(tx_pool)
-            
-            return jsonify({
-                'status': 'queued',
-                'tx_id': tx_id,
-                'pool_size': pool_size,
-            }), 202
-        
-        except Exception as e:
-            logger.error(f'[BLOCKS] TX submission error: {e}')
-            return jsonify({'error': str(e)}), 500
-    
-    @flask_app.route('/api/blocks/pool_status', methods=['GET'])
-    @handle_errors
-    def get_block_pool_status():
-        """Get quantum block pool status"""
-        global tx_pool, tx_pool_lock, quantum_oracle, quantum_witness_aggregator
-        
-        try:
-            with tx_pool_lock:
-                pool_size = len(tx_pool) if tx_pool else 0
-            
-            oracle_metrics = quantum_oracle.get_metrics() if quantum_oracle else {}
-            aggregator_metrics = quantum_witness_aggregator.get_metrics() if quantum_witness_aggregator else {}
-            
-            return jsonify({
-                'tx_pool_size': pool_size,
-                'tx_pool_max': 5000,
-                'oracle': oracle_metrics,
-                'aggregator': aggregator_metrics,
-                'timestamp': datetime.now().isoformat(),
-            }), 200
-        
-        except Exception as e:
-            logger.error(f'[BLOCKS] Pool status error: {e}')
-            return jsonify({'error': str(e)}), 500
-    
-    @flask_app.route('/api/blocks/<int:block_number>/witnesses', methods=['GET'])
-    @handle_errors
-    def get_block_witnesses(block_number):
-        """Get witness chain for a block"""
-        try:
-            conn = DatabaseConnection.get_connection()
-            cursor = conn.cursor(cursor_factory=RealDictCursor)
-            
-            cursor.execute("""
-                SELECT witness_data FROM block_witnesses
-                WHERE block_number = %s
-                ORDER BY created_at ASC
-            """, (block_number,))
-            
-            witnesses = cursor.fetchall()
-            cursor.close()
-            DatabaseConnection.return_connection(conn)
-            
-            if not witnesses:
-                return jsonify({'error': 'No witnesses found'}), 404
-            
-            return jsonify({
-                'block_number': block_number,
-                'witness_count': len(witnesses),
-                'witnesses': [json.loads(w['witness_data']) if isinstance(w['witness_data'], str) else w['witness_data'] for w in witnesses],
-            }), 200
-        
-        except Exception as e:
-            logger.error(f'[BLOCKS] Witness retrieval error: {e}')
-            return jsonify({'error': str(e)}), 500
-    
-    @flask_app.route('/api/blocks/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
-    @rate_limited
-    def catch_all_api(path):
-        """Catch-all for unimplemented API endpoints"""
-        return jsonify({
-            'status': 'error',
-            'message': f'Endpoint not implemented: /api/{path}',
-            'code': 'NOT_IMPLEMENTED',
-            'available_endpoints': {
-                'health': 'GET /health',
-                'status': 'GET /api/status',
-                'auth_login': 'POST /api/auth/login',
-                'auth_register': 'POST /api/auth/register',
-                'user_profile': 'GET /api/users/me',
-                'users_list': 'GET /api/users',
-                'blocks_latest': 'GET /api/blocks/latest',
-                'blocks_list': 'GET /api/blocks',
-                'blocks_submit_tx': 'POST /api/blocks/submit_transaction',
-                'blocks_pool_status': 'GET /api/blocks/pool_status',
-                'blocks_witnesses': 'GET /api/blocks/<block_number>/witnesses',
-                'transactions_list': 'GET /api/transactions',
-                'transactions_submit': 'POST /api/transactions',
-                'quantum_status': 'GET /api/quantum/status',
-                'lattice_status': 'GET /api/quantum/lattice/status',
-                'lattice_refresh': 'POST /api/quantum/lattice/refresh',
-                'lattice_force_status': 'POST /api/quantum/lattice/force-status',
-                'mempool_status': 'GET /api/mempool/status',
-                'gas_prices': 'GET /api/gas/prices',
-                'verify_signature': 'POST /api/crypto/verify-signature',
-                'mobile_config': 'GET /api/mobile/config'
-            }
-        }), 404
-    
-    # Keep-alive endpoint for quantum lattice heartbeat (MUST be before catch-all!)
-    @flask_app.route('/api/keep-alive', methods=['GET', 'POST'])
-    def keep_alive_endpoint():
-        """Heartbeat endpoint - receives quantum lattice cycle metrics"""
-        from datetime import datetime
-        from flask import request
-        
-        # Base response
-        response_data = {
-            'status': 'alive',
-            'timestamp': datetime.now().isoformat(),
-            'source': 'quantum_lattice_heartbeat'
+        status = {
+            'status': 'operational',
+            'timestamp': datetime.utcnow().isoformat(),
+            'quantum_enabled': Config.ENABLE_QUANTUM,
+            'metrics': None
         }
         
-        # If POST request with metrics, include them in response
-        if request.method == 'POST' and request.is_json:
+        if latest_quantum_metrics:
+            status['metrics'] = latest_quantum_metrics
+        
+        if quantum_system and hasattr(quantum_system, 'get_status'):
             try:
-                heartbeat_data = request.get_json()
-                
-                # Extract quantum metrics from heartbeat
-                cycle = heartbeat_data.get('cycle')
-                metrics = heartbeat_data.get('metrics', {})
-                
-                # Add quantum metrics to response
-                response_data.update({
-                    'cycle': cycle,
-                    'quantum_metrics': {
-                        'sigma': metrics.get('sigma'),
-                        'coherence': metrics.get('coherence'),
-                        'fidelity': metrics.get('fidelity', 1.0)
-                    },
-                    'message': f'💓 Cycle {cycle} heartbeat received - Coherence: {metrics.get("coherence", 0):.6f}, Fidelity: {metrics.get("fidelity", 1.0):.6f}'
-                })
-                
-                # Log the heartbeat with metrics
-                logger.info(f"💓 [Cycle {cycle}] Heartbeat: σ={metrics.get('sigma', 0):.2f} | "
-                           f"C={metrics.get('coherence', 0):.6f} | F={metrics.get('fidelity', 1.0):.6f}")
-                
-                # Store latest metrics globally for query endpoint
-                global latest_quantum_metrics
-                latest_quantum_metrics = {
-                    'cycle': cycle,
-                    'timestamp': datetime.now().isoformat(),
-                    'metrics': metrics
-                }
-                
+                system_status = quantum_system.get_status()
+                status['system'] = system_status
             except Exception as e:
-                logger.warning(f"Failed to parse heartbeat metrics: {e}")
-                response_data['message'] = 'Heartbeat received (metrics parse failed)'
-        else:
-            # GET request or no JSON data
-            response_data['message'] = 'Instance awake and responsive'
+                logger.error(f"[Quantum] Status error: {e}")
         
-        return jsonify(response_data), 200
+        return jsonify(status), 200
     
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # QUANTUM TRANSACTION PROCESSOR ROUTES (gas-free W-state + GHZ-8 finality)
-    # ─────────────────────────────────────────────────────────────────────────
-    try:
-        from quantum_engine import register_quantum_routes
-        register_quantum_routes(flask_app)
-        logger.info("[ROUTES] ✓ Quantum transaction routes registered (gas-free)")
-    except Exception as _txn_route_err:
-        logger.warning(f"[ROUTES] Could not register quantum transaction routes: {_txn_route_err}")
-
-    # Catch-all route for unimplemented endpoints (MUST be last!)
-    @flask_app.route('/api/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
+    @app.route('/api/quantum/stats', methods=['GET'])
     @rate_limited
-    def catch_all_root(path):
-        """Catch-all for unimplemented API endpoints"""
-        # Exclude keep-alive endpoint (it's registered separately above)
-        if path == 'keep-alive':
-            return keep_alive_endpoint()
+    @handle_exceptions
+    def quantum_stats():
+        """Get quantum execution statistics"""
+        try:
+            # Try to import quantum engine
+            try:
+                from quantum_engine import get_quantum_executor
+                executor = get_quantum_executor()
+                stats = executor.get_stats()
+                
+                if hasattr(executor, 'w_bus'):
+                    w_state = executor.w_bus.get_current_state()
+                    stats['w_state_bus'] = {
+                        'validators': w_state.validator_ids,
+                        'cycle_count': w_state.cycle_count,
+                        'cumulative_agreement': w_state.cumulative_agreement,
+                        'last_collapse': w_state.last_collapse_outcome
+                    }
+                
+                return jsonify({
+                    'status': 'success',
+                    'quantum_stats': stats
+                }), 200
+            except ImportError:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Quantum engine not available',
+                    'code': 'QUANTUM_UNAVAILABLE'
+                }), 503
+        except Exception as e:
+            logger.error(f"[API] Quantum stats error: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to get quantum stats',
+                'code': 'STATS_ERROR'
+            }), 500
+    
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    # ADMIN ENDPOINTS
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    
+    @app.route('/api/admin/transactions', methods=['GET'])
+    @require_admin
+    @rate_limited
+    @handle_exceptions
+    def admin_list_transactions():
+        """Admin: List all transactions with filters"""
+        try:
+            limit = min(int(request.args.get('limit', 50)), 500)
+            offset = int(request.args.get('offset', 0))
+            status_filter = request.args.get('status')
+            user_id_filter = request.args.get('user_id')
+            
+            query = "SELECT * FROM transactions WHERE 1=1"
+            params = []
+            
+            if status_filter:
+                query += " AND status = %s"
+                params.append(status_filter)
+            
+            if user_id_filter:
+                query += " AND (from_user_id = %s OR to_user_id = %s)"
+                params.extend([user_id_filter, user_id_filter])
+            
+            query += " ORDER BY created_at DESC LIMIT %s OFFSET %s"
+            params.extend([limit, offset])
+            
+            transactions = db_manager.execute_query(query, tuple(params))
+            
+            return jsonify({
+                'status': 'success',
+                'count': len(transactions),
+                'limit': limit,
+                'offset': offset,
+                'transactions': transactions
+            }), 200
+        except Exception as e:
+            logger.error(f"[API] Admin list transactions error: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to list transactions',
+                'code': 'LIST_ERROR'
+            }), 500
+    
+    @app.route('/api/admin/transactions/<tx_id>/approve', methods=['POST'])
+    @require_admin
+    @rate_limited
+    @handle_exceptions
+    def admin_approve_transaction(tx_id):
+        """Admin: Approve pending transaction"""
+        try:
+            tx_id = sanitize_input(tx_id)
+            
+            db_manager.execute_query(
+                "UPDATE transactions SET status = 'approved' WHERE tx_id = %s AND status = 'pending'",
+                (tx_id,),
+                fetch=False
+            )
+            
+            return jsonify({
+                'status': 'success',
+                'message': 'Transaction approved',
+                'transaction_id': tx_id
+            }), 200
+        except Exception as e:
+            logger.error(f"[API] Admin approve transaction error: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to approve transaction',
+                'code': 'APPROVE_ERROR'
+            }), 500
+    
+    @app.route('/api/admin/transactions/<tx_id>/reject', methods=['POST'])
+    @require_admin
+    @rate_limited
+    @handle_exceptions
+    def admin_reject_transaction(tx_id):
+        """Admin: Reject pending transaction"""
+        try:
+            tx_id = sanitize_input(tx_id)
+            data = request.get_json() or {}
+            reason = sanitize_input(data.get('reason', 'Admin rejection'))
+            
+            db_manager.execute_query(
+                "UPDATE transactions SET status = 'rejected' WHERE tx_id = %s AND status = 'pending'",
+                (tx_id,),
+                fetch=False
+            )
+            
+            return jsonify({
+                'status': 'success',
+                'message': 'Transaction rejected',
+                'transaction_id': tx_id,
+                'reason': reason
+            }), 200
+        except Exception as e:
+            logger.error(f"[API] Admin reject transaction error: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': 'Failed to reject transaction',
+                'code': 'REJECT_ERROR'
+            }), 500
+    
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    # UTILITY ENDPOINTS
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    
+    @app.route('/api/keep-alive', methods=['GET', 'POST'])
+    @handle_exceptions
+    def keep_alive():
+        """Heartbeat endpoint for quantum system"""
+        global latest_quantum_metrics
+        
+        if request.method == 'POST':
+            data = request.get_json() or {}
+            latest_quantum_metrics = data
+            logger.debug(f"[Heartbeat] Received metrics: {data}")
         
         return jsonify({
-            'status': 'error',
-            'message': f'Endpoint not implemented: /api/{path}',
-            'code': 'NOT_IMPLEMENTED'
-        }), 404
+            'status': 'alive',
+            'timestamp': datetime.utcnow().isoformat()
+        }), 200
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# FLASK APPLICATION FACTORY
+# WEBSOCKET HANDLERS
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-def create_app():
-    """Create and configure Flask application"""
-    flask_app = Flask(__name__)
-    flask_app.config.from_object(Config)
+def setup_websocket_handlers(socketio_instance):
+    """Setup WebSocket event handlers"""
     
-    # Enable CORS
-    CORS(flask_app, resources={r"/api/*": {"origins": "*"}})
+    @socketio_instance.on('connect')
+    def handle_connect():
+        logger.info(f"[WebSocket] Client connected: {request.sid}")
+        emit('response', {'message': 'Connected to QTCL WebSocket'})
     
-    # Register error handlers
-    register_error_handlers(flask_app)
+    @socketio_instance.on('disconnect')
+    def handle_disconnect():
+        logger.info(f"[WebSocket] Client disconnected: {request.sid}")
     
-    # Register all routes (CRITICAL: must happen in create_app for WSGI/production deployment)
-    setup_routes(flask_app)
+    @socketio_instance.on('subscribe')
+    def handle_subscribe(data):
+        channel = data.get('channel')
+        if channel:
+            room = f"channel_{channel}"
+            join_room(room)
+            logger.info(f"[WebSocket] {request.sid} subscribed to {channel}")
+            emit('response', {'message': f'Subscribed to {channel}'})
     
-    return flask_app
-
-def register_error_handlers(flask_app):
-    """Register global error handlers"""
-    
-    @flask_app.errorhandler(404)
-    def not_found(error):
-        return jsonify({
-            'status': 'error',
-            'message': 'Resource not found',
-            'code': 'NOT_FOUND'
-        }), 404
-    
-    @flask_app.errorhandler(500)
-    def internal_error(error):
-        logger.error(f"[API] Internal server error: {error}")
-        return jsonify({
-            'status': 'error',
-            'message': 'Internal server error',
-            'code': 'INTERNAL_ERROR'
-        }), 500
-    
-    @flask_app.errorhandler(Exception)
-    def handle_exception(error):
-        logger.error(f"[API] Unhandled exception: {error}")
-        logger.error(traceback.format_exc())
-        return jsonify({
-            'status': 'error',
-            'message': 'An unexpected error occurred',
-            'code': 'UNEXPECTED_ERROR'
-        }), 500
+    @socketio_instance.on('unsubscribe')
+    def handle_unsubscribe(data):
+        channel = data.get('channel')
+        if channel:
+            room = f"channel_{channel}"
+            leave_room(room)
+            logger.info(f"[WebSocket] {request.sid} unsubscribed from {channel}")
+            emit('response', {'message': f'Unsubscribed from {channel}'})
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # APPLICATION INITIALIZATION
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-def initialize_quantum_blocks():
-    """
-    Initialize Quantum Block System (Approach 3 + 5).
-    Oracle: Post-formation block enhancement with witness signatures
-    Aggregator: Witness chain during transaction accumulation
-    """
-    global entropy_pool, quantum_oracle, quantum_witness_aggregator, tx_pool, tx_pool_lock
-    
-    try:
-        from collections import deque
-        import threading
-        import hmac
-        import hashlib
-        import secrets
-        import uuid
-        
-        # Create shared entropy pool
-        entropy_pool = deque(maxlen=10000)
-        tx_pool = deque(maxlen=5000)
-        tx_pool_lock = threading.Lock()
-        
-        logger.info("[BLOCKS] Initializing Oracle (post-formation enhancement)...")
-        
-        # Initialize quantum oracle (Approach 3)
-        class QuantumOracleInline:
-            def __init__(self, db_params, entropy_pool, metrics_fn):
-                self.db_params = db_params
-                self.entropy_pool = entropy_pool
-                self.get_metrics = metrics_fn
-                self.running = False
-                self.witnesses_generated = 0
-                self.blocks_locked = 0
-                self.lock = threading.Lock()
-                
-            def start(self):
-                if self.running:
-                    return
-                self.running = True
-                self.thread = threading.Thread(target=self._oracle_loop, daemon=True, name="QuantumOracle")
-                self.thread.start()
-            
-            def stop(self):
-                self.running = False
-                if hasattr(self, 'thread'):
-                    self.thread.join(timeout=5)
-            
-            def _oracle_loop(self):
-                while self.running:
-                    try:
-                        metrics = self.get_metrics()
-                        if not metrics:
-                            time.sleep(2)
-                            continue
-                        
-                        conn = psycopg2.connect(**self.db_params)
-                        cursor = conn.cursor(cursor_factory=RealDictCursor)
-                        
-                        cursor.execute("""
-                            SELECT block_number, block_hash FROM blocks 
-                            WHERE finalized = FALSE LIMIT 50
-                        """)
-                        
-                        blocks = cursor.fetchall()
-                        
-                        for block in blocks:
-                            try:
-                                witness_id = str(uuid.uuid4())
-                                entropy_nonce = secrets.token_hex(16) if len(self.entropy_pool) < 32 else bytes(list(self.entropy_pool)[:32]).hex()
-                                
-                                witness_data = (
-                                    block['block_hash'] +
-                                    f"{metrics.get('coherence', 0):.6f}" +
-                                    f"{metrics.get('fidelity', 0):.6f}" +
-                                    entropy_nonce
-                                )
-                                
-                                signature = hmac.new(
-                                    entropy_nonce.encode(),
-                                    witness_data.encode(),
-                                    hashlib.sha256
-                                ).hexdigest()
-                                
-                                cursor.execute("""
-                                    INSERT INTO block_witnesses (
-                                        witness_id, block_number, witness_data, cycle_number, 
-                                        coherence, fidelity, sigma
-                                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-                                """, (
-                                    witness_id,
-                                    block['block_number'],
-                                    json.dumps({
-                                        'signature': signature,
-                                        'entropy_nonce': entropy_nonce,
-                                        'coherence': metrics.get('coherence', 0),
-                                        'fidelity': metrics.get('fidelity', 0),
-                                    }),
-                                    metrics.get('cycle', 0),
-                                    metrics.get('coherence', 0),
-                                    metrics.get('fidelity', 0),
-                                    metrics.get('sigma', 0),
-                                ))
-                                
-                                with self.lock:
-                                    self.witnesses_generated += 1
-                            
-                            except Exception as e:
-                                logger.error(f"[ORACLE] Witness generation error: {e}")
-                        
-                        conn.commit()
-                        cursor.close()
-                        conn.close()
-                        time.sleep(10)
-                    
-                    except Exception as e:
-                        logger.error(f"[ORACLE] Loop error: {e}")
-                        time.sleep(5)
-            
-            def get_metrics(self):
-                with self.lock:
-                    return {
-                        'witnesses_generated': self.witnesses_generated,
-                        'blocks_locked': self.blocks_locked,
-                    }
-        
-        # Initialize witness aggregator (Approach 5)
-        logger.info("[BLOCKS] Initializing Witness Aggregator (chain during TX fill)...")
-        
-        class QuantumWitnessAggregatorInline:
-            def __init__(self, db_params, entropy_pool, metrics_fn):
-                self.db_params = db_params
-                self.entropy_pool = entropy_pool
-                self.get_metrics = metrics_fn
-                self.running = False
-                self.current_chain_id = None
-                self.witnesses_in_chain = 0
-                self.chains_created = 0
-                self.lock = threading.Lock()
-            
-            def start(self):
-                if self.running:
-                    return
-                self.running = True
-                self.thread = threading.Thread(target=self._aggregator_loop, daemon=True, name="WitnessAggregator")
-                self.thread.start()
-            
-            def stop(self):
-                self.running = False
-                if hasattr(self, 'thread'):
-                    self.thread.join(timeout=5)
-            
-            def _aggregator_loop(self):
-                last_cycle = 0
-                while self.running:
-                    try:
-                        metrics = self.get_metrics()
-                        if not metrics or metrics.get('cycle', 0) == last_cycle:
-                            time.sleep(1)
-                            continue
-                        
-                        last_cycle = metrics.get('cycle', 0)
-                        
-                        with self.lock:
-                            if not self.current_chain_id:
-                                self.current_chain_id = str(uuid.uuid4())
-                                self.chains_created += 1
-                                self.witnesses_in_chain = 0
-                        
-                        entropy_nonce = secrets.token_hex(16) if len(self.entropy_pool) < 32 else bytes(list(self.entropy_pool)[:32]).hex()
-                        witness_sig = hmac.new(
-                            entropy_nonce.encode(),
-                            json.dumps(metrics).encode(),
-                            hashlib.sha256
-                        ).hexdigest()
-                        
-                        with self.lock:
-                            self.witnesses_in_chain += 1
-                        
-                        logger.debug(f"[AGGREGATOR] Added witness to chain (total: {self.witnesses_in_chain})")
-                        time.sleep(1)
-                    
-                    except Exception as e:
-                        logger.error(f"[AGGREGATOR] Loop error: {e}")
-                        time.sleep(2)
-            
-            def get_metrics(self):
-                with self.lock:
-                    return {
-                        'chains_created': self.chains_created,
-                        'current_chain_witnesses': self.witnesses_in_chain,
-                    }
-        
-        # Get DB params
-        db_params = {
-            'host': Config.DATABASE_HOST,
-            'port': Config.DATABASE_PORT,
-            'database': Config.DATABASE_NAME,
-            'user': Config.DATABASE_USER,
-            'password': Config.DATABASE_PASSWORD,
-        }
-        
-        # Create oracle and aggregator
-        metrics_fn = lambda: quantum_system.get_oracle_metrics() if quantum_system else {}
-        
-        quantum_oracle = QuantumOracleInline(db_params, entropy_pool, metrics_fn)
-        quantum_oracle.start()
-        
-        quantum_witness_aggregator = QuantumWitnessAggregatorInline(db_params, entropy_pool, metrics_fn)
-        quantum_witness_aggregator.start()
-        
-        logger.info("[BLOCKS] ✓ Oracle started")
-        logger.info("[BLOCKS] ✓ Witness Aggregator started")
-        
-        return True
-    
-    except Exception as e:
-        logger.error(f"[BLOCKS] Initialization failed: {e}")
-        logger.error(traceback.format_exc())
-        return False
-
 def initialize_app():
-    """Initialize application with integrated database and quantum systems"""
-    global db_manager, quantum_system, entropy_pool, quantum_oracle, quantum_witness_aggregator
+    """Initialize application components"""
+    global db_manager, quantum_system
     
     try:
         logger.info("=" * 100)
-        logger.info("QTCL API INITIALIZATION - PRODUCTION DATABASE + QUANTUM LATTICE CONTROL LIVE V5")
+        logger.info("INITIALIZING QTCL UNIFIED APPLICATION")
         logger.info("=" * 100)
-        logger.info("")
         
-        # Step 1: Initialize DatabaseManager
-        logger.info("[INIT] Initializing DatabaseManager...")
-        db_manager = DatabaseManager()
-        logger.info("[INIT] ✓ DatabaseManager created")
+        # Initialize database
+        logger.info("[Init] Setting up database...")
+        setup_database()
         
-        # Step 2: Validate database connection
-        logger.info("[INIT] Validating database connection...")
-        try:
-            DBConfig.validate()
-            test_conn = DatabaseConnection.get_connection()
-            DatabaseConnection.return_connection(test_conn)
-            logger.info("[INIT] ✓ Database connection validated")
-        except Exception as e:
-            logger.error(f"[INIT] ✗ Database connection failed: {e}")
-            raise
-        
-        # Step 3: Initialize schema
-        logger.info("[INIT] Validating database schema...")
-        if not db_manager.initialize_schema():
-            logger.warning("[INIT] ⚠ Schema validation had issues, continuing...")
-        else:
-            logger.info("[INIT] ✓ Schema validated")
-
-        # Step 3b: Run quantum-specific schema migrations (idempotent)
-        logger.info("[INIT] Running quantum schema migrations...")
-        try:
-            from quantum_schema_migration import run_migrations
-            # DatabaseConnection already imported at module level — use global
-            run_migrations(DatabaseConnection)
-            logger.info("[INIT] ✓ Quantum schema migrations complete")
-        except Exception as _mig_err:
-            logger.warning(f"[INIT] ⚠ Schema migration warning (non-fatal): {_mig_err}")
-        
-        # Step 4: Seed test user
-        logger.info("[INIT] Checking for test admin user...")
+        # Seed admin user
+        logger.info("[Init] Seeding admin user...")
         db_manager.seed_test_user()
         
-        # Step 5: Initialize Quantum Lattice Control Live V5
-        logger.info("[INIT] Initializing Quantum Lattice Control Live V5 system...")
-        if initialize_quantum_system():
-            logger.info("[INIT] ✓ Quantum system initialized")
-        else:
-            logger.warning("[INIT] ⚠ Quantum system not available")
+        # Initialize quantum system if enabled
+        if Config.ENABLE_QUANTUM:
+            try:
+                logger.info("[Init] Initializing quantum system...")
+                from quantum_lattice_control_live_complete import QuantumLatticeControlLive
+                quantum_system = QuantumLatticeControlLive(app_url=Config.APP_URL)
+                quantum_system.start_monitoring()
+                logger.info("[Init] ✓ Quantum system initialized")
+            except Exception as e:
+                logger.warning(f"[Init] Quantum system initialization failed: {e}")
+                quantum_system = None
         
-        # Step 6: Initialize Quantum Block System (Approach 3 + 5)
-        logger.info("[INIT] Initializing Quantum Block System (Oracle + Witness Aggregation)...")
-        initialize_quantum_blocks()
-        logger.info("[INIT] ✓ Quantum block system initialized")
-
-        # Step 7: Start quantum transaction processor (gas-free W-state + GHZ-8 finality)
-        logger.info("[INIT] Starting quantum transaction processor (gas-free)...")
-        try:
-            from quantum_engine import get_transaction_processor
-            _tx_processor = get_transaction_processor()
-            _tx_processor.set_database_connection(DatabaseConnection)
-            _tx_processor.start()
-            logger.info("[INIT] ✓ Quantum transaction processor started (gas-free W-state + GHZ-8)")
-        except Exception as _tp_err:
-            logger.warning(f"[INIT] ⚠ Quantum transaction processor failed to start: {_tp_err}")
-        
-        logger.info("")
-        logger.info("[INIT] ✓ Application initialized successfully")
         logger.info("=" * 100)
-        logger.info(f"API Version: {Config.API_VERSION}")
-        logger.info(f"Environment: {Config.ENVIRONMENT}")
-        logger.info(f"Database: {Config.DATABASE_HOST}:{Config.DATABASE_PORT}/{Config.DATABASE_NAME}")
-        logger.info("=" * 100)
-        logger.info("ADMIN CREDENTIALS:")
-        logger.info("  Email: shemshallah@gmail.com")
-        logger.info("  Password: (uses SUPABASE_PASSWORD environment variable)")
-        logger.info("  Project ID: 6c312f3f-20ea-47cb-8c85-1dc8b5377eb3")
-        logger.info("")
-        logger.info("SYSTEM INTEGRATION:")
-        logger.info("  - db_config.py: Connection pooling & DatabaseBuilderManager")
-        logger.info("  - db_builder_v2.py: Schema, genesis, oracle, pseudoqubits")
-        logger.info("  - quantum_lattice_control_live_complete.py: V5 Quantum System")
-        logger.info("  - QUANTUM BLOCKS: Approach 3+5 (Oracle + Witness Aggregation)")
+        logger.info("✓ APPLICATION INITIALIZED SUCCESSFULLY")
         logger.info("=" * 100)
         
         return True
-    
     except Exception as e:
-        logger.error(f"[INIT] Initialization failed: {e}")
-        logger.error(traceback.format_exc())
+        logger.error(f"[Init] Initialization failed: {e}", exc_info=True)
         return False
 
-
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# APPLICATION ENTRY POINT
+# MAIN ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 if __name__ == '__main__':
-    logger.info(f"Starting QTCL API Server on {os.getenv('API_HOST', '0.0.0.0')}:{os.getenv('API_PORT', '5000')}")
+    try:
+        # Create application
+        app = create_app()
+        
+        # Initialize components
+        if not initialize_app():
+            logger.error("[Main] Failed to initialize application")
+            sys.exit(1)
+        
+        # Log startup info
+        logger.info("=" * 100)
+        logger.info(f"QTCL API v{Config.API_VERSION} - {Config.ENVIRONMENT.upper()} MODE")
+        logger.info("=" * 100)
+        logger.info(f"→ Host: {Config.HOST}")
+        logger.info(f"→ Port: {Config.PORT}")
+        logger.info(f"→ Database: {Config.DATABASE_HOST}")
+        logger.info(f"→ Redis: {'Enabled' if Config.REDIS_ENABLED else 'Disabled'}")
+        logger.info(f"→ WebSocket: {'Enabled' if Config.ENABLE_WEBSOCKET else 'Disabled'}")
+        logger.info(f"→ Quantum: {'Enabled' if Config.ENABLE_QUANTUM else 'Disabled'}")
+        logger.info(f"→ 2FA: {'Enabled' if Config.ENABLE_2FA else 'Disabled'}")
+        logger.info(f"→ Rate Limiting: {'Enabled' if Config.RATE_LIMIT_ENABLED else 'Disabled'}")
+        logger.info("=" * 100)
+        
+        # Start server
+        if Config.ENABLE_WEBSOCKET and socketio:
+            socketio.run(
+                app,
+                host=Config.HOST,
+                port=int(Config.PORT),
+                debug=Config.DEBUG,
+                use_reloader=False,
+                log_output=True
+            )
+        else:
+            app.run(
+                host=Config.HOST,
+                port=int(Config.PORT),
+                debug=Config.DEBUG,
+                use_reloader=False
+            )
     
-    # Initialize app (routes are now registered in create_app)
-    app = create_app()
-    
-    if initialize_app():
-        app.run(
-            host=os.getenv('API_HOST', '0.0.0.0'),
-            port=int(os.getenv('API_PORT', '5000')),
-            debug=Config.DEBUG,
-            threaded=True
-        )
-    else:
-        logger.error("[INIT] Failed to initialize application")
+    except KeyboardInterrupt:
+        logger.info("[Main] Shutting down (Ctrl+C)")
+        sys.exit(0)
+    except Exception as e:
+        logger.critical(f"[Main] Fatal error: {e}", exc_info=True)
         sys.exit(1)
+
+# WSGI export for production servers (gunicorn, uwsgi)
+application = create_app()
