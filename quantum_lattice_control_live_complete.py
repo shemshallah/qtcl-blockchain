@@ -33,7 +33,8 @@ import threading
 import time
 import logging
 import json
-# Integrated NoiseRefreshHeartbeat - no longer external import
+# Import lightweight independent heartbeat system
+from lightweight_heartbeat import LightweightHeartbeat
 
 import queue
 import psycopg2
@@ -1848,196 +1849,11 @@ class NeuralNetworkCheckpoint:
 # NOISE REFRESH HEARTBEAT - HTTP Keep-Alive to Server
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-class NoiseRefreshHeartbeat:
-    """
-    HTTP Keep-Alive heartbeat for quantum system.
-    Pings the server every 100 cycles to maintain connection and signal system health.
-    """
-    def __init__(self, app_url: str = None):
-        self.cycle_count = 0
-        self.last_cycle_time = datetime.now()
-        self.cycles_processed = []
-        self.lock = threading.Lock()
-        
-        # HTTP endpoint configuration
-        self.app_url = app_url or os.getenv('APP_URL', 'http://localhost:5000')
-        self.heartbeat_endpoint = f"{self.app_url}/api/heartbeat"
-        
-        # Metrics aggregation
-        self.sigma_history = []
-        self.coherence_history = []
-        self.fidelity_history = []
-        self.cycle_time_history = []
-        
-        logger.info(f"💓 NoiseRefreshHeartbeat configured: {self.heartbeat_endpoint}")
-    
-    def on_noise_cycle_complete(self, cycle_num: int, metrics: Dict) -> None:
-        """
-        Called when a noise cycle completes.
-        Sends HTTP heartbeat every 100 cycles to keep server alive.
-        """
-        with self.lock:
-            self.cycle_count += 1
-            self.last_cycle_time = datetime.now()
-            
-            # Record metrics
-            if 'sigma' in metrics:
-                self.sigma_history.append(metrics['sigma'])
-            if 'coherence_after' in metrics:
-                self.coherence_history.append(metrics['coherence_after'])
-            if 'fidelity_after' in metrics:
-                self.fidelity_history.append(metrics['fidelity_after'])
-            if 'cycle_time' in metrics:
-                self.cycle_time_history.append(metrics['cycle_time'])
-            
-            self.cycles_processed.append({
-                'cycle_num': cycle_num,
-                'timestamp': self.last_cycle_time,
-                'metrics': metrics
-            })
-            # Keep only last 1000 cycles to avoid memory bloat
-            if len(self.cycles_processed) > 1000:
-                self.cycles_processed = self.cycles_processed[-1000:]
-            
-            # Send HTTP heartbeat every 100 cycles
-            if self.cycle_count % 100 == 0:
-                self._send_http_heartbeat(cycle_num, metrics)
-            
-            # Lightweight heartbeat every 10 cycles (faster feedback)
-            elif self.cycle_count % 10 == 0:
-                self._send_lightweight_heartbeat(cycle_num)
-    
-    def get_heartbeat_status(self) -> Dict:
-        """Get current heartbeat status and metrics (called every cycle)"""
-        with self.lock:
-            recent_count = min(100, len(self.cycles_processed))
-            
-            if recent_count == 0:
-                return {
-                    'cycles_tracked': 0,
-                    'heartbeat_status': '⏳',
-                    'avg_sigma': 0.0,
-                    'avg_coherence': 0.0,
-                    'avg_fidelity': 0.0
-                }
-            
-            recent_cycles = self.cycles_processed[-recent_count:]
-            
-            avg_sigma = np.mean([c['metrics'].get('sigma', 0) for c in recent_cycles if 'sigma' in c['metrics']]) if recent_cycles else 0
-            avg_coherence = np.mean([c['metrics'].get('coherence_after', 0) for c in recent_cycles if 'coherence_after' in c['metrics']]) if recent_cycles else 0
-            avg_fidelity = np.mean([c['metrics'].get('fidelity_after', 0) for c in recent_cycles if 'fidelity_after' in c['metrics']]) if recent_cycles else 0
-            
-            # Heartbeat status indicator: 💓 = healthy, 💗 = good, ⚠️ = degraded
-            if avg_coherence > 0.9 and avg_fidelity > 0.9:
-                status = '💓'
-            elif avg_coherence > 0.8 and avg_fidelity > 0.8:
-                status = '💗'
-            else:
-                status = '⚠️'
-            
-            return {
-                'cycles_tracked': recent_count,
-                'heartbeat_status': status,
-                'avg_sigma': float(avg_sigma),
-                'avg_coherence': float(avg_coherence),
-                'avg_fidelity': float(avg_fidelity),
-                'heartbeat_due': (self.cycle_count % 100 == 0)
-            }
-    
-    def _send_http_heartbeat(self, cycle_num: int, metrics: Dict) -> None:
-        """Send HTTP keep-alive heartbeat to server (asynchronous)"""
-        def _send():
-            try:
-                # Calculate aggregated metrics for last 100 cycles
-                recent_count = min(100, len(self.cycles_processed))
-                recent_cycles = self.cycles_processed[-recent_count:]
-                
-                avg_sigma = np.mean([c['metrics'].get('sigma', 0) for c in recent_cycles if 'sigma' in c['metrics']]) if recent_cycles else 0
-                avg_coherence = np.mean([c['metrics'].get('coherence_after', 0) for c in recent_cycles if 'coherence_after' in c['metrics']]) if recent_cycles else 0
-                avg_fidelity = np.mean([c['metrics'].get('fidelity_after', 0) for c in recent_cycles if 'fidelity_after' in c['metrics']]) if recent_cycles else 0
-                
-                payload = {
-                    'source': 'quantum_lattice_control',
-                    'cycle': cycle_num,
-                    'timestamp': datetime.now().isoformat(),
-                    'metrics': {
-                        'sigma': float(avg_sigma),
-                        'coherence': float(avg_coherence),
-                        'fidelity': float(avg_fidelity),
-                        'cycles_aggregated': recent_count
-                    }
-                }
-                
-                logger.debug(f"[Heartbeat] Sending POST to {self.heartbeat_endpoint} (cycle {cycle_num})...")
-                
-                response = requests.post(
-                    self.heartbeat_endpoint,
-                    json=payload,
-                    timeout=5,
-                    headers={'User-Agent': 'QuantumLatticeHeartbeat/1.0'}
-                )
-                
-                if response.status_code == 200:
-                    logger.info("╔════════════════════════════════════════════════════════════════╗")
-                    logger.info(f"║  💓 HEARTBEAT SENT: Cycle {cycle_num:>6d} | Keep-Alive Signal ║")
-                    logger.info("╠════════════════════════════════════════════════════════════════╣")
-                    logger.info(f"║  Endpoint:             {self.heartbeat_endpoint:<33} ║")
-                    logger.info(f"║  Avg Sigma (σ):        {avg_sigma:>10.6f}                        ║")
-                    logger.info(f"║  Avg Coherence:        {avg_coherence:>10.6f}                        ║")
-                    logger.info(f"║  Avg Fidelity:         {avg_fidelity:>10.6f}                        ║")
-                    logger.info(f"║  Cycles Aggregated:    {recent_count:>10d}                        ║")
-                    logger.info(f"║  Server Response:      HTTP {response.status_code}                           ║")
-                    logger.info("╚════════════════════════════════════════════════════════════════╝")
-                else:
-                    logger.warning(f"⚠ [Cycle {cycle_num}] Heartbeat HTTP {response.status_code} from {self.heartbeat_endpoint}")
-                    logger.warning(f"  Response: {response.text[:200] if response.text else '(no body)'}")
-            
-            except requests.exceptions.Timeout:
-                logger.warning(f"⏱ [Cycle {cycle_num}] Heartbeat timeout - server at {self.heartbeat_endpoint} may be slow or unreachable")
-            except requests.exceptions.ConnectionError as e:
-                logger.warning(f"🔴 [Cycle {cycle_num}] Cannot reach server at {self.heartbeat_endpoint}: {type(e).__name__}")
-            except requests.exceptions.RequestException as e:
-                logger.warning(f"⚠ [Cycle {cycle_num}] Heartbeat request failed ({type(e).__name__}): {str(e)[:100]}")
-            except Exception as e:
-                logger.error(f"❌ [Cycle {cycle_num}] Heartbeat error: {e}")
-        
-        # Send in background thread (non-blocking)
-        thread = threading.Thread(target=_send, daemon=True, name=f"HeartbeatThread-{cycle_num}")
-        thread.start()
-    
-    def _send_lightweight_heartbeat(self, cycle_num: int) -> None:
-        """Send lightweight keep-alive heartbeat every 10 cycles (quick ping)"""
-        def _send():
-            try:
-                # Minimal payload - just ping to keep server alive
-                payload = {
-                    'source': 'quantum_lattice_control_lightweight',
-                    'cycle': cycle_num,
-                    'timestamp': datetime.now().isoformat()
-                }
-                
-                response = requests.post(
-                    self.heartbeat_endpoint,
-                    json=payload,
-                    timeout=3,  # Shorter timeout for lightweight
-                    headers={'User-Agent': 'QuantumLatticeHeartbeat/1.0'}
-                )
-                
-                if response.status_code == 200:
-                    logger.debug(f"[Heartbeat-Lite] 💓 Sent (cycle {cycle_num})")
-                else:
-                    logger.debug(f"[Heartbeat-Lite] HTTP {response.status_code} (cycle {cycle_num})")
-            
-            except requests.exceptions.Timeout:
-                logger.debug(f"[Heartbeat-Lite] Timeout (cycle {cycle_num})")
-            except requests.exceptions.ConnectionError:
-                logger.debug(f"[Heartbeat-Lite] Connection error (cycle {cycle_num})")
-            except Exception as e:
-                logger.debug(f"[Heartbeat-Lite] Error: {type(e).__name__}")
-        
-        # Send in background thread
-        thread = threading.Thread(target=_send, daemon=True, name=f"HeartbeatLiteThread-{cycle_num}")
-        thread.start()
+# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# HEARTBEAT SYSTEM (Now external - see lightweight_heartbeat.py)
+# The lightweight heartbeat runs independently on its own timer (60s interval)
+# No longer tied to cycle completion events - this eliminates interference with lattice refresh
+# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # MAIN SYSTEM ORCHESTRATOR
@@ -2093,9 +1909,14 @@ class QuantumLatticeControlLiveV5:
         
         self.lock = threading.RLock()
 
-        # Initialize HTTP keep-alive heartbeat for noise refresh cycle pinging
-        self.heartbeat = NoiseRefreshHeartbeat(app_url=self.app_url)
-        self.noise_bath.set_heartbeat_callback(self.on_cycle_complete)
+        # Initialize lightweight independent heartbeat (runs on separate 60s timer)
+        keepalive_url = os.getenv('KEEPALIVE_URL', f"{self.app_url}/api/keepalive")
+        self.heartbeat = LightweightHeartbeat(
+            endpoint=keepalive_url,
+            interval_seconds=60  # Ping every 60 seconds
+        )
+        self.heartbeat.start()
+        logger.info(f"✓ Lightweight heartbeat started (60s interval to {keepalive_url})")
         
         # ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
         # Initialize Parallel Batch Processor (3x Speedup)
@@ -2170,11 +1991,6 @@ class QuantumLatticeControlLiveV5:
         logger.info("✓ Quantum lattice control system LIVE")
     
 
-    def on_cycle_complete(self, cycle_num: int, metrics: Dict) -> None:
-        """Callback when cycle completes - sends heartbeat"""
-        if hasattr(self, "heartbeat"):
-            self.heartbeat.on_noise_cycle_complete(cycle_num, metrics)
-
     def stop(self):
         """Stop the system gracefully"""
         if not self.running:
@@ -2182,6 +1998,10 @@ class QuantumLatticeControlLiveV5:
         
         self.running = False
         self.metrics_streamer.stop_writer_thread()
+        
+        # Stop lightweight heartbeat
+        if hasattr(self, 'heartbeat'):
+            self.heartbeat.stop()
         
         # Shutdown parallel processor gracefully
         if self.parallel_processor is not None:
@@ -2326,9 +2146,6 @@ class QuantumLatticeControlLiveV5:
         serial_time_estimate = len(batch_results) * 0.107  # 107ms per batch serial
         speedup = serial_time_estimate / batch_time if batch_time > 0 else 1.0
         
-        # Get heartbeat status
-        hb_status = self.heartbeat.get_heartbeat_status() if hasattr(self, 'heartbeat') else None
-        
         # Build main metrics line with parallel speedup info
         main_log = (
             f"[Cycle {self.cycle_count}] ✓ Complete ({cycle_time:.1f}s total) | "
@@ -2340,32 +2157,9 @@ class QuantumLatticeControlLiveV5:
         
         # Add W-state refresh indicator (gates apply to EVERY batch: σ = 2.0, 4.4, 8.0)
         if w_refresh_time > 0:
-            main_log += f" | 🔄 W-Gates: {w_refresh_time:.3f}s (σ: 2.0 + 4.4 + 8.0 per batch)"
-        
-        # Add heartbeat metrics if available
-        if hb_status and hb_status['cycles_tracked'] > 0:
-            heartbeat_line = (
-                f" | {hb_status['heartbeat_status']} HB: "
-                f"σ_hb={hb_status['avg_sigma']:.2f} | "
-                f"C_hb={hb_status['avg_coherence']:.6f} | "
-                f"F_hb={hb_status['avg_fidelity']:.6f}"
-            )
-            if hb_status['heartbeat_due']:
-                heartbeat_line += " [SENDING]"
-            main_log += heartbeat_line
-        else:
-            main_log += " | ⏳ Heartbeat: Initializing..."
+            main_log += f" | 🔄 W-Gates: {w_refresh_time:.3f}s"
         
         logger.info(main_log)
-
-        # Send heartbeat on cycle completion
-        cycle_metrics = {
-            'sigma': float(avg_sigma),
-            'coherence_after': float(avg_coh),
-            'fidelity_after': float(avg_fid),
-            'cycle_time': cycle_time
-        }
-        self.on_cycle_complete(self.cycle_count, cycle_metrics)
 
         return {
             'cycle': self.cycle_count,
