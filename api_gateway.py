@@ -3250,7 +3250,7 @@ def require_role(role: str):
 # KEY MANAGEMENT ENDPOINTS - Cryptographic key operations
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/keys/generate', methods=['POST'])
+@app.route('/api/keys/generate', methods=['POST'])
 @require_auth
 @rate_limit
 def generate_keypair():
@@ -3309,7 +3309,7 @@ def generate_keypair():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/keys', methods=['GET'])
+@app.route('/api/keys', methods=['GET'])
 @require_auth
 @rate_limit
 def list_user_keys():
@@ -3345,7 +3345,7 @@ def list_user_keys():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/sign/message', methods=['POST'])
+@app.route('/api/sign/message', methods=['POST'])
 @require_auth
 @rate_limit
 def sign_message():
@@ -3401,7 +3401,7 @@ def sign_message():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/verify/signature', methods=['POST'])
+@app.route('/api/verify/signature', methods=['POST'])
 @rate_limit
 def verify_signature():
     """Verify message signature"""
@@ -3436,7 +3436,7 @@ def verify_signature():
 # ADDRESS MANAGEMENT ENDPOINTS - Handle addresses and aliases
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/addresses/generate', methods=['POST'])
+@app.route('/api/addresses/generate', methods=['POST'])
 @require_auth
 @rate_limit
 def generate_address():
@@ -3471,7 +3471,7 @@ def generate_address():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/addresses', methods=['GET'])
+@app.route('/api/addresses', methods=['GET'])
 @require_auth
 @rate_limit
 def list_user_addresses():
@@ -3507,7 +3507,7 @@ def list_user_addresses():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/addresses/<address>/validate', methods=['GET'])
+@app.route('/api/addresses/<address>/validate', methods=['GET'])
 @rate_limit
 def validate_address(address):
     """Validate blockchain address format and existence"""
@@ -3547,7 +3547,7 @@ def validate_address(address):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/addresses/<address_id>/set-primary', methods=['POST'])
+@app.route('/api/addresses/<address_id>/set-primary', methods=['POST'])
 @require_auth
 @rate_limit
 def set_primary_address(address_id):
@@ -3591,7 +3591,7 @@ def set_primary_address(address_id):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/aliases/register', methods=['POST'])
+@app.route('/api/aliases/register', methods=['POST'])
 @require_auth
 @rate_limit
 def register_alias():
@@ -3649,7 +3649,7 @@ def register_alias():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/aliases/<alias>/lookup', methods=['GET'])
+@app.route('/api/aliases/<alias>/lookup', methods=['GET'])
 @rate_limit
 def lookup_alias(alias):
     """Lookup address by alias"""
@@ -3680,7 +3680,7 @@ def lookup_alias(alias):
 # SMART CONTRACT ABI ENDPOINTS - Contract interface management
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/contracts/<contract_id>/abi', methods=['GET'])
+@app.route('/api/contracts/<contract_id>/abi', methods=['GET'])
 @rate_limit
 def get_contract_abi(contract_id):
     """Get contract ABI (Application Binary Interface)"""
@@ -3713,7 +3713,7 @@ def get_contract_abi(contract_id):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/contracts/<contract_id>/methods', methods=['GET'])
+@app.route('/api/contracts/<contract_id>/methods', methods=['GET'])
 @rate_limit
 def get_contract_methods(contract_id):
     """Get all callable methods for contract"""
@@ -3750,7 +3750,7 @@ def get_contract_methods(contract_id):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/contracts/<contract_id>/events', methods=['GET'])
+@app.route('/api/contracts/<contract_id>/events', methods=['GET'])
 @rate_limit
 def get_contract_events(contract_id):
     """Get contract events"""
@@ -3776,7 +3776,7 @@ def get_contract_events(contract_id):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/contracts/<contract_id>/history', methods=['GET'])
+@app.route('/api/contracts/<contract_id>/history', methods=['GET'])
 @rate_limit
 def get_contract_call_history(contract_id):
     """Get contract call history"""
@@ -3828,7 +3828,7 @@ def get_contract_call_history(contract_id):
 # EVENT LOG ENDPOINTS - Filter and query blockchain events
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/events/logs', methods=['POST'])
+@app.route('/api/events/logs', methods=['POST'])
 @rate_limit
 def query_event_logs():
     """Query blockchain event logs with filters"""
@@ -3897,7 +3897,7 @@ def query_event_logs():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/events/watch', methods=['POST'])
+@app.route('/api/events/watch', methods=['POST'])
 @require_auth
 @rate_limit
 def watch_events():
@@ -3933,7 +3933,7 @@ def watch_events():
 # BLOCK TIME & STATS ENDPOINTS - Detailed blockchain statistics
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/stats/block-times', methods=['GET'])
+@app.route('/api/stats/block-times', methods=['GET'])
 @rate_limit
 def get_block_times():
     """Get block time statistics"""
@@ -3964,7 +3964,7 @@ def get_block_times():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/stats/transaction-distribution', methods=['GET'])
+@app.route('/api/stats/transaction-distribution', methods=['GET'])
 @rate_limit
 def get_transaction_distribution():
     """Get distribution of transactions by type"""
@@ -4012,7 +4012,7 @@ def get_transaction_distribution():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/stats/miner-distribution', methods=['GET'])
+@app.route('/api/stats/miner-distribution', methods=['GET'])
 @rate_limit
 def get_miner_distribution():
     """Get block creation distribution among validators"""
@@ -4052,7 +4052,7 @@ def get_miner_distribution():
 # NETWORK UPGRADE ENDPOINTS - Protocol upgrades and voting
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/upgrades/proposals', methods=['GET'])
+@app.route('/api/upgrades/proposals', methods=['GET'])
 @rate_limit
 def list_upgrade_proposals():
     """List network upgrade proposals"""
@@ -4088,7 +4088,7 @@ def list_upgrade_proposals():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/upgrades/<upgrade_id>/vote', methods=['POST'])
+@app.route('/api/upgrades/<upgrade_id>/vote', methods=['POST'])
 @require_auth
 @rate_limit
 def vote_on_upgrade(upgrade_id):
@@ -4128,7 +4128,7 @@ def vote_on_upgrade(upgrade_id):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/upgrades/<upgrade_id>/status', methods=['GET'])
+@app.route('/api/upgrades/<upgrade_id>/status', methods=['GET'])
 @rate_limit
 def get_upgrade_status(upgrade_id):
     """Get upgrade proposal voting status"""
@@ -4187,7 +4187,7 @@ def get_upgrade_status(upgrade_id):
 # SECURITY AUDIT ENDPOINTS - System health and security monitoring
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/security/status', methods=['GET'])
+@app.route('/api/security/status', methods=['GET'])
 @rate_limit
 def get_security_status():
     """Get system security status"""
@@ -4239,7 +4239,7 @@ def get_security_status():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/security/audit-logs', methods=['GET'])
+@app.route('/api/security/audit-logs', methods=['GET'])
 @require_role('admin')
 @rate_limit
 def get_audit_logs():
@@ -4289,7 +4289,7 @@ def get_audit_logs():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/security/threats', methods=['GET'])
+@app.route('/api/security/threats', methods=['GET'])
 @require_role('admin')
 @rate_limit
 def get_threat_alerts():
@@ -4324,7 +4324,7 @@ def get_threat_alerts():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/security/suspicious-activity', methods=['GET'])
+@app.route('/api/security/suspicious-activity', methods=['GET'])
 @require_role('admin')
 @rate_limit
 def get_suspicious_activity():
@@ -4369,7 +4369,7 @@ def get_suspicious_activity():
 # TRANSACTION RETRY ENDPOINTS - Retry failed transactions
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/transactions/<tx_hash>/retry', methods=['POST'])
+@app.route('/api/transactions/<tx_hash>/retry', methods=['POST'])
 @require_auth
 @rate_limit
 def retry_transaction(tx_hash):
@@ -4449,7 +4449,7 @@ def retry_transaction(tx_hash):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/transactions/<tx_hash>/speedup', methods=['POST'])
+@app.route('/api/transactions/<tx_hash>/speedup', methods=['POST'])
 @require_auth
 @rate_limit
 def speedup_transaction(tx_hash):
@@ -4501,7 +4501,7 @@ def speedup_transaction(tx_hash):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/transactions/<tx_hash>/status-history', methods=['GET'])
+@app.route('/api/transactions/<tx_hash>/status-history', methods=['GET'])
 @rate_limit
 def get_transaction_status_history(tx_hash):
     """Get complete status history for transaction"""
@@ -4539,7 +4539,7 @@ def get_transaction_status_history(tx_hash):
 # ADVANCED FEE ESTIMATION ENDPOINTS - Dynamic fee calculations
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/fees/historical', methods=['GET'])
+@app.route('/api/fees/historical', methods=['GET'])
 @rate_limit
 def get_historical_gas_prices():
     """Get historical gas price data"""
@@ -4585,7 +4585,7 @@ def get_historical_gas_prices():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/fees/priority', methods=['POST'])
+@app.route('/api/fees/priority', methods=['POST'])
 @rate_limit
 def calculate_priority_fee():
     """Calculate priority fee for fast inclusion"""
@@ -4633,7 +4633,7 @@ def calculate_priority_fee():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/fees/burn-rate', methods=['GET'])
+@app.route('/api/fees/burn-rate', methods=['GET'])
 @rate_limit
 def get_fee_burn_rate():
     """Get network fee burn rate (deflation)"""
@@ -4675,7 +4675,7 @@ def get_fee_burn_rate():
 # REAL-TIME STREAMING ENDPOINTS - SSE and WebSocket updates
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/stream/prices', methods=['GET'])
+@app.route('/api/stream/prices', methods=['GET'])
 @rate_limit
 def stream_price_updates():
     """Stream real-time price updates via Server-Sent Events"""
@@ -4698,7 +4698,7 @@ def stream_price_updates():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/stream/blocks', methods=['GET'])
+@app.route('/api/stream/blocks', methods=['GET'])
 @rate_limit
 def stream_block_updates():
     """Stream new blocks as they're created via Server-Sent Events"""
@@ -4734,7 +4734,7 @@ def stream_block_updates():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/stream/mempool', methods=['GET'])
+@app.route('/api/stream/mempool', methods=['GET'])
 @rate_limit
 def stream_mempool_updates():
     """Stream mempool transaction updates"""
@@ -4780,7 +4780,7 @@ def handle_channel_subscription(data):
 # MULTISIG WALLET ENDPOINTS - Multi-signature transactions
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/multisig/wallets', methods=['POST'])
+@app.route('/api/multisig/wallets', methods=['POST'])
 @require_auth
 @rate_limit
 def create_multisig_wallet():
@@ -4842,7 +4842,7 @@ def create_multisig_wallet():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/multisig/<wallet_id>/propose', methods=['POST'])
+@app.route('/api/multisig/<wallet_id>/propose', methods=['POST'])
 @require_auth
 @rate_limit
 def propose_multisig_transaction(wallet_id):
@@ -4897,7 +4897,7 @@ def propose_multisig_transaction(wallet_id):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/multisig/<wallet_id>/proposals', methods=['GET'])
+@app.route('/api/multisig/<wallet_id>/proposals', methods=['GET'])
 @rate_limit
 def list_multisig_proposals(wallet_id):
     """List pending proposals for multisig wallet"""
@@ -4946,7 +4946,7 @@ def list_multisig_proposals(wallet_id):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/multisig/<proposal_id>/sign', methods=['POST'])
+@app.route('/api/multisig/<proposal_id>/sign', methods=['POST'])
 @require_auth
 @rate_limit
 def sign_multisig_proposal(proposal_id):
@@ -5030,7 +5030,7 @@ def sign_multisig_proposal(proposal_id):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/multisig/<proposal_id>/execute', methods=['POST'])
+@app.route('/api/multisig/<proposal_id>/execute', methods=['POST'])
 @require_auth
 @rate_limit
 def execute_multisig_proposal(proposal_id):
@@ -5088,7 +5088,7 @@ def execute_multisig_proposal(proposal_id):
 # BRIDGE ENDPOINTS - Cross-chain bridge operations
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/bridge/supported-chains', methods=['GET'])
+@app.route('/api/bridge/supported-chains', methods=['GET'])
 @rate_limit
 def get_supported_chains():
     """Get supported bridge chains"""
@@ -5124,7 +5124,7 @@ def get_supported_chains():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/bridge/lock', methods=['POST'])
+@app.route('/api/bridge/lock', methods=['POST'])
 @require_auth
 @rate_limit
 def lock_for_bridge():
@@ -5188,7 +5188,7 @@ def lock_for_bridge():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/bridge/status/<lock_id>', methods=['GET'])
+@app.route('/api/bridge/status/<lock_id>', methods=['GET'])
 @rate_limit
 def get_bridge_status(lock_id):
     """Get bridge transfer status"""
@@ -5228,7 +5228,7 @@ def get_bridge_status(lock_id):
 # AIRDROP ENDPOINTS - Distribution campaigns
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/airdrops', methods=['GET'])
+@app.route('/api/airdrops', methods=['GET'])
 @rate_limit
 def list_airdrops():
     """List active airdrop campaigns"""
@@ -5270,7 +5270,7 @@ def list_airdrops():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/airdrops/<airdrop_id>/claim', methods=['POST'])
+@app.route('/api/airdrops/<airdrop_id>/claim', methods=['POST'])
 @require_auth
 @rate_limit
 def claim_airdrop(airdrop_id):
@@ -5339,7 +5339,7 @@ def claim_airdrop(airdrop_id):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/airdrops/<airdrop_id>/eligibility', methods=['GET'])
+@app.route('/api/airdrops/<airdrop_id>/eligibility', methods=['GET'])
 @require_auth
 @rate_limit
 def check_airdrop_eligibility(airdrop_id):
@@ -5411,7 +5411,7 @@ def check_airdrop_eligibility(airdrop_id):
 # MOBILE APP ENDPOINTS - Optimized for mobile clients
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/mobile/dashboard', methods=['GET'])
+@app.route('/api/mobile/dashboard', methods=['GET'])
 @require_auth
 @rate_limit
 def mobile_dashboard():
@@ -5480,7 +5480,7 @@ def mobile_dashboard():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/mobile/quick-send', methods=['POST'])
+@app.route('/api/mobile/quick-send', methods=['POST'])
 @require_auth
 @rate_limit
 def mobile_quick_send():
@@ -5545,7 +5545,7 @@ def mobile_quick_send():
         return jsonify({'status': 'error', 'message': str(e), 'code': 'SEND_FAILED'}), 500
 
 
-@app.route('/api/v1/mobile/notifications', methods=['GET'])
+@app.route('/api/mobile/notifications', methods=['GET'])
 @require_auth
 @rate_limit
 def mobile_notifications():
@@ -5584,7 +5584,7 @@ def mobile_notifications():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/mobile/qr-scan', methods=['POST'])
+@app.route('/api/mobile/qr-scan', methods=['POST'])
 @require_auth
 @rate_limit
 def mobile_qr_scan():
@@ -5618,7 +5618,7 @@ def mobile_qr_scan():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/mobile/app-config', methods=['GET'])
+@app.route('/api/mobile/app-config', methods=['GET'])
 @rate_limit
 def mobile_app_config():
     """Get mobile app configuration"""
@@ -7230,7 +7230,7 @@ def get_my_profile():
 # QUANTUM EXECUTION ENDPOINTS - Quantum circuit status and results
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/quantum/execute', methods=['POST'])
+@app.route('/api/quantum/execute', methods=['POST'])
 @require_auth
 @rate_limit
 def execute_quantum_circuit():
@@ -7309,7 +7309,7 @@ def execute_quantum_circuit():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/quantum/executions/<exec_id>', methods=['GET'])
+@app.route('/api/quantum/executions/<exec_id>', methods=['GET'])
 @rate_limit
 def get_quantum_execution(exec_id):
     """Get quantum execution results"""
@@ -7346,7 +7346,7 @@ def get_quantum_execution(exec_id):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/quantum/status', methods=['GET'])
+@app.route('/api/quantum/status', methods=['GET'])
 @rate_limit
 def get_quantum_status():
     """Get quantum system status"""
@@ -7381,7 +7381,7 @@ def get_quantum_status():
 # MEMPOOL ENDPOINTS - Transaction pool management
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/mempool/status', methods=['GET'])
+@app.route('/api/mempool/status', methods=['GET'])
 @rate_limit
 def get_mempool_status():
     """Get mempool status"""
@@ -7411,7 +7411,7 @@ def get_mempool_status():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/mempool/transactions', methods=['GET'])
+@app.route('/api/mempool/transactions', methods=['GET'])
 @rate_limit
 def get_mempool_transactions():
     """Get pending transactions in mempool"""
@@ -7453,7 +7453,7 @@ def get_mempool_transactions():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/mempool/clear', methods=['POST'])
+@app.route('/api/mempool/clear', methods=['POST'])
 @require_role('admin')
 @rate_limit
 def clear_mempool():
@@ -7484,7 +7484,7 @@ def clear_mempool():
 # GAS ESTIMATION ENDPOINTS - Gas pricing and estimation
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/gas/estimate', methods=['POST'])
+@app.route('/api/gas/estimate', methods=['POST'])
 @rate_limit
 def estimate_gas():
     """Estimate gas for transaction"""
@@ -7532,7 +7532,7 @@ def estimate_gas():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/gas/prices', methods=['GET'])
+@app.route('/api/gas/prices', methods=['GET'])
 @rate_limit
 def get_gas_prices():
     """Get current gas prices"""
@@ -7569,7 +7569,7 @@ def get_gas_prices():
 # VALIDATOR ENDPOINTS - Validator management
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/validators', methods=['GET'])
+@app.route('/api/validators', methods=['GET'])
 @rate_limit
 def list_validators():
     """List active validators"""
@@ -7604,7 +7604,7 @@ def list_validators():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/validators/<validator_id>', methods=['GET'])
+@app.route('/api/validators/<validator_id>', methods=['GET'])
 @rate_limit
 def get_validator(validator_id):
     """Get validator details"""
@@ -7647,7 +7647,7 @@ def get_validator(validator_id):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/validators/join', methods=['POST'])
+@app.route('/api/validators/join', methods=['POST'])
 @require_auth
 @rate_limit
 def join_validators():
@@ -7692,7 +7692,7 @@ def join_validators():
 # FINALITY ENDPOINTS - Transaction finality status
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/finality/<tx_hash>', methods=['GET'])
+@app.route('/api/finality/<tx_hash>', methods=['GET'])
 @rate_limit
 def get_finality_status(tx_hash):
     """Get transaction finality status"""
@@ -7742,7 +7742,7 @@ def get_finality_status(tx_hash):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/finality/batch', methods=['POST'])
+@app.route('/api/finality/batch', methods=['POST'])
 @rate_limit
 def batch_finality_check():
     """Check finality for multiple transactions"""
@@ -7784,7 +7784,7 @@ def batch_finality_check():
 # EPOCH & REWARD ENDPOINTS - Network epochs and block rewards
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/epochs/current', methods=['GET'])
+@app.route('/api/epochs/current', methods=['GET'])
 @rate_limit
 def get_current_epoch():
     """Get current epoch information"""
@@ -7817,7 +7817,7 @@ def get_current_epoch():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/epochs/<int:epoch_num>', methods=['GET'])
+@app.route('/api/epochs/<int:epoch_num>', methods=['GET'])
 @rate_limit
 def get_epoch(epoch_num):
     """Get specific epoch details"""
@@ -7852,7 +7852,7 @@ def get_epoch(epoch_num):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/rewards/estimates', methods=['GET'])
+@app.route('/api/rewards/estimates', methods=['GET'])
 @require_auth
 @rate_limit
 def get_reward_estimates():
@@ -7904,7 +7904,7 @@ def get_reward_estimates():
 # NETWORK DIFFICULTY ENDPOINTS - Mining difficulty adjustment
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/network/difficulty', methods=['GET'])
+@app.route('/api/network/difficulty', methods=['GET'])
 @rate_limit
 def get_network_difficulty():
     """Get current network difficulty"""
@@ -7947,7 +7947,7 @@ def get_network_difficulty():
 # ACCOUNT HISTORY ENDPOINTS - Detailed transaction history
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/accounts/<account_id>/history', methods=['GET'])
+@app.route('/api/accounts/<account_id>/history', methods=['GET'])
 @rate_limit
 def get_account_history(account_id):
     """Get detailed account transaction history"""
@@ -8000,7 +8000,7 @@ def get_account_history(account_id):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/accounts/<account_id>/balance-history', methods=['GET'])
+@app.route('/api/accounts/<account_id>/balance-history', methods=['GET'])
 @rate_limit
 def get_balance_history(account_id):
     """Get account balance history"""
@@ -8037,7 +8037,7 @@ def get_balance_history(account_id):
 # TRANSACTION RECEIPT ENDPOINTS - Get detailed transaction receipts
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/receipts/<tx_hash>', methods=['GET'])
+@app.route('/api/receipts/<tx_hash>', methods=['GET'])
 @rate_limit
 def get_transaction_receipt(tx_hash):
     """Get detailed transaction receipt"""
@@ -8090,7 +8090,7 @@ def get_transaction_receipt(tx_hash):
 # TRANSACTION ENDPOINTS - Core blockchain transaction operations
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/transactions/submit', methods=['POST'])
+@app.route('/api/transactions/submit', methods=['POST'])
 @require_auth
 @rate_limit
 def submit_transaction():
@@ -8162,7 +8162,7 @@ def submit_transaction():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/transactions/<tx_hash>', methods=['GET'])
+@app.route('/api/transactions/<tx_hash>', methods=['GET'])
 @rate_limit
 def get_transaction(tx_hash):
     """Get transaction details and status"""
@@ -8215,7 +8215,7 @@ def get_transaction(tx_hash):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/transactions', methods=['GET'])
+@app.route('/api/transactions', methods=['GET'])
 @require_auth
 @rate_limit
 def list_transactions():
@@ -8289,7 +8289,7 @@ def list_transactions():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/transactions/<tx_hash>/cancel', methods=['POST'])
+@app.route('/api/transactions/<tx_hash>/cancel', methods=['POST'])
 @require_auth
 @rate_limit
 def cancel_transaction(tx_hash):
@@ -8342,7 +8342,7 @@ def cancel_transaction(tx_hash):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/transactions/<tx_hash>/wait', methods=['GET'])
+@app.route('/api/transactions/<tx_hash>/wait', methods=['GET'])
 @rate_limit
 def wait_for_transaction(tx_hash):
     """Wait for transaction finality with streaming"""
@@ -8382,7 +8382,7 @@ def wait_for_transaction(tx_hash):
 # BLOCK ENDPOINTS - Blockchain block operations
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/blocks/latest', methods=['GET'])
+@app.route('/api/blocks/latest', methods=['GET'])
 @rate_limit
 def get_latest_block():
     """Get latest block"""
@@ -8422,7 +8422,7 @@ def get_latest_block():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/blocks/<int:height>', methods=['GET'])
+@app.route('/api/blocks/<int:height>', methods=['GET'])
 @rate_limit
 def get_block_by_height(height):
     """Get block by height"""
@@ -8474,7 +8474,7 @@ def get_block_by_height(height):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/blocks', methods=['GET'])
+@app.route('/api/blocks', methods=['GET'])
 @rate_limit
 def list_blocks():
     """List blocks with pagination"""
@@ -8522,7 +8522,7 @@ def list_blocks():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/blocks/stats', methods=['GET'])
+@app.route('/api/blocks/stats', methods=['GET'])
 @rate_limit
 def get_block_stats():
     """Get blockchain statistics"""
@@ -8556,7 +8556,7 @@ def get_block_stats():
 # DEFI ENDPOINTS - Decentralized Finance operations
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/defi/stake', methods=['POST'])
+@app.route('/api/defi/stake', methods=['POST'])
 @require_auth
 @rate_limit
 def stake_tokens():
@@ -8620,7 +8620,7 @@ def stake_tokens():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/defi/unstake', methods=['POST'])
+@app.route('/api/defi/unstake', methods=['POST'])
 @require_auth
 @rate_limit
 def unstake_tokens():
@@ -8681,7 +8681,7 @@ def unstake_tokens():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/defi/stakes', methods=['GET'])
+@app.route('/api/defi/stakes', methods=['GET'])
 @require_auth
 @rate_limit
 def list_stakes():
@@ -8727,7 +8727,7 @@ def list_stakes():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/defi/swap', methods=['POST'])
+@app.route('/api/defi/swap', methods=['POST'])
 @require_auth
 @rate_limit
 def swap_tokens():
@@ -8800,7 +8800,7 @@ def swap_tokens():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/defi/liquidity/add', methods=['POST'])
+@app.route('/api/defi/liquidity/add', methods=['POST'])
 @require_auth
 @rate_limit
 def add_liquidity():
@@ -8864,7 +8864,7 @@ def add_liquidity():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/defi/liquidity/remove', methods=['POST'])
+@app.route('/api/defi/liquidity/remove', methods=['POST'])
 @require_auth
 @rate_limit
 def remove_liquidity():
@@ -8925,7 +8925,7 @@ def remove_liquidity():
 # GOVERNANCE ENDPOINTS - DAO voting and proposals
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/governance/proposals', methods=['POST'])
+@app.route('/api/governance/proposals', methods=['POST'])
 @require_auth
 @rate_limit
 def create_proposal():
@@ -8978,7 +8978,7 @@ def create_proposal():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/governance/proposals', methods=['GET'])
+@app.route('/api/governance/proposals', methods=['GET'])
 @rate_limit
 def list_proposals():
     """List governance proposals"""
@@ -9040,7 +9040,7 @@ def list_proposals():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/governance/proposals/<proposal_id>/vote', methods=['POST'])
+@app.route('/api/governance/proposals/<proposal_id>/vote', methods=['POST'])
 @require_auth
 @rate_limit
 def vote_on_proposal(proposal_id):
@@ -9119,7 +9119,7 @@ def vote_on_proposal(proposal_id):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/governance/proposals/<proposal_id>/results', methods=['GET'])
+@app.route('/api/governance/proposals/<proposal_id>/results', methods=['GET'])
 @rate_limit
 def get_proposal_results(proposal_id):
     """Get proposal voting results"""
@@ -9172,7 +9172,7 @@ def get_proposal_results(proposal_id):
 # ORACLE ENDPOINTS - Quantum oracle integration
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/oracle/prices', methods=['GET'])
+@app.route('/api/oracle/prices', methods=['GET'])
 @rate_limit
 def get_oracle_prices():
     """Get current token prices from oracle"""
@@ -9196,7 +9196,7 @@ def get_oracle_prices():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/oracle/feed/<feed_id>', methods=['GET'])
+@app.route('/api/oracle/feed/<feed_id>', methods=['GET'])
 @rate_limit
 def get_oracle_feed(feed_id):
     """Get specific oracle data feed"""
@@ -9227,7 +9227,7 @@ def get_oracle_feed(feed_id):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/oracle/subscribe', methods=['POST'])
+@app.route('/api/oracle/subscribe', methods=['POST'])
 @require_auth
 @rate_limit
 def subscribe_to_feed():
@@ -9260,7 +9260,7 @@ def subscribe_to_feed():
 # NFT ENDPOINTS - Non-Fungible Token operations
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/nft/mint', methods=['POST'])
+@app.route('/api/nft/mint', methods=['POST'])
 @require_auth
 @rate_limit
 def mint_nft():
@@ -9305,7 +9305,7 @@ def mint_nft():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/nft/<nft_id>', methods=['GET'])
+@app.route('/api/nft/<nft_id>', methods=['GET'])
 @rate_limit
 def get_nft(nft_id):
     """Get NFT details"""
@@ -9341,7 +9341,7 @@ def get_nft(nft_id):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/nft/<nft_id>/transfer', methods=['POST'])
+@app.route('/api/nft/<nft_id>/transfer', methods=['POST'])
 @require_auth
 @rate_limit
 def transfer_nft(nft_id):
@@ -9393,7 +9393,7 @@ def transfer_nft(nft_id):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/nft/user/<user_id>', methods=['GET'])
+@app.route('/api/nft/user/<user_id>', methods=['GET'])
 @rate_limit
 def get_user_nfts(user_id):
     """Get all NFTs owned by user"""
@@ -9444,7 +9444,7 @@ def get_user_nfts(user_id):
 # SMART CONTRACT ENDPOINTS - Deploy and interact with contracts
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/contracts/deploy', methods=['POST'])
+@app.route('/api/contracts/deploy', methods=['POST'])
 @require_auth
 @rate_limit
 def deploy_contract():
@@ -9489,7 +9489,7 @@ def deploy_contract():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/contracts/<contract_id>', methods=['GET'])
+@app.route('/api/contracts/<contract_id>', methods=['GET'])
 @rate_limit
 def get_contract(contract_id):
     """Get smart contract details"""
@@ -9525,7 +9525,7 @@ def get_contract(contract_id):
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/contracts/<contract_id>/call', methods=['POST'])
+@app.route('/api/contracts/<contract_id>/call', methods=['POST'])
 @require_auth
 @rate_limit
 def call_contract(contract_id):
@@ -9575,7 +9575,7 @@ def call_contract(contract_id):
 # ANALYTICS ENDPOINTS - System metrics and insights
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/v1/analytics/network-stats', methods=['GET'])
+@app.route('/api/analytics/network-stats', methods=['GET'])
 @rate_limit
 def get_network_stats():
     """Get network-wide statistics"""
@@ -9610,7 +9610,7 @@ def get_network_stats():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/analytics/user-stats', methods=['GET'])
+@app.route('/api/analytics/user-stats', methods=['GET'])
 @require_auth
 @rate_limit
 def get_user_stats():
@@ -9640,7 +9640,7 @@ def get_user_stats():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
-@app.route('/api/v1/analytics/market-data', methods=['GET'])
+@app.route('/api/analytics/market-data', methods=['GET'])
 @rate_limit
 def get_market_data():
     """Get market data and price history"""
@@ -9742,6 +9742,351 @@ def broadcast_block_update(block_height, block_hash):
         'block_hash': block_hash,
         'timestamp': datetime.now(timezone.utc).isoformat()
     }, room='channel_blocks')
+
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# ENTROPY CERTIFICATION SYSTEM - QUANTUM RANDOM NUMBER GENERATION & BLOCK CERTIFICATION
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+class QRNGEntropyEngine:
+    """Triple-source QRNG entropy system with rate limiting"""
+    
+    def __init__(self):
+        self.anu_url = "https://api.anu.edu.au/random/v1/hex"
+        self.random_org_url = "https://api.random.org/json-rpc/4/invoke"
+        self.lfdr_url = "https://lfdr.de/qrng_api/qrng"
+        self.anu_key = "tnFLyF6slW3h9At8N2cIg1ItqNCe3UOI650XGvvO"
+        self.random_org_key = "7b20d790-9c0d-47d6-808e-4f16b6fe9a6d"
+        self.last_request = {'anu': 0, 'random_org': 0, 'lfdr': 0}
+        self.rate_limits = {'anu': 0.5, 'random_org': 2.0, 'lfdr': 1.0}
+    
+    def _wait_for_rate_limit(self, source: str):
+        now = time.time()
+        last = self.last_request.get(source, 0)
+        limit = self.rate_limits.get(source, 1.0)
+        wait_time = limit - (now - last)
+        if wait_time > 0:
+            time.sleep(wait_time)
+        self.last_request[source] = time.time()
+    
+    def fetch_anu_quantum(self, num_bytes: int = 32) -> Optional[str]:
+        try:
+            self._wait_for_rate_limit('anu')
+            response = requests.get(
+                self.anu_url,
+                params={'length': min(num_bytes * 2, 1024), 'format': 'hex'},
+                timeout=10
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if 'data' in data:
+                    logger.info(f"✓ QRNG-ANU: Fetched {num_bytes} bytes")
+                    return data['data']
+        except Exception as e:
+            logger.warning(f"⚠ QRNG-ANU error: {e}")
+        return None
+    
+    def fetch_random_org_quantum(self, num_bytes: int = 32) -> Optional[str]:
+        try:
+            self._wait_for_rate_limit('random_org')
+            payload = {
+                "jsonrpc": "2.0",
+                "method": "generateBlobs",
+                "params": {"apiKey": self.random_org_key, "n": 1, "size": 64, "format": "hex"},
+                "id": int(time.time() * 1000) % 1000000
+            }
+            response = requests.post(self.random_org_url, json=payload, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if 'result' in data and 'random' in data['result']:
+                    logger.info("✓ QRNG-RandomOrg: Fetched quantum blob")
+                    return data['result']['random']['data'][0]
+        except Exception as e:
+            logger.warning(f"⚠ QRNG-RandomOrg error: {e}")
+        return None
+    
+    def fetch_lfdr_german(self, num_bytes: int = 32) -> Optional[str]:
+        try:
+            self._wait_for_rate_limit('lfdr')
+            response = requests.get(
+                self.lfdr_url,
+                params={'length': min(num_bytes, 100), 'format': 'HEX'},
+                timeout=10
+            )
+            if response.status_code == 200:
+                hex_data = response.text.strip()
+                if hex_data:
+                    logger.info(f"✓ QRNG-LFDR: Fetched {len(hex_data)//2} bytes")
+                    return hex_data
+        except Exception as e:
+            logger.warning(f"⚠ QRNG-LFDR error: {e}")
+        return None
+    
+    def get_triple_entropy(self, num_bytes: int = 32) -> Dict[str, Any]:
+        entropy_data = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'sources': {},
+            'combined_hash': None
+        }
+        
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            anu_future = executor.submit(self.fetch_anu_quantum, num_bytes)
+            ro_future = executor.submit(self.fetch_random_org_quantum, num_bytes)
+            lfdr_future = executor.submit(self.fetch_lfdr_german, num_bytes)
+            
+            try:
+                anu_data = anu_future.result(timeout=15)
+                ro_data = ro_future.result(timeout=15)
+                lfdr_data = lfdr_future.result(timeout=15)
+            except:
+                anu_data = ro_data = lfdr_data = None
+        
+        entropy_data['sources']['anu'] = anu_data is not None
+        entropy_data['sources']['random_org'] = ro_data is not None
+        entropy_data['sources']['lfdr'] = lfdr_data is not None
+        
+        combined = ""
+        if anu_data:
+            combined += anu_data[:num_bytes*2]
+        if ro_data:
+            combined += ro_data[:num_bytes*2]
+        if lfdr_data:
+            combined += lfdr_data[:num_bytes*2]
+        
+        if combined:
+            entropy_data['combined_hash'] = hashlib.sha256(combined.encode()).hexdigest()
+            logger.info(f"✓ Triple entropy combined: {entropy_data['combined_hash'][:16]}...")
+        
+        return entropy_data
+
+
+class ShannonEntropyCalculator:
+    """Calculate Shannon entropy of data"""
+    
+    @staticmethod
+    def calculate_from_bytes(data: bytes) -> float:
+        if not data:
+            return 0.0
+        freq = Counter(data)
+        entropy = 0.0
+        for count in freq.values():
+            p = count / len(data)
+            if p > 0:
+                entropy -= p * math.log2(p)
+        return entropy
+    
+    @staticmethod
+    def entropy_quality_score(entropy_value: float) -> Dict[str, Any]:
+        max_entropy = 8.0
+        ratio = entropy_value / max_entropy
+        
+        if ratio >= 0.99:
+            quality = "EXCELLENT"
+        elif ratio >= 0.95:
+            quality = "VERY_GOOD"
+        elif ratio >= 0.85:
+            quality = "GOOD"
+        elif ratio >= 0.70:
+            quality = "FAIR"
+        else:
+            quality = "POOR"
+        
+        return {
+            'entropy_bits': entropy_value,
+            'quality': quality,
+            'ratio': ratio,
+            'deviation': abs(entropy_value - 7.99)
+        }
+
+
+class EntropyCertificationSystem:
+    """Complete block entropy certification"""
+    
+    def __init__(self):
+        self.qrng = QRNGEntropyEngine()
+        self.shannon = ShannonEntropyCalculator()
+    
+    def certify_block(self, block_hash: str, block_number: int = 0) -> Dict[str, Any]:
+        certificate = {
+            'block_number': block_number,
+            'block_hash': block_hash,
+            'timestamp': datetime.utcnow().isoformat(),
+            'measurements': {}
+        }
+        
+        try:
+            hash_bytes = bytes.fromhex(block_hash)
+            
+            # Shannon entropy
+            shannon = self.shannon.calculate_from_bytes(hash_bytes)
+            shannon_score = self.shannon.entropy_quality_score(shannon)
+            certificate['measurements']['shannon'] = {
+                'entropy': shannon,
+                'quality': shannon_score
+            }
+            
+            # QRNG triple source
+            try:
+                qrng_data = self.qrng.get_triple_entropy(num_bytes=16)
+                certificate['measurements']['qrng'] = qrng_data
+            except:
+                certificate['measurements']['qrng'] = {'error': 'QRNG unavailable'}
+            
+            # Overall score
+            scores = [shannon_score['ratio']]
+            certificate['overall_entropy_score'] = sum(scores) / len(scores) if scores else 0
+            certificate['certification_status'] = 'CERTIFIED' if certificate['overall_entropy_score'] > 0.7 else 'QUESTIONABLE'
+            
+            logger.info(f"✓ Block #{block_number} entropy certified: {certificate['overall_entropy_score']:.4f}")
+            
+        except Exception as e:
+            logger.error(f"✗ Certification failed: {e}")
+            certificate['certification_status'] = 'FAILED'
+            certificate['error'] = str(e)
+        
+        return certificate
+
+
+# Initialize entropy system
+entropy_system = EntropyCertificationSystem()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# ENTROPY CERTIFICATION ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/entropy/certify', methods=['POST'])
+def certify_block_entropy():
+    """POST /api/entropy/certify - Certify block entropy"""
+    try:
+        data = request.get_json()
+        block_hash = data.get('block_hash')
+        block_number = data.get('block_number', 0)
+        
+        if not block_hash:
+            return jsonify({'error': 'block_hash required'}), 400
+        
+        certificate = entropy_system.certify_block(block_hash, block_number)
+        
+        return jsonify({
+            'status': 'success',
+            'certificate': certificate
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"✗ Entropy certification error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/entropy/blocks/<block_number>', methods=['GET'])
+def get_block_entropy(block_number):
+    """GET /api/entropy/blocks/<block_number> - Get block entropy certificate"""
+    try:
+        # In production, fetch actual block_hash from database
+        block_hash = hashlib.sha256(f'block_{block_number}'.encode()).hexdigest()
+        
+        certificate = entropy_system.certify_block(block_hash, int(block_number))
+        
+        return jsonify({
+            'status': 'success',
+            'certificate': certificate
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"✗ Get block entropy error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/entropy/genesis/reseed', methods=['POST'])
+def reseed_genesis_entropy():
+    """POST /api/entropy/genesis/reseed - Re-seed genesis block with live QRNG"""
+    try:
+        logger.info("🔄 Beginning genesis block re-seeding...")
+        
+        qrng_entropy = entropy_system.qrng.get_triple_entropy(num_bytes=64)
+        
+        if qrng_entropy.get('combined_hash'):
+            new_genesis_hash = qrng_entropy['combined_hash']
+            certificate = entropy_system.certify_block(new_genesis_hash, block_number=0)
+            
+            return jsonify({
+                'status': 'success',
+                'action': 'genesis_entropy_reseed',
+                'data': {
+                    'new_genesis_hash': new_genesis_hash,
+                    'certificate': certificate,
+                    'qrng_sources': qrng_entropy['sources']
+                }
+            }), 200
+        else:
+            return jsonify({'status': 'error', 'message': 'QRNG entropy unavailable'}), 503
+    
+    except Exception as e:
+        logger.error(f"✗ Genesis reseed error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/entropy/qrng', methods=['GET'])
+def get_triple_qrng():
+    """GET /api/entropy/qrng - Fetch triple-source quantum randomness"""
+    try:
+        num_bytes = request.args.get('bytes', 32, type=int)
+        num_bytes = min(max(num_bytes, 1), 1024)
+        
+        qrng_data = entropy_system.qrng.get_triple_entropy(num_bytes)
+        
+        return jsonify({
+            'status': 'success',
+            'data': qrng_data
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"✗ QRNG fetch error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/entropy/health', methods=['GET'])
+def entropy_system_health():
+    """GET /api/entropy/health - Check entropy system health"""
+    try:
+        # Test all three QRNG sources
+        health = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'sources': {}
+        }
+        
+        # Quick test of each source (2-second timeout)
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            anu_test = executor.submit(entropy_system.qrng.fetch_anu_quantum, 16)
+            ro_test = executor.submit(entropy_system.qrng.fetch_random_org_quantum, 16)
+            lfdr_test = executor.submit(entropy_system.qrng.fetch_lfdr_german, 16)
+            
+            try:
+                health['sources']['anu'] = anu_test.result(timeout=5) is not None
+            except:
+                health['sources']['anu'] = False
+            
+            try:
+                health['sources']['random_org'] = ro_test.result(timeout=5) is not None
+            except:
+                health['sources']['random_org'] = False
+            
+            try:
+                health['sources']['lfdr'] = lfdr_test.result(timeout=5) is not None
+            except:
+                health['sources']['lfdr'] = False
+        
+        sources_available = sum(1 for v in health['sources'].values() if v)
+        health['status'] = 'healthy' if sources_available >= 2 else 'degraded' if sources_available == 1 else 'offline'
+        health['sources_available'] = sources_available
+        
+        return jsonify(health), 200
+    
+    except Exception as e:
+        logger.error(f"✗ Health check error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
