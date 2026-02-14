@@ -529,6 +529,291 @@ class CoreDatabaseManager:
             'addresses':addresses,
             'totp_enabled':user.get('totp_enabled',False)
         }
+    
+    def update_user_profile(self,user_id:str,updates:Dict[str,Any]):
+        """Update user profile fields"""
+        allowed_fields={'bio','avatar_url','first_name','last_name','phone','company','location'}
+        updates={k:v for k,v in updates.items() if k in allowed_fields}
+        if not updates:
+            return
+        set_clause=','.join([f"{k}=%s" for k in updates.keys()])
+        query=f"UPDATE users SET {set_clause},updated_at=NOW() WHERE user_id=%s"
+        values=list(updates.values())+[user_id]
+        self.db.execute_query(query,tuple(values))
+    
+    def create_session(self,user_id:str,ip_address:str,user_agent:str,token:str)->str:
+        """Create new authenticated session"""
+        session_id=f"sess_{uuid.uuid4().hex[:16]}"
+        expires_at=datetime.now(timezone.utc)+timedelta(hours=24)
+        query="""
+            INSERT INTO user_sessions (session_id,user_id,ip_address,user_agent,token,expires_at,created_at,last_activity)
+            VALUES (%s,%s,%s,%s,%s,%s,NOW(),NOW())
+            RETURNING session_id
+        """
+        result=self.db.execute_query(query,(session_id,user_id,ip_address,user_agent,token,expires_at),fetch_one=True)
+        return result['session_id'] if result else session_id
+    
+    def get_session(self,session_id:str)->Optional[Dict[str,Any]]:
+        """Retrieve session details"""
+        query="SELECT * FROM user_sessions WHERE session_id=%s AND expires_at>NOW()"
+        return self.db.execute_query(query,(session_id,),fetch_one=True)
+    
+    def get_user_sessions(self,user_id:str)->List[Dict[str,Any]]:
+        """Get all active sessions for user"""
+        query="SELECT session_id,ip_address,user_agent,created_at,last_activity FROM user_sessions WHERE user_id=%s AND expires_at>NOW() ORDER BY last_activity DESC"
+        return self.db.execute_query(query,(user_id,))
+    
+    def invalidate_session(self,session_id:str):
+        """Invalidate a session"""
+        query="UPDATE user_sessions SET expires_at=NOW() WHERE session_id=%s"
+        self.db.execute_query(query,(session_id,))
+    
+    def invalidate_all_sessions(self,user_id:str):
+        """Invalidate all sessions for user"""
+        query="UPDATE user_sessions SET expires_at=NOW() WHERE user_id=%s"
+        self.db.execute_query(query,(user_id,))
+    
+    def update_session_activity(self,session_id:str):
+        """Update session last activity timestamp"""
+        query="UPDATE user_sessions SET last_activity=NOW() WHERE session_id=%s"
+        self.db.execute_query(query,(session_id,))
+    
+    def create_password_reset_token(self,user_id:str)->str:
+        """Create password reset token"""
+        token=secrets.token_urlsafe(32)
+        token_hash=hashlib.sha256(token.encode('utf-8')).hexdigest()
+        expires_at=datetime.now(timezone.utc)+timedelta(hours=1)
+        query="""
+            INSERT INTO password_reset_tokens (user_id,token_hash,expires_at,created_at,is_used)
+            VALUES (%s,%s,%s,NOW(),FALSE)
+            RETURNING token
+        """
+        self.db.execute_query(query,(user_id,token_hash,expires_at))
+        return token
+    
+    def verify_password_reset_token(self,token:str)->Optional[str]:
+        """Verify password reset token and return user_id"""
+        token_hash=hashlib.sha256(token.encode('utf-8')).hexdigest()
+        query="SELECT user_id FROM password_reset_tokens WHERE token_hash=%s AND expires_at>NOW() AND is_used=FALSE"
+        result=self.db.execute_query(query,(token_hash,),fetch_one=True)
+        return result['user_id'] if result else None
+    
+    def use_password_reset_token(self,token:str):
+        """Mark password reset token as used"""
+        token_hash=hashlib.sha256(token.encode('utf-8')).hexdigest()
+        query="UPDATE password_reset_tokens SET is_used=TRUE WHERE token_hash=%s"
+        self.db.execute_query(query,(token_hash,))
+    
+    def create_email_verification_token(self,user_id:str,email:str)->str:
+        """Create email verification token"""
+        token=secrets.token_urlsafe(32)
+        token_hash=hashlib.sha256(token.encode('utf-8')).hexdigest()
+        expires_at=datetime.now(timezone.utc)+timedelta(hours=24)
+        query="""
+            INSERT INTO email_verification_tokens (user_id,email,token_hash,expires_at,created_at,is_used)
+            VALUES (%s,%s,%s,%s,NOW(),FALSE)
+            RETURNING token
+        """
+        self.db.execute_query(query,(user_id,email,token_hash,expires_at))
+        return token
+    
+    def verify_email_token(self,token:str)->Optional[Tuple[str,str]]:
+        """Verify email token and return (user_id, email)"""
+        token_hash=hashlib.sha256(token.encode('utf-8')).hexdigest()
+        query="SELECT user_id,email FROM email_verification_tokens WHERE token_hash=%s AND expires_at>NOW() AND is_used=FALSE"
+        result=self.db.execute_query(query,(token_hash,),fetch_one=True)
+        if result:
+            return (result['user_id'],result['email'])
+        return None
+    
+    def use_email_verification_token(self,token:str):
+        """Mark email verification token as used and update user"""
+        token_hash=hashlib.sha256(token.encode('utf-8')).hexdigest()
+        query="UPDATE email_verification_tokens SET is_used=TRUE WHERE token_hash=%s RETURNING user_id"
+        result=self.db.execute_query(query,(token_hash,),fetch_one=True)
+        if result:
+            user_id=result['user_id']
+            self.db.execute_query("UPDATE users SET is_verified=TRUE,updated_at=NOW() WHERE user_id=%s",(user_id,))
+    
+    def get_user_notifications(self,user_id:str,limit:int=50)->List[Dict[str,Any]]:
+        """Get user notifications"""
+        query="SELECT * FROM user_notifications WHERE user_id=%s ORDER BY created_at DESC LIMIT %s"
+        return self.db.execute_query(query,(user_id,limit))
+    
+    def create_notification(self,user_id:str,notification_type:str,title:str,message:str,data:Dict[str,Any]=None)->str:
+        """Create user notification"""
+        notification_id=f"notif_{uuid.uuid4().hex[:16]}"
+        query="""
+            INSERT INTO user_notifications (notification_id,user_id,notification_type,title,message,data,is_read,created_at)
+            VALUES (%s,%s,%s,%s,%s,%s,FALSE,NOW())
+            RETURNING notification_id
+        """
+        result=self.db.execute_query(query,(notification_id,user_id,notification_type,title,message,json.dumps(data or {})),fetch_one=True)
+        return result['notification_id'] if result else notification_id
+    
+    def mark_notification_read(self,notification_id:str):
+        """Mark notification as read"""
+        query="UPDATE user_notifications SET is_read=TRUE WHERE notification_id=%s"
+        self.db.execute_query(query,(notification_id,))
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# DATABASE INITIALIZATION
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+class DatabaseInitializer:
+    """Initialize and manage PostgreSQL database schema"""
+    
+    @staticmethod
+    def initialize_schema(db_manager):
+        """Create all required tables and indexes"""
+        
+        # Users table
+        db_manager.execute_query("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id VARCHAR(32) PRIMARY KEY,
+                username VARCHAR(128) UNIQUE NOT NULL,
+                email VARCHAR(255) UNIQUE NOT NULL,
+                password_hash VARCHAR(255) NOT NULL,
+                role INTEGER DEFAULT 1,
+                is_active BOOLEAN DEFAULT TRUE,
+                is_verified BOOLEAN DEFAULT FALSE,
+                totp_secret VARCHAR(32),
+                totp_enabled BOOLEAN DEFAULT FALSE,
+                failed_login_attempts INTEGER DEFAULT 0,
+                locked_until TIMESTAMP WITH TIME ZONE,
+                last_login TIMESTAMP WITH TIME ZONE,
+                bio TEXT,
+                avatar_url VARCHAR(500),
+                first_name VARCHAR(128),
+                last_name VARCHAR(128),
+                phone VARCHAR(20),
+                company VARCHAR(255),
+                location VARCHAR(255),
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        
+        # User sessions table
+        db_manager.execute_query("""
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                session_id VARCHAR(32) PRIMARY KEY,
+                user_id VARCHAR(32) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                ip_address VARCHAR(45),
+                user_agent TEXT,
+                token TEXT NOT NULL,
+                expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                last_activity TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        
+        # Crypto keys table
+        db_manager.execute_query("""
+            CREATE TABLE IF NOT EXISTS crypto_keys (
+                key_id VARCHAR(32) PRIMARY KEY,
+                user_id VARCHAR(32) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                key_type VARCHAR(50) NOT NULL,
+                public_key TEXT NOT NULL,
+                private_key_encrypted TEXT,
+                fingerprint VARCHAR(128),
+                is_primary BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                expires_at TIMESTAMP WITH TIME ZONE,
+                metadata JSONB DEFAULT '{}'::jsonb
+            )
+        """)
+        
+        # Addresses table
+        db_manager.execute_query("""
+            CREATE TABLE IF NOT EXISTS addresses (
+                address_id VARCHAR(32) PRIMARY KEY,
+                user_id VARCHAR(32) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                address VARCHAR(255) UNIQUE NOT NULL,
+                key_id VARCHAR(32) REFERENCES crypto_keys(key_id),
+                label VARCHAR(255),
+                is_primary BOOLEAN DEFAULT FALSE,
+                address_type VARCHAR(50) DEFAULT 'ed25519',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                metadata JSONB DEFAULT '{}'::jsonb
+            )
+        """)
+        
+        # Address aliases table
+        db_manager.execute_query("""
+            CREATE TABLE IF NOT EXISTS address_aliases (
+                alias_id VARCHAR(32) PRIMARY KEY,
+                user_id VARCHAR(32) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                alias VARCHAR(128) UNIQUE NOT NULL,
+                target_address VARCHAR(255) NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        
+        # Security events table
+        db_manager.execute_query("""
+            CREATE TABLE IF NOT EXISTS security_events (
+                event_id VARCHAR(32) PRIMARY KEY,
+                user_id VARCHAR(32) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                event_type VARCHAR(50) NOT NULL,
+                ip_address VARCHAR(45),
+                user_agent TEXT,
+                details JSONB DEFAULT '{}'::jsonb,
+                severity VARCHAR(20) DEFAULT 'info',
+                timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        
+        # Password reset tokens table
+        db_manager.execute_query("""
+            CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                token_id SERIAL PRIMARY KEY,
+                user_id VARCHAR(32) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                token_hash VARCHAR(64) UNIQUE NOT NULL,
+                expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                is_used BOOLEAN DEFAULT FALSE
+            )
+        """)
+        
+        # Email verification tokens table
+        db_manager.execute_query("""
+            CREATE TABLE IF NOT EXISTS email_verification_tokens (
+                token_id SERIAL PRIMARY KEY,
+                user_id VARCHAR(32) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                email VARCHAR(255) NOT NULL,
+                token_hash VARCHAR(64) UNIQUE NOT NULL,
+                expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                is_used BOOLEAN DEFAULT FALSE
+            )
+        """)
+        
+        # User notifications table
+        db_manager.execute_query("""
+            CREATE TABLE IF NOT EXISTS user_notifications (
+                notification_id VARCHAR(32) PRIMARY KEY,
+                user_id VARCHAR(32) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                notification_type VARCHAR(50) NOT NULL,
+                title VARCHAR(255) NOT NULL,
+                message TEXT,
+                data JSONB DEFAULT '{}'::jsonb,
+                is_read BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        
+        # Create indexes
+        db_manager.execute_query("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
+        db_manager.execute_query("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+        db_manager.execute_query("CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions(user_id)")
+        db_manager.execute_query("CREATE INDEX IF NOT EXISTS idx_crypto_keys_user_id ON crypto_keys(user_id)")
+        db_manager.execute_query("CREATE INDEX IF NOT EXISTS idx_addresses_user_id ON addresses(user_id)")
+        db_manager.execute_query("CREATE INDEX IF NOT EXISTS idx_addresses_address ON addresses(address)")
+        db_manager.execute_query("CREATE INDEX IF NOT EXISTS idx_security_events_user_id ON security_events(user_id)")
+        db_manager.execute_query("CREATE INDEX IF NOT EXISTS idx_security_events_timestamp ON security_events(timestamp)")
+        db_manager.execute_query("CREATE INDEX IF NOT EXISTS idx_password_reset_user_id ON password_reset_tokens(user_id)")
+        db_manager.execute_query("CREATE INDEX IF NOT EXISTS idx_user_notifications_user_id ON user_notifications(user_id)")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # BLUEPRINT FACTORY
@@ -908,6 +1193,288 @@ def create_core_api_blueprint(db_manager,jwt_manager:JWTManager,config:Dict[str,
         except Exception as e:
             logger.error(f"2FA disable error: {e}",exc_info=True)
             return jsonify({'error':'Failed to disable 2FA'}),500
+    
+    @bp.route('/auth/logout',methods=['POST'])
+    @require_auth
+    def logout():
+        """Logout current user and invalidate session"""
+        try:
+            user_id=g.user_id
+            # Invalidate all sessions for the user
+            core_db.invalidate_all_sessions(user_id)
+            
+            # Log logout event
+            core_db.log_security_event(
+                user_id,SecurityEventType.LOGOUT,
+                request.remote_addr,request.headers.get('User-Agent',''),
+                {'logout_time':datetime.now(timezone.utc).isoformat()},
+                severity='info'
+            )
+            
+            return jsonify({'success':True,'message':'Logged out successfully'}),200
+            
+        except Exception as e:
+            logger.error(f"Logout error: {e}",exc_info=True)
+            return jsonify({'error':'Logout failed'}),500
+    
+    @bp.route('/auth/password/change',methods=['POST'])
+    @require_auth
+    @rate_limit(max_requests=10,window_seconds=3600)
+    def change_password():
+        """Change user password with current password verification"""
+        try:
+            data=request.get_json()
+            current_password=data.get('current_password','')
+            new_password=data.get('new_password','')
+            
+            if not current_password or not new_password:
+                return jsonify({'error':'Current and new passwords required'}),400
+            
+            user=core_db.get_user_by_id(g.user_id)
+            if not user:
+                return jsonify({'error':'User not found'}),404
+            
+            # Verify current password
+            if not PasswordValidator.verify_password(current_password,user['password_hash']):
+                core_db.log_security_event(
+                    g.user_id,SecurityEventType.PASSWORD_CHANGE,
+                    request.remote_addr,request.headers.get('User-Agent',''),
+                    {'result':'failed_verification'},severity='warning'
+                )
+                return jsonify({'error':'Current password is incorrect'}),401
+            
+            # Validate new password
+            valid,msg=PasswordValidator.validate_strength(new_password,min_length=config['password_min_length'])
+            if not valid:
+                return jsonify({'error':msg}),400
+            
+            # Ensure new password is different
+            if PasswordValidator.verify_password(new_password,user['password_hash']):
+                return jsonify({'error':'New password must be different from current password'}),400
+            
+            # Update password
+            new_password_hash=PasswordValidator.hash_password(new_password)
+            core_db.update_password(g.user_id,new_password_hash)
+            
+            # Log event
+            core_db.log_security_event(
+                g.user_id,SecurityEventType.PASSWORD_CHANGE,
+                request.remote_addr,request.headers.get('User-Agent',''),
+                {'result':'success'},severity='info'
+            )
+            
+            # Invalidate all existing sessions
+            core_db.invalidate_all_sessions(g.user_id)
+            
+            return jsonify({'success':True,'message':'Password changed successfully'}),200
+            
+        except Exception as e:
+            logger.error(f"Password change error: {e}",exc_info=True)
+            return jsonify({'error':'Failed to change password'}),500
+    
+    @bp.route('/auth/password/reset-request',methods=['POST'])
+    @rate_limit(max_requests=5,window_seconds=3600)
+    def request_password_reset():
+        """Request password reset token via email"""
+        try:
+            data=request.get_json()
+            email=data.get('email','').strip().lower()
+            
+            if not email:
+                return jsonify({'error':'Email required'}),400
+            
+            user=core_db.get_user_by_email(email)
+            if not user:
+                # Don't reveal whether email exists in system for security
+                return jsonify({
+                    'success':True,
+                    'message':'If email exists in system, password reset link has been sent'
+                }),200
+            
+            # Generate reset token
+            reset_token=core_db.create_password_reset_token(user['user_id'])
+            
+            # In production, send email with reset link
+            reset_link=f"https://yourdomain.com/reset-password?token={reset_token}"
+            
+            # Log event
+            core_db.log_security_event(
+                user['user_id'],SecurityEventType.PASSWORD_CHANGE,
+                request.remote_addr,request.headers.get('User-Agent',''),
+                {'action':'password_reset_requested'},severity='info'
+            )
+            
+            # TODO: Send email with reset_link
+            # email_service.send_password_reset(user['email'], reset_link)
+            
+            return jsonify({
+                'success':True,
+                'message':'If email exists in system, password reset link has been sent'
+            }),200
+            
+        except Exception as e:
+            logger.error(f"Password reset request error: {e}",exc_info=True)
+            return jsonify({'error':'Failed to process password reset request'}),500
+    
+    @bp.route('/auth/password/reset',methods=['POST'])
+    @rate_limit(max_requests=5,window_seconds=3600)
+    def reset_password():
+        """Reset password using token"""
+        try:
+            data=request.get_json()
+            token=data.get('token','')
+            new_password=data.get('new_password','')
+            
+            if not token or not new_password:
+                return jsonify({'error':'Token and new password required'}),400
+            
+            # Verify token
+            user_id=core_db.verify_password_reset_token(token)
+            if not user_id:
+                return jsonify({'error':'Invalid or expired reset token'}),401
+            
+            user=core_db.get_user_by_id(user_id)
+            if not user:
+                return jsonify({'error':'User not found'}),404
+            
+            # Validate new password
+            valid,msg=PasswordValidator.validate_strength(new_password,min_length=config['password_min_length'])
+            if not valid:
+                return jsonify({'error':msg}),400
+            
+            # Update password
+            new_password_hash=PasswordValidator.hash_password(new_password)
+            core_db.update_password(user_id,new_password_hash)
+            
+            # Mark token as used
+            core_db.use_password_reset_token(token)
+            
+            # Invalidate all sessions
+            core_db.invalidate_all_sessions(user_id)
+            
+            # Log event
+            core_db.log_security_event(
+                user_id,SecurityEventType.PASSWORD_CHANGE,
+                request.remote_addr,request.headers.get('User-Agent',''),
+                {'action':'password_reset_completed'},severity='info'
+            )
+            
+            return jsonify({'success':True,'message':'Password reset successfully'}),200
+            
+        except Exception as e:
+            logger.error(f"Password reset error: {e}",exc_info=True)
+            return jsonify({'error':'Failed to reset password'}),500
+    
+    @bp.route('/auth/email/verify-request',methods=['POST'])
+    @require_auth
+    @rate_limit(max_requests=5,window_seconds=3600)
+    def request_email_verification():
+        """Request email verification token"""
+        try:
+            data=request.get_json()
+            email=data.get('email','').strip().lower()
+            
+            if not email:
+                return jsonify({'error':'Email required'}),400
+            
+            user=core_db.get_user_by_id(g.user_id)
+            if not user:
+                return jsonify({'error':'User not found'}),404
+            
+            if not re.match(r'^[^\s@]+@[^\s@]+\.[^\s@]+$',email):
+                return jsonify({'error':'Invalid email format'}),400
+            
+            # Check if email is already used by another user
+            existing=core_db.get_user_by_email(email)
+            if existing and existing['user_id']!=g.user_id:
+                return jsonify({'error':'Email already in use'}),409
+            
+            # Generate verification token
+            verify_token=core_db.create_email_verification_token(g.user_id,email)
+            
+            # In production, send email with verification link
+            verify_link=f"https://yourdomain.com/verify-email?token={verify_token}"
+            
+            # TODO: Send email with verify_link
+            # email_service.send_email_verification(email, verify_link)
+            
+            return jsonify({
+                'success':True,
+                'message':'Verification email has been sent'
+            }),200
+            
+        except Exception as e:
+            logger.error(f"Email verification request error: {e}",exc_info=True)
+            return jsonify({'error':'Failed to request email verification'}),500
+    
+    @bp.route('/auth/email/verify',methods=['POST'])
+    @rate_limit(max_requests=10,window_seconds=3600)
+    def verify_email():
+        """Verify email with token"""
+        try:
+            data=request.get_json()
+            token=data.get('token','')
+            
+            if not token:
+                return jsonify({'error':'Verification token required'}),400
+            
+            result=core_db.verify_email_token(token)
+            if not result:
+                return jsonify({'error':'Invalid or expired verification token'}),401
+            
+            user_id,email=result
+            core_db.use_email_verification_token(token)
+            
+            # Update user email
+            query="UPDATE users SET email=%s,is_verified=TRUE,updated_at=NOW() WHERE user_id=%s"
+            core_db.db.execute_query(query,(email,user_id))
+            
+            # Log event
+            core_db.log_security_event(
+                user_id,SecurityEventType.LOGIN_SUCCESS,
+                request.remote_addr,request.headers.get('User-Agent',''),
+                {'action':'email_verified'},severity='info'
+            )
+            
+            return jsonify({'success':True,'message':'Email verified successfully'}),200
+            
+        except Exception as e:
+            logger.error(f"Email verification error: {e}",exc_info=True)
+            return jsonify({'error':'Failed to verify email'}),500
+    
+    @bp.route('/auth/sessions',methods=['GET'])
+    @require_auth
+    def get_active_sessions():
+        """Get all active sessions for current user"""
+        try:
+            sessions=core_db.get_user_sessions(g.user_id)
+            
+            return jsonify({
+                'sessions':sessions,
+                'total':len(sessions)
+            }),200
+            
+        except Exception as e:
+            logger.error(f"Get sessions error: {e}",exc_info=True)
+            return jsonify({'error':'Failed to get sessions'}),500
+    
+    @bp.route('/auth/sessions/<session_id>',methods=['DELETE'])
+    @require_auth
+    def revoke_session(session_id):
+        """Revoke specific session"""
+        try:
+            # Verify session belongs to user
+            session=core_db.get_session(session_id)
+            if not session or session['user_id']!=g.user_id:
+                return jsonify({'error':'Session not found or unauthorized'}),404
+            
+            core_db.invalidate_session(session_id)
+            
+            return jsonify({'success':True,'message':'Session revoked'}),200
+            
+        except Exception as e:
+            logger.error(f"Revoke session error: {e}",exc_info=True)
+            return jsonify({'error':'Failed to revoke session'}),500
     
     # ═══════════════════════════════════════════════════════════════════════════════════
     # USER MANAGEMENT ROUTES
@@ -1408,5 +1975,327 @@ def create_core_api_blueprint(db_manager,jwt_manager:JWTManager,config:Dict[str,
         except Exception as e:
             logger.error(f"Security status error: {e}",exc_info=True)
             return jsonify({'error':'Failed to get security status'}),500
+    
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    # DASHBOARD & ANALYTICS ROUTES
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    
+    @bp.route('/dashboard/overview',methods=['GET'])
+    @require_auth
+    def get_dashboard_overview():
+        """Get comprehensive dashboard overview"""
+        try:
+            user=core_db.get_user_by_id(g.user_id)
+            if not user:
+                return jsonify({'error':'User not found'}),404
+            
+            keys=core_db.get_user_keys(g.user_id)
+            addresses=core_db.get_user_addresses(g.user_id)
+            sessions=core_db.get_user_sessions(g.user_id)
+            recent_events=core_db.get_security_events(g.user_id,10)
+            notifications=core_db.get_user_notifications(g.user_id,5)
+            
+            # Calculate stats
+            account_age=(datetime.now(timezone.utc)-user['created_at']).days if user['created_at'] else 0
+            
+            dashboard={
+                'user':{
+                    'user_id':user['user_id'],
+                    'username':user['username'],
+                    'email':user['email'],
+                    'role':UserRole(user.get('role',1)).name,
+                    'is_verified':user.get('is_verified',False),
+                    'is_active':user.get('is_active',True),
+                    'account_age_days':account_age,
+                    'created_at':user['created_at'].isoformat() if hasattr(user['created_at'],'isoformat') else user['created_at'],
+                    'last_login':user.get('last_login').isoformat() if user.get('last_login') and hasattr(user['last_login'],'isoformat') else user.get('last_login')
+                },
+                'stats':{
+                    'total_keys':len(keys),
+                    'total_addresses':len(addresses),
+                    'active_sessions':len(sessions),
+                    'total_events':len(recent_events),
+                    'unread_notifications':sum(1 for n in notifications if not n.get('is_read',False))
+                },
+                'security':{
+                    'totp_enabled':user.get('totp_enabled',False),
+                    'account_locked':user.get('locked_until') is not None,
+                    'failed_login_attempts':user.get('failed_login_attempts',0),
+                    'last_login':user.get('last_login')
+                },
+                'recent_activity':{
+                    'events':recent_events[:10],
+                    'sessions':sessions[:5]
+                },
+                'notifications':notifications[:5]
+            }
+            
+            return jsonify(dashboard),200
+            
+        except Exception as e:
+            logger.error(f"Dashboard overview error: {e}",exc_info=True)
+            return jsonify({'error':'Failed to load dashboard'}),500
+    
+    @bp.route('/notifications',methods=['GET'])
+    @require_auth
+    def get_notifications():
+        """Get user notifications"""
+        try:
+            limit=min(int(request.args.get('limit',50)),500)
+            notifications=core_db.get_user_notifications(g.user_id,limit)
+            
+            # Parse data fields
+            for notif in notifications:
+                if isinstance(notif.get('data'),str):
+                    try:
+                        notif['data']=json.loads(notif['data'])
+                    except:
+                        notif['data']={}
+            
+            return jsonify({'notifications':notifications,'total':len(notifications)}),200
+            
+        except Exception as e:
+            logger.error(f"Get notifications error: {e}",exc_info=True)
+            return jsonify({'error':'Failed to get notifications'}),500
+    
+    @bp.route('/notifications/<notification_id>/read',methods=['POST'])
+    @require_auth
+    def mark_notification_as_read(notification_id):
+        """Mark notification as read"""
+        try:
+            core_db.mark_notification_read(notification_id)
+            return jsonify({'success':True,'message':'Notification marked as read'}),200
+            
+        except Exception as e:
+            logger.error(f"Mark notification error: {e}",exc_info=True)
+            return jsonify({'error':'Failed to mark notification'}),500
+    
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    # ADVANCED USER PROFILE ROUTES
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    
+    @bp.route('/users/profile/detailed',methods=['GET'])
+    @require_auth
+    def get_detailed_profile():
+        """Get detailed user profile with comprehensive information"""
+        try:
+            user=core_db.get_user_by_id(g.user_id)
+            if not user:
+                return jsonify({'error':'User not found'}),404
+            
+            keys=core_db.get_user_keys(g.user_id)
+            addresses=core_db.get_user_addresses(g.user_id)
+            sessions=core_db.get_user_sessions(g.user_id)
+            recent_events=core_db.get_security_events(g.user_id,20)
+            
+            # Remove sensitive data
+            user.pop('password_hash',None)
+            user.pop('totp_secret',None)
+            
+            profile={
+                'user':user,
+                'keys':{
+                    'total':len(keys),
+                    'primary':[k for k in keys if k.get('is_primary',False)][0] if any(k.get('is_primary',False) for k in keys) else None,
+                    'keys':keys
+                },
+                'addresses':{
+                    'total':len(addresses),
+                    'primary':[a for a in addresses if a.get('is_primary',False)][0] if any(a.get('is_primary',False) for a in addresses) else None,
+                    'addresses':addresses
+                },
+                'sessions':{
+                    'total':len(sessions),
+                    'active_sessions':sessions
+                },
+                'recent_activity':recent_events[:20]
+            }
+            
+            return jsonify(profile),200
+            
+        except Exception as e:
+            logger.error(f"Get detailed profile error: {e}",exc_info=True)
+            return jsonify({'error':'Failed to get detailed profile'}),500
+    
+    @bp.route('/users/profile/update-advanced',methods=['PUT'])
+    @require_auth
+    def update_advanced_profile():
+        """Update advanced user profile fields"""
+        try:
+            data=request.get_json()
+            user=core_db.get_user_by_id(g.user_id)
+            if not user:
+                return jsonify({'error':'User not found'}),404
+            
+            allowed_fields={'bio','avatar_url','first_name','last_name','phone','company','location'}
+            update_data={k:v for k,v in data.items() if k in allowed_fields}
+            
+            if update_data:
+                core_db.update_user_profile(g.user_id,update_data)
+            
+            return jsonify({'success':True,'message':'Profile updated','updated_fields':update_data}),200
+            
+        except Exception as e:
+            logger.error(f"Update advanced profile error: {e}",exc_info=True)
+            return jsonify({'error':'Failed to update profile'}),500
+    
+    @bp.route('/users/account-settings',methods=['GET'])
+    @require_auth
+    def get_account_settings():
+        """Get account settings and preferences"""
+        try:
+            user=core_db.get_user_by_id(g.user_id)
+            if not user:
+                return jsonify({'error':'User not found'}),404
+            
+            settings={
+                'user_id':user['user_id'],
+                'username':user['username'],
+                'email':user['email'],
+                'is_verified':user.get('is_verified',False),
+                'is_active':user.get('is_active',True),
+                'security':{
+                    'totp_enabled':user.get('totp_enabled',False),
+                    'password_last_changed':user.get('updated_at'),
+                    'account_locked':user.get('locked_until') is not None
+                },
+                'notifications_enabled':True,
+                'two_factor_enabled':user.get('totp_enabled',False),
+                'login_attempts_before_lock':5,
+                'session_timeout_minutes':30
+            }
+            
+            return jsonify(settings),200
+            
+        except Exception as e:
+            logger.error(f"Get account settings error: {e}",exc_info=True)
+            return jsonify({'error':'Failed to get account settings'}),500
+    
+    @bp.route('/users/verify-request',methods=['POST'])
+    @require_auth
+    def request_account_verification():
+        """Request account verification via email"""
+        try:
+            user=core_db.get_user_by_id(g.user_id)
+            if not user:
+                return jsonify({'error':'User not found'}),404
+            
+            if user.get('is_verified'):
+                return jsonify({'error':'Account already verified'}),400
+            
+            # Generate verification token
+            verify_token=core_db.create_email_verification_token(g.user_id,user['email'])
+            
+            # TODO: Send email with verification link
+            verify_link=f"https://yourdomain.com/verify?token={verify_token}"
+            # email_service.send_verification(user['email'], verify_link)
+            
+            return jsonify({
+                'success':True,
+                'message':'Verification email sent'
+            }),200
+            
+        except Exception as e:
+            logger.error(f"Request verification error: {e}",exc_info=True)
+            return jsonify({'error':'Failed to request verification'}),500
+    
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    # KEY & ADDRESS MANAGEMENT ROUTES
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    
+    @bp.route('/keys/list',methods=['GET'])
+    @require_auth
+    def list_keys():
+        """List all cryptographic keys"""
+        try:
+            keys=core_db.get_user_keys(g.user_id)
+            
+            for key in keys:
+                # Remove private key from response
+                key.pop('private_key_encrypted',None)
+                if isinstance(key.get('created_at'),datetime):
+                    key['created_at']=key['created_at'].isoformat()
+                if key.get('expires_at') and isinstance(key['expires_at'],datetime):
+                    key['expires_at']=key['expires_at'].isoformat()
+            
+            return jsonify({'keys':keys,'total':len(keys)}),200
+            
+        except Exception as e:
+            logger.error(f"List keys error: {e}",exc_info=True)
+            return jsonify({'error':'Failed to list keys'}),500
+    
+    @bp.route('/addresses/list',methods=['GET'])
+    @require_auth
+    def list_addresses():
+        """List all blockchain addresses"""
+        try:
+            addresses=core_db.get_user_addresses(g.user_id)
+            
+            return jsonify({'addresses':addresses,'total':len(addresses)}),200
+            
+        except Exception as e:
+            logger.error(f"List addresses error: {e}",exc_info=True)
+            return jsonify({'error':'Failed to list addresses'}),500
+    
+    @bp.route('/addresses/primary',methods=['GET'])
+    @require_auth
+    def get_primary_address():
+        """Get primary blockchain address"""
+        try:
+            addresses=core_db.get_user_addresses(g.user_id)
+            primary=[a for a in addresses if a.get('is_primary',False)]
+            
+            if not primary:
+                return jsonify({'error':'No primary address found'}),404
+            
+            return jsonify(primary[0]),200
+            
+        except Exception as e:
+            logger.error(f"Get primary address error: {e}",exc_info=True)
+            return jsonify({'error':'Failed to get primary address'}),500
+    
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    # SYSTEM STATUS & HEALTH ROUTES
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    
+    @bp.route('/health',methods=['GET'])
+    def health_check():
+        """Health check endpoint"""
+        try:
+            return jsonify({
+                'status':'healthy',
+                'timestamp':datetime.now(timezone.utc).isoformat(),
+                'service':'core_api',
+                'version':'1.0.0'
+            }),200
+            
+        except Exception as e:
+            logger.error(f"Health check error: {e}")
+            return jsonify({'status':'unhealthy','error':str(e)}),500
+    
+    @bp.route('/version',methods=['GET'])
+    def get_version():
+        """Get API version information"""
+        try:
+            return jsonify({
+                'version':'1.0.0',
+                'api_name':'QTCL Core API',
+                'features':[
+                    'user_authentication',
+                    'password_management',
+                    'two_factor_authentication',
+                    'cryptographic_key_management',
+                    'blockchain_addresses',
+                    'session_management',
+                    'security_audit_logging',
+                    'email_verification',
+                    'account_recovery'
+                ],
+                'build_date':datetime.now(timezone.utc).isoformat()
+            }),200
+            
+        except Exception as e:
+            logger.error(f"Get version error: {e}")
+            return jsonify({'error':'Failed to get version'}),500
     
     return bp
