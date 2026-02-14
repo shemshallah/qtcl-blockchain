@@ -1536,7 +1536,7 @@ try:
     from main_app import create_app, initialize_app
     
     logger.info("[Flask] Creating application...")
-    app = create_app()
+    app, executor, socketio = create_app()
     initialize_app(app)
     
     # Start all daemons
@@ -1936,6 +1936,10 @@ atexit.register(ultimate_shutdown)
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 application = app
+
+# Export components for external use if needed
+SOCKETIO = socketio
+EXECUTOR = executor
 
 logger.info("")
 logger.info("Production Deployment:")
