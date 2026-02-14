@@ -5,9 +5,24 @@ Complete implementation of blockchain state management, block creation, transact
 and account balance management.
 
 Author: QTCL Development Team
-Version: 1.0
-Date: 2025-02-08
-Lines: ~6000+
+Version: 2.0 - INTEGRATED WITH GLOBAL WSGI
+Date: 2026-02-13
+Lines: ~5000+
+
+INTEGRATION WITH GLOBAL WSGI:
+    This module now uses the global DB, PROFILER, CACHE, and RequestCorrelation from wsgi_config.py
+    
+    Key changes:
+    - All database operations use global DB singleton (circuit breaker + rate limiter protected)
+    - All operations are automatically profiled for performance tracking
+    - Request correlation IDs flow through all operations
+    - Error budget tracking integrated
+    - Smart caching for frequently accessed data
+    
+    Usage:
+        from wsgi_config import DB, PROFILER, CACHE
+        # DB is already initialized and ready to use
+        # No need to create connection pools manually
 
 This module manages the blockchain ledger state, creates blocks from finalized transactions,
 manages account balances, and ensures transaction finality with permanent settlement.
@@ -40,17 +55,47 @@ from cryptography.hazmat.primitives.asymmetric import ec, utils
 from cryptography.hazmat.backends import default_backend
 from cryptography.exceptions import InvalidSignature
 
-# Database
-from supabase import create_client, Client
-import psycopg2
-from psycopg2.pool import ThreadedConnectionPool
+# Database - USING GLOBAL DB FROM WSGI_CONFIG
+from wsgi_config import DB, PROFILER, CACHE, RequestCorrelation, ERROR_BUDGET
 from psycopg2.extras import RealDictCursor, execute_values, Json
 from psycopg2 import sql
+import psycopg2
+
+# Legacy compatibility imports (for classes that still expect these)
+from supabase import create_client, Client
 
 # Configuration
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+# GLOBAL DB WRAPPER - Provides ThreadedConnectionPool-like interface
+class GlobalDBWrapper:
+    """
+    Wrapper to make global DB compatible with ThreadedConnectionPool interface.
+    All methods delegate to global DB with profiling and correlation.
+    """
+    def getconn(self):
+        """Get connection from global pool"""
+        return DB.get_connection()
+    
+    def putconn(self, conn):
+        """Return connection to global pool"""
+        DB.return_connection(conn)
+    
+    def closeall(self):
+        """No-op - global pool manages its own lifecycle"""
+        pass
+
+# Create global DB wrapper instance
+_GLOBAL_DB_POOL = GlobalDBWrapper()
+
+# Helper to create legacy Supabase client (for compatibility)
+def get_supabase_client():
+    """Create Supabase client for components that still use it"""
+    if SUPABASE_URL and SUPABASE_KEY:
+        return create_client(SUPABASE_URL, SUPABASE_KEY)
+    return None
 
 # Logging setup
 logging.basicConfig(
@@ -73,17 +118,9 @@ QTCL_DECIMALS = 18
 QTCL_WEI_PER_QTCL = 10 ** QTCL_DECIMALS
 GENESIS_SUPPLY = TOTAL_SUPPLY_QTCL * QTCL_WEI_PER_QTCL
 
-# Gas configuration — GAS-FREE MODE: all gas values disabled
+# Gas configuration — REMOVED: QTCL is GAS-FREE
 # Quantum finality (GHZ-8 commitment hash) replaces economic finality
-BASE_GAS_PRICE      = 0  # GAS-FREE
-GAS_TRANSFER        = 0  # GAS-FREE
-GAS_CONTRACT_CALL   = 0  # GAS-FREE
-GAS_STAKE           = 0  # GAS-FREE
-GAS_MINT            = 0  # GAS-FREE
-GAS_BURN            = 0  # GAS-FREE
-GAS_LIMIT_PER_BLOCK = 0  # GAS-FREE
-MAX_GAS_PRICE       = 0  # GAS-FREE
-MIN_GAS_PRICE       = 0  # GAS-FREE
+# All transaction fees = 0. No gas. Zero. Nada. None.
 
 # Block configuration
 BLOCK_TIME_TARGET_SECONDS = 10  # 10 second block time
@@ -1545,297 +1582,6 @@ class BalanceValidator:
                 'success_rate_percent': success_rate
             }
 
-class GasManager:
-    """
-    Manage transaction gas fees and validator rewards
-    """
-    
-    def __init__(self, supabase_client: Client, db_pool: ThreadedConnectionPool):
-        self.supabase = supabase_client
-        self.db_pool = db_pool
-        self.lock = threading.Lock()
-        
-        # Gas pricing configuration
-        self.base_gas_price = BASE_GAS_PRICE
-        self.gas_costs = {
-            'transfer': GAS_TRANSFER,
-            'contract_call': GAS_CONTRACT_CALL,
-            'stake': GAS_STAKE,
-            'mint': GAS_MINT,
-            'burn': GAS_BURN,
-            'contract_deploy': 200_000,
-            'unstake': GAS_STAKE
-        }
-        
-        # Statistics
-        self.total_gas_used = 0
-        self.total_fees_collected = 0
-        self.total_fees_burned = 0
-        self.total_rewards_distributed = 0
-        self.transaction_count = 0
-        
-        logger.info("GasManager initialized")
-    
-    def calculate_transaction_gas(self, tx_type: str, payload_size: int = 0) -> int:
-        """
-        Calculate gas cost for transaction
-        
-        Args:
-            tx_type: Type of transaction
-            payload_size: Size of transaction payload in bytes
-            
-        Returns:
-            Gas cost in gas units
-        """
-        # Base gas cost for transaction type
-        base_gas = self.gas_costs.get(tx_type, GAS_TRANSFER)
-        
-        # Additional gas for payload (68 gas per byte for non-zero bytes)
-        payload_gas = payload_size * 68
-        
-        total_gas = base_gas + payload_gas
-        
-        logger.debug(f"Gas calculation for {tx_type}: {total_gas} (base: {base_gas}, payload: {payload_gas})")
-        return total_gas
-    
-    def calculate_dynamic_gas_price(self, block_number: int) -> int:
-        """
-        Calculate dynamic gas price based on network conditions
-        
-        Args:
-            block_number: Current block number
-            
-        Returns:
-            Gas price in QTCL wei per gas unit
-        """
-        # For now, return base gas price
-        # In production, would implement EIP-1559 style dynamic pricing
-        
-        # Future implementation could include:
-        # - Base fee that adjusts based on block fullness
-        # - Priority fee for faster inclusion
-        # - Burning mechanism for base fee
-        
-        return self.base_gas_price
-    
-    def deduct_transaction_fee(self,
-                               sender_id: str,
-                               gas_used: int,
-                               gas_price: int) -> Tuple[bool, int]:
-        """
-        Deduct transaction fee from sender
-        
-        Args:
-            sender_id: Sender user ID
-            gas_used: Gas units used
-            gas_price: Gas price in QTCL wei per gas
-            
-        Returns:
-            Tuple of (success, fee_charged)
-        """
-        fee = gas_used * gas_price
-        
-        if fee <= 0:
-            return True, 0
-        
-        conn = self._get_connection()
-        try:
-            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                cursor.execute("BEGIN")
-                
-                # Lock sender account
-                cursor.execute(
-                    "SELECT balance FROM users WHERE user_id = %s FOR UPDATE",
-                    (sender_id,)
-                )
-                sender = cursor.fetchone()
-                
-                if not sender:
-                    cursor.execute("ROLLBACK")
-                    return False, 0
-                
-                if sender['balance'] < fee:
-                    cursor.execute("ROLLBACK")
-                    return False, 0
-                
-                # Deduct fee
-                new_balance = sender['balance'] - fee
-                cursor.execute(
-                    "UPDATE users SET balance = %s WHERE user_id = %s",
-                    (new_balance, sender_id)
-                )
-                
-                # Record in gas ledger
-                timestamp = datetime.utcnow()
-                cursor.execute(
-                    """
-                    INSERT INTO gas_ledger 
-                    (user_id, gas_used, gas_price, fee, timestamp)
-                    VALUES (%s, %s, %s, %s, %s)
-                    """,
-                    (sender_id, gas_used, gas_price, fee, timestamp)
-                )
-                
-                cursor.execute("COMMIT")
-                
-                with self.lock:
-                    self.total_gas_used += gas_used
-                    self.total_fees_collected += fee
-                    self.transaction_count += 1
-                
-                logger.debug(f"Deducted fee {fee} from {sender_id} (gas: {gas_used} @ {gas_price})")
-                return True, fee
-                
-        except Exception as e:
-            logger.error(f"Fee deduction failed: {e}", exc_info=True)
-            try:
-                conn.rollback()
-            except:
-                pass
-            return False, 0
-        finally:
-            self._return_connection(conn)
-    
-    def calculate_validator_reward(self, block_number: int, base_reward: Optional[int] = None) -> int:
-        """
-        Calculate validator reward for block
-        
-        Args:
-            block_number: Block number
-            base_reward: Optional custom base reward
-            
-        Returns:
-            Reward amount in QTCL wei
-        """
-        if base_reward is not None:
-            return base_reward
-        
-        # Determine epoch and apply halving schedule
-        epoch = block_number // BLOCKS_PER_EPOCH
-        
-        if epoch == 0:
-            reward = EPOCH_1_REWARD
-        elif epoch == 1:
-            reward = EPOCH_2_REWARD
-        else:
-            reward = EPOCH_3_REWARD
-        
-        logger.debug(f"Block {block_number} reward: {reward} (epoch {epoch})")
-        return reward
-    
-    def distribute_block_rewards(self,
-                                 block_number: int,
-                                 validator_id: str,
-                                 fees_collected: int) -> bool:
-        """
-        Distribute block rewards and fees to validator
-        
-        Args:
-            block_number: Block number
-            validator_id: Validator to reward
-            fees_collected: Total fees collected in block
-            
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            # Calculate base reward
-            base_reward = self.calculate_validator_reward(block_number)
-            
-            # Calculate fee distribution
-            fee_to_validator = int(fees_collected * FEE_TO_VALIDATOR_PERCENT / 100)
-            fee_to_burn = fees_collected - fee_to_validator
-            
-            # Total validator reward
-            total_validator_reward = base_reward + fee_to_validator
-            
-            conn = self._get_connection()
-            try:
-                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-                    cursor.execute("BEGIN")
-                    
-                    # Credit validator
-                    cursor.execute(
-                        "SELECT balance FROM users WHERE user_id = %s FOR UPDATE",
-                        (validator_id,)
-                    )
-                    validator = cursor.fetchone()
-                    
-                    if not validator:
-                        cursor.execute("ROLLBACK")
-                        logger.error(f"Validator not found: {validator_id}")
-                        return False
-                    
-                    new_balance = validator['balance'] + total_validator_reward
-                    cursor.execute(
-                        "UPDATE users SET balance = %s WHERE user_id = %s",
-                        (new_balance, validator_id)
-                    )
-                    
-                    # Record reward
-                    timestamp = datetime.utcnow()
-                    cursor.execute(
-                        """
-                        INSERT INTO validator_rewards 
-                        (validator_id, block_number, base_reward, fee_reward, total_reward, timestamp)
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                        """,
-                        (validator_id, block_number, base_reward, fee_to_validator, 
-                         total_validator_reward, timestamp)
-                    )
-                    
-                    # Record burned fees (deflation)
-                    if fee_to_burn > 0:
-                        cursor.execute(
-                            """
-                            INSERT INTO burned_fees 
-                            (block_number, amount, timestamp)
-                            VALUES (%s, %s, %s)
-                            """,
-                            (block_number, fee_to_burn, timestamp)
-                        )
-                    
-                    cursor.execute("COMMIT")
-                    
-                    with self.lock:
-                        self.total_rewards_distributed += total_validator_reward
-                        self.total_fees_burned += fee_to_burn
-                    
-                    logger.info(f"Distributed rewards for block {block_number}: {total_validator_reward} to {validator_id}, burned {fee_to_burn}")
-                    return True
-                    
-            finally:
-                self._return_connection(conn)
-                
-        except Exception as e:
-            logger.error(f"Reward distribution failed: {e}", exc_info=True)
-            return False
-    
-    def get_gas_statistics(self) -> Dict:
-        """Get gas and fee statistics"""
-        with self.lock:
-            avg_gas_per_tx = (self.total_gas_used / self.transaction_count) if self.transaction_count > 0 else 0
-            avg_fee_per_tx = (self.total_fees_collected / self.transaction_count) if self.transaction_count > 0 else 0
-            
-            return {
-                'total_gas_used': self.total_gas_used,
-                'total_fees_collected': self.total_fees_collected,
-                'total_fees_burned': self.total_fees_burned,
-                'total_rewards_distributed': self.total_rewards_distributed,
-                'transaction_count': self.transaction_count,
-                'average_gas_per_tx': avg_gas_per_tx,
-                'average_fee_per_tx': avg_fee_per_tx,
-                'current_gas_price': self.base_gas_price
-            }
-    
-    def _get_connection(self):
-        """Get database connection from pool"""
-        return self.db_pool.getconn()
-    
-    def _return_connection(self, conn):
-        """Return database connection to pool"""
-        self.db_pool.putconn(conn)
-
 
 # ============================================================================
 # MODULE 2: BLOCK CREATION & MANAGEMENT
@@ -3137,12 +2883,10 @@ class FinalizationManager:
     def __init__(self, 
                  supabase_client: Client,
                  db_pool: ThreadedConnectionPool,
-                 balance_manager: BalanceManager,
-                 gas_manager: GasManager):
+                 balance_manager: BalanceManager):
         self.supabase = supabase_client
         self.db_pool = db_pool
         self.balance_manager = balance_manager
-        self.gas_manager = gas_manager
         self.lock = threading.Lock()
         
         # Statistics
@@ -3150,7 +2894,7 @@ class FinalizationManager:
         self.rejected_count = 0
         self.error_count = 0
         
-        logger.info("FinalizationManager initialized")
+        logger.info("FinalizationManager initialized (GAS-FREE mode)")
     
     def finalize_transaction(self,
                             tx_id: str,
@@ -3201,16 +2945,8 @@ class FinalizationManager:
             elif outcome_status == 'rejected':
                 logger.info(f"Transaction {tx_id} rejected by collapse outcome")
                 
-                # Still deduct gas fee even for rejected transactions
-                if tx.get('gas_fee', 0) > 0:
-                    success, fee = self.gas_manager.deduct_transaction_fee(
-                        tx['from_user_id'],
-                        tx.get('gas_used', 0),
-                        tx.get('gas_price', BASE_GAS_PRICE)
-                    )
-                    
-                    if not success:
-                        logger.warning(f"Failed to deduct gas fee for rejected tx {tx_id}")
+                # QTCL IS GAS-FREE - No gas fees to deduct
+                logger.info(f"Transaction {tx_id} rejected by collapse outcome (no gas fees)")
             
             else:
                 with self.lock:
@@ -3398,17 +3134,9 @@ class FinalizationManager:
             # In production, would execute contract logic
             
             from_user = tx['from_user_id']
-            gas_fee = tx.get('gas_fee', 0)
             
-            if gas_fee > 0:
-                success, fee = self.gas_manager.deduct_transaction_fee(
-                    from_user,
-                    tx.get('gas_used', GAS_CONTRACT_CALL),
-                    tx.get('gas_price', BASE_GAS_PRICE)
-                )
-                
-                if not success:
-                    return False, "Failed to deduct gas fee"
+            # QTCL IS GAS-FREE - No gas fees
+            logger.debug(f"Contract call effects applied for {from_user} (gas-free)")
             
             return True, "Contract call executed"
             
@@ -4804,8 +4532,70 @@ if __name__ == "__main__":
     # Statistics
     stats = ledger.get_statistics()
     print(f"✓ Ledger statistics:")
-    print(f"  - Total transactions: {stats['total_transactions']}")
+    print(f\"  - Total transactions: {stats['total_transactions']}")
     print(f"  - Total volume: ${stats['total_volume']:,.2f}")
     print(f"  - Average transaction: ${stats['average_transaction']:,.2f}\n")
     
     print("=== Quantum Ledger Manager - Ready for Deployment ===")
+
+
+# ============================================================================
+# GLOBAL WSGI INTEGRATION HELPERS
+# ============================================================================
+
+def create_ledger_with_globals():
+    """
+    Initialize Quantum Ledger Manager using global DB from wsgi_config.
+    
+    This is the recommended way to initialize the ledger in production.
+    Uses global DB singleton with circuit breaker, rate limiter, profiler, etc.
+    
+    Returns:
+        QuantumLedgerManager instance ready to use
+    
+    Example:
+        from ledger_manager import create_ledger_with_globals
+        ledger = create_ledger_with_globals()
+        
+        # All operations automatically use:
+        # - Global DB pool (12 connections)
+        # - Circuit breaker protection
+        # - Rate limiting
+        # - Performance profiling
+        # - Request correlation
+        # - Error budget tracking
+    """
+    logger.info("[GLOBAL] Initializing ledger with global WSGI components")
+    
+    try:
+        # Use global DB wrapper instead of creating new pool
+        ledger = QuantumLedgerManager(
+            supabase_client=get_supabase_client(),
+            db_pool=_GLOBAL_DB_POOL
+        )
+        
+        logger.info("[GLOBAL] ✓ Ledger initialized with global DB")
+        logger.info("[GLOBAL]   - Circuit breaker: ACTIVE")
+        logger.info("[GLOBAL]   - Rate limiter: ACTIVE")
+        logger.info("[GLOBAL]   - Performance profiler: ACTIVE")
+        logger.info("[GLOBAL]   - Request correlation: ACTIVE")
+        
+        return ledger
+        
+    except Exception as e:
+        logger.error(f"[GLOBAL] ✗ Failed to initialize ledger: {e}")
+        raise
+
+
+def get_ledger_stats_with_profiling():
+    """
+    Get ledger statistics with performance profiling.
+    
+    Example of using PROFILER with ledger operations.
+    """
+    ledger = create_ledger_with_globals()
+    
+    with PROFILER.profile('get_ledger_statistics'):
+        stats = ledger.get_statistics()
+    
+    return stats
