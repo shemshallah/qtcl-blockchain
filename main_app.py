@@ -684,37 +684,24 @@ def create_app():
     if Config.ENABLE_WEBSOCKET and socketio:
         setup_websocket_handlers(socketio)
     
-    # CRITICAL: Initialize database and app components for WSGI servers
-    # This MUST run for both dev (if __name__) and production (gunicorn)
-    # Using guard flag since before_first_request was removed in Flask 2.3+
-    app._db_initialized = False
-    
-    # Store initialization function for use in middleware
-    def _initialize_app():
-        """Initialize database and application components"""
-        if app._db_initialized:
-            return
-        app._db_initialized = True
+    # CRITICAL: Initialize database IMMEDIATELY (before app is returned)
+    # This ensures database is ready for all requests
+    try:
+        logger.info("=" * 100)
+        logger.info("INITIALIZING QTCL DATABASE")
+        logger.info("=" * 100)
         
-        try:
-            logger.info("=" * 100)
-            logger.info("INITIALIZING QTCL UNIFIED APPLICATION (FIRST REQUEST)")
-            logger.info("=" * 100)
-            
-            # Initialize database
-            logger.info("[Init] Setting up database...")
-            setup_database(app)
-            
-            # Seed admin user
-            logger.info("[Init] Seeding admin user...")
-            db_manager.seed_test_user()
-            
-            logger.info("[Init] ✓ Database initialization complete")
-        except Exception as e:
-            logger.error(f"[Init] ✗ Initialization failed: {e}", exc_info=True)
-    
-    # Store the init function on app so it can be called from middleware
-    app._initialize_app = _initialize_app
+        logger.info("[Init] Setting up database...")
+        setup_database(app)
+        
+        logger.info("[Init] Seeding admin user...")
+        db_manager.seed_test_user()
+        
+        logger.info("[Init] ✓ Database initialization complete")
+        app._db_initialized = True
+    except Exception as e:
+        logger.error(f"[Init] ✗ Database initialization failed: {e}", exc_info=True)
+        app._db_initialized = False
     
     logger.info(f"[App] Flask application created - Version {Config.API_VERSION}")
     
@@ -730,10 +717,6 @@ def setup_middleware(app):
     @app.before_request
     def before_request():
         """Pre-request processing"""
-        # Initialize database on first request (Flask 2.3+ compatible)
-        if hasattr(app, '_initialize_app') and not app._db_initialized:
-            app._initialize_app()
-        
         g.request_start_time = time.time()
         g.request_id = str(uuid.uuid4())
         
@@ -2463,6 +2446,15 @@ def setup_websocket_handlers(socketio_instance):
 # MAIN ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
+def initialize_app(app):
+    """Stub function for wsgi_config compatibility
+    
+    Database initialization now happens immediately in create_app().
+    This function is kept for backwards compatibility with wsgi_config.py imports.
+    """
+    logger.debug("[Init] initialize_app called (database already initialized in create_app)")
+    return True
+
 if __name__ == '__main__':
     try:
         # Create application (database will initialize on first request)
@@ -2508,5 +2500,5 @@ if __name__ == '__main__':
         sys.exit(1)
 
 # WSGI export for production servers (gunicorn, uwsgi)
-# Database initialization happens on first request via middleware guard
+# Database initialization happens immediately in create_app()
 application = create_app()
