@@ -27,15 +27,11 @@
 ╚════════════════════════════════════════════════════════════════════════════════╝
 """
 
-import numpy as np
-import requests
 import threading
 import time
 import logging
 import json
-# Import lightweight independent heartbeat system
-from lightweight_heartbeat import LightweightHeartbeat
-
+import requests
 import queue
 import psycopg2
 from psycopg2.extras import execute_batch, RealDictCursor
@@ -52,8 +48,36 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ═════════════════════════════════════════════════════════════════════════════════
+# SAFE NUMPY IMPORT - Critical for system stability
+# ═════════════════════════════════════════════════════════════════════════════════
+try:
+    import numpy as np
+    NUMPY_AVAILABLE = True
+except ImportError:
+    NUMPY_AVAILABLE = False
+    # Provide dummy ndarray for type hints to work
+    class DummyArray:
+        pass
+    np = type('numpy', (), {'ndarray': DummyArray, 'array': DummyArray, 'zeros': DummyArray, 'ones': DummyArray})()
+    logging.getLogger(__name__).warning("NumPy not available - quantum system in fallback mode")
+
+# ═════════════════════════════════════════════════════════════════════════════════
 # PARALLEL BATCH PROCESSING + NOISE-ALONE W-STATE REFRESH (v5.2 ENHANCEMENT)
 # ═════════════════════════════════════════════════════════════════════════════════
+
+try:
+    from lightweight_heartbeat import LightweightHeartbeat
+except ImportError:
+    # Create dummy heartbeat if not available
+    class LightweightHeartbeat:
+        def __init__(self, *args, **kwargs):
+            pass
+        def start(self):
+            pass
+        def stop(self):
+            pass
+        def beat(self):
+            pass
 
 try:
     from parallel_refresh_implementation import (

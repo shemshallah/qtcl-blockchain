@@ -3504,15 +3504,28 @@ try:
     from quantum_lattice_control_live_complete import LATTICE, TransactionValidatorWState, GHZCircuitBuilder
     LATTICE_AVAILABLE = True
     logger.info("✓ LATTICE quantum system imported - Quantum commands enabled")
-except ImportError as e:
-    logger.warning(f"⚠ LATTICE not available: {e}")
+except Exception as e:
+    logger.warning(f"⚠ LATTICE not available: {str(e)[:100]}")
+    # Create dummy classes to prevent downstream errors
+    class LATTICE:
+        pass
+    class TransactionValidatorWState:
+        def __init__(self, *args, **kwargs):
+            pass
+    class GHZCircuitBuilder:
+        def __init__(self, *args, **kwargs):
+            pass
 
 try:
     import quantum_api
     QUANTUM_API_AVAILABLE = True
     logger.info("✓ quantum_api system imported - API integration enabled")
-except ImportError as e:
-    logger.warning(f"⚠ quantum_api not available: {e}")
+except Exception as e:
+    logger.warning(f"⚠ quantum_api not available: {str(e)[:100]}")
+    # Create dummy module
+    class DummyQuantumAPI:
+        pass
+    quantum_api = DummyQuantumAPI()
 
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════

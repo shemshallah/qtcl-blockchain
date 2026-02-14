@@ -494,7 +494,14 @@ try:
     logger.info("[Import] ✓ Terminal logic imported")
 except Exception as e:
     TERMINAL_AVAILABLE = False
-    logger.warning(f"[Import] Terminal logic unavailable: {e}")
+    logger.warning(f"[Import] Terminal logic unavailable: {str(e)[:100]}")
+    # Create dummy classes to prevent downstream errors
+    class TerminalEngine:
+        def __init__(self, *args, **kwargs):
+            self.commands = {}
+    class CommandRegistry:
+        def __init__(self, *args, **kwargs):
+            self.commands = {}
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PART 3: FLASK CONFIGURATION
