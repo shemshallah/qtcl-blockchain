@@ -686,15 +686,15 @@ def create_app():
     
     # CRITICAL: Initialize database and app components for WSGI servers
     # This MUST run for both dev (if __name__) and production (gunicorn)
-    @app.before_first_request
-    def _initialize():
-        """Initialize database and application components on first request"""
-        global db_manager
-        
-        # Prevent multiple initializations
-        if getattr(app, '_initialized', False):
+    # Using guard flag since before_first_request was removed in Flask 2.3+
+    app._db_initialized = False
+    
+    # Store initialization function for use in middleware
+    def _initialize_app():
+        """Initialize database and application components"""
+        if app._db_initialized:
             return
-        app._initialized = True
+        app._db_initialized = True
         
         try:
             logger.info("=" * 100)
@@ -713,6 +713,9 @@ def create_app():
         except Exception as e:
             logger.error(f"[Init] ✗ Initialization failed: {e}", exc_info=True)
     
+    # Store the init function on app so it can be called from middleware
+    app._initialize_app = _initialize_app
+    
     logger.info(f"[App] Flask application created - Version {Config.API_VERSION}")
     
     return app
@@ -727,6 +730,10 @@ def setup_middleware(app):
     @app.before_request
     def before_request():
         """Pre-request processing"""
+        # Initialize database on first request (Flask 2.3+ compatible)
+        if hasattr(app, '_initialize_app') and not app._db_initialized:
+            app._initialize_app()
+        
         g.request_start_time = time.time()
         g.request_id = str(uuid.uuid4())
         
@@ -2501,5 +2508,5 @@ if __name__ == '__main__':
         sys.exit(1)
 
 # WSGI export for production servers (gunicorn, uwsgi)
-# Database initialization happens on first request via @app.before_first_request
+# Database initialization happens on first request via middleware guard
 application = create_app()
