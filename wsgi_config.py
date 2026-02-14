@@ -78,12 +78,25 @@ logging.basicConfig(
     ]
 )
 
+# Safe formatter that handles missing correlation_id
+class SafeFormatter(logging.Formatter):
+    def format(self, record):
+        if not hasattr(record, 'correlation_id'):
+            record.correlation_id = getattr(threading.current_thread(), 'correlation_id', 'NO-CORR')
+        return super().format(record)
+
 # Custom filter to add correlation IDs
 class CorrelationFilter(logging.Filter):
     def filter(self, record):
         if not hasattr(record, 'correlation_id'):
             record.correlation_id = getattr(threading.current_thread(), 'correlation_id', 'NO-CORR')
         return True
+
+# Re-apply formatters to all handlers with safe formatter
+root_logger = logging.getLogger()
+for handler in root_logger.handlers:
+    formatter = SafeFormatter('[%(asctime)s.%(msecs)03d] [%(correlation_id)s] %(levelname)-8s | %(name)-22s | %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    handler.setFormatter(formatter)
 
 logger = logging.getLogger(__name__)
 logger.addFilter(CorrelationFilter())
@@ -758,7 +771,12 @@ class Database:
     
     @classmethod
     def _create_connection(cls):
-        """Create connection with exponential backoff"""
+        """Create connection with exponential backoff - optional in WSGI mode"""
+        # If no database config is provided, return None (WSGI mode)
+        if not Config.SUPABASE_HOST or not Config.SUPABASE_USER:
+            logger.warning("[DB] Database config not found - running in WSGI-only mode")
+            return None
+        
         for attempt in range(1, Config.DB_RETRY_ATTEMPTS + 1):
             try:
                 conn = psycopg2.connect(
@@ -780,7 +798,8 @@ class Database:
                     wait = 2 ** (attempt - 1)
                     time.sleep(wait)
                 else:
-                    raise
+                    logger.warning(f"[DB] Connection failed after {Config.DB_RETRY_ATTEMPTS} attempts - continuing in WSGI mode")
+                    return None
     
     @classmethod
     def get_connection(cls):
@@ -1370,17 +1389,10 @@ def initialize_quantum_system():
         try:
             from quantum_lattice_control_live_complete import QuantumLatticeControlLiveV5
             
-            db_config = {
-                'host': Config.SUPABASE_HOST,
-                'port': Config.SUPABASE_PORT,
-                'database': Config.SUPABASE_DB,
-                'user': Config.SUPABASE_USER,
-                'password': Config.SUPABASE_PASSWORD,
-            }
-            
+            # Use None for db_config - WSGI handles all DB operations
             logger.info("[Quantum] Creating quantum system...")
             _QUANTUM_SYSTEM = QuantumLatticeControlLiveV5(
-                db_config=db_config,
+                db_config=None,
                 app_url=os.getenv('APP_URL', 'http://localhost:5000')
             )
             
