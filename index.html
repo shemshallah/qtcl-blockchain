@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>QTCL - Quantum Terminal & Dashboard</title>
+    <!-- Command Executor Bridge v5.0 -->
+    <script src="/static/command_executor.js" defer></script>
     <style>
         * {
             margin: 0;
@@ -980,6 +982,27 @@
         
         async function executeCommand(cmd) {
             log(`qtcl> ${cmd}`);
+            
+            // Route through CommandExecutor (v5.0)
+            if (window.commandExecutor) {
+                try {
+                    const result = await window.commandExecutor.execute(cmd);
+                    if (result.status === 'success') {
+                        if (result.output) {
+                            log(JSON.stringify(result.output, null, 2), 'success');
+                        } else {
+                            log(`✓ Success (${result.duration_ms?.toFixed(1)}ms)`, 'success');
+                        }
+                    } else {
+                        log(`✗ ${result.error || 'Command failed'}`, 'error');
+                    }
+                    return;
+                } catch (error) {
+                    // Fall through to local handlers if executor not available
+                }
+            }
+            
+            // Local command handling (fallback)
             const args = cmd.trim().split(' ');
             const command = args[0].toLowerCase();
             
@@ -993,6 +1016,7 @@
                     log('  status            - Show system status');
                     log('  dashboard         - Load user dashboard');
                     log('  clear             - Clear terminal');
+                    log('  (use category/action --flag=value for advanced commands)');
                     break;
                     
                 case 'login':
@@ -1131,6 +1155,26 @@
         } else {
             log('✓ Welcome to QTCL. Type "help" for available commands', 'info');
         }
+        
+        // Initialize CommandExecutor (v5.0)
+        document.addEventListener('DOMContentLoaded', () => {
+            if (window.commandExecutor) {
+                log('✓ Command Executor v5.0 initialized', 'success');
+                
+                // Listen for command events
+                window.commandExecutor.on('commandExecuted', (data) => {
+                    // Auto-handled by executeCommand function
+                });
+                
+                window.commandExecutor.on('commandError', (data) => {
+                    if (data.error) {
+                        log(`✗ Executor error: ${data.error}`, 'error');
+                    }
+                });
+            } else {
+                log('⚠ Command Executor not available - local mode only', 'warning');
+            }
+        });
         
         // Check API health
         (async () => {

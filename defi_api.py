@@ -21,6 +21,16 @@ getcontext().prec=28
 logger=logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
+# GLOBAL WSGI INTEGRATION - Quantum Revolution
+# ═══════════════════════════════════════════════════════════════════════════════════════
+try:
+    from wsgi_config import DB, PROFILER, CACHE, ERROR_BUDGET, RequestCorrelation, CIRCUIT_BREAKERS, RATE_LIMITERS
+    WSGI_AVAILABLE = True
+except ImportError:
+    WSGI_AVAILABLE = False
+    logger.warning("[INTEGRATION] WSGI globals not available - running in standalone mode")
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION & ENUMS
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
