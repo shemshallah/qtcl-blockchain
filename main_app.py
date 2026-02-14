@@ -66,6 +66,55 @@ logger = logging.getLogger(__name__)
 # Import database configuration
 from db_config import DatabaseConnection, Config as DBConfig, setup_database, DatabaseBuilderManager
 
+# Import new modular API blueprints
+try:
+    from core_api import create_core_api_blueprint,JWTManager
+    CORE_API_AVAILABLE=True
+    logger.info("[Import] ✓ Core API module imported successfully")
+except ImportError as e:
+    CORE_API_AVAILABLE=False
+    logger.warning(f"[Import] ⚠ Core API import failed: {e}")
+
+try:
+    from blockchain_api import create_blockchain_api_blueprint
+    BLOCKCHAIN_API_AVAILABLE=True
+    logger.info("[Import] ✓ Blockchain API module imported successfully")
+except ImportError as e:
+    BLOCKCHAIN_API_AVAILABLE=False
+    logger.warning(f"[Import] ⚠ Blockchain API import failed: {e}")
+
+try:
+    from quantum_api import create_quantum_api_blueprint
+    QUANTUM_API_AVAILABLE=True
+    logger.info("[Import] ✓ Quantum API module imported successfully")
+except ImportError as e:
+    QUANTUM_API_AVAILABLE=False
+    logger.warning(f"[Import] ⚠ Quantum API import failed: {e}")
+
+try:
+    from defi_api import create_defi_api_blueprint
+    DEFI_API_AVAILABLE=True
+    logger.info("[Import] ✓ DeFi API module imported successfully")
+except ImportError as e:
+    DEFI_API_AVAILABLE=False
+    logger.warning(f"[Import] ⚠ DeFi API import failed: {e}")
+
+try:
+    from admin_api import create_admin_api_blueprint
+    ADMIN_API_AVAILABLE=True
+    logger.info("[Import] ✓ Admin API module imported successfully")
+except ImportError as e:
+    ADMIN_API_AVAILABLE=False
+    logger.warning(f"[Import] ⚠ Admin API import failed: {e}")
+
+try:
+    from oracle_api import create_oracle_api_blueprint
+    ORACLE_API_AVAILABLE=True
+    logger.info("[Import] ✓ Oracle API module imported successfully")
+except ImportError as e:
+    ORACLE_API_AVAILABLE=False
+    logger.warning(f"[Import] ⚠ Oracle API import failed: {e}")
+
 # Import terminal logic for dynamic command list (safe import with fallback)
 try:
     from terminal_logic import TerminalEngine, CommandRegistry, CommandMeta
@@ -824,130 +873,203 @@ def setup_error_handlers(app):
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 def setup_routes(app):
-    """Setup all API routes - standardized to /api/* (no versioning)"""
+    """Setup all API routes using modular blueprints"""
+    
+    logger.info("=" * 100)
+    logger.info("REGISTERING API BLUEPRINTS")
+    logger.info("=" * 100)
+    
+    # Initialize JWT manager for authentication
+    jwt_manager=JWTManager(
+        secret_key=Config.JWT_SECRET,
+        algorithm='HS512',
+        expiration_hours=Config.JWT_EXPIRATION_HOURS
+    )
+    
+    # Register Core API (Auth, Users, Security, Keys, Addresses)
+    if CORE_API_AVAILABLE:
+        try:
+            core_bp=create_core_api_blueprint(
+                db_manager=db_manager,
+                jwt_manager=jwt_manager,
+                config={
+                    'jwt_secret':Config.JWT_SECRET,
+                    'jwt_algorithm':'HS512',
+                    'jwt_expiration_hours':Config.JWT_EXPIRATION_HOURS,
+                    'password_min_length':12,
+                    'max_login_attempts':5,
+                    'lockout_duration_minutes':30
+                }
+            )
+            app.register_blueprint(core_bp)
+            logger.info("[Blueprint] ✓ Core API registered - /api/auth/*, /api/users/*, /api/keys/*, /api/addresses/*")
+        except Exception as e:
+            logger.error(f"[Blueprint] ✗ Failed to register Core API: {e}",exc_info=True)
+    
+    # Register Blockchain API (Blocks, Transactions, Mempool, Gas, Fees)
+    if BLOCKCHAIN_API_AVAILABLE:
+        try:
+            blockchain_bp=create_blockchain_api_blueprint(
+                db_manager=db_manager,
+                config={
+                    'max_block_size':1000000,
+                    'max_tx_per_block':10000,
+                    'min_gas_price':Decimal('0.000001'),
+                    'block_time_target':10.0,
+                    'finality_confirmations':12
+                }
+            )
+            app.register_blueprint(blockchain_bp)
+            logger.info("[Blueprint] ✓ Blockchain API registered - /api/blocks/*, /api/transactions/*, /api/mempool/*")
+        except Exception as e:
+            logger.error(f"[Blueprint] ✗ Failed to register Blockchain API: {e}",exc_info=True)
+    
+    # Register Quantum API (Quantum Circuits, Validators, Entropy)
+    if QUANTUM_API_AVAILABLE:
+        try:
+            quantum_bp=create_quantum_api_blueprint(
+                db_manager=db_manager,
+                config={
+                    'default_qubits':8,
+                    'default_shots':1024,
+                    'max_qubits':16,
+                    'max_shots':8192,
+                    'min_validator_stake':Decimal('10000'),
+                    'max_validators':100
+                }
+            )
+            app.register_blueprint(quantum_bp)
+            logger.info("[Blueprint] ✓ Quantum API registered - /api/quantum/*, /api/validators/*, /api/rewards/*")
+        except Exception as e:
+            logger.error(f"[Blueprint] ✗ Failed to register Quantum API: {e}",exc_info=True)
+    
+    # Register DeFi API (Staking, Swaps, Governance, NFTs, Contracts, Bridge)
+    if DEFI_API_AVAILABLE:
+        try:
+            defi_bp=create_defi_api_blueprint(
+                db_manager=db_manager,
+                config={
+                    'min_stake':Decimal('100'),
+                    'unbonding_days':21,
+                    'default_apy':Decimal('0.12'),
+                    'swap_fee':Decimal('0.003'),
+                    'supported_chains':['ethereum','bsc','polygon','qtcl'],
+                    'bridge_validators_required':3
+                }
+            )
+            app.register_blueprint(defi_bp)
+            logger.info("[Blueprint] ✓ DeFi API registered - /api/defi/*, /api/governance/*, /api/nft/*, /api/bridge/*")
+        except Exception as e:
+            logger.error(f"[Blueprint] ✗ Failed to register DeFi API: {e}",exc_info=True)
+    
+    # Register Admin API (Admin, Stats, Analytics, Events, Mobile)
+    if ADMIN_API_AVAILABLE:
+        try:
+            admin_bp=create_admin_api_blueprint(
+                db_manager=db_manager,
+                config={
+                    'admin_required_role':'admin',
+                    'metrics_retention_days':90,
+                    'events_retention_days':30,
+                    'mobile_config_version':'1.0.0'
+                }
+            )
+            app.register_blueprint(admin_bp)
+            logger.info("[Blueprint] ✓ Admin API registered - /api/admin/*, /api/stats/*, /api/events/*, /api/mobile/*")
+        except Exception as e:
+            logger.error(f"[Blueprint] ✗ Failed to register Admin API: {e}",exc_info=True)
+    
+    # Register Oracle API (Oracle Data, Accounts, Airdrops, Multisig)
+    if ORACLE_API_AVAILABLE:
+        try:
+            oracle_bp=create_oracle_api_blueprint(
+                db_manager=db_manager,
+                config={
+                    'oracle_update_interval':60,
+                    'price_cache_ttl':60
+                }
+            )
+            app.register_blueprint(oracle_bp)
+            logger.info("[Blueprint] ✓ Oracle API registered - /api/oracle/*, /api/accounts/*, /api/airdrops/*, /api/multisig/*")
+        except Exception as e:
+            logger.error(f"[Blueprint] ✗ Failed to register Oracle API: {e}",exc_info=True)
+    
+    logger.info("=" * 100)
+    logger.info("BLUEPRINT REGISTRATION COMPLETE")
+    logger.info("=" * 100)
     
     # ═══════════════════════════════════════════════════════════════════════════════════
-    # HEALTH & STATUS
+    # ESSENTIAL SYSTEM ROUTES (Health, Heartbeat, Keepalive)
     # ═══════════════════════════════════════════════════════════════════════════════════
     
-    @app.route('/health', methods=['GET'])
+    @app.route('/health',methods=['GET'])
     @rate_limited
     @handle_exceptions
     def health():
         """Comprehensive health check"""
-        health_status = {
-            'status': 'healthy',
-            'timestamp': datetime.utcnow().isoformat(),
-            'version': Config.API_VERSION,
-            'environment': Config.ENVIRONMENT,
-            'services': {
-                'api': 'operational',
-                'database': 'unknown',
-                'redis': 'unknown',
-                'websocket': 'unknown'
+        health_status={
+            'status':'healthy',
+            'timestamp':datetime.utcnow().isoformat(),
+            'version':Config.API_VERSION,
+            'environment':Config.ENVIRONMENT,
+            'services':{
+                'api':'operational',
+                'database':'unknown',
+                'redis':'unknown',
+                'websocket':'unknown'
             }
         }
-        
-        # Check database
         try:
             db_manager.execute_query("SELECT 1")
-            health_status['services']['database'] = 'operational'
+            health_status['services']['database']='operational'
         except Exception as e:
-            health_status['services']['database'] = 'degraded'
-            health_status['status'] = 'degraded'
+            health_status['services']['database']='degraded'
+            health_status['status']='degraded'
             logger.error(f"[Health] Database check failed: {e}")
-        
-        # Check Redis
         if Config.REDIS_ENABLED and redis_client:
             try:
                 redis_client.ping()
-                health_status['services']['redis'] = 'operational'
-            except Exception as e:
-                health_status['services']['redis'] = 'degraded'
-                logger.error(f"[Health] Redis check failed: {e}")
+                health_status['services']['redis']='operational'
+            except:
+                health_status['services']['redis']='degraded'
         else:
-            health_status['services']['redis'] = 'disabled'
-        
-        # Check WebSocket
+            health_status['services']['redis']='disabled'
         if Config.ENABLE_WEBSOCKET and socketio:
-            health_status['services']['websocket'] = 'operational'
+            health_status['services']['websocket']='operational'
         else:
-            health_status['services']['websocket'] = 'disabled'
-        
-        status_code = 200 if health_status['status'] == 'healthy' else 503
-        return jsonify(health_status), status_code
+            health_status['services']['websocket']='disabled'
+        status_code=200 if health_status['status']=='healthy' else 503
+        return jsonify(health_status),status_code
     
-    # ═══════════════════════════════════════════════════════════════════════════════════
-    # HEARTBEAT ENDPOINT - Receives heartbeats from quantum system and external clients
-    # ═══════════════════════════════════════════════════════════════════════════════════
-    
-    @app.route('/api/heartbeat', methods=['POST', 'GET'])
+    @app.route('/api/heartbeat',methods=['POST','GET'])
     def heartbeat():
-        """
-        Heartbeat endpoint for keeping server alive.
-        POST: Receive heartbeat from quantum system or external heartbeat client
-        GET: Check current heartbeat status
-        """
+        """Heartbeat endpoint for quantum system"""
         try:
-            if request.method == 'POST':
-                data = request.get_json() or {}
-                source = data.get('source', 'quantum_lattice')
-                cycle = data.get('cycle', 0)
-                metrics = data.get('metrics', {})
-                
+            if request.method=='POST':
+                data=request.get_json() or {}
+                source=data.get('source','quantum_lattice')
+                cycle=data.get('cycle',0)
                 logger.debug(f"[Heartbeat] POST from {source} (cycle {cycle})")
-                
-                return jsonify({
-                    'status': 'heartbeat_received',
-                    'timestamp': datetime.utcnow().isoformat(),
-                    'source': source,
-                    'cycle': cycle
-                }), 200
-            
-            else:  # GET
-                # Return heartbeat status
-                return jsonify({
-                    'status': 'healthy',
-                    'timestamp': datetime.utcnow().isoformat(),
-                    'quantum_system_running': quantum_system is not None and getattr(quantum_system, 'running', False)
-                }), 200
-        
+                return jsonify({'status':'heartbeat_received','timestamp':datetime.utcnow().isoformat(),'source':source,'cycle':cycle}),200
+            else:
+                return jsonify({'status':'healthy','timestamp':datetime.utcnow().isoformat()}),200
         except Exception as e:
             logger.error(f"[Heartbeat] Error: {e}")
-            return jsonify({'status': 'error', 'message': str(e)}), 500
+            return jsonify({'status':'error','message':str(e)}),500
     
-    @app.route('/api/keepalive', methods=['POST', 'GET'])
+    @app.route('/api/keepalive',methods=['POST','GET'])
     def keepalive():
-        """
-        Lightweight keepalive endpoint for independent heartbeat system.
-        Simple ping endpoint - just returns 200 OK.
-        Used by lightweight_heartbeat.py for persistent connection maintenance.
-        """
+        """Lightweight keepalive endpoint"""
         try:
-            if request.method == 'POST':
-                data = request.get_json() or {}
-                ping_num = data.get('ping', 0)
-                source = data.get('source', 'keepalive')
-                
-                logger.debug(f"[Keepalive] POST #{ping_num} from {source}")
-                
-                return jsonify({
-                    'status': 'alive',
-                    'timestamp': datetime.utcnow().isoformat(),
-                    'ping': ping_num
-                }), 200
-            
-            else:  # GET
-                return jsonify({
-                    'status': 'alive',
-                    'timestamp': datetime.utcnow().isoformat()
-                }), 200
-        
+            if request.method=='POST':
+                data=request.get_json() or {}
+                ping_num=data.get('ping',0)
+                return jsonify({'status':'alive','timestamp':datetime.utcnow().isoformat(),'ping':ping_num}),200
+            else:
+                return jsonify({'status':'alive','timestamp':datetime.utcnow().isoformat()}),200
         except Exception as e:
             logger.error(f"[Keepalive] Error: {e}")
-            return jsonify({'status': 'error', 'message': str(e)}), 500
-    
-    # ═══════════════════════════════════════════════════════════════════════════════════
+            return jsonify({'status':'error','message':str(e)}),500
     # AUTHENTICATION
     # ═══════════════════════════════════════════════════════════════════════════════════
     
