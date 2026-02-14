@@ -89,12 +89,27 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # GLOBAL WSGI INTEGRATION - Quantum Revolution
 # ═══════════════════════════════════════════════════════════════════════════════════════
-try:
-    from wsgi_config import DB, PROFILER, CACHE, ERROR_BUDGET, RequestCorrelation, CIRCUIT_BREAKERS, RATE_LIMITERS
-    WSGI_AVAILABLE = True
-except ImportError:
-    WSGI_AVAILABLE = False
-    logger.warning("[INTEGRATION] WSGI globals not available - running in standalone mode")
+WSGI_AVAILABLE = False
+DB = None
+PROFILER = None
+CACHE = None
+ERROR_BUDGET = None
+RequestCorrelation = None
+CIRCUIT_BREAKERS = None
+RATE_LIMITERS = None
+
+def _init_wsgi():
+    """Lazy initialize WSGI components to avoid circular imports"""
+    global WSGI_AVAILABLE, DB, PROFILER, CACHE, ERROR_BUDGET, RequestCorrelation, CIRCUIT_BREAKERS, RATE_LIMITERS
+    if WSGI_AVAILABLE:
+        return
+    try:
+        from wsgi_config import DB as _DB, PROFILER as _PROFILER, CACHE as _CACHE, ERROR_BUDGET as _ERROR_BUDGET, RequestCorrelation as _RC, CIRCUIT_BREAKERS as _CB, RATE_LIMITERS as _RL
+        DB, PROFILER, CACHE, ERROR_BUDGET, RequestCorrelation, CIRCUIT_BREAKERS, RATE_LIMITERS = _DB, _PROFILER, _CACHE, _ERROR_BUDGET, _RC, _CB, _RL
+        WSGI_AVAILABLE = True
+    except ImportError:
+        WSGI_AVAILABLE = False
+        logger.warning("[INTEGRATION] WSGI globals not available - running in standalone mode")
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PART 1: QUANTUM RANDOM NUMBER GENERATORS (REAL ENTROPY)

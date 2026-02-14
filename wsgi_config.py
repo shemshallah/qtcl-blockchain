@@ -1414,9 +1414,24 @@ def get_quantum_system():
     """Get quantum system"""
     return _QUANTUM_SYSTEM
 
-# Initialize
-initialize_quantum_system()
-QUANTUM = _QUANTUM_SYSTEM
+# Defer quantum initialization until later to avoid circular imports
+# Will be called after all wsgi_config components are ready
+def _deferred_quantum_init():
+    """Deferred quantum initialization to break circular imports"""
+    try:
+        initialize_quantum_system()
+    except Exception as e:
+        logger.error(f"[Quantum] Deferred init failed: {e}")
+        return None
+    return _QUANTUM_SYSTEM
+
+# Try immediate initialization, but don't fail if it doesn't work
+try:
+    initialize_quantum_system()
+    QUANTUM = _QUANTUM_SYSTEM
+except Exception as e:
+    logger.warning(f"[Quantum] Immediate init failed: {e}, will retry later")
+    QUANTUM = None
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # SECTION 14: COMPONENT REGISTRATION & WIRING

@@ -653,6 +653,15 @@ def create_app():
             'timestamp': time.time()
         }), 200
     
+    @app.route('/api/keepalive', methods=['POST', 'GET'])
+    def keepalive():
+        """Heartbeat/keepalive endpoint for monitoring"""
+        return jsonify({
+            'status': 'alive',
+            'timestamp': time.time(),
+            'heartbeat': 'active'
+        }), 200
+    
     @app.route('/')
     def index():
         """Serve index.html"""
@@ -754,6 +763,11 @@ def create_app():
         return jsonify({'error': 'Internal server error'}), 500
     
     return app, executor, socketio
+
+def initialize_app(app):
+    """Initialize app with additional configuration for WSGI"""
+    logger.info("[InitApp] QTCL Unified API v5.0 initialization complete")
+    return app
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PART 8: MAIN EXECUTION
