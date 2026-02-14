@@ -45,10 +45,28 @@ import subprocess
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# LOGGING CONFIGURATION (MUST BE FIRST - before any logger.info/warning/error calls)
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s',
+    handlers=[
+        logging.FileHandler('qtcl_unified.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# IMPORTS (now logger is available for error handling)
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
 # Import database configuration
 from db_config import DatabaseConnection, Config as DBConfig, setup_database, DatabaseBuilderManager
 
-# Import terminal logic for dynamic command list
+# Import terminal logic for dynamic command list (safe import with fallback)
 try:
     from terminal_logic import TerminalEngine, CommandRegistry, CommandMeta
     TERMINAL_ORCHESTRATOR_AVAILABLE = True
@@ -56,7 +74,6 @@ try:
 except ImportError as import_error:
     TERMINAL_ORCHESTRATOR_AVAILABLE = False
     logger.warning(f"[Import] ⚠ Terminal logic import failed: {import_error}")
-    logger.warning("[Import] Commands endpoint will return fallback commands")
 except Exception as import_error:
     TERMINAL_ORCHESTRATOR_AVAILABLE = False
     logger.error(f"[Import] ✗ Unexpected error importing terminal_logic: {import_error}", exc_info=True)
@@ -121,20 +138,6 @@ try:
 except ImportError:
     CRYPTO_AVAILABLE = False
     logger.info("[Import] Cryptography not available - advanced crypto features disabled")
-
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# LOGGING CONFIGURATION
-# ═══════════════════════════════════════════════════════════════════════════════════════
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s',
-    handlers=[
-        logging.FileHandler('qtcl_unified.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger(__name__)
 
 # Set precision for Decimal calculations
 getcontext().prec = 28
