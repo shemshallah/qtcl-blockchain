@@ -86,17 +86,8 @@ try:
         except:
             pass
 except ImportError:
-    try:
-        import subprocess,sys as _sys
-        subprocess.check_call([_sys.executable,'-m','pip','install','-q','qiskit','qiskit-aer'],
-                              stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-        from qiskit import QuantumCircuit,QuantumRegister,ClassicalRegister,transpile
-        from qiskit.quantum_info import Statevector,entropy
-        from qiskit_aer import AerSimulator
-        QISKIT_AVAILABLE=True
-        QISKIT_AER_AVAILABLE=True
-    except:
-        pass
+    # Qiskit not available - will use fallback quantum simulation
+    pass
 
 getcontext().prec=28
 logger=logging.getLogger(__name__)
