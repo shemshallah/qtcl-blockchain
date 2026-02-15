@@ -5544,7 +5544,7 @@ class GlobalCommandRegistry:
             # Call the blockchain API /blocks/command endpoint
             import requests
             from terminal_logic import Config
-            api_url = f"{Config.API_BASE_URL}/api/blocks/command"
+            api_url = f"{Config.API_BASE_URL}/blockchain/blocks/command"
             response = requests.post(api_url, json={
                 'command': 'query',
                 'block': block,
@@ -5572,7 +5572,7 @@ class GlobalCommandRegistry:
         try:
             import requests
             from terminal_logic import Config
-            api_url = f"{Config.API_BASE_URL}/api/blocks/command"
+            api_url = f"{Config.API_BASE_URL}/blockchain/blocks/command"
             response = requests.post(api_url, json={
                 'command': 'validate',
                 'block': block,
@@ -5600,7 +5600,7 @@ class GlobalCommandRegistry:
         try:
             import requests
             from terminal_logic import Config
-            api_url = f"{Config.API_BASE_URL}/api/blocks/command"
+            api_url = f"{Config.API_BASE_URL}/blockchain/blocks/command"
             response = requests.post(api_url, json={
                 'command': 'quantum_measure',
                 'block': block,
@@ -5625,7 +5625,7 @@ class GlobalCommandRegistry:
         try:
             import requests
             from terminal_logic import Config
-            api_url = f"{Config.API_BASE_URL}/api/blocks/command"
+            api_url = f"{Config.API_BASE_URL}/blockchain/blocks/command"
             response = requests.post(api_url, json={
                 'command': 'batch_query',
                 'blocks': blocks,
@@ -5649,7 +5649,7 @@ class GlobalCommandRegistry:
         try:
             import requests
             from terminal_logic import Config
-            api_url = f"{Config.API_BASE_URL}/api/blocks/command"
+            api_url = f"{Config.API_BASE_URL}/blockchain/blocks/command"
             response = requests.post(api_url, json={
                 'command': 'chain_integrity',
                 'options': {

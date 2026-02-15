@@ -864,6 +864,20 @@ def create_app():
 
 def initialize_app(app):
     """Initialize app with additional configuration for WSGI"""
+    
+    # Register blockchain API blueprint
+    try:
+        from blockchain_api import create_blockchain_api_blueprint
+        from wsgi_config import DB
+        
+        # Create and register blockchain blueprint
+        blockchain_bp = create_blockchain_api_blueprint(DB)
+        app.register_blueprint(blockchain_bp, url_prefix='/blockchain')
+        logger.info("[InitApp] ✓ Blockchain API blueprint registered at /blockchain")
+    except Exception as e:
+        logger.error(f"[InitApp] Failed to register blockchain blueprint: {e}")
+        logger.error(traceback.format_exc())
+    
     logger.info("[InitApp] QTCL Unified API v5.0 initialization complete")
     return app
 
