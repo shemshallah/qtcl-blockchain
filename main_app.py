@@ -541,35 +541,52 @@ def create_app():
             if not command:
                 return jsonify({'status': 'error', 'error': 'No command provided'}), 400
             
-            logger.info(f"[API] Command: {command} (user: {user_id})")
+            logger.info(f"[API] Executing: {command}")
             
-            # Execute command via terminal if available
-            if executor.terminal:
-                try:
-                    # Simple synchronous execution
-                    output = f"Command executed: {command}"
-                    result = {
+            # Parse command (split by space)
+            parts = command.split()
+            if not parts:
+                return jsonify({'status': 'error', 'error': 'Empty command'}), 400
+            
+            cmd_name = parts[0].lower()
+            cmd_args = parts[1:] if len(parts) > 1 else []
+            
+            # Execute via CommandRegistry
+            try:
+                from terminal_logic import CommandRegistry
+                
+                # For 'help' command - show available commands
+                if cmd_name == 'help':
+                    all_cmds = CommandRegistry.list_commands()
+                    return jsonify({
                         'status': 'success',
-                        'output': output,
+                        'output': all_cmds,
                         'command': command
-                    }
-                    logger.info(f"[API] ✓ {command} executed")
-                    return jsonify(result), 200
-                except Exception as e:
-                    logger.error(f"[API] Terminal execution error: {e}")
-                    return jsonify({'status': 'error', 'error': str(e), 'command': command}), 500
-            else:
-                # No terminal available
-                logger.warning("[API] Terminal not available")
+                    }), 200
+                
+                # For other commands - use registry execution
+                result = CommandRegistry.execute_command(cmd_name, *cmd_args)
+                
+                logger.info(f"[API] ✓ {command} executed")
+                
+                return jsonify({
+                    'status': result.get('status', 'success'),
+                    'output': result.get('result') or result.get('error') or str(result),
+                    'command': command,
+                    'result': result
+                }), 200
+            
+            except Exception as e:
+                logger.error(f"[API] Execution error: {e}", exc_info=True)
                 return jsonify({
                     'status': 'error',
-                    'error': 'Command executor not available',
+                    'error': str(e),
                     'command': command
-                }), 503
+                }), 500
         
         except Exception as e:
             logger.error(f"[API] Unexpected error: {e}", exc_info=True)
-            return jsonify({'status': 'error', 'error': 'Internal server error'}), 500
+            return jsonify({'status': 'error', 'error': str(e)}), 500
     
     @app.route('/api/execute/compound', methods=['POST'])
     async def execute_compound():
