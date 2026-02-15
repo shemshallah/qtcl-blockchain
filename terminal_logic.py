@@ -1456,7 +1456,7 @@ class TerminalEngine:
         self.registry.register('block/stats',self._cmd_block_stats,CommandMeta(
             'block/stats',CommandCategory.BLOCK,'Show block statistics'))
         
-        # QUANTUM COMMANDS
+        # QUANTUM COMMANDS - EXPANDED
         self.registry.register('quantum/status',self._cmd_quantum_status,CommandMeta(
             'quantum/status',CommandCategory.QUANTUM,'Show quantum engine status'))
         self.registry.register('quantum/circuit',self._cmd_quantum_circuit,CommandMeta(
@@ -1467,6 +1467,20 @@ class TerminalEngine:
             'quantum/validator',CommandCategory.QUANTUM,'Quantum validator status'))
         self.registry.register('quantum/finality',self._cmd_quantum_finality,CommandMeta(
             'quantum/finality',CommandCategory.QUANTUM,'Check quantum finality'))
+        self.registry.register('quantum/transaction',self._cmd_quantum_transaction,CommandMeta(
+            'quantum/transaction',CommandCategory.QUANTUM,'Quantum transaction encoding'))
+        self.registry.register('quantum/oracle',self._cmd_quantum_oracle,CommandMeta(
+            'quantum/oracle',CommandCategory.QUANTUM,'Quantum oracle queries'))
+        self.registry.register('quantum/w_state',self._cmd_quantum_w_state,CommandMeta(
+            'quantum/w_state',CommandCategory.QUANTUM,'W-state generation'))
+        self.registry.register('quantum/noise_bath',self._cmd_quantum_noise_bath,CommandMeta(
+            'quantum/noise_bath',CommandCategory.QUANTUM,'Quantum noise bath simulation'))
+        self.registry.register('quantum/neural',self._cmd_quantum_neural,CommandMeta(
+            'quantum/neural',CommandCategory.QUANTUM,'Quantum neural network'))
+        self.registry.register('quantum/health',self._cmd_quantum_health,CommandMeta(
+            'quantum/health',CommandCategory.QUANTUM,'Quantum system health'))
+        self.registry.register('quantum/stats',self._cmd_quantum_stats,CommandMeta(
+            'quantum/stats',CommandCategory.QUANTUM,'Quantum statistics'))
         
         # ORACLE COMMANDS
         self.registry.register('oracle/time',self._cmd_oracle_time,CommandMeta(
@@ -2957,6 +2971,128 @@ class TerminalEngine:
             metrics.record_command('quantum/finality')
         else:
             UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum/finality',False)
+    
+    def _cmd_quantum_transaction(self):
+        UI.header("⚛️ QUANTUM TRANSACTION ENCODING")
+        tx_id=UI.prompt("Transaction ID")
+        user_id=UI.prompt("User ID")
+        target_id=UI.prompt("Target ID")
+        
+        payload={'tx_id':tx_id,'user_id':user_id,'target_id':target_id}
+        success,result=self.client.request('POST','/api/quantum/transaction',payload)
+        if success:
+            UI.success("Transaction encoded with quantum finality proof")
+            UI.print_table(['Field','Value'],[
+                ['TX ID',result.get('tx_id','')[:16]+"..."],
+                ['Finality Proof',result.get('finality_proof','')],
+                ['Oracle Collapse',result.get('collapse_result','')],
+                ['Timestamp',str(result.get('timestamp',''))]
+            ])
+            metrics.record_command('quantum/transaction')
+        else:
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum/transaction',False)
+    
+    def _cmd_quantum_oracle(self):
+        UI.header("⚛️ QUANTUM ORACLE")
+        oracle_type=UI.prompt("Oracle type (price/time/random/event)","price")
+        
+        payload={'type':oracle_type}
+        success,result=self.client.request('POST','/api/quantum/oracle',payload)
+        if success:
+            UI.print_table(['Field','Value'],[
+                ['Type',result.get('type','')],
+                ['Value',str(result.get('value',''))],
+                ['Confidence',f"{float(result.get('confidence',0)):.1%}"],
+                ['Timestamp',result.get('timestamp','')[:19]]
+            ])
+            metrics.record_command('quantum/oracle')
+        else:
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum/oracle',False)
+    
+    def _cmd_quantum_w_state(self):
+        UI.header("⚛️ W-STATE GENERATION")
+        num_qubits=int(UI.prompt("Number of qubits (3-8)","5"))
+        
+        payload={'num_qubits':num_qubits}
+        success,result=self.client.request('POST','/api/quantum/w_state',payload)
+        if success:
+            UI.success("W-state circuit generated")
+            UI.print_table(['Field','Value'],[
+                ['Qubits',str(result.get('num_qubits',0))],
+                ['Circuit Depth',str(result.get('depth',0))],
+                ['Gates',str(result.get('gates',0))],
+                ['Fidelity',f"{float(result.get('fidelity',0)):.4f}"],
+                ['Circuit ID',result.get('circuit_id','')[:16]+"..."]
+            ])
+            metrics.record_command('quantum/w_state')
+        else:
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum/w_state',False)
+    
+    def _cmd_quantum_noise_bath(self):
+        UI.header("⚛️ QUANTUM NOISE BATH")
+        success,result=self.client.request('GET','/api/quantum/noise_bath')
+        if success:
+            UI.print_table(['Parameter','Value'],[
+                ['Depolarizing Rate',f"{float(result.get('depolarizing_rate',0)):.6f}"],
+                ['T1 Relaxation',f"{float(result.get('t1',0))*1e6:.2f} µs"],
+                ['T2 Dephasing',f"{float(result.get('t2',0))*1e6:.2f} µs"],
+                ['Thermal Occupation',f"{float(result.get('thermal',0)):.2f}"],
+                ['Coherence Score',f"{float(result.get('coherence_score',0)):.1%}"]
+            ])
+            metrics.record_command('quantum/noise_bath')
+        else:
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum/noise_bath',False)
+    
+    def _cmd_quantum_neural(self):
+        UI.header("⚛️ QUANTUM NEURAL NETWORK")
+        layers=int(UI.prompt("Number of layers (1-5)","3"))
+        
+        payload={'layers':layers}
+        success,result=self.client.request('POST','/api/quantum/neural',payload)
+        if success:
+            UI.success("Quantum neural network initialized")
+            UI.print_table(['Field','Value'],[
+                ['Layers',str(result.get('layers',0))],
+                ['Parameters',str(result.get('parameters',0))],
+                ['Training Steps',str(result.get('training_steps',0))],
+                ['Accuracy',f"{float(result.get('accuracy',0)):.2%}"],
+                ['Status',result.get('status','initialized')]
+            ])
+            metrics.record_command('quantum/neural')
+        else:
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum/neural',False)
+    
+    def _cmd_quantum_health(self):
+        UI.header("⚛️ QUANTUM SYSTEM HEALTH")
+        success,result=self.client.request('GET','/api/quantum/health')
+        if success:
+            UI.print_table(['Metric','Status'],[
+                ['Overall Health',result.get('overall_health','unknown')],
+                ['Qubit Quality',f"{float(result.get('qubit_quality',0)):.1%}"],
+                ['Gate Fidelity',f"{float(result.get('gate_fidelity',0)):.2%}"],
+                ['Readout Fidelity',f"{float(result.get('readout_fidelity',0)):.2%}"],
+                ['System Uptime',result.get('uptime','')],
+                ['Last Calibration',result.get('last_cal','')[:19]]
+            ])
+            metrics.record_command('quantum/health')
+        else:
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum/health',False)
+    
+    def _cmd_quantum_stats(self):
+        UI.header("⚛️ QUANTUM STATISTICS")
+        success,result=self.client.request('GET','/api/quantum/stats')
+        if success:
+            UI.print_table(['Statistic','Value'],[
+                ['Total Circuits',str(result.get('total_circuits',0))],
+                ['Successful Executions',str(result.get('successful_execs',0))],
+                ['Average Fidelity',f"{float(result.get('avg_fidelity',0)):.4f}"],
+                ['Total Entropy Generated',f"{float(result.get('total_entropy',0)):.2f}"],
+                ['Active Sessions',str(result.get('active_sessions',0))],
+                ['Uptime',result.get('uptime','')]
+            ])
+            metrics.record_command('quantum/stats')
+        else:
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum/stats',False)
     
     # ═════════════════════════════════════════════════════════════════════════════════════════
     # ORACLE COMMAND IMPLEMENTATIONS
