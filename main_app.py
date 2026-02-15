@@ -759,13 +759,10 @@ def create_app():
             'timestamp': time.time(),
             'heartbeat': 'active'
         }), 200
-
-    # ════════════════════════════════════════════════════════════════════════════════════
-    # QUANTUM API ENDPOINTS - v6.0 
-    # ════════════════════════════════════════════════════════════════════════════════════
     
     @app.route('/api/quantum/status', methods=['GET'])
     def quantum_status():
+        """Quantum engine status endpoint"""
         return jsonify({
             'engine_status': 'online',
             'entropy_status': 'active',
@@ -774,118 +771,6 @@ def create_app():
             'coherence': 0.987
         })
     
-    @app.route('/api/quantum/entropy', methods=['GET'])
-    def quantum_entropy():
-        return jsonify({
-            'current_entropy': 2.31828,
-            'max_entropy': 2.58496,
-            'pool_size': 8192,
-            'last_updated': datetime.utcnow().isoformat(),
-            'quality': 0.96
-        })
-    
-    @app.route('/api/quantum/validators', methods=['GET'])
-    def quantum_validators():
-        return jsonify({
-            'validators': [
-                {'validator_id': 'qv_' + secrets.token_hex(8), 'state': 'entangled', 'score': 0.98, 'active': True},
-                {'validator_id': 'qv_' + secrets.token_hex(8), 'state': 'entangled', 'score': 0.95, 'active': True},
-                {'validator_id': 'qv_' + secrets.token_hex(8), 'state': 'collapsed', 'score': 0.87, 'active': False}
-            ]
-        })
-    
-    @app.route('/api/quantum/finality/<tx_id>', methods=['GET'])
-    def quantum_finality(tx_id):
-        return jsonify({
-            'tx_id': tx_id,
-            'finality_status': 'finalized',
-            'proof': secrets.token_hex(16),
-            'collapse_outcome': random.choice(['00', '01', '10', '11']),
-            'confidence': 0.99,
-            'validated_at': datetime.utcnow().isoformat()
-        })
-    
-    @app.route('/api/quantum/transaction', methods=['POST'])
-    def quantum_transaction():
-        data = request.get_json() or {}
-        tx_id = data.get('tx_id', 'tx_' + secrets.token_hex(8))
-        return jsonify({
-            'success': True,
-            'tx_id': tx_id,
-            'finality_proof': secrets.token_hex(4),
-            'collapse_result': random.choice(['0', '1']),
-            'timestamp': time.time()
-        })
-    
-    @app.route('/api/quantum/oracle', methods=['POST'])
-    def quantum_oracle():
-        data = request.get_json() or {}
-        oracle_type = data.get('type', 'price')
-        return jsonify({
-            'type': oracle_type,
-            'value': random.uniform(100, 10000),
-            'confidence': random.uniform(0.85, 0.99),
-            'timestamp': datetime.utcnow().isoformat()
-        })
-    
-    @app.route('/api/quantum/w_state', methods=['POST'])
-    def quantum_w_state():
-        data = request.get_json() or {}
-        num_qubits = data.get('num_qubits', 5)
-        return jsonify({
-            'success': True,
-            'num_qubits': num_qubits,
-            'depth': 2 * num_qubits - 1,
-            'gates': 2 * num_qubits - 1,
-            'fidelity': 0.99,
-            'circuit_id': 'circ_' + secrets.token_hex(8)
-        })
-    
-    @app.route('/api/quantum/noise_bath', methods=['GET'])
-    def quantum_noise_bath():
-        return jsonify({
-            'depolarizing_rate': 0.001,
-            't1': 50e-6,
-            't2': 40e-6,
-            'thermal': 0.02,
-            'coherence_score': 0.95
-        })
-    
-    @app.route('/api/quantum/neural', methods=['POST'])
-    def quantum_neural():
-        data = request.get_json() or {}
-        layers = data.get('layers', 3)
-        return jsonify({
-            'success': True,
-            'layers': layers,
-            'parameters': layers * 16,
-            'training_steps': 1000,
-            'accuracy': random.uniform(0.85, 0.99),
-            'status': 'initialized'
-        })
-    
-    @app.route('/api/quantum/health', methods=['GET'])
-    def quantum_health():
-        return jsonify({
-            'overall_health': 'excellent',
-            'qubit_quality': 0.98,
-            'gate_fidelity': 0.999,
-            'readout_fidelity': 0.995,
-            'uptime': '99.97%',
-            'last_cal': datetime.utcnow().isoformat()
-        })
-    
-    @app.route('/api/quantum/stats', methods=['GET'])
-    def quantum_stats():
-        return jsonify({
-            'total_circuits': 15842,
-            'successful_execs': 15734,
-            'avg_fidelity': 0.9876,
-            'total_entropy': 28476.23,
-            'active_sessions': 12,
-            'uptime': '30 days 14 hours'
-        })
-
     @app.route('/')
     @app.route('/index.html')
     def index():

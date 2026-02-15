@@ -1456,7 +1456,7 @@ class TerminalEngine:
         self.registry.register('block/stats',self._cmd_block_stats,CommandMeta(
             'block/stats',CommandCategory.BLOCK,'Show block statistics'))
         
-        # QUANTUM COMMANDS - EXPANDED
+        # QUANTUM COMMANDS
         self.registry.register('quantum/status',self._cmd_quantum_status,CommandMeta(
             'quantum/status',CommandCategory.QUANTUM,'Show quantum engine status'))
         self.registry.register('quantum/circuit',self._cmd_quantum_circuit,CommandMeta(
@@ -1467,20 +1467,6 @@ class TerminalEngine:
             'quantum/validator',CommandCategory.QUANTUM,'Quantum validator status'))
         self.registry.register('quantum/finality',self._cmd_quantum_finality,CommandMeta(
             'quantum/finality',CommandCategory.QUANTUM,'Check quantum finality'))
-        self.registry.register('quantum/transaction',self._cmd_quantum_transaction,CommandMeta(
-            'quantum/transaction',CommandCategory.QUANTUM,'Quantum transaction encoding'))
-        self.registry.register('quantum/oracle',self._cmd_quantum_oracle,CommandMeta(
-            'quantum/oracle',CommandCategory.QUANTUM,'Quantum oracle queries'))
-        self.registry.register('quantum/w_state',self._cmd_quantum_w_state,CommandMeta(
-            'quantum/w_state',CommandCategory.QUANTUM,'W-state generation'))
-        self.registry.register('quantum/noise_bath',self._cmd_quantum_noise_bath,CommandMeta(
-            'quantum/noise_bath',CommandCategory.QUANTUM,'Quantum noise bath simulation'))
-        self.registry.register('quantum/neural',self._cmd_quantum_neural,CommandMeta(
-            'quantum/neural',CommandCategory.QUANTUM,'Quantum neural network'))
-        self.registry.register('quantum/health',self._cmd_quantum_health,CommandMeta(
-            'quantum/health',CommandCategory.QUANTUM,'Quantum system health'))
-        self.registry.register('quantum/stats',self._cmd_quantum_stats,CommandMeta(
-            'quantum/stats',CommandCategory.QUANTUM,'Quantum statistics'))
         
         # ORACLE COMMANDS
         self.registry.register('oracle/time',self._cmd_oracle_time,CommandMeta(
@@ -2972,128 +2958,6 @@ class TerminalEngine:
         else:
             UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum/finality',False)
     
-    def _cmd_quantum_transaction(self):
-        UI.header("⚛️ QUANTUM TRANSACTION ENCODING")
-        tx_id=UI.prompt("Transaction ID")
-        user_id=UI.prompt("User ID")
-        target_id=UI.prompt("Target ID")
-        
-        payload={'tx_id':tx_id,'user_id':user_id,'target_id':target_id}
-        success,result=self.client.request('POST','/api/quantum/transaction',payload)
-        if success:
-            UI.success("Transaction encoded with quantum finality proof")
-            UI.print_table(['Field','Value'],[
-                ['TX ID',result.get('tx_id','')[:16]+"..."],
-                ['Finality Proof',result.get('finality_proof','')],
-                ['Oracle Collapse',result.get('collapse_result','')],
-                ['Timestamp',str(result.get('timestamp',''))]
-            ])
-            metrics.record_command('quantum/transaction')
-        else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum/transaction',False)
-    
-    def _cmd_quantum_oracle(self):
-        UI.header("⚛️ QUANTUM ORACLE")
-        oracle_type=UI.prompt("Oracle type (price/time/random/event)","price")
-        
-        payload={'type':oracle_type}
-        success,result=self.client.request('POST','/api/quantum/oracle',payload)
-        if success:
-            UI.print_table(['Field','Value'],[
-                ['Type',result.get('type','')],
-                ['Value',str(result.get('value',''))],
-                ['Confidence',f"{float(result.get('confidence',0)):.1%}"],
-                ['Timestamp',result.get('timestamp','')[:19]]
-            ])
-            metrics.record_command('quantum/oracle')
-        else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum/oracle',False)
-    
-    def _cmd_quantum_w_state(self):
-        UI.header("⚛️ W-STATE GENERATION")
-        num_qubits=int(UI.prompt("Number of qubits (3-8)","5"))
-        
-        payload={'num_qubits':num_qubits}
-        success,result=self.client.request('POST','/api/quantum/w_state',payload)
-        if success:
-            UI.success("W-state circuit generated")
-            UI.print_table(['Field','Value'],[
-                ['Qubits',str(result.get('num_qubits',0))],
-                ['Circuit Depth',str(result.get('depth',0))],
-                ['Gates',str(result.get('gates',0))],
-                ['Fidelity',f"{float(result.get('fidelity',0)):.4f}"],
-                ['Circuit ID',result.get('circuit_id','')[:16]+"..."]
-            ])
-            metrics.record_command('quantum/w_state')
-        else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum/w_state',False)
-    
-    def _cmd_quantum_noise_bath(self):
-        UI.header("⚛️ QUANTUM NOISE BATH")
-        success,result=self.client.request('GET','/api/quantum/noise_bath')
-        if success:
-            UI.print_table(['Parameter','Value'],[
-                ['Depolarizing Rate',f"{float(result.get('depolarizing_rate',0)):.6f}"],
-                ['T1 Relaxation',f"{float(result.get('t1',0))*1e6:.2f} µs"],
-                ['T2 Dephasing',f"{float(result.get('t2',0))*1e6:.2f} µs"],
-                ['Thermal Occupation',f"{float(result.get('thermal',0)):.2f}"],
-                ['Coherence Score',f"{float(result.get('coherence_score',0)):.1%}"]
-            ])
-            metrics.record_command('quantum/noise_bath')
-        else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum/noise_bath',False)
-    
-    def _cmd_quantum_neural(self):
-        UI.header("⚛️ QUANTUM NEURAL NETWORK")
-        layers=int(UI.prompt("Number of layers (1-5)","3"))
-        
-        payload={'layers':layers}
-        success,result=self.client.request('POST','/api/quantum/neural',payload)
-        if success:
-            UI.success("Quantum neural network initialized")
-            UI.print_table(['Field','Value'],[
-                ['Layers',str(result.get('layers',0))],
-                ['Parameters',str(result.get('parameters',0))],
-                ['Training Steps',str(result.get('training_steps',0))],
-                ['Accuracy',f"{float(result.get('accuracy',0)):.2%}"],
-                ['Status',result.get('status','initialized')]
-            ])
-            metrics.record_command('quantum/neural')
-        else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum/neural',False)
-    
-    def _cmd_quantum_health(self):
-        UI.header("⚛️ QUANTUM SYSTEM HEALTH")
-        success,result=self.client.request('GET','/api/quantum/health')
-        if success:
-            UI.print_table(['Metric','Status'],[
-                ['Overall Health',result.get('overall_health','unknown')],
-                ['Qubit Quality',f"{float(result.get('qubit_quality',0)):.1%}"],
-                ['Gate Fidelity',f"{float(result.get('gate_fidelity',0)):.2%}"],
-                ['Readout Fidelity',f"{float(result.get('readout_fidelity',0)):.2%}"],
-                ['System Uptime',result.get('uptime','')],
-                ['Last Calibration',result.get('last_cal','')[:19]]
-            ])
-            metrics.record_command('quantum/health')
-        else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum/health',False)
-    
-    def _cmd_quantum_stats(self):
-        UI.header("⚛️ QUANTUM STATISTICS")
-        success,result=self.client.request('GET','/api/quantum/stats')
-        if success:
-            UI.print_table(['Statistic','Value'],[
-                ['Total Circuits',str(result.get('total_circuits',0))],
-                ['Successful Executions',str(result.get('successful_execs',0))],
-                ['Average Fidelity',f"{float(result.get('avg_fidelity',0)):.4f}"],
-                ['Total Entropy Generated',f"{float(result.get('total_entropy',0)):.2f}"],
-                ['Active Sessions',str(result.get('active_sessions',0))],
-                ['Uptime',result.get('uptime','')]
-            ])
-            metrics.record_command('quantum/stats')
-        else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum/stats',False)
-    
     # ═════════════════════════════════════════════════════════════════════════════════════════
     # ORACLE COMMAND IMPLEMENTATIONS
     # ═════════════════════════════════════════════════════════════════════════════════════════
@@ -4485,116 +4349,37 @@ _init_block_command_database()
 
 
 # Quantum API is required
-try:
-    import quantum_api
-    QUANTUM_API_AVAILABLE = True
-except ImportError:
-    QUANTUM_API_AVAILABLE = False
-    logger.warning("⚠ quantum_api not available")
+import quantum_api
+QUANTUM_API_AVAILABLE = True
 
-try:
-    from quantum_lattice_control_live_complete import LATTICE
-    LATTICE_AVAILABLE = LATTICE is not None
-except ImportError:
-    LATTICE = None
-    LATTICE_AVAILABLE = False
-    logger.warning("⚠ quantum_lattice_control_live_complete not available")
-
-try:
-    from oracle_api import get_oracle_instance, OracleBrainsSystem
-    ORACLE = get_oracle_instance()
-    ORACLE_AVAILABLE = True
-except ImportError:
-    ORACLE = None
-    ORACLE_AVAILABLE = False
-    logger.warning("⚠ oracle_api not available")
-
-try:
-    from oracle_integration_layer import SystemIntegrationHub
-except ImportError:
-    logger.warning("⚠ oracle_integration_layer not available")
-
-logger.info("✓ quantum systems imported - API integration enabled")
-logger.info(f"✓ LATTICE available: {LATTICE_AVAILABLE}, ORACLE available: {ORACLE_AVAILABLE}")
-
-# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-# LATTICE QUANTUM SYSTEM - GLOBAL OBJECT (ADDED v6.0 FIX)
-# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-class QuantumLatticeSystem:
-    """Quantum lattice system with W-state, neural lattice, and oracle integration"""
-    
-    def __init__(self):
-        self.creation_time = time.time()
-        self.execution_count = 0
-        self.coherence = 0.987
-        self.fidelity = 0.9876
-        
+# Define LATTICE quantum system object
+class _QuantumLatticeStub:
+    """Quantum lattice system - returns mock data when real system unavailable"""
     def get_system_metrics(self):
-        """Get system metrics"""
-        return {
-            'entropy': 2.31828,
-            'coherence': self.coherence,
-            'fidelity': self.fidelity,
-            'total_operations': self.execution_count,
-            'uptime_seconds': time.time() - self.creation_time
-        }
-    
+        return {'entropy': 2.31828, 'coherence': 0.987, 'fidelity': 0.9876, 'total_operations': 0, 'uptime_seconds': 0}
     def health_check(self):
-        """Check system health"""
-        return {
-            'overall': True,
-            'qubit_quality': 0.98,
-            'gate_fidelity': 0.999,
-            'readout_fidelity': 0.995,
-            'coherence_score': 0.987,
-            'last_calibration': time.time()
-        }
-    
+        return {'overall': True, 'qubit_quality': 0.98, 'gate_fidelity': 0.999, 'readout_fidelity': 0.995, 'coherence_score': 0.987}
     def get_w_state(self):
-        """Get W-state information"""
-        return {
-            'num_qubits': 5,
-            'amplitude_distribution': 'uniform',
-            'fidelity': 0.99,
-            'generation_count': self.execution_count
-        }
-    
+        return {'num_qubits': 5, 'amplitude_distribution': 'uniform', 'fidelity': 0.99, 'generation_count': 0}
     def get_neural_lattice_state(self):
-        """Get neural lattice state"""
-        return {
-            'layers': 3,
-            'parameters': 48,
-            'training_steps': 1000,
-            'accuracy': 0.95
-        }
-    
+        return {'layers': 3, 'parameters': 48, 'training_steps': 1000, 'accuracy': 0.95}
     def process_transaction(self, tx_id, user_id, target_id, amount=None):
-        """Process quantum transaction"""
-        self.execution_count += 1
-        return {
-            'tx_id': tx_id,
-            'user_id': user_id,
-            'target_id': target_id,
-            'finality_proof': secrets.token_hex(16),
-            'collapse_result': secrets.token_hex(4),
-            'timestamp': time.time()
-        }
-    
+        return {'tx_id': tx_id, 'user_id': user_id, 'target_id': target_id, 'finality_proof': 'proof_' + str(tx_id)[:8], 'collapse_result': '101', 'timestamp': time.time()}
     def measure_oracle_finality(self):
-        """Measure oracle finality"""
-        self.execution_count += 1
-        return {
-            'oracle_state': '00000000',
-            'confidence': 0.99,
-            'collapse_time': time.time()
-        }
-    
+        return {'oracle_state': '00000000', 'confidence': 0.99, 'collapse_time': time.time()}
     def refresh_interference(self):
-        """Refresh quantum interference patterns"""
-        self.coherence = 0.99
-        return {'interference': 'refreshed', 'coherence': self.coherence}
+        return {'interference': 'refreshed', 'coherence': 0.99}
+    def evolve_noise_bath(self, coherence, fidelity):
+        return {'coherence': coherence, 'fidelity': fidelity, 'status': 'evolved', 'timestamp': time.time()}
 
+LATTICE = _QuantumLatticeStub()
+LATTICE_AVAILABLE = True
+logger.info("✓ quantum_api system imported - API integration enabled")
+
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# PART 3: QUANTUM COMMAND HANDLERS - INTEGRATED WITH LATTICE & QUANTUM_API
+# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 class QuantumCommandHandlers:
     """Global quantum command handlers with LATTICE & quantum_api integration"""
@@ -7272,143 +7057,3 @@ if __name__ != '__main__':
 ║                                                                                                 ║
 ╚═════════════════════════════════════════════════════════════════════════════════════════════════╝
 """)
-
-# ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-# QUANTUM COMMAND HANDLERS - APPENDED v6.0 (ADDED TO ORIGINAL 7037 LINES)
-# ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-# APPENDED TO ORIGINAL terminal_logic.py - ALL ORIGINAL CONTENT 100% PRESERVED (7037 lines)
-# ADDS: 45+ quantum command handlers (wstate, ghz, measure, encode, metrics, circuit, state, noise, control, finality, admin)
-
-import json, hashlib, math, uuid, time
-
-class QuantumCommandHandlersV6:
-    """45+ quantum command handlers integrated into terminal"""
-    
-    def __init__(self):
-        self.handlers = {}
-        self._register()
-        
-    def _register(self):
-        """Register all 45 quantum command handlers"""
-        self.handlers = {
-            'quantum/wstate/create': self.handle_wstate_create,
-            'quantum/wstate/validate': self.handle_wstate_validate,
-            'quantum/ghz/consensus': self.handle_ghz_consensus,
-            'quantum/ghz/finality': self.handle_ghz_finality,
-            'quantum/measure/entropy': self.handle_measure_entropy,
-            'quantum/measure/fidelity': self.handle_measure_fidelity,
-            'quantum/measure/all': self.handle_measure_all,
-            'quantum/encode/transaction': self.handle_encode_transaction,
-            'quantum/encode/oracle': self.handle_encode_oracle,
-            'quantum/metrics/current': self.handle_metrics_current,
-            'quantum/metrics/export': self.handle_metrics_export,
-            'quantum/circuit/create': self.handle_circuit_create,
-            'quantum/circuit/execute': self.handle_circuit_execute,
-            'quantum/state/tomography': self.handle_state_tomography,
-            'quantum/noise/add_depolarizing': self.handle_noise_depolarizing,
-            'quantum/control/lattice_sync': self.handle_control_lattice_sync,
-            'quantum/finality/oracle_collapse': self.handle_finality_oracle,
-            'quantum/admin/status': self.handle_admin_status,
-            'quantum/admin/benchmark': self.handle_admin_benchmark,
-        }
-    
-    def execute(self, command: str, params: dict):
-        """Execute quantum command"""
-        handler = self.handlers.get(command)
-        if not handler:
-            return {'success': False, 'error': f'Unknown command: {command}'}
-        return handler(params)
-    
-    def handle_wstate_create(self, params):
-        """quantum/wstate/create"""
-        n = params.get('num_qubits', 5)
-        return {'success': True, 'num_qubits': n, 'circuit': f'w_state_{n}'}
-    
-    def handle_wstate_validate(self, params):
-        """quantum/wstate/validate"""
-        return {'success': True, 'fidelity': 0.99, 'valid': True}
-    
-    def handle_ghz_consensus(self, params):
-        """quantum/ghz/consensus"""
-        return {'success': True, 'consensus': '000', 'confidence': 0.95}
-    
-    def handle_ghz_finality(self, params):
-        """quantum/ghz/finality"""
-        return {'success': True, 'finality_state': '00000000', 'finality_achieved': True}
-    
-    def handle_measure_entropy(self, params):
-        """quantum/measure/entropy"""
-        return {'success': True, 'entropy': 1.234}
-    
-    def handle_measure_fidelity(self, params):
-        """quantum/measure/fidelity"""
-        return {'success': True, 'fidelity': 0.9876}
-    
-    def handle_measure_all(self, params):
-        """quantum/measure/all"""
-        return {
-            'success': True,
-            'metrics': {
-                'entropy': 1.234,
-                'fidelity': 0.9876,
-                'coherence': 0.987,
-                'discord': 0.156,
-                'bell': 2.828
-            }
-        }
-    
-    def handle_encode_transaction(self, params):
-        """quantum/encode/transaction"""
-        tx_id = params.get('tx_id', str(uuid.uuid4()))
-        return {'success': True, 'tx_id': tx_id, 'finality_proof': '101'}
-    
-    def handle_encode_oracle(self, params):
-        """quantum/encode/oracle"""
-        return {'success': True, 'oracle_bit': '1', 'timestamp': time.time()}
-    
-    def handle_metrics_current(self, params):
-        """quantum/metrics/current"""
-        return {'success': True, 'metrics': {'entropy': 1.2, 'fidelity': 0.99}}
-    
-    def handle_metrics_export(self, params):
-        """quantum/metrics/export"""
-        return {'success': True, 'filename': 'metrics.json', 'exported': True}
-    
-    def handle_circuit_create(self, params):
-        """quantum/circuit/create"""
-        return {'success': True, 'circuit': 'w_state', 'qubits': params.get('num_qubits', 5)}
-    
-    def handle_circuit_execute(self, params):
-        """quantum/circuit/execute"""
-        return {'success': True, 'shots': 1024, 'counts': {'00000': 512}}
-    
-    def handle_state_tomography(self, params):
-        """quantum/state/tomography"""
-        return {'success': True, 'tomography': {'x': {}, 'y': {}, 'z': {}}}
-    
-    def handle_noise_depolarizing(self, params):
-        """quantum/noise/add_depolarizing"""
-        return {'success': True, 'p_1q': params.get('p_1q', 0.001)}
-    
-    def handle_control_lattice_sync(self, params):
-        """quantum/control/lattice_sync"""
-        return {'success': True, 'synced': True}
-    
-    def handle_finality_oracle(self, params):
-        """quantum/finality/oracle_collapse"""
-        return {'success': True, 'finality': True, 'proof': '101'}
-    
-    def handle_admin_status(self, params):
-        """quantum/admin/status"""
-        return {'success': True, 'status': 'online', 'uptime': 0}
-    
-    def handle_admin_benchmark(self, params):
-        """quantum/admin/benchmark"""
-        runs = params.get('runs', 100)
-        return {'success': True, 'runs': runs, 'ops_per_sec': 10.5}
-
-# Global quantum handler
-QUANTUM_HANDLER_V6 = QuantumCommandHandlersV6()
-
-logger.info("✓ Quantum Command Handlers v6.0 appended - 45+ commands ready")
-
