@@ -1613,9 +1613,8 @@ try:
         logger.critical(f"[Static] ❌ index.html NOT found! Tried: {paths_to_try}")
     
     # Initialize database tables and admin user if database is connected
-    # DISABLED: Use FORCE_DB_RESET.py for manual database initialization instead
-    # This prevents errors during startup when the database schema doesn't match
-    if False and DB and DB._instance:
+    # Now uses force_complete_initialization which handles everything automatically
+    if DB and DB._instance:
         try:
             logger.info("[DB] Initializing database schema and admin user...")
             from db_builder_v2 import DatabaseBuilder
@@ -1626,8 +1625,8 @@ try:
                 database=Config.SUPABASE_DB,
                 port=Config.SUPABASE_PORT
             )
-            # Create tables and initialize admin user
-            if builder.full_initialization(populate_pq=False):
+            # Use force_complete_initialization for automatic setup
+            if builder.force_complete_initialization(populate_pq=False):
                 logger.info("[DB] ✓ Database initialized with admin user: shemshallah@gmail.com")
             else:
                 logger.warning("[DB] Database initialization partially completed")

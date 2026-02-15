@@ -5180,6 +5180,102 @@ class DatabaseBuilder:
     
          
 
+    def force_complete_initialization(self, populate_pq=False):
+        """
+        FORCED COMPLETE INITIALIZATION - One-Command Setup
+        
+        This method:
+        1. Checks if already initialized
+        2. If yes: Returns (idempotent)
+        3. If no: Drops all tables and reinitializes
+        
+        Perfect for wsgi_config.py startup
+        """
+        logger.info(f"\n{CLR.BOLD}{CLR.CYAN}═══════════════════════════════════════════════════════════════════{CLR.E}")
+        logger.info(f"{CLR.BOLD}{CLR.CYAN}FORCED COMPLETE DATABASE INITIALIZATION{CLR.E}")
+        logger.info(f"{CLR.BOLD}{CLR.CYAN}═══════════════════════════════════════════════════════════════════{CLR.E}\n")
+        
+        try:
+            # Step 1: Check if already initialized
+            logger.info(f"{CLR.B}[Step 1/5] Checking if database already initialized...{CLR.E}")
+            check_genesis = """SELECT COUNT(*) as cnt FROM blocks WHERE height=0 LIMIT 1"""
+            try:
+                result = self.execute(check_genesis, return_results=True)
+                if result and len(result) > 0 and result[0].get('cnt', 0) > 0:
+                    logger.info(f"{CLR.G}[SKIP] Genesis block already exists - database initialized{CLR.E}")
+                    return True
+            except Exception:
+                pass  # Table might not exist, continue with initialization
+            
+            logger.info(f"{CLR.Y}Database not initialized - proceeding with setup{CLR.E}")
+            
+            # Step 2: Drop all existing tables
+            logger.info(f"\n{CLR.B}[Step 2/5] Dropping all existing tables...{CLR.E}")
+            self.drop_all_tables()
+            logger.info(f"{CLR.G}[OK] All tables dropped{CLR.E}")
+            
+            # Step 3: Create new schema
+            logger.info(f"\n{CLR.B}[Step 3/5] Creating new database schema...{CLR.E}")
+            self.create_schema(drop_existing=False)
+            self.create_indexes()
+            self.apply_constraints()
+            logger.info(f"{CLR.G}[OK] Schema created{CLR.E}")
+            
+            # Step 4: Initialize data
+            logger.info(f"\n{CLR.B}[Step 4/5] Initializing genesis block and users...{CLR.E}")
+            self.initialize_genesis_data()
+            logger.info(f"{CLR.G}[OK] Genesis data created{CLR.E}")
+            
+            # Step 5: Verify
+            logger.info(f"\n{CLR.B}[Step 5/5] Verifying database...{CLR.E}")
+            
+            # Check genesis block
+            genesis_check = self.execute(
+                "SELECT COUNT(*) as cnt FROM blocks WHERE height=0",
+                return_results=True
+            )
+            genesis_exists = genesis_check and len(genesis_check) > 0 and genesis_check[0].get('cnt', 0) > 0
+            
+            # Check admin user
+            admin_check = self.execute(
+                "SELECT COUNT(*) as cnt FROM users WHERE email='shemshallah@gmail.com' AND password_hash IS NOT NULL",
+                return_results=True
+            )
+            admin_exists = admin_check and len(admin_check) > 0 and admin_check[0].get('cnt', 0) > 0
+            
+            # Check oagi user
+            oagi_check = self.execute(
+                "SELECT COUNT(*) as cnt FROM users WHERE email='oagi.autonomy@gmail.com'",
+                return_results=True
+            )
+            oagi_exists = oagi_check and len(oagi_check) > 0 and oagi_check[0].get('cnt', 0) > 0
+            
+            logger.info(f"  Genesis Block: {'✅ EXISTS' if genesis_exists else '❌ MISSING'}")
+            logger.info(f"  Admin User: {'✅ EXISTS' if admin_exists else '❌ MISSING'}")
+            logger.info(f"  OAGI User: {'✅ EXISTS' if oagi_exists else '❌ MISSING'}")
+            
+            if genesis_exists and admin_exists and oagi_exists:
+                logger.info(f"\n{CLR.BOLD}{CLR.G}═══════════════════════════════════════════════════════════════════{CLR.E}")
+                logger.info(f"{CLR.BOLD}{CLR.G}✅ DATABASE INITIALIZATION COMPLETE ✅{CLR.E}")
+                logger.info(f"{CLR.BOLD}{CLR.G}═══════════════════════════════════════════════════════════════════{CLR.E}\n")
+                
+                logger.info(f"{CLR.G}Admin Credentials:{CLR.E}")
+                logger.info(f"  Email: shemshallah@gmail.com")
+                logger.info(f"  Password: $h10j1r1H0w4rd")
+                logger.info(f"\n{CLR.G}User Credentials:{CLR.E}")
+                logger.info(f"  Email: oagi.autonomy@gmail.com")
+                logger.info(f"  Password: $h10j1r1H0w4rd\n")
+                
+                return True
+            else:
+                logger.error(f"{CLR.R}Database initialization incomplete!{CLR.E}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"{CLR.R}Fatal error during forced initialization: {e}{CLR.E}")
+            logger.error(f"{CLR.R}Traceback: {traceback.format_exc()}{CLR.E}")
+            return False
+
     def full_initialization(self, populate_pq=True):
         """Complete initialization sequence - NEVER drops existing tables in production"""
         logger.info(f"\n{CLR.BOLD}{CLR.CYAN}==================================================================={CLR.E}")
