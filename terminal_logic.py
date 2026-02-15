@@ -4717,37 +4717,125 @@ class QuantumCommandHandlers:
     
     @classmethod
     def quantum_process_transaction(cls, tx_id: str = None, user_id: int = None, target_id: int = None, amount: float = None) -> Dict[str, Any]:
-        """Process transaction with quantum validation - CORE FEATURE"""
+        """PRODUCTION: Process quantum transaction via API endpoint (not random data!)
+        
+        BEHAVIOR:
+        - If called with NO parameters: Prompt user interactively
+        - If called WITH parameters: Use API endpoint directly
+        """
         try:
-            if not LATTICE_AVAILABLE:
-                return {'error': 'LATTICE not available'}
+            # ══════════════════════════════════════════════════════════════════════════════
+            # CASE 1: Called with NO parameters → Interactive CLI mode
+            # ══════════════════════════════════════════════════════════════════════════════
+            if user_id is None and target_id is None and amount is None:
+                logger.info("[QuantumCmd] Interactive mode: Prompting for user input")
+                
+                # Import here to avoid circular imports
+                import sys
+                
+                # Get user input
+                user_email = input("Your email: ").strip()
+                target_email = input("Target email: ").strip()
+                target_identifier = input("Target pseudoqubit_id or UID: ").strip()
+                
+                try:
+                    amount = float(input("Amount: ").strip())
+                except ValueError:
+                    return {
+                        'success': False,
+                        'error': 'INVALID_AMOUNT',
+                        'message': 'Amount must be a valid number',
+                        'error_code': 400
+                    }
+                
+                password = input("Password: ").strip()
+                
+                # Call API endpoint
+                try:
+                    import requests
+                    api_url = 'http://localhost:5000/api/quantum/transaction'
+                    response = requests.post(api_url, json={
+                        'user_email': user_email,
+                        'target_email': target_email,
+                        'target_identifier': target_identifier,
+                        'amount': amount,
+                        'password': password
+                    }, timeout=30)
+                    
+                    result = response.json()
+                    http_status = response.status_code
+                    
+                    logger.info(f"[QuantumCmd] API response: status={http_status}, tx_id={result.get('tx_id', 'ERROR')}")
+                    
+                    return {
+                        'success': result.get('success', False),
+                        'command': 'quantum/transaction',
+                        'timestamp': time.time(),
+                        'result': result,
+                        'http_status': http_status
+                    }
+                except Exception as api_e:
+                    logger.error(f"[QuantumCmd] API call failed: {api_e}")
+                    return {
+                        'success': False,
+                        'error': 'API_ERROR',
+                        'message': str(api_e),
+                        'error_code': 500
+                    }
             
-            # Use defaults if not provided
-            if not tx_id:
-                tx_id = 'tx_' + secrets.token_hex(8)
-            if not user_id:
-                user_id = random.randint(1000, 9999)
-            if not target_id:
-                target_id = random.randint(1000, 9999)
-            if amount is None:
-                amount = random.uniform(10, 1000)
-            
-            with cls._lock:
-                result = LATTICE.process_transaction(tx_id, user_id, target_id, amount)
-                cls._last_result = {
-                    'command': 'quantum/transaction',
-                    'timestamp': time.time(),
-                    'transaction': result,
-                    'finality': result.get('collapse_result', '').count('1') > 4  # Finality if more 1s than 0s
-                }
-                cls._execution_count += 1
-            
-            logger.info(f"[QuantumCmd] TX {tx_id} processed: {cls._last_result['finality']}")
-            return cls._last_result
+            # ══════════════════════════════════════════════════════════════════════════════
+            # CASE 2: Called WITH parameters → Use API endpoint directly
+            # ══════════════════════════════════════════════════════════════════════════════
+            else:
+                logger.info(f"[QuantumCmd] API mode: user={user_id}, target={target_id}, amount={amount}")
+                
+                # Validate we have all required parameters
+                if user_id is None or target_id is None or amount is None:
+                    return {
+                        'success': False,
+                        'error': 'MISSING_PARAMS',
+                        'message': 'user_id, target_id, and amount are required',
+                        'error_code': 400
+                    }
+                
+                # Call API endpoint with provided parameters
+                try:
+                    import requests
+                    api_url = 'http://localhost:5000/api/quantum/transaction'
+                    response = requests.post(api_url, json={
+                        'user_id': user_id,
+                        'target_id': target_id,
+                        'amount': amount
+                    }, timeout=30)
+                    
+                    result = response.json()
+                    http_status = response.status_code
+                    
+                    logger.info(f"[QuantumCmd] API response: status={http_status}, tx_id={result.get('tx_id', 'ERROR')}")
+                    
+                    return {
+                        'success': result.get('success', False),
+                        'command': 'quantum/transaction',
+                        'timestamp': time.time(),
+                        'result': result,
+                        'http_status': http_status
+                    }
+                except Exception as api_e:
+                    logger.error(f"[QuantumCmd] API call failed: {api_e}")
+                    return {
+                        'success': False,
+                        'error': 'API_ERROR',
+                        'message': str(api_e),
+                        'error_code': 500
+                    }
+        
         except Exception as e:
-            logger.error(f"[QuantumCmd] TX error: {e}")
-            traceback.print_exc()
-            return {'error': str(e)}
+            logger.error(f"[QuantumCmd] Unexpected error: {e}", exc_info=True)
+            return {
+                'success': False,
+                'error': str(e),
+                'error_code': 500
+            }
     
     @classmethod
     def quantum_measure_oracle(cls) -> Dict[str, Any]:
