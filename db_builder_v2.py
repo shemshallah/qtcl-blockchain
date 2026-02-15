@@ -3406,10 +3406,7 @@ SCHEMA_DEFINITIONS = {
             uncle_timestamp BIGINT,
             uncle_gas_used BIGINT DEFAULT 0,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            INDEX idx_uncle_hash (uncle_hash),
-            INDEX idx_nephew_block (nephew_block_number),
-            INDEX idx_uncle_block (uncle_block_height)
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """,
     
@@ -3448,10 +3445,7 @@ SCHEMA_DEFINITIONS = {
             verified_at TIMESTAMP WITH TIME ZONE,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            expires_at TIMESTAMP WITH TIME ZONE,
-            INDEX idx_state_root (state_root),
-            INDEX idx_block_height (block_height),
-            INDEX idx_snapshot_hash (snapshot_hash)
+            expires_at TIMESTAMP WITH TIME ZONE
         )
     """,
     
@@ -3513,10 +3507,7 @@ SCHEMA_DEFINITIONS = {
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             finalized_at TIMESTAMP WITH TIME ZONE,
             UNIQUE(block_number),
-            UNIQUE(chain_hash),
-            INDEX idx_chain_block (block_height),
-            INDEX idx_chain_validator (chain_validator),
-            INDEX idx_chain_status (chain_status)
+            UNIQUE(chain_hash)
         )
     """,
     
@@ -3538,11 +3529,7 @@ SCHEMA_DEFINITIONS = {
             measurement_result VARCHAR(255),
             timestamp BIGINT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            INDEX idx_witness_block (block_height),
-            INDEX idx_witness_cycle (cycle_number),
-            INDEX idx_witness_pub_key (witness_public_key),
-            INDEX idx_coherence_fidelity (coherence, fidelity)
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """
 }
@@ -3887,11 +3874,7 @@ SCHEMA_DEFINITIONS.update({
             confirmed_at TIMESTAMP WITH TIME ZONE,
             finalized_at TIMESTAMP WITH TIME ZONE,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            INDEX idx_tx_finality (tx_id),
-            INDEX idx_block_finality (block_height),
-            INDEX idx_finality_score (finality_score),
-            INDEX idx_finality_status (finality_status)
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """,
     
@@ -3907,11 +3890,7 @@ SCHEMA_DEFINITIONS.update({
             state_snapshot_id BIGINT REFERENCES state_snapshots(snapshot_id) ON DELETE SET NULL,
             update_hash VARCHAR(255),
             update_timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            verified_at TIMESTAMP WITH TIME ZONE,
-            INDEX idx_old_root (old_state_root),
-            INDEX idx_new_root (new_state_root),
-            INDEX idx_block_height (block_height),
-            INDEX idx_update_timestamp (update_timestamp)
+            verified_at TIMESTAMP WITH TIME ZONE
         )
     """,
     
@@ -3954,12 +3933,7 @@ SCHEMA_DEFINITIONS.update({
             emitter_address VARCHAR(255),
             removed BOOLEAN DEFAULT FALSE,
             timestamp BIGINT,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-            INDEX idx_contract_events (contract_address),
-            INDEX idx_event_name (event_name),
-            INDEX idx_event_block (block_height),
-            INDEX idx_event_signature (event_signature),
-            INDEX idx_event_tx (tx_id)
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """,
     
