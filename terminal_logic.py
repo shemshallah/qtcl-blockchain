@@ -4932,6 +4932,44 @@ class GlobalCommandRegistry:
     This is the COMMAND CENTER that powers the terminal.
     """
     
+    @staticmethod
+    def _cmd_wrapper(func, primary_param='block', *secondary_params):
+        """
+        Wrapper to handle both positional and keyword arguments for commands.
+        Converts positional args to keyword args based on expected parameter names.
+        
+        Args:
+            func: The function to wrap
+            primary_param: Name of the first parameter (default: 'block')
+            secondary_params: Names of additional parameters in order
+        
+        Example:
+            Block/details 12345 --full --quantum
+            Gets converted to:
+            _block_details(block='12345', full=True, quantum=True)
+        """
+        def wrapper(*args, **kwargs):
+            # Handle primary positional argument
+            if args and not kwargs.get(primary_param):
+                kwargs[primary_param] = args[0]
+                remaining_args = args[1:]
+            else:
+                remaining_args = args
+            
+            # Handle secondary positional arguments
+            for i, (arg, param_name) in enumerate(zip(remaining_args, secondary_params)):
+                if not arg.startswith('--') and param_name and not kwargs.get(param_name):
+                    kwargs[param_name] = arg
+            
+            # Handle flag arguments (--flag becomes flag=True)
+            for arg in remaining_args:
+                if isinstance(arg, str) and arg.startswith('--'):
+                    flag_name = arg[2:]  # Remove '--' prefix
+                    kwargs[flag_name] = True
+            
+            return func(**kwargs)
+        return wrapper
+    
     # Quantum commands
     QUANTUM_COMMANDS = {
         'quantum/status': QuantumCommandHandlers.quantum_status,
@@ -4989,16 +5027,24 @@ class GlobalCommandRegistry:
         'user/list': lambda *a, **k: {'result': 'Users listed'},
     }
     
-    # Block/Blockchain commands (COMPREHENSIVE WITH QUANTUM MEASUREMENTS)
+    # Block/Blockchain commands (COMPREHENSIVE WITH QUANTUM MEASUREMENTS - FIXED FOR POSITIONAL ARGS)
     BLOCK_COMMANDS = {
-        'block/details': lambda **k: GlobalCommandRegistry._block_details(**k),
-        'block/validate': lambda **k: GlobalCommandRegistry._block_validate(**k),
-        'block/quantum': lambda **k: GlobalCommandRegistry._block_quantum(**k),
-        'block/batch': lambda **k: GlobalCommandRegistry._block_batch(**k),
-        'block/integrity': lambda **k: GlobalCommandRegistry._block_integrity(**k),
-        'block/explorer': lambda **k: GlobalCommandRegistry._block_explorer(**k),
-        'block/info': lambda **k: GlobalCommandRegistry._block_info(**k),
-        'block/history': lambda **k: GlobalCommandRegistry._block_history(**k),
+        'block/details': lambda *a, **k: GlobalCommandRegistry._cmd_wrapper(
+            GlobalCommandRegistry._block_details, 'block')(*a, **k),
+        'block/validate': lambda *a, **k: GlobalCommandRegistry._cmd_wrapper(
+            GlobalCommandRegistry._block_validate, 'block')(*a, **k),
+        'block/quantum': lambda *a, **k: GlobalCommandRegistry._cmd_wrapper(
+            GlobalCommandRegistry._block_quantum, 'block')(*a, **k),
+        'block/batch': lambda *a, **k: GlobalCommandRegistry._cmd_wrapper(
+            GlobalCommandRegistry._block_batch, 'blocks')(*a, **k),
+        'block/integrity': lambda *a, **k: GlobalCommandRegistry._cmd_wrapper(
+            GlobalCommandRegistry._block_integrity, 'start', 'end')(*a, **k),
+        'block/explorer': lambda *a, **k: GlobalCommandRegistry._cmd_wrapper(
+            GlobalCommandRegistry._block_explorer, 'block')(*a, **k),
+        'block/info': lambda *a, **k: GlobalCommandRegistry._cmd_wrapper(
+            GlobalCommandRegistry._block_info, 'block')(*a, **k),
+        'block/history': lambda *a, **k: GlobalCommandRegistry._cmd_wrapper(
+            GlobalCommandRegistry._block_history, 'address')(*a, **k),
     }
     
     # DeFi commands (stub implementations)
