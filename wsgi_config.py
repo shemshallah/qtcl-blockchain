@@ -107,23 +107,38 @@ logger.info("║" + " " * 118 + "║")
 logger.info("║" + " " * 20 + "90KB Pure Power • All APIs Global • Self-Healing • Performance Tracking • Zero Downtime" + " " * 10 + "║")
 logger.info("╚" + "═" * 118 + "╝")
 
-def ensure_package(package: str, pip_name: str = None) -> None:
-    """Install packages like a champion"""
+def ensure_package(package: str, pip_name: str = None) -> bool:
+    """Try to import package, don't fail if missing"""
     try:
         __import__(package)
+        return True
     except ImportError:
-        logger.info(f"📦 Installing {pip_name or package}...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "--break-system-packages", pip_name or package])
+        logger.warning(f"⚠️  {pip_name or package} not available")
+        return False
 
-ensure_package("psycopg2", "psycopg2-binary")
-ensure_package("flask")
-ensure_package("requests")
-ensure_package("numpy")
+# Try to import packages but don't fail if missing
+_PSYCOPG2_AVAILABLE = ensure_package("psycopg2", "psycopg2-binary")
+_FLASK_AVAILABLE = ensure_package("flask")
+_REQUESTS_AVAILABLE = ensure_package("requests")
+_NUMPY_AVAILABLE = ensure_package("numpy")
 
-import psycopg2
-from psycopg2.extras import RealDictCursor
-import requests
-import numpy as np
+# Conditional imports
+if _PSYCOPG2_AVAILABLE:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+else:
+    psycopg2 = None
+    RealDictCursor = None
+
+if _REQUESTS_AVAILABLE:
+    import requests
+else:
+    requests = None
+
+if _NUMPY_AVAILABLE:
+    import numpy as np
+else:
+    np = None
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # SECTION 1: CONFIGURATION - THE BRAIN
@@ -1534,12 +1549,23 @@ try:
     HEARTBEAT.register_health_check('quantum', lambda: {'status': 'healthy' if QUANTUM else 'failed'})
     HEARTBEAT.register_health_check('cache', lambda: {'status': 'healthy', **CACHE.get_stats()})
     
-    # Import Flask
-    from main_app import create_app, initialize_app
-    
-    logger.info("[Flask] Creating application...")
-    app, executor, socketio = create_app()
-    initialize_app(app)
+    # Try to import Flask from main_app
+    logger.info("[Flask] Attempting to import create_app from main_app...")
+    try:
+        from main_app import create_app, initialize_app
+        logger.info("[Flask] ✓ Successfully imported main_app")
+        logger.info("[Flask] Creating application from main_app...")
+        app, executor, socketio = create_app()
+        initialize_app(app)
+        logger.info("[Flask] ✓ App created from main_app")
+    except ImportError as ie:
+        logger.warning(f"[Flask] Could not import main_app: {ie}")
+        logger.info("[Flask] Creating app directly in wsgi_config...")
+        from flask import Flask
+        app = Flask(__name__)
+        executor = None
+        socketio = None
+        logger.info("[Flask] ✓ Created minimal Flask app in wsgi_config")
     
     # Initialize database tables and admin user if database is connected
     if DB and DB._instance:
