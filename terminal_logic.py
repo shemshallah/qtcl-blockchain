@@ -1438,11 +1438,19 @@ class TerminalEngine:
         self.registry.register('wallet/multisig/sign',self._cmd_multisig_sign,CommandMeta(
             'wallet/multisig/sign',CommandCategory.WALLET,'Sign multi-sig transaction'))
         
-        # BLOCK COMMANDS
+        # BLOCK COMMANDS - COMPREHENSIVE WITH QUANTUM MEASUREMENTS
         self.registry.register('block/list',self._cmd_block_list,CommandMeta(
             'block/list',CommandCategory.BLOCK,'List recent blocks'))
-        self.registry.register('block/details',self._cmd_block_details,CommandMeta(
-            'block/details',CommandCategory.BLOCK,'Show block details'))
+        self.registry.register('block/details',self._cmd_block_details_comprehensive,CommandMeta(
+            'block/details',CommandCategory.BLOCK,'Comprehensive block details with quantum measurements'))
+        self.registry.register('block/validate',self._cmd_block_validate_comprehensive,CommandMeta(
+            'block/validate',CommandCategory.BLOCK,'Comprehensive block validation with quantum proofs'))
+        self.registry.register('block/quantum',self._cmd_block_quantum_measure,CommandMeta(
+            'block/quantum',CommandCategory.BLOCK,'Perform quantum measurements on block'))
+        self.registry.register('block/batch',self._cmd_block_batch_query,CommandMeta(
+            'block/batch',CommandCategory.BLOCK,'Query multiple blocks in parallel'))
+        self.registry.register('block/integrity',self._cmd_block_integrity_check,CommandMeta(
+            'block/integrity',CommandCategory.BLOCK,'Verify blockchain integrity'))
         self.registry.register('block/explorer',self._cmd_block_explorer,CommandMeta(
             'block/explorer',CommandCategory.BLOCK,'Block explorer with search'))
         self.registry.register('block/stats',self._cmd_block_stats,CommandMeta(
@@ -2620,6 +2628,123 @@ class TerminalEngine:
             logging.error(f"[BlockStats] {e}\n{traceback.format_exc()}")
             self._log_block_command('block/stats', success=False, error_msg=str(e), correlation_id=correlation_id)
             metrics.record_command('block/stats', False)
+    
+    # ═════════════════════════════════════════════════════════════════════════════════════════
+    # COMPREHENSIVE BLOCK COMMANDS WITH QUANTUM MEASUREMENTS
+    # ═════════════════════════════════════════════════════════════════════════════════════════
+    
+    def _cmd_block_details_comprehensive(self):
+        """🔷 Comprehensive block details with quantum measurements"""
+        try:
+            block_id = UI.prompt("Block hash or height (or 'latest')")
+            args_str = block_id
+            
+            # Check for flags
+            show_full = UI.confirm("Include full transaction list?", default=False)
+            show_quantum = UI.confirm("Include quantum measurements?", default=True)
+            validate_block = UI.confirm("Validate block integrity?", default=False)
+            
+            if show_full:
+                args_str += " --full"
+            if show_quantum:
+                args_str += " --quantum"
+            if validate_block:
+                args_str += " --validate"
+            
+            # Call the comprehensive command from terminal_block_commands module
+            try:
+                from terminal_block_commands import cmd_block_details
+                cmd_block_details(self, args_str)
+            except ImportError:
+                UI.error("terminal_block_commands module not available")
+                UI.info("Falling back to basic block details...")
+                # Fallback to original implementation
+                self._cmd_block_details()
+                
+        except Exception as e:
+            UI.error(f"Error: {e}")
+            logging.error(f"[BlockDetailsComprehensive] {e}", exc_info=True)
+    
+    def _cmd_block_validate_comprehensive(self):
+        """🔍 Comprehensive block validation with quantum proofs"""
+        try:
+            block_id = UI.prompt("Block hash or height to validate")
+            validate_quantum = UI.confirm("Validate quantum proofs?", default=True)
+            validate_full = UI.confirm("Full validation (slower)?", default=False)
+            
+            args_str = block_id
+            if not validate_quantum:
+                args_str += " --skip-quantum"
+            if validate_full:
+                args_str += " --full"
+            
+            try:
+                from terminal_block_commands import cmd_block_validate
+                cmd_block_validate(self, args_str)
+            except ImportError:
+                UI.error("terminal_block_commands module not available")
+                
+        except Exception as e:
+            UI.error(f"Error: {e}")
+            logging.error(f"[BlockValidate] {e}", exc_info=True)
+    
+    def _cmd_block_quantum_measure(self):
+        """⚛️ Perform quantum measurements on block"""
+        try:
+            block_id = UI.prompt("Block hash or height for quantum measurement")
+            
+            try:
+                from terminal_block_commands import cmd_block_quantum
+                cmd_block_quantum(self, block_id)
+            except ImportError:
+                UI.error("terminal_block_commands module not available")
+                
+        except Exception as e:
+            UI.error(f"Error: {e}")
+            logging.error(f"[BlockQuantum] {e}", exc_info=True)
+    
+    def _cmd_block_batch_query(self):
+        """📦 Query multiple blocks in parallel"""
+        try:
+            UI.info("Enter block references (space-separated) or range (e.g., 100-110):")
+            blocks = UI.prompt("Blocks")
+            include_quantum = UI.confirm("Include quantum measurements?", default=False)
+            
+            args_str = blocks
+            if include_quantum:
+                args_str += " --quantum"
+            
+            try:
+                from terminal_block_commands import cmd_block_batch
+                cmd_block_batch(self, args_str)
+            except ImportError:
+                UI.error("terminal_block_commands module not available")
+                
+        except Exception as e:
+            UI.error(f"Error: {e}")
+            logging.error(f"[BlockBatch] {e}", exc_info=True)
+    
+    def _cmd_block_integrity_check(self):
+        """🔍 Verify blockchain integrity"""
+        try:
+            UI.info("Enter range (start end) or leave empty for recent 100 blocks:")
+            range_input = input("> ").strip()
+            
+            if not range_input:
+                args_str = "--recent 100"
+            else:
+                args_str = range_input
+            
+            try:
+                from terminal_block_commands import cmd_block_integrity
+                cmd_block_integrity(self, args_str)
+            except ImportError:
+                UI.error("terminal_block_commands module not available")
+                
+        except Exception as e:
+            UI.error(f"Error: {e}")
+            logging.error(f"[BlockIntegrity] {e}", exc_info=True)
+    
     # ═════════════════════════════════════════════════════════════════════════════════════════
     # QUANTUM MEASUREMENT INTEGRATION FOR BLOCK OPERATIONS
     # ═════════════════════════════════════════════════════════════════════════════════════════
