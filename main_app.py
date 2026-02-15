@@ -532,61 +532,111 @@ def create_app():
     
     @app.route('/api/execute', methods=['POST'])
     def execute_command():
-        """Execute a single command - THE MAIN EXECUTION ENDPOINT"""
+        """Execute a single command - THE MAIN EXECUTION ENDPOINT - REAL EXECUTION ONLY"""
+        start_time = time.time()
         try:
             data = request.get_json() or {}
             command = data.get('command', '').strip()
             user_id = g.get('user_id')
             
-            if not command:
-                return jsonify({'status': 'error', 'error': 'No command provided'}), 400
+            logger.info(f"[API/Execute] ━━━ COMMAND START ━━━")
+            logger.info(f"[API/Execute] Command: {command}")
+            logger.info(f"[API/Execute] User: {user_id}")
             
-            logger.info(f"[API] Executing: {command}")
+            if not command:
+                logger.warning("[API/Execute] Empty command")
+                return jsonify({'status': 'error', 'error': 'No command provided'}), 400
             
             # Parse command (split by space)
             parts = command.split()
             if not parts:
+                logger.warning("[API/Execute] No parts after split")
                 return jsonify({'status': 'error', 'error': 'Empty command'}), 400
             
             cmd_name = parts[0].lower()
             cmd_args = parts[1:] if len(parts) > 1 else []
             
-            # Execute via CommandRegistry
+            logger.info(f"[API/Execute] Parsed - cmd: {cmd_name}, args: {cmd_args}")
+            
+            # ════════════════════════════════════════════════════════════════════════════
+            # CRITICAL: Import GlobalCommandRegistry for REAL execution
+            # ════════════════════════════════════════════════════════════════════════════
             try:
-                from terminal_logic import CommandRegistry
-                
-                # For 'help' command - show available commands
-                if cmd_name == 'help':
-                    all_cmds = CommandRegistry.list_commands()
+                from terminal_logic import GlobalCommandRegistry
+                logger.info("[API/Execute] ✓ GlobalCommandRegistry imported")
+            except ImportError as ie:
+                logger.error(f"[API/Execute] ✗ GlobalCommandRegistry import FAILED: {ie}")
+                return jsonify({
+                    'status': 'error',
+                    'error': f'GlobalCommandRegistry not available: {str(ie)}',
+                    'command': command
+                }), 503
+            
+            # ════════════════════════════════════════════════════════════════════════════
+            # EXECUTE 'help' command - return all commands
+            # ════════════════════════════════════════════════════════════════════════════
+            if cmd_name == 'help':
+                logger.info("[API/Execute] Executing: help")
+                try:
+                    all_cmds = GlobalCommandRegistry.list_commands()
+                    logger.info(f"[API/Execute] ✓ help returned {len(all_cmds)} categories")
+                    duration_ms = (time.time() - start_time) * 1000
                     return jsonify({
                         'status': 'success',
                         'output': all_cmds,
-                        'command': command
+                        'command': command,
+                        'duration_ms': duration_ms
                     }), 200
+                except Exception as help_error:
+                    logger.error(f"[API/Execute] help FAILED: {help_error}", exc_info=True)
+                    return jsonify({
+                        'status': 'error',
+                        'error': f'help command failed: {str(help_error)}',
+                        'command': command
+                    }), 500
+            
+            # ════════════════════════════════════════════════════════════════════════════
+            # EXECUTE ANY OTHER COMMAND via GlobalCommandRegistry
+            # ════════════════════════════════════════════════════════════════════════════
+            logger.info(f"[API/Execute] Executing: {cmd_name} with args: {cmd_args}")
+            try:
+                result = GlobalCommandRegistry.execute_command(cmd_name, *cmd_args)
+                logger.info(f"[API/Execute] ✓ {cmd_name} returned: {type(result)}")
+                logger.info(f"[API/Execute] Result keys: {result.keys() if isinstance(result, dict) else 'not-dict'}")
+                logger.info(f"[API/Execute] Result: {str(result)[:200]}")
                 
-                # For other commands - use registry execution
-                result = CommandRegistry.execute_command(cmd_name, *cmd_args)
+                # Extract output from result
+                output = result.get('result') or result.get('output') or result.get('error') or str(result)
                 
-                logger.info(f"[API] ✓ {command} executed")
+                duration_ms = (time.time() - start_time) * 1000
+                logger.info(f"[API/Execute] ✓ {cmd_name} executed in {duration_ms:.1f}ms")
                 
                 return jsonify({
                     'status': result.get('status', 'success'),
-                    'output': result.get('result') or result.get('error') or str(result),
+                    'output': output,
                     'command': command,
-                    'result': result
+                    'result': result,
+                    'duration_ms': duration_ms
                 }), 200
             
-            except Exception as e:
-                logger.error(f"[API] Execution error: {e}", exc_info=True)
+            except Exception as cmd_error:
+                duration_ms = (time.time() - start_time) * 1000
+                logger.error(f"[API/Execute] ✗ {cmd_name} FAILED: {cmd_error}", exc_info=True)
                 return jsonify({
                     'status': 'error',
-                    'error': str(e),
-                    'command': command
+                    'error': f'Command execution failed: {str(cmd_error)}',
+                    'command': command,
+                    'duration_ms': duration_ms
                 }), 500
         
         except Exception as e:
-            logger.error(f"[API] Unexpected error: {e}", exc_info=True)
-            return jsonify({'status': 'error', 'error': str(e)}), 500
+            duration_ms = (time.time() - start_time) * 1000
+            logger.error(f"[API/Execute] ✗ ENDPOINT ERROR: {e}", exc_info=True)
+            return jsonify({
+                'status': 'error',
+                'error': f'Endpoint error: {str(e)}',
+                'duration_ms': duration_ms
+            }), 500
     
     @app.route('/api/execute/compound', methods=['POST'])
     async def execute_compound():
