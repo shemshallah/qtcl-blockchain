@@ -460,15 +460,27 @@ const logger = {
  */
 window.CommandExecutor = QTCLCommandExecutor;
 
-// Auto-initialize
+// Auto-initialize with error handling
 document.addEventListener('DOMContentLoaded', () => {
-    if (!window.commandExecutor) {
-        window.commandExecutor = new QTCLCommandExecutor({
-            apiUrl: `http://${window.location.hostname}:${window.location.port || 5000}`,
-            wsUrl: `ws://${window.location.hostname}:${window.location.port || 5000}/socket.io`
-        });
-        
-        logger.info('[CommandExecutor] Auto-initialized');
+    try {
+        if (!window.commandExecutor) {
+            window.commandExecutor = new QTCLCommandExecutor({
+                apiUrl: `http://${window.location.hostname}:${window.location.port || 5000}`,
+                wsUrl: `ws://${window.location.hostname}:${window.location.port || 5000}/socket.io`
+            });
+            
+            logger.info('[CommandExecutor] Auto-initialized successfully');
+            console.log('[CommandExecutor] ✓ Command executor is ready');
+        }
+    } catch (error) {
+        logger.error('[CommandExecutor] Initialization failed:', error);
+        console.error('[CommandExecutor] Failed to initialize:', error);
+        // Set a dummy executor to prevent crashes
+        window.commandExecutor = {
+            execute: async (cmd) => ({ error: 'Executor not initialized', command: cmd }),
+            on: () => {},
+            emit: () => {}
+        };
     }
 });
 

@@ -1054,7 +1054,12 @@ class QuantumExecutionEngine:
     
     def __init__(self,num_threads:int=4):
         self.num_threads=num_threads
-        self.executor=ThreadPoolExecutor(max_workers=num_threads,thread_name_prefix="QUANTUM")
+        try:
+            # Try with thread_name_prefix (Python 3.6+)
+            self.executor=ThreadPoolExecutor(max_workers=num_threads,thread_name_prefix="QUANTUM")
+        except TypeError:
+            # Fall back for older Python versions
+            self.executor=ThreadPoolExecutor(max_workers=num_threads)
         self.simulator=None
         self.aer_simulator=None
         self.statevector_simulator=None
@@ -1085,9 +1090,10 @@ class QuantumExecutionEngine:
                 shots=QuantumTopologyConfig.AER_SHOTS
             )
             
-            logger.info("✅ Qiskit AER simulators initialized (4 threads)")
+            logger.info(f"✅ Qiskit AER simulators initialized (ThreadPoolExecutor with {self.num_threads} threads)")
         except Exception as e:
-            logger.error(f"❌ AER initialization failed: {e}")
+            logger.error(f"❌ AER initialization failed: {str(e)[:200]}")
+            logger.info("[Quantum] Continuing with fallback mode - basic quantum operations available")
     
     def execute_circuit(self,circuit:QuantumCircuit,shots:Optional[int]=None,
                        noise_model:bool=True)->Dict[str,Any]:
