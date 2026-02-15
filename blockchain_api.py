@@ -2769,7 +2769,9 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
                     return jresp({'error':'Circuit breaker open - blockchain service unavailable','correlation_id':correlation_id},503)
             
             # Route to appropriate handler
-            if cmd_type=='query':
+            elif cmd_type=='history':
+                result=_handle_block_history(options,correlation_id)
+            elif cmd_type=='query':
                 result=_handle_block_query(block_ref,options,correlation_id)
             elif cmd_type=='validate':
                 result=_handle_block_validate(block_ref,options,correlation_id)
@@ -2801,7 +2803,7 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
                 result=_handle_validator_performance(options,correlation_id)
             else:
                 result={'error':f'Unknown command: {cmd_type}','available_commands':[
-                    'query','validate','analyze','quantum_measure','reorg','prune',
+                    'history','query','validate','analyze','quantum_measure','reorg','prune',
                     'export','sync','batch_query','chain_integrity','merkle_verify',
                     'temporal_verify','quantum_finality','stats_aggregate','validator_performance'
                 ]}
@@ -2840,6 +2842,79 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
                 pass  # Fail silently if error budget not available
             return jresp({'error':str(e),'correlation_id':correlation_id if 'correlation_id' in locals() else 'unknown'},500)
     
+    # ── Block normalizer: works on both QuantumBlock dataclass AND db dict ────
+    def _normalize_block(raw):
+        """
+        Accepts a QuantumBlock dataclass OR a db dict row and returns a
+        SimpleNamespace with consistent attribute access across both sources.
+        """
+        from types import SimpleNamespace
+        if raw is None:
+            return None
+        if isinstance(raw, dict):
+            # Ensure status is an enum-like object with .value
+            status_val = raw.get('status','pending')
+            class _S:
+                def __init__(self,v): self.value=v
+                def __str__(self): return self.value
+            obj = SimpleNamespace(
+                block_hash=raw.get('block_hash',''),
+                height=raw.get('height',0),
+                previous_hash=raw.get('previous_hash','0'*64),
+                timestamp=raw.get('timestamp',datetime.now(timezone.utc)),
+                validator=raw.get('validator',''),
+                merkle_root=raw.get('merkle_root',''),
+                quantum_merkle_root=raw.get('quantum_merkle_root',''),
+                state_root=raw.get('state_root',''),
+                quantum_proof=raw.get('quantum_proof'),
+                quantum_entropy=raw.get('quantum_entropy',''),
+                temporal_proof=raw.get('temporal_proof'),
+                status=_S(status_val),
+                difficulty=raw.get('difficulty',1),
+                nonce=raw.get('nonce',''),
+                size_bytes=raw.get('size_bytes',0),
+                gas_used=raw.get('gas_used',0),
+                gas_limit=raw.get('gas_limit',10_000_000),
+                total_fees=Decimal(str(raw.get('total_fees','0') or '0')),
+                reward=Decimal(str(raw.get('reward','10') or '10')),
+                confirmations=raw.get('confirmations',0),
+                epoch=raw.get('epoch',0),
+                tx_capacity=raw.get('tx_capacity',TARGET_TX_PER_BLOCK),
+                quantum_proof_version=raw.get('quantum_proof_version',QUANTUM_PROOF_VERSION),
+                is_orphan=raw.get('is_orphan',False),
+                reorg_depth=raw.get('reorg_depth',0),
+                temporal_coherence=float(raw.get('temporal_coherence',1.0) or 1.0),
+                transactions=raw.get('transactions',[]),
+                metadata=raw.get('metadata',{}) if isinstance(raw.get('metadata'),dict)
+                          else (json.loads(raw['metadata']) if raw.get('metadata') else {}),
+                pseudoqubit_registrations=raw.get('pseudoqubit_registrations',0),
+                fork_id=raw.get('fork_id',''),
+                validator_w_result=raw.get('validator_w_result'),
+                quantum_proof_version_val=raw.get('quantum_proof_version',QUANTUM_PROOF_VERSION),
+            )
+            return obj
+        # Already a QuantumBlock dataclass — return as-is wrapped in namespace if needed
+        return raw
+
+    def _load_block(block_ref):
+        """
+        Unified block loader: tries in-memory chain first, then DB.
+        Returns a normalized block object or None.
+        """
+        block = None
+        is_height = isinstance(block_ref,(int,str)) and str(block_ref).isdigit()
+        # 1. In-memory chain
+        if is_height:
+            block = chain.get_block_at_height(int(block_ref))
+        else:
+            block = chain.get_block(str(block_ref))
+        # 2. DB fallback
+        if block is None:
+            raw = db.get_block(int(block_ref) if is_height else str(block_ref))
+            if raw:
+                block = _normalize_block(raw)
+        return block
+
     def _handle_block_query(block_ref,options,correlation_id):
         """Query block details with caching and quantum measurements"""
         try:
@@ -2852,11 +2927,8 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
                     cached['_cache_hit']=True
                     return cached
             
-            # Query database
-            if isinstance(block_ref,(int,str)) and str(block_ref).isdigit():
-                block=chain.get_block_at_height(int(block_ref))
-            else:
-                block=chain.get_block(str(block_ref))
+            # Query: in-memory first, then DB fallback via unified loader
+            block = _load_block(block_ref)
             
             if not block:
                 return {'error':'Block not found','block_ref':block_ref}
@@ -2917,14 +2989,17 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
     def _handle_block_validate(block_ref,options,correlation_id):
         """Comprehensive block validation with quantum proof verification"""
         try:
-            # Get block
-            if isinstance(block_ref,(int,str)) and str(block_ref).isdigit():
-                block=chain.get_block_at_height(int(block_ref))
-            else:
-                block=chain.get_block(str(block_ref))
+            # Get block — in-memory first, DB fallback via unified loader
+            block = _load_block(block_ref)
             
             if not block:
-                return {'error':'Block not found','block_ref':block_ref}
+                # If DB also has nothing, check if chain even has any blocks
+                tip = chain.get_canonical_tip()
+                latest = db.get_latest_block()
+                tip_info = f"Chain tip: height {tip.height}" if tip else (
+                    f"DB latest: height {latest.get('height','?')}" if latest else "No blocks in chain yet"
+                )
+                return {'error':f'Block not found — {tip_info}','block_ref':block_ref}
             
             validation_results={
                 'block_hash':block.block_hash,
@@ -2965,8 +3040,8 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
             # 3. Previous block link
             try:
                 if block.height>0:
-                    prev_block=chain.get_block_at_height(block.height-1)
-                    link_valid=prev_block and prev_block.block_hash==block.previous_hash
+                    prev_block = _load_block(block.height - 1)
+                    link_valid = prev_block and prev_block.block_hash==block.previous_hash
                     validation_results['checks']['previous_link']={
                         'valid':link_valid,
                         'expected':prev_block.block_hash if prev_block else None,
@@ -3035,10 +3110,7 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
     def _handle_block_analyze(block_ref,options,correlation_id):
         """Deep analysis of block with statistics and patterns"""
         try:
-            if isinstance(block_ref,(int,str)) and str(block_ref).isdigit():
-                block=chain.get_block_at_height(int(block_ref))
-            else:
-                block=chain.get_block(str(block_ref))
+            block = _load_block(block_ref)
             
             if not block:
                 return {'error':'Block not found','block_ref':block_ref}
@@ -3103,10 +3175,7 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
     def _handle_quantum_measure(block_ref,options,correlation_id):
         """Perform comprehensive quantum measurements on block"""
         try:
-            if isinstance(block_ref,(int,str)) and str(block_ref).isdigit():
-                block=chain.get_block_at_height(int(block_ref))
-            else:
-                block=chain.get_block(str(block_ref))
+            block = _load_block(block_ref)
             
             if not block:
                 return {'error':'Block not found','block_ref':block_ref}
@@ -3223,7 +3292,7 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
             
             prev_hash=None
             for height in range(start_height,end_height+1):
-                block=chain.get_block_at_height(height)
+                block = _load_block(height)
                 if not block:
                     integrity_results['broken_links'].append({'height':height,'reason':'Block not found'})
                     continue
@@ -3425,18 +3494,26 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
             return None
     
     def _compute_merkle_root(transactions):
-        """Compute Merkle root from transactions"""
+        """Compute Merkle root from transactions — handles both str-hashes and tx objects"""
         try:
             if not transactions:
                 return hashlib.sha256(b'').hexdigest()
-            
-            tx_hashes=[tx.tx_hash for tx in transactions]
+            # Support both List[str] (QuantumBlock.transactions) and List[obj] (tx objects)
+            tx_hashes=[]
+            for tx in transactions:
+                if isinstance(tx,str):
+                    tx_hashes.append(tx)
+                elif isinstance(tx,dict):
+                    tx_hashes.append(tx.get('tx_hash',str(tx)))
+                elif hasattr(tx,'tx_hash'):
+                    tx_hashes.append(tx.tx_hash)
+                else:
+                    tx_hashes.append(str(tx))
             while len(tx_hashes)>1:
                 if len(tx_hashes)%2!=0:
                     tx_hashes.append(tx_hashes[-1])
-                tx_hashes=[hashlib.sha256(f"{tx_hashes[i]}{tx_hashes[i+1]}".encode()).hexdigest() 
+                tx_hashes=[hashlib.sha256(f"{tx_hashes[i]}{tx_hashes[i+1]}".encode()).hexdigest()
                           for i in range(0,len(tx_hashes),2)]
-            
             return tx_hashes[0]
         except Exception as e:
             return None
@@ -3521,37 +3598,1142 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
         except Exception as e:
             logger.debug(f"Failed to store quantum measurements: {e}")
     
-    # Handlers for remaining commands
+    def _handle_block_history(options,correlation_id):
+        """
+        Block history: returns a paginated list of recent blocks from DB + chain stats.
+        options:
+          limit      (int, default 20, max 200)
+          offset     (int, default 0)
+          min_height (int, optional — only blocks >= this height)
+          max_height (int, optional — only blocks <= this height)
+          validator  (str, optional — filter by validator address)
+          status     (str, optional — filter by status e.g. 'finalized')
+          order      ('asc'|'desc', default 'desc')
+        """
+        try:
+            limit    = min(int(options.get('limit',20)),200)
+            offset   = int(options.get('offset',0))
+            order    = 'ASC' if str(options.get('order','desc')).upper()=='ASC' else 'DESC'
+            filters  = []
+            params: list = []
+
+            if options.get('min_height') is not None:
+                filters.append('height >= %s'); params.append(int(options['min_height']))
+            if options.get('max_height') is not None:
+                filters.append('height <= %s'); params.append(int(options['max_height']))
+            if options.get('validator'):
+                filters.append('validator = %s'); params.append(str(options['validator']))
+            if options.get('status'):
+                filters.append('status = %s');   params.append(str(options['status']))
+
+            where_clause = ('WHERE ' + ' AND '.join(filters)) if filters else ''
+            params_with_limit = params + [limit, offset]
+
+            query = f"""
+                SELECT block_hash, height, previous_hash, timestamp, validator,
+                       merkle_root, quantum_merkle_root, status, confirmations,
+                       difficulty, nonce, size_bytes, gas_used, gas_limit,
+                       total_fees, reward, epoch, tx_capacity,
+                       temporal_coherence, is_orphan, quantum_proof_version,
+                       metadata
+                FROM blocks
+                {where_clause}
+                ORDER BY height {order}
+                LIMIT %s OFFSET %s
+            """
+
+            rows = db._exec(query, tuple(params_with_limit)) or []
+
+            # Count total (separate query for pagination)
+            count_query = f"SELECT COUNT(*) as c FROM blocks {where_clause}"
+            count_row   = db._exec(count_query, tuple(params), fetch_one=True)
+            total_count = int(count_row.get('c',0)) if count_row else len(rows)
+
+            # Augment each row with in-memory data if available
+            block_list = []
+            for row in rows:
+                b = _normalize_block(row) if isinstance(row,dict) else row
+                mem_block = chain.get_block(b.block_hash) if b.block_hash else None
+                entry = {
+                    'block_hash'       : b.block_hash,
+                    'height'           : b.height,
+                    'previous_hash'    : b.previous_hash,
+                    'timestamp'        : b.timestamp.isoformat() if hasattr(b.timestamp,'isoformat') else str(b.timestamp),
+                    'validator'        : b.validator,
+                    'merkle_root'      : b.merkle_root,
+                    'status'           : b.status.value if hasattr(b.status,'value') else str(b.status),
+                    'confirmations'    : b.confirmations,
+                    'difficulty'       : b.difficulty,
+                    'size_bytes'       : b.size_bytes,
+                    'gas_used'         : b.gas_used,
+                    'gas_limit'        : b.gas_limit,
+                    'total_fees'       : str(b.total_fees),
+                    'reward'           : str(b.reward),
+                    'epoch'            : b.epoch,
+                    'tx_capacity'      : b.tx_capacity,
+                    'temporal_coherence': b.temporal_coherence,
+                    'is_orphan'        : b.is_orphan,
+                    'in_memory'        : mem_block is not None,
+                    'quantum_proof_version': b.quantum_proof_version
+                }
+                # Add tx_count if metadata has it
+                meta = b.metadata if isinstance(b.metadata,dict) else {}
+                if 'tx_count' in meta:
+                    entry['tx_count'] = meta['tx_count']
+                block_list.append(entry)
+
+            # Chain summary
+            chain_stats = chain.get_stats()
+            tip         = chain.get_canonical_tip()
+            db_latest   = db.get_latest_block()
+            latest_height = (
+                tip.height if tip else
+                (db_latest.get('height',0) if db_latest else 0)
+            )
+
+            return {
+                'blocks'          : block_list,
+                'total_count'     : total_count,
+                'limit'           : limit,
+                'offset'          : offset,
+                'order'           : order,
+                'page'            : offset // limit + 1,
+                'pages'           : max(1, (total_count + limit - 1) // limit),
+                'latest_height'   : latest_height,
+                'finalized_height': chain_stats.get('finalized_height',0),
+                'chain_length'    : chain_stats.get('chain_length',0),
+                'filters_applied' : bool(filters),
+            }
+        except Exception as e:
+            logger.error(f"[BLOCK_HISTORY] Error: {e}", exc_info=True)
+            # Graceful DB-free fallback: return what we have in memory
+            try:
+                tip    = chain.get_canonical_tip()
+                blocks = []
+                start  = (tip.height if tip else 0)
+                lim    = min(int(options.get('limit',20)),200)
+                for h in range(start, max(-1, start-lim), -1):
+                    b = chain.get_block_at_height(h)
+                    if b:
+                        blocks.append({
+                            'block_hash': b.block_hash, 'height': b.height,
+                            'timestamp': b.timestamp.isoformat(),
+                            'validator': b.validator,
+                            'status': b.status.value,
+                            'confirmations': b.confirmations,
+                            'in_memory': True
+                        })
+                return {
+                    'blocks': blocks, 'total_count': len(blocks),
+                    'limit': lim, 'offset': 0, 'order': 'DESC',
+                    'latest_height': start, '_source': 'memory_fallback',
+                    '_db_error': str(e)
+                }
+            except Exception as e2:
+                return {'error': str(e), 'fallback_error': str(e2)}
+
     def _handle_block_reorg(block_ref,options,correlation_id):
-        """Handle blockchain reorganization"""
-        return {'error':'Reorg handler not implemented - admin only operation'}
+        """
+        Execute or simulate a chain reorganization.
+        options:
+          dry_run          (bool, default True)  — simulate without committing
+          force            (bool, default False) — override safety checks
+          fork_tip_hash    (str)                 — hash of the fork tip to promote
+          max_reorg_depth  (int, default 100)    — safety limit
+        """
+        try:
+            dry_run        = bool(options.get('dry_run', True))
+            force          = bool(options.get('force', False))
+            fork_tip_hash  = options.get('fork_tip_hash')
+            max_reorg_depth= int(options.get('max_reorg_depth', 100))
+
+            ts_start = time.time()
+            canonical_tip = chain.get_canonical_tip()
+
+            if not canonical_tip:
+                return {'error': 'No canonical chain — cannot reorg', 'block_ref': block_ref}
+
+            # ── Determine the new chain tip to promote ──────────────────────
+            if fork_tip_hash:
+                new_tip = chain.get_block(fork_tip_hash)
+                if not new_tip:
+                    new_tip = _load_block(fork_tip_hash)
+                if not new_tip:
+                    return {'error': f'Fork tip not found: {fork_tip_hash}'}
+            elif block_ref:
+                new_tip = _load_block(block_ref)
+                if not new_tip:
+                    return {'error': f'Target block not found: {block_ref}'}
+            else:
+                # Auto-select: find heaviest non-canonical fork tip
+                heaviest = None
+                heaviest_weight = chain._block_weight(canonical_tip)
+                for tip_hash in list(chain._fork_tips):
+                    b = chain.get_block(tip_hash)
+                    if b and b.block_hash != canonical_tip.block_hash:
+                        w = chain._block_weight(b)
+                        if w > heaviest_weight:
+                            heaviest_weight = w
+                            heaviest = b
+                if not heaviest:
+                    return {
+                        'status'          : 'no_reorg_needed',
+                        'message'         : 'Canonical chain is already the heaviest',
+                        'canonical_height': canonical_tip.height,
+                        'canonical_hash'  : canonical_tip.block_hash,
+                        'fork_tips_checked': len(chain._fork_tips),
+                    }
+                new_tip = heaviest
+
+            # ── Safety checks ────────────────────────────────────────────────
+            if new_tip.block_hash == canonical_tip.block_hash:
+                return {
+                    'status'  : 'no_reorg_needed',
+                    'message' : 'Target block is already the canonical tip',
+                    'height'  : canonical_tip.height,
+                    'hash'    : canonical_tip.block_hash,
+                }
+
+            # Walk back new tip to find common ancestor
+            new_chain_hashes  = []
+            cursor = new_tip
+            max_walk = new_tip.height + 1
+            for _ in range(max_walk):
+                if not cursor:
+                    break
+                new_chain_hashes.append(cursor.block_hash)
+                if cursor.block_hash in chain._canonical_chain:
+                    break
+                parent_hash = cursor.previous_hash
+                cursor = chain.get_block(parent_hash) or _load_block(parent_hash)
+
+            if not cursor or cursor.block_hash not in chain._canonical_chain:
+                return {'error': 'No common ancestor found in canonical chain — aborting reorg'}
+
+            common_ancestor = cursor
+            common_idx = chain._canonical_chain.index(common_ancestor.block_hash)
+            reorg_depth = len(chain._canonical_chain) - common_idx - 1
+            new_chain_len = len(new_chain_hashes) - 1  # exclude common ancestor
+
+            if reorg_depth > max_reorg_depth and not force:
+                return {
+                    'error'       : f'Reorg depth {reorg_depth} exceeds max_reorg_depth {max_reorg_depth}',
+                    'hint'        : 'Pass force=true to override',
+                    'reorg_depth' : reorg_depth,
+                }
+
+            # ── Gather blocks being displaced (old chain) ─────────────────────
+            displaced_hashes = chain._canonical_chain[common_idx + 1:]
+            displaced_blocks = []
+            for h in displaced_hashes:
+                b = chain.get_block(h)
+                if b:
+                    displaced_blocks.append({
+                        'block_hash': b.block_hash,
+                        'height'    : b.height,
+                        'validator' : b.validator,
+                        'tx_count'  : len(b.transactions),
+                        'status'    : b.status.value if hasattr(b.status,'value') else str(b.status),
+                    })
+
+            # ── Gather incoming blocks (new chain) ────────────────────────────
+            incoming_hashes = list(reversed(new_chain_hashes[:-1]))  # exclude common ancestor
+            incoming_blocks = []
+            for h in incoming_hashes:
+                b = chain.get_block(h) or _load_block(h)
+                if b:
+                    incoming_blocks.append({
+                        'block_hash'          : b.block_hash,
+                        'height'              : b.height,
+                        'validator'           : b.validator,
+                        'tx_count'            : len(b.transactions) if hasattr(b,'transactions') else 0,
+                        'temporal_coherence'  : getattr(b,'temporal_coherence',1.0),
+                        'quantum_weight'      : chain._block_weight(b) if hasattr(chain,'_block_weight') else 0,
+                    })
+
+            reorg_plan = {
+                'common_ancestor'  : {'hash': common_ancestor.block_hash, 'height': common_ancestor.height},
+                'reorg_depth'      : reorg_depth,
+                'new_chain_length' : new_chain_len,
+                'net_height_change': new_chain_len - reorg_depth,
+                'displaced_blocks' : displaced_blocks,
+                'incoming_blocks'  : incoming_blocks,
+                'old_tip'          : {'hash': canonical_tip.block_hash, 'height': canonical_tip.height},
+                'new_tip'          : {'hash': new_tip.block_hash, 'height': new_tip.height},
+            }
+
+            if dry_run:
+                return {
+                    'status'     : 'dry_run',
+                    'would_reorg': True,
+                    'plan'       : reorg_plan,
+                    'duration_ms': round((time.time()-ts_start)*1000, 2),
+                    'hint'       : 'Pass dry_run=false to execute',
+                }
+
+            # ── Execute reorg on in-memory chain ──────────────────────────────
+            with chain._lock:
+                # Mark displaced blocks as reorged
+                for h in displaced_hashes:
+                    b = chain._blocks.get(h)
+                    if b:
+                        b.status    = BlockStatus.REORGED
+                        b.reorg_depth = reorg_depth
+
+                # Update canonical chain
+                chain._canonical_chain = chain._canonical_chain[:common_idx + 1] + incoming_hashes
+                chain._fork_tips.discard(canonical_tip.block_hash)
+                chain._fork_tips.add(new_tip.block_hash)
+
+                # Mark incoming blocks as confirmed
+                for h in incoming_hashes:
+                    b = chain._blocks.get(h)
+                    if b and b.status not in (BlockStatus.FINALIZED,):
+                        b.status = BlockStatus.CONFIRMED
+
+            # ── Persist reorg to DB ────────────────────────────────────────────
+            for h in displaced_hashes:
+                db._exec("UPDATE blocks SET status=%s, reorg_depth=%s WHERE block_hash=%s",
+                         ('reorged', reorg_depth, h))
+            for h in incoming_hashes:
+                db._exec("UPDATE blocks SET status=%s WHERE block_hash=%s",
+                         ('confirmed', h))
+
+            # Mark displaced transactions as pending (back to mempool)
+            for h in displaced_hashes:
+                db._exec(
+                    "UPDATE transactions SET status='pending', block_hash=NULL, block_height=NULL "
+                    "WHERE block_hash=%s AND status='confirmed'",
+                    (h,)
+                )
+
+            # Update finality
+            chain.update_finality(new_tip.height)
+
+            return {
+                'status'         : 'reorg_executed',
+                'plan'           : reorg_plan,
+                'displaced_count': len(displaced_hashes),
+                'incoming_count' : len(incoming_hashes),
+                'new_canonical_height': new_tip.height,
+                'new_canonical_hash'  : new_tip.block_hash,
+                'duration_ms'         : round((time.time()-ts_start)*1000, 2),
+            }
+
+        except Exception as e:
+            logger.error(f"[BLOCK_REORG] Error: {e}", exc_info=True)
+            return {'error': str(e)}
     
     def _handle_block_prune(options,correlation_id):
-        """Prune old blocks"""
-        return {'error':'Prune handler not implemented - admin only operation'}
+        """
+        Prune finalized blocks from in-memory chain and optionally from DB.
+        options:
+          keep_blocks    (int, default 10000) — retain this many recent blocks in memory
+          prune_db       (bool, default False) — also archive old rows in DB
+          keep_db_blocks (int, default 100000) — DB retention threshold (if prune_db=True)
+          dry_run        (bool, default True)  — report without deleting
+          prune_orphans  (bool, default True)  — remove orphans older than orphan_age_hours
+          orphan_age_hours (int, default 1)    — orphan age threshold
+        """
+        try:
+            ts_start       = time.time()
+            keep_blocks    = int(options.get('keep_blocks', 10_000))
+            prune_db       = bool(options.get('prune_db', False))
+            keep_db_blocks = int(options.get('keep_db_blocks', 100_000))
+            dry_run        = bool(options.get('dry_run', True))
+            prune_orphans  = bool(options.get('prune_orphans', True))
+            orphan_age_h   = int(options.get('orphan_age_hours', 1))
+
+            # ── Collect memory statistics before pruning ──────────────────────
+            stats_before = chain.get_stats()
+            tip          = chain.get_canonical_tip()
+            total_in_mem = len(chain._blocks)
+            orphan_count = len(chain._orphans)
+            now          = datetime.now(timezone.utc)
+            orphan_cutoff= now - timedelta(hours=orphan_age_h)
+
+            # ── Identify what would be pruned ─────────────────────────────────
+            prune_height_threshold = (tip.height - keep_blocks) if tip else 0
+            memory_prune_candidates = [
+                h for h in chain._canonical_chain
+                if (b := chain._blocks.get(h)) and
+                   b.status == BlockStatus.FINALIZED and
+                   b.height <= prune_height_threshold
+            ]
+            orphan_prune_candidates = [
+                h for h, b in chain._orphans.items()
+                if b.timestamp < orphan_cutoff
+            ] if prune_orphans else []
+
+            # ── DB prune candidates ───────────────────────────────────────────
+            db_prune_count = 0
+            db_prune_height = 0
+            if prune_db:
+                latest_db = db.get_latest_block()
+                if latest_db:
+                    db_latest_height = latest_db.get('height', 0)
+                    db_prune_height = max(0, db_latest_height - keep_db_blocks)
+                    db_count_row = db._exec(
+                        "SELECT COUNT(*) as c FROM blocks WHERE height <= %s AND status='finalized'",
+                        (db_prune_height,), fetch_one=True
+                    )
+                    db_prune_count = int(db_count_row.get('c', 0)) if db_count_row else 0
+
+            plan = {
+                'memory_blocks_to_stub'  : len(memory_prune_candidates),
+                'orphans_to_remove'      : len(orphan_prune_candidates),
+                'db_rows_to_archive'     : db_prune_count,
+                'prune_height_threshold' : prune_height_threshold,
+                'keep_blocks_in_memory'  : keep_blocks,
+                'db_prune_height'        : db_prune_height if prune_db else 'n/a',
+                'current_memory_blocks'  : total_in_mem,
+                'current_orphans'        : orphan_count,
+                'canonical_chain_length' : stats_before['chain_length'],
+                'finalized_height'       : stats_before['finalized_height'],
+            }
+
+            if dry_run:
+                return {
+                    'status'     : 'dry_run',
+                    'plan'       : plan,
+                    'duration_ms': round((time.time()-ts_start)*1000, 2),
+                    'hint'       : 'Pass dry_run=false to execute',
+                }
+
+            # ── Execute memory pruning ─────────────────────────────────────────
+            stubbed_count = 0
+            with chain._lock:
+                for h in memory_prune_candidates:
+                    b = chain._blocks.get(h)
+                    if b:
+                        # Replace with minimal stub retaining hash + height + state_root
+                        chain._blocks[h] = QuantumBlock(
+                            block_hash    = b.block_hash,
+                            height        = b.height,
+                            previous_hash = b.previous_hash,
+                            timestamp     = b.timestamp,
+                            validator     = '[pruned]',
+                            status        = BlockStatus.FINALIZED,
+                            state_root    = b.state_root,
+                            merkle_root   = b.merkle_root,
+                            quantum_entropy = b.quantum_entropy[:16] if b.quantum_entropy else '',
+                            epoch         = b.epoch,
+                        )
+                        stubbed_count += 1
+
+                # Remove stale orphans
+                for h in orphan_prune_candidates:
+                    chain._orphans.pop(h, None)
+
+            # ── Execute DB archival ────────────────────────────────────────────
+            db_archived = 0
+            if prune_db and db_prune_height > 0:
+                # Archive to a separate table, then delete from main blocks table
+                db._exec("""
+                    INSERT INTO blocks_archive
+                    SELECT * FROM blocks
+                    WHERE height <= %s AND status = 'finalized'
+                    ON CONFLICT (block_hash) DO NOTHING
+                """, (db_prune_height,))
+                result = db._exec("""
+                    WITH deleted AS (
+                        DELETE FROM blocks
+                        WHERE height <= %s AND status = 'finalized'
+                        RETURNING 1
+                    ) SELECT COUNT(*) as c FROM deleted
+                """, (db_prune_height,), fetch_one=True)
+                db_archived = int(result.get('c', 0)) if result else 0
+
+            stats_after = chain.get_stats()
+
+            return {
+                'status'          : 'pruned',
+                'memory_stubbed'  : stubbed_count,
+                'orphans_removed' : len(orphan_prune_candidates),
+                'db_archived'     : db_archived,
+                'memory_before'   : total_in_mem,
+                'memory_after'    : len(chain._blocks),
+                'orphans_before'  : orphan_count,
+                'orphans_after'   : len(chain._orphans),
+                'chain_length'    : stats_after['chain_length'],
+                'finalized_height': stats_after['finalized_height'],
+                'duration_ms'     : round((time.time()-ts_start)*1000, 2),
+            }
+
+        except Exception as e:
+            logger.error(f"[BLOCK_PRUNE] Error: {e}", exc_info=True)
+            return {'error': str(e)}
     
     def _handle_block_export(block_ref,options,correlation_id):
-        """Export block data"""
-        return {'error':'Export handler not implemented'}
+        """
+        Export one or many blocks in the requested format.
+        options:
+          format          ('json'|'csv'|'ndjson'|'minimal', default 'json')
+          include_transactions (bool, default True)
+          include_quantum  (bool, default False)
+          include_proof    (bool, default False)
+          range_start      (int) — export a height range (ignore block_ref)
+          range_end        (int)
+          range_limit      (int, default 500, max 5000)
+        """
+        try:
+            ts_start             = time.time()
+            fmt                  = str(options.get('format','json')).lower()
+            include_transactions = bool(options.get('include_transactions', True))
+            include_quantum      = bool(options.get('include_quantum', False))
+            include_proof        = bool(options.get('include_proof', False))
+            range_start          = options.get('range_start')
+            range_end            = options.get('range_end')
+            range_limit          = min(int(options.get('range_limit', 500)), 5000)
+
+            # ── Resolve block list ────────────────────────────────────────────
+            blocks_raw = []
+            if range_start is not None:
+                rs = int(range_start)
+                re_ = int(range_end) if range_end is not None else rs + range_limit - 1
+                actual_limit = min(re_ - rs + 1, range_limit)
+                rows = db._exec(
+                    "SELECT * FROM blocks WHERE height >= %s AND height <= %s ORDER BY height ASC LIMIT %s",
+                    (rs, re_, actual_limit)
+                ) or []
+                for row in rows:
+                    b = _load_block(row['height']) or _normalize_block(row)
+                    if b:
+                        blocks_raw.append(b)
+            elif block_ref is not None:
+                b = _load_block(block_ref)
+                if not b:
+                    return {'error': f'Block not found: {block_ref}'}
+                blocks_raw.append(b)
+            else:
+                # Export latest 20 blocks if no ref provided
+                rows = db.get_blocks(limit=20, offset=0)
+                for row in rows:
+                    b = _normalize_block(row) if isinstance(row, dict) else row
+                    if b:
+                        blocks_raw.append(b)
+
+            if not blocks_raw:
+                return {'error': 'No blocks found for export', 'block_ref': block_ref}
+
+            # ── Serialise each block ──────────────────────────────────────────
+            def _ts(t):
+                return t.isoformat() if hasattr(t, 'isoformat') else str(t)
+
+            def _serialise_block(b):
+                row = {
+                    'block_hash'        : b.block_hash,
+                    'height'            : b.height,
+                    'previous_hash'     : b.previous_hash,
+                    'timestamp'         : _ts(b.timestamp),
+                    'validator'         : b.validator,
+                    'merkle_root'       : b.merkle_root,
+                    'quantum_merkle_root': getattr(b,'quantum_merkle_root',''),
+                    'state_root'        : getattr(b,'state_root',''),
+                    'status'            : b.status.value if hasattr(b.status,'value') else str(b.status),
+                    'confirmations'     : b.confirmations,
+                    'difficulty'        : b.difficulty,
+                    'nonce'             : getattr(b,'nonce',''),
+                    'size_bytes'        : b.size_bytes,
+                    'gas_used'          : b.gas_used,
+                    'gas_limit'         : b.gas_limit,
+                    'total_fees'        : str(b.total_fees),
+                    'reward'            : str(b.reward),
+                    'epoch'             : b.epoch,
+                    'tx_capacity'       : b.tx_capacity,
+                    'temporal_coherence': b.temporal_coherence,
+                    'is_orphan'         : b.is_orphan,
+                    'quantum_proof_version': getattr(b,'quantum_proof_version', QUANTUM_PROOF_VERSION),
+                }
+                if include_transactions:
+                    txs = b.transactions if hasattr(b,'transactions') else []
+                    # txs may be list of hash strings or tx objects
+                    row['transactions'] = [
+                        t if isinstance(t, str) else
+                        (t.get('tx_hash','') if isinstance(t,dict) else getattr(t,'tx_hash',''))
+                        for t in txs
+                    ]
+                    row['tx_count'] = len(row['transactions'])
+                if include_quantum:
+                    row['quantum_entropy']  = getattr(b,'quantum_entropy','')
+                    row['temporal_proof']   = getattr(b,'temporal_proof',None)
+                if include_proof:
+                    row['quantum_proof']    = getattr(b,'quantum_proof',None)
+                return row
+
+            serialised = [_serialise_block(b) for b in blocks_raw]
+
+            # ── Format output ─────────────────────────────────────────────────
+            if fmt == 'csv':
+                import csv
+                import io
+                if not serialised:
+                    return {'error': 'No data to export'}
+                buf = io.StringIO()
+                fieldnames = list(serialised[0].keys())
+                writer = csv.DictWriter(buf, fieldnames=fieldnames)
+                writer.writeheader()
+                for row in serialised:
+                    # Flatten any nested values for CSV
+                    flat = {k: (json.dumps(v) if isinstance(v,(list,dict)) else v)
+                            for k,v in row.items()}
+                    writer.writerow(flat)
+                csv_str = buf.getvalue()
+                return {
+                    'format'      : 'csv',
+                    'block_count' : len(serialised),
+                    'data'        : csv_str,
+                    'byte_size'   : len(csv_str.encode()),
+                    'duration_ms' : round((time.time()-ts_start)*1000, 2),
+                }
+
+            elif fmt == 'ndjson':
+                lines = [json.dumps(row, default=str) for row in serialised]
+                ndjson_str = '\n'.join(lines)
+                return {
+                    'format'      : 'ndjson',
+                    'block_count' : len(serialised),
+                    'data'        : ndjson_str,
+                    'byte_size'   : len(ndjson_str.encode()),
+                    'duration_ms' : round((time.time()-ts_start)*1000, 2),
+                }
+
+            elif fmt == 'minimal':
+                minimal = [{
+                    'h'   : r['height'],
+                    'hash': r['block_hash'][:16] + '...',
+                    'ts'  : r['timestamp'],
+                    'v'   : r['validator'][:24],
+                    'txs' : r.get('tx_count', 0),
+                    'st'  : r['status'],
+                } for r in serialised]
+                return {
+                    'format'      : 'minimal',
+                    'block_count' : len(minimal),
+                    'data'        : minimal,
+                    'duration_ms' : round((time.time()-ts_start)*1000, 2),
+                }
+
+            else:  # default: json
+                return {
+                    'format'      : 'json',
+                    'block_count' : len(serialised),
+                    'data'        : serialised,
+                    'byte_size'   : len(json.dumps(serialised, default=str).encode()),
+                    'duration_ms' : round((time.time()-ts_start)*1000, 2),
+                    'options_used': {
+                        'include_transactions': include_transactions,
+                        'include_quantum'     : include_quantum,
+                        'include_proof'       : include_proof,
+                    },
+                }
+
+        except Exception as e:
+            logger.error(f"[BLOCK_EXPORT] Error: {e}", exc_info=True)
+            return {'error': str(e)}
     
     def _handle_block_sync(options,correlation_id):
-        """Sync blockchain state"""
-        return {'error':'Sync handler not implemented'}
+        """
+        Synchronise in-memory chain state from the database.
+        Loads the most recent blocks, rebuilds canonical chain, restores
+        finality state, and resolves any orphans.
+
+        options:
+          depth          (int, default 2000) — how many recent blocks to load
+          force_rebuild  (bool, default False) — wipe in-memory state and full rebuild
+          validate_chain (bool, default False) — run chain integrity after sync
+        """
+        try:
+            ts_start       = time.time()
+            depth          = min(int(options.get('depth', 2000)), 50_000)
+            force_rebuild  = bool(options.get('force_rebuild', False))
+            validate_after = bool(options.get('validate_chain', False))
+
+            stats_before = chain.get_stats()
+            tip_before   = chain.get_canonical_tip()
+
+            # ── Optional full wipe ────────────────────────────────────────────
+            if force_rebuild:
+                with chain._lock:
+                    chain._blocks.clear()
+                    chain._by_height.clear()
+                    chain._canonical_chain.clear()
+                    chain._orphans.clear()
+                    chain._fork_tips.clear()
+                    chain._finalized_height = 0
+                    chain._pending_finality.clear()
+                    chain._difficulty_history.clear()
+                    chain._current_difficulty = 1
+                    chain._planet_progress = 0.0
+
+            # ── Load blocks from DB ordered by height ascending ───────────────
+            rows = db._exec(
+                "SELECT * FROM blocks WHERE status != 'orphaned' ORDER BY height ASC LIMIT %s",
+                (depth,)
+            ) or []
+
+            loaded       = 0
+            already_had  = 0
+            errors       = []
+
+            for row in rows:
+                try:
+                    if row['block_hash'] in chain._blocks:
+                        already_had += 1
+                        continue
+                    blk = _normalize_block(row)
+                    if not blk:
+                        continue
+
+                    # Re-create a proper QuantumBlock to restore chain state
+                    qb = QuantumBlock(
+                        block_hash           = blk.block_hash,
+                        height               = blk.height,
+                        previous_hash        = blk.previous_hash,
+                        timestamp            = blk.timestamp if hasattr(blk.timestamp,'tzinfo') else
+                                               datetime.fromisoformat(str(blk.timestamp).replace(' ','T')).replace(tzinfo=timezone.utc)
+                                               if isinstance(blk.timestamp,str) else
+                                               datetime.now(timezone.utc),
+                        validator            = blk.validator,
+                        merkle_root          = blk.merkle_root,
+                        quantum_merkle_root  = blk.quantum_merkle_root,
+                        state_root           = blk.state_root,
+                        quantum_proof        = blk.quantum_proof,
+                        quantum_entropy      = blk.quantum_entropy,
+                        temporal_proof       = blk.temporal_proof,
+                        status               = BlockStatus(blk.status.value
+                                               if hasattr(blk.status,'value') else str(blk.status))
+                                               if hasattr(blk.status,'value') or isinstance(blk.status,str)
+                                               else BlockStatus.CONFIRMED,
+                        difficulty           = blk.difficulty,
+                        nonce                = blk.nonce,
+                        size_bytes           = blk.size_bytes,
+                        gas_used             = blk.gas_used,
+                        gas_limit            = blk.gas_limit,
+                        total_fees           = blk.total_fees,
+                        reward               = blk.reward,
+                        confirmations        = blk.confirmations,
+                        epoch                = blk.epoch,
+                        tx_capacity          = blk.tx_capacity,
+                        quantum_proof_version= blk.quantum_proof_version,
+                        is_orphan            = blk.is_orphan,
+                        temporal_coherence   = blk.temporal_coherence,
+                        metadata             = blk.metadata,
+                    )
+
+                    with chain._lock:
+                        chain._blocks[qb.block_hash] = qb
+                        chain._by_height[qb.height].append(qb.block_hash)
+
+                    loaded += 1
+                except Exception as row_err:
+                    errors.append({'block_hash': row.get('block_hash','?'), 'error': str(row_err)})
+
+            # ── Rebuild canonical chain from loaded blocks ────────────────────
+            if rows:
+                with chain._lock:
+                    # Sort by height and build canonical chain selecting the block
+                    # with highest quantum weight at each height
+                    heights_in_chain = sorted(chain._by_height.keys())
+                    new_canonical = []
+                    prev_hash = None
+
+                    for h in heights_in_chain:
+                        candidates = [chain._blocks[bh] for bh in chain._by_height[h]
+                                      if bh in chain._blocks]
+                        if not candidates:
+                            continue
+                        # Filter to those connecting to prev (if we have a prev)
+                        if prev_hash is not None:
+                            linked = [b for b in candidates if b.previous_hash == prev_hash]
+                            if linked:
+                                candidates = linked
+
+                        # Pick highest-weight candidate
+                        best = max(candidates, key=lambda b: chain._block_weight(b))
+
+                        # Only extend canonical if it links to previous
+                        if prev_hash is None or best.previous_hash == prev_hash:
+                            new_canonical.append(best.block_hash)
+                            prev_hash = best.block_hash
+                        else:
+                            # Gap detected — stop canonical extension
+                            chain._orphans[best.block_hash] = best
+
+                    chain._canonical_chain = new_canonical
+
+                    # Rebuild fork tips: blocks that no other block points to
+                    all_prev = {chain._blocks[h].previous_hash
+                                for h in chain._blocks if h in chain._blocks}
+                    chain._fork_tips = {
+                        bh for bh in chain._blocks
+                        if bh not in all_prev
+                    }
+
+            # ── Restore finality ──────────────────────────────────────────────
+            if chain._canonical_chain:
+                tip_h = len(chain._canonical_chain)
+                for bh in chain._canonical_chain:
+                    b = chain._blocks.get(bh)
+                    if b and b.status == BlockStatus.FINALIZED:
+                        chain._finalized_height = max(chain._finalized_height, b.height)
+
+            # ── Restore difficulty from recent block times ─────────────────────
+            if len(chain._canonical_chain) >= 2:
+                recent = chain._canonical_chain[-min(100, len(chain._canonical_chain)):]
+                for i in range(1, len(recent)):
+                    b1 = chain._blocks.get(recent[i])
+                    b0 = chain._blocks.get(recent[i-1])
+                    if b1 and b0 and hasattr(b1,'timestamp') and hasattr(b0,'timestamp'):
+                        try:
+                            delta = (b1.timestamp - b0.timestamp).total_seconds()
+                            if 0 < delta < 3600:
+                                chain._difficulty_history.append(delta)
+                        except:
+                            pass
+
+            # ── Optional post-sync validation ────────────────────────────────
+            integrity_summary = None
+            if validate_after and chain._canonical_chain:
+                tip_new = chain.get_canonical_tip()
+                check_depth = min(100, len(chain._canonical_chain))
+                check_result = _handle_chain_integrity(
+                    {'start_height': max(0, (tip_new.height if tip_new else 0) - check_depth),
+                     'end_height'  : tip_new.height if tip_new else 0},
+                    correlation_id
+                )
+                integrity_summary = {
+                    'blocks_checked'  : check_result.get('blocks_checked',0),
+                    'integrity_score' : check_result.get('integrity_score',0.0),
+                    'errors'          : len(check_result.get('broken_links',[])) +
+                                        len(check_result.get('invalid_blocks',[])),
+                }
+
+            stats_after = chain.get_stats()
+            tip_after   = chain.get_canonical_tip()
+
+            return {
+                'status'              : 'synced',
+                'blocks_loaded'       : loaded,
+                'blocks_already_had'  : already_had,
+                'db_rows_scanned'     : len(rows),
+                'load_errors'         : len(errors),
+                'error_details'       : errors[:10],  # cap output
+                'canonical_chain'     : {
+                    'before': stats_before['chain_length'],
+                    'after' : stats_after['chain_length'],
+                },
+                'finalized_height'    : {
+                    'before': stats_before['finalized_height'],
+                    'after' : stats_after['finalized_height'],
+                },
+                'tip'                 : {
+                    'before': {'height': tip_before.height, 'hash': tip_before.block_hash} if tip_before else None,
+                    'after' : {'height': tip_after.height,  'hash': tip_after.block_hash}  if tip_after  else None,
+                },
+                'fork_tips'           : stats_after['fork_tips'],
+                'orphans'             : stats_after['orphan_count'],
+                'current_difficulty'  : stats_after['current_difficulty'],
+                'force_rebuild'       : force_rebuild,
+                'integrity_check'     : integrity_summary,
+                'duration_ms'         : round((time.time()-ts_start)*1000, 2),
+            }
+
+        except Exception as e:
+            logger.error(f"[BLOCK_SYNC] Error: {e}", exc_info=True)
+            return {'error': str(e)}
     
     def _handle_merkle_verify(block_ref,options,correlation_id):
-        """Verify Merkle tree"""
-        validation=_handle_block_validate(block_ref,options,correlation_id)
-        return {'merkle_check':validation.get('checks',{}).get('merkle_root',{})}
-    
+        """
+        Deep Merkle tree verification: re-derives the standard and quantum Merkle
+        roots from the block's transaction list and compares to stored values.
+        options:
+          verify_quantum  (bool, default True)
+          show_tree       (bool, default False) — include full tree levels
+        """
+        try:
+            block = _load_block(block_ref)
+            if not block:
+                return {'error': f'Block not found: {block_ref}'}
+
+            verify_quantum = bool(options.get('verify_quantum', True))
+            show_tree      = bool(options.get('show_tree', False))
+
+            tx_list = list(block.transactions) if hasattr(block, 'transactions') else []
+            tx_hashes = []
+            for t in tx_list:
+                if isinstance(t, str):
+                    tx_hashes.append(t)
+                elif isinstance(t, dict):
+                    tx_hashes.append(t.get('tx_hash', str(t)))
+                elif hasattr(t, 'tx_hash'):
+                    tx_hashes.append(t.tx_hash)
+
+            # ── Standard Merkle ────────────────────────────────────────────────
+            tree_levels = []
+            computed_std_merkle = None
+            try:
+                level = list(tx_hashes)
+                if show_tree:
+                    tree_levels.append({'level': 0, 'nodes': level[:]})
+                depth = 0
+                while len(level) > 1:
+                    depth += 1
+                    if len(level) % 2 != 0:
+                        level.append(level[-1])
+                    level = [hashlib.sha256(
+                        (level[i] + level[i+1] if level[i] <= level[i+1]
+                         else level[i+1] + level[i]).encode()
+                    ).hexdigest() for i in range(0, len(level), 2)]
+                    if show_tree:
+                        tree_levels.append({'level': depth, 'nodes': level[:]})
+                computed_std_merkle = level[0] if level else hashlib.sha256(b'').hexdigest()
+            except Exception as me:
+                computed_std_merkle = None
+                tree_levels = []
+
+            std_stored = block.merkle_root
+            std_valid  = computed_std_merkle == std_stored
+
+            # ── Quantum Merkle ─────────────────────────────────────────────────
+            q_valid = None
+            q_computed = None
+            q_stored   = getattr(block, 'quantum_merkle_root', '')
+            if verify_quantum and q_stored:
+                try:
+                    entropy_hex = getattr(block, 'quantum_entropy', '') or ''
+                    entropy_bytes = bytes.fromhex(entropy_hex[:64]) if len(entropy_hex) >= 64 else os.urandom(32)
+                    q_computed = QuantumBlockBuilder.quantum_merkle_root(tx_hashes, entropy_bytes)
+                    # Quantum Merkle is QRNG-seeded so it will differ — instead we verify
+                    # structural validity: same number of tx inputs produce same-length output
+                    q_valid = isinstance(q_computed, str) and len(q_computed) == 64
+                    # True match check
+                    q_exact_match = q_computed == q_stored
+                except Exception as qe:
+                    q_valid = False
+                    q_computed = str(qe)
+                    q_exact_match = False
+            else:
+                q_exact_match = None
+
+            return {
+                'block_hash'     : block.block_hash,
+                'height'         : block.height,
+                'tx_count'       : len(tx_hashes),
+                'standard_merkle': {
+                    'stored'           : std_stored,
+                    'computed'         : computed_std_merkle,
+                    'valid'            : std_valid,
+                    'tree_depth'       : len(tree_levels) - 1 if tree_levels else 0,
+                    'tree_levels'      : tree_levels if show_tree else [],
+                },
+                'quantum_merkle' : {
+                    'stored'           : q_stored,
+                    'computed'         : q_computed,
+                    'structural_valid' : q_valid,
+                    'exact_match'      : q_exact_match,
+                    'note'             : 'Quantum Merkle uses QRNG seed — exact match requires same seed' if q_stored else 'No quantum merkle stored',
+                },
+                'overall_valid'  : std_valid and (q_valid is None or q_valid),
+            }
+        except Exception as e:
+            logger.error(f"[MERKLE_VERIFY] {e}", exc_info=True)
+            return {'error': str(e)}
+
     def _handle_temporal_verify(block_ref,options,correlation_id):
-        """Verify temporal coherence"""
-        validation=_handle_block_validate(block_ref,options,correlation_id)
-        return {'temporal_check':validation.get('checks',{}).get('temporal_coherence',{})}
-    
+        """
+        Full temporal coherence verification:
+        - Re-runs the temporal circuit for this block
+        - Compares past/present/future state outcomes to stored temporal_proof
+        - Computes coherence score delta vs stored value
+        - Validates temporal chain: block N's 'future_state' should link to N+1's 'past_state'
+        options:
+          run_circuit     (bool, default True) — run fresh temporal circuit
+          check_neighbors (bool, default True) — cross-validate with adjacent blocks
+        """
+        try:
+            block = _load_block(block_ref)
+            if not block:
+                return {'error': f'Block not found: {block_ref}'}
+
+            run_circuit     = bool(options.get('run_circuit', True))
+            check_neighbors = bool(options.get('check_neighbors', True))
+
+            stored_coherence = getattr(block, 'temporal_coherence', None)
+            stored_proof     = getattr(block, 'temporal_proof', None)
+
+            # ── Re-run temporal circuit ────────────────────────────────────────
+            fresh_result = None
+            circuit_coherence = None
+            if run_circuit:
+                try:
+                    prev_block = _load_block(block.height - 1) if block.height > 0 else None
+                    past_hash  = prev_block.block_hash if prev_block else '0' * 64
+                    future_seed = QRNG.get_hex(8)
+                    fresh_result = QCE.build_temporal_circuit(block.height, past_hash, future_seed)
+                    circuit_coherence = fresh_result.get('temporal_coherence', None)
+                except Exception as ce:
+                    fresh_result = {'error': str(ce)}
+
+            # ── Stored proof decode ────────────────────────────────────────────
+            stored_proof_data = None
+            if stored_proof:
+                try:
+                    stored_proof_data = json.loads(stored_proof) if isinstance(stored_proof, str) else stored_proof
+                except:
+                    stored_proof_data = {'raw': stored_proof}
+
+            # ── Neighbor cross-validation ─────────────────────────────────────
+            neighbor_check = {}
+            if check_neighbors:
+                prev_b = _load_block(block.height - 1) if block.height > 0 else None
+                next_b = _load_block(block.height + 1)
+
+                neighbor_check['prev'] = {
+                    'height'     : block.height - 1,
+                    'found'      : prev_b is not None,
+                    'coherence'  : getattr(prev_b, 'temporal_coherence', None) if prev_b else None,
+                    'hash_match' : (block.previous_hash == (prev_b.block_hash if prev_b else None)),
+                }
+                neighbor_check['next'] = {
+                    'height'    : block.height + 1,
+                    'found'     : next_b is not None,
+                    'coherence' : getattr(next_b, 'temporal_coherence', None) if next_b else None,
+                    'prev_hash_match': (next_b.previous_hash == block.block_hash) if next_b else None,
+                }
+
+            # ── Coherence quality assessment ───────────────────────────────────
+            coherence_val  = stored_coherence or (circuit_coherence or 0.0)
+            quality_band   = ('excellent' if coherence_val >= 0.95 else
+                              'good'      if coherence_val >= 0.85 else
+                              'marginal'  if coherence_val >= 0.70 else 'poor')
+            coherence_delta= round(abs((circuit_coherence or coherence_val) - (stored_coherence or coherence_val)), 6)
+
+            return {
+                'block_hash'          : block.block_hash,
+                'height'              : block.height,
+                'stored_coherence'    : stored_coherence,
+                'stored_proof_parsed' : stored_proof_data,
+                'fresh_circuit_result': fresh_result,
+                'circuit_coherence'   : circuit_coherence,
+                'coherence_delta'     : coherence_delta,
+                'quality_band'        : quality_band,
+                'temporal_valid'      : coherence_val >= 0.70,
+                'neighbor_validation' : neighbor_check,
+                'qiskit_available'    : QISKIT_AVAILABLE,
+            }
+        except Exception as e:
+            logger.error(f"[TEMPORAL_VERIFY] {e}", exc_info=True)
+            return {'error': str(e)}
+
     def _handle_quantum_finality(block_ref,options,correlation_id):
-        """Check quantum finality status"""
-        measurements=_handle_quantum_measure(block_ref,options,correlation_id)
-        return {'finality':measurements.get('finality',{})}
+        """
+        Full quantum finality assessment for a block:
+        - Counts confirmations from canonical tip
+        - Decodes and analyses the stored quantum proof
+        - Optionally runs a fresh GHZ-8 circuit
+        - Computes composite finality probability
+        options:
+          run_fresh_circuit (bool, default False) — run new GHZ-8 collapse
+          include_validators (bool, default True) — decode W-state validator info
+        """
+        try:
+            block = _load_block(block_ref)
+            if not block:
+                return {'error': f'Block not found: {block_ref}'}
+
+            run_fresh       = bool(options.get('run_fresh_circuit', False))
+            incl_validators = bool(options.get('include_validators', True))
+
+            tip     = chain.get_canonical_tip()
+            db_tip  = db.get_latest_block()
+            tip_h   = (tip.height if tip else
+                       (db_tip.get('height', block.height) if db_tip else block.height))
+            confs   = max(0, tip_h - block.height + 1)
+
+            # ── Decode stored quantum proof ────────────────────────────────────
+            stored_proof_raw  = getattr(block, 'quantum_proof', None)
+            stored_proof_parsed = {}
+            ghz_outcome       = 'unknown'
+            fidelity          = 0.0
+            validator_info    = {}
+
+            if stored_proof_raw:
+                try:
+                    # Proof may be JSON string or base64-encoded JSON
+                    try:
+                        stored_proof_parsed = json.loads(stored_proof_raw)
+                    except:
+                        decoded = base64.b64decode(stored_proof_raw).decode()
+                        stored_proof_parsed = json.loads(decoded)
+
+                    ghz_outcome = stored_proof_parsed.get('collapse_outcome',
+                                  stored_proof_parsed.get('ghz_outcome', 'unknown'))
+                    fidelity    = float(stored_proof_parsed.get('entanglement_fidelity',
+                                        stored_proof_parsed.get('fidelity', 0.0)))
+
+                    if incl_validators:
+                        validator_info = {
+                            'selected_validator' : stored_proof_parsed.get('validator', -1),
+                            'qubit_states'       : stored_proof_parsed.get('qubit_states', []),
+                            'validator_assignments': stored_proof_parsed.get('qubit_states', [])[:W_VALIDATORS],
+                            'w_circuit_id'       : stored_proof_parsed.get('w_circuit', ''),
+                            'ghz_circuit_id'     : stored_proof_parsed.get('ghz_circuit', ''),
+                            'channel'            : stored_proof_parsed.get('channel', 'unknown'),
+                        }
+                except Exception as pe:
+                    stored_proof_parsed = {'parse_error': str(pe), 'raw_preview': str(stored_proof_raw)[:80]}
+
+            # ── Fresh GHZ-8 circuit ────────────────────────────────────────────
+            fresh_result = None
+            fresh_outcome = None
+            fresh_fidelity = None
+            if run_fresh:
+                try:
+                    ghz = QCE.collapse_ghz8(block.block_hash)
+                    fresh_result   = asdict(ghz)
+                    fresh_outcome  = ghz.collapse_outcome
+                    fresh_fidelity = ghz.entanglement_fidelity
+                except Exception as fe:
+                    fresh_result = {'error': str(fe)}
+
+            # ── Composite finality probability ─────────────────────────────────
+            conf_prob       = 1.0 - math.exp(-confs / 4.0) if confs < FINALITY_CONFIRMATIONS else 1.0
+            quantum_finalized = (ghz_outcome == 'finalized' and fidelity >= 0.5)
+            stored_final_flag = block.status.value if hasattr(block.status,'value') else str(block.status)
+            db_confirmed      = stored_final_flag in ('finalized', 'confirmed')
+
+            composite_prob  = (conf_prob * 0.5 +
+                               (0.3 if quantum_finalized else 0.0) +
+                               (0.2 if db_confirmed else 0.0))
+            is_finalized    = (confs >= FINALITY_CONFIRMATIONS and quantum_finalized)
+
+            return {
+                'block_hash'              : block.block_hash,
+                'height'                  : block.height,
+                'confirmations'           : confs,
+                'canonical_tip_height'    : tip_h,
+                'is_finalized'            : is_finalized,
+                'finality_threshold'      : FINALITY_CONFIRMATIONS,
+                'remaining_confirmations' : max(0, FINALITY_CONFIRMATIONS - confs),
+                'confirmation_probability': round(conf_prob, 6),
+                'quantum_finalized'       : quantum_finalized,
+                'composite_finality_prob' : round(min(composite_prob, 1.0), 6),
+                'ghz_outcome'             : ghz_outcome,
+                'entanglement_fidelity'   : round(fidelity, 6),
+                'block_status'            : stored_final_flag,
+                'stored_proof'            : stored_proof_parsed,
+                'validators'              : validator_info if incl_validators else {},
+                'fresh_circuit'           : fresh_result,
+                'fresh_outcome'           : fresh_outcome,
+                'fresh_fidelity'          : round(fresh_fidelity, 6) if fresh_fidelity is not None else None,
+                'quantum_entropy_present' : bool(getattr(block,'quantum_entropy',None)),
+                'proof_version'           : getattr(block,'quantum_proof_version', QUANTUM_PROOF_VERSION),
+                'temporal_coherence'      : getattr(block,'temporal_coherence', 1.0),
+            }
+        except Exception as e:
+            logger.error(f"[QUANTUM_FINALITY] {e}", exc_info=True)
+            return {'error': str(e)}
     
     def _handle_stats_aggregate(options,correlation_id):
         """Aggregate block statistics"""

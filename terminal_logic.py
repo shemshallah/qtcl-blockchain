@@ -2541,81 +2541,185 @@ class TerminalEngine:
     # ═════════════════════════════════════════════════════════════════════════════════════════
     
     def _cmd_block_details_comprehensive(self):
-        """🔷 Comprehensive block details with quantum measurements"""
         try:
             block_id = UI.prompt("Block hash or height (or 'latest')")
-            args_str = block_id
-            
-            # Check for flags
-            show_full = UI.confirm("Include full transaction list?", default=False)
-            show_quantum = UI.confirm("Include quantum measurements?", default=True)
-            validate_block = UI.confirm("Validate block integrity?", default=False)
-            
-            if show_full:
-                args_str += " --full"
-            if show_quantum:
-                args_str += " --quantum"
-            if validate_block:
-                args_str += " --validate"
-            
-            # Call the comprehensive command
-            pass
+            if not block_id or block_id.strip() == '':
+                UI.error("Block identifier required")
+                return
+            block_id = block_id.strip()
+            if block_id.lower() == 'latest':
+                block_id = 'latest'
+            show_full    = UI.confirm("Include full transaction list?", default=False)
+            show_quantum = UI.confirm("Include quantum measurements?",  default=True)
+            validate_blk = UI.confirm("Validate block integrity?",       default=False)
+            options = {
+                'include_transactions': show_full,
+                'include_quantum'     : show_quantum,
+            }
+            result = GlobalCommandRegistry._block_details(block=block_id,
+                                                          full=show_full,
+                                                          quantum=show_quantum)
+            if validate_blk and result.get('status') == 'success':
+                val = GlobalCommandRegistry._block_validate(block=block_id)
+                if isinstance(result.get('result'), dict):
+                    result['result']['validation'] = val.get('result', val)
+            if result.get('status') == 'success':
+                UI.success(json.dumps(result.get('result', result), indent=2, default=str))
+            else:
+                UI.error(f"Block details failed: {result.get('error', result)}")
         except Exception as e:
             UI.error(f"Error: {e}")
-    
+
     def _cmd_block_validate_comprehensive(self):
-        """🔍 Comprehensive block validation with quantum proofs"""
         try:
             block_id = UI.prompt("Block hash or height to validate")
+            if not block_id or not block_id.strip():
+                UI.error("Block identifier required")
+                return
+            block_id         = block_id.strip()
             validate_quantum = UI.confirm("Validate quantum proofs?", default=True)
-            validate_full = UI.confirm("Full validation (slower)?", default=False)
-            
-            args_str = block_id
+            validate_full    = UI.confirm("Full validation (slower)?", default=False)
+            options = {}
             if not validate_quantum:
-                args_str += " --skip-quantum"
+                options['validate_quantum'] = False
             if validate_full:
-                args_str += " --full"
-            
-            pass
+                options['validate_transactions'] = True
+                options['tx_sample_size']        = 50
+            result = GlobalCommandRegistry._block_validate(block=block_id, **options)
+            if result.get('status') == 'success':
+                inner = result.get('result', result)
+                if isinstance(inner, dict) and 'result' in inner:
+                    inner = inner['result']
+                overall = inner.get('overall_valid', True)
+                checks  = inner.get('checks', {})
+                if overall:
+                    UI.success(f"Block {block_id} — ALL CHECKS PASSED")
+                else:
+                    UI.error(f"Block {block_id} — VALIDATION FAILED")
+                for chk_name, chk_data in checks.items():
+                    icon = '✅' if chk_data.get('valid') else '❌'
+                    UI.info(f"  {icon} {chk_name}: {json.dumps(chk_data, default=str)}")
+            else:
+                UI.error(f"Validation failed: {result.get('error', result)}")
         except Exception as e:
             UI.error(f"Block validation error: {e}")
-    
+
     def _cmd_block_quantum_measure(self):
-        """⚛️ Perform quantum measurements on block"""
         try:
             block_id = UI.prompt("Block hash or height for quantum measurement")
-            
-            pass
+            if not block_id or not block_id.strip():
+                UI.error("Block identifier required")
+                return
+            block_id = block_id.strip()
+            run_finality = UI.confirm("Include fresh finality circuit?", default=False)
+            result = GlobalCommandRegistry._block_quantum(block=block_id)
+            if result.get('status') == 'success':
+                inner = result.get('result', result)
+                if isinstance(inner, dict) and 'result' in inner:
+                    inner = inner['result']
+                UI.success(f"Quantum measurements for block {block_id}:")
+                UI.info(json.dumps(inner, indent=2, default=str))
+                if run_finality:
+                    fin_result = GlobalCommandRegistry._block_finality(block=block_id,
+                                                                        run_fresh=True)
+                    UI.info("Finality:")
+                    UI.info(json.dumps(fin_result.get('result', fin_result), indent=2, default=str))
+            else:
+                UI.error(f"Quantum measurement failed: {result.get('error', result)}")
         except Exception as e:
             UI.error(f"Quantum measurement error: {e}")
-    
+
     def _cmd_block_batch_query(self):
-        """📦 Query multiple blocks in parallel"""
         try:
-            UI.info("Enter block references (space-separated) or range (e.g., 100-110):")
-            blocks = UI.prompt("Blocks")
+            UI.info("Enter block references — space-separated heights/hashes, or a range like 10-20:")
+            blocks_input = input("> ").strip()
+            if not blocks_input:
+                UI.error("No blocks specified")
+                return
             include_quantum = UI.confirm("Include quantum measurements?", default=False)
-            
-            args_str = blocks
-            if include_quantum:
-                args_str += " --quantum"
-            
-            pass
+            # Parse: range syntax OR space-separated list
+            block_refs: list = []
+            range_match = re.match(r'^(\d+)-(\d+)$', blocks_input)
+            if range_match:
+                start_h = int(range_match.group(1))
+                end_h   = int(range_match.group(2))
+                if end_h - start_h > 200:
+                    UI.error("Range too large — maximum 200 blocks at once")
+                    return
+                block_refs = list(range(start_h, end_h + 1))
+            else:
+                for token in blocks_input.split():
+                    token = token.strip()
+                    if token:
+                        block_refs.append(int(token) if token.isdigit() else token)
+            if not block_refs:
+                UI.error("No valid block references parsed")
+                return
+            result = GlobalCommandRegistry._block_batch(blocks=block_refs,
+                                                         quantum=include_quantum)
+            if result.get('status') == 'success':
+                inner = result.get('result', result)
+                if isinstance(inner, dict) and 'result' in inner:
+                    inner = inner['result']
+                blocks_data = inner.get('results', inner.get('blocks', []))
+                ok_count    = sum(1 for b in blocks_data if 'error' not in b)
+                fail_count  = len(blocks_data) - ok_count
+                UI.success(f"Batch query: {ok_count} found, {fail_count} errors out of {len(block_refs)} requested")
+                for b in blocks_data[:10]:
+                    if 'error' in b:
+                        UI.error(f"  ❌ {b.get('block_ref','?')}: {b['error']}")
+                    else:
+                        UI.info(f"  ✅ h={b.get('height','?')} {b.get('block_hash','')[:16]}... [{b.get('status','')}]")
+                if len(blocks_data) > 10:
+                    UI.info(f"  ... and {len(blocks_data)-10} more (full data in result)")
+            else:
+                UI.error(f"Batch query failed: {result.get('error', result)}")
         except Exception as e:
             UI.error(f"Batch query error: {e}")
-    
+
     def _cmd_block_integrity_check(self):
-        """🔍 Verify blockchain integrity"""
         try:
-            UI.info("Enter range (start end) or leave empty for recent 100 blocks:")
+            UI.info("Enter height range — format: <start> <end> — or press Enter for recent 100 blocks:")
             range_input = input("> ").strip()
-            
+            validate_q  = UI.confirm("Validate quantum proofs in each block?", default=False)
             if not range_input:
-                args_str = "--recent 100"
+                start_h = None
+                end_h   = None
             else:
-                args_str = range_input
-            
-            pass
+                parts = range_input.split()
+                if len(parts) >= 2:
+                    start_h = int(parts[0])
+                    end_h   = int(parts[1])
+                elif len(parts) == 1 and '-' in parts[0]:
+                    segs = parts[0].split('-')
+                    start_h, end_h = int(segs[0]), int(segs[1])
+                else:
+                    start_h = int(parts[0])
+                    end_h   = start_h + 99
+            result = GlobalCommandRegistry._block_integrity(start=start_h, end=end_h,
+                                                             validate_quantum=validate_q)
+            if result.get('status') == 'success':
+                inner = result.get('result', result)
+                if isinstance(inner, dict) and 'result' in inner:
+                    inner = inner['result']
+                checked  = inner.get('blocks_checked', 0)
+                valid    = inner.get('valid_blocks', 0)
+                score    = inner.get('integrity_score', 0.0)
+                broken   = inner.get('broken_links', [])
+                invalids = inner.get('invalid_blocks', [])
+                orphaned = inner.get('orphaned_blocks', [])
+                icon     = '✅' if score >= 1.0 else ('⚠️' if score >= 0.95 else '❌')
+                UI.success(f"{icon} Integrity: {valid}/{checked} valid — score {score:.4f}")
+                if broken:
+                    UI.error(f"  Broken links ({len(broken)}): {broken[:5]}")
+                if invalids:
+                    UI.error(f"  Invalid blocks ({len(invalids)}): {[b.get('height') for b in invalids[:5]]}")
+                if orphaned:
+                    UI.info(f"  Orphaned blocks: {orphaned[:10]}")
+                if score >= 1.0:
+                    UI.success("Chain is fully intact in the checked range.")
+            else:
+                UI.error(f"Integrity check failed: {result.get('error', result)}")
         except Exception as e:
             UI.error(f"Integrity check error: {e}")
     
@@ -4859,8 +4963,58 @@ class GlobalCommandRegistry:
             GlobalCommandRegistry._block_explorer, 'block')(*a, **k),
         'block/info': lambda *a, **k: GlobalCommandRegistry._cmd_wrapper(
             GlobalCommandRegistry._block_info, 'block')(*a, **k),
-        'block/history': lambda *a, **k: GlobalCommandRegistry._cmd_wrapper(
-            GlobalCommandRegistry._block_history, 'address')(*a, **k),
+        'block/finality': lambda *a, **k: GlobalCommandRegistry._cmd_wrapper(
+            GlobalCommandRegistry._block_finality, 'block')(*a, **k),
+        'block/export': lambda *a, **k: GlobalCommandRegistry._block_export(
+            block=a[0] if a else k.pop('block', None),
+            format=k.pop('format', 'json'),
+            include_transactions=k.pop('include_transactions', True),
+            include_quantum=k.pop('include_quantum', False),
+            range_start=k.pop('range_start', None),
+            range_end=k.pop('range_end', None),
+            range_limit=k.pop('range_limit', 500),
+            **k
+        ),
+        'block/sync': lambda *a, **k: GlobalCommandRegistry._block_sync(
+            depth=a[0] if a else k.pop('depth', 2000),
+            force_rebuild=k.pop('force_rebuild', False),
+            validate_chain=k.pop('validate_chain', False),
+            **k
+        ),
+        'block/reorg': lambda *a, **k: GlobalCommandRegistry._block_reorg(
+            block=a[0] if a else k.pop('block', None),
+            dry_run=k.pop('dry_run', True),
+            force=k.pop('force', False),
+            max_reorg_depth=k.pop('max_reorg_depth', 100),
+            **k
+        ),
+        'block/prune': lambda *a, **k: GlobalCommandRegistry._block_prune(
+            keep_blocks=a[0] if a else k.pop('keep_blocks', 10000),
+            prune_db=k.pop('prune_db', False),
+            dry_run=k.pop('dry_run', True),
+            **k
+        ),
+        'block/merkle': lambda *a, **k: GlobalCommandRegistry._block_merkle(
+            block=a[0] if a else k.pop('block', None),
+            show_tree=k.pop('show_tree', False),
+            **k
+        ),
+        'block/temporal': lambda *a, **k: GlobalCommandRegistry._block_temporal(
+            block=a[0] if a else k.pop('block', None),
+            run_circuit=k.pop('run_circuit', True),
+            **k
+        ),
+        # block/history — first positional arg maps to 'limit', or use limit=N kwarg
+        'block/history': lambda *a, **k: GlobalCommandRegistry._block_history(
+            limit=a[0] if a else k.pop('limit', 20),
+            offset=k.pop('offset', 0),
+            order=k.pop('order', 'desc'),
+            min_height=k.pop('min_height', None),
+            max_height=k.pop('max_height', None),
+            validator=k.pop('validator', None) or k.pop('address', None),
+            status=k.pop('status', None),
+            **k
+        ),
     }
     
     # DeFi commands (stub implementations)
@@ -5464,19 +5618,427 @@ class GlobalCommandRegistry:
         except Exception as e:
             return {'status': 'error', 'error': str(e)}
 
-    def _block_explorer(**kwargs) -> Dict[str, Any]:
-        """Block explorer (stub - redirects to block/details)"""
-        return {'status': 'info', 'result': 'Use block/details for comprehensive block information'}
+    @staticmethod
+    def _block_explorer(block: str = None, query: str = None, **kwargs) -> Dict[str, Any]:
+        """
+        Universal block explorer — searches by height, hash prefix, validator, tx_hash,
+        or address. Returns matching blocks and transactions from the chain.
+        """
+        try:
+            import requests
+            base_url  = 'https://qtcl-blockchain.koyeb.app'
+            search_q  = block or query or kwargs.get('q', '')
+            if not search_q:
+                return {
+                    'status': 'error',
+                    'error' : 'Provide a block height, hash, validator address, or tx_hash to search'
+                }
+            search_q = str(search_q).strip()
+            results  = {'status': 'success', 'query': search_q, 'matches': {}}
+
+            # ── Strategy 1: exact height ──────────────────────────────────────
+            if search_q.isdigit():
+                resp = requests.get(f'{base_url}/blockchain/blocks/{search_q}', timeout=8)
+                if resp.status_code == 200:
+                    results['matches']['block_by_height'] = resp.json()
+
+            # ── Strategy 2: full or prefix hash (≥ 8 hex chars) ──────────────
+            if re.match(r'^[0-9a-fA-F]{8,64}$', search_q):
+                if len(search_q) == 64:
+                    resp = requests.get(f'{base_url}/blockchain/blocks/hash/{search_q}', timeout=8)
+                    if resp.status_code == 200:
+                        results['matches']['block_by_hash'] = resp.json()
+                    # Also try as tx_hash
+                    resp_tx = requests.get(f'{base_url}/blockchain/transactions/{search_q}', timeout=8)
+                    if resp_tx.status_code == 200:
+                        results['matches']['transaction'] = resp_tx.json()
+                else:
+                    # Prefix search via block command
+                    resp = requests.post(f'{base_url}/blockchain/blocks/command', json={
+                        'command': 'query',
+                        'block'  : search_q,
+                        'options': {'include_transactions': False},
+                    }, timeout=10)
+                    if resp.status_code == 200:
+                        results['matches']['block_prefix'] = resp.json()
+
+            # ── Strategy 3: address / validator search ────────────────────────
+            if search_q.startswith('qtcl') or len(search_q) > 20:
+                resp_txs = requests.get(
+                    f'{base_url}/blockchain/transactions',
+                    params={'address': search_q, 'limit': 10},
+                    timeout=8
+                )
+                if resp_txs.status_code == 200:
+                    results['matches']['transactions_by_address'] = resp_txs.json()
+                # Validator search: get blocks validated by this address
+                resp_blks = requests.post(f'{base_url}/blockchain/blocks/command', json={
+                    'command': 'history',
+                    'options': {'validator': search_q, 'limit': 10},
+                }, timeout=10)
+                if resp_blks.status_code == 200:
+                    val_data = resp_blks.json().get('result', {})
+                    if val_data.get('blocks'):
+                        results['matches']['blocks_by_validator'] = val_data
+
+            # ── Strategy 4: latest blocks as fallback ─────────────────────────
+            if not results['matches']:
+                resp = requests.get(f'{base_url}/blockchain/blocks', params={'limit': 5}, timeout=8)
+                if resp.status_code == 200:
+                    results['matches']['latest_blocks'] = resp.json()
+                    results['_note'] = f"No exact match for '{search_q}' — showing latest blocks"
+
+            match_count = sum(
+                (len(v) if isinstance(v, list) else 1)
+                for v in results['matches'].values()
+                if v
+            )
+            results['match_count'] = match_count
+            return results
+
+        except Exception as e:
+            return {'status': 'error', 'error': str(e)}
+
+    @staticmethod
+    def _block_info(block: str = None, **kwargs) -> Dict[str, Any]:
+        """
+        Quick block info summary — height, hash, timestamp, tx_count, status,
+        validator, fees, and finality. Lightweight alternative to block/details.
+        """
+        try:
+            import requests
+            base_url = 'https://qtcl-blockchain.koyeb.app'
+            ref      = (block or kwargs.get('height') or kwargs.get('hash') or '').strip()
+            if not ref:
+                # Return current chain summary when no block specified
+                resp = requests.get(f'{base_url}/blockchain/blocks/stats', timeout=8)
+                if resp.status_code == 200:
+                    stats = resp.json()
+                    return {
+                        'status'  : 'success',
+                        'type'    : 'chain_summary',
+                        'result'  : stats,
+                    }
+                return {'status': 'error', 'error': 'No block identifier provided'}
+
+            # Resolve: height or hash
+            if ref.isdigit():
+                resp = requests.get(f'{base_url}/blockchain/blocks/{ref}', timeout=8)
+            else:
+                resp = requests.get(f'{base_url}/blockchain/blocks/hash/{ref}', timeout=8)
+
+            if resp.status_code == 200:
+                raw = resp.json()
+                # Extract the fields we care about (first-level or inside 'block' key)
+                data = raw if 'block_hash' in raw else raw.get('block', raw)
+                info = {
+                    'height'            : data.get('height'),
+                    'block_hash'        : data.get('block_hash',''),
+                    'hash_preview'      : data.get('block_hash','')[:20] + '...',
+                    'timestamp'         : data.get('timestamp'),
+                    'validator'         : data.get('validator',''),
+                    'tx_count'          : data.get('tx_count', len(data.get('transactions', []))),
+                    'status'            : data.get('status',''),
+                    'confirmations'     : data.get('confirmations', 0),
+                    'total_fees'        : data.get('total_fees', '0'),
+                    'reward'            : data.get('reward', '10'),
+                    'difficulty'        : data.get('difficulty', 1),
+                    'size_bytes'        : data.get('size_bytes', 0),
+                    'temporal_coherence': data.get('temporal_coherence', 1.0),
+                    'epoch'             : data.get('epoch', 0),
+                    'is_finalized'      : data.get('status','') == 'finalized',
+                    'gas_used'          : data.get('gas_used', 0),
+                    'gas_limit'         : data.get('gas_limit', 10_000_000),
+                    'gas_utilization'   : (
+                        f"{round(data.get('gas_used',0)/max(data.get('gas_limit',10_000_000),1)*100,1)}%"
+                    ),
+                }
+                return {'status': 'success', 'result': info}
+            elif resp.status_code == 404:
+                return {'status': 'error', 'error': f'Block not found: {ref}'}
+            else:
+                return {'status': 'error', 'error': f'API {resp.status_code}: {resp.text[:120]}'}
+
+        except Exception as e:
+            return {'status': 'error', 'error': str(e)}
     
     @staticmethod
-    def _block_info(**kwargs) -> Dict[str, Any]:
-        """Block info (stub - redirects to block/details)"""
-        return {'status': 'info', 'result': 'Use block/details for comprehensive block information'}
-    
+    def _block_finality(block: str = None, run_fresh: bool = False,
+                        include_validators: bool = True, **kwargs) -> Dict[str, Any]:
+        """
+        Full quantum finality status for a block — confirmations, GHZ proof,
+        fidelity, composite probability, and optionally a fresh circuit run.
+        """
+        try:
+            import requests
+            base_url = 'https://qtcl-blockchain.koyeb.app'
+            if not block:
+                return {'status': 'error', 'error': 'Block hash or height required'}
+            response = requests.post(f'{base_url}/blockchain/blocks/command', json={
+                'command': 'quantum_finality',
+                'block'  : str(block),
+                'options': {
+                    'run_fresh_circuit' : bool(run_fresh),
+                    'include_validators': bool(include_validators),
+                },
+            }, timeout=20)
+            if response.status_code == 200:
+                return {'status': 'success', 'result': response.json()}
+            return {'status': 'error', 'error': f'API {response.status_code}: {response.text[:200]}'}
+        except Exception as e:
+            return {'status': 'error', 'error': str(e)}
+
     @staticmethod
-    def _block_history(**kwargs) -> Dict[str, Any]:
-        """Block history (stub - redirects to block/batch)"""
-        return {'status': 'info', 'result': 'Use block/batch for querying multiple blocks'}
+    def _block_export(block: str = None, format: str = 'json',
+                      include_transactions: bool = True, include_quantum: bool = False,
+                      range_start=None, range_end=None, range_limit: int = 500,
+                      **kwargs) -> Dict[str, Any]:
+        """Export block(s) in json/csv/ndjson/minimal format. Supports range_start/range_end."""
+        try:
+            import requests
+            base_url = 'https://qtcl-blockchain.koyeb.app'
+            payload = {
+                'command': 'export',
+                'block'  : str(block) if block else None,
+                'options': {
+                    'format'              : format,
+                    'include_transactions': include_transactions,
+                    'include_quantum'     : include_quantum,
+                    'range_limit'         : int(range_limit),
+                },
+            }
+            if range_start is not None:
+                payload['options']['range_start'] = int(range_start)
+            if range_end is not None:
+                payload['options']['range_end']   = int(range_end)
+            response = requests.post(f'{base_url}/blockchain/blocks/command', json=payload, timeout=30)
+            if response.status_code == 200:
+                return {'status': 'success', 'result': response.json()}
+            return {'status': 'error', 'error': f'API {response.status_code}: {response.text[:200]}'}
+        except Exception as e:
+            return {'status': 'error', 'error': str(e)}
+
+    @staticmethod
+    def _block_sync(depth: int = 2000, force_rebuild: bool = False,
+                    validate_chain: bool = False, **kwargs) -> Dict[str, Any]:
+        """Sync in-memory chain from DB. depth=rows to load, force_rebuild wipes memory first."""
+        try:
+            import requests
+            base_url = 'https://qtcl-blockchain.koyeb.app'
+            response = requests.post(f'{base_url}/blockchain/blocks/command', json={
+                'command': 'sync',
+                'options': {
+                    'depth'         : int(depth),
+                    'force_rebuild' : bool(force_rebuild),
+                    'validate_chain': bool(validate_chain),
+                },
+            }, timeout=60)
+            if response.status_code == 200:
+                return {'status': 'success', 'result': response.json()}
+            return {'status': 'error', 'error': f'API {response.status_code}: {response.text[:200]}'}
+        except Exception as e:
+            return {'status': 'error', 'error': str(e)}
+
+    @staticmethod
+    def _block_reorg(block: str = None, dry_run: bool = True, force: bool = False,
+                     max_reorg_depth: int = 100, fork_tip_hash: str = None,
+                     **kwargs) -> Dict[str, Any]:
+        """
+        Trigger or simulate a chain reorg. dry_run=true (default) only shows what would happen.
+        Pass dry_run=false to execute. Optionally specify fork_tip_hash to promote.
+        """
+        try:
+            import requests
+            base_url = 'https://qtcl-blockchain.koyeb.app'
+            options  = {
+                'dry_run'        : bool(dry_run),
+                'force'          : bool(force),
+                'max_reorg_depth': int(max_reorg_depth),
+            }
+            if fork_tip_hash:
+                options['fork_tip_hash'] = fork_tip_hash
+            response = requests.post(f'{base_url}/blockchain/blocks/command', json={
+                'command': 'reorg',
+                'block'  : str(block) if block else None,
+                'options': options,
+            }, timeout=30)
+            if response.status_code == 200:
+                return {'status': 'success', 'result': response.json()}
+            return {'status': 'error', 'error': f'API {response.status_code}: {response.text[:200]}'}
+        except Exception as e:
+            return {'status': 'error', 'error': str(e)}
+
+    @staticmethod
+    def _block_prune(keep_blocks: int = 10000, prune_db: bool = False,
+                     dry_run: bool = True, keep_db_blocks: int = 100000,
+                     prune_orphans: bool = True, orphan_age_hours: int = 1,
+                     **kwargs) -> Dict[str, Any]:
+        """
+        Prune finalized blocks from memory (and optionally DB).
+        dry_run=true (default) shows plan without deleting.
+        """
+        try:
+            import requests
+            base_url = 'https://qtcl-blockchain.koyeb.app'
+            response = requests.post(f'{base_url}/blockchain/blocks/command', json={
+                'command': 'prune',
+                'options': {
+                    'keep_blocks'    : int(keep_blocks),
+                    'prune_db'       : bool(prune_db),
+                    'keep_db_blocks' : int(keep_db_blocks),
+                    'dry_run'        : bool(dry_run),
+                    'prune_orphans'  : bool(prune_orphans),
+                    'orphan_age_hours': int(orphan_age_hours),
+                },
+            }, timeout=30)
+            if response.status_code == 200:
+                return {'status': 'success', 'result': response.json()}
+            return {'status': 'error', 'error': f'API {response.status_code}: {response.text[:200]}'}
+        except Exception as e:
+            return {'status': 'error', 'error': str(e)}
+
+    @staticmethod
+    def _block_merkle(block: str = None, show_tree: bool = False,
+                      verify_quantum: bool = True, **kwargs) -> Dict[str, Any]:
+        """
+        Deep Merkle tree verification: recomputes standard and quantum Merkle roots
+        from stored transaction list and compares to block header values.
+        """
+        try:
+            import requests
+            base_url = 'https://qtcl-blockchain.koyeb.app'
+            if not block:
+                return {'status': 'error', 'error': 'Block hash or height required'}
+            response = requests.post(f'{base_url}/blockchain/blocks/command', json={
+                'command': 'merkle_verify',
+                'block'  : str(block),
+                'options': {
+                    'show_tree'     : bool(show_tree),
+                    'verify_quantum': bool(verify_quantum),
+                },
+            }, timeout=15)
+            if response.status_code == 200:
+                return {'status': 'success', 'result': response.json()}
+            return {'status': 'error', 'error': f'API {response.status_code}: {response.text[:200]}'}
+        except Exception as e:
+            return {'status': 'error', 'error': str(e)}
+
+    @staticmethod
+    def _block_temporal(block: str = None, run_circuit: bool = True,
+                        check_neighbors: bool = True, **kwargs) -> Dict[str, Any]:
+        """
+        Temporal coherence verification: re-runs temporal circuit, compares to stored
+        proof, validates coherence band, cross-checks with adjacent blocks.
+        """
+        try:
+            import requests
+            base_url = 'https://qtcl-blockchain.koyeb.app'
+            if not block:
+                return {'status': 'error', 'error': 'Block hash or height required'}
+            response = requests.post(f'{base_url}/blockchain/blocks/command', json={
+                'command': 'temporal_verify',
+                'block'  : str(block),
+                'options': {
+                    'run_circuit'    : bool(run_circuit),
+                    'check_neighbors': bool(check_neighbors),
+                },
+            }, timeout=15)
+            if response.status_code == 200:
+                return {'status': 'success', 'result': response.json()}
+            return {'status': 'error', 'error': f'API {response.status_code}: {response.text[:200]}'}
+        except Exception as e:
+            return {'status': 'error', 'error': str(e)}
+
+    @staticmethod
+    def _block_history(address: str = None, limit: int = 20, offset: int = 0,
+                       order: str = 'desc', min_height: int = None, max_height: int = None,
+                       validator: str = None, status: str = None, **kwargs) -> Dict[str, Any]:
+        """
+        Block history — returns paginated recent blocks from DB via block_command/history.
+
+        Usage examples:
+            block/history
+            block/history limit=50
+            block/history order=asc
+            block/history validator=qtcl_genesis_validator_v3
+            block/history min_height=0 max_height=100
+            block/history status=finalized
+        """
+        try:
+            import requests
+            base_url = 'https://qtcl-blockchain.koyeb.app'
+
+            # Build options payload
+            options_payload: Dict[str, Any] = {
+                'limit': int(limit),
+                'offset': int(offset),
+                'order': str(order),
+            }
+            if min_height is not None:
+                options_payload['min_height'] = int(min_height)
+            if max_height is not None:
+                options_payload['max_height'] = int(max_height)
+            if validator:
+                options_payload['validator'] = str(validator)
+            if status:
+                options_payload['status'] = str(status)
+            # address parameter is treated as validator filter if supplied
+            if address and not validator:
+                options_payload['validator'] = str(address)
+
+            response = requests.post(
+                f'{base_url}/blockchain/blocks/command',
+                json={'command': 'history', 'options': options_payload},
+                timeout=15
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                result = data.get('result', data)
+                # Format for terminal display
+                blocks = result.get('blocks', [])
+                summary = {
+                    'total_blocks'     : result.get('total_count', len(blocks)),
+                    'page'             : result.get('page', 1),
+                    'pages'            : result.get('pages', 1),
+                    'latest_height'    : result.get('latest_height', '?'),
+                    'finalized_height' : result.get('finalized_height', '?'),
+                    'chain_length'     : result.get('chain_length', '?'),
+                    'showing'          : f"{len(blocks)} blocks (offset={offset}, limit={limit})",
+                    'order'            : order.upper(),
+                }
+                return {
+                    'status'    : 'success',
+                    'summary'   : summary,
+                    'blocks'    : blocks,
+                    'pagination': {
+                        'limit' : int(limit),
+                        'offset': int(offset),
+                        'order' : order,
+                    }
+                }
+            else:
+                # Fallback: try the REST endpoint directly
+                fallback_resp = requests.get(
+                    f'{base_url}/blockchain/blocks',
+                    params={'limit': limit, 'offset': offset},
+                    timeout=10
+                )
+                if fallback_resp.status_code == 200:
+                    fb_data = fallback_resp.json()
+                    return {
+                        'status' : 'success',
+                        'blocks' : fb_data.get('blocks', []),
+                        'total'  : fb_data.get('total', 0),
+                        '_note'  : 'Served from /api/blocks fallback'
+                    }
+                return {
+                    'status': 'error',
+                    'error' : f'API returned {response.status_code}: {response.text[:200]}'
+                }
+
+        except Exception as e:
+            return {'status': 'error', 'error': str(e)}
 
 
 
