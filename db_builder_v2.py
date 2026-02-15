@@ -4148,6 +4148,24 @@ class DatabaseBuilder:
     def return_connection(self, conn):
         """Return connection to pool"""
         if conn:
+            self.pool.putconn(conn)
+    
+    def cursor(self, cursor_factory=RealDictCursor):
+        """
+        Get a cursor from the connection pool.
+        IMPORTANT: Users must call close() on the cursor and return_connection() when done.
+        
+        Better approach: Use execute() or execute_fetch() methods instead.
+        This method is provided for backward compatibility.
+        """
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor(cursor_factory=cursor_factory)
+            cursor._db_conn = conn  # Store connection for cleanup
+            return cursor
+        except Exception as e:
+            logger.error(f"{CLR.R}Error getting cursor: {e}{CLR.E}")
+            raise
             try:
                 self.pool.putconn(conn)
             except Exception as e:

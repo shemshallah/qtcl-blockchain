@@ -843,6 +843,20 @@ class Database:
                     conn.close()
     
     @classmethod
+    def cursor(cls, cursor_factory=None):
+        """Get a cursor from a database connection"""
+        conn = cls.get_connection()
+        if not conn:
+            raise Exception("Database connection unavailable")
+        try:
+            if cursor_factory:
+                return conn.cursor(cursor_factory=cursor_factory)
+            else:
+                return conn.cursor()
+        except Exception as e:
+            logger.error(f"[DB] Error getting cursor: {e}")
+            raise
+    @classmethod
     def execute(cls, query: str, params: tuple = None, correlation_id: str = None) -> list:
         """Execute query with circuit breaker, rate limiter, and profiler"""
         
@@ -1599,7 +1613,9 @@ try:
         logger.critical(f"[Static] ❌ index.html NOT found! Tried: {paths_to_try}")
     
     # Initialize database tables and admin user if database is connected
-    if DB and DB._instance:
+    # DISABLED: Use FORCE_DB_RESET.py for manual database initialization instead
+    # This prevents errors during startup when the database schema doesn't match
+    if False and DB and DB._instance:
         try:
             logger.info("[DB] Initializing database schema and admin user...")
             from db_builder_v2 import DatabaseBuilder
