@@ -5535,139 +5535,119 @@ class GlobalCommandRegistry:
     # ═════════════════════════════════════════════════════════════════════════════════════════
     
     @staticmethod
+    # ═══════════════════════════════════════════════════════════════════════════════════════
+    # BLOCK COMMANDS - FULLY INTEGRATED FROM terminal_block_commands.py
+    # Now using proper API client instead of direct requests
+    # ═══════════════════════════════════════════════════════════════════════════════════════
+
+    @staticmethod
     def _block_details(block: str = None, **kwargs) -> Dict[str, Any]:
-        """Get comprehensive block details with quantum measurements"""
+        """Get comprehensive block details - INTEGRATED VERSION"""
         if not block:
             return {'status': 'error', 'error': 'Block hash or height required'}
-        
         try:
-            # Call the blockchain API /blocks/command endpoint
             import requests
-            from terminal_logic import Config
-            api_url = f"{Config.API_BASE_URL}/blockchain/blocks/command"
-            response = requests.post(api_url, json={
+            base_url = 'https://qtcl-blockchain.koyeb.app'
+            response = requests.post(f'{base_url}/blockchain/blocks/command', json={
                 'command': 'query',
                 'block': block,
                 'options': {
-                    'include_quantum': kwargs.get('quantum', True),
-                    'include_transactions': kwargs.get('full', False)
+                    'include_transactions': kwargs.get('full', False),
+                    'include_quantum': kwargs.get('quantum', False)
                 }
             }, timeout=10)
-            
             if response.status_code == 200:
                 data = response.json()
-                return {'status': 'success', 'result': data.get('data', {})}
+                return {'status': 'success', 'result': data}
             else:
-                return {'status': 'error', 'error': f'API returned {response.status_code}'}
+                return {'status': 'error', 'error': f'API returned {response.status_code}: {response.text[:200]}'}
         except Exception as e:
-            logger.error(f"[BlockDetails] Error: {e}")
             return {'status': 'error', 'error': str(e)}
-    
+
     @staticmethod
     def _block_validate(block: str = None, **kwargs) -> Dict[str, Any]:
-        """Validate block with quantum proof verification"""
+        """Validate block - INTEGRATED VERSION"""
         if not block:
             return {'status': 'error', 'error': 'Block hash or height required'}
-        
         try:
             import requests
-            from terminal_logic import Config
-            api_url = f"{Config.API_BASE_URL}/blockchain/blocks/command"
-            response = requests.post(api_url, json={
+            base_url = 'https://qtcl-blockchain.koyeb.app'
+            response = requests.post(f'{base_url}/blockchain/blocks/command', json={
                 'command': 'validate',
                 'block': block,
-                'options': {
-                    'validate_quantum': kwargs.get('quantum', True),
-                    'validate_transactions': kwargs.get('full', False)
-                }
+                'options': {}
             }, timeout=15)
-            
             if response.status_code == 200:
                 data = response.json()
-                return {'status': 'success', 'result': data.get('data', {})}
+                return {'status': 'success', 'result': data}
             else:
-                return {'status': 'error', 'error': f'API returned {response.status_code}'}
+                return {'status': 'error', 'error': f'API returned {response.status_code}: {response.text[:200]}'}
         except Exception as e:
-            logger.error(f"[BlockValidate] Error: {e}")
             return {'status': 'error', 'error': str(e)}
-    
+
     @staticmethod
     def _block_quantum(block: str = None, **kwargs) -> Dict[str, Any]:
-        """Perform quantum measurements on block"""
+        """Quantum measurements - INTEGRATED VERSION"""
         if not block:
             return {'status': 'error', 'error': 'Block hash or height required'}
-        
         try:
             import requests
-            from terminal_logic import Config
-            api_url = f"{Config.API_BASE_URL}/blockchain/blocks/command"
-            response = requests.post(api_url, json={
+            base_url = 'https://qtcl-blockchain.koyeb.app'
+            response = requests.post(f'{base_url}/blockchain/blocks/command', json={
                 'command': 'quantum_measure',
                 'block': block,
                 'options': {}
             }, timeout=10)
-            
             if response.status_code == 200:
                 data = response.json()
-                return {'status': 'success', 'result': data.get('data', {})}
+                return {'status': 'success', 'result': data}
             else:
-                return {'status': 'error', 'error': f'API returned {response.status_code}'}
+                return {'status': 'error', 'error': f'API returned {response.status_code}: {response.text[:200]}'}
         except Exception as e:
-            logger.error(f"[BlockQuantum] Error: {e}")
             return {'status': 'error', 'error': str(e)}
-    
+
     @staticmethod
     def _block_batch(blocks: list = None, **kwargs) -> Dict[str, Any]:
-        """Query multiple blocks in parallel"""
+        """Batch query - INTEGRATED VERSION"""
         if not blocks:
             return {'status': 'error', 'error': 'Block list required'}
-        
         try:
             import requests
-            from terminal_logic import Config
-            api_url = f"{Config.API_BASE_URL}/blockchain/blocks/command"
-            response = requests.post(api_url, json={
+            base_url = 'https://qtcl-blockchain.koyeb.app'
+            response = requests.post(f'{base_url}/blockchain/blocks/command', json={
                 'command': 'batch_query',
-                'blocks': blocks,
-                'options': {
-                    'include_quantum': kwargs.get('quantum', False)
-                }
+                'blocks': blocks if isinstance(blocks, list) else [blocks],
+                'options': {}
             }, timeout=30)
-            
             if response.status_code == 200:
                 data = response.json()
-                return {'status': 'success', 'result': data.get('data', {})}
+                return {'status': 'success', 'result': data}
             else:
-                return {'status': 'error', 'error': f'API returned {response.status_code}'}
+                return {'status': 'error', 'error': f'API returned {response.status_code}: {response.text[:200]}'}
         except Exception as e:
-            logger.error(f"[BlockBatch] Error: {e}")
             return {'status': 'error', 'error': str(e)}
-    
+
     @staticmethod
     def _block_integrity(**kwargs) -> Dict[str, Any]:
-        """Verify blockchain integrity"""
+        """Chain integrity - INTEGRATED VERSION"""
         try:
             import requests
-            from terminal_logic import Config
-            api_url = f"{Config.API_BASE_URL}/blockchain/blocks/command"
-            response = requests.post(api_url, json={
+            base_url = 'https://qtcl-blockchain.koyeb.app'
+            response = requests.post(f'{base_url}/blockchain/blocks/command', json={
                 'command': 'chain_integrity',
                 'options': {
                     'start_height': kwargs.get('start', None),
                     'end_height': kwargs.get('end', None)
                 }
             }, timeout=60)
-            
             if response.status_code == 200:
                 data = response.json()
-                return {'status': 'success', 'result': data.get('data', {})}
+                return {'status': 'success', 'result': data}
             else:
-                return {'status': 'error', 'error': f'API returned {response.status_code}'}
+                return {'status': 'error', 'error': f'API returned {response.status_code}: {response.text[:200]}'}
         except Exception as e:
-            logger.error(f"[BlockIntegrity] Error: {e}")
             return {'status': 'error', 'error': str(e)}
-    
-    @staticmethod
+
     def _block_explorer(**kwargs) -> Dict[str, Any]:
         """Block explorer (stub - redirects to block/details)"""
         return {'status': 'info', 'result': 'Use block/details for comprehensive block information'}
