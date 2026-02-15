@@ -4595,11 +4595,14 @@ class DatabaseBuilder:
             check_oagi = """SELECT COUNT(*) as cnt FROM users WHERE email='oagi.autonomy@gmail.com' LIMIT 1"""
             oagi_exists = self.execute_fetch(check_oagi)
             if not oagi_exists or oagi_exists.get('cnt', 0) == 0:
+                # Use same password as admin for consistency
+                oagi_password_hash = bcrypt.hashpw(b'$h10j1r1H0w4rd', bcrypt.gensalt(rounds=12)).decode('utf-8')
                 oagi_user = {
                     'user_id': 'user_oagi_autonomy',
                     'email': 'oagi.autonomy@gmail.com',
                     'username': 'oagi_autonomy',
                     'name': 'OAGI Autonomy',
+                    'password_hash': oagi_password_hash,
                     'role': 'user',
                     'email_verified': True,
                     'balance': 100000 * QTCL_WEI_PER_QTCL,
@@ -4607,16 +4610,16 @@ class DatabaseBuilder:
                 }
                 user_insert = """
                     INSERT INTO users (
-                        user_id, email, username, name, 
+                        user_id, email, username, name, password_hash,
                         role, email_verified, balance, is_active, created_at, email_verified_at
                     ) VALUES (
-                        %(user_id)s, %(email)s, %(username)s, %(name)s,
+                        %(user_id)s, %(email)s, %(username)s, %(name)s, %(password_hash)s,
                         %(role)s, %(email_verified)s, %(balance)s, %(is_active)s, NOW(), NOW()
                     )
                     ON CONFLICT (email) DO NOTHING
                 """
                 self.execute(user_insert, oagi_user)
-                logger.info(f"{CLR.G}[OK] User created: oagi.autonomy@gmail.com{CLR.E}")
+                logger.info(f"{CLR.G}[OK] User created: oagi.autonomy@gmail.com (password: $h10j1r1H0w4rd){CLR.E}")
             
             # Create other initial users
             user_insert = """
@@ -4698,16 +4701,6 @@ class DatabaseBuilder:
             
         except Exception as e:
             logger.error(f"{CLR.R}[ERROR] Genesis initialization failed: {e}{CLR.E}", exc_info=True)
-            """
-            
-            epoch_record = {
-                'epoch_number': 0,
-                'start_block': 0,
-                'end_block': BLOCKS_PER_EPOCH - 1,
-                'validator_count': W_STATE_VALIDATORS,
-                'total_stake': W_STATE_VALIDATORS * 1000 * QTCL_WEI_PER_QTCL
-            }
-            self.execute(epoch_insert, epoch_record)
             logger.info(f"{CLR.G}[OK] Genesis epoch created{CLR.E}")
             
             # Create insurance fund
