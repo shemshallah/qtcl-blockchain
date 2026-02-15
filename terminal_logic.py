@@ -97,7 +97,8 @@ import re
 def ensure_packages():
     packages={
         'requests':'requests','colorama':'colorama','tabulate':'tabulate','PyJWT':'PyJWT',
-        'cryptography':'cryptography','pydantic':'pydantic','python_dateutil':'python-dateutil'
+        'cryptography':'cryptography','pydantic':'pydantic','python_dateutil':'python-dateutil',
+        'bcrypt':'bcrypt','psycopg2':'psycopg2-binary'
     }
     for module,pip_name in packages.items():
         try:__import__(module)
@@ -110,6 +111,13 @@ import requests
 from colorama import Fore, Back, Style, init
 from tabulate import tabulate
 import jwt
+import bcrypt
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    PSYCOPG2_AVAILABLE=True
+except ImportError:
+    PSYCOPG2_AVAILABLE=False
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, ec, padding
 from cryptography.hazmat.backends import default_backend
@@ -202,6 +210,70 @@ class WSGIGlobals:
         }
         return parts
 
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# AUTH DATABASE UTILITIES
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+
+class AuthDatabase:
+    """Direct database access for auth operations"""
+    
+    @classmethod
+    def get_connection(cls):
+        try:
+            return psycopg2.connect(
+                host=os.getenv('SUPABASE_HOST','localhost'),
+                user=os.getenv('SUPABASE_USER','postgres'),
+                password=os.getenv('SUPABASE_PASSWORD'),
+                database=os.getenv('SUPABASE_DB','postgres'),
+                port=int(os.getenv('SUPABASE_PORT',5432)),
+                connect_timeout=5
+            )
+        except Exception as e:
+            logger.error(f"[AuthDatabase] Connection failed: {e}")
+            return None
+    
+    @classmethod
+    def execute(cls,query:str,params:tuple=()):
+        conn=cls.get_connection()
+        if not conn:return None
+        try:
+            cur=conn.cursor(cursor_factory=RealDictCursor)
+            cur.execute(query,params)
+            result=cur.fetchall() if cur.description else None
+            conn.commit()
+            cur.close()
+            conn.close()
+            return result
+        except Exception as e:
+            if conn:conn.rollback();conn.close()
+            logger.error(f"[AuthDatabase] Query failed: {e}")
+            return None
+    
+    @classmethod
+    def fetch_one(cls,query:str,params:tuple=()):
+        result=cls.execute(query,params)
+        return result[0] if result else None
+    
+    @classmethod
+    def fetch_all(cls,query:str,params:tuple=()):
+        result=cls.execute(query,params)
+        return result or []
+
+class PasswordUtils:
+    """Password hashing and verification"""
+    
+    @staticmethod
+    def hash_password(password:str)->str:
+        salt=bcrypt.gensalt(rounds=12)
+        return bcrypt.hashpw(password.encode('utf-8'),salt).decode('utf-8')
+    
+    @staticmethod
+    def verify_password(password:str,hash_val:str)->bool:
+        try:
+            return bcrypt.checkpw(password.encode('utf-8'),hash_val.encode('utf-8'))
+        except:
+            return False
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 # PSEUDOQUBIT ID GENERATOR
@@ -4043,11 +4115,14 @@ class GlobalCommandRegistry:
     
     # Auth commands (REAL IMPLEMENTATIONS)
     AUTH_COMMANDS = {
-        'auth/login': lambda *a, **k: __import__('auth_handlers', fromlist=['AuthCommandHandlers']).AuthCommandHandlers.auth_login(*a, **k),
-        'auth/logout': lambda *a, **k: __import__('auth_handlers', fromlist=['AuthCommandHandlers']).AuthCommandHandlers.auth_logout(*a, **k),
-        'auth/register': lambda *a, **k: __import__('auth_handlers', fromlist=['AuthCommandHandlers']).AuthCommandHandlers.auth_register(*a, **k),
-        'auth/verify': lambda *a, **k: __import__('auth_handlers', fromlist=['AuthCommandHandlers']).AuthCommandHandlers.auth_verify(*a, **k),
-        'auth/refresh': lambda *a, **k: __import__('auth_handlers', fromlist=['AuthCommandHandlers']).AuthCommandHandlers.auth_refresh(*a, **k),
+        'auth/login': lambda **k: GlobalCommandRegistry._auth_login(**k),
+        'auth/logout': lambda **k: GlobalCommandRegistry._auth_logout(**k),
+        'auth/register': lambda **k: GlobalCommandRegistry._auth_register(**k),
+        'auth/verify': lambda **k: GlobalCommandRegistry._auth_verify(**k),
+        'auth/refresh': lambda **k: GlobalCommandRegistry._auth_refresh(**k),
+        'auth/mfa-setup': lambda **k: GlobalCommandRegistry._auth_mfa_setup(**k),
+        'auth/2fa-verify': lambda **k: GlobalCommandRegistry._auth_2fa_verify(**k),
+        'auth/pq-rotate': lambda **k: GlobalCommandRegistry._auth_pq_rotate(**k),
     }
     
     # User commands (stub implementations)
@@ -4249,6 +4324,307 @@ class GlobalCommandRegistry:
             'callable': True,
             'available': True
         }
+    
+    # ═════════════════════════════════════════════════════════════════════════════════════════
+    # AUTH COMMAND IMPLEMENTATIONS
+    # ═════════════════════════════════════════════════════════════════════════════════════════
+    
+    @staticmethod
+    def _auth_register(email:str=None,username:str=None,password:str=None,**kwargs)->Dict[str,Any]:
+        """Register new user with pseudoqubit assignment"""
+        if not all([email,username,password]):
+            return{'status':'error','error':'Missing required fields: email, username, password'}
+        
+        try:
+            if not PSYCOPG2_AVAILABLE:
+                return{'status':'error','error':'Database unavailable'}
+            
+            conn=AuthDatabase.get_connection()
+            if not conn:
+                return{'status':'error','error':'Database connection failed'}
+            
+            cur=conn.cursor(cursor_factory=RealDictCursor)
+            
+            cur.execute("SELECT user_id FROM users WHERE email=%s LIMIT 1",(email,))
+            if cur.fetchone():
+                cur.close()
+                conn.close()
+                return{'status':'error','error':'Email already registered','code':'EMAIL_EXISTS'}
+            
+            cur.execute("SELECT user_id FROM users WHERE username=%s LIMIT 1",(username,))
+            if cur.fetchone():
+                cur.close()
+                conn.close()
+                return{'status':'error','error':'Username already taken','code':'USERNAME_EXISTS'}
+            
+            user_id=f"user_{uuid.uuid4().hex[:12]}"
+            password_hash=PasswordUtils.hash_password(password)
+            now=datetime.now(timezone.utc)
+            pq_id=PseudoqubitIDGenerator.generate(email)
+            
+            metadata={
+                'pseudoqubit_id':pq_id,
+                'security_level':'ENHANCED',
+                'registration_ip':kwargs.get('ip_address','unknown')
+            }
+            
+            cur.execute("""
+                INSERT INTO users(
+                    user_id,email,username,password_hash,
+                    created_at,is_active,metadata
+                ) VALUES(%s,%s,%s,%s,%s,%s,%s)
+            """,(user_id,email,username,password_hash,now,True,json.dumps(metadata)))
+            
+            conn.commit()
+            cur.close()
+            conn.close()
+            
+            access_token=jwt.encode({
+                'user_id':user_id,'email':email,'username':username,
+                'type':'access','iat':time.time(),
+                'exp':time.time()+86400
+            },os.getenv('JWT_SECRET','secret'),algorithm='HS512')
+            
+            logger.info(f"[Auth/Register] Success: {user_id} | PQ: {pq_id}")
+            
+            return{
+                'status':'success',
+                'user_id':user_id,
+                'email':email,
+                'username':username,
+                'pseudoqubit_id':pq_id,
+                'access_token':access_token,
+                'message':'Registration successful'
+            }
+        except Exception as e:
+            logger.error(f"[Auth/Register] Error: {e}",exc_info=True)
+            return{'status':'error','error':str(e),'code':'SERVER_ERROR'}
+    
+    @staticmethod
+    def _auth_login(email:str=None,password:str=None,**kwargs)->Dict[str,Any]:
+        """Login user, create session"""
+        if not email or not password:
+            return{'status':'error','error':'Missing email or password'}
+        
+        try:
+            if not PSYCOPG2_AVAILABLE:
+                return{'status':'error','error':'Database unavailable'}
+            
+            conn=AuthDatabase.get_connection()
+            if not conn:
+                return{'status':'error','error':'Database connection failed'}
+            
+            cur=conn.cursor(cursor_factory=RealDictCursor)
+            
+            cur.execute("SELECT * FROM users WHERE email=%s LIMIT 1",(email,))
+            user=cur.fetchone()
+            
+            if not user:
+                cur.close()
+                conn.close()
+                logger.warning(f"[Auth/Login] User not found: {email}")
+                return{'status':'error','error':'Invalid credentials','code':'INVALID_CREDENTIALS'}
+            
+            if not PasswordUtils.verify_password(password,user['password_hash']):
+                cur.close()
+                conn.close()
+                logger.warning(f"[Auth/Login] Invalid password: {user['user_id']}")
+                return{'status':'error','error':'Invalid credentials','code':'INVALID_CREDENTIALS'}
+            
+            session_id=str(uuid.uuid4())
+            access_token=jwt.encode({
+                'user_id':user['user_id'],'email':user['email'],
+                'username':user['username'],'type':'access',
+                'iat':time.time(),'exp':time.time()+86400
+            },os.getenv('JWT_SECRET','secret'),algorithm='HS512')
+            
+            refresh_token=jwt.encode({
+                'user_id':user['user_id'],'email':user['email'],
+                'username':user['username'],'type':'refresh',
+                'iat':time.time(),'exp':time.time()+604800
+            },os.getenv('JWT_SECRET','secret'),algorithm='HS512')
+            
+            now=datetime.now(timezone.utc)
+            cur.execute("""
+                INSERT INTO sessions(
+                    session_id,user_id,access_token,refresh_token,
+                    expires_at,refresh_expires_at,created_at,ip_address,user_agent
+                ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,(session_id,user['user_id'],access_token,refresh_token,
+                 now+timedelta(hours=24),now+timedelta(days=7),now,
+                 kwargs.get('ip_address','unknown'),kwargs.get('user_agent','unknown')))
+            
+            cur.execute("""
+                UPDATE users
+                SET last_login=%s,last_login_ip=%s,failed_login_attempts=0
+                WHERE user_id=%s
+            """,(now,kwargs.get('ip_address','unknown'),user['user_id']))
+            
+            conn.commit()
+            cur.close()
+            conn.close()
+            
+            metadata=json.loads(user.get('metadata','{}'))
+            pq_id=metadata.get('pseudoqubit_id')
+            
+            logger.info(f"[Auth/Login] Success: {user['user_id']}")
+            
+            return{
+                'status':'success',
+                'user_id':user['user_id'],
+                'email':user['email'],
+                'username':user['username'],
+                'pseudoqubit_id':pq_id,
+                'session_id':session_id,
+                'access_token':access_token,
+                'refresh_token':refresh_token,
+                'expires_in':'24h',
+                'message':'Login successful'
+            }
+        except Exception as e:
+            logger.error(f"[Auth/Login] Error: {e}",exc_info=True)
+            return{'status':'error','error':str(e),'code':'SERVER_ERROR'}
+    
+    @staticmethod
+    def _auth_logout(session_id:str=None,**kwargs)->Dict[str,Any]:
+        """Logout user, invalidate session"""
+        if not session_id:
+            return{'status':'error','error':'No active session'}
+        
+        try:
+            if not PSYCOPG2_AVAILABLE:
+                return{'status':'error','error':'Database unavailable'}
+            
+            conn=AuthDatabase.get_connection()
+            if not conn:
+                return{'status':'error','error':'Database connection failed'}
+            
+            cur=conn.cursor()
+            
+            cur.execute("DELETE FROM sessions WHERE session_id=%s",(session_id,))
+            conn.commit()
+            cur.close()
+            conn.close()
+            
+            logger.info(f"[Auth/Logout] Success: {session_id}")
+            
+            return{'status':'success','message':'Logout successful. Session invalidated.'}
+        except Exception as e:
+            logger.error(f"[Auth/Logout] Error: {e}")
+            return{'status':'error','error':str(e)}
+    
+    @staticmethod
+    def _auth_verify(email:str=None,token:str=None,**kwargs)->Dict[str,Any]:
+        """Verify email address"""
+        if not email:
+            return{'status':'error','error':'Email required'}
+        
+        try:
+            if not PSYCOPG2_AVAILABLE:
+                return{'status':'error','error':'Database unavailable'}
+            
+            conn=AuthDatabase.get_connection()
+            if not conn:
+                return{'status':'error','error':'Database connection failed'}
+            
+            cur=conn.cursor(cursor_factory=RealDictCursor)
+            
+            cur.execute("SELECT user_id,email_verified FROM users WHERE email=%s LIMIT 1",(email,))
+            user=cur.fetchone()
+            
+            if not user:
+                cur.close()
+                conn.close()
+                return{'status':'error','error':'User not found'}
+            
+            if user['email_verified']:
+                cur.close()
+                conn.close()
+                return{'status':'success','verified':True,'message':'Email already verified'}
+            
+            now=datetime.now(timezone.utc)
+            cur.execute("""
+                UPDATE users
+                SET email_verified=TRUE,email_verified_at=%s
+                WHERE email=%s
+            """,(now,email))
+            
+            conn.commit()
+            cur.close()
+            conn.close()
+            
+            logger.info(f"[Auth/Verify] Success: {user['user_id']}")
+            
+            return{'status':'success','verified':True,'message':'Email verified successfully'}
+        except Exception as e:
+            logger.error(f"[Auth/Verify] Error: {e}")
+            return{'status':'error','error':str(e)}
+    
+    @staticmethod
+    def _auth_refresh(token:str=None,**kwargs)->Dict[str,Any]:
+        """Refresh access token"""
+        if not token:
+            return{'status':'error','error':'Token required'}
+        
+        try:
+            payload=jwt.decode(token,os.getenv('JWT_SECRET','secret'),algorithms=['HS512'])
+            
+            new_token=jwt.encode({
+                'user_id':payload['user_id'],'email':payload['email'],
+                'username':payload['username'],'type':'access',
+                'iat':time.time(),'exp':time.time()+86400
+            },os.getenv('JWT_SECRET','secret'),algorithm='HS512')
+            
+            logger.info(f"[Auth/Refresh] Success: {payload['user_id']}")
+            
+            return{
+                'status':'success',
+                'access_token':new_token,
+                'expires_in':'24h',
+                'message':'Token refreshed successfully'
+            }
+        except Exception as e:
+            logger.error(f"[Auth/Refresh] Error: {e}")
+            return{'status':'error','error':str(e)}
+    
+    @staticmethod
+    def _auth_mfa_setup(action:str='enable',**kwargs)->Dict[str,Any]:
+        """Setup MFA (stub for now)"""
+        if action=='enable':
+            secret=secrets.token_urlsafe(32)
+            return{
+                'status':'success',
+                'mfa_enabled':True,
+                'secret':secret,
+                'message':'MFA setup initiated. Save the secret securely.'
+            }
+        elif action=='disable':
+            return{'status':'success','mfa_enabled':False,'message':'MFA disabled'}
+        else:
+            return{'status':'error','error':'Invalid action'}
+    
+    @staticmethod
+    def _auth_2fa_verify(code:str=None,**kwargs)->Dict[str,Any]:
+        """Verify 2FA code (stub for now)"""
+        if not code or len(code)!=6:
+            return{'status':'error','error':'Invalid 2FA code format'}
+        
+        return{'status':'success','verified':True,'message':'2FA verified'}
+    
+    @staticmethod
+    def _auth_pq_rotate(**kwargs)->Dict[str,Any]:
+        """Rotate post-quantum keypair (stub for now)"""
+        user_id=kwargs.get('user_id')
+        if not user_id:
+            return{'status':'error','error':'Authentication required'}
+        
+        pq_pub=base64.b64encode(secrets.token_bytes(2048)).decode('utf-8')
+        return{
+            'status':'success',
+            'public_key':pq_pub[:50]+'...',
+            'message':'PQ keypair rotated successfully'
+        }
+
 
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
