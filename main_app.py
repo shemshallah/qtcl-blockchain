@@ -547,7 +547,7 @@ def create_app():
                 logger.warning("[API/Execute] Empty command")
                 return jsonify({'status': 'error', 'error': 'No command provided'}), 400
             
-            # Parse command (split by space)
+            # Parse command (split by space) - ENHANCED WITH KWARGS PARSING
             parts = command.split()
             if not parts:
                 logger.warning("[API/Execute] No parts after split")
@@ -556,7 +556,17 @@ def create_app():
             cmd_name = parts[0].lower()
             cmd_args = parts[1:] if len(parts) > 1 else []
             
-            logger.info(f"[API/Execute] Parsed - cmd: {cmd_name}, args: {cmd_args}")
+            # Parse key=value pairs into kwargs dictionary
+            cmd_kwargs = {}
+            positional_args = []
+            for arg in cmd_args:
+                if '=' in arg:
+                    key, value = arg.split('=', 1)
+                    cmd_kwargs[key.strip()] = value.strip()
+                else:
+                    positional_args.append(arg)
+            
+            logger.info(f"[API/Execute] Parsed - cmd: {cmd_name}, args: {positional_args}, kwargs: {cmd_kwargs}")
             
             # ════════════════════════════════════════════════════════════════════════════
             # CRITICAL: Import GlobalCommandRegistry for REAL execution
@@ -598,9 +608,9 @@ def create_app():
             # ════════════════════════════════════════════════════════════════════════════
             # EXECUTE ANY OTHER COMMAND via GlobalCommandRegistry
             # ════════════════════════════════════════════════════════════════════════════
-            logger.info(f"[API/Execute] Executing: {cmd_name} with args: {cmd_args}")
+            logger.info(f"[API/Execute] Executing: {cmd_name} with args: {positional_args}, kwargs: {cmd_kwargs}")
             try:
-                result = GlobalCommandRegistry.execute_command(cmd_name, *cmd_args)
+                result = GlobalCommandRegistry.execute_command(cmd_name, *positional_args, **cmd_kwargs)
                 logger.info(f"[API/Execute] ✓ {cmd_name} returned: {type(result)}")
                 logger.info(f"[API/Execute] Result keys: {result.keys() if isinstance(result, dict) else 'not-dict'}")
                 logger.info(f"[API/Execute] Result: {str(result)[:200]}")
