@@ -1189,7 +1189,7 @@ class RealTimeMetricsStreamer:
         self.fidelity_queue = queue.Queue(maxsize=10000)  # Increased for long-running operations
         self.measurement_queue = queue.Queue(maxsize=10000)
         self.mitigation_queue = queue.Queue(maxsize=10000)
-        self.pseudoqubit_queue = queue.Queue(maxsize=10000)
+        self.pseudoqubit_queue = queue.Queue(maxsize=100000)
         self.adaptation_queue = queue.Queue(maxsize=20000)  # Largest - most frequent
         
         self.writer_thread = None
@@ -1419,7 +1419,7 @@ class RealTimeMetricsStreamer:
                 except queue.Empty:
                     break
             
-            while not self.pseudoqubit_queue.empty() and len(pseudoqubits) < 500:
+            while not self.pseudoqubit_queue.empty() and len(pseudoqubits) < 5000:
                 try:
                     pseudoqubits.append(self.pseudoqubit_queue.get_nowait())
                 except queue.Empty:

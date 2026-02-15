@@ -1541,6 +1541,27 @@ try:
     app, executor, socketio = create_app()
     initialize_app(app)
     
+    # Initialize database tables and admin user if database is connected
+    if DB and DB._instance:
+        try:
+            logger.info("[DB] Initializing database schema and admin user...")
+            from db_builder_v2 import DatabaseBuilder
+            builder = DatabaseBuilder(
+                host=Config.SUPABASE_HOST,
+                user=Config.SUPABASE_USER,
+                password=Config.SUPABASE_PASSWORD,
+                database=Config.SUPABASE_DB,
+                port=Config.SUPABASE_PORT
+            )
+            # Create tables and initialize admin user
+            if builder.full_initialization(populate_pq=False):
+                logger.info("[DB] ✓ Database initialized with admin user: shemshallah@gmail.com")
+            else:
+                logger.warning("[DB] Database initialization partially completed")
+        except Exception as e:
+            logger.error(f"[DB] Database initialization error: {str(e)[:200]}")
+            logger.info("[DB] Database may already be initialized - continuing")
+    
     # Start all daemons
     HEARTBEAT.start()
     if QUANTUM:
