@@ -2747,12 +2747,15 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
             options=data.get('options',{})
             
             # Initialize correlation tracking
-            correlation_id=None
-            if WSGI_AVAILABLE and RequestCorrelation:
-                correlation_id=RequestCorrelation.get_correlation_id() or str(uuid.uuid4())
-                RequestCorrelation.set_correlation_id(correlation_id)
-            else:
-                correlation_id=str(uuid.uuid4())
+            correlation_id=str(uuid.uuid4())
+            try:
+                if WSGI_AVAILABLE and RequestCorrelation:
+                    if hasattr(RequestCorrelation, 'get_correlation_id'):
+                        correlation_id=RequestCorrelation.get_correlation_id() or str(uuid.uuid4())
+                    if hasattr(RequestCorrelation, 'set_correlation_id'):
+                        RequestCorrelation.set_correlation_id(correlation_id)
+            except Exception as corr_err:
+                logger.debug(f"[BLOCK_COMMAND] Correlation tracking not available: {corr_err}")
             
             logger.info(f"[BLOCK_COMMAND] {cmd_type} for block={block_ref} correlation={correlation_id}")
             
@@ -2827,9 +2830,12 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
             
         except Exception as e:
             logger.error(f"[BLOCK_COMMAND] Error: {e}",exc_info=True)
-            if WSGI_AVAILABLE and ERROR_BUDGET:
-                ERROR_BUDGET.record_error('blockchain','block_command')
-            return jresp({'error':str(e),'traceback':traceback.format_exc(),'correlation_id':correlation_id},500)
+            try:
+                if WSGI_AVAILABLE and ERROR_BUDGET and hasattr(ERROR_BUDGET, 'record_error'):
+                    ERROR_BUDGET.record_error('blockchain','block_command')
+            except:
+                pass  # Fail silently if error budget not available
+            return jresp({'error':str(e),'correlation_id':correlation_id if 'correlation_id' in locals() else 'unknown'},500)
     
     def _handle_block_query(block_ref,options,correlation_id):
         """Query block details with caching and quantum measurements"""
