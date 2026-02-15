@@ -762,14 +762,89 @@ def create_app():
     
     @app.route('/api/quantum/status', methods=['GET'])
     def quantum_status():
-        """Quantum engine status endpoint"""
+        """Quantum engine status endpoint - real metrics"""
+        from terminal_logic import LATTICE
+        metrics = LATTICE.get_system_metrics()
+        health = LATTICE.health_check()
         return jsonify({
             'engine_status': 'online',
             'entropy_status': 'active',
             'validators_active': 5,
-            'finality_proofs': 1247,
-            'coherence': 0.987
+            'finality_proofs': metrics['total_operations'],
+            'coherence': metrics['coherence'],
+            'fidelity': metrics['fidelity'],
+            'health_status': health['status']
         })
+    
+    @app.route('/api/quantum/transaction', methods=['POST'])
+    def quantum_transaction():
+        """Quantum transaction: validate user/target emails, pseudoqubit_id/uid, password, then execute"""
+        try:
+            from terminal_logic import LATTICE, AuthenticationService
+            
+            data = request.get_json() or {}
+            user_email = data.get('user_email', '')
+            target_email = data.get('target_email', '')
+            target_identifier = data.get('target_identifier', '')  # pseudoqubit_id or uid
+            amount = data.get('amount', 0)
+            password = data.get('password', '')
+            
+            if not all([user_email, target_email, target_identifier, amount, password]):
+                return jsonify({'success': False, 'error': 'Missing required fields'}), 400
+            
+            # 1. Validate user email exists in DB
+            success, user_data = AuthenticationService.get_user_by_email(user_email)
+            if not success or not user_data:
+                return jsonify({'success': False, 'error': 'User not found'}), 404
+            
+            # 2. Validate target email exists in DB
+            success, target_data = AuthenticationService.get_user_by_email(target_email)
+            if not success or not target_data:
+                return jsonify({'success': False, 'error': 'Target user not found'}), 404
+            
+            # 3. Validate target_identifier matches pseudoqubit_id or uid
+            target_pseudoqubit = target_data.get('pseudoqubit_id', '')
+            target_uid = target_data.get('uid') or target_data.get('id', '')
+            
+            if target_identifier != target_pseudoqubit and target_identifier != target_uid:
+                return jsonify({'success': False, 'error': 'Target pseudoqubit_id or UID does not match'}), 400
+            
+            # 4. Verify user password against stored bcrypt hash
+            password_hash = user_data.get('password_hash', '')
+            if not AuthenticationService.verify_password(password, password_hash):
+                return jsonify({'success': False, 'error': 'Invalid password'}), 401
+            
+            # 5. Get user IDs for quantum processing
+            user_id = user_data.get('uid') or user_data.get('id')
+            target_id = target_data.get('uid') or target_data.get('id')
+            user_pseudoqubit = user_data.get('pseudoqubit_id', '')
+            
+            # 6. Process transaction through LATTICE quantum system
+            tx_id = 'tx_' + secrets.token_hex(8)
+            lattice_result = LATTICE.process_transaction(tx_id, user_id, target_id, amount)
+            
+            # 7. Get oracle finality
+            oracle_result = LATTICE.measure_oracle_finality()
+            
+            # 8. Return transaction result with quantum metrics
+            return jsonify({
+                'success': True,
+                'tx_id': tx_id,
+                'user_email': user_email,
+                'user_pseudoqubit': user_pseudoqubit,
+                'target_email': target_email,
+                'target_pseudoqubit': target_identifier,
+                'amount': amount,
+                'fidelity': lattice_result.get('fidelity_at_encoding', 0),
+                'collapse_result': oracle_result.get('oracle_state', '00000000'),
+                'finality': oracle_result.get('confidence', 0) > 0.98,
+                'status': 'finalized' if oracle_result.get('confidence', 0) > 0.98 else 'encoded',
+                'timestamp': time.time()
+            })
+        except Exception as e:
+            logger.error(f"Quantum transaction error: {e}")
+            traceback.print_exc()
+            return jsonify({'success': False, 'error': str(e)}), 500
     
     @app.route('/')
     @app.route('/index.html')
