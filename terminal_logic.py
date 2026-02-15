@@ -793,7 +793,7 @@ class TaskResult:
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 
 class Config:
-    API_BASE_URL=os.getenv('QTCL_API_URL','http://localhost:5000')
+    API_BASE_URL=os.getenv('QTCL_API_URL','https://qtcl-blockchain.koyeb.app')
     API_TIMEOUT=30;API_RETRIES=3;API_RATE_LIMIT=100
     SESSION_FILE='.qtcl_session.json';SESSION_TIMEOUT_HOURS=24
     CACHE_ENABLED=True;CACHE_TTL=300;CACHE_MAX_SIZE=10000
@@ -5543,7 +5543,9 @@ class GlobalCommandRegistry:
         try:
             # Call the blockchain API /blocks/command endpoint
             import requests
-            response = requests.post('http://localhost:5000/blockchain/blocks/command', json={
+            from terminal_logic import Config
+            api_url = f"{Config.API_BASE_URL}/blockchain/blocks/command"
+            response = requests.post(api_url, json={
                 'command': 'query',
                 'block': block,
                 'options': {
@@ -5569,7 +5571,9 @@ class GlobalCommandRegistry:
         
         try:
             import requests
-            response = requests.post('http://localhost:5000/blockchain/blocks/command', json={
+            from terminal_logic import Config
+            api_url = f"{Config.API_BASE_URL}/blockchain/blocks/command"
+            response = requests.post(api_url, json={
                 'command': 'validate',
                 'block': block,
                 'options': {
@@ -5595,7 +5599,9 @@ class GlobalCommandRegistry:
         
         try:
             import requests
-            response = requests.post('http://localhost:5000/blockchain/blocks/command', json={
+            from terminal_logic import Config
+            api_url = f"{Config.API_BASE_URL}/blockchain/blocks/command"
+            response = requests.post(api_url, json={
                 'command': 'quantum_measure',
                 'block': block,
                 'options': {}
@@ -5618,7 +5624,9 @@ class GlobalCommandRegistry:
         
         try:
             import requests
-            response = requests.post('http://localhost:5000/blockchain/blocks/command', json={
+            from terminal_logic import Config
+            api_url = f"{Config.API_BASE_URL}/blockchain/blocks/command"
+            response = requests.post(api_url, json={
                 'command': 'batch_query',
                 'blocks': blocks,
                 'options': {
@@ -5640,7 +5648,9 @@ class GlobalCommandRegistry:
         """Verify blockchain integrity"""
         try:
             import requests
-            response = requests.post('http://localhost:5000/blockchain/blocks/command', json={
+            from terminal_logic import Config
+            api_url = f"{Config.API_BASE_URL}/blockchain/blocks/command"
+            response = requests.post(api_url, json={
                 'command': 'chain_integrity',
                 'options': {
                     'start_height': kwargs.get('start', None),
