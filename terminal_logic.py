@@ -4041,13 +4041,13 @@ class GlobalCommandRegistry:
         'oracle/event': OracleCommandHandlers.log_event,
     }
     
-    # Auth commands (stub implementations)
+    # Auth commands (REAL IMPLEMENTATIONS)
     AUTH_COMMANDS = {
-        'auth/login': lambda *a, **k: {'result': 'Login successful'},
-        'auth/logout': lambda *a, **k: {'result': 'Logout successful'},
-        'auth/register': lambda *a, **k: {'result': 'Registration successful'},
-        'auth/verify': lambda *a, **k: {'result': 'Verification successful'},
-        'auth/refresh': lambda *a, **k: {'result': 'Token refreshed'},
+        'auth/login': lambda *a, **k: __import__('auth_handlers', fromlist=['AuthCommandHandlers']).AuthCommandHandlers.auth_login(*a, **k),
+        'auth/logout': lambda *a, **k: __import__('auth_handlers', fromlist=['AuthCommandHandlers']).AuthCommandHandlers.auth_logout(*a, **k),
+        'auth/register': lambda *a, **k: __import__('auth_handlers', fromlist=['AuthCommandHandlers']).AuthCommandHandlers.auth_register(*a, **k),
+        'auth/verify': lambda *a, **k: __import__('auth_handlers', fromlist=['AuthCommandHandlers']).AuthCommandHandlers.auth_verify(*a, **k),
+        'auth/refresh': lambda *a, **k: __import__('auth_handlers', fromlist=['AuthCommandHandlers']).AuthCommandHandlers.auth_refresh(*a, **k),
     }
     
     # User commands (stub implementations)
