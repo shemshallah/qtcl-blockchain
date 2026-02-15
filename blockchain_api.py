@@ -2949,32 +2949,31 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
         """
         Accepts a QuantumBlock dataclass, a db dict row, a list/tuple from raw cursor,
         and returns a SimpleNamespace with consistent attribute access.
+        FIXED: Ensures all list/dict fields default to proper types.
         """
         from types import SimpleNamespace
         if raw is None:
             return None
         
         # Handle raw tuple/list from database cursor
-        if isinstance(raw, (tuple, list)):
-            logger.error(f"[NORMALIZE_BLOCK] ERROR: Received raw {type(raw).__name__} instead of dict. This indicates _exec() is not converting rows to dicts properly. Raw data: {raw[:3] if len(raw) > 3 else raw}")
-            # Try to construct a minimal block object from tuple
-            if len(raw) > 2:
-                return SimpleNamespace(
-                    block_hash=raw[0] if len(raw) > 0 else '',
-                    height=raw[1] if len(raw) > 1 else 0,
-                    previous_hash=raw[2] if len(raw) > 2 else '0'*64,
-                    timestamp=raw[4] if len(raw) > 4 else datetime.now(timezone.utc),
-                    validator=raw[5] if len(raw) > 5 else '',
-                    merkle_root=raw[6] if len(raw) > 6 else '',
-                    quantum_merkle_root=raw[7] if len(raw) > 7 else '',
-                    state_root=raw[8] if len(raw) > 8 else '',
-                    status=SimpleNamespace(value='unknown'),
-                    size_bytes=0,
-                    transactions=[],
-                    confirmations=0,
-                    temporal_coherence=1.0
-                )
-            return None
+        if isinstance(raw, (tuple, list)) and not isinstance(raw, dict):
+            logger.error(f"[NORMALIZE_BLOCK] Received raw {type(raw).__name__} instead of dict. Data: {raw[:3] if len(raw) > 3 else raw}")
+            # Minimal block object from tuple
+            return SimpleNamespace(
+                block_hash=raw[0] if len(raw) > 0 else '',
+                height=raw[1] if len(raw) > 1 else 0,
+                previous_hash=raw[2] if len(raw) > 2 else '0'*64,
+                timestamp=raw[4] if len(raw) > 4 else datetime.now(timezone.utc),
+                validator=raw[5] if len(raw) > 5 else '',
+                merkle_root=raw[6] if len(raw) > 6 else '',
+                quantum_merkle_root=raw[7] if len(raw) > 7 else '',
+                state_root=raw[8] if len(raw) > 8 else '',
+                status=SimpleNamespace(value='unknown'),
+                size_bytes=0,
+                transactions=[],  # ← Always a list
+                confirmations=0,
+                temporal_coherence=1.0
+            )
         
         if isinstance(raw, dict):
             # Ensure status is an enum-like object with .value
@@ -2982,6 +2981,12 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
             class _S:
                 def __init__(self,v): self.value=v
                 def __str__(self): return self.value
+            
+            # CRITICAL: Ensure transactions is always a list
+            transactions = raw.get('transactions',[])
+            if not isinstance(transactions, (list, tuple)):
+                transactions = []
+            
             obj = SimpleNamespace(
                 block_hash=raw.get('block_hash',''),
                 height=raw.get('height',0),
@@ -3009,7 +3014,7 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
                 is_orphan=raw.get('is_orphan',False),
                 reorg_depth=raw.get('reorg_depth',0),
                 temporal_coherence=float(raw.get('temporal_coherence',1.0) or 1.0),
-                transactions=raw.get('transactions',[]),
+                transactions=list(transactions),  # ← Ensure it's a list
                 metadata=raw.get('metadata',{}) if isinstance(raw.get('metadata'),dict)
                           else (json.loads(raw['metadata']) if raw.get('metadata') else {}),
                 pseudoqubit_registrations=raw.get('pseudoqubit_registrations',0),
@@ -3018,10 +3023,43 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
                 quantum_proof_version_val=raw.get('quantum_proof_version',QUANTUM_PROOF_VERSION),
             )
             return obj
-        # Already a QuantumBlock dataclass — return as-is wrapped in namespace if needed
+        # Already a QuantumBlock dataclass — return as-is
         return raw
 
-    def _load_block(block_ref):
+    def _safe_tx_count(block):
+        """
+        Safely get transaction count from block object.
+        Handles: int, list, tuple, None, missing attribute
+        """
+        if not hasattr(block, 'transactions'):
+            return 0
+        tx = block.transactions
+        if tx is None:
+            return 0
+        if isinstance(tx, int):
+            return tx  # Already a count from DB
+        if isinstance(tx, (list, tuple)):
+            return len(tx)
+        # Unknown type, assume 0
+        return 0
+    
+    def _safe_tx_list(block, limit=100):
+        """
+        Safely get transaction list from block object.
+        Handles: int, list, tuple, None, missing attribute
+        Returns empty list if transactions is a count (int)
+        """
+        if not hasattr(block, 'transactions'):
+            return []
+        tx = block.transactions
+        if tx is None:
+            return []
+        if isinstance(tx, int):
+            return []  # Only have count, not actual transactions
+        if isinstance(tx, (list, tuple)):
+            return list(tx[:limit]) if len(tx) > limit else list(tx)
+        return []
+
         """
         Unified block loader: tries in-memory chain first, then DB.
         Returns a normalized block object or None.
@@ -3071,7 +3109,7 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
                 'status':block.status,
                 'confirmations':block.confirmations,
                 'size_bytes':block.size_bytes,
-                'tx_count':len(block.transactions),
+                'tx_count':_safe_tx_count(block),
                 'total_fees':str(block.total_fees),
                 'reward':str(block.reward),
                 'difficulty':block.difficulty,
@@ -3089,15 +3127,16 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
             
             # Add transactions if requested
             if options.get('include_transactions'):
+                tx_list = _safe_tx_list(block, limit=100)
                 result['transactions']=[{
-                    'tx_hash':tx.tx_hash,
-                    'from':tx.from_address,
-                    'to':tx.to_address,
-                    'amount':str(tx.amount),
-                    'fee':str(tx.fee),
-                    'status':tx.status
-                } for tx in block.transactions[:100]]  # Limit to first 100
-                result['tx_count_actual']=len(block.transactions)
+                    'tx_hash':tx.tx_hash if hasattr(tx, 'tx_hash') else '',
+                    'from':tx.from_address if hasattr(tx, 'from_address') else '',
+                    'to':tx.to_address if hasattr(tx, 'to_address') else '',
+                    'amount':str(tx.amount) if hasattr(tx, 'amount') else '0',
+                    'fee':str(tx.fee) if hasattr(tx, 'fee') else '0',
+                    'status':tx.status if hasattr(tx, 'status') else 'unknown'
+                } for tx in tx_list]
+                result['tx_count_actual']=_safe_tx_count(block)
             
             # Cache result
             if WSGI_AVAILABLE and CACHE:
@@ -3208,23 +3247,24 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
             # 6. Transaction validation (sampling)
             if options.get('validate_transactions'):
                 try:
-                    tx_sample_size=min(len(block.transactions),options.get('tx_sample_size',10))
-                    tx_sample=block.transactions[:tx_sample_size]
-                    tx_valid_count=0
-                    for tx in tx_sample:
+                    tx_count = _safe_tx_count(block)
+                    tx_list = _safe_tx_list(block, limit=options.get('tx_sample_size', 10))
+                    tx_sample_size = len(tx_list)
+                    tx_valid_count = 0
+                    for tx in tx_list:
                         if _validate_transaction(tx):
-                            tx_valid_count+=1
-                    tx_valid=tx_valid_count==tx_sample_size
-                    validation_results['checks']['transactions']={
-                        'valid':tx_valid,
-                        'sampled':tx_sample_size,
-                        'valid_count':tx_valid_count,
-                        'total':len(block.transactions)
+                            tx_valid_count += 1
+                    tx_valid = tx_valid_count == tx_sample_size if tx_sample_size > 0 else True
+                    validation_results['checks']['transactions'] = {
+                        'valid': tx_valid,
+                        'sampled': tx_sample_size,
+                        'valid_count': tx_valid_count,
+                        'total': tx_count
                     }
                     if not tx_valid:
-                        validation_results['overall_valid']=False
+                        validation_results['overall_valid'] = False
                 except Exception as e:
-                    validation_results['checks']['transactions']={'valid':False,'error':str(e)}
+                    validation_results['checks']['transactions'] = {'valid': False, 'error': str(e)}
             
             return validation_results
             
@@ -3254,7 +3294,7 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
                 'timestamp':block.timestamp.isoformat() if hasattr(block.timestamp,'isoformat') else str(block.timestamp),
                 'age_seconds':(datetime.now(timezone.utc)-block.timestamp).total_seconds() if hasattr(block,'timestamp') else None,
                 'size_bytes':block.size_bytes,
-                'tx_count':len(block.transactions),
+                'tx_count':_safe_tx_count(block),
                 'gas_used':block.gas_used,
                 'gas_limit':block.gas_limit,
                 'gas_utilization_pct':round(block.gas_used/max(block.gas_limit,1)*100,2),
@@ -3263,14 +3303,15 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
                 'validator':block.validator
             }
             
-            # Transaction analysis
-            if block.transactions:
-                tx_amounts=[float(tx.amount) for tx in block.transactions if hasattr(tx,'amount')]
-                tx_fees=[float(tx.fee) for tx in block.transactions if hasattr(tx,'fee')]
-                tx_types=Counter([tx.tx_type for tx in block.transactions if hasattr(tx,'tx_type')])
+            # Transaction analysis - only if we have actual transaction objects
+            tx_list = _safe_tx_list(block)
+            if tx_list and len(tx_list) > 0:
+                tx_amounts=[float(tx.amount) for tx in tx_list if hasattr(tx,'amount')]
+                tx_fees=[float(tx.fee) for tx in tx_list if hasattr(tx,'fee')]
+                tx_types=Counter([tx.tx_type for tx in tx_list if hasattr(tx,'tx_type')])
                 
                 analysis['transaction_analysis']={
-                    'count':len(block.transactions),
+                    'count':len(tx_list),
                     'total_value':str(sum(tx_amounts)),
                     'avg_value':str(sum(tx_amounts)/len(tx_amounts)) if tx_amounts else '0',
                     'max_value':str(max(tx_amounts)) if tx_amounts else '0',
@@ -3278,8 +3319,8 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
                     'total_fees':str(sum(tx_fees)),
                     'avg_fee':str(sum(tx_fees)/len(tx_fees)) if tx_fees else '0',
                     'tx_types':dict(tx_types),
-                    'unique_senders':len(set(tx.from_address for tx in block.transactions if hasattr(tx,'from_address'))),
-                    'unique_receivers':len(set(tx.to_address for tx in block.transactions if hasattr(tx,'to_address')))
+                    'unique_senders':len(set(tx.from_address for tx in tx_list if hasattr(tx,'from_address'))),
+                    'unique_receivers':len(set(tx.to_address for tx in tx_list if hasattr(tx,'to_address')))
                 }
             
             # Quantum analysis
