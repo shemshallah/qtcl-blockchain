@@ -1917,6 +1917,91 @@ try:
         '''
         return render_template_string(html)
     
+    # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    # STATIC FILE SERVING - Serve index.html and web assets
+    # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    
+    @app.route('/')
+    def serve_root():
+        """Serve index.html at root path"""
+        from flask import send_file, current_app
+        try:
+            # Try to find index.html in current directory
+            import os
+            possible_paths = [
+                'index.html',
+                os.path.join(os.getcwd(), 'index.html'),
+                os.path.join(os.path.dirname(__file__), 'index.html'),
+                '/app/index.html',
+                '/src/index.html'
+            ]
+            
+            for path in possible_paths:
+                if os.path.isfile(path):
+                    logger.info(f"[Static] Serving index.html from: {path}")
+                    return send_file(path, mimetype='text/html')
+            
+            # Fallback: Serve dashboard if index.html not found
+            logger.warning("[Static] index.html not found in expected locations, falling back to /dashboard")
+            return dashboard()
+        except Exception as e:
+            logger.error(f"[Static] Error serving index.html: {e}")
+            return dashboard()
+    
+    @app.route('/index.html')
+    def serve_index_html():
+        """Serve index.html explicitly"""
+        return serve_root()
+    
+    @app.route('/<path:filename>')
+    def serve_static(filename):
+        """Serve static files (CSS, JS, images, etc.)"""
+        from flask import send_file, current_app, jsonify
+        try:
+            import os
+            
+            # Security: Prevent directory traversal
+            if '..' in filename or filename.startswith('/'):
+                logger.warning(f"[Static] Security: Blocked access to {filename}")
+                return jsonify({'error': 'Invalid path'}), 403
+            
+            possible_paths = [
+                filename,
+                os.path.join(os.getcwd(), filename),
+                os.path.join(os.path.dirname(__file__), filename),
+                f'/app/{filename}',
+                f'/src/{filename}'
+            ]
+            
+            for path in possible_paths:
+                if os.path.isfile(path):
+                    logger.info(f"[Static] Serving {filename} from: {path}")
+                    # Determine MIME type
+                    if filename.endswith('.css'):
+                        return send_file(path, mimetype='text/css')
+                    elif filename.endswith('.js'):
+                        return send_file(path, mimetype='application/javascript')
+                    elif filename.endswith('.json'):
+                        return send_file(path, mimetype='application/json')
+                    elif filename.endswith('.png'):
+                        return send_file(path, mimetype='image/png')
+                    elif filename.endswith('.jpg') or filename.endswith('.jpeg'):
+                        return send_file(path, mimetype='image/jpeg')
+                    elif filename.endswith('.svg'):
+                        return send_file(path, mimetype='image/svg+xml')
+                    elif filename.endswith('.woff'):
+                        return send_file(path, mimetype='font/woff')
+                    elif filename.endswith('.woff2'):
+                        return send_file(path, mimetype='font/woff2')
+                    else:
+                        return send_file(path)
+            
+            logger.warning(f"[Static] File not found: {filename}")
+            return jsonify({'error': f'File not found: {filename}'}), 404
+        except Exception as e:
+            logger.error(f"[Static] Error serving {filename}: {e}")
+            return jsonify({'error': f'Server error: {e}'}), 500
+    
     logger.info("╔" + "═" * 118 + "╗")
     logger.info("║" + " " * 118 + "║")
     logger.info("║" + " " * 30 + "✓✓✓ ULTIMATE WSGI - ALL SYSTEMS OPERATIONAL ✓✓✓" + " " * 33 + "║")
