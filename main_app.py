@@ -761,32 +761,122 @@ def create_app():
         }), 200
     
     @app.route('/')
+    @app.route('/index.html')
     def index():
-        """Serve index.html"""
+        """Serve index.html with proper headers and path handling"""
         try:
-            # Try to serve index.html from current directory
-            with open('index.html', 'r') as f:
-                return f.read()
-        except:
-            return """
-            <html>
-            <body style="background: #0f0f1e; color: #f0f0f0; font-family: monospace; padding: 20px;">
-            <h1>🚀 QTCL Unified API v5.0</h1>
-            <p>Command execution API is operational</p>
-            <p><strong>Endpoints:</strong></p>
-            <ul>
-                <li>POST /api/execute - Execute a single command</li>
-                <li>POST /api/execute/compound - Execute compound commands</li>
-                <li>POST /api/execute/batch - Execute batch of commands</li>
-                <li>GET /api/commands - List available commands</li>
-                <li>GET /api/execute/history - Get execution history</li>
-                <li>GET /api/execute/stats - Get statistics</li>
-                <li>GET /api/health - Health check</li>
-            </ul>
-            <p>WebSocket endpoint: ws://localhost:5000/socket.io</p>
-            </body>
-            </html>
-            """
+            import os
+            from pathlib import Path
+            
+            # Try multiple possible paths
+            possible_paths = [
+                'index.html',
+                './index.html',
+                os.path.join(os.path.dirname(__file__), 'index.html'),
+                os.path.join(os.getcwd(), 'index.html'),
+                '/mnt/user-data/outputs/index.html',
+            ]
+            
+            for path in possible_paths:
+                if os.path.exists(path) and os.path.isfile(path):
+                    logger.info(f"[Index] Found index.html at: {path}")
+                    with open(path, 'r') as f:
+                        content = f.read()
+                    # Return with proper Content-Type header
+                    response = Response(content, mimetype='text/html')
+                    response.headers['Content-Type'] = 'text/html; charset=utf-8'
+                    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+                    return response
+            
+            # If index.html not found, log and return fallback
+            logger.warning("[Index] index.html not found in any expected location")
+            logger.warning(f"[Index] Tried paths: {possible_paths}")
+            logger.warning(f"[Index] Current working directory: {os.getcwd()}")
+            logger.warning(f"[Index] Script directory: {os.path.dirname(__file__)}")
+            
+            # Return functional fallback with proper headers
+            fallback_html = """<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QTCL - Quantum Terminal</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --primary: #a78bfa;
+            --bg-black: #0f0f1e;
+            --bg-dark: #1a1a2e;
+            --text-primary: #f0f0f0;
+            --text-secondary: #94a3b8;
+        }
+        html, body {
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(135deg, #0a0a14 0%, #0f0f1e 100%);
+            color: var(--text-primary);
+            font-family: 'Monaco', 'Courier New', monospace;
+        }
+        body { display: flex; flex-direction: column; padding: 20px; }
+        h1 { color: var(--primary); margin-bottom: 20px; }
+        .status { background: var(--bg-dark); padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+        .endpoints { background: var(--bg-dark); padding: 20px; border-radius: 8px; }
+        ul { margin-left: 20px; margin-top: 10px; }
+        li { margin: 8px 0; }
+        a { color: var(--primary); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .warning { color: #f59e0b; }
+        .info { color: var(--text-secondary); font-size: 12px; }
+    </style>
+</head>
+<body>
+    <h1>⚛️ QTCL Unified API v5.0</h1>
+    
+    <div class="status">
+        <strong>Status: 🟢 Operational</strong>
+        <p class="info">Command execution API is running</p>
+        <p class="warning">⚠️ Note: index.html not found in expected locations</p>
+        <p class="info">Make sure index.html is in the same directory as main_app.py or in the application root</p>
+    </div>
+    
+    <div class="endpoints">
+        <strong>API Endpoints:</strong>
+        <ul>
+            <li><strong>POST /api/execute</strong> - Execute a single command</li>
+            <li><strong>POST /api/execute/compound</strong> - Execute compound commands</li>
+            <li><strong>POST /api/execute/batch</strong> - Execute batch of commands</li>
+            <li><strong>GET /api/commands</strong> - List available commands</li>
+            <li><strong>GET /api/execute/history</strong> - Get execution history</li>
+            <li><strong>GET /api/execute/stats</strong> - Get statistics</li>
+            <li><strong>GET /api/health</strong> - Health check</li>
+        </ul>
+    </div>
+    
+    <div style="margin-top: 20px; padding: 20px; background: var(--bg-dark); border-radius: 8px;">
+        <strong>WebSocket Support:</strong>
+        <p>ws://localhost:5000/socket.io</p>
+    </div>
+    
+    <script>
+        // Test API connection
+        fetch('/api/health')
+            .then(r => r.json())
+            .then(data => console.log('✓ API Connected:', data))
+            .catch(e => console.error('✗ API Error:', e));
+    </script>
+</body>
+</html>"""
+            
+            response = Response(fallback_html, mimetype='text/html')
+            response.headers['Content-Type'] = 'text/html; charset=utf-8'
+            return response
+            
+        except Exception as e:
+            logger.error(f"[Index] Error serving index: {e}", exc_info=True)
+            return jsonify({
+                'error': f'Index error: {str(e)}',
+                'message': 'index.html could not be loaded. Check server logs for details.'
+            }), 500
     
     # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     # PART 5: WEBSOCKET SUPPORT FOR REAL-TIME EXECUTION
