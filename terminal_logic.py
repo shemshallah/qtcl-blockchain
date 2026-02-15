@@ -4041,12 +4041,104 @@ class GlobalCommandRegistry:
         'oracle/event': OracleCommandHandlers.log_event,
     }
     
+    # Auth commands (stub implementations)
+    AUTH_COMMANDS = {
+        'auth/login': lambda *a, **k: {'result': 'Login successful'},
+        'auth/logout': lambda *a, **k: {'result': 'Logout successful'},
+        'auth/register': lambda *a, **k: {'result': 'Registration successful'},
+        'auth/verify': lambda *a, **k: {'result': 'Verification successful'},
+        'auth/refresh': lambda *a, **k: {'result': 'Token refreshed'},
+    }
+    
+    # User commands (stub implementations)
+    USER_COMMANDS = {
+        'user/profile': lambda *a, **k: {'result': 'User profile retrieved'},
+        'user/settings': lambda *a, **k: {'result': 'User settings retrieved'},
+        'user/update': lambda *a, **k: {'result': 'User updated'},
+        'user/delete': lambda *a, **k: {'result': 'User deleted'},
+        'user/list': lambda *a, **k: {'result': 'Users listed'},
+    }
+    
+    # Block/Blockchain commands (stub implementations)
+    BLOCK_COMMANDS = {
+        'block/explorer': lambda *a, **k: {'result': 'Block explorer'},
+        'block/info': lambda *a, **k: {'result': 'Block information'},
+        'block/history': lambda *a, **k: {'result': 'Block history'},
+        'block/validate': lambda *a, **k: {'result': 'Block validated'},
+    }
+    
+    # DeFi commands (stub implementations)
+    DEFI_COMMANDS = {
+        'defi/swap': lambda *a, **k: {'result': 'Swap executed'},
+        'defi/liquidity': lambda *a, **k: {'result': 'Liquidity information'},
+        'defi/yield': lambda *a, **k: {'result': 'Yield farming info'},
+        'defi/stake': lambda *a, **k: {'result': 'Staking successful'},
+        'defi/unstake': lambda *a, **k: {'result': 'Unstaking successful'},
+    }
+    
+    # Governance commands (stub implementations)
+    GOVERNANCE_COMMANDS = {
+        'governance/vote': lambda *a, **k: {'result': 'Vote recorded'},
+        'governance/proposals': lambda *a, **k: {'result': 'Proposals listed'},
+        'governance/create': lambda *a, **k: {'result': 'Proposal created'},
+        'governance/status': lambda *a, **k: {'result': 'Governance status'},
+    }
+    
+    # NFT commands (stub implementations)
+    NFT_COMMANDS = {
+        'nft/mint': lambda *a, **k: {'result': 'NFT minted'},
+        'nft/transfer': lambda *a, **k: {'result': 'NFT transferred'},
+        'nft/list': lambda *a, **k: {'result': 'NFTs listed'},
+        'nft/info': lambda *a, **k: {'result': 'NFT information'},
+    }
+    
+    # Smart Contract commands (stub implementations)
+    CONTRACT_COMMANDS = {
+        'contract/deploy': lambda *a, **k: {'result': 'Contract deployed'},
+        'contract/call': lambda *a, **k: {'result': 'Contract called'},
+        'contract/status': lambda *a, **k: {'result': 'Contract status'},
+        'contract/list': lambda *a, **k: {'result': 'Contracts listed'},
+    }
+    
+    # Cross-chain Bridge commands (stub implementations)
+    BRIDGE_COMMANDS = {
+        'bridge/transfer': lambda *a, **k: {'result': 'Bridge transfer initiated'},
+        'bridge/status': lambda *a, **k: {'result': 'Bridge status'},
+        'bridge/validate': lambda *a, **k: {'result': 'Bridge validated'},
+    }
+    
+    # Admin commands (stub implementations)
+    ADMIN_COMMANDS = {
+        'admin/users': lambda *a, **k: {'result': 'User management'},
+        'admin/system': lambda *a, **k: {'result': 'System info'},
+        'admin/logs': lambda *a, **k: {'result': 'System logs'},
+        'admin/config': lambda *a, **k: {'result': 'Configuration'},
+    }
+    
+    # System commands (stub implementations)
+    SYSTEM_COMMANDS = {
+        'system/health': lambda *a, **k: {'result': 'System healthy'},
+        'system/status': lambda *a, **k: {'result': 'System running'},
+        'system/uptime': lambda *a, **k: {'result': 'System uptime info'},
+        'system/info': lambda *a, **k: {'result': 'System information'},
+    }
+    
     # All commands combined
     ALL_COMMANDS = {
         **QUANTUM_COMMANDS,
         **TRANSACTION_COMMANDS,
         **WALLET_COMMANDS,
         **ORACLE_COMMANDS,
+        **AUTH_COMMANDS,
+        **USER_COMMANDS,
+        **BLOCK_COMMANDS,
+        **DEFI_COMMANDS,
+        **GOVERNANCE_COMMANDS,
+        **NFT_COMMANDS,
+        **CONTRACT_COMMANDS,
+        **BRIDGE_COMMANDS,
+        **ADMIN_COMMANDS,
+        **SYSTEM_COMMANDS,
     }
     
     @classmethod
@@ -4083,20 +4175,51 @@ class GlobalCommandRegistry:
     def list_commands(cls, category: str = None) -> Dict[str, List[str]]:
         """List available commands, optionally filtered by category"""
         if category:
-            if category.lower() == 'quantum':
+            category = category.lower()
+            if category == 'quantum':
                 return {'quantum': list(cls.QUANTUM_COMMANDS.keys())}
-            elif category.lower() == 'transaction':
+            elif category == 'transaction':
                 return {'transaction': list(cls.TRANSACTION_COMMANDS.keys())}
-            elif category.lower() == 'wallet':
+            elif category == 'wallet':
                 return {'wallet': list(cls.WALLET_COMMANDS.keys())}
-            elif category.lower() == 'oracle':
+            elif category == 'oracle':
                 return {'oracle': list(cls.ORACLE_COMMANDS.keys())}
+            elif category == 'auth':
+                return {'auth': list(cls.AUTH_COMMANDS.keys())}
+            elif category == 'user':
+                return {'user': list(cls.USER_COMMANDS.keys())}
+            elif category == 'block':
+                return {'block': list(cls.BLOCK_COMMANDS.keys())}
+            elif category == 'defi':
+                return {'defi': list(cls.DEFI_COMMANDS.keys())}
+            elif category == 'governance':
+                return {'governance': list(cls.GOVERNANCE_COMMANDS.keys())}
+            elif category == 'nft':
+                return {'nft': list(cls.NFT_COMMANDS.keys())}
+            elif category == 'contract':
+                return {'contract': list(cls.CONTRACT_COMMANDS.keys())}
+            elif category == 'bridge':
+                return {'bridge': list(cls.BRIDGE_COMMANDS.keys())}
+            elif category == 'admin':
+                return {'admin': list(cls.ADMIN_COMMANDS.keys())}
+            elif category == 'system':
+                return {'system': list(cls.SYSTEM_COMMANDS.keys())}
         
         return {
-            'quantum': list(cls.QUANTUM_COMMANDS.keys()),
+            'auth': list(cls.AUTH_COMMANDS.keys()),
+            'user': list(cls.USER_COMMANDS.keys()),
             'transaction': list(cls.TRANSACTION_COMMANDS.keys()),
             'wallet': list(cls.WALLET_COMMANDS.keys()),
+            'block': list(cls.BLOCK_COMMANDS.keys()),
+            'quantum': list(cls.QUANTUM_COMMANDS.keys()),
             'oracle': list(cls.ORACLE_COMMANDS.keys()),
+            'defi': list(cls.DEFI_COMMANDS.keys()),
+            'governance': list(cls.GOVERNANCE_COMMANDS.keys()),
+            'nft': list(cls.NFT_COMMANDS.keys()),
+            'contract': list(cls.CONTRACT_COMMANDS.keys()),
+            'bridge': list(cls.BRIDGE_COMMANDS.keys()),
+            'admin': list(cls.ADMIN_COMMANDS.keys()),
+            'system': list(cls.SYSTEM_COMMANDS.keys()),
             'total': len(cls.ALL_COMMANDS)
         }
     
