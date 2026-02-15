@@ -5708,7 +5708,10 @@ class GlobalCommandRegistry:
         try:
             import requests
             base_url = 'https://qtcl-blockchain.koyeb.app'
-            ref      = (block or kwargs.get('height') or kwargs.get('hash') or '').strip()
+            # Convert block to string and handle both int and str inputs
+            block_input = block or kwargs.get('height') or kwargs.get('hash')
+            ref = str(block_input).strip() if block_input is not None else ''
+            
             if not ref:
                 # Return current chain summary when no block specified
                 resp = requests.get(f'{base_url}/blockchain/blocks/stats', timeout=8)
@@ -5731,13 +5734,22 @@ class GlobalCommandRegistry:
                 raw = resp.json()
                 # Extract the fields we care about (first-level or inside 'block' key)
                 data = raw if 'block_hash' in raw else raw.get('block', raw)
+                
+                # Handle tx_count: could be int (from DB) or need to count list
+                tx_count_val = data.get('tx_count')
+                if isinstance(tx_count_val, int):
+                    tx_count = tx_count_val
+                else:
+                    transactions = data.get('transactions', [])
+                    tx_count = len(transactions) if isinstance(transactions, (list, tuple)) else 0
+                
                 info = {
                     'height'            : data.get('height'),
                     'block_hash'        : data.get('block_hash',''),
                     'hash_preview'      : data.get('block_hash','')[:20] + '...',
                     'timestamp'         : data.get('timestamp'),
                     'validator'         : data.get('validator',''),
-                    'tx_count'          : data.get('tx_count', len(data.get('transactions', []))),
+                    'tx_count'          : tx_count,
                     'status'            : data.get('status',''),
                     'confirmations'     : data.get('confirmations', 0),
                     'total_fees'        : data.get('total_fees', '0'),
@@ -5760,6 +5772,7 @@ class GlobalCommandRegistry:
                 return {'status': 'error', 'error': f'API {resp.status_code}: {resp.text[:120]}'}
 
         except Exception as e:
+            logger.error(f"[BLOCK_INFO] Error: {e}", exc_info=True)
             return {'status': 'error', 'error': str(e)}
     
     @staticmethod
