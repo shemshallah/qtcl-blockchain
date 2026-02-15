@@ -4306,6 +4306,7 @@ _init_block_command_database()
 # Quantum API is required
 import quantum_api
 QUANTUM_API_AVAILABLE = True
+LATTICE_AVAILABLE = True
 logger.info("✓ quantum_api system imported - API integration enabled")
 
 
