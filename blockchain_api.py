@@ -3360,26 +3360,38 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
             # REAL Qiskit Aer entropy measurements from block hash
             try:
                 if hasattr(block,'quantum_entropy') and block.quantum_entropy:
-                    entropy_str = block.quantum_entropy
-                    # Only try to convert if it looks like hex
+                    entropy_str = str(block.quantum_entropy).strip()
+                    
+                    # Try to parse as hex first
+                    entropy_bytes = None
                     try:
-                        if all(c in '0123456789abcdefABCDEF' for c in entropy_str):
+                        # Check if it's valid hex
+                        if all(c in '0123456789abcdefABCDEF' for c in entropy_str) and len(entropy_str) >= 2:
                             entropy_bytes = bytes.fromhex(entropy_str)
-                        else:
-                            entropy_bytes = entropy_str.encode('utf-8')
                     except:
-                        entropy_bytes = entropy_str.encode('utf-8')
+                        pass
+                    
+                    # If not hex, use it as UTF-8 or numeric
+                    if entropy_bytes is None:
+                        try:
+                            # Try to parse as float/number
+                            val = float(entropy_str)
+                            entropy_bytes = val.to_bytes(8, byteorder='big', signed=True) if isinstance(val, (int, float)) else entropy_str.encode('utf-8')
+                        except:
+                            entropy_bytes = entropy_str.encode('utf-8')
                     
                     measurements['entropy']={
                         'shannon_entropy':_calculate_shannon_entropy(entropy_bytes),
                         'byte_entropy':_calculate_byte_entropy(entropy_bytes),
                         'length_bytes':len(entropy_bytes),
-                        'hex_preview':entropy_bytes[:16].hex() if len(entropy_bytes)>=16 else entropy_bytes.hex()
+                        'hex_preview':entropy_bytes[:16].hex() if len(entropy_bytes)>=16 else entropy_bytes.hex(),
+                        'source_value': entropy_str
                     }
                 else:
                     # Generate quantum entropy from block hash using Qiskit Aer if available
                     measurements['entropy'] = _generate_qiskit_entropy(block)
             except Exception as e:
+                logger.debug(f"[ENTROPY] Error: {e}")
                 measurements['entropy']={'error':str(e), 'source':'fallback'}
             
             # Coherence measurements with REAL Qiskit circuits
@@ -3479,8 +3491,13 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
                 else:
                     return {'error':'No blocks in chain'}
             
-            start_height=options.get('start_height',max(0,tip.height-100))
-            end_height=options.get('end_height',tip.height)
+            # Ensure tip has valid height attribute
+            tip_height = getattr(tip, 'height', None) if tip else None
+            if tip_height is None:
+                return {'error':'No valid block height found in chain'}
+            
+            start_height=options.get('start_height',max(0,tip_height-100))
+            end_height=options.get('end_height',tip_height)
             
             integrity_results={
                 'start_height':start_height,
@@ -3674,7 +3691,7 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
             }
     
     def _run_qiskit_w_state_circuit(block):
-        """Run a REAL W-state quantum circuit using Qiskit Aer"""
+        """Run a REAL W-state quantum circuit using Qiskit Aer for 5 validators"""
         try:
             if not QISKIT_AER_AVAILABLE:
                 return {
@@ -3687,17 +3704,27 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
             cr = ClassicalRegister(5, 'c')
             qc = QuantumCircuit(qr, cr, name='W-5')
             
-            # Create W state using controlled rotations
-            qc.ry(2 * np.arcsin(1/np.sqrt(5)), qr[0])
-            qc.cx(qr[0], qr[1])
-            qc.ry(2 * np.arcsin(1/np.sqrt(4)), qr[1])
-            qc.cx(qr[1], qr[2])
-            qc.ry(2 * np.arcsin(1/np.sqrt(3)), qr[2])
-            qc.cx(qr[2], qr[3])
-            qc.ry(2 * np.arcsin(1/np.sqrt(2)), qr[3])
-            qc.cx(qr[3], qr[4])
+            # Create W-state: (1/√5)(|10000⟩ + |01000⟩ + |00100⟩ + |00010⟩ + |00001⟩)
+            # Method: Use controlled RY gates with proper angles
+            angles = [2*np.arcsin(1/np.sqrt(5-i)) for i in range(5)]
             
-            # Measure
+            # Start with first qubit in |1⟩
+            qc.x(qr[0])
+            
+            # Controlled operations to spread the superposition
+            for i in range(4):
+                # Uncompute previous qubits
+                for j in range(i):
+                    qc.cx(qr[j], qr[j+1])
+                
+                # Apply rotation controlled by previous qubits
+                qc.ry(angles[i], qr[i+1])
+                
+                # Re-entangle
+                for j in range(i, -1, -1):
+                    qc.cx(qr[j], qr[j+1])
+            
+            # Measure all qubits
             qc.measure(qr, cr)
             
             # Run circuit
@@ -3706,16 +3733,17 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
             result = job.result()
             counts = result.get_counts(qc)
             
-            # W-state should give each qubit equal probability
-            # Calculate fidelity based on how uniform the distribution is
-            total_shots = sum(counts.values())
-            ideal_per_qubit = total_shots / 5
-            fidelity = 1.0 - (sum(abs(c - ideal_per_qubit) for c in counts.values()) / (2 * total_shots))
+            # W-state expected outcomes: exactly one qubit in |1⟩
+            expected_w_states = {'10000', '01000', '00100', '00010', '00001'}
+            w_state_counts = sum(counts.get(state, 0) for state in expected_w_states)
+            fidelity = w_state_counts / 1000.0
             
             return {
                 'fidelity': round(max(0, fidelity), 4),
-                'distribution': counts,
-                'total_shots': total_shots,
+                'w_state_counts': w_state_counts,
+                'w_state_outcomes': {k: v for k, v in counts.items() if k in expected_w_states},
+                'all_outcomes': counts,
+                'total_shots': 1000,
                 'source': 'qiskit_aer_real'
             }
         except Exception as e:
