@@ -5499,112 +5499,180 @@ class GlobalCommandRegistry:
     # ═══════════════════════════════════════════════════════════════════════════════════════
 
     @staticmethod
+    @staticmethod
     def _block_details(block: str = None, **kwargs) -> Dict[str, Any]:
-        """Get comprehensive block details - INTEGRATED VERSION"""
+        """Get comprehensive block details directly from database"""
         if not block:
             return {'status': 'error', 'error': 'Block hash or height required'}
         try:
-            import requests
-            base_url = 'https://qtcl-blockchain.koyeb.app'
-            response = requests.post(f'{base_url}/blockchain/blocks/command', json={
-                'command': 'query',
-                'block': block,
-                'options': {
-                    'include_transactions': kwargs.get('full', False),
-                    'include_quantum': kwargs.get('quantum', False)
-                }
-            }, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                return {'status': 'success', 'result': data}
+            from wsgi_config import DB
+            block_id = str(block).strip().lower()
+            is_hash = len(block_id) > 20 or block_id.startswith('0x')
+            if block_id == 'latest':
+                query = "SELECT height, block_number, block_hash, previous_hash, state_root, timestamp, transactions_count, size, validator, status, gas_used, gas_limit, difficulty, miner_reward, finalized, quantum_proof, temporal_proof, quantum_entropy, entropy_score, quantum_state_hash, quantum_validation_status FROM blocks ORDER BY height DESC LIMIT 1"
+                params = []
+            elif is_hash:
+                query = "SELECT height, block_number, block_hash, previous_hash, state_root, timestamp, transactions_count, size, validator, status, gas_used, gas_limit, difficulty, miner_reward, finalized, quantum_proof, temporal_proof, quantum_entropy, entropy_score, quantum_state_hash, quantum_validation_status FROM blocks WHERE block_hash = %s LIMIT 1"
+                params = [block_id]
             else:
-                return {'status': 'error', 'error': f'API returned {response.status_code}: {response.text[:200]}'}
+                query = "SELECT height, block_number, block_hash, previous_hash, state_root, timestamp, transactions_count, size, validator, status, gas_used, gas_limit, difficulty, miner_reward, finalized, quantum_proof, temporal_proof, quantum_entropy, entropy_score, quantum_state_hash, quantum_validation_status FROM blocks WHERE height = %s LIMIT 1"
+                params = [int(block_id)]
+            if not DB:
+                return {'status': 'error', 'error': 'Database unavailable'}
+            with DB.cursor() as cur:
+                cur.execute(query, params)
+                row = cur.fetchone()
+            if not row:
+                return {'status': 'error', 'error': f'Block {block} not found'}
+            block_data = {'height': row[0], 'block_number': row[1], 'hash': row[2], 'previous_hash': row[3], 'state_root': row[4], 'timestamp': row[5].isoformat() if row[5] else None, 'transactions': row[6] or 0, 'size': row[7] or 0, 'validator': row[8], 'status': row[9], 'gas_used': row[10], 'gas_limit': row[11], 'difficulty': row[12], 'reward': row[13], 'finalized': row[14], 'quantum': {'proof': row[15], 'temporal_proof': row[16], 'entropy': row[17], 'entropy_score': row[18], 'state_hash': row[19], 'validation_status': row[20]}}
+            if kwargs.get('full'):
+                with DB.cursor() as cur:
+                    cur.execute("SELECT tx_id, tx_hash, from_user_id, to_user_id, amount, status, created_at FROM transactions WHERE height = %s", [row[0]])
+                    tx_rows = cur.fetchall() or []
+                block_data['transactions_list'] = [{'id': tx[0], 'hash': tx[1], 'from': tx[2], 'to': tx[3], 'amount': tx[4], 'status': tx[5], 'timestamp': tx[6].isoformat() if tx[6] else None} for tx in tx_rows]
+            return {'status': 'success', 'result': block_data}
         except Exception as e:
+            import logging; logging.error(f"[BlockDetails] {e}")
             return {'status': 'error', 'error': str(e)}
 
     @staticmethod
     def _block_validate(block: str = None, **kwargs) -> Dict[str, Any]:
-        """Validate block - INTEGRATED VERSION"""
+        """Validate block integrity and hashes directly from database"""
         if not block:
             return {'status': 'error', 'error': 'Block hash or height required'}
         try:
-            import requests
-            base_url = 'https://qtcl-blockchain.koyeb.app'
-            response = requests.post(f'{base_url}/blockchain/blocks/command', json={
-                'command': 'validate',
-                'block': block,
-                'options': {}
-            }, timeout=15)
-            if response.status_code == 200:
-                data = response.json()
-                return {'status': 'success', 'result': data}
+            from wsgi_config import DB
+            block_id = str(block).strip().lower()
+            is_hash = len(block_id) > 20 or block_id.startswith('0x')
+            if block_id == 'latest':
+                query = "SELECT height, block_hash, previous_hash, state_root, block_number FROM blocks ORDER BY height DESC LIMIT 1"
+                params = []
+            elif is_hash:
+                query = "SELECT height, block_hash, previous_hash, state_root, block_number FROM blocks WHERE block_hash = %s LIMIT 1"
+                params = [block_id]
             else:
-                return {'status': 'error', 'error': f'API returned {response.status_code}: {response.text[:200]}'}
+                query = "SELECT height, block_hash, previous_hash, state_root, block_number FROM blocks WHERE height = %s LIMIT 1"
+                params = [int(block_id)]
+            if not DB:
+                return {'status': 'error', 'error': 'Database unavailable'}
+            with DB.cursor() as cur:
+                cur.execute(query, params)
+                row = cur.fetchone()
+            if not row:
+                return {'status': 'error', 'error': f'Block {block} not found'}
+            height, block_hash, prev_hash, state_root, block_num = row
+            validations = {'hash_valid': bool(block_hash and len(block_hash) == 64), 'previous_hash_valid': bool(prev_hash is None or len(prev_hash) == 64), 'state_root_valid': bool(state_root and len(state_root) == 64), 'block_number_matches_height': block_num == height, 'block_found': True}
+            if prev_hash and height > 0:
+                with DB.cursor() as cur:
+                    cur.execute("SELECT COUNT(*) FROM blocks WHERE block_hash = %s", [prev_hash])
+                    parent_exists = cur.fetchone()[0] > 0
+                validations['parent_exists'] = parent_exists
+            all_valid = all(v for k, v in validations.items() if k != 'block_found')
+            return {'status': 'success', 'result': {'height': height, 'hash': block_hash, 'valid': all_valid, 'validations': validations, 'issues': [k for k, v in validations.items() if not v]}}
         except Exception as e:
+            import logging; logging.error(f"[BlockValidate] {e}")
             return {'status': 'error', 'error': str(e)}
 
     @staticmethod
     def _block_quantum(block: str = None, **kwargs) -> Dict[str, Any]:
-        """Quantum measurements - INTEGRATED VERSION"""
+        """Get quantum measurements for block directly from database"""
         if not block:
             return {'status': 'error', 'error': 'Block hash or height required'}
         try:
-            import requests
-            base_url = 'https://qtcl-blockchain.koyeb.app'
-            response = requests.post(f'{base_url}/blockchain/blocks/command', json={
-                'command': 'quantum_measure',
-                'block': block,
-                'options': {}
-            }, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                return {'status': 'success', 'result': data}
+            from wsgi_config import DB
+            block_id = str(block).strip().lower()
+            is_hash = len(block_id) > 20 or block_id.startswith('0x')
+            if block_id == 'latest':
+                query = "SELECT height, quantum_proof, quantum_entropy, entropy_score, quantum_state_hash, quantum_validation_status, quantum_measurements_count, quantum_proof_version FROM blocks ORDER BY height DESC LIMIT 1"
+                params = []
+            elif is_hash:
+                query = "SELECT height, quantum_proof, quantum_entropy, entropy_score, quantum_state_hash, quantum_validation_status, quantum_measurements_count, quantum_proof_version FROM blocks WHERE block_hash = %s LIMIT 1"
+                params = [block_id]
             else:
-                return {'status': 'error', 'error': f'API returned {response.status_code}: {response.text[:200]}'}
+                query = "SELECT height, quantum_proof, quantum_entropy, entropy_score, quantum_state_hash, quantum_validation_status, quantum_measurements_count, quantum_proof_version FROM blocks WHERE height = %s LIMIT 1"
+                params = [int(block_id)]
+            if not DB:
+                return {'status': 'error', 'error': 'Database unavailable'}
+            with DB.cursor() as cur:
+                cur.execute(query, params)
+                row = cur.fetchone()
+            if not row:
+                return {'status': 'error', 'error': f'Block {block} not found'}
+            quantum_data = {'height': row[0], 'proof': row[1], 'entropy': row[2], 'entropy_score': row[3], 'state_hash': row[4], 'validation_status': row[5], 'measurements_count': row[6] or 0, 'proof_version': row[7]}
+            return {'status': 'success', 'result': quantum_data}
         except Exception as e:
+            import logging; logging.error(f"[BlockQuantum] {e}")
             return {'status': 'error', 'error': str(e)}
 
     @staticmethod
     def _block_batch(blocks: list = None, **kwargs) -> Dict[str, Any]:
-        """Batch query - INTEGRATED VERSION"""
+        """Batch fetch multiple blocks directly from database"""
         if not blocks:
             return {'status': 'error', 'error': 'Block list required'}
         try:
-            import requests
-            base_url = 'https://qtcl-blockchain.koyeb.app'
-            response = requests.post(f'{base_url}/blockchain/blocks/command', json={
-                'command': 'batch_query',
-                'blocks': blocks if isinstance(blocks, list) else [blocks],
-                'options': {}
-            }, timeout=30)
-            if response.status_code == 200:
-                data = response.json()
-                return {'status': 'success', 'result': data}
-            else:
-                return {'status': 'error', 'error': f'API returned {response.status_code}: {response.text[:200]}'}
+            from wsgi_config import DB
+            if not DB:
+                return {'status': 'error', 'error': 'Database unavailable'}
+            block_list = blocks if isinstance(blocks, list) else [blocks]
+            results = []
+            for block in block_list:
+                block_id = str(block).strip().lower()
+                is_hash = len(block_id) > 20 or block_id.startswith('0x')
+                if is_hash:
+                    query = "SELECT height, block_number, block_hash, timestamp, status FROM blocks WHERE block_hash = %s LIMIT 1"
+                    params = [block_id]
+                else:
+                    try:
+                        height_val = int(block_id)
+                        query = "SELECT height, block_number, block_hash, timestamp, status FROM blocks WHERE height = %s LIMIT 1"
+                        params = [height_val]
+                    except ValueError:
+                        results.append({'block': block, 'found': False, 'error': 'Invalid block identifier'})
+                        continue
+                with DB.cursor() as cur:
+                    cur.execute(query, params)
+                    row = cur.fetchone()
+                if row:
+                    results.append({'block': block, 'found': True, 'height': row[0], 'block_number': row[1], 'hash': row[2], 'timestamp': row[3].isoformat() if row[3] else None, 'status': row[4]})
+                else:
+                    results.append({'block': block, 'found': False})
+            return {'status': 'success', 'result': {'queried': len(block_list), 'found': sum(1 for r in results if r.get('found')), 'blocks': results}}
         except Exception as e:
+            import logging; logging.error(f"[BlockBatch] {e}")
             return {'status': 'error', 'error': str(e)}
 
     @staticmethod
     def _block_integrity(**kwargs) -> Dict[str, Any]:
-        """Chain integrity - INTEGRATED VERSION"""
+        """Check blockchain integrity - verify chain continuity"""
         try:
-            import requests
-            base_url = 'https://qtcl-blockchain.koyeb.app'
-            response = requests.post(f'{base_url}/blockchain/blocks/command', json={
-                'command': 'chain_integrity',
-                'options': {
-                    'start_height': kwargs.get('start', None),
-                    'end_height': kwargs.get('end', None)
-                }
-            }, timeout=60)
-            if response.status_code == 200:
-                data = response.json()
-                return {'status': 'success', 'result': data}
-            else:
-                return {'status': 'error', 'error': f'API returned {response.status_code}: {response.text[:200]}'}
+            from wsgi_config import DB
+            if not DB:
+                return {'status': 'error', 'error': 'Database unavailable'}
+            issues = []
+            with DB.cursor() as cur:
+                cur.execute("SELECT height, block_hash, previous_hash FROM blocks ORDER BY height ASC")
+                blocks = cur.fetchall() or []
+            if not blocks:
+                return {'status': 'success', 'result': {'valid': True, 'blocks_checked': 0, 'issues': ['No blocks in chain']}}
+            for i, (height, block_hash, prev_hash) in enumerate(blocks):
+                if height == 0:
+                    if prev_hash is not None:
+                        issues.append(f'Block 0: Genesis block has parent_hash set')
+                else:
+                    if prev_hash is None:
+                        issues.append(f'Block {height}: Missing parent hash')
+                    else:
+                        if i == 0 or blocks[i-1][1] != prev_hash:
+                            with DB.cursor() as cur:
+                                cur.execute("SELECT COUNT(*) FROM blocks WHERE block_hash = %s", [prev_hash])
+                                parent_found = cur.fetchone()[0] > 0
+                            if not parent_found:
+                                issues.append(f'Block {height}: Parent block not found')
+            return {'status': 'success', 'result': {'valid': len(issues) == 0, 'blocks_checked': len(blocks), 'issues': issues, 'chain_height': blocks[-1][0] if blocks else 0}}
         except Exception as e:
+            import logging; logging.error(f"[BlockIntegrity] {e}")
             return {'status': 'error', 'error': str(e)}
+
 
     @staticmethod
     def _block_explorer(block: str = None, query: str = None, **kwargs) -> Dict[str, Any]:

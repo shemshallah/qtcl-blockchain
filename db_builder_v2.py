@@ -4604,7 +4604,7 @@ class DatabaseBuilder:
                 'CREATE INDEX IF NOT EXISTS idx_tx_tx_hash ON transactions(tx_hash)',
                 'CREATE INDEX IF NOT EXISTS idx_tx_from_user ON transactions(from_user_id)',
                 'CREATE INDEX IF NOT EXISTS idx_tx_to_user ON transactions(to_user_id)',
-                'CREATE INDEX IF NOT EXISTS idx_tx_height ON transactions(height)',
+                'CREATE INDEX IF NOT EXISTS idx_tx_block ON transactions(block_number)',
                 'CREATE INDEX IF NOT EXISTS idx_tx_status ON transactions(status)',
                 'CREATE INDEX IF NOT EXISTS idx_tx_created ON transactions(created_at)',
                 'CREATE INDEX IF NOT EXISTS idx_tx_from_to ON transactions(from_user_id, to_user_id)',
@@ -4613,8 +4613,8 @@ class DatabaseBuilder:
             'blocks': [
                 'CREATE INDEX IF NOT EXISTS idx_block_number ON blocks(block_number)',
                 'CREATE INDEX IF NOT EXISTS idx_block_hash ON blocks(block_hash)',
-                'CREATE INDEX IF NOT EXISTS idx_block_parent ON blocks(previous_hash)',
-                'CREATE INDEX IF NOT EXISTS idx_block_validator ON blocks(validator)',
+                'CREATE INDEX IF NOT EXISTS idx_block_parent ON blocks(parent_hash)',
+                'CREATE INDEX IF NOT EXISTS idx_block_miner ON blocks(validator_address)',
                 'CREATE INDEX IF NOT EXISTS idx_block_timestamp ON blocks(timestamp)',
                 'CREATE INDEX IF NOT EXISTS idx_block_created ON blocks(created_at)',
             ],
@@ -4824,100 +4824,58 @@ class DatabaseBuilder:
             logger.info(f"{CLR.B}Initializing genesis data...{CLR.E}")
             
             # Create genesis block using HEIGHT not block_number for compatibility with blockchain_api
-            genesis_ts = int(datetime.now(timezone.utc).timestamp())
             genesis_block = {
                 'height': 0,
-                'block_number': 0,
-                'block_hash': hashlib.sha256(b'GENESIS_QTCL_BLOCK_0').hexdigest(),
-                'previous_hash': '0x0000000000000000000000000000000000000000000000000000000000000000',
-                'state_root': hashlib.sha256(b'GENESIS_STATE_ROOT').hexdigest(),
-                'transactions_root': hashlib.sha256(b'GENESIS_TX_ROOT').hexdigest(),
-                'receipts_root': hashlib.sha256(b'GENESIS_RECEIPTS_ROOT').hexdigest(),
-                'timestamp': genesis_ts,
-                'transactions': 0,
+                'block_hash': hashlib.sha256(b'GENESIS').hexdigest(),
+                'previous_hash': '0x0',
                 'validator': 'qtcl_genesis_validator_v3',
-                'validator_signature': None,
-                'quantum_state_hash': hashlib.sha256(b'GENESIS_QUANTUM_STATE').hexdigest(),
-                'entropy_score': 0.5,
-                'floquet_cycle': 0,
+                'timestamp': int(datetime.now(timezone.utc).timestamp()),
+                'difficulty': 1,
+                'nonce': '0',
+                'gas_limit': GAS_LIMIT_PER_BLOCK,
+                'gas_used': 0,
                 'merkle_root': hashlib.sha256(b'GENESIS_MERKLE').hexdigest(),
                 'quantum_merkle_root': hashlib.sha256(b'GENESIS_QUANTUM_MERKLE').hexdigest(),
-                'quantum_proof': hashlib.sha256(b'GENESIS_QUANTUM_PROOF').hexdigest(),
+                'state_root': hashlib.sha256(b'GENESIS_STATE').hexdigest(),
+                'quantum_proof': hashlib.sha256(b'GENESIS_QP').hexdigest(),
                 'quantum_entropy': '0.5',
-                'temporal_proof': hashlib.sha256(b'GENESIS_TEMPORAL_PROOF').hexdigest(),
-                'difficulty': 1.0,
-                'total_difficulty': 1,
-                'gas_used': 0,
-                'gas_limit': GAS_LIMIT_PER_BLOCK,
-                'base_fee_per_gas': None,
-                'miner_reward': 0,
-                'uncle_rewards': 0,
-                'total_fees': 0,
-                'burned_fees': 0,
-                'reward': 0,
+                'temporal_proof': hashlib.sha256(b'GENESIS_TP').hexdigest(),
                 'size_bytes': 0,
                 'quantum_validation_status': 'validated',
                 'quantum_measurements_count': 0,
-                'quantum_proof_version': 3,
-                'validated_at': None,
-                'validation_entropy_avg': None,
-                'extra_data': None,
-                'nonce': '0x0000000000000000',
-                'mix_hash': None,
-                'logs_bloom': None,
-                'is_orphan': False,
-                'is_uncle': False,
-                'uncle_position': None,
+                'status': 'finalized',
                 'confirmations': 0,
                 'epoch': 0,
                 'tx_capacity': 0,
                 'temporal_coherence': 0.9,
-                'status': 'finalized',
-                'finalized': True,
-                'finalized_at': datetime.now(timezone.utc)
+                'is_orphan': False,
+                'quantum_proof_version': 3
             }
             
             genesis_insert = """
                 INSERT INTO blocks (
-                    height, block_number, block_hash, previous_hash, state_root,
-                    transactions_root, receipts_root, timestamp, transactions, validator,
-                    validator_signature, quantum_state_hash, entropy_score, floquet_cycle,
-                    merkle_root, quantum_merkle_root, quantum_proof, quantum_entropy,
-                    temporal_proof, difficulty, total_difficulty, gas_used, gas_limit,
-                    base_fee_per_gas, miner_reward, uncle_rewards, total_fees,
-                    burned_fees, reward, size_bytes, quantum_validation_status,
-                    quantum_measurements_count, quantum_proof_version, validated_at,
-                    validation_entropy_avg, extra_data, nonce, mix_hash, logs_bloom,
-                    is_orphan, is_uncle, uncle_position, confirmations, epoch,
-                    tx_capacity, temporal_coherence, status, finalized, finalized_at,
+                    height, block_hash, previous_hash, validator, 
+                    timestamp, difficulty, nonce, gas_limit, gas_used,
+                    merkle_root, quantum_merkle_root, state_root, quantum_proof,
+                    quantum_entropy, temporal_proof, size_bytes, 
+                    quantum_validation_status, quantum_measurements_count, 
+                    status, confirmations, epoch, tx_capacity, 
+                    temporal_coherence, is_orphan, quantum_proof_version,
                     created_at
                 ) VALUES (
-                    %(height)s, %(block_number)s, %(block_hash)s, %(previous_hash)s,
-                    %(state_root)s, %(transactions_root)s, %(receipts_root)s,
-                    %(timestamp)s, %(transactions)s, %(validator)s,
-                    %(validator_signature)s, %(quantum_state_hash)s, %(entropy_score)s,
-                    %(floquet_cycle)s, %(merkle_root)s, %(quantum_merkle_root)s,
-                    %(quantum_proof)s, %(quantum_entropy)s, %(temporal_proof)s,
-                    %(difficulty)s, %(total_difficulty)s, %(gas_used)s, %(gas_limit)s,
-                    %(base_fee_per_gas)s, %(miner_reward)s, %(uncle_rewards)s,
-                    %(total_fees)s, %(burned_fees)s, %(reward)s, %(size_bytes)s,
+                    %(height)s, %(block_hash)s, %(previous_hash)s, %(validator)s,
+                    %(timestamp)s, %(difficulty)s, %(nonce)s, %(gas_limit)s, %(gas_used)s,
+                    %(merkle_root)s, %(quantum_merkle_root)s, %(state_root)s, %(quantum_proof)s,
+                    %(quantum_entropy)s, %(temporal_proof)s, %(size_bytes)s,
                     %(quantum_validation_status)s, %(quantum_measurements_count)s,
-                    %(quantum_proof_version)s, %(validated_at)s,
-                    %(validation_entropy_avg)s, %(extra_data)s, %(nonce)s,
-                    %(mix_hash)s, %(logs_bloom)s, %(is_orphan)s, %(is_uncle)s,
-                    %(uncle_position)s, %(confirmations)s, %(epoch)s,
-                    %(tx_capacity)s, %(temporal_coherence)s, %(status)s,
-                    %(finalized)s, %(finalized_at)s, NOW()
+                    %(status)s, %(confirmations)s, %(epoch)s, %(tx_capacity)s,
+                    %(temporal_coherence)s, %(is_orphan)s, %(quantum_proof_version)s,
+                    NOW()
                 )
                 ON CONFLICT (height) DO NOTHING
             """
             
-            try:
-                self.execute(genesis_insert, genesis_block)
-                logger.info(f"{CLR.G}[OK] Genesis block created at height=0, block_number=0{CLR.E}")
-            except Exception as e:
-                logger.error(f"{CLR.R}[ERROR] Genesis block insert failed: {str(e)}{CLR.E}")
-                logger.info(f"{CLR.Y}[WARN] Continuing despite genesis block error...{CLR.E}")
+            self.execute(genesis_insert, genesis_block)
             logger.info(f"{CLR.G}[OK] Genesis block created at height=0{CLR.E}")
             
             # Create initial users - ADMIN FIRST
