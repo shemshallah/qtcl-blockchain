@@ -1507,37 +1507,54 @@ class BlockchainDB:
 
     def _exec(self,query:str,params:tuple=(),fetch_one:bool=False,fetch_all:bool=True):
         try:
-            # Use RealDictCursor or DictCursor for proper dict conversion
-            from psycopg2.extras import RealDictCursor, DictCursor
-            
-            if hasattr(self.db, 'cursor'):
-                # Direct psycopg2 connection
-                with self.db.cursor(cursor_factory=RealDictCursor) as cur:
-                    cur.execute(query, params)
-                    if fetch_one:
-                        row = cur.fetchone()
-                        return dict(row) if row else None
-                    else:
-                        rows = cur.fetchall()
-                        return [dict(row) for row in rows] if rows else []
-            elif hasattr(self.db, 'execute_query'):
-                result = self.db.execute_query(query, params, fetch_one=fetch_one)
-            elif hasattr(self.db, 'execute'):
-                result = self.db.execute(query, params)
-            else:
+            # If db_manager has execute_query method (preferred)
+            if hasattr(self.db, 'execute_query'):
+                result = self.db.execute_query(query, params or (), fetch_one=fetch_one)
+                if result is None:
+                    return None if fetch_one else []
+                # execute_query should already return dicts via RealDictCursor
+                if isinstance(result, dict):
+                    return result
+                if isinstance(result, list):
+                    # Already list of dicts from execute_query
+                    return result[0] if (fetch_one and len(result) > 0) else result
                 return None if fetch_one else []
             
-            # If result is already dict(s), return as-is
-            if isinstance(result, dict):
-                return result if fetch_one else [result]
-            if isinstance(result, list) and len(result) > 0:
-                if isinstance(result[0], dict):
-                    return result[0] if fetch_one else result
+            # Fallback: if db_manager has execute method
+            if hasattr(self.db, 'execute'):
+                result = self.db.execute(query, params or ())
+                if not result:
+                    return None if fetch_one else []
+                # Convert raw tuples to dicts if needed
+                if isinstance(result, list) and len(result) > 0:
+                    first = result[0]
+                    if isinstance(first, (tuple, list)):
+                        # Raw tuples - need to convert using cursor description
+                        # Get column names from a fresh cursor
+                        try:
+                            from psycopg2.extras import RealDictCursor
+                            conn = self.db.get_connection() if hasattr(self.db, 'get_connection') else None
+                            if conn:
+                                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                                    cur.execute(query, params or ())
+                                    if fetch_one:
+                                        row = cur.fetchone()
+                                        return dict(row) if row else None
+                                    else:
+                                        rows = cur.fetchall()
+                                        return [dict(row) for row in rows] if rows else []
+                        except:
+                            pass
+                    elif isinstance(first, dict):
+                        # Already dicts
+                        return result[0] if (fetch_one and len(result) > 0) else result
+                return None if fetch_one else []
             
-            # Fallback if not converted to dict
+            # No database interface available
             return None if fetch_one else []
+            
         except Exception as e:
-            logger.error("[DB] Query error: %s | %s",query[:80],e)
+            logger.error("[DB] Query error: %s | %s", query[:80], e)
             import traceback
             logger.error("[DB] Traceback: %s", traceback.format_exc())
             return None if fetch_one else []
