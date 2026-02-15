@@ -88,15 +88,24 @@ import psycopg2
 from psycopg2.extras import RealDictCursor,execute_batch,execute_values,Json
 
 try:
-    from qiskit import QuantumCircuit,QuantumRegister,ClassicalRegister,transpile,assemble,execute
-    from qiskit_aer import AerSimulator,QasmSimulator,StatevectorSimulator
-    from qiskit_aer.noise import NoiseModel,depolarizing_error,amplitude_damping_error,phase_damping_error,pauli_error
-    from qiskit.quantum_info import Statevector,DensityMatrix,state_fidelity,entropy,partial_trace,purity
-    from qiskit.circuit.library import QFT,GroverOperator,EfficientSU2
-    QISKIT_AVAILABLE=True
+    from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister, transpile
+    from qiskit_aer import AerSimulator, QasmSimulator, StatevectorSimulator
+    from qiskit_aer.noise import NoiseModel, depolarizing_error, amplitude_damping_error, phase_damping_error, pauli_error
+    from qiskit.quantum_info import Statevector, DensityMatrix, state_fidelity, entropy, partial_trace, purity
+    from qiskit.circuit.library import QFT, GroverOperator, EfficientSU2
+    
+    # Handle execute import - deprecated in qiskit 1.0+
+    try:
+        from qiskit import execute
+    except ImportError:
+        # Qiskit 1.0+ - execute was moved/removed, we'll use simulator.run() instead
+        execute = None
+    
+    QISKIT_AVAILABLE = True
 except ImportError as e:
-    QISKIT_AVAILABLE=False
+    QISKIT_AVAILABLE = False
     logging.warning(f"⚠️  Qiskit not available: {e}")
+    execute = None
 
 try:
     import numpy as np

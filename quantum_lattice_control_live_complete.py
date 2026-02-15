@@ -1,6 +1,5 @@
 
 #!/usr/bin/env python3
-from __future__ import annotations
 """
 ╔════════════════════════════════════════════════════════════════════════════════╗
 ║                                                                                ║
@@ -48,47 +47,12 @@ import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ═════════════════════════════════════════════════════════════════════════════════
-# SAFE NUMPY IMPORT - Critical for system stability
-# ═════════════════════════════════════════════════════════════════════════════════
-try:
-    import numpy as np
-    NUMPY_AVAILABLE = True
-except Exception as e:
-    NUMPY_AVAILABLE = False
-    # Minimal fallback - numpy may not be available in some environments
-    # Type hints are deferred (from __future__ import annotations) so this doesn't break
-    import sys
-    
-    class _NumpyFallback:
-        """Minimal numpy fallback for environments without numpy"""
-        class ndarray:
-            pass
-        class uint64:
-            pass
-        pi = 3.14159265359
-    
-    np = _NumpyFallback()
-    logger = logging.getLogger(__name__)
-    logger.warning(f"NumPy not available - using fallback mode")
+# NumPy is a core dependency for quantum and scientific computing
+import numpy as np
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # PARALLEL BATCH PROCESSING + NOISE-ALONE W-STATE REFRESH (v5.2 ENHANCEMENT)
 # ═════════════════════════════════════════════════════════════════════════════════
-
-try:
-    from lightweight_heartbeat import LightweightHeartbeat
-except ImportError:
-    # Create dummy heartbeat if not available
-    class LightweightHeartbeat:
-        def __init__(self, *args, **kwargs):
-            pass
-        def start(self):
-            pass
-        def stop(self):
-            pass
-        def beat(self):
-            pass
 
 try:
     from parallel_refresh_implementation import (
@@ -106,6 +70,20 @@ except ImportError:
         "Sequential batch processing will be used. "
         "Copy parallel_refresh_implementation.py to enable 3.5x speedup."
     )
+
+try:
+    from lightweight_heartbeat import LightweightHeartbeat
+except ImportError:
+    # Create dummy heartbeat if not available
+    class LightweightHeartbeat:
+        def __init__(self, *args, **kwargs):
+            pass
+        def start(self):
+            pass
+        def stop(self):
+            pass
+        def beat(self):
+            pass
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LOGGING CONFIGURATION
@@ -4300,7 +4278,7 @@ logger.info("╚═════════════════════�
 
 # Try to import qiskit aer for quantum simulation
 try:
-    from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister, transpile, execute
+    from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister, transpile
     from qiskit_aer import AerSimulator, QasmSimulator, StatevectorSimulator
     from qiskit_aer.noise import NoiseModel, depolarizing_error, amplitude_damping_error, phase_damping_error
     from qiskit.quantum_info import Statevector, DensityMatrix, state_fidelity, entropy, partial_trace
@@ -4312,8 +4290,8 @@ try:
     logger.info("✓ Qiskit AER loaded successfully - Full quantum simulation enabled")
 except ImportError as e:
     QISKIT_AVAILABLE = False
-    logger.warning(f"⚠ Qiskit AER not available: {e}. Using fallback quantum simulation.")
-    np = None
+    logger.error(f"✗ Qiskit AER import failed: {e}")
+    raise  # Re-raise to fail fast instead of silently degrading
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PART 3: GLOBAL QUANTUM LATTICE - TRANSACTION W-STATE MANAGEMENT (5 VALIDATOR QUBITS)
