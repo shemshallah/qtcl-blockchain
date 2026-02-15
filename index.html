@@ -4,8 +4,72 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>QTCL - Quantum Terminal & Dashboard</title>
-    <!-- Command Executor Bridge v5.0 -->
-    <script src="/static/command_executor.js" defer></script>
+    <!-- Command Executor - INLINED DIRECTLY -->
+    <script>
+        /**
+         * ULTRA-SIMPLE COMMAND EXECUTOR - INLINED
+         * Just send commands to /api/execute and display output
+         */
+        class QTCLCommandExecutor {
+            constructor() {
+                this.history = [];
+                this.isConnected = true;
+                this.listeners = {};
+                console.log('[Executor] ✓ Initialized');
+            }
+            
+            async execute(command) {
+                console.log('[Executor] Executing:', command);
+                
+                try {
+                    const response = await fetch('/api/execute', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${localStorage.getItem('authToken') || ''}`
+                        },
+                        body: JSON.stringify({ command })
+                    });
+                    
+                    const data = await response.json();
+                    console.log('[Executor] Response:', data);
+                    
+                    return {
+                        status: data.status || 'success',
+                        output: data.output || JSON.stringify(data),
+                        command: command,
+                        error: data.error || null
+                    };
+                } catch (error) {
+                    console.error('[Executor] Error:', error);
+                    return {
+                        status: 'error',
+                        error: error.message,
+                        command: command,
+                        output: null
+                    };
+                }
+            }
+            
+            on(event, callback) {
+                if (!this.listeners[event]) this.listeners[event] = [];
+                this.listeners[event].push(callback);
+            }
+            
+            emit(event, data) {
+                if (this.listeners[event]) {
+                    this.listeners[event].forEach(cb => {
+                        try { cb(data); } catch (e) { console.error(e); }
+                    });
+                }
+            }
+        }
+
+        // Initialize immediately
+        console.log('[Boot] Initializing executor...');
+        window.commandExecutor = new QTCLCommandExecutor();
+        console.log('[Boot] ✓ window.commandExecutor is ready');
+    </script>
     <style>
         * {
             margin: 0;
@@ -1157,13 +1221,26 @@
         }
         
         // Initialize CommandExecutor (v5.0)
-        document.addEventListener('DOMContentLoaded', () => {
-            if (window.commandExecutor) {
-                log('✓ Command Executor ENABLED', 'success');
-            } else {
-                log('⚠ Command Executor not available', 'warning');
-            }
-        });
+        // Check immediately - should already be defined from head script
+        function initExecutor() {
+            setTimeout(() => {
+                if (window.commandExecutor) {
+                    log('✓ Command Executor ENABLED', 'success');
+                    console.log('[Init] ✓ Executor confirmed ready');
+                } else {
+                    log('⚠ Command Executor not available', 'warning');
+                    console.error('[Init] CRITICAL: window.commandExecutor is', window.commandExecutor);
+                    console.error('[Init] Executor should have been defined in <head>');
+                }
+            }, 10);
+        }
+        
+        // Run on DOM ready
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initExecutor);
+        } else {
+            initExecutor();
+        }
         
         // Check API health
         (async () => {
