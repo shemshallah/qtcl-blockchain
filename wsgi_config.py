@@ -1947,80 +1947,57 @@ try:
     # STATIC FILE SERVING - Serve index.html and web assets
     # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     
-    # Pre-load index.html content at startup (fixes Koyeb path issues)
+    # Pre-load index.html from same directory as this file
+    _WSGI_DIR = os.path.dirname(os.path.abspath(__file__))
+    _INDEX_HTML_PATH = os.path.join(_WSGI_DIR, 'index.html')
     _INDEX_HTML_CACHE = None
+    
     try:
-        possible_paths = [
-            'index.html',
-            os.path.join(os.getcwd(), 'index.html'),
-            os.path.join(os.path.dirname(__file__), 'index.html'),
-            '/app/index.html',
-            '/src/index.html',
-            '/mnt/user-data/outputs/index.html',
-            '/workspace/index.html',
-            '/home/app/index.html',
-        ]
-        for path in possible_paths:
-            if os.path.isfile(path):
-                with open(path, 'r') as f:
-                    _INDEX_HTML_CACHE = f.read()
-                logger.info(f"[Static] Pre-loaded index.html from: {path}")
-                break
-        if not _INDEX_HTML_CACHE:
-            logger.warning(f"[Static] index.html not found in any location. Tried: {possible_paths}")
+        if os.path.exists(_INDEX_HTML_PATH):
+            with open(_INDEX_HTML_PATH, 'r', encoding='utf-8') as f:
+                _INDEX_HTML_CACHE = f.read()
+            logger.info(f"[Static] ✅ Loaded index.html from: {_INDEX_HTML_PATH}")
+        else:
+            logger.warning(f"[Static] ❌ index.html not found at: {_INDEX_HTML_PATH}")
+            logger.warning(f"[Static] Directory contents: {os.listdir(_WSGI_DIR)[:10]}")
     except Exception as e:
-        logger.warning(f"[Static] Could not pre-load index.html: {e}")
+        logger.error(f"[Static] Error loading index.html: {e}")
     
     @app.route('/')
-    def serve_root():
-        """Serve index.html at root path"""
+    @app.route('/index.html')
+    def serve_index():
+        """Serve index.html or fallback"""
         from flask import Response
-        if _INDEX_HTML_CACHE:
-            logger.info("[Static] Serving cached index.html")
-            return Response(_INDEX_HTML_CACHE, mimetype='text/html')
         
-        # Fallback: Return proper HTML if index.html not cached
-        logger.warning("[Static] No cached index.html, returning fallback HTML")
-        fallback_html = """<!DOCTYPE html>
+        # Return cached index.html
+        if _INDEX_HTML_CACHE:
+            logger.info("[Route] Serving index.html")
+            return Response(_INDEX_HTML_CACHE, mimetype='text/html; charset=utf-8')
+        
+        # Fallback HTML
+        logger.warning("[Route] Serving fallback HTML")
+        fallback = """<!DOCTYPE html>
 <html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>QTCL - Quantum Terminal</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        :root { --primary: #a78bfa; --bg-dark: #1a1a2e; --text-primary: #f0f0f0; }
-        html, body { width: 100%; height: 100%; background: linear-gradient(135deg, #0a0a14 0%, #0f0f1e 100%); color: var(--text-primary); font-family: 'Monaco', monospace; }
-        body { display: flex; flex-direction: column; padding: 40px; }
-        h1 { color: var(--primary); margin-bottom: 20px; }
-        .container { background: var(--bg-dark); padding: 30px; border-radius: 12px; max-width: 800px; }
-        .status { color: #10b981; font-weight: bold; }
-        ul { margin-left: 20px; margin-top: 15px; }
-        li { margin: 10px 0; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QTCL - Quantum Terminal</title>
+<style>
+* { margin: 0; padding: 0; }
+html, body { width: 100%; height: 100%; background: #0f0f1e; color: #f0f0f0; font-family: monospace; }
+body { padding: 40px; }
+h1 { color: #a78bfa; margin-bottom: 20px; }
+p { color: #94a3b8; }
+</style>
 </head>
 <body>
-    <h1>⚛️ QTCL Unified API v5.0</h1>
-    <div class="container">
-        <p><span class="status">✓ API Server is OPERATIONAL</span></p>
-        <p style="margin-top: 15px;">Command execution engine is running and ready</p>
-        <strong style="display: block; margin-top: 20px;">Available API Endpoints:</strong>
-        <ul>
-            <li><strong>POST /api/execute</strong> - Execute a single command</li>
-            <li><strong>GET /api/health</strong> - Health check</li>
-            <li><strong>GET /api/ultimate/status</strong> - System status</li>
-            <li><strong>GET /api/ultimate/metrics</strong> - Metrics</li>
-        </ul>
-        <p style="margin-top: 20px; color: #94a3b8; font-size: 12px;">Note: Full index.html not found - displaying fallback UI. Check deployment logs.</p>
-    </div>
+<h1>⚛️ QTCL Unified API v5.0</h1>
+<p>✓ API Server is OPERATIONAL</p>
+<p>Terminal UI coming...</p>
 </body>
 </html>"""
-        return Response(fallback_html, mimetype='text/html')
-    
-    @app.route('/index.html')
-    def serve_index_html():
-        """Serve index.html explicitly"""
-        return serve_root()
+        return Response(fallback, mimetype='text/html; charset=utf-8')
+
     
     @app.route('/<path:filename>')
     def serve_static(filename):

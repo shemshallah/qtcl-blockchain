@@ -2558,8 +2558,11 @@ class TerminalEngine:
             if validate_block:
                 args_str += " --validate"
             
-            # Call the comprehensive command from terminal_block_commands module
-            try:
+            # Call the comprehensive command
+            pass
+        except Exception as e:
+            UI.error(f"Error: {e}")
+    
     def _cmd_block_validate_comprehensive(self):
         """🔍 Comprehensive block validation with quantum proofs"""
         try:
@@ -2573,13 +2576,19 @@ class TerminalEngine:
             if validate_full:
                 args_str += " --full"
             
-            try:
+            pass
+        except Exception as e:
+            UI.error(f"Block validation error: {e}")
+    
     def _cmd_block_quantum_measure(self):
         """⚛️ Perform quantum measurements on block"""
         try:
             block_id = UI.prompt("Block hash or height for quantum measurement")
             
-            try:
+            pass
+        except Exception as e:
+            UI.error(f"Quantum measurement error: {e}")
+    
     def _cmd_block_batch_query(self):
         """📦 Query multiple blocks in parallel"""
         try:
@@ -2591,7 +2600,10 @@ class TerminalEngine:
             if include_quantum:
                 args_str += " --quantum"
             
-            try:
+            pass
+        except Exception as e:
+            UI.error(f"Batch query error: {e}")
+    
     def _cmd_block_integrity_check(self):
         """🔍 Verify blockchain integrity"""
         try:
@@ -2603,7 +2615,10 @@ class TerminalEngine:
             else:
                 args_str = range_input
             
-            try:
+            pass
+        except Exception as e:
+            UI.error(f"Integrity check error: {e}")
+    
     def _measure_quantum_block_state(self, block_data, correlation_id):
         """
         Recursively measure and validate quantum block state including:
@@ -3991,6 +4006,8 @@ class TerminalEngine:
             if choice=="List":
                 self._cmd_block_list()
             elif choice=="Details":
+                pass
+    
     def _oracle_submenu(self):
         while True:
             choice=UI.prompt_choice("Oracle:",[
