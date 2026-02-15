@@ -2713,6 +2713,66 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
             return jresp({'error':str(e)},500)
 
     # ═══════════════════════════════════════════════════════════════════════════════════════
+    # SECTION: DIAGNOSTICS - DATABASE HEALTH & BLOCK CHAIN STATE
+    # ═══════════════════════════════════════════════════════════════════════════════════════
+    
+    @bp.route('/blocks/diagnostics',methods=['GET'])
+    @rate_limit(50)
+    def block_diagnostics():
+        """Database health and block chain state diagnostics"""
+        try:
+            # Check genesis block
+            genesis=db._exec("SELECT * FROM blocks WHERE height=0 LIMIT 1",fetch_one=True)
+            genesis_exists=genesis is not None
+            
+            # Get block counts
+            total=db._exec("SELECT COUNT(*) as c FROM blocks",fetch_one=True)
+            total_count=int(total.get('c',0)) if total else 0
+            
+            # Get height range
+            range_info=db._exec("SELECT MIN(height) as min_h,MAX(height) as max_h FROM blocks",fetch_one=True)
+            min_height=range_info.get('min_h') if range_info else None
+            max_height=range_info.get('max_h') if range_info else None
+            
+            # Get validator count
+            validators=db._exec("SELECT COUNT(DISTINCT validator) as c FROM blocks",fetch_one=True)
+            validator_count=int(validators.get('c',0)) if validators else 0
+            
+            # Get block status distribution
+            status_dist=db._exec("""
+                SELECT status,COUNT(*) as cnt FROM blocks 
+                GROUP BY status ORDER BY cnt DESC
+            """)
+            
+            return jresp({
+                'status':'success',
+                'timestamp':datetime.now(timezone.utc).isoformat(),
+                'database':{
+                    'connected':True,
+                    'total_blocks':total_count,
+                    'min_height':min_height,
+                    'max_height':max_height,
+                    'height_range':max_height-min_height+1 if max_height is not None else 0,
+                    'unique_validators':validator_count
+                },
+                'genesis':{
+                    'exists':genesis_exists,
+                    'block_hash':genesis.get('block_hash') if genesis else None,
+                    'validator':genesis.get('validator') if genesis else None,
+                    'timestamp':genesis.get('timestamp').isoformat() if genesis and hasattr(genesis.get('timestamp'),'isoformat') else None
+                },
+                'chain':{
+                    'status':'initialized' if genesis_exists else 'not_initialized',
+                    'blocks_missing':max_height-min_height+1-(total_count) if max_height else None
+                },
+                'status_distribution':dict([(s.get('status'),s.get('cnt')) for s in (status_dist or [])]),
+                '_diagnostic_message':'Database is healthy' if genesis_exists and total_count>0 else 'CRITICAL: No blocks in database. Run initialization.'
+            })
+        except Exception as e:
+            logger.error(f"[BLOCK_DIAGNOSTICS] Error: {e}",exc_info=True)
+            return jresp({'error':str(e),'_diagnostic':'Database connection failed'},500)
+    
+    # ═══════════════════════════════════════════════════════════════════════════════════════
     # SECTION: COMPREHENSIVE BLOCK COMMAND SYSTEM WITH QUANTUM MEASUREMENTS
     # ═══════════════════════════════════════════════════════════════════════════════════════
     
@@ -3599,6 +3659,7 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
     def _handle_block_history(options,correlation_id):
         """
         Block history: returns a paginated list of recent blocks from DB + chain stats.
+        ENHANCED: Checks for genesis block, handles empty database gracefully.
         options:
           limit      (int, default 20, max 200)
           offset     (int, default 0)
@@ -3614,6 +3675,35 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
             order    = 'ASC' if str(options.get('order','desc')).upper()=='ASC' else 'DESC'
             filters  = []
             params: list = []
+
+            # Check if genesis block exists
+            genesis_check = db._exec("SELECT COUNT(*) as c FROM blocks WHERE height=0",fetch_one=True)
+            genesis_exists = genesis_check and genesis_check.get('c',0) > 0 if genesis_check else False
+            
+            # Check total block count
+            total_blocks_check = db._exec("SELECT COUNT(*) as c FROM blocks",fetch_one=True)
+            total_blocks = total_blocks_check.get('c',0) if total_blocks_check else 0
+            
+            logger.info(f"[BLOCK_HISTORY] Genesis exists: {genesis_exists}, Total blocks: {total_blocks}")
+            
+            # If no blocks, return diagnostic
+            if total_blocks == 0:
+                return {
+                    'blocks': [],
+                    'total_count': 0,
+                    'limit': limit,
+                    'offset': offset,
+                    'order': order,
+                    'page': 1,
+                    'pages': 0,
+                    'latest_height': 0,
+                    'finalized_height': 0,
+                    'chain_length': 0,
+                    'filters_applied': False,
+                    '_diagnostic': 'No blocks in database. Genesis block needs initialization.',
+                    '_genesis_exists': False,
+                    '_total_blocks': 0
+                }
 
             if options.get('min_height') is not None:
                 filters.append('height >= %s'); params.append(int(options['min_height']))
@@ -3695,12 +3785,14 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
                 'limit'           : limit,
                 'offset'          : offset,
                 'order'           : order,
-                'page'            : offset // limit + 1,
+                'page'            : offset // limit + 1 if limit > 0 else 1,
                 'pages'           : max(1, (total_count + limit - 1) // limit),
                 'latest_height'   : latest_height,
                 'finalized_height': chain_stats.get('finalized_height',0),
                 'chain_length'    : chain_stats.get('chain_length',0),
                 'filters_applied' : bool(filters),
+                '_genesis_exists': genesis_exists,
+                '_total_blocks': total_blocks
             }
         except Exception as e:
             logger.error(f"[BLOCK_HISTORY] Error: {e}", exc_info=True)
@@ -3728,7 +3820,7 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
                     '_db_error': str(e)
                 }
             except Exception as e2:
-                return {'error': str(e), 'fallback_error': str(e2)}
+                return {'error': str(e), 'fallback_error': str(e2), '_diagnostic': 'Database and memory fallback both failed'}
 
     def _handle_block_reorg(block_ref,options,correlation_id):
         """

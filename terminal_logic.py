@@ -5333,8 +5333,14 @@ class GlobalCommandRegistry:
             cur.close()
             conn.close()
             
-            metadata=json.loads(user.get('metadata','{}'))
-            pq_id=metadata.get('pseudoqubit_id')
+            # Fix: metadata might already be dict from RealDictCursor
+            metadata=user.get('metadata',{})
+            if isinstance(metadata,str):
+                try:
+                    metadata=json.loads(metadata)
+                except:
+                    metadata={}
+            pq_id=metadata.get('pseudoqubit_id') if isinstance(metadata,dict) else None
             
             logger.info(f"[Auth/Login] Success: {user['user_id']}")
             
