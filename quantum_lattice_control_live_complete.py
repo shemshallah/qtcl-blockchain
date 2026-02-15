@@ -36,7 +36,7 @@ import queue
 import psycopg2
 from psycopg2.extras import execute_batch, RealDictCursor
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Optional, Callable
+from typing import Dict, List, Tuple, Optional, Callable, Any
 from collections import deque, defaultdict
 from dataclasses import dataclass
 from enum import Enum

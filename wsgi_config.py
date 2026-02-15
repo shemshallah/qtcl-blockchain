@@ -1521,6 +1521,8 @@ def register_all_apis():
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 app = None
+executor = None
+socketio = None
 
 try:
     # Register everything
@@ -1937,9 +1939,11 @@ atexit.register(ultimate_shutdown)
 
 application = app
 
-# Export components for external use if needed
-SOCKETIO = socketio
-EXECUTOR = executor
+# Export components for external use if defined
+if executor is not None:
+    EXECUTOR = executor
+if socketio is not None:
+    SOCKETIO = socketio
 
 logger.info("")
 logger.info("Production Deployment:")
