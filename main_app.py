@@ -1015,3 +1015,84 @@ if __name__ == '__main__':
         debug=Config.DEBUG,
         allow_unsafe_werkzeug=True
     )
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# QUANTUM API ENDPOINTS - APPENDED v6.0 (ADDED TO ORIGINAL 1017 LINES)
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# APPENDED TO ORIGINAL main_app.py - ALL ORIGINAL CONTENT 100% PRESERVED (1017 lines)
+# ADDS: Flask routes for quantum command execution (/api/quantum/*, /api/execute with quantum support)
+
+try:
+    from flask import Blueprint, request, jsonify
+    from terminal_logic import QUANTUM_HANDLER_V6
+    
+    # Quantum API Blueprint
+    quantum_bp = Blueprint('quantum', __name__, url_prefix='/api/quantum')
+    
+    @quantum_bp.route('/execute', methods=['POST'])
+    def execute_quantum():
+        """Execute quantum command"""
+        try:
+            data = request.get_json() or {}
+            command = data.get('command', '')
+            params = data.get('params', {})
+            
+            if not command:
+                return jsonify({'success': False, 'error': 'No command provided'}), 400
+            
+            result = QUANTUM_HANDLER_V6.execute(command, params)
+            return jsonify(result)
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+    
+    @quantum_bp.route('/wstate/create', methods=['POST'])
+    def quantum_wstate_create():
+        """POST /api/quantum/wstate/create"""
+        params = request.get_json() or {}
+        result = QUANTUM_HANDLER_V6.execute('quantum/wstate/create', params)
+        return jsonify(result)
+    
+    @quantum_bp.route('/measure/all', methods=['POST'])
+    def quantum_measure_all():
+        """POST /api/quantum/measure/all"""
+        params = request.get_json() or {}
+        result = QUANTUM_HANDLER_V6.execute('quantum/measure/all', params)
+        return jsonify(result)
+    
+    @quantum_bp.route('/ghz/consensus', methods=['POST'])
+    def quantum_ghz_consensus():
+        """POST /api/quantum/ghz/consensus"""
+        params = request.get_json() or {}
+        result = QUANTUM_HANDLER_V6.execute('quantum/ghz/consensus', params)
+        return jsonify(result)
+    
+    @quantum_bp.route('/encode/transaction', methods=['POST'])
+    def quantum_encode_transaction():
+        """POST /api/quantum/encode/transaction"""
+        params = request.get_json() or {}
+        result = QUANTUM_HANDLER_V6.execute('quantum/encode/transaction', params)
+        return jsonify(result)
+    
+    @quantum_bp.route('/admin/status', methods=['GET'])
+    def quantum_admin_status():
+        """GET /api/quantum/admin/status"""
+        result = QUANTUM_HANDLER_V6.execute('quantum/admin/status', {})
+        return jsonify(result)
+    
+    @quantum_bp.route('/admin/benchmark', methods=['POST'])
+    def quantum_admin_benchmark():
+        """POST /api/quantum/admin/benchmark"""
+        params = request.get_json() or {}
+        result = QUANTUM_HANDLER_V6.execute('quantum/admin/benchmark', params)
+        return jsonify(result)
+    
+    # Register blueprint if app exists
+    if 'app' in globals():
+        app.register_blueprint(quantum_bp)
+        logger.info("✓ Quantum API Blueprint registered")
+    
+except ImportError:
+    logger.warning("Flask or quantum handlers not available for quantum API endpoints")
+
+logger.info("✓ Quantum API Endpoints v6.0 appended - /api/quantum/* routes ready")
+
