@@ -4123,6 +4123,15 @@ class GlobalCommandRegistry:
         'system/info': lambda *a, **k: {'result': 'System information'},
     }
     
+    # Parallel task execution commands (stub implementations)
+    PARALLEL_COMMANDS = {
+        'parallel/submit': lambda *a, **k: {'result': 'Task submitted for parallel execution'},
+        'parallel/status': lambda *a, **k: {'result': 'Parallel task status retrieved'},
+        'parallel/wait': lambda *a, **k: {'result': 'Waiting for parallel tasks to complete'},
+        'parallel/results': lambda *a, **k: {'result': 'Parallel task results retrieved'},
+        'parallel/cancel': lambda *a, **k: {'result': 'Parallel task cancelled'},
+    }
+    
     # All commands combined
     ALL_COMMANDS = {
         **QUANTUM_COMMANDS,
@@ -4139,6 +4148,7 @@ class GlobalCommandRegistry:
         **BRIDGE_COMMANDS,
         **ADMIN_COMMANDS,
         **SYSTEM_COMMANDS,
+        **PARALLEL_COMMANDS,
     }
     
     @classmethod
@@ -4204,6 +4214,8 @@ class GlobalCommandRegistry:
                 return {'admin': list(cls.ADMIN_COMMANDS.keys())}
             elif category == 'system':
                 return {'system': list(cls.SYSTEM_COMMANDS.keys())}
+            elif category == 'parallel':
+                return {'parallel': list(cls.PARALLEL_COMMANDS.keys())}
         
         return {
             'auth': list(cls.AUTH_COMMANDS.keys()),
@@ -4220,6 +4232,7 @@ class GlobalCommandRegistry:
             'bridge': list(cls.BRIDGE_COMMANDS.keys()),
             'admin': list(cls.ADMIN_COMMANDS.keys()),
             'system': list(cls.SYSTEM_COMMANDS.keys()),
+            'parallel': list(cls.PARALLEL_COMMANDS.keys()),
             'total': len(cls.ALL_COMMANDS)
         }
     

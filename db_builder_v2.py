@@ -5038,7 +5038,7 @@ class DatabaseBuilder:
          
 
     def full_initialization(self, populate_pq=True):
-        """Complete initialization sequence"""
+        """Complete initialization sequence - NEVER drops existing tables in production"""
         logger.info(f"\n{CLR.BOLD}{CLR.CYAN}==================================================================={CLR.E}")
         logger.info(f"{CLR.BOLD}{CLR.CYAN}STARTING COMPLETE DATABASE INITIALIZATION SEQUENCE{CLR.E}")
         logger.info(f"{CLR.BOLD}{CLR.CYAN}==================================================================={CLR.E}\n")
@@ -5046,8 +5046,8 @@ class DatabaseBuilder:
         try:
             start_time = time.time()
             
-            logger.info(f"{CLR.Q}[1/7] Creating schema...{CLR.E}")
-            self.create_schema(drop_existing=True)
+            logger.info(f"{CLR.Q}[1/7] Creating schema (preserving existing tables)...{CLR.E}")
+            self.create_schema(drop_existing=False)
             
             logger.info(f"{CLR.Q}[2/7] Creating indexes...{CLR.E}")
             self.create_indexes()
