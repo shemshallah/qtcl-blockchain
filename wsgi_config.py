@@ -1918,231 +1918,37 @@ try:
         return render_template_string(html)
     
     # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-    # STATIC FILE SERVING - Robust solution for multiple deployment scenarios
-    # Handles: Local dev, Docker, Koyeb, Kubernetes, and missing files
+    # STATIC FILE SERVING - Serve index.html and web assets
     # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     
-    # Pre-load or generate index.html content
-    _INDEX_HTML_CONTENT = None
-    
-    def _load_index_html():
-        """Load or generate index.html - used for serving root path"""
-        global _INDEX_HTML_CONTENT
-        if _INDEX_HTML_CONTENT is not None:
-            return _INDEX_HTML_CONTENT
-        
-        import os
-        
-        # Try to find index.html in multiple locations
+    # Pre-load index.html content at startup (fixes Koyeb path issues)
+    _INDEX_HTML_CACHE = None
+    try:
         possible_paths = [
             'index.html',
             os.path.join(os.getcwd(), 'index.html'),
             os.path.join(os.path.dirname(__file__), 'index.html'),
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'index.html'),
             '/app/index.html',
-            '/src/index.html',
-            '/workspace/index.html',
-            '/usr/src/app/index.html',
-            '/home/app/index.html',
-            os.path.expanduser('~/index.html'),
+            '/src/index.html'
         ]
-        
         for path in possible_paths:
-            try:
-                if os.path.isfile(path):
-                    with open(path, 'r') as f:
-                        _INDEX_HTML_CONTENT = f.read()
-                        logger.info(f"[Static] Loaded index.html from: {path}")
-                        return _INDEX_HTML_CONTENT
-            except Exception as e:
-                logger.debug(f"[Static] Could not read {path}: {e}")
-                continue
-        
-        # If not found, generate inline HTML dashboard
-        logger.warning("[Static] index.html not found anywhere, generating inline HTML")
-        _INDEX_HTML_CONTENT = '''<!DOCTYPE html>
-<html>
-<head>
-    <title>QTCL - Quantum Blockchain Terminal</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Courier New', monospace;
-            background: #0a0a0f;
-            color: #00ff88;
-            min-height: 100vh;
-            padding: 20px;
-        }
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-        }
-        header {
-            text-align: center;
-            padding: 30px 0;
-            border-bottom: 2px solid #00ff88;
-            margin-bottom: 30px;
-        }
-        h1 {
-            font-size: 2.5em;
-            margin: 10px 0;
-        }
-        .status {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 20px;
-            margin: 30px 0;
-        }
-        .card {
-            border: 2px solid #00ff88;
-            padding: 20px;
-            background: #1a1a2e;
-            border-radius: 5px;
-        }
-        .card h2 {
-            margin-bottom: 15px;
-            font-size: 1.5em;
-        }
-        .metric {
-            display: flex;
-            justify-content: space-between;
-            padding: 8px 0;
-            border-bottom: 1px solid #00ff8833;
-        }
-        .metric-label {
-            font-weight: bold;
-        }
-        .metric-value {
-            color: #00ff88;
-        }
-        .success { color: #00ff88; }
-        .warning { color: #ffaa00; }
-        .error { color: #ff4444; }
-        .button-group {
-            display: flex;
-            gap: 10px;
-            margin-top: 20px;
-            flex-wrap: wrap;
-        }
-        a, button {
-            background: #00ff88;
-            color: #000;
-            padding: 10px 20px;
-            border: none;
-            border-radius: 3px;
-            cursor: pointer;
-            text-decoration: none;
-            font-weight: bold;
-        }
-        a:hover, button:hover {
-            background: #00dd77;
-        }
-        .footer {
-            text-align: center;
-            margin-top: 30px;
-            padding-top: 20px;
-            border-top: 2px solid #00ff88;
-            color: #00ff8888;
-        }
-        .loading {
-            text-align: center;
-            padding: 20px;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <header>
-            <h1>🚀 QTCL Quantum Blockchain</h1>
-            <p>Hyperbolic Quantum-Classical Hybrid Consensus Ledger</p>
-        </header>
-        
-        <div class="status">
-            <div class="card">
-                <h2>System Status</h2>
-                <div class="metric">
-                    <span class="metric-label">Status:</span>
-                    <span class="metric-value success">✓ OPERATIONAL</span>
-                </div>
-                <div class="metric">
-                    <span class="metric-label">API:</span>
-                    <span class="metric-value success">✓ Available</span>
-                </div>
-                <div class="metric">
-                    <span class="metric-label">Database:</span>
-                    <span class="metric-value" id="db-status">⏳ Checking...</span>
-                </div>
-                <div class="metric">
-                    <span class="metric-label">Quantum Engine:</span>
-                    <span class="metric-value" id="quantum-status">⏳ Checking...</span>
-                </div>
-            </div>
-            
-            <div class="card">
-                <h2>Quick Links</h2>
-                <div class="button-group">
-                    <a href="/dashboard">📊 Dashboard</a>
-                    <a href="/api/ultimate/status">📡 API Status</a>
-                    <a href="/api/ultimate/metrics">📈 Metrics</a>
-                    <a href="/health">❤️ Health Check</a>
-                </div>
-            </div>
-            
-            <div class="card">
-                <h2>Information</h2>
-                <p style="line-height: 1.6; margin: 10px 0;">
-                    <strong>QTCL</strong> is a production-grade quantum-classical hybrid blockchain system.
-                </p>
-                <p style="line-height: 1.6; font-size: 0.9em; color: #00ff8888;">
-                    Version: 5.1 | Status: Production | Updated: 2026-02-15
-                </p>
-            </div>
-        </div>
-        
-        <div class="footer">
-            <p>Built with precision. Deployed with confidence. Running with quantum finality. 🎯</p>
-        </div>
-    </div>
-    
-    <script>
-        // Check system status
-        async function checkStatus() {
-            try {
-                const response = await fetch('/api/ultimate/status');
-                const data = await response.json();
-                
-                document.getElementById('db-status').textContent = 
-                    data.systems?.database?.queries > 0 ? '✓ Online' : '⚠ Checking...';
-                document.getElementById('quantum-status').textContent = 
-                    data.systems?.quantum_lattice ? '✓ Online' : '⚠ Not available';
-            } catch (e) {
-                console.log('Status check failed:', e);
-                document.getElementById('db-status').textContent = '⚠ Checking...';
-            }
-        }
-        
-        // Check status on load
-        checkStatus();
-        // Refresh every 30 seconds
-        setInterval(checkStatus, 30000);
-    </script>
-</body>
-</html>'''
-        return _INDEX_HTML_CONTENT
+            if os.path.isfile(path):
+                with open(path, 'r') as f:
+                    _INDEX_HTML_CACHE = f.read()
+                logger.info(f"[Static] Pre-loaded index.html from: {path}")
+                break
+    except Exception as e:
+        logger.warning(f"[Static] Could not pre-load index.html: {e}")
     
     @app.route('/')
     def serve_root():
-        """Serve index.html at root path - works even if file doesn't exist"""
+        """Serve index.html at root path"""
         from flask import Response
-        try:
-            content = _load_index_html()
-            logger.info("[Static] Serving root path with index.html")
-            return Response(content, mimetype='text/html')
-        except Exception as e:
-            logger.error(f"[Static] Error serving root: {e}")
-            return dashboard()  # Fallback to dashboard
+        if _INDEX_HTML_CACHE:
+            logger.info("[Static] Serving cached index.html")
+            return Response(_INDEX_HTML_CACHE, mimetype='text/html')
+        logger.warning("[Static] No cached index.html, falling back to /dashboard")
+        return dashboard()
     
     @app.route('/index.html')
     def serve_index_html():
@@ -2151,59 +1957,52 @@ try:
     
     @app.route('/<path:filename>')
     def serve_static(filename):
-        """Serve static files - works for deployed environments"""
-        from flask import send_file, jsonify
-        import os
-        
+        """Serve static files (CSS, JS, images, etc.)"""
+        from flask import send_file, current_app, jsonify
         try:
+            import os
+            
             # Security: Prevent directory traversal
             if '..' in filename or filename.startswith('/'):
                 logger.warning(f"[Static] Security: Blocked access to {filename}")
                 return jsonify({'error': 'Invalid path'}), 403
             
-            # Search for file
             possible_paths = [
                 filename,
                 os.path.join(os.getcwd(), filename),
                 os.path.join(os.path.dirname(__file__), filename),
-                os.path.join(os.path.dirname(os.path.abspath(__file__)), filename),
                 f'/app/{filename}',
-                f'/src/{filename}',
-                f'/workspace/{filename}',
-                f'/usr/src/app/{filename}',
-                os.path.expanduser(f'~/{filename}'),
+                f'/src/{filename}'
             ]
             
             for path in possible_paths:
-                try:
-                    if os.path.isfile(path):
-                        logger.info(f"[Static] Serving {filename}")
-                        
-                        # Determine MIME type
-                        if filename.endswith('.css'):
-                            return send_file(path, mimetype='text/css')
-                        elif filename.endswith('.js'):
-                            return send_file(path, mimetype='application/javascript')
-                        elif filename.endswith('.json'):
-                            return send_file(path, mimetype='application/json')
-                        elif filename.endswith('.png'):
-                            return send_file(path, mimetype='image/png')
-                        elif filename.endswith('.jpg') or filename.endswith('.jpeg'):
-                            return send_file(path, mimetype='image/jpeg')
-                        elif filename.endswith('.svg'):
-                            return send_file(path, mimetype='image/svg+xml')
-                        elif filename.endswith(('.woff', '.woff2')):
-                            return send_file(path, mimetype='font/woff2')
-                        else:
-                            return send_file(path)
-                except (OSError, IOError):
-                    continue
+                if os.path.isfile(path):
+                    logger.info(f"[Static] Serving {filename} from: {path}")
+                    # Determine MIME type
+                    if filename.endswith('.css'):
+                        return send_file(path, mimetype='text/css')
+                    elif filename.endswith('.js'):
+                        return send_file(path, mimetype='application/javascript')
+                    elif filename.endswith('.json'):
+                        return send_file(path, mimetype='application/json')
+                    elif filename.endswith('.png'):
+                        return send_file(path, mimetype='image/png')
+                    elif filename.endswith('.jpg') or filename.endswith('.jpeg'):
+                        return send_file(path, mimetype='image/jpeg')
+                    elif filename.endswith('.svg'):
+                        return send_file(path, mimetype='image/svg+xml')
+                    elif filename.endswith('.woff'):
+                        return send_file(path, mimetype='font/woff')
+                    elif filename.endswith('.woff2'):
+                        return send_file(path, mimetype='font/woff2')
+                    else:
+                        return send_file(path)
             
             logger.warning(f"[Static] File not found: {filename}")
             return jsonify({'error': f'File not found: {filename}'}), 404
         except Exception as e:
             logger.error(f"[Static] Error serving {filename}: {e}")
-            return jsonify({'error': str(e)}), 500
+            return jsonify({'error': f'Server error: {e}'}), 500
     
     logger.info("╔" + "═" * 118 + "╗")
     logger.info("║" + " " * 118 + "║")
