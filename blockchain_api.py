@@ -3060,6 +3060,7 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
             return list(tx[:limit]) if len(tx) > limit else list(tx)
         return []
 
+    def _load_block(block_ref):
         """
         Unified block loader: tries in-memory chain first, then DB.
         Returns a normalized block object or None.
