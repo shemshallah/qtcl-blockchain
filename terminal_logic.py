@@ -4989,12 +4989,16 @@ class GlobalCommandRegistry:
         'user/list': lambda *a, **k: {'result': 'Users listed'},
     }
     
-    # Block/Blockchain commands (stub implementations)
+    # Block/Blockchain commands (COMPREHENSIVE WITH QUANTUM MEASUREMENTS)
     BLOCK_COMMANDS = {
-        'block/explorer': lambda *a, **k: {'result': 'Block explorer'},
-        'block/info': lambda *a, **k: {'result': 'Block information'},
-        'block/history': lambda *a, **k: {'result': 'Block history'},
-        'block/validate': lambda *a, **k: {'result': 'Block validated'},
+        'block/details': lambda **k: GlobalCommandRegistry._block_details(**k),
+        'block/validate': lambda **k: GlobalCommandRegistry._block_validate(**k),
+        'block/quantum': lambda **k: GlobalCommandRegistry._block_quantum(**k),
+        'block/batch': lambda **k: GlobalCommandRegistry._block_batch(**k),
+        'block/integrity': lambda **k: GlobalCommandRegistry._block_integrity(**k),
+        'block/explorer': lambda **k: GlobalCommandRegistry._block_explorer(**k),
+        'block/info': lambda **k: GlobalCommandRegistry._block_info(**k),
+        'block/history': lambda **k: GlobalCommandRegistry._block_history(**k),
     }
     
     # DeFi commands (stub implementations)
@@ -5479,6 +5483,148 @@ class GlobalCommandRegistry:
             'public_key':pq_pub[:50]+'...',
             'message':'PQ keypair rotated successfully'
         }
+    
+    # ═════════════════════════════════════════════════════════════════════════════════════════
+    # BLOCK COMMAND IMPLEMENTATIONS - COMPREHENSIVE WITH QUANTUM MEASUREMENTS
+    # ═════════════════════════════════════════════════════════════════════════════════════════
+    
+    @staticmethod
+    def _block_details(block: str = None, **kwargs) -> Dict[str, Any]:
+        """Get comprehensive block details with quantum measurements"""
+        if not block:
+            return {'status': 'error', 'error': 'Block hash or height required'}
+        
+        try:
+            # Call the blockchain API /blocks/command endpoint
+            import requests
+            response = requests.post('http://localhost:5000/blockchain/blocks/command', json={
+                'command': 'query',
+                'block': block,
+                'options': {
+                    'include_quantum': kwargs.get('quantum', True),
+                    'include_transactions': kwargs.get('full', False)
+                }
+            }, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                return {'status': 'success', 'result': data.get('data', {})}
+            else:
+                return {'status': 'error', 'error': f'API returned {response.status_code}'}
+        except Exception as e:
+            logger.error(f"[BlockDetails] Error: {e}")
+            return {'status': 'error', 'error': str(e)}
+    
+    @staticmethod
+    def _block_validate(block: str = None, **kwargs) -> Dict[str, Any]:
+        """Validate block with quantum proof verification"""
+        if not block:
+            return {'status': 'error', 'error': 'Block hash or height required'}
+        
+        try:
+            import requests
+            response = requests.post('http://localhost:5000/blockchain/blocks/command', json={
+                'command': 'validate',
+                'block': block,
+                'options': {
+                    'validate_quantum': kwargs.get('quantum', True),
+                    'validate_transactions': kwargs.get('full', False)
+                }
+            }, timeout=15)
+            
+            if response.status_code == 200:
+                data = response.json()
+                return {'status': 'success', 'result': data.get('data', {})}
+            else:
+                return {'status': 'error', 'error': f'API returned {response.status_code}'}
+        except Exception as e:
+            logger.error(f"[BlockValidate] Error: {e}")
+            return {'status': 'error', 'error': str(e)}
+    
+    @staticmethod
+    def _block_quantum(block: str = None, **kwargs) -> Dict[str, Any]:
+        """Perform quantum measurements on block"""
+        if not block:
+            return {'status': 'error', 'error': 'Block hash or height required'}
+        
+        try:
+            import requests
+            response = requests.post('http://localhost:5000/blockchain/blocks/command', json={
+                'command': 'quantum_measure',
+                'block': block,
+                'options': {}
+            }, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                return {'status': 'success', 'result': data.get('data', {})}
+            else:
+                return {'status': 'error', 'error': f'API returned {response.status_code}'}
+        except Exception as e:
+            logger.error(f"[BlockQuantum] Error: {e}")
+            return {'status': 'error', 'error': str(e)}
+    
+    @staticmethod
+    def _block_batch(blocks: list = None, **kwargs) -> Dict[str, Any]:
+        """Query multiple blocks in parallel"""
+        if not blocks:
+            return {'status': 'error', 'error': 'Block list required'}
+        
+        try:
+            import requests
+            response = requests.post('http://localhost:5000/blockchain/blocks/command', json={
+                'command': 'batch_query',
+                'blocks': blocks,
+                'options': {
+                    'include_quantum': kwargs.get('quantum', False)
+                }
+            }, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                return {'status': 'success', 'result': data.get('data', {})}
+            else:
+                return {'status': 'error', 'error': f'API returned {response.status_code}'}
+        except Exception as e:
+            logger.error(f"[BlockBatch] Error: {e}")
+            return {'status': 'error', 'error': str(e)}
+    
+    @staticmethod
+    def _block_integrity(**kwargs) -> Dict[str, Any]:
+        """Verify blockchain integrity"""
+        try:
+            import requests
+            response = requests.post('http://localhost:5000/blockchain/blocks/command', json={
+                'command': 'chain_integrity',
+                'options': {
+                    'start_height': kwargs.get('start', None),
+                    'end_height': kwargs.get('end', None)
+                }
+            }, timeout=60)
+            
+            if response.status_code == 200:
+                data = response.json()
+                return {'status': 'success', 'result': data.get('data', {})}
+            else:
+                return {'status': 'error', 'error': f'API returned {response.status_code}'}
+        except Exception as e:
+            logger.error(f"[BlockIntegrity] Error: {e}")
+            return {'status': 'error', 'error': str(e)}
+    
+    @staticmethod
+    def _block_explorer(**kwargs) -> Dict[str, Any]:
+        """Block explorer (stub - redirects to block/details)"""
+        return {'status': 'info', 'result': 'Use block/details for comprehensive block information'}
+    
+    @staticmethod
+    def _block_info(**kwargs) -> Dict[str, Any]:
+        """Block info (stub - redirects to block/details)"""
+        return {'status': 'info', 'result': 'Use block/details for comprehensive block information'}
+    
+    @staticmethod
+    def _block_history(**kwargs) -> Dict[str, Any]:
+        """Block history (stub - redirects to block/batch)"""
+        return {'status': 'info', 'result': 'Use block/batch for querying multiple blocks'}
 
 
 
