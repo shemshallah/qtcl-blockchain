@@ -1,5 +1,6 @@
 
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 ╔════════════════════════════════════════════════════════════════════════════════╗
 ║                                                                                ║
@@ -53,13 +54,23 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 try:
     import numpy as np
     NUMPY_AVAILABLE = True
-except ImportError:
+except Exception as e:
     NUMPY_AVAILABLE = False
-    # Provide dummy ndarray for type hints to work
-    class DummyArray:
-        pass
-    np = type('numpy', (), {'ndarray': DummyArray, 'array': DummyArray, 'zeros': DummyArray, 'ones': DummyArray})()
-    logging.getLogger(__name__).warning("NumPy not available - quantum system in fallback mode")
+    # Minimal fallback - numpy may not be available in some environments
+    # Type hints are deferred (from __future__ import annotations) so this doesn't break
+    import sys
+    
+    class _NumpyFallback:
+        """Minimal numpy fallback for environments without numpy"""
+        class ndarray:
+            pass
+        class uint64:
+            pass
+        pi = 3.14159265359
+    
+    np = _NumpyFallback()
+    logger = logging.getLogger(__name__)
+    logger.warning(f"NumPy not available - using fallback mode")
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # PARALLEL BATCH PROCESSING + NOISE-ALONE W-STATE REFRESH (v5.2 ENHANCEMENT)

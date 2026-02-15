@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 ╔═══════════════════════════════════════════════════════════════════════════════════════════════════╗
 ║                                                                                                   ║
@@ -3506,15 +3507,13 @@ try:
     logger.info("✓ LATTICE quantum system imported - Quantum commands enabled")
 except Exception as e:
     logger.warning(f"⚠ LATTICE not available: {str(e)[:100]}")
-    # Create dummy classes to prevent downstream errors
+    # Fallback classes - minimal, doesn't execute quantum code
     class LATTICE:
         pass
     class TransactionValidatorWState:
-        def __init__(self, *args, **kwargs):
-            pass
+        pass
     class GHZCircuitBuilder:
-        def __init__(self, *args, **kwargs):
-            pass
+        pass
 
 try:
     import quantum_api
@@ -3522,10 +3521,9 @@ try:
     logger.info("✓ quantum_api system imported - API integration enabled")
 except Exception as e:
     logger.warning(f"⚠ quantum_api not available: {str(e)[:100]}")
-    # Create dummy module
-    class DummyQuantumAPI:
+    # Fallback module - minimal
+    class quantum_api:
         pass
-    quantum_api = DummyQuantumAPI()
 
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
