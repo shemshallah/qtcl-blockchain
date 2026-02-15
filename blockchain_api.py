@@ -1507,14 +1507,41 @@ class BlockchainDB:
 
     def _exec(self,query:str,params:tuple=(),fetch_one:bool=False,fetch_all:bool=True):
         try:
-            if hasattr(self.db,'execute_query'):
-                return self.db.execute_query(query,params,fetch_one=fetch_one)
-            elif hasattr(self.db,'execute'):
-                return self.db.execute(query,params)
-            return []
+            # Use RealDictCursor or DictCursor for proper dict conversion
+            from psycopg2.extras import RealDictCursor, DictCursor
+            
+            if hasattr(self.db, 'cursor'):
+                # Direct psycopg2 connection
+                with self.db.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute(query, params)
+                    if fetch_one:
+                        row = cur.fetchone()
+                        return dict(row) if row else None
+                    else:
+                        rows = cur.fetchall()
+                        return [dict(row) for row in rows] if rows else []
+            elif hasattr(self.db, 'execute_query'):
+                result = self.db.execute_query(query, params, fetch_one=fetch_one)
+            elif hasattr(self.db, 'execute'):
+                result = self.db.execute(query, params)
+            else:
+                return None if fetch_one else []
+            
+            # If result is already dict(s), return as-is
+            if isinstance(result, dict):
+                return result if fetch_one else [result]
+            if isinstance(result, list) and len(result) > 0:
+                if isinstance(result[0], dict):
+                    return result[0] if fetch_one else result
+            
+            # Fallback if not converted to dict
+            return None if fetch_one else []
         except Exception as e:
             logger.error("[DB] Query error: %s | %s",query[:80],e)
-            return None
+            import traceback
+            logger.error("[DB] Traceback: %s", traceback.format_exc())
+            return None if fetch_one else []
+
 
     def save_quantum_block(self,block:QuantumBlock)->bool:
         try:
@@ -2903,12 +2930,35 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
     # ── Block normalizer: works on both QuantumBlock dataclass AND db dict ────
     def _normalize_block(raw):
         """
-        Accepts a QuantumBlock dataclass OR a db dict row and returns a
-        SimpleNamespace with consistent attribute access across both sources.
+        Accepts a QuantumBlock dataclass, a db dict row, a list/tuple from raw cursor,
+        and returns a SimpleNamespace with consistent attribute access.
         """
         from types import SimpleNamespace
         if raw is None:
             return None
+        
+        # Handle raw tuple/list from database cursor
+        if isinstance(raw, (tuple, list)):
+            logger.error(f"[NORMALIZE_BLOCK] ERROR: Received raw {type(raw).__name__} instead of dict. This indicates _exec() is not converting rows to dicts properly. Raw data: {raw[:3] if len(raw) > 3 else raw}")
+            # Try to construct a minimal block object from tuple
+            if len(raw) > 2:
+                return SimpleNamespace(
+                    block_hash=raw[0] if len(raw) > 0 else '',
+                    height=raw[1] if len(raw) > 1 else 0,
+                    previous_hash=raw[2] if len(raw) > 2 else '0'*64,
+                    timestamp=raw[4] if len(raw) > 4 else datetime.now(timezone.utc),
+                    validator=raw[5] if len(raw) > 5 else '',
+                    merkle_root=raw[6] if len(raw) > 6 else '',
+                    quantum_merkle_root=raw[7] if len(raw) > 7 else '',
+                    state_root=raw[8] if len(raw) > 8 else '',
+                    status=SimpleNamespace(value='unknown'),
+                    size_bytes=0,
+                    transactions=[],
+                    confirmations=0,
+                    temporal_coherence=1.0
+                )
+            return None
+        
         if isinstance(raw, dict):
             # Ensure status is an enum-like object with .value
             status_val = raw.get('status','pending')
