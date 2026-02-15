@@ -1538,6 +1538,7 @@ def register_all_apis():
 app = None
 executor = None
 socketio = None
+_INDEX_HTML_CACHE_GLOBAL = None  # Will be populated when app initializes
 
 try:
     # Register everything
@@ -1566,6 +1567,36 @@ try:
         executor = None
         socketio = None
         logger.info("[Flask] ✓ Created minimal Flask app in wsgi_config")
+    
+    # ⚡ LOAD INDEX.HTML IMMEDIATELY AFTER APP CREATION, BEFORE ROUTES
+    # This ensures _INDEX_HTML_CACHE_GLOBAL is populated before any routes use it
+    _INDEX_HTML_CACHE_GLOBAL = None
+    index_env_path = os.getenv('INDEX_HTML_PATH')
+    
+    paths_to_try = []
+    if index_env_path:
+        paths_to_try.insert(0, index_env_path)
+    
+    paths_to_try.extend([
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'index.html'),
+        os.path.join(os.getcwd(), 'index.html'),
+        '/workspace/index.html',
+        '/app/index.html',
+        '/src/index.html',
+    ])
+    
+    for path in paths_to_try:
+        try:
+            if os.path.isfile(path):
+                with open(path, 'r', encoding='utf-8') as f:
+                    _INDEX_HTML_CACHE_GLOBAL = f.read()
+                logger.info(f"[Static] ✅ LOADED index.html ({len(_INDEX_HTML_CACHE_GLOBAL)} bytes) from: {path}")
+                break
+        except Exception as e:
+            logger.debug(f"[Static] Tried {path}: {e}")
+    
+    if not _INDEX_HTML_CACHE_GLOBAL:
+        logger.critical(f"[Static] ❌ index.html NOT found! Tried: {paths_to_try}")
     
     # Initialize database tables and admin user if database is connected
     if DB and DB._instance:
@@ -1947,35 +1978,23 @@ try:
     # STATIC FILE SERVING - Serve index.html and web assets
     # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     
-    # Pre-load index.html from same directory as this file
-    _WSGI_DIR = os.path.dirname(os.path.abspath(__file__))
-    _INDEX_HTML_PATH = os.path.join(_WSGI_DIR, 'index.html')
-    _INDEX_HTML_CACHE = None
+    # Index.html is loaded earlier (right after app creation) to ensure it's available to routes
+    # See loading code around line 1570
     
-    try:
-        if os.path.exists(_INDEX_HTML_PATH):
-            with open(_INDEX_HTML_PATH, 'r', encoding='utf-8') as f:
-                _INDEX_HTML_CACHE = f.read()
-            logger.info(f"[Static] ✅ Loaded index.html from: {_INDEX_HTML_PATH}")
-        else:
-            logger.warning(f"[Static] ❌ index.html not found at: {_INDEX_HTML_PATH}")
-            logger.warning(f"[Static] Directory contents: {os.listdir(_WSGI_DIR)[:10]}")
-    except Exception as e:
-        logger.error(f"[Static] Error loading index.html: {e}")
     
     @app.route('/')
-    @app.route('/index.html')
+    @app.route('/index.html')  
     def serve_index():
-        """Serve index.html or fallback"""
+        """Serve index.html - BULLETPROOF"""
         from flask import Response
         
-        # Return cached index.html
-        if _INDEX_HTML_CACHE:
-            logger.info("[Route] Serving index.html")
-            return Response(_INDEX_HTML_CACHE, mimetype='text/html; charset=utf-8')
+        # Use the module-level cached index.html
+        if _INDEX_HTML_CACHE_GLOBAL and len(_INDEX_HTML_CACHE_GLOBAL) > 0:
+            logger.debug(f"[Route /] Serving cached index.html ({len(_INDEX_HTML_CACHE_GLOBAL)} bytes)")
+            return Response(_INDEX_HTML_CACHE_GLOBAL, mimetype='text/html; charset=utf-8')
         
-        # Fallback HTML
-        logger.warning("[Route] Serving fallback HTML")
+        # Fallback if cache is empty
+        logger.warning("[Route /] index.html cache is EMPTY, serving fallback")
         fallback = """<!DOCTYPE html>
 <html>
 <head>
