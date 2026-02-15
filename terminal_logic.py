@@ -4981,21 +4981,9 @@ class GlobalCommandRegistry:
             validate_chain=k.pop('validate_chain', False),
             **k
         ),
-        'block/reorg': lambda *a, **k: GlobalCommandRegistry._block_reorg(
-            block=a[0] if a else k.pop('block', None),
-            dry_run=k.pop('dry_run', True),
-            force=k.pop('force', False),
-            max_reorg_depth=k.pop('max_reorg_depth', 100),
-            **k
-        ),
         'block/merkle': lambda *a, **k: GlobalCommandRegistry._block_merkle(
             block=a[0] if a else k.pop('block', None),
             show_tree=k.pop('show_tree', False),
-            **k
-        ),
-        'block/temporal': lambda *a, **k: GlobalCommandRegistry._block_temporal(
-            block=a[0] if a else k.pop('block', None),
-            run_circuit=k.pop('run_circuit', True),
             **k
         ),
         # block/history — first positional arg maps to 'limit', or use limit=N kwarg
@@ -5843,30 +5831,9 @@ class GlobalCommandRegistry:
     def _block_reorg(block: str = None, dry_run: bool = True, force: bool = False,
                      max_reorg_depth: int = 100, fork_tip_hash: str = None,
                      **kwargs) -> Dict[str, Any]:
-        """
-        Trigger or simulate a chain reorg. dry_run=true (default) only shows what would happen.
-        Pass dry_run=false to execute. Optionally specify fork_tip_hash to promote.
-        """
-        try:
-            import requests
-            base_url = 'https://qtcl-blockchain.koyeb.app'
-            options  = {
-                'dry_run'        : bool(dry_run),
-                'force'          : bool(force),
-                'max_reorg_depth': int(max_reorg_depth),
-            }
-            if fork_tip_hash:
-                options['fork_tip_hash'] = fork_tip_hash
-            response = requests.post(f'{base_url}/blockchain/blocks/command', json={
-                'command': 'reorg',
-                'block'  : str(block) if block else None,
-                'options': options,
-            }, timeout=30)
-            if response.status_code == 200:
-                return {'status': 'success', 'result': response.json()}
-            return {'status': 'error', 'error': f'API {response.status_code}: {response.text[:200]}'}
-        except Exception as e:
-            return {'status': 'error', 'error': str(e)}
+        """Block reorg disabled - not available to users"""
+        return {'status': 'error', 'error': 'block/reorg command is not available'}
+
 
     @staticmethod
     def _block_merkle(block: str = None, show_tree: bool = False,
@@ -5897,37 +5864,19 @@ class GlobalCommandRegistry:
     @staticmethod
     def _block_temporal(block: str = None, run_circuit: bool = True,
                         check_neighbors: bool = True, **kwargs) -> Dict[str, Any]:
-        """
-        Temporal coherence verification: re-runs temporal circuit, compares to stored
-        proof, validates coherence band, cross-checks with adjacent blocks.
-        """
-        try:
-            import requests
-            base_url = 'https://qtcl-blockchain.koyeb.app'
-            if not block:
-                return {'status': 'error', 'error': 'Block hash or height required'}
-            response = requests.post(f'{base_url}/blockchain/blocks/command', json={
-                'command': 'temporal_verify',
-                'block'  : str(block),
-                'options': {
-                    'run_circuit'    : bool(run_circuit),
-                    'check_neighbors': bool(check_neighbors),
-                },
-            }, timeout=15)
-            if response.status_code == 200:
-                return {'status': 'success', 'result': response.json()}
-            return {'status': 'error', 'error': f'API {response.status_code}: {response.text[:200]}'}
-        except Exception as e:
-            return {'status': 'error', 'error': str(e)}
+        """Block temporal command disabled - not available to users"""
+        return {'status': 'error', 'error': 'block/temporal command is not available'}
+
 
     @staticmethod
     def _block_history(address: str = None, limit: int = 20, offset: int = 0,
                        order: str = 'desc', min_height: int = None, max_height: int = None,
                        validator: str = None, status: str = None, **kwargs) -> Dict[str, Any]:
         """
-        Block history — returns paginated recent blocks from DB via block_command/history.
+        AGGRESSIVE DB QUERY: Block history directly from database using WSGI globals.
+        Returns paginated recent blocks with full filtering support.
 
-        Usage examples:
+        Usage:
             block/history
             block/history limit=50
             block/history order=asc
@@ -5936,80 +5885,144 @@ class GlobalCommandRegistry:
             block/history status=finalized
         """
         try:
-            import requests
-            base_url = 'https://qtcl-blockchain.koyeb.app'
-
-            # Build options payload
-            options_payload: Dict[str, Any] = {
-                'limit': int(limit),
-                'offset': int(offset),
-                'order': str(order),
-            }
+            from wsgi_config import DB, CACHE
+            import psycopg2
+            
+            limit = max(1, min(int(limit), 500))  # 1-500 blocks
+            offset = max(0, int(offset))
+            order = 'DESC' if str(order).lower() == 'desc' else 'ASC'
+            
+            # Build query with filters
+            where_clauses = []
+            params = []
+            
             if min_height is not None:
-                options_payload['min_height'] = int(min_height)
+                where_clauses.append(f"height >= %s")
+                params.append(int(min_height))
+            
             if max_height is not None:
-                options_payload['max_height'] = int(max_height)
+                where_clauses.append(f"height <= %s")
+                params.append(int(max_height))
+            
             if validator:
-                options_payload['validator'] = str(validator)
+                where_clauses.append(f"validator = %s")
+                params.append(str(validator))
+            
             if status:
-                options_payload['status'] = str(status)
-            # address parameter is treated as validator filter if supplied
-            if address and not validator:
-                options_payload['validator'] = str(address)
-
-            response = requests.post(
-                f'{base_url}/blockchain/blocks/command',
-                json={'command': 'history', 'options': options_payload},
-                timeout=15
-            )
-
-            if response.status_code == 200:
-                data = response.json()
-                result = data.get('result', data)
-                # Format for terminal display
-                blocks = result.get('blocks', [])
-                summary = {
-                    'total_blocks'     : result.get('total_count', len(blocks)),
-                    'page'             : result.get('page', 1),
-                    'pages'            : result.get('pages', 1),
-                    'latest_height'    : result.get('latest_height', '?'),
-                    'finalized_height' : result.get('finalized_height', '?'),
-                    'chain_length'     : result.get('chain_length', '?'),
-                    'showing'          : f"{len(blocks)} blocks (offset={offset}, limit={limit})",
-                    'order'            : order.upper(),
+                where_clauses.append(f"status = %s")
+                params.append(str(status).lower())
+            
+            where_clause = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+            
+            # Query blocks with filtering
+            query = f"""
+                SELECT 
+                    height, block_number, block_hash, previous_hash, 
+                    timestamp, transactions_count, size, validator, status,
+                    gas_used, gas_limit, difficulty, miner_reward
+                FROM blocks
+                {where_clause}
+                ORDER BY height {order}
+                LIMIT %s OFFSET %s
+            """
+            params.extend([limit, offset])
+            
+            # Get total count for pagination
+            count_query = f"SELECT COUNT(*) FROM blocks {where_clause}"
+            count_params = params[:-2] if where_clauses else []
+            
+            blocks = []
+            total_count = 0
+            
+            if DB:
+                try:
+                    with DB.cursor() as cur:
+                        # Get total count
+                        cur.execute(count_query, count_params)
+                        total_count = cur.fetchone()[0] if cur else 0
+                        
+                        # Get blocks
+                        cur.execute(query, params)
+                        rows = cur.fetchall() if cur else []
+                        
+                        for row in rows:
+                            blocks.append({
+                                'height': row[0],
+                                'block_number': row[1],
+                                'hash': row[2],
+                                'previous_hash': row[3],
+                                'timestamp': row[4].isoformat() if row[4] else None,
+                                'transactions': row[5] or 0,
+                                'size': row[6] or 0,
+                                'validator': row[7],
+                                'status': row[8],
+                                'gas_used': row[9],
+                                'gas_limit': row[10],
+                                'difficulty': row[11],
+                                'reward': row[12]
+                            })
+                except Exception as db_err:
+                    import logging
+                    logging.error(f"[BlockHistory] DB query failed: {db_err}")
+            
+            # Get latest/finalized heights
+            latest_height = max([b['height'] for b in blocks], default=0)
+            finalized_height = max([b['height'] for b in blocks if b.get('status') == 'finalized'], default=0)
+            
+            pages = (total_count + limit - 1) // limit if limit else 1
+            current_page = (offset // limit) + 1 if limit else 1
+            
+            return {
+                'status': 'success',
+                'summary': {
+                    'total_blocks': total_count,
+                    'page': current_page,
+                    'pages': pages,
+                    'latest_height': latest_height,
+                    'finalized_height': finalized_height,
+                    'chain_length': total_count,
+                    'showing': f"{len(blocks)} blocks (offset={offset}, limit={limit})",
+                    'order': order
+                },
+                'blocks': blocks,
+                'pagination': {
+                    'limit': limit,
+                    'offset': offset,
+                    'order': order.lower(),
+                    'total': total_count,
+                    'pages': pages
                 }
-                return {
-                    'status'    : 'success',
-                    'summary'   : summary,
-                    'blocks'    : blocks,
-                    'pagination': {
-                        'limit' : int(limit),
-                        'offset': int(offset),
-                        'order' : order,
-                    }
+            }
+            
+        except ImportError:
+            # Fallback if WSGI globals unavailable
+            return {
+                'status': 'error',
+                'error': 'Database not available - WSGI globals not initialized',
+                'blocks': [],
+                'summary': {
+                    'total_blocks': 0,
+                    'latest_height': '?',
+                    'finalized_height': '?',
+                    'chain_length': '?',
+                    'showing': '0 blocks',
+                    'order': order.upper()
                 }
-            else:
-                # Fallback: try the REST endpoint directly
-                fallback_resp = requests.get(
-                    f'{base_url}/blockchain/blocks',
-                    params={'limit': limit, 'offset': offset},
-                    timeout=10
-                )
-                if fallback_resp.status_code == 200:
-                    fb_data = fallback_resp.json()
-                    return {
-                        'status' : 'success',
-                        'blocks' : fb_data.get('blocks', []),
-                        'total'  : fb_data.get('total', 0),
-                        '_note'  : 'Served from /api/blocks fallback'
-                    }
-                return {
-                    'status': 'error',
-                    'error' : f'API returned {response.status_code}: {response.text[:200]}'
-                }
-
+            }
         except Exception as e:
-            return {'status': 'error', 'error': str(e)}
+            import logging
+            logging.error(f"[BlockHistory] Exception: {e}")
+            return {
+                'status': 'error',
+                'error': str(e),
+                'blocks': [],
+                'pagination': {
+                    'limit': limit,
+                    'offset': offset,
+                    'order': order.lower()
+                }
+            }
+
 
 
 

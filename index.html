@@ -829,6 +829,26 @@
         let isAuthenticated = !!authToken && !!currentUser;
         
         // ═══════════════════════════════════════════════════════════════════════════════
+        // UPDATE UI WITH CURRENT USER ON PAGE LOAD
+        // ═══════════════════════════════════════════════════════════════════════════════
+        
+        function updateUserDisplay() {
+            const userDisplay = document.getElementById('userDisplay');
+            if (currentUser && currentUser.username && authToken) {
+                userDisplay.textContent = currentUser.username;
+                userDisplay.classList.remove('guest');
+                userDisplay.classList.add('authenticated');
+            } else {
+                userDisplay.textContent = 'Guest';
+                userDisplay.classList.add('guest');
+                userDisplay.classList.remove('authenticated');
+            }
+        }
+        
+        // Update display immediately on page load
+        updateUserDisplay();
+        
+        // ═══════════════════════════════════════════════════════════════════════════════
         // UTILITIES
         // ═══════════════════════════════════════════════════════════════════════════════
         
@@ -990,14 +1010,13 @@
             
             if (isAuthenticated && currentUser) {
                 loginBtn.style.display = 'none';
-                userDisplay.textContent = currentUser.username;
-                userDisplay.classList.remove('guest');
+                updateUserDisplay();  // Use the new function
                 userMenuAuth.style.display = 'flex';
                 dashboardNav.style.pointerEvents = 'auto';
+                dashboardNav.style.opacity = '1';
             } else {
                 loginBtn.style.display = 'inline-flex';
-                userDisplay.textContent = 'Guest';
-                userDisplay.classList.add('guest');
+                updateUserDisplay();  // Use the new function
                 userMenuAuth.style.display = 'none';
                 dashboardNav.style.pointerEvents = 'none';
                 dashboardNav.style.opacity = '0.5';
@@ -1223,6 +1242,9 @@
         // Initialize CommandExecutor (v5.0)
         // Check immediately - should already be defined from head script
         function initExecutor() {
+            // Update authentication UI on page load
+            updateAuthUI();
+            
             setTimeout(() => {
                 if (window.commandExecutor) {
                     log('✓ Command Executor ENABLED', 'success');
