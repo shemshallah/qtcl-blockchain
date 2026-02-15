@@ -2769,7 +2769,7 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
                     return jresp({'error':'Circuit breaker open - blockchain service unavailable','correlation_id':correlation_id},503)
             
             # Route to appropriate handler
-            elif cmd_type=='history':
+            if cmd_type=='history':
                 result=_handle_block_history(options,correlation_id)
             elif cmd_type=='query':
                 result=_handle_block_query(block_ref,options,correlation_id)
@@ -2781,8 +2781,6 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
                 result=_handle_quantum_measure(block_ref,options,correlation_id)
             elif cmd_type=='reorg':
                 result=_handle_block_reorg(block_ref,options,correlation_id)
-            elif cmd_type=='prune':
-                result=_handle_block_prune(options,correlation_id)
             elif cmd_type=='export':
                 result=_handle_block_export(block_ref,options,correlation_id)
             elif cmd_type=='sync':
@@ -2803,7 +2801,7 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
                 result=_handle_validator_performance(options,correlation_id)
             else:
                 result={'error':f'Unknown command: {cmd_type}','available_commands':[
-                    'history','query','validate','analyze','quantum_measure','reorg','prune',
+                    'history','query','validate','analyze','quantum_measure','reorg',
                     'export','sync','batch_query','chain_integrity','merkle_verify',
                     'temporal_verify','quantum_finality','stats_aggregate','validator_performance'
                 ]}

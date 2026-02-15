@@ -4988,12 +4988,6 @@ class GlobalCommandRegistry:
             max_reorg_depth=k.pop('max_reorg_depth', 100),
             **k
         ),
-        'block/prune': lambda *a, **k: GlobalCommandRegistry._block_prune(
-            keep_blocks=a[0] if a else k.pop('keep_blocks', 10000),
-            prune_db=k.pop('prune_db', False),
-            dry_run=k.pop('dry_run', True),
-            **k
-        ),
         'block/merkle': lambda *a, **k: GlobalCommandRegistry._block_merkle(
             block=a[0] if a else k.pop('block', None),
             show_tree=k.pop('show_tree', False),
@@ -5861,35 +5855,6 @@ class GlobalCommandRegistry:
                 'command': 'reorg',
                 'block'  : str(block) if block else None,
                 'options': options,
-            }, timeout=30)
-            if response.status_code == 200:
-                return {'status': 'success', 'result': response.json()}
-            return {'status': 'error', 'error': f'API {response.status_code}: {response.text[:200]}'}
-        except Exception as e:
-            return {'status': 'error', 'error': str(e)}
-
-    @staticmethod
-    def _block_prune(keep_blocks: int = 10000, prune_db: bool = False,
-                     dry_run: bool = True, keep_db_blocks: int = 100000,
-                     prune_orphans: bool = True, orphan_age_hours: int = 1,
-                     **kwargs) -> Dict[str, Any]:
-        """
-        Prune finalized blocks from memory (and optionally DB).
-        dry_run=true (default) shows plan without deleting.
-        """
-        try:
-            import requests
-            base_url = 'https://qtcl-blockchain.koyeb.app'
-            response = requests.post(f'{base_url}/blockchain/blocks/command', json={
-                'command': 'prune',
-                'options': {
-                    'keep_blocks'    : int(keep_blocks),
-                    'prune_db'       : bool(prune_db),
-                    'keep_db_blocks' : int(keep_db_blocks),
-                    'dry_run'        : bool(dry_run),
-                    'prune_orphans'  : bool(prune_orphans),
-                    'orphan_age_hours': int(orphan_age_hours),
-                },
             }, timeout=30)
             if response.status_code == 200:
                 return {'status': 'success', 'result': response.json()}
