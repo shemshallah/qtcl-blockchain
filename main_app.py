@@ -975,6 +975,11 @@ def initialize_app(app):
 # PART 8: MAIN EXECUTION
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+
+# Initialize app at module level for WSGI servers (Koyeb, Heroku, Docker)
+app, executor, socketio = create_app()
+logger.info('[Module] App initialized at module level for WSGI')
+
 if __name__ == '__main__':
     logger.info("""
 ╔═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
@@ -1001,8 +1006,6 @@ if __name__ == '__main__':
 ║                                                                                                                             ║
 ╚═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
     """)
-    
-    app, executor, socketio = create_app()
     
     # Run the app
     socketio.run(

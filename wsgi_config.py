@@ -1929,7 +1929,10 @@ try:
             os.path.join(os.getcwd(), 'index.html'),
             os.path.join(os.path.dirname(__file__), 'index.html'),
             '/app/index.html',
-            '/src/index.html'
+            '/src/index.html',
+            '/mnt/user-data/outputs/index.html',
+            '/workspace/index.html',
+            '/home/app/index.html',
         ]
         for path in possible_paths:
             if os.path.isfile(path):
@@ -1937,6 +1940,8 @@ try:
                     _INDEX_HTML_CACHE = f.read()
                 logger.info(f"[Static] Pre-loaded index.html from: {path}")
                 break
+        if not _INDEX_HTML_CACHE:
+            logger.warning(f"[Static] index.html not found in any location. Tried: {possible_paths}")
     except Exception as e:
         logger.warning(f"[Static] Could not pre-load index.html: {e}")
     
@@ -1947,8 +1952,44 @@ try:
         if _INDEX_HTML_CACHE:
             logger.info("[Static] Serving cached index.html")
             return Response(_INDEX_HTML_CACHE, mimetype='text/html')
-        logger.warning("[Static] No cached index.html, falling back to /dashboard")
-        return dashboard()
+        
+        # Fallback: Return proper HTML if index.html not cached
+        logger.warning("[Static] No cached index.html, returning fallback HTML")
+        fallback_html = """<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QTCL - Quantum Terminal</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root { --primary: #a78bfa; --bg-dark: #1a1a2e; --text-primary: #f0f0f0; }
+        html, body { width: 100%; height: 100%; background: linear-gradient(135deg, #0a0a14 0%, #0f0f1e 100%); color: var(--text-primary); font-family: 'Monaco', monospace; }
+        body { display: flex; flex-direction: column; padding: 40px; }
+        h1 { color: var(--primary); margin-bottom: 20px; }
+        .container { background: var(--bg-dark); padding: 30px; border-radius: 12px; max-width: 800px; }
+        .status { color: #10b981; font-weight: bold; }
+        ul { margin-left: 20px; margin-top: 15px; }
+        li { margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <h1>⚛️ QTCL Unified API v5.0</h1>
+    <div class="container">
+        <p><span class="status">✓ API Server is OPERATIONAL</span></p>
+        <p style="margin-top: 15px;">Command execution engine is running and ready</p>
+        <strong style="display: block; margin-top: 20px;">Available API Endpoints:</strong>
+        <ul>
+            <li><strong>POST /api/execute</strong> - Execute a single command</li>
+            <li><strong>GET /api/health</strong> - Health check</li>
+            <li><strong>GET /api/ultimate/status</strong> - System status</li>
+            <li><strong>GET /api/ultimate/metrics</strong> - Metrics</li>
+        </ul>
+        <p style="margin-top: 20px; color: #94a3b8; font-size: 12px;">Note: Full index.html not found - displaying fallback UI. Check deployment logs.</p>
+    </div>
+</body>
+</html>"""
+        return Response(fallback_html, mimetype='text/html')
     
     @app.route('/index.html')
     def serve_index_html():
