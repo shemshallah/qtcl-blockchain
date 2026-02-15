@@ -91,6 +91,7 @@ import subprocess
 import requests
 import threading
 import queue
+import bcrypt
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Optional, Any, Set, Union, Callable
 from dataclasses import dataclass, field, asdict
@@ -3142,20 +3143,24 @@ SCHEMA_DEFINITIONS = {
     
     'blocks': """
         CREATE TABLE IF NOT EXISTS blocks (
-            block_number BIGINT PRIMARY KEY,
+            height BIGINT PRIMARY KEY,
             block_hash VARCHAR(255) UNIQUE NOT NULL,
-            parent_hash VARCHAR(255) NOT NULL,
+            previous_hash VARCHAR(255) NOT NULL,
             state_root VARCHAR(255),
             transactions_root VARCHAR(255),
             receipts_root VARCHAR(255),
             timestamp BIGINT NOT NULL,
             transactions INTEGER DEFAULT 0,
-            validator_address TEXT,
+            validator TEXT,
             validator_signature TEXT,
             quantum_state_hash VARCHAR(255),
             entropy_score DOUBLE PRECISION DEFAULT 0.0,
             floquet_cycle INTEGER DEFAULT 0,
             merkle_root VARCHAR(255),
+            quantum_merkle_root VARCHAR(255),
+            quantum_proof VARCHAR(255),
+            quantum_entropy TEXT,
+            temporal_proof VARCHAR(255),
             difficulty DOUBLE PRECISION DEFAULT 1.0,
             total_difficulty NUMERIC(30, 0),
             gas_used BIGINT DEFAULT 0,
@@ -3165,17 +3170,25 @@ SCHEMA_DEFINITIONS = {
             uncle_rewards NUMERIC(30, 0) DEFAULT 0,
             total_fees NUMERIC(30, 0) DEFAULT 0,
             burned_fees NUMERIC(30, 0) DEFAULT 0,
+            reward NUMERIC(30, 0) DEFAULT 0,
             size_bytes INTEGER,
             quantum_validation_status VARCHAR(50) DEFAULT 'unvalidated',
             quantum_measurements_count INTEGER DEFAULT 0,
+            quantum_proof_version INTEGER DEFAULT 3,
             validated_at TIMESTAMP WITH TIME ZONE,
             validation_entropy_avg NUMERIC(5,4),
             extra_data TEXT,
             nonce VARCHAR(255),
             mix_hash VARCHAR(255),
             logs_bloom TEXT,
+            is_orphan BOOLEAN DEFAULT FALSE,
             is_uncle BOOLEAN DEFAULT FALSE,
             uncle_position INTEGER,
+            confirmations INTEGER DEFAULT 0,
+            epoch INTEGER DEFAULT 0,
+            tx_capacity INTEGER DEFAULT 0,
+            temporal_coherence DOUBLE PRECISION DEFAULT 0.9,
+            status VARCHAR(50) DEFAULT 'pending',
             finalized BOOLEAN DEFAULT FALSE,
             finalized_at TIMESTAMP WITH TIME ZONE,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -3200,7 +3213,7 @@ SCHEMA_DEFINITIONS = {
             gas_used BIGINT DEFAULT 0,
             max_fee_per_gas NUMERIC(30, 0),
             max_priority_fee_per_gas NUMERIC(30, 0),
-            block_number BIGINT REFERENCES blocks(block_number),
+            height BIGINT REFERENCES blocks(height),
             block_hash VARCHAR(255),
             transaction_index INTEGER,
             quantum_state_hash VARCHAR(255),
@@ -4183,6 +4196,15 @@ class DatabaseBuilder:
             if conn:
                 self.return_connection(conn)
     
+    def execute_fetch(self, query, params=None):
+        """Execute query and fetch one result (for checking existence, etc)"""
+        try:
+            results = self.execute(query, params, return_results=True)
+            return results[0] if results else None
+        except Exception as e:
+            logger.error(f"{CLR.R}Error fetching result: {e}{CLR.E}")
+            return None
+    
     def execute_many(self, query, data_list):
         """Execute multiple inserts efficiently using execute_values"""
         if not data_list:
@@ -4450,104 +4472,214 @@ class DatabaseBuilder:
             raise
     
     def initialize_genesis_data(self):
-        """Initialize genesis block, users, and validators"""
-        logger.info(f"{CLR.B}Initializing genesis data...{CLR.E}")
+        """Initialize genesis block, users, and validators - IDEMPOTENT (skip if data exists)"""
+        logger.info(f"{CLR.B}Checking if genesis data needs initialization...{CLR.E}")
         
         try:
-            # Create genesis block
+            # Check if data already exists - CRITICAL for fast boot and preventing doubles
+            check_genesis = """SELECT COUNT(*) as cnt FROM blocks WHERE height=0 LIMIT 1"""
+            result = self.execute_fetch(check_genesis)
+            if result and result.get('cnt', 0) > 0:
+                logger.info(f"{CLR.G}[SKIP] Genesis block already exists - database already initialized{CLR.E}")
+                return
+            
+            check_admin = """SELECT COUNT(*) as cnt FROM users WHERE email='shemshallah@gmail.com' LIMIT 1"""
+            admin_exists = self.execute_fetch(check_admin)
+            
+            logger.info(f"{CLR.B}Initializing genesis data...{CLR.E}")
+            
+            # Create genesis block using HEIGHT not block_number for compatibility with blockchain_api
             genesis_block = {
-                'block_number': 0,
+                'height': 0,
                 'block_hash': hashlib.sha256(b'GENESIS').hexdigest(),
-                'parent_hash': '0x0',
-                'validator_address': 'GENESIS',
+                'previous_hash': '0x0',
+                'validator': 'qtcl_genesis_validator_v3',
                 'timestamp': int(datetime.now(timezone.utc).timestamp()),
                 'difficulty': 1,
                 'nonce': '0',
                 'gas_limit': GAS_LIMIT_PER_BLOCK,
                 'gas_used': 0,
-                'transactions': 0,
+                'merkle_root': hashlib.sha256(b'GENESIS_MERKLE').hexdigest(),
+                'quantum_merkle_root': hashlib.sha256(b'GENESIS_QUANTUM_MERKLE').hexdigest(),
                 'state_root': hashlib.sha256(b'GENESIS_STATE').hexdigest(),
-                'receipts_root': hashlib.sha256(b'GENESIS_RECEIPTS').hexdigest(),
-                'entropy_score': 0.5,
-                'quantum_state_hash': hashlib.sha256(b'GENESIS_QS').hexdigest(),
+                'quantum_proof': hashlib.sha256(b'GENESIS_QP').hexdigest(),
+                'quantum_entropy': '0.5',
+                'temporal_proof': hashlib.sha256(b'GENESIS_TP').hexdigest(),
                 'size_bytes': 0,
                 'quantum_validation_status': 'validated',
                 'quantum_measurements_count': 0,
-                'finalized': True
+                'status': 'finalized',
+                'confirmations': 0,
+                'epoch': 0,
+                'tx_capacity': 0,
+                'temporal_coherence': 0.9,
+                'is_orphan': False,
+                'quantum_proof_version': 3
             }
             
             genesis_insert = """
-                INSERT INTO blocks (block_number, block_hash, parent_hash, validator_address, 
-                timestamp, difficulty, nonce, gas_limit, gas_used, transactions, 
-                state_root, receipts_root, entropy_score, 
-                quantum_state_hash, size_bytes, quantum_validation_status,
-                quantum_measurements_count, finalized, finalized_at, created_at)
-                VALUES (%(block_number)s, %(block_hash)s, %(parent_hash)s, 
-                %(validator_address)s, %(timestamp)s, %(difficulty)s, %(nonce)s, 
-                %(gas_limit)s, %(gas_used)s, %(transactions)s,
-                %(state_root)s, %(receipts_root)s, %(entropy_score)s, 
-                %(quantum_state_hash)s, %(size_bytes)s, %(quantum_validation_status)s,
-                %(quantum_measurements_count)s, %(finalized)s, NOW(), NOW())
-                ON CONFLICT (block_number) DO NOTHING
+                INSERT INTO blocks (
+                    height, block_hash, previous_hash, validator, 
+                    timestamp, difficulty, nonce, gas_limit, gas_used,
+                    merkle_root, quantum_merkle_root, state_root, quantum_proof,
+                    quantum_entropy, temporal_proof, size_bytes, 
+                    quantum_validation_status, quantum_measurements_count, 
+                    status, confirmations, epoch, tx_capacity, 
+                    temporal_coherence, is_orphan, quantum_proof_version,
+                    created_at
+                ) VALUES (
+                    %(height)s, %(block_hash)s, %(previous_hash)s, %(validator)s,
+                    %(timestamp)s, %(difficulty)s, %(nonce)s, %(gas_limit)s, %(gas_used)s,
+                    %(merkle_root)s, %(quantum_merkle_root)s, %(state_root)s, %(quantum_proof)s,
+                    %(quantum_entropy)s, %(temporal_proof)s, %(size_bytes)s,
+                    %(quantum_validation_status)s, %(quantum_measurements_count)s,
+                    %(status)s, %(confirmations)s, %(epoch)s, %(tx_capacity)s,
+                    %(temporal_coherence)s, %(is_orphan)s, %(quantum_proof_version)s,
+                    NOW()
+                )
+                ON CONFLICT (height) DO NOTHING
             """
             
             self.execute(genesis_insert, genesis_block)
-            logger.info(f"{CLR.G}[OK] Genesis block created{CLR.E}")
+            logger.info(f"{CLR.G}[OK] Genesis block created at height=0{CLR.E}")
             
-            # Create initial users
+            # Create initial users - ADMIN FIRST
+            import bcrypt
+            
+            # Admin user shemshallah@gmail.com with bcrypt hashed password
+            if not admin_exists or admin_exists.get('cnt', 0) == 0:
+                admin_password_hash = bcrypt.hashpw(b'$h10j1r1H0w4rd', bcrypt.gensalt(rounds=12)).decode('utf-8')
+                admin_user = {
+                    'user_id': 'admin_shemshallah',
+                    'email': 'shemshallah@gmail.com',
+                    'username': 'shemshallah',
+                    'name': 'Admin Shemshallah',
+                    'password_hash': admin_password_hash,
+                    'role': 'admin',
+                    'email_verified': True,
+                    'balance': 1000000 * QTCL_WEI_PER_QTCL,
+                    'is_active': True
+                }
+                admin_insert = """
+                    INSERT INTO users (
+                        user_id, email, username, name, password_hash, 
+                        role, email_verified, balance, is_active, created_at, email_verified_at
+                    ) VALUES (
+                        %(user_id)s, %(email)s, %(username)s, %(name)s, %(password_hash)s,
+                        %(role)s, %(email_verified)s, %(balance)s, %(is_active)s, NOW(), NOW()
+                    )
+                    ON CONFLICT (email) DO NOTHING
+                """
+                self.execute(admin_insert, admin_user)
+                logger.info(f"{CLR.G}[OK] Admin user created: shemshallah@gmail.com{CLR.E}")
+            
+            # Check for oagi.autonomy@gmail.com user
+            check_oagi = """SELECT COUNT(*) as cnt FROM users WHERE email='oagi.autonomy@gmail.com' LIMIT 1"""
+            oagi_exists = self.execute_fetch(check_oagi)
+            if not oagi_exists or oagi_exists.get('cnt', 0) == 0:
+                oagi_user = {
+                    'user_id': 'user_oagi_autonomy',
+                    'email': 'oagi.autonomy@gmail.com',
+                    'username': 'oagi_autonomy',
+                    'name': 'OAGI Autonomy',
+                    'role': 'user',
+                    'email_verified': True,
+                    'balance': 100000 * QTCL_WEI_PER_QTCL,
+                    'is_active': True
+                }
+                user_insert = """
+                    INSERT INTO users (
+                        user_id, email, username, name, 
+                        role, email_verified, balance, is_active, created_at, email_verified_at
+                    ) VALUES (
+                        %(user_id)s, %(email)s, %(username)s, %(name)s,
+                        %(role)s, %(email_verified)s, %(balance)s, %(is_active)s, NOW(), NOW()
+                    )
+                    ON CONFLICT (email) DO NOTHING
+                """
+                self.execute(user_insert, oagi_user)
+                logger.info(f"{CLR.G}[OK] User created: oagi.autonomy@gmail.com{CLR.E}")
+            
+            # Create other initial users
             user_insert = """
-                INSERT INTO users (user_id, email, name, balance, role, created_at)
-                VALUES (%(user_id)s, %(email)s, %(name)s, %(balance)s, %(role)s, NOW())
-                ON CONFLICT (user_id) DO NOTHING
+                INSERT INTO users (user_id, email, username, name, balance, role, created_at, email_verified, email_verified_at, is_active)
+                VALUES (%(user_id)s, %(email)s, %(username)s, %(name)s, %(balance)s, %(role)s, NOW(), TRUE, NOW(), TRUE)
+                ON CONFLICT (email) DO NOTHING
             """
             
-            for idx, user_data in enumerate(INITIAL_USERS):
+            other_users = [u for u in INITIAL_USERS if u['email'] not in ['shemshallah@gmail.com', 'oagi.autonomy@gmail.com']]
+            for idx, user_data in enumerate(other_users):
                 user_id = f"user_{hashlib.sha256(user_data['email'].encode()).hexdigest()[:16]}"
                 user_record = {
                     'user_id': user_id,
                     'email': user_data['email'],
+                    'username': user_data['email'].split('@')[0],
                     'name': user_data['name'],
                     'balance': user_data['balance'] * QTCL_WEI_PER_QTCL,
                     'role': user_data['role']
                 }
                 self.execute(user_insert, user_record)
             
-            logger.info(f"{CLR.G}[OK] {len(INITIAL_USERS)} initial users created{CLR.E}")
+            logger.info(f"{CLR.G}[OK] Initial users created (admin + {len(other_users)} others){CLR.E}")
             
             # Create initial validators
-            validator_insert = """
-                INSERT INTO validators (validator_id, validator_address, validator_name, 
-                public_key, stake_amount, status, reputation_score, joined_at)
-                VALUES (%(validator_id)s, %(validator_address)s, %(validator_name)s, 
-                %(public_key)s, %(stake_amount)s, %(status)s, %(reputation_score)s, NOW())
-                ON CONFLICT (validator_id) DO NOTHING
-            """
-            
-            for idx in range(W_STATE_VALIDATORS):
-                validator_id = f"val_{secrets.token_hex(8)}"
-                validator_address = f"0x{secrets.token_hex(20)}"
-                public_key = secrets.token_hex(32)
+            check_validators = """SELECT COUNT(*) as cnt FROM validators LIMIT 1"""
+            validator_check = self.execute_fetch(check_validators)
+            if not validator_check or validator_check.get('cnt', 0) == 0:
+                validator_insert = """
+                    INSERT INTO validators (validator_id, validator_address, validator_name, 
+                    public_key, stake_amount, status, reputation_score, joined_at)
+                    VALUES (%(validator_id)s, %(validator_address)s, %(validator_name)s, 
+                    %(public_key)s, %(stake_amount)s, %(status)s, %(reputation_score)s, NOW())
+                    ON CONFLICT (validator_id) DO NOTHING
+                """
                 
-                validator_record = {
-                    'validator_id': validator_id,
-                    'validator_address': validator_address,
-                    'validator_name': f"Validator {idx + 1}",
-                    'public_key': public_key,
-                    'stake_amount': 1000 * QTCL_WEI_PER_QTCL,
-                    'status': 'active',
-                    'reputation_score': 100.0
-                }
-                self.execute(validator_insert, validator_record)
-            
-            logger.info(f"{CLR.G}[OK] {W_STATE_VALIDATORS} initial validators created{CLR.E}")
+                for idx in range(W_STATE_VALIDATORS):
+                    validator_id = f"val_{secrets.token_hex(8)}"
+                    validator_address = f"0x{secrets.token_hex(20)}"
+                    public_key = secrets.token_hex(32)
+                    
+                    validator_record = {
+                        'validator_id': validator_id,
+                        'validator_address': validator_address,
+                        'validator_name': f"Validator {idx + 1}",
+                        'public_key': public_key,
+                        'stake_amount': 1000 * QTCL_WEI_PER_QTCL,
+                        'status': 'active',
+                        'reputation_score': 100.0
+                    }
+                    self.execute(validator_insert, validator_record)
+                
+                logger.info(f"{CLR.G}[OK] {W_STATE_VALIDATORS} initial validators created{CLR.E}")
+            else:
+                logger.info(f"{CLR.G}[SKIP] Validators already exist{CLR.E}")
             
             # Create genesis epoch
-            epoch_insert = """
-                INSERT INTO epochs (epoch_number, start_block, end_block, 
-                start_timestamp, validator_count, total_stake, finality_status, epoch_status)
-                VALUES (%(epoch_number)s, %(start_block)s, %(end_block)s, 
-                NOW(), %(validator_count)s, %(total_stake)s, 'finalized', 'finalized')
-                ON CONFLICT (epoch_number) DO NOTHING
+            check_epochs = """SELECT COUNT(*) as cnt FROM epochs WHERE epoch_number=0 LIMIT 1"""
+            epoch_check = self.execute_fetch(check_epochs)
+            if not epoch_check or epoch_check.get('cnt', 0) == 0:
+                epoch_insert = """
+                    INSERT INTO epochs (epoch_number, start_block, end_block, 
+                    start_timestamp, validator_count, total_stake, finality_status, epoch_status)
+                    VALUES (%(epoch_number)s, %(start_block)s, %(end_block)s, 
+                    NOW(), %(validator_count)s, %(total_stake)s, 'finalized', 'finalized')
+                    ON CONFLICT (epoch_number) DO NOTHING
+                """
+                
+                epoch_record = {
+                    'epoch_number': 0,
+                    'start_block': 0,
+                    'end_block': 0,
+                    'validator_count': W_STATE_VALIDATORS,
+                    'total_stake': W_STATE_VALIDATORS * 1000 * QTCL_WEI_PER_QTCL
+                }
+                self.execute(epoch_insert, epoch_record)
+                logger.info(f"{CLR.G}[OK] Genesis epoch 0 created{CLR.E}")
+            
+            logger.info(f"{CLR.G}[OK] Genesis data initialization complete{CLR.E}")
+            
+        except Exception as e:
+            logger.error(f"{CLR.R}[ERROR] Genesis initialization failed: {e}{CLR.E}", exc_info=True)
             """
             
             epoch_record = {
