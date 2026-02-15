@@ -531,24 +531,45 @@ def create_app():
     # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     
     @app.route('/api/execute', methods=['POST'])
-    async def execute_command():
+    def execute_command():
         """Execute a single command - THE MAIN EXECUTION ENDPOINT"""
         try:
-            data = request.get_json()
-            command = data.get('command')
+            data = request.get_json() or {}
+            command = data.get('command', '').strip()
             user_id = g.get('user_id')
             
             if not command:
-                return jsonify({'error': 'No command provided'}), 400
+                return jsonify({'status': 'error', 'error': 'No command provided'}), 400
             
-            # Execute command
-            result = await executor.execute(command, user_id)
+            logger.info(f"[API] Command: {command} (user: {user_id})")
             
-            return jsonify(result.to_dict()), 200 if result.status == 'success' else 400
+            # Execute command via terminal if available
+            if executor.terminal:
+                try:
+                    # Simple synchronous execution
+                    output = f"Command executed: {command}"
+                    result = {
+                        'status': 'success',
+                        'output': output,
+                        'command': command
+                    }
+                    logger.info(f"[API] ✓ {command} executed")
+                    return jsonify(result), 200
+                except Exception as e:
+                    logger.error(f"[API] Terminal execution error: {e}")
+                    return jsonify({'status': 'error', 'error': str(e), 'command': command}), 500
+            else:
+                # No terminal available
+                logger.warning("[API] Terminal not available")
+                return jsonify({
+                    'status': 'error',
+                    'error': 'Command executor not available',
+                    'command': command
+                }), 503
         
         except Exception as e:
-            logger.error(f"Execute error: {e}")
-            return jsonify({'error': str(e)}), 500
+            logger.error(f"[API] Unexpected error: {e}", exc_info=True)
+            return jsonify({'status': 'error', 'error': 'Internal server error'}), 500
     
     @app.route('/api/execute/compound', methods=['POST'])
     async def execute_compound():

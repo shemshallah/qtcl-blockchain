@@ -21,9 +21,14 @@
 
 class QTCLCommandExecutor {
     constructor(config = {}) {
+        // Determine API URL from current location
+        const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const host = window.location.host;
+        
         this.config = {
-            apiUrl: config.apiUrl || 'http://localhost:5000',
-            wsUrl: config.wsUrl || 'ws://localhost:5000/socket.io',
+            apiUrl: config.apiUrl || `${protocol}//${host}`,
+            wsUrl: config.wsUrl || `${wsProtocol}//${host}/socket.io`,
             timeout: config.timeout || 30000,
             maxHistory: config.maxHistory || 100,
             ...config
@@ -48,18 +53,35 @@ class QTCLCommandExecutor {
      * Initialize the executor
      */
     init() {
-        this.connectWebSocket();
-        this.setupEventListeners();
-        logger.info('[CommandExecutor] Initialized');
+        try {
+            this.setupEventListeners();
+            logger.info('[CommandExecutor] Event listeners configured');
+        } catch (e) {
+            logger.warn('[CommandExecutor] Event listener setup warning:', e);
+        }
+        
+        // Don't block on WebSocket - do it async
+        Promise.resolve().then(() => {
+            try {
+                this.connectWebSocket();
+            } catch (e) {
+                logger.warn('[CommandExecutor] WebSocket connection warning:', e);
+                // Will still work via HTTP if WebSocket fails
+            }
+        });
+        
+        logger.info('[CommandExecutor] Initialized (WebSocket connecting in background)');
     }
     
     /**
-     * Connect to WebSocket server
+     * Connect to WebSocket server - non-blocking
      */
     connectWebSocket() {
         try {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = `${protocol}//${window.location.host}/socket.io`;
+            
+            logger.debug(`[WebSocket] Attempting connection to ${wsUrl}`);
             
             this.ws = new WebSocket(wsUrl);
             
@@ -71,23 +93,29 @@ class QTCLCommandExecutor {
             };
             
             this.ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                this._handleWebSocketMessage(data);
+                try {
+                    const data = JSON.parse(event.data);
+                    this._handleWebSocketMessage(data);
+                } catch (e) {
+                    logger.error('[WebSocket] Message parse error:', e);
+                }
             };
             
             this.ws.onerror = (error) => {
-                logger.error('[WebSocket] Error:', error);
-                this._emit('commandError', { message: 'WebSocket error' });
+                logger.warn('[WebSocket] Connection error (will use HTTP):', error);
+                this._emit('commandError', { message: 'WebSocket error - using HTTP fallback' });
             };
             
             this.ws.onclose = () => {
                 this.isConnected = false;
-                logger.warn('[WebSocket] Disconnected');
+                logger.info('[WebSocket] Disconnected - HTTP fallback active');
                 this._emit('connectionChanged', { connected: false });
-                setTimeout(() => this.connectWebSocket(), 5000); // Reconnect
+                // Try to reconnect every 10 seconds
+                setTimeout(() => this.connectWebSocket(), 10000);
             };
         } catch (error) {
-            logger.error('[WebSocket] Connection failed:', error);
+            logger.warn('[WebSocket] Setup error:', error);
+            // Non-fatal - HTTP execution still works
         }
     }
     
@@ -379,25 +407,43 @@ class QTCLCommandExecutor {
      */
     
     async _executeViaAPI(command, commandId, options) {
-        const response = await fetch(
-            `${this.config.apiUrl}/api/execute`,
-            {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    command,
-                    ...options
-                }),
-                timeout: this.config.timeout
+        try {
+            const authToken = localStorage.getItem('authToken');
+            const headers = {
+                'Content-Type': 'application/json'
+            };
+            
+            if (authToken) {
+                headers['Authorization'] = `Bearer ${authToken}`;
             }
-        );
-        
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.error || `API error: ${response.statusText}`);
+            
+            const response = await fetch(
+                `${this.config.apiUrl}/api/execute`,
+                {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify({
+                        command,
+                        ...options
+                    })
+                }
+            );
+            
+            const data = await response.json();
+            
+            if (!response.ok) {
+                throw new Error(data.error || `API error: ${response.statusText}`);
+            }
+            
+            return data;
+        } catch (error) {
+            logger.error('[API] Execution error:', error.message);
+            return {
+                status: 'error',
+                error: error.message || 'Command execution failed',
+                command
+            };
         }
-        
-        return await response.json();
     }
     
     _handleWebSocketMessage(data) {
@@ -460,29 +506,21 @@ const logger = {
  */
 window.CommandExecutor = QTCLCommandExecutor;
 
-// Auto-initialize with error handling
-document.addEventListener('DOMContentLoaded', () => {
-    try {
+// Direct initialization - must work
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
         if (!window.commandExecutor) {
-            window.commandExecutor = new QTCLCommandExecutor({
-                apiUrl: `http://${window.location.hostname}:${window.location.port || 5000}`,
-                wsUrl: `ws://${window.location.hostname}:${window.location.port || 5000}/socket.io`
-            });
-            
-            logger.info('[CommandExecutor] Auto-initialized successfully');
-            console.log('[CommandExecutor] ✓ Command executor is ready');
+            window.commandExecutor = new QTCLCommandExecutor();
+            console.log('[CommandExecutor] ✓ Initialized and ready');
         }
-    } catch (error) {
-        logger.error('[CommandExecutor] Initialization failed:', error);
-        console.error('[CommandExecutor] Failed to initialize:', error);
-        // Set a dummy executor to prevent crashes
-        window.commandExecutor = {
-            execute: async (cmd) => ({ error: 'Executor not initialized', command: cmd }),
-            on: () => {},
-            emit: () => {}
-        };
+    });
+} else {
+    // DOM already loaded
+    if (!window.commandExecutor) {
+        window.commandExecutor = new QTCLCommandExecutor();
+        console.log('[CommandExecutor] ✓ Initialized and ready');
     }
-});
+}
 
 // Export for module systems
 if (typeof module !== 'undefined' && module.exports) {

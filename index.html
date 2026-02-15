@@ -1159,21 +1159,9 @@
         // Initialize CommandExecutor (v5.0)
         document.addEventListener('DOMContentLoaded', () => {
             if (window.commandExecutor) {
-                log('✓ Command Executor v5.0 initialized', 'success');
-                
-                // Listen for command events
-                window.commandExecutor.on('commandExecuted', (data) => {
-                    // Auto-handled by executeCommand function
-                });
-                
-                window.commandExecutor.on('commandError', (data) => {
-                    if (data.error) {
-                        log(`✗ Executor error: ${data.error}`, 'error');
-                    }
-                });
+                log('✓ Command Executor ENABLED', 'success');
             } else {
-                log('⚠ Command Executor initialization pending - check console for errors', 'warning');
-                console.warn('[Terminal] window.commandExecutor not available');
+                log('⚠ Command Executor not available', 'warning');
             }
         });
         
