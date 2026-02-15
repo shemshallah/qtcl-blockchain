@@ -1996,8 +1996,11 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
     @rate_limit(100,60)
     def submit_transaction():
         """Submit transaction through full quantum routing pipeline."""
-        correlation_id=RequestCorrelation.start_operation('submit_transaction')
-        with PROFILER.profile('submit_transaction'):
+        correlation_id=str(uuid.uuid4())
+        try:
+            if hasattr(RequestCorrelation, 'start_operation'):
+                correlation_id=RequestCorrelation.start_operation('submit_transaction')
+        except: pass
             try:
                 data=request.get_json() or {}
                 from_address=data.get('from_address','').strip()
@@ -2009,8 +2012,12 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
                 except:tx_type=TransactionType.TRANSFER
 
                 if amount<=0:
-                    ERROR_BUDGET.deduct(0.05)
-                    RequestCorrelation.end_operation(correlation_id, success=False)
+                    try:
+                        if hasattr(ERROR_BUDGET, 'deduct'):
+                            ERROR_BUDGET.deduct(0.05)
+                        if hasattr(RequestCorrelation, 'end_operation'):
+                            RequestCorrelation.end_operation(correlation_id, success=False)
+                    except: pass
                     return jresp({'error':'Amount must be positive'},400)
 
                 # Nonce
@@ -2067,7 +2074,10 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
                 )
                 mempool.add(mem_entry)
 
-                RequestCorrelation.end_operation(correlation_id, success=True)
+                try:
+                    if hasattr(RequestCorrelation, 'end_operation'):
+                        RequestCorrelation.end_operation(correlation_id, success=True)
+                except: pass
                 return jresp({
                     'tx_hash':tx_hash,
                     'status':tx_record['status'],
@@ -2081,7 +2091,10 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
                     'estimated_confirmation_blocks':cfg['finality_confirmations']
                 },201)
             except Exception as e:
-                ERROR_BUDGET.deduct(0.10)
+                try:
+                    if hasattr(ERROR_BUDGET, 'deduct'):
+                        ERROR_BUDGET.deduct(0.10)
+                except: pass
                 logger.error("[API] submit_transaction error: %s",traceback.format_exc())
                 RequestCorrelation.end_operation(correlation_id, success=False)
                 return jresp({'error':str(e)},500)
@@ -2808,12 +2821,15 @@ def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
             
             # Record profiling metrics
             duration_ms=(time.time()-profile_start)*1000
-            if WSGI_AVAILABLE and PROFILER:
-                PROFILER.record_operation(
-                    operation=f'block_command_{cmd_type}',
-                    duration_ms=duration_ms,
-                    metadata={'block':block_ref,'correlation_id':correlation_id}
-                )
+            try:
+                if WSGI_AVAILABLE and PROFILER and hasattr(PROFILER, 'record_operation'):
+                    PROFILER.record_operation(
+                        operation=f'block_command_{cmd_type}',
+                        duration_ms=duration_ms,
+                        metadata={'block':block_ref,'correlation_id':correlation_id}
+                    )
+            except Exception:
+                pass  # Profiler not available, continue without it
             
             # Log to database
             _log_block_command(cmd_type,block_ref,options,result,correlation_id,duration_ms)

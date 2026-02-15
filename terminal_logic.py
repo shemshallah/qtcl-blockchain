@@ -2359,99 +2359,6 @@ class TerminalEngine:
             self._log_block_command('block/list', success=False, error_msg=str(e), correlation_id=correlation_id)
             metrics.record_command('block/list', False)
     
-    def _cmd_block_details(self):
-        """📦 Get detailed block information with quantum proof verification"""
-        correlation_id = str(uuid.uuid4())[:12]
-        
-        try:
-            block_num = UI.prompt("Block number")
-            UI.header(f"📦 BLOCK {block_num} DETAILS")
-            
-            # Check cache
-            _init_wsgi_globals()
-            cache_key = f"block:detail:{block_num}"
-            if WSGI_AVAILABLE and CACHE:
-                cached = CACHE.get(cache_key)
-                if cached:
-                    block = cached
-                    success = True
-                    UI.success("✓ From cache")
-                else:
-                    success, block = self.client.request('GET', f'/api/blocks/{block_num}')
-                    if success:
-                        CACHE.set(cache_key, block, ttl=300)
-            else:
-                success, block = self.client.request('GET', f'/api/blocks/{block_num}')
-            
-            if success:
-                # Store in database
-                if WSGI_AVAILABLE and DB:
-                    try:
-                        with DB.cursor() as cur:
-                            cur.execute("""
-                                INSERT INTO block_details_cache 
-                                (block_number, hash, timestamp, user_id, correlation_id, data)
-                                VALUES (%s, %s, %s, %s, %s, %s::jsonb)
-                                ON CONFLICT (block_number) DO UPDATE SET
-                                    timestamp = EXCLUDED.timestamp,
-                                    access_count = access_count + 1
-                            """, (
-                                block.get('block_number', 0),
-                                block.get('hash', ''),
-                                datetime.utcnow(),
-                                self.session.get('user_id', 'unknown'),
-                                correlation_id,
-                                json.dumps(block)
-                            ))
-                            DB.commit()
-                    except Exception as db_err:
-                        logging.error(f"[BlockDetails] DB error: {db_err}")
-                
-                # Quantum proof validation
-                quantum_proof = block.get('quantum_proof', '')
-                quantum_valid = "✓ VALID" if quantum_proof and len(quantum_proof) > 20 else "⚠ PENDING"
-                
-                display_data = [
-                    ['Block Number', str(block.get('block_number', ''))],
-                    ['Hash', block.get('hash', '')[:32] + "..."],
-                    ['Parent Hash', block.get('parent_hash', '')[:32] + "..."],
-                    ['Timestamp', block.get('timestamp', '')],
-                    ['Transactions', str(len(block.get('transactions', [])))],
-                    ['Miner', block.get('miner', '')[:16] + "..."],
-                    ['Gas Used', str(block.get('gas_used', 0))],
-                    ['Gas Limit', str(block.get('gas_limit', 0))],
-                    ['Finalized', "✓ YES" if block.get('finalized') else "⏳ NO"],
-                    ['Quantum Proof', quantum_valid],
-                    ['Merkle Root', block.get('merkle_root', '')[:32] + "..."],
-                    ['Difficulty', str(block.get('difficulty', 0))[:16]],
-                ]
-                
-                UI.print_table(['Field', 'Value'], display_data)
-                
-                # Additional metrics
-                if block.get('transactions'):
-                    UI.info(f"📊 Transactions in block:")
-                    for idx, tx in enumerate(block.get('transactions', [])[:5], 1):
-                        print(f"    {idx}. {tx.get('hash', '')[:24]}... | {tx.get('value', 0):.2f} QTCL")
-                    if len(block.get('transactions', [])) > 5:
-                        print(f"    ... and {len(block.get('transactions', [])) - 5} more")
-                
-                self._log_block_command('block/details', block, success=True, correlation_id=correlation_id)
-                metrics.record_command('block/details')
-                
-            else:
-                error_msg = block.get('error', 'Unknown error')
-                UI.error(f"Failed: {error_msg}")
-                self._log_block_command('block/details', {'block_num': block_num}, 
-                    success=False, error_msg=error_msg, correlation_id=correlation_id)
-                metrics.record_command('block/details', False)
-        
-        except Exception as e:
-            UI.error(f"Exception: {e}")
-            logging.error(f"[BlockDetails] {e}\n{traceback.format_exc()}")
-            self._log_block_command('block/details', success=False, error_msg=str(e), correlation_id=correlation_id)
-            metrics.record_command('block/details', False)
-    
     def _cmd_block_explorer(self):
         """🔍 Advanced block explorer with multi-type search and database indexing"""
         correlation_id = str(uuid.uuid4())[:12]
@@ -2653,18 +2560,6 @@ class TerminalEngine:
             
             # Call the comprehensive command from terminal_block_commands module
             try:
-                from terminal_block_commands import cmd_block_details
-                cmd_block_details(self, args_str)
-            except ImportError:
-                UI.error("terminal_block_commands module not available")
-                UI.info("Falling back to basic block details...")
-                # Fallback to original implementation
-                self._cmd_block_details()
-                
-        except Exception as e:
-            UI.error(f"Error: {e}")
-            logging.error(f"[BlockDetailsComprehensive] {e}", exc_info=True)
-    
     def _cmd_block_validate_comprehensive(self):
         """🔍 Comprehensive block validation with quantum proofs"""
         try:
@@ -2679,30 +2574,12 @@ class TerminalEngine:
                 args_str += " --full"
             
             try:
-                from terminal_block_commands import cmd_block_validate
-                cmd_block_validate(self, args_str)
-            except ImportError:
-                UI.error("terminal_block_commands module not available")
-                
-        except Exception as e:
-            UI.error(f"Error: {e}")
-            logging.error(f"[BlockValidate] {e}", exc_info=True)
-    
     def _cmd_block_quantum_measure(self):
         """⚛️ Perform quantum measurements on block"""
         try:
             block_id = UI.prompt("Block hash or height for quantum measurement")
             
             try:
-                from terminal_block_commands import cmd_block_quantum
-                cmd_block_quantum(self, block_id)
-            except ImportError:
-                UI.error("terminal_block_commands module not available")
-                
-        except Exception as e:
-            UI.error(f"Error: {e}")
-            logging.error(f"[BlockQuantum] {e}", exc_info=True)
-    
     def _cmd_block_batch_query(self):
         """📦 Query multiple blocks in parallel"""
         try:
@@ -2715,15 +2592,6 @@ class TerminalEngine:
                 args_str += " --quantum"
             
             try:
-                from terminal_block_commands import cmd_block_batch
-                cmd_block_batch(self, args_str)
-            except ImportError:
-                UI.error("terminal_block_commands module not available")
-                
-        except Exception as e:
-            UI.error(f"Error: {e}")
-            logging.error(f"[BlockBatch] {e}", exc_info=True)
-    
     def _cmd_block_integrity_check(self):
         """🔍 Verify blockchain integrity"""
         try:
@@ -2736,19 +2604,6 @@ class TerminalEngine:
                 args_str = range_input
             
             try:
-                from terminal_block_commands import cmd_block_integrity
-                cmd_block_integrity(self, args_str)
-            except ImportError:
-                UI.error("terminal_block_commands module not available")
-                
-        except Exception as e:
-            UI.error(f"Error: {e}")
-            logging.error(f"[BlockIntegrity] {e}", exc_info=True)
-    
-    # ═════════════════════════════════════════════════════════════════════════════════════════
-    # QUANTUM MEASUREMENT INTEGRATION FOR BLOCK OPERATIONS
-    # ═════════════════════════════════════════════════════════════════════════════════════════
-    
     def _measure_quantum_block_state(self, block_data, correlation_id):
         """
         Recursively measure and validate quantum block state including:
@@ -2885,52 +2740,6 @@ class TerminalEngine:
         except Exception as e:
             logging.error(f"[RecursiveValidation] {e}")
             return {'status': 'exception', 'validated': False, 'error': str(e)}
-    
-    def _cmd_block_validate(self):
-        """⚛️ Recursively validate block chain with quantum measurements"""
-        try:
-            block_num = int(UI.prompt("Block number to validate"))
-            max_depth = int(UI.prompt("Validation depth (1-5)", "3"))
-            max_depth = min(max(1, max_depth), 5)
-            
-            UI.header(f"⚛️ RECURSIVE BLOCK VALIDATION - Depth: {max_depth}")
-            
-            # Run recursive validation
-            result = self._recursive_block_validation(block_num, max_depth=max_depth)
-            
-            # Display results
-            print(f"\n{Fore.CYAN}Block #{result.get('block_number', '?')}{Style.RESET_ALL}")
-            print(f"  Quantum Valid: {'✓' if result.get('quantum_valid') else '✗'}")
-            print(f"  Merkle Valid:  {'✓' if result.get('merkle_valid') else '✗'}")
-            print(f"  Finalized:     {'✓' if result.get('finalized') else '⏳'}")
-            print(f"  Overall Valid: {'✓' if result.get('validated') else '✗'}")
-            
-            # Show measurements
-            if result.get('measurements'):
-                m = result['measurements']['measurements']
-                print(f"\n  Quantum Measurements:")
-                print(f"    Coherence: {float(m.get('coherence', 0)):.4f}")
-                print(f"    Entropy:   {float(m.get('entropy', 0)):.4f}")
-                print(f"    Finality:  {float(m.get('finality_confidence', 0)):.4f}")
-            
-            # Show recursive validation chain if present
-            if result.get('parent_validation'):
-                print(f"\n  Parent Block Validation (Depth {result.get('depth', 0) + 1}):")
-                parent = result['parent_validation']
-                print(f"    Quantum: {'✓' if parent.get('quantum_valid') else '✗'}")
-                print(f"    Valid:   {'✓' if parent.get('validated') else '✗'}")
-            
-            UI.success("Validation complete")
-            metrics.record_command('block/validate')
-        
-        except Exception as e:
-            UI.error(f"Validation failed: {e}")
-            logging.error(f"[BlockValidate] {e}\n{traceback.format_exc()}")
-            metrics.record_command('block/validate', False)
-    
-    # ═════════════════════════════════════════════════════════════════════════════════════════
-    # BLOCK COMMAND DISPATCHER AND SUBCOMMAND REGISTRATION
-    # ═════════════════════════════════════════════════════════════════════════════════════════
     
     def register_block_commands(self):
         """Register all block-related subcommands with full implementations"""
@@ -4182,16 +3991,6 @@ class TerminalEngine:
             if choice=="List":
                 self._cmd_block_list()
             elif choice=="Details":
-                self._cmd_block_details()
-            elif choice=="Explorer":
-                self._cmd_block_explorer()
-            elif choice=="Statistics":
-                self._cmd_block_stats()
-            elif choice=="Validate":
-                self._cmd_block_validate()
-            else:
-                break
-    
     def _oracle_submenu(self):
         while True:
             choice=UI.prompt_choice("Oracle:",[
