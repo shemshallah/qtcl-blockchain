@@ -1573,8 +1573,8 @@ try:
         app, executor, socketio = create_app()
         initialize_app(app, socketio)  # ⚡ PASS SOCKETIO INSTANCE ⚡
         logger.info("[Flask] ✓ App created from main_app")
-    except ImportError as ie:
-        logger.warning(f"[Flask] Could not import main_app: {ie}")
+    except Exception as e:
+        logger.error(f"[Flask] Failed to create app from main_app: {e}")
         logger.info("[Flask] Creating app directly in wsgi_config...")
         from flask import Flask
         app = Flask(__name__)

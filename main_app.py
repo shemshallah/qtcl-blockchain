@@ -1398,7 +1398,7 @@ def initialize_app(app, socketio=None):
         logger.error(traceback.format_exc())
     
     logger.info("[InitApp] QTCL Unified API v5.0 initialization complete")
-    return app, executor, socketio
+
 logger.info('[Module] App initialized at module level for WSGI')
 
 if __name__ == '__main__':
