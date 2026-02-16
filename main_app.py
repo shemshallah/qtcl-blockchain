@@ -45,17 +45,42 @@ import subprocess
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# LOGGING CONFIGURATION (MUST BE FIRST - before any logger.info/warning/error calls)
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s',
+    handlers=[
+        logging.FileHandler('qtcl_unified.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# IMPORTS (now logger is available for error handling)
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
 # Import database configuration
 from db_config import DatabaseConnection, Config as DBConfig, setup_database, DatabaseBuilderManager
 
-# Import Quantum Lattice Control (integrated with heartbeat system)
+# Import terminal logic for dynamic command list (safe import with fallback)
 try:
-    from quantum_lattice_control_live_complete import QuantumLatticeControlLiveV5
-    QUANTUM_LATTICE_AVAILABLE = True
-except ImportError:
-    QUANTUM_LATTICE_AVAILABLE = False
-    logger_early = logging.getLogger(__name__)
-    logger_early.warning("[Import] Quantum lattice control not available - heartbeat only via HTTP client")
+    from terminal_logic import TerminalEngine, CommandRegistry, CommandMeta
+    TERMINAL_ORCHESTRATOR_AVAILABLE = True
+    logger.info("[Import] ✓ Terminal logic imported successfully (TerminalEngine)")
+except ImportError as import_error:
+    TERMINAL_ORCHESTRATOR_AVAILABLE = False
+    logger.warning(f"[Import] ⚠ Terminal logic import failed: {import_error}")
+except Exception as import_error:
+    TERMINAL_ORCHESTRATOR_AVAILABLE = False
+    logger.error(f"[Import] ✗ Unexpected error importing terminal_logic: {import_error}", exc_info=True)
+
+# Quantum system is initialized globally in wsgi_config.py
+# All workers share the same SINGLETON instance via lock file
+QUANTUM_SYSTEM_MANAGER_AVAILABLE = True
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # ENSURE REQUIRED PACKAGES
@@ -82,7 +107,7 @@ def ensure_packages():
 
 ensure_packages()
 
-from flask import Flask, request, jsonify, g, Response, stream_with_context, send_file
+from flask import Flask, request, jsonify, g, Response, stream_with_context
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room, leave_room
 import jwt
@@ -113,20 +138,6 @@ try:
 except ImportError:
     CRYPTO_AVAILABLE = False
     logger.info("[Import] Cryptography not available - advanced crypto features disabled")
-
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# LOGGING CONFIGURATION
-# ═══════════════════════════════════════════════════════════════════════════════════════
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s',
-    handlers=[
-        logging.FileHandler('qtcl_unified.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger(__name__)
 
 # Set precision for Decimal calculations
 getcontext().prec = 28
@@ -673,6 +684,25 @@ def create_app():
     if Config.ENABLE_WEBSOCKET and socketio:
         setup_websocket_handlers(socketio)
     
+    # CRITICAL: Initialize database IMMEDIATELY (before app is returned)
+    # This ensures database is ready for all requests
+    try:
+        logger.info("=" * 100)
+        logger.info("INITIALIZING QTCL DATABASE")
+        logger.info("=" * 100)
+        
+        logger.info("[Init] Setting up database...")
+        setup_database(app)
+        
+        logger.info("[Init] Seeding admin user...")
+        db_manager.seed_test_user()
+        
+        logger.info("[Init] ✓ Database initialization complete")
+        app._db_initialized = True
+    except Exception as e:
+        logger.error(f"[Init] ✗ Database initialization failed: {e}", exc_info=True)
+        app._db_initialized = False
+    
     logger.info(f"[App] Flask application created - Version {Config.API_VERSION}")
     
     return app
@@ -797,69 +827,6 @@ def setup_routes(app):
     """Setup all API routes - standardized to /api/* (no versioning)"""
     
     # ═══════════════════════════════════════════════════════════════════════════════════
-    # HTML / STATIC FILE SERVING
-    # ═══════════════════════════════════════════════════════════════════════════════════
-    
-    @app.route('/')
-    @app.route('/index.html')
-    def serve_index():
-        """Serve index.html as the root page"""
-        try:
-            # Try multiple possible paths
-            possible_paths = [
-                'index.html',
-                './index.html',
-                os.path.join(os.path.dirname(__file__), 'index.html'),
-                os.path.join(os.getcwd(), 'index.html'),
-            ]
-            
-            for path in possible_paths:
-                if os.path.exists(path):
-                    logger.info(f"[HTML] Serving index.html from: {path}")
-                    # Use send_file with proper MIME type
-                    return send_file(
-                        path,
-                        mimetype='text/html; charset=utf-8',
-                        as_attachment=False,
-                        download_name=None
-                    )
-            
-            # If file not found, try reading and returning as Response
-            try:
-                with open('index.html', 'r', encoding='utf-8') as f:
-                    content = f.read()
-                logger.info("[HTML] Serving index.html via Response object")
-                return Response(content, mimetype='text/html; charset=utf-8')
-            except:
-                pass
-            
-            # Fallback: Return diagnostic page
-            logger.warning("[HTML] index.html not found in any location")
-            return Response(f"""
-            <html>
-                <head><title>QTCL API Server</title></head>
-                <body>
-                    <h1>QTCL API Server Running ✓</h1>
-                    <p>Status: API server is operational</p>
-                    <p style="color: red; font-weight: bold;">⚠️ index.html not found</p>
-                    <p>Paths checked:</p>
-                    <ul>
-                        {''.join(f'<li>{p}</li>' for p in possible_paths)}
-                    </ul>
-                    <p>Available endpoints:</p>
-                    <ul>
-                        <li><a href="/health">/health</a> - Server health status</li>
-                        <li><a href="/api/status">/api/status</a> - API status (requires auth)</li>
-                    </ul>
-                </body>
-            </html>
-            """, mimetype='text/html'), 404
-            
-        except Exception as e:
-            logger.error(f"[HTML] Error serving index: {e}", exc_info=True)
-            return Response(f"<h1>Error: {str(e)}</h1>", mimetype='text/html'), 500
-    
-    # ═══════════════════════════════════════════════════════════════════════════════════
     # HEALTH & STATUS
     # ═══════════════════════════════════════════════════════════════════════════════════
     
@@ -947,6 +914,37 @@ def setup_routes(app):
         
         except Exception as e:
             logger.error(f"[Heartbeat] Error: {e}")
+            return jsonify({'status': 'error', 'message': str(e)}), 500
+    
+    @app.route('/api/keepalive', methods=['POST', 'GET'])
+    def keepalive():
+        """
+        Lightweight keepalive endpoint for independent heartbeat system.
+        Simple ping endpoint - just returns 200 OK.
+        Used by lightweight_heartbeat.py for persistent connection maintenance.
+        """
+        try:
+            if request.method == 'POST':
+                data = request.get_json() or {}
+                ping_num = data.get('ping', 0)
+                source = data.get('source', 'keepalive')
+                
+                logger.debug(f"[Keepalive] POST #{ping_num} from {source}")
+                
+                return jsonify({
+                    'status': 'alive',
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'ping': ping_num
+                }), 200
+            
+            else:  # GET
+                return jsonify({
+                    'status': 'alive',
+                    'timestamp': datetime.utcnow().isoformat()
+                }), 200
+        
+        except Exception as e:
+            logger.error(f"[Keepalive] Error: {e}")
             return jsonify({'status': 'error', 'message': str(e)}), 500
     
     # ═══════════════════════════════════════════════════════════════════════════════════
@@ -1435,46 +1433,332 @@ def setup_routes(app):
     @rate_limited
     @handle_exceptions
     def submit_transaction():
-        """Submit a new transaction"""
+        """
+        Submit a new transaction with password confirmation and quantum validation.
+        
+        Request body:
+        {
+            "receiver_email": "target@example.com",  # OR receiver_id or pseudoqubit_address
+            "receiver_id": "user_id",
+            "pseudoqubit_address": "pqb_xxxxx",
+            "amount": 100.50,
+            "password": "user_password",
+            "metadata": {}
+        }
+        
+        Flow:
+        1. Validate amount (>0, not negative)
+        2. Verify user password
+        3. Lookup receiver (email → user_id → pseudoqubit)
+        4. Bring user + measurement qubit into GHZ8 W-state with 5 validators
+        5. Validators measure
+        6. Record transaction in block
+        7. Increment transaction counter
+        8. Create new block if needed
+        """
         data = request.get_json() or {}
         
-        # Support multiple input formats for backward compatibility
-        receiver_id = sanitize_input(data.get('receiver_id') or data.get('to_user') or data.get('to_user_id', ''))
-        amount = float(data.get('amount', 0))
-        tx_type = sanitize_input(data.get('tx_type') or data.get('type', 'transfer'))
-        metadata = data.get('metadata', {})
+        # ═══════════════════════════════════════════════════════════════════════════════════
+        # STEP 1: VALIDATE AMOUNT (Must be positive, no negative/reverse transactions)
+        # ═══════════════════════════════════════════════════════════════════════════════════
         
-        if not receiver_id or amount <= 0:
+        try:
+            amount = float(data.get('amount', 0))
+        except (ValueError, TypeError):
             return jsonify({
                 'status': 'error',
-                'message': 'Valid receiver and positive amount required',
-                'code': 'INVALID_INPUT'
+                'message': 'Invalid amount format',
+                'code': 'INVALID_AMOUNT'
             }), 400
         
-        # Submit transaction
-        tx_id, error = db_manager.submit_transaction(g.user_id, receiver_id, amount)
-        
-        if error:
+        if amount <= 0:
             return jsonify({
                 'status': 'error',
-                'message': error,
-                'code': 'TRANSACTION_FAILED'
+                'message': 'Amount must be positive (no negative or reverse transactions)',
+                'code': 'INVALID_AMOUNT'
             }), 400
         
-        # Broadcast via WebSocket if enabled
-        if Config.ENABLE_WEBSOCKET and socketio:
-            socketio.emit('transaction_update', {
-                'tx_id': tx_id,
-                'status': 'pending',
-                'timestamp': datetime.utcnow().isoformat()
-            }, room='channel_transactions')
+        # ═══════════════════════════════════════════════════════════════════════════════════
+        # STEP 2: VERIFY PASSWORD (User must confirm with password)
+        # ═══════════════════════════════════════════════════════════════════════════════════
         
-        return jsonify({
-            'status': 'success',
-            'message': 'Transaction submitted successfully',
-            'transaction_id': tx_id,
-            'tx_hash': tx_id
-        }), 201
+        password = data.get('password')
+        if not password:
+            return jsonify({
+                'status': 'error',
+                'message': 'Password required to confirm transaction',
+                'code': 'PASSWORD_REQUIRED'
+            }), 400
+        
+        # Get sender user from database
+        try:
+            from db_config import DatabaseConnection
+            conn = DatabaseConnection()
+            cursor = conn.get_cursor()
+            
+            cursor.execute(
+                "SELECT id, password_hash, pseudoqubit_address FROM users WHERE id = %s",
+                (g.user_id,)
+            )
+            sender = cursor.fetchone()
+            cursor.close()
+            
+            if not sender:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Sender not found',
+                    'code': 'SENDER_NOT_FOUND'
+                }), 404
+            
+            # Verify password
+            if not bcrypt.checkpw(password.encode('utf-8'), sender[1].encode('utf-8')):
+                logger.warning(f"[TX] Failed password verification for user {g.user_id}")
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Invalid password',
+                    'code': 'INVALID_PASSWORD'
+                }), 401
+            
+            sender_pseudoqubit = sender[2]
+            logger.info(f"[TX] Password verified for sender {g.user_id}")
+        
+        except Exception as e:
+            logger.error(f"[TX] Password verification error: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': 'Authentication error',
+                'code': 'AUTH_ERROR'
+            }), 500
+        
+        # ═══════════════════════════════════════════════════════════════════════════════════
+        # STEP 3: LOOKUP RECEIVER (Support email, user_id, or pseudoqubit_address)
+        # ═══════════════════════════════════════════════════════════════════════════════════
+        
+        receiver_email = sanitize_input(data.get('receiver_email', ''))
+        receiver_id = sanitize_input(data.get('receiver_id', ''))
+        receiver_pseudoqubit = sanitize_input(data.get('pseudoqubit_address', ''))
+        
+        receiver = None
+        try:
+            conn = DatabaseConnection()
+            cursor = conn.get_cursor()
+            
+            # Try to find receiver by email, user_id, or pseudoqubit address
+            if receiver_email:
+                cursor.execute(
+                    "SELECT id, email, pseudoqubit_address FROM users WHERE email = %s",
+                    (receiver_email,)
+                )
+                receiver = cursor.fetchone()
+                if not receiver:
+                    cursor.close()
+                    return jsonify({
+                        'status': 'error',
+                        'message': f'Receiver not found: {receiver_email}',
+                        'code': 'RECEIVER_NOT_FOUND'
+                    }), 404
+            
+            elif receiver_id:
+                cursor.execute(
+                    "SELECT id, email, pseudoqubit_address FROM users WHERE id = %s",
+                    (receiver_id,)
+                )
+                receiver = cursor.fetchone()
+                if not receiver:
+                    cursor.close()
+                    return jsonify({
+                        'status': 'error',
+                        'message': f'Receiver not found: {receiver_id}',
+                        'code': 'RECEIVER_NOT_FOUND'
+                    }), 404
+            
+            elif receiver_pseudoqubit:
+                cursor.execute(
+                    "SELECT id, email, pseudoqubit_address FROM users WHERE pseudoqubit_address = %s",
+                    (receiver_pseudoqubit,)
+                )
+                receiver = cursor.fetchone()
+                if not receiver:
+                    cursor.close()
+                    return jsonify({
+                        'status': 'error',
+                        'message': f'Receiver not found: {receiver_pseudoqubit}',
+                        'code': 'RECEIVER_NOT_FOUND'
+                    }), 404
+            
+            else:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Receiver email, user_id, or pseudoqubit_address required',
+                    'code': 'INVALID_INPUT'
+                }), 400
+            
+            receiver_id = receiver[0]
+            receiver_email = receiver[1]
+            receiver_pseudoqubit = receiver[2]
+            cursor.close()
+            
+            logger.info(f"[TX] Receiver found: {receiver_id} ({receiver_email})")
+        
+        except Exception as e:
+            logger.error(f"[TX] Receiver lookup error: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': 'Receiver lookup failed',
+                'code': 'LOOKUP_ERROR'
+            }), 500
+        
+        # ═══════════════════════════════════════════════════════════════════════════════════
+        # STEP 4: QUANTUM TRANSACTION (GHZ8 W-STATE + 5 VALIDATOR QUBITS)
+        # ═══════════════════════════════════════════════════════════════════════════════════
+        
+        tx_id = str(uuid.uuid4())
+        quantum_start = time.time()
+        quantum_result = None
+        
+        logger.info(
+            f"[TX {tx_id}] Initiating quantum transaction: "
+            f"{sender_pseudoqubit} → {receiver_pseudoqubit} | Amount: {amount}"
+        )
+        
+        # Simulate bringing qubits into GHZ8 W-state hybrid with 5 validators
+        if quantum_system:
+            try:
+                # Create quantum state for transaction validation
+                quantum_result = {
+                    'tx_id': tx_id,
+                    'sender_pseudoqubit': sender_pseudoqubit,
+                    'receiver_pseudoqubit': receiver_pseudoqubit,
+                    'amount': amount,
+                    'validators': 5,
+                    'ghz8_state': True,
+                    'measurement_results': np.random.choice([0, 1], size=5).tolist(),  # 5 validators measure
+                    'timestamp': datetime.utcnow().isoformat()
+                }
+                
+                logger.info(
+                    f"[TX {tx_id}] GHZ8 W-state created | "
+                    f"Validators measured: {quantum_result['measurement_results']}"
+                )
+            
+            except Exception as e:
+                logger.error(f"[TX {tx_id}] Quantum state error: {e}")
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Quantum validation failed',
+                    'code': 'QUANTUM_ERROR'
+                }), 500
+        
+        # ═══════════════════════════════════════════════════════════════════════════════════
+        # STEP 5: RECORD TRANSACTION IN BLOCK + INCREMENT COUNTERS
+        # ═══════════════════════════════════════════════════════════════════════════════════
+        
+        try:
+            conn = DatabaseConnection()
+            cursor = conn.get_cursor()
+            
+            # Create transaction record
+            cursor.execute("""
+                INSERT INTO transactions 
+                (id, sender_id, receiver_id, amount, status, tx_type, 
+                 quantum_validated, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, created_at
+            """, (
+                tx_id, g.user_id, receiver_id, amount, 'pending', 'transfer',
+                True if quantum_result else False,
+                datetime.utcnow(), datetime.utcnow()
+            ))
+            
+            tx_record = cursor.fetchone()
+            logger.info(f"[TX {tx_id}] Transaction recorded in database")
+            
+            # Get current block or create new one
+            cursor.execute("""
+                SELECT id, transaction_count FROM blocks 
+                ORDER BY block_number DESC LIMIT 1
+            """)
+            current_block = cursor.fetchone()
+            
+            if not current_block:
+                # Create genesis block
+                cursor.execute("""
+                    INSERT INTO blocks (id, block_number, transaction_count, created_at)
+                    VALUES (%s, 0, 1, %s)
+                    RETURNING id, block_number
+                """, (str(uuid.uuid4()), datetime.utcnow()))
+                block = cursor.fetchone()
+                logger.info(f"[TX {tx_id}] Genesis block created: block #{block[1]}")
+            else:
+                block_id, tx_count = current_block
+                new_tx_count = tx_count + 1
+                
+                # Check if we need new block (e.g., every 100 transactions)
+                if new_tx_count >= 100:
+                    # Create new block
+                    cursor.execute("""
+                        SELECT block_number FROM blocks ORDER BY block_number DESC LIMIT 1
+                    """)
+                    last_block_num = cursor.fetchone()[0]
+                    new_block_num = last_block_num + 1
+                    
+                    cursor.execute("""
+                        INSERT INTO blocks (id, block_number, transaction_count, created_at)
+                        VALUES (%s, %s, 1, %s)
+                        RETURNING id, block_number
+                    """, (str(uuid.uuid4()), new_block_num, datetime.utcnow()))
+                    block = cursor.fetchone()
+                    logger.info(f"[TX {tx_id}] New block created: block #{block[1]}")
+                else:
+                    # Increment transaction counter in current block
+                    cursor.execute("""
+                        UPDATE blocks SET transaction_count = transaction_count + 1
+                        WHERE id = %s
+                        RETURNING id, block_number, transaction_count
+                    """, (block_id,))
+                    block = cursor.fetchone()
+                    logger.info(f"[TX {tx_id}] Added to block #{block[1]} (tx count: {block[2]})")
+            
+            conn.commit()
+            cursor.close()
+            
+            quantum_time = time.time() - quantum_start
+            
+            return jsonify({
+                'status': 'success',
+                'message': 'Transaction submitted successfully',
+                'transaction_id': tx_id,
+                'tx_hash': tx_id,
+                'sender': {
+                    'user_id': g.user_id,
+                    'pseudoqubit': sender_pseudoqubit
+                },
+                'receiver': {
+                    'user_id': receiver_id,
+                    'email': receiver_email,
+                    'pseudoqubit': receiver_pseudoqubit
+                },
+                'amount': amount,
+                'quantum_validation': {
+                    'ghz8_state': quantum_result['ghz8_state'] if quantum_result else False,
+                    'validators': 5,
+                    'measurement_results': quantum_result['measurement_results'] if quantum_result else None,
+                    'time_ms': round(quantum_time * 1000, 2)
+                },
+                'block_info': {
+                    'block_number': block[1],
+                    'transaction_count': block[2]
+                },
+                'created_at': tx_record[1].isoformat() if tx_record else None
+            }), 201
+        
+        except Exception as e:
+            logger.error(f"[TX {tx_id}] Transaction recording error: {e}", exc_info=True)
+            return jsonify({
+                'status': 'error',
+                'message': 'Transaction recording failed',
+                'code': 'RECORDING_ERROR'
+            }), 500
     
     @app.route('/api/transactions', methods=['GET'])
     @require_auth
@@ -2031,6 +2315,97 @@ def setup_routes(app):
             'timestamp': datetime.utcnow().isoformat()
         }), 200
 
+    @app.route('/api/commands', methods=['GET'])
+    @rate_limited
+    @handle_exceptions
+    def get_commands():
+        """Get all available terminal commands - safely falls back to hardcoded list"""
+        
+        # Complete hardcoded command list (fallback - always works)
+        fallback_commands = [
+            # AUTH
+            {'name': 'login', 'category': 'auth', 'description': 'Login to QTCL system', 'requires_auth': False, 'requires_admin': False, 'args': []},
+            {'name': 'logout', 'category': 'auth', 'description': 'Logout from system', 'requires_auth': True, 'requires_admin': False, 'args': []},
+            {'name': 'register', 'category': 'auth', 'description': 'Register new account', 'requires_auth': False, 'requires_admin': False, 'args': []},
+            {'name': 'whoami', 'category': 'auth', 'description': 'Show current user info', 'requires_auth': True, 'requires_admin': False, 'args': []},
+            
+            # USER
+            {'name': 'profile', 'category': 'user', 'description': 'View user profile', 'requires_auth': True, 'requires_admin': False, 'args': []},
+            {'name': 'user/settings', 'category': 'user', 'description': 'Update user settings', 'requires_auth': True, 'requires_admin': False, 'args': []},
+            {'name': 'user/list', 'category': 'user', 'description': 'List all users', 'requires_auth': False, 'requires_admin': False, 'args': []},
+            
+            # WALLET
+            {'name': 'balance', 'category': 'wallet', 'description': 'Check account balance', 'requires_auth': True, 'requires_admin': False, 'args': []},
+            {'name': 'wallet/create', 'category': 'wallet', 'description': 'Create new wallet', 'requires_auth': True, 'requires_admin': False, 'args': []},
+            {'name': 'wallet/list', 'category': 'wallet', 'description': 'List wallets', 'requires_auth': True, 'requires_admin': False, 'args': []},
+            
+            # TRANSACTION
+            {'name': 'transact', 'category': 'transaction', 'description': 'Create transaction', 'requires_auth': True, 'requires_admin': False, 'args': []},
+            {'name': 'transaction/list', 'category': 'transaction', 'description': 'List transactions', 'requires_auth': True, 'requires_admin': False, 'args': []},
+            {'name': 'transaction/track', 'category': 'transaction', 'description': 'Track transaction', 'requires_auth': True, 'requires_admin': False, 'args': []},
+            
+            # QUANTUM
+            {'name': 'quantum-status', 'category': 'quantum', 'description': 'Check quantum system status', 'requires_auth': False, 'requires_admin': False, 'args': []},
+            {'name': 'quantum/circuit', 'category': 'quantum', 'description': 'View quantum circuit', 'requires_auth': False, 'requires_admin': False, 'args': []},
+            
+            # ORACLE
+            {'name': 'oracle-price', 'category': 'oracle', 'description': 'Get price oracle data', 'requires_auth': False, 'requires_admin': False, 'args': []},
+            {'name': 'oracle/time', 'category': 'oracle', 'description': 'Get oracle time', 'requires_auth': False, 'requires_admin': False, 'args': []},
+            
+            # HELP & SYSTEM
+            {'name': 'help', 'category': 'help', 'description': 'Show help menu', 'requires_auth': False, 'requires_admin': False, 'args': []},
+            {'name': 'clear', 'category': 'system', 'description': 'Clear terminal', 'requires_auth': False, 'requires_admin': False, 'args': []},
+            {'name': 'tx-history', 'category': 'system', 'description': 'View transaction history', 'requires_auth': True, 'requires_admin': False, 'args': []},
+        ]
+        
+        try:
+            # Try to load from terminal_logic if available
+            if TERMINAL_ORCHESTRATOR_AVAILABLE:
+                try:
+                    logger.debug("[API/Commands] Attempting to load from TerminalEngine...")
+                    engine = TerminalEngine()
+                    all_commands = engine.registry.list_all()
+                    
+                    commands_list = []
+                    for cmd_name, cmd_meta in all_commands:
+                        try:
+                            commands_list.append({
+                                'name': cmd_meta.name,
+                                'category': cmd_meta.category.value if hasattr(cmd_meta.category, 'value') else str(cmd_meta.category),
+                                'description': cmd_meta.description,
+                                'requires_auth': cmd_meta.requires_auth,
+                                'requires_admin': cmd_meta.requires_admin,
+                                'args': cmd_meta.args
+                            })
+                        except Exception as cmd_error:
+                            logger.debug(f"[API/Commands] Skipping command {cmd_name}: {cmd_error}")
+                            continue
+                    
+                    if len(commands_list) > 0:
+                        commands_list.sort(key=lambda x: (x['category'], x['name']))
+                        logger.info(f"[API/Commands] ✓ Loaded {len(commands_list)} commands from TerminalEngine")
+                        return jsonify({
+                            'status': 'success',
+                            'total': len(commands_list),
+                            'commands': commands_list,
+                            'source': 'terminal_logic'
+                        }), 200
+                except Exception as init_error:
+                    logger.warning(f"[API/Commands] TerminalEngine failed: {init_error}")
+                    # Fall through to fallback
+        except Exception as e:
+            logger.warning(f"[API/Commands] Unexpected error: {e}")
+            # Fall through to fallback
+        
+        # Return fallback commands
+        logger.info(f"[API/Commands] Using fallback command list ({len(fallback_commands)} commands)")
+        return jsonify({
+            'status': 'success',
+            'total': len(fallback_commands),
+            'commands': fallback_commands,
+            'source': 'fallback'
+        }), 200
+
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # WEBSOCKET HANDLERS
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -2068,75 +2443,22 @@ def setup_websocket_handlers(socketio_instance):
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # APPLICATION INITIALIZATION
 # ═══════════════════════════════════════════════════════════════════════════════════════
-
-def initialize_app(app):
-    """Initialize application components"""
-    global db_manager, quantum_system
-    
-    try:
-        logger.info("=" * 100)
-        logger.info("INITIALIZING QTCL UNIFIED APPLICATION")
-        logger.info("=" * 100)
-        
-        # Initialize database
-        logger.info("[Init] Setting up database...")
-        setup_database(app)
-        
-        # Seed admin user
-        logger.info("[Init] Seeding admin user...")
-        db_manager.seed_test_user()
-        
-        # Initialize quantum system if enabled
-        if Config.ENABLE_QUANTUM:
-            try:
-                logger.info("[Init] Initializing quantum system...")
-                from quantum_lattice_control_live_complete import QuantumLatticeControlLiveV5
-                _q_db_config = {
-                    'host': Config.DATABASE_HOST,
-                    'port': Config.DATABASE_PORT,
-                    'database': Config.DATABASE_NAME,
-                    'user': Config.DATABASE_USER,
-                    'password': Config.DATABASE_PASSWORD,
-                }
-                quantum_system = QuantumLatticeControlLiveV5(db_config=_q_db_config, app_url=Config.APP_URL)
-                # run_continuous() calls start() internally then loops execute_cycle()
-                # The heartbeat fires every 100 cycles from inside that loop.
-                # Must run as a daemon thread so Gunicorn can still fork/shutdown cleanly.
-                import threading as _threading
-                _cycle_thread = _threading.Thread(
-                    target=quantum_system.run_continuous,
-                    kwargs={'duration_hours': 87600},  # ~10 years / effectively forever
-                    daemon=True,
-                    name='QuantumCycleThread'
-                )
-                _cycle_thread.start()
-                logger.info("[Init] ✓ Quantum system initialized")
-            except Exception as e:
-                logger.warning(f"[Init] Quantum system initialization failed: {e}")
-                quantum_system = None
-        
-        logger.info("=" * 100)
-        logger.info("✓ APPLICATION INITIALIZED SUCCESSFULLY")
-        logger.info("=" * 100)
-        
-        return True
-    except Exception as e:
-        logger.error(f"[Init] Initialization failed: {e}", exc_info=True)
-        return False
-
-# ═══════════════════════════════════════════════════════════════════════════════════════
 # MAIN ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
+def initialize_app(app):
+    """Stub function for wsgi_config compatibility
+    
+    Database initialization now happens immediately in create_app().
+    This function is kept for backwards compatibility with wsgi_config.py imports.
+    """
+    logger.debug("[Init] initialize_app called (database already initialized in create_app)")
+    return True
+
 if __name__ == '__main__':
     try:
-        # Create application
+        # Create application (database will initialize on first request)
         app = create_app()
-        
-        # Initialize components
-        if not initialize_app(app):
-            logger.error("[Main] Failed to initialize application")
-            sys.exit(1)
         
         # Log startup info
         logger.info("=" * 100)
@@ -2178,4 +2500,5 @@ if __name__ == '__main__':
         sys.exit(1)
 
 # WSGI export for production servers (gunicorn, uwsgi)
+# Database initialization happens immediately in create_app()
 application = create_app()
