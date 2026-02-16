@@ -2134,6 +2134,30 @@ def create_quantum_api_blueprint()->Blueprint:
     # TRANSACTION ENDPOINTS
     # ═══════════════════════════════════════════════════════════════════════════════════
     
+    @bp.route('/transaction',methods=['POST'])
+    def api_quantum_transaction():
+        """PRODUCTION QUANTUM TRANSACTION - Main endpoint that CLI uses"""
+        try:
+            data=request.get_json()or{}
+            
+            result=QUANTUM_TX_PROCESSOR.process_transaction_complete(
+                user_email=data.get('user_email',''),
+                target_email=data.get('target_email',''),
+                amount=float(data.get('amount',0)),
+                password=data.get('password',''),
+                target_identifier=data.get('target_identifier','')
+            )
+            
+            if not result or not isinstance(result,dict):
+                error_response={'success':False,'error':'Transaction processor returned invalid result','http_status':500}
+                return jsonify(error_response),500
+            
+            http_status=result.get('http_status',200)
+            return jsonify(result),http_status
+        except Exception as e:
+            logger.error(f'[QuantumAPI-TX] Exception: {e}',exc_info=True)
+            return jsonify({'success':False,'error':str(e),'http_status':500}),500
+    
     @bp.route('/transaction/quantum-secure',methods=['POST'])
     def api_quantum_transaction_secure():
         """PRODUCTION QUANTUM TRANSACTION - 6-LAYER PROCESSOR"""
@@ -2148,11 +2172,15 @@ def create_quantum_api_blueprint()->Blueprint:
                 target_identifier=data.get('target_identifier','')
             )
             
+            if not result or not isinstance(result,dict):
+                error_response={'success':False,'error':'Transaction processor returned invalid result','http_status':500}
+                return jsonify(error_response),500
+            
             http_status=result.get('http_status',200)
             return jsonify(result),http_status
         except Exception as e:
-            logger.error(f'[QuantumAPI-TX] Exception: {e}')
-            return jsonify({'error':str(e)}),500
+            logger.error(f'[QuantumAPI-TX-Secure] Exception: {e}',exc_info=True)
+            return jsonify({'success':False,'error':str(e),'http_status':500}),500
     
     @bp.route('/transaction/process',methods=['POST'])
     def api_process_transaction():
@@ -2168,10 +2196,15 @@ def create_quantum_api_blueprint()->Blueprint:
                 target_identifier=data.get('target_identifier','')
             )
             
+            if not result or not isinstance(result,dict):
+                error_response={'success':False,'error':'Transaction processor returned invalid result','http_status':500}
+                return jsonify(error_response),500
+            
             http_status=result.get('http_status',200)
             return jsonify(result),http_status
         except Exception as e:
-            return jsonify({'error':str(e)}),500
+            logger.error(f'[QuantumAPI-TX-Process] Exception: {e}',exc_info=True)
+            return jsonify({'success':False,'error':str(e),'http_status':500}),500
     
     # ═══════════════════════════════════════════════════════════════════════════════════
     # SYSTEM ENDPOINTS

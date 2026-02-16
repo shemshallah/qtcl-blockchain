@@ -4798,36 +4798,15 @@ class QuantumCommandHandlers:
                         'error_code': 400
                     }
                 
-                # Call API endpoint with provided parameters
-                try:
-                    import requests
-                    api_url = 'http://localhost:5000/api/quantum/transaction'
-                    response = requests.post(api_url, json={
-                        'user_id': user_id,
-                        'target_id': target_id,
-                        'amount': amount
-                    }, timeout=30)
-                    
-                    result = response.json()
-                    http_status = response.status_code
-                    
-                    logger.info(f"[QuantumCmd] API response: status={http_status}, tx_id={result.get('tx_id', 'ERROR')}")
-                    
-                    return {
-                        'success': result.get('success', False),
-                        'command': 'quantum/transaction',
-                        'timestamp': time.time(),
-                        'result': result,
-                        'http_status': http_status
-                    }
-                except Exception as api_e:
-                    logger.error(f"[QuantumCmd] API call failed: {api_e}")
-                    return {
-                        'success': False,
-                        'error': 'API_ERROR',
-                        'message': str(api_e),
-                        'error_code': 500
-                    }
+                # NOTE: This branch is deprecated - use interactive mode instead
+                # API endpoint requires: user_email, password, target_email, target_identifier
+                # Not: user_id, target_id directly
+                return {
+                    'success': False,
+                    'error': 'DEPRECATED_API_CALL',
+                    'message': 'Use interactive mode or provide user_email, password, target_email, target_identifier',
+                    'error_code': 400
+                }
         
         except Exception as e:
             logger.error(f"[QuantumCmd] Unexpected error: {e}", exc_info=True)
