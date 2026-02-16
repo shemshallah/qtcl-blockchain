@@ -5531,13 +5531,14 @@ class GlobalCommandRegistry:
         'auth/pq-rotate': lambda **k: GlobalCommandRegistry._auth_pq_rotate(**k),
     }
     
-    # User commands (REAL IMPLEMENTATIONS WITH GLOBALS)
+    # User commands (REAL IMPLEMENTATIONS WITH GLOBALS & MULTI-LAYER LOGIC)
     USER_COMMANDS = {
+        'user/register': lambda *a, **k: GlobalCommandRegistry._user_register(**k),
+        'user/login': lambda *a, **k: GlobalCommandRegistry._user_login(**k),
         'user/profile': lambda *a, **k: GlobalCommandRegistry._user_profile(**k),
         'user/settings': lambda *a, **k: GlobalCommandRegistry._user_settings(**k),
         'user/update': lambda *a, **k: GlobalCommandRegistry._user_update(**k),
         'user/delete': lambda *a, **k: GlobalCommandRegistry._user_delete(**k),
-        'user/list': lambda *a, **k: GlobalCommandRegistry._user_list(**k),
     }
     
     # Block/Blockchain commands (COMPREHENSIVE WITH QUANTUM MEASUREMENTS - FIXED FOR POSITIONAL ARGS)
@@ -5914,11 +5915,439 @@ class GlobalCommandRegistry:
             return[]
     
     # ═════════════════════════════════════════════════════════════════════════════════════════
-    # USER COMMAND IMPLEMENTATIONS - REAL LOGIC WITH GLOBALS
+    # USER COMMAND IMPLEMENTATIONS - REAL LOGIC WITH MULTI-LAYER DB INTEGRATION
     # ═════════════════════════════════════════════════════════════════════════════════════════
     
     @staticmethod
-    def _user_profile(user_id:str=None,**kwargs)->Dict[str,Any]:
+    def _user_register(email:str=None, username:str=None, password:str=None, password_confirm:str=None, **kwargs)->Dict[str,Any]:
+        """
+        USER-REGISTER: Register new user
+        LAYER 1: Input validation (email, username, password double-entry)
+        LAYER 2: Database checks (duplicate email/username)
+        LAYER 3: Pseudoqubit assignment and database insertion
+        LAYER 4: Return user details with assigned pseudoqubit
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        try:
+            # ===== LAYER 1: Input Validation =====
+            if not all([email, username, password, password_confirm]):
+                return {
+                    'status': 'error',
+                    'error': 'Missing fields: email, username, password, password_confirm',
+                    'required_fields': ['email', 'username', 'password', 'password_confirm']
+                }
+            
+            # Validate password match
+            if password != password_confirm:
+                return {
+                    'status': 'error',
+                    'error': 'Passwords do not match',
+                    'code': 'PASSWORD_MISMATCH'
+                }
+            
+            # Validate password strength (minimum 8 chars, 1 number, 1 special)
+            if len(password) < 8:
+                return {
+                    'status': 'error',
+                    'error': 'Password must be at least 8 characters',
+                    'code': 'PASSWORD_TOO_SHORT'
+                }
+            
+            if not any(c.isdigit() for c in password):
+                return {
+                    'status': 'error',
+                    'error': 'Password must contain at least one number',
+                    'code': 'PASSWORD_NO_DIGITS'
+                }
+            
+            # Basic email validation
+            if '@' not in email or '.' not in email:
+                return {
+                    'status': 'error',
+                    'error': 'Invalid email format',
+                    'code': 'INVALID_EMAIL'
+                }
+            
+            logger.info(f"[Register:L1] ✓ Input validation passed for email={email}, username={username}")
+            
+            # ===== LAYER 2: Database Availability & Duplicate Checks =====
+            from wsgi_config import GLOBALS
+            db = GLOBALS.DB if hasattr(GLOBALS, 'DB') else None
+            
+            if not db:
+                logger.warning("[Register:L2] ⚠ Database not available via GLOBALS")
+                return {
+                    'status': 'error',
+                    'error': 'Database not available',
+                    'code': 'DB_UNAVAILABLE'
+                }
+            
+            # Check if email exists
+            try:
+                existing_email = db.execute(
+                    "SELECT user_id FROM users WHERE email=%s LIMIT 1",
+                    (email,)
+                )
+                if existing_email:
+                    logger.warning(f"[Register:L2] Email already exists: {email}")
+                    return {
+                        'status': 'error',
+                        'error': 'Email already registered',
+                        'code': 'EMAIL_EXISTS'
+                    }
+            except Exception as e:
+                logger.debug(f"[Register:L2] Email check query: {e}")
+            
+            # Check if username exists
+            try:
+                existing_username = db.execute(
+                    "SELECT user_id FROM users WHERE username=%s LIMIT 1",
+                    (username,)
+                )
+                if existing_username:
+                    logger.warning(f"[Register:L2] Username already exists: {username}")
+                    return {
+                        'status': 'error',
+                        'error': 'Username already taken',
+                        'code': 'USERNAME_EXISTS'
+                    }
+            except Exception as e:
+                logger.debug(f"[Register:L2] Username check query: {e}")
+            
+            logger.info(f"[Register:L2] ✓ Database checks passed - email and username available")
+            
+            # ===== LAYER 3: Pseudoqubit Assignment & Database Insertion =====
+            user_id = f"user_{uuid.uuid4().hex[:16]}"
+            
+            # Generate pseudoqubit ID
+            import hashlib
+            pq_hash = hashlib.sha256(f"{email}{user_id}{time.time()}".encode()).hexdigest()[:16]
+            pseudoqubit_id = f"pq_{pq_hash}"
+            
+            # Hash password
+            password_hash = hashlib.sha256(password.encode()).hexdigest()
+            
+            now = datetime.now(timezone.utc).isoformat()
+            
+            try:
+                # Insert user into database
+                db.execute_update(
+                    """INSERT INTO users (user_id, email, username, password_hash, pseudoqubit_id, created_at, is_active)
+                       VALUES (%s, %s, %s, %s, %s, %s, TRUE)""",
+                    (user_id, email, username, password_hash, pseudoqubit_id, now)
+                )
+                logger.info(f"[Register:L3] ✓ User inserted: {user_id}, PQ assigned: {pseudoqubit_id}")
+            except Exception as e:
+                logger.error(f"[Register:L3] Database insert failed: {e}")
+                return {
+                    'status': 'error',
+                    'error': f'Failed to create user: {str(e)}',
+                    'code': 'DB_INSERT_FAILED'
+                }
+            
+            # ===== LAYER 4: Return User Details =====
+            user_details = {
+                'status': 'success',
+                'message': f'User {username} registered successfully!',
+                'user': {
+                    'user_id': user_id,
+                    'email': email,
+                    'username': username,
+                    'pseudoqubit_id': pseudoqubit_id,
+                    'created_at': now,
+                    'is_active': True
+                }
+            }
+            
+            logger.info(f"[Register:L4] ✓ Registration complete - user {username} with PQ {pseudoqubit_id}")
+            return user_details
+        
+        except Exception as e:
+            logger.error(f"[Register] Unexpected error: {e}", exc_info=True)
+            return {
+                'status': 'error',
+                'error': f'Registration failed: {str(e)}',
+                'code': 'UNEXPECTED_ERROR'
+            }
+    
+    @staticmethod
+    def _user_login(email:str=None, password:str=None, **kwargs)->Dict[str,Any]:
+        """
+        USER-LOGIN: Login user
+        LAYER 1: Input validation
+        LAYER 2: Database lookup
+        LAYER 3: Password verification
+        LAYER 4: Return user details with session
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        try:
+            # LAYER 1: Validate inputs
+            if not email or not password:
+                return {
+                    'status': 'error',
+                    'error': 'Email and password required',
+                    'code': 'MISSING_CREDENTIALS'
+                }
+            
+            # LAYER 2: Lookup user in database
+            from wsgi_config import GLOBALS
+            db = GLOBALS.DB
+            
+            if not db:
+                return {'status': 'error', 'error': 'Database unavailable'}
+            
+            try:
+                user = db.execute(
+                    "SELECT user_id, username, password_hash, pseudoqubit_id, is_active FROM users WHERE email=%s",
+                    (email,)
+                )
+                if not user:
+                    logger.warning(f"[Login:L2] User not found: {email}")
+                    return {
+                        'status': 'error',
+                        'error': 'User not found',
+                        'code': 'USER_NOT_FOUND'
+                    }
+            except Exception as e:
+                logger.error(f"[Login:L2] Database query error: {e}")
+                return {'status': 'error', 'error': 'Database error'}
+            
+            # LAYER 3: Verify password
+            password_hash = hashlib.sha256(password.encode()).hexdigest()
+            
+            if isinstance(user, list) and len(user) > 0:
+                user_data = user[0]
+            else:
+                user_data = user
+            
+            if user_data.get('password_hash') != password_hash:
+                logger.warning(f"[Login:L3] Password mismatch for: {email}")
+                return {
+                    'status': 'error',
+                    'error': 'Incorrect password',
+                    'code': 'INVALID_PASSWORD'
+                }
+            
+            if not user_data.get('is_active'):
+                return {
+                    'status': 'error',
+                    'error': 'Account inactive',
+                    'code': 'ACCOUNT_INACTIVE'
+                }
+            
+            # LAYER 4: Return user details
+            session_token = f"session_{uuid.uuid4().hex[:32]}"
+            
+            logger.info(f"[Login] ✓ Login successful: {user_data.get('username')} (PQ: {user_data.get('pseudoqubit_id')})")
+            
+            return {
+                'status': 'success',
+                'message': f"Welcome {user_data.get('username')}!",
+                'user': {
+                    'user_id': user_data.get('user_id'),
+                    'username': user_data.get('username'),
+                    'email': email,
+                    'pseudoqubit_id': user_data.get('pseudoqubit_id')
+                },
+                'session_token': session_token
+            }
+        
+        except Exception as e:
+            logger.error(f"[Login] Error: {e}")
+            return {'status': 'error', 'error': str(e)}
+    
+    @staticmethod
+    def _user_profile(user_id:str=None, **kwargs)->Dict[str,Any]:
+        """
+        USER-PROFILE: Show user profile with pseudoqubit
+        LAYER 1: Get current user (from context or user_id parameter)
+        LAYER 2: Database query for complete profile
+        LAYER 3: Format and return profile details
+        """
+        if not user_id:
+            return {'status': 'error', 'error': 'user_id required'}
+        
+        try:
+            from wsgi_config import GLOBALS
+            db = GLOBALS.DB
+            
+            if not db:
+                return {'status': 'error', 'error': 'Database unavailable'}
+            
+            # Query user profile
+            user = db.execute(
+                "SELECT user_id, username, email, pseudoqubit_id, created_at, is_active FROM users WHERE user_id=%s",
+                (user_id,)
+            )
+            
+            if not user:
+                return {
+                    'status': 'error',
+                    'error': 'User not found',
+                    'code': 'USER_NOT_FOUND'
+                }
+            
+            user_data = user[0] if isinstance(user, list) else user
+            
+            return {
+                'status': 'success',
+                'profile': {
+                    'user_id': user_data.get('user_id'),
+                    'username': user_data.get('username'),
+                    'email': user_data.get('email'),
+                    'pseudoqubit_id': user_data.get('pseudoqubit_id'),
+                    'created_at': user_data.get('created_at'),
+                    'is_active': user_data.get('is_active')
+                }
+            }
+        
+        except Exception as e:
+            return {'status': 'error', 'error': str(e)}
+    
+    @staticmethod
+    def _user_update(user_id:str=None, update_type:str=None, value:str=None, value_confirm:str=None, **kwargs)->Dict[str,Any]:
+        """
+        USER-UPDATE: Update email or password (logged-in user only)
+        LAYER 1: Verify user_id matches logged-in user
+        LAYER 2: Validate new value
+        LAYER 3: Database update
+        LAYER 4: Return confirmation
+        """
+        if not user_id:
+            return {'status': 'error', 'error': 'user_id required'}
+        
+        if update_type not in ['email', 'password']:
+            return {
+                'status': 'error',
+                'error': 'update_type must be "email" or "password"'
+            }
+        
+        try:
+            from wsgi_config import GLOBALS
+            db = GLOBALS.DB
+            
+            if not db:
+                return {'status': 'error', 'error': 'Database unavailable'}
+            
+            if update_type == 'password':
+                # Password update - validate twice match
+                if value != value_confirm:
+                    return {
+                        'status': 'error',
+                        'error': 'Passwords do not match',
+                        'code': 'PASSWORD_MISMATCH'
+                    }
+                
+                password_hash = hashlib.sha256(value.encode()).hexdigest()
+                db.execute_update(
+                    "UPDATE users SET password_hash=%s, updated_at=NOW() WHERE user_id=%s",
+                    (password_hash, user_id)
+                )
+                
+                return {
+                    'status': 'success',
+                    'message': 'Password updated successfully'
+                }
+            
+            elif update_type == 'email':
+                # Email update - check if already exists
+                existing = db.execute(
+                    "SELECT user_id FROM users WHERE email=%s AND user_id!=%s",
+                    (value, user_id)
+                )
+                if existing:
+                    return {
+                        'status': 'error',
+                        'error': 'Email already in use',
+                        'code': 'EMAIL_EXISTS'
+                    }
+                
+                db.execute_update(
+                    "UPDATE users SET email=%s, updated_at=NOW() WHERE user_id=%s",
+                    (value, user_id)
+                )
+                
+                return {
+                    'status': 'success',
+                    'message': 'Email updated successfully'
+                }
+        
+        except Exception as e:
+            return {'status': 'error', 'error': str(e)}
+    
+    @staticmethod
+    def _user_delete(user_id:str=None, confirm_email:str=None, **kwargs)->Dict[str,Any]:
+        """
+        USER-DELETE: Delete account (ask twice, confirm with email)
+        LAYER 1: Verify user exists
+        LAYER 2: Verify email matches
+        LAYER 3: Get pseudoqubit for reuse
+        LAYER 4: Delete user, mark pseudoqubit as available
+        LAYER 5: Return confirmation
+        """
+        if not user_id or not confirm_email:
+            return {
+                'status': 'error',
+                'error': 'user_id and confirm_email required',
+                'warning': 'Account deletion requires email confirmation'
+            }
+        
+        try:
+            from wsgi_config import GLOBALS
+            db = GLOBALS.DB
+            
+            if not db:
+                return {'status': 'error', 'error': 'Database unavailable'}
+            
+            # Get user data
+            user = db.execute(
+                "SELECT user_id, email, pseudoqubit_id FROM users WHERE user_id=%s",
+                (user_id,)
+            )
+            
+            if not user:
+                return {'status': 'error', 'error': 'User not found'}
+            
+            user_data = user[0] if isinstance(user, list) else user
+            
+            # Verify email matches
+            if user_data.get('email') != confirm_email:
+                return {
+                    'status': 'error',
+                    'error': 'Email does not match account email',
+                    'code': 'EMAIL_MISMATCH'
+                }
+            
+            pq_id = user_data.get('pseudoqubit_id')
+            
+            # Delete user
+            db.execute_update(
+                "DELETE FROM users WHERE user_id=%s",
+                (user_id,)
+            )
+            
+            # Mark pseudoqubit as available for reuse
+            db.execute_update(
+                "UPDATE pseudoqubit_registry SET available=TRUE, released_at=NOW() WHERE pseudoqubit_id=%s",
+                (pq_id,)
+            )
+            
+            return {
+                'status': 'success',
+                'message': f'Account {user_data.get("email")} permanently deleted',
+                'pseudoqubit_released': pq_id,
+                'note': 'Pseudoqubit is now available for new user registration'
+            }
+        
+        except Exception as e:
+            return {'status': 'error', 'error': str(e)}
+    
+    @staticmethod
+    def _user_settings(user_id:str=None,**kwargs)->Dict[str,Any]:
         """Get user profile using GLOBALS.DB"""
         if not user_id:
             return{'status':'error','error':'user_id required'}

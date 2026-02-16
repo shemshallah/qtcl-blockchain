@@ -2755,48 +2755,54 @@ def setup_routes(app):
             }), 500
 
     @app.route('/api/commands', methods=['GET'])
-    @rate_limited
     @handle_exceptions
     def get_commands():
-        """Get all available terminal commands - safely falls back to hardcoded list"""
+        """Get all available commands - DYNAMIC from registry"""
+        try:
+            # Try to get from GLOBALS first
+            if BOOTSTRAP_INTEGRATION_AVAILABLE:
+                cmd_registry = GLOBALS.COMMAND_REGISTRY
+                if cmd_registry and hasattr(cmd_registry, 'ALL_COMMANDS'):
+                    commands = []
+                    for cmd_name, handler in cmd_registry.ALL_COMMANDS.items():
+                        commands.append({
+                            'name': cmd_name,
+                            'category': cmd_name.split('/')[0],
+                            'description': getattr(handler, '__doc__', 'No description'),
+                            'handler': str(handler)
+                        })
+                    logger.info(f"[API] Returning {len(commands)} dynamic commands from GLOBALS registry")
+                    return jsonify({'commands': commands, 'count': len(commands)}), 200
+            
+            # Fallback: Try terminal_logic directly
+            try:
+                from terminal_logic import GlobalCommandRegistry
+                GlobalCommandRegistry.bootstrap()
+                commands = []
+                for cmd_name, handler in GlobalCommandRegistry.ALL_COMMANDS.items():
+                    commands.append({
+                        'name': cmd_name,
+                        'category': cmd_name.split('/')[0],
+                        'description': getattr(handler, '__doc__', 'No description')
+                    })
+                logger.info(f"[API] Returning {len(commands)} commands from GlobalCommandRegistry")
+                return jsonify({'commands': commands, 'count': len(commands)}), 200
+            except Exception as e:
+                logger.error(f"[API] Command registry error: {e}")
+                return jsonify({
+                    'error': 'Command registry unavailable',
+                    'message': str(e)
+                }), 500
         
-        # Complete hardcoded command list (fallback - always works)
-        fallback_commands = [
-            # AUTH
-            {'name': 'login', 'category': 'auth', 'description': 'Login to QTCL system', 'requires_auth': False, 'requires_admin': False, 'args': []},
-            {'name': 'logout', 'category': 'auth', 'description': 'Logout from system', 'requires_auth': True, 'requires_admin': False, 'args': []},
-            {'name': 'register', 'category': 'auth', 'description': 'Register new account', 'requires_auth': False, 'requires_admin': False, 'args': []},
-            {'name': 'whoami', 'category': 'auth', 'description': 'Show current user info', 'requires_auth': True, 'requires_admin': False, 'args': []},
-            
-            # USER
-            {'name': 'profile', 'category': 'user', 'description': 'View user profile', 'requires_auth': True, 'requires_admin': False, 'args': []},
-            {'name': 'user/settings', 'category': 'user', 'description': 'Update user settings', 'requires_auth': True, 'requires_admin': False, 'args': []},
-            {'name': 'user/list', 'category': 'user', 'description': 'List all users', 'requires_auth': False, 'requires_admin': False, 'args': []},
-            
-            # WALLET
-            {'name': 'balance', 'category': 'wallet', 'description': 'Check account balance', 'requires_auth': True, 'requires_admin': False, 'args': []},
-            {'name': 'wallet/create', 'category': 'wallet', 'description': 'Create new wallet', 'requires_auth': True, 'requires_admin': False, 'args': []},
-            {'name': 'wallet/list', 'category': 'wallet', 'description': 'List wallets', 'requires_auth': True, 'requires_admin': False, 'args': []},
-            
-            # TRANSACTION
-            {'name': 'transact', 'category': 'transaction', 'description': 'Create transaction', 'requires_auth': True, 'requires_admin': False, 'args': []},
-            {'name': 'transaction/list', 'category': 'transaction', 'description': 'List transactions', 'requires_auth': True, 'requires_admin': False, 'args': []},
-            {'name': 'transaction/track', 'category': 'transaction', 'description': 'Track transaction', 'requires_auth': True, 'requires_admin': False, 'args': []},
-            
-            # QUANTUM
-            {'name': 'quantum-status', 'category': 'quantum', 'description': 'Check quantum system status', 'requires_auth': False, 'requires_admin': False, 'args': []},
-            {'name': 'quantum/circuit', 'category': 'quantum', 'description': 'View quantum circuit', 'requires_auth': False, 'requires_admin': False, 'args': []},
-            
-            # ORACLE
-            {'name': 'oracle-price', 'category': 'oracle', 'description': 'Get price oracle data', 'requires_auth': False, 'requires_admin': False, 'args': []},
-            {'name': 'oracle/time', 'category': 'oracle', 'description': 'Get oracle time', 'requires_auth': False, 'requires_admin': False, 'args': []},
-            
-            # HELP & SYSTEM
-            {'name': 'help', 'category': 'help', 'description': 'Show help menu', 'requires_auth': False, 'requires_admin': False, 'args': []},
-            {'name': 'clear', 'category': 'system', 'description': 'Clear terminal', 'requires_auth': False, 'requires_admin': False, 'args': []},
-            {'name': 'tx-history', 'category': 'system', 'description': 'View transaction history', 'requires_auth': True, 'requires_admin': False, 'args': []},
-        ]
-        
+        except Exception as e:
+            logger.error(f"[API] Error getting commands: {e}")
+            return jsonify({'error': str(e)}), 500
+    
+    # Old fallback code removed - no more hardcoded lists
+    @app.route('/api/commands_old', methods=['GET'])
+    @handle_exceptions 
+    def get_commands_old():
+        """DEPRECATED - Use /api/commands instead"""
         try:
             # Try to load from terminal_logic if available
             if TERMINAL_ORCHESTRATOR_AVAILABLE:

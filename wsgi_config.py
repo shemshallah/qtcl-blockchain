@@ -530,70 +530,98 @@ def bootstrap_systems():
 
 def bootstrap_heartbeat():
     """
-    Start the dual heartbeat system
-    HTTP heartbeat: Makes internal requests to keep system alive
-    Quantum heartbeat: Refreshes quantum system every cycle
+    Start working heartbeat system that actually maintains the application
+    HTTP heartbeat: Responds to external health checks (passive)
+    Quantum heartbeat: ACTIVELY maintains quantum system and lattice
     """
-    import requests
     
     def http_heartbeat():
-        """HTTP heartbeat - keep app alive by making internal requests"""
-        counter = 0
+        """Passive heartbeat - responds to /health checks"""
+        logger.info("[Heartbeat:HTTP] ✓ HTTP heartbeat thread started")
         while True:
             try:
-                counter += 1
-                # Just sleep - Koyeb will keep app alive via HTTP requests from outside
                 time.sleep(30)
-                logger.debug(f"[Heartbeat] HTTP pulse #{counter} (system should receive external requests)")
+                # Just keep the thread alive - Koyeb will send requests to /health
+                logger.debug("[Heartbeat:HTTP] Pulse (app responding to external health checks)")
             except Exception as e:
-                logger.warning(f"[Heartbeat] HTTP error: {e}")
+                logger.error(f"[Heartbeat:HTTP] Error: {e}")
+                time.sleep(30)
     
     def quantum_heartbeat():
-        """Quantum heartbeat - refresh quantum system and lattice"""
-        counter = 0
+        """ACTIVE heartbeat - maintains quantum system and command registry"""
+        logger.info("[Heartbeat:Quantum] ✓ Quantum heartbeat thread started")
+        logger.info("[Heartbeat:Quantum] Will refresh quantum lattice every 10 seconds")
+        
+        cycle = 0
         while True:
             try:
-                counter += 1
+                time.sleep(10)
+                cycle += 1
                 
-                # Try to refresh quantum system
-                quantum = GLOBALS.QUANTUM
+                # CRITICAL: Refresh quantum lattice via GLOBALS
+                quantum = GLOBALS.QUANTUM if GLOBALS else None
                 if quantum:
                     try:
-                        # Call quantum heartbeat if available
-                        if hasattr(quantum, 'heartbeat'):
-                            quantum.heartbeat()
-                        # Try to refresh W-state
+                        # Call lattice control refresh if available
                         if hasattr(quantum, 'refresh_coherence'):
                             quantum.refresh_coherence()
-                        logger.debug(f"[Heartbeat] Quantum pulse #{counter} - system refreshed")
+                            logger.debug(f"[Heartbeat:Quantum:Cycle{cycle}] ✓ Quantum coherence refreshed")
+                        
+                        if hasattr(quantum, 'heartbeat'):
+                            quantum.heartbeat()
+                            logger.debug(f"[Heartbeat:Quantum:Cycle{cycle}] ✓ Quantum heartbeat executed")
+                        
+                        if hasattr(quantum, 'get_neural_lattice_state'):
+                            state = quantum.get_neural_lattice_state()
+                            logger.debug(f"[Heartbeat:Quantum:Cycle{cycle}] ✓ Neural lattice state updated")
                     except Exception as qe:
-                        logger.debug(f"[Heartbeat] Quantum operation: {qe}")
+                        logger.debug(f"[Heartbeat:Quantum:Cycle{cycle}] ⚠ Quantum operation: {qe}")
+                else:
+                    logger.debug(f"[Heartbeat:Quantum:Cycle{cycle}] ⚠ Quantum system not in GLOBALS")
                 
-                # Bootstrap command registry if needed
+                # CRITICAL: Ensure command registry is bootstrapped
                 try:
                     from terminal_logic import GlobalCommandRegistry
                     if hasattr(GlobalCommandRegistry, 'bootstrap'):
                         GlobalCommandRegistry.bootstrap()
+                        if cycle % 6 == 0:  # Log every 60 seconds
+                            num_commands = len(GlobalCommandRegistry.ALL_COMMANDS)
+                            logger.info(f"[Heartbeat:Commands:Cycle{cycle}] ✓ Command registry verified ({num_commands} commands)")
                 except Exception as cre:
-                    logger.debug(f"[Heartbeat] Command bootstrap: {cre}")
+                    logger.debug(f"[Heartbeat:Commands:Cycle{cycle}] ⚠ Command bootstrap: {cre}")
                 
-                time.sleep(10)  # More frequent quantum checks
+                # CRITICAL: Validate GLOBALS is initialized
+                if GLOBALS and hasattr(GLOBALS, 'health_check'):
+                    try:
+                        if cycle % 12 == 0:  # Log every 120 seconds
+                            health = GLOBALS.health_check()
+                            logger.info(f"[Heartbeat:Health:Cycle{cycle}] System status: {health['overall_status']}")
+                    except Exception as he:
+                        logger.debug(f"[Heartbeat:Health] Error: {he}")
+                
             except Exception as e:
-                logger.warning(f"[Heartbeat] Quantum error: {e}")
+                logger.error(f"[Heartbeat:Quantum] Error in cycle {cycle}: {e}")
                 time.sleep(10)
     
     # Start both heartbeats as daemon threads
-    http_thread = threading.Thread(target=http_heartbeat, daemon=True, name="HTTPHeartbeat")
-    quantum_thread = threading.Thread(target=quantum_heartbeat, daemon=True, name="QuantumHeartbeat")
-    
-    http_thread.start()
-    quantum_thread.start()
-    
-    logger.info("[Heartbeats] ✓ Both heartbeat threads started")
-    logger.info("[Heartbeats] ✓ HTTP heartbeat running (responds to external requests)")
-    logger.info("[Heartbeats] ✓ Quantum heartbeat running (refreshes every 10 seconds)")
-    
-    return True
+    try:
+        http_thread = threading.Thread(target=http_heartbeat, daemon=True, name="HTTPHeartbeat")
+        quantum_thread = threading.Thread(target=quantum_heartbeat, daemon=True, name="QuantumHeartbeat")
+        
+        http_thread.start()
+        quantum_thread.start()
+        
+        logger.info("[Heartbeat] ╔════════════════════════════════════════════════════════════╗")
+        logger.info("[Heartbeat] ║           DUAL HEARTBEAT SYSTEM STARTED                     ║")
+        logger.info("[Heartbeat] ║  HTTP: Responds to external health checks (passive)         ║")
+        logger.info("[Heartbeat] ║  Quantum: Refreshes lattice every 10 seconds (ACTIVE)       ║")
+        logger.info("[Heartbeat] ║  Both running as daemon threads                             ║")
+        logger.info("[Heartbeat] ╚════════════════════════════════════════════════════════════╝")
+        
+        return True
+    except Exception as e:
+        logger.error(f"[Heartbeat] Failed to start heartbeat system: {e}")
+        return False
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════
 # SECTION 4: MASTER COMMAND REGISTRY - HEART OF THE SYSTEM
