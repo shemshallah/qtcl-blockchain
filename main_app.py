@@ -672,7 +672,7 @@ def create_app():
                 'duration_ms': duration_ms
             }), 500
     
-    @app.route('/api/execute/compound', methods=['POST'])
+   @app.route('/api/execute/compound', methods=['POST'])
     async def execute_compound():
         """Execute compound command with operators"""
         try:
@@ -1051,50 +1051,27 @@ def debug():
             traceback.print_exc()
             return jsonify({'success':False,'error':f'Transaction processing failed: {str(e)}','error_code':'UNKNOWN_ERROR'}),500
     
-    @app.route('/')
+    from flask import Flask, Response
+import os
+
+@app.route('/')
 @app.route('/index.html')
 def index():
-    """Serve index.html with absolute forced Content-Type"""
+    """Serve index.html with proper HTML rendering"""
     try:
-        import os
-        from flask import make_response
+        # Read the file directly
+        with open('index.html', 'r', encoding='utf-8') as f:
+            html_content = f.read()
         
-        # Try multiple possible paths
-        possible_paths = [
-            'index.html',
-            './index.html',
-            os.path.join(os.path.dirname(__file__), 'index.html'),
-            os.path.join(os.getcwd(), 'index.html'),
-            '/app/index.html',
-            '/workspace/index.html',
-        ]
-        
-        file_path = None
-        for path in possible_paths:
-            if os.path.exists(path) and os.path.isfile(path):
-                file_path = path
-                break
-        
-        if file_path:
-            # Read as bytes to avoid encoding issues
-            with open(file_path, 'rb') as f:
-                content = f.read()
-            
-            # Create response with EXPLICIT content-type
-            response = make_response(content)
-            response.content_type = 'text/html; charset=utf-8'
-            response.headers['Content-Type'] = 'text/html; charset=utf-8'
-            response.headers['X-Content-Type-Options'] = 'nosniff'
-            response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-            return response
-        
-        # Fallback if file not found
-        logger.error(f"[Index] index.html not found. CWD: {os.getcwd()}, Files: {os.listdir('.')}")
-        return "index.html not found", 404
-        
+        # Return as Response object with explicit HTML MIME type
+        return Response(html_content, mimetype='text/html; charset=utf-8')
+    
+    except FileNotFoundError:
+        logger.error("index.html not found")
+        return "<h1>Error: index.html not found</h1>", 404
     except Exception as e:
-        logger.error(f"[Index] Error: {e}", exc_info=True)
-        return f"Error: {str(e)}", 500
+        logger.error(f"Error: {e}")
+        return f"<h1>Error: {str(e)}</h1>", 500
 
 
     
