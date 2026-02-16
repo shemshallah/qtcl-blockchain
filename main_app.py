@@ -496,7 +496,19 @@ except Exception as e:
     logger.error(f"[Import] CRITICAL: Terminal logic unavailable: {e}")
     raise  # Fail fast instead of silently degrading
 
-# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# Force JSON responses to not override HTML
+@app.after_request
+def after_request(response):
+    """Ensure proper content types"""
+    # If the response is HTML string, force the header
+    if response.mimetype == 'text/html' or response.content_type == 'text/html':
+        response.headers['Content-Type'] = 'text/html; charset=utf-8'
+    return response
+
+
+#
+
+ ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PART 3: FLASK CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -744,6 +756,24 @@ def create_app():
             'total': len(executor.history)
         }), 200
     
+    @app.route('/debug')
+def debug():
+    import os
+    import json
+    
+    info = {
+        'cwd': os.getcwd(),
+        'cwd_contents': os.listdir('.'),
+        'script_dir': os.path.dirname(__file__),
+        'script_dir_contents': os.listdir(os.path.dirname(__file__)) if os.path.exists(os.path.dirname(__file__)) else 'N/A',
+        'index_exists_cwd': os.path.exists('index.html'),
+        'index_exists_script': os.path.exists(os.path.join(os.path.dirname(__file__), 'index.html')),
+    }
+    
+    return json.dumps(info, indent=2), 200, {'Content-Type': 'application/json'}
+
+
+
     @app.route('/api/execute/stats', methods=['GET'])
     def execution_stats():
         """Get execution statistics"""
@@ -1024,12 +1054,12 @@ def create_app():
     @app.route('/')
 @app.route('/index.html')
 def index():
-    """Serve index.html with proper Content-Type headers"""
+    """Serve index.html with absolute forced Content-Type"""
     try:
         import os
-        from flask import send_file, make_response
+        from flask import make_response
         
-        # List of possible paths to check
+        # Try multiple possible paths
         possible_paths = [
             'index.html',
             './index.html',
@@ -1039,22 +1069,33 @@ def index():
             '/workspace/index.html',
         ]
         
+        file_path = None
         for path in possible_paths:
-            if os.path.exists(path):
-                logger.info(f"[Index] Serving index.html from: {path}")
-                # send_file automatically sets mimetype based on extension
-                response = make_response(send_file(path))
-                response.headers['Content-Type'] = 'text/html; charset=utf-8'
-                response.headers['Cache-Control'] = 'no-cache'
-                return response
+            if os.path.exists(path) and os.path.isfile(path):
+                file_path = path
+                break
         
-        # If not found, return error
-        logger.error("[Index] index.html not found in any location")
-        return "QTCL API Server - index.html not found", 404
+        if file_path:
+            # Read as bytes to avoid encoding issues
+            with open(file_path, 'rb') as f:
+                content = f.read()
+            
+            # Create response with EXPLICIT content-type
+            response = make_response(content)
+            response.content_type = 'text/html; charset=utf-8'
+            response.headers['Content-Type'] = 'text/html; charset=utf-8'
+            response.headers['X-Content-Type-Options'] = 'nosniff'
+            response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+            return response
+        
+        # Fallback if file not found
+        logger.error(f"[Index] index.html not found. CWD: {os.getcwd()}, Files: {os.listdir('.')}")
+        return "index.html not found", 404
         
     except Exception as e:
-        logger.error(f"[Index] Error: {e}")
+        logger.error(f"[Index] Error: {e}", exc_info=True)
         return f"Error: {str(e)}", 500
+
 
     
     # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
