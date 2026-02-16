@@ -1078,22 +1078,56 @@
                         if (result.output) {
                             log(JSON.stringify(result.output, null, 2), 'success');
                         }
+                        // Clear any pending prompt
+                        window._pendingInteractivePrompt = null;
                     } else if (result.status === 'input_prompt') {
+                        // Display the prompt
                         if (result.input_prompt && result.input_prompt.message) {
                             log(result.input_prompt.message, 'info');
                         }
                         if (result.progress) {
                             log(result.progress, 'info');
                         }
+                        
+                        // Store the prompt info so next input is captured as the value
+                        window._pendingInteractivePrompt = {
+                            command: cmd,
+                            input_prompt: result.input_prompt,
+                            next_command_template: result.next_command
+                        };
+                        log('⏳ Waiting for input...', 'info');
                     } else {
                         log(`✗ ${result.error || 'Command failed'}`, 'error');
+                        window._pendingInteractivePrompt = null;
                     }
                     return;
                 } catch (error) {
                     console.error('CommandExecutor error:', error);
                     log(`✗ API Error: ${error.message}`, 'error');
+                    window._pendingInteractivePrompt = null;
                     return;
                 }
+            }
+            
+            // If we're waiting for a prompt response, handle it
+            if (window._pendingInteractivePrompt) {
+                const prompt = window._pendingInteractivePrompt;
+                const fieldName = prompt.input_prompt.field_name;
+                const value = cmd;  // The whole input is the value
+                
+                // Build the next command with the provided value
+                // Extract the base command and current params
+                const baseCmd = prompt.command;
+                const newCommand = `${baseCmd} --${fieldName}=${value}`;
+                
+                log(`📝 Submitting: ${fieldName}=${value}`);
+                
+                // Clear the pending prompt
+                window._pendingInteractivePrompt = null;
+                
+                // Recursively execute the next command
+                await executeCommand(newCommand);
+                return;
             }
             
             // Local command handling
