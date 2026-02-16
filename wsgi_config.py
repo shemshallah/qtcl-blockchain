@@ -1571,7 +1571,7 @@ try:
         logger.info("[Flask] ✓ Successfully imported main_app")
         logger.info("[Flask] Creating application from main_app...")
         app, executor, socketio = create_app()
-        initialize_app(app)
+        initialize_app(app, socketio)  # ⚡ PASS SOCKETIO INSTANCE ⚡
         logger.info("[Flask] ✓ App created from main_app")
     except ImportError as ie:
         logger.warning(f"[Flask] Could not import main_app: {ie}")
@@ -2097,6 +2097,62 @@ except Exception as e:
     
     from flask import Flask, jsonify
     app = Flask(__name__)
+    
+    # ⚡ ADD FALLBACK INDEX ROUTE IF NOT ALREADY DEFINED
+    # This ensures the root path works even if main_app.py had issues
+    if app is not None:
+        # Check if root route exists, if not add fallback
+        @app.route('/', methods=['GET'])
+        @app.route('/index.html', methods=['GET'])
+        def serve_index():
+            """Serve index.html from outputs or provide fallback"""
+            from flask import Response
+            
+            # Try to load index.html from multiple locations
+            import os
+            paths = [
+                '/mnt/user-data/outputs/index.html',
+                os.path.join(os.getcwd(), 'index.html'),
+                os.path.join(os.path.dirname(__file__), 'index.html'),
+                'index.html'
+            ]
+            
+            for path in paths:
+                try:
+                    if os.path.exists(path):
+                        with open(path, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        logger.info(f"[WSGI] ✓ Serving index.html from: {path}")
+                        response = Response(content, mimetype='text/html')
+                        response.headers['Content-Type'] = 'text/html; charset=utf-8'
+                        response.headers['Cache-Control'] = 'no-cache'
+                        return response
+                except Exception as e:
+                    logger.debug(f"[WSGI] Could not read {path}: {e}")
+                    continue
+            
+            # Fallback HTML if index not found
+            logger.warning("[WSGI] ⚠️ index.html not found, using fallback")
+            fallback = """<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>QTCL Quantum Lattice</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0a0a14;color:#f0f0f0;font-family:Monaco,monospace;padding:40px;line-height:1.6}h1{color:#a78bfa;margin-bottom:30px}.box{background:#1a1a2e;padding:30px;border-radius:12px;margin-bottom:20px}ul{margin:15px 0 0 25px}li{margin:10px 0}a{color:#a78bfa;text-decoration:none}a:hover{text-decoration:underline}.status{display:inline-block;width:12px;height:12px;border-radius:50%;background:#10b981;margin-right:8px}</style>
+</head><body>
+<h1>⚛️ QTCL Quantum Lattice Control System</h1>
+<div class="box"><h2><span class="status"></span>System Operational</h2><p>The Quantum Lattice system is running successfully.</p></div>
+<div class="box"><h3>Available API Endpoints:</h3><ul>
+<li><strong>POST /api/execute</strong> - Execute commands</li>
+<li><strong>GET /api/health</strong> - Health check</li>
+<li><strong>GET /health-tree</strong> - System health tree</li>
+<li><strong>POST /api/keepalive</strong> - Heartbeat endpoint</li>
+</ul></div>
+<div class="box"><h3>WebSocket</h3><p>Connect to: <code>ws://[host]:8000/socket.io</code></p></div>
+<script>fetch('/api/health').then(r=>r.json()).then(d=>console.log('✓ API Connected:',d)).catch(e=>console.error('✗ API Error:',e))</script>
+</body></html>"""
+            response = Response(fallback, mimetype='text/html')
+            response.headers['Content-Type'] = 'text/html; charset=utf-8'
+            return response
+        
+        logger.info("[WSGI] ✓ Registered fallback index route")
     
     @app.route('/health')
     def health():

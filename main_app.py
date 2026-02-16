@@ -1213,7 +1213,7 @@ def create_app():
     
     return app, executor, socketio
 
-def initialize_app(app):
+def initialize_app(app, socketio=None):
     """Initialize app with additional configuration for WSGI"""
     
     # Register quantum API blueprint
@@ -1227,6 +1227,11 @@ def initialize_app(app):
         logger.error(f"[InitApp] Failed to register quantum blueprint: {e}")
         logger.error(traceback.format_exc())
     
+    # Only register socketio handlers if socketio instance is provided
+    if not socketio:
+        logger.warning("[InitApp] ⚠️ SocketIO instance not provided - WebSocket handlers will not be registered")
+        return
+    
     # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     # WEBSOCKET HANDLERS (Socket.io) - Interactive Command Flow
     # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1234,6 +1239,8 @@ def initialize_app(app):
     # Import GlobalCommandRegistry for command execution
     try:
         from terminal_logic import GlobalCommandRegistry
+        from flask_socketio import emit
+        from flask import request
         logger.info("[WebSocket] ✓ GlobalCommandRegistry imported for Socket.io handlers")
     except Exception as e:
         logger.error(f"[WebSocket] Failed to import GlobalCommandRegistry: {e}")
