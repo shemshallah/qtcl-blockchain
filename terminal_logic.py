@@ -2992,18 +2992,55 @@ class TerminalEngine:
         """PRODUCTION Quantum-secured transaction with 6-layer finality verification"""
         UI.header("⚛️ QUANTUM TRANSACTION - 6-LAYER PROCESSOR")
         
-        # Collect transaction parameters
-        user_email = UI.prompt("Your email")
-        target_email = UI.prompt("Target email")
-        target_identifier = UI.prompt("Target pseudoqubit_id or UID")
-        
-        try:
-            amount = float(UI.prompt("Amount"))
-        except ValueError:
-            UI.error("Invalid amount")
+        # Check if we have arguments - if not, show usage
+        if not self.args or (len(self.args) == 0):
+            UI.info("USAGE: quantum/transaction --user_email=<email> --password=<pass> --target_email=<email> --target_identifier=<id> --amount=<amt>")
+            UI.info("\nEXAMPLE:")
+            UI.print("  quantum/transaction --user_email=alice@example.com --password=SecurePass123! --target_email=bob@example.com --target_identifier=pseud_bob456 --amount=500.0")
+            UI.info("\nOPTIONS:")
+            UI.print("  --user_email=<email>         Your email address")
+            UI.print("  --password=<password>        Your password (or use --prompt-password)")
+            UI.print("  --target_email=<email>       Target user email")
+            UI.print("  --target_identifier=<id>     Target pseudoqubit_id or UID")
+            UI.print("  --amount=<number>            Amount to transfer in QTCL")
+            UI.print("  --interactive                Prompt for values interactively")
             return
         
-        password = UI.prompt("Confirm with password", password=True)
+        # Check if --interactive flag is set
+        interactive = self.get_flag('interactive', False)
+        
+        # Parse arguments or use interactive mode
+        if interactive:
+            # Collect transaction parameters interactively
+            user_email = UI.prompt("Your email")
+            target_email = UI.prompt("Target email")
+            target_identifier = UI.prompt("Target pseudoqubit_id or UID")
+            
+            try:
+                amount = float(UI.prompt("Amount"))
+            except ValueError:
+                UI.error("Invalid amount")
+                return
+            
+            password = UI.prompt("Confirm with password", password=True)
+        else:
+            # Parse from command-line flags
+            user_email = self.get_flag('user_email', '')
+            password = self.get_flag('password', '')
+            target_email = self.get_flag('target_email', '')
+            target_identifier = self.get_flag('target_identifier', '')
+            
+            try:
+                amount = float(self.get_flag('amount', 0))
+            except (ValueError, TypeError):
+                UI.error("Invalid amount - must be a number")
+                return
+            
+            # Validate all required fields are present
+            if not all([user_email, password, target_email, target_identifier, amount]):
+                UI.error("Missing required parameters")
+                UI.info("Use: quantum/transaction --help")
+                return
         
         # Call PRODUCTION quantum transaction processor
         payload = {
@@ -4720,68 +4757,36 @@ class QuantumCommandHandlers:
         """PRODUCTION: Process quantum transaction via API endpoint (not random data!)
         
         BEHAVIOR:
-        - If called with NO parameters: Prompt user interactively
+        - If called with NO parameters: Return help message (not interactive in HTTP context!)
         - If called WITH parameters: Use API endpoint directly
         """
         try:
             # ══════════════════════════════════════════════════════════════════════════════
-            # CASE 1: Called with NO parameters → Interactive CLI mode
+            # CASE 1: Called with NO parameters → Return usage help (can't use input() in HTTP!)
             # ══════════════════════════════════════════════════════════════════════════════
             if user_id is None and target_id is None and amount is None:
-                logger.info("[QuantumCmd] Interactive mode: Prompting for user input")
+                logger.info("[QuantumCmd] No parameters provided - returning help message")
                 
-                # Import here to avoid circular imports
-                import sys
-                
-                # Get user input
-                user_email = input("Your email: ").strip()
-                target_email = input("Target email: ").strip()
-                target_identifier = input("Target pseudoqubit_id or UID: ").strip()
-                
-                try:
-                    amount = float(input("Amount: ").strip())
-                except ValueError:
-                    return {
-                        'success': False,
-                        'error': 'INVALID_AMOUNT',
-                        'message': 'Amount must be a valid number',
-                        'error_code': 400
-                    }
-                
-                password = input("Password: ").strip()
-                
-                # Call API endpoint
-                try:
-                    import requests
-                    api_url = 'http://localhost:5000/api/quantum/transaction'
-                    response = requests.post(api_url, json={
-                        'user_email': user_email,
-                        'target_email': target_email,
-                        'target_identifier': target_identifier,
-                        'amount': amount,
-                        'password': password
-                    }, timeout=30)
-                    
-                    result = response.json()
-                    http_status = response.status_code
-                    
-                    logger.info(f"[QuantumCmd] API response: status={http_status}, tx_id={result.get('tx_id', 'ERROR')}")
-                    
-                    return {
-                        'success': result.get('success', False),
-                        'command': 'quantum/transaction',
-                        'timestamp': time.time(),
-                        'result': result,
-                        'http_status': http_status
-                    }
-                except Exception as api_e:
-                    logger.error(f"[QuantumCmd] API call failed: {api_e}")
-                    return {
-                        'success': False,
-                        'error': 'API_ERROR',
-                        'message': str(api_e),
-                        'error_code': 500
-                    }
+                # NEVER use input() here - this could be called from HTTP context!
+                return {
+                    'success': False,
+                    'error': 'MISSING_PARAMETERS',
+                    'command': 'quantum/transaction',
+                    'usage': 'quantum/transaction --user_email=<email> --password=<pass> --target_email=<email> --target_identifier=<id> --amount=<amt>',
+                    'example': 'quantum/transaction --user_email=alice@example.com --password=SecurePass123! --target_email=bob@example.com --target_identifier=pseud_bob456 --amount=500.0',
+                    'options': {
+                        'user_email': 'Your email address (required)',
+                        'password': 'Your password (required)',
+                        'target_email': 'Target user email (required)',
+                        'target_identifier': 'Target pseudoqubit_id or UID (required)',
+                        'amount': 'Amount to transfer in QTCL (required, must be >= 0.001)'
+                    },
+                    'flags': {
+                        '--interactive': 'Prompt for values interactively (CLI only)'
+                    },
+                    'http_status': 400,
+                    'error_code': 'MISSING_PARAMETERS'
+                }
             
             # ══════════════════════════════════════════════════════════════════════════════
             # CASE 2: Called WITH parameters → Use API endpoint directly
@@ -5496,21 +5501,46 @@ class GlobalCommandRegistry:
     
     @classmethod
     def get_command(cls, command_name: str) -> Optional[Callable]:
-        """Get command handler by name"""
-        return cls.ALL_COMMANDS.get(command_name)
+        """Get command handler by name (case-insensitive)"""
+        # First try exact match
+        if command_name in cls.ALL_COMMANDS:
+            return cls.ALL_COMMANDS.get(command_name)
+        
+        # Then try case-insensitive match
+        command_name_lower = command_name.lower()
+        for cmd, handler in cls.ALL_COMMANDS.items():
+            if cmd.lower() == command_name_lower:
+                return handler
+        
+        return None
     
     @classmethod
     def execute_command(cls, command_name: str, *args, **kwargs) -> Dict[str, Any]:
-        """Execute command with arguments"""
+        """Execute command with arguments (case-insensitive)"""
         try:
+            # Normalize command name for lookup but preserve original for response
             handler = cls.get_command(command_name)
+            
+            # Find the actual registered command name (case-preserved)
+            actual_command_name = command_name
+            if handler:
+                command_name_lower = command_name.lower()
+                for cmd in cls.ALL_COMMANDS.keys():
+                    if cmd.lower() == command_name_lower:
+                        actual_command_name = cmd
+                        break
+            
             if not handler:
-                return {'error': f'Command not found: {command_name}', 'available': list(cls.ALL_COMMANDS.keys())}
+                return {
+                    'error': f'Command not found: {command_name}',
+                    'available': list(cls.ALL_COMMANDS.keys()),
+                    'hint': 'Type "help" for available commands'
+                }
             
             result = handler(*args, **kwargs)
             
             return {
-                'command': command_name,
+                'command': actual_command_name,
                 'status': 'success',
                 'result': result,
                 'timestamp': time.time()
