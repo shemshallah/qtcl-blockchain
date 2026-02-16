@@ -47,41 +47,23 @@ handlers=[logging.FileHandler(os.path.join(PROJECT_ROOT,'qtcl_command_center.log
 logger=logging.getLogger(__name__)
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════
-# MODULE IMPORTS & INITIALIZATION
+# MODULE IMPORTS
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-logger.info("[Init] Importing system modules...")
-try:
-    import db_builder_v2
-    logger.info("[Init] ✓ db_builder_v2 imported")
-except Exception as e:
-    logger.warning(f"[Init] db_builder_v2 import failed: {e}")
+db_builder=None
+quantum_lattice_module=None
 
 try:
-    import core_api
-    logger.info("[Init] ✓ core_api imported")
+    import db_builder_v2 as db_builder
+    logger.info("[Init] ✓ db_builder_v2 loaded")
 except Exception as e:
-    logger.warning(f"[Init] core_api import failed: {e}")
+    logger.warning(f"[Init] db_builder_v2: {e}")
 
 try:
-    import quantum_api
-    logger.info("[Init] ✓ quantum_api imported")
+    import quantum_lattice_control_live_complete as quantum_lattice_module
+    logger.info("[Init] ✓ quantum_lattice loaded")
 except Exception as e:
-    logger.warning(f"[Init] quantum_api import failed: {e}")
-
-try:
-    import quantum_lattice_control_live_complete
-    logger.info("[Init] ✓ quantum_lattice_control_live_complete imported")
-except Exception as e:
-    logger.warning(f"[Init] quantum_lattice import failed: {e}")
-
-try:
-    import terminal_logic
-    logger.info("[Init] ✓ terminal_logic imported")
-except Exception as e:
-    logger.warning(f"[Init] terminal_logic import failed: {e}")
-
-logger.info("[Init] ✓ All modules imported")
+    logger.warning(f"[Init] quantum_lattice: {e}")
 
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1136,6 +1118,39 @@ def create_command_center_blueprint()->Blueprint:
         return jsonify({'success':True,'healthy':True,'ready':GLOBAL_STATE.system_ready,
                        'timestamp':datetime.utcnow().isoformat()})
     
+    @bp.route('/heartbeat',methods=['POST'])
+    def heartbeat():
+        """POST heartbeat from background monitor"""
+        try:
+            data=request.get_json() or {}
+            uptime=(datetime.utcnow()-GLOBAL_STATE.startup_time).total_seconds()
+            hb={'timestamp':datetime.utcnow().isoformat(),'status':'ok','uptime':uptime,'data':data}
+            with GLOBAL_STATE.lock:
+                GLOBAL_STATE.last_heartbeat=hb
+                GLOBAL_STATE.heartbeat_history.append(hb)
+            return jsonify({'status':'received'}),200
+        except Exception as e:
+            return jsonify({'error':str(e)}),500
+    
+    @bp.route('/lattice/refresh',methods=['GET','POST'])
+    def lattice_refresh():
+        """Refresh quantum lattice neural net metrics"""
+        try:
+            uptime=(datetime.utcnow()-GLOBAL_STATE.startup_time).total_seconds()
+            metrics={
+                'timestamp':datetime.utcnow().isoformat(),'uptime':uptime,
+                'commands':GLOBAL_STATE.total_commands,'errors':GLOBAL_STATE.total_errors,
+                'sessions':len(GLOBAL_STATE.sessions),'registry_size':len(MASTER_REGISTRY.commands),
+                'last_heartbeat':GLOBAL_STATE.last_heartbeat,'heartbeats':len(GLOBAL_STATE.heartbeat_history)
+            }
+            if quantum_lattice_module and hasattr(quantum_lattice_module,'get_lattice_state'):
+                try:
+                    metrics['lattice']=quantum_lattice_module.get_lattice_state()
+                except:pass
+            return jsonify({'success':True,'metrics':metrics}),200
+        except Exception as e:
+            return jsonify({'error':str(e)}),500
+
     @bp.route('/audit',methods=['GET'])
     def get_audit():
         """Get audit trail"""
@@ -1185,14 +1200,14 @@ def initialize_command_center()->None:
     logger.info("╚"+"═"*150+"╝")
     
     try:
-        logger.info("[Init] Initializing database and module globals...")
-        try:
-            from db_builder_v2 import init_db, DB_POOL
-            init_db()
-            GLOBAL_STATE.db_pool = DB_POOL
-            logger.info("[Init] ✓ Database initialized")
-        except Exception as db_e:
-            logger.warning(f"[Init] DB init error: {db_e}")
+        if db_builder and hasattr(db_builder,'init_db'):
+            try:
+                db_builder.init_db()
+                if hasattr(db_builder,'DB_POOL'):
+                    GLOBAL_STATE.db_pool=db_builder.DB_POOL
+                logger.info("[Init] ✓ Database initialized")
+            except Exception as e:
+                logger.warning(f"[Init] DB error: {e}")
         
         logger.info("[Init] Loading command registry...")
         load_all_commands()
