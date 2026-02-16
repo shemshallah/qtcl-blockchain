@@ -1227,7 +1227,157 @@ def initialize_app(app):
         logger.error(f"[InitApp] Failed to register quantum blueprint: {e}")
         logger.error(traceback.format_exc())
     
-    # Register blockchain API blueprint
+    # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    # WEBSOCKET HANDLERS (Socket.io) - Interactive Command Flow
+    # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    
+    # Import GlobalCommandRegistry for command execution
+    try:
+        from terminal_logic import GlobalCommandRegistry
+        logger.info("[WebSocket] ✓ GlobalCommandRegistry imported for Socket.io handlers")
+    except Exception as e:
+        logger.error(f"[WebSocket] Failed to import GlobalCommandRegistry: {e}")
+        GlobalCommandRegistry = None
+    
+    @socketio.on('connect')
+    def handle_connect():
+        """User connects via WebSocket"""
+        logger.info(f"[WebSocket] Client connected: {request.sid}")
+        emit('connected', {'status': 'connected', 'sid': request.sid})
+    
+    @socketio.on('disconnect')
+    def handle_disconnect():
+        """User disconnects"""
+        logger.info(f"[WebSocket] Client disconnected: {request.sid}")
+    
+    @socketio.on('execute_command')
+    def handle_execute_command(data):
+        """Execute a command via WebSocket"""
+        if not GlobalCommandRegistry:
+            emit('command_result', {
+                'status': 'error',
+                'error': 'CommandRegistry not available'
+            })
+            return
+        
+        cmd = data.get('command', '').strip()
+        logger.info(f"[WebSocket] Execute: {cmd}")
+        
+        try:
+            # Execute the command
+            result = GlobalCommandRegistry.execute_command(cmd.split()[0], *cmd.split()[1:])
+            
+            # Check if this is an interactive prompt request
+            if result.get('status') == 'collecting_input' and result.get('input_prompt'):
+                # Store state in session
+                if not hasattr(socketio, 'session'):
+                    socketio.session = {}
+                socketio.session[request.sid] = {
+                    'interactive_state': 'waiting_for_prompt',
+                    'base_command': cmd,
+                    'field_name': result['input_prompt']['field_name'],
+                    'step': result.get('step'),
+                    'total_steps': result.get('total_steps')
+                }
+                
+                # Send prompt to client
+                emit('prompt_required', {
+                    'message': result['input_prompt']['message'],
+                    'field': result['input_prompt']['field_name'],
+                    'placeholder': result['input_prompt'].get('placeholder', ''),
+                    'step': result.get('step'),
+                    'total_steps': result.get('total_steps'),
+                    'progress': result.get('progress', '')
+                })
+                return
+            
+            # Regular success response
+            emit('command_result', {
+                'status': 'success',
+                'result': result,
+                'command': cmd
+            })
+        
+        except Exception as e:
+            logger.error(f"[WebSocket] Command error: {e}")
+            emit('command_result', {
+                'status': 'error',
+                'error': str(e),
+                'command': cmd
+            })
+    
+    @socketio.on('prompt_response')
+    def handle_prompt_response(data):
+        """Handle user's response to an interactive prompt"""
+        if not GlobalCommandRegistry:
+            emit('error', {'message': 'CommandRegistry not available'})
+            return
+        
+        value = data.get('value', '').strip()
+        field_name = data.get('field', '')
+        
+        logger.info(f"[WebSocket] Prompt response: {field_name}={value}")
+        
+        try:
+            # Get session state
+            if not hasattr(socketio, 'session'):
+                socketio.session = {}
+            
+            session = socketio.session.get(request.sid)
+            if not session:
+                emit('error', {'message': 'Session not found'})
+                return
+            
+            # Build command with this field value
+            base_command = session['base_command']
+            new_command = f"{base_command} --{field_name}={value}"
+            
+            logger.info(f"[WebSocket] Building command: {new_command}")
+            
+            # Execute with the new parameter
+            result = GlobalCommandRegistry.execute_command(new_command.split()[0], *new_command.split()[1:])
+            
+            # Check if another prompt is needed
+            if result.get('status') == 'collecting_input' and result.get('input_prompt'):
+                # Update session
+                socketio.session[request.sid] = {
+                    'interactive_state': 'waiting_for_prompt',
+                    'base_command': new_command,
+                    'field_name': result['input_prompt']['field_name'],
+                    'step': result.get('step'),
+                    'total_steps': result.get('total_steps')
+                }
+                
+                # Send next prompt
+                emit('prompt_required', {
+                    'message': result['input_prompt']['message'],
+                    'field': result['input_prompt']['field_name'],
+                    'placeholder': result['input_prompt'].get('placeholder', ''),
+                    'step': result.get('step'),
+                    'total_steps': result.get('total_steps'),
+                    'progress': result.get('progress', '')
+                })
+                return
+            
+            # All prompts done - transaction is executing or complete
+            if session:
+                del socketio.session[request.sid]
+            
+            emit('command_result', {
+                'status': 'success',
+                'result': result,
+                'command': new_command
+            })
+        
+        except Exception as e:
+            logger.error(f"[WebSocket] Prompt response error: {e}", exc_info=True)
+            emit('command_result', {
+                'status': 'error',
+                'error': str(e)
+            })
+    
+    # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    # REGISTER QUANTUM API BLUEPRINT
     try:
         from blockchain_api import create_blockchain_api_blueprint
         from wsgi_config import DB
@@ -1241,15 +1391,7 @@ def initialize_app(app):
         logger.error(traceback.format_exc())
     
     logger.info("[InitApp] QTCL Unified API v5.0 initialization complete")
-    return app
-
-# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-# PART 8: MAIN EXECUTION
-# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-
-# Initialize app at module level for WSGI servers (Koyeb, Heroku, Docker)
-app, executor, socketio = create_app()
+    return app, executor, socketio
 logger.info('[Module] App initialized at module level for WSGI')
 
 if __name__ == '__main__':

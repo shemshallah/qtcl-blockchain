@@ -1063,101 +1063,57 @@
         // TERMINAL COMMANDS
         // ═══════════════════════════════════════════════════════════════════════════════
         
+        // Socket.io connection
+        const socket = io();
+        let isWaitingForPrompt = false;
+        let currentField = '';
+        
+        socket.on('connected', (data) => {
+            console.log('[Socket.io] Connected:', data.sid);
+            log('✓ Connected to server', 'success');
+        });
+        
+        socket.on('prompt_required', (data) => {
+            // Server is asking for a field value
+            log(`${data.message}`, 'info');
+            if (data.progress) log(data.progress, 'info');
+            
+            isWaitingForPrompt = true;
+            currentField = data.field;
+            
+            // Update input placeholder
+            document.getElementById('terminalInput').placeholder = data.placeholder || `Enter ${data.field}...`;
+            document.getElementById('terminalInput').focus();
+        });
+        
+        socket.on('command_result', (data) => {
+            isWaitingForPrompt = false;
+            if (data.status === 'success') {
+                log(JSON.stringify(data.result, null, 2), 'success');
+            } else {
+                log(`✗ ${data.error || 'Error'}`, 'error');
+            }
+        });
+        
+        socket.on('error', (data) => {
+            log(`✗ ${data.message || 'Error'}`, 'error');
+            isWaitingForPrompt = false;
+        });
+        
         async function executeCommand(cmd) {
             log(`qtcl> ${cmd}`);
             
-            // CHECK FIRST: If we're waiting for a prompt response, capture as field value
-            if (window._pendingInteractivePrompt) {
-                const prompt = window._pendingInteractivePrompt;
-                const fieldName = prompt.fieldName;
-                const value = cmd;
-                
-                const newCommand = `${prompt.baseCommand} --${fieldName}=${value}`;
-                log(`✓ ${fieldName} = ${value}`);
-                
-                window._pendingInteractivePrompt = null;
-                await executeCommand(newCommand);
+            // If waiting for prompt, send as response not new command
+            if (isWaitingForPrompt) {
+                socket.emit('prompt_response', {
+                    field: currentField,
+                    value: cmd
+                });
                 return;
             }
             
-            // Use commandExecutor for all commands
-            if (window.commandExecutor) {
-                try {
-                    const result = await window.commandExecutor.execute(cmd);
-                    
-                    // Check for input prompt
-                    if (result.status === 'input_prompt') {
-                        if (result.input_prompt && result.input_prompt.message) {
-                            log(result.input_prompt.message, 'info');
-                        }
-                        if (result.progress) {
-                            log(result.progress, 'info');
-                        }
-                        
-                        // Set pending prompt for next input
-                        window._pendingInteractivePrompt = {
-                            baseCommand: cmd,
-                            fieldName: result.input_prompt.field_name
-                        };
-                        return;
-                    }
-                    
-                    // Success - display output
-                    if (result.status === 'success' && result.output) {
-                        log(JSON.stringify(result.output, null, 2), 'success');
-                        return;
-                    }
-                    
-                    // For other responses (help, etc), show the result
-                    if (result.result) {
-                        log(JSON.stringify(result.result, null, 2), 'success');
-                        return;
-                    }
-                    
-                    // Error
-                    if (result.error) {
-                        log(`✗ ${result.error}`, 'error');
-                        return;
-                    }
-                    
-                    // Default: show full result
-                    log(JSON.stringify(result, null, 2), 'success');
-                    return;
-                    
-                } catch (error) {
-                    log(`✗ ${error.message}`, 'error');
-                    return;
-                }
-            }
-            
-            // Fallback local handlers (if commandExecutor not available)
-            const args = cmd.trim().split(' ');
-            const command = args[0].toLowerCase();
-            
-            switch (command) {
-                case 'help':
-                    log('Available commands:', 'info');
-                    log('  help              - Show this help message');
-                    log('  login             - Login');
-                    log('  logout            - Logout');
-                    log('  clear             - Clear terminal');
-                    break;
-                    
-                case 'login':
-                    showAuthModal(true);
-                    break;
-                    
-                case 'logout':
-                    handleLogout();
-                    break;
-                    
-                case 'clear':
-                    document.getElementById('terminalOutput').innerHTML = '';
-                    break;
-                    
-                default:
-                    log(`✗ Unknown command: '${command}'`, 'error');
-            }
+            // Otherwise, execute as new command
+            socket.emit('execute_command', { command: cmd });
         }
         
         // ═══════════════════════════════════════════════════════════════════════════════
@@ -1283,5 +1239,8 @@
             }
         })();
     </script>
+    
+    <!-- Socket.io for WebSocket communication -->
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
 </body>
 </html>
