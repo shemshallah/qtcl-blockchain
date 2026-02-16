@@ -6078,7 +6078,7 @@ class GlobalCommandRegistry:
         USER-LOGIN: Login user
         LAYER 1: Input validation
         LAYER 2: Database lookup
-        LAYER 3: Password verification
+        LAYER 3: Password verification (supports bcrypt, PBKDF2, and SHA256)
         LAYER 4: Return user details with session
         """
         import logging
@@ -6116,16 +6116,56 @@ class GlobalCommandRegistry:
                 logger.error(f"[Login:L2] Database query error: {e}")
                 return {'status': 'error', 'error': 'Database error'}
             
-            # LAYER 3: Verify password
-            password_hash = hashlib.sha256(password.encode()).hexdigest()
-            
+            # LAYER 3: Verify password - support multiple hash formats
             if isinstance(user, list) and len(user) > 0:
                 user_data = user[0]
             else:
                 user_data = user
             
-            if user_data.get('password_hash') != password_hash:
-                logger.warning(f"[Login:L3] Password mismatch for: {email}")
+            stored_hash = user_data.get('password_hash', '')
+            password_verified = False
+            hash_type = 'unknown'
+            
+            # Try bcrypt first (starts with $2b$ or $2y$)
+            if stored_hash.startswith('$2b$') or stored_hash.startswith('$2y$') or stored_hash.startswith('$2a$'):
+                try:
+                    import bcrypt
+                    password_verified = bcrypt.checkpw(password.encode(), stored_hash.encode())
+                    hash_type = 'bcrypt'
+                    logger.debug(f"[Login:L3] Using bcrypt verification")
+                except ImportError:
+                    logger.warning(f"[Login:L3] bcrypt not available, trying fallback")
+                except Exception as e:
+                    logger.debug(f"[Login:L3] bcrypt check failed: {e}")
+            
+            # Try PBKDF2 (contains $)
+            elif '$' in stored_hash and len(stored_hash) > 128:
+                try:
+                    parts = stored_hash.split('$')
+                    if len(parts) == 2:
+                        salt_hex = parts[0]
+                        stored_hash_hex = parts[1]
+                        
+                        # PBKDF2 with SHA256 - 100k iterations
+                        test_hash = hashlib.pbkdf2_hmac('sha256', password.encode(), bytes.fromhex(salt_hex), 100000)
+                        password_verified = test_hash.hex() == stored_hash_hex
+                        hash_type = 'pbkdf2'
+                        logger.debug(f"[Login:L3] Using PBKDF2 verification")
+                except Exception as e:
+                    logger.debug(f"[Login:L3] PBKDF2 check failed: {e}")
+            
+            # Fall back to SHA256 (64 char hex string)
+            else:
+                try:
+                    password_hash = hashlib.sha256(password.encode()).hexdigest()
+                    password_verified = password_hash == stored_hash
+                    hash_type = 'sha256'
+                    logger.debug(f"[Login:L3] Using SHA256 verification")
+                except Exception as e:
+                    logger.debug(f"[Login:L3] SHA256 check failed: {e}")
+            
+            if not password_verified:
+                logger.warning(f"[Login:L3] Password mismatch for: {email} (hash_type={hash_type})")
                 return {
                     'status': 'error',
                     'error': 'Incorrect password',
@@ -6142,7 +6182,7 @@ class GlobalCommandRegistry:
             # LAYER 4: Return user details
             session_token = f"session_{uuid.uuid4().hex[:32]}"
             
-            logger.info(f"[Login] ✓ Login successful: {user_data.get('username')} (PQ: {user_data.get('pseudoqubit_id')})")
+            logger.info(f"[Login] ✓ Login successful: {user_data.get('username')} (PQ: {user_data.get('pseudoqubit_id')}) hash_type={hash_type}")
             
             return {
                 'status': 'success',
