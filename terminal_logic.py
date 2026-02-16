@@ -7799,14 +7799,33 @@ class QuantumParallelExecutor:
 # Global quantum executor instance
 QUANTUM_EXECUTOR = QuantumParallelExecutor()
 
-# Register quantum parallel command
-GlobalCommandRegistry.register_command(
-    'parallel/quantum',
-    lambda *args, **kwargs: asyncio.run(QUANTUM_EXECUTOR.execute_parallel(list(args), kwargs.get('strategy', 'adaptive'))),
-    "Execute commands in parallel quantum dimensions"
-)
+# Add quantum parallel command to GlobalCommandRegistry.PARALLEL_COMMANDS
+# This needs to be added before ALL_COMMANDS is constructed
+def _register_quantum_parallel():
+    """Register quantum parallel command after class definition"""
+    GlobalCommandRegistry.PARALLEL_COMMANDS['parallel/quantum'] = lambda *args, **kwargs: asyncio.run(QUANTUM_EXECUTOR.execute_parallel(list(args), kwargs.get('strategy', 'adaptive')))
+    # Rebuild ALL_COMMANDS to include new parallel/quantum command
+    GlobalCommandRegistry.ALL_COMMANDS = {
+        **GlobalCommandRegistry.QUANTUM_COMMANDS,
+        **GlobalCommandRegistry.TRANSACTION_COMMANDS,
+        **GlobalCommandRegistry.WALLET_COMMANDS,
+        **GlobalCommandRegistry.ORACLE_COMMANDS,
+        **GlobalCommandRegistry.AUTH_COMMANDS,
+        **GlobalCommandRegistry.USER_COMMANDS,
+        **GlobalCommandRegistry.BLOCK_COMMANDS,
+        **GlobalCommandRegistry.DEFI_COMMANDS,
+        **GlobalCommandRegistry.GOVERNANCE_COMMANDS,
+        **GlobalCommandRegistry.NFT_COMMANDS,
+        **GlobalCommandRegistry.CONTRACT_COMMANDS,
+        **GlobalCommandRegistry.BRIDGE_COMMANDS,
+        **GlobalCommandRegistry.ADMIN_COMMANDS,
+        **GlobalCommandRegistry.SYSTEM_COMMANDS,
+        **GlobalCommandRegistry.PARALLEL_COMMANDS,
+    }
+    logger.info("[QuantumExecutor] ✓ Registered parallel/quantum command")
 
-logger.info("[QuantumExecutor] ✓ Registered parallel/quantum command")
+# Execute registration
+_register_quantum_parallel()
 
 # Auto-register on module load (only if not main)
 if __name__ != '__main__':
