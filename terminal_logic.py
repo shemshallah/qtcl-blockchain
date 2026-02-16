@@ -4753,27 +4753,152 @@ class QuantumCommandHandlers:
             return {'error': str(e), 'status': 'error'}
     
     @classmethod
-    def quantum_process_transaction(cls, tx_id: str = None, user_id: int = None, target_id: int = None, amount: float = None) -> Dict[str, Any]:
-        """PRODUCTION: Process quantum transaction via API endpoint (not random data!)
+    def quantum_process_transaction(cls, tx_id: str = None, user_id: int = None, target_id: int = None, amount: float = None, **kwargs) -> Dict[str, Any]:
+        """PRODUCTION: Process quantum transaction via API endpoint
         
-        BEHAVIOR:
-        - If called with NO parameters: Return help message (not interactive in HTTP context!)
-        - If called WITH parameters: Use API endpoint directly
+        ACCEPTS FLAGS:
+        - --user_email=<email>
+        - --password=<password>
+        - --target_email=<email>
+        - --target_identifier=<id>
+        - --amount=<number>
+        - --interactive (returns form fields for HTTP UI to prompt)
+        
+        HTTP USAGE:
+        POST /api/execute
+        {
+          "command": "quantum/transaction",
+          "user_email": "alice@example.com",
+          "password": "SecurePass123!",
+          "target_email": "bob@example.com",
+          "target_identifier": "pseud_bob456",
+          "amount": 500.0
+        }
         """
         try:
+            logger.info(f"[QuantumCmd] Called with: tx_id={tx_id}, user_id={user_id}, kwargs={list(kwargs.keys())}")
+            
+            # Extract flags from kwargs
+            interactive = kwargs.get('interactive', False)
+            user_email = kwargs.get('user_email', '')
+            password = kwargs.get('password', '')
+            target_email = kwargs.get('target_email', '')
+            target_identifier = kwargs.get('target_identifier', '')
+            
+            try:
+                amount_val = kwargs.get('amount', amount)
+                if amount_val is not None:
+                    amount_val = float(amount_val)
+            except (ValueError, TypeError):
+                amount_val = None
+            
             # ══════════════════════════════════════════════════════════════════════════════
-            # CASE 1: Called with NO parameters → Return usage help (can't use input() in HTTP!)
+            # CASE 1: Interactive flag set → Return form fields for HTTP UI to populate
             # ══════════════════════════════════════════════════════════════════════════════
-            if user_id is None and target_id is None and amount is None:
-                logger.info("[QuantumCmd] No parameters provided - returning help message")
+            if interactive:
+                logger.info("[QuantumCmd] Interactive mode requested")
+                return {
+                    'success': False,
+                    'error': 'INTERACTIVE_FORM_REQUIRED',
+                    'command': 'quantum/transaction',
+                    'mode': 'interactive',
+                    'form_fields': [
+                        {
+                            'name': 'user_email',
+                            'type': 'email',
+                            'label': 'Your Email',
+                            'required': True,
+                            'placeholder': 'alice@example.com'
+                        },
+                        {
+                            'name': 'password',
+                            'type': 'password',
+                            'label': 'Password',
+                            'required': True,
+                            'placeholder': 'SecurePassword123!@#'
+                        },
+                        {
+                            'name': 'target_email',
+                            'type': 'email',
+                            'label': 'Target Email',
+                            'required': True,
+                            'placeholder': 'bob@example.com'
+                        },
+                        {
+                            'name': 'target_identifier',
+                            'type': 'text',
+                            'label': 'Target ID (pseudoqubit_id or UID)',
+                            'required': True,
+                            'placeholder': 'pseud_bob456'
+                        },
+                        {
+                            'name': 'amount',
+                            'type': 'number',
+                            'label': 'Amount (QTCL)',
+                            'required': True,
+                            'placeholder': '500.0',
+                            'min': 0.001,
+                            'step': 0.001
+                        }
+                    ],
+                    'http_status': 400,
+                    'error_code': 'INTERACTIVE_FORM_REQUIRED'
+                }
+            
+            # ══════════════════════════════════════════════════════════════════════════════
+            # CASE 2: All required parameters provided → Execute transaction
+            # ══════════════════════════════════════════════════════════════════════════════
+            if all([user_email, password, target_email, target_identifier, amount_val]):
+                logger.info(f"[QuantumCmd] Executing with email={user_email}, target={target_email}, amount={amount_val}")
                 
-                # NEVER use input() here - this could be called from HTTP context!
+                # Call the HTTP endpoint to process transaction
+                try:
+                    import requests
+                    api_url = os.getenv('API_BASE_URL', 'http://localhost:5000') + '/api/quantum/transaction'
+                    response = requests.post(api_url, json={
+                        'user_email': user_email,
+                        'password': password,
+                        'target_email': target_email,
+                        'target_identifier': target_identifier,
+                        'amount': amount_val
+                    }, timeout=30)
+                    
+                    result = response.json()
+                    http_status = response.status_code
+                    
+                    logger.info(f"[QuantumCmd] API response: status={http_status}, success={result.get('success')}")
+                    
+                    return {
+                        'success': result.get('success', False),
+                        'command': 'quantum/transaction',
+                        'tx_id': result.get('tx_id', ''),
+                        'timestamp': time.time(),
+                        'result': result,
+                        'http_status': http_status
+                    }
+                except Exception as api_e:
+                    logger.error(f"[QuantumCmd] API call failed: {api_e}")
+                    return {
+                        'success': False,
+                        'error': 'API_ERROR',
+                        'message': str(api_e),
+                        'error_code': 500,
+                        'http_status': 500
+                    }
+            
+            # ══════════════════════════════════════════════════════════════════════════════
+            # CASE 3: Missing parameters → Return help
+            # ══════════════════════════════════════════════════════════════════════════════
+            else:
+                logger.info(f"[QuantumCmd] Missing parameters: email={bool(user_email)}, password={bool(password)}, target_email={bool(target_email)}, target_id={bool(target_identifier)}, amount={bool(amount_val)}")
+                
                 return {
                     'success': False,
                     'error': 'MISSING_PARAMETERS',
                     'command': 'quantum/transaction',
                     'usage': 'quantum/transaction --user_email=<email> --password=<pass> --target_email=<email> --target_identifier=<id> --amount=<amt>',
                     'example': 'quantum/transaction --user_email=alice@example.com --password=SecurePass123! --target_email=bob@example.com --target_identifier=pseud_bob456 --amount=500.0',
+                    'interactive_example': 'quantum/transaction --interactive',
                     'options': {
                         'user_email': 'Your email address (required)',
                         'password': 'Your password (required)',
@@ -4782,35 +4907,10 @@ class QuantumCommandHandlers:
                         'amount': 'Amount to transfer in QTCL (required, must be >= 0.001)'
                     },
                     'flags': {
-                        '--interactive': 'Prompt for values interactively (CLI only)'
+                        '--interactive': 'Return interactive form fields for HTTP UI'
                     },
                     'http_status': 400,
                     'error_code': 'MISSING_PARAMETERS'
-                }
-            
-            # ══════════════════════════════════════════════════════════════════════════════
-            # CASE 2: Called WITH parameters → Use API endpoint directly
-            # ══════════════════════════════════════════════════════════════════════════════
-            else:
-                logger.info(f"[QuantumCmd] API mode: user={user_id}, target={target_id}, amount={amount}")
-                
-                # Validate we have all required parameters
-                if user_id is None or target_id is None or amount is None:
-                    return {
-                        'success': False,
-                        'error': 'MISSING_PARAMS',
-                        'message': 'user_id, target_id, and amount are required',
-                        'error_code': 400
-                    }
-                
-                # NOTE: This branch is deprecated - use interactive mode instead
-                # API endpoint requires: user_email, password, target_email, target_identifier
-                # Not: user_id, target_id directly
-                return {
-                    'success': False,
-                    'error': 'DEPRECATED_API_CALL',
-                    'message': 'Use interactive mode or provide user_email, password, target_email, target_identifier',
-                    'error_code': 400
                 }
         
         except Exception as e:
@@ -4818,7 +4918,8 @@ class QuantumCommandHandlers:
             return {
                 'success': False,
                 'error': str(e),
-                'error_code': 500
+                'error_code': 500,
+                'http_status': 500
             }
     
     @classmethod
