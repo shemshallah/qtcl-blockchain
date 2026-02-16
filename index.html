@@ -1066,6 +1066,26 @@
         async function executeCommand(cmd) {
             log(`qtcl> ${cmd}`);
             
+            // CHECK FIRST: If we're waiting for a prompt response, handle it BEFORE parsing as command
+            if (window._pendingInteractivePrompt) {
+                const prompt = window._pendingInteractivePrompt;
+                const fieldName = prompt.input_prompt.field_name;
+                const value = cmd;  // The whole input is the value
+                
+                // Build the next command with the provided value
+                const baseCmd = prompt.command;
+                const newCommand = `${baseCmd} --${fieldName}=${value}`;
+                
+                log(`📝 Submitting: ${fieldName}=${value}`);
+                
+                // Clear the pending prompt
+                window._pendingInteractivePrompt = null;
+                
+                // Recursively execute the next command
+                await executeCommand(newCommand);
+                return;
+            }
+            
             // Parse command
             const args = cmd.trim().split(' ');
             const command = args[0].toLowerCase();
@@ -1107,27 +1127,6 @@
                     window._pendingInteractivePrompt = null;
                     return;
                 }
-            }
-            
-            // If we're waiting for a prompt response, handle it
-            if (window._pendingInteractivePrompt) {
-                const prompt = window._pendingInteractivePrompt;
-                const fieldName = prompt.input_prompt.field_name;
-                const value = cmd;  // The whole input is the value
-                
-                // Build the next command with the provided value
-                // Extract the base command and current params
-                const baseCmd = prompt.command;
-                const newCommand = `${baseCmd} --${fieldName}=${value}`;
-                
-                log(`📝 Submitting: ${fieldName}=${value}`);
-                
-                // Clear the pending prompt
-                window._pendingInteractivePrompt = null;
-                
-                // Recursively execute the next command
-                await executeCommand(newCommand);
-                return;
             }
             
             // Local command handling
