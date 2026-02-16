@@ -4787,27 +4787,50 @@ class QuantumCommandHandlers:
             if interactive or (not all([user_email, password, target_email, target_identifier, amount_val])):
                 logger.info("[QuantumCmd-L1] LAYER 1: User Input Collection - Starting interactive mode")
                 
-                # Try to prompt the user interactively (works in real CLI)
-                try:
-                    if not user_email:
-                        user_email = input("📧 Your email: ").strip()
-                    if not password:
-                        password = input("🔐 Password: ").strip()
-                    if not target_email:
-                        target_email = input("📧 Target email: ").strip()
-                    if not target_identifier:
-                        target_identifier = input("🎯 Target ID (pseudoqubit or UID): ").strip()
-                    if not amount_val:
-                        try:
-                            amount_val = float(input("💰 Amount (QTCL): ").strip())
-                        except ValueError:
-                            return {'success': False, 'error': 'INVALID_AMOUNT', 'error_code': 400}
-                    
-                    logger.info(f"[QuantumCmd-L1] ✓ User input collected interactively: {user_email}, {target_email}, {amount_val}")
+                # Check if stdin is a real terminal (TTY) - only prompt if true
+                import sys
+                stdin_is_tty = hasattr(sys.stdin, 'isatty') and sys.stdin.isatty()
                 
-                except (EOFError, RuntimeError):
-                    # If input() fails (no stdin in HTTP context), return form fields for UI to populate
-                    logger.info("[QuantumCmd-L1] input() failed - returning form_fields for HTTP UI")
+                logger.info(f"[QuantumCmd-L1] stdin.isatty()={stdin_is_tty}")
+                
+                # Only try input() if we have a real terminal
+                if stdin_is_tty:
+                    logger.info("[QuantumCmd-L1] Real TTY detected - prompting user interactively")
+                    try:
+                        if not user_email:
+                            user_email = input("📧 Your email: ").strip()
+                        if not password:
+                            password = input("🔐 Password: ").strip()
+                        if not target_email:
+                            target_email = input("📧 Target email: ").strip()
+                        if not target_identifier:
+                            target_identifier = input("🎯 Target ID (pseudoqubit or UID): ").strip()
+                        if not amount_val:
+                            try:
+                                amount_val = float(input("💰 Amount (QTCL): ").strip())
+                            except ValueError:
+                                return {'success': False, 'error': 'INVALID_AMOUNT', 'error_code': 400}
+                        
+                        logger.info(f"[QuantumCmd-L1] ✓ User input collected interactively: {user_email}, {target_email}, {amount_val}")
+                    
+                    except (EOFError, RuntimeError, KeyboardInterrupt) as e:
+                        logger.warning(f"[QuantumCmd-L1] input() failed: {e} - returning form_fields")
+                        return {
+                            'success': False,
+                            'error': 'INTERACTIVE_FORM_REQUIRED',
+                            'command': 'quantum/transaction',
+                            'mode': 'interactive',
+                            'form_fields': [
+                                {'name': 'user_email', 'type': 'email', 'label': 'Your Email', 'required': True, 'placeholder': 'alice@example.com'},
+                                {'name': 'password', 'type': 'password', 'label': 'Password', 'required': True},
+                                {'name': 'target_email', 'type': 'email', 'label': 'Target Email', 'required': True},
+                                {'name': 'target_identifier', 'type': 'text', 'label': 'Target ID', 'required': True},
+                                {'name': 'amount', 'type': 'number', 'label': 'Amount (QTCL)', 'required': True, 'min': 0.001}
+                            ]
+                        }
+                else:
+                    # No TTY - we're in HTTP/web context, return form fields
+                    logger.info("[QuantumCmd-L1] No TTY detected - returning form_fields for HTTP UI")
                     return {
                         'success': False,
                         'error': 'INTERACTIVE_FORM_REQUIRED',
