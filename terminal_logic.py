@@ -4782,102 +4782,87 @@ class QuantumCommandHandlers:
                 amount_val = None
             
             # ══════════════════════════════════════════════════════════════════════════════
-            # LAYER 1: USER INPUT COLLECTION (Interactive Mode)
+            # LAYER 1: USER INPUT COLLECTION (True Interactive Mode - Step by Step)
             # ══════════════════════════════════════════════════════════════════════════════
-            if interactive or (not all([user_email, password, target_email, target_identifier, amount_val])):
-                logger.info("[QuantumCmd-L1] LAYER 1: User Input Collection - Starting interactive mode")
+            
+            # Track which fields we have and which we're missing
+            fields_needed = [
+                ('user_email', 'Your email', 'email'),
+                ('password', 'Password', 'password'),
+                ('target_email', 'Target email', 'email'),
+                ('target_identifier', 'Target ID (pseudoqubit or UID)', 'text'),
+                ('amount', 'Amount (QTCL)', 'number')
+            ]
+            
+            collected_fields = {
+                'user_email': user_email,
+                'password': password,
+                'target_email': target_email,
+                'target_identifier': target_identifier,
+                'amount': amount_val
+            }
+            
+            # Find first missing field
+            next_missing = None
+            step = 0
+            for i, (field_name, field_label, field_type) in enumerate(fields_needed):
+                step = i + 1
+                if not collected_fields[field_name]:
+                    next_missing = (field_name, field_label, field_type, step, len(fields_needed))
+                    break
+            
+            # If we're missing a field and in interactive mode, return prompt for that field
+            if interactive and next_missing:
+                field_name, field_label, field_type, step, total = next_missing
                 
-                # Check if stdin is a real terminal (TTY) - only prompt if true
-                import sys
-                stdin_is_tty = hasattr(sys.stdin, 'isatty') and sys.stdin.isatty()
+                # Build the command to resubmit with this field filled
+                current_params = []
+                if user_email:
+                    current_params.append(f"--user_email={user_email}")
+                if password:
+                    current_params.append(f"--password={password}")
+                if target_email:
+                    current_params.append(f"--target_email={target_email}")
+                if target_identifier:
+                    current_params.append(f"--target_identifier={target_identifier}")
+                if amount_val:
+                    current_params.append(f"--amount={amount_val}")
                 
-                logger.info(f"[QuantumCmd-L1] stdin.isatty()={stdin_is_tty}")
+                logger.info(f"[QuantumCmd-L1] Step {step}/{total}: Prompting for {field_name}")
                 
-                # Only try input() if we have a real terminal
-                if stdin_is_tty:
-                    logger.info("[QuantumCmd-L1] Real TTY detected - prompting user interactively")
-                    try:
-                        if not user_email:
-                            user_email = input("📧 Your email: ").strip()
-                        if not password:
-                            password = input("🔐 Password: ").strip()
-                        if not target_email:
-                            target_email = input("📧 Target email: ").strip()
-                        if not target_identifier:
-                            target_identifier = input("🎯 Target ID (pseudoqubit or UID): ").strip()
-                        if not amount_val:
-                            try:
-                                amount_val = float(input("💰 Amount (QTCL): ").strip())
-                            except ValueError:
-                                return {'success': False, 'error': 'INVALID_AMOUNT', 'error_code': 400}
-                        
-                        logger.info(f"[QuantumCmd-L1] ✓ User input collected interactively: {user_email}, {target_email}, {amount_val}")
+                prompt_emoji = {'email': '📧', 'password': '🔐', 'number': '💰'}.get(field_type, '🎯')
+                
+                return {
+                    'success': False,
+                    'status': 'collecting_input',
+                    'step': step,
+                    'total_steps': total,
+                    'command': 'quantum/transaction',
+                    'mode': 'interactive',
+                    'progress': f"[{'█' * (step-1)}{'░' * (total-step+1)}] Step {step}/{total}",
                     
-                    except (EOFError, RuntimeError, KeyboardInterrupt) as e:
-                        logger.warning(f"[QuantumCmd-L1] input() failed: {e} - returning form_fields")
-                        return {
-                            'success': False,
-                            'error': 'INTERACTIVE_FORM_REQUIRED',
-                            'command': 'quantum/transaction',
-                            'mode': 'interactive',
-                            'form_fields': [
-                                {'name': 'user_email', 'type': 'email', 'label': 'Your Email', 'required': True, 'placeholder': 'alice@example.com'},
-                                {'name': 'password', 'type': 'password', 'label': 'Password', 'required': True},
-                                {'name': 'target_email', 'type': 'email', 'label': 'Target Email', 'required': True},
-                                {'name': 'target_identifier', 'type': 'text', 'label': 'Target ID', 'required': True},
-                                {'name': 'amount', 'type': 'number', 'label': 'Amount (QTCL)', 'required': True, 'min': 0.001}
-                            ]
-                        }
-                else:
-                    # No TTY - we're in HTTP/web context, return form fields
-                    logger.info("[QuantumCmd-L1] No TTY detected - returning form_fields for HTTP UI")
-                    return {
-                        'success': False,
-                        'error': 'INTERACTIVE_FORM_REQUIRED',
-                        'command': 'quantum/transaction',
-                        'mode': 'interactive',
-                        'form_fields': [
-                            {
-                                'name': 'user_email',
-                                'type': 'email',
-                                'label': 'Your Email',
-                                'required': True,
-                                'placeholder': 'alice@example.com'
-                            },
-                            {
-                                'name': 'password',
-                                'type': 'password',
-                                'label': 'Password',
-                                'required': True,
-                                'placeholder': 'SecurePassword123!@#'
-                            },
-                            {
-                                'name': 'target_email',
-                                'type': 'email',
-                                'label': 'Target Email',
-                                'required': True,
-                                'placeholder': 'bob@example.com'
-                            },
-                            {
-                                'name': 'target_identifier',
-                                'type': 'text',
-                                'label': 'Target ID (pseudoqubit_id or UID)',
-                                'required': True,
-                                'placeholder': 'pseud_bob456'
-                            },
-                            {
-                                'name': 'amount',
-                                'type': 'number',
-                                'label': 'Amount (QTCL)',
-                                'required': True,
-                                'placeholder': '500.0',
-                                'min': 0.001,
-                                'step': 0.001
-                            }
-                        ],
-                        'http_status': 400,
-                        'error_code': 'INTERACTIVE_FORM_REQUIRED'
-                    }
+                    # Frontend uses this to render an input box
+                    'input_prompt': {
+                        'message': f"{prompt_emoji} {field_label}: ",
+                        'field_name': field_name,
+                        'field_type': field_type,
+                        'placeholder': {
+                            'user_email': 'alice@example.com',
+                            'password': 'SecurePassword123!@#',
+                            'target_email': 'bob@example.com',
+                            'target_identifier': 'pseud_bob456',
+                            'amount': '500.0'
+                        }.get(field_name, ''),
+                        'current_params': current_params,
+                        'auto_resubmit': True,  # Auto-resubmit when user enters value
+                        'mask_input': field_type == 'password'  # Hide password input
+                    },
+                    
+                    'error_code': 'COLLECTING_INPUT'
+                }
+            
+            # If we get here, we have ALL parameters - continue to L1B-L6 with full display!
+            logger.info("[QuantumCmd-L1] ✓ All parameters collected - proceeding to L1B")
             
             # ══════════════════════════════════════════════════════════════════════════════
             # LAYER 1B: PARAMETER VALIDATION
