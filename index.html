@@ -1066,22 +1066,21 @@
         async function executeCommand(cmd) {
             log(`qtcl> ${cmd}`);
             
-            // CHECK FIRST: If we're waiting for a prompt response, handle it BEFORE parsing as command
+            // CHECK FIRST: If we're waiting for a prompt response, capture it as field value
             if (window._pendingInteractivePrompt) {
                 const prompt = window._pendingInteractivePrompt;
-                const fieldName = prompt.input_prompt.field_name;
+                const fieldName = prompt.fieldName;
                 const value = cmd;  // The whole input is the value
                 
-                // Build the next command with the provided value
-                const baseCmd = prompt.command;
+                const baseCmd = prompt.baseCommand;
                 const newCommand = `${baseCmd} --${fieldName}=${value}`;
                 
-                log(`📝 Submitting: ${fieldName}=${value}`);
+                log(`✓ ${fieldName} = ${value}`);
                 
                 // Clear the pending prompt
                 window._pendingInteractivePrompt = null;
                 
-                // Recursively execute the next command
+                // Recursively execute
                 await executeCommand(newCommand);
                 return;
             }
@@ -1090,57 +1089,70 @@
             const args = cmd.trim().split(' ');
             const command = args[0].toLowerCase();
             
-            // Try to execute via API/CommandExecutor if available
-            if (window.commandExecutor && command !== 'help' && command !== 'login' && command !== 'logout' && command !== 'status' && command !== 'dashboard' && command !== 'whoami' && command !== 'clear') {
+            // If not a local command, try API
+            const localCommands = ['help', 'login', 'logout', 'status', 'dashboard', 'whoami', 'clear'];
+            if (!localCommands.includes(command)) {
                 try {
-                    const result = await window.commandExecutor.execute(cmd);
-                    if (result.status === 'success') {
-                        if (result.output) {
-                            log(JSON.stringify(result.output, null, 2), 'success');
-                        }
-                        // Clear any pending prompt
-                        window._pendingInteractivePrompt = null;
-                    } else if (result.status === 'input_prompt') {
-                        // Display the prompt
-                        if (result.input_prompt && result.input_prompt.message) {
-                            log(result.input_prompt.message, 'info');
-                        }
-                        if (result.progress) {
-                            log(result.progress, 'info');
+                    console.log('[Execute] Calling API for:', cmd);
+                    const response = await fetch('/api/execute', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${localStorage.getItem('authToken') || ''}`
+                        },
+                        body: JSON.stringify({ command: cmd })
+                    });
+                    
+                    const data = await response.json();
+                    console.log('[Execute] API Response:', data);
+                    
+                    // Check for interactive prompt
+                    if (data.status === 'collecting_input' && data.input_prompt) {
+                        log(data.input_prompt.message, 'info');
+                        if (data.progress) {
+                            log(data.progress, 'info');
                         }
                         
-                        // Store the prompt info so next input is captured as the value
+                        // Store prompt info for next input
                         window._pendingInteractivePrompt = {
-                            command: cmd,
-                            input_prompt: result.input_prompt,
-                            next_command_template: result.next_command
+                            baseCommand: cmd,
+                            fieldName: data.input_prompt.field_name
                         };
-                        log('⏳ Waiting for input...', 'info');
-                    } else {
-                        log(`✗ ${result.error || 'Command failed'}`, 'error');
-                        window._pendingInteractivePrompt = null;
+                        
+                        log('⏳ Enter value:', 'info');
+                        return;
                     }
+                    
+                    // Success response
+                    if (data.status === 'success' || data.result) {
+                        const output = data.output || (data.result ? JSON.stringify(data.result) : 'Done');
+                        log(output, 'success');
+                        return;
+                    }
+                    
+                    // Error response
+                    log(`✗ ${data.error || 'Error'}`, 'error');
                     return;
+                    
                 } catch (error) {
-                    console.error('CommandExecutor error:', error);
+                    console.error('[Execute] API Error:', error);
                     log(`✗ API Error: ${error.message}`, 'error');
-                    window._pendingInteractivePrompt = null;
                     return;
                 }
             }
             
-            // Local command handling
+            // Local commands
             switch (command) {
                 case 'help':
                     log('Available commands:', 'info');
                     log('  help              - Show this help message');
-                    log('  login [user]      - Login to QTCL');
+                    log('  login             - Login to QTCL');
                     log('  logout            - Logout from QTCL');
                     log('  whoami            - Show current user');
                     log('  status            - Show system status');
                     log('  dashboard         - Load user dashboard');
                     log('  clear             - Clear terminal');
-                    log('  (use category/action --flag=value for advanced commands)');
+                    log('  quantum/transaction --interactive - Interactive quantum transaction');
                     break;
                     
                 case 'login':
@@ -1190,9 +1202,7 @@
                     break;
                     
                 default:
-                    if (command.length > 0) {
-                        log(`✗ Unknown command: '${command}'. Type 'help' for available commands`, 'error');
-                    }
+                    log(`✗ Unknown command: '${command}'. Type 'help' for available commands`, 'error');
             }
         }
         
