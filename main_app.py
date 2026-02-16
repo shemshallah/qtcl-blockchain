@@ -1271,8 +1271,20 @@ def initialize_app(app, socketio=None):
         logger.info(f"[WebSocket] Execute: {cmd}")
         
         try:
+            if not cmd:
+                emit('command_result', {
+                    'status': 'error',
+                    'error': 'No command provided'
+                })
+                return
+            
+            # Parse command properly
+            parts = cmd.split()
+            cmd_name = parts[0]
+            args = parts[1:] if len(parts) > 1 else []
+            
             # Execute the command
-            result = GlobalCommandRegistry.execute_command(cmd.split()[0], *cmd.split()[1:])
+            result = GlobalCommandRegistry.execute_command(cmd_name, *args)
             
             # Check if this is an interactive prompt request
             if result.get('status') == 'collecting_input' and result.get('input_prompt'):
