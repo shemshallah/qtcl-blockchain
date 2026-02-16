@@ -118,6 +118,21 @@ except ImportError:
     NUMPY_AVAILABLE=False
     SCIPY_AVAILABLE=False
 
+# ═════════════════════════════════════════════════════════════════════════════════════════════════════════
+# BOOTSTRAP GLOBALS INTEGRATION - Access unified system registry
+# ═════════════════════════════════════════════════════════════════════════════════════════════════════════
+try:
+    from wsgi_config import GLOBALS
+    GLOBALS_AVAILABLE=True
+    logging.info("[QuantumAPI] ✓ GLOBALS bootstrap system imported")
+except ImportError:
+    GLOBALS_AVAILABLE=False
+    logging.warning("[QuantumAPI] ⚠ GLOBALS not available - will use direct imports")
+    class DummyGLOBALS:
+        QUANTUM=None
+        DB=None
+    GLOBALS=DummyGLOBALS()
+
 getcontext().prec=32
 logger=logging.getLogger(__name__)
 

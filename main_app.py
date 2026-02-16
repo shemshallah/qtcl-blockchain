@@ -83,6 +83,55 @@ except Exception as import_error:
 QUANTUM_SYSTEM_MANAGER_AVAILABLE = True
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
+# BOOTSTRAP GLOBALS INTEGRATION - THE AUTHORITATIVE SYSTEM REGISTRY
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# Import the unified bootstrap system from wsgi_config
+# This is CRITICAL - GLOBALS is how all components find each other
+
+try:
+    from wsgi_config import GLOBALS, bootstrap_systems, bootstrap_heartbeat, GLOBAL_STATE
+    BOOTSTRAP_INTEGRATION_AVAILABLE = True
+    logger.info("[Bootstrap] ✓ GLOBALS bootstrap system imported")
+except ImportError as e:
+    BOOTSTRAP_INTEGRATION_AVAILABLE = False
+    logger.error(f"[Bootstrap] ✗ CRITICAL: Could not import bootstrap system: {e}")
+    # Create dummy if import fails
+    class DummyGLOBALS:
+        def register(self, *args, **kwargs): pass
+        def get(self, key, default=None): return default
+        DB=None
+        QUANTUM=None
+        COMMAND_PROCESSOR=None
+    GLOBALS = DummyGLOBALS()
+
+# Also import old-style for backward compatibility
+try:
+    from wsgi_config import GLOBAL_REGISTRY, Layer, set_user, set_db, set_flask_app
+    GLOBAL_INTEGRATION_AVAILABLE = True
+    logger.info("[Global] ✓ Legacy global registry imported")
+except ImportError as e:
+    GLOBAL_INTEGRATION_AVAILABLE = False
+    logger.warning(f"[Global] ⚠ Could not import legacy global integration: {e}")
+    # Dummy implementations
+    class DummyRegistry:
+        def register(self, *args, **kwargs): pass
+        def call(self, name, *args, **kwargs): return None
+    GLOBAL_REGISTRY = DummyRegistry()
+    class DummyState:
+        user_id = None
+        token = None
+    GLOBAL_STATE = DummyState()
+    class Layer:
+        LAYER_0 = "0"
+        LAYER_1 = "1"
+        LAYER_2 = "2"
+        LAYER_3 = "3"
+        LAYER_4 = "4"
+    def set_user(u, t=None): pass
+    def set_db(d): pass
+    def set_flask_app(a): pass
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
 # ENSURE REQUIRED PACKAGES
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
@@ -702,6 +751,122 @@ def create_app():
     except Exception as e:
         logger.error(f"[Init] ✗ Database initialization failed: {e}", exc_info=True)
         app._db_initialized = False
+    
+    # ═════════════════════════════════════════════════════════════════════════════════
+    # BOOTSTRAP ALL SYSTEMS WITH GLOBALS REGISTRY
+    # ═════════════════════════════════════════════════════════════════════════════════
+    # This is THE critical integration point - register everything
+    
+    if BOOTSTRAP_INTEGRATION_AVAILABLE:
+        try:
+            logger.info("[Bootstrap] ╔════════════════════════════════════════════════╗")
+            logger.info("[Bootstrap] ║  REGISTERING ALL SYSTEMS WITH GLOBALS REGISTRY  ║")
+            logger.info("[Bootstrap] ╚════════════════════════════════════════════════╝")
+            
+            # Register database systems
+            GLOBALS.register('DB', db_manager, 'DATABASE', 'Database connection manager')
+            GLOBALS.register('DB_TRANSACTION_MANAGER', TransactionManager() if 'TransactionManager' in dir() else db_manager, 'DATABASE', 'Transaction manager')
+            GLOBALS.register('DB_BUILDER', DatabaseBuilderManager() if 'DatabaseBuilderManager' in dir() else None, 'DATABASE', 'Database builder and migrations')
+            
+            # Register Flask application
+            GLOBALS.register('FLASK_APP', app, 'FRAMEWORK', 'Flask application instance')
+            
+            # Register quantum system if available
+            if QUANTUM_SYSTEM_MANAGER_AVAILABLE:
+                try:
+                    # Try to get quantum system from wsgi_config
+                    from wsgi_config import quantum_lattice_module
+                    if quantum_lattice_module:
+                        GLOBALS.register('QUANTUM', quantum_lattice_module, 'QUANTUM', 'Quantum lattice control system')
+                        logger.info("[Bootstrap] ✓ Quantum system registered")
+                except:
+                    logger.warning("[Bootstrap] ⚠ Quantum system not available")
+            
+            # Register command systems
+            if TERMINAL_ORCHESTRATOR_AVAILABLE:
+                try:
+                    # Register command registry and processor
+                    from terminal_logic import GlobalCommandRegistry, COMMAND_PROCESSOR
+                    GLOBALS.register('COMMAND_REGISTRY', GlobalCommandRegistry, 'COMMANDS', 'Global command registry')
+                    GLOBALS.register('COMMAND_PROCESSOR', COMMAND_PROCESSOR, 'COMMANDS', 'Command execution processor')
+                    
+                    # Bootstrap the command registry
+                    if hasattr(GlobalCommandRegistry, 'bootstrap'):
+                        GlobalCommandRegistry.bootstrap()
+                    
+                    logger.info("[Bootstrap] ✓ Command systems registered")
+                except Exception as e:
+                    logger.warning(f"[Bootstrap] ⚠ Command system registration failed: {e}")
+            
+            # Register API modules
+            try:
+                import core_api
+                GLOBALS.register('CORE_API', core_api, 'API', 'Core API module')
+            except:
+                logger.debug("[Bootstrap] core_api not available")
+            
+            try:
+                import quantum_api
+                GLOBALS.register('QUANTUM_API', quantum_api, 'API', 'Quantum API module')
+            except:
+                logger.debug("[Bootstrap] quantum_api not available")
+            
+            try:
+                import blockchain_api
+                GLOBALS.register('BLOCKCHAIN_API', blockchain_api, 'API', 'Blockchain API module')
+            except:
+                logger.debug("[Bootstrap] blockchain_api not available")
+            
+            try:
+                import oracle_api
+                GLOBALS.register('ORACLE_API', oracle_api, 'API', 'Oracle integration API')
+            except:
+                logger.debug("[Bootstrap] oracle_api not available")
+            
+            # Start heartbeat systems
+            bootstrap_heartbeat()
+            
+            # Log bootstrap summary
+            bootstrap_summary = GLOBALS.summary()
+            logger.info(f"[Bootstrap] ✓ System registration complete:")
+            logger.info(f"[Bootstrap]   Total registered: {bootstrap_summary['total_registered']}")
+            logger.info(f"[Bootstrap]   Categories: {list(bootstrap_summary['categories'].keys())}")
+            
+            # Health check
+            health = GLOBALS.health_check()
+            logger.info(f"[Bootstrap] ✓ System health: {health['overall_status']}")
+            logger.info(f"[Bootstrap]   Components operational: {health['components_healthy']}/{health['components_total']}")
+            
+        except Exception as e:
+            logger.error(f"[Bootstrap] ✗ Failed to register systems: {e}", exc_info=True)
+    
+    # ═════════════════════════════════════════════════════════════════════════════════
+    # REGISTER FUNCTIONS TO GLOBAL REGISTRY (Layer 1 & 2 functions)
+    # Legacy system - kept for backward compatibility
+    # ═════════════════════════════════════════════════════════════════════════════════
+    
+    if GLOBAL_INTEGRATION_AVAILABLE:
+        try:
+            # Register Layer 1 (Auth/Validation) functions
+            GLOBAL_REGISTRY.register('generate_token', generate_token, 'main_app', Layer.LAYER_1, 'auth')
+            GLOBAL_REGISTRY.register('verify_token', verify_token, 'main_app', Layer.LAYER_1, 'auth')
+            GLOBAL_REGISTRY.register('validate_password_strength', validate_password_strength, 'main_app', Layer.LAYER_1, 'validation')
+            GLOBAL_REGISTRY.register('validate_email', validate_email, 'main_app', Layer.LAYER_1, 'validation')
+            GLOBAL_REGISTRY.register('check_rate_limit', check_rate_limit, 'main_app', Layer.LAYER_1, 'validation')
+            GLOBAL_REGISTRY.register('sanitize_input', sanitize_input, 'main_app', Layer.LAYER_1, 'validation')
+            
+            # Register Layer 2 (Transaction/Ledger) functions
+            # (These will be available for api_gateway to call)
+            
+            # Set global state
+            set_flask_app(app)
+            set_db(db_manager.pool if hasattr(db_manager, 'pool') else None)
+            GLOBAL_STATE.layer1_ready = True
+            GLOBAL_STATE.layer2_ready = True
+            
+            logger.info(f"[Global] ✓ Registered {len(GLOBAL_REGISTRY.functions)} functions to global registry")
+        except Exception as e:
+            logger.warning(f"[Global] Failed to register functions: {e}")
     
     logger.info(f"[App] Flask application created - Version {Config.API_VERSION}")
     

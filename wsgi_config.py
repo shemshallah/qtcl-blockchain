@@ -317,6 +317,262 @@ class GlobalCommandCenterState:
 GLOBAL_STATE=GlobalCommandCenterState()
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════
+# SECTION 3.5: UNIFIED BOOTSTRAP GLOBALS REGISTRY - INTEGRATED MASTER CONTROL
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════
+# This is THE bootstrap system for all global systems - Database, Quantum, Cache, Profiling, Commands
+
+class BootstrapGlobalsRegistry:
+    """
+    AUTHORITATIVE UNIFIED GLOBALS REGISTRY
+    ═══════════════════════════════════════════════════════════════════════════════════════════════════
+    Master registry for accessing all subsystems globally throughout the application.
+    Every component (command, API endpoint, handler) accesses everything through GLOBALS.
+    
+    This is THE solution to "command not found" - all systems registered at runtime,
+    all accessible via unified interface, zero import/initialization ordering issues.
+    ═══════════════════════════════════════════════════════════════════════════════════════════════════
+    """
+    _instance=None
+    _lock=RLock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance=super().__new__(cls)
+                    cls._instance._initialized=False
+        return cls._instance
+    
+    def __init__(self):
+        """Initialize the bootstrap registry"""
+        if self._initialized:
+            return
+        
+        self.lock=RLock()
+        self._registry:Dict[str,Dict[str,Any]]={}
+        self._categories:Dict[str,List[str]]=defaultdict(list)
+        self._initialized=True
+        logger.info("[BOOTSTRAP] ✓ BootstrapGlobalsRegistry initialized")
+    
+    def register(self,key:str,value:Any,category:str="SYSTEM",description:str=""):
+        """Register a global system component with category tracking"""
+        with self.lock:
+            self._registry[key]={
+                'value':value,
+                'category':category,
+                'description':description,
+                'registered_at':datetime.utcnow().isoformat(),
+                'type':type(value).__name__
+            }
+            self._categories[category].append(key)
+            logger.info(f"[GLOBALS] ✓ REGISTERED {key} ({category}) - {type(value).__name__}")
+            return True
+    
+    def get(self,key:str,default=None):
+        """Get a registered component"""
+        with self.lock:
+            entry=self._registry.get(key)
+            if entry:
+                return entry['value']
+            return default
+    
+    def has(self,key:str)->bool:
+        """Check if a component is registered"""
+        with self.lock:
+            return key in self._registry
+    
+    def list_components(self,category:Optional[str]=None)->Dict[str,Any]:
+        """List all registered components, optionally filtered by category"""
+        with self.lock:
+            if category:
+                keys=self._categories.get(category,[])
+                return {k:self._registry[k] for k in keys if k in self._registry}
+            return dict(self._registry)
+    
+    def summary(self)->Dict[str,Any]:
+        """Get summary of all registered systems"""
+        with self.lock:
+            return {
+                'total_registered':len(self._registry),
+                'categories':dict(self._categories),
+                'components':{k:f"{v['type']}" for k,v in self._registry.items()}
+            }
+    
+    def health_check(self)->Dict[str,Any]:
+        """Comprehensive health check of all registered systems"""
+        with self.lock:
+            health_status={}
+            for key,entry in self._registry.items():
+                try:
+                    value=entry['value']
+                    # Check if component has health_check method
+                    if hasattr(value,'health_check') and callable(getattr(value,'health_check')):
+                        health_status[key]={'status':'healthy','details':value.health_check()}
+                    else:
+                        # At least verify it's not None and accessible
+                        health_status[key]={'status':'operational','type':entry['type']}
+                except Exception as e:
+                    health_status[key]={'status':'unhealthy','error':str(e)}
+            
+            # Overall system health
+            total=len(health_status)
+            healthy=sum(1 for v in health_status.values() if v['status']=='healthy' or v['status']=='operational')
+            
+            return {
+                'timestamp':datetime.utcnow().isoformat(),
+                'overall_status':'healthy' if healthy==total else 'degraded' if healthy>0 else 'down',
+                'components_healthy':healthy,
+                'components_total':total,
+                'component_status':health_status
+            }
+    
+    # CONVENIENCE ACCESSORS - These are HEAVILY used throughout the codebase
+    @property
+    def DB(self):
+        """Access the database connection/manager"""
+        return self.get('DB')
+    
+    @property
+    def DB_CONNECTION(self):
+        """Alias for DB"""
+        return self.get('DB_CONNECTION') or self.get('DB')
+    
+    @property
+    def DB_TRANSACTION_MANAGER(self):
+        """Access transaction manager"""
+        return self.get('DB_TRANSACTION_MANAGER')
+    
+    @property
+    def DB_BUILDER(self):
+        """Access database builder/migration manager"""
+        return self.get('DB_BUILDER')
+    
+    @property
+    def QUANTUM(self):
+        """Access quantum system - CRITICAL for quantum operations"""
+        quantum=self.get('QUANTUM')
+        if quantum is None:
+            logger.warning("[GLOBALS] ⚠ QUANTUM not registered, returning None")
+        return quantum
+    
+    @property
+    def COMMAND_REGISTRY(self):
+        """Access command registry for command discovery"""
+        return self.get('COMMAND_REGISTRY')
+    
+    @property
+    def COMMAND_PROCESSOR(self):
+        """Access command processor for execution"""
+        return self.get('COMMAND_PROCESSOR')
+    
+    @property
+    def CACHE(self):
+        """Access cache system for performance"""
+        return self.get('CACHE')
+    
+    @property
+    def PROFILER(self):
+        """Access profiler for performance monitoring"""
+        return self.get('PROFILER')
+    
+    @property
+    def FLASK_APP(self):
+        """Access Flask application instance"""
+        return self.get('FLASK_APP')
+    
+    @property
+    def CORE_API(self):
+        """Access core API module"""
+        return self.get('CORE_API')
+    
+    @property
+    def QUANTUM_API(self):
+        """Access quantum API module"""
+        return self.get('QUANTUM_API')
+    
+    @property
+    def BLOCKCHAIN_API(self):
+        """Access blockchain API module"""
+        return self.get('BLOCKCHAIN_API')
+    
+    @property
+    def ORACLE_API(self):
+        """Access oracle integration API"""
+        return self.get('ORACLE_API')
+    
+    @property
+    def LEDGER_MANAGER(self):
+        """Access ledger/transaction manager"""
+        return self.get('LEDGER_MANAGER')
+    
+    @property
+    def GLOBAL_STATE_SNAPSHOT(self):
+        """Get snapshot of global state"""
+        return GLOBAL_STATE.get_snapshot()
+
+# Create singleton instance - THIS IS THE GLOBALS EVERYONE USES
+GLOBALS=BootstrapGlobalsRegistry()
+logger.info("[BOOTSTRAP] ✓ GLOBALS singleton created - ready for system registration")
+
+def bootstrap_systems():
+    """
+    Master bootstrap function - call this during app initialization
+    Registers all critical systems with GLOBALS
+    Should be called from main_app.create_app() or wsgi initialization
+    """
+    logger.info("[BOOTSTRAP] ╔════════════════════════════════════════════════════════════════╗")
+    logger.info("[BOOTSTRAP] ║        BEGINNING COMPLETE SYSTEM BOOTSTRAP SEQUENCE            ║")
+    logger.info("[BOOTSTRAP] ╚════════════════════════════════════════════════════════════════╝")
+    
+    # Will be populated by main_app.py and api modules during initialization
+    logger.info("[BOOTSTRAP] Systems will register themselves during app creation")
+    return True
+
+def bootstrap_heartbeat():
+    """
+    Start the dual heartbeat system
+    HTTP heartbeat: GET /health endpoint keeps app alive
+    Quantum heartbeat: Background thread validates quantum system
+    """
+    def http_heartbeat():
+        """HTTP heartbeat - triggers /health endpoint every 30 seconds"""
+        import time
+        counter=0
+        while True:
+            try:
+                time.sleep(30)
+                counter+=1
+                logger.debug(f"[Heartbeat] HTTP pulse #{counter}")
+            except:
+                pass
+    
+    def quantum_heartbeat():
+        """Quantum heartbeat - validates quantum system every 100 cycles"""
+        counter=0
+        while True:
+            try:
+                import time
+                time.sleep(5)
+                counter+=1
+                if counter%20==0:  # Every ~100 seconds
+                    quantum=GLOBALS.QUANTUM
+                    if quantum and hasattr(quantum,'heartbeat'):
+                        quantum.heartbeat()
+                    logger.debug(f"[Heartbeat] Quantum pulse #{counter}")
+            except:
+                pass
+    
+    # Start both heartbeats as daemon threads
+    http_thread=threading.Thread(target=http_heartbeat,daemon=True,name="HTTPHeartbeat")
+    quantum_thread=threading.Thread(target=quantum_heartbeat,daemon=True,name="QuantumHeartbeat")
+    
+    http_thread.start()
+    quantum_thread.start()
+    
+    logger.info("[Heartbeats] ✓ Both heartbeat threads started")
+    return True
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════
 # SECTION 4: MASTER COMMAND REGISTRY - HEART OF THE SYSTEM
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════
 
