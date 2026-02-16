@@ -1068,9 +1068,25 @@
         let isWaitingForPrompt = false;
         let currentField = '';
         
+        // Connection status
+        socket.on('connect', () => {
+            console.log('[Socket.io] Connected');
+            log('✓ WebSocket connected', 'success');
+        });
+        
+        socket.on('connect_error', (err) => {
+            console.error('[Socket.io] Connection error:', err);
+            log('✗ WebSocket connection error', 'error');
+        });
+        
+        socket.on('disconnect', (reason) => {
+            console.log('[Socket.io] Disconnected:', reason);
+            log('⚠ WebSocket disconnected', 'info');
+        });
+        
         socket.on('connected', (data) => {
-            console.log('[Socket.io] Connected:', data.sid);
-            log('✓ Connected to server', 'success');
+            console.log('[Socket.io] Server says connected:', data.sid);
+            log('✓ Server confirmed connection', 'success');
         });
         
         socket.on('prompt_required', (data) => {
@@ -1087,6 +1103,7 @@
         });
         
         socket.on('command_result', (data) => {
+            console.log('[Socket] Command result:', data);
             isWaitingForPrompt = false;
             if (data.status === 'success') {
                 log(JSON.stringify(data.result, null, 2), 'success');
@@ -1101,10 +1118,12 @@
         });
         
         async function executeCommand(cmd) {
+            console.log('[Execute] Command:', cmd);
             log(`qtcl> ${cmd}`);
             
             // If waiting for prompt, send as response not new command
             if (isWaitingForPrompt) {
+                console.log('[Execute] Sending prompt response');
                 socket.emit('prompt_response', {
                     field: currentField,
                     value: cmd
@@ -1113,6 +1132,7 @@
             }
             
             // Otherwise, execute as new command
+            console.log('[Execute] Emitting execute_command');
             socket.emit('execute_command', { command: cmd });
         }
         
