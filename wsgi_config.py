@@ -1120,42 +1120,22 @@ def create_command_center_blueprint()->Blueprint:
         except Exception as e:
             return jsonify({'error':str(e)}),500
     
-    return bp
-
-# ════════════════════════════════════════════════════════════════════════════════════════════════════════
-# SECTION 8: APPLICATION FACTORY
-# ════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 def create_app()->Flask:
     """Create Flask application"""
     app=Flask(__name__)
     app.config['JSON_SORT_KEYS']=False
     CORS(app)
-    
     bp=create_command_center_blueprint()
     app.register_blueprint(bp)
-    
     @app.route('/',methods=['GET'])
-    def root():
-        return jsonify({
-            'name':'QTCL Command Center','version':'5.0.0',
-            'commands':len(MASTER_REGISTRY.commands),'status':'operational',
-            'api_url':'/api','help_url':'/api/help','timestamp':datetime.utcnow().isoformat()
-        })
-    
+    def home():
+        return open(os.path.join(PROJECT_ROOT,'index.html')).read() if os.path.exists(os.path.join(PROJECT_ROOT,'index.html')) else '<html><body><h1>QTCL</h1><p><a href=/api>API</a></p></body></html>',200,{'Content-Type':'text/html'}
     @app.errorhandler(404)
-    def not_found(e):
-        return jsonify({'error':'Not found','status':'error'}),404
-    
+    def e404(e):return jsonify({'error':'not found'}),404
     @app.errorhandler(500)
-    def server_error(e):
-        return jsonify({'error':'Server error','status':'error','details':str(e)}),500
-    
+    def e500(e):return jsonify({'error':'error'}),500
     return app
-
-# ════════════════════════════════════════════════════════════════════════════════════════════════════════
-# SECTION 9: INITIALIZATION & STARTUP
-# ════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 def initialize_command_center()->None:
     """Initialize entire command center"""
