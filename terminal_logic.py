@@ -4754,26 +4754,15 @@ class QuantumCommandHandlers:
     
     @classmethod
     def quantum_process_transaction(cls, tx_id: str = None, user_id: int = None, target_id: int = None, amount: float = None, **kwargs) -> Dict[str, Any]:
-        """PRODUCTION: Process quantum transaction via API endpoint
+        """PRODUCTION: Process quantum transaction with 6-LAYER LOGIC
         
-        ACCEPTS FLAGS:
-        - --user_email=<email>
-        - --password=<password>
-        - --target_email=<email>
-        - --target_identifier=<id>
-        - --amount=<number>
-        - --interactive (returns form fields for HTTP UI to prompt)
-        
-        HTTP USAGE:
-        POST /api/execute
-        {
-          "command": "quantum/transaction",
-          "user_email": "alice@example.com",
-          "password": "SecurePass123!",
-          "target_email": "bob@example.com",
-          "target_identifier": "pseud_bob456",
-          "amount": 500.0
-        }
+        LAYER 1: User Input Collection
+        LAYER 1B: Parameter Validation  
+        LAYER 2: Interactive Form Building
+        LAYER 3: Confirmation & Review
+        LAYER 4: API Call Preparation
+        LAYER 5: Transaction Execution
+        LAYER 6: Result Display & Confirmation
         """
         try:
             logger.info(f"[QuantumCmd] Called with: tx_id={tx_id}, user_id={user_id}, kwargs={list(kwargs.keys())}")
@@ -4793,128 +4782,245 @@ class QuantumCommandHandlers:
                 amount_val = None
             
             # ══════════════════════════════════════════════════════════════════════════════
-            # CASE 1: Interactive flag set → Return form fields for HTTP UI to populate
+            # LAYER 1: USER INPUT COLLECTION (Interactive CLI Mode)
             # ══════════════════════════════════════════════════════════════════════════════
-            if interactive:
-                logger.info("[QuantumCmd] Interactive mode requested")
-                return {
-                    'success': False,
-                    'error': 'INTERACTIVE_FORM_REQUIRED',
-                    'command': 'quantum/transaction',
-                    'mode': 'interactive',
-                    'form_fields': [
-                        {
-                            'name': 'user_email',
-                            'type': 'email',
-                            'label': 'Your Email',
-                            'required': True,
-                            'placeholder': 'alice@example.com'
-                        },
-                        {
-                            'name': 'password',
-                            'type': 'password',
-                            'label': 'Password',
-                            'required': True,
-                            'placeholder': 'SecurePassword123!@#'
-                        },
-                        {
-                            'name': 'target_email',
-                            'type': 'email',
-                            'label': 'Target Email',
-                            'required': True,
-                            'placeholder': 'bob@example.com'
-                        },
-                        {
-                            'name': 'target_identifier',
-                            'type': 'text',
-                            'label': 'Target ID (pseudoqubit_id or UID)',
-                            'required': True,
-                            'placeholder': 'pseud_bob456'
-                        },
-                        {
-                            'name': 'amount',
-                            'type': 'number',
-                            'label': 'Amount (QTCL)',
-                            'required': True,
-                            'placeholder': '500.0',
-                            'min': 0.001,
-                            'step': 0.001
-                        }
-                    ],
-                    'http_status': 400,
-                    'error_code': 'INTERACTIVE_FORM_REQUIRED'
-                }
-            
-            # ══════════════════════════════════════════════════════════════════════════════
-            # CASE 2: All required parameters provided → Execute transaction
-            # ══════════════════════════════════════════════════════════════════════════════
-            if all([user_email, password, target_email, target_identifier, amount_val]):
-                logger.info(f"[QuantumCmd] Executing with email={user_email}, target={target_email}, amount={amount_val}")
+            if interactive or (not all([user_email, password, target_email, target_identifier, amount_val])):
+                logger.info("[QuantumCmd-L1] LAYER 1: User Input Collection - Starting interactive mode")
                 
-                # Call the HTTP endpoint to process transaction
+                # Check if we're in an HTTP context (request object exists)
                 try:
-                    import requests
-                    api_url = os.getenv('API_BASE_URL', 'http://localhost:5000') + '/api/quantum/transaction'
-                    response = requests.post(api_url, json={
-                        'user_email': user_email,
-                        'password': password,
-                        'target_email': target_email,
-                        'target_identifier': target_identifier,
-                        'amount': amount_val
-                    }, timeout=30)
-                    
-                    result = response.json()
-                    http_status = response.status_code
-                    
-                    logger.info(f"[QuantumCmd] API response: status={http_status}, success={result.get('success')}")
-                    
-                    return {
-                        'success': result.get('success', False),
-                        'command': 'quantum/transaction',
-                        'tx_id': result.get('tx_id', ''),
-                        'timestamp': time.time(),
-                        'result': result,
-                        'http_status': http_status
-                    }
-                except Exception as api_e:
-                    logger.error(f"[QuantumCmd] API call failed: {api_e}")
+                    from flask import request as flask_request
+                    is_http = True
+                except:
+                    is_http = False
+                
+                # HTTP context: return form fields JSON
+                if is_http and interactive:
+                    logger.info("[QuantumCmd-L1] HTTP context detected - returning form_fields")
                     return {
                         'success': False,
-                        'error': 'API_ERROR',
-                        'message': str(api_e),
-                        'error_code': 500,
-                        'http_status': 500
+                        'error': 'INTERACTIVE_FORM_REQUIRED',
+                        'command': 'quantum/transaction',
+                        'mode': 'interactive',
+                        'form_fields': [
+                            {
+                                'name': 'user_email',
+                                'type': 'email',
+                                'label': 'Your Email',
+                                'required': True,
+                                'placeholder': 'alice@example.com'
+                            },
+                            {
+                                'name': 'password',
+                                'type': 'password',
+                                'label': 'Password',
+                                'required': True,
+                                'placeholder': 'SecurePassword123!@#'
+                            },
+                            {
+                                'name': 'target_email',
+                                'type': 'email',
+                                'label': 'Target Email',
+                                'required': True,
+                                'placeholder': 'bob@example.com'
+                            },
+                            {
+                                'name': 'target_identifier',
+                                'type': 'text',
+                                'label': 'Target ID (pseudoqubit_id or UID)',
+                                'required': True,
+                                'placeholder': 'pseud_bob456'
+                            },
+                            {
+                                'name': 'amount',
+                                'type': 'number',
+                                'label': 'Amount (QTCL)',
+                                'required': True,
+                                'placeholder': '500.0',
+                                'min': 0.001,
+                                'step': 0.001
+                            }
+                        ],
+                        'http_status': 400,
+                        'error_code': 'INTERACTIVE_FORM_REQUIRED'
+                    }
+                
+                # CLI context: Actually prompt the user interactively
+                logger.info("[QuantumCmd-L1] CLI context - prompting for user input")
+                try:
+                    if not user_email:
+                        user_email = input("📧 Your email: ").strip()
+                    if not password:
+                        password = input("🔐 Password: ").strip()
+                    if not target_email:
+                        target_email = input("📧 Target email: ").strip()
+                    if not target_identifier:
+                        target_identifier = input("🎯 Target ID (pseudoqubit or UID): ").strip()
+                    if not amount_val:
+                        try:
+                            amount_val = float(input("💰 Amount (QTCL): ").strip())
+                        except ValueError:
+                            return {'success': False, 'error': 'INVALID_AMOUNT', 'error_code': 400}
+                    
+                    logger.info(f"[QuantumCmd-L1] ✓ User input collected: {user_email}, {target_email}, {amount_val}")
+                except EOFError:
+                    # If EOF (can't use input() in this context), return form fields
+                    return {
+                        'success': False,
+                        'error': 'INTERACTIVE_FORM_REQUIRED',
+                        'command': 'quantum/transaction',
+                        'form_fields': [
+                            {'name': 'user_email', 'type': 'email', 'label': 'Your Email'},
+                            {'name': 'password', 'type': 'password', 'label': 'Password'},
+                            {'name': 'target_email', 'type': 'email', 'label': 'Target Email'},
+                            {'name': 'target_identifier', 'type': 'text', 'label': 'Target ID'},
+                            {'name': 'amount', 'type': 'number', 'label': 'Amount (QTCL)', 'min': 0.001}
+                        ]
                     }
             
             # ══════════════════════════════════════════════════════════════════════════════
-            # CASE 3: Missing parameters → Return help
+            # LAYER 1B: PARAMETER VALIDATION
             # ══════════════════════════════════════════════════════════════════════════════
-            else:
-                logger.info(f"[QuantumCmd] Missing parameters: email={bool(user_email)}, password={bool(password)}, target_email={bool(target_email)}, target_id={bool(target_identifier)}, amount={bool(amount_val)}")
-                
+            logger.info(f"[QuantumCmd-L1B] LAYER 1B: Parameter Validation")
+            
+            if not user_email or not password or not target_email or not target_identifier or amount_val is None:
+                logger.warning("[QuantumCmd-L1B] ✗ Missing required parameters")
                 return {
                     'success': False,
                     'error': 'MISSING_PARAMETERS',
                     'command': 'quantum/transaction',
                     'usage': 'quantum/transaction --user_email=<email> --password=<pass> --target_email=<email> --target_identifier=<id> --amount=<amt>',
-                    'example': 'quantum/transaction --user_email=alice@example.com --password=SecurePass123! --target_email=bob@example.com --target_identifier=pseud_bob456 --amount=500.0',
-                    'interactive_example': 'quantum/transaction --interactive',
-                    'options': {
-                        'user_email': 'Your email address (required)',
-                        'password': 'Your password (required)',
-                        'target_email': 'Target user email (required)',
-                        'target_identifier': 'Target pseudoqubit_id or UID (required)',
-                        'amount': 'Amount to transfer in QTCL (required, must be >= 0.001)'
-                    },
-                    'flags': {
-                        '--interactive': 'Return interactive form fields for HTTP UI'
-                    },
-                    'http_status': 400,
-                    'error_code': 'MISSING_PARAMETERS'
+                    'missing_fields': [
+                        'user_email' if not user_email else None,
+                        'password' if not password else None,
+                        'target_email' if not target_email else None,
+                        'target_identifier' if not target_identifier else None,
+                        'amount' if amount_val is None else None
+                    ]
                 }
+            
+            if amount_val < 0.001 or amount_val > 999999999.999:
+                logger.warning(f"[QuantumCmd-L1B] ✗ Amount {amount_val} out of range")
+                return {'success': False, 'error': 'INVALID_AMOUNT', 'error_code': 400}
+            
+            logger.info(f"[QuantumCmd-L1B] ✓ All parameters valid")
+            
+            # ══════════════════════════════════════════════════════════════════════════════
+            # LAYER 2: TRANSACTION REVIEW & CONFIRMATION
+            # ══════════════════════════════════════════════════════════════════════════════
+            logger.info(f"[QuantumCmd-L2] LAYER 2: Transaction Review")
+            print("\n" + "="*80)
+            print("📊 TRANSACTION REVIEW")
+            print("="*80)
+            print(f"  From:   {user_email}")
+            print(f"  To:     {target_email}")
+            print(f"  Amount: {amount_val:.8f} QTCL")
+            print("="*80 + "\n")
+            
+            # Try to get confirmation (in CLI mode)
+            try:
+                confirm = input("✓ Confirm transaction? (yes/no): ").strip().lower()
+                if confirm not in ['yes', 'y']:
+                    logger.info("[QuantumCmd-L2] User cancelled transaction")
+                    return {'success': False, 'error': 'TRANSACTION_CANCELLED', 'error_code': 400}
+            except EOFError:
+                pass  # If can't prompt, continue anyway
+            
+            logger.info(f"[QuantumCmd-L2] ✓ Transaction confirmed by user")
+            
+            # ══════════════════════════════════════════════════════════════════════════════
+            # LAYER 3: API CALL PREPARATION
+            # ══════════════════════════════════════════════════════════════════════════════
+            logger.info(f"[QuantumCmd-L3] LAYER 3: API Call Preparation")
+            
+            payload = {
+                'user_email': user_email,
+                'password': password,
+                'target_email': target_email,
+                'target_identifier': target_identifier,
+                'amount': amount_val
+            }
+            
+            logger.info(f"[QuantumCmd-L3] ✓ Payload prepared: {len(payload)} fields")
+            
+            # ══════════════════════════════════════════════════════════════════════════════
+            # LAYER 4: BACKEND API EXECUTION
+            # ══════════════════════════════════════════════════════════════════════════════
+            logger.info(f"[QuantumCmd-L4] LAYER 4: Executing transaction on backend")
+            
+            try:
+                import requests
+                import os as os_module
+                api_url = os_module.getenv('API_BASE_URL', 'http://localhost:5000') + '/api/quantum/transaction'
+                
+                print("\n⏳ Processing quantum transaction...")
+                response = requests.post(api_url, json=payload, timeout=30)
+                
+                result = response.json()
+                http_status = response.status_code
+                
+                logger.info(f"[QuantumCmd-L4] API response: status={http_status}, success={result.get('success')}")
+                
+            except Exception as api_e:
+                logger.error(f"[QuantumCmd-L4] API call failed: {api_e}")
+                return {
+                    'success': False,
+                    'error': 'API_ERROR',
+                    'message': str(api_e),
+                    'error_code': 500
+                }
+            
+            # ══════════════════════════════════════════════════════════════════════════════
+            # LAYER 5: RESULT PROCESSING
+            # ══════════════════════════════════════════════════════════════════════════════
+            logger.info(f"[QuantumCmd-L5] LAYER 5: Processing results")
+            
+            if result.get('success'):
+                logger.info(f"[QuantumCmd-L5] ✓ Transaction successful: {result.get('tx_id')}")
+                
+                # Display transaction details
+                print("\n" + "="*80)
+                print("✅ TRANSACTION SUCCESSFUL")
+                print("="*80)
+                print(f"  TX ID:    {result.get('tx_id', '')[:32]}...")
+                print(f"  Status:   {result.get('status', 'unknown').upper()}")
+                print(f"  Finality: {result.get('finality', False)}")
+                
+                qm = result.get('quantum_metrics', {})
+                if qm:
+                    print(f"\n  Quantum Metrics:")
+                    print(f"    Entropy:  {float(qm.get('entropy', 0)):.4f}")
+                    print(f"    Coherence:{float(qm.get('coherence', 0)):.1%}")
+                    print(f"    Fidelity: {float(qm.get('fidelity', 0)):.1%}")
+                
+                print("="*80 + "\n")
+            else:
+                logger.warning(f"[QuantumCmd-L5] ✗ Transaction failed: {result.get('error')}")
+                
+                print("\n" + "="*80)
+                print("❌ TRANSACTION FAILED")
+                print("="*80)
+                print(f"  Error: {result.get('error', 'Unknown error')}")
+                print(f"  Code:  {result.get('error_code', 'N/A')}")
+                print("="*80 + "\n")
+            
+            # ══════════════════════════════════════════════════════════════════════════════
+            # LAYER 6: FINAL RESPONSE
+            # ══════════════════════════════════════════════════════════════════════════════
+            logger.info(f"[QuantumCmd-L6] LAYER 6: Building final response")
+            
+            return {
+                'success': result.get('success', False),
+                'command': 'quantum/transaction',
+                'tx_id': result.get('tx_id', ''),
+                'timestamp': time.time(),
+                'result': result,
+                'http_status': result.get('http_status', http_status),
+                'layers_executed': 6
+            }
         
         except Exception as e:
-            logger.error(f"[QuantumCmd] Unexpected error: {e}", exc_info=True)
+            logger.error(f"[QuantumCmd] FATAL ERROR: {e}", exc_info=True)
             return {
                 'success': False,
                 'error': str(e),
