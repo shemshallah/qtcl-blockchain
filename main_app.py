@@ -556,13 +556,25 @@ def create_app():
             cmd_name = parts[0].lower()
             cmd_args = parts[1:] if len(parts) > 1 else []
             
-            # Parse key=value pairs into kwargs dictionary
+            # Parse key=value pairs into kwargs dictionary + boolean flags
             cmd_kwargs = {}
             positional_args = []
             for arg in cmd_args:
+                # Handle --key=value or -key=value format
                 if '=' in arg:
                     key, value = arg.split('=', 1)
-                    cmd_kwargs[key.strip()] = value.strip()
+                    # Strip leading dashes from key
+                    key = key.lstrip('-').strip()
+                    cmd_kwargs[key] = value.strip()
+                # Handle --boolean-flag format (set to True)
+                elif arg.startswith('--'):
+                    key = arg.lstrip('-').strip()
+                    cmd_kwargs[key] = True
+                # Handle -single-dash flags (also boolean)
+                elif arg.startswith('-') and len(arg) > 1:
+                    key = arg.lstrip('-').strip()
+                    cmd_kwargs[key] = True
+                # Positional arguments (no -- prefix)
                 else:
                     positional_args.append(arg)
             
