@@ -1131,22 +1131,45 @@
                 return;
             }
             
-            // Otherwise, execute as new command
-            console.log('[Execute] Emitting execute_command');
-            socket.emit('execute_command', { command: cmd });
+            // Try WebSocket first, fallback to HTTP
+            if (socket && socket.connected) {
+                console.log('[Execute] Using WebSocket');
+                socket.emit('execute_command', { command: cmd });
+            } else {
+                console.log('[Execute] WebSocket not connected, using HTTP fallback');
+                try {
+                    const result = await window.commandExecutor.execute(cmd);
+                    if (result.status === 'success') {
+                        log(JSON.stringify(result.output, null, 2), 'success');
+                    } else {
+                        log(`✗ ${result.error || 'Error'}`, 'error');
+                    }
+                } catch (e) {
+                    log(`✗ Execution failed: ${e.message}`, 'error');
+                }
+            }
         }
         
         // ═══════════════════════════════════════════════════════════════════════════════
         // EVENT LISTENERS
         // ═══════════════════════════════════════════════════════════════════════════════
         
-        document.getElementById('terminalInput').addEventListener('keypress', async (e) => {
-            if (e.key === 'Enter') {
-                const cmd = e.target.value.trim();
-                e.target.value = '';
-                if (cmd) await executeCommand(cmd);
-            }
-        });
+        // Ensure DOM is ready before attaching listeners
+        const terminalInput = document.getElementById('terminalInput');
+        if (!terminalInput) {
+            console.error('[Init] terminalInput element not found!');
+        } else {
+            console.log('[Init] terminalInput element found, attaching event listener');
+            terminalInput.addEventListener('keypress', async (e) => {
+                console.log('[Input] Key pressed:', e.key);
+                if (e.key === 'Enter') {
+                    console.log('[Input] Enter pressed, executing command');
+                    const cmd = e.target.value.trim();
+                    e.target.value = '';
+                    if (cmd) await executeCommand(cmd);
+                }
+            });
+        }
         
         document.getElementById('loginBtn').addEventListener('click', () => {
             showAuthModal(true);
