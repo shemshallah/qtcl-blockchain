@@ -1120,6 +1120,7 @@ def create_command_center_blueprint()->Blueprint:
         except Exception as e:
             return jsonify({'error':str(e)}),500
     
+    return bp
 
 def create_app()->Flask:
     """Create Flask application"""
