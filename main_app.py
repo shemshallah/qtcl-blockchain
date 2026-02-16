@@ -37,19 +37,6 @@
 ║    ✅ system/* - System operations                                                                                         ║
 ║    ✅ parallel/* - Parallel task execution                                                                                 ║
 ║                                                                                                                             ║
-║    FEATURES:                                                                                                               ║
-║    • Command execution with ~50ms latency                                                                                  ║
-║    • Flag parsing: --flag=value, --flag value, -f, --flag                                                                 ║
-║    • Variable substitution: ${VAR}, $VAR                                                                                   ║
-║    • Compound operators: ; (sequential), | (pipe), && (conditional), || (fallback)                                         ║
-║    • Real-time WebSocket streaming                                                                                         ║
-║    • Complete audit logging                                                                                                ║
-║    • RBAC enforcement                                                                                                      ║
-║    • Error recovery & retry                                                                                                ║
-║    • Performance monitoring                                                                                                ║
-║    • Command history tracking                                                                                              ║
-║    • Automatic validation                                                                                                  ║
-║                                                                                                                             ║
 ╚═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
 """
 
@@ -496,19 +483,21 @@ except Exception as e:
     logger.error(f"[Import] CRITICAL: Terminal logic unavailable: {e}")
     raise  # Fail fast instead of silently degrading
 
-# Force JSON responses to not override HTML
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# CRITICAL FIX: Force proper HTML responses
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
 @app.after_request
 def after_request(response):
-    """Ensure proper content types"""
-    # If the response is HTML string, force the header
+    """Ensure proper content types and headers - CRITICAL FIX FOR HTML RENDERING"""
+    # CRITICAL: If response contains HTML content, force correct headers
     if response.mimetype == 'text/html' or response.content_type == 'text/html':
         response.headers['Content-Type'] = 'text/html; charset=utf-8'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
     return response
 
-
-#
-
- ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PART 3: FLASK CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -672,7 +661,7 @@ def create_app():
                 'duration_ms': duration_ms
             }), 500
     
-   @app.route('/api/execute/compound', methods=['POST'])
+    @app.route('/api/execute/compound', methods=['POST'])
     async def execute_compound():
         """Execute compound command with operators"""
         try:
@@ -757,22 +746,20 @@ def create_app():
         }), 200
     
     @app.route('/debug')
-def debug():
-    import os
-    import json
-    
-    info = {
-        'cwd': os.getcwd(),
-        'cwd_contents': os.listdir('.'),
-        'script_dir': os.path.dirname(__file__),
-        'script_dir_contents': os.listdir(os.path.dirname(__file__)) if os.path.exists(os.path.dirname(__file__)) else 'N/A',
-        'index_exists_cwd': os.path.exists('index.html'),
-        'index_exists_script': os.path.exists(os.path.join(os.path.dirname(__file__), 'index.html')),
-    }
-    
-    return json.dumps(info, indent=2), 200, {'Content-Type': 'application/json'}
-
-
+    def debug():
+        import os
+        import json
+        
+        info = {
+            'cwd': os.getcwd(),
+            'cwd_contents': os.listdir('.'),
+            'script_dir': os.path.dirname(__file__),
+            'script_dir_contents': os.listdir(os.path.dirname(__file__)) if os.path.exists(os.path.dirname(__file__)) else 'N/A',
+            'index_exists_cwd': os.path.exists('index.html'),
+            'index_exists_script': os.path.exists(os.path.join(os.path.dirname(__file__), 'index.html')),
+        }
+        
+        return json.dumps(info, indent=2), 200, {'Content-Type': 'application/json'}
 
     @app.route('/api/execute/stats', methods=['GET'])
     def execution_stats():
@@ -901,9 +888,9 @@ def debug():
             "amount": 500.0,                        # EXACT user input, not random
             "fidelity": 0.9876,                     # Random each time from N(0.987, 0.005)
             "collapse_result": "10110101",          # Random 8-bit each time
-            "finality": true,                       # true if fidelity > 0.98
-            "status": "finalized",                  # finalized if finality true, else encoded
-            "pending_in_mempool": 1,                # Count of pending transactions
+            "finality": true,                        # true if fidelity > 0.98
+            "status": "finalized",                    # finalized if finality true, else encoded
+            "pending_in_mempool": 1,                    # Count of pending transactions
             "estimated_block_height": 1,            # Will become actual block when created
             "timestamp": 1708028754.123
         }
@@ -923,120 +910,120 @@ def debug():
             import random
             import logging
             
-            data=request.get_json()or{}
-            user_email=data.get('user_email','').strip()
-            password=data.get('password','')
-            target_email=data.get('target_email','').strip()
-            target_identifier=data.get('target_identifier','').strip()
-            amount=float(data.get('amount',0))
+            data = request.get_json() or {}
+            user_email = data.get('user_email', '').strip()
+            password = data.get('password', '')
+            target_email = data.get('target_email', '').strip()
+            target_identifier = data.get('target_identifier', '').strip()
+            amount = float(data.get('amount', 0))
             
             logger.info(f'[TX-INIT] Transaction initiated: {user_email} → {target_email} | Amount: {amount}')
             
-            if not all([user_email,target_email,target_identifier,amount,password]):
+            if not all([user_email, target_email, target_identifier, amount, password]):
                 logger.warning(f'[TX-VALIDATION] Missing required fields')
-                return jsonify({'success':False,'error':'Missing required fields','error_code':'MISSING_FIELDS'}),400
+                return jsonify({'success': False, 'error': 'Missing required fields', 'error_code': 'MISSING_FIELDS'}), 400
             
-            if amount<0.001 or amount>999999999.999:
+            if amount < 0.001 or amount > 999999999.999:
                 logger.warning(f'[TX-VALIDATION] Invalid amount: {amount}')
-                return jsonify({'success':False,'error':f'Amount must be between 0.001 and 999999999.999','error_code':'INVALID_AMOUNT'}),400
+                return jsonify({'success': False, 'error': f'Amount must be between 0.001 and 999999999.999', 'error_code': 'INVALID_AMOUNT'}), 400
             
-            success,user_data=AuthenticationService.get_user_by_email(user_email)
+            success, user_data = AuthenticationService.get_user_by_email(user_email)
             if not success or not user_data:
                 logger.warning(f'[TX-LAYER1] User not found: {user_email}')
-                return jsonify({'success':False,'error':'User not found','error_code':'USER_NOT_FOUND'}),404
+                return jsonify({'success': False, 'error': 'User not found', 'error_code': 'USER_NOT_FOUND'}), 404
             
-            password_hash=user_data.get('password_hash','')
-            if not AuthenticationService.verify_password(password,password_hash):
+            password_hash = user_data.get('password_hash', '')
+            if not AuthenticationService.verify_password(password, password_hash):
                 logger.warning(f'[TX-LAYER1] Invalid password for {user_email}')
-                return jsonify({'success':False,'error':'Invalid password','error_code':'INVALID_PASSWORD'}),401
+                return jsonify({'success': False, 'error': 'Invalid password', 'error_code': 'INVALID_PASSWORD'}), 401
             
-            user_id=user_data.get('uid')or user_data.get('id')
-            user_balance=float(user_data.get('balance',0))
-            user_pseudoqubit=user_data.get('pseudoqubit_id','')
+            user_id = user_data.get('uid') or user_data.get('id')
+            user_balance = float(user_data.get('balance', 0))
+            user_pseudoqubit = user_data.get('pseudoqubit_id', '')
             
             logger.info(f'[TX-LAYER1] ✓ User validated: {user_email} (ID:{user_id}) Balance:{user_balance}')
             
-            success,target_data=AuthenticationService.get_user_by_email(target_email)
+            success, target_data = AuthenticationService.get_user_by_email(target_email)
             if not success or not target_data:
                 logger.warning(f'[TX-LAYER1B] Target user not found: {target_email}')
-                return jsonify({'success':False,'error':'Target user not found','error_code':'TARGET_NOT_FOUND'}),404
+                return jsonify({'success': False, 'error': 'Target user not found', 'error_code': 'TARGET_NOT_FOUND'}), 404
             
-            target_pseudoqubit=target_data.get('pseudoqubit_id','')
-            target_uid=target_data.get('uid')or target_data.get('id','')
+            target_pseudoqubit = target_data.get('pseudoqubit_id', '')
+            target_uid = target_data.get('uid') or target_data.get('id', '')
             
-            if target_identifier!=target_pseudoqubit and target_identifier!=str(target_uid):
+            if target_identifier != target_pseudoqubit and target_identifier != str(target_uid):
                 logger.warning(f'[TX-LAYER1B] Invalid target identifier: {target_identifier}')
-                return jsonify({'success':False,'error':'Target pseudoqubit_id or UID does not match','error_code':'INVALID_TARGET_ID'}),400
+                return jsonify({'success': False, 'error': 'Target pseudoqubit_id or UID does not match', 'error_code': 'INVALID_TARGET_ID'}), 400
             
-            target_id=target_data.get('uid')or target_data.get('id')
+            target_id = target_data.get('uid') or target_data.get('id')
             logger.info(f'[TX-LAYER1B] ✓ Target validated: {target_email} (ID:{target_id})')
             
-            if user_balance<amount:
+            if user_balance < amount:
                 logger.warning(f'[TX-LAYER2] Insufficient balance: {user_email} has {user_balance}, needs {amount}')
-                return jsonify({'success':False,'error':f'Insufficient balance. Have: {user_balance}, Need: {amount}','error_code':'INSUFFICIENT_BALANCE'}),400
+                return jsonify({'success': False, 'error': f'Insufficient balance. Have: {user_balance}, Need: {amount}', 'error_code': 'INSUFFICIENT_BALANCE'}), 400
             
             logger.info(f'[TX-LAYER2] ✓ Balance verified: {user_balance} >= {amount}')
             
-            oracle_collapse=''.join(str(random.randint(0,1))for _ in range(8))
-            fidelity=random.gauss(0.987,0.005)
-            fidelity=max(0.95,min(0.99,fidelity))
-            finality_achieved=fidelity>0.98
-            quantum_proof=secrets.token_hex(16)
+            oracle_collapse = ''.join(str(random.randint(0, 1)) for _ in range(8))
+            fidelity = random.gauss(0.987, 0.005)
+            fidelity = max(0.95, min(0.99, fidelity))
+            finality_achieved = fidelity > 0.98
+            quantum_proof = secrets.token_hex(16)
             
             logger.info(f'[TX-LAYER3] Quantum metrics: collapse={oracle_collapse} fidelity={fidelity:.4f} finality={finality_achieved} proof={quantum_proof[:16]}...')
             
-            tx_id='tx_'+secrets.token_hex(8)
-            current_time=time.time()
+            tx_id = 'tx_' + secrets.token_hex(8)
+            current_time = time.time()
             
-            tx={
-                'id':tx_id,
-                'tx_id':tx_id,
-                'from_user_id':user_id,
-                'to_user_id':target_id,
-                'amount':amount,
-                'tx_type':'transfer',
-                'status':'finalized',
-                'timestamp':current_time,
-                'quantum_finality_proof':quantum_proof,
-                'oracle_collapse':oracle_collapse,
-                'fidelity':fidelity,
-                'finality':finality_achieved,
-                'collapse_outcome':oracle_collapse,
-                'from_email':user_email,
-                'to_email':target_email,
-                'from_pseudoqubit':user_pseudoqubit,
-                'to_pseudoqubit':target_pseudoqubit
+            tx = {
+                'id': tx_id,
+                'tx_id': tx_id,
+                'from_user_id': user_id,
+                'to_user_id': target_id,
+                'amount': amount,
+                'tx_type': 'transfer',
+                'status': 'finalized',
+                'timestamp': current_time,
+                'quantum_finality_proof': quantum_proof,
+                'oracle_collapse': oracle_collapse,
+                'fidelity': fidelity,
+                'finality': finality_achieved,
+                'collapse_outcome': oracle_collapse,
+                'from_email': user_email,
+                'to_email': target_email,
+                'from_pseudoqubit': user_pseudoqubit,
+                'to_pseudoqubit': target_pseudoqubit
             }
             
             logger.info(f'[TX-LAYER4] ✓ Transaction created: {tx_id} {user_id} → {target_id} amount={amount} QTCL')
             
             if not global_mempool:
                 logger.error('[TX-LAYER5] global_mempool not initialized!')
-                return jsonify({'success':False,'error':'Ledger system not ready','error_code':'LEDGER_ERROR'}),500
+                return jsonify({'success': False, 'error': 'Ledger system not ready', 'error_code': 'LEDGER_ERROR'}), 500
             
             global_mempool.add_transaction(tx)
-            pending_count=global_mempool.get_pending_count()
+            pending_count = global_mempool.get_pending_count()
             
             logger.info(f'[TX-LAYER5] ✓ Transaction added to mempool. Pending: {pending_count}')
             
-            response_data={
-                'success':True,
-                'command':'quantum/transaction',
-                'tx_id':tx_id,
-                'user_email':user_email,
-                'user_id':user_id,
-                'user_pseudoqubit':user_pseudoqubit,
-                'target_email':target_email,
-                'target_id':target_id,
-                'target_pseudoqubit':target_pseudoqubit,
-                'amount':amount,
-                'fidelity':round(fidelity,4),
-                'collapse_result':oracle_collapse,
-                'finality':finality_achieved,
-                'status':'finalized'if finality_achieved else'encoded',
-                'pending_in_mempool':pending_count,
-                'estimated_block_height':pending_count,
-                'timestamp':current_time
+            response_data = {
+                'success': True,
+                'command': 'quantum/transaction',
+                'tx_id': tx_id,
+                'user_email': user_email,
+                'user_id': user_id,
+                'user_pseudoqubit': user_pseudoqubit,
+                'target_email': target_email,
+                'target_id': target_id,
+                'target_pseudoqubit': target_pseudoqubit,
+                'amount': amount,
+                'fidelity': round(fidelity, 4),
+                'collapse_result': oracle_collapse,
+                'finality': finality_achieved,
+                'status': 'finalized' if finality_achieved else 'encoded',
+                'pending_in_mempool': pending_count,
+                'estimated_block_height': pending_count,
+                'timestamp': current_time
             }
             
             logger.info(f'[TX-LAYER6] ✓ Transaction complete: {tx_id} Status: {response_data["status"]} Finality: {finality_achieved}')
@@ -1044,36 +1031,127 @@ def debug():
             return jsonify(response_data)
         
         except ValueError as e:
-            logger.error(f'[TX-ERROR] Value error: {e}',exc_info=True)
-            return jsonify({'success':False,'error':f'Invalid input: {str(e)}','error_code':'INVALID_AMOUNT'}),400
+            logger.error(f'[TX-ERROR] Value error: {e}', exc_info=True)
+            return jsonify({'success': False, 'error': f'Invalid input: {str(e)}', 'error_code': 'INVALID_AMOUNT'}), 400
         except Exception as e:
-            logger.error(f'[TX-ERROR] Exception: {e}',exc_info=True)
+            logger.error(f'[TX-ERROR] Exception: {e}', exc_info=True)
             traceback.print_exc()
-            return jsonify({'success':False,'error':f'Transaction processing failed: {str(e)}','error_code':'UNKNOWN_ERROR'}),500
+            return jsonify({'success': False, 'error': f'Transaction processing failed: {str(e)}', 'error_code': 'UNKNOWN_ERROR'}), 500
     
-    from flask import Flask, Response
-import os
-
-@app.route('/')
-@app.route('/index.html')
-def index():
-    """Serve index.html with proper HTML rendering"""
-    try:
-        # Read the file directly
-        with open('index.html', 'r', encoding='utf-8') as f:
-            html_content = f.read()
-        
-        # Return as Response object with explicit HTML MIME type
-        return Response(html_content, mimetype='text/html; charset=utf-8')
+    # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    # CRITICAL FIX: INDEX ROUTE WITH ABSOLUTE HTML RENDERING
+    # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     
-    except FileNotFoundError:
-        logger.error("index.html not found")
-        return "<h1>Error: index.html not found</h1>", 404
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        return f"<h1>Error: {str(e)}</h1>", 500
+    @app.route('/')
+    @app.route('/index.html')
+    def index():
+        """Serve index.html with absolute bulletproof HTML rendering"""
+        try:
+            # MULTIPLE FALLBACK PATHS - try everything
+            possible_paths = [
+                'index.html',
+                os.path.join(os.path.dirname(__file__), 'index.html'),
+                os.path.join(os.getcwd(), 'index.html'),
+                '/workspace/index.html',
+                '/app/index.html',
+                '/src/index.html',
+            ]
+            
+            html_content = None
+            used_path = None
+            
+            for path in possible_paths:
+                try:
+                    if os.path.exists(path) and os.path.isfile(path):
+                        with open(path, 'r', encoding='utf-8') as f:
+                            html_content = f.read()
+                        used_path = path
+                        logger.info(f"[INDEX] ✓ Found index.html at: {path}")
+                        break
+                except Exception as e:
+                    logger.debug(f"[INDEX] Tried {path}: {e}")
+                    continue
+            
+            if html_content:
+                # Create response with EXPLICIT headers
+                response = Response(
+                    html_content,
+                    status=200,
+                    mimetype='text/html'
+                )
+                # FORCE correct headers - multiple ways to ensure browser renders as HTML
+                response.headers['Content-Type'] = 'text/html; charset=utf-8'
+                response.headers['X-Content-Type-Options'] = 'nosniff'
+                response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+                response.headers['Content-Disposition'] = 'inline'
+                
+                logger.info(f"[INDEX] ✓ Serving {len(html_content)} bytes from {used_path}")
+                return response
+            
+            # ABSOLUTE FALLBACK - hardcoded minimal HTML
+            logger.error("[INDEX] ⚠ No index.html found - serving built-in fallback")
+            fallback_html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QTCL - Quantum Terminal</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: linear-gradient(135deg, #0a0a14 0%, #0f0f1e 100%);
+            color: #f0f0f0;
+            font-family: 'Monaco', 'Courier New', monospace;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            max-width: 800px;
+            text-align: center;
+        }
+        h1 { color: #a78bfa; font-size: 48px; margin-bottom: 20px; }
+        .status { color: #10b981; margin-bottom: 30px; }
+        pre {
+            background: rgba(26, 26, 46, 0.5);
+            border: 1px solid #2a2a3e;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: left;
+            overflow-x: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>⚛️ QTCL</h1>
+        <div class="status">✓ API Server is OPERATIONAL</div>
+        <pre>Quantum Terminal & Dashboard
+━━━━━━━━━━━━━━━━━━━━━━━
+Status: Online
+Version: v5.0
+WebSocket: Ready
 
-
+The index.html file was not found,
+but the API is running correctly.</pre>
+    </div>
+</body>
+</html>"""
+            response = Response(fallback_html, mimetype='text/html')
+            response.headers['Content-Type'] = 'text/html; charset=utf-8'
+            response.headers['X-Content-Type-Options'] = 'nosniff'
+            return response
+            
+        except Exception as e:
+            logger.error(f"[INDEX] Critical error: {e}")
+            error_html = f"""<!DOCTYPE html>
+<html><body style="background:#0a0a14;color:#ef4444;font-family:monospace;padding:40px;">
+<h1>Error Loading QTCL</h1>
+<pre>{str(e)}</pre>
+</body></html>"""
+            return Response(error_html, status=500, mimetype='text/html')
     
     # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     # PART 5: WEBSOCKET SUPPORT FOR REAL-TIME EXECUTION
@@ -1156,8 +1234,8 @@ def initialize_app(app, socketio=None):
     try:
         from quantum_api import create_quantum_api_blueprint_extended
         
-        quantum_bp=create_quantum_api_blueprint_extended()
-        app.register_blueprint(quantum_bp,url_prefix='/api/quantum')
+        quantum_bp = create_quantum_api_blueprint_extended()
+        app.register_blueprint(quantum_bp, url_prefix='/api/quantum')
         logger.info("[InitApp] ✓ Quantum API blueprint registered at /api/quantum")
     except Exception as e:
         logger.error(f"[InitApp] Failed to register quantum blueprint: {e}")
@@ -1375,6 +1453,9 @@ if __name__ == '__main__':
 ║                                                                                                                             ║
 ╚═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
     """)
+    
+    app, executor, socketio = create_app()
+    initialize_app(app, socketio)
     
     # Run the app
     socketio.run(
