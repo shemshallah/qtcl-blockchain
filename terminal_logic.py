@@ -4782,7 +4782,7 @@ class QuantumCommandHandlers:
                 amount_val = None
             
             # ══════════════════════════════════════════════════════════════════════════════
-            # LAYER 1: USER INPUT COLLECTION (True Interactive Mode - Step by Step)
+            # LAYER 1: USER INPUT COLLECTION (Simple Interactive Mode)
             # ══════════════════════════════════════════════════════════════════════════════
             
             # Track which fields we have and which we're missing
@@ -4811,7 +4811,7 @@ class QuantumCommandHandlers:
                     next_missing = (field_name, field_label, field_type, step, len(fields_needed))
                     break
             
-            # If we're missing a field and in interactive mode, return prompt for that field
+            # If we're missing a field and in interactive mode, prompt for it
             if interactive and next_missing:
                 field_name, field_label, field_type, step, total = next_missing
                 
@@ -4828,9 +4828,10 @@ class QuantumCommandHandlers:
                 if amount_val:
                     current_params.append(f"--amount={amount_val}")
                 
-                logger.info(f"[QuantumCmd-L1] Step {step}/{total}: Prompting for {field_name}")
-                
                 prompt_emoji = {'email': '📧', 'password': '🔐', 'number': '💰'}.get(field_type, '🎯')
+                progress_bar = f"[{'█' * (step-1)}{'░' * (total-step+1)}] {step}/{total}"
+                
+                logger.info(f"[QuantumCmd-L1] Step {step}/{total}: Prompting for {field_name}")
                 
                 return {
                     'success': False,
@@ -4839,11 +4840,8 @@ class QuantumCommandHandlers:
                     'total_steps': total,
                     'command': 'quantum/transaction',
                     'mode': 'interactive',
-                    'progress': f"[{'█' * (step-1)}{'░' * (total-step+1)}] Step {step}/{total}",
-                    
-                    # Frontend uses this to render an input box
                     'input_prompt': {
-                        'message': f"{prompt_emoji} {field_label}: ",
+                        'message': f"{prompt_emoji} {field_label}",
                         'field_name': field_name,
                         'field_type': field_type,
                         'placeholder': {
@@ -4852,12 +4850,10 @@ class QuantumCommandHandlers:
                             'target_email': 'bob@example.com',
                             'target_identifier': 'pseud_bob456',
                             'amount': '500.0'
-                        }.get(field_name, ''),
-                        'current_params': current_params,
-                        'auto_resubmit': True,  # Auto-resubmit when user enters value
-                        'mask_input': field_type == 'password'  # Hide password input
+                        }.get(field_name, '')
                     },
-                    
+                    'progress': progress_bar,
+                    'next_command': f"quantum/transaction --interactive {' '.join(current_params)} --{field_name}=YOUR_VALUE",
                     'error_code': 'COLLECTING_INPUT'
                 }
             

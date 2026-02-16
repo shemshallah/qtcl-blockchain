@@ -1070,68 +1070,19 @@
             if (window.commandExecutor) {
                 try {
                     const result = await window.commandExecutor.execute(cmd);
-                    
-                    // Handle interactive input prompts
-                    if (result.status === 'input_prompt' && result.input_prompt) {
-                        const prompt = result.input_prompt;
-                        log(prompt.message, 'info');
-                        log(result.progress || '', 'info');
-                        
-                        // Create input field for the prompt
-                        const terminalInput = document.getElementById('terminalInput');
-                        terminalInput.placeholder = prompt.placeholder || '';
-                        terminalInput.type = prompt.field_type || 'text';
-                        if (prompt.mask_input) terminalInput.type = 'password';
-                        terminalInput.focus();
-                        
-                        // Create a one-time listener for this prompt
-                        const handlePromptSubmit = async (e) => {
-                            if (e.key === 'Enter') {
-                                const value = e.target.value.trim();
-                                e.target.value = '';
-                                
-                                if (value) {
-                                    // Resubmit with the collected value
-                                    const newResult = await window.commandExecutor.submitPromptInput(value);
-                                    
-                                    // Remove this listener
-                                    terminalInput.removeEventListener('keypress', handlePromptSubmit);
-                                    
-                                    // Recursively handle the next prompt or final result
-                                    if (newResult.status === 'input_prompt') {
-                                        // Another prompt - display it
-                                        const newPrompt = newResult.input_prompt;
-                                        log(newPrompt.message, 'info');
-                                        log(newResult.progress || '', 'info');
-                                        terminalInput.placeholder = newPrompt.placeholder || '';
-                                        terminalInput.type = newPrompt.field_type || 'text';
-                                        if (newPrompt.mask_input) terminalInput.type = 'password';
-                                        terminalInput.focus();
-                                        window.currentPromptHandler = handlePromptSubmit;  // Will reuse same listener
-                                    } else if (newResult.status === 'success') {
-                                        // All done!
-                                        log(JSON.stringify(newResult.output || newResult.result, null, 2), 'success');
-                                        terminalInput.placeholder = 'Enter command or type \\'help\\' for available commands';
-                                        terminalInput.type = 'text';
-                                    } else {
-                                        log(`✗ ${newResult.error || 'Command failed'}`, 'error');
-                                        terminalInput.placeholder = 'Enter command or type \\'help\\' for available commands';
-                                        terminalInput.type = 'text';
-                                    }
-                                }
-                            }
-                        };
-                        
-                        terminalInput.addEventListener('keypress', handlePromptSubmit);
-                        return;
-                    }
-                    
-                    // Handle normal responses
                     if (result.status === 'success') {
                         if (result.output) {
                             log(JSON.stringify(result.output, null, 2), 'success');
                         } else {
                             log(`✓ Success (${result.duration_ms?.toFixed(1)}ms)`, 'success');
+                        }
+                    } else if (result.status === 'input_prompt') {
+                        // Display the prompt message
+                        if (result.input_prompt && result.input_prompt.message) {
+                            log(result.input_prompt.message, 'info');
+                        }
+                        if (result.progress) {
+                            log(result.progress, 'info');
                         }
                     } else {
                         log(`✗ ${result.error || 'Command failed'}`, 'error');
