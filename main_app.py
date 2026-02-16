@@ -995,6 +995,144 @@ def setup_routes(app):
     # HEALTH & STATUS
     # ═══════════════════════════════════════════════════════════════════════════════════
     
+    @app.route('/api/system/status', methods=['GET'])
+    @handle_exceptions
+    def system_status():
+        """Comprehensive system status - shows everything is working"""
+        try:
+            status = {
+                'timestamp': datetime.now().isoformat(),
+                'version': Config.API_VERSION,
+                'systems': {}
+            }
+            
+            # Database status
+            try:
+                db = GLOBALS.DB if BOOTSTRAP_INTEGRATION_AVAILABLE else None
+                status['systems']['database'] = {
+                    'available': db is not None,
+                    'type': type(db).__name__ if db else 'None'
+                }
+            except:
+                status['systems']['database'] = {'available': False}
+            
+            # Command system status
+            try:
+                cmd_registry = GLOBALS.COMMAND_REGISTRY if BOOTSTRAP_INTEGRATION_AVAILABLE else None
+                cmd_processor = GLOBALS.COMMAND_PROCESSOR if BOOTSTRAP_INTEGRATION_AVAILABLE else None
+                
+                num_commands = 0
+                if cmd_registry and hasattr(cmd_registry, 'ALL_COMMANDS'):
+                    num_commands = len(cmd_registry.ALL_COMMANDS)
+                
+                status['systems']['commands'] = {
+                    'available': cmd_registry is not None,
+                    'processor_available': cmd_processor is not None,
+                    'command_count': num_commands
+                }
+            except:
+                status['systems']['commands'] = {'available': False}
+            
+            # Quantum system status
+            try:
+                quantum = GLOBALS.QUANTUM if BOOTSTRAP_INTEGRATION_AVAILABLE else None
+                status['systems']['quantum'] = {
+                    'available': quantum is not None,
+                    'type': type(quantum).__name__ if quantum else 'None'
+                }
+                
+                if quantum and hasattr(quantum, 'health_check'):
+                    try:
+                        health = quantum.health_check()
+                        status['systems']['quantum']['health'] = health
+                    except:
+                        pass
+            except:
+                status['systems']['quantum'] = {'available': False}
+            
+            # Cache system
+            try:
+                cache = GLOBALS.CACHE if BOOTSTRAP_INTEGRATION_AVAILABLE else None
+                status['systems']['cache'] = {
+                    'available': cache is not None,
+                    'type': type(cache).__name__ if cache else 'None'
+                }
+            except:
+                status['systems']['cache'] = {'available': False}
+            
+            # Profiler system
+            try:
+                profiler = GLOBALS.PROFILER if BOOTSTRAP_INTEGRATION_AVAILABLE else None
+                status['systems']['profiler'] = {
+                    'available': profiler is not None,
+                    'type': type(profiler).__name__ if profiler else 'None'
+                }
+            except:
+                status['systems']['profiler'] = {'available': False}
+            
+            # Flask app status
+            status['systems']['flask'] = {
+                'available': app is not None,
+                'debug': app.debug if app else False
+            }
+            
+            # Overall health
+            all_available = all(v.get('available', False) for v in status['systems'].values())
+            status['overall_status'] = 'healthy' if all_available else 'degraded'
+            status['bootstrap_complete'] = BOOTSTRAP_INTEGRATION_AVAILABLE
+            
+            return jsonify(status), 200
+        
+        except Exception as e:
+            logger.error(f"[API/Status] Error: {e}")
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/api/system/bootstrap', methods=['GET', 'POST'])
+    @handle_exceptions
+    def system_bootstrap_status():
+        """Show bootstrap status and manually trigger bootstrap if needed"""
+        try:
+            if request.method == 'POST':
+                logger.info("[API/Bootstrap] Manual bootstrap triggered")
+                # Try to re-bootstrap
+                try:
+                    if BOOTSTRAP_INTEGRATION_AVAILABLE:
+                        result = bootstrap_systems()
+                        return jsonify({
+                            'status': 'bootstrap_triggered',
+                            'result': result,
+                            'timestamp': datetime.now().isoformat()
+                        }), 200
+                except Exception as e:
+                    return jsonify({
+                        'status': 'error',
+                        'error': str(e)
+                    }), 500
+            
+            # GET - return bootstrap summary
+            if BOOTSTRAP_INTEGRATION_AVAILABLE:
+                summary = GLOBALS.summary()
+                health = GLOBALS.health_check()
+                
+                return jsonify({
+                    'bootstrap_status': 'complete',
+                    'registered_components': summary['total_registered'],
+                    'categories': summary.get('categories', {}),
+                    'system_health': health['overall_status'],
+                    'components_operational': health['components_healthy'],
+                    'components_total': health['components_total'],
+                    'timestamp': datetime.now().isoformat()
+                }), 200
+            else:
+                return jsonify({
+                    'bootstrap_status': 'not_initialized',
+                    'timestamp': datetime.now().isoformat()
+                }), 200
+        
+        except Exception as e:
+            logger.error(f"[API/Bootstrap] Error: {e}")
+            return jsonify({'error': str(e)}), 500
+    
     @app.route('/health', methods=['GET'])
     @rate_limited
     @handle_exceptions
@@ -2289,6 +2427,103 @@ def setup_routes(app):
     # QUANTUM SYSTEM
     # ═══════════════════════════════════════════════════════════════════════════════════
     
+    @app.route('/api/quantum/refresh', methods=['POST'])
+    @handle_exceptions
+    def quantum_refresh():
+        """CRITICAL: Manually refresh quantum system and lattice"""
+        try:
+            logger.info("[API/Quantum] Refresh requested")
+            
+            # Access quantum system via GLOBALS
+            quantum = GLOBALS.QUANTUM if BOOTSTRAP_INTEGRATION_AVAILABLE else None
+            
+            if quantum:
+                refresh_results = {
+                    'status': 'refreshing',
+                    'timestamp': datetime.now().isoformat()
+                }
+                
+                try:
+                    if hasattr(quantum, 'refresh_coherence'):
+                        quantum.refresh_coherence()
+                        refresh_results['coherence_refreshed'] = True
+                        logger.info("[API/Quantum] ✓ Coherence refreshed")
+                except Exception as e:
+                    refresh_results['coherence_error'] = str(e)
+                    logger.warning(f"[API/Quantum] Coherence refresh failed: {e}")
+                
+                try:
+                    if hasattr(quantum, 'heartbeat'):
+                        quantum.heartbeat()
+                        refresh_results['heartbeat'] = True
+                        logger.info("[API/Quantum] ✓ Heartbeat executed")
+                except Exception as e:
+                    refresh_results['heartbeat_error'] = str(e)
+                    logger.warning(f"[API/Quantum] Heartbeat failed: {e}")
+                
+                try:
+                    if hasattr(quantum, 'get_system_metrics'):
+                        metrics = quantum.get_system_metrics()
+                        refresh_results['metrics'] = metrics
+                        logger.info("[API/Quantum] ✓ Metrics retrieved")
+                except Exception as e:
+                    logger.debug(f"[API/Quantum] Metrics retrieval: {e}")
+                
+                refresh_results['status'] = 'success'
+                return jsonify(refresh_results), 200
+            else:
+                return jsonify({
+                    'status': 'warning',
+                    'message': 'Quantum system not available',
+                    'timestamp': datetime.now().isoformat()
+                }), 200
+        
+        except Exception as e:
+            logger.error(f"[API/Quantum] Refresh failed: {e}")
+            return jsonify({'status': 'error', 'error': str(e)}), 500
+
+    @app.route('/api/quantum/lattice', methods=['GET'])
+    @handle_exceptions
+    def quantum_lattice_status():
+        """Get quantum lattice status and neural lattice state"""
+        try:
+            quantum = GLOBALS.QUANTUM if BOOTSTRAP_INTEGRATION_AVAILABLE else None
+            
+            if quantum:
+                status = {
+                    'quantum_available': True,
+                    'timestamp': datetime.now().isoformat()
+                }
+                
+                try:
+                    if hasattr(quantum, 'get_w_state'):
+                        status['w_state'] = quantum.get_w_state()
+                except:
+                    pass
+                
+                try:
+                    if hasattr(quantum, 'get_neural_lattice_state'):
+                        status['neural_lattice'] = quantum.get_neural_lattice_state()
+                except:
+                    pass
+                
+                try:
+                    if hasattr(quantum, 'health_check'):
+                        status['health'] = quantum.health_check()
+                except:
+                    pass
+                
+                return jsonify(status), 200
+            else:
+                return jsonify({
+                    'quantum_available': False,
+                    'timestamp': datetime.now().isoformat()
+                }), 200
+        
+        except Exception as e:
+            logger.error(f"[API/Quantum] Lattice status error: {e}")
+            return jsonify({'error': str(e)}), 500
+    
     @app.route('/api/quantum/status', methods=['GET'])
     @rate_limited
     @handle_exceptions
@@ -2479,6 +2714,45 @@ def setup_routes(app):
             'status': 'alive',
             'timestamp': datetime.utcnow().isoformat()
         }), 200
+
+    @app.route('/api/command', methods=['POST'])
+    @handle_exceptions
+    def execute_command():
+        """CRITICAL: Execute a command via GLOBALS system"""
+        data = request.get_json() or {}
+        command_name = data.get('command') or request.args.get('command')
+        args = data.get('args', [])
+        kwargs = data.get('kwargs', {})
+        
+        if not command_name:
+            return jsonify({'error': 'command parameter required'}), 400
+        
+        logger.info(f"[API/Command] Executing: {command_name}")
+        
+        # Try GLOBALS first
+        if BOOTSTRAP_INTEGRATION_AVAILABLE:
+            try:
+                processor = GLOBALS.COMMAND_PROCESSOR
+                if processor and hasattr(processor, 'execute_command'):
+                    result = processor.execute_command(command_name, *args, **kwargs)
+                    logger.info(f"[API/Command] ✓ Executed via GLOBALS.COMMAND_PROCESSOR")
+                    return jsonify(result), 200
+            except Exception as e:
+                logger.debug(f"[API/Command] GLOBALS execution failed: {e}")
+        
+        # Fallback: GlobalCommandRegistry directly
+        try:
+            from terminal_logic import GlobalCommandRegistry
+            result = GlobalCommandRegistry.execute_command(command_name, *args, **kwargs)
+            logger.info(f"[API/Command] ✓ Executed via GlobalCommandRegistry")
+            return jsonify(result), 200
+        except Exception as e:
+            logger.error(f"[API/Command] Fallback failed: {e}")
+            return jsonify({
+                'status': 'error',
+                'error': f'Command execution failed: {str(e)}',
+                'command': command_name
+            }), 500
 
     @app.route('/api/commands', methods=['GET'])
     @rate_limited

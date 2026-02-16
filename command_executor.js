@@ -1,6 +1,6 @@
 /**
- * ULTRA-SIMPLE COMMAND EXECUTOR - WITH INPUT PROMPT DETECTION
- * Just send commands to /api/execute and display output
+ * COMMAND EXECUTOR - FULLY INTEGRATED WITH GLOBALS SYSTEM
+ * Executes commands via /api/command endpoint
  */
 
 class QTCLCommandExecutor {
@@ -8,46 +8,94 @@ class QTCLCommandExecutor {
         this.history = [];
         this.isConnected = true;
         this.listeners = {};
-        console.log('[Executor] ✓ Initialized');
+        console.log('[Executor] ✓ Initialized - ready to execute commands');
     }
     
-    async execute(command) {
-        console.log('[Executor] Executing:', command);
+    async execute(command, args=[], kwargs={}) {
+        console.log('[Executor] Executing:', command, {args, kwargs});
         
         try {
-            const response = await fetch('/api/execute', {
+            const response = await fetch('/api/command', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${localStorage.getItem('authToken') || ''}`
                 },
-                body: JSON.stringify({ command })
+                body: JSON.stringify({ 
+                    command,
+                    args: args || [],
+                    kwargs: kwargs || {}
+                })
             });
             
             const data = await response.json();
             console.log('[Executor] Response:', data);
             
-            // Check if this is an interactive input prompt
-            if (data.input_prompt && data.status === 'collecting_input') {
-                console.log('[Executor] Input prompt detected');
+            // Handle successful response
+            if (response.ok) {
+                this.history.push({
+                    command,
+                    timestamp: new Date(),
+                    result: data
+                });
+                
                 return {
-                    status: 'input_prompt',
-                    input_prompt: data.input_prompt,
-                    progress: data.progress,
-                    command: command
+                    status: data.status || 'success',
+                    result: data.result || data.output,
+                    command: command,
+                    error: data.error || null,
+                    raw: data
+                };
+            } else {
+                // Handle error response
+                return {
+                    status: 'error',
+                    error: data.error || 'Command execution failed',
+                    command: command,
+                    raw: data
                 };
             }
-            
-            return {
-                status: data.status || 'success',
-                output: data.output || JSON.stringify(data),
-                command: command,
-                error: data.error || null
-            };
         } catch (error) {
             console.error('[Executor] Error:', error);
             return {
                 status: 'error',
+                error: error.message,
+                command: command
+            };
+        }
+    }
+    
+    async executeRaw(commandString) {
+        // Parse command string like "quantum/status arg1 arg2"
+        const parts = commandString.trim().split(/\s+/);
+        const command = parts[0];
+        const args = parts.slice(1);
+        return this.execute(command, args, {});
+    }
+    
+    on(event, callback) {
+        if (!this.listeners[event]) this.listeners[event] = [];
+        this.listeners[event].push(callback);
+    }
+    
+    emit(event, data) {
+        if (this.listeners[event]) {
+            this.listeners[event].forEach(cb => cb(data));
+        }
+    }
+    
+    getHistory(limit=100) {
+        return this.history.slice(-limit);
+    }
+    
+    clearHistory() {
+        this.history = [];
+    }
+}
+
+// Create global instance
+window.qtclExecutor = new QTCLCommandExecutor();
+console.log('[CommandExecutor] ✓ Global executor ready at window.qtclExecutor');
                 error: error.message,
                 command: command,
                 output: null

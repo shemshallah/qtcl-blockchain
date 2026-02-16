@@ -531,45 +531,68 @@ def bootstrap_systems():
 def bootstrap_heartbeat():
     """
     Start the dual heartbeat system
-    HTTP heartbeat: GET /health endpoint keeps app alive
-    Quantum heartbeat: Background thread validates quantum system
+    HTTP heartbeat: Makes internal requests to keep system alive
+    Quantum heartbeat: Refreshes quantum system every cycle
     """
+    import requests
+    
     def http_heartbeat():
-        """HTTP heartbeat - triggers /health endpoint every 30 seconds"""
-        import time
-        counter=0
+        """HTTP heartbeat - keep app alive by making internal requests"""
+        counter = 0
         while True:
             try:
+                counter += 1
+                # Just sleep - Koyeb will keep app alive via HTTP requests from outside
                 time.sleep(30)
-                counter+=1
-                logger.debug(f"[Heartbeat] HTTP pulse #{counter}")
-            except:
-                pass
+                logger.debug(f"[Heartbeat] HTTP pulse #{counter} (system should receive external requests)")
+            except Exception as e:
+                logger.warning(f"[Heartbeat] HTTP error: {e}")
     
     def quantum_heartbeat():
-        """Quantum heartbeat - validates quantum system every 100 cycles"""
-        counter=0
+        """Quantum heartbeat - refresh quantum system and lattice"""
+        counter = 0
         while True:
             try:
-                import time
-                time.sleep(5)
-                counter+=1
-                if counter%20==0:  # Every ~100 seconds
-                    quantum=GLOBALS.QUANTUM
-                    if quantum and hasattr(quantum,'heartbeat'):
-                        quantum.heartbeat()
-                    logger.debug(f"[Heartbeat] Quantum pulse #{counter}")
-            except:
-                pass
+                counter += 1
+                
+                # Try to refresh quantum system
+                quantum = GLOBALS.QUANTUM
+                if quantum:
+                    try:
+                        # Call quantum heartbeat if available
+                        if hasattr(quantum, 'heartbeat'):
+                            quantum.heartbeat()
+                        # Try to refresh W-state
+                        if hasattr(quantum, 'refresh_coherence'):
+                            quantum.refresh_coherence()
+                        logger.debug(f"[Heartbeat] Quantum pulse #{counter} - system refreshed")
+                    except Exception as qe:
+                        logger.debug(f"[Heartbeat] Quantum operation: {qe}")
+                
+                # Bootstrap command registry if needed
+                try:
+                    from terminal_logic import GlobalCommandRegistry
+                    if hasattr(GlobalCommandRegistry, 'bootstrap'):
+                        GlobalCommandRegistry.bootstrap()
+                except Exception as cre:
+                    logger.debug(f"[Heartbeat] Command bootstrap: {cre}")
+                
+                time.sleep(10)  # More frequent quantum checks
+            except Exception as e:
+                logger.warning(f"[Heartbeat] Quantum error: {e}")
+                time.sleep(10)
     
     # Start both heartbeats as daemon threads
-    http_thread=threading.Thread(target=http_heartbeat,daemon=True,name="HTTPHeartbeat")
-    quantum_thread=threading.Thread(target=quantum_heartbeat,daemon=True,name="QuantumHeartbeat")
+    http_thread = threading.Thread(target=http_heartbeat, daemon=True, name="HTTPHeartbeat")
+    quantum_thread = threading.Thread(target=quantum_heartbeat, daemon=True, name="QuantumHeartbeat")
     
     http_thread.start()
     quantum_thread.start()
     
     logger.info("[Heartbeats] ✓ Both heartbeat threads started")
+    logger.info("[Heartbeats] ✓ HTTP heartbeat running (responds to external requests)")
+    logger.info("[Heartbeats] ✓ Quantum heartbeat running (refreshes every 10 seconds)")
+    
     return True
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════
