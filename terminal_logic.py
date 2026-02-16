@@ -4782,21 +4782,32 @@ class QuantumCommandHandlers:
                 amount_val = None
             
             # ══════════════════════════════════════════════════════════════════════════════
-            # LAYER 1: USER INPUT COLLECTION (Interactive CLI Mode)
+            # LAYER 1: USER INPUT COLLECTION (Interactive Mode)
             # ══════════════════════════════════════════════════════════════════════════════
             if interactive or (not all([user_email, password, target_email, target_identifier, amount_val])):
                 logger.info("[QuantumCmd-L1] LAYER 1: User Input Collection - Starting interactive mode")
                 
-                # Check if we're in an HTTP context (request object exists)
+                # Try to prompt the user interactively (works in real CLI)
                 try:
-                    from flask import request as flask_request
-                    is_http = True
-                except:
-                    is_http = False
+                    if not user_email:
+                        user_email = input("📧 Your email: ").strip()
+                    if not password:
+                        password = input("🔐 Password: ").strip()
+                    if not target_email:
+                        target_email = input("📧 Target email: ").strip()
+                    if not target_identifier:
+                        target_identifier = input("🎯 Target ID (pseudoqubit or UID): ").strip()
+                    if not amount_val:
+                        try:
+                            amount_val = float(input("💰 Amount (QTCL): ").strip())
+                        except ValueError:
+                            return {'success': False, 'error': 'INVALID_AMOUNT', 'error_code': 400}
+                    
+                    logger.info(f"[QuantumCmd-L1] ✓ User input collected interactively: {user_email}, {target_email}, {amount_val}")
                 
-                # HTTP context: return form fields JSON
-                if is_http and interactive:
-                    logger.info("[QuantumCmd-L1] HTTP context detected - returning form_fields")
+                except (EOFError, RuntimeError):
+                    # If input() fails (no stdin in HTTP context), return form fields for UI to populate
+                    logger.info("[QuantumCmd-L1] input() failed - returning form_fields for HTTP UI")
                     return {
                         'success': False,
                         'error': 'INTERACTIVE_FORM_REQUIRED',
@@ -4843,39 +4854,6 @@ class QuantumCommandHandlers:
                         ],
                         'http_status': 400,
                         'error_code': 'INTERACTIVE_FORM_REQUIRED'
-                    }
-                
-                # CLI context: Actually prompt the user interactively
-                logger.info("[QuantumCmd-L1] CLI context - prompting for user input")
-                try:
-                    if not user_email:
-                        user_email = input("📧 Your email: ").strip()
-                    if not password:
-                        password = input("🔐 Password: ").strip()
-                    if not target_email:
-                        target_email = input("📧 Target email: ").strip()
-                    if not target_identifier:
-                        target_identifier = input("🎯 Target ID (pseudoqubit or UID): ").strip()
-                    if not amount_val:
-                        try:
-                            amount_val = float(input("💰 Amount (QTCL): ").strip())
-                        except ValueError:
-                            return {'success': False, 'error': 'INVALID_AMOUNT', 'error_code': 400}
-                    
-                    logger.info(f"[QuantumCmd-L1] ✓ User input collected: {user_email}, {target_email}, {amount_val}")
-                except EOFError:
-                    # If EOF (can't use input() in this context), return form fields
-                    return {
-                        'success': False,
-                        'error': 'INTERACTIVE_FORM_REQUIRED',
-                        'command': 'quantum/transaction',
-                        'form_fields': [
-                            {'name': 'user_email', 'type': 'email', 'label': 'Your Email'},
-                            {'name': 'password', 'type': 'password', 'label': 'Password'},
-                            {'name': 'target_email', 'type': 'email', 'label': 'Target Email'},
-                            {'name': 'target_identifier', 'type': 'text', 'label': 'Target ID'},
-                            {'name': 'amount', 'type': 'number', 'label': 'Amount (QTCL)', 'min': 0.001}
-                        ]
                     }
             
             # ══════════════════════════════════════════════════════════════════════════════
