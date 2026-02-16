@@ -1066,21 +1066,16 @@
         async function executeCommand(cmd) {
             log(`qtcl> ${cmd}`);
             
-            // CHECK FIRST: If we're waiting for a prompt response, capture it as field value
+            // CHECK FIRST: If we're waiting for a prompt response, capture as field value
             if (window._pendingInteractivePrompt) {
                 const prompt = window._pendingInteractivePrompt;
                 const fieldName = prompt.fieldName;
-                const value = cmd;  // The whole input is the value
+                const value = cmd;
                 
-                const baseCmd = prompt.baseCommand;
-                const newCommand = `${baseCmd} --${fieldName}=${value}`;
-                
+                const newCommand = `${prompt.baseCommand} --${fieldName}=${value}`;
                 log(`✓ ${fieldName} = ${value}`);
                 
-                // Clear the pending prompt
                 window._pendingInteractivePrompt = null;
-                
-                // Recursively execute
                 await executeCommand(newCommand);
                 return;
             }
@@ -1089,11 +1084,9 @@
             const args = cmd.trim().split(' ');
             const command = args[0].toLowerCase();
             
-            // If not a local command, try API
-            const localCommands = ['help', 'login', 'logout', 'status', 'dashboard', 'whoami', 'clear'];
-            if (!localCommands.includes(command)) {
+            // Try to execute via API if not a local command
+            if (command !== 'help' && command !== 'login' && command !== 'logout' && command !== 'status' && command !== 'dashboard' && command !== 'whoami' && command !== 'clear') {
                 try {
-                    console.log('[Execute] Calling API for:', cmd);
                     const response = await fetch('/api/execute', {
                         method: 'POST',
                         headers: {
@@ -1104,44 +1097,31 @@
                     });
                     
                     const data = await response.json();
-                    console.log('[Execute] API Response:', data);
                     
-                    // Check for interactive prompt
+                    // Check for input_prompt
                     if (data.status === 'collecting_input' && data.input_prompt) {
                         log(data.input_prompt.message, 'info');
-                        if (data.progress) {
-                            log(data.progress, 'info');
-                        }
+                        if (data.progress) log(data.progress, 'info');
                         
-                        // Store prompt info for next input
+                        // Set pending prompt
                         window._pendingInteractivePrompt = {
                             baseCommand: cmd,
                             fieldName: data.input_prompt.field_name
                         };
-                        
-                        log('⏳ Enter value:', 'info');
                         return;
                     }
                     
-                    // Success response
-                    if (data.status === 'success' || data.result) {
-                        const output = data.output || (data.result ? JSON.stringify(data.result) : 'Done');
-                        log(output, 'success');
-                        return;
-                    }
-                    
-                    // Error response
-                    log(`✗ ${data.error || 'Error'}`, 'error');
+                    // Display full JSON response
+                    log(JSON.stringify(data, null, 2), 'success');
                     return;
                     
                 } catch (error) {
-                    console.error('[Execute] API Error:', error);
                     log(`✗ API Error: ${error.message}`, 'error');
                     return;
                 }
             }
             
-            // Local commands
+            // Local command handling
             switch (command) {
                 case 'help':
                     log('Available commands:', 'info');
@@ -1152,7 +1132,6 @@
                     log('  status            - Show system status');
                     log('  dashboard         - Load user dashboard');
                     log('  clear             - Clear terminal');
-                    log('  quantum/transaction --interactive - Interactive quantum transaction');
                     break;
                     
                 case 'login':
@@ -1202,7 +1181,9 @@
                     break;
                     
                 default:
-                    log(`✗ Unknown command: '${command}'. Type 'help' for available commands`, 'error');
+                    if (command.length > 0) {
+                        log(`✗ Unknown command: '${command}'. Type 'help' for available commands`, 'error');
+                    }
             }
         }
         
