@@ -47,6 +47,44 @@ handlers=[logging.FileHandler(os.path.join(PROJECT_ROOT,'qtcl_command_center.log
 logger=logging.getLogger(__name__)
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════
+# MODULE IMPORTS & INITIALIZATION
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+logger.info("[Init] Importing system modules...")
+try:
+    import db_builder_v2
+    logger.info("[Init] ✓ db_builder_v2 imported")
+except Exception as e:
+    logger.warning(f"[Init] db_builder_v2 import failed: {e}")
+
+try:
+    import core_api
+    logger.info("[Init] ✓ core_api imported")
+except Exception as e:
+    logger.warning(f"[Init] core_api import failed: {e}")
+
+try:
+    import quantum_api
+    logger.info("[Init] ✓ quantum_api imported")
+except Exception as e:
+    logger.warning(f"[Init] quantum_api import failed: {e}")
+
+try:
+    import quantum_lattice_control_live_complete
+    logger.info("[Init] ✓ quantum_lattice_control_live_complete imported")
+except Exception as e:
+    logger.warning(f"[Init] quantum_lattice import failed: {e}")
+
+try:
+    import terminal_logic
+    logger.info("[Init] ✓ terminal_logic imported")
+except Exception as e:
+    logger.warning(f"[Init] terminal_logic import failed: {e}")
+
+logger.info("[Init] ✓ All modules imported")
+
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════
 # SECTION 1: COMMAND ENUMS & STATUS TYPES
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -1147,6 +1185,15 @@ def initialize_command_center()->None:
     logger.info("╚"+"═"*150+"╝")
     
     try:
+        logger.info("[Init] Initializing database and module globals...")
+        try:
+            from db_builder_v2 import init_db, DB_POOL
+            init_db()
+            GLOBAL_STATE.db_pool = DB_POOL
+            logger.info("[Init] ✓ Database initialized")
+        except Exception as db_e:
+            logger.warning(f"[Init] DB init error: {db_e}")
+        
         logger.info("[Init] Loading command registry...")
         load_all_commands()
         
