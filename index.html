@@ -1066,18 +1066,19 @@
         async function executeCommand(cmd) {
             log(`qtcl> ${cmd}`);
             
-            // Route through CommandExecutor (v5.0)
-            if (window.commandExecutor) {
+            // Parse command
+            const args = cmd.trim().split(' ');
+            const command = args[0].toLowerCase();
+            
+            // Try to execute via API/CommandExecutor if available
+            if (window.commandExecutor && command !== 'help' && command !== 'login' && command !== 'logout' && command !== 'status' && command !== 'dashboard' && command !== 'whoami' && command !== 'clear') {
                 try {
                     const result = await window.commandExecutor.execute(cmd);
                     if (result.status === 'success') {
                         if (result.output) {
                             log(JSON.stringify(result.output, null, 2), 'success');
-                        } else {
-                            log(`✓ Success (${result.duration_ms?.toFixed(1)}ms)`, 'success');
                         }
                     } else if (result.status === 'input_prompt') {
-                        // Display the prompt message
                         if (result.input_prompt && result.input_prompt.message) {
                             log(result.input_prompt.message, 'info');
                         }
@@ -1089,14 +1090,13 @@
                     }
                     return;
                 } catch (error) {
-                    // Fall through to local handlers if executor not available
+                    console.error('CommandExecutor error:', error);
+                    log(`✗ API Error: ${error.message}`, 'error');
+                    return;
                 }
             }
             
-            // Local command handling (fallback)
-            const args = cmd.trim().split(' ');
-            const command = args[0].toLowerCase();
-            
+            // Local command handling
             switch (command) {
                 case 'help':
                     log('Available commands:', 'info');
