@@ -1080,57 +1080,66 @@
                 return;
             }
             
-            // Parse command
-            const args = cmd.trim().split(' ');
-            const command = args[0].toLowerCase();
-            
-            // Try to execute via API if not a local command
-            if (command !== 'help' && command !== 'login' && command !== 'logout' && command !== 'status' && command !== 'dashboard' && command !== 'whoami' && command !== 'clear') {
+            // Use commandExecutor for all commands
+            if (window.commandExecutor) {
                 try {
-                    const response = await fetch('/api/execute', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${localStorage.getItem('authToken') || ''}`
-                        },
-                        body: JSON.stringify({ command: cmd })
-                    });
+                    const result = await window.commandExecutor.execute(cmd);
                     
-                    const data = await response.json();
-                    
-                    // Check for input_prompt
-                    if (data.status === 'collecting_input' && data.input_prompt) {
-                        log(data.input_prompt.message, 'info');
-                        if (data.progress) log(data.progress, 'info');
+                    // Check for input prompt
+                    if (result.status === 'input_prompt') {
+                        if (result.input_prompt && result.input_prompt.message) {
+                            log(result.input_prompt.message, 'info');
+                        }
+                        if (result.progress) {
+                            log(result.progress, 'info');
+                        }
                         
-                        // Set pending prompt
+                        // Set pending prompt for next input
                         window._pendingInteractivePrompt = {
                             baseCommand: cmd,
-                            fieldName: data.input_prompt.field_name
+                            fieldName: result.input_prompt.field_name
                         };
                         return;
                     }
                     
-                    // Display full JSON response
-                    log(JSON.stringify(data, null, 2), 'success');
+                    // Success - display output
+                    if (result.status === 'success' && result.output) {
+                        log(JSON.stringify(result.output, null, 2), 'success');
+                        return;
+                    }
+                    
+                    // For other responses (help, etc), show the result
+                    if (result.result) {
+                        log(JSON.stringify(result.result, null, 2), 'success');
+                        return;
+                    }
+                    
+                    // Error
+                    if (result.error) {
+                        log(`✗ ${result.error}`, 'error');
+                        return;
+                    }
+                    
+                    // Default: show full result
+                    log(JSON.stringify(result, null, 2), 'success');
                     return;
                     
                 } catch (error) {
-                    log(`✗ API Error: ${error.message}`, 'error');
+                    log(`✗ ${error.message}`, 'error');
                     return;
                 }
             }
             
-            // Local command handling
+            // Fallback local handlers (if commandExecutor not available)
+            const args = cmd.trim().split(' ');
+            const command = args[0].toLowerCase();
+            
             switch (command) {
                 case 'help':
                     log('Available commands:', 'info');
                     log('  help              - Show this help message');
-                    log('  login             - Login to QTCL');
-                    log('  logout            - Logout from QTCL');
-                    log('  whoami            - Show current user');
-                    log('  status            - Show system status');
-                    log('  dashboard         - Load user dashboard');
+                    log('  login             - Login');
+                    log('  logout            - Logout');
                     log('  clear             - Clear terminal');
                     break;
                     
@@ -1139,41 +1148,7 @@
                     break;
                     
                 case 'logout':
-                    if (isAuthenticated) {
-                        handleLogout();
-                    } else {
-                        log('✗ Not logged in', 'error');
-                    }
-                    break;
-                    
-                case 'whoami':
-                    if (isAuthenticated) {
-                        log(`Current user: ${currentUser.username} (${currentUser.role})`, 'success');
-                    } else {
-                        log('Not authenticated', 'warning');
-                    }
-                    break;
-                    
-                case 'status':
-                    try {
-                        const status = await apiCall('/health');
-                        log(`✓ API Status: ${status.status}`, 'success');
-                        log(`  Service: ${status.service}`);
-                        log(`  Version: ${status.version}`);
-                    } catch (error) {
-                        log(`✗ API Error: ${error.message}`, 'error');
-                    }
-                    break;
-                    
-                case 'dashboard':
-                    if (!isAuthenticated) {
-                        log('✗ Please login first', 'error');
-                        break;
-                    }
-                    loadDashboard();
-                    const dashTab = document.querySelector('[data-tab="dashboard"]');
-                    dashTab.click();
-                    log('✓ Dashboard loaded', 'success');
+                    handleLogout();
                     break;
                     
                 case 'clear':
@@ -1181,9 +1156,7 @@
                     break;
                     
                 default:
-                    if (command.length > 0) {
-                        log(`✗ Unknown command: '${command}'. Type 'help' for available commands`, 'error');
-                    }
+                    log(`✗ Unknown command: '${command}'`, 'error');
             }
         }
         
