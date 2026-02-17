@@ -83,11 +83,20 @@ try:
         LATTICE_NEURAL_REFRESH = _LNR
         W_STATE_ENHANCED = _WSE
         NOISE_BATH_ENHANCED = _NBE
+        
         logger.info("[Init] ✓ HEARTBEAT object imported successfully")
-        logger.info(f"[Init] ✓ Heartbeat status: running={HEARTBEAT.running if HEARTBEAT else 'N/A'}")
-        logger.info(f"[Init] ✓ Listeners registered: {len(HEARTBEAT.listeners) if HEARTBEAT else 0}")
+        logger.info(f"[Init]   Type: {type(HEARTBEAT)}")
+        logger.info(f"[Init]   Running: {HEARTBEAT.running if HEARTBEAT else 'None'}")
+        logger.info(f"[Init]   Frequency: {HEARTBEAT.frequency if HEARTBEAT else 'N/A'} Hz")
+        logger.info(f"[Init]   Pre-registered listeners: {len(HEARTBEAT.listeners) if HEARTBEAT else 0}")
+        
+        # List all pre-registered listeners
+        if HEARTBEAT and HEARTBEAT.listeners:
+            for i, listener in enumerate(HEARTBEAT.listeners):
+                logger.info(f"[Init]     Listener {i+1}: {getattr(listener, '__name__', str(listener))}")
+        
     except Exception as e:
-        logger.error(f"[Init] ✗ Failed to import heartbeat: {e}")
+        logger.error(f"[Init] ✗ Failed to import heartbeat: {e}", exc_info=True)
         import traceback
         logger.error(traceback.format_exc())
 
@@ -112,26 +121,40 @@ def _initialize_heartbeat_system():
     
     try:
         logger.info("[Heartbeat] 🫀 Starting quantum heartbeat orchestration...")
+        logger.info(f"[Heartbeat] Heartbeat object: {HEARTBEAT}")
+        logger.info(f"[Heartbeat] Heartbeat running before start: {HEARTBEAT.running}")
+        logger.info(f"[Heartbeat] Heartbeat listeners before start: {len(HEARTBEAT.listeners)}")
         
         # Start the heartbeat - this begins the pulse loop
         HEARTBEAT.start()
         logger.info("[Heartbeat] ✓ Heartbeat pulse loop started")
         
         # Give heartbeat a moment to begin
-        time.sleep(0.2)
+        time.sleep(0.5)
         
         # Verify it's actually running
         if HEARTBEAT.running:
-            logger.info(f"[Heartbeat] ✓ Heartbeat ACTIVE: {HEARTBEAT.pulse_count} pulses, "
-                       f"{len(HEARTBEAT.listeners)} listeners")
+            pulse_count = HEARTBEAT.pulse_count
+            listener_count = len(HEARTBEAT.listeners)
+            logger.info(f"[Heartbeat] ✅ HEARTBEAT ACTIVE AND PULSING")
+            logger.info(f"[Heartbeat]   Pulse count: {pulse_count} (expected: 5+)")
+            logger.info(f"[Heartbeat]   Listeners: {listener_count}")
+            logger.info(f"[Heartbeat]   Frequency: {HEARTBEAT.frequency} Hz")
+            
+            if pulse_count < 2:
+                logger.warning(f"[Heartbeat] ⚠️  Very low pulse count ({pulse_count}) - heartbeat may be slow")
+            
             return True
         else:
-            logger.error("[Heartbeat] ❌ Heartbeat failed to start")
+            logger.error("[Heartbeat] ❌ Heartbeat.running is False - pulse loop didn't start")
+            logger.error(f"[Heartbeat]   Pulse count: {HEARTBEAT.pulse_count}")
+            logger.error(f"[Heartbeat]   Thread: {HEARTBEAT.thread}")
             return False
     
     except Exception as e:
         logger.error(f"[Heartbeat] ❌ Heartbeat initialization failed: {e}", exc_info=True)
         return False
+
 
 def _get_heartbeat_status():
     """Get current heartbeat status"""
@@ -1710,36 +1733,92 @@ def create_app()->Flask:
                 'timestamp': time.time()
             }), 503
         
-        metrics = HEARTBEAT.get_metrics()
-        neural_state = LATTICE_NEURAL_REFRESH.get_state() if LATTICE_NEURAL_REFRESH else {}
-        w_state = W_STATE_ENHANCED.get_state() if W_STATE_ENHANCED else {}
-        noise_state = NOISE_BATH_ENHANCED.get_state() if NOISE_BATH_ENHANCED else {}
+        try:
+            metrics = {
+                'status': 'online' if HEARTBEAT.running else 'offline',
+                'running': HEARTBEAT.running,
+                'pulse_count': HEARTBEAT.pulse_count,
+                'frequency_hz': HEARTBEAT.frequency,
+                'listeners': len(HEARTBEAT.listeners),
+                'sync_count': HEARTBEAT.sync_count,
+                'desync_count': HEARTBEAT.desync_count,
+                'error_count': HEARTBEAT.error_count,
+                'avg_pulse_interval': HEARTBEAT.avg_pulse_interval if hasattr(HEARTBEAT, 'avg_pulse_interval') else 0,
+                'timestamp': time.time(),
+                'listeners_detail': []
+            }
+            
+            # List all listeners
+            for i, listener in enumerate(HEARTBEAT.listeners):
+                listener_name = getattr(listener, '__name__', f'listener_{i}')
+                metrics['listeners_detail'].append({
+                    'index': i,
+                    'name': listener_name,
+                    'callable': callable(listener)
+                })
+            
+            neural_state = LATTICE_NEURAL_REFRESH.get_state() if LATTICE_NEURAL_REFRESH else {}
+            w_state = W_STATE_ENHANCED.get_state() if W_STATE_ENHANCED else {}
+            noise_state = NOISE_BATH_ENHANCED.get_state() if NOISE_BATH_ENHANCED else {}
+            
+            return jsonify({
+                'heartbeat': metrics,
+                'subsystems': {
+                    'neural_network': {
+                        'neurons': 57,
+                        'weight_updates': neural_state.get('total_weight_updates', 0),
+                        'convergence': neural_state.get('convergence_status', 'unknown')
+                    },
+                    'w_state': {
+                        'superposition_states': w_state.get('superposition_states', 0),
+                        'coherence_avg': w_state.get('coherence_avg', 0)
+                    },
+                    'noise_bath': {
+                        'fidelity_preservation': noise_state.get('fidelity_preservation_rate', 0),
+                        'non_markovian_order': noise_state.get('non_markovian_order', 0)
+                    }
+                },
+                'timestamp': time.time()
+            }), 200
+        except Exception as e:
+            logger.error(f"[Heartbeat Endpoint] Error: {e}", exc_info=True)
+            return jsonify({
+                'status': 'error',
+                'message': str(e),
+                'timestamp': time.time()
+            }), 500
+    
+    @app.route('/quantum/heartbeat/debug', methods=['GET'])
+    def heartbeat_debug():
+        """Debug heartbeat - detailed diagnostic info"""
+        if HEARTBEAT is None:
+            return jsonify({
+                'heartbeat': None,
+                'message': 'Heartbeat not initialized'
+            }), 503
         
         return jsonify({
-            'status': 'online' if metrics['running'] else 'offline',
             'heartbeat': {
-                'running': metrics['running'],
-                'pulse_count': metrics['pulse_count'],
-                'frequency_hz': metrics['frequency'],
-                'listeners': metrics['listeners'],
-                'errors': metrics['error_count'],
-                'sync_count': metrics['sync_count'],
-                'desync_count': metrics['desync_count']
+                'object': str(HEARTBEAT),
+                'type': str(type(HEARTBEAT)),
+                'running': HEARTBEAT.running,
+                'thread': str(HEARTBEAT.thread),
+                'frequency': HEARTBEAT.frequency,
+                'pulse_interval': HEARTBEAT.pulse_interval,
+                'pulse_count': HEARTBEAT.pulse_count,
+                'last_pulse_time': HEARTBEAT.last_pulse_time,
+                'listeners_count': len(HEARTBEAT.listeners),
+                'listeners': [getattr(l, '__name__', str(l)) for l in HEARTBEAT.listeners],
+                'sync_count': HEARTBEAT.sync_count,
+                'desync_count': HEARTBEAT.desync_count,
+                'error_count': HEARTBEAT.error_count,
+                'avg_pulse_interval': HEARTBEAT.avg_pulse_interval if hasattr(HEARTBEAT, 'avg_pulse_interval') else None
             },
             'subsystems': {
-                'neural_network': {
-                    'neurons': 57,
-                    'weight_updates': neural_state.get('total_weight_updates', 0),
-                    'convergence': neural_state.get('convergence_status', 'unknown')
-                },
-                'w_state': {
-                    'superposition_states': w_state.get('superposition_states', 0),
-                    'coherence_avg': w_state.get('coherence_avg', 0)
-                },
-                'noise_bath': {
-                    'fidelity_preservation': noise_state.get('fidelity_preservation_rate', 0),
-                    'non_markovian_order': noise_state.get('non_markovian_order', 0)
-                }
+                'lattice': 'LATTICE' in globals() and LATTICE is not None,
+                'neural_refresh': 'LATTICE_NEURAL_REFRESH' in globals() and LATTICE_NEURAL_REFRESH is not None,
+                'w_state': 'W_STATE_ENHANCED' in globals() and W_STATE_ENHANCED is not None,
+                'noise_bath': 'NOISE_BATH_ENHANCED' in globals() and NOISE_BATH_ENHANCED is not None
             },
             'timestamp': time.time()
         }), 200
@@ -1751,6 +1830,32 @@ def create_app()->Flask:
     def e404(e):return jsonify({'error':'not found'}),404
     @app.errorhandler(500)
     def e500(e):return jsonify({'error':'error'}),500
+    
+    # Add heartbeat monitoring to every request
+    _request_count = [0]  # Use list to make it mutable in nested function
+    _last_pulse_check = [HEARTBEAT.pulse_count if HEARTBEAT else 0]
+    
+    @app.after_request
+    def monitor_heartbeat(response):
+        """Monitor heartbeat status on every request"""
+        _request_count[0] += 1
+        
+        # Every 10 requests, log heartbeat status
+        if _request_count[0] % 10 == 0 and HEARTBEAT and HEARTBEAT.running:
+            current_pulse = HEARTBEAT.pulse_count
+            pulse_delta = current_pulse - _last_pulse_check[0]
+            
+            if pulse_delta > 0:
+                logger.debug(f"[Heartbeat] ✓ Pulsing: {current_pulse} pulses, "
+                            f"+{pulse_delta} since last check, {len(HEARTBEAT.listeners)} listeners")
+            else:
+                logger.warning(f"[Heartbeat] ⚠️ Stalled: {current_pulse} pulses, "
+                              f"no pulse change since last check")
+            
+            _last_pulse_check[0] = current_pulse
+        
+        return response
+    
     return app
 
 def initialize_command_center()->None:
@@ -1925,13 +2030,52 @@ try:
         for module_name, register_func_name in modules_to_register:
             try:
                 module = __import__(module_name)
-                register_func = getattr(module, register_func_name)
-                if register_func():
-                    registration_count += 1
+                register_func = getattr(module, register_func_name, None)
+                
+                if register_func is None:
+                    logger.warning(f"[WSGI] ⚠️  {module_name}.{register_func_name} not found")
+                    continue
+                
+                if callable(register_func):
+                    result = register_func()
+                    if result:
+                        registration_count += 1
+                    else:
+                        logger.warning(f"[WSGI] ⚠️  {module_name} registration returned False")
+                else:
+                    logger.warning(f"[WSGI] ⚠️  {module_name}.{register_func_name} is not callable")
             except Exception as e:
-                logger.debug(f"[WSGI] {module_name} registration skipped: {e}")
+                logger.warning(f"[WSGI] ❌ {module_name} registration failed: {e}", exc_info=True)
         
         logger.info(f"[WSGI] ✓ {registration_count}/{len(modules_to_register)} API modules registered with heartbeat")
+        
+        # Direct registration fallback - register callbacks manually if modules failed
+        if registration_count < len(modules_to_register):
+            logger.info("[WSGI] 🔧 Attempting direct heartbeat registration for failed modules...")
+            
+            # Try direct imports and registration
+            direct_registrations = [
+                ('quantum_api', 'QuantumHeartbeatIntegration', '_quantum_heartbeat'),
+                ('blockchain_api', 'BlockchainHeartbeatIntegration', '_blockchain_heartbeat'),
+                ('oracle_api', 'OracleHeartbeatIntegration', '_oracle_heartbeat'),
+                ('defi_api', 'DeFiHeartbeatIntegration', '_defi_heartbeat'),
+                ('core_api', 'CoreApiHeartbeatIntegration', '_core_heartbeat'),
+                ('admin_api', 'AdminHeartbeatIntegration', '_admin_heartbeat'),
+            ]
+            
+            for mod_name, class_name, instance_name in direct_registrations:
+                try:
+                    module = __import__(mod_name)
+                    hb_class = getattr(module, class_name, None)
+                    hb_instance = getattr(module, instance_name, None)
+                    
+                    if hb_instance and hasattr(hb_instance, 'on_heartbeat'):
+                        HEARTBEAT.add_listener(hb_instance.on_heartbeat)
+                        logger.info(f"[WSGI] ✓ {mod_name} directly registered with heartbeat")
+                        registration_count += 1
+                except Exception as e:
+                    logger.debug(f"[WSGI] Direct registration for {mod_name} failed: {e}")
+
     else:
         logger.warning("[WSGI] ⚠️  Heartbeat system initialization failed - running in degraded mode")
     
