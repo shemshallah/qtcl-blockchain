@@ -689,12 +689,10 @@ def create_blueprint()->Blueprint:
                 created_at=datetime.now(timezone.utc)
             )
             
-    if defi_db is None:
-        raise RuntimeError("[DeFi] Database manager not initialized")
-    try:
+            if defi_db is None:
+                raise RuntimeError("[DeFi] Database manager not initialized")
+            
             defi_db.create_stake(stake)
-    except Exception as e:
-        logger.error(f"Database operation failed: {e}")
             
             return jsonify({
                 'success':True,
@@ -717,12 +715,9 @@ def create_blueprint()->Blueprint:
             if not g.authenticated:
                 return jsonify({'error':'Authentication required'}),401
             
-    if stakes=defi_db is None:
-        raise RuntimeError("[DeFi] Database manager not initialized")
-    try:
+            if defi_db is None:
+                raise RuntimeError("[DeFi] Database manager not initialized")
             stakes=defi_db.get_user_stakes(g.user_id)
-    except Exception as e:
-        logger.error(f"Database operation failed: {e}")
             
             for stake in stakes:
                 duration=(datetime.now(timezone.utc)-stake['created_at']).days
@@ -752,12 +747,9 @@ def create_blueprint()->Blueprint:
             data=request.get_json()
             stake_id=data.get('stake_id','')
             
-    if stakes=defi_db is None:
-        raise RuntimeError("[DeFi] Database manager not initialized")
-    try:
+            if defi_db is None:
+                raise RuntimeError("[DeFi] Database manager not initialized")
             stakes=defi_db.get_user_stakes(g.user_id)
-    except Exception as e:
-        logger.error(f"Database operation failed: {e}")
             stake=next((s for s in stakes if s['stake_id']==stake_id),None)
             
             if not stake:
@@ -772,12 +764,9 @@ def create_blueprint()->Blueprint:
             )
             unbonding_at=datetime.now(timezone.utc)+unbonding_period
             
-    if defi_db is None:
-        raise RuntimeError("[DeFi] Database manager not initialized")
-    try:
+            if defi_db is None:
+                raise RuntimeError("[DeFi] Database manager not initialized")
             defi_db.update_stake_status(stake_id,StakeStatus.UNBONDING)
-    except Exception as e:
-        logger.error(f"Database operation failed: {e}")
             
             query="UPDATE stakes SET unbonding_at=%s WHERE stake_id=%s"
             db_manager.execute_query(query,(unbonding_at,stake_id))
@@ -815,12 +804,9 @@ def create_blueprint()->Blueprint:
             if amount_a<=0 or amount_b<=0:
                 return jsonify({'error':'Amounts must be positive'}),400
             
-    if pool=defi_db is None:
-        raise RuntimeError("[DeFi] Database manager not initialized")
-    try:
+            if defi_db is None:
+                raise RuntimeError("[DeFi] Database manager not initialized")
             pool=defi_db.get_pool(pool_id)
-    except Exception as e:
-        logger.error(f"Database operation failed: {e}")
             if not pool:
                 return jsonify({'error':'Pool not found'}),404
             
@@ -834,12 +820,9 @@ def create_blueprint()->Blueprint:
             new_reserve_b=reserve_b+amount_b
             new_total_shares=total_shares+shares
             
-    if defi_db is None:
-        raise RuntimeError("[DeFi] Database manager not initialized")
-    try:
+            if defi_db is None:
+                raise RuntimeError("[DeFi] Database manager not initialized")
             defi_db.update_pool_reserves(pool_id,new_reserve_a,new_reserve_b,new_total_shares)
-    except Exception as e:
-        logger.error(f"Database operation failed: {e}")
             
             return jsonify({
                 'success':True,
@@ -869,12 +852,9 @@ def create_blueprint()->Blueprint:
             if shares<=0:
                 return jsonify({'error':'Shares must be positive'}),400
             
-    if pool=defi_db is None:
-        raise RuntimeError("[DeFi] Database manager not initialized")
-    try:
+            if defi_db is None:
+                raise RuntimeError("[DeFi] Database manager not initialized")
             pool=defi_db.get_pool(pool_id)
-    except Exception as e:
-        logger.error(f"Database operation failed: {e}")
             if not pool:
                 return jsonify({'error':'Pool not found'}),404
             
@@ -891,12 +871,9 @@ def create_blueprint()->Blueprint:
             new_reserve_b=reserve_b-amount_b
             new_total_shares=total_shares-shares
             
-    if defi_db is None:
-        raise RuntimeError("[DeFi] Database manager not initialized")
-    try:
+            if defi_db is None:
+                raise RuntimeError("[DeFi] Database manager not initialized")
             defi_db.update_pool_reserves(pool_id,new_reserve_a,new_reserve_b,new_total_shares)
-    except Exception as e:
-        logger.error(f"Database operation failed: {e}")
             
             return jsonify({
                 'success':True,
@@ -928,12 +905,9 @@ def create_blueprint()->Blueprint:
             if amount_in<=0:
                 return jsonify({'error':'Amount must be positive'}),400
             
-    if pool=defi_db is None:
-        raise RuntimeError("[DeFi] Database manager not initialized")
-    try:
+            if defi_db is None:
+                raise RuntimeError("[DeFi] Database manager not initialized")
             pool=defi_db.get_pool(pool_id)
-    except Exception as e:
-        logger.error(f"Database operation failed: {e}")
             if not pool:
                 return jsonify({'error':'Pool not found'}),404
             
@@ -972,31 +946,22 @@ def create_blueprint()->Blueprint:
                 slippage=price_impact
             )
             
-    if defi_db is None:
-        raise RuntimeError("[DeFi] Database manager not initialized")
-    try:
+            if defi_db is None:
+                raise RuntimeError("[DeFi] Database manager not initialized")
             defi_db.create_swap(swap)
-    except Exception as e:
-        logger.error(f"Database operation failed: {e}")
             
             if token_in==pool['token_a']:
                 new_reserve_a=reserve_in+amount_in
                 new_reserve_b=reserve_out-amount_out
-    if defi_db is None:
-        raise RuntimeError("[DeFi] Database manager not initialized")
-    try:
+            if defi_db is None:
+                raise RuntimeError("[DeFi] Database manager not initialized")
                 defi_db.update_pool_reserves(pool_id,new_reserve_a,new_reserve_b,Decimal(str(pool['total_shares'])))
-    except Exception as e:
-        logger.error(f"Database operation failed: {e}")
             else:
                 new_reserve_a=reserve_out-amount_out
                 new_reserve_b=reserve_in+amount_in
-    if defi_db is None:
-        raise RuntimeError("[DeFi] Database manager not initialized")
-    try:
+            if defi_db is None:
+                raise RuntimeError("[DeFi] Database manager not initialized")
                 defi_db.update_pool_reserves(pool_id,new_reserve_a,new_reserve_b,Decimal(str(pool['total_shares'])))
-    except Exception as e:
-        logger.error(f"Database operation failed: {e}")
             
             return jsonify({
                 'success':True,
@@ -1033,12 +998,9 @@ def create_blueprint()->Blueprint:
                 except:
                     pass
             
-    if proposals=defi_db is None:
-        raise RuntimeError("[DeFi] Database manager not initialized")
-    try:
+            if defi_db is None:
+                raise RuntimeError("[DeFi] Database manager not initialized")
             proposals=defi_db.get_proposals(status_enum,limit)
-    except Exception as e:
-        logger.error(f"Database operation failed: {e}")
             
             return jsonify({'proposals':proposals,'total':len(proposals)}),200
             
@@ -1063,12 +1025,9 @@ def create_blueprint()->Blueprint:
             except:
                 return jsonify({'error':'Invalid vote option'}),400
             
-    if proposal=defi_db is None:
-        raise RuntimeError("[DeFi] Database manager not initialized")
-    try:
+            if defi_db is None:
+                raise RuntimeError("[DeFi] Database manager not initialized")
             proposal=defi_db.get_proposal(proposal_id)
-    except Exception as e:
-        logger.error(f"Database operation failed: {e}")
             if not proposal:
                 return jsonify({'error':'Proposal not found'}),404
             
@@ -1100,12 +1059,9 @@ def create_blueprint()->Blueprint:
                 timestamp=datetime.now(timezone.utc)
             )
             
-    if defi_db is None:
-        raise RuntimeError("[DeFi] Database manager not initialized")
-    try:
+            if defi_db is None:
+                raise RuntimeError("[DeFi] Database manager not initialized")
             defi_db.cast_vote(vote)
-    except Exception as e:
-        logger.error(f"Database operation failed: {e}")
             
             return jsonify({
                 'success':True,
@@ -1160,12 +1116,9 @@ def create_blueprint()->Blueprint:
                 royalty_percentage=royalty_percentage
             )
             
-    if defi_db is None:
-        raise RuntimeError("[DeFi] Database manager not initialized")
-    try:
+            if defi_db is None:
+                raise RuntimeError("[DeFi] Database manager not initialized")
             defi_db.create_nft(nft)
-    except Exception as e:
-        logger.error(f"Database operation failed: {e}")
             
             return jsonify({
                 'success':True,
@@ -1195,24 +1148,18 @@ def create_blueprint()->Blueprint:
             if not to_address:
                 return jsonify({'error':'Recipient address required'}),400
             
-    if nft=defi_db is None:
-        raise RuntimeError("[DeFi] Database manager not initialized")
-    try:
+            if defi_db is None:
+                raise RuntimeError("[DeFi] Database manager not initialized")
             nft=defi_db.get_nft(nft_id)
-    except Exception as e:
-        logger.error(f"Database operation failed: {e}")
             if not nft:
                 return jsonify({'error':'NFT not found'}),404
             
             if nft['owner']!=g.user_id:
                 return jsonify({'error':'Not NFT owner'}),403
             
-    if defi_db is None:
-        raise RuntimeError("[DeFi] Database manager not initialized")
-    try:
+            if defi_db is None:
+                raise RuntimeError("[DeFi] Database manager not initialized")
             defi_db.transfer_nft(nft_id,to_address)
-    except Exception as e:
-        logger.error(f"Database operation failed: {e}")
             
             return jsonify({
                 'success':True,
@@ -1267,12 +1214,9 @@ def create_blueprint()->Blueprint:
                 validators_required=config['bridge_validators_required']
             )
             
-    if defi_db is None:
-        raise RuntimeError("[DeFi] Database manager not initialized")
-    try:
+            if defi_db is None:
+                raise RuntimeError("[DeFi] Database manager not initialized")
             defi_db.create_bridge_lock(lock)
-    except Exception as e:
-        logger.error(f"Database operation failed: {e}")
             
             return jsonify({
                 'success':True,
@@ -1292,8 +1236,8 @@ def create_blueprint()->Blueprint:
     def bridge_status(lock_id):
         """Get bridge lock status"""
         try:
-    if lock=defi_db is None:
-        raise RuntimeError("[DeFi] Database manager not initialized")
+            if defi_db is None:
+                raise RuntimeError("[DeFi] Database manager not initialized")
             lock=defi_db.get_bridge_lock(lock_id)
             if not lock:
                 return jsonify({'error':'Lock not found'}),404
