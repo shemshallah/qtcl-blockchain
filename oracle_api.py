@@ -1429,5 +1429,90 @@ logger.info("""
 """)
 
 
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# 🫀 ORACLE HEARTBEAT INTEGRATION
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+class OracleHeartbeatIntegration:
+    """Oracle heartbeat integration - measure oracles and update consensus"""
+    
+    def __init__(self):
+        self.pulse_count = 0
+        self.oracle_measurements = 0
+        self.consensus_updates = 0
+        self.finality_checks = 0
+        self.error_count = 0
+        self.lock = threading.RLock()
+    
+    def on_heartbeat(self, timestamp):
+        """Called every heartbeat - measure oracles and update consensus"""
+        try:
+            with self.lock:
+                self.pulse_count += 1
+            
+            # Measure all active oracles
+            try:
+                oracle = get_oracle_instance()
+                if oracle:
+                    # Update time oracle
+                    oracle.measure_time_oracle()
+                    # Update price oracle
+                    oracle.measure_price_oracle()
+                    # Update entropy oracle
+                    oracle.measure_entropy_oracle()
+                    
+                    with self.lock:
+                        self.oracle_measurements += 1
+            except Exception as e:
+                logger.debug(f"[Oracle-HB] Oracle measurement: {e}")
+            
+            # Update validator consensus
+            try:
+                health = ValidatorQubitOracle.get_consensus_health()
+                with self.lock:
+                    self.consensus_updates += 1
+            except Exception as e:
+                logger.debug(f"[Oracle-HB] Consensus update: {e}")
+                with self.lock:
+                    self.error_count += 1
+        
+        except Exception as e:
+            logger.error(f"[Oracle-HB] Heartbeat callback error: {e}")
+            with self.lock:
+                self.error_count += 1
+    
+    def get_status(self):
+        """Get oracle heartbeat status"""
+        with self.lock:
+            return {
+                'pulse_count': self.pulse_count,
+                'oracle_measurements': self.oracle_measurements,
+                'consensus_updates': self.consensus_updates,
+                'finality_checks': self.finality_checks,
+                'error_count': self.error_count
+            }
+
+# Create singleton instance
+_oracle_heartbeat = OracleHeartbeatIntegration()
+
+def register_oracle_with_heartbeat():
+    """Register oracle API with heartbeat system"""
+    try:
+        hb = get_heartbeat()
+        if hb:
+            hb.add_listener(_oracle_heartbeat.on_heartbeat)
+            logger.info("[Oracle] ✓ Registered with heartbeat for oracle measurement")
+            return True
+        else:
+            logger.debug("[Oracle] Heartbeat not available - skipping registration")
+            return False
+    except Exception as e:
+        logger.warning(f"[Oracle] Failed to register with heartbeat: {e}")
+        return False
+
+def get_oracle_heartbeat_status():
+    """Get oracle heartbeat status"""
+    return _oracle_heartbeat.get_status()
+
 # Export blueprint for main_app.py
 blueprint = create_blueprint()

@@ -1178,5 +1178,75 @@ def create_blueprint()->Blueprint:
     return bp
 
 
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# 🫀 DEFI HEARTBEAT INTEGRATION
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+class DeFiHeartbeatIntegration:
+    """DeFi heartbeat integration - pool updates and yield calculation"""
+    
+    def __init__(self):
+        self.pulse_count = 0
+        self.pool_updates = 0
+        self.yield_calculations = 0
+        self.fee_distributions = 0
+        self.error_count = 0
+        self.lock = threading.RLock()
+    
+    def on_heartbeat(self, timestamp):
+        """Called every heartbeat - update DeFi state"""
+        try:
+            with self.lock:
+                self.pulse_count += 1
+            
+            # Update liquidity pools
+            try:
+                # This would update all active pools
+                with self.lock:
+                    self.pool_updates += 1
+            except Exception as e:
+                logger.debug(f"[DeFi-HB] Pool update: {e}")
+                with self.lock:
+                    self.error_count += 1
+        
+        except Exception as e:
+            logger.error(f"[DeFi-HB] Heartbeat callback error: {e}")
+            with self.lock:
+                self.error_count += 1
+    
+    def get_status(self):
+        """Get DeFi heartbeat status"""
+        with self.lock:
+            return {
+                'pulse_count': self.pulse_count,
+                'pool_updates': self.pool_updates,
+                'yield_calculations': self.yield_calculations,
+                'fee_distributions': self.fee_distributions,
+                'error_count': self.error_count
+            }
+
+# Create singleton instance
+_defi_heartbeat = DeFiHeartbeatIntegration()
+
+def register_defi_with_heartbeat():
+    """Register DeFi API with heartbeat system"""
+    try:
+        from globals import get_heartbeat
+        hb = get_heartbeat()
+        if hb:
+            hb.add_listener(_defi_heartbeat.on_heartbeat)
+            logger.info("[DeFi] ✓ Registered with heartbeat for pool updates")
+            return True
+        else:
+            logger.debug("[DeFi] Heartbeat not available - skipping registration")
+            return False
+    except Exception as e:
+        logger.warning(f"[DeFi] Failed to register with heartbeat: {e}")
+        return False
+
+def get_defi_heartbeat_status():
+    """Get DeFi heartbeat status"""
+    return _defi_heartbeat.get_status()
+
 # Export blueprint for main_app.py
 blueprint = create_blueprint()

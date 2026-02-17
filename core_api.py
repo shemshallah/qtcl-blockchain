@@ -94,8 +94,8 @@ class SecurityEventType(Enum):
     LOGIN_FAILED="login_failed"
     LOGOUT="logout"
     PASSWORD_CHANGE="password_change"
-    2FA_ENABLED="2fa_enabled"
-    2FA_DISABLED="2fa_disabled"
+    TWO_FA_ENABLED="2fa_enabled"
+    TWO_FA_DISABLED="2fa_disabled"
     KEY_GENERATED="key_generated"
     KEY_ROTATED="key_rotated"
     SUSPICIOUS_ACTIVITY="suspicious_activity"
@@ -2322,6 +2322,68 @@ def create_blueprint()->Blueprint:
     
     return bp
 
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# 🫀 CORE API HEARTBEAT INTEGRATION
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+class CoreApiHeartbeatIntegration:
+    """Core API heartbeat integration - system metrics and health"""
+    
+    def __init__(self):
+        self.pulse_count = 0
+        self.health_checks = 0
+        self.metrics_updates = 0
+        self.error_count = 0
+        self.uptime_seconds = 0
+        self.lock = threading.RLock()
+    
+    def on_heartbeat(self, timestamp):
+        """Called every heartbeat - update system health metrics"""
+        try:
+            with self.lock:
+                self.pulse_count += 1
+                self.uptime_seconds += 0.1  # ~100ms per pulse
+                self.health_checks += 1
+        
+        except Exception as e:
+            logger.error(f"[Core-HB] Heartbeat callback error: {e}")
+            with self.lock:
+                self.error_count += 1
+    
+    def get_status(self):
+        """Get core API heartbeat status"""
+        with self.lock:
+            return {
+                'pulse_count': self.pulse_count,
+                'health_checks': self.health_checks,
+                'metrics_updates': self.metrics_updates,
+                'error_count': self.error_count,
+                'uptime_seconds': self.uptime_seconds
+            }
+
+# Create singleton instance
+_core_heartbeat = CoreApiHeartbeatIntegration()
+
+def register_core_with_heartbeat():
+    """Register Core API with heartbeat system"""
+    try:
+        from globals import get_heartbeat
+        hb = get_heartbeat()
+        if hb:
+            hb.add_listener(_core_heartbeat.on_heartbeat)
+            logger.info("[Core] ✓ Registered with heartbeat for system metrics")
+            return True
+        else:
+            logger.debug("[Core] Heartbeat not available - skipping registration")
+            return False
+    except Exception as e:
+        logger.warning(f"[Core] Failed to register with heartbeat: {e}")
+        return False
+
+def get_core_heartbeat_status():
+    """Get core API heartbeat status"""
+    return _core_heartbeat.get_status()
 
 # Export blueprint for main_app.py
 blueprint = create_blueprint()

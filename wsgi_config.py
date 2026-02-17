@@ -96,6 +96,64 @@ except Exception as e:
 
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════
+# 🫀 QUANTUM HEARTBEAT INITIALIZATION ORCHESTRATOR (NEW)
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+def _initialize_heartbeat_system():
+    """
+    Orchestrate heartbeat initialization across all systems.
+    Called ONCE at app startup to coordinate everything.
+    """
+    global HEARTBEAT
+    
+    if HEARTBEAT is None:
+        logger.error("[Heartbeat] ❌ HEARTBEAT NOT AVAILABLE - System will run in degraded mode")
+        return False
+    
+    try:
+        logger.info("[Heartbeat] 🫀 Starting quantum heartbeat orchestration...")
+        
+        # Start the heartbeat - this begins the pulse loop
+        HEARTBEAT.start()
+        logger.info("[Heartbeat] ✓ Heartbeat pulse loop started")
+        
+        # Give heartbeat a moment to begin
+        time.sleep(0.2)
+        
+        # Verify it's actually running
+        if HEARTBEAT.running:
+            logger.info(f"[Heartbeat] ✓ Heartbeat ACTIVE: {HEARTBEAT.pulse_count} pulses, "
+                       f"{len(HEARTBEAT.listeners)} listeners")
+            return True
+        else:
+            logger.error("[Heartbeat] ❌ Heartbeat failed to start")
+            return False
+    
+    except Exception as e:
+        logger.error(f"[Heartbeat] ❌ Heartbeat initialization failed: {e}", exc_info=True)
+        return False
+
+def _get_heartbeat_status():
+    """Get current heartbeat status"""
+    if HEARTBEAT is None:
+        return {'status': 'unavailable', 'running': False}
+    
+    return {
+        'status': 'running' if HEARTBEAT.running else 'stopped',
+        'running': HEARTBEAT.running,
+        'pulse_count': HEARTBEAT.pulse_count,
+        'listeners': len(HEARTBEAT.listeners),
+        'sync_count': HEARTBEAT.sync_count,
+        'desync_count': HEARTBEAT.desync_count,
+        'error_count': HEARTBEAT.error_count,
+        'avg_pulse_interval': HEARTBEAT.avg_pulse_interval if hasattr(HEARTBEAT, 'avg_pulse_interval') else 0
+    }
+
+# Store heartbeat status getter for global access
+HEARTBEAT_STATUS = _get_heartbeat_status
+
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════
 # SECTION 1: COMMAND ENUMS & STATUS TYPES
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -1836,6 +1894,54 @@ try:
     initialize_command_center()
     app=create_app()
     logger.info(f"[WSGI] ✓ Flask app created with {len(list(app.url_map.iter_rules()))} routes")
+    
+    # 🫀 HEARTBEAT INITIALIZATION
+    logger.info("[WSGI] 🫀 Initializing quantum heartbeat system...")
+    heartbeat_ok = _initialize_heartbeat_system()
+    if heartbeat_ok:
+        logger.info("[WSGI] ✅ Heartbeat system initialized successfully")
+        
+        # Wire heartbeat into globals
+        try:
+            from globals import wire_heartbeat_to_globals
+            wire_heartbeat_to_globals()
+        except Exception as e:
+            logger.warning(f"[WSGI] Failed to wire heartbeat to globals: {e}")
+        
+        # Register all API modules with heartbeat
+        logger.info("[WSGI] 🔗 Registering all API modules with heartbeat...")
+        registration_count = 0
+        
+        modules_to_register = [
+            ('quantum_api', 'register_quantum_with_heartbeat'),
+            ('blockchain_api', 'register_blockchain_with_heartbeat'),
+            ('oracle_api', 'register_oracle_with_heartbeat'),
+            ('defi_api', 'register_defi_with_heartbeat'),
+            ('core_api', 'register_core_with_heartbeat'),
+            ('admin_api', 'register_admin_with_heartbeat'),
+            ('db_builder_v2', 'register_database_with_heartbeat'),
+        ]
+        
+        for module_name, register_func_name in modules_to_register:
+            try:
+                module = __import__(module_name)
+                register_func = getattr(module, register_func_name)
+                if register_func():
+                    registration_count += 1
+            except Exception as e:
+                logger.debug(f"[WSGI] {module_name} registration skipped: {e}")
+        
+        logger.info(f"[WSGI] ✓ {registration_count}/{len(modules_to_register)} API modules registered with heartbeat")
+    else:
+        logger.warning("[WSGI] ⚠️  Heartbeat system initialization failed - running in degraded mode")
+    
+    # Register ledger with heartbeat
+    try:
+        from ledger_manager import register_ledger_with_heartbeat
+        register_ledger_with_heartbeat()
+    except Exception as e:
+        logger.debug(f"[WSGI] Ledger heartbeat registration skipped: {e}")
+    
     logger.info("[WSGI] ✓ WSGI APPLICATION READY FOR DEPLOYMENT")
 except ImportError as e:
     logger.critical(f"[WSGI] ✗ Failed to create app: {e}")
@@ -2294,6 +2400,10 @@ def cli_main()->None:
     parser.add_argument('--debug',action='store_true',help='Debug mode')
     
     args=parser.parse_args()
+    
+    # 🫀 HEARTBEAT INITIALIZATION
+    logger.info("[CLI] 🫀 Initializing quantum heartbeat system...")
+    _initialize_heartbeat_system()
     
     if args.mode=='interactive':
         terminal=InteractiveTerminal()

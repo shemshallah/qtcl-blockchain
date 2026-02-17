@@ -3658,6 +3658,103 @@ def init_quantum_v7():
 logger.info("✓ Quantum API Enhanced v7.0 appended - W-state generation & Qiskit integration ready")
 
 
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════
+# 🫀 QUANTUM HEARTBEAT INTEGRATION
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+class QuantumHeartbeatIntegration:
+    """Quantum API heartbeat integration - called every pulse"""
+    
+    def __init__(self):
+        self.pulse_count = 0
+        self.w_state_refresh_count = 0
+        self.metrics_update_count = 0
+        self.error_count = 0
+        self.last_coherence = 0.0
+        self.last_fidelity = 0.0
+        self.coherence_history = deque(maxlen=100)
+        self.fidelity_history = deque(maxlen=100)
+        self.lock = threading.RLock()
+    
+    def on_heartbeat(self, timestamp):
+        """Called every heartbeat pulse - refresh quantum state"""
+        try:
+            with self.lock:
+                self.pulse_count += 1
+            
+            # Every heartbeat: refresh W-state coherence
+            try:
+                if QUANTUM_WSTATE_GENERATOR:
+                    QUANTUM_WSTATE_GENERATOR.refresh_w_state_coherence()
+                    with self.lock:
+                        self.w_state_refresh_count += 1
+            except Exception as e:
+                logger.warning(f"[Quantum-HB] W-state refresh failed: {e}")
+                with self.lock:
+                    self.error_count += 1
+            
+            # Every heartbeat: update metrics
+            try:
+                if QUANTUM_METRICS:
+                    metrics = QUANTUM_METRICS.compute_all_metrics()
+                    self.last_coherence = metrics.get('coherence', 0.0)
+                    self.last_fidelity = metrics.get('fidelity', 0.0)
+                    
+                    with self.lock:
+                        self.coherence_history.append(self.last_coherence)
+                        self.fidelity_history.append(self.last_fidelity)
+                        self.metrics_update_count += 1
+            except Exception as e:
+                logger.warning(f"[Quantum-HB] Metrics update failed: {e}")
+                with self.lock:
+                    self.error_count += 1
+        
+        except Exception as e:
+            logger.error(f"[Quantum-HB] Heartbeat callback error: {e}")
+            with self.lock:
+                self.error_count += 1
+    
+    def get_status(self):
+        """Get quantum heartbeat status"""
+        with self.lock:
+            avg_coherence = sum(self.coherence_history) / len(self.coherence_history) if self.coherence_history else 0.0
+            avg_fidelity = sum(self.fidelity_history) / len(self.fidelity_history) if self.fidelity_history else 0.0
+            
+            return {
+                'pulse_count': self.pulse_count,
+                'w_state_refresh_count': self.w_state_refresh_count,
+                'metrics_update_count': self.metrics_update_count,
+                'error_count': self.error_count,
+                'last_coherence': self.last_coherence,
+                'last_fidelity': self.last_fidelity,
+                'avg_coherence': avg_coherence,
+                'avg_fidelity': avg_fidelity,
+                'coherence_trend': 'stable' if len(self.coherence_history) < 2 else 
+                                   ('improving' if self.coherence_history[-1] > self.coherence_history[0] else 'degrading')
+            }
+
+# Create singleton instance
+_quantum_heartbeat = QuantumHeartbeatIntegration()
+
+def register_quantum_with_heartbeat():
+    """Register quantum API with heartbeat system"""
+    try:
+        hb = get_heartbeat()
+        if hb:
+            hb.add_listener(_quantum_heartbeat.on_heartbeat)
+            logger.info("[Quantum] ✓ Registered with heartbeat for periodic state refresh")
+            return True
+        else:
+            logger.debug("[Quantum] Heartbeat not available - skipping registration")
+            return False
+    except Exception as e:
+        logger.warning(f"[Quantum] Failed to register with heartbeat: {e}")
+        return False
+
+def get_quantum_heartbeat_status():
+    """Get quantum heartbeat status"""
+    return _quantum_heartbeat.get_status()
 
 # Export blueprint for main_app.py
 blueprint = create_blueprint()
+

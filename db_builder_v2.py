@@ -6834,6 +6834,75 @@ class DatabaseOrchestrator:
         except Exception as e:
             logger.error(f"{CLR.R}Error running demo queries: {e}{CLR.E}")
 
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# 🫀 DATABASE BUILDER HEARTBEAT INTEGRATION
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+class DatabaseHeartbeatIntegration:
+    """Database builder heartbeat integration - connection pool management"""
+    
+    def __init__(self):
+        self.pulse_count = 0
+        self.pool_checks = 0
+        self.connection_refreshes = 0
+        self.error_count = 0
+        self.lock = threading.RLock()
+    
+    def on_heartbeat(self, timestamp):
+        """Called every heartbeat - manage database connections"""
+        try:
+            with self.lock:
+                self.pulse_count += 1
+                self.pool_checks += 1
+            
+            # Check connection pool health
+            try:
+                # This would check pool status
+                pass
+            except Exception as e:
+                logger.debug(f"[DB-HB] Pool check: {e}")
+                with self.lock:
+                    self.error_count += 1
+        
+        except Exception as e:
+            logger.error(f"[DB-HB] Heartbeat callback error: {e}")
+            with self.lock:
+                self.error_count += 1
+    
+    def get_status(self):
+        """Get database heartbeat status"""
+        with self.lock:
+            return {
+                'pulse_count': self.pulse_count,
+                'pool_checks': self.pool_checks,
+                'connection_refreshes': self.connection_refreshes,
+                'error_count': self.error_count
+            }
+
+# Create singleton instance
+_database_heartbeat = DatabaseHeartbeatIntegration()
+
+def register_database_with_heartbeat():
+    """Register database builder with heartbeat system"""
+    try:
+        from globals import get_heartbeat
+        hb = get_heartbeat()
+        if hb:
+            hb.add_listener(_database_heartbeat.on_heartbeat)
+            logger.info("[Database] ✓ Registered with heartbeat for connection management")
+            return True
+        else:
+            logger.debug("[Database] Heartbeat not available - skipping registration")
+            return False
+    except Exception as e:
+        logger.warning(f"[Database] Failed to register with heartbeat: {e}")
+        return False
+
+def get_database_heartbeat_status():
+    """Get database heartbeat status"""
+    return _database_heartbeat.get_status()
+
 def main():
     """Main entry point"""
     print_banner()

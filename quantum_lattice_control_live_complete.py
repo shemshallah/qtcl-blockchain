@@ -4290,8 +4290,9 @@ try:
     logger.info("✓ Qiskit AER loaded successfully - Full quantum simulation enabled")
 except ImportError as e:
     QISKIT_AVAILABLE = False
-    logger.error(f"✗ Qiskit AER import failed: {e}")
-    raise  # Re-raise to fail fast instead of silently degrading
+    logger.warning(f"⚠️  Qiskit AER import failed: {e} - Quantum simulation will run in fallback mode")
+    # Don't re-raise - allow system to continue with fallback
+    # This keeps heartbeat and other systems running even if Qiskit unavailable
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PART 3: GLOBAL QUANTUM LATTICE - TRANSACTION W-STATE MANAGEMENT (5 VALIDATOR QUBITS)

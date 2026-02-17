@@ -942,6 +942,40 @@ def clear_request_context():
         get_globals().request_context.clear()
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════
+# 🫀 HEARTBEAT INTEGRATION
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+def wire_heartbeat_to_globals():
+    """Wire heartbeat from wsgi_config into GLOBALS after it's initialized"""
+    try:
+        from wsgi_config import HEARTBEAT, LATTICE, LATTICE_NEURAL_REFRESH, W_STATE_ENHANCED, NOISE_BATH_ENHANCED
+        
+        if HEARTBEAT is not None:
+            globals_instance = get_globals()
+            with globals_instance.lock:
+                globals_instance.quantum.heartbeat = HEARTBEAT
+                globals_instance.quantum.lattice = LATTICE
+                globals_instance.quantum.neural_network = LATTICE_NEURAL_REFRESH
+                globals_instance.quantum.w_state_manager = W_STATE_ENHANCED
+                globals_instance.quantum.noise_bath = NOISE_BATH_ENHANCED
+            
+            logger.info("[Globals] ✓ Heartbeat wired to GLOBALS")
+            return True
+        else:
+            logger.warning("[Globals] ⚠️  Heartbeat not available from wsgi_config")
+            return False
+    except ImportError:
+        logger.debug("[Globals] Skipping heartbeat wiring (wsgi_config not yet loaded)")
+        return False
+    except Exception as e:
+        logger.error(f"[Globals] Failed to wire heartbeat: {e}")
+        return False
+
+def get_heartbeat():
+    """Get heartbeat instance"""
+    return get_globals().quantum.heartbeat
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
 # MODULE READY
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 
