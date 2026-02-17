@@ -877,6 +877,21 @@ class UI:
         print(f"\r{' '*50}\r",end='',flush=True)
     
     @staticmethod
+    def loading_start(msg:str="Processing"):
+        """Start loading animation without fixed duration"""
+        print(f"{Fore.CYAN}⟳ {msg}{Style.RESET_ALL}", flush=True)
+    
+    @staticmethod
+    def clear_loading():
+        """Clear loading animation"""
+        print(f"\r{' '*100}\r", end='', flush=True)
+    
+    @staticmethod
+    def section(text:str):
+        """Display a section header"""
+        print(f"\n{Fore.MAGENTA}{Style.BRIGHT}▫ {text}{Style.RESET_ALL}")
+    
+    @staticmethod
     def separator():print(f"{Fore.CYAN}{'─'*80}{Style.RESET_ALL}")
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
@@ -2730,6 +2745,194 @@ class TerminalEngine:
         except Exception as e:
             UI.error(f"Integrity check error: {e}")
     
+    def _cmd_block_measure(self):
+        """⚛️ MEASURE QUANTUM PROPERTIES OF BLOCKS - Comprehensive Analysis"""
+        UI.header("⚛️ BLOCK QUANTUM MEASUREMENT")
+        
+        try:
+            block_number = int(UI.prompt("Block number to measure (or -1 for latest)", "-1"))
+            
+            UI.loading("Measuring quantum properties...")
+            
+            success, result = self.client.request('POST', '/api/blocks/measure',
+                                                 {'block_number': block_number})
+            
+            if success:
+                measurements = result.get('measurements', {})
+                
+                UI.success("✓ Quantum measurements complete")
+                
+                # Display measurements
+                UI.header("QUANTUM MEASUREMENTS")
+                UI.print_table(['Metric', 'Value'], [
+                    ['Coherence', f"{float(measurements.get('coherence', 0)):.4f}"],
+                    ['Entropy', f"{float(measurements.get('entropy', 0)):.4f}"],
+                    ['Fidelity', f"{float(measurements.get('fidelity', 0)):.4f}"],
+                    ['Finality Confidence', f"{float(measurements.get('finality_confidence', 0)):.1%}"],
+                    ['W-State Agreement', f"{float(measurements.get('w_state_agreement', 0)):.1%}"],
+                    ['GHZ-8 Consensus', str(measurements.get('ghz8_consensus', False)).upper()],
+                ])
+                
+                # Display block info
+                block_info = result.get('block_info', {})
+                if block_info:
+                    UI.header("BLOCK INFORMATION")
+                    UI.print_table(['Field', 'Value'], [
+                        ['Block Number', str(block_info.get('block_number', ''))],
+                        ['Hash', block_info.get('hash', '')[:32] + '...'],
+                        ['Transaction Count', str(block_info.get('transaction_count', 0))],
+                        ['Size', f"{float(block_info.get('size', 0)) / 1024:.2f} KB"],
+                        ['Timestamp', block_info.get('timestamp', '')[:19]],
+                        ['Status', block_info.get('status', 'unknown').upper()],
+                    ])
+                
+                metrics.record_command('block/measure')
+            else:
+                UI.error(f"Measurement failed: {result.get('error', 'Unknown error')}")
+                metrics.record_command('block/measure', False)
+        
+        except Exception as e:
+            UI.error(f"Exception: {e}")
+            metrics.record_command('block/measure', False)
+    
+    def _cmd_block_validate(self):
+        """✅ COMPREHENSIVE BLOCK VALIDATION - Full Blockchain Verification"""
+        UI.header("✅ COMPREHENSIVE BLOCK VALIDATION")
+        
+        try:
+            start_block = int(UI.prompt("Start block number (or 0 for genesis)", "0"))
+            end_block = int(UI.prompt("End block number (or -1 for latest)", "-1"))
+            
+            validate_quantum = UI.confirm("Validate quantum proofs?", default=True)
+            validate_merkle = UI.confirm("Validate merkle trees?", default=True)
+            validate_signatures = UI.confirm("Validate signatures?", default=False)
+            
+            UI.loading(f"Validating blocks {start_block} to {end_block}...")
+            
+            success, result = self.client.request('POST', '/api/blocks/validate', {
+                'start_block': start_block,
+                'end_block': end_block,
+                'validate_quantum': validate_quantum,
+                'validate_merkle': validate_merkle,
+                'validate_signatures': validate_signatures
+            })
+            
+            if success:
+                validation_result = result.get('validation', {})
+                
+                UI.success("✓ Validation complete")
+                
+                # Display summary
+                UI.header("VALIDATION SUMMARY")
+                total_blocks = validation_result.get('total_blocks_checked', 0)
+                valid_blocks = validation_result.get('valid_blocks', 0)
+                invalid_blocks = total_blocks - valid_blocks
+                validity_score = validation_result.get('validity_score', 0.0)
+                
+                UI.print_table(['Category', 'Count'], [
+                    ['Blocks Checked', str(total_blocks)],
+                    ['Valid Blocks', str(valid_blocks)],
+                    ['Invalid Blocks', str(invalid_blocks)],
+                    ['Validity Score', f"{float(validity_score):.1%}"],
+                ])
+                
+                # Display detailed results
+                if invalid_blocks > 0:
+                    UI.header("INVALID BLOCKS")
+                    invalid_list = validation_result.get('invalid_blocks', [])
+                    for ib in invalid_list[:10]:
+                        UI.error(f"Block #{ib.get('block_number', '')}: {ib.get('error', 'unknown')}")
+                else:
+                    UI.success("✓ All blocks valid")
+                
+                # Display validation type results
+                if validate_quantum and 'quantum_validation' in validation_result:
+                    qv = validation_result['quantum_validation']
+                    UI.info(f"Quantum: {qv.get('valid', 0)}/{qv.get('total', 0)} valid")
+                
+                if validate_merkle and 'merkle_validation' in validation_result:
+                    mv = validation_result['merkle_validation']
+                    UI.info(f"Merkle: {mv.get('valid', 0)}/{mv.get('total', 0)} valid")
+                
+                metrics.record_command('block/validate')
+            else:
+                UI.error(f"Validation failed: {result.get('error', 'Unknown error')}")
+                metrics.record_command('block/validate', False)
+        
+        except Exception as e:
+            UI.error(f"Exception: {e}")
+            metrics.record_command('block/validate', False)
+    
+    def _cmd_block_history(self):
+        """📜 TRANSACTION HISTORY - View all transactions and block progression"""
+        UI.header("📜 BLOCKCHAIN TRANSACTION HISTORY")
+        
+        try:
+            # Get filters
+            limit = int(UI.prompt("Number of transactions to display (default 50)", "50"))
+            limit = min(limit, 500)  # Cap at 500
+            
+            tx_type_filter = UI.prompt("Filter by type (transfer/stake/burn or leave blank)", "").strip()
+            user_filter = UI.prompt("Filter by user email (or leave blank)", "").strip()
+            
+            UI.loading("Retrieving history...")
+            
+            params = {'limit': limit}
+            if tx_type_filter:
+                params['type'] = tx_type_filter
+            if user_filter:
+                params['user_email'] = user_filter
+            
+            success, result = self.client.request('GET', '/api/transactions/history', params=params)
+            
+            if success:
+                transactions = result.get('transactions', [])
+                
+                UI.success(f"✓ Retrieved {len(transactions)} transactions")
+                UI.separator()
+                
+                # Display in table format
+                rows = []
+                for tx in transactions:
+                    row = [
+                        tx.get('tx_id', '')[:16] + '...',
+                        tx.get('tx_type', 'unknown'),
+                        tx.get('from_user', '')[:12] + '...' if tx.get('from_user') else 'N/A',
+                        tx.get('to_user', '')[:12] + '...' if tx.get('to_user') else 'N/A',
+                        f"{float(tx.get('amount', 0)) / (10**18):.4f}",
+                        tx.get('status', 'unknown').upper(),
+                        tx.get('timestamp', '')[:10] if tx.get('timestamp') else 'N/A'
+                    ]
+                    rows.append(row)
+                
+                UI.print_table(['TX ID', 'Type', 'From', 'To', 'Amount (QTCL)', 'Status', 'Date'],
+                             rows)
+                
+                # Display summary statistics
+                UI.separator()
+                UI.header("TRANSACTION STATISTICS")
+                
+                total_amount = sum(float(tx.get('amount', 0)) for tx in transactions)
+                approved_count = sum(1 for tx in transactions if tx.get('status') == 'finalized')
+                finality_rate = approved_count / len(transactions) if transactions else 0
+                
+                UI.print_table(['Metric', 'Value'], [
+                    ['Total Transactions', str(len(transactions))],
+                    ['Total Amount', f"{total_amount / (10**18):.8f} QTCL"],
+                    ['Finalized Count', str(approved_count)],
+                    ['Finality Rate', f"{finality_rate:.1%}"],
+                    ['Date Range', f"Recent {len(transactions)} transactions"],
+                ])
+                
+                metrics.record_command('block/history')
+            else:
+                UI.error(f"History retrieval failed: {result.get('error', 'Unknown error')}")
+                metrics.record_command('block/history', False)
+        
+        except Exception as e:
+            UI.error(f"Exception: {e}")
+            metrics.record_command('block/history', False)
+    
     def _measure_quantum_block_state(self, block_data, correlation_id):
         """
         Recursively measure and validate quantum block state including:
@@ -2875,6 +3078,8 @@ class TerminalEngine:
             'explorer': ('🔍 Search blocks/transactions/addresses', self._cmd_block_explorer),
             'stats': ('📊 View block statistics and metrics', self._cmd_block_stats),
             'validate': ('⚛️ Recursively validate block chain', self._cmd_block_validate),
+            'measure': ('⚛️ Measure quantum properties of blocks', self._cmd_block_measure),
+            'history': ('📜 View transaction history and progression', self._cmd_block_history),
         }
         return self.block_commands
     
@@ -2989,106 +3194,275 @@ class TerminalEngine:
             UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum/finality',False)
     
     def _cmd_quantum_transaction(self):
-        """PRODUCTION Quantum-secured transaction with 6-layer finality verification"""
-        UI.header("⚛️ QUANTUM TRANSACTION - 6-LAYER PROCESSOR")
+        """
+        COMPREHENSIVE INTERACTIVE QUANTUM TRANSACTION EXECUTOR
         
-        # Check if we have arguments - if not, show usage
-        if not self.args or (len(self.args) == 0):
-            UI.info("USAGE: quantum/transaction --user_email=<email> --password=<pass> --target_email=<email> --target_identifier=<id> --amount=<amt>")
-            UI.info("\nEXAMPLE:")
-            UI.print("  quantum/transaction --user_email=alice@example.com --password=SecurePass123! --target_email=bob@example.com --target_identifier=pseud_bob456 --amount=500.0")
-            UI.info("\nOPTIONS:")
-            UI.print("  --user_email=<email>         Your email address")
-            UI.print("  --password=<password>        Your password (or use --prompt-password)")
-            UI.print("  --target_email=<email>       Target user email")
-            UI.print("  --target_identifier=<id>     Target pseudoqubit_id or UID")
-            UI.print("  --amount=<number>            Amount to transfer in QTCL")
-            UI.print("  --interactive                Prompt for values interactively")
-            return
+        Guides user through complete 10-phase transaction flow:
+        1. Email collection → User identification
+        2. Target identification (email/pseudoqubit/UID)
+        3. Amount input
+        4. Amount validation against balance
+        5. Password authentication
+        6. Quantum state preparation
+        7. Validator consensus (W-state)
+        8. Oracle collapse measurement
+        9. GHZ finality verification
+        10. Balance application & receipt generation
+        """
         
-        # Check if --interactive flag is set
-        interactive = self.get_flag('interactive', False)
+        UI.header("⚛️  QUANTUM TRANSACTION - INTERACTIVE FLOW")
+        UI.info("Complete 10-phase quantum-secured transaction with finality verification")
+        UI.separator()
         
-        # Parse arguments or use interactive mode
-        if interactive:
-            # Collect transaction parameters interactively
-            user_email = UI.prompt("Your email")
-            target_email = UI.prompt("Target email")
-            target_identifier = UI.prompt("Target pseudoqubit_id or UID")
+        try:
+            # ─────────────────────────────────────────────────────────────────────────────────
+            # PHASE 1: USER EMAIL IDENTIFICATION
+            # ─────────────────────────────────────────────────────────────────────────────────
             
-            try:
-                amount = float(UI.prompt("Amount"))
-            except ValueError:
-                UI.error("Invalid amount")
+            UI.section("PHASE 1/10: USER AUTHENTICATION")
+            user_email = UI.prompt("Your email address (or current for logged-in user)").strip()
+            
+            if not user_email or user_email.lower() == 'current':
+                if self.session.is_authenticated():
+                    user_email = self.session.session.email
+                    user_id = self.session.session.user_id
+                    pseudoqubit_id = self.session.session.pseudoqubit_id
+                    UI.info(f"✓ Using current user: {user_email}")
+                else:
+                    UI.error("Not authenticated and no email provided")
+                    return
+            else:
+                # Look up user by email
+                success, user_data = self.client.request('GET', '/api/users/by-email', 
+                                                         params={'email': user_email})
+                
+                if not success or not user_data:
+                    UI.error(f"User not found: {user_email}")
+                    return
+                
+                user_id = user_data.get('user_id')
+                pseudoqubit_id = user_data.get('pseudoqubit_id', 'N/A')
+            
+            UI.success(f"✓ User identified")
+            UI.print(f"  UID: {user_id[:16]}...")
+            UI.print(f"  PQ:  {pseudoqubit_id}")
+            
+            # ─────────────────────────────────────────────────────────────────────────────────
+            # PHASE 2: TARGET IDENTIFICATION
+            # ─────────────────────────────────────────────────────────────────────────────────
+            
+            UI.section("PHASE 2/10: TARGET IDENTIFICATION")
+            UI.info("Provide target as: email, pseudoqubit_id, username, or UID")
+            
+            target_identifier = UI.prompt("Target identifier").strip()
+            
+            if not target_identifier:
+                UI.error("Target identifier required")
                 return
             
-            password = UI.prompt("Confirm with password", password=True)
-        else:
-            # Parse from command-line flags
-            user_email = self.get_flag('user_email', '')
-            password = self.get_flag('password', '')
-            target_email = self.get_flag('target_email', '')
-            target_identifier = self.get_flag('target_identifier', '')
+            # Try to identify target
+            target_data = None
             
-            try:
-                amount = float(self.get_flag('amount', 0))
-            except (ValueError, TypeError):
-                UI.error("Invalid amount - must be a number")
+            # Try email first
+            success, result = self.client.request('GET', '/api/users/by-email',
+                                                 params={'email': target_identifier})
+            if success and result:
+                target_data = result
+            
+            # Try pseudoqubit_id
+            if not target_data:
+                success, result = self.client.request('GET', '/api/users/by-pq',
+                                                     params={'pseudoqubit_id': target_identifier})
+                if success and result:
+                    target_data = result
+            
+            # Try UID
+            if not target_data:
+                success, result = self.client.request('GET', f'/api/users/{target_identifier}')
+                if success and result:
+                    target_data = result
+            
+            if not target_data:
+                UI.error(f"Target not found: {target_identifier}")
                 return
             
-            # Validate all required fields are present
-            if not all([user_email, password, target_email, target_identifier, amount]):
-                UI.error("Missing required parameters")
-                UI.info("Use: quantum/transaction --help")
+            target_user_id = target_data.get('user_id')
+            target_email = target_data.get('email')
+            target_pseudoqubit = target_data.get('pseudoqubit_id', 'N/A')
+            
+            UI.success(f"✓ Target identified")
+            UI.print(f"  Email: {target_email}")
+            UI.print(f"  UID:   {target_user_id[:16]}...")
+            UI.print(f"  PQ:    {target_pseudoqubit}")
+            
+            # ─────────────────────────────────────────────────────────────────────────────────
+            # PHASE 3: AMOUNT INPUT
+            # ─────────────────────────────────────────────────────────────────────────────────
+            
+            UI.section("PHASE 3/10: AMOUNT SPECIFICATION")
+            
+            while True:
+                try:
+                    amount_str = UI.prompt("Amount to transfer (QTCL)").strip()
+                    amount = float(amount_str)
+                    
+                    if amount <= 0:
+                        UI.error("Amount must be positive")
+                        continue
+                    
+                    # Convert to wei (18 decimals)
+                    amount_wei = int(amount * (10 ** 18))
+                    break
+                except ValueError:
+                    UI.error("Invalid amount format")
+            
+            UI.success(f"✓ Amount: {amount:.8f} QTCL ({amount_wei} wei)")
+            
+            # ─────────────────────────────────────────────────────────────────────────────────
+            # PHASE 4: BALANCE VALIDATION
+            # ─────────────────────────────────────────────────────────────────────────────────
+            
+            UI.section("PHASE 4/10: BALANCE VALIDATION")
+            
+            success, user_balance_data = self.client.request('GET', f'/api/users/{user_id}/balance')
+            
+            if not success:
+                UI.error("Could not retrieve balance")
                 return
-        
-        # Call PRODUCTION quantum transaction processor
-        payload = {
-            'user_email': user_email,
-            'target_email': target_email,
-            'target_identifier': target_identifier,
-            'amount': amount,
-            'password': password
-        }
-        
-        UI.info("Processing quantum transaction...")
-        success, result = self.client.request('POST', '/api/quantum/transaction', payload)
-        
-        if success:
-            UI.success("✓ Transaction finalized with quantum verification")
             
-            # Display transaction details
-            UI.print_table(['Field','Value'],[
-                ['Transaction ID',result.get('tx_id','')[:24]+"..."],
-                ['From User',result.get('user_email','')],
-                ['To User',result.get('target_email','')],
-                ['Target ID',str(result.get('target_id',''))],
-                ['Amount',f"{float(result.get('amount',0)):.8f} QTCL"],
-                ['Status',result.get('status','unknown').upper()]
-            ])
+            current_balance = float(user_balance_data.get('balance', 0))
+            current_balance_wei = user_balance_data.get('balance_wei', 0)
             
-            # Display quantum metrics
-            qm = result.get('quantum_metrics', {})
-            if qm:
-                UI.print_table(['Quantum Metric','Value'],[
-                    ['Entropy',f"{float(qm.get('entropy',0)):.4f}"],
-                    ['Coherence',f"{float(qm.get('coherence',0)):.1%}"],
-                    ['Fidelity',f"{float(qm.get('fidelity',0)):.1%}"],
+            UI.print(f"Current balance: {current_balance:.8f} QTCL")
+            UI.print(f"Transfer amount: {amount:.8f} QTCL")
+            
+            if current_balance_wei < amount_wei:
+                UI.error(f"Insufficient balance: {current_balance:.8f} < {amount:.8f}")
+                return
+            
+            balance_after = current_balance - amount
+            UI.success(f"✓ Balance sufficient")
+            UI.print(f"Balance after:   {balance_after:.8f} QTCL")
+            
+            # ─────────────────────────────────────────────────────────────────────────────────
+            # PHASE 5: PASSWORD AUTHENTICATION
+            # ─────────────────────────────────────────────────────────────────────────────────
+            
+            UI.section("PHASE 5/10: PASSWORD AUTHENTICATION")
+            UI.warning("Password required to bring qubits to 3GHz and 8GHz states")
+            
+            password = UI.prompt("Password", password=True).strip()
+            
+            if not password:
+                UI.error("Password required for transaction finality")
+                return
+            
+            # Verify password
+            success, auth_result = self.client.request('POST', '/api/auth/verify-password',
+                                                       {'email': user_email, 'password': password})
+            
+            if not success:
+                UI.error("Password verification failed")
+                return
+            
+            password_hash = hashlib.sha256(password.encode()).hexdigest()
+            UI.success("✓ Password authenticated")
+            
+            # ─────────────────────────────────────────────────────────────────────────────────
+            # PHASE 6-10: QUANTUM TRANSACTION EXECUTION
+            # ─────────────────────────────────────────────────────────────────────────────────
+            
+            UI.section("PHASES 6-10: QUANTUM EXECUTION")
+            UI.loading_start("6. Preparing quantum state (W-state coherence)...")
+            
+            # Call the comprehensive quantum transaction API
+            payload = {
+                'user_id': user_id,
+                'user_email': user_email,
+                'pseudoqubit_id': pseudoqubit_id,
+                'target_user_id': target_user_id,
+                'target_email': target_email,
+                'target_pseudoqubit': target_pseudoqubit,
+                'amount': amount_wei,
+                'password_hash': password_hash,
+                'interactive': True
+            }
+            
+            success, result = self.client.request('POST', '/api/quantum/transaction/execute', payload)
+            
+            if success:
+                tx_id = result.get('tx_id', 'UNKNOWN')
+                
+                UI.clear_loading()
+                UI.success("✅ QUANTUM TRANSACTION COMPLETE")
+                UI.separator()
+                
+                # Display transaction summary
+                UI.header("TRANSACTION DETAILS")
+                UI.print_table(['Field', 'Value'], [
+                    ['Transaction ID', tx_id[:32] + '...'],
+                    ['From Email', result.get('user_email', '')],
+                    ['To Email', result.get('target_email', '')],
+                    ['Amount', f"{float(result.get('amount', 0)) / (10**18):.8f} QTCL"],
+                    ['Status', result.get('status', 'unknown').upper()],
+                    ['Balance Before', f"{float(result.get('balance_before', 0)) / (10**18):.8f} QTCL"],
+                    ['Balance After', f"{float(result.get('balance_after', 0)) / (10**18):.8f} QTCL"],
                 ])
+                
+                # Display quantum metrics
+                qm = result.get('quantum_metrics', {})
+                if qm:
+                    UI.header("QUANTUM METRICS")
+                    UI.print_table(['Metric', 'Value'], [
+                        ['W-State Coherence', f"{float(qm.get('w_state_coherence', 0)):.4f}"],
+                        ['Validator Agreement', f"{float(qm.get('validator_agreement', 0)):.1%}"],
+                        ['Oracle Collapse', str(result.get('oracle_collapse', 0))],
+                        ['3-GHz Consensus', str(qm.get('ghz3_consensus', False))],
+                        ['8-GHz Consensus', str(qm.get('ghz8_consensus', False))],
+                        ['Entropy Score', f"{float(qm.get('entropy_score', 0)):.4f}"],
+                        ['Finality', str(result.get('finality', False)).upper()],
+                        ['Finality Confidence', f"{float(result.get('finality_confidence', 0)):.1%}"],
+                    ])
+                
+                # Display receipt
+                receipt = result.get('receipt')
+                if receipt:
+                    UI.header("TRANSACTION RECEIPT")
+                    UI.print_table(['Field', 'Value'], [
+                        ['Receipt ID', receipt.get('receipt_id', '')],
+                        ['TX Hash', receipt.get('quantum_hash', '')[:32] + '...'],
+                        ['Timestamp', receipt.get('timestamp', '')[:19]],
+                        ['Status', receipt.get('status', '').upper()],
+                    ])
+                
+                # Mempool and block status
+                if result.get('mempool_status'):
+                    UI.success(f"✓ Added to mempool")
+                
+                if 'block_number' in result:
+                    UI.success(f"✓ Included in block #{result['block_number']}")
+                    UI.print(f"  Block hash: {result.get('block_hash', '')[:32]}...")
+                
+                metrics.record_command('quantum/transaction')
             
-            # Display finality information
-            UI.print_table(['Finality Status','Value'],[
-                ['Achieved',str(result.get('finality',False))],
-                ['Confidence',f"{float(result.get('finality_confidence',0)):.1%}"],
-                ['Oracle Collapse',str(result.get('oracle_collapse',0))],
-                ['Mempool Pending',str(result.get('pending_in_mempool',0))]
-            ])
-            
-            metrics.record_command('quantum/transaction')
-        else:
-            error_code = result.get('error_code', 'UNKNOWN')
-            error_msg = result.get('error', 'Unknown error')
-            UI.error(f"Transaction failed ({error_code}): {error_msg}")
+            else:
+                UI.clear_loading()
+                error_code = result.get('error_code', 'UNKNOWN')
+                error_msg = result.get('error', 'Unknown error')
+                UI.error(f"Transaction failed ({error_code}): {error_msg}")
+                
+                if 'error_details' in result:
+                    UI.print(json.dumps(result['error_details'], indent=2))
+                
+                metrics.record_command('quantum/transaction', False)
+        
+        except KeyboardInterrupt:
+            UI.warning("\n⏸  Transaction cancelled by user")
+            metrics.record_command('quantum/transaction', False)
+        
+        except Exception as e:
+            UI.error(f"Unexpected error: {e}")
+            logger.error(f"Transaction command failed: {e}", exc_info=True)
             metrics.record_command('quantum/transaction', False)
     
     def _cmd_quantum_oracle(self):

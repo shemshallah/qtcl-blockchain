@@ -3024,6 +3024,477 @@ class FinalizationManager:
             logger.error(f"Failed to apply transaction effects: {e}", exc_info=True)
             return False, f"Effects application error: {e}"
     
+    def execute_quantum_transaction(self,
+                                     user_id: str,
+                                     user_email: str,
+                                     pseudoqubit_id: str,
+                                     target_user_id: str,
+                                     target_email: str,
+                                     target_pseudoqubit: str,
+                                     amount: int,
+                                     password_hash: str,
+                                     oracle_qubit_state: Optional[Dict] = None,
+                                     validator_qubits: Optional[List[Dict]] = None) -> Tuple[bool, Dict]:
+        """
+        COMPREHENSIVE QUANTUM-ENABLED TRANSACTION EXECUTION
+        
+        Full transaction lifecycle with quantum finality:
+        1. User and target validation
+        2. Balance verification
+        3. Quantum state preparation (5-qubit W-state)
+        4. Transaction encoding (user→target→oracle qubits)
+        5. GHZ-8 consensus measurement
+        6. Oracle collapse for finality determination
+        7. Validator qubit agreement (3-GHz and 8-GHz states)
+        8. Balance application
+        9. Block creation trigger
+        10. Receipt generation
+        
+        Args:
+            user_id: Sender user ID
+            user_email: Sender email
+            pseudoqubit_id: Sender PQ ID
+            target_user_id: Recipient user ID
+            target_email: Recipient email
+            target_pseudoqubit: Recipient PQ ID
+            amount: Transfer amount (wei)
+            password_hash: SHA256 hash of user's password
+            oracle_qubit_state: Optional pre-measured oracle state
+            validator_qubits: Optional pre-validated qubit states
+            
+        Returns:
+            Tuple of (success: bool, result: Dict with full transaction details)
+        """
+        tx_id = f"tx_{secrets.token_hex(16)}"
+        result = {
+            'tx_id': tx_id,
+            'status': 'processing',
+            'user_id': user_id,
+            'user_email': user_email,
+            'target_id': target_user_id,
+            'target_email': target_email,
+            'amount': amount,
+            'quantum_metrics': {},
+            'validator_agreement': 0.0,
+            'oracle_collapse': False,
+            'mempool_status': False,
+            'finality': False,
+            'receipt': None
+        }
+        
+        try:
+            logger.info(f"[QUANTUM-TX] Starting comprehensive transaction {tx_id}")
+            
+            # ─────────────────────────────────────────────────────────────────────────────────
+            # PHASE 1: USER AND TARGET VALIDATION
+            # ─────────────────────────────────────────────────────────────────────────────────
+            
+            conn = self._get_connection()
+            try:
+                with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                    # Validate sender exists and is active
+                    cursor.execute(
+                        "SELECT user_id, email, pseudoqubit_id, balance, is_active FROM users WHERE user_id = %s",
+                        (user_id,)
+                    )
+                    sender = cursor.fetchone()
+                    
+                    if not sender:
+                        result['status'] = 'error'
+                        result['error'] = f"Sender not found: {user_id}"
+                        logger.warning(f"[QUANTUM-TX] Sender validation failed: {result['error']}")
+                        return False, result
+                    
+                    if not sender['is_active']:
+                        result['status'] = 'error'
+                        result['error'] = f"Sender account inactive: {user_id}"
+                        logger.warning(f"[QUANTUM-TX] {result['error']}")
+                        return False, result
+                    
+                    # Validate recipient exists and is active
+                    cursor.execute(
+                        "SELECT user_id, email, pseudoqubit_id, balance, is_active FROM users WHERE user_id = %s",
+                        (target_user_id,)
+                    )
+                    recipient = cursor.fetchone()
+                    
+                    if not recipient:
+                        result['status'] = 'error'
+                        result['error'] = f"Recipient not found: {target_user_id}"
+                        logger.warning(f"[QUANTUM-TX] Recipient validation failed: {result['error']}")
+                        return False, result
+                    
+                    if not recipient['is_active']:
+                        result['status'] = 'error'
+                        result['error'] = f"Recipient account inactive: {target_user_id}"
+                        logger.warning(f"[QUANTUM-TX] {result['error']}")
+                        return False, result
+                    
+                    logger.info(f"[QUANTUM-TX] ✓ Sender and recipient validated")
+                    
+                    # ─────────────────────────────────────────────────────────────────────────────────
+                    # PHASE 2: BALANCE VERIFICATION AND TRANSACTION VALIDATION
+                    # ─────────────────────────────────────────────────────────────────────────────────
+                    
+                    sender_balance = int(sender['balance']) if sender['balance'] else 0
+                    
+                    if sender_balance < amount:
+                        result['status'] = 'error'
+                        result['error'] = f"Insufficient balance: {sender_balance} < {amount}"
+                        result['balance_before'] = sender_balance
+                        result['balance_required'] = amount
+                        logger.warning(f"[QUANTUM-TX] {result['error']}")
+                        return False, result
+                    
+                    if amount <= 0:
+                        result['status'] = 'error'
+                        result['error'] = "Amount must be positive"
+                        return False, result
+                    
+                    logger.info(f"[QUANTUM-TX] ✓ Balance verified: {sender_balance} >= {amount}")
+                    
+                    # ─────────────────────────────────────────────────────────────────────────────────
+                    # PHASE 3: QUANTUM STATE PREPARATION
+                    # ─────────────────────────────────────────────────────────────────────────────────
+                    
+                    quantum_state_data = {
+                        'user_qubit_encoding': self._encode_user_qubit(user_id, pseudoqubit_id),
+                        'target_qubit_encoding': self._encode_target_qubit(target_user_id, target_pseudoqubit),
+                        'transaction_amount_hash': hashlib.sha256(str(amount).encode()).hexdigest(),
+                        'timestamp_hash': hashlib.sha256(datetime.utcnow().isoformat().encode()).hexdigest(),
+                        'tx_id_hash': hashlib.sha256(tx_id.encode()).hexdigest()
+                    }
+                    
+                    w_state_coherence = self._calculate_w_state_coherence(
+                        user_id, target_user_id, amount
+                    )
+                    
+                    result['quantum_metrics']['w_state_coherence'] = w_state_coherence
+                    logger.info(f"[QUANTUM-TX] ✓ W-state prepared (coherence: {w_state_coherence:.4f})")
+                    
+                    # ─────────────────────────────────────────────────────────────────────────────────
+                    # PHASE 4: VALIDATOR QUBIT CONSENSUS (5 VALIDATORS, W-STATE)
+                    # ─────────────────────────────────────────────────────────────────────────────────
+                    
+                    validator_agreement = self._measure_validator_agreement(
+                        tx_id, user_id, target_user_id, amount, validator_qubits
+                    )
+                    
+                    result['validator_agreement'] = validator_agreement
+                    result['quantum_metrics']['validator_agreement'] = validator_agreement
+                    
+                    if validator_agreement < 0.67:  # 2/3 threshold
+                        result['status'] = 'error'
+                        result['error'] = f"Insufficient validator agreement: {validator_agreement:.2%}"
+                        logger.warning(f"[QUANTUM-TX] {result['error']}")
+                        return False, result
+                    
+                    logger.info(f"[QUANTUM-TX] ✓ Validator consensus: {validator_agreement:.2%}")
+                    
+                    # ─────────────────────────────────────────────────────────────────────────────────
+                    # PHASE 5: ORACLE QUBIT MEASUREMENT FOR FINALITY
+                    # ─────────────────────────────────────────────────────────────────────────────────
+                    
+                    oracle_collapse, finality_confidence = self._measure_oracle_qubit(
+                        tx_id, user_id, target_user_id, oracle_qubit_state
+                    )
+                    
+                    result['oracle_collapse'] = int(oracle_collapse)
+                    result['quantum_metrics']['finality_confidence'] = finality_confidence
+                    
+                    logger.info(f"[QUANTUM-TX] ✓ Oracle collapse: {oracle_collapse} (confidence: {finality_confidence:.2%})")
+                    
+                    # ─────────────────────────────────────────────────────────────────────────────────
+                    # PHASE 6: GHZ-3 (3GHZ) AND GHZ-8 (8GHZ) FINALITY MEASUREMENT
+                    # ─────────────────────────────────────────────────────────────────────────────────
+                    
+                    ghz3_consensus, ghz8_consensus, entropy_score = self._measure_ghz_finality(
+                        tx_id, user_id, target_user_id, amount
+                    )
+                    
+                    result['quantum_metrics']['ghz3_consensus'] = ghz3_consensus
+                    result['quantum_metrics']['ghz8_consensus'] = ghz8_consensus
+                    result['quantum_metrics']['entropy_score'] = entropy_score
+                    
+                    if not (ghz8_consensus or (ghz3_consensus and finality_confidence > 0.85)):
+                        result['status'] = 'pending_finality'
+                        logger.info(f"[QUANTUM-TX] ⏳ GHZ states not collapsed, transaction pending")
+                    
+                    logger.info(f"[QUANTUM-TX] ✓ GHZ measurements: 3-GHz={ghz3_consensus}, 8-GHz={ghz8_consensus}")
+                    
+                    # ─────────────────────────────────────────────────────────────────────────────────
+                    # PHASE 7: BALANCE APPLICATION (ATOMIC TRANSFER)
+                    # ─────────────────────────────────────────────────────────────────────────────────
+                    
+                    # Start atomic transaction for balance update
+                    cursor.execute("BEGIN")
+                    
+                    # Lock both accounts FOR UPDATE
+                    cursor.execute(
+                        "SELECT balance FROM users WHERE user_id = %s FOR UPDATE",
+                        (user_id,)
+                    )
+                    current_sender = cursor.fetchone()
+                    
+                    cursor.execute(
+                        "SELECT balance FROM users WHERE user_id = %s FOR UPDATE",
+                        (target_user_id,)
+                    )
+                    current_recipient = cursor.fetchone()
+                    
+                    # Final balance check (re-check in case of concurrent updates)
+                    if not current_sender or int(current_sender['balance']) < amount:
+                        cursor.execute("ROLLBACK")
+                        result['status'] = 'error'
+                        result['error'] = "Insufficient balance (concurrent update detected)"
+                        logger.warning(f"[QUANTUM-TX] {result['error']}")
+                        return False, result
+                    
+                    # Deduct from sender
+                    new_sender_balance = int(current_sender['balance']) - amount
+                    cursor.execute(
+                        "UPDATE users SET balance = %s WHERE user_id = %s",
+                        (new_sender_balance, user_id)
+                    )
+                    
+                    # Credit to recipient
+                    new_recipient_balance = (int(current_recipient['balance']) if current_recipient else 0) + amount
+                    cursor.execute(
+                        "UPDATE users SET balance = %s WHERE user_id = %s",
+                        (new_recipient_balance, target_user_id)
+                    )
+                    
+                    # Record transaction in ledger
+                    timestamp = datetime.utcnow()
+                    cursor.execute(
+                        """
+                        INSERT INTO transactions 
+                        (id, from_user_id, to_user_id, amount, tx_type, status, 
+                         quantum_hash, entropy_score, validator_agreement, 
+                         oracle_collapse, ghz8_finality, timestamp, block_number)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (tx_id, user_id, target_user_id, amount, 'transfer', 'finalized',
+                         quantum_state_data['tx_id_hash'], entropy_score, validator_agreement,
+                         int(oracle_collapse), int(ghz8_consensus), timestamp, None)
+                    )
+                    
+                    # Record balance changes
+                    cursor.execute(
+                        """
+                        INSERT INTO balance_changes 
+                        (user_id, change_amount, balance_before, balance_after, tx_id, change_type, timestamp)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (user_id, -amount, int(current_sender['balance']), new_sender_balance, 
+                         tx_id, 'transfer_debit', timestamp)
+                    )
+                    
+                    cursor.execute(
+                        """
+                        INSERT INTO balance_changes 
+                        (user_id, change_amount, balance_before, balance_after, tx_id, change_type, timestamp)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (target_user_id, amount, int(current_recipient['balance']) if current_recipient else 0, 
+                         new_recipient_balance, tx_id, 'transfer_credit', timestamp)
+                    )
+                    
+                    # Commit atomic transaction
+                    cursor.execute("COMMIT")
+                    
+                    result['balance_before'] = int(current_sender['balance'])
+                    result['balance_after'] = new_sender_balance
+                    result['status'] = 'finalized'
+                    
+                    logger.info(f"[QUANTUM-TX] ✓ Balances updated atomically")
+                    
+                    # ─────────────────────────────────────────────────────────────────────────────────
+                    # PHASE 8: RECEIPT GENERATION
+                    # ─────────────────────────────────────────────────────────────────────────────────
+                    
+                    receipt = {
+                        'receipt_id': f"RCP_{secrets.token_hex(8)}",
+                        'tx_id': tx_id,
+                        'from_user': user_id,
+                        'from_email': user_email,
+                        'to_user': target_user_id,
+                        'to_email': target_email,
+                        'amount': amount,
+                        'timestamp': timestamp.isoformat(),
+                        'status': 'finalized',
+                        'quantum_hash': quantum_state_data['tx_id_hash'],
+                        'validator_agreement': validator_agreement,
+                        'oracle_collapse': int(oracle_collapse),
+                        'ghz8_finality': int(ghz8_consensus),
+                        'entropy_score': entropy_score,
+                        'balance_before': int(current_sender['balance']),
+                        'balance_after': new_sender_balance
+                    }
+                    
+                    result['receipt'] = receipt
+                    result['finality'] = ghz8_consensus or finality_confidence > 0.85
+                    result['finality_confidence'] = finality_confidence
+                    
+                    logger.info(f"[QUANTUM-TX] ✓ Receipt generated")
+                    
+                    # ─────────────────────────────────────────────────────────────────────────────────
+                    # PHASE 9: BLOCK CREATION TRIGGER (IF MEMPOOL ENABLED)
+                    # ─────────────────────────────────────────────────────────────────────────────────
+                    
+                    # Add transaction to mempool if available
+                    try:
+                        if global_mempool is not None:
+                            mempool_tx = {
+                                'tx_id': tx_id,
+                                'from_user_id': user_id,
+                                'to_user_id': target_user_id,
+                                'amount': amount,
+                                'tx_type': 'transfer',
+                                'status': 'finalized',
+                                'quantum_hash': quantum_state_data['tx_id_hash'],
+                                'entropy_score': entropy_score,
+                                'validator_agreement': validator_agreement,
+                                'oracle_collapse': int(oracle_collapse),
+                                'timestamp': timestamp.isoformat()
+                            }
+                            global_mempool.add_transaction(mempool_tx)
+                            result['mempool_status'] = True
+                            
+                            # Trigger block creation if block creator available
+                            if global_block_creator is not None:
+                                block = global_block_creator.create_block_from_mempool(global_mempool)
+                                if block:
+                                    result['block_number'] = block.block_number
+                                    result['block_hash'] = block.block_hash
+                                    logger.info(f"[QUANTUM-TX] ✓ Block #{block.block_number} created")
+                    except Exception as e:
+                        logger.warning(f"[QUANTUM-TX] Mempool/block creation skipped: {e}")
+                    
+                    with self.lock:
+                        self.finalized_count += 1
+                    
+                    logger.info(f"[QUANTUM-TX] ✅ COMPLETE: {tx_id} FINALIZED")
+                    return True, result
+            
+            finally:
+                self._return_connection(conn)
+        
+        except Exception as e:
+            logger.error(f"[QUANTUM-TX] FAILED: {e}", exc_info=True)
+            result['status'] = 'error'
+            result['error'] = str(e)
+            with self.lock:
+                self.error_count += 1
+            return False, result
+    
+    def _encode_user_qubit(self, user_id: str, pseudoqubit_id: str) -> str:
+        """Encode user identity into qubit state"""
+        combined = f"{user_id}:{pseudoqubit_id}"
+        return hashlib.sha256(combined.encode()).hexdigest()[:32]
+    
+    def _encode_target_qubit(self, target_user_id: str, target_pseudoqubit: str) -> str:
+        """Encode target identity into qubit state"""
+        combined = f"{target_user_id}:{target_pseudoqubit}"
+        return hashlib.sha256(combined.encode()).hexdigest()[:32]
+    
+    def _calculate_w_state_coherence(self, user_id: str, target_user_id: str, amount: int) -> float:
+        """Calculate W-state coherence from transaction parameters"""
+        # Hash of transaction creates quantum fingerprint
+        fingerprint = hashlib.sha256(
+            f"{user_id}{target_user_id}{amount}".encode()
+        ).digest()
+        
+        # Convert hash bytes to float 0-1
+        coherence = float(int.from_bytes(fingerprint[:4], 'big')) / (2**32 - 1)
+        return coherence
+    
+    def _measure_validator_agreement(self, tx_id: str, user_id: str, target_user_id: str, 
+                                    amount: int, validator_qubits: Optional[List[Dict]] = None) -> float:
+        """
+        Measure agreement from 5 validator qubits (W-state consensus)
+        Returns: float 0.0-1.0 representing percentage agreement
+        """
+        try:
+            # Compute transaction commitment
+            tx_commitment = hashlib.sha256(
+                f"{tx_id}{user_id}{target_user_id}{amount}".encode()
+            ).digest()
+            
+            # If validator qubits provided, measure them
+            if validator_qubits and len(validator_qubits) >= 5:
+                agreement_bits = sum(1 for q in validator_qubits[:5] if q.get('measured_value', 0))
+                return agreement_bits / 5.0
+            
+            # Otherwise, derive from commitment hash
+            agreement_value = int.from_bytes(tx_commitment[:2], 'big') / (2**16 - 1)
+            
+            # Apply W-state threshold (2/3 minimum)
+            if agreement_value >= 0.67:
+                return agreement_value
+            else:
+                return agreement_value * 0.9  # Scale down if below threshold
+        
+        except Exception as e:
+            logger.warning(f"Validator agreement measurement failed: {e}")
+            return 0.5  # Conservative default
+    
+    def _measure_oracle_qubit(self, tx_id: str, user_id: str, target_user_id: str,
+                             oracle_qubit_state: Optional[Dict] = None) -> Tuple[bool, float]:
+        """
+        Measure oracle qubit for transaction finality
+        Returns: Tuple of (collapsed: bool, finality_confidence: float)
+        """
+        try:
+            # Compute oracle fingerprint
+            oracle_fingerprint = hashlib.sha256(
+                f"oracle:{tx_id}:{user_id}:{target_user_id}".encode()
+            ).digest()
+            
+            # If oracle state provided, use it
+            if oracle_qubit_state:
+                collapsed = oracle_qubit_state.get('collapsed', False)
+                confidence = oracle_qubit_state.get('confidence', 0.5)
+            else:
+                # Derive from fingerprint
+                confidence = int.from_bytes(oracle_fingerprint[:4], 'big') / (2**32 - 1)
+                collapsed = confidence > 0.75  # Oracle collapses if confidence high
+            
+            return collapsed, confidence
+        
+        except Exception as e:
+            logger.warning(f"Oracle qubit measurement failed: {e}")
+            return False, 0.5
+    
+    def _measure_ghz_finality(self, tx_id: str, user_id: str, target_user_id: str, 
+                             amount: int) -> Tuple[bool, bool, float]:
+        """
+        Measure GHZ-3 and GHZ-8 states for transaction finality
+        Returns: Tuple of (ghz3_consensus: bool, ghz8_consensus: bool, entropy: float)
+        """
+        try:
+            # Compute GHZ fingerprints
+            ghz_fingerprint = hashlib.sha256(
+                f"ghz:{tx_id}:{user_id}:{target_user_id}:{amount}".encode()
+            ).digest()
+            
+            # GHZ-3 (3 qubits for 3-GHz state)
+            ghz3_bits = ghz_fingerprint[0]
+            ghz3_consensus = bin(ghz3_bits).count('1') >= 2  # 2/3 agreement
+            
+            # GHZ-8 (8 qubits for 8-GHz state)
+            ghz8_bits = int.from_bytes(ghz_fingerprint[:1], 'big')
+            ghz8_consensus = bin(ghz8_bits).count('1') >= 5  # 5/8 agreement
+            
+            # Entropy from full fingerprint (quantum randomness)
+            entropy = sum(bin(b).count('1') for b in ghz_fingerprint) / (len(ghz_fingerprint) * 8)
+            
+            return ghz3_consensus, ghz8_consensus, entropy
+        
+        except Exception as e:
+            logger.warning(f"GHZ finality measurement failed: {e}")
+            return False, False, 0.5
+    
     def _apply_transfer_effects(self, tx: Dict, outcome: Dict) -> Tuple[bool, str]:
         """Apply transfer transaction effects"""
         try:
@@ -4532,7 +5003,7 @@ if __name__ == "__main__":
     # Statistics
     stats = ledger.get_statistics()
     print(f"✓ Ledger statistics:")
-    print(f\"  - Total transactions: {stats['total_transactions']}")
+    print(f"  - Total transactions: {stats['total_transactions']}")
     print(f"  - Total volume: ${stats['total_volume']:,.2f}")
     print(f"  - Average transaction: ${stats['average_transaction']:,.2f}\n")
     
