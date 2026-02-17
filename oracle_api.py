@@ -1,4 +1,16 @@
 #!/usr/bin/env python3
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# GLOBALS INTEGRATION - Unified State Management
+# ═══════════════════════════════════════════════════════════════════════════════════════
+try:
+    from globals import get_db_pool, get_heartbeat, get_globals, get_auth_manager, get_terminal
+    GLOBALS_AVAILABLE = True
+except ImportError:
+    GLOBALS_AVAILABLE = False
+    logger.warning(f"[{os.path.basename(input_path)}] Globals not available - using fallback")
+
+
 """
 ╔════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
 ║                                                                                                                                    ║
@@ -1415,3 +1427,7 @@ logger.info("""
 ║                                                                                                            ║
 ╚════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
 """)
+
+
+# Export blueprint for main_app.py
+blueprint = create_blueprint()

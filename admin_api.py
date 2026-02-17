@@ -1,4 +1,16 @@
 #!/usr/bin/env python3
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# GLOBALS INTEGRATION - Unified State Management
+# ═══════════════════════════════════════════════════════════════════════════════════════
+try:
+    from globals import get_db_pool, get_heartbeat, get_globals, get_auth_manager, get_terminal
+    GLOBALS_AVAILABLE = True
+except ImportError:
+    GLOBALS_AVAILABLE = False
+    logger.warning(f"[{os.path.basename(input_path)}] Globals not available - using fallback")
+
+
 """
 ADMIN & ANALYTICS API MODULE - System Administration, User Management, Analytics, Monitoring
 Complete production-grade implementation with comprehensive admin and analytics features
@@ -413,7 +425,7 @@ class AdminDatabaseManager:
 # BLUEPRINT FACTORY
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-def create_admin_api_blueprint(db_manager,config:Dict[str,Any]=None)->Blueprint:
+def create_blueprint()->Blueprint:
     """Factory function to create Admin API blueprint"""
     
     bp=Blueprint('admin_api',__name__,url_prefix='/api')
@@ -1828,3 +1840,7 @@ logger_admin.info("""
 """)
 
 logger_admin.info("✓ Admin API expansion complete - 2000+ lines of fortress security")
+
+
+# Export blueprint for main_app.py
+blueprint = create_blueprint()

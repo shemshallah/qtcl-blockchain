@@ -1,4 +1,16 @@
 #!/usr/bin/env python3
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# GLOBALS INTEGRATION - Unified State Management
+# ═══════════════════════════════════════════════════════════════════════════════════════
+try:
+    from globals import get_db_pool, get_heartbeat, get_globals, get_auth_manager, get_terminal
+    GLOBALS_AVAILABLE = True
+except ImportError:
+    GLOBALS_AVAILABLE = False
+    logger.warning(f"[{os.path.basename(input_path)}] Globals not available - using fallback")
+
+
 """
 ╔══════════════════════════════════════════════════════════════════════════════════════════════╗
 ║          QTCL QUANTUM BLOCKCHAIN API — FULL STACK PRODUCTION IMPLEMENTATION                 ║
@@ -1672,7 +1684,7 @@ class BlockchainDB:
 # SECTION 9: FLASK BLUEPRINT
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-def create_blockchain_api_blueprint(db_manager,config:Dict=None)->Blueprint:
+def create_blueprint()->Blueprint:
     """
     Factory: creates the fully quantum-enabled blockchain API Blueprint.
     Registers all routes: /api/blocks/*, /api/transactions/*, /api/mempool/*,
@@ -5429,3 +5441,7 @@ CREATE INDEX IF NOT EXISTS idx_validator_performance_validator ON validator_perf
 
 def get_schema_sql()->str:
     return BLOCKCHAIN_SCHEMA_SQL
+
+
+# Export blueprint for main_app.py
+blueprint = create_blueprint()

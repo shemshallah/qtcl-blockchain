@@ -1,4 +1,16 @@
 #!/usr/bin/env python3
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# GLOBALS INTEGRATION - Unified State Management
+# ═══════════════════════════════════════════════════════════════════════════════════════
+try:
+    from globals import get_db_pool, get_heartbeat, get_globals, get_auth_manager, get_terminal
+    GLOBALS_AVAILABLE = True
+except ImportError:
+    GLOBALS_AVAILABLE = False
+    logger.warning(f"[{os.path.basename(input_path)}] Globals not available - using fallback")
+
+
 """
 CORE API MODULE - Authentication, Users, Security, Keys, Addresses
 Complete production-grade implementation with quantum-enhanced security
@@ -829,7 +841,7 @@ class DatabaseInitializer:
 # BLUEPRINT FACTORY
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-def create_core_api_blueprint(db_manager,jwt_manager:JWTManager,config:Dict[str,Any]=None)->Blueprint:
+def create_blueprint()->Blueprint:
     """Factory function to create Core API blueprint with dependencies"""
     
     bp=Blueprint('core_api',__name__,url_prefix='/api')
@@ -2309,3 +2321,7 @@ def create_core_api_blueprint(db_manager,jwt_manager:JWTManager,config:Dict[str,
             return jsonify({'error':'Failed to get version'}),500
     
     return bp
+
+
+# Export blueprint for main_app.py
+blueprint = create_blueprint()
