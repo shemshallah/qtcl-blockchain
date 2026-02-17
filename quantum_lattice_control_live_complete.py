@@ -5251,6 +5251,9 @@ class UniversalQuantumHeartbeat:
     
     def _pulse_loop(self):
         """Main pulse loop - runs in dedicated thread"""
+        logger.info("❤️ HEARTBEAT PULSE LOOP STARTED - Ready to synchronize all subsystems")
+        pulse_errors = 0
+        
         while self.running:
             try:
                 current_time = time.time()
@@ -5260,29 +5263,42 @@ class UniversalQuantumHeartbeat:
                     # EMIT PULSE TO ALL LISTENERS
                     with self.lock:
                         listeners_copy = list(self.listeners)
+                        listener_count = len(listeners_copy)
                     
-                    for listener in listeners_copy:
-                        try:
-                            listener(current_time)
-                        except Exception as e:
-                            logger.warning(f"Listener failed: {e}")
-                            with self.lock:
-                                self.error_count += 1
-                    
-                    # Update metrics
-                    with self.lock:
-                        self.pulse_count += 1
-                        self.last_pulse_time = current_time
+                    if listener_count > 0:
+                        for listener in listeners_copy:
+                            try:
+                                listener(current_time)
+                            except Exception as e:
+                                logger.warning(f"⚠️ Listener {getattr(listener, '__name__', str(listener))} failed: {e}")
+                                pulse_errors += 1
+                                with self.lock:
+                                    self.error_count += 1
                         
-                        if self.avg_pulse_interval == 0:
-                            self.avg_pulse_interval = time_since_last
-                        else:
-                            self.avg_pulse_interval = 0.9 * self.avg_pulse_interval + 0.1 * time_since_last
+                        # Update metrics
+                        with self.lock:
+                            self.pulse_count += 1
+                            self.sync_count += 1
+                            self.last_pulse_time = current_time
+                            
+                            if self.avg_pulse_interval == 0:
+                                self.avg_pulse_interval = time_since_last
+                            else:
+                                self.avg_pulse_interval = 0.9 * self.avg_pulse_interval + 0.1 * time_since_last
+                        
+                        if self.pulse_count % 10 == 0:
+                            logger.debug(f"❤️ Heartbeat pulse #{self.pulse_count} synchronized {listener_count} systems")
+                    else:
+                        logger.warning("⚠️ No listeners registered to heartbeat! Quantum systems not synchronized.")
+                        with self.lock:
+                            self.desync_count += 1
                 
                 time.sleep(0.001)  # 1ms sleep to prevent busy-waiting
             
             except Exception as e:
-                logger.error(f"Heartbeat pulse loop error: {e}")
+                logger.error(f"❌ Heartbeat pulse loop error: {e}")
+                pulse_errors += 1
+                time.sleep(0.01)
     
     def get_metrics(self) -> Dict[str, Any]:
         """Get heartbeat metrics"""
@@ -5613,9 +5629,14 @@ W_STATE_ENHANCED = EnhancedWStateManager()
 NOISE_BATH_ENHANCED = EnhancedNoiseBathRefresh(kappa=0.08)
 
 # REGISTER ALL SYSTEMS AS HEARTBEAT LISTENERS - THIS ENSURES THEY ALL STAY SYNCHRONIZED
+logger.info("🔧 Registering quantum subsystems with heartbeat...")
 HEARTBEAT.add_listener(LATTICE_NEURAL_REFRESH.on_heartbeat)
+logger.info("  ✓ Lattice Neural Refresh registered")
 HEARTBEAT.add_listener(W_STATE_ENHANCED.on_heartbeat)
+logger.info("  ✓ W-State Enhanced registered")
 HEARTBEAT.add_listener(NOISE_BATH_ENHANCED.on_heartbeat)
+logger.info("  ✓ Noise Bath Enhanced registered")
+logger.info("✅ All subsystems registered to heartbeat listener chain")
 
 logger.info("""
 ╔════════════════════════════════════════════════════════════════════════════════════════╗
@@ -5655,10 +5676,17 @@ logger.info("""
 
 try:
     logger.info("🫀 AUTO-STARTING HEARTBEAT SYSTEM...")
-    HEARTBEAT.start()
-    logger.info("❤️ HEARTBEAT STARTED - All quantum systems synchronized at 1.0 Hz")
+    if not HEARTBEAT.running:
+        HEARTBEAT.start()
+        logger.info("❤️ HEARTBEAT STARTED - All quantum systems synchronized at 1.0 Hz")
+        logger.info(f"✓ Heartbeat configured for {HEARTBEAT.frequency} Hz with {len(HEARTBEAT.listeners)} listeners")
+        logger.info("✓ Heartbeat pulses will now trigger all registered subsystems")
+    else:
+        logger.warning("⚠️ Heartbeat is already running")
 except Exception as e:
-    logger.error(f"⚠️ Failed to start heartbeat: {e}")
+    logger.error(f"❌ CRITICAL: Failed to start heartbeat: {e}")
+    import traceback
+    traceback.print_exc()
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════
 # AUTO-REGISTER WITH GLOBALS IF AVAILABLE

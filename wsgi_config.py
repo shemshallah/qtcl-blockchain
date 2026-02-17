@@ -580,9 +580,14 @@ def bootstrap_heartbeat():
             
             logger.info("[Heartbeat:Quantum] ✓ Imported UniversalQuantumHeartbeat")
             
-            # Start the heartbeat - this will synchronize ALL subsystems
-            HEARTBEAT.start()
-            logger.info("[Heartbeat:Quantum] ✓ Universal Heartbeat STARTED (1.0 Hz)")
+            # Start the heartbeat only if it's not already running
+            if not HEARTBEAT.running:
+                logger.info("[Heartbeat:Quantum] Starting heartbeat...")
+                HEARTBEAT.start()
+            else:
+                logger.info("[Heartbeat:Quantum] ✓ Heartbeat already running!")
+            
+            logger.info("[Heartbeat:Quantum] ✓ Universal Heartbeat ACTIVE (1.0 Hz)")
             logger.info("[Heartbeat:Quantum] ✓ Lattice Neural Refresh SYNCHRONIZED")
             logger.info("[Heartbeat:Quantum] ✓ W-State Coherence SYNCHRONIZED")
             logger.info("[Heartbeat:Quantum] ✓ Noise Bath Evolution SYNCHRONIZED")
@@ -600,12 +605,13 @@ def bootstrap_heartbeat():
                     ws_state = W_STATE_ENHANCED.get_state()
                     nb_state = NOISE_BATH_ENHANCED.get_state()
                     
-                    logger.debug(
+                    logger.info(
                         f"[Heartbeat:Quantum:Cycle{cycle}] "
-                        f"Pulses={hb_metrics['pulse_count']} | "
-                        f"NeuralUpdates={nn_state['total_weight_updates']} | "
-                        f"Coherence={ws_state['coherence_avg']:.2f} | "
-                        f"Fidelity={nb_state['fidelity_preservation_rate']:.3f}"
+                        f"❤️ Pulses={hb_metrics['pulse_count']} | "
+                        f"⚡NeuralUpdates={nn_state['total_weight_updates']} | "
+                        f"🌀Coherence={ws_state['coherence_avg']:.2f} | "
+                        f"🌊Fidelity={nb_state['fidelity_preservation_rate']:.3f} | "
+                        f"Listeners={hb_metrics['listeners']}"
                     )
                 
                 except Exception as e:
