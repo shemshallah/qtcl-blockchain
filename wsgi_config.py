@@ -112,6 +112,8 @@ def _initialize_heartbeat_system():
     """
     Orchestrate heartbeat initialization across all systems.
     Called ONCE at app startup to coordinate everything.
+    CRITICAL: This now IMPORTS but does NOT START the heartbeat.
+    Starting happens AFTER all listeners are registered.
     """
     global HEARTBEAT
     
@@ -120,14 +122,48 @@ def _initialize_heartbeat_system():
         return False
     
     try:
-        logger.info("[Heartbeat] 🫀 Starting quantum heartbeat orchestration...")
+        logger.info("[Heartbeat] 🫀 Preparing quantum heartbeat orchestration...")
         logger.info(f"[Heartbeat] Heartbeat object: {HEARTBEAT}")
-        logger.info(f"[Heartbeat] Heartbeat running before start: {HEARTBEAT.running}")
-        logger.info(f"[Heartbeat] Heartbeat listeners before start: {len(HEARTBEAT.listeners)}")
+        logger.info(f"[Heartbeat] Heartbeat running before registration: {HEARTBEAT.running}")
+        logger.info(f"[Heartbeat] Heartbeat listeners before registration: {len(HEARTBEAT.listeners)}")
         
-        # Start the heartbeat - this begins the pulse loop
+        # CRITICAL: Do NOT start heartbeat yet!
+        # Listeners must be registered first.
+        logger.info("[Heartbeat] ✓ Heartbeat imported and ready (NOT STARTED YET)")
+        logger.info("[Heartbeat] ⏳ Waiting for listener registration before pulse begins...")
+        
+        return True
+    
+    except Exception as e:
+        logger.error(f"[Heartbeat] ❌ Heartbeat initialization failed: {e}", exc_info=True)
+        return False
+
+
+def _start_heartbeat_after_listeners():
+    """
+    START the heartbeat AFTER all listeners are registered.
+    This is called AFTER registration phase completes.
+    """
+    global HEARTBEAT
+    
+    if HEARTBEAT is None:
+        logger.error("[Heartbeat:Start] ❌ HEARTBEAT NOT AVAILABLE")
+        return False
+    
+    if HEARTBEAT.running:
+        logger.info("[Heartbeat:Start] ✓ Heartbeat already running")
+        return True
+    
+    try:
+        logger.info("[Heartbeat:Start] 🫀 NOW STARTING HEARTBEAT WITH REGISTERED LISTENERS...")
+        logger.info(f"[Heartbeat:Start] Listeners ready: {len(HEARTBEAT.listeners)}")
+        
+        if len(HEARTBEAT.listeners) == 0:
+            logger.warning("[Heartbeat:Start] ⚠️  WARNING: No listeners registered before heartbeat start!")
+        
+        # START the heartbeat - this begins the pulse loop
         HEARTBEAT.start()
-        logger.info("[Heartbeat] ✓ Heartbeat pulse loop started")
+        logger.info("[Heartbeat:Start] ✓ Heartbeat pulse loop started")
         
         # Give heartbeat a moment to begin
         time.sleep(0.5)
@@ -136,23 +172,25 @@ def _initialize_heartbeat_system():
         if HEARTBEAT.running:
             pulse_count = HEARTBEAT.pulse_count
             listener_count = len(HEARTBEAT.listeners)
-            logger.info(f"[Heartbeat] ✅ HEARTBEAT ACTIVE AND PULSING")
-            logger.info(f"[Heartbeat]   Pulse count: {pulse_count} (expected: 5+)")
-            logger.info(f"[Heartbeat]   Listeners: {listener_count}")
-            logger.info(f"[Heartbeat]   Frequency: {HEARTBEAT.frequency} Hz")
+            logger.info(f"[Heartbeat:Start] ✅ HEARTBEAT ACTIVE AND PULSING")
+            logger.info(f"[Heartbeat:Start]   Pulse count: {pulse_count}")
+            logger.info(f"[Heartbeat:Start]   Listeners: {listener_count}")
+            logger.info(f"[Heartbeat:Start]   Frequency: {HEARTBEAT.frequency} Hz")
             
-            if pulse_count < 2:
-                logger.warning(f"[Heartbeat] ⚠️  Very low pulse count ({pulse_count}) - heartbeat may be slow")
+            # Log listener details
+            for i, listener in enumerate(HEARTBEAT.listeners):
+                listener_name = getattr(listener, '__name__', f'listener_{i}')
+                logger.info(f"[Heartbeat:Start]   Listener {i+1}: {listener_name}")
             
             return True
         else:
-            logger.error("[Heartbeat] ❌ Heartbeat.running is False - pulse loop didn't start")
-            logger.error(f"[Heartbeat]   Pulse count: {HEARTBEAT.pulse_count}")
-            logger.error(f"[Heartbeat]   Thread: {HEARTBEAT.thread}")
+            logger.error("[Heartbeat:Start] ❌ Heartbeat.running is False - pulse loop didn't start")
+            logger.error(f"[Heartbeat:Start]   Pulse count: {HEARTBEAT.pulse_count}")
+            logger.error(f"[Heartbeat:Start]   Thread: {HEARTBEAT.thread}")
             return False
     
     except Exception as e:
-        logger.error(f"[Heartbeat] ❌ Heartbeat initialization failed: {e}", exc_info=True)
+        logger.error(f"[Heartbeat:Start] ❌ Heartbeat start failed: {e}", exc_info=True)
         return False
 
 
@@ -2000,11 +2038,11 @@ try:
     app=create_app()
     logger.info(f"[WSGI] ✓ Flask app created with {len(list(app.url_map.iter_rules()))} routes")
     
-    # 🫀 HEARTBEAT INITIALIZATION
+    # 🫀 HEARTBEAT INITIALIZATION (PREPARE - DO NOT START YET)
     logger.info("[WSGI] 🫀 Initializing quantum heartbeat system...")
     heartbeat_ok = _initialize_heartbeat_system()
     if heartbeat_ok:
-        logger.info("[WSGI] ✅ Heartbeat system initialized successfully")
+        logger.info("[WSGI] ✅ Heartbeat system prepared (listeners phase next)")
         
         # Wire heartbeat into globals
         try:
@@ -2013,8 +2051,8 @@ try:
         except Exception as e:
             logger.warning(f"[WSGI] Failed to wire heartbeat to globals: {e}")
         
-        # Register all API modules with heartbeat
-        logger.info("[WSGI] 🔗 Registering all API modules with heartbeat...")
+        # ✅ PHASE 1: REGISTER ALL LISTENERS BEFORE STARTING HEARTBEAT
+        logger.info("[WSGI] 🔗 PHASE 1: Registering all API modules with heartbeat...")
         registration_count = 0
         
         modules_to_register = [
@@ -2051,7 +2089,7 @@ try:
         
         # Direct registration fallback - register callbacks manually if modules failed
         if registration_count < len(modules_to_register):
-            logger.info("[WSGI] 🔧 Attempting direct heartbeat registration for failed modules...")
+            logger.info("[WSGI] 🔧 PHASE 1b: Attempting direct heartbeat registration for failed modules...")
             
             # Try direct imports and registration
             direct_registrations = [
@@ -2075,16 +2113,25 @@ try:
                         registration_count += 1
                 except Exception as e:
                     logger.debug(f"[WSGI] Direct registration for {mod_name} failed: {e}")
+        
+        # Register ledger with heartbeat
+        try:
+            from ledger_manager import register_ledger_with_heartbeat
+            register_ledger_with_heartbeat()
+        except Exception as e:
+            logger.debug(f"[WSGI] Ledger heartbeat registration skipped: {e}")
+        
+        # ✅ PHASE 2: NOW START THE HEARTBEAT AFTER ALL LISTENERS ARE REGISTERED
+        logger.info("[WSGI] ⏸️  PHASE 2: All listeners registered - NOW STARTING HEARTBEAT...")
+        logger.info(f"[WSGI] Total listeners ready: {len(HEARTBEAT.listeners)}")
+        
+        if _start_heartbeat_after_listeners():
+            logger.info("[WSGI] ✅ HEARTBEAT SUCCESSFULLY STARTED WITH LISTENERS")
+        else:
+            logger.error("[WSGI] ❌ Failed to start heartbeat - system running in degraded mode")
 
     else:
         logger.warning("[WSGI] ⚠️  Heartbeat system initialization failed - running in degraded mode")
-    
-    # Register ledger with heartbeat
-    try:
-        from ledger_manager import register_ledger_with_heartbeat
-        register_ledger_with_heartbeat()
-    except Exception as e:
-        logger.debug(f"[WSGI] Ledger heartbeat registration skipped: {e}")
     
     logger.info("[WSGI] ✓ WSGI APPLICATION READY FOR DEPLOYMENT")
 except ImportError as e:

@@ -5228,19 +5228,41 @@ class UniversalQuantumHeartbeat:
     def add_listener(self, callback: Callable):
         """Register a system to be called on each heartbeat"""
         with self.lock:
+            listener_name = getattr(callback, '__name__', str(callback))
             if callback not in self.listeners:
                 self.listeners.append(callback)
-                logger.debug(f"Added heartbeat listener: {getattr(callback, '__name__', str(callback))}")
+                logger.info(f"✅ [HEARTBEAT] Listener registered: {listener_name} (total: {len(self.listeners)})")
+            else:
+                logger.debug(f"⚠️ [HEARTBEAT] Listener already registered: {listener_name}")
+    
     
     def start(self):
         """Start the heartbeat pulse"""
         with self.lock:
             if self.running:
+                logger.warning("❤️ Heartbeat already running - ignoring duplicate start request")
                 return
+            
+            logger.info("=" * 80)
+            logger.info("❤️ STARTING UNIVERSAL QUANTUM HEARTBEAT")
+            logger.info(f"  Frequency: {self.frequency} Hz (interval: {self.pulse_interval} s)")
+            logger.info(f"  Listeners registered: {len(self.listeners)}")
+            
+            if len(self.listeners) == 0:
+                logger.warning("⚠️  WARNING: Starting heartbeat with NO listeners registered!")
+            
+            # List all listeners
+            for i, listener in enumerate(self.listeners):
+                listener_name = getattr(listener, '__name__', f'listener_{i}')
+                logger.info(f"    Listener {i+1}: {listener_name}")
+            
+            logger.info("=" * 80)
+            
             self.running = True
             self.thread = threading.Thread(target=self._pulse_loop, daemon=True, name="QuantumHeartbeat")
             self.thread.start()
-            logger.info("❤️ UniversalQuantumHeartbeat STARTED")
+            logger.info("❤️ Heartbeat thread started successfully")
+    
     
     def stop(self):
         """Stop the heartbeat"""
@@ -5253,6 +5275,7 @@ class UniversalQuantumHeartbeat:
     def _pulse_loop(self):
         """Main pulse loop - runs in dedicated thread"""
         logger.info("❤️ HEARTBEAT PULSE LOOP STARTED - Ready to synchronize all subsystems")
+        logger.info(f"❤️ Initial state: running={self.running}, listeners={len(self.listeners)}, frequency={self.frequency} Hz")
         pulse_errors = 0
         
         while self.running:
@@ -5267,14 +5290,36 @@ class UniversalQuantumHeartbeat:
                         listener_count = len(listeners_copy)
                     
                     if listener_count > 0:
-                        for listener in listeners_copy:
+                        # Pre-pulse logging
+                        if self.pulse_count == 0:
+                            logger.info(f"❤️ FIRST PULSE! {listener_count} listeners ready")
+                            for i, listener in enumerate(listeners_copy):
+                                listener_name = getattr(listener, '__name__', f'listener_{i}')
+                                logger.info(f"  Listener {i+1}: {listener_name}")
+                        
+                        # Execute each listener
+                        pulse_start_time = time.time()
+                        listeners_executed = 0
+                        
+                        for i, listener in enumerate(listeners_copy):
+                            listener_name = getattr(listener, '__name__', f'listener_{i}')
+                            listener_start = time.time()
                             try:
                                 listener(current_time)
+                                listener_duration = (time.time() - listener_start) * 1000
+                                listeners_executed += 1
+                                
+                                if self.pulse_count % 50 == 0:  # Log every 50 pulses
+                                    logger.debug(f"  ✓ {listener_name} ({listener_duration:.2f}ms)")
+                            
                             except Exception as e:
-                                logger.warning(f"⚠️ Listener {getattr(listener, '__name__', str(listener))} failed: {e}")
+                                listener_duration = (time.time() - listener_start) * 1000
+                                logger.warning(f"⚠️ Listener {listener_name} failed after {listener_duration:.2f}ms: {e}")
                                 pulse_errors += 1
                                 with self.lock:
                                     self.error_count += 1
+                        
+                        pulse_duration = (time.time() - pulse_start_time) * 1000
                         
                         # Update metrics
                         with self.lock:
@@ -5287,12 +5332,18 @@ class UniversalQuantumHeartbeat:
                             else:
                                 self.avg_pulse_interval = 0.9 * self.avg_pulse_interval + 0.1 * time_since_last
                         
+                        # Regular pulse logging (every 10 pulses)
                         if self.pulse_count % 10 == 0:
-                            logger.debug(f"❤️ Heartbeat pulse #{self.pulse_count} synchronized {listener_count} systems")
+                            logger.info(f"❤️ PULSE #{self.pulse_count:5d} | Listeners: {listeners_executed:2d} | Duration: {pulse_duration:6.2f}ms | Errors: {pulse_errors}")
+                    
                     else:
                         logger.warning("⚠️ No listeners registered to heartbeat! Quantum systems not synchronized.")
                         with self.lock:
                             self.desync_count += 1
+                        
+                        # Log this warning every 50 cycles
+                        if self.desync_count % 50 == 0:
+                            logger.error(f"❌ CRITICAL: Heartbeat running but {self.desync_count} empty cycles detected - NO LISTENERS!")
                 
                 time.sleep(0.001)  # 1ms sleep to prevent busy-waiting
             
