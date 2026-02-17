@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
 
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# GLOBALS INTEGRATION - Unified State Management
-# ═══════════════════════════════════════════════════════════════════════════════════════
-try:
-    from globals import get_db_pool, get_heartbeat, get_globals, get_auth_manager, get_terminal
-    GLOBALS_AVAILABLE = True
-except ImportError:
-    GLOBALS_AVAILABLE = False
-    logger.warning(f"[{os.path.basename(input_path)}] Globals not available - using fallback")
-
-
 """
 DEFI & SMART CONTRACTS API MODULE - Staking, Swaps, Liquidity, Governance, NFTs, Contracts, Bridge
 Complete production-grade implementation with comprehensive DeFi primitives
@@ -31,6 +20,17 @@ from psycopg2.extras import RealDictCursor,execute_batch,execute_values,Json
 
 getcontext().prec=28
 logger=logging.getLogger(__name__)
+input_path=os.path.abspath(__file__)
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# GLOBALS INTEGRATION - Unified State Management
+# ═══════════════════════════════════════════════════════════════════════════════════════
+try:
+    from globals import get_db_pool, get_heartbeat, get_globals, get_auth_manager, get_terminal
+    GLOBALS_AVAILABLE = True
+except ImportError:
+    GLOBALS_AVAILABLE = False
+    logger.warning(f"[{os.path.basename(input_path)}] Globals not available - using fallback")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # GLOBAL WSGI INTEGRATION - Quantum Revolution

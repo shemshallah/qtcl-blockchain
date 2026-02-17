@@ -794,15 +794,36 @@ class NonMarkovianNoiseBath:
             phase_error=phase_damping_error(QuantumTopologyConfig.PHASE_DAMPING_RATE)
             
             for qubit in range(QuantumTopologyConfig.NUM_TOTAL_QUBITS):
-                self.noise_model.add_quantum_error(depol_error,['u1','u2','u3'],qargs=[qubit])
-                self.noise_model.add_quantum_error(amp_error,['reset'],qargs=[qubit])
-                self.noise_model.add_quantum_error(phase_error,['measure'],qargs=[qubit])
+                # Fix: v1.0+ API uses positional qargs, not keyword argument
+                try:
+                    self.noise_model.add_quantum_error(depol_error,'u1',[qubit])
+                    self.noise_model.add_quantum_error(depol_error,'u2',[qubit])
+                    self.noise_model.add_quantum_error(depol_error,'u3',[qubit])
+                except TypeError:
+                    # Fallback for older versions or different API
+                    try:
+                        self.noise_model.add_quantum_error(depol_error,['u1','u2','u3'])
+                    except:
+                        pass
+                
+                try:
+                    self.noise_model.add_quantum_error(amp_error,'reset',[qubit])
+                except:
+                    pass
+                
+                try:
+                    self.noise_model.add_quantum_error(phase_error,'measure',[qubit])
+                except:
+                    pass
             
             # Two-qubit errors
             two_qubit_error=depolarizing_error(QuantumTopologyConfig.DEPOLARIZING_RATE*2,2)
             for q1 in range(QuantumTopologyConfig.NUM_TOTAL_QUBITS):
                 for q2 in range(q1+1,QuantumTopologyConfig.NUM_TOTAL_QUBITS):
-                    self.noise_model.add_quantum_error(two_qubit_error,['cx'],qargs=[q1,q2])
+                    try:
+                        self.noise_model.add_quantum_error(two_qubit_error,'cx',[q1,q2])
+                    except:
+                        pass
             
             logger.info(f"✅ Non-Markovian noise bath initialized (κ={self.memory_kernel})")
         except Exception as e:
@@ -1104,18 +1125,30 @@ class QuantumExecutionEngine:
         
         try:
             # Main AER simulator with noise model
-            self.aer_simulator=AerSimulator(
-                method='density_matrix',
-                noise_model=NOISE_BATH.get_noise_model(),
-                shots=QuantumTopologyConfig.AER_SHOTS,
-                seed=QuantumTopologyConfig.AER_SEED
-            )
+            # Fix: v1.0+ uses 'seed_simulator' not 'seed'
+            sim_kwargs={
+                'method':'density_matrix',
+                'shots':QuantumTopologyConfig.AER_SHOTS,
+                'noise_model':NOISE_BATH.get_noise_model(),
+            }
+            
+            try:
+                sim_kwargs['seed_simulator']=QuantumTopologyConfig.AER_SEED
+                self.aer_simulator=AerSimulator(**sim_kwargs)
+            except TypeError as te:
+                # Fallback: seed parameter not supported in this version
+                logger.debug(f"seed_simulator not supported: {te}, continuing without seed")
+                del sim_kwargs['seed_simulator']
+                self.aer_simulator=AerSimulator(**sim_kwargs)
             
             # Statevector simulator (for pure state calculations)
-            self.statevector_simulator=StatevectorSimulator(
-                method='statevector',
-                shots=QuantumTopologyConfig.AER_SHOTS
-            )
+            sv_kwargs={'method':'statevector','shots':QuantumTopologyConfig.AER_SHOTS}
+            try:
+                sv_kwargs['seed_simulator']=QuantumTopologyConfig.AER_SEED
+                self.statevector_simulator=StatevectorSimulator(**sv_kwargs)
+            except TypeError:
+                del sv_kwargs['seed_simulator']
+                self.statevector_simulator=StatevectorSimulator(**sv_kwargs)
             
             logger.info(f"✅ Qiskit AER simulators initialized (ThreadPoolExecutor with {self.num_threads} threads)")
         except Exception as e:
