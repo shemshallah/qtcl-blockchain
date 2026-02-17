@@ -1639,7 +1639,36 @@ def create_command_center_blueprint()->Blueprint:
             return jsonify({'success':True,'help':help_text})
         except Exception as e:
             return jsonify({'error':str(e)}),500
-    
+
+    @bp.route('/command',methods=['POST'])
+    def execute_command_compat():
+        """Frontend-compatible /api/command endpoint - mirrors /api/execute with richer output shaping"""
+        try:
+            data=request.get_json() or {}
+            cmd=data.get('command','').strip()
+            if not cmd:
+                return jsonify({'error':'No command specified','status':'error'}),400
+            auth_header=request.headers.get('Authorization','')
+            auth_token=auth_header.replace('Bearer ','') if auth_header else None
+            user_id=request.headers.get('X-User-ID')
+            user_role=request.headers.get('X-User-Role','user')
+            context=ExecutionContext(
+                command=cmd,user_id=user_id,auth_token=auth_token,
+                parameters=data.get('kwargs',data.get('parameters',{})),
+                user_role=user_role,
+                correlation_id=request.headers.get('X-Correlation-ID',str(uuid.uuid4()))
+            )
+            result=MASTER_REGISTRY.execute(context)
+            payload={'status':'success' if result.success else 'error','command':cmd,'timestamp':datetime.utcnow().isoformat(),'elapsed_ms':getattr(result,'elapsed_ms',0)}
+            if result.success:
+                payload['result']={'output':result.output} if result.output else {'output':'OK'}
+            else:
+                payload['error']=result.error or f"Command '{cmd}' not found. Type 'help' to list commands."
+            return jsonify(payload),(200 if result.success else 400)
+        except Exception as e:
+            logger.error(f"[API] /api/command error: {e}")
+            return jsonify({'error':str(e),'status':'error'}),500
+
     @bp.route('/search',methods=['GET','POST'])
     def search_commands():
         """Search commands"""

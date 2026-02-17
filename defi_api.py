@@ -562,48 +562,65 @@ class DeFiDatabaseManager:
 # BLUEPRINT FACTORY
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
+def _resolve_defi_db_manager():
+    """Lazy DB resolver - tries all known sources at call time"""
+    if GLOBALS_AVAILABLE:
+        try:
+            from globals import get_db_pool
+            pool=get_db_pool()
+            if pool is not None:
+                return pool
+        except Exception:
+            pass
+    try:
+        from db_builder_v2 import DB_POOL
+        if DB_POOL is not None:
+            return DB_POOL
+    except Exception:
+        pass
+    return None
+
+
+class _LazyDeFiDB:
+    """Proxy that resolves DeFiDatabaseManager on first route call - allows blueprint registration before DB is ready"""
+    def __init__(self):
+        self._real=None
+    def _get(self):
+        if self._real is None:
+            mgr=_resolve_defi_db_manager()
+            if mgr is None:
+                raise RuntimeError("[DeFi] Database manager not available at request time")
+            self._real=DeFiDatabaseManager(mgr)
+        return self._real
+    def __getattr__(self,name):
+        return getattr(self._get(),name)
+
+
 def create_blueprint()->Blueprint:
     """Factory function to create DeFi API blueprint - uses globals for db access"""
-    
+
     db_manager=None
     try:
         if GLOBALS_AVAILABLE:
             globals_obj=get_globals()
-            db_manager=globals_obj.DB if hasattr(globals_obj,'DB') else None
+            # GlobalState stores DB pool under .database.pool, not .DB
+            if hasattr(globals_obj,'database') and hasattr(globals_obj.database,'pool'):
+                db_manager=globals_obj.database.pool
         if db_manager is None:
-            try:
-                from wsgi_config import DB
-                db_manager=DB
-            except:
-                pass
+            db_manager=_resolve_defi_db_manager()
         if db_manager is None:
-            raise RuntimeError("[DeFi] Database manager not available")
+            logger.warning("[DeFi] Database not available at blueprint creation time - using lazy proxy (will resolve at request time)")
     except Exception as e:
-        logger.error(f"[DeFi] Database initialization failed: {e}")
-        raise RuntimeError(f"Cannot initialize DeFi without database: {e}")
-    
-    defi_db=None
-    if db_manager:
-        try:
-            defi_db=db_manager
-        except Exception as e:
-            logger.error(f"[DeFi] Manager creation failed: {e}")
-            raise
+        logger.warning(f"[DeFi] Database init warning (non-fatal): {e}")
     
     bp=Blueprint('defi_api',__name__,url_prefix='/api')
-    
-    # Fallback: try to get from wsgi_config if not set
-    if db_manager is None:
-        try:
-            from wsgi_config import DB
-            db_manager=DB
-        except:
-            db_manager=None
-    
-    if db_manager:
+
+    # Use real DeFiDatabaseManager if DB available now, otherwise lazy proxy that resolves at request time
+    if db_manager is not None:
         defi_db=DeFiDatabaseManager(db_manager)
     else:
-        defi_db=None
+        defi_db=_LazyDeFiDB()
+        logger.info("[DeFi] Blueprint created with lazy DB proxy - will resolve on first request")
     
     config={
             'min_stake':Decimal('100'),

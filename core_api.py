@@ -1568,8 +1568,8 @@ def create_blueprint()->Blueprint:
     
     @bp.route('/users/password/change',methods=['POST'])
     @require_auth
-    def change_password():
-        """Change user password"""
+    def users_change_password():
+        """Change user password (users route)"""
         try:
             data=request.get_json()
             current_password=data.get('current_password','')

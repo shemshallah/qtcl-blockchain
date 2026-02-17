@@ -3933,3 +3933,30 @@ QUANTUM_INTEGRATION = QuantumSystemIntegration()
 
 def get_quantum_integration():
     return QUANTUM_INTEGRATION
+
+# ════════════════════════════════════════════════════════════════════════════════════════
+# BLUEPRINT FACTORY EXPORT - required by wsgi_config
+# ════════════════════════════════════════════════════════════════════════════════════════
+
+_quantum_blueprint_instance = None
+
+def get_quantum_blueprint():
+    """Get or create the quantum API blueprint (deferred/lazy init compatible).
+    wsgi_config imports this by name - MUST exist at module level."""
+    global _quantum_blueprint_instance
+    if _quantum_blueprint_instance is None:
+        try:
+            _quantum_blueprint_instance = create_quantum_api_blueprint()
+            try:
+                _quantum_blueprint_instance = extend_quantum_api_with_advanced_features(_quantum_blueprint_instance)
+            except Exception as ext_e:
+                logger.warning(f"[Quantum] Advanced extension skipped: {ext_e}")
+            logger.info("[Quantum] ✅ Blueprint created via get_quantum_blueprint()")
+        except Exception as e:
+            logger.error(f"[Quantum] Primary blueprint creation failed, using fallback: {e}")
+            try:
+                _quantum_blueprint_instance = create_blueprint()
+            except Exception as e2:
+                logger.error(f"[Quantum] Fallback blueprint also failed: {e2}")
+                raise RuntimeError(f"[Quantum] Cannot create any blueprint: {e} / {e2}")
+    return _quantum_blueprint_instance

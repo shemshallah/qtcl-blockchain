@@ -1,408 +1,532 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>QTCL - Quantum Temporal Coherence Ledger</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        html, body { width: 100%; height: 100%; overflow: hidden; font-size: 13px; }
-        body {
-            background: linear-gradient(135deg, #0a0a0a 0%, #151520 100%);
-            color: #b0b0b0;
-            font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
-            line-height: 1.5;
-        }
-        .container {
-            display: flex;
-            height: 100vh;
-            flex-direction: column;
-            padding: 16px;
-            gap: 12px;
-        }
-        .header {
-            background: linear-gradient(90deg, #1a1a2e 0%, #16213e 100%);
-            border: 1px solid #2a2a4a;
-            border-radius: 4px;
-            padding: 16px;
-            box-shadow: 0 2px 8px rgba(0,128,128,0.1);
-        }
-        .header-title {
-            font-size: 18px;
-            font-weight: bold;
-            color: #00d4ff;
-            margin-bottom: 8px;
-            letter-spacing: 2px;
-        }
-        .header-subtitle {
-            font-size: 11px;
-            color: #606060;
-            margin: 4px 0;
-            letter-spacing: 0.5px;
-        }
-        .system-info {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 12px;
-            margin-top: 12px;
-            font-size: 11px;
-        }
-        .info-block {
-            background: rgba(0, 128, 128, 0.05);
-            border-left: 3px solid #008080;
-            padding: 8px;
-            border-radius: 2px;
-        }
-        .info-label { color: #606060; }
-        .info-value { color: #4a8a4a; font-weight: bold; }
-        
-        .main-content {
-            display: flex;
-            gap: 12px;
-            flex: 1;
-            overflow: hidden;
-        }
-        
-        .welcome-panel {
-            width: 320px;
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-            border: 1px solid #2a2a4a;
-            border-radius: 4px;
-            padding: 16px;
-            overflow-y: auto;
-            display: none;
-        }
-        .welcome-panel.show { display: block; }
-        
-        .welcome-title {
-            font-size: 14px;
-            font-weight: bold;
-            color: #00d4ff;
-            margin-bottom: 12px;
-        }
-        .welcome-section {
-            margin-bottom: 12px;
-        }
-        .welcome-section-title {
-            font-size: 11px;
-            color: #4a8a4a;
-            font-weight: bold;
-            margin-bottom: 6px;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-        .welcome-text {
-            font-size: 11px;
-            color: #808080;
-            line-height: 1.6;
-        }
-        
-        .terminal-container {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            background: linear-gradient(135deg, #0a0a0a 0%, #151520 100%);
-            border: 1px solid #2a2a4a;
-            border-radius: 4px;
-            overflow: hidden;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-        }
-        
-        .terminal-header {
-            padding: 8px 12px;
-            border-bottom: 1px solid #2a2a4a;
-            background: linear-gradient(90deg, #1a1a2e 0%, #16213e 100%);
-            font-size: 11px;
-            color: #606060;
-            letter-spacing: 1px;
-        }
-        
-        .terminal-output {
-            flex: 1;
-            overflow-y: auto;
-            padding: 12px;
-            background: #0a0a0a;
-        }
-        
-        .terminal-output::-webkit-scrollbar {
-            width: 6px;
-        }
-        .terminal-output::-webkit-scrollbar-track {
-            background: #0a0a0a;
-        }
-        .terminal-output::-webkit-scrollbar-thumb {
-            background: #2a2a4a;
-            border-radius: 3px;
-        }
-        
-        .output-line {
-            margin-bottom: 4px;
-            white-space: pre-wrap;
-            word-wrap: break-word;
-        }
-        .line-prompt { color: #606060; }
-        .line-cmd { color: #b0b0b0; }
-        .line-success { color: #4a8a4a; }
-        .line-error { color: #8a4a4a; }
-        .line-info { color: #4a7a8a; }
-        .line-warning { color: #8a8a4a; }
-        
-        .terminal-input {
-            padding: 12px;
-            border-top: 1px solid #2a2a4a;
-            background: linear-gradient(90deg, #0f0f15 0%, #14141f 100%);
-            display: flex;
-            gap: 8px;
-            align-items: center;
-        }
-        
-        .input-prompt { color: #606060; user-select: none; }
-        
-        input#cmd {
-            flex: 1;
-            background: transparent;
-            border: none;
-            color: #b0b0b0;
-            padding: 0;
-            font-family: inherit;
-            font-size: inherit;
-            outline: none;
-        }
-        input#cmd::placeholder { color: #4a4a4a; }
-        
-        .toggle-welcome {
-            padding: 4px 12px;
-            background: linear-gradient(90deg, #1a3a3a 0%, #1a2a3a 100%);
-            border: 1px solid #2a5a5a;
-            color: #00d4ff;
-            cursor: pointer;
-            border-radius: 2px;
-            font-size: 11px;
-            transition: all 0.2s;
-        }
-        .toggle-welcome:hover {
-            border-color: #00d4ff;
-            box-shadow: 0 0 8px rgba(0, 212, 255, 0.2);
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>QTCL — Quantum Temporal Coherence Ledger</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#080810;
+  --bg2:#0d0d1a;
+  --panel:#0f0f1e;
+  --border:#1e1e38;
+  --border2:#252545;
+  --cyan:#00d4ff;
+  --cyan2:#00a0cc;
+  --green:#2ecc71;
+  --green2:#1a7a45;
+  --amber:#f0b429;
+  --red:#e05252;
+  --dim:#404060;
+  --mid:#606080;
+  --text:#c0c0d8;
+  --glow-cyan: 0 0 12px rgba(0,212,255,0.3);
+  --glow-green: 0 0 10px rgba(46,204,113,0.25);
+}
+html,body{width:100%;height:100%;overflow:hidden;font-family:'Menlo','Monaco','Courier New',monospace;font-size:13px;background:var(--bg);color:var(--text);line-height:1.55}
+
+/* ─── LAYOUT ─── */
+#app{display:flex;flex-direction:column;height:100vh}
+
+/* ─── TOP BAR ─── */
+#topbar{
+  display:flex;align-items:center;gap:0;
+  background:linear-gradient(90deg,#06061a 0%,#0a0a1f 100%);
+  border-bottom:1px solid var(--border);
+  padding:0;
+  flex-shrink:0;
+  height:42px;
+}
+#brand{
+  display:flex;align-items:center;gap:10px;
+  padding:0 18px;border-right:1px solid var(--border);
+  height:100%;
+}
+.brand-icon{font-size:16px}
+.brand-name{
+  font-size:12px;font-weight:bold;letter-spacing:2px;
+  color:var(--cyan);text-shadow:var(--glow-cyan);
+}
+
+/* ─── TABS ─── */
+#tabs{display:flex;height:100%;flex:1}
+.tab{
+  display:flex;align-items:center;gap:7px;
+  padding:0 20px;cursor:pointer;
+  border-right:1px solid var(--border);
+  font-size:11px;letter-spacing:1.5px;font-weight:bold;
+  color:var(--dim);transition:all 0.15s;
+  text-transform:uppercase;position:relative;
+  user-select:none;
+}
+.tab:hover{color:var(--text);background:rgba(255,255,255,0.02)}
+.tab.active{
+  color:var(--cyan);
+  background:rgba(0,212,255,0.05);
+}
+.tab.active::after{
+  content:'';position:absolute;bottom:0;left:0;right:0;height:2px;
+  background:var(--cyan);box-shadow:var(--glow-cyan);
+}
+.tab-dot{width:6px;height:6px;border-radius:50%;background:var(--dim)}
+.tab.active .tab-dot{background:var(--cyan);box-shadow:var(--glow-cyan)}
+
+/* ─── STATUS STRIP ─── */
+#statusbar{
+  margin-left:auto;display:flex;align-items:center;gap:16px;
+  padding-right:16px;font-size:10px;color:var(--dim);letter-spacing:0.5px;
+}
+.stat{display:flex;align-items:center;gap:5px}
+.stat-dot{width:5px;height:5px;border-radius:50%}
+.stat-dot.ok{background:var(--green);box-shadow:var(--glow-green);animation:pulse 3s ease-in-out infinite}
+.stat-dot.warn{background:var(--amber)}
+.stat-dot.off{background:var(--red)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}
+
+/* ─── CONTENT AREA ─── */
+#content{flex:1;overflow:hidden;display:flex}
+
+/* ─── TERMINAL TAB ─── */
+#terminal-view{flex:1;display:flex;flex-direction:column;overflow:hidden}
+
+/* ─── TERMINAL OUTPUT ─── */
+#output{
+  flex:1;overflow-y:auto;overflow-x:hidden;
+  padding:14px 16px;background:var(--bg);
+}
+#output::-webkit-scrollbar{width:5px}
+#output::-webkit-scrollbar-track{background:transparent}
+#output::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+#output::-webkit-scrollbar-thumb:hover{background:var(--dim)}
+
+/* ─── OUTPUT LINES ─── */
+.line{margin-bottom:3px;white-space:pre-wrap;word-wrap:break-word;font-size:13px;animation:fadeIn 0.1s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(1px)}to{opacity:1;transform:translateY(0)}}
+.line-prompt{color:var(--mid)}
+.line-cmd{color:var(--text)}
+.line-success{color:var(--green)}
+.line-error{color:var(--red)}
+.line-info{color:#4a8aaa}
+.line-warning{color:var(--amber)}
+.line-system{color:var(--cyan);opacity:0.85}
+.line-dim{color:var(--dim)}
+.line-header{color:var(--cyan);font-weight:bold;letter-spacing:1px;border-bottom:1px solid var(--border);padding-bottom:2px;margin-bottom:4px}
+
+/* prompt line */
+.prompt-line{display:flex;gap:6px;margin-bottom:3px}
+.prompt-arrow{color:var(--cyan);opacity:0.7}
+.prompt-cmd-text{color:var(--text)}
+
+/* ─── INPUT AREA ─── */
+#inputbar{
+  display:flex;align-items:center;
+  padding:10px 16px;gap:10px;
+  border-top:1px solid var(--border);
+  background:linear-gradient(90deg,var(--bg) 0%,var(--bg2) 100%);
+  flex-shrink:0;
+}
+.input-ps1{color:var(--cyan);opacity:0.75;user-select:none;font-size:13px;flex-shrink:0}
+#cmd{
+  flex:1;background:transparent;border:none;outline:none;
+  color:var(--text);font-family:inherit;font-size:13px;caret-color:var(--cyan);
+}
+#cmd::placeholder{color:var(--dim)}
+#exec-btn{
+  padding:5px 14px;background:rgba(0,212,255,0.08);
+  border:1px solid var(--border2);color:var(--cyan);
+  cursor:pointer;border-radius:2px;font-size:10px;letter-spacing:1px;
+  font-family:inherit;transition:all 0.15s;text-transform:uppercase;
+}
+#exec-btn:hover{background:rgba(0,212,255,0.15);border-color:var(--cyan);box-shadow:var(--glow-cyan)}
+
+/* ─── INFO TAB ─── */
+#info-view{
+  flex:1;display:none;overflow-y:auto;
+  padding:20px;background:var(--bg2);
+}
+#info-view.active{display:block}
+.info-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;margin-bottom:20px}
+.info-card{
+  background:var(--panel);border:1px solid var(--border);
+  border-radius:3px;padding:14px;
+}
+.info-card-title{
+  font-size:10px;letter-spacing:2px;text-transform:uppercase;
+  color:var(--cyan);margin-bottom:10px;opacity:0.8;
+  border-bottom:1px solid var(--border);padding-bottom:6px;
+}
+.info-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;font-size:11px}
+.info-key{color:var(--mid)}
+.info-val{color:var(--green);font-weight:bold}
+.info-val.dim{color:var(--dim)}
+.info-val.warn{color:var(--amber)}
+.info-val.cyan{color:var(--cyan)}
+.cmd-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.cmd-tag{
+  padding:2px 8px;background:rgba(0,212,255,0.07);
+  border:1px solid rgba(0,212,255,0.2);border-radius:2px;
+  font-size:10px;color:var(--cyan);letter-spacing:0.5px;cursor:pointer;
+  transition:all 0.1s;
+}
+.cmd-tag:hover{background:rgba(0,212,255,0.18);border-color:var(--cyan)}
+
+/* ─── BOOT SEQUENCE ─── */
+.boot-line{color:var(--cyan);opacity:0;animation:bootFade 0.3s forwards}
+@keyframes bootFade{to{opacity:1}}
+</style>
 </head>
 <body>
-    <div class="container">
-        <!-- Header with system info -->
-        <div class="header">
-            <div class="header-title">⚛️ QUANTUM TEMPORAL COHERENCE LEDGER (QTCL)</div>
-            <div class="header-subtitle">Hybrid Blockchain: Classical + Quantum Computing | Distributed Ledger Protocol</div>
-            <div class="system-info">
-                <div class="info-block">
-                    <div class="info-label">BLOCKCHAIN TYPE</div>
-                    <div class="info-value">Quantum-Classical Hybrid</div>
-                </div>
-                <div class="info-block">
-                    <div class="info-label">CONSENSUS</div>
-                    <div class="info-value">Quantum PoW + Classical PoS</div>
-                </div>
-                <div class="info-block">
-                    <div class="info-label">QUANTUM ENGINE</div>
-                    <div class="info-value" id="quantum-status">Initializing...</div>
-                </div>
-                <div class="info-block">
-                    <div class="info-label">LEDGER STATUS</div>
-                    <div class="info-value" id="ledger-status">Synchronizing...</div>
-                </div>
-            </div>
-        </div>
+<div id="app">
 
-        <!-- Main content: Welcome panel + Terminal -->
-        <div class="main-content">
-            <div class="welcome-panel" id="welcomePanel">
-                <div class="welcome-title">SYSTEM ARCHITECTURE</div>
-                
-                <div class="welcome-section">
-                    <div class="welcome-section-title">🔬 Quantum Subsystem</div>
-                    <div class="welcome-text">
-                        • Quantum circuit execution
-                        • Entropy measurement
-                        • Coherence validation
-                        • Finality proofs
-                    </div>
-                </div>
-                
-                <div class="welcome-section">
-                    <div class="welcome-section-title">⛓️ Blockchain</div>
-                    <div class="welcome-text">
-                        • Block validation
-                        • Merkle tree verification
-                        • Transaction processing
-                        • Smart contracts
-                    </div>
-                </div>
-                
-                <div class="welcome-section">
-                    <div class="welcome-section-title">💰 DeFi</div>
-                    <div class="welcome-text">
-                        • Staking & yields
-                        • Lending protocols
-                        • AMM swaps
-                        • Governance
-                    </div>
-                </div>
-                
-                <div class="welcome-section">
-                    <div class="welcome-section-title">🔮 Oracle Services</div>
-                    <div class="welcome-text">
-                        • Price feeds
-                        • Time services
-                        • Random generation
-                        • Event triggers
-                    </div>
-                </div>
+  <!-- TOP BAR -->
+  <div id="topbar">
+    <div id="brand">
+      <span class="brand-icon">⚛</span>
+      <span class="brand-name">QTCL</span>
+    </div>
+    <div id="tabs">
+      <div class="tab active" data-view="terminal" onclick="switchTab('terminal')">
+        <div class="tab-dot"></div>TERMINAL
+      </div>
+      <div class="tab" data-view="info" onclick="switchTab('info')">
+        <div class="tab-dot"></div>INFO
+      </div>
+    </div>
+    <div id="statusbar">
+      <div class="stat">
+        <div class="stat-dot ok" id="dot-api"></div>
+        <span id="lbl-api">API</span>
+      </div>
+      <div class="stat">
+        <div class="stat-dot warn" id="dot-quantum"></div>
+        <span id="lbl-quantum">QUANTUM</span>
+      </div>
+      <div class="stat">
+        <div class="stat-dot warn" id="dot-db"></div>
+        <span id="lbl-db">DB</span>
+      </div>
+    </div>
+  </div>
 
-                <div class="welcome-section">
-                    <div class="welcome-section-title">👤 User Commands</div>
-                    <div class="welcome-text">
-                        Type <span style="color: #4a8a4a;">help</span> to see all commands
-                    </div>
-                </div>
-            </div>
+  <!-- CONTENT -->
+  <div id="content">
 
-            <!-- Terminal -->
-            <div class="terminal-container">
-                <div class="terminal-header">
-                    TERMINAL INTERFACE
-                    <span style="float: right; cursor: pointer;" id="toggleBtn" class="toggle-welcome">INFO</span>
-                </div>
-                <div class="terminal-output" id="output">
-                    <div class="output-line">
-                        <span class="line-info">●</span> QTCL Terminal v5.0 - Type 'help' for commands
-                    </div>
-                </div>
-                <div class="terminal-input">
-                    <span class="input-prompt">›</span>
-                    <input type="text" id="cmd" placeholder="Enter command..." spellcheck="false" autocomplete="off">
-                </div>
-            </div>
-        </div>
+    <!-- TERMINAL VIEW -->
+    <div id="terminal-view">
+      <div id="output"></div>
+      <div id="inputbar">
+        <span class="input-ps1">QTCL ›</span>
+        <input type="text" id="cmd" placeholder="Type a command… ('help' to list all)" spellcheck="false" autocomplete="off" autocorrect="off">
+        <button id="exec-btn" onclick="execute()">RUN</button>
+      </div>
     </div>
 
-    <script>
-        const output = document.getElementById('output');
-        const input = document.getElementById('cmd');
-        const welcomePanel = document.getElementById('welcomePanel');
-        const toggleBtn = document.getElementById('toggleBtn');
-        const history = [];
-        let historyIdx = -1;
+    <!-- INFO VIEW -->
+    <div id="info-view">
+      <div class="info-grid" id="info-grid">
+        <!-- populated by JS -->
+      </div>
+    </div>
 
-        function addLine(text, type = 'info') {
-            const line = document.createElement('div');
-            line.className = 'output-line';
-            
-            let html = '';
-            const escaped = text
-                .replace(/&/g, '&amp;')
-                .replace(/</g, '&lt;')
-                .replace(/>/g, '&gt;');
-            
-            if (type === 'cmd') {
-                html = `<span class="line-prompt">›</span> <span class="line-cmd">${escaped}</span>`;
-            } else {
-                const className = `line-${type}`;
-                html = `<span class="${className}">${escaped}</span>`;
-            }
-            
-            line.innerHTML = html;
-            output.appendChild(line);
-            output.scrollTop = output.scrollHeight;
+  </div>
+</div>
+
+<script>
+'use strict';
+// ─── STATE ───
+const output  = document.getElementById('output');
+const cmdInput = document.getElementById('cmd');
+let cmdHistory = [], histIdx = -1;
+let statusData = {};
+
+// ─── TAB SWITCHING ───
+function switchTab(name){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===name));
+  document.getElementById('terminal-view').style.display = name==='terminal'?'flex':'none';
+  document.getElementById('info-view').classList.toggle('active', name==='info');
+  if(name==='terminal') cmdInput.focus();
+  if(name==='info') renderInfoGrid();
+}
+// init display
+document.getElementById('terminal-view').style.display='flex';
+
+// ─── LINE FACTORY ───
+function addLine(text, cls='info'){
+  if(text===undefined||text===null) return;
+  const lines = String(text).split('\n');
+  lines.forEach(raw=>{
+    if(!raw && cls!=='success') return; // skip empty lines except in success blocks
+    const d = document.createElement('div');
+    d.className = `line line-${cls}`;
+    d.textContent = raw;
+    output.appendChild(d);
+  });
+  output.scrollTop = output.scrollHeight;
+}
+
+function addPromptLine(cmd){
+  const d = document.createElement('div');
+  d.className = 'line prompt-line';
+  d.innerHTML = `<span class="prompt-arrow">›</span><span class="prompt-cmd-text">${esc(cmd)}</span>`;
+  output.appendChild(d);
+  output.scrollTop = output.scrollHeight;
+}
+
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') }
+
+function addSep(){
+  const d=document.createElement('div');
+  d.className='line line-dim';
+  d.textContent='─'.repeat(60);
+  output.appendChild(d);
+}
+
+// ─── COMMAND EXECUTION ───
+async function execute(){
+  const raw = cmdInput.value.trim();
+  if(!raw) return;
+
+  cmdHistory.unshift(raw);
+  histIdx = -1;
+  cmdInput.value = '';
+
+  addPromptLine(raw);
+
+  // Local commands that don't need the server
+  const lc = raw.toLowerCase();
+  if(lc==='clear'||lc==='cls'){output.innerHTML=''; return;}
+  if(lc==='info'){switchTab('info'); return;}
+
+  try{
+    const res = await fetch('/api/command',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({command:raw, args:[], kwargs:{}})
+    });
+
+    const data = await res.json().catch(()=>({error:'Invalid JSON response'}));
+
+    if(res.ok && (data.status==='success'||data.result)){
+      const result = data.result;
+      if(!result){
+        addLine('OK','success');
+      } else if(typeof result === 'object'){
+        if(result.output){
+          result.output.split('\n').forEach(l=>{
+            if(l.trim()) addLine(l, l.startsWith('─')||l.startsWith('═')||l.startsWith('║')? 'system' : 'success');
+          });
+        } else {
+          // Pretty-print JSON result
+          try{
+            const pretty = JSON.stringify(result, null, 2);
+            pretty.split('\n').forEach(l=>addLine(l,'success'));
+          } catch {
+            addLine(String(result),'success');
+          }
         }
+      } else {
+        String(result).split('\n').forEach(l=>{ if(l.trim()) addLine(l,'success') });
+      }
+    } else {
+      const err = data.error || `HTTP ${res.status}`;
+      addLine('✗ '+err,'error');
+      if(data.suggestions&&data.suggestions.length){
+        addLine('Similar commands: '+data.suggestions.join(', '),'warning');
+      }
+    }
+  } catch(err){
+    addLine('Network error: '+err.message,'error');
+  }
 
-        async function execute() {
-            const cmd = input.value.trim();
-            if (!cmd) return;
+  output.scrollTop = output.scrollHeight;
+  cmdInput.focus();
+}
 
-            history.unshift(cmd);
-            historyIdx = -1;
+// ─── KEYBOARD ───
+cmdInput.addEventListener('keydown', e=>{
+  if(e.key==='Enter'){e.preventDefault();execute();}
+  else if(e.key==='ArrowUp'){
+    e.preventDefault();
+    histIdx = Math.min(histIdx+1, cmdHistory.length-1);
+    if(histIdx>=0) cmdInput.value=cmdHistory[histIdx];
+  }
+  else if(e.key==='ArrowDown'){
+    e.preventDefault();
+    histIdx = Math.max(histIdx-1,-1);
+    cmdInput.value = histIdx>=0? cmdHistory[histIdx]:'';
+  }
+  else if(e.key==='Tab'){
+    e.preventDefault();
+    autocomplete();
+  }
+});
 
-            addLine(cmd, 'cmd');
-            input.value = '';
+// ─── AUTOCOMPLETE (simple prefix match) ───
+const KNOWN_CMDS=['help','list-commands','health','system-status','version','time','whoami','echo',
+  'quantum/status','quantum/health','quantum/stats','quantum/w_state','quantum/neural',
+  'transaction/create','transaction/list','transaction/stats','transaction/track',
+  'wallet/create','wallet/balance','wallet/list',
+  'oracle/time','oracle/price','oracle/random',
+  'block/latest','block/details','block/list',
+  'auth/login','auth/logout','auth/status',
+  'clear','info'];
 
-            try {
-                const response = await fetch('/api/command', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        command: cmd,
-                        args: [],
-                        kwargs: {}
-                    })
-                });
+function autocomplete(){
+  const v=cmdInput.value;
+  if(!v) return;
+  const matches=KNOWN_CMDS.filter(c=>c.startsWith(v)&&c!==v);
+  if(matches.length===1){ cmdInput.value=matches[0]; }
+  else if(matches.length>1){
+    addLine('Completions: '+matches.join('  '),'dim');
+  }
+}
 
-                const data = await response.json();
+// ─── STATUS POLLING ───
+async function loadStatus(){
+  try{
+    const r=await fetch('/api/status');
+    if(r.ok){
+      const d=await r.json();
+      statusData=d;
+      // quantum
+      const qok=d.quantum&&(d.quantum.status==='active'||d.quantum.status==='Active');
+      setDot('quantum',qok?'ok':'warn');
+      document.getElementById('lbl-quantum').textContent=
+        d.quantum?(d.quantum.status||'QUANTUM').toUpperCase().slice(0,10):'QUANTUM';
+      // db
+      const dbok=d.database||d.db;
+      setDot('db',dbok?'ok':'warn');
+      // api always ok if we got response
+      setDot('api','ok');
+      // ledger
+      if(d.ledger&&typeof d.ledger.blocks==='number'){
+        document.getElementById('lbl-db').textContent=d.ledger.blocks+' BLK';
+      }
+    }
+  } catch(e){ setDot('api','warn') }
+}
+function setDot(id,cls){
+  const d=document.getElementById('dot-'+id);
+  if(d){ d.className='stat-dot '+cls }
+}
+setInterval(loadStatus,15000);
 
-                if (response.ok && data.result) {
-                    const result = data.result;
-                    if (typeof result === 'object') {
-                        if (result.output) {
-                            result.output.split('\n').forEach(l => {
-                                if (l.trim()) addLine(l, 'success');
-                            });
-                        } else {
-                            addLine(JSON.stringify(result, null, 2), 'success');
-                        }
-                    } else {
-                        String(result).split('\n').forEach(l => {
-                            if (l.trim()) addLine(l, 'success');
-                        });
-                    }
-                } else if (data.error) {
-                    addLine(data.error, 'error');
-                } else {
-                    addLine('Command executed', 'success');
-                }
-            } catch (err) {
-                addLine(`Error: ${err.message}`, 'error');
-            }
+// ─── INFO GRID ───
+function renderInfoGrid(){
+  const grid=document.getElementById('info-grid');
+  grid.innerHTML='';
 
-            input.focus();
-        }
+  const cards=[
+    {
+      title:'System Architecture',
+      rows:[
+        ['Blockchain Type','Quantum-Classical Hybrid'],
+        ['Consensus','Quantum PoW + Classical PoS'],
+        ['Validator Qubits','5 (W-State Consensus)'],
+        ['GHZ Circuit','8-qubit finality proofs'],
+      ]
+    },
+    {
+      title:'Quantum Subsystem',
+      rows:[
+        ['Engine',statusData.quantum?.status||'Initializing…'],
+        ['W-State',statusData.quantum?.w_state||'—'],
+        ['Coherence',statusData.quantum?.coherence||'—'],
+        ['Entropy Pool',statusData.quantum?.entropy||'—'],
+      ]
+    },
+    {
+      title:'Ledger Status',
+      rows:[
+        ['Blocks',statusData.ledger?.blocks??'—'],
+        ['Transactions',statusData.ledger?.transactions??'—'],
+        ['Validators',statusData.ledger?.validators??'—'],
+        ['Uptime',statusData.uptime?Math.round(statusData.uptime)+'s':'—'],
+      ]
+    },
+    {
+      title:'DeFi & Oracle',
+      rows:[
+        ['Staking','Available'],
+        ['Swaps','AMM Active'],
+        ['Price Oracle','Integrated'],
+        ['QRNG','Active'],
+      ]
+    },
+  ];
 
-        input.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-                e.preventDefault();
-                execute();
-            } else if (e.key === 'ArrowUp') {
-                e.preventDefault();
-                historyIdx = Math.min(historyIdx + 1, history.length - 1);
-                if (historyIdx >= 0) input.value = history[historyIdx];
-            } else if (e.key === 'ArrowDown') {
-                e.preventDefault();
-                historyIdx = Math.max(historyIdx - 1, -1);
-                if (historyIdx >= 0) input.value = history[historyIdx];
-                else input.value = '';
-            }
-        });
+  cards.forEach(c=>{
+    const card=document.createElement('div');
+    card.className='info-card';
+    card.innerHTML=`<div class="info-card-title">${c.title}</div>`+
+      c.rows.map(([k,v])=>`<div class="info-row"><span class="info-key">${k}</span><span class="info-val">${v}</span></div>`).join('');
+    grid.appendChild(card);
+  });
 
-        toggleBtn.addEventListener('click', () => {
-            welcomePanel.classList.toggle('show');
-            toggleBtn.textContent = welcomePanel.classList.contains('show') ? 'HIDE' : 'INFO';
-        });
+  // Command quick-launch card
+  const cats={
+    'QUANTUM':['quantum/status','quantum/health','quantum/stats'],
+    'BLOCKCHAIN':['block/latest','block/list','transaction/list'],
+    'WALLET':['wallet/list','wallet/balance','wallet/create'],
+    'SYSTEM':['help','system-status','version','health','time'],
+  };
+  const cmdCard=document.createElement('div');
+  cmdCard.className='info-card';
+  cmdCard.style.gridColumn='1/-1';
+  let html='<div class="info-card-title">Quick Commands — click to run</div>';
+  Object.entries(cats).forEach(([cat,cmds])=>{
+    html+=`<div style="margin-bottom:10px"><div style="font-size:10px;color:var(--mid);margin-bottom:5px;letter-spacing:1px">${cat}</div><div class="cmd-list">`;
+    cmds.forEach(cmd=>{
+      html+=`<span class="cmd-tag" onclick="runQuick('${cmd}')">${cmd}</span>`;
+    });
+    html+='</div></div>';
+  });
+  cmdCard.innerHTML=html;
+  grid.appendChild(cmdCard);
+}
 
-        // Load system status
-        async function loadStatus() {
-            try {
-                const res = await fetch('/api/status');
-                const data = await res.json();
-                if (data.quantum) {
-                    document.getElementById('quantum-status').textContent = data.quantum.status || 'Active';
-                }
-                if (data.ledger) {
-                    document.getElementById('ledger-status').textContent = `${data.ledger.blocks || 0} blocks`;
-                }
-            } catch (e) {
-                console.log('Status load deferred');
-            }
-        }
+function runQuick(cmd){
+  switchTab('terminal');
+  cmdInput.value=cmd;
+  execute();
+}
 
-        input.focus();
-        loadStatus();
-    </script>
+// ─── BOOT SEQUENCE ───
+async function boot(){
+  const BOOT=[
+    {t:0,  msg:'╔═══════════════════════════════════════════════════════════╗', cls:'system'},
+    {t:30, msg:'║     QUANTUM TEMPORAL COHERENCE LEDGER  v5.0               ║', cls:'system'},
+    {t:30, msg:'║     Hybrid Blockchain Command Interface                    ║', cls:'system'},
+    {t:30, msg:'╚═══════════════════════════════════════════════════════════╝', cls:'system'},
+    {t:80, msg:'', cls:'info'},
+    {t:80, msg:'Initializing quantum subsystem…', cls:'info'},
+    {t:120,msg:'Loading command registry…', cls:'info'},
+    {t:80, msg:'Connecting to PostgreSQL ledger…', cls:'info'},
+    {t:100,msg:'', cls:'info'},
+    {t:60, msg:'Type  help          — list all registered commands', cls:'dim'},
+    {t:40, msg:'Type  system-status — full system health', cls:'dim'},
+    {t:40, msg:'Type  version       — build version info', cls:'dim'},
+    {t:40, msg:'Press Tab           — autocomplete', cls:'dim'},
+    {t:40, msg:'Click INFO tab      — system architecture', cls:'dim'},
+    {t:80, msg:'', cls:'info'},
+    {t:60, msg:'Ready.', cls:'success'},
+    {t:20, msg:'', cls:'info'},
+  ];
+
+  let delay=0;
+  for(const {t,msg,cls} of BOOT){
+    delay+=t;
+    await new Promise(r=>setTimeout(r,delay));
+    addLine(msg,cls);
+  }
+
+  // kick off status load
+  loadStatus();
+}
+
+cmdInput.focus();
+boot();
+</script>
 </body>
 </html>
