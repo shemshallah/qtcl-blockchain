@@ -2277,42 +2277,63 @@ try:
             logger.error("[WSGI] ❌ Failed to start heartbeat - system running in degraded mode")
         
         # ✅ PHASE 3: INITIALIZE API BLUEPRINTS (after globals + heartbeat are ready)
-        logger.info("[WSGI] 📋 PHASE 3: Initializing API blueprints after globals are ready...")
+        logger.info("[WSGI] \U0001f4cb PHASE 3: Registering API blueprints with Flask app...")
         
-        blueprints_to_init = [
-            ('defi_api', 'get_defi_blueprint'),
-            ('core_api', 'get_core_blueprint'),
-            ('admin_api', 'get_admin_blueprint'),
-            ('blockchain_api', 'get_blockchain_blueprint'),
-            ('quantum_api', 'get_quantum_blueprint'),
-            ('oracle_api', 'get_oracle_blueprint'),
+        blueprints_to_register = [
+            ('defi_api',      'get_defi_blueprint'),
+            ('core_api',      'get_core_blueprint'),
+            ('admin_api',     'get_admin_blueprint'),
+            ('blockchain_api','get_blockchain_blueprint'),
+            ('quantum_api',   'get_quantum_blueprint'),
+            ('oracle_api',    'get_oracle_blueprint'),
         ]
         
         blueprints_initialized = 0
-        for module_name, factory_func_name in blueprints_to_init:
+        failed_blueprints = []
+        
+        for module_name, factory_func_name in blueprints_to_register:
             try:
+                # Force-import the module if not already loaded
                 module = sys.modules.get(module_name)
                 if module is None:
-                    logger.debug(f"[WSGI] {module_name} not yet imported, skipping blueprint init")
-                    continue
-                
-                factory_func = getattr(module, factory_func_name, None)
-                if factory_func and callable(factory_func):
                     try:
-                        bp = factory_func()
-                        if bp:
-                            blueprints_initialized += 1
-                            logger.info(f"✅ {module_name} blueprint initialized via {factory_func_name}()")
-                        else:
-                            logger.warning(f"⚠️  {module_name} blueprint factory returned None")
-                    except Exception as be:
-                        logger.warning(f"[WSGI] Failed to initialize {module_name} blueprint: {be}")
+                        module = __import__(module_name)
+                        logger.info(f"[WSGI] \u2713 Imported {module_name}")
+                    except Exception as ie:
+                        logger.warning(f"[WSGI] \u274c Cannot import {module_name}: {ie}")
+                        failed_blueprints.append((module_name, str(ie)))
+                        continue
+                
+                # Get factory from module first, then fall back to wsgi-local wrapper
+                factory_func = getattr(module, factory_func_name, None)
+                if factory_func is None:
+                    factory_func = globals().get(factory_func_name)
+                
+                if factory_func and callable(factory_func):
+                    bp = factory_func()
+                    if bp is not None:
+                        app.register_blueprint(bp)
+                        blueprints_initialized += 1
+                        logger.info(f"[WSGI] \u2705 {module_name} blueprint registered with Flask app")
+                    else:
+                        logger.warning(f"[WSGI] \u26a0\ufe0f  {module_name} blueprint factory returned None")
+                        failed_blueprints.append((module_name, 'factory returned None'))
                 else:
-                    logger.debug(f"[WSGI] {module_name} factory function '{factory_func_name}' not found")
+                    logger.warning(f"[WSGI] \u26a0\ufe0f  {factory_func_name} not found in {module_name} or wsgi globals")
+                    failed_blueprints.append((module_name, f'{factory_func_name} not found'))
             except Exception as e:
-                logger.debug(f"[WSGI] Blueprint init for {module_name} failed: {e}")
+                logger.error(f"[WSGI] \u274c Failed to register {module_name} blueprint: {e}", exc_info=True)
+                failed_blueprints.append((module_name, str(e)))
         
-        logger.info(f"[WSGI] ✓ {blueprints_initialized} API blueprints initialized")
+        logger.info(f"[WSGI] \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550")
+        logger.info(f"[WSGI] Blueprint Registration: {blueprints_initialized}/{len(blueprints_to_register)} registered")
+        if failed_blueprints:
+            for name, err in failed_blueprints:
+                logger.error(f"[WSGI]   \u274c {name}: {err}")
+        else:
+            logger.info(f"[WSGI]   \u2705 All blueprints registered successfully")
+        logger.info(f"[WSGI] \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550")
+        logger.info(f"[WSGI] \u2713 Flask app now has {len(list(app.url_map.iter_rules()))} total routes")
 
     else:
         logger.warning("[WSGI] ⚠️  Heartbeat system initialization failed - running in degraded mode")
