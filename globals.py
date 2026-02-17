@@ -668,6 +668,177 @@ def initialize_globals() -> bool:
             globals_inst.health = SystemHealth.OFFLINE
         return False
 
+class SystemHeartbeat:
+    """System-wide heartbeat for keeping server alive and tracking metrics"""
+    
+    def __init__(self, interval: float = 30.0):
+        """
+        Initialize heartbeat
+        
+        Args:
+            interval: Heartbeat interval in seconds (default 30s)
+        """
+        self.interval = interval
+        self.running = False
+        self.pulse_count = 0
+        self.listeners = []
+        self.error_count = 0
+        self.last_beat_time = None
+        self.lock = threading.RLock()
+        self.thread = None
+        self.metrics = {
+            'cpu_usage': 0.0,
+            'memory_usage': 0.0,
+            'request_count': 0,
+            'error_count': 0,
+            'avg_response_time': 0.0,
+            'quantum_pulses': 0,
+            'timestamp': datetime.utcnow().isoformat(),
+        }
+    
+    def start(self):
+        """Start the heartbeat thread"""
+        with self.lock:
+            if self.running:
+                return
+            self.running = True
+        
+        self.thread = threading.Thread(target=self._beat_loop, daemon=True)
+        self.thread.name = "SystemHeartbeat"
+        self.thread.start()
+        logger.info("[Heartbeat] ✓ Heartbeat started (30s interval)")
+    
+    def stop(self):
+        """Stop the heartbeat"""
+        with self.lock:
+            self.running = False
+        
+        if self.thread:
+            self.thread.join(timeout=5)
+        logger.info("[Heartbeat] ✓ Heartbeat stopped")
+    
+    def add_listener(self, callback: Callable):
+        """Register a callback to be called on each heartbeat"""
+        with self.lock:
+            if callback not in self.listeners:
+                self.listeners.append(callback)
+    
+    def _beat_loop(self):
+        """Main heartbeat loop - runs every 30 seconds"""
+        logger.info("[Heartbeat] Beat loop started")
+        while self.running:
+            try:
+                time.sleep(self.interval)
+                if not self.running:
+                    break
+                
+                self.beat()
+            except Exception as e:
+                logger.error(f"[Heartbeat] Error in beat loop: {e}")
+                self.error_count += 1
+                time.sleep(5)
+    
+    def beat(self):
+        """Execute a heartbeat pulse"""
+        with self.lock:
+            try:
+                self.pulse_count += 1
+                self.last_beat_time = datetime.utcnow()
+                
+                # Update metrics
+                gs = get_globals()
+                self.metrics['timestamp'] = datetime.utcnow().isoformat()
+                self.metrics['request_count'] = gs.metrics.http_requests
+                self.metrics['error_count'] = gs.metrics.http_errors
+                self.metrics['quantum_pulses'] = gs.metrics.quantum_pulses
+                
+                # Calculate average response time
+                if gs.metrics.request_times:
+                    avg_time = sum(r['duration_ms'] for r in gs.metrics.request_times) / len(gs.metrics.request_times)
+                    self.metrics['avg_response_time'] = round(avg_time, 2)
+                
+                logger.debug(f"[Heartbeat] Pulse #{self.pulse_count} - {self.pulse_count * self.interval}s elapsed")
+                
+                # Call listeners
+                for listener in self.listeners:
+                    try:
+                        listener(self.last_beat_time)
+                    except Exception as e:
+                        logger.error(f"[Heartbeat] Listener error: {e}")
+                        self.error_count += 1
+                
+                # Post to API heartbeat endpoint to keep server alive
+                self._post_heartbeat_to_api()
+            
+            except Exception as e:
+                logger.error(f"[Heartbeat] Beat execution error: {e}")
+                self.error_count += 1
+    
+    def _post_heartbeat_to_api(self):
+        """POST heartbeat to /api/heartbeat endpoint to keep server alive"""
+        try:
+            payload = {
+                'pulse': self.pulse_count,
+                'timestamp': datetime.utcnow().isoformat(),
+                'metrics': self.metrics
+            }
+            
+            # Make async call to avoid blocking
+            def _async_post():
+                try:
+                    import requests
+                    requests.post(
+                        'http://localhost:5000/api/heartbeat',
+                        json=payload,
+                        timeout=2
+                    )
+                except Exception:
+                    pass
+            
+            # Post asynchronously
+            post_thread = threading.Thread(target=_async_post, daemon=True)
+            post_thread.start()
+        
+        except Exception:
+            pass
+    
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get current metrics"""
+        with self.lock:
+            return dict(self.metrics)
+
+
+def _init_quantum(globals_inst: GlobalState):
+    """Initialize quantum systems including heartbeat"""
+    logger.info("[Init] Initializing quantum systems...")
+    try:
+        # Try to import quantum components
+        try:
+            from quantum_lattice_control_live_complete import QuantumLatticeControlLiveV5
+            lattice = QuantumLatticeControlLiveV5()
+            with globals_inst.lock:
+                globals_inst.quantum.lattice = lattice
+            logger.info("[Init] ✓ Quantum Lattice initialized")
+        except Exception as e:
+            logger.warning(f"[Init] Quantum Lattice not available: {e}")
+        
+        # Initialize heartbeat system - CRITICAL
+        heartbeat = SystemHeartbeat(interval=30.0)
+        with globals_inst.lock:
+            globals_inst.quantum.heartbeat = heartbeat
+        
+        # Start heartbeat in background
+        heartbeat.start()
+        logger.info("[Init] ✓ System Heartbeat initialized (30s interval, auto-posting to /api/heartbeat)")
+        
+        return True
+    except Exception as e:
+        logger.error(f"[Init] Quantum initialization failed: {e}")
+        with globals_inst.lock:
+            globals_inst.init_errors.append(f"Quantum init: {e}")
+        return False
+
+
 def _init_logic_hierarchy(globals_inst: GlobalState):
     """Initialize hierarchical logic blocks (LEVEL 1)"""
     logger.info("[Init] Creating logic hierarchy...")

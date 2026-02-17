@@ -63,6 +63,7 @@ try:
         get_state_snapshot,
         get_debug_info,
         get_heartbeat,
+        get_lattice,
         get_blockchain,
         get_defi,
         get_oracle,
@@ -361,6 +362,116 @@ def create_app():
     # ════════════════════════════════════════════════════════════════════════════════════════
     # COMPONENT-SPECIFIC ENDPOINTS
     # ════════════════════════════════════════════════════════════════════════════════════════
+    
+    @app.route('/api/heartbeat', methods=['POST'])
+    def api_heartbeat():
+        """Heartbeat endpoint - receives heartbeat pulses from SystemHeartbeat"""
+        try:
+            data = request.get_json() or {}
+            pulse = data.get('pulse', 0)
+            metrics = data.get('metrics', {})
+            
+            heartbeat = get_heartbeat()
+            if heartbeat:
+                with gs.lock:
+                    gs.metrics.quantum_pulses += 1
+            
+            return jsonify({
+                'status': 'received',
+                'pulse': pulse,
+                'timestamp': datetime.utcnow().isoformat()
+            }), 200
+        except Exception as e:
+            logger.error(f"[API] Heartbeat endpoint error: {e}")
+            return jsonify({'error': str(e)}), 500
+    
+    @app.route('/api/metrics/heartbeat', methods=['GET'])
+    def metrics_heartbeat():
+        """Get current heartbeat and system metrics"""
+        heartbeat = get_heartbeat()
+        with gs.lock:
+            return jsonify({
+                'heartbeat': {
+                    'running': heartbeat.running if heartbeat else False,
+                    'pulse_count': heartbeat.pulse_count if heartbeat else 0,
+                    'interval': heartbeat.interval if heartbeat else 30,
+                    'error_count': heartbeat.error_count if heartbeat else 0,
+                    'listeners': len(heartbeat.listeners) if heartbeat else 0,
+                    'last_beat': heartbeat.last_beat_time.isoformat() if heartbeat and heartbeat.last_beat_time else None,
+                    'metrics': heartbeat.get_metrics() if heartbeat else {}
+                },
+                'system': {
+                    'http_requests': gs.metrics.http_requests,
+                    'http_errors': gs.metrics.http_errors,
+                    'quantum_pulses': gs.metrics.quantum_pulses,
+                    'transactions': gs.metrics.transactions_processed,
+                    'blocks': gs.metrics.blocks_created,
+                    'timestamp': datetime.utcnow().isoformat()
+                }
+            }), 200
+    
+    @app.route('/api/metrics/quantum', methods=['GET'])
+    def metrics_quantum():
+        """Get quantum lattice control metrics"""
+        heartbeat = get_heartbeat()
+        lattice = get_lattice()
+        
+        with gs.lock:
+            quantum_metrics = {
+                'heartbeat_active': heartbeat is not None and heartbeat.running,
+                'heartbeat_pulse_count': heartbeat.pulse_count if heartbeat else 0,
+                'lattice_active': lattice is not None,
+                'quantum_pulses': gs.metrics.quantum_pulses,
+                'timestamp': datetime.utcnow().isoformat()
+            }
+            
+            # Add lattice-specific metrics if available
+            if lattice and hasattr(lattice, 'get_metrics'):
+                try:
+                    lattice_metrics = lattice.get_metrics()
+                    quantum_metrics['lattice_metrics'] = lattice_metrics
+                except Exception as e:
+                    logger.debug(f"Could not get lattice metrics: {e}")
+            
+            return jsonify(quantum_metrics), 200
+    
+    @app.route('/api/system/status', methods=['GET'])
+    def system_status():
+        """Get comprehensive system status with all metrics"""
+        heartbeat = get_heartbeat()
+        health = get_system_health()
+        
+        with gs.lock:
+            return jsonify({
+                'status': 'operational',
+                'health': health,
+                'uptime_seconds': (datetime.utcnow() - gs.startup_time).total_seconds() if gs.startup_time else 0,
+                'heartbeat': {
+                    'running': heartbeat.running if heartbeat else False,
+                    'pulse_count': heartbeat.pulse_count if heartbeat else 0,
+                    'metrics': heartbeat.get_metrics() if heartbeat else {}
+                },
+                'metrics': gs.metrics.get_stats(),
+                'timestamp': datetime.utcnow().isoformat()
+            }), 200
+    
+    @app.route('/api/health', methods=['GET'])
+    def api_health():
+        """Health check endpoint"""
+        health = get_system_health()
+        heartbeat = get_heartbeat()
+        
+        is_healthy = (
+            heartbeat and heartbeat.running and
+            health['status'] == 'healthy'
+        )
+        
+        return jsonify({
+            'healthy': is_healthy,
+            'status': health['status'],
+            'heartbeat_active': heartbeat.running if heartbeat else False,
+            'timestamp': datetime.utcnow().isoformat()
+        }), 200
     
     @app.route('/api/quantum/status', methods=['GET'])
     def quantum_status():
