@@ -562,10 +562,33 @@ class DeFiDatabaseManager:
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 def create_blueprint()->Blueprint:
-    """Factory function to create DeFi API blueprint"""
+    """Factory function to create DeFi API blueprint - uses globals for db access"""
     
     bp=Blueprint('defi_api',__name__,url_prefix='/api')
-    defi_db=DeFiDatabaseManager(db_manager)
+    
+    # Get database manager from globals (initialized by wsgi_config)
+    db_manager=None
+    if GLOBALS_AVAILABLE:
+        try:
+            globals_obj=get_globals()
+            db_manager=globals_obj.DB if hasattr(globals_obj,'DB') else None
+        except:
+            pass
+    
+    # Fallback: try to get from wsgi_config
+    if db_manager is None:
+        try:
+            from wsgi_config import DB
+            db_manager=DB
+        except:
+            logger.warning("[DeFi] Database manager not available - using stub")
+            db_manager=None
+    
+    if db_manager:
+        defi_db=DeFiDatabaseManager(db_manager)
+    else:
+        logger.warning("[DeFi] Creating DeFiDatabaseManager in stub mode")
+        defi_db=None
     
     if config is None:
         config={
@@ -1248,5 +1271,38 @@ def get_defi_heartbeat_status():
     """Get DeFi heartbeat status"""
     return _defi_heartbeat.get_status()
 
-# Export blueprint for main_app.py
-blueprint = create_blueprint()
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# DEFERRED BLUEPRINT CREATION - Happens after WSGI globals init
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+_defi_blueprint_instance=None
+
+def get_defi_blueprint()->Blueprint:
+    """
+    Get or create DeFi API blueprint (deferred initialization for globals readiness)
+    Call this AFTER wsgi_config has initialized globals and DB
+    """
+    global _defi_blueprint_instance
+    if _defi_blueprint_instance is None:
+        _defi_blueprint_instance=create_blueprint()
+        logger.info("[DeFi] Blueprint created and ready for routing")
+    return _defi_blueprint_instance
+
+# Blueprint property - lazy loading on first access
+class BlueprintProxy:
+    """Proxy that defers blueprint creation until first access"""
+    
+    def __getattr__(self,name):
+        bp=get_defi_blueprint()
+        return getattr(bp,name)
+    
+    def __repr__(self):
+        return repr(get_defi_blueprint())
+
+# Export as proxy - first access triggers creation
+try:
+    blueprint=get_defi_blueprint()
+except Exception as e:
+    logger.warning(f"[DeFi] Could not create blueprint at import time: {e}")
+    logger.info("[DeFi] Blueprint will be created on first access via get_defi_blueprint()")
+    blueprint=BlueprintProxy()

@@ -2129,6 +2129,44 @@ try:
             logger.info("[WSGI] ✅ HEARTBEAT SUCCESSFULLY STARTED WITH LISTENERS")
         else:
             logger.error("[WSGI] ❌ Failed to start heartbeat - system running in degraded mode")
+        
+        # ✅ PHASE 3: INITIALIZE API BLUEPRINTS (after globals + heartbeat are ready)
+        logger.info("[WSGI] 📋 PHASE 3: Initializing API blueprints after globals are ready...")
+        
+        blueprints_to_init = [
+            ('defi_api', 'get_defi_blueprint'),
+            ('core_api', 'get_core_blueprint'),
+            ('admin_api', 'get_admin_blueprint'),
+            ('blockchain_api', 'get_blockchain_blueprint'),
+            ('quantum_api', 'get_quantum_blueprint'),
+            ('oracle_api', 'get_oracle_blueprint'),
+        ]
+        
+        blueprints_initialized = 0
+        for module_name, factory_func_name in blueprints_to_init:
+            try:
+                module = sys.modules.get(module_name)
+                if module is None:
+                    logger.debug(f"[WSGI] {module_name} not yet imported, skipping blueprint init")
+                    continue
+                
+                factory_func = getattr(module, factory_func_name, None)
+                if factory_func and callable(factory_func):
+                    try:
+                        bp = factory_func()
+                        if bp:
+                            blueprints_initialized += 1
+                            logger.info(f"✅ {module_name} blueprint initialized via {factory_func_name}()")
+                        else:
+                            logger.warning(f"⚠️  {module_name} blueprint factory returned None")
+                    except Exception as be:
+                        logger.warning(f"[WSGI] Failed to initialize {module_name} blueprint: {be}")
+                else:
+                    logger.debug(f"[WSGI] {module_name} factory function '{factory_func_name}' not found")
+            except Exception as e:
+                logger.debug(f"[WSGI] Blueprint init for {module_name} failed: {e}")
+        
+        logger.info(f"[WSGI] ✓ {blueprints_initialized} API blueprints initialized")
 
     else:
         logger.warning("[WSGI] ⚠️  Heartbeat system initialization failed - running in degraded mode")
