@@ -433,6 +433,7 @@ def create_blueprint()->Blueprint:
     metrics_collector=MetricsCollector()
     event_streamer=EventStreamer()
     
+    config=None
     if config is None:
         config={
             'admin_required_role':'admin',
