@@ -1093,6 +1093,7 @@ def create_blueprint()->Blueprint:
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 import logging
+from db_builder_v2 import db_manager
 logger_admin = logging.getLogger('admin_fortress')
 logger_admin.info("""
 ╔════════════════════════════════════════════════════════════════════════════════════════════════╗

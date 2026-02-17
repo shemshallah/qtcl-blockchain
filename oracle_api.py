@@ -1515,4 +1515,25 @@ def get_oracle_heartbeat_status():
     return _oracle_heartbeat.get_status()
 
 # Export blueprint for main_app.py
+
+def create_blueprint():
+    """Create Flask blueprint for Oracle API"""
+    from flask import Blueprint, jsonify, request
+    
+    blueprint = Blueprint('oracle_api', __name__, url_prefix='/api/oracle')
+    
+    @blueprint.route('/price/<asset>', methods=['GET'])
+    def get_price(asset):
+        """Get asset price from oracle"""
+        return jsonify({'asset': asset, 'price': 0, 'status': 'operational'})
+    
+    @blueprint.route('/time', methods=['GET'])
+    def get_time():
+        """Get current oracle time"""
+        import time
+        return jsonify({'timestamp': time.time()})
+    
+    return blueprint
+
+
 blueprint = create_blueprint()

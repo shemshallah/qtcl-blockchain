@@ -3756,5 +3756,39 @@ def get_quantum_heartbeat_status():
     return _quantum_heartbeat.get_status()
 
 # Export blueprint for main_app.py
+
+def create_blueprint():
+    """Create Flask blueprint for Quantum API"""
+    from flask import Blueprint, jsonify, request
+    
+    blueprint = Blueprint('quantum_api', __name__, url_prefix='/api/quantum')
+    
+    @blueprint.route('/status', methods=['GET'])
+    def quantum_status():
+        """Get quantum system status"""
+        try:
+            metrics = QUANTUM.get_metrics() if hasattr(QUANTUM, 'get_metrics') else {}
+            return jsonify({
+                'status': 'online',
+                'quantum_system': 'operational',
+                'metrics': metrics
+            })
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+    
+    @blueprint.route('/measure/<qubit_id>', methods=['GET'])
+    def measure_qubit(qubit_id):
+        """Measure quantum state of qubit"""
+        try:
+            if hasattr(QUANTUM, 'measure'):
+                result = QUANTUM.measure(int(qubit_id))
+                return jsonify({'qubit_id': qubit_id, 'measurement': result})
+            return jsonify({'error': 'Measurement not available'}), 503
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+    
+    return blueprint
+
+
 blueprint = create_blueprint()
 

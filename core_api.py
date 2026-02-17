@@ -27,6 +27,7 @@ from collections import defaultdict,deque,Counter
 from flask import Blueprint,request,jsonify,g,Response,session,make_response
 import psycopg2
 from psycopg2.extras import RealDictCursor,execute_batch,execute_values,Json
+from db_builder_v2 import db_manager
 
 try:
     from cryptography.hazmat.primitives import hashes,serialization,hmac as crypto_hmac

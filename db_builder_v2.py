@@ -6834,6 +6834,25 @@ class DatabaseOrchestrator:
         except Exception as e:
             logger.error(f"{CLR.R}Error running demo queries: {e}{CLR.E}")
 
+# =====================================================================
+# GLOBAL DATABASE MANAGER SINGLETON
+# =====================================================================
+# Initialize db_manager for use across all modules
+try:
+    db_manager = DatabaseBuilder(
+        host=POOLER_HOST,
+        user=POOLER_USER, 
+        password=POOLER_PASSWORD,
+        port=POOLER_PORT,
+        database=POOLER_DB,
+        pool_size=DB_POOL_MAX_CONNECTIONS
+    )
+    print("✅ [DB] Global db_manager singleton initialized")
+except Exception as e:
+    print(f"⚠️  [DB] Failed to initialize db_manager: {e}")
+    db_manager = None
+
+
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # 🫀 DATABASE BUILDER HEARTBEAT INTEGRATION
