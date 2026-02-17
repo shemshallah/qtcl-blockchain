@@ -3,204 +3,406 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>QTCL Terminal</title>
+    <title>QTCL - Quantum Temporal Coherence Ledger</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        html, body { width: 100%; height: 100%; overflow: hidden; }
+        html, body { width: 100%; height: 100%; overflow: hidden; font-size: 13px; }
         body {
-            background: #141414;
+            background: linear-gradient(135deg, #0a0a0a 0%, #151520 100%);
             color: #b0b0b0;
             font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
-            font-size: 13px;
             line-height: 1.5;
         }
         .container {
             display: flex;
-            flex-direction: column;
             height: 100vh;
-            padding: 12px;
-            gap: 8px;
+            flex-direction: column;
+            padding: 16px;
+            gap: 12px;
         }
         .header {
-            padding: 8px 12px;
-            border-bottom: 1px solid #2a2a2a;
-            color: #808080;
-            font-size: 12px;
+            background: linear-gradient(90deg, #1a1a2e 0%, #16213e 100%);
+            border: 1px solid #2a2a4a;
+            border-radius: 4px;
+            padding: 16px;
+            box-shadow: 0 2px 8px rgba(0,128,128,0.1);
+        }
+        .header-title {
+            font-size: 18px;
+            font-weight: bold;
+            color: #00d4ff;
+            margin-bottom: 8px;
+            letter-spacing: 2px;
+        }
+        .header-subtitle {
+            font-size: 11px;
+            color: #606060;
+            margin: 4px 0;
+            letter-spacing: 0.5px;
+        }
+        .system-info {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 12px;
+            margin-top: 12px;
+            font-size: 11px;
+        }
+        .info-block {
+            background: rgba(0, 128, 128, 0.05);
+            border-left: 3px solid #008080;
+            padding: 8px;
+            border-radius: 2px;
+        }
+        .info-label { color: #606060; }
+        .info-value { color: #4a8a4a; font-weight: bold; }
+        
+        .main-content {
+            display: flex;
+            gap: 12px;
+            flex: 1;
+            overflow: hidden;
+        }
+        
+        .welcome-panel {
+            width: 320px;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            border: 1px solid #2a2a4a;
+            border-radius: 4px;
+            padding: 16px;
+            overflow-y: auto;
+            display: none;
+        }
+        .welcome-panel.show { display: block; }
+        
+        .welcome-title {
+            font-size: 14px;
+            font-weight: bold;
+            color: #00d4ff;
+            margin-bottom: 12px;
+        }
+        .welcome-section {
+            margin-bottom: 12px;
+        }
+        .welcome-section-title {
+            font-size: 11px;
+            color: #4a8a4a;
+            font-weight: bold;
+            margin-bottom: 6px;
+            text-transform: uppercase;
             letter-spacing: 1px;
         }
-        .header-text {
+        .welcome-text {
+            font-size: 11px;
+            color: #808080;
+            line-height: 1.6;
+        }
+        
+        .terminal-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: linear-gradient(135deg, #0a0a0a 0%, #151520 100%);
+            border: 1px solid #2a2a4a;
+            border-radius: 4px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        }
+        
+        .terminal-header {
+            padding: 8px 12px;
+            border-bottom: 1px solid #2a2a4a;
+            background: linear-gradient(90deg, #1a1a2e 0%, #16213e 100%);
+            font-size: 11px;
             color: #606060;
+            letter-spacing: 1px;
         }
-        .status {
-            float: right;
-            color: #008080;
-            font-weight: bold;
-        }
-        .output {
+        
+        .terminal-output {
             flex: 1;
             overflow-y: auto;
-            padding: 8px 12px;
+            padding: 12px;
             background: #0a0a0a;
-            border: 1px solid #1a1a1a;
         }
-        .output::-webkit-scrollbar {
+        
+        .terminal-output::-webkit-scrollbar {
             width: 6px;
         }
-        .output::-webkit-scrollbar-track {
+        .terminal-output::-webkit-scrollbar-track {
             background: #0a0a0a;
         }
-        .output::-webkit-scrollbar-thumb {
-            background: #2a2a2a;
+        .terminal-output::-webkit-scrollbar-thumb {
+            background: #2a2a4a;
             border-radius: 3px;
         }
-        .line {
+        
+        .output-line {
             margin-bottom: 4px;
             white-space: pre-wrap;
             word-wrap: break-word;
         }
-        .prompt {
-            color: #606060;
-        }
-        .cmd {
-            color: #b0b0b0;
-        }
-        .success {
-            color: #4a8a4a;
-        }
-        .error {
-            color: #8a4a4a;
-        }
-        .info {
-            color: #4a7a8a;
-        }
-        .input-panel {
+        .line-prompt { color: #606060; }
+        .line-cmd { color: #b0b0b0; }
+        .line-success { color: #4a8a4a; }
+        .line-error { color: #8a4a4a; }
+        .line-info { color: #4a7a8a; }
+        .line-warning { color: #8a8a4a; }
+        
+        .terminal-input {
+            padding: 12px;
+            border-top: 1px solid #2a2a4a;
+            background: linear-gradient(90deg, #0f0f15 0%, #14141f 100%);
             display: flex;
-            gap: 6px;
+            gap: 8px;
             align-items: center;
-            padding: 8px 12px;
-            background: #1a1a1a;
-            border: 1px solid #2a2a2a;
-            border-top: 1px solid #2a2a2a;
         }
-        .prompt-char {
-            color: #606060;
-            user-select: none;
-        }
-        input {
+        
+        .input-prompt { color: #606060; user-select: none; }
+        
+        input#cmd {
             flex: 1;
-            background: #0a0a0a;
-            border: 1px solid #2a2a2a;
+            background: transparent;
+            border: none;
             color: #b0b0b0;
-            padding: 6px 8px;
-            font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
-            font-size: 13px;
+            padding: 0;
+            font-family: inherit;
+            font-size: inherit;
             outline: none;
         }
-        input:focus {
-            border-color: #3a3a3a;
-            background: #151515;
-        }
-        input::placeholder {
-            color: #4a4a4a;
-        }
-        button {
-            background: #1a1a1a;
-            border: 1px solid #2a2a2a;
-            color: #808080;
-            padding: 4px 10px;
+        input#cmd::placeholder { color: #4a4a4a; }
+        
+        .toggle-welcome {
+            padding: 4px 12px;
+            background: linear-gradient(90deg, #1a3a3a 0%, #1a2a3a 100%);
+            border: 1px solid #2a5a5a;
+            color: #00d4ff;
             cursor: pointer;
-            font-family: inherit;
-            font-size: 12px;
+            border-radius: 2px;
+            font-size: 11px;
             transition: all 0.2s;
         }
-        button:hover {
-            border-color: #3a3a3a;
-            background: #222;
-            color: #a0a0a0;
-        }
-        button:active {
-            background: #111;
+        .toggle-welcome:hover {
+            border-color: #00d4ff;
+            box-shadow: 0 0 8px rgba(0, 212, 255, 0.2);
         }
     </style>
 </head>
 <body>
     <div class="container">
+        <!-- Header with system info -->
         <div class="header">
-            QTCL TERMINAL <span class="status">◆</span>
+            <div class="header-title">⚛️ QUANTUM TEMPORAL COHERENCE LEDGER (QTCL)</div>
+            <div class="header-subtitle">Hybrid Blockchain: Classical + Quantum Computing | Distributed Ledger Protocol</div>
+            <div class="system-info">
+                <div class="info-block">
+                    <div class="info-label">BLOCKCHAIN TYPE</div>
+                    <div class="info-value">Quantum-Classical Hybrid</div>
+                </div>
+                <div class="info-block">
+                    <div class="info-label">CONSENSUS</div>
+                    <div class="info-value">Quantum PoW + Classical PoS</div>
+                </div>
+                <div class="info-block">
+                    <div class="info-label">QUANTUM ENGINE</div>
+                    <div class="info-value" id="quantum-status">Initializing...</div>
+                </div>
+                <div class="info-block">
+                    <div class="info-label">LEDGER STATUS</div>
+                    <div class="info-value" id="ledger-status">Synchronizing...</div>
+                </div>
+            </div>
         </div>
-        
-        <div class="output" id="output">
-            <div class="line"><span class="info">●</span> Ready for input</div>
-        </div>
-        
-        <div class="input-panel">
-            <span class="prompt-char">›</span>
-            <input type="text" id="input" placeholder="Enter command..." spellcheck="false" autocomplete="off">
-            <button id="send">Send</button>
+
+        <!-- Main content: Welcome panel + Terminal -->
+        <div class="main-content">
+            <div class="welcome-panel" id="welcomePanel">
+                <div class="welcome-title">SYSTEM ARCHITECTURE</div>
+                
+                <div class="welcome-section">
+                    <div class="welcome-section-title">🔬 Quantum Subsystem</div>
+                    <div class="welcome-text">
+                        • Quantum circuit execution
+                        • Entropy measurement
+                        • Coherence validation
+                        • Finality proofs
+                    </div>
+                </div>
+                
+                <div class="welcome-section">
+                    <div class="welcome-section-title">⛓️ Blockchain</div>
+                    <div class="welcome-text">
+                        • Block validation
+                        • Merkle tree verification
+                        • Transaction processing
+                        • Smart contracts
+                    </div>
+                </div>
+                
+                <div class="welcome-section">
+                    <div class="welcome-section-title">💰 DeFi</div>
+                    <div class="welcome-text">
+                        • Staking & yields
+                        • Lending protocols
+                        • AMM swaps
+                        • Governance
+                    </div>
+                </div>
+                
+                <div class="welcome-section">
+                    <div class="welcome-section-title">🔮 Oracle Services</div>
+                    <div class="welcome-text">
+                        • Price feeds
+                        • Time services
+                        • Random generation
+                        • Event triggers
+                    </div>
+                </div>
+
+                <div class="welcome-section">
+                    <div class="welcome-section-title">👤 User Commands</div>
+                    <div class="welcome-text">
+                        Type <span style="color: #4a8a4a;">help</span> to see all commands
+                    </div>
+                </div>
+            </div>
+
+            <!-- Terminal -->
+            <div class="terminal-container">
+                <div class="terminal-header">
+                    TERMINAL INTERFACE
+                    <span style="float: right; cursor: pointer;" id="toggleBtn" class="toggle-welcome">INFO</span>
+                </div>
+                <div class="terminal-output" id="output">
+                    <div class="output-line">
+                        <span class="line-info">●</span> QTCL Terminal v5.0 - Type 'help' for commands
+                    </div>
+                </div>
+                <div class="terminal-input">
+                    <span class="input-prompt">›</span>
+                    <input type="text" id="cmd" placeholder="Enter command..." spellcheck="false" autocomplete="off">
+                </div>
+            </div>
         </div>
     </div>
 
     <script>
         const output = document.getElementById('output');
-        const input = document.getElementById('input');
-        const sendBtn = document.getElementById('send');
-        
+        const input = document.getElementById('cmd');
+        const welcomePanel = document.getElementById('welcomePanel');
+        const toggleBtn = document.getElementById('toggleBtn');
+        const history = [];
+        let historyIdx = -1;
+
         function addLine(text, type = 'info') {
             const line = document.createElement('div');
-            line.className = 'line';
+            line.className = 'output-line';
             
-            let className = type;
-            if (type === 'prompt') {
-                line.innerHTML = `<span class="prompt">${text}</span>`;
-            } else if (type === 'cmd') {
-                line.innerHTML = `<span class="prompt">›</span> <span class="cmd">${text}</span>`;
+            let html = '';
+            const escaped = text
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+            
+            if (type === 'cmd') {
+                html = `<span class="line-prompt">›</span> <span class="line-cmd">${escaped}</span>`;
             } else {
-                line.innerHTML = `<span class="${className}">${text}</span>`;
+                const className = `line-${type}`;
+                html = `<span class="${className}">${escaped}</span>`;
             }
             
+            line.innerHTML = html;
             output.appendChild(line);
             output.scrollTop = output.scrollHeight;
         }
-        
-        async function executeCommand() {
+
+        async function execute() {
             const cmd = input.value.trim();
             if (!cmd) return;
-            
-            addLine(`› ${cmd}`, 'cmd');
+
+            history.unshift(cmd);
+            historyIdx = -1;
+
+            addLine(cmd, 'cmd');
             input.value = '';
-            
+
             try {
                 const response = await fetch('/api/command', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ command: cmd, args: [], kwargs: {} })
+                    body: JSON.stringify({
+                        command: cmd,
+                        args: [],
+                        kwargs: {}
+                    })
                 });
-                
+
                 const data = await response.json();
-                
-                if (data.result) {
-                    addLine(String(data.result), 'success');
+
+                if (response.ok && data.result) {
+                    const result = data.result;
+                    if (typeof result === 'object') {
+                        if (result.output) {
+                            result.output.split('\n').forEach(l => {
+                                if (l.trim()) addLine(l, 'success');
+                            });
+                        } else {
+                            addLine(JSON.stringify(result, null, 2), 'success');
+                        }
+                    } else {
+                        String(result).split('\n').forEach(l => {
+                            if (l.trim()) addLine(l, 'success');
+                        });
+                    }
                 } else if (data.error) {
-                    addLine(String(data.error), 'error');
-                } else if (data.output) {
-                    addLine(String(data.output), 'success');
+                    addLine(data.error, 'error');
                 } else {
-                    addLine('OK', 'success');
+                    addLine('Command executed', 'success');
                 }
             } catch (err) {
                 addLine(`Error: ${err.message}`, 'error');
             }
+
+            input.focus();
         }
-        
-        sendBtn.addEventListener('click', executeCommand);
+
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
                 e.preventDefault();
-                executeCommand();
+                execute();
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                historyIdx = Math.min(historyIdx + 1, history.length - 1);
+                if (historyIdx >= 0) input.value = history[historyIdx];
+            } else if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                historyIdx = Math.max(historyIdx - 1, -1);
+                if (historyIdx >= 0) input.value = history[historyIdx];
+                else input.value = '';
             }
         });
-        
+
+        toggleBtn.addEventListener('click', () => {
+            welcomePanel.classList.toggle('show');
+            toggleBtn.textContent = welcomePanel.classList.contains('show') ? 'HIDE' : 'INFO';
+        });
+
+        // Load system status
+        async function loadStatus() {
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+                if (data.quantum) {
+                    document.getElementById('quantum-status').textContent = data.quantum.status || 'Active';
+                }
+                if (data.ledger) {
+                    document.getElementById('ledger-status').textContent = `${data.ledger.blocks || 0} blocks`;
+                }
+            } catch (e) {
+                console.log('Status load deferred');
+            }
+        }
+
         input.focus();
+        loadStatus();
     </script>
 </body>
 </html>
