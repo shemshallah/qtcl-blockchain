@@ -23,6 +23,7 @@
 ╚══════════════════════════════════════════════════════════════════════════════════════════════════════╝
 """
 
+import logging
 import sys,os,logging,traceback,threading,time,fcntl,json,uuid,secrets,hashlib,random,pickle,gzip,struct
 import sqlite3,re,csv,io,subprocess,signal,atexit,tempfile,shutil,inspect,copy,getpass,readline,mimetypes
 from datetime import datetime,timedelta,timezone
@@ -1751,6 +1752,151 @@ def create_command_center_blueprint()->Blueprint:
             return jsonify({'error':str(e)}),500
     
     return bp
+
+
+
+# ════════════════════════════════════════════════════════════════════════════════════════
+# BLUEPRINT IMPORTS - Deferred loading from all API modules
+# ════════════════════════════════════════════════════════════════════════════════════════
+
+def get_defi_blueprint():
+    """Lazy load DeFi API blueprint"""
+    try:
+        from defi_api import get_defi_blueprint as getter
+        return getter()
+    except Exception as e:
+        logger.error(f"[WSGI] Failed to load DeFi blueprint: {e}")
+        raise
+
+def get_blockchain_blueprint():
+    """Lazy load Blockchain API blueprint"""
+    try:
+        from blockchain_api import get_blockchain_blueprint as getter
+        return getter()
+    except Exception as e:
+        logger.error(f"[WSGI] Failed to load Blockchain blueprint: {e}")
+        raise
+
+def get_oracle_blueprint():
+    """Lazy load Oracle API blueprint"""
+    try:
+        from oracle_api import get_oracle_blueprint as getter
+        return getter()
+    except Exception as e:
+        logger.error(f"[WSGI] Failed to load Oracle blueprint: {e}")
+        raise
+
+def get_core_blueprint():
+    """Lazy load Core API blueprint"""
+    try:
+        from core_api import get_core_blueprint as getter
+        return getter()
+    except Exception as e:
+        logger.error(f"[WSGI] Failed to load Core blueprint: {e}")
+        raise
+
+def get_admin_blueprint():
+    """Lazy load Admin API blueprint"""
+    try:
+        from admin_api import get_admin_blueprint as getter
+        return getter()
+    except Exception as e:
+        logger.error(f"[WSGI] Failed to load Admin blueprint: {e}")
+        raise
+
+def get_quantum_blueprint():
+    """Lazy load Quantum API blueprint"""
+    try:
+        from quantum_api import get_quantum_blueprint as getter
+        return getter()
+    except Exception as e:
+        logger.error(f"[WSGI] Failed to load Quantum blueprint: {e}")
+        raise
+
+
+def register_blueprints_with_error_handling(app):
+    """Register all blueprints with comprehensive error handling"""
+    blueprints_info=[
+        ('defi_api','get_defi_blueprint'),
+        ('blockchain_api','get_blockchain_blueprint'),
+        ('oracle_api','get_oracle_blueprint'),
+        ('core_api','get_core_blueprint'),
+        ('admin_api','get_admin_blueprint'),
+        ('quantum_api','get_quantum_blueprint'),
+    ]
+    
+    registered_count=0
+    failed_blueprints=[]
+    
+    for name,getter_func in blueprints_info:
+        try:
+            logger.info(f"[WSGI] Attempting to register {name}...")
+            getter=globals().get(getter_func)
+            if getter is None:
+                failed_blueprints.append((name,'Getter function not found'))
+                continue
+            
+            bp=getter()
+            if bp is None:
+                failed_blueprints.append((name,'Blueprint is None'))
+                continue
+            
+            app.register_blueprint(bp)
+            registered_count+=1
+            logger.info(f"[WSGI] ✓ {name} registered successfully")
+            
+        except Exception as e:
+            logger.error(f"[WSGI] ✗ Failed to register {name}: {e}",exc_info=True)
+            failed_blueprints.append((name,str(e)))
+    
+    logger.info(f"[WSGI] ═══════════════════════════════════════════════════════")
+    logger.info(f"[WSGI] Blueprint Registration Summary:")
+    logger.info(f"[WSGI]   Registered: {registered_count}/{len(blueprints_info)}")
+    if failed_blueprints:
+        logger.error(f"[WSGI]   Failed: {len(failed_blueprints)}")
+        for name,error in failed_blueprints:
+            logger.error(f"[WSGI]     - {name}: {error}")
+    else:
+        logger.info(f"[WSGI]   ✓ All blueprints registered successfully")
+    logger.info(f"[WSGI] ═══════════════════════════════════════════════════════")
+    
+    if registered_count==0:
+        raise RuntimeError("[WSGI] No blueprints could be registered - system cannot start")
+    
+    return registered_count,failed_blueprints
+
+
+
+def register_all_api_listeners_with_heartbeat():
+    """Register all API listeners with heartbeat system"""
+    from defi_api import register_defi_with_heartbeat
+    from blockchain_api import register_blockchain_with_heartbeat
+    from oracle_api import register_oracle_with_heartbeat
+    from core_api import register_core_with_heartbeat
+    from admin_api import register_admin_with_heartbeat
+    from quantum_api import register_quantum_with_heartbeat
+    
+    listeners_registration=[
+        ('DeFi',register_defi_with_heartbeat),
+        ('Blockchain',register_blockchain_with_heartbeat),
+        ('Oracle',register_oracle_with_heartbeat),
+        ('Core',register_core_with_heartbeat),
+        ('Admin',register_admin_with_heartbeat),
+        ('Quantum',register_quantum_with_heartbeat),
+    ]
+    
+    success_count=0
+    for name,register_func in listeners_registration:
+        try:
+            if register_func():
+                success_count+=1
+                logger.info(f"[WSGI] {name} API listener registered with heartbeat")
+        except Exception as e:
+            logger.warning(f"[WSGI] Failed to register {name} listener: {e}")
+    
+    logger.info(f"[WSGI] ✓ {success_count}/{len(listeners_registration)} API listeners registered")
+    return success_count==len(listeners_registration)
+
 
 def create_app()->Flask:
     """Create Flask application"""
