@@ -552,7 +552,7 @@ def bootstrap_heartbeat():
     """
     Start working heartbeat system that actually maintains the application
     HTTP heartbeat: Responds to external health checks (passive)
-    Quantum heartbeat: ACTIVELY maintains quantum system and lattice
+    Quantum heartbeat: ACTIVELY maintains quantum system and lattice via UniversalQuantumHeartbeat
     """
     
     def http_heartbeat():
@@ -568,36 +568,156 @@ def bootstrap_heartbeat():
                 time.sleep(30)
     
     def quantum_heartbeat():
-        """ACTIVE heartbeat - maintains quantum system and command registry"""
+        """ACTIVE heartbeat - uses UniversalQuantumHeartbeat to maintain quantum systems"""
         logger.info("[Heartbeat:Quantum] ✓ Quantum heartbeat thread started")
-        logger.info("[Heartbeat:Quantum] Will refresh quantum lattice every 10 seconds")
         
-        cycle = 0
-        while True:
-            try:
-                time.sleep(10)
-                cycle += 1
+        try:
+            # Import the actual heartbeat system
+            from quantum_lattice_control_live_complete import (
+                HEARTBEAT, LATTICE, LATTICE_NEURAL_REFRESH, 
+                W_STATE_ENHANCED, NOISE_BATH_ENHANCED
+            )
+            
+            logger.info("[Heartbeat:Quantum] ✓ Imported UniversalQuantumHeartbeat")
+            
+            # Start the heartbeat - this will synchronize ALL subsystems
+            HEARTBEAT.start()
+            logger.info("[Heartbeat:Quantum] ✓ Universal Heartbeat STARTED (1.0 Hz)")
+            logger.info("[Heartbeat:Quantum] ✓ Lattice Neural Refresh SYNCHRONIZED")
+            logger.info("[Heartbeat:Quantum] ✓ W-State Coherence SYNCHRONIZED")
+            logger.info("[Heartbeat:Quantum] ✓ Noise Bath Evolution SYNCHRONIZED")
+            
+            # Heartbeat will now automatically pulse all registered listeners
+            cycle = 0
+            while True:
+                try:
+                    time.sleep(5)
+                    cycle += 1
+                    
+                    # Log metrics periodically
+                    hb_metrics = HEARTBEAT.get_metrics()
+                    nn_state = LATTICE_NEURAL_REFRESH.get_state()
+                    ws_state = W_STATE_ENHANCED.get_state()
+                    nb_state = NOISE_BATH_ENHANCED.get_state()
+                    
+                    logger.debug(
+                        f"[Heartbeat:Quantum:Cycle{cycle}] "
+                        f"Pulses={hb_metrics['pulse_count']} | "
+                        f"NeuralUpdates={nn_state['total_weight_updates']} | "
+                        f"Coherence={ws_state['coherence_avg']:.2f} | "
+                        f"Fidelity={nb_state['fidelity_preservation_rate']:.3f}"
+                    )
                 
-                # CRITICAL: Refresh quantum lattice via GLOBALS
-                quantum = GLOBALS.QUANTUM if GLOBALS else None
-                if quantum:
-                    try:
-                        # Call lattice control refresh if available
-                        if hasattr(quantum, 'refresh_coherence'):
-                            quantum.refresh_coherence()
-                            logger.debug(f"[Heartbeat:Quantum:Cycle{cycle}] ✓ Quantum coherence refreshed")
-                        
-                        if hasattr(quantum, 'heartbeat'):
-                            quantum.heartbeat()
-                            logger.debug(f"[Heartbeat:Quantum:Cycle{cycle}] ✓ Quantum heartbeat executed")
-                        
-                        if hasattr(quantum, 'get_neural_lattice_state'):
-                            state = quantum.get_neural_lattice_state()
-                            logger.debug(f"[Heartbeat:Quantum:Cycle{cycle}] ✓ Neural lattice state updated")
-                    except Exception as qe:
-                        logger.debug(f"[Heartbeat:Quantum:Cycle{cycle}] ⚠ Quantum operation: {qe}")
-                else:
-                    logger.debug(f"[Heartbeat:Quantum:Cycle{cycle}] ⚠ Quantum system not in GLOBALS")
+                except Exception as e:
+                    logger.debug(f"[Heartbeat:Quantum:Cycle{cycle}] ⚠ Status check error: {e}")
+        
+        except ImportError as ie:
+            logger.warning(f"[Heartbeat:Quantum] ⚠ Could not import quantum systems: {ie}")
+            logger.info("[Heartbeat:Quantum] Falling back to legacy heartbeat mechanism")
+            
+            # Fallback to old behavior
+            cycle = 0
+            while True:
+                try:
+                    time.sleep(10)
+                    cycle += 1
+                    
+                    quantum = GLOBALS.QUANTUM if GLOBALS else None
+                    if quantum:
+                        try:
+                            if hasattr(quantum, 'refresh_coherence'):
+                                quantum.refresh_coherence()
+                                logger.debug(f"[Heartbeat:Quantum:Cycle{cycle}] ✓ Quantum coherence refreshed")
+                            
+                            if hasattr(quantum, 'heartbeat'):
+                                quantum.heartbeat()
+                                logger.debug(f"[Heartbeat:Quantum:Cycle{cycle}] ✓ Quantum heartbeat executed")
+                            
+                            if hasattr(quantum, 'get_neural_lattice_state'):
+                                state = quantum.get_neural_lattice_state()
+                                logger.debug(f"[Heartbeat:Quantum:Cycle{cycle}] ✓ Neural lattice state updated")
+                        except Exception as qe:
+                            logger.debug(f"[Heartbeat:Quantum:Cycle{cycle}] ⚠ Quantum operation: {qe}")
+                    else:
+                        logger.debug(f"[Heartbeat:Quantum:Cycle{cycle}] ⚠ Quantum system not in GLOBALS")
+                
+                except Exception as e:
+                    logger.error(f"[Heartbeat:Quantum] Legacy error: {e}")
+                    time.sleep(10)
+    
+    # Start both heartbeat threads
+    http_thread = threading.Thread(target=http_heartbeat, daemon=True, name="HTTPHeartbeat")
+    http_thread.start()
+    
+    quantum_thread = threading.Thread(target=quantum_heartbeat, daemon=True, name="QuantumHeartbeat")
+    quantum_thread.start()
+    
+    logger.info("[Heartbeat] ✓ Both heartbeat threads started")
+    return True
+
+def bootstrap_quantum_systems():
+    """
+    Register all quantum subsystems with GLOBALS
+    Called during app initialization to wire up heartbeat, lattice net, W-state, noise bath
+    """
+    try:
+        from quantum_lattice_control_live_complete import (
+            HEARTBEAT, LATTICE, LATTICE_NEURAL_REFRESH, 
+            W_STATE_ENHANCED, NOISE_BATH_ENHANCED
+        )
+        
+        logger.info("[BOOTSTRAP:Quantum] ✓ Importing quantum subsystems...")
+        
+        # Register each system with GLOBALS
+        GLOBALS.register(
+            'HEARTBEAT',
+            HEARTBEAT,
+            category='QUANTUM_SUBSYSTEMS',
+            description='Universal Heartbeat (1.0 Hz) - synchronizes all quantum systems'
+        )
+        
+        GLOBALS.register(
+            'LATTICE',
+            LATTICE,
+            category='QUANTUM_SUBSYSTEMS',
+            description='Main Quantum Lattice - transaction processor'
+        )
+        
+        GLOBALS.register(
+            'LATTICE_NEURAL_REFRESH',
+            LATTICE_NEURAL_REFRESH,
+            category='QUANTUM_SUBSYSTEMS',
+            description='Continuous Lattice Neural Network (57 neurons) - online learning'
+        )
+        
+        GLOBALS.register(
+            'W_STATE_ENHANCED',
+            W_STATE_ENHANCED,
+            category='QUANTUM_SUBSYSTEMS',
+            description='Enhanced W-State Coherence Manager - transaction validation'
+        )
+        
+        GLOBALS.register(
+            'NOISE_BATH_ENHANCED',
+            NOISE_BATH_ENHANCED,
+            category='QUANTUM_SUBSYSTEMS',
+            description='Enhanced Noise Bath (κ=0.08) - non-Markovian evolution'
+        )
+        
+        logger.info("[BOOTSTRAP:Quantum] ✓ All quantum systems registered with GLOBALS")
+        
+        # Log the summary
+        summary = GLOBALS.summary()
+        logger.info(f"[BOOTSTRAP:Quantum] Total registered systems: {summary['total_registered']}")
+        
+        return True
+    
+    except ImportError as e:
+        logger.warning(f"[BOOTSTRAP:Quantum] ⚠ Could not import quantum systems: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"[BOOTSTRAP:Quantum] ✗ Error registering quantum systems: {e}", exc_info=True)
+        return False
                 
                 # CRITICAL: Ensure command registry is bootstrapped
                 try:

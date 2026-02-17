@@ -89,7 +89,7 @@ QUANTUM_SYSTEM_MANAGER_AVAILABLE = True
 # This is CRITICAL - GLOBALS is how all components find each other
 
 try:
-    from wsgi_config import GLOBALS, bootstrap_systems, bootstrap_heartbeat, GLOBAL_STATE
+    from wsgi_config import GLOBALS, bootstrap_systems, bootstrap_heartbeat, bootstrap_quantum_systems, GLOBAL_STATE
     BOOTSTRAP_INTEGRATION_AVAILABLE = True
     logger.info("[Bootstrap] ✓ GLOBALS bootstrap system imported")
 except ImportError as e:
@@ -855,6 +855,13 @@ def create_app():
             
             # Start heartbeat systems
             bootstrap_heartbeat()
+            
+            # Bootstrap quantum subsystems and register with GLOBALS
+            quantum_bootstrap_result = bootstrap_quantum_systems()
+            if quantum_bootstrap_result:
+                logger.info("[Bootstrap] ✓ Quantum subsystems bootstrapped and registered")
+            else:
+                logger.warning("[Bootstrap] ⚠ Quantum subsystems bootstrap failed, system may operate in degraded mode")
             
             # Log bootstrap summary
             bootstrap_summary = GLOBALS.summary()
