@@ -5649,6 +5649,35 @@ logger.info("""
 ╚════════════════════════════════════════════════════════════════════════════════════════╝
 """)
 
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════
+# AUTO-START HEARTBEAT ON MODULE LOAD
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════
+
+try:
+    logger.info("🫀 AUTO-STARTING HEARTBEAT SYSTEM...")
+    HEARTBEAT.start()
+    logger.info("❤️ HEARTBEAT STARTED - All quantum systems synchronized at 1.0 Hz")
+except Exception as e:
+    logger.error(f"⚠️ Failed to start heartbeat: {e}")
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════
+# AUTO-REGISTER WITH GLOBALS IF AVAILABLE
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════
+
+try:
+    from wsgi_config import GLOBALS
+    logger.info("📍 Registering quantum systems with GLOBALS...")
+    GLOBALS.register('HEARTBEAT', HEARTBEAT, category='QUANTUM_SUBSYSTEMS', description='Universal Heartbeat (1.0 Hz)')
+    GLOBALS.register('LATTICE', LATTICE, category='QUANTUM_SUBSYSTEMS', description='Main Quantum Lattice')
+    GLOBALS.register('LATTICE_NEURAL_REFRESH', LATTICE_NEURAL_REFRESH, category='QUANTUM_SUBSYSTEMS', description='57-neuron neural network')
+    GLOBALS.register('W_STATE_ENHANCED', W_STATE_ENHANCED, category='QUANTUM_SUBSYSTEMS', description='W-state coherence manager')
+    GLOBALS.register('NOISE_BATH_ENHANCED', NOISE_BATH_ENHANCED, category='QUANTUM_SUBSYSTEMS', description='Non-Markovian noise bath')
+    logger.info("✅ All quantum systems registered with GLOBALS")
+except ImportError:
+    logger.warning("⚠️ GLOBALS not available yet - will register during bootstrap")
+except Exception as e:
+    logger.warning(f"⚠️ Could not register with GLOBALS: {e}")
+
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PART 11: ADVANCED INTEGRATION WITH QUANTUM_API GLOBALS (when available)
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
