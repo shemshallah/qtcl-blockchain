@@ -1542,3 +1542,116 @@ blueprint = create_blueprint()
 def get_oracle_blueprint():
     """Factory function to get oracle blueprint"""
     return create_blueprint()
+
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════
+# LEVEL 2 SUBLOGIC - ORACLE SYSTEM FEEDS BLOCKCHAIN, DEFI, LEDGER
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+class OracleSystemIntegration:
+    """Oracle system feeding price/data to blockchain, defi, ledger"""
+    
+    _instance = None
+    _lock = threading.RLock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
+    
+    def __init__(self):
+        self.feeds = {}
+        self.price_cache = {}
+        self.feed_history = []
+        
+        # System outputs
+        self.blockchain_price_broadcasts = 0
+        self.defi_price_updates = 0
+        self.ledger_price_records = 0
+        
+        self.initialize_integrations()
+    
+    def initialize_integrations(self):
+        """Initialize system connections"""
+        try:
+            from globals import get_globals
+            self.global_state = get_globals()
+        except:
+            pass
+    
+    def update_price_feed(self, symbol, price):
+        """Update price feed and broadcast to all systems"""
+        self.price_cache[symbol] = {
+            'price': price,
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+        
+        # Broadcast to blockchain
+        self._broadcast_to_blockchain(symbol, price)
+        
+        # Update DeFi
+        self._feed_defi(symbol, price)
+        
+        # Record in ledger
+        self._record_in_ledger(symbol, price)
+        
+        self.feed_history.append({
+            'symbol': symbol,
+            'price': price,
+            'timestamp': self.price_cache[symbol]['timestamp']
+        })
+        
+        return True
+    
+    def _broadcast_to_blockchain(self, symbol, price):
+        """Broadcast price to blockchain"""
+        try:
+            from blockchain_api import get_blockchain_integration
+            blockchain = get_blockchain_integration()
+            blockchain.oracle_price_cache[symbol] = price
+            self.blockchain_price_broadcasts += 1
+        except:
+            pass
+    
+    def _feed_defi(self, symbol, price):
+        """Feed price to DeFi"""
+        try:
+            from defi_api import get_defi_integration
+            defi = get_defi_integration()
+            defi.oracle_prices[symbol] = price
+            self.defi_price_updates += 1
+        except:
+            pass
+    
+    def _record_in_ledger(self, symbol, price):
+        """Record price in ledger"""
+        try:
+            from ledger_manager import get_ledger_integration
+            ledger = get_ledger_integration()
+            ledger.record_price_feed(symbol, price)
+            self.ledger_price_records += 1
+        except:
+            pass
+    
+    def get_current_prices(self):
+        """Get all current cached prices"""
+        return self.price_cache.copy()
+    
+    def get_system_status(self):
+        """Get oracle status with all integrations"""
+        return {
+            'module': 'oracle',
+            'feeds': len(self.feeds),
+            'cached_prices': len(self.price_cache),
+            'feed_history_size': len(self.feed_history),
+            'blockchain_broadcasts': self.blockchain_price_broadcasts,
+            'defi_updates': self.defi_price_updates,
+            'ledger_records': self.ledger_price_records
+        }
+
+ORACLE_INTEGRATION = OracleSystemIntegration()
+
+def get_oracle_integration():
+    return ORACLE_INTEGRATION

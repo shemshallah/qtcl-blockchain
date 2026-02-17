@@ -889,3 +889,238 @@ if __name__ == '__main__':
                 pass
         
         logger.info("[Main] QTCL v5.0 shutdown complete")
+
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════
+# LEVEL 2 SUBLOGIC - MASTER APPLICATION ORCHESTRATOR
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+class MasterApplicationOrchestrator:
+    """Master orchestrator for complete QTCL application"""
+    
+    def __init__(self):
+        self.app = None
+        self.all_systems = {}
+        self.initialization_status = {}
+        self.initialize_complete_system()
+    
+    def initialize_complete_system(self):
+        """Initialize complete QTCL system"""
+        print("[MasterOrch] Initializing complete QTCL system...")
+        
+        # Initialize GLOBALS
+        self._init_globals()
+        
+        # Initialize all systems
+        self._init_quantum()
+        self._init_blockchain()
+        self._init_defi()
+        self._init_oracle()
+        self._init_ledger()
+        self._init_auth()
+        self._init_terminal()
+        
+        # Build interconnections
+        self._build_system_interconnections()
+        
+        # Create Flask app
+        self._create_flask_app()
+        
+        print("[MasterOrch] ✓ Complete system initialized")
+    
+    def _init_globals(self):
+        """Initialize GLOBALS system"""
+        try:
+            from globals import initialize_globals, initialize_system_orchestration
+            initialize_globals()
+            initialize_system_orchestration()
+            self.initialization_status['globals'] = 'ready'
+            print("[MasterOrch] ✓ GLOBALS initialized")
+        except Exception as e:
+            self.initialization_status['globals'] = f'error: {e}'
+            print(f"[MasterOrch] ✗ GLOBALS: {e}")
+    
+    def _init_quantum(self):
+        """Initialize quantum system"""
+        try:
+            from quantum_api import get_quantum_integration
+            self.all_systems['quantum'] = get_quantum_integration()
+            self.initialization_status['quantum'] = 'ready'
+            print("[MasterOrch] ✓ Quantum system initialized")
+        except Exception as e:
+            self.initialization_status['quantum'] = f'error: {e}'
+            print(f"[MasterOrch] ✗ Quantum: {e}")
+    
+    def _init_blockchain(self):
+        """Initialize blockchain system"""
+        try:
+            from blockchain_api import get_blockchain_integration
+            self.all_systems['blockchain'] = get_blockchain_integration()
+            self.initialization_status['blockchain'] = 'ready'
+            print("[MasterOrch] ✓ Blockchain system initialized")
+        except Exception as e:
+            self.initialization_status['blockchain'] = f'error: {e}'
+            print(f"[MasterOrch] ✗ Blockchain: {e}")
+    
+    def _init_defi(self):
+        """Initialize DeFi system"""
+        try:
+            from defi_api import get_defi_integration
+            self.all_systems['defi'] = get_defi_integration()
+            self.initialization_status['defi'] = 'ready'
+            print("[MasterOrch] ✓ DeFi system initialized")
+        except Exception as e:
+            self.initialization_status['defi'] = f'error: {e}'
+            print(f"[MasterOrch] ✗ DeFi: {e}")
+    
+    def _init_oracle(self):
+        """Initialize oracle system"""
+        try:
+            from oracle_api import get_oracle_integration
+            self.all_systems['oracle'] = get_oracle_integration()
+            self.initialization_status['oracle'] = 'ready'
+            print("[MasterOrch] ✓ Oracle system initialized")
+        except Exception as e:
+            self.initialization_status['oracle'] = f'error: {e}'
+            print(f"[MasterOrch] ✗ Oracle: {e}")
+    
+    def _init_ledger(self):
+        """Initialize ledger system"""
+        try:
+            from ledger_manager import get_ledger_integration
+            self.all_systems['ledger'] = get_ledger_integration()
+            self.initialization_status['ledger'] = 'ready'
+            print("[MasterOrch] ✓ Ledger system initialized")
+        except Exception as e:
+            self.initialization_status['ledger'] = f'error: {e}'
+            print(f"[MasterOrch] ✗ Ledger: {e}")
+    
+    def _init_auth(self):
+        """Initialize auth system"""
+        try:
+            from auth_handlers import AUTH_INTEGRATION
+            self.all_systems['auth'] = AUTH_INTEGRATION
+            self.initialization_status['auth'] = 'ready'
+            print("[MasterOrch] ✓ Auth system initialized")
+        except Exception as e:
+            self.initialization_status['auth'] = f'error: {e}'
+            print(f"[MasterOrch] ✗ Auth: {e}")
+    
+    def _init_terminal(self):
+        """Initialize terminal system"""
+        try:
+            from terminal_logic import TERMINAL_ORCHESTRATOR
+            self.all_systems['terminal'] = TERMINAL_ORCHESTRATOR
+            self.initialization_status['terminal'] = 'ready'
+            print("[MasterOrch] ✓ Terminal system initialized")
+        except Exception as e:
+            self.initialization_status['terminal'] = f'error: {e}'
+            print(f"[MasterOrch] ✗ Terminal: {e}")
+    
+    def _build_system_interconnections(self):
+        """Build interconnections between all systems"""
+        print("[MasterOrch] Building system interconnections...")
+        
+        # Quantum → Blockchain
+        if 'quantum' in self.all_systems and 'blockchain' in self.all_systems:
+            self.all_systems['blockchain'].consume_quantum_entropy()
+        
+        # Oracle → DeFi
+        if 'oracle' in self.all_systems and 'defi' in self.all_systems:
+            pass  # DeFi will pull prices from oracle
+        
+        # Blockchain → Ledger
+        if 'blockchain' in self.all_systems and 'ledger' in self.all_systems:
+            self.all_systems['ledger'].sync_with_blockchain()
+        
+        print("[MasterOrch] ✓ Interconnections built")
+    
+    def _create_flask_app(self):
+        """Create Flask app with all routes"""
+        from flask import Flask, jsonify
+        
+        self.app = Flask(__name__)
+        
+        # Health check
+        @self.app.route('/health', methods=['GET'])
+        def health():
+            return jsonify({'status': 'healthy'})
+        
+        # System status
+        @self.app.route('/status', methods=['GET'])
+        def status():
+            return jsonify({
+                'systems': self.initialization_status,
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            })
+        
+        # Quantum endpoint
+        @self.app.route('/api/quantum/status', methods=['GET'])
+        def quantum_status():
+            if 'quantum' in self.all_systems:
+                return jsonify(self.all_systems['quantum'].get_system_status())
+            return jsonify({'error': 'Quantum system not available'})
+        
+        # Blockchain endpoint
+        @self.app.route('/api/blockchain/status', methods=['GET'])
+        def blockchain_status():
+            if 'blockchain' in self.all_systems:
+                return jsonify(self.all_systems['blockchain'].get_system_status())
+            return jsonify({'error': 'Blockchain system not available'})
+        
+        # DeFi endpoint
+        @self.app.route('/api/defi/status', methods=['GET'])
+        def defi_status():
+            if 'defi' in self.all_systems:
+                return jsonify(self.all_systems['defi'].get_system_status())
+            return jsonify({'error': 'DeFi system not available'})
+        
+        # Oracle endpoint
+        @self.app.route('/api/oracle/status', methods=['GET'])
+        def oracle_status():
+            if 'oracle' in self.all_systems:
+                return jsonify(self.all_systems['oracle'].get_system_status())
+            return jsonify({'error': 'Oracle system not available'})
+        
+        # Ledger endpoint
+        @self.app.route('/api/ledger/status', methods=['GET'])
+        def ledger_status():
+            if 'ledger' in self.all_systems:
+                return jsonify(self.all_systems['ledger'].get_system_status())
+            return jsonify({'error': 'Ledger system not available'})
+        
+        # Terminal command endpoint
+        @self.app.route('/api/command', methods=['POST'])
+        def execute_command():
+            from flask import request
+            if 'command' in self.all_systems:
+                cmd = request.json.get('cmd', '')
+                result = self.all_systems['terminal'].execute_command(cmd)
+                return jsonify(result)
+            return jsonify({'error': 'Terminal not available'})
+        
+        print("[MasterOrch] ✓ Flask app created with all routes")
+    
+    def get_app(self):
+        """Get Flask app"""
+        return self.app
+    
+    def get_system_status(self):
+        """Get complete system status"""
+        return {
+            'initialization': self.initialization_status,
+            'systems': list(self.all_systems.keys()),
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════
+# APPLICATION CREATION & ENTRY POINT
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+MASTER_ORCHESTRATOR = MasterApplicationOrchestrator()
+app = MASTER_ORCHESTRATOR.get_app()
+
+if __name__ == '__main__':
+    print("[Main] Starting QTCL application...")
+    print(f"[Main] System status: {MASTER_ORCHESTRATOR.get_system_status()}")
+    app.run(host='0.0.0.0', port=5000, debug=False)
