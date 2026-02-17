@@ -718,30 +718,6 @@ def bootstrap_quantum_systems():
     except Exception as e:
         logger.error(f"[BOOTSTRAP:Quantum] ✗ Error registering quantum systems: {e}", exc_info=True)
         return False
-                
-                # CRITICAL: Ensure command registry is bootstrapped
-                try:
-                    from terminal_logic import GlobalCommandRegistry
-                    if hasattr(GlobalCommandRegistry, 'bootstrap'):
-                        GlobalCommandRegistry.bootstrap()
-                        if cycle % 6 == 0:  # Log every 60 seconds
-                            num_commands = len(GlobalCommandRegistry.ALL_COMMANDS)
-                            logger.info(f"[Heartbeat:Commands:Cycle{cycle}] ✓ Command registry verified ({num_commands} commands)")
-                except Exception as cre:
-                    logger.debug(f"[Heartbeat:Commands:Cycle{cycle}] ⚠ Command bootstrap: {cre}")
-                
-                # CRITICAL: Validate GLOBALS is initialized
-                if GLOBALS and hasattr(GLOBALS, 'health_check'):
-                    try:
-                        if cycle % 12 == 0:  # Log every 120 seconds
-                            health = GLOBALS.health_check()
-                            logger.info(f"[Heartbeat:Health:Cycle{cycle}] System status: {health['overall_status']}")
-                    except Exception as he:
-                        logger.debug(f"[Heartbeat:Health] Error: {he}")
-                
-            except Exception as e:
-                logger.error(f"[Heartbeat:Quantum] Error in cycle {cycle}: {e}")
-                time.sleep(10)
     
     # Start both heartbeats as daemon threads
     try:
