@@ -3,28 +3,35 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>QTCL — Quantum Temporal Coherence Ledger</title>
+<title>QTCL v5.0 — Quantum Temporal Coherence Ledger</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
-  --bg:#080810;
-  --bg2:#0d0d1a;
-  --panel:#0f0f1e;
-  --border:#1e1e38;
+  --bg:#050508;
+  --bg2:#0a0a12;
+  --bg3:#0f0f1a;
+  --panel:#0d0d18;
+  --border:#1a1a2e;
   --border2:#252545;
+  --border-light:#363654;
   --cyan:#00d4ff;
   --cyan2:#00a0cc;
+  --cyan-dark:#0088aa;
   --green:#2ecc71;
   --green2:#1a7a45;
   --amber:#f0b429;
   --red:#e05252;
+  --purple:#bb86fc;
   --dim:#404060;
   --mid:#606080;
-  --text:#c0c0d8;
+  --text:#d0d0e8;
+  --text-dim:#a0a0b8;
   --glow-cyan: 0 0 12px rgba(0,212,255,0.3);
   --glow-green: 0 0 10px rgba(46,204,113,0.25);
+  --glow-purple: 0 0 10px rgba(187,134,252,0.25);
+  --transition: all 0.2s cubic-bezier(0.4,0,0.2,1);
 }
-html,body{width:100%;height:100%;overflow:hidden;font-family:'Menlo','Monaco','Courier New',monospace;font-size:13px;background:var(--bg);color:var(--text);line-height:1.55}
+html,body{width:100%;height:100%;overflow:hidden;font-family:'Fira Code','Menlo','Monaco','Courier New',monospace;font-size:13px;background:var(--bg);color:var(--text);line-height:1.6;letter-spacing:0.3px}
 
 /* ─── LAYOUT ─── */
 #app{display:flex;flex-direction:column;height:100vh}
@@ -32,57 +39,62 @@ html,body{width:100%;height:100%;overflow:hidden;font-family:'Menlo','Monaco','C
 /* ─── TOP BAR ─── */
 #topbar{
   display:flex;align-items:center;gap:0;
-  background:linear-gradient(90deg,#06061a 0%,#0a0a1f 100%);
-  border-bottom:1px solid var(--border);
+  background:linear-gradient(90deg,#02020a 0%,#08081a 100%);
+  border-bottom:2px solid var(--border);
   padding:0;
   flex-shrink:0;
-  height:42px;
+  height:50px;
+  box-shadow:0 2px 8px rgba(0,0,0,0.5);
 }
 #brand{
-  display:flex;align-items:center;gap:10px;
-  padding:0 18px;border-right:1px solid var(--border);
+  display:flex;align-items:center;gap:12px;
+  padding:0 22px;border-right:2px solid var(--border);
   height:100%;
 }
-.brand-icon{font-size:16px}
+.brand-icon{font-size:18px;color:var(--cyan)}
 .brand-name{
-  font-size:12px;font-weight:bold;letter-spacing:2px;
+  font-size:13px;font-weight:bold;letter-spacing:3px;
   color:var(--cyan);text-shadow:var(--glow-cyan);
+}
+.brand-version{
+  font-size:10px;color:var(--mid);letter-spacing:1px;margin-left:8px;
 }
 
 /* ─── TABS ─── */
 #tabs{display:flex;height:100%;flex:1}
 .tab{
-  display:flex;align-items:center;gap:7px;
-  padding:0 20px;cursor:pointer;
+  display:flex;align-items:center;gap:8px;
+  padding:0 24px;cursor:pointer;
   border-right:1px solid var(--border);
-  font-size:11px;letter-spacing:1.5px;font-weight:bold;
-  color:var(--dim);transition:all 0.15s;
+  font-size:11px;letter-spacing:2px;font-weight:bold;
+  color:var(--dim);transition:var(--transition);
   text-transform:uppercase;position:relative;
   user-select:none;
 }
-.tab:hover{color:var(--text);background:rgba(255,255,255,0.02)}
+.tab:hover{color:var(--text);background:rgba(255,255,255,0.01)}
 .tab.active{
   color:var(--cyan);
-  background:rgba(0,212,255,0.05);
+  background:rgba(0,212,255,0.06);
 }
 .tab.active::after{
-  content:'';position:absolute;bottom:0;left:0;right:0;height:2px;
-  background:var(--cyan);box-shadow:var(--glow-cyan);
+  content:'';position:absolute;bottom:0;left:0;right:0;height:3px;
+  background:linear-gradient(90deg,var(--cyan),var(--cyan2));box-shadow:var(--glow-cyan);
 }
-.tab-dot{width:6px;height:6px;border-radius:50%;background:var(--dim)}
-.tab.active .tab-dot{background:var(--cyan);box-shadow:var(--glow-cyan)}
+.tab-dot{width:7px;height:7px;border-radius:50%;background:var(--dim)}
+.tab.active .tab-dot{background:var(--cyan);box-shadow:var(--glow-cyan);animation:pulse 2.5s ease-in-out infinite}
 
 /* ─── STATUS STRIP ─── */
 #statusbar{
-  margin-left:auto;display:flex;align-items:center;gap:16px;
-  padding-right:16px;font-size:10px;color:var(--dim);letter-spacing:0.5px;
+  margin-left:auto;display:flex;align-items:center;gap:20px;
+  padding-right:20px;font-size:10px;color:var(--dim);letter-spacing:1px;
+  text-transform:uppercase;
 }
-.stat{display:flex;align-items:center;gap:5px}
-.stat-dot{width:5px;height:5px;border-radius:50%}
-.stat-dot.ok{background:var(--green);box-shadow:var(--glow-green);animation:pulse 3s ease-in-out infinite}
-.stat-dot.warn{background:var(--amber)}
-.stat-dot.off{background:var(--red)}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}
+.stat{display:flex;align-items:center;gap:7px;padding:0 10px}
+.stat-dot{width:6px;height:6px;border-radius:50%;animation:pulse 2.5s ease-in-out infinite}
+.stat-dot.ok{background:var(--green);box-shadow:var(--glow-green)}
+.stat-dot.warn{background:var(--amber);animation:none;opacity:0.7}
+.stat-dot.off{background:var(--red);animation:none;opacity:0.6}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:0.6;transform:scale(1.1)}}
 
 /* ─── CONTENT AREA ─── */
 #content{flex:1;overflow:hidden;display:flex}
@@ -93,87 +105,128 @@ html,body{width:100%;height:100%;overflow:hidden;font-family:'Menlo','Monaco','C
 /* ─── TERMINAL OUTPUT ─── */
 #output{
   flex:1;overflow-y:auto;overflow-x:hidden;
-  padding:14px 16px;background:var(--bg);
+  padding:16px 20px;background:var(--bg);
 }
-#output::-webkit-scrollbar{width:5px}
+#output::-webkit-scrollbar{width:6px}
 #output::-webkit-scrollbar-track{background:transparent}
-#output::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+#output::-webkit-scrollbar-thumb{background:var(--border-light);border-radius:3px;transition:var(--transition)}
 #output::-webkit-scrollbar-thumb:hover{background:var(--dim)}
 
 /* ─── OUTPUT LINES ─── */
-.line{margin-bottom:3px;white-space:pre-wrap;word-wrap:break-word;font-size:13px;animation:fadeIn 0.1s ease}
-@keyframes fadeIn{from{opacity:0;transform:translateY(1px)}to{opacity:1;transform:translateY(0)}}
+.line{margin-bottom:4px;white-space:pre-wrap;word-wrap:break-word;font-size:13px;animation:fadeIn 0.15s ease;font-variant-numeric:tabular-nums}
+@keyframes fadeIn{from{opacity:0;transform:translateY(2px)}to{opacity:1;transform:translateY(0)}}
 .line-prompt{color:var(--mid)}
-.line-cmd{color:var(--text)}
+.line-cmd{color:var(--text);font-weight:500}
 .line-success{color:var(--green)}
 .line-error{color:var(--red)}
-.line-info{color:#4a8aaa}
+.line-info{color:#5a9ccc}
 .line-warning{color:var(--amber)}
 .line-system{color:var(--cyan);opacity:0.85}
 .line-dim{color:var(--dim)}
-.line-header{color:var(--cyan);font-weight:bold;letter-spacing:1px;border-bottom:1px solid var(--border);padding-bottom:2px;margin-bottom:4px}
+.line-header{color:var(--cyan);font-weight:bold;letter-spacing:2px;border-bottom:1px solid var(--border);padding-bottom:3px;margin-bottom:6px}
 
 /* prompt line */
-.prompt-line{display:flex;gap:6px;margin-bottom:3px}
-.prompt-arrow{color:var(--cyan);opacity:0.7}
+.prompt-line{display:flex;gap:7px;margin-bottom:4px;align-items:flex-start}
+.prompt-arrow{color:var(--cyan);opacity:0.7;font-weight:bold;min-width:15px}
 .prompt-cmd-text{color:var(--text)}
 
 /* ─── INPUT AREA ─── */
 #inputbar{
   display:flex;align-items:center;
-  padding:10px 16px;gap:10px;
-  border-top:1px solid var(--border);
+  padding:12px 20px;gap:12px;
+  border-top:2px solid var(--border);
   background:linear-gradient(90deg,var(--bg) 0%,var(--bg2) 100%);
   flex-shrink:0;
 }
-.input-ps1{color:var(--cyan);opacity:0.75;user-select:none;font-size:13px;flex-shrink:0}
+.input-ps1{color:var(--cyan);opacity:0.8;user-select:none;font-size:13px;flex-shrink:0;font-weight:bold}
 #cmd{
   flex:1;background:transparent;border:none;outline:none;
   color:var(--text);font-family:inherit;font-size:13px;caret-color:var(--cyan);
 }
 #cmd::placeholder{color:var(--dim)}
+#cmd:focus{color:var(--text)}
 #exec-btn{
-  padding:5px 14px;background:rgba(0,212,255,0.08);
-  border:1px solid var(--border2);color:var(--cyan);
-  cursor:pointer;border-radius:2px;font-size:10px;letter-spacing:1px;
-  font-family:inherit;transition:all 0.15s;text-transform:uppercase;
+  padding:7px 18px;background:rgba(0,212,255,0.08);
+  border:1px solid var(--border-light);color:var(--cyan);
+  cursor:pointer;border-radius:3px;font-size:11px;letter-spacing:1px;
+  font-family:inherit;transition:var(--transition);text-transform:uppercase;font-weight:bold;
 }
-#exec-btn:hover{background:rgba(0,212,255,0.15);border-color:var(--cyan);box-shadow:var(--glow-cyan)}
+#exec-btn:hover{background:rgba(0,212,255,0.18);border-color:var(--cyan);box-shadow:0 0 10px rgba(0,212,255,0.2)}
+#exec-btn:active{transform:scale(0.98)}
 
 /* ─── INFO TAB ─── */
 #info-view{
-  flex:1;display:none;overflow-y:auto;
-  padding:20px;background:var(--bg2);
+  flex:1;display:none;overflow-y:auto;overflow-x:hidden;
+  padding:24px;background:var(--bg2);
 }
 #info-view.active{display:block}
-.info-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;margin-bottom:20px}
+#info-view::-webkit-scrollbar{width:6px}
+#info-view::-webkit-scrollbar-track{background:transparent}
+#info-view::-webkit-scrollbar-thumb{background:var(--border-light);border-radius:3px}
+#info-view::-webkit-scrollbar-thumb:hover{background:var(--dim)}
+
+.info-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:18px;margin-bottom:24px}
 .info-card{
-  background:var(--panel);border:1px solid var(--border);
-  border-radius:3px;padding:14px;
+  background:linear-gradient(135deg,var(--panel) 0%,var(--bg3) 100%);
+  border:1px solid var(--border-light);
+  border-radius:6px;padding:18px;
+  transition:var(--transition);
+  box-shadow:0 4px 6px rgba(0,0,0,0.2);
 }
+.info-card:hover{border-color:var(--cyan);box-shadow:0 0 15px rgba(0,212,255,0.15)}
 .info-card-title{
-  font-size:10px;letter-spacing:2px;text-transform:uppercase;
-  color:var(--cyan);margin-bottom:10px;opacity:0.8;
-  border-bottom:1px solid var(--border);padding-bottom:6px;
+  font-size:11px;letter-spacing:2px;text-transform:uppercase;
+  color:var(--cyan);margin-bottom:14px;opacity:0.9;
+  border-bottom:2px solid var(--border);padding-bottom:8px;
+  font-weight:bold;
 }
-.info-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;font-size:11px}
-.info-key{color:var(--mid)}
-.info-val{color:var(--green);font-weight:bold}
+.info-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:12px}
+.info-key{color:var(--mid);font-weight:500}
+.info-val{color:var(--green);font-weight:bold;font-variant-numeric:tabular-nums}
 .info-val.dim{color:var(--dim)}
 .info-val.warn{color:var(--amber)}
 .info-val.cyan{color:var(--cyan)}
-.cmd-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.info-val.purple{color:var(--purple)}
+
+.cmd-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
 .cmd-tag{
-  padding:2px 8px;background:rgba(0,212,255,0.07);
-  border:1px solid rgba(0,212,255,0.2);border-radius:2px;
+  padding:4px 10px;background:rgba(0,212,255,0.08);
+  border:1px solid var(--border-light);border-radius:3px;
   font-size:10px;color:var(--cyan);letter-spacing:0.5px;cursor:pointer;
-  transition:all 0.1s;
+  transition:var(--transition);font-weight:500;
 }
-.cmd-tag:hover{background:rgba(0,212,255,0.18);border-color:var(--cyan)}
+.cmd-tag:hover{background:rgba(0,212,255,0.2);border-color:var(--cyan);box-shadow:var(--glow-cyan);transform:scale(1.05)}
+.cmd-tag:active{transform:scale(0.95)}
+
+/* ─── COMMAND CATEGORIES ─── */
+.category-section{margin-bottom:28px}
+.category-header{
+  font-size:12px;letter-spacing:2px;text-transform:uppercase;
+  color:var(--purple);margin-bottom:12px;opacity:0.9;
+  font-weight:bold;padding-bottom:6px;border-bottom:1px solid var(--border);
+}
 
 /* ─── BOOT SEQUENCE ─── */
-.boot-line{color:var(--cyan);opacity:0;animation:bootFade 0.3s forwards}
+.boot-line{color:var(--cyan);opacity:0;animation:bootFade 0.4s forwards}
 @keyframes bootFade{to{opacity:1}}
+
+/* ─── SPINNER ─── */
+.spinner{
+  display:inline-block;width:12px;height:12px;border:2px solid var(--dim);
+  border-top:2px solid var(--cyan);border-radius:50%;
+  animation:spin 0.8s linear infinite;vertical-align:middle;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ─── RESPONSIVE ─── */
+@media (max-width: 768px) {
+  .brand-name{font-size:11px}
+  .tab{padding:0 14px;font-size:9px}
+  #topbar{height:45px}
+  #inputbar{padding:10px 14px;gap:8px}
+  .info-grid{grid-template-columns:1fr}
+  #statusbar{gap:10px;padding-right:14px}
+}
 </style>
 </head>
 <body>
@@ -184,6 +237,7 @@ html,body{width:100%;height:100%;overflow:hidden;font-family:'Menlo','Monaco','C
     <div id="brand">
       <span class="brand-icon">⚛</span>
       <span class="brand-name">QTCL</span>
+      <span class="brand-version">v5.0</span>
     </div>
     <div id="tabs">
       <div class="tab active" data-view="terminal" onclick="switchTab('terminal')">
@@ -217,15 +271,15 @@ html,body{width:100%;height:100%;overflow:hidden;font-family:'Menlo','Monaco','C
       <div id="output"></div>
       <div id="inputbar">
         <span class="input-ps1">QTCL ›</span>
-        <input type="text" id="cmd" placeholder="Type a command… ('help' to list all)" spellcheck="false" autocomplete="off" autocorrect="off">
+        <input type="text" id="cmd" placeholder="Type 'help' for commands…" spellcheck="false" autocomplete="off">
         <button id="exec-btn" onclick="execute()">RUN</button>
       </div>
     </div>
 
     <!-- INFO VIEW -->
     <div id="info-view">
-      <div class="info-grid" id="info-grid">
-        <!-- populated by JS -->
+      <div id="info-content">
+        <!-- Dynamically populated -->
       </div>
     </div>
 
@@ -234,298 +288,367 @@ html,body{width:100%;height:100%;overflow:hidden;font-family:'Menlo','Monaco','C
 
 <script>
 'use strict';
-// ─── STATE ───
-const output  = document.getElementById('output');
-const cmdInput = document.getElementById('cmd');
-let cmdHistory = [], histIdx = -1;
-let statusData = {};
+
+// ─── GLOBAL STATE ───
+const state = {
+  output: document.getElementById('output'),
+  cmdInput: document.getElementById('cmd'),
+  cmdHistory: [],
+  histIdx: -1,
+  statusData: {},
+  allCommands: [],
+  commandsByCategory: {},
+  isLoading: false
+};
 
 // ─── TAB SWITCHING ───
-function switchTab(name){
-  document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===name));
-  document.getElementById('terminal-view').style.display = name==='terminal'?'flex':'none';
-  document.getElementById('info-view').classList.toggle('active', name==='info');
-  if(name==='terminal') cmdInput.focus();
-  if(name==='info') renderInfoGrid();
-}
-// init display
-document.getElementById('terminal-view').style.display='flex';
-
-// ─── LINE FACTORY ───
-function addLine(text, cls='info'){
-  if(text===undefined||text===null) return;
-  const lines = String(text).split('\n');
-  lines.forEach(raw=>{
-    if(!raw && cls!=='success') return; // skip empty lines except in success blocks
-    const d = document.createElement('div');
-    d.className = `line line-${cls}`;
-    d.textContent = raw;
-    output.appendChild(d);
-  });
-  output.scrollTop = output.scrollHeight;
+function switchTab(name) {
+  const tabs = document.querySelectorAll('.tab');
+  tabs.forEach(t => t.classList.remove('active'));
+  document.querySelector(`[data-view="${name}"]`).classList.add('active');
+  
+  const termView = document.getElementById('terminal-view');
+  const infoView = document.getElementById('info-view');
+  
+  if (name === 'terminal') {
+    termView.style.display = 'flex';
+    infoView.classList.remove('active');
+    state.cmdInput.focus();
+  } else {
+    termView.style.display = 'none';
+    infoView.classList.add('active');
+  }
 }
 
-function addPromptLine(cmd){
-  const d = document.createElement('div');
-  d.className = 'line prompt-line';
-  d.innerHTML = `<span class="prompt-arrow">›</span><span class="prompt-cmd-text">${esc(cmd)}</span>`;
-  output.appendChild(d);
-  output.scrollTop = output.scrollHeight;
+// ─── OUTPUT UTILITIES ───
+function addLine(text, style = 'system') {
+  const line = document.createElement('div');
+  line.className = `line line-${style}`;
+  line.textContent = text;
+  state.output.appendChild(line);
+  state.output.scrollTop = state.output.scrollHeight;
 }
 
-function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;') }
-
-function addSep(){
-  const d=document.createElement('div');
-  d.className='line line-dim';
-  d.textContent='─'.repeat(60);
-  output.appendChild(d);
+function addPromptLine(cmd) {
+  const container = document.createElement('div');
+  container.className = 'prompt-line';
+  container.innerHTML = `<span class="prompt-arrow">›</span><span class="prompt-cmd-text">${escapeHtml(cmd)}</span>`;
+  state.output.appendChild(container);
 }
 
-// ─── COMMAND EXECUTION ───
-async function execute(){
-  const raw = cmdInput.value.trim();
-  if(!raw) return;
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
 
-  cmdHistory.unshift(raw);
-  histIdx = -1;
-  cmdInput.value = '';
+// ─── COMMAND EXECUTION (DEEPLY INTEGRATED WITH GLOBALS) ───
+async function execute() {
+  const raw = state.cmdInput.value.trim();
+  if (!raw || state.isLoading) return;
+
+  state.cmdHistory.unshift(raw);
+  state.histIdx = -1;
+  state.cmdInput.value = '';
 
   addPromptLine(raw);
 
-  // Local commands that don't need the server
+  // Local client-side commands
   const lc = raw.toLowerCase();
-  if(lc==='clear'||lc==='cls'){output.innerHTML=''; return;}
-  if(lc==='info'){switchTab('info'); return;}
+  if (lc === 'clear' || lc === 'cls') { state.output.innerHTML = ''; return; }
+  if (lc === 'info') { switchTab('info'); return; }
+  if (lc === 'help') { showDynamicHelp(); return; }
 
-  try{
-    const res = await fetch('/api/command',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({command:raw, args:[], kwargs:{}})
+  state.isLoading = true;
+  state.cmdInput.disabled = true;
+
+  try {
+    // Execute via /api/command endpoint with full globals integration
+    const res = await fetch('/api/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: raw, args: [], kwargs: {} })
     });
 
-    const data = await res.json().catch(()=>({error:'Invalid JSON response'}));
+    const data = await res.json().catch(() => ({ error: 'Invalid JSON response' }));
 
-    if(res.ok && (data.status==='success'||data.result)){
+    if (res.ok && (data.status === 'success' || data.result)) {
       const result = data.result;
-      if(!result){
-        addLine('OK','success');
-      } else if(typeof result === 'object'){
-        if(result.output){
-          result.output.split('\n').forEach(l=>{
-            if(l.trim()) addLine(l, l.startsWith('─')||l.startsWith('═')||l.startsWith('║')? 'system' : 'success');
+      if (!result) {
+        addLine('✓ OK', 'success');
+      } else if (typeof result === 'object') {
+        if (result.output) {
+          result.output.split('\n').forEach(l => {
+            if (l.trim()) addLine(l, l.includes('─') || l.includes('═') || l.includes('║') ? 'system' : 'success');
           });
         } else {
-          // Pretty-print JSON result
-          try{
+          try {
             const pretty = JSON.stringify(result, null, 2);
-            pretty.split('\n').forEach(l=>addLine(l,'success'));
+            pretty.split('\n').forEach(l => addLine(l, 'success'));
           } catch {
-            addLine(String(result),'success');
+            addLine(String(result), 'success');
           }
         }
       } else {
-        String(result).split('\n').forEach(l=>{ if(l.trim()) addLine(l,'success') });
+        String(result).split('\n').forEach(l => { if (l.trim()) addLine(l, 'success'); });
       }
     } else {
       const err = data.error || `HTTP ${res.status}`;
-      addLine('✗ '+err,'error');
-      if(data.suggestions&&data.suggestions.length){
-        addLine('Similar commands: '+data.suggestions.join(', '),'warning');
+      addLine('✗ ' + err, 'error');
+      if (data.suggestions && data.suggestions.length) {
+        addLine('Similar: ' + data.suggestions.join(', '), 'warning');
       }
     }
-  } catch(err){
-    addLine('Network error: '+err.message,'error');
+  } catch (err) {
+    addLine('Network error: ' + err.message, 'error');
+  } finally {
+    state.isLoading = false;
+    state.cmdInput.disabled = false;
+    state.output.scrollTop = state.output.scrollHeight;
+    state.cmdInput.focus();
   }
-
-  output.scrollTop = output.scrollHeight;
-  cmdInput.focus();
 }
 
-// ─── KEYBOARD ───
-cmdInput.addEventListener('keydown', e=>{
-  if(e.key==='Enter'){e.preventDefault();execute();}
-  else if(e.key==='ArrowUp'){
-    e.preventDefault();
-    histIdx = Math.min(histIdx+1, cmdHistory.length-1);
-    if(histIdx>=0) cmdInput.value=cmdHistory[histIdx];
+// ─── DYNAMIC COMMAND LOADING FROM /api/commands ───
+async function loadCommands() {
+  try {
+    addLine('Loading command registry from globals…', 'dim');
+    const res = await fetch('/api/commands');
+    if (res.ok) {
+      const data = await res.json();
+      state.allCommands = data.commands || [];
+      state.commandsByCategory = {};
+      
+      state.allCommands.forEach(cmd => {
+        if (!state.commandsByCategory[cmd.category]) {
+          state.commandsByCategory[cmd.category] = [];
+        }
+        state.commandsByCategory[cmd.category].push(cmd);
+      });
+      
+      addLine(`✓ Loaded ${state.allCommands.length} commands from registry`, 'success');
+      renderInfoGrid();
+    } else {
+      addLine('⚠ Could not load commands', 'warning');
+    }
+  } catch (e) {
+    addLine(`⚠ Command load error: ${e.message}`, 'warning');
+    console.error('Command load failed:', e);
   }
-  else if(e.key==='ArrowDown'){
-    e.preventDefault();
-    histIdx = Math.max(histIdx-1,-1);
-    cmdInput.value = histIdx>=0? cmdHistory[histIdx]:'';
+}
+
+// ─── DYNAMIC HELP (SCRAPES FROM GLOBALS REGISTRY) ───
+function showDynamicHelp() {
+  addLine('', 'dim');
+  addLine('╔════════════════════════════════════════════════════╗', 'system');
+  addLine('║  QUANTUM TEMPORAL COHERENCE LEDGER — COMMAND LIST   ║', 'system');
+  addLine('╚════════════════════════════════════════════════════╝', 'system');
+  addLine('', 'dim');
+  
+  if (Object.keys(state.commandsByCategory).length === 0) {
+    addLine('(No commands loaded - visit INFO tab to load)', 'dim');
+    return;
   }
-  else if(e.key==='Tab'){
+  
+  const categories = Object.keys(state.commandsByCategory).sort();
+  categories.forEach(cat => {
+    const cmds = state.commandsByCategory[cat];
+    const names = cmds.map(c => c.command).sort().join('  ');
+    addLine(`${cat.toUpperCase().padEnd(15)} ${names}`, 'info');
+  });
+  
+  addLine('', 'dim');
+  addLine('type <command> to execute', 'dim');
+  addLine('click INFO tab for system details & quick launch', 'dim');
+  addLine('', 'dim');
+}
+
+// ─── KEYBOARD HANDLING ───
+state.cmdInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') { 
+    e.preventDefault(); 
+    execute(); 
+  }
+  else if (e.key === 'ArrowUp') {
     e.preventDefault();
-    autocomplete();
+    state.histIdx = Math.min(state.histIdx + 1, state.cmdHistory.length - 1);
+    if (state.histIdx >= 0) state.cmdInput.value = state.cmdHistory[state.histIdx];
+  }
+  else if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    state.histIdx = Math.max(state.histIdx - 1, -1);
+    state.cmdInput.value = state.histIdx >= 0 ? state.cmdHistory[state.histIdx] : '';
   }
 });
 
-// ─── AUTOCOMPLETE (simple prefix match) ───
-const KNOWN_CMDS=['help','list-commands','health','system-status','version','time','whoami','echo',
-  'quantum/status','quantum/health','quantum/stats','quantum/w_state','quantum/neural',
-  'transaction/create','transaction/list','transaction/stats','transaction/track',
-  'wallet/create','wallet/balance','wallet/list',
-  'oracle/time','oracle/price','oracle/random',
-  'block/latest','block/details','block/list',
-  'auth/login','auth/logout','auth/status',
-  'clear','info'];
-
-function autocomplete(){
-  const v=cmdInput.value;
-  if(!v) return;
-  const matches=KNOWN_CMDS.filter(c=>c.startsWith(v)&&c!==v);
-  if(matches.length===1){ cmdInput.value=matches[0]; }
-  else if(matches.length>1){
-    addLine('Completions: '+matches.join('  '),'dim');
+// ─── STATUS POLLING (INTEGRATES WITH GLOBALS VIA /api/status) ───
+async function loadStatus() {
+  try {
+    const r = await fetch('/api/status');
+    if (r.ok) {
+      const d = await r.json();
+      state.statusData = d;
+      
+      const qok = d.quantum && (d.quantum.status === 'active' || d.quantum.status === 'Active');
+      setDot('quantum', qok ? 'ok' : 'warn');
+      document.getElementById('lbl-quantum').textContent = 
+        d.quantum ? (d.quantum.status || 'QUANTUM').toUpperCase().slice(0, 10) : 'QUANTUM';
+      
+      const dbok = d.database || d.db;
+      setDot('db', dbok ? 'ok' : 'warn');
+      
+      setDot('api', 'ok');
+      
+      if (d.ledger && typeof d.ledger.blocks === 'number') {
+        document.getElementById('lbl-db').textContent = d.ledger.blocks + ' BLK';
+      }
+    }
+  } catch (e) { 
+    setDot('api', 'warn');
   }
 }
 
-// ─── STATUS POLLING ───
-async function loadStatus(){
-  try{
-    const r=await fetch('/api/status');
-    if(r.ok){
-      const d=await r.json();
-      statusData=d;
-      // quantum
-      const qok=d.quantum&&(d.quantum.status==='active'||d.quantum.status==='Active');
-      setDot('quantum',qok?'ok':'warn');
-      document.getElementById('lbl-quantum').textContent=
-        d.quantum?(d.quantum.status||'QUANTUM').toUpperCase().slice(0,10):'QUANTUM';
-      // db
-      const dbok=d.database||d.db;
-      setDot('db',dbok?'ok':'warn');
-      // api always ok if we got response
-      setDot('api','ok');
-      // ledger
-      if(d.ledger&&typeof d.ledger.blocks==='number'){
-        document.getElementById('lbl-db').textContent=d.ledger.blocks+' BLK';
-      }
-    }
-  } catch(e){ setDot('api','warn') }
+function setDot(id, cls) {
+  const d = document.getElementById('dot-' + id);
+  if (d) d.className = 'stat-dot ' + cls;
 }
-function setDot(id,cls){
-  const d=document.getElementById('dot-'+id);
-  if(d){ d.className='stat-dot '+cls }
-}
-setInterval(loadStatus,15000);
 
-// ─── INFO GRID ───
-function renderInfoGrid(){
-  const grid=document.getElementById('info-grid');
-  grid.innerHTML='';
+setInterval(loadStatus, 12000);
 
-  const cards=[
-    {
-      title:'System Architecture',
-      rows:[
-        ['Blockchain Type','Quantum-Classical Hybrid'],
-        ['Consensus','Quantum PoW + Classical PoS'],
-        ['Validator Qubits','5 (W-State Consensus)'],
-        ['GHZ Circuit','8-qubit finality proofs'],
-      ]
-    },
-    {
-      title:'Quantum Subsystem',
-      rows:[
-        ['Engine',statusData.quantum?.status||'Initializing…'],
-        ['W-State',statusData.quantum?.w_state||'—'],
-        ['Coherence',statusData.quantum?.coherence||'—'],
-        ['Entropy Pool',statusData.quantum?.entropy||'—'],
-      ]
-    },
-    {
-      title:'Ledger Status',
-      rows:[
-        ['Blocks',statusData.ledger?.blocks??'—'],
-        ['Transactions',statusData.ledger?.transactions??'—'],
-        ['Validators',statusData.ledger?.validators??'—'],
-        ['Uptime',statusData.uptime?Math.round(statusData.uptime)+'s':'—'],
-      ]
-    },
-    {
-      title:'DeFi & Oracle',
-      rows:[
-        ['Staking','Available'],
-        ['Swaps','AMM Active'],
-        ['Price Oracle','Integrated'],
-        ['QRNG','Active'],
-      ]
-    },
-  ];
+// ─── INFO GRID (DEEP GLOBALS INTEGRATION) ───
+function renderInfoGrid() {
+  const container = document.getElementById('info-content');
+  container.innerHTML = '';
 
-  cards.forEach(c=>{
-    const card=document.createElement('div');
-    card.className='info-card';
-    card.innerHTML=`<div class="info-card-title">${c.title}</div>`+
-      c.rows.map(([k,v])=>`<div class="info-row"><span class="info-key">${k}</span><span class="info-val">${v}</span></div>`).join('');
-    grid.appendChild(card);
-  });
+  // System Architecture Card
+  const archCard = document.createElement('div');
+  archCard.className = 'info-card';
+  archCard.innerHTML = `
+    <div class="info-card-title">System Architecture</div>
+    <div class="info-row"><span class="info-key">Blockchain Type</span><span class="info-val">Quantum-Classical</span></div>
+    <div class="info-row"><span class="info-key">Consensus</span><span class="info-val">Quantum PoW + Classical PoS</span></div>
+    <div class="info-row"><span class="info-key">Validator Qubits</span><span class="info-val cyan">5 (W-State)</span></div>
+    <div class="info-row"><span class="info-key">Finality Proofs</span><span class="info-val purple">8-GHZ Circuit</span></div>
+  `;
+  
+  // Quantum Subsystem Card
+  const qCard = document.createElement('div');
+  qCard.className = 'info-card';
+  qCard.innerHTML = `
+    <div class="info-card-title">Quantum Subsystem</div>
+    <div class="info-row"><span class="info-key">Engine</span><span class="info-val">${state.statusData.quantum?.status || '—'}</span></div>
+    <div class="info-row"><span class="info-key">W-State</span><span class="info-val cyan">${state.statusData.quantum?.w_state || '—'}</span></div>
+    <div class="info-row"><span class="info-key">Coherence</span><span class="info-val purple">${state.statusData.quantum?.coherence || '—'}</span></div>
+    <div class="info-row"><span class="info-key">Entropy Pool</span><span class="info-val">${state.statusData.quantum?.entropy || '—'}</span></div>
+  `;
+  
+  // Ledger Status Card
+  const ledgerCard = document.createElement('div');
+  ledgerCard.className = 'info-card';
+  ledgerCard.innerHTML = `
+    <div class="info-card-title">Ledger Status</div>
+    <div class="info-row"><span class="info-key">Blocks</span><span class="info-val">${state.statusData.ledger?.blocks ?? '—'}</span></div>
+    <div class="info-row"><span class="info-key">Transactions</span><span class="info-val">${state.statusData.ledger?.transactions ?? '—'}</span></div>
+    <div class="info-row"><span class="info-key">Validators</span><span class="info-val">${state.statusData.ledger?.validators ?? '—'}</span></div>
+    <div class="info-row"><span class="info-key">Uptime</span><span class="info-val">${state.statusData.uptime ? Math.round(state.statusData.uptime) + 's' : '—'}</span></div>
+  `;
+  
+  // DeFi & Oracle Card
+  const defiCard = document.createElement('div');
+  defiCard.className = 'info-card';
+  defiCard.innerHTML = `
+    <div class="info-card-title">DeFi & Oracle</div>
+    <div class="info-row"><span class="info-key">Staking</span><span class="info-val green">Available</span></div>
+    <div class="info-row"><span class="info-key">AMM Swaps</span><span class="info-val green">Active</span></div>
+    <div class="info-row"><span class="info-key">Price Oracle</span><span class="info-val green">Integrated</span></div>
+    <div class="info-row"><span class="info-key">QRNG</span><span class="info-val green">Active</span></div>
+  `;
+  
+  const grid = document.createElement('div');
+  grid.className = 'info-grid';
+  grid.appendChild(archCard);
+  grid.appendChild(qCard);
+  grid.appendChild(ledgerCard);
+  grid.appendChild(defiCard);
+  container.appendChild(grid);
 
-  // Command quick-launch card
-  const cats={
-    'QUANTUM':['quantum/status','quantum/health','quantum/stats'],
-    'BLOCKCHAIN':['block/latest','block/list','transaction/list'],
-    'WALLET':['wallet/list','wallet/balance','wallet/create'],
-    'SYSTEM':['help','system-status','version','health','time'],
-  };
-  const cmdCard=document.createElement('div');
-  cmdCard.className='info-card';
-  cmdCard.style.gridColumn='1/-1';
-  let html='<div class="info-card-title">Quick Commands — click to run</div>';
-  Object.entries(cats).forEach(([cat,cmds])=>{
-    html+=`<div style="margin-bottom:10px"><div style="font-size:10px;color:var(--mid);margin-bottom:5px;letter-spacing:1px">${cat}</div><div class="cmd-list">`;
-    cmds.forEach(cmd=>{
-      html+=`<span class="cmd-tag" onclick="runQuick('${cmd}')">${cmd}</span>`;
+  // Command Quick Launch by Category (from globals registry)
+  const cats = Object.keys(state.commandsByCategory).sort();
+  
+  if (cats.length === 0) {
+    const noCmd = document.createElement('div');
+    noCmd.style.color = 'var(--dim)';
+    noCmd.style.padding = '20px';
+    noCmd.textContent = 'Commands not yet loaded. Run "help" in terminal.';
+    container.appendChild(noCmd);
+    return;
+  }
+  
+  cats.forEach(category => {
+    const section = document.createElement('div');
+    section.className = 'category-section';
+    
+    const header = document.createElement('div');
+    header.className = 'category-header';
+    header.textContent = category.toUpperCase();
+    section.appendChild(header);
+    
+    const cmdList = document.createElement('div');
+    cmdList.className = 'cmd-list';
+    
+    state.commandsByCategory[category].forEach(cmd => {
+      const tag = document.createElement('span');
+      tag.className = 'cmd-tag';
+      tag.textContent = cmd.command;
+      tag.onclick = () => runQuick(cmd.command);
+      cmdList.appendChild(tag);
     });
-    html+='</div></div>';
+    
+    section.appendChild(cmdList);
+    container.appendChild(section);
   });
-  cmdCard.innerHTML=html;
-  grid.appendChild(cmdCard);
 }
 
-function runQuick(cmd){
+function runQuick(cmd) {
   switchTab('terminal');
-  cmdInput.value=cmd;
+  state.cmdInput.value = cmd;
   execute();
 }
 
 // ─── BOOT SEQUENCE ───
-async function boot(){
-  const BOOT=[
-    {t:0,  msg:'╔═══════════════════════════════════════════════════════════╗', cls:'system'},
-    {t:30, msg:'║     QUANTUM TEMPORAL COHERENCE LEDGER  v5.0               ║', cls:'system'},
-    {t:30, msg:'║     Hybrid Blockchain Command Interface                    ║', cls:'system'},
-    {t:30, msg:'╚═══════════════════════════════════════════════════════════╝', cls:'system'},
-    {t:80, msg:'', cls:'info'},
-    {t:80, msg:'Initializing quantum subsystem…', cls:'info'},
-    {t:120,msg:'Loading command registry…', cls:'info'},
-    {t:80, msg:'Connecting to PostgreSQL ledger…', cls:'info'},
-    {t:100,msg:'', cls:'info'},
-    {t:60, msg:'Type  help          — list all registered commands', cls:'dim'},
-    {t:40, msg:'Type  system-status — full system health', cls:'dim'},
-    {t:40, msg:'Type  version       — build version info', cls:'dim'},
-    {t:40, msg:'Press Tab           — autocomplete', cls:'dim'},
-    {t:40, msg:'Click INFO tab      — system architecture', cls:'dim'},
-    {t:80, msg:'', cls:'info'},
-    {t:60, msg:'Ready.', cls:'success'},
-    {t:20, msg:'', cls:'info'},
+async function boot() {
+  const BOOT = [
+    { t: 0, msg: '╔═══════════════════════════════════════════════════════════╗', cls: 'system' },
+    { t: 30, msg: '║     QUANTUM TEMPORAL COHERENCE LEDGER  v5.0               ║', cls: 'system' },
+    { t: 30, msg: '║     Hybrid Blockchain Command Interface                    ║', cls: 'system' },
+    { t: 30, msg: '╚═══════════════════════════════════════════════════════════╝', cls: 'system' },
+    { t: 80, msg: '', cls: 'info' },
+    { t: 60, msg: 'Initializing quantum subsystem…', cls: 'info' },
+    { t: 80, msg: 'Loading command registry from globals…', cls: 'info' },
+    { t: 60, msg: 'Connecting to PostgreSQL ledger…', cls: 'info' },
+    { t: 100, msg: '', cls: 'info' },
+    { t: 60, msg: 'Type  help          — list all commands from globals', cls: 'dim' },
+    { t: 40, msg: 'Type  system-status — full system health', cls: 'dim' },
+    { t: 40, msg: 'Type  version       — build version info', cls: 'dim' },
+    { t: 40, msg: 'Click INFO tab      — system details & quick command launch', cls: 'dim' },
+    { t: 80, msg: '', cls: 'info' },
+    { t: 60, msg: 'Ready.', cls: 'success' },
+    { t: 20, msg: '', cls: 'info' },
   ];
 
-  let delay=0;
-  for(const {t,msg,cls} of BOOT){
-    delay+=t;
-    await new Promise(r=>setTimeout(r,delay));
-    addLine(msg,cls);
+  let delay = 0;
+  for (const { t, msg, cls } of BOOT) {
+    delay += t;
+    await new Promise(r => setTimeout(r, delay));
+    addLine(msg, cls);
   }
 
-  // kick off status load
+  // Load commands and status from globals
+  await loadCommands();
   loadStatus();
 }
 
-cmdInput.focus();
+state.cmdInput.focus();
 boot();
 </script>
 </body>

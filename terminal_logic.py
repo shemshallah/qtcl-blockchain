@@ -5728,12 +5728,22 @@ class GlobalCommandRegistry:
         'admin/config': lambda *a, **k: {'result': 'Configuration'},
     }
     
-    # System commands (stub implementations)
+    # System commands (EXPANDED WITH REAL IMPLEMENTATIONS)
     SYSTEM_COMMANDS = {
-        'system/health': lambda *a, **k: {'result': 'System healthy'},
-        'system/status': lambda *a, **k: {'result': 'System running'},
-        'system/uptime': lambda *a, **k: {'result': 'System uptime info'},
-        'system/info': lambda *a, **k: {'result': 'System information'},
+        'system/health': lambda *a, **k: GlobalCommandRegistry._system_health(**k),
+        'system/status': lambda *a, **k: GlobalCommandRegistry._system_status(**k),
+        'system/uptime': lambda *a, **k: GlobalCommandRegistry._system_uptime(**k),
+        'system/info': lambda *a, **k: GlobalCommandRegistry._system_info(**k),
+        'system/metrics': lambda *a, **k: GlobalCommandRegistry._system_metrics(**k),
+        'system/version': lambda *a, **k: GlobalCommandRegistry._system_version(**k),
+    }
+    
+    # Help commands (REAL IMPLEMENTATIONS FOR DYNAMIC HELP)
+    HELP_COMMANDS = {
+        'help': lambda *a, **k: GlobalCommandRegistry._cmd_help(**k),
+        'help/commands': lambda *a, **k: GlobalCommandRegistry._cmd_help_commands(**k),
+        'help/category': lambda *a, **k: GlobalCommandRegistry._cmd_help_category(
+            category=a[0] if a else k.pop('category', None), **k),
     }
     
     # Parallel task execution commands (stub implementations)
@@ -5747,6 +5757,7 @@ class GlobalCommandRegistry:
     
     # All commands combined
     ALL_COMMANDS = {
+        **HELP_COMMANDS,
         **QUANTUM_COMMANDS,
         **TRANSACTION_COMMANDS,
         **WALLET_COMMANDS,
@@ -5824,7 +5835,9 @@ class GlobalCommandRegistry:
         """List available commands, optionally filtered by category"""
         if category:
             category = category.lower()
-            if category == 'quantum':
+            if category == 'help':
+                return {'help': list(cls.HELP_COMMANDS.keys())}
+            elif category == 'quantum':
                 return {'quantum': list(cls.QUANTUM_COMMANDS.keys())}
             elif category == 'transaction':
                 return {'transaction': list(cls.TRANSACTION_COMMANDS.keys())}
@@ -5856,6 +5869,7 @@ class GlobalCommandRegistry:
                 return {'parallel': list(cls.PARALLEL_COMMANDS.keys())}
         
         return {
+            'help': list(cls.HELP_COMMANDS.keys()),
             'auth': list(cls.AUTH_COMMANDS.keys()),
             'user': list(cls.USER_COMMANDS.keys()),
             'transaction': list(cls.TRANSACTION_COMMANDS.keys()),
@@ -5886,6 +5900,188 @@ class GlobalCommandRegistry:
             'description': handler.__doc__ or 'No documentation',
             'callable': True,
             'available': True
+        }
+    
+    # ═════════════════════════════════════════════════════════════════════════════════════════
+    # HELP COMMAND IMPLEMENTATIONS (DYNAMIC FROM GLOBALS REGISTRY)
+    # ═════════════════════════════════════════════════════════════════════════════════════════
+    
+    @classmethod
+    def _cmd_help(**kwargs):
+        """Show help for all commands - dynamically loaded from globals registry"""
+        try:
+            from globals import get_globals
+            gs = get_globals()
+            
+            output = []
+            output.append('╔════════════════════════════════════════════════════════╗')
+            output.append('║  QTCL v5.0 — COMMAND REFERENCE                         ║')
+            output.append('╚════════════════════════════════════════════════════════╝')
+            output.append('')
+            
+            # Group commands by category
+            categories = {
+                'help': GlobalCommandRegistry.HELP_COMMANDS,
+                'auth': GlobalCommandRegistry.AUTH_COMMANDS,
+                'user': GlobalCommandRegistry.USER_COMMANDS,
+                'transaction': GlobalCommandRegistry.TRANSACTION_COMMANDS,
+                'wallet': GlobalCommandRegistry.WALLET_COMMANDS,
+                'quantum': GlobalCommandRegistry.QUANTUM_COMMANDS,
+                'oracle': GlobalCommandRegistry.ORACLE_COMMANDS,
+                'block': GlobalCommandRegistry.BLOCK_COMMANDS,
+                'defi': GlobalCommandRegistry.DEFI_COMMANDS,
+                'governance': GlobalCommandRegistry.GOVERNANCE_COMMANDS,
+                'nft': GlobalCommandRegistry.NFT_COMMANDS,
+                'contract': GlobalCommandRegistry.CONTRACT_COMMANDS,
+                'bridge': GlobalCommandRegistry.BRIDGE_COMMANDS,
+                'admin': GlobalCommandRegistry.ADMIN_COMMANDS,
+                'system': GlobalCommandRegistry.SYSTEM_COMMANDS,
+            }
+            
+            for cat_name, cat_commands in sorted(categories.items()):
+                if cat_commands:
+                    output.append(f'{cat_name.upper().ljust(15)} {", ".join(sorted(cat_commands.keys()))}')
+            
+            output.append('')
+            output.append('Type "help/commands" for detailed list')
+            output.append('Type "help/category <name>" for category details')
+            output.append('')
+            
+            return {'output': '\n'.join(output)}
+        except Exception as e:
+            return {'error': str(e), 'output': f'Help error: {e}'}
+    
+    @classmethod
+    def _cmd_help_commands(**kwargs):
+        """List all commands with detailed information"""
+        output = []
+        output.append('ALL AVAILABLE COMMANDS:')
+        output.append('')
+        
+        for cmd_name in sorted(GlobalCommandRegistry.ALL_COMMANDS.keys()):
+            output.append(f'  {cmd_name}')
+        
+        output.append('')
+        output.append(f'Total: {len(GlobalCommandRegistry.ALL_COMMANDS)} commands')
+        
+        return {'output': '\n'.join(output)}
+    
+    @classmethod
+    def _cmd_help_category(category=None, **kwargs):
+        """Show help for a specific command category"""
+        if not category:
+            return {'error': 'Category not specified. Usage: help/category <name>'}
+        
+        category_lower = category.lower()
+        category_map = {
+            'help': GlobalCommandRegistry.HELP_COMMANDS,
+            'auth': GlobalCommandRegistry.AUTH_COMMANDS,
+            'user': GlobalCommandRegistry.USER_COMMANDS,
+            'transaction': GlobalCommandRegistry.TRANSACTION_COMMANDS,
+            'wallet': GlobalCommandRegistry.WALLET_COMMANDS,
+            'quantum': GlobalCommandRegistry.QUANTUM_COMMANDS,
+            'oracle': GlobalCommandRegistry.ORACLE_COMMANDS,
+            'block': GlobalCommandRegistry.BLOCK_COMMANDS,
+            'defi': GlobalCommandRegistry.DEFI_COMMANDS,
+            'governance': GlobalCommandRegistry.GOVERNANCE_COMMANDS,
+            'nft': GlobalCommandRegistry.NFT_COMMANDS,
+            'contract': GlobalCommandRegistry.CONTRACT_COMMANDS,
+            'bridge': GlobalCommandRegistry.BRIDGE_COMMANDS,
+            'admin': GlobalCommandRegistry.ADMIN_COMMANDS,
+            'system': GlobalCommandRegistry.SYSTEM_COMMANDS,
+        }
+        
+        if category_lower not in category_map:
+            return {'error': f'Unknown category: {category}. Available: {", ".join(category_map.keys())}'}
+        
+        cmds = category_map[category_lower]
+        output = []
+        output.append(f'{category.upper()} COMMANDS:')
+        output.append('')
+        for cmd in sorted(cmds.keys()):
+            output.append(f'  {cmd}')
+        output.append('')
+        
+        return {'output': '\n'.join(output)}
+    
+    # ═════════════════════════════════════════════════════════════════════════════════════════
+    # SYSTEM COMMAND IMPLEMENTATIONS (WITH GLOBALS INTEGRATION)
+    # ═════════════════════════════════════════════════════════════════════════════════════════
+    
+    @classmethod
+    def _system_health(**kwargs):
+        """Get system health from globals"""
+        try:
+            from globals import get_globals
+            gs = get_globals()
+            return gs.get_system_health()
+        except Exception as e:
+            return {'error': str(e), 'status': 'error'}
+    
+    @classmethod
+    def _system_status(**kwargs):
+        """Get system status snapshot from globals"""
+        try:
+            from globals import get_globals
+            gs = get_globals()
+            return gs.snapshot()
+        except Exception as e:
+            return {'error': str(e), 'status': 'unknown'}
+    
+    @classmethod
+    def _system_uptime(**kwargs):
+        """Get system uptime from globals"""
+        try:
+            from globals import get_globals
+            gs = get_globals()
+            if gs.startup_time:
+                uptime_seconds = (datetime.utcnow() - gs.startup_time).total_seconds()
+                hours = int(uptime_seconds // 3600)
+                minutes = int((uptime_seconds % 3600) // 60)
+                seconds = int(uptime_seconds % 60)
+                return {'uptime': f'{hours}h {minutes}m {seconds}s', 'uptime_seconds': uptime_seconds}
+            else:
+                return {'uptime': 'unknown', 'uptime_seconds': 0}
+        except Exception as e:
+            return {'error': str(e)}
+    
+    @classmethod
+    def _system_info(**kwargs):
+        """Get detailed system information from globals"""
+        try:
+            from globals import get_globals
+            gs = get_globals()
+            return {
+                'initialized': gs.initialized,
+                'health_status': gs.health.value if gs.health else 'unknown',
+                'quantum_ready': gs.quantum.all_initialized() if gs.quantum else False,
+                'database_healthy': gs.database.healthy if gs.database else False,
+                'functions_registered': len(gs.all_functions),
+                'commands_available': len(GlobalCommandRegistry.ALL_COMMANDS),
+                'sessions_active': len(gs.sessions),
+            }
+        except Exception as e:
+            return {'error': str(e)}
+    
+    @classmethod
+    def _system_metrics(**kwargs):
+        """Get detailed system metrics from globals"""
+        try:
+            from globals import get_globals
+            gs = get_globals()
+            return gs.metrics.get_stats()
+        except Exception as e:
+            return {'error': str(e), 'metrics': None}
+    
+    @classmethod
+    def _system_version(**kwargs):
+        """Get version and build information"""
+        return {
+            'version': '5.0.0',
+            'name': 'QTCL - Quantum Temporal Coherence Ledger',
+            'build': 'Expanded v5.0 with deep globals integration',
+            'type': 'Hybrid Quantum-Classical Blockchain',
+            'timestamp': datetime.utcnow().isoformat(),
         }
     
     # ═════════════════════════════════════════════════════════════════════════════════════════
@@ -5935,6 +6131,7 @@ class GlobalCommandRegistry:
         logger.info("[Registry] Rebuilding ALL_COMMANDS from all command sources...")
         
         cls.ALL_COMMANDS={
+            **cls.HELP_COMMANDS,
             **cls.QUANTUM_COMMANDS,
             **cls.TRANSACTION_COMMANDS,
             **cls.WALLET_COMMANDS,
@@ -5956,6 +6153,7 @@ class GlobalCommandRegistry:
         
         # Log counts by category for verification
         categories={
+            'HELP':len(cls.HELP_COMMANDS),
             'QUANTUM':len(cls.QUANTUM_COMMANDS),
             'TRANSACTION':len(cls.TRANSACTION_COMMANDS),
             'WALLET':len(cls.WALLET_COMMANDS),

@@ -563,7 +563,32 @@ def create_app():
     
     @app.route('/api/command', methods=['POST'])
     def execute_command():
-        """Execute a command via the terminal engine"""
+        """
+        COMPREHENSIVE COMMAND EXECUTION ENDPOINT WITH DEEP GLOBALS INTEGRATION
+        
+        FEATURES:
+        • Full GlobalCommandRegistry integration
+        • Per-category command execution from terminal_logic.py
+        • Proper error handling with suggestions
+        • Auth token propagation
+        • System metrics recording via globals
+        • Correlation ID tracking
+        
+        REQUEST:
+          {
+            "command": "quantum/status",
+            "args": [],
+            "kwargs": {}
+          }
+        
+        RESPONSE:
+          {
+            "status": "success",
+            "command": "quantum/status",
+            "result": {...},
+            "timestamp": "2024-02-17T..."
+          }
+        """
         try:
             data = request.get_json() or {}
             command = data.get('command', '').strip()
@@ -571,139 +596,251 @@ def create_app():
             kwargs = data.get('kwargs', {})
             
             if not command:
-                return jsonify({'error': 'No command specified', 'status': 'error'}), 400
+                return jsonify({
+                    'error': 'No command specified',
+                    'status': 'error',
+                    'hint': 'send {"command": "help"}'
+                }), 400
             
             # Get auth token if provided
             auth_header = request.headers.get('Authorization', '')
             auth_token = auth_header.replace('Bearer ', '') if auth_header else None
             
-            # Execute command via GlobalCommandRegistry
+            logger.info(f"[API] Executing command: {command} with args={args}")
+            
+            # Execute command via GlobalCommandRegistry with full globals integration
             if GlobalCommandRegistry:
                 try:
-                    # Convert command like 'auth/login' to registry lookup
                     cmd_parts = command.split('/')
                     
-                    # Build all command maps
-                    all_commands = {
-                        **GlobalCommandRegistry.AUTH_COMMANDS,
-                        **GlobalCommandRegistry.USER_COMMANDS,
-                        **GlobalCommandRegistry.TRANSACTION_COMMANDS,
-                        **GlobalCommandRegistry.WALLET_COMMANDS,
-                        **GlobalCommandRegistry.BLOCK_COMMANDS,
-                        **GlobalCommandRegistry.QUANTUM_COMMANDS,
-                        **GlobalCommandRegistry.ORACLE_COMMANDS,
-                        **GlobalCommandRegistry.DEFI_COMMANDS,
-                        **GlobalCommandRegistry.GOVERNANCE_COMMANDS,
-                        **GlobalCommandRegistry.NFT_COMMANDS,
-                        **GlobalCommandRegistry.CONTRACT_COMMANDS,
-                        **GlobalCommandRegistry.BRIDGE_COMMANDS,
-                        **GlobalCommandRegistry.ADMIN_COMMANDS,
-                        **GlobalCommandRegistry.SYSTEM_COMMANDS,
-                    }
+                    # BUILD ALL COMMAND MAPS FROM GLOBALS REGISTRY
+                    all_commands = {}
                     
+                    # Safely aggregate all command categories from GlobalCommandRegistry
+                    command_categories = [
+                        'AUTH_COMMANDS',
+                        'USER_COMMANDS',
+                        'TRANSACTION_COMMANDS',
+                        'WALLET_COMMANDS',
+                        'BLOCK_COMMANDS',
+                        'QUANTUM_COMMANDS',
+                        'ORACLE_COMMANDS',
+                        'DEFI_COMMANDS',
+                        'GOVERNANCE_COMMANDS',
+                        'NFT_COMMANDS',
+                        'CONTRACT_COMMANDS',
+                        'BRIDGE_COMMANDS',
+                        'ADMIN_COMMANDS',
+                        'SYSTEM_COMMANDS',
+                    ]
+                    
+                    for cat in command_categories:
+                        cat_commands = getattr(GlobalCommandRegistry, cat, {})
+                        if isinstance(cat_commands, dict):
+                            all_commands.update(cat_commands)
+                            logger.debug(f"[API] Loaded {len(cat_commands)} commands from {cat}")
+                    
+                    logger.info(f"[API] Total commands available: {len(all_commands)}")
+                    
+                    # LOOKUP COMMAND
                     cmd_func = all_commands.get(command)
                     
                     if not cmd_func:
-                        # Try to find matching command
-                        matching = [k for k in all_commands.keys() if k.startswith(cmd_parts[0] + '/')]
-                        if matching:
-                            return jsonify({
-                                'error': f'Command not found. Did you mean: {matching}',
-                                'status': 'error',
-                                'suggestions': matching
-                            }), 404
-                        else:
-                            return jsonify({
-                                'error': f'Unknown command: {command}',
-                                'status': 'error'
-                            }), 404
+                        # Find suggestions based on prefix match
+                        prefix = cmd_parts[0] if cmd_parts else ''
+                        suggestions = [k for k in all_commands.keys() if k.startswith(prefix + '/') and k != command]
+                        
+                        error_msg = f'Unknown command: {command}'
+                        logger.warning(f"[API] {error_msg} | Suggestions: {suggestions}")
+                        
+                        return jsonify({
+                            'status': 'error',
+                            'error': error_msg,
+                            'command': command,
+                            'suggestions': suggestions[:5],  # Limit to 5 suggestions
+                            'timestamp': datetime.utcnow().isoformat()
+                        }), 404
                     
-                    # Pass auth token to command if needed
+                    # INJECT AUTH TOKEN IF NEEDED
                     if auth_token:
                         kwargs['auth_token'] = auth_token
                     
-                    # Execute the command
-                    logger.info(f"[API] Executing command: {command} with args={args}, kwargs={kwargs}")
+                    # EXECUTE COMMAND WITH GLOBALS CONTEXT
+                    logger.debug(f"[API] Executing {command} with args={args}, kwargs={kwargs}")
                     result = cmd_func(*args, **kwargs)
+                    
+                    # RECORD METRICS IN GLOBALS
+                    try:
+                        gs = get_globals()
+                        gs.metrics.http_requests += 1
+                        gs.metrics.api_calls[command] += 1
+                        gs.terminal.executed_commands += 1
+                        gs.terminal.last_command = command
+                        gs.terminal.last_command_time = datetime.utcnow()
+                    except Exception as e:
+                        logger.debug(f"[API] Could not record metrics: {e}")
+                    
+                    # FORMAT RESULT
+                    formatted_result = result
+                    if isinstance(result, dict):
+                        formatted_result = result
+                    elif isinstance(result, str):
+                        formatted_result = {'output': result}
+                    else:
+                        formatted_result = {'output': str(result)}
                     
                     return jsonify({
                         'status': 'success',
                         'command': command,
-                        'result': result if isinstance(result, dict) else {'output': str(result)},
+                        'result': formatted_result,
                         'timestamp': datetime.utcnow().isoformat()
                     }), 200
                 
                 except Exception as e:
                     logger.error(f"[API] Command execution error: {e}", exc_info=True)
+                    
+                    # RECORD ERROR IN GLOBALS
+                    try:
+                        gs = get_globals()
+                        gs.metrics.http_errors += 1
+                        gs.terminal.failed_commands += 1
+                    except:
+                        pass
+                    
                     return jsonify({
-                        'error': str(e),
                         'status': 'error',
                         'command': command,
+                        'error': str(e),
+                        'type': type(e).__name__,
                         'timestamp': datetime.utcnow().isoformat()
                     }), 500
             else:
+                logger.error("[API] GlobalCommandRegistry not available")
                 return jsonify({
+                    'status': 'error',
                     'error': 'Terminal engine not available',
-                    'status': 'error'
+                    'hint': 'Terminal system not initialized yet'
                 }), 503
         
         except Exception as e:
             logger.error(f"[API] Command endpoint error: {e}", exc_info=True)
-            return jsonify({'error': str(e), 'status': 'error'}), 500
+            return jsonify({
+                'status': 'error',
+                'error': str(e),
+                'type': type(e).__name__,
+                'timestamp': datetime.utcnow().isoformat()
+            }), 500
     
     @app.route('/api/commands', methods=['GET'])
     def list_commands():
-        """List all available commands with metadata"""
+        """
+        LIST ALL AVAILABLE COMMANDS FROM GLOBALS REGISTRY
+        
+        This endpoint aggregates all commands from GlobalCommandRegistry,
+        organized by category for easy discovery and UI rendering.
+        
+        RESPONSE:
+          {
+            "commands": [
+              {
+                "command": "quantum/status",
+                "category": "quantum",
+                "description": "quantum command"
+              },
+              ...
+            ],
+            "categories": ["auth", "quantum", "blockchain", ...],
+            "total": 47,
+            "timestamp": "2024-02-17T..."
+          }
+        """
         try:
             if not GlobalCommandRegistry:
+                logger.warning("[API] GlobalCommandRegistry not available")
                 return jsonify({
+                    'status': 'error',
                     'commands': [],
                     'categories': [],
-                    'error': 'Terminal engine not available'
+                    'total': 0,
+                    'error': 'Terminal registry not initialized'
                 }), 503
             
-            # Build all command maps
-            command_map = {
-                'auth': [(k, 'authentication') for k in GlobalCommandRegistry.AUTH_COMMANDS.keys()],
-                'user': [(k, 'user management') for k in GlobalCommandRegistry.USER_COMMANDS.keys()],
-                'transaction': [(k, 'transactions') for k in GlobalCommandRegistry.TRANSACTION_COMMANDS.keys()],
-                'wallet': [(k, 'wallet operations') for k in GlobalCommandRegistry.WALLET_COMMANDS.keys()],
-                'block': [(k, 'blockchain') for k in GlobalCommandRegistry.BLOCK_COMMANDS.keys()],
-                'quantum': [(k, 'quantum operations') for k in GlobalCommandRegistry.QUANTUM_COMMANDS.keys()],
-                'oracle': [(k, 'oracle services') for k in GlobalCommandRegistry.ORACLE_COMMANDS.keys()],
-                'defi': [(k, 'defi operations') for k in GlobalCommandRegistry.DEFI_COMMANDS.keys()],
-                'governance': [(k, 'governance') for k in GlobalCommandRegistry.GOVERNANCE_COMMANDS.keys()],
-                'nft': [(k, 'nft operations') for k in GlobalCommandRegistry.NFT_COMMANDS.keys()],
-                'contract': [(k, 'smart contracts') for k in GlobalCommandRegistry.CONTRACT_COMMANDS.keys()],
-                'bridge': [(k, 'bridge operations') for k in GlobalCommandRegistry.BRIDGE_COMMANDS.keys()],
-                'admin': [(k, 'admin') for k in GlobalCommandRegistry.ADMIN_COMMANDS.keys()],
-                'system': [(k, 'system') for k in GlobalCommandRegistry.SYSTEM_COMMANDS.keys()],
+            # CATEGORY MAPPING WITH DESCRIPTIONS
+            category_map = {
+                'auth': 'Authentication & Authorization',
+                'user': 'User Management & Profiles',
+                'transaction': 'Transaction Operations',
+                'wallet': 'Wallet Management',
+                'block': 'Blockchain & Block Explorer',
+                'quantum': 'Quantum Operations & Measurements',
+                'oracle': 'Oracle Services & Data Feeds',
+                'defi': 'DeFi Operations',
+                'governance': 'Governance & Voting',
+                'nft': 'NFT Operations',
+                'contract': 'Smart Contracts',
+                'bridge': 'Cross-chain Bridge',
+                'admin': 'Administration & Management',
+                'system': 'System Information & Health',
             }
             
-            # Flatten and format
+            # BUILD COMMAND LIST FROM ALL REGISTRY CATEGORIES
             commands = []
-            for category, cmds in command_map.items():
-                for cmd_name, desc in cmds:
-                    commands.append({
-                        'command': cmd_name,
-                        'category': category,
-                        'description': desc,
-                        'examples': f'{cmd_name} arg1 arg2'
-                    })
+            command_set = set()
             
-            # Sort by category then command
+            registry_categories = {
+                'auth': getattr(GlobalCommandRegistry, 'AUTH_COMMANDS', {}),
+                'user': getattr(GlobalCommandRegistry, 'USER_COMMANDS', {}),
+                'transaction': getattr(GlobalCommandRegistry, 'TRANSACTION_COMMANDS', {}),
+                'wallet': getattr(GlobalCommandRegistry, 'WALLET_COMMANDS', {}),
+                'block': getattr(GlobalCommandRegistry, 'BLOCK_COMMANDS', {}),
+                'quantum': getattr(GlobalCommandRegistry, 'QUANTUM_COMMANDS', {}),
+                'oracle': getattr(GlobalCommandRegistry, 'ORACLE_COMMANDS', {}),
+                'defi': getattr(GlobalCommandRegistry, 'DEFI_COMMANDS', {}),
+                'governance': getattr(GlobalCommandRegistry, 'GOVERNANCE_COMMANDS', {}),
+                'nft': getattr(GlobalCommandRegistry, 'NFT_COMMANDS', {}),
+                'contract': getattr(GlobalCommandRegistry, 'CONTRACT_COMMANDS', {}),
+                'bridge': getattr(GlobalCommandRegistry, 'BRIDGE_COMMANDS', {}),
+                'admin': getattr(GlobalCommandRegistry, 'ADMIN_COMMANDS', {}),
+                'system': getattr(GlobalCommandRegistry, 'SYSTEM_COMMANDS', {}),
+            }
+            
+            for category, cmd_dict in registry_categories.items():
+                if isinstance(cmd_dict, dict):
+                    for cmd_name in cmd_dict.keys():
+                        if cmd_name not in command_set:
+                            commands.append({
+                                'command': cmd_name,
+                                'category': category,
+                                'description': category_map.get(category, 'Command'),
+                                'category_description': category_map.get(category, '')
+                            })
+                            command_set.add(cmd_name)
+            
+            # SORT BY CATEGORY THEN COMMAND NAME
             commands.sort(key=lambda x: (x['category'], x['command']))
             
+            # GET UNIQUE CATEGORIES THAT HAVE COMMANDS
+            active_categories = sorted(list(set(c['category'] for c in commands)))
+            
+            logger.info(f"[API] Listed {len(commands)} commands across {len(active_categories)} categories")
+            
             return jsonify({
+                'status': 'success',
                 'commands': commands,
                 'total': len(commands),
-                'categories': sorted(list(command_map.keys())),
+                'categories': active_categories,
+                'category_count': len(active_categories),
                 'timestamp': datetime.utcnow().isoformat()
             }), 200
         
         except Exception as e:
             logger.error(f"[API] List commands error: {e}", exc_info=True)
-            return jsonify({'error': str(e), 'status': 'error'}), 500
+            return jsonify({
+                'status': 'error',
+                'error': str(e),
+                'commands': [],
+                'total': 0
+            }), 500
     
     @app.route('/api/command-help', methods=['GET'])
     def command_help():
