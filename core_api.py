@@ -539,18 +539,18 @@ class CoreDatabaseManager:
         query="SELECT * FROM address_aliases WHERE alias=%s"
         return self.db.execute_query(query,(alias,),fetch_one=True)
     
-    def get_user_profile(self,user_id:str)->Dict[str,Any]:
-        """Get comprehensive user profile"""
-        user=self.get_user_by_id(user_id)
+    def get_user_profile(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """Get comprehensive user profile - returns None if not found"""
+        user = self.get_user_by_id(user_id)
         if not user:
-            return {}
-        keys=self.get_user_keys(user_id)
-        addresses=self.get_user_addresses(user_id)
+            return None
+        keys = self.get_user_keys(user_id)
+        addresses = self.get_user_addresses(user_id)
         return {
-            'user':user,
-            'keys':keys,
-            'addresses':addresses,
-            'totp_enabled':user.get('totp_enabled',False)
+            'user': user,
+            'keys': keys,
+            'addresses': addresses,
+            'totp_enabled': user.get('totp_enabled', False)
         }
     
     def update_user_profile(self,user_id:str,updates:Dict[str,Any]):
@@ -1503,25 +1503,26 @@ def create_blueprint()->Blueprint:
     # USER MANAGEMENT ROUTES
     # ═══════════════════════════════════════════════════════════════════════════════════
     
-    @bp.route('/users/profile/me',methods=['GET'])
+    @bp.route('/users/profile/me', methods=['GET'])
     @require_auth
     def get_my_profile():
         """Get current user profile with all details"""
         try:
-            profile=core_db.get_user_profile(g.user_id)
-            if not profile:
-                return jsonify({'error':'Profile not found'}),404
+            profile = core_db.get_user_profile(g.user_id)
+            if profile is None:
+                return jsonify({'error': 'Profile not found'}), 404
             
-            # Remove sensitive data
-            if 'user' in profile:
-                profile['user'].pop('password_hash',None)
-                profile['user'].pop('totp_secret',None)
+            # Remove sensitive data - check structure first
+            if isinstance(profile, dict) and 'user' in profile:
+                if isinstance(profile['user'], dict):
+                    profile['user'].pop('password_hash', None)
+                    profile['user'].pop('totp_secret', None)
             
-            return jsonify(profile),200
+            return jsonify(profile), 200
             
         except Exception as e:
-            logger.error(f"Get profile error: {e}",exc_info=True)
-            return jsonify({'error':'Failed to get profile'}),500
+            logger.error(f"Get profile error: {e}", exc_info=True)
+            return jsonify({'error': 'Failed to get profile'}), 500
     
     @bp.route('/users/profile/me',methods=['PUT'])
     @require_auth
@@ -2097,70 +2098,87 @@ def create_blueprint()->Blueprint:
     # ADVANCED USER PROFILE ROUTES
     # ═══════════════════════════════════════════════════════════════════════════════════
     
-    @bp.route('/users/profile/detailed',methods=['GET'])
+    @bp.route('/users/profile/detailed', methods=['GET'])
     @require_auth
     def get_detailed_profile():
         """Get detailed user profile with comprehensive information"""
         try:
-            user=core_db.get_user_by_id(g.user_id)
+            user = core_db.get_user_by_id(g.user_id)
             if not user:
-                return jsonify({'error':'User not found'}),404
+                return jsonify({'error': 'User not found'}), 404
             
-            keys=core_db.get_user_keys(g.user_id)
-            addresses=core_db.get_user_addresses(g.user_id)
-            sessions=core_db.get_user_sessions(g.user_id)
-            recent_events=core_db.get_security_events(g.user_id,20)
+            # Ensure user is a dict and make a copy before modifying
+            if isinstance(user, dict):
+                user = user.copy()
+            else:
+                user = {}
             
-            # Remove sensitive data
-            user.pop('password_hash',None)
-            user.pop('totp_secret',None)
+            # Remove sensitive data safely
+            user.pop('password_hash', None)
+            user.pop('totp_secret', None)
             
-            profile={
-                'user':user,
-                'keys':{
-                    'total':len(keys),
-                    'primary':[k for k in keys if k.get('is_primary',False)][0] if any(k.get('is_primary',False) for k in keys) else None,
-                    'keys':keys
+            keys = core_db.get_user_keys(g.user_id) or []
+            addresses = core_db.get_user_addresses(g.user_id) or []
+            sessions = core_db.get_user_sessions(g.user_id) or []
+            recent_events = core_db.get_security_events(g.user_id, 20) or []
+            
+            # Get primary safely using next()
+            primary_key = next((k for k in keys if k.get('is_primary', False)), None)
+            primary_address = next((a for a in addresses if a.get('is_primary', False)), None)
+            
+            profile = {
+                'user': user,
+                'keys': {
+                    'total': len(keys),
+                    'primary': primary_key,
+                    'keys': keys
                 },
-                'addresses':{
-                    'total':len(addresses),
-                    'primary':[a for a in addresses if a.get('is_primary',False)][0] if any(a.get('is_primary',False) for a in addresses) else None,
-                    'addresses':addresses
+                'addresses': {
+                    'total': len(addresses),
+                    'primary': primary_address,
+                    'addresses': addresses
                 },
-                'sessions':{
-                    'total':len(sessions),
-                    'active_sessions':sessions
+                'sessions': {
+                    'total': len(sessions),
+                    'active_sessions': sessions
                 },
-                'recent_activity':recent_events[:20]
+                'recent_activity': recent_events[:20]
             }
             
-            return jsonify(profile),200
+            return jsonify(profile), 200
             
         except Exception as e:
-            logger.error(f"Get detailed profile error: {e}",exc_info=True)
-            return jsonify({'error':'Failed to get detailed profile'}),500
+            logger.error(f"Get detailed profile error: {e}", exc_info=True)
+            return jsonify({'error': 'Failed to get detailed profile'}), 500
     
-    @bp.route('/users/profile/update-advanced',methods=['PUT'])
+    @bp.route('/users/profile/update-advanced', methods=['PUT'])
     @require_auth
     def update_advanced_profile():
         """Update advanced user profile fields"""
         try:
-            data=request.get_json()
-            user=core_db.get_user_by_id(g.user_id)
-            if not user:
-                return jsonify({'error':'User not found'}),404
+            data = request.get_json() or {}
+            if not data:
+                return jsonify({'error': 'No data provided'}), 400
             
-            allowed_fields={'bio','avatar_url','first_name','last_name','phone','company','location'}
-            update_data={k:v for k,v in data.items() if k in allowed_fields}
+            user = core_db.get_user_by_id(g.user_id)
+            if not user:
+                return jsonify({'error': 'User not found'}), 404
+            
+            allowed_fields = {'bio', 'avatar_url', 'first_name', 'last_name', 'phone', 'company', 'location'}
+            update_data = {k: v for k, v in data.items() if k in allowed_fields and v is not None}
             
             if update_data:
-                core_db.update_user_profile(g.user_id,update_data)
+                core_db.update_user_profile(g.user_id, update_data)
             
-            return jsonify({'success':True,'message':'Profile updated','updated_fields':update_data}),200
+            return jsonify({
+                'success': True,
+                'message': 'Profile updated' if update_data else 'No fields updated',
+                'updated_fields': update_data
+            }), 200
             
         except Exception as e:
-            logger.error(f"Update advanced profile error: {e}",exc_info=True)
-            return jsonify({'error':'Failed to update profile'}),500
+            logger.error(f"Update advanced profile error: {e}", exc_info=True)
+            return jsonify({'error': 'Failed to update profile'}), 500
     
     @bp.route('/users/account-settings',methods=['GET'])
     @require_auth

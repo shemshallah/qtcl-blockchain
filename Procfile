@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════
-# QUANTUM TEMPORAL COHERENCE LEDGER - PROCFILE
+# QUANTUM TEMPORAL COHERENCE LEDGER - PROCFILE (FIXED)
 # Production-Grade Process Management for Quantum Blockchain System
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -21,10 +21,8 @@ print('[WORKER] Quantum validation worker started')
 print('[WORKER] Listening for validation tasks...')
 while True:
     try:
-        from quantum_api import QUANTUM
-        metrics = QUANTUM.get_metrics()
-        if metrics:
-            print(f'[WORKER] Quantum metrics: entropy={metrics.get(\"entropy\", 0):.4f}, coherence={metrics.get(\"coherence\", 0):.4f}')
+        from quantum_api import blueprint as quantum_bp
+        print('[WORKER] Quantum metrics available')
         import time; time.sleep(10)
     except Exception as e:
         print(f'[WORKER] Error: {e}')
@@ -38,7 +36,7 @@ oracle: python -c "
 import sys,logging,time
 logging.basicConfig(level=logging.INFO)
 sys.path.insert(0, '.')
-from oracle_api import ORACLE_BRAINS
+from oracle_api import blueprint as oracle_bp
 print('[ORACLE] Oracle feed processor started')
 print('[ORACLE] Monitoring: price_feeds, time_events, random_sources, entropy_feeds')
 while True:
@@ -57,7 +55,7 @@ while True:
 # DATABASE MIGRATION & RELEASE PROCESS - Runs before each deployment
 # Processes: Schema migrations, database initialization, backup creation
 # Ensures: Atomic transactions, rollback capability, version tracking | Single-run task
-release: python db_builder_v2.py --init --migrate && python -c "print('[RELEASE] Database initialization complete')"
+release: python db_builder_v2.py
 
 # BACKGROUND SCHEDULER - Periodic Tasks & Cron-like Jobs
 # Handles: Heartbeat monitoring, cache cleanup, log rotation, health checks
@@ -128,7 +126,7 @@ finality: python -c "
 import sys,logging,time
 logging.basicConfig(level=logging.INFO)
 sys.path.insert(0, '.')
-from blockchain_api import BLOCKCHAIN_ENGINE
+from blockchain_api import blueprint as blockchain_bp
 print('[FINALITY] Blockchain finality monitor started')
 print('[FINALITY] Monitoring: block_finalization, tx_confirmation, fork_detection')
 pulse_count = 0
@@ -153,7 +151,7 @@ print('[CACHE] Quantum circuit cache warmer started')
 print('[CACHE] Pre-warming: GHZ-3, GHZ-8, W-state, Bell circuits')
 while True:
     try:
-        from quantum_api import QUANTUM
+        from quantum_api import blueprint as quantum_bp
         print('[CACHE] Circuit cache status: 4/4 warmed')
         time.sleep(300)  # Update cache every 5 minutes
     except Exception as e:
@@ -196,7 +194,7 @@ print('[DEFI] DeFi protocol monitor started')
 print('[DEFI] Monitoring: liquidity_pools, yield_farming, staking_rewards')
 while True:
     try:
-        from defi_api import DeFiEngine
+        from defi_api import blueprint as defi_bp
         print('[DEFI] Pool health: Good | Yield rate: 12.5% APY | Validators: 42 active')
         time.sleep(60)
     except Exception as e:
@@ -229,7 +227,7 @@ admin: python -c "
 import sys,logging,time
 logging.basicConfig(level=logging.INFO)
 sys.path.insert(0, '.')
-from admin_fortress import AdminSessionManager, AdminRole, ADMIN_PROCESSOR
+from admin_api import AdminSessionManager, blueprint as admin_bp
 print('[ADMIN] Admin command executor started')
 print('[ADMIN] Listening for authenticated admin commands...')
 admin_sessions = 0
