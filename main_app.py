@@ -823,6 +823,36 @@ def create_app():
             except:
                 logger.debug("[Bootstrap] oracle_api not available")
             
+            # Register authentication systems
+            try:
+                import auth_handlers
+                GLOBALS.register('AUTH_HANDLERS', auth_handlers, 'SECURITY', 'Authentication handlers module')
+                logger.info("[Bootstrap] ✓ Auth handlers registered")
+            except Exception as e:
+                logger.warning(f"[Bootstrap] ⚠ Auth handlers registration failed: {e}")
+            
+            # Register Bcrypt engine
+            try:
+                from auth_handlers import BcryptEngine
+                bcrypt_engine = BcryptEngine()
+                GLOBALS.register('BCRYPT_ENGINE', bcrypt_engine, 'SECURITY', 'Bcrypt password hashing engine')
+                logger.info("[Bootstrap] ✓ Bcrypt engine registered and initialized")
+            except Exception as e:
+                logger.warning(f"[Bootstrap] ⚠ Bcrypt engine registration failed: {e}")
+            
+            # Register Pseudoqubit Pool Manager
+            try:
+                from auth_handlers import PseudoqubitPoolManager
+                pq_pool = PseudoqubitPoolManager(db=db_manager)
+                GLOBALS.register('PSEUDOQUBIT_POOL', pq_pool, 'SECURITY', 'Pseudoqubit pool manager - 106496 lattice-point allocation')
+                
+                # Initialize pool on first run
+                pq_pool.initialize_pool()
+                
+                logger.info("[Bootstrap] ✓ Pseudoqubit pool registered and initialized (106496 lattice points)")
+            except Exception as e:
+                logger.warning(f"[Bootstrap] ⚠ Pseudoqubit pool registration failed: {e}")
+            
             # Start heartbeat systems
             bootstrap_heartbeat()
             
@@ -1087,6 +1117,26 @@ def setup_routes(app):
             logger.error(f"[API/Status] Error: {e}")
             return jsonify({'error': str(e)}), 500
 
+    @app.route('/api/pseudoqubit/pool/stats', methods=['GET'])
+    @handle_exceptions
+    def pseudoqubit_pool_stats():
+        """Get pseudoqubit pool statistics and utilization"""
+        try:
+            pq_pool = GLOBALS.PSEUDOQUBIT_POOL if BOOTSTRAP_INTEGRATION_AVAILABLE else None
+            
+            if pq_pool and hasattr(pq_pool, 'get_pool_stats'):
+                stats = pq_pool.get_pool_stats()
+                return jsonify(stats), 200
+            else:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Pseudoqubit pool not available'
+                }), 500
+        
+        except Exception as e:
+            logger.error(f"[API/PQ-Pool] Error: {e}")
+            return jsonify({'error': str(e)}), 500
+    
     @app.route('/api/system/bootstrap', methods=['GET', 'POST'])
     @handle_exceptions
     def system_bootstrap_status():

@@ -6021,13 +6021,45 @@ class GlobalCommandRegistry:
             # ===== LAYER 3: Pseudoqubit Assignment & Database Insertion =====
             user_id = f"user_{uuid.uuid4().hex[:16]}"
             
-            # Generate pseudoqubit ID
-            import hashlib
-            pq_hash = hashlib.sha256(f"{email}{user_id}{time.time()}".encode()).hexdigest()[:16]
-            pseudoqubit_id = f"pq_{pq_hash}"
+            # Get pseudoqubit from GLOBALS.PSEUDOQUBIT_POOL (managed pool with 106496 lattice points)
+            pq_pool = GLOBALS.PSEUDOQUBIT_POOL if hasattr(GLOBALS, 'PSEUDOQUBIT_POOL') else None
             
-            # Hash password
-            password_hash = hashlib.sha256(password.encode()).hexdigest()
+            if pq_pool and hasattr(pq_pool, 'get_next_available'):
+                try:
+                    pseudoqubit_id = pq_pool.get_next_available(user_id)
+                    if not pseudoqubit_id:
+                        logger.error("[Register:L3] No available pseudoqubits in pool!")
+                        return {
+                            'status': 'error',
+                            'error': 'Pseudoqubit pool exhausted',
+                            'code': 'NO_PSEUDOQUBITS_AVAILABLE'
+                        }
+                    logger.info(f"[Register:L3] ✓ Pseudoqubit assigned from pool: {pseudoqubit_id}")
+                except Exception as e:
+                    logger.warning(f"[Register:L3] Pool allocation failed: {e}, using fallback")
+                    # Fallback if pool fails
+                    import hashlib
+                    pq_hash = hashlib.sha256(f"{email}{user_id}{time.time()}".encode()).hexdigest()[:16]
+                    pseudoqubit_id = f"pq_{pq_hash}"
+            else:
+                # Fallback if pool not available
+                logger.warning("[Register:L3] Pseudoqubit pool not available, using fallback generation")
+                import hashlib
+                pq_hash = hashlib.sha256(f"{email}{user_id}{time.time()}".encode()).hexdigest()[:16]
+                pseudoqubit_id = f"pq_{pq_hash}"
+            
+            # Hash password using GLOBALS.BCRYPT_ENGINE if available
+            if bcrypt_engine and hasattr(bcrypt_engine, 'hash_password'):
+                try:
+                    password_hash = bcrypt_engine.hash_password(password)
+                    logger.info(f"[Register:L3] ✓ Password hashed with bcrypt")
+                except Exception as e:
+                    logger.warning(f"[Register:L3] Bcrypt hashing failed: {e}, using fallback")
+                    password_hash = hashlib.sha256(password.encode()).hexdigest()
+            else:
+                # Fallback to SHA256
+                password_hash = hashlib.sha256(password.encode()).hexdigest()
+                logger.warning(f"[Register:L3] Bcrypt engine not available, using SHA256")
             
             now = datetime.now(timezone.utc).isoformat()
             
@@ -6078,7 +6110,7 @@ class GlobalCommandRegistry:
         USER-LOGIN: Login user
         LAYER 1: Input validation
         LAYER 2: Database lookup
-        LAYER 3: Password verification (supports bcrypt, PBKDF2, and SHA256)
+        LAYER 3: Password verification (uses GLOBALS.BCRYPT_ENGINE if available)
         LAYER 4: Return user details with session
         """
         import logging
@@ -6116,7 +6148,7 @@ class GlobalCommandRegistry:
                 logger.error(f"[Login:L2] Database query error: {e}")
                 return {'status': 'error', 'error': 'Database error'}
             
-            # LAYER 3: Verify password - support multiple hash formats
+            # LAYER 3: Verify password - try GLOBALS.BCRYPT_ENGINE first
             if isinstance(user, list) and len(user) > 0:
                 user_data = user[0]
             else:
@@ -6126,20 +6158,31 @@ class GlobalCommandRegistry:
             password_verified = False
             hash_type = 'unknown'
             
-            # Try bcrypt first (starts with $2b$ or $2y$)
-            if stored_hash.startswith('$2b$') or stored_hash.startswith('$2y$') or stored_hash.startswith('$2a$'):
+            # Try GLOBALS.BCRYPT_ENGINE first (preferred)
+            bcrypt_engine = GLOBALS.BCRYPT_ENGINE if hasattr(GLOBALS, 'BCRYPT_ENGINE') else None
+            
+            if bcrypt_engine and hasattr(bcrypt_engine, 'verify_password'):
+                try:
+                    password_verified = bcrypt_engine.verify_password(password, stored_hash)
+                    hash_type = 'bcrypt_via_engine'
+                    logger.debug(f"[Login:L3] Using GLOBALS.BCRYPT_ENGINE for verification")
+                except Exception as e:
+                    logger.debug(f"[Login:L3] BCRYPT_ENGINE verification failed: {e}, trying fallback")
+            
+            # Fallback: Try bcrypt directly if hash starts with $2b$
+            if not password_verified and (stored_hash.startswith('$2b$') or stored_hash.startswith('$2y$') or stored_hash.startswith('$2a$')):
                 try:
                     import bcrypt
                     password_verified = bcrypt.checkpw(password.encode(), stored_hash.encode())
-                    hash_type = 'bcrypt'
-                    logger.debug(f"[Login:L3] Using bcrypt verification")
+                    hash_type = 'bcrypt_direct'
+                    logger.debug(f"[Login:L3] Using direct bcrypt verification")
                 except ImportError:
-                    logger.warning(f"[Login:L3] bcrypt not available, trying fallback")
+                    logger.warning(f"[Login:L3] bcrypt not available")
                 except Exception as e:
-                    logger.debug(f"[Login:L3] bcrypt check failed: {e}")
+                    logger.debug(f"[Login:L3] Direct bcrypt check failed: {e}")
             
             # Try PBKDF2 (contains $)
-            elif '$' in stored_hash and len(stored_hash) > 128:
+            if not password_verified and '$' in stored_hash and len(stored_hash) > 128:
                 try:
                     parts = stored_hash.split('$')
                     if len(parts) == 2:
@@ -6155,12 +6198,12 @@ class GlobalCommandRegistry:
                     logger.debug(f"[Login:L3] PBKDF2 check failed: {e}")
             
             # Fall back to SHA256 (64 char hex string)
-            else:
+            if not password_verified:
                 try:
                     password_hash = hashlib.sha256(password.encode()).hexdigest()
                     password_verified = password_hash == stored_hash
                     hash_type = 'sha256'
-                    logger.debug(f"[Login:L3] Using SHA256 verification")
+                    logger.debug(f"[Login:L3] Using SHA256 verification (fallback)")
                 except Exception as e:
                     logger.debug(f"[Login:L3] SHA256 check failed: {e}")
             
@@ -6370,11 +6413,27 @@ class GlobalCommandRegistry:
                 (user_id,)
             )
             
-            # Mark pseudoqubit as available for reuse
-            db.execute_update(
-                "UPDATE pseudoqubit_registry SET available=TRUE, released_at=NOW() WHERE pseudoqubit_id=%s",
-                (pq_id,)
-            )
+            # Release pseudoqubit back to pool using GLOBALS.PSEUDOQUBIT_POOL
+            pq_pool = GLOBALS.PSEUDOQUBIT_POOL if hasattr(GLOBALS, 'PSEUDOQUBIT_POOL') else None
+            
+            if pq_pool and hasattr(pq_pool, 'release_pseudoqubit'):
+                try:
+                    pq_pool.release_pseudoqubit(pq_id)
+                    logger.info(f"[Delete:L4] ✓ Pseudoqubit {pq_id} released back to pool for recycling")
+                except Exception as e:
+                    logger.warning(f"[Delete:L4] Pool release failed: {e}, marking as available in db")
+                    # Fallback: just mark as available in db
+                    db.execute_update(
+                        "UPDATE pseudoqubit_pool SET available=TRUE, released_at=NOW() WHERE pseudoqubit_id=%s",
+                        (pq_id,)
+                    )
+            else:
+                # Fallback if pool not available
+                logger.warning("[Delete:L4] Pseudoqubit pool not available, marking available in db")
+                db.execute_update(
+                    "UPDATE pseudoqubit_pool SET available=TRUE, released_at=NOW() WHERE pseudoqubit_id=%s",
+                    (pq_id,)
+                )
             
             return {
                 'status': 'success',

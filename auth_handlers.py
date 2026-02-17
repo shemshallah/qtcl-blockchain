@@ -767,6 +767,280 @@ def verify_password(password:str,hash_val:str)->bool:
     except:
         return False
 
+
+class PseudoqubitPoolManager:
+    """
+    PSEUDOQUBIT POOL MANAGER - Manages 106496 lattice-point pseudoqubits
+    
+    Each pseudoqubit represents a unique lattice point (0-106495)
+    - Pre-allocated: All 106496 created at initialization
+    - Sequential allocation: Next available assigned to new users
+    - Recycling: Deleted users' pseudoqubits return to available pool
+    - Managed as a whole: Not randomly generated, pool-based allocation
+    
+    GLOBAL REGISTRATION: GLOBALS.PSEUDOQUBIT_POOL
+    """
+    
+    TOTAL_PSEUDOQUBITS = 106496  # Total lattice points
+    
+    def __init__(self, db=None):
+        self.logger = logging.getLogger(__name__)
+        self.db = db
+        self.lock = threading.RLock()
+        self.logger.info(f"[PseudoqubitPoolManager] ✓ Initialized for {self.TOTAL_PSEUDOQUBITS} total pseudoqubits")
+    
+    def initialize_pool(self):
+        """Initialize the pseudoqubit pool - run once at startup"""
+        try:
+            if not self.db:
+                self.logger.warning("[PseudoqubitPool] ⚠ Database not available")
+                return False
+            
+            # Check if pool already initialized
+            count = self.db.execute(
+                "SELECT COUNT(*) as cnt FROM pseudoqubit_pool"
+            )
+            
+            if count and count[0].get('cnt', 0) > 0:
+                self.logger.info(f"[PseudoqubitPool] ✓ Pool already initialized with {count[0]['cnt']} pseudoqubits")
+                return True
+            
+            # Initialize all 106496 pseudoqubits
+            self.logger.info(f"[PseudoqubitPool] Initializing {self.TOTAL_PSEUDOQUBITS} pseudoqubits...")
+            
+            try:
+                # Method 1: Try batch insert if available
+                pq_records = []
+                for i in range(self.TOTAL_PSEUDOQUBITS):
+                    pq_id = f"pq_{i:06d}"  # pq_000000, pq_000001, etc.
+                    lattice_point = i      # 0, 1, 2, ..., 106495
+                    available = True
+                    assigned_to = None
+                    created_at = datetime.now(timezone.utc).isoformat()
+                    assigned_at = None
+                    released_at = None
+                    
+                    pq_records.append((
+                        pq_id, 
+                        lattice_point, 
+                        available, 
+                        assigned_to, 
+                        created_at, 
+                        assigned_at,
+                        released_at
+                    ))
+                
+                # Insert in batches of 1000 for performance
+                for batch_start in range(0, len(pq_records), 1000):
+                    batch = pq_records[batch_start:batch_start + 1000]
+                    batch_end = min(batch_start + 1000, len(pq_records))
+                    
+                    # Build SQL with proper NULL handling
+                    sql = """INSERT INTO pseudoqubit_pool 
+                             (pseudoqubit_id, lattice_point, available, assigned_to, created_at, assigned_at, released_at)
+                             VALUES """
+                    
+                    values = []
+                    placeholders = []
+                    for idx, record in enumerate(batch):
+                        placeholders.append(f"(%s, %s, %s, %s, %s, %s, %s)")
+                        values.extend(record)
+                    
+                    sql += ", ".join(placeholders)
+                    
+                    self.db.execute_update(sql, values)
+                    self.logger.debug(f"[PseudoqubitPool] Inserted batch {batch_start}-{batch_end}")
+                
+                self.logger.info(f"[PseudoqubitPool] ✓ Initialized all {self.TOTAL_PSEUDOQUBITS} pseudoqubits")
+                return True
+            
+            except Exception as e:
+                self.logger.error(f"[PseudoqubitPool] Batch insert failed: {e}")
+                return False
+        
+        except Exception as e:
+            self.logger.error(f"[PseudoqubitPool] Initialization failed: {e}")
+            return False
+    
+    def get_next_available(self, user_id: str) -> Optional[str]:
+        """Get next available pseudoqubit from pool and assign to user"""
+        try:
+            with self.lock:
+                if not self.db:
+                    self.logger.warning("[PseudoqubitPool] ⚠ Database not available")
+                    return None
+                
+                # Get next available pseudoqubit (prefer recently released for recycling)
+                pq = self.db.execute(
+                    """SELECT pseudoqubit_id, lattice_point 
+                       FROM pseudoqubit_pool 
+                       WHERE available = TRUE 
+                       ORDER BY released_at DESC NULLS LAST, lattice_point ASC 
+                       LIMIT 1"""
+                )
+                
+                if not pq:
+                    self.logger.error("[PseudoqubitPool] ✗ No available pseudoqubits in pool!")
+                    return None
+                
+                pq_data = pq[0] if isinstance(pq, list) else pq
+                pseudoqubit_id = pq_data.get('pseudoqubit_id')
+                lattice_point = pq_data.get('lattice_point')
+                
+                # Mark as assigned
+                self.db.execute_update(
+                    """UPDATE pseudoqubit_pool 
+                       SET available = FALSE, assigned_to = %s, assigned_at = NOW()
+                       WHERE pseudoqubit_id = %s""",
+                    (user_id, pseudoqubit_id)
+                )
+                
+                self.logger.info(f"[PseudoqubitPool] ✓ Assigned {pseudoqubit_id} (lattice_point={lattice_point}) to user {user_id}")
+                return pseudoqubit_id
+        
+        except Exception as e:
+            self.logger.error(f"[PseudoqubitPool] get_next_available failed: {e}")
+            return None
+    
+    def release_pseudoqubit(self, pseudoqubit_id: str) -> bool:
+        """Release pseudoqubit back to pool when user is deleted"""
+        try:
+            with self.lock:
+                if not self.db:
+                    self.logger.warning("[PseudoqubitPool] ⚠ Database not available")
+                    return False
+                
+                # Mark as available again
+                self.db.execute_update(
+                    """UPDATE pseudoqubit_pool 
+                       SET available = TRUE, assigned_to = NULL, released_at = NOW()
+                       WHERE pseudoqubit_id = %s""",
+                    (pseudoqubit_id,)
+                )
+                
+                self.logger.info(f"[PseudoqubitPool] ✓ Released {pseudoqubit_id} back to pool (available for reuse)")
+                return True
+        
+        except Exception as e:
+            self.logger.error(f"[PseudoqubitPool] release_pseudoqubit failed: {e}")
+            return False
+    
+    def get_pool_stats(self) -> Dict[str, Any]:
+        """Get statistics about pool usage"""
+        try:
+            if not self.db:
+                return {'status': 'error', 'message': 'Database not available'}
+            
+            stats = self.db.execute(
+                """SELECT 
+                   COUNT(*) as total,
+                   SUM(CASE WHEN available=TRUE THEN 1 ELSE 0 END) as available,
+                   SUM(CASE WHEN available=FALSE THEN 1 ELSE 0 END) as assigned
+                   FROM pseudoqubit_pool"""
+            )
+            
+            if stats:
+                s = stats[0] if isinstance(stats, list) else stats
+                return {
+                    'status': 'success',
+                    'total_pseudoqubits': s.get('total', 0),
+                    'available': s.get('available', 0),
+                    'assigned': s.get('assigned', 0),
+                    'utilization_percent': round(100 * s.get('assigned', 0) / self.TOTAL_PSEUDOQUBITS, 2)
+                }
+            else:
+                return {'status': 'error', 'message': 'Could not query pool stats'}
+        
+        except Exception as e:
+            self.logger.error(f"[PseudoqubitPool] get_pool_stats failed: {e}")
+            return {'status': 'error', 'message': str(e)}
+    
+    def health_check(self) -> Dict[str, Any]:
+        """Health check for pseudoqubit pool"""
+        stats = self.get_pool_stats()
+        return {
+            'status': 'healthy' if stats.get('status') == 'success' else 'unhealthy',
+            'pool_manager': 'PseudoqubitPoolManager',
+            'total_pseudoqubits': self.TOTAL_PSEUDOQUBITS,
+            'stats': stats,
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+
+
+class BcryptEngine:
+    """
+    GLOBAL BCRYPT HANDLER - Registered in GLOBALS.BCRYPT_ENGINE
+    All password hashing/verification goes through this
+    """
+    
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+        self.rounds = 12
+        self.logger.info("[BcryptEngine] ✓ Initialized with 12 rounds")
+    
+    def hash_password(self, password: str) -> str:
+        """Hash password with bcrypt (12 rounds)"""
+        try:
+            if not password:
+                raise ValueError("Password cannot be empty")
+            
+            salt = bcrypt.gensalt(rounds=self.rounds)
+            password_hash = bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
+            self.logger.debug(f"[BcryptEngine] ✓ Password hashed successfully")
+            return password_hash
+        except Exception as e:
+            self.logger.error(f"[BcryptEngine] Hash failed: {e}")
+            raise
+    
+    def verify_password(self, password: str, hash_val: str) -> bool:
+        """Verify password against bcrypt hash"""
+        try:
+            if not password or not hash_val:
+                return False
+            
+            result = bcrypt.checkpw(password.encode('utf-8'), hash_val.encode('utf-8'))
+            if result:
+                self.logger.debug(f"[BcryptEngine] ✓ Password verified successfully")
+            else:
+                self.logger.debug(f"[BcryptEngine] ✗ Password verification failed")
+            return result
+        except Exception as e:
+            self.logger.debug(f"[BcryptEngine] Verification error: {e}")
+            return False
+    
+    def hash_email(self, email: str) -> str:
+        """Hash email for pseudoqubit generation"""
+        try:
+            return hashlib.sha256(email.encode()).hexdigest()[:16]
+        except Exception as e:
+            self.logger.error(f"[BcryptEngine] Email hash failed: {e}")
+            return ""
+    
+    def generate_pseudoqubit_id(self, email: str, user_id: str) -> str:
+        """Generate unique pseudoqubit ID"""
+        try:
+            combined = f"{email}:{user_id}:{time.time()}"
+            pq_hash = hashlib.sha256(combined.encode()).hexdigest()[:16]
+            pseudoqubit_id = f"pq_{pq_hash}"
+            self.logger.debug(f"[BcryptEngine] ✓ Generated pseudoqubit: {pseudoqubit_id}")
+            return pseudoqubit_id
+        except Exception as e:
+            self.logger.error(f"[BcryptEngine] Pseudoqubit generation failed: {e}")
+            return ""
+    
+    def health_check(self) -> Dict[str, Any]:
+        """Health check for bcrypt engine"""
+        return {
+            'status': 'healthy',
+            'engine': 'BcryptEngine',
+            'rounds': self.rounds,
+            'bcrypt_available': True,
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+
+# Global instance for standalone usage
+_bcrypt_engine = BcryptEngine()
+
 class TokenManager:
     """JWT token creation and validation"""
     

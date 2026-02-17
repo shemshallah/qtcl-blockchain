@@ -506,6 +506,26 @@ class BootstrapGlobalsRegistry:
         return self.get('LEDGER_MANAGER')
     
     @property
+    def AUTH_HANDLERS(self):
+        """Access auth handlers module"""
+        return self.get('AUTH_HANDLERS')
+    
+    @property
+    def BCRYPT_ENGINE(self):
+        """Access bcrypt engine for password hashing/verification"""
+        return self.get('BCRYPT_ENGINE')
+    
+    @property
+    def PSEUDOQUBIT_POOL(self):
+        """Access pseudoqubit pool manager - manages 106496 lattice-point pseudoqubits"""
+        return self.get('PSEUDOQUBIT_POOL')
+    
+    @property
+    def AUTH_ENGINE(self):
+        """Alias for BCRYPT_ENGINE"""
+        return self.get('BCRYPT_ENGINE') or self.get('AUTH_ENGINE')
+    
+    @property
     def GLOBAL_STATE_SNAPSHOT(self):
         """Get snapshot of global state"""
         return GLOBAL_STATE.get_snapshot()
