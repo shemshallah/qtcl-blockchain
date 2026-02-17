@@ -618,9 +618,11 @@
             }
 
             executeCommand(cmd) {
-                const parts = cmd.split(' ');
+                const parts = cmd.trim().split(/\s+/);
                 const command = parts[0].toLowerCase();
+                const args = parts.slice(1);
 
+                // Handle built-in commands
                 switch(command) {
                     case 'login':
                         if (this.isAuthenticated) {
@@ -686,9 +688,66 @@
                         document.getElementById('terminal').innerHTML = '';
                         break;
 
+                    // Default: Try to execute as API command
                     default:
-                        this.printLine(`✗ Unknown command: ${command}`, 'error');
-                        this.printLine(`Type 'help' for commands`, 'info');
+                        // Parse command like "auth/login" or "quantum/status"
+                        if (command.includes('/')) {
+                            this.executeAPICommand(command, args);
+                        } else {
+                            this.printLine(`✗ Unknown command: ${command}`, 'error');
+                            this.printLine(`Type 'help' for commands`, 'info');
+                        }
+                }
+            }
+
+            async executeAPICommand(command, args) {
+                """Execute command via API endpoint"""
+                this.printLine('', 'info');
+                this.printLine(`Executing: ${command}...`, 'info');
+
+                try {
+                    const response = await fetch(`${API_URL}/command`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${this.authToken || ''}`
+                        },
+                        body: JSON.stringify({
+                            command: command,
+                            args: args,
+                            kwargs: {}
+                        })
+                    });
+
+                    const data = await response.json();
+
+                    if (response.ok) {
+                        this.printLine(`✓ ${command} executed`, 'success');
+                        
+                        // Display result
+                        if (data.result) {
+                            if (typeof data.result === 'object') {
+                                this.printLine(JSON.stringify(data.result, null, 2), 'text');
+                            } else {
+                                this.printLine(String(data.result), 'text');
+                            }
+                        }
+                        this.printLine('', 'info');
+                    } else {
+                        const errorMsg = data.error || 'Command execution failed';
+                        this.printLine(`✗ ${errorMsg}`, 'error');
+                        
+                        if (data.suggestions && data.suggestions.length > 0) {
+                            this.printLine('Did you mean:', 'info');
+                            data.suggestions.forEach(s => {
+                                this.printLine(`  • ${s}`, 'text');
+                            });
+                        }
+                        this.printLine('', 'info');
+                    }
+                } catch (e) {
+                    this.printLine(`✗ Error: ${e.message}`, 'error');
+                    this.printLine('', 'info');
                 }
             }
 
@@ -1241,25 +1300,50 @@
 
             showHelp() {
                 this.printLine('', 'info');
-                this.printLine('🚀 QTCL TERMINAL v5.0 - 81+ COMMANDS', 'warning');
+                this.printLine('🚀 QTCL TERMINAL v5.0 - COMMAND HELP', 'warning');
                 this.printLine('', 'info');
-                this.printLine('AUTH (6): login, logout, register, whoami, auth/2fa/setup, auth/token/refresh', 'text');
-                this.printLine('USER (4): user/profile, user/settings, user/list, user/details', 'text');
-                this.printLine('TRANSACTION (7): transaction/create, track, list, cancel, analyze, export, stats', 'text');
-                this.printLine('WALLET (8): wallet/create, list, balance, import, export, multisig/create, sign', 'text');
-                this.printLine('BLOCK (4): block/list, details, explorer, stats', 'text');
-                this.printLine('QUANTUM (5): quantum/status, circuit, entropy, validator, finality', 'text');
-                this.printLine('ORACLE (5): oracle/time, price, random, event, feed', 'text');
-                this.printLine('DEFI (6): defi/stake, unstake, borrow, repay, yield, pool', 'text');
-                this.printLine('GOVERNANCE (4): governance/vote, proposal, delegate, stats', 'text');
-                this.printLine('NFT (5): nft/mint, transfer, burn, metadata, collection', 'text');
-                this.printLine('CONTRACT (4): contract/deploy, execute, compile, state', 'text');
-                this.printLine('BRIDGE (4): bridge/initiate, status, history, wrapped', 'text');
-                this.printLine('👑 ADMIN (6): admin/users, approval, monitoring, settings, audit, emergency', 'text');
-                this.printLine('SYSTEM (5): system/status, health, config, backup, restore', 'text');
-                this.printLine('PARALLEL (3): parallel/execute, batch, monitor', 'text');
-                this.printLine('HELP (5): help, help/admin, help/search, help/commands, help/examples', 'text');
-                this.printLine('', 'info');
+                
+                // Fetch commands dynamically
+                fetch(`${API_URL}/command-help`)
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.help) {
+                            // Display each category
+                            for (const [key, category] of Object.entries(data.help)) {
+                                this.printLine(`📌 ${category.category.toUpperCase()}`, 'warning');
+                                this.printLine(`   ${category.description}`, 'text');
+                                category.commands.forEach(cmd => {
+                                    this.printLine(`   • ${cmd}`, 'text');
+                                });
+                                this.printLine('', 'info');
+                            }
+                        }
+                        this.printLine('Try: <category>/<command> [args]', 'info');
+                        this.printLine('Example: auth/login username password', 'info');
+                        this.printLine('', 'info');
+                    })
+                    .catch(e => {
+                        // Fallback help text
+                        this.printLine('🚀 QTCL TERMINAL v5.0 - 81+ COMMANDS', 'warning');
+                        this.printLine('', 'info');
+                        this.printLine('AUTH (6): login, logout, register, whoami, auth/2fa/setup, auth/token/refresh', 'text');
+                        this.printLine('USER (4): user/profile, user/settings, user/list, user/details', 'text');
+                        this.printLine('TRANSACTION (7): transaction/create, track, list, cancel, analyze, export, stats', 'text');
+                        this.printLine('WALLET (8): wallet/create, list, balance, import, export, multisig/create, sign', 'text');
+                        this.printLine('BLOCK (4): block/list, details, explorer, stats', 'text');
+                        this.printLine('QUANTUM (5): quantum/status, circuit, entropy, validator, finality', 'text');
+                        this.printLine('ORACLE (5): oracle/time, price, random, event, feed', 'text');
+                        this.printLine('DEFI (6): defi/stake, unstake, borrow, repay, yield, pool', 'text');
+                        this.printLine('GOVERNANCE (4): governance/vote, proposal, delegate, stats', 'text');
+                        this.printLine('NFT (5): nft/mint, transfer, burn, metadata, collection', 'text');
+                        this.printLine('CONTRACT (4): contract/deploy, execute, compile, state', 'text');
+                        this.printLine('BRIDGE (4): bridge/initiate, status, history, wrapped', 'text');
+                        this.printLine('👑 ADMIN (6): admin/users, approval, monitoring, settings, audit, emergency', 'text');
+                        this.printLine('SYSTEM (5): system/status, health, config, backup, restore', 'text');
+                        this.printLine('PARALLEL (3): parallel/execute, batch, monitor', 'text');
+                        this.printLine('HELP (5): help, help/admin, help/search, help/commands, help/examples', 'text');
+                        this.printLine('', 'info');
+                    });
             }
 
             showProfile() {

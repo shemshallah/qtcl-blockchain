@@ -77,6 +77,21 @@ except ImportError as e:
     sys.exit(1)
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════
+# IMPORT TERMINAL ENGINE FOR COMMAND EXECUTION
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+logger.info("[Main] Importing terminal engine for command execution...")
+try:
+    from terminal_logic import TerminalEngine, GlobalCommandRegistry, CommandRegistry
+    TERMINAL_ENGINE = None
+    logger.info("✅ [Main] Terminal engine imported")
+except ImportError as e:
+    logger.warning(f"⚠️ [Main] Terminal engine not available: {e}")
+    TERMINAL_ENGINE = None
+    GlobalCommandRegistry = None
+    CommandRegistry = None
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
 # INITIALIZE GLOBAL STATE (LEVEL 1 LOGIC)
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -541,6 +556,248 @@ def create_app():
                 'last_entry': ledger.last_entry_time.isoformat() if ledger.last_entry_time else None,
                 'timestamp': datetime.utcnow().isoformat()
             }), 200
+    
+    # ════════════════════════════════════════════════════════════════════════════════════════
+    # COMMAND EXECUTION ENDPOINTS
+    # ════════════════════════════════════════════════════════════════════════════════════════
+    
+    @app.route('/api/command', methods=['POST'])
+    def execute_command():
+        """Execute a command via the terminal engine"""
+        try:
+            data = request.get_json() or {}
+            command = data.get('command', '').strip()
+            args = data.get('args', [])
+            kwargs = data.get('kwargs', {})
+            
+            if not command:
+                return jsonify({'error': 'No command specified', 'status': 'error'}), 400
+            
+            # Get auth token if provided
+            auth_header = request.headers.get('Authorization', '')
+            auth_token = auth_header.replace('Bearer ', '') if auth_header else None
+            
+            # Execute command via GlobalCommandRegistry
+            if GlobalCommandRegistry:
+                try:
+                    # Convert command like 'auth/login' to registry lookup
+                    cmd_parts = command.split('/')
+                    
+                    # Build all command maps
+                    all_commands = {
+                        **GlobalCommandRegistry.AUTH_COMMANDS,
+                        **GlobalCommandRegistry.USER_COMMANDS,
+                        **GlobalCommandRegistry.TRANSACTION_COMMANDS,
+                        **GlobalCommandRegistry.WALLET_COMMANDS,
+                        **GlobalCommandRegistry.BLOCK_COMMANDS,
+                        **GlobalCommandRegistry.QUANTUM_COMMANDS,
+                        **GlobalCommandRegistry.ORACLE_COMMANDS,
+                        **GlobalCommandRegistry.DEFI_COMMANDS,
+                        **GlobalCommandRegistry.GOVERNANCE_COMMANDS,
+                        **GlobalCommandRegistry.NFT_COMMANDS,
+                        **GlobalCommandRegistry.CONTRACT_COMMANDS,
+                        **GlobalCommandRegistry.BRIDGE_COMMANDS,
+                        **GlobalCommandRegistry.ADMIN_COMMANDS,
+                        **GlobalCommandRegistry.SYSTEM_COMMANDS,
+                    }
+                    
+                    cmd_func = all_commands.get(command)
+                    
+                    if not cmd_func:
+                        # Try to find matching command
+                        matching = [k for k in all_commands.keys() if k.startswith(cmd_parts[0] + '/')]
+                        if matching:
+                            return jsonify({
+                                'error': f'Command not found. Did you mean: {matching}',
+                                'status': 'error',
+                                'suggestions': matching
+                            }), 404
+                        else:
+                            return jsonify({
+                                'error': f'Unknown command: {command}',
+                                'status': 'error'
+                            }), 404
+                    
+                    # Pass auth token to command if needed
+                    if auth_token:
+                        kwargs['auth_token'] = auth_token
+                    
+                    # Execute the command
+                    logger.info(f"[API] Executing command: {command} with args={args}, kwargs={kwargs}")
+                    result = cmd_func(*args, **kwargs)
+                    
+                    return jsonify({
+                        'status': 'success',
+                        'command': command,
+                        'result': result if isinstance(result, dict) else {'output': str(result)},
+                        'timestamp': datetime.utcnow().isoformat()
+                    }), 200
+                
+                except Exception as e:
+                    logger.error(f"[API] Command execution error: {e}", exc_info=True)
+                    return jsonify({
+                        'error': str(e),
+                        'status': 'error',
+                        'command': command,
+                        'timestamp': datetime.utcnow().isoformat()
+                    }), 500
+            else:
+                return jsonify({
+                    'error': 'Terminal engine not available',
+                    'status': 'error'
+                }), 503
+        
+        except Exception as e:
+            logger.error(f"[API] Command endpoint error: {e}", exc_info=True)
+            return jsonify({'error': str(e), 'status': 'error'}), 500
+    
+    @app.route('/api/commands', methods=['GET'])
+    def list_commands():
+        """List all available commands with metadata"""
+        try:
+            if not GlobalCommandRegistry:
+                return jsonify({
+                    'commands': [],
+                    'categories': [],
+                    'error': 'Terminal engine not available'
+                }), 503
+            
+            # Build all command maps
+            command_map = {
+                'auth': [(k, 'authentication') for k in GlobalCommandRegistry.AUTH_COMMANDS.keys()],
+                'user': [(k, 'user management') for k in GlobalCommandRegistry.USER_COMMANDS.keys()],
+                'transaction': [(k, 'transactions') for k in GlobalCommandRegistry.TRANSACTION_COMMANDS.keys()],
+                'wallet': [(k, 'wallet operations') for k in GlobalCommandRegistry.WALLET_COMMANDS.keys()],
+                'block': [(k, 'blockchain') for k in GlobalCommandRegistry.BLOCK_COMMANDS.keys()],
+                'quantum': [(k, 'quantum operations') for k in GlobalCommandRegistry.QUANTUM_COMMANDS.keys()],
+                'oracle': [(k, 'oracle services') for k in GlobalCommandRegistry.ORACLE_COMMANDS.keys()],
+                'defi': [(k, 'defi operations') for k in GlobalCommandRegistry.DEFI_COMMANDS.keys()],
+                'governance': [(k, 'governance') for k in GlobalCommandRegistry.GOVERNANCE_COMMANDS.keys()],
+                'nft': [(k, 'nft operations') for k in GlobalCommandRegistry.NFT_COMMANDS.keys()],
+                'contract': [(k, 'smart contracts') for k in GlobalCommandRegistry.CONTRACT_COMMANDS.keys()],
+                'bridge': [(k, 'bridge operations') for k in GlobalCommandRegistry.BRIDGE_COMMANDS.keys()],
+                'admin': [(k, 'admin') for k in GlobalCommandRegistry.ADMIN_COMMANDS.keys()],
+                'system': [(k, 'system') for k in GlobalCommandRegistry.SYSTEM_COMMANDS.keys()],
+            }
+            
+            # Flatten and format
+            commands = []
+            for category, cmds in command_map.items():
+                for cmd_name, desc in cmds:
+                    commands.append({
+                        'command': cmd_name,
+                        'category': category,
+                        'description': desc,
+                        'examples': f'{cmd_name} arg1 arg2'
+                    })
+            
+            # Sort by category then command
+            commands.sort(key=lambda x: (x['category'], x['command']))
+            
+            return jsonify({
+                'commands': commands,
+                'total': len(commands),
+                'categories': sorted(list(command_map.keys())),
+                'timestamp': datetime.utcnow().isoformat()
+            }), 200
+        
+        except Exception as e:
+            logger.error(f"[API] List commands error: {e}", exc_info=True)
+            return jsonify({'error': str(e), 'status': 'error'}), 500
+    
+    @app.route('/api/command-help', methods=['GET'])
+    def command_help():
+        """Get detailed help for all commands, grouped by category"""
+        try:
+            if not GlobalCommandRegistry:
+                return jsonify({
+                    'help': {},
+                    'error': 'Terminal engine not available'
+                }), 503
+            
+            # Build command help
+            help_text = {
+                'auth': {
+                    'category': 'Authentication',
+                    'description': 'User authentication commands',
+                    'commands': list(GlobalCommandRegistry.AUTH_COMMANDS.keys())
+                },
+                'user': {
+                    'category': 'User Management',
+                    'description': 'User profile and settings',
+                    'commands': list(GlobalCommandRegistry.USER_COMMANDS.keys())
+                },
+                'transaction': {
+                    'category': 'Transactions',
+                    'description': 'Transaction operations',
+                    'commands': list(GlobalCommandRegistry.TRANSACTION_COMMANDS.keys())
+                },
+                'wallet': {
+                    'category': 'Wallet',
+                    'description': 'Wallet operations',
+                    'commands': list(GlobalCommandRegistry.WALLET_COMMANDS.keys())
+                },
+                'block': {
+                    'category': 'Blockchain',
+                    'description': 'Block explorer and operations',
+                    'commands': list(GlobalCommandRegistry.BLOCK_COMMANDS.keys())
+                },
+                'quantum': {
+                    'category': 'Quantum',
+                    'description': 'Quantum operations and measurements',
+                    'commands': list(GlobalCommandRegistry.QUANTUM_COMMANDS.keys())
+                },
+                'oracle': {
+                    'category': 'Oracle',
+                    'description': 'Price, time, and event oracle',
+                    'commands': list(GlobalCommandRegistry.ORACLE_COMMANDS.keys())
+                },
+                'defi': {
+                    'category': 'DeFi',
+                    'description': 'DeFi operations (staking, lending, etc)',
+                    'commands': list(GlobalCommandRegistry.DEFI_COMMANDS.keys())
+                },
+                'governance': {
+                    'category': 'Governance',
+                    'description': 'Voting and proposals',
+                    'commands': list(GlobalCommandRegistry.GOVERNANCE_COMMANDS.keys())
+                },
+                'nft': {
+                    'category': 'NFT',
+                    'description': 'NFT minting and management',
+                    'commands': list(GlobalCommandRegistry.NFT_COMMANDS.keys())
+                },
+                'contract': {
+                    'category': 'Smart Contracts',
+                    'description': 'Deploy and execute contracts',
+                    'commands': list(GlobalCommandRegistry.CONTRACT_COMMANDS.keys())
+                },
+                'bridge': {
+                    'category': 'Bridge',
+                    'description': 'Cross-chain operations',
+                    'commands': list(GlobalCommandRegistry.BRIDGE_COMMANDS.keys())
+                },
+                'admin': {
+                    'category': 'Admin',
+                    'description': 'Administrative commands (admin only)',
+                    'commands': list(GlobalCommandRegistry.ADMIN_COMMANDS.keys())
+                },
+                'system': {
+                    'category': 'System',
+                    'description': 'System status and operations',
+                    'commands': list(GlobalCommandRegistry.SYSTEM_COMMANDS.keys())
+                },
+            }
+            
+            return jsonify({
+                'help': help_text,
+                'total_categories': len(help_text),
+                'timestamp': datetime.utcnow().isoformat()
+            }), 200
+        
+        except Exception as e:
+            logger.error(f"[API] Command help error: {e}", exc_info=True)
+            return jsonify({'error': str(e), 'status': 'error'}), 500
     
     # ════════════════════════════════════════════════════════════════════════════════════════
     # ERROR HANDLERS
