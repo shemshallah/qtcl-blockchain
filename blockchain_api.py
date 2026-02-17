@@ -2885,8 +2885,16 @@ def create_blueprint()->Blueprint:
                     return jresp({'error':'Circuit breaker open - blockchain service unavailable','correlation_id':correlation_id},503)
             
             # Route to appropriate handler
-            if cmd_type=='history':
+            if cmd_type=='all':
+                result=_handle_block_all(options,correlation_id)
+            elif cmd_type=='list':
+                result=_handle_block_list(options,correlation_id)
+            elif cmd_type=='history':
                 result=_handle_block_history(options,correlation_id)
+            elif cmd_type=='details':
+                result=_handle_block_details(block_ref,options,correlation_id)
+            elif cmd_type=='stats':
+                result=_handle_block_stats(options,correlation_id)
             elif cmd_type=='query' or cmd_type=='info':  # Alias: info -> query
                 result=_handle_block_query(block_ref,options,correlation_id)
             elif cmd_type=='validate':
@@ -4003,6 +4011,449 @@ def create_blueprint()->Blueprint:
             logger.debug(f"Failed to store quantum measurements: {e}")
     
     def _handle_block_history(options,correlation_id):
+        """
+        Block history: returns a paginated list of recent blocks from DB + chain stats.
+        ENHANCED: Checks for genesis block, handles empty database gracefully.
+        options:
+          limit      (int, default 20, max 200)
+          offset     (int, default 0)
+          min_height (int, optional — only blocks >= this height)
+          max_height (int, optional — only blocks <= this height)
+          validator  (str, optional — filter by validator address)
+          status     (str, optional — filter by status e.g. 'finalized')
+          order      ('asc'|'desc', default 'desc')
+        """
+        start_time=time.time()
+        try:
+            limit    = min(int(options.get('limit',20)),200)
+            offset   = int(options.get('offset',0))
+            order    = 'ASC' if str(options.get('order','desc')).upper()=='ASC' else 'DESC'
+            filters  = []
+            params: list = []
+
+            # Check if genesis block exists
+            genesis_check = db._exec("SELECT COUNT(*) as c FROM blocks WHERE height=0",fetch_one=True)
+            genesis_exists = genesis_check and genesis_check.get('c',0) > 0 if genesis_check else False
+            
+            # Check total block count
+            total_blocks_check = db._exec("SELECT COUNT(*) as c FROM blocks",fetch_one=True)
+            total_blocks = total_blocks_check.get('c',0) if total_blocks_check else 0
+            
+            logger.info(f"[BLOCK_HISTORY] Genesis exists: {genesis_exists}, Total blocks: {total_blocks}")
+            
+            # If no blocks, return diagnostic
+            if total_blocks == 0:
+                try:
+                    gs=get_globals()
+                    if gs and hasattr(gs,'block_command_metrics'):
+                        gs.block_command_metrics.record_history_query((time.time()-start_time)*1000)
+                except:
+                    pass
+                return {
+                    'blocks': [],
+                    'total_count': 0,
+                    'limit': limit,
+                    'offset': offset,
+                    'order': order,
+                    'page': 1,
+                    'pages': 0,
+                    'latest_height': 0,
+                    'finalized_height': 0,
+                    'chain_length': 0,
+                    'filters_applied': False,
+                    '_diagnostic': 'No blocks in database. Genesis block needs initialization.',
+                    '_genesis_exists': False,
+                    '_total_blocks': 0
+                }
+
+            if options.get('min_height') is not None:
+                filters.append('height >= %s'); params.append(int(options['min_height']))
+            if options.get('max_height') is not None:
+                filters.append('height <= %s'); params.append(int(options['max_height']))
+            if options.get('validator'):
+                filters.append('validator = %s'); params.append(str(options['validator']))
+            if options.get('status'):
+                filters.append('status = %s');   params.append(str(options['status']))
+
+            where_clause = ('WHERE ' + ' AND '.join(filters)) if filters else ''
+            params_with_limit = params + [limit, offset]
+
+            query = f"""
+                SELECT block_hash, height, previous_hash, timestamp, validator,
+                       merkle_root, quantum_merkle_root, status, confirmations,
+                       difficulty, nonce, size_bytes, gas_used, gas_limit,
+                       total_fees, reward, epoch, tx_capacity,
+                       temporal_coherence, is_orphan, quantum_proof_version,
+                       metadata
+                FROM blocks
+                {where_clause}
+                ORDER BY height {order}
+                LIMIT %s OFFSET %s
+            """
+
+            rows = db._exec(query, tuple(params_with_limit)) or []
+
+            # Count total (separate query for pagination)
+            count_query = f"SELECT COUNT(*) as c FROM blocks {where_clause}"
+            count_row   = db._exec(count_query, tuple(params), fetch_one=True)
+            total_count = int(count_row.get('c',0)) if count_row else len(rows)
+
+            # Augment each row with in-memory data if available
+            block_list = []
+            for row in rows:
+                b = _normalize_block(row) if isinstance(row,dict) else row
+                mem_block = chain.get_block(b.block_hash) if b.block_hash else None
+                entry = {
+                    'block_hash'       : b.block_hash,
+                    'height'           : b.height,
+                    'previous_hash'    : b.previous_hash,
+                    'timestamp'        : b.timestamp.isoformat() if hasattr(b.timestamp,'isoformat') else str(b.timestamp),
+                    'validator'        : b.validator,
+                    'merkle_root'      : b.merkle_root,
+                    'status'           : b.status.value if hasattr(b.status,'value') else str(b.status),
+                    'confirmations'    : b.confirmations,
+                    'difficulty'       : b.difficulty,
+                    'nonce'            : b.nonce,
+                    'size_bytes'       : b.size_bytes,
+                    'gas_used'         : b.gas_used,
+                    'gas_limit'        : b.gas_limit,
+                    'total_fees'       : str(b.total_fees) if b.total_fees else '0',
+                    'reward'           : str(b.reward) if b.reward else '0',
+                    'epoch'            : b.epoch,
+                    'tx_capacity'      : b.tx_capacity,
+                    'temporal_coherence': b.temporal_coherence,
+                    'is_orphan'        : b.is_orphan,
+                    'quantum_proof_version': b.quantum_proof_version,
+                    'from_memory'      : mem_block is not None
+                }
+                if isinstance(row,dict) and 'metadata' in row:
+                    try:
+                        entry['metadata']=json.loads(row['metadata']) if isinstance(row['metadata'],str) else row['metadata']
+                    except:
+                        entry['metadata']={}
+                block_list.append(entry)
+
+            # Update GLOBALS metrics
+            try:
+                gs=get_globals()
+                if gs and hasattr(gs,'block_command_metrics'):
+                    gs.block_command_metrics.record_history_query((time.time()-start_time)*1000)
+                    gs.metrics.api_calls['block_history']=gs.metrics.api_calls.get('block_history',0)+1
+            except:
+                pass
+
+            pages = (total_count + limit - 1) // limit if limit > 0 else 0
+            return {
+                'blocks': block_list,
+                'total_count': total_count,
+                'limit': limit,
+                'offset': offset,
+                'order': order,
+                'page': (offset // limit) + 1 if limit > 0 else 1,
+                'pages': pages,
+                'latest_height': rows[0].get('height',0) if rows else 0,
+                'finalized_height': total_blocks - 1 if total_blocks > 0 else 0,
+                'chain_length': total_blocks,
+                'filters_applied': len(filters) > 0,
+                'metrics': {'query_time_ms': (time.time()-start_time)*1000, 'blocks_returned': len(block_list)},
+                'correlation_id': correlation_id
+            }
+
+        except Exception as e:
+            logger.error(f"[BLOCK_HISTORY] Error: {e}",exc_info=True)
+            try:
+                gs=get_globals()
+                if gs and hasattr(gs,'block_command_metrics'):
+                    gs.block_command_metrics.record_error(str(e))
+            except:
+                pass
+            return {'status':'error','error':str(e),'correlation_id':correlation_id}
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# BLOCK ALL COMMAND - Complete blockchain snapshot with filters, caching
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    def _handle_block_all(options,correlation_id):
+        """Block all: Complete blockchain retrieval with caching and GLOBALS metrics"""
+        start_time=time.time()
+        try:
+            gs=None
+            try:
+                gs=get_globals()
+            except:
+                pass
+            
+            # L1: Validate options
+            min_height=int(options.get('min_height',0))
+            max_height=int(options.get('max_height',999999999))
+            limit=min(int(options.get('limit',10000)),100000)
+            order=str(options.get('order','DESC')).upper()
+            include_metadata=bool(options.get('include_metadata',False))
+            
+            # L2: Build query
+            where_conditions=[]
+            params=[]
+            if min_height>0: where_conditions.append('height >= %s'); params.append(min_height)
+            if max_height<999999999: where_conditions.append('height <= %s'); params.append(max_height)
+            where_clause='WHERE '+' AND '.join(where_conditions) if where_conditions else ''
+            
+            cols=['block_hash','height','previous_hash','timestamp','validator','merkle_root','quantum_merkle_root','status','confirmations','difficulty','nonce','size_bytes','gas_used','gas_limit','total_fees','reward','epoch','tx_capacity','temporal_coherence','is_orphan','quantum_proof_version']
+            if include_metadata: cols.append('metadata')
+            
+            query=f"SELECT {','.join(cols)} FROM blocks {where_clause} ORDER BY height {order} LIMIT %s"
+            params.append(limit)
+            
+            # L3: Execute query
+            blocks=db._exec(query,tuple(params)) if db else []
+            
+            # L4: Format results
+            formatted=[]
+            for b in blocks:
+                fb={'hash':b.get('block_hash',''),'height':b.get('height',0),'timestamp':str(b.get('timestamp','')),'validator':b.get('validator',''),'status':b.get('status',''),'confirmations':b.get('confirmations',0),'difficulty':b.get('difficulty',0),'size_bytes':b.get('size_bytes',0)}
+                if include_metadata:
+                    try:
+                        metadata=b.get('metadata',{})
+                        if isinstance(metadata,str): metadata=json.loads(metadata)
+                        fb['metadata']=metadata
+                    except:
+                        fb['metadata']={}
+                formatted.append(fb)
+            
+            # L5: Update metrics
+            query_time_ms=(time.time()-start_time)*1000
+            if gs and hasattr(gs,'block_command_metrics'):
+                gs.block_command_metrics.record_all_blocks_query(query_time_ms,len(formatted))
+                gs.metrics.api_calls['block_all']=gs.metrics.api_calls.get('block_all',0)+1
+            
+            return {'status':'success','blocks':formatted,'count':len(formatted),'metrics':{'query_time_ms':query_time_ms,'blocks_returned':len(formatted)},'correlation_id':correlation_id}
+        
+        except Exception as e:
+            logger.error(f"[BLOCK_ALL] Error: {e}",exc_info=True)
+            try:
+                gs=get_globals()
+                if gs and hasattr(gs,'block_command_metrics'):
+                    gs.block_command_metrics.record_error(str(e))
+            except:
+                pass
+            return {'status':'error','error':str(e),'correlation_id':correlation_id}
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# BLOCK LIST COMMAND - Paginated block listing
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    def _handle_block_list(options,correlation_id):
+        """Block list: Paginated block retrieval with sorting"""
+        start_time=time.time()
+        try:
+            gs=None
+            try:
+                gs=get_globals()
+            except:
+                pass
+            
+            # L1: Parse pagination
+            page=max(int(options.get('page',1)),1)
+            per_page=min(int(options.get('per_page',50)),500)
+            offset=(page-1)*per_page
+            sort_by=str(options.get('sort_by','height'))
+            sort_order=str(options.get('sort_order','DESC')).upper()
+            
+            # Validate sort_by
+            allowed_sorts=['height','timestamp','difficulty','size_bytes']
+            if sort_by not in allowed_sorts: sort_by='height'
+            
+            # L2: Get total count
+            count_result=db._exec("SELECT COUNT(*) as total FROM blocks",fetch_one=True) if db else None
+            total=count_result.get('total',0) if count_result else 0
+            
+            # L3: Calculate pagination
+            per_page_safe=per_page if per_page>0 else 1
+            total_pages=(total+per_page_safe-1)//per_page_safe
+            
+            # L4: Query paginated blocks
+            query=f"SELECT block_hash,height,previous_hash,timestamp,validator,merkle_root,quantum_merkle_root,status,confirmations,difficulty,nonce,size_bytes,gas_used,gas_limit,total_fees,reward,epoch,tx_capacity,temporal_coherence,is_orphan,quantum_proof_version FROM blocks ORDER BY {sort_by} {sort_order} LIMIT %s OFFSET %s"
+            blocks=db._exec(query,(per_page,offset)) if db else []
+            
+            # L5: Format and return with pagination
+            formatted=[]
+            for b in blocks:
+                formatted.append({'hash':b.get('block_hash',''),'height':b.get('height',0),'timestamp':str(b.get('timestamp','')),'validator':b.get('validator',''),'status':b.get('status',''),'confirmations':b.get('confirmations',0),'difficulty':b.get('difficulty',0),'size_bytes':b.get('size_bytes',0)})
+            
+            # Update metrics
+            query_time_ms=(time.time()-start_time)*1000
+            if gs and hasattr(gs,'block_command_metrics'):
+                gs.block_command_metrics.record_list_blocks_query(query_time_ms,len(formatted))
+                gs.metrics.api_calls['block_list']=gs.metrics.api_calls.get('block_list',0)+1
+            
+            return {'status':'success','blocks':formatted,'pagination':{'current_page':page,'per_page':per_page,'total_items':total,'total_pages':total_pages,'has_next':page<total_pages,'has_prev':page>1,'next_page':page+1 if page<total_pages else None,'prev_page':page-1 if page>1 else None},'metrics':{'query_time_ms':query_time_ms,'blocks_returned':len(formatted)},'correlation_id':correlation_id}
+        
+        except Exception as e:
+            logger.error(f"[BLOCK_LIST] Error: {e}",exc_info=True)
+            try:
+                gs=get_globals()
+                if gs and hasattr(gs,'block_command_metrics'):
+                    gs.block_command_metrics.record_error(str(e))
+            except:
+                pass
+            return {'status':'error','error':str(e),'correlation_id':correlation_id}
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# BLOCK DETAILS COMMAND - Deep block analysis with transactions and validation
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    def _handle_block_details(block_ref,options,correlation_id):
+        """Block details: Complete block information with transactions and validation"""
+        start_time=time.time()
+        try:
+            gs=None
+            try:
+                gs=get_globals()
+            except:
+                pass
+            
+            # L1: Find block by hash or height
+            block=None
+            if block_ref.isdigit():
+                result=db._exec("SELECT * FROM blocks WHERE height=%s LIMIT 1",(int(block_ref),),fetch_one=True) if db else None
+                block=result
+            else:
+                result=db._exec("SELECT * FROM blocks WHERE block_hash=%s LIMIT 1",(block_ref,),fetch_one=True) if db else None
+                block=result
+            
+            if not block:
+                return {'status':'error','error':f'Block not found: {block_ref}','correlation_id':correlation_id}
+            
+            # L2: Get transactions
+            txs=db._exec("SELECT tx_hash,from_address,to_address,amount,timestamp,status,gas_used FROM transactions WHERE block_hash=%s ORDER BY tx_index ASC LIMIT 1000",(block.get('block_hash',''),)) if db else []
+            
+            # L3: Get validations
+            validations=db._exec("SELECT validation_type,is_valid,validator,timestamp FROM block_validations WHERE block_hash=%s",(block.get('block_hash',''),)) if db else []
+            
+            # L4: Get related blocks
+            related={}
+            if block.get('previous_hash'):
+                prev=db._exec("SELECT height,block_hash FROM blocks WHERE block_hash=%s LIMIT 1",(block['previous_hash'],),fetch_one=True) if db else None
+                if prev: related['previous']={'hash':prev.get('block_hash'),'height':prev.get('height')}
+            if block.get('block_hash'):
+                nxt=db._exec("SELECT height,block_hash FROM blocks WHERE previous_hash=%s LIMIT 1",(block['block_hash'],),fetch_one=True) if db else None
+                if nxt: related['next']={'hash':nxt.get('block_hash'),'height':nxt.get('height')}
+            
+            # L5: Format detailed response
+            validation_map={}
+            for v in validations:
+                vtype=v.get('validation_type','')
+                if vtype not in validation_map:
+                    validation_map[vtype]={'type':vtype,'is_valid':v.get('is_valid',False),'validators':[]}
+                validation_map[vtype]['validators'].append(v.get('validator',''))
+            
+            detailed_block={
+                'hash':block.get('block_hash',''),
+                'height':block.get('height',0),
+                'timestamp':str(block.get('timestamp','')),
+                'previous_hash':block.get('previous_hash',''),
+                'validator':block.get('validator',''),
+                'merkle_root':block.get('merkle_root',''),
+                'quantum_merkle_root':block.get('quantum_merkle_root',''),
+                'status':block.get('status',''),
+                'confirmations':block.get('confirmations',0),
+                'difficulty':block.get('difficulty',0),
+                'nonce':block.get('nonce',0),
+                'size_bytes':block.get('size_bytes',0),
+                'size_kb':block.get('size_bytes',0)/1024 if block.get('size_bytes') else 0,
+                'gas_used':block.get('gas_used',0),
+                'gas_limit':block.get('gas_limit',0),
+                'total_fees':float(block.get('total_fees',0)) if block.get('total_fees') else 0,
+                'reward':float(block.get('reward',0)) if block.get('reward') else 0,
+                'epoch':block.get('epoch',0),
+                'temporal_coherence':block.get('temporal_coherence',0),
+                'is_orphan':block.get('is_orphan',False),
+                'transactions':{'count':len(txs),'details':txs,'total_value':sum(float(t.get('amount',0)) for t in txs),'total_gas_used':sum(t.get('gas_used',0) for t in txs)},
+                'validations':{'validations':list(validation_map.values()),'is_confirmed':all(v['is_valid'] for v in validation_map.values()) if validation_map else False,'validator_count':len(set(v.get('validator','') for v in validations))},
+                'related_blocks':related
+            }
+            
+            # Update metrics
+            query_time_ms=(time.time()-start_time)*1000
+            if gs and hasattr(gs,'block_command_metrics'):
+                gs.block_command_metrics.record_details_query(query_time_ms)
+                gs.metrics.api_calls['block_details']=gs.metrics.api_calls.get('block_details',0)+1
+            
+            return {'status':'success','block':detailed_block,'metrics':{'query_time_ms':query_time_ms,'transactions_found':len(txs)},'correlation_id':correlation_id}
+        
+        except Exception as e:
+            logger.error(f"[BLOCK_DETAILS] Error: {e}",exc_info=True)
+            try:
+                gs=get_globals()
+                if gs and hasattr(gs,'block_command_metrics'):
+                    gs.block_command_metrics.record_error(str(e))
+            except:
+                pass
+            return {'status':'error','error':str(e),'correlation_id':correlation_id}
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# BLOCK STATS COMMAND - Comprehensive statistics
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    def _handle_block_stats(options,correlation_id):
+        """Block stats: Comprehensive blockchain statistics"""
+        start_time=time.time()
+        try:
+            gs=None
+            try:
+                gs=get_globals()
+            except:
+                pass
+            
+            # L1: Get basic stats
+            basic=db._exec("SELECT COUNT(*) as total_blocks,MAX(height) as max_height,MIN(timestamp) as first_block_time,MAX(timestamp) as latest_block_time,AVG(CAST(size_bytes AS FLOAT)) as avg_size_bytes,SUM(CAST(size_bytes AS FLOAT)) as total_size_bytes,AVG(CAST(gas_used AS FLOAT)) as avg_gas_used,AVG(CAST(difficulty AS FLOAT)) as avg_difficulty,SUM(CAST(reward AS FLOAT)) as total_reward,SUM(CAST(total_fees AS FLOAT)) as total_fees,COUNT(DISTINCT validator) as unique_validators FROM blocks",fetch_one=True) if db else {}
+            
+            # L2: Get performance stats
+            perf=db._exec("SELECT AVG(CAST(size_bytes AS FLOAT)) as avg_size_bytes,STDDEV(CAST(size_bytes AS FLOAT)) as stdev_size_bytes FROM blocks",fetch_one=True) if db else {}
+            
+            # L3: Get distribution by status
+            dist=db._exec("SELECT status,COUNT(*) as count FROM blocks GROUP BY status") if db else []
+            distribution={d.get('status','unknown'):{' count':d.get('count',0)} for d in dist}
+            
+            # L4: Get top validators
+            validators=db._exec("SELECT validator,COUNT(*) as blocks_mined,SUM(CAST(reward AS FLOAT)) as total_reward FROM blocks WHERE validator IS NOT NULL GROUP BY validator ORDER BY blocks_mined DESC LIMIT 10") if db else []
+            
+            # L5: Compile stats
+            stats={
+                'basic':{
+                    'total_blocks':basic.get('total_blocks',0),
+                    'chain_height':basic.get('max_height',0),
+                    'first_block_time':str(basic.get('first_block_time','')),
+                    'latest_block_time':str(basic.get('latest_block_time','')),
+                    'avg_block_size_kb':basic.get('avg_size_bytes',0)/1024 if basic.get('avg_size_bytes') else 0,
+                    'total_size_gb':basic.get('total_size_bytes',0)/(1024**3) if basic.get('total_size_bytes') else 0,
+                    'avg_gas_per_block':basic.get('avg_gas_used',0),
+                    'avg_difficulty':basic.get('avg_difficulty',0),
+                    'total_reward_issued':basic.get('total_reward',0),
+                    'total_fees_collected':basic.get('total_fees',0),
+                    'unique_validators':basic.get('unique_validators',0)
+                },
+                'distribution':distribution,
+                'top_validators':[{'validator':v.get('validator',''),'blocks_mined':v.get('blocks_mined',0),'total_reward':v.get('total_reward',0)} for v in validators],
+                'command_metrics':gs.block_command_metrics.get_comprehensive_stats() if gs and hasattr(gs,'block_command_metrics') else {}
+            }
+            
+            # Update metrics
+            query_time_ms=(time.time()-start_time)*1000
+            if gs and hasattr(gs,'block_command_metrics'):
+                gs.block_command_metrics.record_stats_query(query_time_ms)
+                gs.metrics.api_calls['block_stats']=gs.metrics.api_calls.get('block_stats',0)+1
+            
+            return {'status':'success','stats':stats,'metrics':{'query_time_ms':query_time_ms},'correlation_id':correlation_id}
+        
+        except Exception as e:
+            logger.error(f"[BLOCK_STATS] Error: {e}",exc_info=True)
+            try:
+                gs=get_globals()
+                if gs and hasattr(gs,'block_command_metrics'):
+                    gs.block_command_metrics.record_error(str(e))
+            except:
+                pass
+            return {'status':'error','error':str(e),'correlation_id':correlation_id}
         """
         Block history: returns a paginated list of recent blocks from DB + chain stats.
         ENHANCED: Checks for genesis block, handles empty database gracefully.

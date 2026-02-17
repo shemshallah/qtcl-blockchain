@@ -305,6 +305,47 @@ class TerminalState:
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 
 @dataclass
+class BlockCommandMetrics:
+    """Block command metrics tracking"""
+    all_blocks_queries: int = 0
+    list_blocks_queries: int = 0
+    history_queries: int = 0
+    details_queries: int = 0
+    stats_queries: int = 0
+    total_blocks_retrieved: int = 0
+    query_times: deque = field(default_factory=lambda: deque(maxlen=1000))
+    cache_hits: int = 0
+    cache_misses: int = 0
+    
+    def record_all_blocks_query(self, duration_ms: float, count: int):
+        self.all_blocks_queries += 1
+        self.total_blocks_retrieved += count
+        self.query_times.append({'type': 'all', 'duration_ms': duration_ms, 'timestamp': datetime.utcnow()})
+    
+    def record_list_blocks_query(self, duration_ms: float, count: int):
+        self.list_blocks_queries += 1
+        self.total_blocks_retrieved += count
+        self.query_times.append({'type': 'list', 'duration_ms': duration_ms, 'timestamp': datetime.utcnow()})
+    
+    def record_history_query(self, duration_ms: float):
+        self.history_queries += 1
+        self.query_times.append({'type': 'history', 'duration_ms': duration_ms, 'timestamp': datetime.utcnow()})
+    
+    def record_details_query(self, duration_ms: float):
+        self.details_queries += 1
+        self.query_times.append({'type': 'details', 'duration_ms': duration_ms, 'timestamp': datetime.utcnow()})
+    
+    def record_stats_query(self, duration_ms: float):
+        self.stats_queries += 1
+        self.query_times.append({'type': 'stats', 'duration_ms': duration_ms, 'timestamp': datetime.utcnow()})
+    
+    def record_cache_hit(self):
+        self.cache_hits += 1
+    
+    def record_cache_miss(self):
+        self.cache_misses += 1
+
+@dataclass
 class ApplicationMetrics:
     """Application-wide metrics"""
     http_requests: int = 0
@@ -429,6 +470,7 @@ class GlobalState:
     # ════════════════════════════════════════════════════════════════════════════════════════
     
     metrics: ApplicationMetrics = field(default_factory=ApplicationMetrics)
+    block_command_metrics: BlockCommandMetrics = field(default_factory=BlockCommandMetrics)
     rate_limiting: RateLimiting = field(default_factory=RateLimiting)
     config: Dict[str, Any] = field(default_factory=dict)
     
