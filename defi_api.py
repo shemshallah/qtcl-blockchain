@@ -161,7 +161,7 @@ class GovernanceProposal:
     yes_votes:Decimal=Decimal('0')
     no_votes:Decimal=Decimal('0')
     abstain_votes:Decimal=Decimal('0')
-    veto_votes:Decimal('0')
+    veto_votes:Decimal=Decimal('0')
     quorum_threshold:Decimal=Decimal('0.33')
     pass_threshold:Decimal=Decimal('0.5')
     execution_data:Optional[Dict[str,Any]]=None

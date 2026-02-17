@@ -848,15 +848,14 @@ def create_blueprint()->Blueprint:
     bp=Blueprint('core_api',__name__,url_prefix='/api')
     core_db=CoreDatabaseManager(db_manager)
     
-    if config is None:
-        config={
-            'jwt_secret':os.getenv('JWT_SECRET',secrets.token_urlsafe(64)),
-            'jwt_algorithm':'HS512',
-            'jwt_expiration_hours':24,
-            'password_min_length':12,
-            'max_login_attempts':5,
-            'lockout_duration_minutes':30
-        }
+    config={
+        'jwt_secret':os.getenv('JWT_SECRET',secrets.token_urlsafe(64)),
+        'jwt_algorithm':'HS512',
+        'jwt_expiration_hours':24,
+        'password_min_length':12,
+        'max_login_attempts':5,
+        'lockout_duration_minutes':30
+    }
     
     # ═══════════════════════════════════════════════════════════════════════════════════
     # DECORATORS
