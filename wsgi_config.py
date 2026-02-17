@@ -52,6 +52,11 @@ logger=logging.getLogger(__name__)
 
 db_builder=None
 quantum_lattice_module=None
+HEARTBEAT=None
+LATTICE=None
+LATTICE_NEURAL_REFRESH=None
+W_STATE_ENHANCED=None
+NOISE_BATH_ENHANCED=None
 
 try:
     import db_builder_v2 as db_builder
@@ -62,6 +67,30 @@ except Exception as e:
 try:
     import quantum_lattice_control_live_complete as quantum_lattice_module
     logger.info("[Init] ✓ quantum_lattice loaded")
+    
+    # ✅ EXPLICITLY IMPORT HEARTBEAT AND SUBSYSTEMS
+    logger.info("[Init] Importing quantum heartbeat and subsystems...")
+    try:
+        from quantum_lattice_control_live_complete import (
+            HEARTBEAT as _HB,
+            LATTICE as _LAT,
+            LATTICE_NEURAL_REFRESH as _LNR,
+            W_STATE_ENHANCED as _WSE,
+            NOISE_BATH_ENHANCED as _NBE
+        )
+        HEARTBEAT = _HB
+        LATTICE = _LAT
+        LATTICE_NEURAL_REFRESH = _LNR
+        W_STATE_ENHANCED = _WSE
+        NOISE_BATH_ENHANCED = _NBE
+        logger.info("[Init] ✓ HEARTBEAT object imported successfully")
+        logger.info(f"[Init] ✓ Heartbeat status: running={HEARTBEAT.running if HEARTBEAT else 'N/A'}")
+        logger.info(f"[Init] ✓ Listeners registered: {len(HEARTBEAT.listeners) if HEARTBEAT else 0}")
+    except Exception as e:
+        logger.error(f"[Init] ✗ Failed to import heartbeat: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
 except Exception as e:
     logger.warning(f"[Init] quantum_lattice: {e}")
 
@@ -1611,6 +1640,52 @@ def create_app()->Flask:
     CORS(app)
     bp=create_command_center_blueprint()
     app.register_blueprint(bp)
+    
+    # ✅ ADD HEARTBEAT STATUS ENDPOINT
+    @app.route('/quantum/heartbeat/status', methods=['GET'])
+    def heartbeat_status():
+        """Get quantum heartbeat status"""
+        if HEARTBEAT is None:
+            return jsonify({
+                'status': 'offline',
+                'message': 'Heartbeat not initialized',
+                'timestamp': time.time()
+            }), 503
+        
+        metrics = HEARTBEAT.get_metrics()
+        neural_state = LATTICE_NEURAL_REFRESH.get_state() if LATTICE_NEURAL_REFRESH else {}
+        w_state = W_STATE_ENHANCED.get_state() if W_STATE_ENHANCED else {}
+        noise_state = NOISE_BATH_ENHANCED.get_state() if NOISE_BATH_ENHANCED else {}
+        
+        return jsonify({
+            'status': 'online' if metrics['running'] else 'offline',
+            'heartbeat': {
+                'running': metrics['running'],
+                'pulse_count': metrics['pulse_count'],
+                'frequency_hz': metrics['frequency'],
+                'listeners': metrics['listeners'],
+                'errors': metrics['error_count'],
+                'sync_count': metrics['sync_count'],
+                'desync_count': metrics['desync_count']
+            },
+            'subsystems': {
+                'neural_network': {
+                    'neurons': 57,
+                    'weight_updates': neural_state.get('total_weight_updates', 0),
+                    'convergence': neural_state.get('convergence_status', 'unknown')
+                },
+                'w_state': {
+                    'superposition_states': w_state.get('superposition_states', 0),
+                    'coherence_avg': w_state.get('coherence_avg', 0)
+                },
+                'noise_bath': {
+                    'fidelity_preservation': noise_state.get('fidelity_preservation_rate', 0),
+                    'non_markovian_order': noise_state.get('non_markovian_order', 0)
+                }
+            },
+            'timestamp': time.time()
+        }), 200
+    
     @app.route('/',methods=['GET'])
     def home():
         return open(os.path.join(PROJECT_ROOT,'index.html')).read() if os.path.exists(os.path.join(PROJECT_ROOT,'index.html')) else '<html><body><h1>QTCL</h1><p><a href=/api>API</a></p></body></html>',200,{'Content-Type':'text/html'}
@@ -1627,6 +1702,25 @@ def initialize_command_center()->None:
     logger.info("║ QUANTUM TEMPORAL COHERENCE LEDGER - COMMAND CENTER INITIALIZATION v5.0.0".ljust(151)+"║")
     logger.info("║ Master WSGI Application - Single File All-In-One Control System".ljust(151)+"║")
     logger.info("╚"+"═"*150+"╝")
+    
+    # ✅ EXPLICITLY ACTIVATE HEARTBEAT BEFORE COMMAND INITIALIZATION
+    if HEARTBEAT is not None:
+        logger.info("\n[Init] 🫀 ACTIVATING QUANTUM HEARTBEAT SYSTEM...")
+        try:
+            if not HEARTBEAT.running:
+                logger.info(f"[Init]   Listeners registered: {len(HEARTBEAT.listeners)}")
+                logger.info("[Init]   Starting heartbeat pulse...")
+                HEARTBEAT.start()
+                time.sleep(0.5)  # Give it a moment to start
+                logger.info(f"[Init] ✅ HEARTBEAT ACTIVATED - Running={HEARTBEAT.running}, Pulses={HEARTBEAT.pulse_count}")
+            else:
+                logger.info(f"[Init] ✓ Heartbeat already running - Pulses={HEARTBEAT.pulse_count}")
+        except Exception as e:
+            logger.error(f"[Init] ❌ Failed to start heartbeat: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+    else:
+        logger.warning("[Init] ⚠️ HEARTBEAT NOT AVAILABLE - Quantum subsystems offline")
     
     try:
         if db_builder and hasattr(db_builder,'init_db'):
