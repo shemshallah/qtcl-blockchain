@@ -3,774 +3,204 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>QTCL Terminal | Quantum Lattice Control Live</title>
+    <title>QTCL Terminal</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        html, body {
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-        }
-        
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { width: 100%; height: 100%; overflow: hidden; }
         body {
-            background: #0a0a0a;
-            color: #00ff99;
-            font-family: 'JetBrains Mono', 'Courier New', monospace;
-            letter-spacing: 0.5px;
+            background: #141414;
+            color: #b0b0b0;
+            font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+            font-size: 13px;
+            line-height: 1.5;
         }
-        
-        .terminal-wrapper {
+        .container {
             display: flex;
             flex-direction: column;
             height: 100vh;
-            width: 100%;
-            background: linear-gradient(135deg, #0a0a0a 0%, #0f0f15 50%, #0a0a12 100%);
-            border: 1px solid #1a1a2e;
+            padding: 12px;
+            gap: 8px;
         }
-        
-        /* ═══════════════════════════════════════════════════════════════════════════════════ */
-        /* HEADER */
-        /* ═══════════════════════════════════════════════════════════════════════════════════ */
-        
-        .terminal-header {
-            background: linear-gradient(180deg, rgba(0,25,50,0.95) 0%, rgba(0,15,30,0.9) 100%);
-            border-bottom: 2px solid #00ff99;
-            padding: 16px 20px;
-            box-shadow: 0 4px 20px rgba(0,255,153,0.1), inset 0 1px 0 rgba(255,255,255,0.1);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        
-        .header-left {
-            display: flex;
-            align-items: center;
-            gap: 15px;
-        }
-        
-        .heartbeat-indicator {
-            width: 12px;
-            height: 12px;
-            background: #00ff99;
-            border-radius: 50%;
-            box-shadow: 0 0 15px #00ff99, inset 0 0 8px rgba(0,255,153,0.5);
-            animation: heartbeat 1s ease-in-out infinite;
-        }
-        
-        @keyframes heartbeat {
-            0%, 100% { box-shadow: 0 0 15px #00ff99, inset 0 0 8px rgba(0,255,153,0.5); opacity: 1; }
-            50% { box-shadow: 0 0 5px #00ff99, inset 0 0 2px rgba(0,255,153,0.2); opacity: 0.5; }
-        }
-        
-        .header-title {
-            font-size: 16px;
-            font-weight: bold;
-            color: #00ff99;
-            text-shadow: 0 0 20px rgba(0,255,153,0.3);
-            letter-spacing: 2px;
-        }
-        
-        .header-subtitle {
-            font-size: 12px;
-            color: #b0b0b0;
-            font-weight: 300;
-        }
-        
-        .header-right {
-            display: flex;
-            gap: 20px;
-            align-items: center;
-            font-size: 11px;
+        .header {
+            padding: 8px 12px;
+            border-bottom: 1px solid #2a2a2a;
             color: #808080;
+            font-size: 12px;
+            letter-spacing: 1px;
         }
-        
-        .status-badge {
-            background: rgba(0,255,153,0.1);
-            border: 1px solid #00ff99;
-            padding: 4px 10px;
-            border-radius: 3px;
-            color: #00ff99;
-            font-size: 11px;
+        .header-text {
+            color: #606060;
+        }
+        .status {
+            float: right;
+            color: #008080;
             font-weight: bold;
         }
-        
-        /* ═══════════════════════════════════════════════════════════════════════════════════ */
-        /* MAIN CONTENT AREA */
-        /* ═══════════════════════════════════════════════════════════════════════════════════ */
-        
-        .terminal-content {
-            display: flex;
-            flex: 1;
-            overflow: hidden;
-            gap: 0;
-        }
-        
-        .terminal-main {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            background: #0a0a0a;
-            border-right: 1px solid #1a1a2e;
-        }
-        
-        /* ═════════════════════════════════════════════════════════════════════════════════ */
-        /* OUTPUT PANEL */
-        /* ═════════════════════════════════════════════════════════════════════════════════ */
-        
-        .terminal-output {
+        .output {
             flex: 1;
             overflow-y: auto;
-            overflow-x: hidden;
-            padding: 16px 20px;
+            padding: 8px 12px;
             background: #0a0a0a;
-            scroll-behavior: smooth;
+            border: 1px solid #1a1a1a;
         }
-        
-        .terminal-output::-webkit-scrollbar {
-            width: 8px;
+        .output::-webkit-scrollbar {
+            width: 6px;
         }
-        
-        .terminal-output::-webkit-scrollbar-track {
-            background: rgba(0,0,0,0.3);
+        .output::-webkit-scrollbar-track {
+            background: #0a0a0a;
         }
-        
-        .terminal-output::-webkit-scrollbar-thumb {
-            background: linear-gradient(to bottom, #00ff99, #00ccff);
-            border-radius: 4px;
-            box-shadow: 0 0 10px rgba(0,255,153,0.2);
+        .output::-webkit-scrollbar-thumb {
+            background: #2a2a2a;
+            border-radius: 3px;
         }
-        
-        .terminal-output::-webkit-scrollbar-thumb:hover {
-            background: linear-gradient(to bottom, #00ff99, #00ffff);
-        }
-        
-        .terminal-line {
-            margin-bottom: 8px;
-            padding: 4px 8px;
-            font-size: 13px;
-            line-height: 1.6;
+        .line {
+            margin-bottom: 4px;
             white-space: pre-wrap;
             word-wrap: break-word;
-            border-left: 3px solid transparent;
-            transition: all 0.2s ease;
         }
-        
-        .terminal-line:hover {
-            border-left-color: #00ffcc;
-            background: rgba(0,255,153,0.03);
-            padding-left: 12px;
-        }
-        
-        .line-prompt {
-            color: #00ff99;
-            font-weight: bold;
-            user-select: none;
-        }
-        
-        .line-command {
-            color: #00ccff;
-        }
-        
-        .line-success {
-            color: #00ff99;
-        }
-        
-        .line-warning {
-            color: #ffcc00;
-        }
-        
-        .line-error {
-            color: #ff6699;
-        }
-        
-        .line-info {
-            color: #6699ff;
-        }
-        
-        .line-timestamp {
-            color: #606060;
-            font-size: 11px;
-            margin-right: 8px;
-        }
-        
-        .line-module {
-            color: #00ffcc;
-            font-size: 11px;
-            background: rgba(0,255,204,0.1);
-            padding: 2px 6px;
-            border-radius: 2px;
-            margin-right: 8px;
-            font-weight: bold;
-        }
-        
-        /* ═════════════════════════════════════════════════════════════════════════════════ */
-        /* INPUT PANEL */
-        /* ═════════════════════════════════════════════════════════════════════════════════ */
-        
-        .terminal-input-panel {
-            background: linear-gradient(180deg, rgba(0,15,30,0.9) 0%, rgba(0,10,20,0.95) 100%);
-            border-top: 2px solid #00ff99;
-            padding: 12px 20px;
-            display: flex;
-            gap: 8px;
-            align-items: center;
-            box-shadow: inset 0 1px 0 rgba(0,255,153,0.1);
-        }
-        
-        .terminal-prompt {
-            color: #00ff99;
-            font-weight: bold;
-            flex-shrink: 0;
-            user-select: none;
-            text-shadow: 0 0 10px rgba(0,255,153,0.3);
-        }
-        
-        .terminal-input {
-            flex: 1;
-            background: rgba(0,0,0,0.3);
-            border: 1px solid #404040;
-            color: #00ff99;
-            font-family: 'JetBrains Mono', 'Courier New', monospace;
-            font-size: 13px;
-            padding: 8px 12px;
-            border-radius: 3px;
-            outline: none;
-            transition: all 0.2s ease;
-            letter-spacing: 0.5px;
-        }
-        
-        .terminal-input:focus {
-            border-color: #00ff99;
-            box-shadow: 0 0 10px rgba(0,255,153,0.2), inset 0 0 5px rgba(0,255,153,0.05);
-            background: rgba(0,20,40,0.4);
-        }
-        
-        .terminal-input::placeholder {
+        .prompt {
             color: #606060;
         }
-        
-        .input-button {
-            background: rgba(0,255,153,0.1);
-            border: 1px solid #00ff99;
-            color: #00ff99;
-            padding: 6px 14px;
-            border-radius: 3px;
-            cursor: pointer;
-            font-size: 12px;
-            font-weight: bold;
-            transition: all 0.2s ease;
-            flex-shrink: 0;
-        }
-        
-        .input-button:hover {
-            background: rgba(0,255,153,0.2);
-            box-shadow: 0 0 10px rgba(0,255,153,0.3);
-        }
-        
-        .input-button:active {
-            background: rgba(0,255,153,0.3);
-            transform: scale(0.98);
-        }
-        
-        /* ═════════════════════════════════════════════════════════════════════════════════ */
-        /* SIDEBAR / COMMAND HELP */
-        /* ═════════════════════════════════════════════════════════════════════════════════ */
-        
-        .terminal-sidebar {
-            width: 280px;
-            background: linear-gradient(180deg, rgba(0,15,30,0.95) 0%, rgba(0,10,20,0.9) 100%);
-            border-left: 1px solid #1a1a2e;
-            overflow-y: auto;
-            overflow-x: hidden;
-            display: flex;
-            flex-direction: column;
-        }
-        
-        .sidebar-section {
-            border-bottom: 1px solid #1a1a2e;
-            padding: 0;
-        }
-        
-        .sidebar-title {
-            background: rgba(0,255,153,0.08);
-            border-bottom: 1px solid #00ff99;
-            padding: 10px 15px;
-            font-size: 11px;
-            font-weight: bold;
-            color: #00ff99;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            text-shadow: 0 0 10px rgba(0,255,153,0.2);
-            cursor: pointer;
-            user-select: none;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        
-        .sidebar-title:hover {
-            background: rgba(0,255,153,0.12);
-        }
-        
-        .sidebar-toggle {
-            font-size: 10px;
-            color: #606060;
-        }
-        
-        .sidebar-content {
-            padding: 8px 0;
-            max-height: 400px;
-            overflow-y: auto;
-        }
-        
-        .sidebar-item {
-            padding: 8px 12px;
-            font-size: 12px;
+        .cmd {
             color: #b0b0b0;
-            cursor: pointer;
-            border-left: 3px solid transparent;
-            transition: all 0.2s ease;
+        }
+        .success {
+            color: #4a8a4a;
+        }
+        .error {
+            color: #8a4a4a;
+        }
+        .info {
+            color: #4a7a8a;
+        }
+        .input-panel {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+            padding: 8px 12px;
+            background: #1a1a1a;
+            border: 1px solid #2a2a2a;
+            border-top: 1px solid #2a2a2a;
+        }
+        .prompt-char {
+            color: #606060;
             user-select: none;
         }
-        
-        .sidebar-item:hover {
-            background: rgba(0,255,153,0.08);
-            color: #00ff99;
-            border-left-color: #00ff99;
-            padding-left: 16px;
+        input {
+            flex: 1;
+            background: #0a0a0a;
+            border: 1px solid #2a2a2a;
+            color: #b0b0b0;
+            padding: 6px 8px;
+            font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+            font-size: 13px;
+            outline: none;
         }
-        
-        .sidebar-item.command-name {
-            color: #00ccff;
-            font-weight: bold;
+        input:focus {
+            border-color: #3a3a3a;
+            background: #151515;
         }
-        
-        .sidebar-item.command-desc {
+        input::placeholder {
+            color: #4a4a4a;
+        }
+        button {
+            background: #1a1a1a;
+            border: 1px solid #2a2a2a;
             color: #808080;
-            font-size: 11px;
-            padding-left: 16px;
-            font-style: italic;
+            padding: 4px 10px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 12px;
+            transition: all 0.2s;
         }
-        
-        /* ═════════════════════════════════════════════════════════════════════════════════ */
-        /* FOOTER */
-        /* ═════════════════════════════════════════════════════════════════════════════════ */
-        
-        .terminal-footer {
-            background: linear-gradient(180deg, rgba(0,15,30,0.9) 0%, rgba(0,10,20,0.95) 100%);
-            border-top: 1px solid #1a1a2e;
-            padding: 8px 20px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            font-size: 11px;
-            color: #606060;
-            gap: 20px;
+        button:hover {
+            border-color: #3a3a3a;
+            background: #222;
+            color: #a0a0a0;
         }
-        
-        .footer-item {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-        
-        .footer-dot {
-            width: 6px;
-            height: 6px;
-            background: #00ff99;
-            border-radius: 50%;
-            box-shadow: 0 0 8px #00ff99;
-        }
-        
-        .footer-text {
-            color: #808080;
-        }
-        
-        /* ═════════════════════════════════════════════════════════════════════════════════ */
-        /* UTILITIES */
-        /* ═════════════════════════════════════════════════════════════════════════════════ */
-        
-        .loading-spinner {
-            display: inline-block;
-            width: 10px;
-            height: 10px;
-            border: 2px solid #00ff99;
-            border-top: 2px solid transparent;
-            border-radius: 50%;
-            animation: spin 0.8s linear infinite;
-            margin-right: 4px;
-        }
-        
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
-        
-        .divider {
-            border-top: 1px dashed #404040;
-            margin: 12px 0;
-            opacity: 0.5;
-        }
-        
-        .hidden {
-            display: none !important;
+        button:active {
+            background: #111;
         }
     </style>
 </head>
 <body>
-    <div class="terminal-wrapper">
-        <!-- HEADER -->
-        <div class="terminal-header">
-            <div class="header-left">
-                <div class="heartbeat-indicator"></div>
-                <div>
-                    <div class="header-title">⚛️ QUANTUM LATTICE CONTROL TERMINAL</div>
-                    <div class="header-subtitle">Interactive command center | Live system control</div>
-                </div>
-            </div>
-            <div class="header-right">
-                <div>Commands: <span id="cmd-count">0</span></div>
-                <div>Status: <span class="status-badge">READY</span></div>
-                <div id="time">--:--:--</div>
-            </div>
+    <div class="container">
+        <div class="header">
+            QTCL TERMINAL <span class="status">◆</span>
         </div>
         
-        <!-- MAIN CONTENT -->
-        <div class="terminal-content">
-            <div class="terminal-main">
-                <!-- OUTPUT -->
-                <div class="terminal-output" id="output">
-                    <div class="terminal-line">
-                        <span class="line-timestamp">[INIT]</span>
-                        <span class="line-success">✓</span> Terminal initialized - Ready for commands
-                    </div>
-                    <div class="terminal-line">
-                        <span class="line-timestamp">[INIT]</span>
-                        <span class="line-info">ℹ</span> Type <span class="line-command">help</span> to see available commands
-                    </div>
-                    <div class="divider"></div>
-                </div>
-                
-                <!-- INPUT -->
-                <div class="terminal-input-panel">
-                    <div class="terminal-prompt">▶</div>
-                    <input 
-                        type="text" 
-                        class="terminal-input" 
-                        id="input"
-                        placeholder="Enter command (e.g., help, quantum-status, system-status)..."
-                        autocomplete="off"
-                        spellcheck="false"
-                    >
-                    <button class="input-button" id="send-btn">Execute</button>
-                    <button class="input-button" id="clear-btn">Clear</button>
-                </div>
-            </div>
-            
-            <!-- SIDEBAR -->
-            <div class="terminal-sidebar">
-                <div class="sidebar-section">
-                    <div class="sidebar-title" id="help-toggle">
-                        <span>📋 COMMANDS</span>
-                        <span class="sidebar-toggle">–</span>
-                    </div>
-                    <div class="sidebar-content" id="help-content">
-                        <div class="sidebar-item" style="color: #606060; text-align: center; padding: 20px 10px;">
-                            <span class="loading-spinner"></span>Loading commands...
-                        </div>
-                    </div>
-                </div>
-                
-                <div class="sidebar-section" style="flex: 1; display: flex; flex-direction: column;">
-                    <div class="sidebar-title">
-                        ⏱️ HISTORY
-                    </div>
-                    <div class="sidebar-content" id="history-content" style="flex: 1; overflow-y: auto;">
-                        <div class="sidebar-item" style="color: #606060; text-align: center;">
-                            (empty)
-                        </div>
-                    </div>
-                </div>
-            </div>
+        <div class="output" id="output">
+            <div class="line"><span class="info">●</span> Ready for input</div>
         </div>
         
-        <!-- FOOTER -->
-        <div class="terminal-footer">
-            <div class="footer-item">
-                <div class="footer-dot"></div>
-                <span class="footer-text">System Ready</span>
-            </div>
-            <div class="footer-item">
-                <span class="footer-text">Quantum Lattice Control | QTCL v5.0</span>
-            </div>
-            <div class="footer-item" id="memory-stat">
-                Memory: -- KB
-            </div>
+        <div class="input-panel">
+            <span class="prompt-char">›</span>
+            <input type="text" id="input" placeholder="Enter command..." spellcheck="false" autocomplete="off">
+            <button id="send">Send</button>
         </div>
     </div>
 
-    <!-- COMMAND EXECUTOR -->
-    <script src="command_executor.js"></script>
-
     <script>
-        // ═══════════════════════════════════════════════════════════════════════════════
-        // TERMINAL LOGIC - FULLY INTEGRATED WITH GLOBALS & WSGI
-        // ═══════════════════════════════════════════════════════════════════════════════
-
-        class TerminalUI {
-            constructor() {
-                this.outputEl = document.getElementById('output');
-                this.inputEl = document.getElementById('input');
-                this.sendBtn = document.getElementById('send-btn');
-                this.clearBtn = document.getElementById('clear-btn');
-                this.helpContent = document.getElementById('help-content');
-                this.historyContent = document.getElementById('history-content');
-                this.commandCount = document.getElementById('cmd-count');
-                this.timeEl = document.getElementById('time');
-                
-                this.commandHistory = [];
-                this.commandHistoryIndex = -1;
-                this.commands = {};
-                this.executedCommands = [];
-                
-                this.init();
+        const output = document.getElementById('output');
+        const input = document.getElementById('input');
+        const sendBtn = document.getElementById('send');
+        
+        function addLine(text, type = 'info') {
+            const line = document.createElement('div');
+            line.className = 'line';
+            
+            let className = type;
+            if (type === 'prompt') {
+                line.innerHTML = `<span class="prompt">${text}</span>`;
+            } else if (type === 'cmd') {
+                line.innerHTML = `<span class="prompt">›</span> <span class="cmd">${text}</span>`;
+            } else {
+                line.innerHTML = `<span class="${className}">${text}</span>`;
             }
             
-            init() {
-                this.setupEventListeners();
-                this.loadCommands();
-                this.updateTime();
-                setInterval(() => this.updateTime(), 1000);
-                
-                this.log('System initialized', 'info');
-                this.log('Type "help" to see available commands', 'info');
-            }
+            output.appendChild(line);
+            output.scrollTop = output.scrollHeight;
+        }
+        
+        async function executeCommand() {
+            const cmd = input.value.trim();
+            if (!cmd) return;
             
-            setupEventListeners() {
-                this.sendBtn.addEventListener('click', () => this.executeInput());
-                this.clearBtn.addEventListener('click', () => this.clearOutput());
-                this.inputEl.addEventListener('keydown', (e) => this.handleKeydown(e));
-                document.getElementById('help-toggle').addEventListener('click', () => {
-                    this.helpContent.classList.toggle('hidden');
-                });
-            }
+            addLine(`› ${cmd}`, 'cmd');
+            input.value = '';
             
-            handleKeydown(e) {
-                if (e.key === 'Enter') {
-                    e.preventDefault();
-                    this.executeInput();
-                } else if (e.key === 'ArrowUp') {
-                    e.preventDefault();
-                    this.commandHistoryIndex = Math.min(
-                        this.commandHistoryIndex + 1,
-                        this.commandHistory.length - 1
-                    );
-                    if (this.commandHistoryIndex >= 0) {
-                        this.inputEl.value = this.commandHistory[this.commandHistory.length - 1 - this.commandHistoryIndex];
-                    }
-                } else if (e.key === 'ArrowDown') {
-                    e.preventDefault();
-                    this.commandHistoryIndex = Math.max(this.commandHistoryIndex - 1, -1);
-                    if (this.commandHistoryIndex >= 0) {
-                        this.inputEl.value = this.commandHistory[this.commandHistory.length - 1 - this.commandHistoryIndex];
-                    } else {
-                        this.inputEl.value = '';
-                    }
-                }
-            }
-            
-            async loadCommands() {
-                try {
-                    const response = await fetch('/api/commands-list', {
-                        method: 'GET',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${localStorage.getItem('authToken') || ''}`
-                        }
-                    });
-                    
-                    if (!response.ok) throw new Error('Failed to load commands');
-                    
-                    const data = await response.json();
-                    this.commands = data.commands || {};
-                    
-                    this.renderCommandList();
-                    this.commandCount.textContent = Object.keys(this.commands).length;
-                } catch (error) {
-                    console.error('[Terminal] Error loading commands:', error);
-                    this.log(`Failed to load commands: ${error.message}`, 'error');
-                }
-            }
-            
-            renderCommandList() {
-                this.helpContent.innerHTML = '';
-                
-                if (Object.keys(this.commands).length === 0) {
-                    this.helpContent.innerHTML = '<div class="sidebar-item" style="color: #606060;">No commands available</div>';
-                    return;
-                }
-                
-                // Group commands by category
-                const categories = {};
-                Object.entries(this.commands).forEach(([name, cmd]) => {
-                    const cat = cmd.category || 'general';
-                    if (!categories[cat]) categories[cat] = [];
-                    categories[cat].push({ name, ...cmd });
+            try {
+                const response = await fetch('/api/command', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ command: cmd, args: [], kwargs: {} })
                 });
                 
-                // Render categories
-                Object.entries(categories).sort().forEach(([cat, cmds]) => {
-                    const section = document.createElement('div');
-                    section.style.marginBottom = '8px';
-                    
-                    const title = document.createElement('div');
-                    title.className = 'sidebar-item';
-                    title.style.color = '#00ff99';
-                    title.style.fontWeight = 'bold';
-                    title.style.fontSize = '11px';
-                    title.textContent = `${cat.toUpperCase()}`;
-                    section.appendChild(title);
-                    
-                    cmds.forEach(cmd => {
-                        const item = document.createElement('div');
-                        item.className = 'sidebar-item command-name';
-                        item.textContent = cmd.name;
-                        item.style.cursor = 'pointer';
-                        item.addEventListener('click', () => {
-                            this.inputEl.value = cmd.name;
-                            this.inputEl.focus();
-                        });
-                        section.appendChild(item);
-                        
-                        if (cmd.description) {
-                            const desc = document.createElement('div');
-                            desc.className = 'sidebar-item command-desc';
-                            desc.textContent = cmd.description;
-                            section.appendChild(desc);
-                        }
-                    });
-                    
-                    this.helpContent.appendChild(section);
-                });
-            }
-            
-            async executeInput() {
-                const cmd = this.inputEl.value.trim();
-                if (!cmd) return;
+                const data = await response.json();
                 
-                this.commandHistory.unshift(cmd);
-                this.commandHistoryIndex = -1;
-                this.inputEl.value = '';
-                
-                this.log(`▶ ${cmd}`, 'command');
-                
-                try {
-                    const response = await window.qtclExecutor.executeRaw(cmd);
-                    
-                    if (response.status === 'success') {
-                        this.log(String(response.result || 'Command executed successfully'), 'success');
-                    } else {
-                        this.log(String(response.error || 'Command failed'), 'error');
-                    }
-                    
-                    this.addToHistoryPanel(cmd);
-                    this.executedCommands.push({ cmd, time: new Date() });
-                } catch (error) {
-                    this.log(`Error: ${error.message}`, 'error');
+                if (data.result) {
+                    addLine(String(data.result), 'success');
+                } else if (data.error) {
+                    addLine(String(data.error), 'error');
+                } else if (data.output) {
+                    addLine(String(data.output), 'success');
+                } else {
+                    addLine('OK', 'success');
                 }
-                
-                this.scrollToBottom();
-            }
-            
-            addToHistoryPanel(cmd) {
-                if (this.executedCommands.length === 0) {
-                    this.historyContent.innerHTML = '';
-                }
-                
-                const item = document.createElement('div');
-                item.className = 'sidebar-item';
-                item.textContent = cmd;
-                item.style.cursor = 'pointer';
-                item.style.color = '#00ccff';
-                item.addEventListener('click', () => {
-                    this.inputEl.value = cmd;
-                    this.inputEl.focus();
-                });
-                
-                this.historyContent.insertBefore(item, this.historyContent.firstChild);
-                
-                // Keep only last 10
-                while (this.historyContent.children.length > 10) {
-                    this.historyContent.removeChild(this.historyContent.lastChild);
-                }
-            }
-            
-            log(message, level = 'info') {
-                const line = document.createElement('div');
-                line.className = 'terminal-line';
-                
-                const timestamp = new Date().toLocaleTimeString('en-US', { 
-                    hour12: false, 
-                    hour: '2-digit',
-                    minute: '2-digit',
-                    second: '2-digit'
-                });
-                
-                const timeSpan = document.createElement('span');
-                timeSpan.className = 'line-timestamp';
-                timeSpan.textContent = `[${timestamp}]`;
-                
-                let content = document.createElement('span');
-                content.className = `line-${level}`;
-                
-                const icon = {
-                    info: 'ℹ',
-                    success: '✓',
-                    error: '✗',
-                    warning: '⚠',
-                    command: '→'
-                }[level] || '•';
-                
-                content.textContent = `${icon} ${message}`;
-                
-                line.appendChild(timeSpan);
-                line.appendChild(content);
-                this.outputEl.appendChild(line);
-                
-                this.scrollToBottom();
-            }
-            
-            scrollToBottom() {
-                this.outputEl.scrollTop = this.outputEl.scrollHeight;
-            }
-            
-            clearOutput() {
-                this.outputEl.innerHTML = '<div class="terminal-line"><span class="line-success">✓ Output cleared</span></div>';
-                this.scrollToBottom();
-            }
-            
-            updateTime() {
-                const now = new Date();
-                const time = now.toLocaleTimeString('en-US', { hour12: false });
-                this.timeEl.textContent = time;
+            } catch (err) {
+                addLine(`Error: ${err.message}`, 'error');
             }
         }
-
-        // ═══════════════════════════════════════════════════════════════════════════════
-        // INITIALIZE TERMINAL
-        // ═══════════════════════════════════════════════════════════════════════════════
-
-        window.terminal = null;
-
-        document.addEventListener('DOMContentLoaded', () => {
-            window.terminal = new TerminalUI();
-            console.log('[Terminal] ✓ Terminal UI initialized');
-            console.log('[Terminal] ✓ Command executor available:', window.qtclExecutor);
+        
+        sendBtn.addEventListener('click', executeCommand);
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                executeCommand();
+            }
         });
+        
+        input.focus();
     </script>
 </body>
 </html>

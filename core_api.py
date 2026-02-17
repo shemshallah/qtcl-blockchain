@@ -2405,3 +2405,8 @@ def get_core_heartbeat_status():
 
 # Export blueprint for main_app.py
 blueprint = create_blueprint()
+
+# Factory function for WSGI integration
+def get_core_blueprint():
+    """Factory function to get core blueprint"""
+    return create_blueprint()

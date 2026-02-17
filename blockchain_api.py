@@ -5998,3 +5998,8 @@ def create_blueprint():
 
 
 blueprint = create_blueprint()
+
+# Factory function for WSGI integration
+def get_blockchain_blueprint():
+    """Factory function to get blockchain blueprint"""
+    return create_blueprint()

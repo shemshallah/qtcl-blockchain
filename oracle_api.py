@@ -1537,3 +1537,8 @@ def create_blueprint():
 
 
 blueprint = create_blueprint()
+
+# Factory function for WSGI integration
+def get_oracle_blueprint():
+    """Factory function to get oracle blueprint"""
+    return create_blueprint()

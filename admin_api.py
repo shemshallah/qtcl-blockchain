@@ -1914,3 +1914,8 @@ def get_admin_heartbeat_status():
 
 # Export blueprint for main_app.py
 blueprint = create_blueprint()
+
+# Factory function for WSGI integration
+def get_admin_blueprint():
+    """Factory function to get admin blueprint"""
+    return create_blueprint()
