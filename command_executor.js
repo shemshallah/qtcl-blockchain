@@ -96,28 +96,3 @@ class QTCLCommandExecutor {
 // Create global instance
 window.qtclExecutor = new QTCLCommandExecutor();
 console.log('[CommandExecutor] ✓ Global executor ready at window.qtclExecutor');
-                error: error.message,
-                command: command,
-                output: null
-            };
-        }
-    }
-    
-    on(event, callback) {
-        if (!this.listeners[event]) this.listeners[event] = [];
-        this.listeners[event].push(callback);
-    }
-    
-    emit(event, data) {
-        if (this.listeners[event]) {
-            this.listeners[event].forEach(cb => {
-                try { cb(data); } catch (e) { console.error(e); }
-            });
-        }
-    }
-}
-
-// Initialize immediately
-console.log('[Main] Initializing executor...');
-window.commandExecutor = new QTCLCommandExecutor();
-console.log('[Main] ✓ window.commandExecutor is ready');

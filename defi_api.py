@@ -571,36 +571,28 @@ def create_blueprint()->Blueprint:
             globals_obj=get_globals()
             db_manager=globals_obj.DB if hasattr(globals_obj,'DB') else None
         if db_manager is None:
-            from wsgi_config import DB
-            db_manager=DB
+            try:
+                from wsgi_config import DB
+                db_manager=DB
+            except:
+                pass
         if db_manager is None:
             raise RuntimeError("[DeFi] Database manager not available")
     except Exception as e:
         logger.error(f"[DeFi] Database initialization failed: {e}")
         raise RuntimeError(f"Cannot initialize DeFi without database: {e}")
+    
     defi_db=None
     if db_manager:
         try:
-            from db_builder_v2 import *
-            # Initialize appropriate database manager based on module
-            pass
+            defi_db=db_manager
         except Exception as e:
             logger.error(f"[DeFi] Manager creation failed: {e}")
             raise
-    """Factory function to create DeFi API blueprint - uses globals for db access"""
     
     bp=Blueprint('defi_api',__name__,url_prefix='/api')
     
-    # Get database manager from globals (initialized by wsgi_config)
-    db_manager=None
-    if GLOBALS_AVAILABLE:
-        try:
-            globals_obj=get_globals()
-            db_manager=globals_obj.DB if hasattr(globals_obj,'DB') else None
-        except:
-            pass
-    
-    # Fallback: try to get from wsgi_config
+    # Fallback: try to get from wsgi_config if not set
     if db_manager is None:
         try:
             from wsgi_config import DB
