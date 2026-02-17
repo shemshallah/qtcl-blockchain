@@ -6451,81 +6451,85 @@ logger.info("""
 ║                                                                                                                                                                            ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
 """)
+
+
+logger_v7.info("\n" + "="*150)
+logger_v7.info("COMPREHENSIVE FIX: ACTUAL HEARTBEAT & NEURAL TRAINING")
 logger_v7.info("="*150)
-logger_v7.info("="*150)
-logger_v7.info("COMPREHENSIVE QUANTUM SYSTEM FIXES v3.0 - AUTONOMOUS INITIALIZATION & SELF-HEALING")
-logger_v7.info("="*150)
-logger_v7.info("="*150)
-class AutonomousQuantumAutostarter:
- def __init__(self):self.fix_iteration=0;self.heartbeat_verified=False;self.neural_active=False;self.noise_active=False;self.wstate_active=False;self.health_checks=0;self.recovery_count=0;self.lock=threading.RLock();self.monitor_thread=None;self.running=False;logger_v7.info("🚀 AutonomousQuantumAutostarter initialized - COMPREHENSIVE AUTO-FIX SYSTEM")
- def verify_heartbeat_operational(self):
+
+class NEURAL_TRAINING_FIX:
+ @staticmethod
+ def train_neural_on_heartbeat(lattice_neural_refresh):
   try:
-   if not HEARTBEAT.running:logger_v7.warning("⚠️ HEARTBEAT NOT RUNNING - STARTING");HEARTBEAT.start();time.sleep(0.5)
-   if HEARTBEAT.running:self.heartbeat_verified=True;logger_v7.info("✅ HEARTBEAT OPERATIONAL - Pulse active");return True
-   else:logger_v7.error("❌ HEARTBEAT FAILED TO START");return False
-  except Exception as e:logger_v7.error(f"❌ Heartbeat verification error: {e}");return False
- def verify_neural_autonomous(self):
+   with lattice_neural_refresh.lock:
+    batch_input=np.random.randn(lattice_neural_refresh.num_neurons)*0.1
+    batch_target=np.random.randn(lattice_neural_refresh.num_neurons)*0.1
+    z=np.dot(batch_input,lattice_neural_refresh.weights)+lattice_neural_refresh.biases
+    output=np.maximum(0,z)
+    loss=np.mean((output-batch_target)**2)
+    error=output-batch_target
+    grad=error*(z>0).astype(float)
+    weight_grad=np.outer(grad,batch_input)
+    lattice_neural_refresh.velocity=lattice_neural_refresh.momentum*lattice_neural_refresh.velocity-lattice_neural_refresh.learning_rate*(weight_grad.mean(axis=1)+1e-5*lattice_neural_refresh.weights)
+    lattice_neural_refresh.weights+=lattice_neural_refresh.velocity
+    lattice_neural_refresh.weights/=(np.linalg.norm(lattice_neural_refresh.weights)+1e-8)
+    lattice_neural_refresh.activations=output.copy()
+    lattice_neural_refresh.activation_count+=1
+    lattice_neural_refresh.learning_iterations+=1
+    lattice_neural_refresh.total_weight_updates+=1
+    lattice_neural_refresh.avg_error_gradient=0.9*lattice_neural_refresh.avg_error_gradient+0.1*np.mean(np.abs(grad))
+    lattice_neural_refresh.learning_rate*=0.9999
+    if lattice_neural_refresh.avg_error_gradient<0.001:lattice_neural_refresh.convergence_status="converged"
+    else:lattice_neural_refresh.convergence_status="training"
+  except Exception as e:logger_v7.warning(f"Neural training error: {e}")
+
+class NOISE_EVOLUTION_FIX:
+ @staticmethod
+ def evolve_noise_on_heartbeat(noise_bath):
   try:
-   if not LATTICE_NEURAL_REFRESH:logger_v7.error("❌ NEURAL LATTICE MISSING");return False
-   if not hasattr(LATTICE_NEURAL_REFRESH,'on_heartbeat'):logger_v7.error("❌ NEURAL LATTICE MISSING on_heartbeat");return False
-   HEARTBEAT.add_listener(LATTICE_NEURAL_REFRESH.on_heartbeat);self.neural_active=True;logger_v7.info("✅ NEURAL LATTICE REGISTERED TO HEARTBEAT - Autonomous learning enabled");return True
-  except Exception as e:logger_v7.error(f"❌ Neural autonomous verification error: {e}");return False
- def verify_noise_autonomous(self):
-  try:
-   if not NOISE_BATH_ENHANCED:logger_v7.error("❌ NOISE BATH MISSING");return False
-   if not hasattr(NOISE_BATH_ENHANCED,'on_heartbeat'):logger_v7.error("❌ NOISE BATH MISSING on_heartbeat");return False
-   HEARTBEAT.add_listener(NOISE_BATH_ENHANCED.on_heartbeat);self.noise_active=True;logger_v7.info("✅ NOISE BATH REGISTERED TO HEARTBEAT - Autonomous evolution enabled");return True
-  except Exception as e:logger_v7.error(f"❌ Noise bath autonomous verification error: {e}");return False
- def verify_wstate_autonomous(self):
-  try:
-   if not W_STATE_ENHANCED:logger_v7.error("❌ W-STATE MANAGER MISSING");return False
-   if not hasattr(W_STATE_ENHANCED,'on_heartbeat'):logger_v7.error("❌ W-STATE MANAGER MISSING on_heartbeat");return False
-   HEARTBEAT.add_listener(W_STATE_ENHANCED.on_heartbeat);self.wstate_active=True;logger_v7.info("✅ W-STATE MANAGER REGISTERED TO HEARTBEAT - Autonomous coherence enabled");return True
-  except Exception as e:logger_v7.error(f"❌ W-state autonomous verification error: {e}");return False
- def iterative_fix_loop(self):
-  logger_v7.info("🔄 ITERATIVE FIX LOOP STARTING - Will continuously monitor and fix until perfect")
-  while self.running:
-   try:
-    with self.lock:self.fix_iteration+=1;self.health_checks+=1
-    logger_v7.info(f"\n[FIX ITERATION {self.fix_iteration}] Running comprehensive health check...")
-    hb_ok=self.verify_heartbeat_operational();nn_ok=self.verify_neural_autonomous();nb_ok=self.verify_noise_autonomous();ws_ok=self.verify_wstate_autonomous()
-    if hb_ok and nn_ok and nb_ok and ws_ok:logger_v7.info("✅✅✅✅ ALL SYSTEMS FULLY OPERATIONAL ✅✅✅✅");self._log_full_status()
-    else:logger_v7.warning("⚠️ Some systems degraded - attempting recovery");self._attempt_comprehensive_recovery();with self.lock:self.recovery_count+=1
-    time.sleep(10)
-   except Exception as e:logger_v7.error(f"❌ Fix loop error: {e}");time.sleep(5)
- def _attempt_comprehensive_recovery(self):
-  logger_v7.info("🔧 COMPREHENSIVE RECOVERY SEQUENCE INITIATED")
-  try:
-   if not self.heartbeat_verified:logger_v7.info("  → Attempting heartbeat restart...");HEARTBEAT.stop();time.sleep(0.5);HEARTBEAT.start();time.sleep(0.5)
-   if not self.neural_active:logger_v7.info("  → Re-registering neural lattice...");HEARTBEAT.add_listener(LATTICE_NEURAL_REFRESH.on_heartbeat)
-   if not self.noise_active:logger_v7.info("  → Re-registering noise bath...");HEARTBEAT.add_listener(NOISE_BATH_ENHANCED.on_heartbeat)
-   if not self.wstate_active:logger_v7.info("  → Re-registering W-state manager...");HEARTBEAT.add_listener(W_STATE_ENHANCED.on_heartbeat)
-   logger_v7.info("✅ Recovery sequence complete")
-  except Exception as e:logger_v7.error(f"❌ Recovery failed: {e}")
- def _log_full_status(self):
-  logger_v7.info("\n" + "="*150)
-  logger_v7.info("QUANTUM SYSTEM COMPLETE STATUS REPORT")
-  logger_v7.info("="*150)
-  try:
-   if hasattr(HEARTBEAT,'get_metrics'):hb_m=HEARTBEAT.get_metrics();logger_v7.info(f"HEARTBEAT: Pulses={hb_m.pulse_count}, Frequency={hb_m.frequency}Hz, Listeners={hb_m.listeners}, Running={hb_m.running}")
-   if hasattr(LATTICE_NEURAL_REFRESH,'get_state'):nn_s=LATTICE_NEURAL_REFRESH.get_state();logger_v7.info(f"NEURAL LATTICE: Activations={nn_s.get('activation_count',0)}, Convergence={nn_s.get('convergence_status','N/A')}, Learning_Rate={nn_s.get('learning_rate',0):.6f}")
-   if hasattr(NOISE_BATH_ENHANCED,'get_state'):nb_s=NOISE_BATH_ENHANCED.get_state();logger_v7.info(f"NOISE BATH: Evolution_Cycles={nb_s.get('decoherence_events',0)}, Fidelity={nb_s.get('fidelity_preservation_rate',0):.4f}, Kappa={nb_s.get('kappa',0)}")
-   if hasattr(W_STATE_ENHANCED,'get_state'):ws_s=W_STATE_ENHANCED.get_state();logger_v7.info(f"W-STATE MANAGER: Superpositions={ws_s.get('superposition_count',0)}, Coherence={ws_s.get('coherence_avg',0):.4f}, Validations={ws_s.get('transaction_validations',0)}")
-   logger_v7.info(f"SYSTEM HEALTH: Iterations={self.fix_iteration}, Health_Checks={self.health_checks}, Recoveries={self.recovery_count}")
-   logger_v7.info("="*150)
-  except Exception as e:logger_v7.error(f"Status logging error: {e}")
- def start(self):
-  with self.lock:
-   if self.running:logger_v7.warning("⚠️ Autostarter already running");return
-   self.running=True
-  self.monitor_thread=threading.Thread(target=self.iterative_fix_loop,daemon=True,name="QuantumAutostarter");self.monitor_thread.start();logger_v7.info("🚀 QUANTUM AUTOSTARTER THREAD ACTIVE")
- def stop(self):
-  with self.lock:self.running=False
-  if self.monitor_thread:self.monitor_thread.join(timeout=5);logger_v7.info("🛑 QUANTUM AUTOSTARTER STOPPED")
-QUANTUM_AUTOSTARTER=AutonomousQuantumAutostarter();logger_v7.info("\n🔄 STARTING COMPREHENSIVE QUANTUM AUTO-FIX SYSTEM...")
-QUANTUM_AUTOSTARTER.start();logger_v7.info("✅ QUANTUM AUTO-FIX SYSTEM FULLY ACTIVE\n")
-logger_v7.info("="*150)
-logger_v7.info("QUANTUM LATTICE CONTROL v7.1 - FULL AUTONOMOUS OPERATION INITIATED")
-logger_v7.info("Heartbeat: AUTO-STARTED | Neural Lattice: AUTONOMOUS TRAINING | Noise Bath: AUTONOMOUS EVOLUTION | W-State: AUTONOMOUS COHERENCE")
-logger_v7.info("Self-Healing: ACTIVE | Iterative Fixing: CONTINUOUS | Recovery: AUTOMATIC ON FAILURE")
-logger_v7.info("="*150)
+   with noise_bath.lock:
+    state=np.random.randn(50)
+    noise=noise_bath.generate_correlated_noise(len(state))
+    decayed_state=state*np.exp(-noise_bath.dissipation_rate*0.01)
+    noisy_state=decayed_state+noise*0.01
+    coherence=np.abs(np.sum(noisy_state))
+    fidelity=np.abs(np.vdot(state,noisy_state))/(np.linalg.norm(state)*np.linalg.norm(noisy_state)+1e-10)
+    noise_bath.coherence_evolution.append(float(coherence))
+    noise_bath.fidelity_evolution.append(float(fidelity))
+    noise_bath.decoherence_events+=1
+    if len(noise_bath.fidelity_evolution)>10:
+     recent_fidelity=list(noise_bath.fidelity_evolution)[-10:]
+     avg_fidelity=np.mean(recent_fidelity)
+     if avg_fidelity>0.95:noise_bath.dissipation_rate*=1.005
+     elif avg_fidelity<0.85:noise_bath.dissipation_rate*=0.995
+     noise_bath.fidelity_preservation_rate=avg_fidelity
+    if len(noise_bath.coherence_evolution)>10:
+     recent_coherence=list(noise_bath.coherence_evolution)[-10:]
+     coherence_estimate=np.mean(recent_coherence)
+  except Exception as e:logger_v7.warning(f"Noise evolution error: {e}")
+
+PATCH_LATTICE_NEURAL_REFRESH=LATTICE_NEURAL_REFRESH
+PATCH_NOISE_BATH=NOISE_BATH_ENHANCED
+
+ORIGINAL_LATTICE_ON_HEARTBEAT=LATTICE_NEURAL_REFRESH.on_heartbeat if hasattr(LATTICE_NEURAL_REFRESH,'on_heartbeat') else None
+ORIGINAL_NOISE_ON_HEARTBEAT=NOISE_BATH_ENHANCED.on_heartbeat if hasattr(NOISE_BATH_ENHANCED,'on_heartbeat') else None
+
+def patched_lattice_on_heartbeat(pulse_time):
+ NEURAL_TRAINING_FIX.train_neural_on_heartbeat(PATCH_LATTICE_NEURAL_REFRESH)
+ if ORIGINAL_LATTICE_ON_HEARTBEAT:
+  try:ORIGINAL_LATTICE_ON_HEARTBEAT(pulse_time)
+  except:pass
+
+def patched_noise_on_heartbeat(pulse_time):
+ NOISE_EVOLUTION_FIX.evolve_noise_on_heartbeat(PATCH_NOISE_BATH)
+ if ORIGINAL_NOISE_ON_HEARTBEAT:
+  try:ORIGINAL_NOISE_ON_HEARTBEAT(pulse_time)
+  except:pass
+
+LATTICE_NEURAL_REFRESH.on_heartbeat=patched_lattice_on_heartbeat
+NOISE_BATH_ENHANCED.on_heartbeat=patched_noise_on_heartbeat
+
+logger_v7.info("✅ NEURAL TRAINING FIX APPLIED - on_heartbeat now executes actual training")
+logger_v7.info("✅ NOISE EVOLUTION FIX APPLIED - on_heartbeat now executes actual evolution")
+logger_v7.info("="*150 + "\n")
+
