@@ -31,7 +31,7 @@
   --glow-purple: 0 0 10px rgba(187,134,252,0.25);
   --transition: all 0.2s cubic-bezier(0.4,0,0.2,1);
 }
-html,body{width:100%;height:100%;overflow:hidden;font-family:'Fira Code','Menlo','Monaco','Courier New',monospace;font-size:13px;background:var(--bg);color:var(--text);line-height:1.6;letter-spacing:0.3px}
+html,body{width:100%;height:100%;overflow:hidden;font-family:'Fira Code','Menlo','Monaco','Courier New',monospace;font-size:13px;background:var(--bg);color:var(--text);line-height:1.6;letter-spacing:0.3px;position:fixed;}
 
 /* ─── LAYOUT ─── */
 #app{display:flex;flex-direction:column;height:100vh}
@@ -138,7 +138,7 @@ html,body{width:100%;height:100%;overflow:hidden;font-family:'Fira Code','Menlo'
   background:linear-gradient(90deg,var(--bg) 0%,var(--bg2) 100%);
   flex-shrink:0;
   position:relative;
-  z-index:1000;
+  z-index:9999;
   box-shadow:0 -2px 10px rgba(0,0,0,0.5);
 }
 .input-ps1{color:var(--cyan);opacity:0.8;user-select:none;font-size:13px;flex-shrink:0;font-weight:bold}
@@ -146,6 +146,8 @@ html,body{width:100%;height:100%;overflow:hidden;font-family:'Fira Code','Menlo'
   flex:1;background:transparent;border:none;outline:none;
   color:var(--text);font-family:inherit;font-size:13px;caret-color:var(--cyan);
   padding:8px 4px;
+  -webkit-user-select:text;
+  user-select:text;
 }
 #cmd::placeholder{color:var(--dim)}
 #cmd:focus{color:var(--text);outline:none;border-bottom:1px solid var(--cyan)}
@@ -155,47 +157,83 @@ html,body{width:100%;height:100%;overflow:hidden;font-family:'Fira Code','Menlo'
   cursor:pointer;border-radius:3px;font-size:11px;letter-spacing:1px;
   font-family:inherit;transition:var(--transition);text-transform:uppercase;font-weight:bold;
   min-width:50px;
+  flex-shrink:0;
 }
 #exec-btn:hover{background:rgba(0,212,255,0.18);border-color:var(--cyan);box-shadow:0 0 10px rgba(0,212,255,0.2)}
 #exec-btn:active{transform:scale(0.98)}
 
 /* ─── MOBILE OPTIMIZATIONS ─── */
 @media (max-width: 768px) {
+  #app{
+    height:100vh;
+    max-height:100vh;
+    overflow:hidden;
+  }
+  
+  #content{
+    overflow:hidden;
+    max-height:calc(100vh - 95px);
+  }
+  
   #inputbar{
-    padding:14px 16px;gap:10px;
+    padding:10px 12px;
+    gap:8px;
     position:fixed;
     bottom:0;
     left:0;
     right:0;
     width:100%;
+    height:auto;
+    min-height:50px;
     border-top:2px solid var(--border);
-    box-shadow:0 -2px 15px rgba(0,0,0,0.8);
+    border-bottom:none;
+    box-shadow:0 -4px 20px rgba(0,0,0,0.9);
+    z-index:9999;
+    background:var(--bg);
   }
   
   #terminal-view{
-    padding-bottom:65px;
+    flex:1;
+    overflow:hidden;
+    display:flex;
+    flex-direction:column;
+    height:calc(100vh - 95px);
   }
   
   #output{
-    padding-bottom:10px;
+    flex:1;
+    overflow-y:auto;
+    overflow-x:hidden;
+    padding:12px 14px;
+    padding-bottom:20px;
   }
   
   .input-ps1{
-    font-size:12px;
+    font-size:11px;
+    min-width:35px;
   }
   
   #cmd{
-    font-size:15px;
-    padding:10px 8px;
-    min-height:40px;
+    font-size:16px;
+    padding:12px 8px;
+    min-height:38px;
+    border:1px solid var(--border-light);
+    border-radius:3px;
+    background:rgba(255,255,255,0.01);
+  }
+  
+  #cmd:focus{
+    border:1px solid var(--cyan);
+    background:rgba(0,212,255,0.05);
   }
   
   #exec-btn{
-    padding:10px 14px;
+    padding:10px 12px;
     font-size:12px;
-    min-width:60px;
+    min-width:55px;
+    min-height:38px;
   }
-}
+}\n
 
 /* ─── INFO TAB ─── */
 #info-view{
@@ -249,9 +287,14 @@ html,body{width:100%;height:100%;overflow:hidden;font-family:'Fira Code','Menlo'
   font-weight:bold;padding-bottom:6px;border-bottom:1px solid var(--border);
 }
 
-/* ─── BOOT SEQUENCE ─── */
-.boot-line{color:var(--cyan);opacity:0;animation:bootFade 0.4s forwards}
-@keyframes bootFade{to{opacity:1}}
+/* ─── INPUT FOCUS INDICATOR ─── */
+#inputbar {
+  border-top: 3px solid var(--cyan);
+}
+
+#cmd:focus {
+  background: rgba(0,212,255,0.05);
+}
 
 /* ─── SPINNER ─── */
 .spinner{
@@ -349,32 +392,86 @@ const state = {
 function setupMobileFocus() {
   if (!state.isMobile) return;
   
-  // Auto-focus input field on page load
+  // Force input to always be visible on mobile
+  const inputBar = document.getElementById('inputbar');
+  const terminalView = document.getElementById('terminal-view');
+  
+  // Auto-focus on page load
   setTimeout(() => state.cmdInput.focus(), 100);
   
-  // Auto-focus when clicking anywhere in terminal area
-  document.getElementById('terminal-view').addEventListener('click', (e) => {
-    // Don't focus if clicking on output text for selection
-    if (e.target.id === 'output') {
+  // Keep input visible - fix viewport when keyboard appears
+  window.addEventListener('resize', () => {
+    setTimeout(() => {
+      if (state.cmdInput === document.activeElement) {
+        state.cmdInput.scrollIntoView({ behavior: 'instant', block: 'end' });
+      }
+    }, 100);
+  });
+  
+  // Aggressive focus on any terminal click
+  terminalView.addEventListener('click', (e) => {
+    if (e.target.id !== 'exec-btn') {
+      e.preventDefault();
       state.cmdInput.focus();
     }
   });
   
-  // Keep input visible by focusing when user taps anywhere
-  document.addEventListener('touchend', (e) => {
+  // Focus on any touch
+  terminalView.addEventListener('touchstart', (e) => {
     if (!e.target.closest('#inputbar')) {
-      // Slight delay to prevent keyboard from closing
-      setTimeout(() => state.cmdInput.focus(), 100);
+      state.cmdInput.focus();
     }
   });
   
-  // Show keyboard when focusing
+  // Keep refocusing if it loses focus
+  document.addEventListener('blur', () => {
+    if (state.isMobile && document.hidden === false) {
+      setTimeout(() => state.cmdInput.focus(), 50);
+    }
+  }, true);
+  
+  // When input gets focus - show it
   state.cmdInput.addEventListener('focus', () => {
+    inputBar.style.display = 'flex';
+    inputBar.style.visibility = 'visible';
+    inputBar.style.opacity = '1';
+    
     setTimeout(() => {
       state.cmdInput.scrollIntoView({ behavior: 'smooth', block: 'end' });
-    }, 300);
+      // Scroll the input bar into view on mobile
+      if (state.isMobile) {
+        window.scrollTo(0, document.body.scrollHeight);
+      }
+    }, 100);
   });
-}
+  
+  // Make sure input bar never hides
+  state.cmdInput.addEventListener('blur', () => {
+    setTimeout(() => {
+      inputBar.style.display = 'flex';
+      inputBar.style.visibility = 'visible';
+      inputBar.style.opacity = '1';
+    }, 100);
+  });
+  
+  // Prevent accidental scrolling that hides input
+  document.addEventListener('touchmove', (e) => {
+    if (!e.target.closest('#output')) {
+      e.preventDefault();
+    }
+  }, { passive: false });
+  
+  // Ensure input is always accessible
+  setInterval(() => {
+    if (state.isMobile) {
+      const inputBar = document.getElementById('inputbar');
+      inputBar.style.display = 'flex';
+      inputBar.style.visibility = 'visible';
+      inputBar.style.opacity = '1';
+      inputBar.style.position = 'fixed';
+      inputBar.style.zIndex = '9999';
+    }
+  }, 500);
 
 // ─── TAB SWITCHING ───
 function switchTab(name) {
@@ -481,6 +578,18 @@ async function execute() {
     state.cmdInput.disabled = false;
     state.output.scrollTop = state.output.scrollHeight;
     state.cmdInput.focus();
+    
+    // Mobile: ensure input stays visible after command
+    if (state.isMobile) {
+      setTimeout(() => {
+        const inputBar = document.getElementById('inputbar');
+        inputBar.style.display = 'flex';
+        inputBar.style.visibility = 'visible';
+        inputBar.style.opacity = '1';
+        state.cmdInput.focus();
+        state.cmdInput.scrollIntoView({ behavior: 'instant', block: 'end' });
+      }, 100);
+    }
   }
 }
 
