@@ -913,8 +913,6 @@ def _init_database(globals_inst: GlobalState):
     """Initialize database connection pool — tolerates missing env-vars gracefully."""
     logger.info("[Globals] Initializing database...")
     try:
-        # db_builder_v2 exposes `db_manager` (DatabaseBuilder singleton).
-        # We also accept DB_POOL as an alias if present.
         import db_builder_v2 as _db_mod
 
         pool = getattr(_db_mod, 'DB_POOL', None) or getattr(_db_mod, 'db_manager', None)
@@ -929,6 +927,8 @@ def _init_database(globals_inst: GlobalState):
 
         if pool is not None:
             logger.info("[Globals] ✅ Database initialized (pool ready)")
+            # ── Eagerly populate in-memory stats from live DB ─────────────
+            _populate_blockchain_stats(globals_inst, pool)
         else:
             logger.warning("[Globals] ⚠ db_builder_v2 loaded but no pool found — DB degraded")
 
@@ -938,6 +938,83 @@ def _init_database(globals_inst: GlobalState):
     except Exception as e:
         logger.warning(f"[Globals] Database init error (continuing): {e}")
         globals_inst.database.healthy = False
+
+
+def _populate_blockchain_stats(globals_inst: GlobalState, pool):
+    """Read live DB counts into in-memory GlobalState so health/status endpoints
+    show real numbers instead of zeros."""
+    try:
+        conn = pool.get_connection()
+        cur = conn.cursor()
+        
+        try:
+            # blocks table
+            try:
+                cur.execute("SELECT COUNT(*) FROM blocks")
+                row = cur.fetchone()
+                if row and row[0]:
+                    with globals_inst.lock:
+                        globals_inst.blockchain.chain_height = int(row[0])
+                        globals_inst.blockchain.total_blocks = int(row[0])
+                    logger.info(f"[Globals] blockchain.chain_height = {globals_inst.blockchain.chain_height}")
+            except Exception as _e:
+                logger.debug(f"[Globals] blocks count failed: {_e}")
+            
+            # transactions table
+            try:
+                cur.execute("SELECT COUNT(*) FROM transactions")
+                row = cur.fetchone()
+                if row and row[0]:
+                    with globals_inst.lock:
+                        globals_inst.blockchain.total_transactions = int(row[0])
+            except Exception:
+                pass
+            
+            # pending transactions
+            try:
+                cur.execute("SELECT COUNT(*) FROM transactions WHERE status='pending'")
+                row = cur.fetchone()
+                if row and row[0]:
+                    with globals_inst.lock:
+                        globals_inst.blockchain.mempool_size = int(row[0])
+            except Exception:
+                pass
+            
+            # ledger entries
+            try:
+                cur.execute("SELECT COUNT(*) FROM ledger_entries")
+                row = cur.fetchone()
+                if row and row[0]:
+                    with globals_inst.lock:
+                        globals_inst.ledger.total_entries = int(row[0])
+            except Exception:
+                pass
+            
+            # active users count
+            try:
+                cur.execute("SELECT COUNT(*) FROM users WHERE is_active=TRUE AND is_deleted=FALSE")
+                row = cur.fetchone()
+                if row and row[0]:
+                    logger.info(f"[Globals] active users in DB = {row[0]}")
+            except Exception:
+                pass
+            
+            # DeFi pools
+            try:
+                cur.execute("SELECT COUNT(*) FROM liquidity_pools WHERE is_active=TRUE")
+                row = cur.fetchone()
+                if row and row[0]:
+                    with globals_inst.lock:
+                        globals_inst.defi.active_pools = int(row[0])
+            except Exception:
+                pass
+            
+            logger.info(f"[Globals] ✅ DB stats populated: chain={globals_inst.blockchain.chain_height} txns={globals_inst.blockchain.total_transactions}")
+        finally:
+            cur.close()
+            pool.return_connection(conn)
+    except Exception as e:
+        logger.warning(f"[Globals] _populate_blockchain_stats error (non-fatal): {e}")
 
 def _init_authentication(globals_inst: GlobalState):
     """Initialize authentication systems — tries JWTTokenManager then TokenManager."""
@@ -1038,8 +1115,22 @@ def get_quantum_noise():
     return get_globals().quantum.noise_bath
 
 def get_db_pool():
-    """Get database pool"""
-    return get_globals().database.pool
+    """Get database pool — returns DatabaseBuilder instance stored in globals.database.pool.
+    If not yet initialised, tries to lazy-load from db_builder_v2."""
+    pool = get_globals().database.pool
+    if pool is not None:
+        return pool
+    # Lazy-load path (called before _init_database ran)
+    try:
+        import db_builder_v2 as _db
+        pool = getattr(_db, 'DB_POOL', None) or getattr(_db, 'db_manager', None)
+        if pool is not None:
+            with get_globals().lock:
+                get_globals().database.pool = pool
+                get_globals().database.healthy = True
+        return pool
+    except Exception:
+        return None
 
 def get_auth_manager():
     """Get JWT auth manager"""

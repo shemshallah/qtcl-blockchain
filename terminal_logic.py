@@ -440,26 +440,29 @@ class SupabaseAuthManager:
 
     @classmethod
     def _hash_password(cls, password: str) -> str:
-        """SHA-256 based password hash with salt (bcrypt preferred if available)."""
+        """Hash password with bcrypt (12 rounds). Always bcrypt — NO sha256 fallback."""
         try:
-            import bcrypt
-            return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+            import bcrypt as _bcrypt
+            return _bcrypt.hashpw(password.encode('utf-8'), _bcrypt.gensalt(rounds=12)).decode('utf-8')
         except ImportError:
-            salt = secrets.token_hex(16)
-            h = hashlib.sha256(f"{salt}{password}".encode()).hexdigest()
-            return f"sha256${salt}${h}"
+            raise RuntimeError("bcrypt is required but not installed. Run: pip install bcrypt")
 
     @classmethod
     def _verify_password(cls, password: str, password_hash: str) -> bool:
-        """Verify a password against stored hash."""
+        """Verify password. Handles bcrypt ($2b$ prefix) and legacy sha256$ hashes."""
+        if not password or not password_hash:
+            return False
         try:
-            import bcrypt
-            return bcrypt.checkpw(password.encode(), password_hash.encode())
-        except ImportError:
+            import bcrypt as _bcrypt
+            if password_hash.startswith('$2b$') or password_hash.startswith('$2a$') or password_hash.startswith('$2y$'):
+                return _bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8'))
+            # Legacy sha256$ format: sha256$<salt>$<hash>
             if password_hash.startswith('sha256$'):
                 _, salt, stored = password_hash.split('$', 2)
                 h = hashlib.sha256(f"{salt}{password}".encode()).hexdigest()
                 return h == stored
+        except Exception as _e:
+            logger.debug(f"[SupabaseAuth] _verify_password error: {_e}")
         return False
 
     @classmethod
@@ -686,28 +689,94 @@ class SupabaseAuthManager:
 
     @classmethod
     def _login_local_fallback(cls, email: str, password: str) -> Tuple[bool, dict]:
-        """Verify credentials against local SQLite store."""
+        """
+        CRITICAL FIX v3.1: Local fallback now queries PostgreSQL `users` table
+        via auth_handlers.AuthHandlers.auth_login() (which uses bcrypt.checkpw).
+        
+        OLD (broken): sqlite3.connect(Config.DB_FILE) → qtcl_users table → always empty
+        NEW (fixed):  auth_handlers.AuthHandlers.auth_login() → PostgreSQL users table
+                      with full bcrypt verification + session creation
+        """
         try:
-            conn = sqlite3.connect(Config.DB_FILE)
-            cur = conn.execute(
-                "SELECT uid, name, password_hash, pseudoqubit_id, role FROM qtcl_users WHERE email=? LIMIT 1",
+            # Primary path: use the full auth_handlers authentication stack
+            # which queries PostgreSQL `users` table and verifies with bcrypt
+            from auth_handlers import AuthHandlers, UserManager, verify_password
+            
+            result = AuthHandlers.auth_login(
+                email=email,
+                password=password,
+                ip_address='terminal',
+                user_agent='QTCL-Terminal/5.0'
+            )
+            
+            if result.get('status') == 'success':
+                return True, {
+                    'token':           result.get('access_token', ''),
+                    'uid':             result.get('user_id', ''),
+                    'email':           result.get('email', email),
+                    'name':            result.get('username', 'User'),
+                    'role':            'user',
+                    'pseudoqubit_id':  str(result.get('pseudoqubit_id', 'N-A')),
+                    'session_id':      result.get('session_id', ''),
+                    'refresh_token':   result.get('refresh_token', ''),
+                    'message':         result.get('message', 'Login successful'),
+                }
+            else:
+                err = result.get('error', 'Authentication failed')
+                return False, {'error': err}
+        
+        except ImportError:
+            # auth_handlers not available — try raw DB query as last resort
+            logger.warning("[SupabaseAuth] auth_handlers not importable, trying raw DB query")
+            return cls._login_raw_db(email, password)
+        except Exception as e:
+            logger.error(f"[SupabaseAuth] _login_local_fallback error: {e}")
+            return False, {'error': str(e)}
+    
+    @classmethod
+    def _login_raw_db(cls, email: str, password: str) -> Tuple[bool, dict]:
+        """Last-resort login: raw PostgreSQL query + bcrypt verify.
+        Called only if auth_handlers import fails."""
+        try:
+            import bcrypt
+            from globals import get_db_pool
+            pool = get_db_pool()
+            if pool is None:
+                return False, {'error': 'Database not available'}
+            
+            conn = pool.get_connection()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT user_id, email, username, password_hash, metadata FROM users "
+                "WHERE email=%s AND is_active=TRUE AND is_deleted=FALSE LIMIT 1",
                 (email,)
             )
-            row = cur.fetchone(); conn.close()
+            row = cur.fetchone()
+            pool.return_connection(conn)
+            
             if not row:
                 return False, {'error': 'User not found'}
-            uid, name, stored_hash, pseudoqubit_id, role = row
-            if not cls._verify_password(password, stored_hash):
+            
+            uid, db_email, username, password_hash, metadata = row
+            if not bcrypt.checkpw(password.encode('utf-8'), password_hash.encode('utf-8')):
                 return False, {'error': 'Invalid password'}
-            # Generate a local JWT-like token
-            token_raw = f"{uid}:{email}:{time.time()}:{secrets.token_hex(16)}"
-            token = base64.b64encode(token_raw.encode()).decode()
+            
+            import jwt as _jwt, secrets as _s, time as _t
+            token_payload = {'user_id': uid, 'email': db_email, 'exp': _t.time() + 86400}
+            token = _jwt.encode(token_payload, os.getenv('JWT_SECRET', _s.token_urlsafe(32)), algorithm='HS256')
+            
+            meta = {}
+            if metadata:
+                try: meta = json.loads(metadata) if isinstance(metadata, str) else metadata
+                except: pass
+            
             return True, {
-                'token': token, 'uid': uid, 'email': email,
-                'name': name or 'User', 'role': role or 'user',
-                'pseudoqubit_id': pseudoqubit_id or 'N-A'
+                'token': token, 'uid': uid, 'email': db_email,
+                'name': username or db_email.split('@')[0], 'role': 'user',
+                'pseudoqubit_id': str(meta.get('pseudoqubit_id', 'N-A')),
             }
         except Exception as e:
+            logger.error(f"[SupabaseAuth] _login_raw_db error: {e}")
             return False, {'error': str(e)}
 
     @classmethod
@@ -1017,7 +1086,50 @@ class SessionManager:
         except Exception as e:logger.error(f"Failed to save session: {e}")
     
     def login(self,email:str,password:str)->Tuple[bool,str]:
-        # ── Try Supabase Auth first ─────────────────────────────────────────
+        """
+        CRITICAL FIX v3.1: Auth priority order:
+          1. auth_handlers.AuthHandlers.auth_login() → PostgreSQL users table + bcrypt
+          2. SupabaseAuthManager.login_user() → Supabase REST API
+          3. Legacy /api/auth/login endpoint
+        """
+        # ── Priority 1: Direct PostgreSQL auth via auth_handlers ────────────
+        try:
+            from auth_handlers import AuthHandlers as _AH
+            result = _AH.auth_login(
+                email=email,
+                password=password,
+                ip_address='terminal',
+                user_agent='QTCL-Terminal/5.0'
+            )
+            if result.get('status') == 'success':
+                # Use access_token preferentially; fall back to 'token'
+                token = result.get('access_token') or result.get('token', '')
+                self.session.token          = token
+                self.session.user_id        = result.get('user_id', '')
+                self.session.supabase_uid   = result.get('user_id', '')
+                self.session.email          = email
+                self.session.name           = result.get('username', 'User')
+                self.session.pseudoqubit_id = str(result.get('pseudoqubit_id', 'N-A'))
+                raw_role = 'user'
+                try:    self.session.role = UserRole(raw_role)
+                except: self.session.role = UserRole.USER
+                self.session.is_authenticated = True
+                self.session.created_at = time.time()
+                self.client.set_auth_token(token)
+                self.save_session()
+                msg = result.get('message', f'Logged in as {email}')
+                return True, msg
+            else:
+                err = result.get('error', 'Authentication failed')
+                # Non-retriable errors: wrong password, account locked
+                code = result.get('code', '')
+                if code in ('INVALID_CREDENTIALS', 'ACCOUNT_LOCKED', 'VALIDATION_ERROR'):
+                    return False, err
+                # Otherwise fall through to Supabase
+        except Exception as _e:
+            logger.debug(f"[SessionManager] auth_handlers path failed: {_e}")
+        
+        # ── Priority 2: Supabase Auth ────────────────────────────────────────
         ok, result = SupabaseAuthManager.login_user(email, password)
         if ok:
             self.session.token        = result.get('token','')
@@ -1034,7 +1146,8 @@ class SessionManager:
             self.client.set_auth_token(self.session.token)
             self.save_session()
             return True, "Login successful"
-        # ── Supabase Auth failed — try legacy API ───────────────────────────
+        
+        # ── Priority 3: Legacy API endpoint ─────────────────────────────────
         success,api_result=self.client.request('POST','/api/auth/login',{'email':email,'password':password})
         if success and api_result.get('token'):
             token=api_result['token']
@@ -5450,7 +5563,28 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         'help-category':        h_help_category,
         'help-command':         h_help_command,
         # WSGI
-        'wsgi-status':          lambda f,a: _ok(WSGIGlobals.summary()),
+        'wsgi-status': lambda f, a: _ok({
+            **WSGIGlobals.summary(),
+            'globals_health': (lambda gs: {
+                'blockchain': {
+                    'chain_height': gs.blockchain.chain_height,
+                    'pending_tx':   gs.blockchain.mempool_size,
+                    'total_tx':     gs.blockchain.total_transactions,
+                },
+                'auth': {
+                    'active_sessions': gs.auth.active_sessions,
+                    'users_cached':    len(gs.auth.users),
+                },
+                'database': {
+                    'healthy': gs.database.healthy,
+                    'pool_available': gs.database.pool is not None,
+                },
+                'ledger': {'entries': gs.ledger.total_entries},
+                'defi':   {'pools': gs.defi.active_pools},
+            })(
+                __import__('globals').get_globals()
+            ) if True else {}
+        }),
         'wsgi-cache-stats':     lambda f,a: _ok(WSGIGlobals.cache_get('_stats') or {}),
     }
 

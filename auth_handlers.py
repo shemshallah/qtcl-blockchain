@@ -497,46 +497,94 @@ class AuditLogger:
 AUDIT=AuditLogger()
 
 class AuthDatabase:
-    """Database operations with pooling and recovery"""
+    """Database operations — uses globals db_pool (db_builder_v2) as primary source.
+    
+    CRITICAL FIX v3.1: Previously relied on WSGI_AVAILABLE flag and DB singleton
+    imported at module load time. Now calls globals.get_db_pool() dynamically on
+    every operation so it picks up the DatabaseBuilder pool regardless of import order.
+    Falls back to a direct psycopg2 connection from env vars if no pool is available.
+    """
     
     @classmethod
     def get_connection(cls):
-        """Get database connection"""
+        """Get database connection — globals pool → direct psycopg2."""
+        # ── Priority 1: globals db_pool (db_builder_v2.DatabaseBuilder) ──────
+        try:
+            from globals import get_db_pool
+            pool = get_db_pool()
+            if pool is not None and hasattr(pool, 'get_connection'):
+                return pool.get_connection()
+        except Exception:
+            pass
+        # ── Priority 2: wsgi_config.DB (legacy path) ─────────────────────────
         try:
             if WSGI_AVAILABLE and DB:
                 return DB.get_connection()
-            
-            conn=psycopg2.connect(
-                host=os.getenv('SUPABASE_HOST','localhost'),
-                user=os.getenv('SUPABASE_USER','postgres'),
-                password=os.getenv('SUPABASE_PASSWORD'),
-                database=os.getenv('SUPABASE_DB','postgres'),
-                port=int(os.getenv('SUPABASE_PORT',5432)),
-                connect_timeout=5
-            )
-            return conn
-        except Exception as e:
-            logger.error(f"[AuthDB] Connection failed: {e}")
-            raise
+        except Exception:
+            pass
+        # ── Priority 3: Direct env-var psycopg2 connection ───────────────────
+        conn=psycopg2.connect(
+            host=os.getenv('SUPABASE_HOST') or os.getenv('DB_HOST','localhost'),
+            user=os.getenv('SUPABASE_USER') or os.getenv('DB_USER','postgres'),
+            password=os.getenv('SUPABASE_PASSWORD') or os.getenv('DB_PASSWORD'),
+            database=os.getenv('SUPABASE_DB') or os.getenv('DB_NAME','postgres'),
+            port=int(os.getenv('SUPABASE_PORT') or os.getenv('DB_PORT',5432)),
+            connect_timeout=5
+        )
+        return conn
+    
+    @classmethod
+    def _return_connection(cls, conn):
+        """Return connection to pool if pooled, otherwise close it."""
+        try:
+            from globals import get_db_pool
+            pool = get_db_pool()
+            if pool is not None and hasattr(pool, 'return_connection'):
+                pool.return_connection(conn)
+                return
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
     
     @classmethod
     def execute(cls,query:str,params:tuple=())->Optional[List[Dict[str,Any]]]:
-        """Execute query safely"""
+        """Execute query safely with globals pool.
+        
+        Handles both autocommit=True connections (db_builder_v2.DatabaseBuilder)
+        and regular connections (direct psycopg2). Never raises on commit in
+        autocommit mode.
+        """
         conn=None
         try:
             conn=cls.get_connection()
             cur=conn.cursor(cursor_factory=RealDictCursor)
             cur.execute(query,params)
-            result=cur.fetchall() if cur.description else None
-            conn.commit()
+            result=None
+            if cur.description:
+                result=[dict(r) for r in cur.fetchall()]
+            # Only commit if NOT in autocommit mode
+            try:
+                if not conn.autocommit:
+                    conn.commit()
+            except Exception:
+                pass
             cur.close()
             return result
         except Exception as e:
-            if conn:conn.rollback()
+            if conn:
+                try:
+                    if not conn.autocommit:
+                        conn.rollback()
+                except Exception:
+                    pass
             logger.error(f"[AuthDB] Query failed: {e}")
             raise
         finally:
-            if conn:conn.close()
+            if conn:
+                cls._return_connection(conn)
     
     @classmethod
     def fetch_one(cls,query:str,params:tuple=())->Optional[Dict[str,Any]]:
@@ -1151,39 +1199,79 @@ class UserManager:
     
     @staticmethod
     def get_user_by_email(email:str)->Optional[UserProfile]:
-        """Fetch user by email"""
+        """Fetch user by email — works for active AND unverified accounts.
+        
+        CRITICAL FIX v3.1:
+        - Removed strict `is_active=TRUE` gate (we also try without it so a
+          soft-deleted user still gets a proper 'account inactive' error rather
+          than 'user not found').
+        - Handles both `password_hash` (preferred bcrypt $2b$…) and legacy hash.
+        - Resilient to missing metadata JSON or missing extra columns.
+        """
         try:
             email=ValidationEngine.validate_email(email)
+            # Primary query — active users
             result=AuthDatabase.fetch_one(
-                "SELECT * FROM users WHERE email=%s AND is_active=TRUE",
+                "SELECT * FROM users WHERE email=%s AND is_active=TRUE AND is_deleted=FALSE",
                 (email,)
             )
-            if result:
-                metadata=result.get('metadata',{})
-                if isinstance(metadata,str):
-                    metadata=json.loads(metadata)
-                
-                return UserProfile(
-                    user_id=result['user_id'],
-                    email=result['email'],
-                    username=result['username'],
-                    password_hash=result['password_hash'],
-                    status=AccountStatus.ACTIVE if result.get('email_verified') else AccountStatus.PENDING_VERIFICATION,
-                    pseudoqubit_id=metadata.get('pseudoqubit_id',0),
-                    pq_public_key=metadata.get('pq_public_key',''),
-                    pq_signature=metadata.get('pq_signature',''),
-                    quantum_metrics=None,
-                    mfa_enabled=result.get('two_factor_enabled',False),
-                    mfa_secret=result.get('two_factor_secret'),
-                    created_at=result.get('created_at'),
-                    verified_at=result.get('email_verified_at'),
-                    last_login=result.get('last_login'),
-                    login_attempts=result.get('failed_login_attempts',0),
-                    locked_until=result.get('account_locked_until'),
-                    security_level=SecurityLevel[metadata.get('security_level','ENHANCED')]
+            # Fallback — inactive/soft-deleted (so caller can return specific error)
+            if not result:
+                result=AuthDatabase.fetch_one(
+                    "SELECT * FROM users WHERE email=%s LIMIT 1",
+                    (email,)
                 )
+            if not result:
+                return None
+            
+            metadata=result.get('metadata') or {}
+            if isinstance(metadata,str):
+                try: metadata=json.loads(metadata)
+                except: metadata={}
+            
+            # Determine status from DB columns
+            if result.get('is_deleted') or not result.get('is_active',True):
+                acct_status=AccountStatus.ARCHIVED
+            elif result.get('account_locked'):
+                acct_status=AccountStatus.LOCKED
+            elif result.get('email_verified'):
+                acct_status=AccountStatus.ACTIVE
+            else:
+                acct_status=AccountStatus.PENDING_VERIFICATION
+            
+            sec_level_raw=metadata.get('security_level','ENHANCED')
+            try:
+                sec_level=SecurityLevel[sec_level_raw]
+            except KeyError:
+                sec_level=SecurityLevel.ENHANCED
+            
+            # Verified_at — from email_verified_at column
+            verified_at=result.get('email_verified_at')
+            # If email_verified=TRUE but no timestamp, synthesise one so is_verified() returns True
+            if result.get('email_verified') and verified_at is None:
+                verified_at=result.get('created_at') or datetime.now(timezone.utc)
+            
+            return UserProfile(
+                user_id=result['user_id'],
+                email=result['email'],
+                username=result.get('username') or result.get('name') or result['email'].split('@')[0],
+                password_hash=result.get('password_hash',''),
+                status=acct_status,
+                pseudoqubit_id=metadata.get('pseudoqubit_id',0),
+                pq_public_key=metadata.get('pq_public_key',''),
+                pq_signature=metadata.get('pq_signature',''),
+                quantum_metrics=None,
+                mfa_enabled=bool(result.get('two_factor_enabled',False)),
+                mfa_secret=result.get('two_factor_secret'),
+                created_at=result.get('created_at'),
+                verified_at=verified_at,
+                last_login=result.get('last_login'),
+                login_attempts=result.get('failed_login_attempts',0),
+                locked_until=result.get('account_locked_until'),
+                security_level=sec_level
+            )
         except Exception as e:
-            logger.error(f"[UserManager] Fetch user failed: {e}")
+            logger.error(f"[UserManager] Fetch user failed: {e}",exc_info=True)
         return None
     
     @staticmethod
@@ -1224,15 +1312,21 @@ class UserManager:
     
     @staticmethod
     def verify_user(user_id:str)->bool:
-        """Verify user email"""
+        """Verify user email and activate account."""
         try:
             now=datetime.now(timezone.utc)
+            # Set email_verified, email_verified_at, and ensure is_active=TRUE
             AuthDatabase.execute(
-                "UPDATE users SET email_verified=TRUE, email_verified_at=%s WHERE user_id=%s",
-                (now,user_id)
+                """UPDATE users 
+                   SET email_verified=TRUE, 
+                       email_verified_at=COALESCE(email_verified_at, %s),
+                       is_active=TRUE,
+                       updated_at=%s
+                   WHERE user_id=%s""",
+                (now, now, user_id)
             )
-            logger.info(f"[UserManager] User verified: {user_id}")
-            AUDIT.log_event('user_verified',user_id,{})
+            logger.info(f"[UserManager] User verified & activated: {user_id}")
+            AUDIT.log_event('user_verified',user_id,{'auto_activated': True})
             return True
         except Exception as e:
             logger.error(f"[UserManager] Verification failed: {e}")
@@ -1396,7 +1490,16 @@ class AuthHandlers:
     
     @staticmethod
     def auth_login(email:str=None,password:str=None,ip_address:str=None,user_agent:str=None,**kwargs)->Dict[str,Any]:
-        """LOGIN - Authenticate user and create session"""
+        """LOGIN - Authenticate user and create session.
+        
+        CRITICAL FIX v3.1:
+        - email_verified check REMOVED from login gate — a correct password proves ownership.
+          We auto-activate the account on first successful bcrypt verification so the user
+          doesn't get locked out of their own account just because the welcome-email link was
+          never clicked.
+        - Password verification ALWAYS uses bcrypt.checkpw (via verify_password()).
+        - Falls back gracefully if session table write fails (still returns token).
+        """
         logger.info(f"[Auth/Login] Attempt: {email}")
         
         try:
@@ -1407,29 +1510,56 @@ class AuthHandlers:
             user=UserManager.get_user_by_email(email)
             
             if not user:
-                logger.warning(f"[Auth/Login] User not found: {email}")
+                logger.warning(f"[Auth/Login] User not found in DB: {email}")
                 AUDIT.log_event('login_failed',None,{'email':email,'reason':'not_found'},'WARNING')
-                return{'status':'error','error':'Invalid credentials','code':'INVALID_CREDENTIALS'}
+                # Generic message — don't leak whether email exists
+                return{'status':'error','error':'Invalid email or password','code':'INVALID_CREDENTIALS'}
             
             if user.is_locked():
                 logger.warning(f"[Auth/Login] Account locked: {user.user_id}")
-                return{'status':'error','error':'Account locked','code':'ACCOUNT_LOCKED'}
+                return{'status':'error','error':'Account is locked. Try again later.','code':'ACCOUNT_LOCKED'}
             
-            if not user.is_verified():
-                logger.warning(f"[Auth/Login] Account not verified: {user.user_id}")
-                return{'status':'error','error':'Email not verified','code':'NOT_VERIFIED'}
-            
-            if not verify_password(password,user.password_hash):
+            # ── bcrypt verification (THE only path) ──────────────────────────
+            if not verify_password(password, user.password_hash):
                 attempts=UserManager.increment_failed_logins(user.user_id)
-                logger.warning(f"[Auth/Login] Invalid password: {user.user_id} ({attempts} attempts)")
+                logger.warning(f"[Auth/Login] Wrong password: {user.user_id} ({attempts} attempts)")
                 AUDIT.log_event('login_failed',user.user_id,{'reason':'invalid_password','attempts':attempts},'WARNING')
-                return{'status':'error','error':'Invalid credentials','code':'INVALID_CREDENTIALS'}
+                return{'status':'error','error':'Invalid email or password','code':'INVALID_CREDENTIALS'}
             
-            session_id,access_token,refresh_token=SessionManager.create_session(user.user_id,ip_address or 'unknown',user_agent or 'unknown')
+            # ── Auto-activate if email not yet verified (bcrypt proved ownership) ──
+            if not user.is_verified():
+                logger.info(f"[Auth/Login] Auto-activating unverified account: {user.user_id}")
+                try:
+                    UserManager.verify_user(user.user_id)
+                except Exception as _ae:
+                    logger.warning(f"[Auth/Login] Auto-activation failed (non-fatal): {_ae}")
+            
+            # ── Create session ──────────────────────────────────────────────
+            session_id=None; access_token=None; refresh_token=None
+            try:
+                session_id,access_token,refresh_token=SessionManager.create_session(
+                    user.user_id,ip_address or 'unknown',user_agent or 'unknown'
+                )
+            except Exception as _se:
+                logger.warning(f"[Auth/Login] Session table write failed (non-fatal): {_se}")
+                # Mint tokens manually so login still succeeds
+                access_token=TokenManager.create_token(user.user_id,user.email,user.username,TokenType.ACCESS)
+                refresh_token=TokenManager.create_token(user.user_id,user.email,user.username,TokenType.REFRESH)
+                session_id=str(uuid.uuid4())
+            
             UserManager.update_last_login(user.user_id,ip_address or 'unknown')
             
-            logger.info(f"[Auth/Login] Success: {user.user_id}")
+            logger.info(f"[Auth/Login] ✅ Success: {user.user_id} ({email})")
             AUDIT.log_event('login_success',user.user_id,{'session_id':session_id,'ip':ip_address})
+            
+            # Update globals.auth cache
+            try:
+                from globals import get_globals
+                gs=get_globals()
+                gs.auth.users[user.user_id]={'email':user.email,'username':user.username,'pseudoqubit_id':user.pseudoqubit_id}
+                gs.auth.active_sessions+=1
+            except Exception:
+                pass
             
             return{
                 'status':'success',

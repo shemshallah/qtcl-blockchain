@@ -57,6 +57,132 @@ except Exception as _e:
     logger.error(f'[wsgi] globals init error (continuing): {_e}')
     _GS = None
 
+# ── Expose component singletons as module-level vars ──────────────────────────
+# terminal_logic.WSGIGlobals.load() does getattr(wsgi_config, 'DB', None) etc.
+# These MUST be module-level to be discoverable.
+
+def _expose_components():
+    """Wire db_builder_v2 + globals components into module-level vars."""
+    global DB, CACHE, PROFILER, CIRCUIT_BREAKERS, RATE_LIMITERS
+    global APIS, HEARTBEAT, ORCHESTRATOR, MONITOR, QUANTUM, ERROR_BUDGET
+    
+    # DB — DatabaseBuilder pool from globals (which loaded db_builder_v2)
+    try:
+        DB = get_db_pool()
+        if DB is None:
+            import db_builder_v2 as _db
+            DB = getattr(_db, 'db_manager', None) or getattr(_db, 'DB_POOL', None)
+    except Exception as _e:
+        logger.warning(f'[wsgi] DB singleton not available: {_e}')
+        DB = None
+    
+    # HEARTBEAT — from globals.quantum.heartbeat
+    try:
+        HEARTBEAT = get_heartbeat()
+    except Exception:
+        HEARTBEAT = None
+    
+    # QUANTUM — quantum subsystems bundle
+    try:
+        gs = get_globals()
+        QUANTUM = gs.quantum
+    except Exception:
+        QUANTUM = None
+    
+    # Placeholders — extend these when real implementations are wired
+    CACHE           = None
+    PROFILER        = None
+    CIRCUIT_BREAKERS= None
+    RATE_LIMITERS   = None
+    APIS            = None
+    ORCHESTRATOR    = None
+    MONITOR         = None
+    ERROR_BUDGET    = None
+    
+    logger.info(f'[wsgi] Components exposed — DB:{DB is not None} HEARTBEAT:{HEARTBEAT is not None} QUANTUM:{QUANTUM is not None}')
+
+# Declare with defaults so WSGIGlobals.load() never gets AttributeError
+DB              = None
+CACHE           = None
+PROFILER        = None
+CIRCUIT_BREAKERS= None
+RATE_LIMITERS   = None
+APIS            = None
+HEARTBEAT       = None
+ORCHESTRATOR    = None
+MONITOR         = None
+QUANTUM         = None
+ERROR_BUDGET    = None
+
+_expose_components()
+
+# ── Populate globals blockchain/auth/ledger stats from live DB ────────────────
+def _populate_globals_from_db():
+    """Read actual DB counts and seed in-memory globals state."""
+    try:
+        if DB is None:
+            return
+        gs = get_globals()
+        conn = DB.get_connection()
+        cur = conn.cursor()
+        
+        try:
+            # blockchain chain_height
+            cur.execute("SELECT COUNT(*) FROM blocks")
+            row = cur.fetchone()
+            if row and row[0]:
+                gs.blockchain.chain_height = int(row[0])
+                gs.blockchain.total_blocks = int(row[0])
+                logger.info(f'[wsgi] blockchain.chain_height = {gs.blockchain.chain_height}')
+            
+            # total transactions
+            try:
+                cur.execute("SELECT COUNT(*) FROM transactions")
+                row = cur.fetchone()
+                if row and row[0]:
+                    gs.blockchain.total_transactions = int(row[0])
+            except Exception:
+                pass
+            
+            # pending transactions
+            try:
+                cur.execute("SELECT COUNT(*) FROM transactions WHERE status='pending'")
+                row = cur.fetchone()
+                if row and row[0]:
+                    gs.blockchain.mempool_size = int(row[0])
+            except Exception:
+                pass
+            
+            # auth users & active sessions
+            try:
+                cur.execute("SELECT COUNT(*) FROM users WHERE is_active=TRUE AND is_deleted=FALSE")
+                row = cur.fetchone()
+                if row and row[0]:
+                    gs.auth.active_sessions = int(row[0])  # approximate user count
+            except Exception:
+                pass
+            
+            # ledger entries
+            try:
+                cur.execute("SELECT COUNT(*) FROM ledger_entries")
+                row = cur.fetchone()
+                if row and row[0]:
+                    gs.ledger.total_entries = int(row[0])
+            except Exception:
+                pass
+            
+            logger.info(f'[wsgi] ✅ DB stats loaded into globals: blocks={gs.blockchain.chain_height} txns={gs.blockchain.total_transactions}')
+        finally:
+            cur.close()
+            DB.return_connection(conn)
+    except Exception as _e:
+        logger.warning(f'[wsgi] Could not populate globals from DB (non-fatal): {_e}')
+
+try:
+    _populate_globals_from_db()
+except Exception as _pe:
+    logger.warning(f'[wsgi] DB population skipped: {_pe}')
+
 # ══════════════════════════════════════════════════════════════════════════════
 # STEP 2 — TERMINAL LOGIC → COMMAND_REGISTRY
 # ══════════════════════════════════════════════════════════════════════════════
@@ -131,12 +257,26 @@ def home():
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({
-        'status':   'healthy',
-        'commands': len(COMMAND_REGISTRY),
-        'engine':   _ENGINE is not None,
-        'time':     datetime.now(timezone.utc).isoformat(),
-    }), 200
+    try:
+        gs = get_globals()
+        snap = get_system_health()
+        return jsonify({
+            'status':   snap.get('status', 'healthy'),
+            'commands': len(COMMAND_REGISTRY),
+            'engine':   _ENGINE is not None,
+            'blockchain': snap.get('blockchain', {}),
+            'database': snap.get('database', {}),
+            'quantum':  snap.get('quantum', {}),
+            'uptime_seconds': snap.get('uptime_seconds', 0),
+            'time':     datetime.now(timezone.utc).isoformat(),
+        }), 200
+    except Exception as _e:
+        return jsonify({
+            'status':   'healthy',
+            'commands': len(COMMAND_REGISTRY),
+            'engine':   _ENGINE is not None,
+            'time':     datetime.now(timezone.utc).isoformat(),
+        }), 200
 
 
 @app.route('/api/status', methods=['GET'])
