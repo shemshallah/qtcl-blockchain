@@ -5177,10 +5177,38 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             return _err(f'Quantum not available: {e}')
 
     def h_quantum_status(flags, args):
-        result = _quantum_status_from_globals()
-        if result['status'] == 'error':
-            return _req('GET', '/api/quantum/status')
-        return result
+        try:
+            from globals import get_globals, get_lattice, get_heartbeat
+            gs  = get_globals()
+            lat = get_lattice()
+            hb  = get_heartbeat()
+
+            q = gs.quantum
+            out = {
+                'heartbeat_running':     hb.running       if hb  else False,
+                'heartbeat_pulse_count': hb.pulse_count   if hb  else 0,
+                'heartbeat_errors':      hb.error_count   if hb  else 0,
+                'heartbeat_listeners':   len(hb.listeners) if hb and hasattr(hb,'listeners') else 0,
+                'lattice_ready':         lat is not None,
+                'neural_network_ready':  q.neural_network  is not None,
+                'w_state_ready':         q.w_state_manager is not None,
+                'noise_bath_ready':      q.noise_bath      is not None,
+            }
+            # Enrich with live lattice metrics if available
+            if lat is not None:
+                try:
+                    m = lat.get_system_metrics() if hasattr(lat,'get_system_metrics') else {}
+                    out.update({k: v for k, v in m.items() if k not in out})
+                except Exception:
+                    pass
+            if hb is not None:
+                try:
+                    out['heartbeat_metrics'] = hb.get_metrics()
+                except Exception:
+                    pass
+            return _ok(out)
+        except Exception as e:
+            return _err(f'Quantum status unavailable: {e}')
 
     def h_quantum_entropy(flags, args):
         try:

@@ -325,6 +325,23 @@ class AdminDatabaseManager:
     def __init__(self,db_manager):
         self.db=db_manager
     
+    def execute_query(self, query, params=None, fetch_one=False):
+        """Shim: translates old execute_query calls to DatabaseBuilder.execute API."""
+        if self.db is None:
+            return None if fetch_one else []
+        try:
+            is_select = query.strip().upper().startswith('SELECT')
+            if is_select:
+                results = self.db.execute(query, params, return_results=True)
+                if results is None:
+                    return None if fetch_one else []
+                return results[0] if fetch_one else results
+            else:
+                return self.db.execute(query, params, return_results=False)
+        except Exception as _eq:
+            logger.error(f"[AdminDB] execute_query failed: {_eq}")
+            return None if fetch_one else []
+    
     def log_admin_action(self,log:AdminLog)->str:
         """Log administrative action"""
         query="""
@@ -429,7 +446,8 @@ def create_blueprint()->Blueprint:
     """Factory function to create Admin API blueprint"""
     
     bp=Blueprint('admin_api',__name__,url_prefix='/api')
-    admin_db=AdminDatabaseManager(db_manager)
+    _adm=AdminDatabaseManager(db_manager)  # wrapper with execute_query shim
+    admin_db=_adm
     metrics_collector=MetricsCollector()
     event_streamer=EventStreamer()
     
@@ -465,61 +483,49 @@ def create_blueprint()->Blueprint:
         return decorator
     
     def require_auth(f):
-        """Authentication decorator — validates Bearer token via globals auth manager."""
+        """Authentication decorator — validates Bearer token via globals session_store or JWT."""
         @wraps(f)
         def decorated_function(*args,**kwargs):
             auth_header=request.headers.get('Authorization','')
-            token = auth_header.replace('Bearer ','').strip() if auth_header.startswith('Bearer ') else ''
-            
-            g.authenticated = False
-            g.user_id       = None
-            g.is_admin      = False
-            g.user_role     = 'user'
-            
+            g.authenticated=False; g.user_id=None; g.is_admin=False; g.user_role='user'
+            if not auth_header.startswith('Bearer '):
+                return jsonify({'error':'Authentication required'}),401
+            token=auth_header[7:].strip()
             if not token:
-                return jsonify({'error':'Authentication required','code':'NO_TOKEN'}),401
-            
-            # ── Priority 1: globals session_store (populated by h_login) ─────
+                return jsonify({'error':'Authentication required'}),401
+
+            # Priority 1: globals session_store
             try:
                 from globals import get_globals as _gg
-                _gs = _gg()
-                session_entry = _gs.auth.session_store.get(token)
-                if session_entry and session_entry.get('authenticated'):
-                    g.authenticated = True
-                    g.user_id       = session_entry.get('user_id','')
-                    g.user_role     = session_entry.get('role','user')
-                    g.is_admin      = session_entry.get('is_admin', g.user_role in ('admin','superadmin'))
+                sess=_gg().auth.session_store.get(token)
+                if sess and sess.get('authenticated'):
+                    g.authenticated=True
+                    g.user_id=sess.get('user_id','')
+                    g.user_role=sess.get('role','user')
+                    g.is_admin=sess.get('is_admin', g.user_role in ('admin','superadmin'))
                     return f(*args,**kwargs)
             except Exception:
                 pass
-            
-            # ── Priority 2: JWT stateless verification ────────────────────────
+
+            # Priority 2: JWT stateless verify
             try:
-                from globals import get_auth_manager as _gam
-                auth_mgr = _gam()
-                if auth_mgr:
-                    payload = auth_mgr.verify_token(token)
-                    if payload:
-                        role = payload.get('role','user')
-                        g.authenticated = True
-                        g.user_id       = payload.get('user_id','')
-                        g.user_role     = role
-                        g.is_admin      = payload.get('is_admin', role in ('admin','superadmin','super_admin'))
-                        return f(*args,**kwargs)
+                from auth_handlers import TokenManager as _TM
+                payload=_TM.verify_token(token)
+                if payload:
+                    role=payload.get('role','user')
+                    g.authenticated=True; g.user_id=payload.get('user_id','')
+                    g.user_role=role; g.is_admin=payload.get('is_admin', role in ('admin','superadmin'))
+                    return f(*args,**kwargs)
             except Exception:
                 pass
-            
-            # ── Priority 3: ADMIN_SECRET bypass ──────────────────────────────
-            import os as _os
-            admin_secret = _os.getenv('ADMIN_SECRET','')
-            if admin_secret and token == admin_secret:
-                g.authenticated = True
-                g.user_id       = 'admin_bypass'
-                g.user_role     = 'admin'
-                g.is_admin      = True
+
+            # Priority 3: ADMIN_SECRET env bypass
+            secret=os.getenv('ADMIN_SECRET','')
+            if secret and token==secret:
+                g.authenticated=True; g.user_id='admin_bypass'; g.user_role='admin'; g.is_admin=True
                 return f(*args,**kwargs)
-            
-            return jsonify({'error':'Invalid or expired token','code':'INVALID_TOKEN'}),401
+
+            return jsonify({'error':'Invalid or expired token'}),401
         return decorated_function
     
     def require_admin(f):
@@ -555,8 +561,8 @@ def create_blueprint()->Blueprint:
             
             base_query+=" ORDER BY created_at DESC LIMIT %s OFFSET %s"
             
-            users=db_manager.execute_query(base_query,(limit,offset))
-            total=db_manager.execute_query(count_query,fetch_one=True)
+            users=_adm.execute_query(base_query,(limit,offset))
+            total=_adm.execute_query(count_query,fetch_one=True)
             
             return jsonify({
                 'users':users,
@@ -580,7 +586,7 @@ def create_blueprint()->Blueprint:
             reason=data.get('reason','')
             
             query="UPDATE users SET is_active=FALSE WHERE user_id=%s"
-            db_manager.execute_query(query,(user_id,))
+            _adm.execute_query(query,(user_id,))
             
             log=AdminLog(
                 log_id=f"log_{uuid.uuid4().hex[:16]}",
@@ -609,7 +615,7 @@ def create_blueprint()->Blueprint:
         """Admin: Activate user account"""
         try:
             query="UPDATE users SET is_active=TRUE WHERE user_id=%s"
-            db_manager.execute_query(query,(user_id,))
+            _adm.execute_query(query,(user_id,))
             
             log=AdminLog(
                 log_id=f"log_{uuid.uuid4().hex[:16]}",
@@ -660,31 +666,31 @@ def create_blueprint()->Blueprint:
             stats={}
             
             query="SELECT COUNT(*) as count FROM users"
-            result=db_manager.execute_query(query,fetch_one=True)
+            result=_adm.execute_query(query,fetch_one=True)
             stats['total_users']=result['count'] if result else 0
             
             query="SELECT COUNT(*) as count FROM users WHERE created_at>NOW()-INTERVAL '24 hours'"
-            result=db_manager.execute_query(query,fetch_one=True)
+            result=_adm.execute_query(query,fetch_one=True)
             stats['new_users_24h']=result['count'] if result else 0
             
             query="SELECT COUNT(*) as count FROM transactions"
-            result=db_manager.execute_query(query,fetch_one=True)
+            result=_adm.execute_query(query,fetch_one=True)
             stats['total_transactions']=result['count'] if result else 0
             
             query="SELECT COUNT(*) as count FROM transactions WHERE timestamp>NOW()-INTERVAL '24 hours'"
-            result=db_manager.execute_query(query,fetch_one=True)
+            result=_adm.execute_query(query,fetch_one=True)
             stats['transactions_24h']=result['count'] if result else 0
             
             query="SELECT COUNT(*) as count FROM blocks"
-            result=db_manager.execute_query(query,fetch_one=True)
+            result=_adm.execute_query(query,fetch_one=True)
             stats['total_blocks']=result['count'] if result else 0
             
             query="SELECT COUNT(*) as count FROM validators WHERE status='active'"
-            result=db_manager.execute_query(query,fetch_one=True)
+            result=_adm.execute_query(query,fetch_one=True)
             stats['active_validators']=result['count'] if result else 0
             
             query="SELECT COALESCE(SUM(reserve_a+reserve_b),0) as tvl FROM liquidity_pools"
-            result=db_manager.execute_query(query,fetch_one=True)
+            result=_adm.execute_query(query,fetch_one=True)
             stats['total_value_locked']=str(result['tvl']) if result else '0'
             
             return jsonify(stats),200
@@ -711,7 +717,7 @@ def create_blueprint()->Blueprint:
                 ORDER BY hour ASC
             """
             
-            results=db_manager.execute_query(query,(hours,))
+            results=_adm.execute_query(query,(hours,))
             
             block_times=[r['avg_block_time'] for r in results if r['avg_block_time']]
             
@@ -745,7 +751,7 @@ def create_blueprint()->Blueprint:
                 ORDER BY count DESC
             """
             
-            results=db_manager.execute_query(query)
+            results=_adm.execute_query(query)
             
             return jsonify({
                 'distribution':results,
@@ -775,7 +781,7 @@ def create_blueprint()->Blueprint:
                 LIMIT 20
             """
             
-            results=db_manager.execute_query(query,(hours,))
+            results=_adm.execute_query(query,(hours,))
             
             return jsonify({
                 'validators':results,
@@ -844,7 +850,7 @@ def create_blueprint()->Blueprint:
         def generate():
             while True:
                 query="SELECT * FROM blocks ORDER BY height DESC LIMIT 1"
-                latest_block=db_manager.execute_query(query,fetch_one=True)
+                latest_block=_adm.execute_query(query,fetch_one=True)
                 
                 if latest_block:
                     data=json.dumps(latest_block,default=str)
@@ -861,7 +867,7 @@ def create_blueprint()->Blueprint:
         def generate():
             while True:
                 query="SELECT COUNT(*) as size FROM transactions WHERE status='pending'"
-                result=db_manager.execute_query(query,fetch_one=True)
+                result=_adm.execute_query(query,fetch_one=True)
                 
                 if result:
                     data=json.dumps({'mempool_size':result['size']})
@@ -886,7 +892,7 @@ def create_blueprint()->Blueprint:
                     FROM liquidity_pools
                     LIMIT 10
                 """
-                prices=db_manager.execute_query(query)
+                prices=_adm.execute_query(query)
                 
                 data=json.dumps(prices,default=str)
                 yield f"data: {data}\n\n"
@@ -944,15 +950,15 @@ def create_blueprint()->Blueprint:
             dashboard_data={}
             
             query="SELECT balance FROM accounts WHERE user_id=%s"
-            result=db_manager.execute_query(query,(g.user_id,),fetch_one=True)
+            result=_adm.execute_query(query,(g.user_id,),fetch_one=True)
             dashboard_data['balance']=str(result['balance']) if result else '0'
             
             query="SELECT COUNT(*) as count FROM transactions WHERE from_address=%s OR to_address=%s"
-            result=db_manager.execute_query(query,(g.user_id,g.user_id),fetch_one=True)
+            result=_adm.execute_query(query,(g.user_id,g.user_id),fetch_one=True)
             dashboard_data['total_transactions']=result['count'] if result else 0
             
             query="SELECT COALESCE(SUM(amount),0) as total FROM stakes WHERE user_id=%s AND status='active'"
-            result=db_manager.execute_query(query,(g.user_id,),fetch_one=True)
+            result=_adm.execute_query(query,(g.user_id,),fetch_one=True)
             dashboard_data['total_staked']=str(result['total']) if result else '0'
             
             query="""
@@ -960,7 +966,7 @@ def create_blueprint()->Blueprint:
                 WHERE from_address=%s 
                 ORDER BY timestamp DESC LIMIT 5
             """
-            recent_txs=db_manager.execute_query(query,(g.user_id,))
+            recent_txs=_adm.execute_query(query,(g.user_id,))
             dashboard_data['recent_transactions']=recent_txs
             
             return jsonify(dashboard_data),200
@@ -1072,7 +1078,7 @@ def create_blueprint()->Blueprint:
         """Get system upgrade proposals"""
         try:
             query="SELECT * FROM upgrades ORDER BY proposed_at DESC LIMIT 50"
-            upgrades=db_manager.execute_query(query)
+            upgrades=_adm.execute_query(query)
             
             return jsonify({'upgrades':upgrades,'total':len(upgrades)}),200
             
@@ -1116,7 +1122,7 @@ def create_blueprint()->Blueprint:
             else:
                 query="UPDATE upgrades SET votes_against=votes_against+1 WHERE upgrade_id=%s"
             
-            db_manager.execute_query(query,(upgrade_id,))
+            _adm.execute_query(query,(upgrade_id,))
             
             return jsonify({
                 'success':True,
