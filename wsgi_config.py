@@ -42,6 +42,22 @@ from flask_cors import CORS
 # ══════════════════════════════════════════════════════════════════════════════
 
 from globals import (
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INTEGRATED COMMAND SYSTEM - Oracle pricing, response wrapping, multi-execute
+# ══════════════════════════════════════════════════════════════════════════════
+try:
+    from integrated_oracle_provider import (
+        ORACLE_PRICE_PROVIDER, ResponseWrapper, get_oracle_price_provider
+    )
+    INTEGRATED_AVAILABLE = True
+    logger.info('[wsgi] Integrated oracle system loaded')
+except ImportError as e:
+    INTEGRATED_AVAILABLE = False
+    ResponseWrapper = None
+    ORACLE_PRICE_PROVIDER = None
+    logger.warning('[wsgi] Integrated oracle system not available: %s', e)
+
     get_globals, initialize_globals, get_system_health, get_state_snapshot,
     COMMAND_REGISTRY, dispatch_command,
     get_heartbeat, get_lattice, get_db_pool, get_auth_manager,
@@ -333,6 +349,227 @@ def api_status():
 
 
 @app.route('/api/command', methods=['POST'])
+@app.route('/api/execute', methods=['POST'])
+def api_command():
+    """
+    Universal hyphenated command dispatcher with integrated error handling.
+    """
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        raw  = (body.get('command') or body.get('cmd') or '').strip()
+        if not raw:
+            if INTEGRATED_AVAILABLE and ResponseWrapper:
+                return jsonify(ResponseWrapper.error(
+                    error='No command provided',
+                    error_code='EMPTY_COMMAND'
+                )), 400
+            else:
+                return jsonify({'status': 'error', 'error': 'No command provided'}), 400
+
+        extra_args = body.get('args', [])
+        extra_kw   = body.get('kwargs', {})
+        if extra_args:
+            raw += ' ' + ' '.join(str(a) for a in extra_args if a)
+        if extra_kw:
+            for k, v in extra_kw.items():
+                if v is not None and v != '':
+                    raw += f' --{k}={v}'
+
+        is_auth, is_admin = _parse_auth(request)
+        result = dispatch_command(raw, is_admin=is_admin, is_authenticated=is_auth)
+        
+        # Ensure proper response format
+        if INTEGRATED_AVAILABLE and ResponseWrapper:
+            result = ResponseWrapper.ensure_json(result)
+
+        try:
+            get_globals().metrics.commands_executed += 1
+        except Exception:
+            pass
+
+        status_code = 200 if result.get('status') == 'success' else 400
+        return jsonify(result), status_code
+
+    except Exception as exc:
+        logger.error(f'[/api/command] {exc}\n{traceback.format_exc()}')
+        if INTEGRATED_AVAILABLE and ResponseWrapper:
+            return jsonify(ResponseWrapper.error(
+                error=str(exc), error_code='INTERNAL_ERROR'
+            )), 500
+        else:
+            return jsonify({'status': 'error', 'error': str(exc)}), 500
+
+
+@app.route('/api/commands/batch', methods=['POST'])
+def api_commands_batch():
+    """Execute multiple commands in parallel with aggregated results."""
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        commands = body.get('commands', [])
+        
+        if not commands:
+            if INTEGRATED_AVAILABLE and ResponseWrapper:
+                return jsonify(ResponseWrapper.error(
+                    error='No commands provided', error_code='EMPTY_BATCH'
+                )), 400
+        
+        is_auth, is_admin = _parse_auth(request)
+        
+        # Execute in parallel
+        import concurrent.futures
+        results = []
+        errors = []
+        timings = []
+        
+        def execute_single(cmd_str):
+            import time
+            t0 = time.time()
+            try:
+                result = dispatch_command(cmd_str, is_admin=is_admin, is_authenticated=is_auth)
+                duration = time.time() - t0
+                timings.append(duration)
+                return {'command': cmd_str, 'response': ResponseWrapper.ensure_json(result) if ResponseWrapper else result, 'duration': duration, 'error': None}
+            except Exception as e:
+                logger.error('[batch] Command %s failed: %s', cmd_str, e)
+                errors.append({'command': cmd_str, 'error': str(e)})
+                return {'command': cmd_str, 'response': None, 'error': str(e)}
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(commands), 10)) as executor:
+            futures = [executor.submit(execute_single, cmd) for cmd in commands]
+            results = [f.result() for f in concurrent.futures.as_completed(futures)]
+        
+        successful = [r for r in results if not r.get('error')]
+        failed = [r for r in results if r.get('error')]
+        
+        if INTEGRATED_AVAILABLE and ResponseWrapper:
+            return jsonify(ResponseWrapper.success(
+                data={
+                    'results': results, 'successful': len(successful),
+                    'failed': len(failed), 'total': len(commands)
+                },
+                message=f'Executed {len(successful)}/{len(commands)} commands',
+                metadata={
+                    'avg_duration_ms': round((sum(timings) / len(timings)) * 1000) if timings else 0,
+                    'total_duration_ms': round(sum(timings) * 1000) if timings else 0
+                }
+            )), 200
+        else:
+            return jsonify({'status': 'success', 'result': results}), 200
+    
+    except Exception as exc:
+        logger.error('[/api/commands/batch] %s', exc)
+        if INTEGRATED_AVAILABLE and ResponseWrapper:
+            return jsonify(ResponseWrapper.error(error=str(exc), error_code='BATCH_FAILED')), 500
+        else:
+            return jsonify({'status': 'error', 'error': str(exc)}), 500
+
+
+@app.route('/api/commands/sequential', methods=['POST'])
+def api_commands_sequential():
+    """Execute multiple commands sequentially."""
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        commands = body.get('commands', [])
+        
+        if not commands:
+            if INTEGRATED_AVAILABLE and ResponseWrapper:
+                return jsonify(ResponseWrapper.error(
+                    error='No commands provided', error_code='EMPTY_BATCH'
+                )), 400
+        
+        is_auth, is_admin = _parse_auth(request)
+        results = []
+        errors = []
+        timings = []
+        
+        for cmd_str in commands:
+            import time
+            t0 = time.time()
+            try:
+                result = dispatch_command(cmd_str, is_admin=is_admin, is_authenticated=is_auth)
+                duration = time.time() - t0
+                timings.append(duration)
+                results.append({'command': cmd_str, 'response': ResponseWrapper.ensure_json(result) if ResponseWrapper else result, 'duration': duration})
+            except Exception as e:
+                logger.error('[seq] Command %s failed: %s', cmd_str, e)
+                errors.append({'command': cmd_str, 'error': str(e)})
+                results.append({'command': cmd_str, 'response': None, 'error': str(e)})
+        
+        if INTEGRATED_AVAILABLE and ResponseWrapper:
+            return jsonify(ResponseWrapper.success(
+                data={
+                    'results': results, 'successful': len([r for r in results if not r.get('error')]),
+                    'failed': len(errors), 'total': len(commands)
+                },
+                metadata={
+                    'avg_duration_ms': round((sum(timings) / len(timings)) * 1000) if timings else 0,
+                    'total_duration_ms': round(sum(timings) * 1000) if timings else 0
+                }
+            )), 200
+        else:
+            return jsonify({'status': 'success', 'result': results}), 200
+    
+    except Exception as exc:
+        logger.error('[/api/commands/sequential] %s', exc)
+        if INTEGRATED_AVAILABLE and ResponseWrapper:
+            return jsonify(ResponseWrapper.error(error=str(exc), error_code='SEQ_FAILED')), 500
+
+
+@app.route('/api/oracle/price/<symbol>', methods=['GET'])
+def api_oracle_price(symbol):
+    """Get price for a specific symbol."""
+    try:
+        if not INTEGRATED_AVAILABLE or not ORACLE_PRICE_PROVIDER:
+            return jsonify({'status': 'error', 'error': 'Oracle not available'}), 503
+        
+        price_data = ORACLE_PRICE_PROVIDER.get_price(symbol)
+        
+        if price_data.get('available'):
+            return jsonify(ResponseWrapper.success(data=price_data)), 200
+        else:
+            return jsonify(ResponseWrapper.error(
+                error=f'Symbol not found: {symbol}', error_code='SYMBOL_NOT_FOUND'
+            )), 404
+    
+    except Exception as exc:
+        logger.error('[/api/oracle/price/%s] %s', symbol, exc)
+        if INTEGRATED_AVAILABLE and ResponseWrapper:
+            return jsonify(ResponseWrapper.error(error=str(exc), error_code='PRICE_ERROR')), 500
+
+
+@app.route('/api/oracle/prices', methods=['GET'])
+def api_oracle_prices():
+    """Get all available prices."""
+    try:
+        if not INTEGRATED_AVAILABLE or not ORACLE_PRICE_PROVIDER:
+            return jsonify({'status': 'error', 'error': 'Oracle not available'}), 503
+        
+        all_prices = ORACLE_PRICE_PROVIDER.get_all_prices()
+        return jsonify(ResponseWrapper.success(
+            data={'prices': all_prices, 'count': len(all_prices)}
+        )), 200
+    
+    except Exception as exc:
+        logger.error('[/api/oracle/prices] %s', exc)
+        if INTEGRATED_AVAILABLE and ResponseWrapper:
+            return jsonify(ResponseWrapper.error(error=str(exc), error_code='PRICES_ERROR')), 500
+
+
+@app.route('/api/oracle/status', methods=['GET'])
+def api_oracle_status():
+    """Get oracle system status."""
+    try:
+        if not INTEGRATED_AVAILABLE or not ORACLE_PRICE_PROVIDER:
+            return jsonify({'status': 'error', 'error': 'Oracle not available'}), 503
+        
+        status = ORACLE_PRICE_PROVIDER.get_status()
+        return jsonify(ResponseWrapper.success(data=status)), 200
+    
+    except Exception as exc:
+        logger.error('[/api/oracle/status] %s', exc)
+        if INTEGRATED_AVAILABLE and ResponseWrapper:
+            return jsonify(ResponseWrapper.error(error=str(exc), error_code='STATUS_ERROR')), 500
+
 @app.route('/api/execute', methods=['POST'])
 def api_command():
     """

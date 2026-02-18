@@ -1516,24 +1516,130 @@ def get_oracle_heartbeat_status():
 
 # Export blueprint for main_app.py
 
-def create_blueprint():
-    """Create Flask blueprint for Oracle API"""
+
+def create_oracle_api_blueprint():
+    """Create unified oracle API blueprint using integrated provider."""
     from flask import Blueprint, jsonify, request
+    from integrated_oracle_provider import ORACLE_PRICE_PROVIDER, ResponseWrapper
     
     blueprint = Blueprint('oracle_api', __name__, url_prefix='/api/oracle')
     
-    @blueprint.route('/price/<asset>', methods=['GET'])
-    def get_price(asset):
-        """Get asset price from oracle"""
-        return jsonify({'asset': asset, 'price': 0, 'status': 'operational'})
+    @blueprint.route('/price/<symbol>', methods=['GET'])
+    def get_price(symbol):
+        """Get asset price from unified oracle provider."""
+        try:
+            price_data = ORACLE_PRICE_PROVIDER.get_price(symbol)
+            
+            if price_data.get('available'):
+                return jsonify(ResponseWrapper.success(data=price_data)), 200
+            else:
+                return jsonify(ResponseWrapper.error(
+                    error=f'Symbol not found: {symbol}',
+                    error_code='SYMBOL_NOT_FOUND'
+                )), 404
+        except Exception as e:
+            return jsonify(ResponseWrapper.error(
+                error=str(e), error_code='PRICE_ERROR'
+            )), 500
+    
+    @blueprint.route('/prices', methods=['GET'])
+    def get_prices():
+        """Get all available prices."""
+        try:
+            all_prices = ORACLE_PRICE_PROVIDER.get_all_prices()
+            return jsonify(ResponseWrapper.success(
+                data={'prices': all_prices, 'count': len(all_prices)}
+            )), 200
+        except Exception as e:
+            return jsonify(ResponseWrapper.error(
+                error=str(e), error_code='PRICES_ERROR'
+            )), 500
+    
+    @blueprint.route('/update', methods=['POST'])
+    def update_price():
+        """Update oracle price (admin only)."""
+        try:
+            is_admin = request.headers.get('X-Admin', False)
+            if not is_admin:
+                return jsonify(ResponseWrapper.error(
+                    error='Admin privileges required',
+                    error_code='UNAUTHORIZED'
+                )), 403
+            
+            body = request.get_json(force=True, silent=True) or {}
+            symbol = body.get('symbol')
+            price = body.get('price')
+            source = body.get('source', 'admin')
+            
+            if not symbol or price is None:
+                return jsonify(ResponseWrapper.error(
+                    error='symbol and price required',
+                    error_code='INVALID_INPUT'
+                )), 400
+            
+            ORACLE_PRICE_PROVIDER.update_price(symbol, float(price), source)
+            
+            return jsonify(ResponseWrapper.success(
+                data={'symbol': symbol, 'price': float(price), 'source': source}
+            )), 200
+        
+        except ValueError:
+            return jsonify(ResponseWrapper.error(
+                error='price must be numeric',
+                error_code='INVALID_PRICE'
+            )), 400
+        except Exception as e:
+            return jsonify(ResponseWrapper.error(
+                error=str(e), error_code='UPDATE_ERROR'
+            )), 500
+    
+    @blueprint.route('/status', methods=['GET'])
+    def get_status():
+        """Get oracle system status."""
+        try:
+            status = ORACLE_PRICE_PROVIDER.get_status()
+            return jsonify(ResponseWrapper.success(data=status)), 200
+        except Exception as e:
+            return jsonify(ResponseWrapper.error(
+                error=str(e), error_code='STATUS_ERROR'
+            )), 500
     
     @blueprint.route('/time', methods=['GET'])
     def get_time():
-        """Get current oracle time"""
-        import time
-        return jsonify({'timestamp': time.time()})
+        """Get oracle timestamp."""
+        try:
+            import time
+            return jsonify(ResponseWrapper.success(
+                data={'timestamp': time.time()}
+            )), 200
+        except Exception as e:
+            return jsonify(ResponseWrapper.error(
+                error=str(e), error_code='TIME_ERROR'
+            )), 500
+    
+    @blueprint.route('/random', methods=['GET'])
+    def get_random():
+        """Get random bytes (quantum-backed)."""
+        try:
+            nbytes = int(request.args.get('bytes', 32))
+            import secrets
+            val = secrets.token_hex(nbytes)
+            return jsonify(ResponseWrapper.success(
+                data={'random_hex': val, 'bytes': nbytes, 'source': 'quantum_rng'}
+            )), 200
+        except Exception as e:
+            return jsonify(ResponseWrapper.error(
+                error=str(e), error_code='RANDOM_ERROR'
+            )), 500
     
     return blueprint
+
+blueprint = create_oracle_api_blueprint()
+
+def get_oracle_blueprint():
+    """Factory function for WSGI integration."""
+    return create_oracle_api_blueprint()
+
 
 
 blueprint = create_blueprint()

@@ -4883,6 +4883,114 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
 
     # ── AUTH ──────────────────────────────────────────────────────────────────
 
+
+    def h_oracle_price(flags, args):
+        """Get oracle price for a symbol."""
+        try:
+            from integrated_oracle_provider import ORACLE_PRICE_PROVIDER, ResponseWrapper
+            symbol = flags.get('symbol') or flags.get('pair') or (args[0] if args else 'QTCL-USD')
+            price_data = ORACLE_PRICE_PROVIDER.get_price(symbol)
+            
+            if price_data.get('available'):
+                return ResponseWrapper.success(
+                    data=price_data,
+                    message=f'Price for {symbol}: {price_data["price"]}'
+                )
+            else:
+                return ResponseWrapper.error(
+                    error=f'Price not available for symbol {symbol}',
+                    error_code='SYMBOL_NOT_FOUND',
+                    suggestions=['Try QTCL-USD, BTC-USD, ETH-USD, USDC-USD']
+                )
+        except Exception as e:
+            return _err(f'Failed to fetch price: {str(e)}')
+
+    def h_oracle_prices(flags, args):
+        """Get all available prices."""
+        try:
+            from integrated_oracle_provider import ORACLE_PRICE_PROVIDER, ResponseWrapper
+            all_prices = ORACLE_PRICE_PROVIDER.get_all_prices()
+            return ResponseWrapper.success(
+                data={'prices': all_prices, 'count': len(all_prices)},
+                message=f'Retrieved {len(all_prices)} prices'
+            )
+        except Exception as e:
+            return _err(f'Failed to fetch prices: {str(e)}')
+
+    def h_oracle_update(flags, args):
+        """Update oracle price (admin only)."""
+        try:
+            from integrated_oracle_provider import ORACLE_PRICE_PROVIDER, ResponseWrapper
+            symbol = flags.get('symbol') or (args[0] if args else None)
+            price = flags.get('price') or (args[1] if len(args) > 1 else None)
+            source = flags.get('source', 'manual')
+            
+            if not symbol or not price:
+                return ResponseWrapper.error(
+                    error='Usage: oracle-update --symbol=BTC-USD --price=50000',
+                    error_code='INVALID_ARGS'
+                )
+            
+            price = float(price)
+            ORACLE_PRICE_PROVIDER.update_price(symbol, price, source)
+            
+            return ResponseWrapper.success(
+                data={'symbol': symbol, 'price': price, 'source': source},
+                message=f'Updated {symbol} to {price}'
+            )
+        except ValueError:
+            return _err('Price must be a valid number')
+        except Exception as e:
+            return _err(f'Failed to update price: {str(e)}')
+
+    def h_oracle_feed(flags, args):
+        """Get list of available price feeds."""
+        try:
+            from integrated_oracle_provider import ORACLE_PRICE_PROVIDER, ResponseWrapper
+            prices = ORACLE_PRICE_PROVIDER.get_all_prices()
+            return ResponseWrapper.success(
+                data={'feeds': list(prices.keys()), 'count': len(prices)}
+            )
+        except Exception as e:
+            return _err(f'Failed to fetch feeds: {str(e)}')
+
+    def h_oracle_event(flags, args):
+        """Get recent oracle events."""
+        try:
+            from integrated_oracle_provider import ORACLE_PRICE_PROVIDER, ResponseWrapper
+            status = ORACLE_PRICE_PROVIDER.get_status()
+            return ResponseWrapper.success(
+                data=status,
+                message=f'Oracle has {status["cached_symbols"]} cached symbols'
+            )
+        except Exception as e:
+            return _err(f'Failed to fetch events: {str(e)}')
+
+    def h_oracle_random(flags, args):
+        """Generate random bytes (quantum-backed)."""
+        try:
+            from integrated_oracle_provider import ResponseWrapper
+            import secrets
+            nbytes = int(flags.get('bytes', 32))
+            val = secrets.token_hex(nbytes)
+            return ResponseWrapper.success(
+                data={'random_hex': val, 'bytes': nbytes, 'source': 'quantum_rng'}
+            )
+        except Exception as e:
+            return _err(f'Failed to generate random: {str(e)}')
+
+    def h_oracle_time(flags, args):
+        """Get oracle timestamp."""
+        try:
+            from integrated_oracle_provider import ResponseWrapper
+            import time
+            return ResponseWrapper.success(
+                data={'timestamp': time.time(), 'source': 'system'}
+            )
+        except Exception as e:
+            return _err(f'Failed to get time: {str(e)}')
+
+
     def h_login(flags, args):
         email = flags.get('email') or (args[0] if args else None)
         pw    = flags.get('password') or (args[1] if len(args) > 1 else None)
@@ -5114,7 +5222,7 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             pass
         return _req('GET', '/api/oracle/time')
 
-    def h_oracle_price(flags, args):
+    def h_oracle_price_OLD(flags, args):
         symbol = flags.get('symbol') or flags.get('pair') or (args[0] if args else 'QTCL-USD')
         try:
             from globals import get_oracle
