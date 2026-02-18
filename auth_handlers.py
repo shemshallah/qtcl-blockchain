@@ -1199,81 +1199,99 @@ class UserManager:
     
     @staticmethod
     def get_user_by_email(email:str)->Optional[UserProfile]:
-        """Fetch user by email — works for active AND unverified accounts.
+        """Fetch user by email — bullet-proof against schema drift.
         
-        CRITICAL FIX v3.1:
-        - Removed strict `is_active=TRUE` gate (we also try without it so a
-          soft-deleted user still gets a proper 'account inactive' error rather
-          than 'user not found').
-        - Handles both `password_hash` (preferred bcrypt $2b$…) and legacy hash.
-        - Resilient to missing metadata JSON or missing extra columns.
+        FIX v3.2: Uses safest single-column query first (just email LIMIT 1).
+        Previous version used AND is_deleted=FALSE which throws if that column
+        doesn't exist in production schema — caught by outer except, silently
+        returns None, causing 'user not found' even with correct credentials.
         """
         try:
             email=ValidationEngine.validate_email(email)
-            # Primary query — active users
-            result=AuthDatabase.fetch_one(
-                "SELECT * FROM users WHERE email=%s AND is_active=TRUE AND is_deleted=FALSE",
+        except Exception:
+            return None
+        
+        result = None
+        
+        # Safest query — just email match, no optional columns that may not exist
+        try:
+            result = AuthDatabase.fetch_one(
+                "SELECT * FROM users WHERE email=%s LIMIT 1",
                 (email,)
             )
-            # Fallback — inactive/soft-deleted (so caller can return specific error)
-            if not result:
-                result=AuthDatabase.fetch_one(
-                    "SELECT * FROM users WHERE email=%s LIMIT 1",
-                    (email,)
-                )
-            if not result:
-                return None
-            
-            metadata=result.get('metadata') or {}
-            if isinstance(metadata,str):
-                try: metadata=json.loads(metadata)
-                except: metadata={}
-            
-            # Determine status from DB columns
-            if result.get('is_deleted') or not result.get('is_active',True):
-                acct_status=AccountStatus.ARCHIVED
-            elif result.get('account_locked'):
-                acct_status=AccountStatus.LOCKED
-            elif result.get('email_verified'):
-                acct_status=AccountStatus.ACTIVE
-            else:
-                acct_status=AccountStatus.PENDING_VERIFICATION
-            
-            sec_level_raw=metadata.get('security_level','ENHANCED')
-            try:
-                sec_level=SecurityLevel[sec_level_raw]
-            except KeyError:
-                sec_level=SecurityLevel.ENHANCED
-            
-            # Verified_at — from email_verified_at column
-            verified_at=result.get('email_verified_at')
-            # If email_verified=TRUE but no timestamp, synthesise one so is_verified() returns True
-            if result.get('email_verified') and verified_at is None:
-                verified_at=result.get('created_at') or datetime.now(timezone.utc)
-            
+        except Exception as e1:
+            logger.error(f"[UserManager] get_user_by_email query failed: {e1}", exc_info=True)
+            return None
+        
+        if not result:
+            logger.warning(f"[UserManager] No user found for email: {email}")
+            return None
+        
+        # Log useful diagnostics
+        pw_hash = result.get('password_hash', '')
+        if not pw_hash:
+            logger.error(f"[UserManager] User {result.get('user_id')} has NO password_hash!")
+        else:
+            is_bcrypt = pw_hash.startswith(('$2b$', '$2a$', '$2y$'))
+            logger.info(f"[UserManager] Found user {result.get('user_id')} hash_type={'bcrypt' if is_bcrypt else 'other'}")
+        
+        # Parse metadata safely
+        metadata = result.get('metadata') or {}
+        if isinstance(metadata, str):
+            try: metadata = json.loads(metadata)
+            except: metadata = {}
+        
+        # Determine account status from whatever columns exist
+        if result.get('is_deleted'):
+            acct_status = AccountStatus.ARCHIVED
+        elif result.get('account_locked'):
+            acct_status = AccountStatus.LOCKED
+        elif result.get('email_verified'):
+            acct_status = AccountStatus.ACTIVE
+        else:
+            # PENDING — auth_login will auto-activate on correct bcrypt
+            acct_status = AccountStatus.PENDING_VERIFICATION
+        
+        sec_level_raw = metadata.get('security_level', 'ENHANCED')
+        try:
+            sec_level = SecurityLevel[sec_level_raw]
+        except (KeyError, ValueError):
+            sec_level = SecurityLevel.ENHANCED
+        
+        # Synthesise verified_at so is_verified() works
+        verified_at = result.get('email_verified_at')
+        if result.get('email_verified') and verified_at is None:
+            verified_at = result.get('created_at') or datetime.now(timezone.utc)
+        
+        username = (
+            result.get('username')
+            or result.get('name')
+            or result['email'].split('@')[0]
+        )
+        
+        try:
             return UserProfile(
                 user_id=result['user_id'],
                 email=result['email'],
-                username=result.get('username') or result.get('name') or result['email'].split('@')[0],
-                password_hash=result.get('password_hash',''),
+                username=username,
+                password_hash=pw_hash,
                 status=acct_status,
-                pseudoqubit_id=metadata.get('pseudoqubit_id',0),
-                pq_public_key=metadata.get('pq_public_key',''),
-                pq_signature=metadata.get('pq_signature',''),
+                pseudoqubit_id=metadata.get('pseudoqubit_id', 0),
+                pq_public_key=metadata.get('pq_public_key', ''),
+                pq_signature=metadata.get('pq_signature', ''),
                 quantum_metrics=None,
-                mfa_enabled=bool(result.get('two_factor_enabled',False)),
+                mfa_enabled=bool(result.get('two_factor_enabled', False)),
                 mfa_secret=result.get('two_factor_secret'),
                 created_at=result.get('created_at'),
                 verified_at=verified_at,
                 last_login=result.get('last_login'),
-                login_attempts=result.get('failed_login_attempts',0),
+                login_attempts=int(result.get('failed_login_attempts', 0) or 0),
                 locked_until=result.get('account_locked_until'),
                 security_level=sec_level
             )
         except Exception as e:
-            logger.error(f"[UserManager] Fetch user failed: {e}",exc_info=True)
-        return None
-    
+            logger.error(f"[UserManager] UserProfile construction failed: {e}", exc_info=True)
+            return None
     @staticmethod
     def get_user_by_id(user_id:str)->Optional[UserProfile]:
         """Fetch user by ID"""
@@ -1520,6 +1538,9 @@ class AuthHandlers:
                 return{'status':'error','error':'Account is locked. Try again later.','code':'ACCOUNT_LOCKED'}
             
             # ── bcrypt verification (THE only path) ──────────────────────────
+            # Debug: log hash prefix so we can confirm bcrypt format without leaking full hash
+            _hash_prefix = user.password_hash[:10] if user.password_hash else 'EMPTY'
+            logger.info(f"[Auth/Login] Verifying bcrypt for {user.user_id}, hash_prefix={_hash_prefix!r}")
             if not verify_password(password, user.password_hash):
                 attempts=UserManager.increment_failed_logins(user.user_id)
                 logger.warning(f"[Auth/Login] Wrong password: {user.user_id} ({attempts} attempts)")
