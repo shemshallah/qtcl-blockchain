@@ -42,6 +42,11 @@ from flask_cors import CORS
 # ══════════════════════════════════════════════════════════════════════════════
 
 from globals import (
+    get_globals, initialize_globals, get_system_health, get_state_snapshot,
+    COMMAND_REGISTRY, dispatch_command,
+    get_heartbeat, get_lattice, get_db_pool, get_auth_manager,
+    get_oracle, get_defi, get_ledger, get_blockchain, get_metrics,
+)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # INTEGRATED COMMAND SYSTEM - Oracle pricing, response wrapping, multi-execute
@@ -57,12 +62,6 @@ except ImportError as e:
     ResponseWrapper = None
     ORACLE_PRICE_PROVIDER = None
     logger.warning('[wsgi] Integrated oracle system not available: %s', e)
-
-    get_globals, initialize_globals, get_system_health, get_state_snapshot,
-    COMMAND_REGISTRY, dispatch_command,
-    get_heartbeat, get_lattice, get_db_pool, get_auth_manager,
-    get_oracle, get_defi, get_ledger, get_blockchain, get_metrics,
-)
 
 logger.info('[wsgi] globals imported — initialising...')
 try:
