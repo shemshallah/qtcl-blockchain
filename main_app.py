@@ -611,46 +611,29 @@ def create_app():
             # Execute command via GlobalCommandRegistry with full globals integration
             if GlobalCommandRegistry:
                 try:
-                    cmd_parts = command.split('/')
-                    
-                    # BUILD ALL COMMAND MAPS FROM GLOBALS REGISTRY
-                    all_commands = {}
-                    
-                    # Safely aggregate all command categories from GlobalCommandRegistry
-                    command_categories = [
-                        'AUTH_COMMANDS',
-                        'USER_COMMANDS',
-                        'TRANSACTION_COMMANDS',
-                        'WALLET_COMMANDS',
-                        'BLOCK_COMMANDS',
-                        'QUANTUM_COMMANDS',
-                        'ORACLE_COMMANDS',
-                        'DEFI_COMMANDS',
-                        'GOVERNANCE_COMMANDS',
-                        'NFT_COMMANDS',
-                        'CONTRACT_COMMANDS',
-                        'BRIDGE_COMMANDS',
-                        'ADMIN_COMMANDS',
-                        'SYSTEM_COMMANDS',
-                    ]
-                    
-                    for cat in command_categories:
-                        cat_commands = getattr(GlobalCommandRegistry, cat, {})
-                        if isinstance(cat_commands, dict):
-                            all_commands.update(cat_commands)
-                            logger.debug(f"[API] Loaded {len(cat_commands)} commands from {cat}")
+                    # USE ALL_COMMANDS DIRECTLY FROM GlobalCommandRegistry
+                    all_commands = GlobalCommandRegistry.ALL_COMMANDS
                     
                     logger.info(f"[API] Total commands available: {len(all_commands)}")
                     
-                    # LOOKUP COMMAND
+                    # LOOKUP COMMAND (EXACT MATCH FIRST)
                     cmd_func = all_commands.get(command)
+                    
+                    # If not found, try case-insensitive match
+                    if not cmd_func:
+                        command_lower = command.lower()
+                        for cmd_name, handler in all_commands.items():
+                            if cmd_name.lower() == command_lower:
+                                cmd_func = handler
+                                break
                     
                     if not cmd_func:
                         # Find suggestions based on prefix match
+                        cmd_parts = command.split('/')
                         prefix = cmd_parts[0] if cmd_parts else ''
                         suggestions = [k for k in all_commands.keys() if k.startswith(prefix + '/') and k != command]
                         
-                        error_msg = f'Unknown command: {command}'
+                        error_msg = f'Command \'{command}\' not found.'
                         logger.warning(f"[API] {error_msg} | Suggestions: {suggestions}")
                         
                         return jsonify({
@@ -767,6 +750,7 @@ def create_app():
             
             # CATEGORY MAPPING WITH DESCRIPTIONS
             category_map = {
+                'help': 'Help & Documentation',
                 'auth': 'Authentication & Authorization',
                 'user': 'User Management & Profiles',
                 'transaction': 'Transaction Operations',
@@ -781,6 +765,7 @@ def create_app():
                 'bridge': 'Cross-chain Bridge',
                 'admin': 'Administration & Management',
                 'system': 'System Information & Health',
+                'parallel': 'Parallel Task Execution',
             }
             
             # BUILD COMMAND LIST FROM ALL REGISTRY CATEGORIES
@@ -788,6 +773,7 @@ def create_app():
             command_set = set()
             
             registry_categories = {
+                'help': getattr(GlobalCommandRegistry, 'HELP_COMMANDS', {}),
                 'auth': getattr(GlobalCommandRegistry, 'AUTH_COMMANDS', {}),
                 'user': getattr(GlobalCommandRegistry, 'USER_COMMANDS', {}),
                 'transaction': getattr(GlobalCommandRegistry, 'TRANSACTION_COMMANDS', {}),
@@ -802,6 +788,7 @@ def create_app():
                 'bridge': getattr(GlobalCommandRegistry, 'BRIDGE_COMMANDS', {}),
                 'admin': getattr(GlobalCommandRegistry, 'ADMIN_COMMANDS', {}),
                 'system': getattr(GlobalCommandRegistry, 'SYSTEM_COMMANDS', {}),
+                'parallel': getattr(GlobalCommandRegistry, 'PARALLEL_COMMANDS', {}),
             }
             
             for category, cmd_dict in registry_categories.items():
