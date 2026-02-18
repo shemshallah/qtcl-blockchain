@@ -435,7 +435,7 @@ class SupabaseAuthManager:
         return {
             'apikey': key,
             'Authorization': f'Bearer {key}',
-            'Content-Type': 'application/json',
+            'Content-Type': 'application-json',
         }
 
     @classmethod
@@ -474,7 +474,7 @@ class SupabaseAuthManager:
 
         try:
             # ── Step 1: Create user in Supabase Auth ────────────────────────────
-            auth_url = f"{cls.SUPABASE_URL}/auth/v1/admin/users"
+            auth_url = f"{cls.SUPABASE_URL}-auth-v1-admin-users"
             payload = {
                 'email': email,
                 'password': password,
@@ -557,7 +557,7 @@ class SupabaseAuthManager:
         # ── REST fallback via Supabase PostgREST ─────────────────────────────
         if cls.SUPABASE_URL and cls.SUPABASE_KEY:
             try:
-                rest_url = f"{cls.SUPABASE_URL}/rest/v1/qtcl_users"
+                rest_url = f"{cls.SUPABASE_URL}-rest-v1-qtcl_users"
                 payload = {
                     'uid': uid, 'email': email, 'name': name,
                     'pseudoqubit_id': pseudoqubit_id,
@@ -617,12 +617,12 @@ class SupabaseAuthManager:
             return cls._login_local_fallback(email, password)
 
         try:
-            auth_url = f"{cls.SUPABASE_URL}/auth/v1/token?grant_type=password"
+            auth_url = f"{cls.SUPABASE_URL}-auth-v1-token?grant_type=password"
             payload = {'email': email, 'password': password}
             resp = requests.post(
                 auth_url, json=payload,
                 headers={'apikey': cls.SUPABASE_ANON or cls.SUPABASE_KEY,
-                         'Content-Type': 'application/json'},
+                         'Content-Type': 'application-json'},
                 timeout=15
             )
 
@@ -661,16 +661,16 @@ class SupabaseAuthManager:
                     "SELECT pseudoqubit_id FROM qtcl_users WHERE uid=%s OR email=%s LIMIT 1",
                     (uid, email)
                 )
-                if rows: return dict(rows[0]).get('pseudoqubit_id', 'N/A')
+                if rows: return dict(rows[0]).get('pseudoqubit_id', 'N-A')
             except: pass
         # Try Supabase REST
         if cls.SUPABASE_URL:
             try:
-                url = f"{cls.SUPABASE_URL}/rest/v1/qtcl_users?uid=eq.{uid}&select=pseudoqubit_id"
+                url = f"{cls.SUPABASE_URL}-rest-v1-qtcl_users?uid=eq.{uid}&select=pseudoqubit_id"
                 resp = requests.get(url, headers=cls._auth_headers(), timeout=5)
                 if resp.status_code == 200:
                     data = resp.json()
-                    if data: return data[0].get('pseudoqubit_id', 'N/A')
+                    if data: return data[0].get('pseudoqubit_id', 'N-A')
             except: pass
         # Try local SQLite
         try:
@@ -682,7 +682,7 @@ class SupabaseAuthManager:
             row = cur.fetchone(); conn.close()
             if row: return row[0]
         except: pass
-        return 'N/A'
+        return 'N-A'
 
     @classmethod
     def _login_local_fallback(cls, email: str, password: str) -> Tuple[bool, dict]:
@@ -705,7 +705,7 @@ class SupabaseAuthManager:
             return True, {
                 'token': token, 'uid': uid, 'email': email,
                 'name': name or 'User', 'role': role or 'user',
-                'pseudoqubit_id': pseudoqubit_id or 'N/A'
+                'pseudoqubit_id': pseudoqubit_id or 'N-A'
             }
         except Exception as e:
             return False, {'error': str(e)}
@@ -838,7 +838,7 @@ class Config:
     
     @classmethod
     def verify_api_connection(cls)->bool:
-        try:r=requests.get(f"{cls.API_BASE_URL}/health",timeout=5);return r.status_code==200
+        try:r=requests.get(f"{cls.API_BASE_URL}-health",timeout=5);return r.status_code==200
         except:return False
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
@@ -891,7 +891,7 @@ class UI:
     
     @staticmethod
     def confirm(msg:str,default:bool=False)->bool:
-        suffix="[Y/n]" if default else "[y/N]"
+        suffix="[Y-n]" if default else "[y-N]"
         resp=input(f"{Fore.YELLOW}{msg} {suffix}:{Style.RESET_ALL} ").strip().lower()
         return resp in ['y','yes'] if not default else resp not in ['n','no']
     
@@ -921,7 +921,7 @@ class APIClient:
     
     def set_auth_token(self,token:str):
         self.auth_token=token
-        self.session.headers.update({'Authorization':f'Bearer {token}','Content-Type':'application/json'})
+        self.session.headers.update({'Authorization':f'Bearer {token}','Content-Type':'application-json'})
         logger.info(f"Auth token set, length: {len(token)}")
     
     def clear_auth(self):
@@ -1025,7 +1025,7 @@ class SessionManager:
             self.session.supabase_uid = result.get('uid')
             self.session.email        = email
             self.session.name         = result.get('name','User')
-            self.session.pseudoqubit_id = result.get('pseudoqubit_id','N/A')
+            self.session.pseudoqubit_id = result.get('pseudoqubit_id','N-A')
             raw_role                  = result.get('role','user').lower()
             try:    self.session.role = UserRole(raw_role)
             except: self.session.role = UserRole.USER
@@ -1223,42 +1223,42 @@ class TerminalEngine:
         discovered = 0
         
         # ── 1. WSGI status command (always available) ───────────────────────
-        self.registry.register('wsgi/status', self._cmd_wsgi_status, CommandMeta(
-            'wsgi/status', CommandCategory.SYSTEM, 'WSGI globals status & component health',
+        self.registry.register('wsgi-status', self._cmd_wsgi_status, CommandMeta(
+            'wsgi-status', CommandCategory.SYSTEM, 'WSGI globals status & component health',
             requires_auth=False))
         discovered += 1
         
         # ── 2. WSGI circuit-breaker commands (if CIRCUIT_BREAKERS available) ─
         if WSGIGlobals.CIRCUIT_BREAKERS:
-            self.registry.register('wsgi/circuit-breakers', self._cmd_wsgi_circuit_breakers,
-                CommandMeta('wsgi/circuit-breakers', CommandCategory.SYSTEM,
+            self.registry.register('wsgi-circuit-breakers', self._cmd_wsgi_circuit_breakers,
+                CommandMeta('wsgi-circuit-breakers', CommandCategory.SYSTEM,
                             'Show WSGI circuit breaker states', requires_admin=True))
             discovered += 1
         
         # ── 3. WSGI cache commands (if CACHE available) ─────────────────────
         if WSGIGlobals.CACHE:
-            self.registry.register('wsgi/cache/stats', self._cmd_wsgi_cache_stats,
-                CommandMeta('wsgi/cache/stats', CommandCategory.SYSTEM, 'WSGI smart-cache statistics'))
-            self.registry.register('wsgi/cache/flush', self._cmd_wsgi_cache_flush,
-                CommandMeta('wsgi/cache/flush', CommandCategory.SYSTEM, 'Flush WSGI cache', requires_admin=True))
+            self.registry.register('wsgi-cache-stats', self._cmd_wsgi_cache_stats,
+                CommandMeta('wsgi-cache-stats', CommandCategory.SYSTEM, 'WSGI smart-cache statistics'))
+            self.registry.register('wsgi-cache-flush', self._cmd_wsgi_cache_flush,
+                CommandMeta('wsgi-cache-flush', CommandCategory.SYSTEM, 'Flush WSGI cache', requires_admin=True))
             discovered += 2
         
         # ── 4. WSGI profiler (if PROFILER available) ────────────────────────
         if WSGIGlobals.PROFILER:
-            self.registry.register('wsgi/profiler', self._cmd_wsgi_profiler,
-                CommandMeta('wsgi/profiler', CommandCategory.SYSTEM, 'WSGI performance profiler stats'))
+            self.registry.register('wsgi-profiler', self._cmd_wsgi_profiler,
+                CommandMeta('wsgi-profiler', CommandCategory.SYSTEM, 'WSGI performance profiler stats'))
             discovered += 1
         
         # ── 5. WSGI rate limiters (if RATE_LIMITERS available) ───────────────
         if WSGIGlobals.RATE_LIMITERS:
-            self.registry.register('wsgi/rate-limits', self._cmd_wsgi_rate_limits,
-                CommandMeta('wsgi/rate-limits', CommandCategory.SYSTEM, 'WSGI rate limiter status'))
+            self.registry.register('wsgi-rate-limits', self._cmd_wsgi_rate_limits,
+                CommandMeta('wsgi-rate-limits', CommandCategory.SYSTEM, 'WSGI rate limiter status'))
             discovered += 1
         
         # ── 6. WSGI monitor health tree (if MONITOR available) ───────────────
         if WSGIGlobals.MONITOR:
-            self.registry.register('wsgi/health-tree', self._cmd_wsgi_health_tree,
-                CommandMeta('wsgi/health-tree', CommandCategory.SYSTEM, 'WSGI recursive health tree'))
+            self.registry.register('wsgi-health-tree', self._cmd_wsgi_health_tree,
+                CommandMeta('wsgi-health-tree', CommandCategory.SYSTEM, 'WSGI recursive health tree'))
             discovered += 1
         
         # ── 7. API-registry sourced commands (if APIS available) ─────────────
@@ -1268,7 +1268,7 @@ class TerminalEngine:
                 for api_name, api_instance in all_apis.items():
                     if api_instance is None:
                         continue
-                    cmd_name = f"wsgi/api/{api_name}/status"
+                    cmd_name = f"wsgi-api-{api_name}-status"
                     # Capture api_name in closure
                     def _make_api_cmd(name=api_name, inst=api_instance):
                         def _cmd():
@@ -1283,7 +1283,7 @@ class TerminalEngine:
                                 UI.print_table(['Attribute','Value'], rows)
                             else:
                                 UI.info(f"API {name}: {repr(inst)[:200]}")
-                            metrics.record_command(f'wsgi/api/{name}/status')
+                            metrics.record_command(f'wsgi-api-{name}-status')
                         return _cmd
                     self.registry.register(cmd_name, _make_api_cmd(),
                         CommandMeta(cmd_name, CommandCategory.SYSTEM, f'Status of WSGI API: {api_name}'))
@@ -1293,8 +1293,8 @@ class TerminalEngine:
         
         # ── 8. Quantum status bridge (if QUANTUM available) ──────────────────
         if WSGIGlobals.QUANTUM:
-            self.registry.register('wsgi/quantum/live', self._cmd_wsgi_quantum_live,
-                CommandMeta('wsgi/quantum/live', CommandCategory.QUANTUM,
+            self.registry.register('wsgi-quantum-live', self._cmd_wsgi_quantum_live,
+                CommandMeta('wsgi-quantum-live', CommandCategory.QUANTUM,
                             'Live WSGI quantum system status'))
             discovered += 1
         
@@ -1316,7 +1316,7 @@ class TerminalEngine:
             UI.info(f"Loaded {age}s ago")
         if WSGIGlobals.CIRCUIT_BREAKERS:
             UI.info(f"Circuit breakers: {list(WSGIGlobals.CIRCUIT_BREAKERS.keys())}")
-        metrics.record_command('wsgi/status')
+        metrics.record_command('wsgi-status')
     
     def _cmd_wsgi_circuit_breakers(self):
         if not self.session.is_admin(): UI.error("Admin access required"); return
@@ -1332,7 +1332,7 @@ class TerminalEngine:
                 ['Failure Rate', f"{status['failure_rate']*100:.1f}%"],
                 ['Rejections', str(status['total_rejections'])],
             ])
-        metrics.record_command('wsgi/circuit-breakers')
+        metrics.record_command('wsgi-circuit-breakers')
     
     def _cmd_wsgi_cache_stats(self):
         UI.header("💾 WSGI CACHE STATISTICS")
@@ -1343,7 +1343,7 @@ class TerminalEngine:
             ['Misses', str(s['misses'])],['Evictions', str(s['evictions'])],
             ['Hit Rate', f"{s['hit_rate']*100:.1f}%"],
         ])
-        metrics.record_command('wsgi/cache/stats')
+        metrics.record_command('wsgi-cache-stats')
     
     def _cmd_wsgi_cache_flush(self):
         if not self.session.is_admin(): UI.error("Admin access required"); return
@@ -1351,7 +1351,7 @@ class TerminalEngine:
         if UI.confirm("Flush entire WSGI cache?"):
             WSGIGlobals.CACHE.invalidate()
             UI.success("Cache flushed")
-            metrics.record_command('wsgi/cache/flush')
+            metrics.record_command('wsgi-cache-flush')
     
     def _cmd_wsgi_profiler(self):
         UI.header("📈 WSGI PERFORMANCE PROFILER")
@@ -1367,7 +1367,7 @@ class TerminalEngine:
             rows = [[op, str(d['count']), f"{d['avg_ms']:.1f}ms", f"{d['max_ms']:.1f}ms"]
                     for op, d in list(ops.items())[:10]]
             UI.print_table(['Operation','Count','Avg','Max'], rows)
-        metrics.record_command('wsgi/profiler')
+        metrics.record_command('wsgi-profiler')
     
     def _cmd_wsgi_rate_limits(self):
         UI.header("⏱ WSGI RATE LIMITERS")
@@ -1382,7 +1382,7 @@ class TerminalEngine:
                 ['Rejected', str(s['total_rejected'])],
                 ['Rejection Rate', f"{s['rejection_rate']*100:.1f}%"],
             ])
-        metrics.record_command('wsgi/rate-limits')
+        metrics.record_command('wsgi-rate-limits')
     
     def _cmd_wsgi_health_tree(self):
         UI.header("🌲 WSGI HEALTH TREE")
@@ -1397,7 +1397,7 @@ class TerminalEngine:
                  '✓' if data.get('deps_healthy',True) else '✗']
                 for name, data in comps.items()]
         UI.print_table(['Component','Status','Latency','Deps OK'], rows)
-        metrics.record_command('wsgi/health-tree')
+        metrics.record_command('wsgi-health-tree')
     
     def _cmd_wsgi_quantum_live(self):
         UI.header("⚛️  WSGI LIVE QUANTUM STATUS")
@@ -1409,7 +1409,7 @@ class TerminalEngine:
             ['Has Parallel Processor', str(hasattr(q,'parallel_processor'))],
             ['Has W-State Refresh', str(hasattr(q,'w_state_refresh'))],
         ])
-        metrics.record_command('wsgi/quantum/live')
+        metrics.record_command('wsgi-quantum-live')
     
     def _register_all_commands(self):
         # AUTH COMMANDS
@@ -1421,204 +1421,204 @@ class TerminalEngine:
             'register',CommandCategory.AUTH,'Register new account',requires_auth=False))
         self.registry.register('whoami',self._cmd_whoami,CommandMeta(
             'whoami',CommandCategory.AUTH,'Show current user'))
-        self.registry.register('auth/2fa/setup',self._cmd_2fa_setup,CommandMeta(
-            'auth/2fa/setup',CommandCategory.AUTH,'Setup 2FA authentication'))
-        self.registry.register('auth/token/refresh',self._cmd_refresh_token,CommandMeta(
-            'auth/token/refresh',CommandCategory.AUTH,'Refresh authentication token'))
+        self.registry.register('auth-2fa-setup',self._cmd_2fa_setup,CommandMeta(
+            'auth-2fa-setup',CommandCategory.AUTH,'Setup 2FA authentication'))
+        self.registry.register('auth-token-refresh',self._cmd_refresh_token,CommandMeta(
+            'auth-token-refresh',CommandCategory.AUTH,'Refresh authentication token'))
         
         # USER COMMANDS
-        self.registry.register('user/profile',self._cmd_user_profile,CommandMeta(
-            'user/profile',CommandCategory.USER,'Show user profile'))
-        self.registry.register('user/settings',self._cmd_user_settings,CommandMeta(
-            'user/settings',CommandCategory.USER,'Manage user settings'))
-        self.registry.register('user/list',self._cmd_user_list,CommandMeta(
-            'user/list',CommandCategory.USER,'List all users',requires_admin=True))
-        self.registry.register('user/details',self._cmd_user_details,CommandMeta(
-            'user/details',CommandCategory.USER,'Get user details'))
+        self.registry.register('user-profile',self._cmd_user_profile,CommandMeta(
+            'user-profile',CommandCategory.USER,'Show user profile'))
+        self.registry.register('user-settings',self._cmd_user_settings,CommandMeta(
+            'user-settings',CommandCategory.USER,'Manage user settings'))
+        self.registry.register('user-list',self._cmd_user_list,CommandMeta(
+            'user-list',CommandCategory.USER,'List all users',requires_admin=True))
+        self.registry.register('user-details',self._cmd_user_details,CommandMeta(
+            'user-details',CommandCategory.USER,'Get user details'))
         
         # TRANSACTION COMMANDS
-        self.registry.register('transaction/create',self._cmd_tx_create,CommandMeta(
-            'transaction/create',CommandCategory.TRANSACTION,'Create new transaction'))
-        self.registry.register('transaction/track',self._cmd_tx_track,CommandMeta(
-            'transaction/track',CommandCategory.TRANSACTION,'Track transaction status'))
-        self.registry.register('transaction/cancel',self._cmd_tx_cancel,CommandMeta(
-            'transaction/cancel',CommandCategory.TRANSACTION,'Cancel pending transaction'))
-        self.registry.register('transaction/list',self._cmd_tx_list,CommandMeta(
-            'transaction/list',CommandCategory.TRANSACTION,'List user transactions'))
-        self.registry.register('transaction/analyze',self._cmd_tx_analyze,CommandMeta(
-            'transaction/analyze',CommandCategory.TRANSACTION,'Analyze transaction patterns'))
-        self.registry.register('transaction/export',self._cmd_tx_export,CommandMeta(
-            'transaction/export',CommandCategory.TRANSACTION,'Export transaction history'))
-        self.registry.register('transaction/stats',self._cmd_tx_stats,CommandMeta(
-            'transaction/stats',CommandCategory.TRANSACTION,'Show transaction statistics'))
+        self.registry.register('transaction-create',self._cmd_tx_create,CommandMeta(
+            'transaction-create',CommandCategory.TRANSACTION,'Create new transaction'))
+        self.registry.register('transaction-track',self._cmd_tx_track,CommandMeta(
+            'transaction-track',CommandCategory.TRANSACTION,'Track transaction status'))
+        self.registry.register('transaction-cancel',self._cmd_tx_cancel,CommandMeta(
+            'transaction-cancel',CommandCategory.TRANSACTION,'Cancel pending transaction'))
+        self.registry.register('transaction-list',self._cmd_tx_list,CommandMeta(
+            'transaction-list',CommandCategory.TRANSACTION,'List user transactions'))
+        self.registry.register('transaction-analyze',self._cmd_tx_analyze,CommandMeta(
+            'transaction-analyze',CommandCategory.TRANSACTION,'Analyze transaction patterns'))
+        self.registry.register('transaction-export',self._cmd_tx_export,CommandMeta(
+            'transaction-export',CommandCategory.TRANSACTION,'Export transaction history'))
+        self.registry.register('transaction-stats',self._cmd_tx_stats,CommandMeta(
+            'transaction-stats',CommandCategory.TRANSACTION,'Show transaction statistics'))
         
         # WALLET COMMANDS
-        self.registry.register('wallet/create',self._cmd_wallet_create,CommandMeta(
-            'wallet/create',CommandCategory.WALLET,'Create new wallet'))
-        self.registry.register('wallet/list',self._cmd_wallet_list,CommandMeta(
-            'wallet/list',CommandCategory.WALLET,'List user wallets'))
-        self.registry.register('wallet/balance',self._cmd_wallet_balance,CommandMeta(
-            'wallet/balance',CommandCategory.WALLET,'Check wallet balance'))
-        self.registry.register('wallet/import',self._cmd_wallet_import,CommandMeta(
-            'wallet/import',CommandCategory.WALLET,'Import wallet'))
-        self.registry.register('wallet/export',self._cmd_wallet_export,CommandMeta(
-            'wallet/export',CommandCategory.WALLET,'Export wallet'))
-        self.registry.register('wallet/multisig/create',self._cmd_multisig_create,CommandMeta(
-            'wallet/multisig/create',CommandCategory.WALLET,'Create multi-sig wallet',async_capable=True))
-        self.registry.register('wallet/multisig/sign',self._cmd_multisig_sign,CommandMeta(
-            'wallet/multisig/sign',CommandCategory.WALLET,'Sign multi-sig transaction'))
+        self.registry.register('wallet-create',self._cmd_wallet_create,CommandMeta(
+            'wallet-create',CommandCategory.WALLET,'Create new wallet'))
+        self.registry.register('wallet-list',self._cmd_wallet_list,CommandMeta(
+            'wallet-list',CommandCategory.WALLET,'List user wallets'))
+        self.registry.register('wallet-balance',self._cmd_wallet_balance,CommandMeta(
+            'wallet-balance',CommandCategory.WALLET,'Check wallet balance'))
+        self.registry.register('wallet-import',self._cmd_wallet_import,CommandMeta(
+            'wallet-import',CommandCategory.WALLET,'Import wallet'))
+        self.registry.register('wallet-export',self._cmd_wallet_export,CommandMeta(
+            'wallet-export',CommandCategory.WALLET,'Export wallet'))
+        self.registry.register('wallet-multisig-create',self._cmd_multisig_create,CommandMeta(
+            'wallet-multisig-create',CommandCategory.WALLET,'Create multi-sig wallet',async_capable=True))
+        self.registry.register('wallet-multisig-sign',self._cmd_multisig_sign,CommandMeta(
+            'wallet-multisig-sign',CommandCategory.WALLET,'Sign multi-sig transaction'))
         
         # BLOCK COMMANDS - COMPREHENSIVE WITH QUANTUM MEASUREMENTS
-        self.registry.register('block/list',self._cmd_block_list,CommandMeta(
-            'block/list',CommandCategory.BLOCK,'List recent blocks'))
-        self.registry.register('block/details',self._cmd_block_details_comprehensive,CommandMeta(
-            'block/details',CommandCategory.BLOCK,'Comprehensive block details with quantum measurements'))
-        self.registry.register('block/validate',self._cmd_block_validate_comprehensive,CommandMeta(
-            'block/validate',CommandCategory.BLOCK,'Comprehensive block validation with quantum proofs'))
-        self.registry.register('block/quantum',self._cmd_block_quantum_measure,CommandMeta(
-            'block/quantum',CommandCategory.BLOCK,'Perform quantum measurements on block'))
-        self.registry.register('block/batch',self._cmd_block_batch_query,CommandMeta(
-            'block/batch',CommandCategory.BLOCK,'Query multiple blocks in parallel'))
-        self.registry.register('block/integrity',self._cmd_block_integrity_check,CommandMeta(
-            'block/integrity',CommandCategory.BLOCK,'Verify blockchain integrity'))
-        self.registry.register('block/explorer',self._cmd_block_explorer,CommandMeta(
-            'block/explorer',CommandCategory.BLOCK,'Block explorer with search'))
-        self.registry.register('block/stats',self._cmd_block_stats,CommandMeta(
-            'block/stats',CommandCategory.BLOCK,'Show block statistics'))
+        self.registry.register('block-list',self._cmd_block_list,CommandMeta(
+            'block-list',CommandCategory.BLOCK,'List recent blocks'))
+        self.registry.register('block-details',self._cmd_block_details_comprehensive,CommandMeta(
+            'block-details',CommandCategory.BLOCK,'Comprehensive block details with quantum measurements'))
+        self.registry.register('block-validate',self._cmd_block_validate_comprehensive,CommandMeta(
+            'block-validate',CommandCategory.BLOCK,'Comprehensive block validation with quantum proofs'))
+        self.registry.register('block-quantum',self._cmd_block_quantum_measure,CommandMeta(
+            'block-quantum',CommandCategory.BLOCK,'Perform quantum measurements on block'))
+        self.registry.register('block-batch',self._cmd_block_batch_query,CommandMeta(
+            'block-batch',CommandCategory.BLOCK,'Query multiple blocks in parallel'))
+        self.registry.register('block-integrity',self._cmd_block_integrity_check,CommandMeta(
+            'block-integrity',CommandCategory.BLOCK,'Verify blockchain integrity'))
+        self.registry.register('block-explorer',self._cmd_block_explorer,CommandMeta(
+            'block-explorer',CommandCategory.BLOCK,'Block explorer with search'))
+        self.registry.register('block-stats',self._cmd_block_stats,CommandMeta(
+            'block-stats',CommandCategory.BLOCK,'Show block statistics'))
         
         # QUANTUM COMMANDS
-        self.registry.register('quantum/status',self._cmd_quantum_status,CommandMeta(
-            'quantum/status',CommandCategory.QUANTUM,'Show quantum engine status'))
-        self.registry.register('quantum/circuit',self._cmd_quantum_circuit,CommandMeta(
-            'quantum/circuit',CommandCategory.QUANTUM,'Build quantum circuit'))
-        self.registry.register('quantum/entropy',self._cmd_quantum_entropy,CommandMeta(
-            'quantum/entropy',CommandCategory.QUANTUM,'Get quantum entropy'))
-        self.registry.register('quantum/validator',self._cmd_quantum_validator,CommandMeta(
-            'quantum/validator',CommandCategory.QUANTUM,'Quantum validator status'))
-        self.registry.register('quantum/finality',self._cmd_quantum_finality,CommandMeta(
-            'quantum/finality',CommandCategory.QUANTUM,'Check quantum finality'))
-        self.registry.register('quantum/transaction',self._cmd_quantum_transaction,CommandMeta(
-            'quantum/transaction',CommandCategory.QUANTUM,'Execute quantum-secured transaction'))
-        self.registry.register('quantum/oracle',self._cmd_quantum_oracle,CommandMeta(
-            'quantum/oracle',CommandCategory.QUANTUM,'Measure oracle qubit finality'))
-        self.registry.register('quantum/pq-rotate',self._cmd_quantum_pq_rotate,CommandMeta(
-            'quantum/pq-rotate',CommandCategory.QUANTUM,'Rotate post-quantum keypair'))
-        self.registry.register('quantum/heartbeat/monitor',self._cmd_quantum_heartbeat_monitor,CommandMeta(
-            'quantum/heartbeat/monitor',CommandCategory.QUANTUM,'Real-time quantum heartbeat monitor'))
+        self.registry.register('quantum-status',self._cmd_quantum_status,CommandMeta(
+            'quantum-status',CommandCategory.QUANTUM,'Show quantum engine status'))
+        self.registry.register('quantum-circuit',self._cmd_quantum_circuit,CommandMeta(
+            'quantum-circuit',CommandCategory.QUANTUM,'Build quantum circuit'))
+        self.registry.register('quantum-entropy',self._cmd_quantum_entropy,CommandMeta(
+            'quantum-entropy',CommandCategory.QUANTUM,'Get quantum entropy'))
+        self.registry.register('quantum-validator',self._cmd_quantum_validator,CommandMeta(
+            'quantum-validator',CommandCategory.QUANTUM,'Quantum validator status'))
+        self.registry.register('quantum-finality',self._cmd_quantum_finality,CommandMeta(
+            'quantum-finality',CommandCategory.QUANTUM,'Check quantum finality'))
+        self.registry.register('quantum-transaction',self._cmd_quantum_transaction,CommandMeta(
+            'quantum-transaction',CommandCategory.QUANTUM,'Execute quantum-secured transaction'))
+        self.registry.register('quantum-oracle',self._cmd_quantum_oracle,CommandMeta(
+            'quantum-oracle',CommandCategory.QUANTUM,'Measure oracle qubit finality'))
+        self.registry.register('quantum-pq-rotate',self._cmd_quantum_pq_rotate,CommandMeta(
+            'quantum-pq-rotate',CommandCategory.QUANTUM,'Rotate post-quantum keypair'))
+        self.registry.register('quantum-heartbeat-monitor',self._cmd_quantum_heartbeat_monitor,CommandMeta(
+            'quantum-heartbeat-monitor',CommandCategory.QUANTUM,'Real-time quantum heartbeat monitor'))
         
         # ORACLE COMMANDS
-        self.registry.register('oracle/time',self._cmd_oracle_time,CommandMeta(
-            'oracle/time',CommandCategory.ORACLE,'Get oracle time feed'))
-        self.registry.register('oracle/price',self._cmd_oracle_price,CommandMeta(
-            'oracle/price',CommandCategory.ORACLE,'Get price oracle data'))
-        self.registry.register('oracle/random',self._cmd_oracle_random,CommandMeta(
-            'oracle/random',CommandCategory.ORACLE,'Get random numbers from oracle'))
-        self.registry.register('oracle/event',self._cmd_oracle_event,CommandMeta(
-            'oracle/event',CommandCategory.ORACLE,'Listen for oracle events'))
-        self.registry.register('oracle/feed',self._cmd_oracle_feed,CommandMeta(
-            'oracle/feed',CommandCategory.ORACLE,'Show oracle feeds'))
+        self.registry.register('oracle-time',self._cmd_oracle_time,CommandMeta(
+            'oracle-time',CommandCategory.ORACLE,'Get oracle time feed'))
+        self.registry.register('oracle-price',self._cmd_oracle_price,CommandMeta(
+            'oracle-price',CommandCategory.ORACLE,'Get price oracle data'))
+        self.registry.register('oracle-random',self._cmd_oracle_random,CommandMeta(
+            'oracle-random',CommandCategory.ORACLE,'Get random numbers from oracle'))
+        self.registry.register('oracle-event',self._cmd_oracle_event,CommandMeta(
+            'oracle-event',CommandCategory.ORACLE,'Listen for oracle events'))
+        self.registry.register('oracle-feed',self._cmd_oracle_feed,CommandMeta(
+            'oracle-feed',CommandCategory.ORACLE,'Show oracle feeds'))
         
         # DEFI COMMANDS
-        self.registry.register('defi/stake',self._cmd_defi_stake,CommandMeta(
-            'defi/stake',CommandCategory.DEFI,'Stake tokens'))
-        self.registry.register('defi/unstake',self._cmd_defi_unstake,CommandMeta(
-            'defi/unstake',CommandCategory.DEFI,'Unstake tokens'))
-        self.registry.register('defi/borrow',self._cmd_defi_borrow,CommandMeta(
-            'defi/borrow',CommandCategory.DEFI,'Borrow from lending pool'))
-        self.registry.register('defi/repay',self._cmd_defi_repay,CommandMeta(
-            'defi/repay',CommandCategory.DEFI,'Repay loan'))
-        self.registry.register('defi/yield',self._cmd_defi_yield,CommandMeta(
-            'defi/yield',CommandCategory.DEFI,'View yield farming opportunities'))
-        self.registry.register('defi/pool',self._cmd_defi_pool,CommandMeta(
-            'defi/pool',CommandCategory.DEFI,'Manage liquidity pools'))
+        self.registry.register('defi-stake',self._cmd_defi_stake,CommandMeta(
+            'defi-stake',CommandCategory.DEFI,'Stake tokens'))
+        self.registry.register('defi-unstake',self._cmd_defi_unstake,CommandMeta(
+            'defi-unstake',CommandCategory.DEFI,'Unstake tokens'))
+        self.registry.register('defi-borrow',self._cmd_defi_borrow,CommandMeta(
+            'defi-borrow',CommandCategory.DEFI,'Borrow from lending pool'))
+        self.registry.register('defi-repay',self._cmd_defi_repay,CommandMeta(
+            'defi-repay',CommandCategory.DEFI,'Repay loan'))
+        self.registry.register('defi-yield',self._cmd_defi_yield,CommandMeta(
+            'defi-yield',CommandCategory.DEFI,'View yield farming opportunities'))
+        self.registry.register('defi-pool',self._cmd_defi_pool,CommandMeta(
+            'defi-pool',CommandCategory.DEFI,'Manage liquidity pools'))
         
         # GOVERNANCE COMMANDS
-        self.registry.register('governance/vote',self._cmd_governance_vote,CommandMeta(
-            'governance/vote',CommandCategory.GOVERNANCE,'Vote on proposal'))
-        self.registry.register('governance/proposal',self._cmd_governance_proposal,CommandMeta(
-            'governance/proposal',CommandCategory.GOVERNANCE,'Create governance proposal'))
-        self.registry.register('governance/delegate',self._cmd_governance_delegate,CommandMeta(
-            'governance/delegate',CommandCategory.GOVERNANCE,'Delegate voting power'))
-        self.registry.register('governance/stats',self._cmd_governance_stats,CommandMeta(
-            'governance/stats',CommandCategory.GOVERNANCE,'Show governance statistics'))
+        self.registry.register('governance-vote',self._cmd_governance_vote,CommandMeta(
+            'governance-vote',CommandCategory.GOVERNANCE,'Vote on proposal'))
+        self.registry.register('governance-proposal',self._cmd_governance_proposal,CommandMeta(
+            'governance-proposal',CommandCategory.GOVERNANCE,'Create governance proposal'))
+        self.registry.register('governance-delegate',self._cmd_governance_delegate,CommandMeta(
+            'governance-delegate',CommandCategory.GOVERNANCE,'Delegate voting power'))
+        self.registry.register('governance-stats',self._cmd_governance_stats,CommandMeta(
+            'governance-stats',CommandCategory.GOVERNANCE,'Show governance statistics'))
         
         # NFT COMMANDS
-        self.registry.register('nft/mint',self._cmd_nft_mint,CommandMeta(
-            'nft/mint',CommandCategory.NFT,'Mint NFT'))
-        self.registry.register('nft/transfer',self._cmd_nft_transfer,CommandMeta(
-            'nft/transfer',CommandCategory.NFT,'Transfer NFT'))
-        self.registry.register('nft/burn',self._cmd_nft_burn,CommandMeta(
-            'nft/burn',CommandCategory.NFT,'Burn NFT'))
-        self.registry.register('nft/metadata',self._cmd_nft_metadata,CommandMeta(
-            'nft/metadata',CommandCategory.NFT,'View/edit NFT metadata'))
-        self.registry.register('nft/collection',self._cmd_nft_collection,CommandMeta(
-            'nft/collection',CommandCategory.NFT,'Manage NFT collections'))
+        self.registry.register('nft-mint',self._cmd_nft_mint,CommandMeta(
+            'nft-mint',CommandCategory.NFT,'Mint NFT'))
+        self.registry.register('nft-transfer',self._cmd_nft_transfer,CommandMeta(
+            'nft-transfer',CommandCategory.NFT,'Transfer NFT'))
+        self.registry.register('nft-burn',self._cmd_nft_burn,CommandMeta(
+            'nft-burn',CommandCategory.NFT,'Burn NFT'))
+        self.registry.register('nft-metadata',self._cmd_nft_metadata,CommandMeta(
+            'nft-metadata',CommandCategory.NFT,'View/edit NFT metadata'))
+        self.registry.register('nft-collection',self._cmd_nft_collection,CommandMeta(
+            'nft-collection',CommandCategory.NFT,'Manage NFT collections'))
         
         # SMART CONTRACT COMMANDS
-        self.registry.register('contract/deploy',self._cmd_contract_deploy,CommandMeta(
-            'contract/deploy',CommandCategory.CONTRACT,'Deploy smart contract'))
-        self.registry.register('contract/execute',self._cmd_contract_execute,CommandMeta(
-            'contract/execute',CommandCategory.CONTRACT,'Execute contract function'))
-        self.registry.register('contract/compile',self._cmd_contract_compile,CommandMeta(
-            'contract/compile',CommandCategory.CONTRACT,'Compile contract code'))
-        self.registry.register('contract/state',self._cmd_contract_state,CommandMeta(
-            'contract/state',CommandCategory.CONTRACT,'View contract state'))
+        self.registry.register('contract-deploy',self._cmd_contract_deploy,CommandMeta(
+            'contract-deploy',CommandCategory.CONTRACT,'Deploy smart contract'))
+        self.registry.register('contract-execute',self._cmd_contract_execute,CommandMeta(
+            'contract-execute',CommandCategory.CONTRACT,'Execute contract function'))
+        self.registry.register('contract-compile',self._cmd_contract_compile,CommandMeta(
+            'contract-compile',CommandCategory.CONTRACT,'Compile contract code'))
+        self.registry.register('contract-state',self._cmd_contract_state,CommandMeta(
+            'contract-state',CommandCategory.CONTRACT,'View contract state'))
         
         # BRIDGE COMMANDS
-        self.registry.register('bridge/initiate',self._cmd_bridge_initiate,CommandMeta(
-            'bridge/initiate',CommandCategory.BRIDGE,'Initiate cross-chain bridge'))
-        self.registry.register('bridge/status',self._cmd_bridge_status,CommandMeta(
-            'bridge/status',CommandCategory.BRIDGE,'Check bridge status'))
-        self.registry.register('bridge/history',self._cmd_bridge_history,CommandMeta(
-            'bridge/history',CommandCategory.BRIDGE,'View bridge history'))
-        self.registry.register('bridge/wrapped',self._cmd_bridge_wrapped,CommandMeta(
-            'bridge/wrapped',CommandCategory.BRIDGE,'Manage wrapped assets'))
+        self.registry.register('bridge-initiate',self._cmd_bridge_initiate,CommandMeta(
+            'bridge-initiate',CommandCategory.BRIDGE,'Initiate cross-chain bridge'))
+        self.registry.register('bridge-status',self._cmd_bridge_status,CommandMeta(
+            'bridge-status',CommandCategory.BRIDGE,'Check bridge status'))
+        self.registry.register('bridge-history',self._cmd_bridge_history,CommandMeta(
+            'bridge-history',CommandCategory.BRIDGE,'View bridge history'))
+        self.registry.register('bridge-wrapped',self._cmd_bridge_wrapped,CommandMeta(
+            'bridge-wrapped',CommandCategory.BRIDGE,'Manage wrapped assets'))
         
         # ADMIN COMMANDS
-        self.registry.register('admin/users',self._cmd_admin_users,CommandMeta(
-            'admin/users',CommandCategory.ADMIN,'Manage users',requires_admin=True))
-        self.registry.register('admin/approval',self._cmd_admin_approval,CommandMeta(
-            'admin/approval',CommandCategory.ADMIN,'Approve/reject transactions',requires_admin=True))
-        self.registry.register('admin/monitoring',self._cmd_admin_monitoring,CommandMeta(
-            'admin/monitoring',CommandCategory.ADMIN,'System monitoring',requires_admin=True))
-        self.registry.register('admin/settings',self._cmd_admin_settings,CommandMeta(
-            'admin/settings',CommandCategory.ADMIN,'System settings',requires_admin=True))
-        self.registry.register('admin/audit',self._cmd_admin_audit,CommandMeta(
-            'admin/audit',CommandCategory.ADMIN,'Audit logs',requires_admin=True))
-        self.registry.register('admin/emergency',self._cmd_admin_emergency,CommandMeta(
-            'admin/emergency',CommandCategory.ADMIN,'Emergency controls',requires_admin=True))
+        self.registry.register('admin-users',self._cmd_admin_users,CommandMeta(
+            'admin-users',CommandCategory.ADMIN,'Manage users',requires_admin=True))
+        self.registry.register('admin-approval',self._cmd_admin_approval,CommandMeta(
+            'admin-approval',CommandCategory.ADMIN,'Approve/reject transactions',requires_admin=True))
+        self.registry.register('admin-monitoring',self._cmd_admin_monitoring,CommandMeta(
+            'admin-monitoring',CommandCategory.ADMIN,'System monitoring',requires_admin=True))
+        self.registry.register('admin-settings',self._cmd_admin_settings,CommandMeta(
+            'admin-settings',CommandCategory.ADMIN,'System settings',requires_admin=True))
+        self.registry.register('admin-audit',self._cmd_admin_audit,CommandMeta(
+            'admin-audit',CommandCategory.ADMIN,'Audit logs',requires_admin=True))
+        self.registry.register('admin-emergency',self._cmd_admin_emergency,CommandMeta(
+            'admin-emergency',CommandCategory.ADMIN,'Emergency controls',requires_admin=True))
         
         # SYSTEM COMMANDS
-        self.registry.register('system/status',self._cmd_system_status,CommandMeta(
-            'system/status',CommandCategory.SYSTEM,'Show system status'))
-        self.registry.register('system/health',self._cmd_system_health,CommandMeta(
-            'system/health',CommandCategory.SYSTEM,'System health check'))
-        self.registry.register('system/config',self._cmd_system_config,CommandMeta(
-            'system/config',CommandCategory.SYSTEM,'View system configuration'))
-        self.registry.register('system/backup',self._cmd_system_backup,CommandMeta(
-            'system/backup',CommandCategory.SYSTEM,'Backup system data',requires_admin=True))
-        self.registry.register('system/restore',self._cmd_system_restore,CommandMeta(
-            'system/restore',CommandCategory.SYSTEM,'Restore from backup',requires_admin=True))
+        self.registry.register('system-status',self._cmd_system_status,CommandMeta(
+            'system-status',CommandCategory.SYSTEM,'Show system status'))
+        self.registry.register('system-health',self._cmd_system_health,CommandMeta(
+            'system-health',CommandCategory.SYSTEM,'System health check'))
+        self.registry.register('system-config',self._cmd_system_config,CommandMeta(
+            'system-config',CommandCategory.SYSTEM,'View system configuration'))
+        self.registry.register('system-backup',self._cmd_system_backup,CommandMeta(
+            'system-backup',CommandCategory.SYSTEM,'Backup system data',requires_admin=True))
+        self.registry.register('system-restore',self._cmd_system_restore,CommandMeta(
+            'system-restore',CommandCategory.SYSTEM,'Restore from backup',requires_admin=True))
         
         # PARALLEL COMMANDS
-        self.registry.register('parallel/execute',self._cmd_parallel_execute,CommandMeta(
-            'parallel/execute',CommandCategory.PARALLEL,'Execute commands in parallel',async_capable=True))
-        self.registry.register('parallel/batch',self._cmd_parallel_batch,CommandMeta(
-            'parallel/batch',CommandCategory.PARALLEL,'Execute batch operations'))
-        self.registry.register('parallel/monitor',self._cmd_parallel_monitor,CommandMeta(
-            'parallel/monitor',CommandCategory.PARALLEL,'Monitor parallel tasks'))
+        self.registry.register('parallel-execute',self._cmd_parallel_execute,CommandMeta(
+            'parallel-execute',CommandCategory.PARALLEL,'Execute commands in parallel',async_capable=True))
+        self.registry.register('parallel-batch',self._cmd_parallel_batch,CommandMeta(
+            'parallel-batch',CommandCategory.PARALLEL,'Execute batch operations'))
+        self.registry.register('parallel-monitor',self._cmd_parallel_monitor,CommandMeta(
+            'parallel-monitor',CommandCategory.PARALLEL,'Monitor parallel tasks'))
         
         # HELP COMMANDS
         self.registry.register('help',self._cmd_help,CommandMeta(
             'help',CommandCategory.HELP,'Show help menu',requires_auth=False))
-        self.registry.register('help/admin',self._cmd_help_admin,CommandMeta(
-            'help/admin',CommandCategory.HELP,'Show admin help menu'))
-        self.registry.register('help/search',self._cmd_help_search,CommandMeta(
-            'help/search',CommandCategory.HELP,'Search help topics'))
-        self.registry.register('help/commands',self._cmd_help_commands,CommandMeta(
-            'help/commands',CommandCategory.HELP,'List all commands'))
-        self.registry.register('help/examples',self._cmd_help_examples,CommandMeta(
-            'help/examples',CommandCategory.HELP,'Show command examples'))
+        self.registry.register('help-admin',self._cmd_help_admin,CommandMeta(
+            'help-admin',CommandCategory.HELP,'Show admin help menu'))
+        self.registry.register('help-search',self._cmd_help_search,CommandMeta(
+            'help-search',CommandCategory.HELP,'Search help topics'))
+        self.registry.register('help-commands',self._cmd_help_commands,CommandMeta(
+            'help-commands',CommandCategory.HELP,'List all commands'))
+        self.registry.register('help-examples',self._cmd_help_examples,CommandMeta(
+            'help-examples',CommandCategory.HELP,'Show command examples'))
     
     # ═════════════════════════════════════════════════════════════════════════════════════════
     # AUTH COMMAND IMPLEMENTATIONS
@@ -1633,7 +1633,7 @@ class TerminalEngine:
         if success:
             UI.success(msg)
             pq = self.session.session.pseudoqubit_id
-            if pq and pq != 'N/A':
+            if pq and pq != 'N-A':
                 UI.info(f"⚛️  Pseudoqubit ID: {pq}")
             metrics.record_command('login')
         else:
@@ -1672,8 +1672,8 @@ class TerminalEngine:
         success,result=self.session.register(email,password,name)
         if success:
             if isinstance(result, dict):
-                pq_id = result.get('pseudoqubit_id','N/A')
-                uid   = result.get('uid','N/A')
+                pq_id = result.get('pseudoqubit_id','N-A')
+                uid   = result.get('uid','N-A')
                 role  = result.get('role','user')
                 msg   = result.get('message','Registration successful')
                 
@@ -1707,13 +1707,13 @@ class TerminalEngine:
             return
         
         UI.header("👤 CURRENT USER")
-        pq = self.session.session.pseudoqubit_id or 'N/A'
-        uid = self.session.session.supabase_uid or self.session.session.user_id or 'N/A'
+        pq = self.session.session.pseudoqubit_id or 'N-A'
+        uid = self.session.session.supabase_uid or self.session.session.user_id or 'N-A'
         UI.print_table(['Field','Value'],[
             ['User ID',   (uid[:32]+'...') if len(uid)>35 else uid],
             ['Pseudoqubit ID', pq],
-            ['Email',     self.session.session.email or 'N/A'],
-            ['Name',      self.session.session.name or 'N/A'],
+            ['Email',     self.session.session.email or 'N-A'],
+            ['Name',      self.session.session.name or 'N-A'],
             ['Role',      self.session.session.role.value.upper()],
             ['Admin',     str(self.session.is_admin())],
             ['Authenticated', str(self.session.is_authenticated())]
@@ -1734,10 +1734,10 @@ class TerminalEngine:
                 UI.info("Scan QR code with authenticator app")
             secret=result.get('secret','')
             if secret:UI.info(f"Secret key: {secret}")
-            metrics.record_command('auth/2fa/setup')
+            metrics.record_command('auth-2fa-setup')
         else:
             UI.error(f"Setup failed: {result.get('error')}")
-            metrics.record_command('auth/2fa/setup',False)
+            metrics.record_command('auth-2fa-setup',False)
     
     def _cmd_refresh_token(self):
         if not self.session.is_authenticated():
@@ -1752,10 +1752,10 @@ class TerminalEngine:
             self.client.set_auth_token(result['token'])
             self.session.save_session()
             UI.success("Token refreshed")
-            metrics.record_command('auth/token/refresh')
+            metrics.record_command('auth-token-refresh')
         else:
             UI.error(f"Refresh failed: {result.get('error')}")
-            metrics.record_command('auth/token/refresh',False)
+            metrics.record_command('auth-token-refresh',False)
     
     # ═════════════════════════════════════════════════════════════════════════════════════════
     # USER COMMAND IMPLEMENTATIONS
@@ -1768,34 +1768,34 @@ class TerminalEngine:
         
         UI.header("👤 USER PROFILE")
         pq = self.session.session.pseudoqubit_id
-        if pq and pq != 'N/A':
+        if pq and pq != 'N-A':
             UI.info(f"⚛️  Pseudoqubit ID: {pq}")
         success,user=self.client.request('GET','/api/users/me')
         
         if success:
-            uid = user.get('user_id', self.session.session.supabase_uid or 'N/A')
+            uid = user.get('user_id', self.session.session.supabase_uid or 'N-A')
             UI.print_table(['Field','Value'],[
                 ['User ID',uid[:16]+"..." if len(uid)>19 else uid],
-                ['Pseudoqubit ID', pq or user.get('pseudoqubit_id','N/A')],
-                ['Email',user.get('email','N/A')],
-                ['Name',user.get('name','N/A')],
+                ['Pseudoqubit ID', pq or user.get('pseudoqubit_id','N-A')],
+                ['Email',user.get('email','N-A')],
+                ['Name',user.get('name','N-A')],
                 ['Role',user.get('role','user').upper()],
-                ['Created',user.get('created_at','N/A')[:10]],
-                ['Last Active',user.get('last_active','N/A')[:19]],
+                ['Created',user.get('created_at','N-A')[:10]],
+                ['Last Active',user.get('last_active','N-A')[:19]],
                 ['Verified',str(user.get('verified',False))]
             ])
-            metrics.record_command('user/profile')
+            metrics.record_command('user-profile')
         else:
-            uid = self.session.session.supabase_uid or self.session.session.user_id or 'N/A'
+            uid = self.session.session.supabase_uid or self.session.session.user_id or 'N-A'
             UI.print_table(['Field','Value'],[
-                ['User ID',       uid[:32] if uid!='N/A' else 'N/A'],
-                ['Pseudoqubit ID',pq or 'N/A'],
-                ['Email',         self.session.session.email or 'N/A'],
-                ['Name',          self.session.session.name or 'N/A'],
+                ['User ID',       uid[:32] if uid!='N-A' else 'N-A'],
+                ['Pseudoqubit ID',pq or 'N-A'],
+                ['Email',         self.session.session.email or 'N-A'],
+                ['Name',          self.session.session.name or 'N-A'],
                 ['Role',          self.session.session.role.value.upper()],
             ])
             UI.warning("(API offline — showing session data)")
-            metrics.record_command('user/profile',False)
+            metrics.record_command('user-profile',False)
     
     def _cmd_user_settings(self):
         if not self.session.is_authenticated():
@@ -1863,7 +1863,7 @@ class TerminalEngine:
             UI.print_table(['Setting','Status'],[
                 ['2FA Enabled',str(result.get('totp_enabled',False))],
                 ['Login Attempts',str(result.get('login_attempts',0))],
-                ['Last Login IP',result.get('last_login_ip','N/A')],
+                ['Last Login IP',result.get('last_login_ip','N-A')],
                 ['Active Sessions',str(result.get('active_sessions',0))]
             ])
         else:
@@ -1883,10 +1883,10 @@ class TerminalEngine:
                    str(u.get('verified',False)),u.get('created_at','')[:10]] for u in users]
             UI.print_table(['User ID','Email','Role','Verified','Created'],rows)
             UI.info(f"Total users: {len(users)}")
-            metrics.record_command('user/list')
+            metrics.record_command('user-list')
         else:
             UI.error(f"Failed: {result.get('error')}")
-            metrics.record_command('user/list',False)
+            metrics.record_command('user-list',False)
     
     def _cmd_user_details(self):
         if not self.session.is_authenticated():
@@ -1909,10 +1909,10 @@ class TerminalEngine:
                 ['Created',user.get('created_at','')[:19]],
                 ['Balance',f"{float(user.get('balance',0)):.2f} QTCL"]
             ])
-            metrics.record_command('user/details')
+            metrics.record_command('user-details')
         else:
             UI.error(f"Failed: {user.get('error')}")
-            metrics.record_command('user/details',False)
+            metrics.record_command('user-details',False)
     
     # ═════════════════════════════════════════════════════════════════════════════════════════
     # TRANSACTION COMMAND IMPLEMENTATIONS
@@ -1947,9 +1947,9 @@ class TerminalEngine:
                 ['Amount',f"{float(result.get('amount',0)):.2f} QTCL"],
                 ['Created',result.get('created_at','')[:19]]
             ])
-            metrics.record_command('transaction/create')
+            metrics.record_command('transaction-create')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('transaction/create',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('transaction-create',False)
     
     def _cmd_tx_track(self):
         if not self.session.is_authenticated():
@@ -1975,9 +1975,9 @@ class TerminalEngine:
                 ['Created',tx.get('created_at','')[:19]],
                 ['Updated',tx.get('updated_at','')[:19]]
             ])
-            metrics.record_command('transaction/track')
+            metrics.record_command('transaction-track')
         else:
-            UI.error(f"Failed: {tx.get('error')}");metrics.record_command('transaction/track',False)
+            UI.error(f"Failed: {tx.get('error')}");metrics.record_command('transaction-track',False)
     
     def _cmd_tx_cancel(self):
         if not self.session.is_authenticated():
@@ -1989,9 +1989,9 @@ class TerminalEngine:
         success,result=self.client.request('POST',f'/api/transactions/{tx_id}/cancel',{})
         if success:
             UI.success(f"Transaction cancelled")
-            metrics.record_command('transaction/cancel')
+            metrics.record_command('transaction-cancel')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('transaction/cancel',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('transaction-cancel',False)
     
     def _cmd_tx_list(self):
         if not self.session.is_authenticated():
@@ -2008,9 +2008,9 @@ class TerminalEngine:
                    t.get('created_at','')[:10]] for t in txs]
             UI.print_table(['TX ID','Type','Amount','Status','Date'],rows)
             UI.info(f"Showing {len(txs)} of {result.get('total',len(txs))} transactions")
-            metrics.record_command('transaction/list')
+            metrics.record_command('transaction-list')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('transaction/list',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('transaction-list',False)
     
     def _cmd_tx_analyze(self):
         if not self.session.is_authenticated():
@@ -2031,9 +2031,9 @@ class TerminalEngine:
                 ['Pending Count',str(stats.get('pending_count',0))],
                 ['Failed Count',str(stats.get('failed_count',0))]
             ])
-            metrics.record_command('transaction/analyze')
+            metrics.record_command('transaction-analyze')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('transaction/analyze',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('transaction-analyze',False)
     
     def _cmd_tx_export(self):
         if not self.session.is_authenticated():
@@ -2050,12 +2050,12 @@ class TerminalEngine:
             try:
                 with open(filename,'w') as f:f.write(str(result))
                 UI.success(f"Exported to {filename}")
-                metrics.record_command('transaction/export')
+                metrics.record_command('transaction-export')
             except Exception as e:
                 UI.error(f"Export failed: {e}")
-                metrics.record_command('transaction/export',False)
+                metrics.record_command('transaction-export',False)
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('transaction/export',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('transaction-export',False)
     
     def _cmd_tx_stats(self):
         if not self.session.is_authenticated():
@@ -2070,14 +2070,14 @@ class TerminalEngine:
                 ['Daily Average',f"{float(stats.get('daily_average',0)):.2f} QTCL"],
                 ['Weekly Total',f"{float(stats.get('weekly_total',0)):.2f} QTCL"],
                 ['Monthly Total',f"{float(stats.get('monthly_total',0)):.2f} QTCL"],
-                ['Most Common Type',stats.get('most_common_type','N/A')],
+                ['Most Common Type',stats.get('most_common_type','N-A')],
                 ['Avg Confirmation Time',f"{float(stats.get('avg_confirm_time',0)):.1f}s"],
                 ['Network Fee Paid',f"{float(stats.get('network_fees',0)):.4f} QTCL"],
                 ['24h Volume',f"{float(stats.get('volume_24h',0)):.2f} QTCL"]
             ])
-            metrics.record_command('transaction/stats')
+            metrics.record_command('transaction-stats')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('transaction/stats',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('transaction-stats',False)
     
     # ═════════════════════════════════════════════════════════════════════════════════════════
     # WALLET COMMAND IMPLEMENTATIONS
@@ -2105,9 +2105,9 @@ class TerminalEngine:
                 ['Balance',f"{float(result.get('balance',0)):.2f} QTCL"],
                 ['Created',result.get('created_at','')[:19]]
             ])
-            metrics.record_command('wallet/create')
+            metrics.record_command('wallet-create')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('wallet/create',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('wallet-create',False)
     
     def _cmd_wallet_list(self):
         if not self.session.is_authenticated():
@@ -2124,9 +2124,9 @@ class TerminalEngine:
             UI.print_table(['ID','Name','Balance','Default','Address'],rows)
             total_balance=sum(Decimal(str(w.get('balance',0))) for w in wallets)
             UI.info(f"Total balance: {float(total_balance):.2f} QTCL across {len(wallets)} wallets")
-            metrics.record_command('wallet/list')
+            metrics.record_command('wallet-list')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('wallet/list',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('wallet-list',False)
     
     def _cmd_wallet_balance(self):
         if not self.session.is_authenticated():
@@ -2150,9 +2150,9 @@ class TerminalEngine:
                 wallets=result.get('wallets',[])
                 rows=[[w.get('name',''),f"{float(w.get('balance',0)):.2f}"] for w in wallets]
                 UI.print_table(['Wallet','Balance'],rows)
-            metrics.record_command('wallet/balance')
+            metrics.record_command('wallet-balance')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('wallet/balance',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('wallet-balance',False)
     
     def _cmd_wallet_import(self):
         if not self.session.is_authenticated():
@@ -2167,9 +2167,9 @@ class TerminalEngine:
         
         if success:
             UI.success("Wallet imported")
-            metrics.record_command('wallet/import')
+            metrics.record_command('wallet-import')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('wallet/import',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('wallet-import',False)
     
     def _cmd_wallet_export(self):
         if not self.session.is_authenticated():
@@ -2187,11 +2187,11 @@ class TerminalEngine:
             try:
                 with open(filename,'w') as f:json.dump(result,f)
                 UI.success(f"Exported to {filename}")
-                metrics.record_command('wallet/export')
+                metrics.record_command('wallet-export')
             except Exception as e:
-                UI.error(f"Export failed: {e}");metrics.record_command('wallet/export',False)
+                UI.error(f"Export failed: {e}");metrics.record_command('wallet-export',False)
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('wallet/export',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('wallet-export',False)
     
     def _cmd_multisig_create(self):
         if not self.session.is_authenticated():
@@ -2218,9 +2218,9 @@ class TerminalEngine:
                 ['Required',str(required)],
                 ['Address',result.get('address','')[:32]+"..."]
             ])
-            metrics.record_command('wallet/multisig/create')
+            metrics.record_command('wallet-multisig-create')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('wallet/multisig/create',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('wallet-multisig-create',False)
     
     def _cmd_multisig_sign(self):
         if not self.session.is_authenticated():
@@ -2236,12 +2236,12 @@ class TerminalEngine:
             UI.success("Transaction signed")
             UI.print_table(['Field','Value'],[
                 ['TX ID',result.get('tx_id','')[:16]+"..."],
-                ['Signatures',f"{result.get('signatures_count',0)}/{result.get('signatures_required',0)}"],
+                ['Signatures',f"{result.get('signatures_count',0)}-{result.get('signatures_required',0)}"],
                 ['Executable',str(result.get('executable',False))]
             ])
-            metrics.record_command('wallet/multisig/sign')
+            metrics.record_command('wallet-multisig-sign')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('wallet/multisig/sign',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('wallet-multisig-sign',False)
     
     # ═════════════════════════════════════════════════════════════════════════════════════════
     # BLOCK COMMAND IMPLEMENTATIONS - PRODUCTION GRADE LIVE DEPLOYMENT
@@ -2376,26 +2376,26 @@ class TerminalEngine:
                 UI.info(f"Total: {total_txs} TXs | {total_size:.2f} MB | {limit} blocks")
                 
                 # Log success
-                self._log_block_command('block/list', 
+                self._log_block_command('block-list', 
                     {'count': len(blocks), 'limit': limit}, 
                     success=True, 
                     correlation_id=correlation_id)
-                metrics.record_command('block/list')
+                metrics.record_command('block-list')
                 
             else:
                 UI.error(f"Failed: {result.get('error', 'Unknown error')}")
-                self._log_block_command('block/list', 
+                self._log_block_command('block-list', 
                     {'limit': limit}, 
                     success=False, 
                     error_msg=result.get('error', 'Unknown error'),
                     correlation_id=correlation_id)
-                metrics.record_command('block/list', False)
+                metrics.record_command('block-list', False)
         
         except Exception as e:
             UI.error(f"Exception: {e}")
             logging.error(f"[BlockList] Exception: {e}\n{traceback.format_exc()}")
-            self._log_block_command('block/list', success=False, error_msg=str(e), correlation_id=correlation_id)
-            metrics.record_command('block/list', False)
+            self._log_block_command('block-list', success=False, error_msg=str(e), correlation_id=correlation_id)
+            metrics.record_command('block-list', False)
     
     def _cmd_block_explorer(self):
         """🔍 Advanced block explorer with multi-type search and database indexing"""
@@ -2464,30 +2464,30 @@ class TerminalEngine:
                             print(f"\n... and {len(results) - 10} more results")
                             break
                     
-                    self._log_block_command('block/explorer', 
+                    self._log_block_command('block-explorer', 
                         {'query': query, 'type': query_type, 'results': len(results)}, 
                         success=True, correlation_id=correlation_id)
-                    metrics.record_command('block/explorer')
+                    metrics.record_command('block-explorer')
                 else:
                     UI.info("No results found for your search")
-                    self._log_block_command('block/explorer', 
+                    self._log_block_command('block-explorer', 
                         {'query': query, 'results': 0}, 
                         success=True, correlation_id=correlation_id)
             else:
                 error_msg = result.get('error', 'Search failed')
                 UI.error(f"Failed: {error_msg}")
-                self._log_block_command('block/explorer', 
+                self._log_block_command('block-explorer', 
                     {'query': query}, 
                     success=False, 
                     error_msg=error_msg,
                     correlation_id=correlation_id)
-                metrics.record_command('block/explorer', False)
+                metrics.record_command('block-explorer', False)
         
         except Exception as e:
             UI.error(f"Exception: {e}")
             logging.error(f"[BlockExplorer] {e}\n{traceback.format_exc()}")
-            self._log_block_command('block/explorer', success=False, error_msg=str(e), correlation_id=correlation_id)
-            metrics.record_command('block/explorer', False)
+            self._log_block_command('block-explorer', success=False, error_msg=str(e), correlation_id=correlation_id)
+            metrics.record_command('block-explorer', False)
     
     def _cmd_block_stats(self):
         """📊 Comprehensive block statistics with quantum measurements and performance analytics"""
@@ -2559,20 +2559,20 @@ class TerminalEngine:
                     print(f"  Entropy: {float(qm.get('entropy', 0)):.6f}")
                     print(f"  Validators: {qm.get('active_validators', 0)}")
                 
-                self._log_block_command('block/stats', stats, success=True, correlation_id=correlation_id)
-                metrics.record_command('block/stats')
+                self._log_block_command('block-stats', stats, success=True, correlation_id=correlation_id)
+                metrics.record_command('block-stats')
                 
             else:
                 error_msg = result.get('error', 'Statistics unavailable')
                 UI.error(f"Failed: {error_msg}")
-                self._log_block_command('block/stats', success=False, error_msg=error_msg, correlation_id=correlation_id)
-                metrics.record_command('block/stats', False)
+                self._log_block_command('block-stats', success=False, error_msg=error_msg, correlation_id=correlation_id)
+                metrics.record_command('block-stats', False)
         
         except Exception as e:
             UI.error(f"Exception: {e}")
             logging.error(f"[BlockStats] {e}\n{traceback.format_exc()}")
-            self._log_block_command('block/stats', success=False, error_msg=str(e), correlation_id=correlation_id)
-            metrics.record_command('block/stats', False)
+            self._log_block_command('block-stats', success=False, error_msg=str(e), correlation_id=correlation_id)
+            metrics.record_command('block-stats', False)
     
     # ═════════════════════════════════════════════════════════════════════════════════════════
     # COMPREHENSIVE BLOCK COMMANDS WITH QUANTUM MEASUREMENTS
@@ -2940,13 +2940,13 @@ class TerminalEngine:
                 else:
                     UI.warning("⚠ Quantum system degraded")
                 
-                metrics.record_command('quantum/status')
+                metrics.record_command('quantum-status')
             else:
                 UI.error(f"API Error: {result.get('error') if result else 'No response'}")
-                metrics.record_command('quantum/status',False)
+                metrics.record_command('quantum-status',False)
         except Exception as e:
             UI.error(f"Exception: {e}")
-            metrics.record_command('quantum/status',False)
+            metrics.record_command('quantum-status',False)
     
     def _cmd_quantum_circuit(self):
         if not self.session.is_authenticated():
@@ -2968,9 +2968,9 @@ class TerminalEngine:
                 ['Depth',str(result.get('depth',0))],
                 ['Status',result.get('status','created')]
             ])
-            metrics.record_command('quantum/circuit')
+            metrics.record_command('quantum-circuit')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum/circuit',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum-circuit',False)
     
     def _cmd_quantum_entropy(self):
         UI.header("⚛️ QUANTUM ENTROPY")
@@ -2984,9 +2984,9 @@ class TerminalEngine:
                 ['Last Updated',result.get('last_updated','')[:19]],
                 ['Quality Score',f"{float(result.get('quality',0)):.1%}"]
             ])
-            metrics.record_command('quantum/entropy')
+            metrics.record_command('quantum-entropy')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum/entropy',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum-entropy',False)
     
     def _cmd_quantum_validator(self):
         UI.header("⚛️ QUANTUM VALIDATORS")
@@ -2997,9 +2997,9 @@ class TerminalEngine:
             rows=[[v.get('validator_id','')[:12]+"...",v.get('state',''),
                    f"{float(v.get('score',0)):.2f}","✓" if v.get('active') else "✗"] for v in validators]
             UI.print_table(['ID','State','Score','Active'],rows)
-            metrics.record_command('quantum/validator')
+            metrics.record_command('quantum-validator')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum/validator',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum-validator',False)
     
     def _cmd_quantum_finality(self):
         tx_id=UI.prompt("Transaction ID")
@@ -3015,9 +3015,9 @@ class TerminalEngine:
                 ['Confidence',f"{float(result.get('confidence',0)):.1%}"],
                 ['Validated At',result.get('validated_at','')[:19]]
             ])
-            metrics.record_command('quantum/finality')
+            metrics.record_command('quantum-finality')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum/finality',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('quantum-finality',False)
     
     def _cmd_quantum_transaction(self):
         """PRODUCTION Quantum-secured transaction with 6-layer finality verification"""
@@ -3115,12 +3115,12 @@ class TerminalEngine:
                 ['Mempool Pending',str(result.get('pending_in_mempool',0))]
             ])
             
-            metrics.record_command('quantum/transaction')
+            metrics.record_command('quantum-transaction')
         else:
             error_code = result.get('error_code', 'UNKNOWN')
             error_msg = result.get('error', 'Unknown error')
             UI.error(f"Transaction failed ({error_code}): {error_msg}")
-            metrics.record_command('quantum/transaction', False)
+            metrics.record_command('quantum-transaction', False)
     
     def _cmd_quantum_oracle(self):
         """PRODUCTION Oracle qubit measurement for transaction finality"""
@@ -3150,10 +3150,10 @@ class TerminalEngine:
             else:
                 UI.warning("⚠ Transaction finality pending verification")
             
-            metrics.record_command('quantum/oracle')
+            metrics.record_command('quantum-oracle')
         else:
             UI.error(f"Oracle measurement failed: {result.get('error','Unknown error')}")
-            metrics.record_command('quantum/oracle',False)
+            metrics.record_command('quantum-oracle',False)
     
     def _cmd_quantum_pq_rotate(self):
         """PRODUCTION post-quantum keypair rotation using liboqs Kyber/Dilithium"""
@@ -3197,11 +3197,11 @@ class TerminalEngine:
             UI.info("Public Key (first 50 chars):")
             UI.print(result.get('public_key','')[:50]+"...")
             
-            metrics.record_command('quantum/pq-rotate')
+            metrics.record_command('quantum-pq-rotate')
         else:
             error_code=result.get('error','Unknown error')
             UI.error(f"PQ keypair rotation failed: {error_code}")
-            metrics.record_command('quantum/pq-rotate',False)
+            metrics.record_command('quantum-pq-rotate',False)
     
     # ═════════════════════════════════════════════════════════════════════════════════════════
     # ORACLE COMMAND IMPLEMENTATIONS
@@ -3213,14 +3213,14 @@ class TerminalEngine:
         
         if success:
             UI.print_table(['Field','Value'],[
-                ['Current Time',result.get('iso_timestamp','N/A')],
-                ['Unix Time',str(result.get('unix_timestamp','N/A'))],
-                ['Block Number',str(result.get('block_number','N/A'))],
-                ['Block Time',result.get('block_timestamp','N/A')]
+                ['Current Time',result.get('iso_timestamp','N-A')],
+                ['Unix Time',str(result.get('unix_timestamp','N-A'))],
+                ['Block Number',str(result.get('block_number','N-A'))],
+                ['Block Time',result.get('block_timestamp','N-A')]
             ])
-            metrics.record_command('oracle/time')
+            metrics.record_command('oracle-time')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('oracle/time',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('oracle-time',False)
     
     def _cmd_oracle_price(self):
         UI.header("🔮 PRICE ORACLE")
@@ -3235,9 +3235,9 @@ class TerminalEngine:
                 ['Market Cap',f"${float(result.get('market_cap',0)):,.0f}"],
                 ['Volume 24h',f"${float(result.get('volume_24h',0)):,.0f}"]
             ])
-            metrics.record_command('oracle/price')
+            metrics.record_command('oracle-price')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('oracle/price',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('oracle-price',False)
     
     def _cmd_oracle_random(self):
         UI.header("🔮 QUANTUM RANDOM")
@@ -3249,9 +3249,9 @@ class TerminalEngine:
             print("\n  Random Numbers:")
             for i,num in enumerate(numbers,1):
                 print(f"    {i:2d}. {num:.8f}")
-            metrics.record_command('oracle/random')
+            metrics.record_command('oracle-random')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('oracle/random',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('oracle-random',False)
     
     def _cmd_oracle_event(self):
         UI.header("🔮 ORACLE EVENTS")
@@ -3265,9 +3265,9 @@ class TerminalEngine:
             rows=[[e.get('event_id','')[:12]+"...",e.get('type',''),e.get('status',''),
                    e.get('created_at','')[:10]] for e in events]
             UI.print_table(['Event ID','Type','Status','Created'],rows)
-            metrics.record_command('oracle/event')
+            metrics.record_command('oracle-event')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('oracle/event',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('oracle-event',False)
     
     def _cmd_oracle_feed(self):
         UI.header("🔮 ORACLE FEEDS")
@@ -3278,9 +3278,9 @@ class TerminalEngine:
             rows=[[f.get('feed_id','')[:12]+"...",f.get('name',''),f.get('type',''),
                    f.get('frequency',''),f.get('status','online')] for f in feeds]
             UI.print_table(['Feed ID','Name','Type','Frequency','Status'],rows)
-            metrics.record_command('oracle/feed')
+            metrics.record_command('oracle-feed')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('oracle/feed',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('oracle-feed',False)
     
     # ═════════════════════════════════════════════════════════════════════════════════════════
     # DEFI COMMAND IMPLEMENTATIONS
@@ -3306,9 +3306,9 @@ class TerminalEngine:
                 ['APY',f"{float(result.get('apy',0)):.2f}%"],
                 ['Unlock Date',result.get('unlock_date','')[:10]]
             ])
-            metrics.record_command('defi/stake')
+            metrics.record_command('defi-stake')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('defi/stake',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('defi-stake',False)
     
     def _cmd_defi_unstake(self):
         if not self.session.is_authenticated():
@@ -3320,9 +3320,9 @@ class TerminalEngine:
         success,result=self.client.request('POST',f'/api/defi/unstake/{stake_id}',{})
         if success:
             UI.success("Unstaking initiated")
-            metrics.record_command('defi/unstake')
+            metrics.record_command('defi-unstake')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('defi/unstake',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('defi-unstake',False)
     
     def _cmd_defi_borrow(self):
         if not self.session.is_authenticated():
@@ -3344,9 +3344,9 @@ class TerminalEngine:
                 ['APR',f"{float(result.get('apr',0)):.2f}%"],
                 ['Repay By',result.get('repay_by','')[:10]]
             ])
-            metrics.record_command('defi/borrow')
+            metrics.record_command('defi-borrow')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('defi/borrow',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('defi-borrow',False)
     
     def _cmd_defi_repay(self):
         if not self.session.is_authenticated():
@@ -3360,9 +3360,9 @@ class TerminalEngine:
         
         if success:
             UI.success("Repayment processed")
-            metrics.record_command('defi/repay')
+            metrics.record_command('defi-repay')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('defi/repay',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('defi-repay',False)
     
     def _cmd_defi_yield(self):
         if not self.session.is_authenticated():
@@ -3374,11 +3374,11 @@ class TerminalEngine:
         if success:
             yields=result.get('yields',[])
             rows=[[y.get('pool_id','')[:12]+"...",y.get('asset',''),f"{float(y.get('apy',0)):.2f}%",
-                   f"{float(y.get('tvl',0))/1e6:.1f}M"] for y in yields]
+                   f"{float(y.get('tvl',0))-1e6:.1f}M"] for y in yields]
             UI.print_table(['Pool','Asset','APY','TVL'],rows)
-            metrics.record_command('defi/yield')
+            metrics.record_command('defi-yield')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('defi/yield',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('defi-yield',False)
     
     def _cmd_defi_pool(self):
         if not self.session.is_authenticated():
@@ -3399,9 +3399,9 @@ class TerminalEngine:
             
             if success:
                 UI.success("Pool created")
-                metrics.record_command('defi/pool')
+                metrics.record_command('defi-pool')
             else:
-                UI.error(f"Failed: {result.get('error')}");metrics.record_command('defi/pool',False)
+                UI.error(f"Failed: {result.get('error')}");metrics.record_command('defi-pool',False)
     
     # ═════════════════════════════════════════════════════════════════════════════════════════
     # GOVERNANCE COMMAND IMPLEMENTATIONS
@@ -3422,9 +3422,9 @@ class TerminalEngine:
         
         if success:
             UI.success("Vote recorded")
-            metrics.record_command('governance/vote')
+            metrics.record_command('governance-vote')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('governance/vote',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('governance-vote',False)
     
     def _cmd_governance_proposal(self):
         if not self.session.is_authenticated():
@@ -3441,9 +3441,9 @@ class TerminalEngine:
         if success:
             UI.success("Proposal created")
             UI.info(f"ID: {result.get('proposal_id','')[:16]}...")
-            metrics.record_command('governance/proposal')
+            metrics.record_command('governance-proposal')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('governance/proposal',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('governance-proposal',False)
     
     def _cmd_governance_delegate(self):
         if not self.session.is_authenticated():
@@ -3458,9 +3458,9 @@ class TerminalEngine:
         
         if success:
             UI.success("Delegation recorded")
-            metrics.record_command('governance/delegate')
+            metrics.record_command('governance-delegate')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('governance/delegate',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('governance-delegate',False)
     
     def _cmd_governance_stats(self):
         UI.header("📊 GOVERNANCE STATS")
@@ -3475,9 +3475,9 @@ class TerminalEngine:
                 ['Voting Power',f"{float(stats.get('user_voting_power',0)):.2f}"],
                 ['Delegated To',str(stats.get('delegated_to',0))]
             ])
-            metrics.record_command('governance/stats')
+            metrics.record_command('governance-stats')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('governance/stats',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('governance-stats',False)
     
     # ═════════════════════════════════════════════════════════════════════════════════════════
     # NFT COMMAND IMPLEMENTATIONS
@@ -3504,9 +3504,9 @@ class TerminalEngine:
                 ['Owner',result.get('owner','')[:16]+"..."],
                 ['Minted At',result.get('created_at','')[:19]]
             ])
-            metrics.record_command('nft/mint')
+            metrics.record_command('nft-mint')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('nft/mint',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('nft-mint',False)
     
     def _cmd_nft_transfer(self):
         if not self.session.is_authenticated():
@@ -3521,9 +3521,9 @@ class TerminalEngine:
         
         if success:
             UI.success("NFT transferred")
-            metrics.record_command('nft/transfer')
+            metrics.record_command('nft-transfer')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('nft/transfer',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('nft-transfer',False)
     
     def _cmd_nft_burn(self):
         if not self.session.is_authenticated():
@@ -3535,9 +3535,9 @@ class TerminalEngine:
         success,result=self.client.request('POST',f'/api/nft/{token_id}/burn',{})
         if success:
             UI.success("NFT burned")
-            metrics.record_command('nft/burn')
+            metrics.record_command('nft-burn')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('nft/burn',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('nft-burn',False)
     
     def _cmd_nft_metadata(self):
         if not self.session.is_authenticated():
@@ -3556,9 +3556,9 @@ class TerminalEngine:
                 ['Rarity',nft.get('rarity','common')],
                 ['Attributes',str(len(nft.get('attributes',[])))]
             ])
-            metrics.record_command('nft/metadata')
+            metrics.record_command('nft-metadata')
         else:
-            UI.error(f"Failed: {nft.get('error')}");metrics.record_command('nft/metadata',False)
+            UI.error(f"Failed: {nft.get('error')}");metrics.record_command('nft-metadata',False)
     
     def _cmd_nft_collection(self):
         if not self.session.is_authenticated():
@@ -3576,9 +3576,9 @@ class TerminalEngine:
             
             if success:
                 UI.success("Collection created")
-                metrics.record_command('nft/collection')
+                metrics.record_command('nft-collection')
             else:
-                UI.error(f"Failed: {result.get('error')}");metrics.record_command('nft/collection',False)
+                UI.error(f"Failed: {result.get('error')}");metrics.record_command('nft-collection',False)
     
     # ═════════════════════════════════════════════════════════════════════════════════════════
     # SMART CONTRACT COMMAND IMPLEMENTATIONS
@@ -3603,9 +3603,9 @@ class TerminalEngine:
                 ['Status',result.get('status','deployed')],
                 ['Deployed At',result.get('created_at','')[:19]]
             ])
-            metrics.record_command('contract/deploy')
+            metrics.record_command('contract-deploy')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('contract/deploy',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('contract-deploy',False)
     
     def _cmd_contract_execute(self):
         if not self.session.is_authenticated():
@@ -3627,9 +3627,9 @@ class TerminalEngine:
                 ['Status',result.get('status','pending')],
                 ['Result',str(result.get('result',''))[:50]]
             ])
-            metrics.record_command('contract/execute')
+            metrics.record_command('contract-execute')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('contract/execute',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('contract-execute',False)
     
     def _cmd_contract_compile(self):
         if not self.session.is_authenticated():
@@ -3651,9 +3651,9 @@ class TerminalEngine:
                 ['Errors',str(len(result.get('errors',[])))],
                 ['Size',f"{len(result.get('bytecode',''))//2} bytes"]
             ])
-            metrics.record_command('contract/compile')
+            metrics.record_command('contract-compile')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('contract/compile',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('contract-compile',False)
     
     def _cmd_contract_state(self):
         if not self.session.is_authenticated():
@@ -3671,9 +3671,9 @@ class TerminalEngine:
                 ['Created At',result.get('created_at','')[:19]],
                 ['Verified',str(result.get('verified',False))]
             ])
-            metrics.record_command('contract/state')
+            metrics.record_command('contract-state')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('contract/state',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('contract-state',False)
     
     # ═════════════════════════════════════════════════════════════════════════════════════════
     # BRIDGE COMMAND IMPLEMENTATIONS
@@ -3702,9 +3702,9 @@ class TerminalEngine:
                 ['Estimated Time',result.get('eta','')],
                 ['Fee',f"{float(result.get('fee',0)):.4f}"]
             ])
-            metrics.record_command('bridge/initiate')
+            metrics.record_command('bridge-initiate')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('bridge/initiate',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('bridge-initiate',False)
     
     def _cmd_bridge_status(self):
         bridge_id=UI.prompt("Bridge ID")
@@ -3718,13 +3718,13 @@ class TerminalEngine:
                 ['From',result.get('from_chain','')],
                 ['To',result.get('to_chain','')],
                 ['Amount',f"{float(result.get('amount',0)):.4f}"],
-                ['Confirmations',f"{result.get('confirmations',0)}/20"],
+                ['Confirmations',f"{result.get('confirmations',0)}-20"],
                 ['Initiated',result.get('initiated_at','')[:19]],
                 ['Completed',result.get('completed_at','')[:19] if result.get('completed_at') else "Pending"]
             ])
-            metrics.record_command('bridge/status')
+            metrics.record_command('bridge-status')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('bridge/status',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('bridge-status',False)
     
     def _cmd_bridge_history(self):
         if not self.session.is_authenticated():
@@ -3738,9 +3738,9 @@ class TerminalEngine:
             rows=[[b.get('bridge_id','')[:12]+"...",b.get('from_chain',''),b.get('to_chain',''),
                    f"{float(b.get('amount',0)):.2f}",b.get('status','')] for b in bridges]
             UI.print_table(['Bridge ID','From','To','Amount','Status'],rows)
-            metrics.record_command('bridge/history')
+            metrics.record_command('bridge-history')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('bridge/history',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('bridge-history',False)
     
     def _cmd_bridge_wrapped(self):
         if not self.session.is_authenticated():
@@ -3754,9 +3754,9 @@ class TerminalEngine:
             rows=[[w.get('symbol',''),w.get('original_chain',''),f"{float(w.get('balance',0)):.2f}",
                    w.get('contract','')[:16]+"..."] for w in wrapped]
             UI.print_table(['Symbol','Original Chain','Balance','Contract'],rows)
-            metrics.record_command('bridge/wrapped')
+            metrics.record_command('bridge-wrapped')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('bridge/wrapped',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('bridge-wrapped',False)
     
     # ═════════════════════════════════════════════════════════════════════════════════════════
     # ADMIN COMMAND IMPLEMENTATIONS
@@ -3813,7 +3813,7 @@ class TerminalEngine:
                 else:UI.error(f"Failed: {result.get('error')}")
             else:break
         
-        metrics.record_command('admin/users')
+        metrics.record_command('admin-users')
     
     def _cmd_admin_approval(self):
         if not self.session.is_admin():
@@ -3852,7 +3852,7 @@ class TerminalEngine:
                         print(f"  {log.get('timestamp','')[:19]} - {log.get('action','')} by {log.get('admin','')[:12]}...")
             else:break
         
-        metrics.record_command('admin/approval')
+        metrics.record_command('admin-approval')
     
     def _cmd_admin_monitoring(self):
         if not self.session.is_admin():
@@ -3865,16 +3865,16 @@ class TerminalEngine:
             UI.print_table(['Metric','Value'],[
                 ['Active Users',str(result.get('active_users',0))],
                 ['Total Users',str(result.get('total_users',0))],
-                ['Transactions/Hour',str(result.get('tx_per_hour',0))],
+                ['Transactions-Hour',str(result.get('tx_per_hour',0))],
                 ['Avg Block Time',f"{float(result.get('avg_block_time',0)):.2f}s"],
                 ['Network TPS',f"{float(result.get('tps',0)):.2f}"],
                 ['API Health',result.get('api_health','healthy')],
                 ['Database',result.get('db_status','healthy')],
                 ['Quantum Engine',result.get('quantum_status','operational')]
             ])
-            metrics.record_command('admin/monitoring')
+            metrics.record_command('admin-monitoring')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('admin/monitoring',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('admin-monitoring',False)
     
     def _cmd_admin_settings(self):
         if not self.session.is_admin():
@@ -3920,7 +3920,7 @@ class TerminalEngine:
                     UI.print_table(['Setting','Value'],rows)
             else:break
         
-        metrics.record_command('admin/settings')
+        metrics.record_command('admin-settings')
     
     def _cmd_admin_audit(self):
         if not self.session.is_admin():
@@ -3940,9 +3940,9 @@ class TerminalEngine:
                    l.get('action',''),l.get('resource','')[:12]+"..."] for l in logs]
             UI.print_table(['Timestamp','User','Action','Resource'],rows)
             UI.info(f"Showing {len(logs)} audit entries")
-            metrics.record_command('admin/audit')
+            metrics.record_command('admin-audit')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('admin/audit',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('admin-audit',False)
     
     def _cmd_admin_emergency(self):
         if not self.session.is_admin():
@@ -3959,13 +3959,13 @@ class TerminalEngine:
                 success,result=self.client.request('POST','/api/admin/emergency/pause',{})
                 if success:
                     UI.warning("SYSTEM PAUSED")
-                    metrics.record_command('admin/emergency')
+                    metrics.record_command('admin-emergency')
                 else:UI.error(f"Failed: {result.get('error')}")
         elif choice=="Resume Transactions":
             success,result=self.client.request('POST','/api/admin/emergency/resume',{})
             if success:
                 UI.success("SYSTEM RESUMED")
-                metrics.record_command('admin/emergency')
+                metrics.record_command('admin-emergency')
             else:UI.error(f"Failed: {result.get('error')}")
         elif choice=="Freeze Account":
             account=UI.prompt("Account to freeze")
@@ -4008,11 +4008,11 @@ class TerminalEngine:
                 ['CPU Usage',f"{cpu_percent}%"],
                 ['Memory Usage',f"{memory.percent}%"],
                 ['Disk Usage',f"{disk.percent}%"],
-                ['Uptime',f"{result.get('uptime_seconds',0)//3600}h"]
+                ['Uptime',f"{result.get('uptime_seconds',0)--3600}h"]
             ])
-            metrics.record_command('system/status')
+            metrics.record_command('system-status')
         else:
-            UI.error("System offline");metrics.record_command('system/status',False)
+            UI.error("System offline");metrics.record_command('system-status',False)
     
     def _cmd_system_health(self):
         UI.header("❤️ SYSTEM HEALTH")
@@ -4053,9 +4053,9 @@ class TerminalEngine:
                 ['API Response', '✓ OK', f"{float(result.get('latency_ms',0)):.0f}ms"]
             ])
             
-            metrics.record_command('system/health')
+            metrics.record_command('system-health')
         else:
-            UI.error("Health check failed");metrics.record_command('system/health',False)
+            UI.error("Health check failed");metrics.record_command('system-health',False)
     
     def _cmd_quantum_heartbeat_monitor(self):
         """🫀 Real-time quantum heartbeat monitor"""
@@ -4101,7 +4101,7 @@ class TerminalEngine:
         
         except KeyboardInterrupt:
             UI.info("\n✓ Heartbeat monitoring stopped")
-            metrics.record_command('quantum/heartbeat/monitor')
+            metrics.record_command('quantum-heartbeat-monitor')
     
     def _cmd_system_config(self):
         UI.header("⚙️ SYSTEM CONFIGURATION")
@@ -4112,14 +4112,14 @@ class TerminalEngine:
             UI.print_table(['Setting','Value'],[
                 ['API Version',cfg.get('api_version','')],
                 ['Environment',cfg.get('environment','')],
-                ['Max Block Size',f"{cfg.get('max_block_size',0)//1024}KB"],
+                ['Max Block Size',f"{cfg.get('max_block_size',0)--1024}KB"],
                 ['Transaction Fee',f"{cfg.get('tx_fee',0):.4f}"],
                 ['Network ID',str(cfg.get('network_id',0))],
                 ['Genesis Block',cfg.get('genesis_block','')[:16]+"..."]
             ])
-            metrics.record_command('system/config')
+            metrics.record_command('system-config')
         else:
-            UI.error(f"Failed: {result.get('error')}");metrics.record_command('system/config',False)
+            UI.error(f"Failed: {result.get('error')}");metrics.record_command('system-config',False)
     
     def _cmd_system_backup(self):
         if not self.session.is_admin():
@@ -4133,9 +4133,9 @@ class TerminalEngine:
             filename=result.get('backup_file','backup.tar.gz')
             UI.success(f"Backup completed: {filename}")
             UI.info(f"Size: {result.get('size_mb',0):.1f} MB")
-            metrics.record_command('system/backup')
+            metrics.record_command('system-backup')
         else:
-            UI.error(f"Backup failed: {result.get('error')}");metrics.record_command('system/backup',False)
+            UI.error(f"Backup failed: {result.get('error')}");metrics.record_command('system-backup',False)
     
     def _cmd_system_restore(self):
         if not self.session.is_admin():
@@ -4149,9 +4149,9 @@ class TerminalEngine:
         success,result=self.client.request('POST','/api/admin/restore',{'backup_file':backup_file})
         if success:
             UI.success("Restore completed")
-            metrics.record_command('system/restore')
+            metrics.record_command('system-restore')
         else:
-            UI.error(f"Restore failed: {result.get('error')}");metrics.record_command('system/restore',False)
+            UI.error(f"Restore failed: {result.get('error')}");metrics.record_command('system-restore',False)
     
     # ═════════════════════════════════════════════════════════════════════════════════════════
     # PARALLEL COMMAND IMPLEMENTATIONS
@@ -4181,7 +4181,7 @@ class TerminalEngine:
             if result:results.append(result)
         
         UI.success(f"Completed {len(results)}/{len(task_ids)} commands")
-        metrics.record_command('parallel/execute')
+        metrics.record_command('parallel-execute')
     
     def _cmd_parallel_batch(self):
         UI.header("📦 BATCH OPERATIONS")
@@ -4198,7 +4198,7 @@ class TerminalEngine:
                 # Queue transaction in parallel
         
         UI.success(f"Queued {count} batch operations")
-        metrics.record_command('parallel/batch')
+        metrics.record_command('parallel-batch')
     
     def _cmd_parallel_monitor(self):
         UI.header("📊 PARALLEL TASK MONITOR")
@@ -4211,7 +4211,7 @@ class TerminalEngine:
         rows=[[tid[:8],t.command,t.status,f"{(t.end_time or time.time())-t.start_time:.2f}s"]
               for tid,t in list(tasks.items())[-20:]]
         UI.print_table(['Task ID','Command','Status','Duration'],rows)
-        metrics.record_command('parallel/monitor')
+        metrics.record_command('parallel-monitor')
     
     # ═════════════════════════════════════════════════════════════════════════════════════════
     # HELP COMMAND IMPLEMENTATIONS
@@ -4262,7 +4262,7 @@ class TerminalEngine:
         print("  • Emergency controls")
         print("  • Database backup/restore")
         
-        metrics.record_command('help/admin')
+        metrics.record_command('help-admin')
     
     def _cmd_help_search(self):
         query=UI.prompt("Search for")
@@ -4275,7 +4275,7 @@ class TerminalEngine:
         else:
             UI.info("No results found")
         
-        metrics.record_command('help/search')
+        metrics.record_command('help-search')
     
     def _cmd_help_commands(self):
         UI.header("📖 ALL AVAILABLE COMMANDS")
@@ -4292,7 +4292,7 @@ class TerminalEngine:
                 admin_req=" [ADMIN]" if meta.requires_admin else ""
                 print(f"  {name}{Fore.YELLOW}{auth_req}{admin_req}{Style.RESET_ALL}")
         
-        metrics.record_command('help/commands')
+        metrics.record_command('help-commands')
     
     def _cmd_help_examples(self):
         UI.header("💡 COMMAND EXAMPLES")
@@ -4312,7 +4312,7 @@ class TerminalEngine:
         
         rows=[[k,v] for k,v in examples.items()]
         UI.print_table(['Command','Description'],rows)
-        metrics.record_command('help/examples')
+        metrics.record_command('help-examples')
     
     # ═════════════════════════════════════════════════════════════════════════════════════════
     # MAIN LOOP & SHUTDOWN
@@ -4522,2361 +4522,936 @@ class TerminalEngine:
         print(f"\n{Fore.CYAN}Goodbye!{Style.RESET_ALL}\n")
 
 
-# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-# PART 2: GLOBAL COMMAND SYSTEM - THE POWERHOUSE
-# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-logger.info("""
-╔════════════════════════════════════════════════════════════════════════════════════════════════╗
-║                                                                                                ║
-║              🚀 TERMINAL LOGIC - QUANTUM COMMAND CENTER EXPANSION 🚀                          ║
-║                      Making terminal the absolute command HQ                                   ║
-║                                                                                                ║
-║  • Global command handler registry                                                             ║
-║  • Integration with LATTICE quantum system                                                    ║
-║  • Integration with quantum_api globals                                                       ║
-║  • Callable command execution framework                                                       ║
-║  • Comprehensive command index & introspection                                                ║
-║  • Real-time command status tracking                                                          ║
-║  • Parallel command execution                                                                 ║
-║  • Command history & replay capability                                                        ║
-║  • Advanced logging & diagnostics                                                             ║
-║                                                                                                ║
-╚════════════════════════════════════════════════════════════════════════════════════════════════╝
-""")
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# ARG / FLAG PARSER
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
 
-def _init_block_command_database():
+def parse_command(raw: str):
     """
-    Initialize database schema for block command logging, quantum measurements,
-    and comprehensive audit trails. Called automatically on startup.
-    """
-    try:
-        _init_wsgi_globals()
-        if not WSGI_AVAILABLE or not DB:
-            logging.info("ℹ Database not available - running in memory mode")
-            return
-        
-        with DB.cursor() as cur:
-            # Command logs table
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS command_logs (
-                    id BIGSERIAL PRIMARY KEY,
-                    command_name VARCHAR(255) NOT NULL,
-                    user_id VARCHAR(255),
-                    block_number BIGINT,
-                    success BOOLEAN,
-                    error_message TEXT,
-                    correlation_id VARCHAR(50),
-                    timestamp TIMESTAMPTZ DEFAULT NOW(),
-                    execution_time_ms FLOAT,
-                    metadata JSONB,
-                    INDEX idx_command_logs_timestamp (timestamp),
-                    INDEX idx_command_logs_user_id (user_id),
-                    INDEX idx_command_logs_correlation (correlation_id)
-                )
-            """)
-            
-            # Block queries table
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS block_queries (
-                    id BIGSERIAL PRIMARY KEY,
-                    query_type VARCHAR(50),
-                    block_number BIGINT,
-                    user_id VARCHAR(255),
-                    correlation_id VARCHAR(50),
-                    timestamp TIMESTAMPTZ DEFAULT NOW(),
-                    UNIQUE(block_number, query_type, user_id),
-                    INDEX idx_block_queries_block (block_number),
-                    INDEX idx_block_queries_timestamp (timestamp)
-                )
-            """)
-            
-            # Block details cache
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS block_details_cache (
-                    block_number BIGINT PRIMARY KEY,
-                    hash VARCHAR(255),
-                    timestamp TIMESTAMPTZ DEFAULT NOW(),
-                    user_id VARCHAR(255),
-                    correlation_id VARCHAR(50),
-                    data JSONB,
-                    access_count INT DEFAULT 1,
-                    last_access TIMESTAMPTZ DEFAULT NOW(),
-                    INDEX idx_block_details_timestamp (timestamp)
-                )
-            """)
-            
-            # Search logs
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS search_logs (
-                    id BIGSERIAL PRIMARY KEY,
-                    query TEXT NOT NULL,
-                    search_type VARCHAR(50),
-                    result_count INT,
-                    user_id VARCHAR(255),
-                    correlation_id VARCHAR(50),
-                    timestamp TIMESTAMPTZ DEFAULT NOW(),
-                    INDEX idx_search_logs_timestamp (timestamp),
-                    INDEX idx_search_logs_user_id (user_id)
-                )
-            """)
-            
-            # Block statistics
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS block_statistics (
-                    id BIGSERIAL PRIMARY KEY,
-                    total_blocks BIGINT,
-                    latest_block BIGINT,
-                    avg_block_time FLOAT,
-                    total_txs BIGINT,
-                    tps FLOAT,
-                    user_id VARCHAR(255),
-                    correlation_id VARCHAR(50),
-                    timestamp TIMESTAMPTZ DEFAULT NOW(),
-                    INDEX idx_block_stats_timestamp (timestamp)
-                )
-            """)
-            
-            # Quantum measurements for blocks
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS quantum_measurements (
-                    id BIGSERIAL PRIMARY KEY,
-                    block_number BIGINT,
-                    correlation_id VARCHAR(50),
-                    coherence FLOAT,
-                    entropy FLOAT,
-                    finality_confidence FLOAT,
-                    timestamp TIMESTAMPTZ DEFAULT NOW(),
-                    measurements_json JSONB,
-                    INDEX idx_quantum_meas_block (block_number),
-                    INDEX idx_quantum_meas_timestamp (timestamp),
-                    INDEX idx_quantum_meas_correlation (correlation_id)
-                )
-            """)
-            
-            DB.commit()
-            logging.info("✓ Block command database schema initialized")
-        
-    except Exception as e:
-        logging.error(f"[DBInit] Schema creation failed: {e}")
-        logging.debug(traceback.format_exc())
+    Parse a raw command string into (name, positional_args, flags).
 
-# Initialize on import
-_init_block_command_database()
-
-
-
-# Quantum API is required
-import quantum_api
-QUANTUM_API_AVAILABLE = True
-
-# Define LATTICE quantum system object with real metrics and threading
-class _QuantumLatticeSystem:
-    """Quantum lattice system with real-time metrics collection and fidelity monitoring"""
-    
-    def __init__(self):
-        self.lock = threading.RLock()
-        self.metrics_history = deque(maxlen=1000)
-        self.current_metrics = {
-            'entropy': 2.31828,
-            'coherence': 0.987,
-            'fidelity': 0.9876,
-            'total_operations': 0,
-            'uptime_seconds': time.time()
-        }
-        self.fidelity_checks = 0
-        self.last_oracle_state = None
-        self._start_fidelity_monitor()
-    
-    def _start_fidelity_monitor(self):
-        """Start background thread to periodically check fidelity"""
-        def monitor():
-            while True:
-                try:
-                    with self.lock:
-                        # Simulate fidelity measurement with slight variation
-                        base_fidelity = 0.987
-                        noise = random.gauss(0, 0.005)
-                        new_fidelity = max(0.95, min(0.995, base_fidelity + noise))
-                        
-                        self.current_metrics['fidelity'] = new_fidelity
-                        self.current_metrics['coherence'] = max(0.92, min(0.99, new_fidelity + random.gauss(0, 0.003)))
-                        self.current_metrics['entropy'] = 2.31828 + random.gauss(0, 0.01)
-                        self.current_metrics['total_operations'] += 1
-                        
-                        # Log to metrics history
-                        self.metrics_history.append({
-                            'timestamp': time.time(),
-                            'fidelity': self.current_metrics['fidelity'],
-                            'coherence': self.current_metrics['coherence'],
-                            'entropy': self.current_metrics['entropy']
-                        })
-                        
-                        self.fidelity_checks += 1
-                    
-                    time.sleep(2)  # Check every 2 seconds
-                except Exception as e:
-                    logger.warning(f"Fidelity monitor error: {e}")
-                    time.sleep(5)
-        
-        thread = threading.Thread(target=monitor, daemon=True, name="QuantumFidelityMonitor")
-        thread.start()
-    
-    def get_system_metrics(self):
-        with self.lock:
-            return {
-                'entropy': self.current_metrics['entropy'],
-                'coherence': self.current_metrics['coherence'],
-                'fidelity': self.current_metrics['fidelity'],
-                'total_operations': self.current_metrics['total_operations'],
-                'uptime_seconds': time.time() - self.current_metrics['uptime_seconds'],
-                'fidelity_checks_performed': self.fidelity_checks
-            }
-    
-    def health_check(self):
-        with self.lock:
-            fidelity = self.current_metrics['fidelity']
-            return {
-                'overall': fidelity > 0.95,
-                'qubit_quality': fidelity,
-                'gate_fidelity': min(0.999, fidelity + 0.005),
-                'readout_fidelity': min(0.995, fidelity + 0.003),
-                'coherence_score': self.current_metrics['coherence'],
-                'status': 'excellent' if fidelity > 0.98 else 'good' if fidelity > 0.95 else 'degraded'
-            }
-    
-    def get_w_state(self):
-        with self.lock:
-            return {
-                'num_qubits': 5,
-                'amplitude_distribution': 'uniform',
-                'fidelity': self.current_metrics['fidelity'],
-                'generation_count': self.current_metrics['total_operations']
-            }
-    
-    def get_neural_lattice_state(self):
-        return {'layers': 3, 'parameters': 48, 'training_steps': 1000, 'accuracy': 0.95}
-    
-    def process_transaction(self, tx_id, user_id, target_id, amount=None):
-        with self.lock:
-            # Generate oracle state based on actual collapse simulation (not always 00000000)
-            oracle_bits = ''.join(str(random.randint(0, 1)) for _ in range(8))
-            
-            self.current_metrics['total_operations'] += 1
-            
-            return {
-                'tx_id': tx_id,
-                'user_id': user_id,
-                'target_id': target_id,
-                'amount': amount,
-                'finality_proof': secrets.token_hex(16),
-                'collapse_result': oracle_bits,
-                'fidelity_at_encoding': self.current_metrics['fidelity'],
-                'timestamp': time.time()
-            }
-    
-    def measure_oracle_finality(self):
-        with self.lock:
-            # Oracle state varies, not always 00000000
-            oracle_state = ''.join(str(random.randint(0, 1)) for _ in range(8))
-            self.last_oracle_state = oracle_state
-            
-            # Finality based on fidelity threshold
-            finality_achieved = self.current_metrics['fidelity'] > 0.98
-            
-            return {
-                'oracle_state': oracle_state,
-                'confidence': self.current_metrics['fidelity'],
-                'collapse_time': time.time(),
-                'finality': finality_achieved
-            }
-    
-    def refresh_interference(self):
-        with self.lock:
-            return {'interference': 'refreshed', 'coherence': self.current_metrics['coherence']}
-    
-    def evolve_noise_bath(self, coherence, fidelity):
-        with self.lock:
-            # Update metrics based on noise evolution
-            self.current_metrics['coherence'] = coherence
-            self.current_metrics['fidelity'] = fidelity
-            recovery_strength = max(0, 1.0 - (1.0 - fidelity) / 0.05) if fidelity < 0.95 else 0
-            
-            return {
-                'coherence': coherence,
-                'fidelity': fidelity,
-                'status': 'evolved',
-                'recovery_strength': recovery_strength,
-                'revival_detected': recovery_strength > 0.5,
-                'timestamp': time.time()
-            }
-
-LATTICE = _QuantumLatticeSystem()
-LATTICE_AVAILABLE = True
-logger.info("✓ quantum_api system imported - API integration enabled")
-logger.info("✓ Real-time fidelity monitoring thread started")
-
-
-# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-# PART 3: QUANTUM COMMAND HANDLERS - INTEGRATED WITH LATTICE & QUANTUM_API
-# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-class QuantumCommandHandlers:
-    """Global quantum command handlers with LATTICE & quantum_api integration"""
-    
-    _lock = RLock()
-    _execution_count = 0
-    _last_result = None
-    
-    @classmethod
-    def quantum_status(cls) -> Dict[str, Any]:
-        """Get comprehensive quantum system status"""
-        try:
-            if not LATTICE_AVAILABLE:
-                return {'error': 'LATTICE not available', 'status': 'offline'}
-            
-            with cls._lock:
-                metrics = LATTICE.get_system_metrics()
-                health = LATTICE.health_check()
-                
-                cls._last_result = {
-                    'command': 'quantum/status',
-                    'timestamp': time.time(),
-                    'metrics': metrics,
-                    'health': health,
-                    'w_state': LATTICE.get_w_state(),
-                    'neural_lattice': LATTICE.get_neural_lattice_state(),
-                    'status': 'OPERATIONAL' if health.get('overall') else 'DEGRADED'
-                }
-                cls._execution_count += 1
-                
-            logger.info(f"[QuantumCmd] Status retrieved: {cls._last_result['status']}")
-            return cls._last_result
-        except Exception as e:
-            logger.error(f"[QuantumCmd] Status error: {e}")
-            return {'error': str(e), 'status': 'error'}
-    
-    @classmethod
-    def quantum_process_transaction(cls, tx_id: str = None, user_id: int = None, target_id: int = None, amount: float = None, **kwargs) -> Dict[str, Any]:
-        """PRODUCTION: Process quantum transaction with 6-LAYER LOGIC
-        
-        LAYER 1: User Input Collection
-        LAYER 1B: Parameter Validation  
-        LAYER 2: Interactive Form Building
-        LAYER 3: Confirmation & Review
-        LAYER 4: API Call Preparation
-        LAYER 5: Transaction Execution
-        LAYER 6: Result Display & Confirmation
-        """
-        try:
-            logger.info(f"[QuantumCmd] Called with: tx_id={tx_id}, user_id={user_id}, kwargs={list(kwargs.keys())}")
-            
-            # Extract flags from kwargs
-            interactive = kwargs.get('interactive', False)
-            user_email = kwargs.get('user_email', '')
-            password = kwargs.get('password', '')
-            target_email = kwargs.get('target_email', '')
-            target_identifier = kwargs.get('target_identifier', '')
-            
-            try:
-                amount_val = kwargs.get('amount', amount)
-                if amount_val is not None:
-                    amount_val = float(amount_val)
-            except (ValueError, TypeError):
-                amount_val = None
-            
-            # ══════════════════════════════════════════════════════════════════════════════
-            # LAYER 1: USER INPUT COLLECTION (Simple Interactive Mode)
-            # ══════════════════════════════════════════════════════════════════════════════
-            
-            # Track which fields we have and which we're missing
-            fields_needed = [
-                ('user_email', 'Your email', 'email'),
-                ('password', 'Password', 'password'),
-                ('target_email', 'Target email', 'email'),
-                ('target_identifier', 'Target ID (pseudoqubit or UID)', 'text'),
-                ('amount', 'Amount (QTCL)', 'number')
-            ]
-            
-            collected_fields = {
-                'user_email': user_email,
-                'password': password,
-                'target_email': target_email,
-                'target_identifier': target_identifier,
-                'amount': amount_val
-            }
-            
-            # Find first missing field
-            next_missing = None
-            step = 0
-            for i, (field_name, field_label, field_type) in enumerate(fields_needed):
-                step = i + 1
-                if not collected_fields[field_name]:
-                    next_missing = (field_name, field_label, field_type, step, len(fields_needed))
-                    break
-            
-            # If we're missing a field and in interactive mode, prompt for it
-            if interactive and next_missing:
-                field_name, field_label, field_type, step, total = next_missing
-                
-                # Build the command to resubmit with this field filled
-                current_params = []
-                if user_email:
-                    current_params.append(f"--user_email={user_email}")
-                if password:
-                    current_params.append(f"--password={password}")
-                if target_email:
-                    current_params.append(f"--target_email={target_email}")
-                if target_identifier:
-                    current_params.append(f"--target_identifier={target_identifier}")
-                if amount_val:
-                    current_params.append(f"--amount={amount_val}")
-                
-                prompt_emoji = {'email': '📧', 'password': '🔐', 'number': '💰'}.get(field_type, '🎯')
-                progress_bar = f"[{'█' * (step-1)}{'░' * (total-step+1)}] {step}/{total}"
-                
-                logger.info(f"[QuantumCmd-L1] Step {step}/{total}: Prompting for {field_name}")
-                
-                return {
-                    'success': False,
-                    'status': 'collecting_input',
-                    'step': step,
-                    'total_steps': total,
-                    'command': 'quantum/transaction',
-                    'mode': 'interactive',
-                    'input_prompt': {
-                        'message': f"{prompt_emoji} {field_label}",
-                        'field_name': field_name,
-                        'field_type': field_type,
-                        'placeholder': {
-                            'user_email': 'alice@example.com',
-                            'password': 'SecurePassword123!@#',
-                            'target_email': 'bob@example.com',
-                            'target_identifier': 'pseud_bob456',
-                            'amount': '500.0'
-                        }.get(field_name, '')
-                    },
-                    'progress': progress_bar,
-                    'next_command': f"quantum/transaction --interactive {' '.join(current_params)} --{field_name}=YOUR_VALUE",
-                    'error_code': 'COLLECTING_INPUT'
-                }
-            
-            # If we get here, we have ALL parameters - continue to L1B-L6 with full display!
-            logger.info("[QuantumCmd-L1] ✓ All parameters collected - proceeding to L1B")
-            
-            # ══════════════════════════════════════════════════════════════════════════════
-            # LAYER 1B: PARAMETER VALIDATION
-            # ══════════════════════════════════════════════════════════════════════════════
-            logger.info(f"[QuantumCmd-L1B] LAYER 1B: Parameter Validation")
-            
-            if not user_email or not password or not target_email or not target_identifier or amount_val is None:
-                logger.warning("[QuantumCmd-L1B] ✗ Missing required parameters")
-                return {
-                    'success': False,
-                    'error': 'MISSING_PARAMETERS',
-                    'command': 'quantum/transaction',
-                    'usage': 'quantum/transaction --user_email=<email> --password=<pass> --target_email=<email> --target_identifier=<id> --amount=<amt>',
-                    'missing_fields': [
-                        'user_email' if not user_email else None,
-                        'password' if not password else None,
-                        'target_email' if not target_email else None,
-                        'target_identifier' if not target_identifier else None,
-                        'amount' if amount_val is None else None
-                    ]
-                }
-            
-            if amount_val < 0.001 or amount_val > 999999999.999:
-                logger.warning(f"[QuantumCmd-L1B] ✗ Amount {amount_val} out of range")
-                return {'success': False, 'error': 'INVALID_AMOUNT', 'error_code': 400}
-            
-            logger.info(f"[QuantumCmd-L1B] ✓ All parameters valid")
-            
-            # ══════════════════════════════════════════════════════════════════════════════
-            # LAYER 2: TRANSACTION REVIEW & CONFIRMATION
-            # ══════════════════════════════════════════════════════════════════════════════
-            logger.info(f"[QuantumCmd-L2] LAYER 2: Transaction Review")
-            print("\n" + "="*80)
-            print("📊 TRANSACTION REVIEW")
-            print("="*80)
-            print(f"  From:   {user_email}")
-            print(f"  To:     {target_email}")
-            print(f"  Amount: {amount_val:.8f} QTCL")
-            print("="*80 + "\n")
-            
-            # Try to get confirmation (in CLI mode)
-            try:
-                confirm = input("✓ Confirm transaction? (yes/no): ").strip().lower()
-                if confirm not in ['yes', 'y']:
-                    logger.info("[QuantumCmd-L2] User cancelled transaction")
-                    return {'success': False, 'error': 'TRANSACTION_CANCELLED', 'error_code': 400}
-            except EOFError:
-                pass  # If can't prompt, continue anyway
-            
-            logger.info(f"[QuantumCmd-L2] ✓ Transaction confirmed by user")
-            
-            # ══════════════════════════════════════════════════════════════════════════════
-            # LAYER 3: API CALL PREPARATION
-            # ══════════════════════════════════════════════════════════════════════════════
-            logger.info(f"[QuantumCmd-L3] LAYER 3: API Call Preparation")
-            
-            payload = {
-                'user_email': user_email,
-                'password': password,
-                'target_email': target_email,
-                'target_identifier': target_identifier,
-                'amount': amount_val
-            }
-            
-            logger.info(f"[QuantumCmd-L3] ✓ Payload prepared: {len(payload)} fields")
-            
-            # ══════════════════════════════════════════════════════════════════════════════
-            # LAYER 4: BACKEND API EXECUTION
-            # ══════════════════════════════════════════════════════════════════════════════
-            logger.info(f"[QuantumCmd-L4] LAYER 4: Executing transaction on backend")
-            
-            try:
-                import requests
-                import os as os_module
-                api_url = os_module.getenv('API_BASE_URL', 'http://localhost:5000') + '/api/quantum/transaction'
-                
-                print("\n⏳ Processing quantum transaction...")
-                response = requests.post(api_url, json=payload, timeout=30)
-                
-                result = response.json()
-                http_status = response.status_code
-                
-                logger.info(f"[QuantumCmd-L4] API response: status={http_status}, success={result.get('success')}")
-                
-            except Exception as api_e:
-                logger.error(f"[QuantumCmd-L4] API call failed: {api_e}")
-                return {
-                    'success': False,
-                    'error': 'API_ERROR',
-                    'message': str(api_e),
-                    'error_code': 500
-                }
-            
-            # ══════════════════════════════════════════════════════════════════════════════
-            # LAYER 5: RESULT PROCESSING
-            # ══════════════════════════════════════════════════════════════════════════════
-            logger.info(f"[QuantumCmd-L5] LAYER 5: Processing results")
-            
-            if result.get('success'):
-                logger.info(f"[QuantumCmd-L5] ✓ Transaction successful: {result.get('tx_id')}")
-                
-                # Display transaction details
-                print("\n" + "="*80)
-                print("✅ TRANSACTION SUCCESSFUL")
-                print("="*80)
-                print(f"  TX ID:    {result.get('tx_id', '')[:32]}...")
-                print(f"  Status:   {result.get('status', 'unknown').upper()}")
-                print(f"  Finality: {result.get('finality', False)}")
-                
-                qm = result.get('quantum_metrics', {})
-                if qm:
-                    print(f"\n  Quantum Metrics:")
-                    print(f"    Entropy:  {float(qm.get('entropy', 0)):.4f}")
-                    print(f"    Coherence:{float(qm.get('coherence', 0)):.1%}")
-                    print(f"    Fidelity: {float(qm.get('fidelity', 0)):.1%}")
-                
-                print("="*80 + "\n")
-            else:
-                logger.warning(f"[QuantumCmd-L5] ✗ Transaction failed: {result.get('error')}")
-                
-                print("\n" + "="*80)
-                print("❌ TRANSACTION FAILED")
-                print("="*80)
-                print(f"  Error: {result.get('error', 'Unknown error')}")
-                print(f"  Code:  {result.get('error_code', 'N/A')}")
-                print("="*80 + "\n")
-            
-            # ══════════════════════════════════════════════════════════════════════════════
-            # LAYER 6: FINAL RESPONSE
-            # ══════════════════════════════════════════════════════════════════════════════
-            logger.info(f"[QuantumCmd-L6] LAYER 6: Building final response")
-            
-            return {
-                'success': result.get('success', False),
-                'command': 'quantum/transaction',
-                'tx_id': result.get('tx_id', ''),
-                'timestamp': time.time(),
-                'result': result,
-                'http_status': result.get('http_status', http_status),
-                'layers_executed': 6
-            }
-        
-        except Exception as e:
-            logger.error(f"[QuantumCmd] FATAL ERROR: {e}", exc_info=True)
-            return {
-                'success': False,
-                'error': str(e),
-                'error_code': 500,
-                'http_status': 500
-            }
-    
-    @classmethod
-    def quantum_measure_oracle(cls) -> Dict[str, Any]:
-        """Measure oracle qubit for transaction finality"""
-        try:
-            if not LATTICE_AVAILABLE:
-                return {'error': 'LATTICE not available'}
-            
-            with cls._lock:
-                oracle = LATTICE.measure_oracle_finality()
-                cls._last_result = {
-                    'command': 'quantum/oracle',
-                    'timestamp': time.time(),
-                    'oracle_result': oracle,
-                    'finality': oracle.get('finality', False),
-                    'confidence': oracle.get('confidence', 0.0)
-                }
-                cls._execution_count += 1
-            
-            logger.info(f"[QuantumCmd] Oracle measured: finality={cls._last_result['finality']}")
-            return cls._last_result
-        except Exception as e:
-            logger.error(f"[QuantumCmd] Oracle error: {e}")
-            return {'error': str(e)}
-    
-    @classmethod
-    def quantum_refresh_w_state(cls) -> Dict[str, Any]:
-        """Refresh W-state and detect interference"""
-        try:
-            if not LATTICE_AVAILABLE:
-                return {'error': 'LATTICE not available'}
-            
-            with cls._lock:
-                interference = LATTICE.refresh_interference()
-                cls._last_result = {
-                    'command': 'quantum/w_state',
-                    'timestamp': time.time(),
-                    'interference': interference,
-                    'detected': interference.get('interference_detected', False),
-                    'strength': interference.get('strength', 0.0)
-                }
-                cls._execution_count += 1
-            
-            logger.info(f"[QuantumCmd] W-State refreshed: {cls._last_result['detected']}")
-            return cls._last_result
-        except Exception as e:
-            logger.error(f"[QuantumCmd] W-State error: {e}")
-            return {'error': str(e)}
-    
-    @classmethod
-    def quantum_noise_bath_evolution(cls, coherence: float = 0.95, fidelity: float = 0.92) -> Dict[str, Any]:
-        """Evolve noise bath with W-state revival detection"""
-        try:
-            if not LATTICE_AVAILABLE:
-                return {'error': 'LATTICE not available'}
-            
-            with cls._lock:
-                result = LATTICE.evolve_noise_bath(coherence, fidelity)
-                cls._last_result = {
-                    'command': 'quantum/noise_bath',
-                    'timestamp': time.time(),
-                    'evolution': result,
-                    'revival_detected': result.get('revival_detected', False),
-                    'recovery_strength': result.get('recovery_strength', 0.0)
-                }
-                cls._execution_count += 1
-            
-            logger.info(f"[QuantumCmd] Noise bath evolved: revival={cls._last_result['revival_detected']}")
-            return cls._last_result
-        except Exception as e:
-            logger.error(f"[QuantumCmd] Noise bath error: {e}")
-            return {'error': str(e)}
-    
-    @classmethod
-    def quantum_neural_lattice_state(cls) -> Dict[str, Any]:
-        """Get neural lattice learning state"""
-        try:
-            if not LATTICE_AVAILABLE:
-                return {'error': 'LATTICE not available'}
-            
-            with cls._lock:
-                state = LATTICE.get_neural_lattice_state()
-                cls._last_result = {
-                    'command': 'quantum/neural',
-                    'timestamp': time.time(),
-                    'neural_state': state,
-                    'forward_passes': state.get('forward_passes', 0),
-                    'backward_passes': state.get('backward_passes', 0)
-                }
-                cls._execution_count += 1
-            
-            logger.info(f"[QuantumCmd] Neural lattice state retrieved")
-            return cls._last_result
-        except Exception as e:
-            logger.error(f"[QuantumCmd] Neural lattice error: {e}")
-            return {'error': str(e)}
-    
-    @classmethod
-    def quantum_health_check(cls) -> Dict[str, Any]:
-        """Full quantum system health check"""
-        try:
-            if not LATTICE_AVAILABLE:
-                return {'error': 'LATTICE not available', 'overall': False}
-            
-            with cls._lock:
-                health = LATTICE.health_check()
-                cls._last_result = {
-                    'command': 'quantum/health',
-                    'timestamp': time.time(),
-                    'health': health,
-                    'overall': health.get('overall', False)
-                }
-                cls._execution_count += 1
-            
-            logger.info(f"[QuantumCmd] Health check: {health.get('overall', False)}")
-            return cls._last_result
-        except Exception as e:
-            logger.error(f"[QuantumCmd] Health check error: {e}")
-            return {'error': str(e)}
-    
-    @classmethod
-    def get_execution_stats(cls) -> Dict[str, Any]:
-        """Get command execution statistics"""
-        with cls._lock:
-            return {
-                'total_executions': cls._execution_count,
-                'last_command': cls._last_result.get('command') if cls._last_result else None,
-                'last_timestamp': cls._last_result.get('timestamp') if cls._last_result else None,
-                'last_result': cls._last_result
-            }
-
-
-# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-# PART 4: GLOBAL TRANSACTION HANDLERS - INTEGRATED WITH SYSTEM
-# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-class TransactionCommandHandlers:
-    """Global transaction command handlers"""
-    
-    _lock = RLock()
-    _transaction_cache = deque(maxlen=1000)
-    _pending_transactions = {}
-    _finalized_transactions = {}
-    
-    @classmethod
-    def create_transaction(cls, from_user: int, to_user: int, amount: float, 
-                          tx_type: str = 'transfer') -> Dict[str, Any]:
-        """Create and process transaction with quantum validation"""
-        try:
-            tx_id = str(uuid.uuid4())
-            
-            # Create transaction record
-            tx_record = {
-                'tx_id': tx_id,
-                'from_user': from_user,
-                'to_user': to_user,
-                'amount': amount,
-                'type': tx_type,
-                'status': 'PENDING',
-                'created_at': time.time(),
-                'quantum_validated': False
-            }
-            
-            # Process with quantum validation if available
-            if LATTICE_AVAILABLE:
-                quantum_result = QuantumCommandHandlers.quantum_process_transaction(
-                    tx_id, from_user, to_user, amount
-                )
-                tx_record['quantum_result'] = quantum_result
-                tx_record['quantum_validated'] = True
-                
-                if quantum_result.get('finality'):
-                    tx_record['status'] = 'FINALIZED'
-                    with cls._lock:
-                        cls._finalized_transactions[tx_id] = tx_record
-                else:
-                    with cls._lock:
-                        cls._pending_transactions[tx_id] = tx_record
-            else:
-                with cls._lock:
-                    cls._pending_transactions[tx_id] = tx_record
-            
-            with cls._lock:
-                cls._transaction_cache.append(tx_record)
-            
-            logger.info(f"[TxCmd] Created TX {tx_id}: {tx_record['status']}")
-            return tx_record
-        except Exception as e:
-            logger.error(f"[TxCmd] Creation error: {e}")
-            return {'error': str(e), 'tx_id': None}
-    
-    @classmethod
-    def track_transaction(cls, tx_id: str) -> Dict[str, Any]:
-        """Track transaction status"""
-        try:
-            with cls._lock:
-                if tx_id in cls._finalized_transactions:
-                    return {
-                        'tx_id': tx_id,
-                        'status': 'FINALIZED',
-                        'details': cls._finalized_transactions[tx_id]
-                    }
-                elif tx_id in cls._pending_transactions:
-                    return {
-                        'tx_id': tx_id,
-                        'status': 'PENDING',
-                        'details': cls._pending_transactions[tx_id]
-                    }
-            
-            # Search cache
-            for tx in cls._transaction_cache:
-                if tx.get('tx_id') == tx_id:
-                    return {
-                        'tx_id': tx_id,
-                        'status': tx.get('status'),
-                        'details': tx
-                    }
-            
-            return {'tx_id': tx_id, 'status': 'NOT_FOUND'}
-        except Exception as e:
-            logger.error(f"[TxCmd] Track error: {e}")
-            return {'error': str(e)}
-    
-    @classmethod
-    def list_transactions(cls, limit: int = 100) -> List[Dict[str, Any]]:
-        """List recent transactions"""
-        try:
-            with cls._lock:
-                recent = list(cls._transaction_cache)[-limit:]
-            logger.info(f"[TxCmd] Listed {len(recent)} transactions")
-            return recent
-        except Exception as e:
-            logger.error(f"[TxCmd] List error: {e}")
-            return []
-    
-    @classmethod
-    def get_transaction_stats(cls) -> Dict[str, Any]:
-        """Get transaction statistics"""
-        with cls._lock:
-            return {
-                'pending': len(cls._pending_transactions),
-                'finalized': len(cls._finalized_transactions),
-                'total_cached': len(cls._transaction_cache),
-                'pending_amount': sum(tx.get('amount', 0) for tx in cls._pending_transactions.values()),
-                'finalized_amount': sum(tx.get('amount', 0) for tx in cls._finalized_transactions.values())
-            }
-
-
-# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-# PART 5: GLOBAL WALLET HANDLERS - PERSISTENT STATE
-# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-class WalletCommandHandlers:
-    """Global wallet management with persistent state"""
-    
-    _lock = RLock()
-    _wallets = {}
-    _balances = defaultdict(float)
-    _wallet_history = defaultdict(deque)
-    
-    @classmethod
-    def create_wallet(cls, user_id: int, wallet_name: str = None) -> Dict[str, Any]:
-        """Create new wallet"""
-        try:
-            wallet_id = f"wallet_{user_id}_{secrets.token_hex(8)}"
-            wallet_name = wallet_name or f"Wallet-{user_id}"
-            
-            with cls._lock:
-                cls._wallets[wallet_id] = {
-                    'wallet_id': wallet_id,
-                    'user_id': user_id,
-                    'name': wallet_name,
-                    'balance': 0.0,
-                    'created_at': time.time(),
-                    'transactions': deque(maxlen=1000)
-                }
-                cls._balances[wallet_id] = 0.0
-            
-            logger.info(f"[WalletCmd] Created wallet {wallet_id}")
-            return cls._wallets[wallet_id]
-        except Exception as e:
-            logger.error(f"[WalletCmd] Create error: {e}")
-            return {'error': str(e)}
-    
-    @classmethod
-    def get_balance(cls, wallet_id: str) -> float:
-        """Get wallet balance"""
-        with cls._lock:
-            return cls._balances.get(wallet_id, 0.0)
-    
-    @classmethod
-    def update_balance(cls, wallet_id: str, amount: float) -> bool:
-        """Update wallet balance"""
-        try:
-            with cls._lock:
-                current = cls._balances.get(wallet_id, 0.0)
-                cls._balances[wallet_id] = max(0.0, current + amount)
-                if wallet_id in cls._wallets:
-                    cls._wallets[wallet_id]['balance'] = cls._balances[wallet_id]
-                    cls._wallet_history[wallet_id].append({
-                        'timestamp': time.time(),
-                        'amount': amount,
-                        'balance': cls._balances[wallet_id]
-                    })
-            logger.info(f"[WalletCmd] Updated {wallet_id}: {amount:+.2f}")
-            return True
-        except Exception as e:
-            logger.error(f"[WalletCmd] Update error: {e}")
-            return False
-    
-    @classmethod
-    def list_wallets(cls, user_id: int) -> List[Dict[str, Any]]:
-        """List wallets for user"""
-        try:
-            with cls._lock:
-                return [w for w in cls._wallets.values() if w.get('user_id') == user_id]
-        except Exception as e:
-            logger.error(f"[WalletCmd] List error: {e}")
-            return []
-
-
-# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-# PART 6: ORACLE COMMAND HANDLERS - PRICE, TIME, RANDOM DATA
-# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-class OracleCommandHandlers:
-    """Global oracle handlers for price, time, random, events"""
-    
-    _lock = RLock()
-    _price_cache = {}
-    _random_cache = deque(maxlen=100)
-    _event_log = deque(maxlen=10000)
-    
-    @classmethod
-    def get_time(cls) -> Dict[str, Any]:
-        """Get current time with multiple formats"""
-        try:
-            now = datetime.now(timezone.utc)
-            with cls._lock:
-                result = {
-                    'unix_timestamp': time.time(),
-                    'iso_8601': now.isoformat(),
-                    'formatted': now.strftime('%Y-%m-%d %H:%M:%S UTC'),
-                    'timezone': 'UTC'
-                }
-            logger.info(f"[OracleCmd] Time retrieved")
-            return result
-        except Exception as e:
-            logger.error(f"[OracleCmd] Time error: {e}")
-            return {'error': str(e)}
-    
-    @classmethod
-    def get_price(cls, symbol: str) -> Dict[str, Any]:
-        """Get price oracle data"""
-        try:
-            with cls._lock:
-                if symbol in cls._price_cache:
-                    cached = cls._price_cache[symbol]
-                    if time.time() - cached.get('timestamp', 0) < 300:  # 5 min cache
-                        return cached
-            
-            # Simulate price feed (in real system, fetch from actual oracle)
-            price = round(100.0 + (hash(symbol) % 1000) / 10.0, 2)
-            result = {
-                'symbol': symbol,
-                'price': price,
-                'currency': 'USD',
-                'timestamp': time.time(),
-                'source': 'oracle_simulator'
-            }
-            
-            with cls._lock:
-                cls._price_cache[symbol] = result
-            
-            logger.info(f"[OracleCmd] Price {symbol}: ${price}")
-            return result
-        except Exception as e:
-            logger.error(f"[OracleCmd] Price error: {e}")
-            return {'error': str(e)}
-    
-    @classmethod
-    def get_random(cls, num_bytes: int = 32) -> Dict[str, Any]:
-        """Get random number from quantum-enhanced oracle"""
-        try:
-            random_bytes = secrets.token_bytes(num_bytes)
-            random_hex = random_bytes.hex()
-            random_int = int.from_bytes(random_bytes, 'big')
-            
-            result = {
-                'bytes': num_bytes,
-                'hex': random_hex,
-                'integer': random_int,
-                'timestamp': time.time(),
-                'source': 'quantum_rng'
-            }
-            
-            with cls._lock:
-                cls._random_cache.append(result)
-            
-            logger.info(f"[OracleCmd] Random: {random_hex[:16]}...")
-            return result
-        except Exception as e:
-            logger.error(f"[OracleCmd] Random error: {e}")
-            return {'error': str(e)}
-    
-    @classmethod
-    def log_event(cls, event_type: str, event_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Log system event"""
-        try:
-            event = {
-                'type': event_type,
-                'data': event_data,
-                'timestamp': time.time(),
-                'event_id': str(uuid.uuid4())
-            }
-            
-            with cls._lock:
-                cls._event_log.append(event)
-            
-            logger.info(f"[OracleCmd] Event logged: {event_type}")
-            return event
-        except Exception as e:
-            logger.error(f"[OracleCmd] Event log error: {e}")
-            return {'error': str(e)}
-
-
-
-# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-# PART 8: COMMAND PROCESSOR - ENHANCED TERMINAL INTEGRATION
-# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-class CommandProcessor:
-    """
-    Process commands with full integration to global systems.
-    Thread-safe processor that coordinates all command execution.
-    """
-    
-    def __init__(self):
-        self._lock = RLock()
-        self._command_history = deque(maxlen=10000)
-        self._execution_stats = defaultdict(lambda: {'count': 0, 'errors': 0, 'avg_time': 0})
-        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix='CMD-')
-    
-    def process(self, command: str, *args, **kwargs) -> Dict[str, Any]:
-        """Process a command synchronously"""
-        start_time = time.time()
-        
-        try:
-            result = GlobalCommandRegistry.execute_command(command, *args, **kwargs)
-            elapsed = time.time() - start_time
-            
-            with self._lock:
-                self._command_history.append({
-                    'command': command,
-                    'status': result.get('status', 'unknown'),
-                    'elapsed': elapsed,
-                    'timestamp': time.time()
-                })
-                
-                stats = self._execution_stats[command]
-                stats['count'] += 1
-                stats['avg_time'] = (stats['avg_time'] * (stats['count'] - 1) + elapsed) / stats['count']
-                if result.get('status') == 'error':
-                    stats['errors'] += 1
-            
-            logger.info(f"[CmdProcessor] {command} completed in {elapsed:.3f}s")
-            return result
-        except Exception as e:
-            logger.error(f"[CmdProcessor] Error: {e}")
-            return {
-                'command': command,
-                'status': 'error',
-                'error': str(e),
-                'timestamp': time.time()
-            }
-    
-    def process_async(self, command: str, *args, **kwargs) -> str:
-        """Process a command asynchronously, return task ID"""
-        task_id = str(uuid.uuid4())
-        
-        def task_wrapper():
-            return self.process(command, *args, **kwargs)
-        
-        future = self._executor.submit(task_wrapper)
-        
-        with self._lock:
-            # Store future for later retrieval
-            pass
-        
-        logger.info(f"[CmdProcessor] Async task {task_id} queued: {command}")
-        return task_id
-    
-    def get_history(self, limit: int = 100) -> List[Dict[str, Any]]:
-        """Get command history"""
-        with self._lock:
-            return list(self._command_history)[-limit:]
-    
-    def get_stats(self) -> Dict[str, Any]:
-        """Get execution statistics"""
-        with self._lock:
-            return {
-                'total_commands': len(self._command_history),
-                'unique_commands': len(self._execution_stats),
-                'execution_stats': dict(self._execution_stats),
-                'recent_commands': [
-                    h['command'] for h in list(self._command_history)[-10:]
-                ]
-            }
-
-
-# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-# PART 9: GLOBAL PROCESSOR INSTANTIATION
-# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-# Create global command processor
-COMMAND_PROCESSOR = CommandProcessor()
-
-logger.info("""
-╔════════════════════════════════════════════════════════════════════════════════════════════════╗
-║                                                                                                ║
-║              🎯 TERMINAL COMMAND CENTER INITIALIZED - READY FOR DEPLOYMENT 🎯                 ║
-║                                                                                                ║
-║  Command Registry:                                                                             ║
-║  ✓ Quantum Commands (8 handlers)                                                              ║
-║  ✓ Transaction Commands (4 handlers)                                                          ║
-║  ✓ Wallet Commands (4 handlers)                                                               ║
-║  ✓ Oracle Commands (4 handlers)                                                               ║
-║  ───────────────────────────────────────────────────────────────────────────────────────────  ║
-║  Total: 20+ callable commands globally accessible                                             ║
-║                                                                                                ║
-║  Integration Status:                                                                           ║
-║  ✓ LATTICE quantum system available: %s                                                      ║
-║  ✓ quantum_api integration available: %s                                                      ║
-║  ✓ Command processor with async execution                                                     ║
-║  ✓ Full command history & statistics tracking                                                 ║
-║                                                                                                ║
-║  Usage:                                                                                        ║
-║  ─────                                                                                         ║
-║  COMMAND_PROCESSOR.process('quantum/status')                                                  ║
-║  COMMAND_PROCESSOR.process('transaction/create', 1, 2, 500.0)                                ║
-║  COMMAND_PROCESSOR.process('wallet/balance', 'wallet_id')                                     ║
-║  COMMAND_PROCESSOR.process('oracle/price', 'BTC')                                             ║
-║  COMMAND_PROCESSOR.get_stats()                                                                ║
-║  GlobalCommandRegistry.list_commands()                                                        ║
-║  GlobalCommandRegistry.execute_command('quantum/transaction', ...)                            ║
-║                                                                                                ║
-║  This terminal is now the COMMAND CENTER of the entire system.                               ║
-║                                                                                                ║
-╚════════════════════════════════════════════════════════════════════════════════════════════════╝
-""" % (LATTICE_AVAILABLE, QUANTUM_API_AVAILABLE))
-
-# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-# PART 10: ENHANCED TERMINAL ENGINE WITH GLOBAL COMMANDS
-# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-# Add global command methods to TerminalEngine class
-original_quantum_status = TerminalEngine._cmd_quantum_status
-
-def _cmd_quantum_status_enhanced(self):
-    """Enhanced quantum status using global command"""
-    UI.header("🌌 QUANTUM SYSTEM STATUS (Global)")
-    result = COMMAND_PROCESSOR.process('quantum/status')
-    
-    if result.get('status') == 'success':
-        metrics = result.get('result', {})
-        w_state = metrics.get('w_state', {})
-        health = metrics.get('health', {})
-        
-        UI.print_table(['Component','Value'],[
-            ['System Status', metrics.get('status', 'UNKNOWN')],
-            ['W-State Coherence', f"{w_state.get('coherence_avg', 0):.3f}"],
-            ['W-State Fidelity', f"{w_state.get('fidelity_avg', 0):.3f}"],
-            ['QisKit Available', str(health.get('qiskit_available', False))],
-            ['Entanglement Strength', f"{w_state.get('entanglement_strength', 0):.3f}"],
-            ['Transactions Processed', f"{metrics.get('transactions_processed', 0)}"],
-            ['Neural Lattice State', 'LEARNING' if metrics.get('neural_lattice', {}).get('forward_passes', 0) > 0 else 'READY'],
-        ])
-        metrics.record_command('quantum/status')
-    else:
-        UI.error(f"Error: {result.get('error', 'Unknown')}")
-        metrics.record_command('quantum/status', False)
-
-# Monkey-patch if possible
-try:
-    TerminalEngine._cmd_quantum_status = _cmd_quantum_status_enhanced
-except:
-    pass
-
-logger.info("✓ Terminal engine enhanced with global command integration")
-
-# ═════════════════════════════════════════════════════════════════════════════════════════════
-# ENTRY POINT
-# ═════════════════════════════════════════════════════════════════════════════════════════════
-
-
-# ═════════════════════════════════════════════════════════════════════════════════════════════════
-# COMPREHENSIVE BLOCK COMMANDS (INTEGRATED FROM terminal_block_commands.py)
-# ═════════════════════════════════════════════════════════════════════════════════════════════════
-
-
-# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-# COMPREHENSIVE BLOCK COMMAND IMPLEMENTATIONS
-# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-def cmd_block_details(engine, args: str = None):
-    """
-    ╔══════════════════════════════════════════════════════════════════════════════════════╗
-    ║                    COMPREHENSIVE BLOCK DETAILS WITH QUANTUM MEASUREMENTS              ║
-    ╚══════════════════════════════════════════════════════════════════════════════════════╝
-    
-    This is the flagship block command that showcases the full power of:
-    - WSGI global integration (DB, CACHE, PROFILER, CIRCUIT_BREAKERS)
-    - Quantum measurements (entropy, coherence, finality, entanglement)
-    - Performance profiling with correlation tracking
-    - Smart caching with TTL
-    - Comprehensive audit logging
-    - Multi-modal validation (hash, merkle, temporal, quantum)
-    - Network position analysis
-    - Validator performance metrics
-    
-    Usage:
-      block/details <hash_or_height> [--full] [--quantum] [--validate] [--network]
-      
     Examples:
-      block/details 12345                    # Get block at height 12345
-      block/details abc123def --full         # Full details including all transactions
-      block/details 12345 --quantum          # Include quantum measurements
-      block/details latest --validate        # Validate latest block
-      block/details 12345 --network          # Include network position analysis
+        "admin-users"                      → ('admin-users', [], {})
+        "admin-users --limit=20 --active"  → ('admin-users', [], {'limit':'20','active':True})
+        "help-admin-users"                 → ('help-admin-users', [], {})
+        "oracle-price BTCUSD"              → ('oracle-price', ['BTCUSD'], {})
+        "block-details 42 --verbose"       → ('block-details', ['42'], {'verbose':True})
     """
-    from terminal_logic import UI
-    
-    try:
-        # Parse arguments
-        parts = args.split() if args else []
-        if not parts:
-            UI.error("Usage: block/details <hash_or_height> [--full] [--quantum] [--validate] [--network]")
-            return
-        
-        block_id = parts[0]
-        flags = parts[1:]
-        
-        # Resolve 'latest' to actual height
-        if block_id.lower() == 'latest':
-            try:
-                tip_result = engine.client.get('/blockchain/tip')
-                if tip_result.get('success') and tip_result.get('data'):
-                    block_id = str(tip_result['data'].get('height', 0))
-                else:
-                    UI.error("Could not resolve 'latest' block")
-                    return
-            except Exception as e:
-                UI.error(f"Error resolving 'latest': {e}")
-                return
-        
-        UI.header(f"🔷 COMPREHENSIVE BLOCK DETAILS - {block_id}")
-        
-        # Build options from flags
-        options = {
-            'include_transactions': '--full' in flags or '--transactions' in flags,
-            'include_quantum': '--quantum' in flags,
-            'force_refresh': '--refresh' in flags or '--no-cache' in flags
-        }
-        
-        # Execute block command via API
-        start_time = time.time()
-        
+    import re
+    tokens = raw.strip().split()
+    if not tokens:
+        return ('', [], {})
+
+    name = tokens[0].lower()
+    args = []
+    flags = {}
+
+    for tok in tokens[1:]:
+        m = re.match(r'^--([a-zA-Z0-9_-]+)(?:=(.+))?$', tok)
+        if m:
+            key = m.group(1).replace('-', '_')
+            val = m.group(2)
+            flags[key] = val if val is not None else True
+        else:
+            args.append(tok)
+
+    return (name, args, flags)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# API COMMAND HANDLERS (non-interactive, for HTTP dispatch)
+# These thin wrappers call TerminalEngine's client/session/data,
+# bypassing interactive prompts, and return plain dicts for JSON serialisation.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+def _build_api_handlers(engine: 'TerminalEngine') -> dict:
+    """
+    Return a dict mapping every hyphen command name → callable(flags:dict, args:list) → dict.
+    engine is a fully-booted TerminalEngine with session, client, registry wired up.
+    """
+    c = engine.client       # APIClient
+    s = engine.session      # SessionManager
+
+    def _ok(data=None, message='OK'):
+        return {'status': 'success', 'result': data or {}, 'message': message}
+
+    def _err(msg):
+        return {'status': 'error', 'error': msg}
+
+    def _req(method, path, body=None, params=None):
+        ok, data = c.request(method, path, body, params=params)
+        if ok:
+            return _ok(data)
+        return _err(data.get('error', 'Request failed') if isinstance(data, dict) else str(data))
+
+    # ── AUTH ──────────────────────────────────────────────────────────────────
+
+    def h_login(flags, args):
+        email = flags.get('email') or (args[0] if args else None)
+        pw    = flags.get('password') or (args[1] if len(args) > 1 else None)
+        if not email or not pw:
+            return _err('Usage: login --email=x --password=y')
+        ok, msg = s.login(email, pw)
+        return _ok({'message': msg, 'authenticated': ok}) if ok else _err(msg)
+
+    def h_logout(flags, args):
+        s.logout()
+        return _ok(message='Logged out')
+
+    def h_whoami(flags, args):
+        if not s.is_authenticated():
+            return _err('Not authenticated')
+        sess = s.session
+        return _ok({
+            'email':          getattr(sess, 'email', 'N/A'),
+            'role':           getattr(sess, 'role', 'user'),
+            'pseudoqubit_id': getattr(sess, 'pseudoqubit_id', 'N/A'),
+            'authenticated':  True,
+        })
+
+    def h_register(flags, args):
+        email = flags.get('email')
+        pw    = flags.get('password')
+        name  = flags.get('name', flags.get('username', ''))
+        if not all([email, pw, name]):
+            return _err('Usage: register --email=x --password=y --name=z')
+        ok, result = s.register(email, pw, name)
+        return _ok(result if isinstance(result, dict) else {'message': str(result)}) if ok else _err(str(result))
+
+    # ── USERS ─────────────────────────────────────────────────────────────────
+
+    def h_user_profile(flags, args):
+        return _req('GET', '/api/users/profile/me')
+
+    def h_user_list(flags, args):
+        params = {k: v for k, v in flags.items() if k in ('limit', 'offset', 'role', 'active')}
+        return _req('GET', '/api/users', params=params)
+
+    def h_user_details(flags, args):
+        uid = flags.get('id') or flags.get('user_id') or (args[0] if args else None)
+        if not uid:
+            return _err('Usage: user-details --id=<user_id>')
+        return _req('GET', f'/api/users/{uid}')
+
+    # ── TRANSACTIONS ──────────────────────────────────────────────────────────
+
+    def h_tx_list(flags, args):
+        params = {k: v for k, v in flags.items() if k in ('limit', 'offset', 'status', 'type')}
+        return _req('GET', '/api/transactions', params=params)
+
+    def h_tx_create(flags, args):
+        body = {k: v for k, v in flags.items() if k in ('to', 'amount', 'type', 'memo', 'currency')}
+        if not body.get('to') or not body.get('amount'):
+            return _err('Usage: transaction-create --to=<addr> --amount=<n> [--type=transfer] [--memo=x]')
+        return _req('POST', '/api/transactions', body)
+
+    def h_tx_track(flags, args):
+        tx_id = flags.get('id') or flags.get('tx_id') or (args[0] if args else None)
+        if not tx_id:
+            return _err('Usage: transaction-track --id=<tx_id>')
+        return _req('GET', f'/api/transactions/{tx_id}')
+
+    def h_tx_cancel(flags, args):
+        tx_id = flags.get('id') or flags.get('tx_id') or (args[0] if args else None)
+        if not tx_id:
+            return _err('Usage: transaction-cancel --id=<tx_id>')
+        return _req('POST', f'/api/transactions/{tx_id}/cancel', {})
+
+    def h_tx_stats(flags, args):
+        return _req('GET', '/api/transactions/stats')
+
+    # ── WALLETS ───────────────────────────────────────────────────────────────
+
+    def h_wallet_list(flags, args):
+        return _req('GET', '/api/wallets')
+
+    def h_wallet_create(flags, args):
+        body = {k: v for k, v in flags.items() if k in ('name', 'type', 'currency')}
+        return _req('POST', '/api/wallets', body)
+
+    def h_wallet_balance(flags, args):
+        wid = flags.get('id') or flags.get('wallet_id') or (args[0] if args else None)
+        if not wid:
+            return _req('GET', '/api/wallets/balance')
+        return _req('GET', f'/api/wallets/{wid}/balance')
+
+    def h_wallet_import(flags, args):
+        body = {k: v for k, v in flags.items() if k in ('private_key', 'mnemonic', 'format', 'name')}
+        return _req('POST', '/api/wallets/import', body)
+
+    def h_wallet_export(flags, args):
+        wid = flags.get('id') or (args[0] if args else None)
+        if not wid:
+            return _err('Usage: wallet-export --id=<wallet_id>')
+        return _req('GET', f'/api/wallets/{wid}/export')
+
+    def h_multisig_create(flags, args):
+        body = {k: v for k, v in flags.items()}
+        return _req('POST', '/api/wallets/multisig', body)
+
+    # ── BLOCKS ────────────────────────────────────────────────────────────────
+
+    def h_block_list(flags, args):
+        params = {k: v for k, v in flags.items() if k in ('limit', 'offset', 'order')}
+        params.setdefault('limit', '20')
+        return _req('GET', '/api/blocks', params=params)
+
+    def h_block_details(flags, args):
+        num = flags.get('block') or flags.get('number') or flags.get('hash') or (args[0] if args else None)
+        if not num:
+            return _err('Usage: block-details --block=<number_or_hash>')
+        return _req('GET', f'/api/blocks/{num}')
+
+    def h_block_stats(flags, args):
+        return _req('GET', '/api/blocks/stats')
+
+    def h_block_validate(flags, args):
+        num = flags.get('block') or (args[0] if args else None)
+        if not num:
+            return _err('Usage: block-validate --block=<number>')
+        return _req('GET', f'/api/blocks/{num}/validate')
+
+    def h_block_explorer(flags, args):
+        query = flags.get('q') or flags.get('query') or (args[0] if args else '')
+        return _req('GET', '/api/blocks/search', params={'q': query})
+
+    # ── QUANTUM ───────────────────────────────────────────────────────────────
+
+    def _quantum_status_from_globals():
         try:
-            # Call the comprehensive block command endpoint
-            result = engine.client.post('/blockchain/blocks/command', {
-                'command': 'query',
-                'block': block_id,
-                'options': options
+            from globals import get_globals, get_lattice
+            gs = get_globals()
+            lattice = get_lattice()
+            health = gs.quantum.get_health()
+            lattice_metrics = lattice.current_metrics if lattice else {}
+            return _ok({**health, **lattice_metrics})
+        except Exception as e:
+            return _err(f'Quantum not available: {e}')
+
+    def h_quantum_status(flags, args):
+        result = _quantum_status_from_globals()
+        if result['status'] == 'error':
+            return _req('GET', '/api/quantum/status')
+        return result
+
+    def h_quantum_entropy(flags, args):
+        try:
+            from globals import get_lattice
+            lat = get_lattice()
+            if lat:
+                return _ok({'entropy': lat.current_metrics.get('entropy', 'N/A'),
+                            'source': 'quantum_lattice'})
+        except Exception:
+            pass
+        return _req('GET', '/api/quantum/entropy')
+
+    def h_quantum_circuit(flags, args):
+        body = {k: v for k, v in flags.items() if k in ('qubits', 'depth', 'gates', 'type')}
+        return _req('POST', '/api/quantum/circuit', body)
+
+    def h_quantum_validator(flags, args):
+        return _req('GET', '/api/quantum/validator')
+
+    def h_quantum_finality(flags, args):
+        tx = flags.get('tx') or flags.get('tx_id') or (args[0] if args else None)
+        path = f'/api/quantum/finality/{tx}' if tx else '/api/quantum/finality'
+        return _req('GET', path)
+
+    def h_quantum_transaction(flags, args):
+        body = {k: v for k, v in flags.items()}
+        return _req('POST', '/api/quantum/transaction', body)
+
+    def h_quantum_heartbeat_monitor(flags, args):
+        try:
+            from globals import get_heartbeat
+            hb = get_heartbeat()
+            if hb:
+                return _ok({
+                    'running':     hb.running,
+                    'pulse_count': hb.pulse_count,
+                    'last_beat':   hb.last_beat_time.isoformat() if hb.last_beat_time else None,
+                    'metrics':     hb.get_metrics(),
+                })
+        except Exception:
+            pass
+        return _req('GET', '/api/quantum/heartbeat')
+
+    # ── ORACLE ────────────────────────────────────────────────────────────────
+
+    def h_oracle_time(flags, args):
+        try:
+            from globals import get_oracle
+            oracle = get_oracle()
+            if oracle and oracle.last_update:
+                return _ok({'server_time': oracle.last_update.isoformat(), 'source': 'globals'})
+        except Exception:
+            pass
+        return _req('GET', '/api/oracle/time')
+
+    def h_oracle_price(flags, args):
+        symbol = flags.get('symbol') or flags.get('pair') or (args[0] if args else 'QTCL-USD')
+        try:
+            from globals import get_oracle
+            oracle = get_oracle()
+            if oracle and symbol in oracle.prices:
+                return _ok({'symbol': symbol, 'price': str(oracle.prices[symbol]), 'source': 'globals'})
+        except Exception:
+            pass
+        return _req('GET', f'/api/oracle/price/{symbol}')
+
+    def h_oracle_random(flags, args):
+        import secrets
+        nbytes = int(flags.get('bytes', 32))
+        val = secrets.token_hex(nbytes)
+        return _ok({'random_hex': val, 'bytes': nbytes, 'source': 'quantum_rng'})
+
+    def h_oracle_feed(flags, args):
+        return _req('GET', '/api/oracle/feeds')
+
+    def h_oracle_event(flags, args):
+        return _req('GET', '/api/oracle/events')
+
+    # ── DEFI ──────────────────────────────────────────────────────────────────
+
+    def h_defi_stake(flags, args):
+        body = {k: v for k, v in flags.items() if k in ('amount', 'duration', 'pool', 'currency')}
+        if not body.get('amount'):
+            return _err('Usage: defi-stake --amount=<n> [--pool=x] [--duration=30d]')
+        return _req('POST', '/api/defi/stake', body)
+
+    def h_defi_unstake(flags, args):
+        body = {k: v for k, v in flags.items() if k in ('amount', 'pool', 'stake_id')}
+        return _req('POST', '/api/defi/unstake', body)
+
+    def h_defi_borrow(flags, args):
+        body = {k: v for k, v in flags.items() if k in ('amount', 'collateral', 'currency', 'pool')}
+        return _req('POST', '/api/defi/borrow', body)
+
+    def h_defi_repay(flags, args):
+        body = {k: v for k, v in flags.items() if k in ('loan_id', 'amount')}
+        return _req('POST', '/api/defi/repay', body)
+
+    def h_defi_yield(flags, args):
+        return _req('GET', '/api/defi/yield')
+
+    def h_defi_pool(flags, args):
+        pool = flags.get('id') or flags.get('pool') or (args[0] if args else None)
+        if pool:
+            return _req('GET', f'/api/defi/pools/{pool}')
+        return _req('GET', '/api/defi/pools')
+
+    # ── GOVERNANCE ────────────────────────────────────────────────────────────
+
+    def h_governance_vote(flags, args):
+        body = {k: v for k, v in flags.items() if k in ('proposal_id', 'vote', 'weight')}
+        if not body.get('proposal_id') or not body.get('vote'):
+            return _err('Usage: governance-vote --proposal_id=x --vote=yes|no|abstain')
+        return _req('POST', '/api/governance/vote', body)
+
+    def h_governance_proposal(flags, args):
+        if flags.get('create'):
+            body = {k: v for k, v in flags.items() if k in ('title', 'description', 'type', 'duration')}
+            return _req('POST', '/api/governance/proposals', body)
+        pid = flags.get('id') or (args[0] if args else None)
+        if pid:
+            return _req('GET', f'/api/governance/proposals/{pid}')
+        return _req('GET', '/api/governance/proposals')
+
+    def h_governance_delegate(flags, args):
+        body = {k: v for k, v in flags.items() if k in ('to', 'amount', 'until')}
+        return _req('POST', '/api/governance/delegate', body)
+
+    def h_governance_stats(flags, args):
+        return _req('GET', '/api/governance/stats')
+
+    # ── NFT ───────────────────────────────────────────────────────────────────
+
+    def h_nft_mint(flags, args):
+        body = {k: v for k, v in flags.items() if k in ('name', 'description', 'uri', 'collection', 'royalty')}
+        return _req('POST', '/api/nft/mint', body)
+
+    def h_nft_transfer(flags, args):
+        body = {k: v for k, v in flags.items() if k in ('token_id', 'to', 'memo')}
+        return _req('POST', '/api/nft/transfer', body)
+
+    def h_nft_burn(flags, args):
+        body = {'token_id': flags.get('token_id') or (args[0] if args else None)}
+        return _req('POST', '/api/nft/burn', body)
+
+    def h_nft_metadata(flags, args):
+        token_id = flags.get('token_id') or flags.get('id') or (args[0] if args else None)
+        if not token_id:
+            return _err('Usage: nft-metadata --token_id=<id>')
+        return _req('GET', f'/api/nft/{token_id}/metadata')
+
+    def h_nft_collection(flags, args):
+        col = flags.get('id') or flags.get('collection') or (args[0] if args else None)
+        if col:
+            return _req('GET', f'/api/nft/collections/{col}')
+        return _req('GET', '/api/nft/collections')
+
+    # ── CONTRACTS ─────────────────────────────────────────────────────────────
+
+    def h_contract_deploy(flags, args):
+        body = {k: v for k, v in flags.items() if k in ('code', 'abi', 'name', 'args', 'gas')}
+        return _req('POST', '/api/contracts/deploy', body)
+
+    def h_contract_execute(flags, args):
+        body = {k: v for k, v in flags.items() if k in ('address', 'function', 'args', 'gas', 'value')}
+        return _req('POST', '/api/contracts/execute', body)
+
+    def h_contract_compile(flags, args):
+        body = {k: v for k, v in flags.items() if k in ('source', 'language', 'version')}
+        return _req('POST', '/api/contracts/compile', body)
+
+    def h_contract_state(flags, args):
+        addr = flags.get('address') or (args[0] if args else None)
+        if not addr:
+            return _err('Usage: contract-state --address=<0x...>')
+        return _req('GET', f'/api/contracts/{addr}/state')
+
+    # ── BRIDGE ────────────────────────────────────────────────────────────────
+
+    def h_bridge_initiate(flags, args):
+        body = {k: v for k, v in flags.items() if k in ('to_chain', 'from_chain', 'amount', 'token', 'recipient')}
+        return _req('POST', '/api/bridge/initiate', body)
+
+    def h_bridge_status(flags, args):
+        bid = flags.get('id') or (args[0] if args else None)
+        if bid:
+            return _req('GET', f'/api/bridge/{bid}/status')
+        return _req('GET', '/api/bridge/status')
+
+    def h_bridge_history(flags, args):
+        params = {k: v for k, v in flags.items() if k in ('limit', 'chain')}
+        return _req('GET', '/api/bridge/history', params=params)
+
+    def h_bridge_wrapped(flags, args):
+        token = flags.get('token') or (args[0] if args else None)
+        if token:
+            return _req('GET', f'/api/bridge/wrapped/{token}')
+        return _req('GET', '/api/bridge/wrapped')
+
+    # ── ADMIN ─────────────────────────────────────────────────────────────────
+
+    def h_admin_users(flags, args):
+        if not s.is_admin():
+            return _err('Admin access required')
+        params = {k: v for k, v in flags.items() if k in ('limit', 'offset', 'role', 'active', 'search')}
+        # Sub-actions via flags
+        if flags.get('ban'):
+            uid = flags.get('ban')
+            return _req('POST', f'/api/admin/users/{uid}/ban', {})
+        if flags.get('restore'):
+            uid = flags.get('restore')
+            return _req('POST', f'/api/admin/users/{uid}/restore', {})
+        if flags.get('role') and flags.get('id'):
+            return _req('PUT', f'/api/admin/users/{flags["id"]}', {'role': flags['role']})
+        if flags.get('id'):
+            return _req('GET', f'/api/admin/users/{flags["id"]}')
+        return _req('GET', '/api/admin/users', params=params)
+
+    def h_admin_approval(flags, args):
+        if not s.is_admin():
+            return _err('Admin access required')
+        if flags.get('approve'):
+            return _req('POST', f'/api/admin/approvals/{flags["approve"]}/approve', {})
+        if flags.get('reject'):
+            body = {'reason': flags.get('reason', '')}
+            return _req('POST', f'/api/admin/approvals/{flags["reject"]}/reject', body)
+        return _req('GET', '/api/admin/approvals/pending')
+
+    def h_admin_monitoring(flags, args):
+        if not s.is_admin():
+            return _err('Admin access required')
+        return _req('GET', '/api/admin/monitoring')
+
+    def h_admin_settings(flags, args):
+        if not s.is_admin():
+            return _err('Admin access required')
+        if flags.get('set') and flags.get('value') is not None:
+            return _req('PUT', '/api/admin/settings', {'key': flags['set'], 'value': flags['value']})
+        return _req('GET', '/api/admin/settings')
+
+    def h_admin_audit(flags, args):
+        if not s.is_admin():
+            return _err('Admin access required')
+        params = {k: v for k, v in flags.items() if k in ('limit', 'offset', 'user', 'action', 'from', 'to')}
+        params.setdefault('limit', '50')
+        return _req('GET', '/api/admin/audit', params=params)
+
+    def h_admin_emergency(flags, args):
+        if not s.is_admin():
+            return _err('Admin access required')
+        if flags.get('action') == 'halt':
+            return _req('POST', '/api/admin/emergency/halt', {})
+        if flags.get('action') == 'resume':
+            return _req('POST', '/api/admin/emergency/resume', {})
+        return _ok({'actions': ['--action=halt', '--action=resume'], 'message': 'Emergency controls'})
+
+    # ── SYSTEM ────────────────────────────────────────────────────────────────
+
+    def h_system_status(flags, args):
+        try:
+            from globals import get_globals, get_system_health
+            gs = get_globals()
+            return _ok({
+                'health':    gs.get_system_health(),
+                'snapshot':  gs.snapshot(),
             })
-            
-            duration_ms = (time.time() - start_time) * 1000
-            
-            if not result.get('success'):
-                UI.error(f"Block query failed: {result.get('error', 'Unknown error')}")
-                return
-            
-            block_data = result.get('data', {})
-            
-            # Display basic information
-            UI.section("📊 Basic Information")
-            basic_table = [
-                ['Block Hash', block_data.get('block_hash', 'N/A')[:64]],
-                ['Height', f"{block_data.get('height', 0):,}"],
-                ['Status', block_data.get('status', 'unknown').upper()],
-                ['Confirmations', f"{block_data.get('confirmations', 0):,}"],
-                ['Timestamp', block_data.get('timestamp', 'N/A')],
-                ['Validator', block_data.get('validator', 'N/A')[:42]],
-                ['Epoch', f"{block_data.get('epoch', 0):,}"],
-                ['Is Orphan', '✓ YES' if block_data.get('is_orphan') else '✗ NO'],
-                ['Temporal Coherence', f"{block_data.get('temporal_coherence', 1.0):.4f}"]
-            ]
-            UI.print_table(['Property', 'Value'], basic_table)
-            
-            # Display block metrics
-            UI.section("📈 Block Metrics")
-            metrics_table = [
-                ['Size', f"{block_data.get('size_bytes', 0):,} bytes"],
-                ['Transactions', f"{block_data.get('tx_count', 0):,}"],
-                ['Gas Used', f"{block_data.get('gas_used', 0):,}"],
-                ['Gas Limit', f"{block_data.get('gas_limit', 0):,}"],
-                ['Gas Utilization', f"{(block_data.get('gas_used', 0) / max(block_data.get('gas_limit', 1), 1) * 100):.1f}%"],
-                ['Total Fees', f"{block_data.get('total_fees', '0')} QTCL"],
-                ['Block Reward', f"{block_data.get('reward', '0')} QTCL"],
-                ['Difficulty', f"{block_data.get('difficulty', 1):,}"]
-            ]
-            UI.print_table(['Metric', 'Value'], metrics_table)
-            
-            # Display cryptographic roots
-            UI.section("🔐 Cryptographic Roots")
-            crypto_table = [
-                ['Previous Hash', block_data.get('previous_hash', 'N/A')[:64]],
-                ['Merkle Root', block_data.get('merkle_root', 'N/A')[:64]],
-                ['Quantum Merkle', block_data.get('quantum_merkle_root', 'N/A')[:64]],
-                ['State Root', block_data.get('state_root', 'N/A')[:64]]
-            ]
-            UI.print_table(['Root Type', 'Hash'], crypto_table)
-            
-            # Display quantum metrics if included
-            if options.get('include_quantum') and 'quantum_metrics' in block_data:
-                UI.section("⚛️  QUANTUM MEASUREMENTS")
-                qm = block_data['quantum_metrics']
-                
-                # Entropy metrics
-                if 'entropy' in qm and 'shannon' in qm.get('entropy', {}):
-                    entropy = qm['entropy']
-                    entropy_table = [
-                        ['Shannon Entropy', f"{entropy.get('shannon', 0):.4f} bits"],
-                        ['Byte Entropy', f"{entropy.get('byte_entropy', 0):.4f}"],
-                        ['Data Length', f"{entropy.get('length', 0)} bytes"]
-                    ]
-                    UI.print_table(['Entropy Metric', 'Value'], entropy_table)
-                    
-                    # Entropy quality assessment
-                    shannon = entropy.get('shannon', 0)
-                    if shannon >= 7.9:
-                        UI.success("  ✓ Excellent entropy quality (near-ideal)")
-                    elif shannon >= 7.5:
-                        UI.info("  ✓ Good entropy quality")
-                    elif shannon >= 7.0:
-                        UI.warning("  ⚠ Moderate entropy quality")
-                    else:
-                        UI.error("  ✗ Poor entropy quality")
-                
-                # Coherence metrics
-                coherence_table = [
-                    ['W-State Fidelity', f"{qm.get('w_state_fidelity', 0):.4f}"],
-                    ['Temporal Coherence', f"{qm.get('temporal_coherence', 0):.4f}"],
-                    ['GHZ Collapse', '✓ Verified' if qm.get('ghz_collapse_verified') else '✗ Not Verified']
-                ]
-                UI.print_table(['Coherence Metric', 'Value'], coherence_table)
-            
-            # Display transactions if included
-            if options.get('include_transactions') and 'transactions' in block_data:
-                UI.section(f"💳 Transactions (showing {min(len(block_data['transactions']), 10)} of {block_data.get('tx_count_actual', len(block_data['transactions']))})")
-                tx_table = []
-                for tx in block_data['transactions'][:10]:
-                    tx_table.append([
-                        tx.get('tx_hash', '')[:16] + '...',
-                        tx.get('from', '')[:12] + '...',
-                        tx.get('to', '')[:12] + '...',
-                        f"{tx.get('amount', '0')} QTCL",
-                        tx.get('status', 'unknown')
-                    ])
-                if tx_table:
-                    UI.print_table(['TX Hash', 'From', 'To', 'Amount', 'Status'], tx_table)
-            
-            # Display metadata
-            metadata = block_data.get('_metadata', {})
-            if metadata:
-                UI.section("🔧 Query Metadata")
-                meta_table = [
-                    ['Correlation ID', metadata.get('correlation_id', 'N/A')],
-                    ['Query Duration', f"{metadata.get('duration_ms', 0):.2f} ms"],
-                    ['Cache Hit', '✓ Yes' if block_data.get('_cache_hit') else '✗ No'],
-                    ['Timestamp', metadata.get('timestamp', 'N/A')]
-                ]
-                UI.print_table(['Property', 'Value'], meta_table)
-            
-            # Run validation if requested
-            if '--validate' in flags:
-                UI.section("🔍 VALIDATION RESULTS")
-                val_result = engine.client.post('/blockchain/blocks/command', {
-                    'command': 'validate',
-                    'block': block_id,
-                    'options': {'validate_quantum': True, 'validate_transactions': True}
-                })
-                
-                if val_result.get('success'):
-                    val_data = val_result.get('data', {})
-                    overall_valid = val_data.get('overall_valid', False)
-                    
-                    UI.info(f"Overall Valid: {'✓ YES' if overall_valid else '✗ NO'}")
-                    
-                    checks = val_data.get('checks', {})
-                    val_table = []
-                    for check_name, check_data in checks.items():
-                        if isinstance(check_data, dict):
-                            status = '✓' if check_data.get('valid') else '✗'
-                            val_table.append([check_name.replace('_', ' ').title(), status])
-                    
-                    if val_table:
-                        UI.print_table(['Check', 'Result'], val_table)
-            
-            # Run network analysis if requested
-            if '--network' in flags:
-                UI.section("🌐 NETWORK POSITION ANALYSIS")
-                analyze_result = engine.client.post('/blockchain/blocks/command', {
-                    'command': 'analyze',
-                    'block': block_id,
-                    'options': {'include_network': True}
-                })
-                
-                if analyze_result.get('success'):
-                    network = analyze_result.get('data', {}).get('network_analysis', {})
-                    if network and not network.get('error'):
-                        net_table = [
-                            ['Time Since Previous', f"{network.get('time_since_previous_sec', 0):.2f}s"],
-                            ['Block Time Ratio', f"{network.get('block_time_ratio', 1.0):.2f}x"],
-                            ['Difficulty Change', f"{network.get('difficulty_change', 0):+d}"],
-                            ['Difficulty Change %', f"{network.get('difficulty_change_pct', 0):+.2f}%"]
-                        ]
-                        if 'time_to_next_sec' in network:
-                            net_table.append(['Time To Next', f"{network['time_to_next_sec']:.2f}s"])
-                        UI.print_table(['Network Metric', 'Value'], net_table)
-            
-            UI.success(f"\n✓ Block details retrieved in {duration_ms:.2f}ms")
-            
         except Exception as e:
-            UI.error(f"API call failed: {e}")
-            logger.error(f"Block details error: {e}", exc_info=True)
-            
-    except Exception as e:
-        UI.error(f"Block details command error: {e}")
-        logger.error(f"Block details error: {e}", exc_info=True)
+            return _req('GET', '/api/status')
 
+    def h_system_health(flags, args):
+        try:
+            from globals import get_system_health
+            return _ok(get_system_health())
+        except Exception:
+            return _req('GET', '/health')
 
-def cmd_block_validate(engine, args: str = None):
-    """Comprehensive block validation with quantum proof verification"""
-    from terminal_logic import UI
-    
-    try:
-        if not args:
-            UI.error("Usage: block/validate <hash_or_height> [--full] [--skip-quantum]")
-            return
-        
-        parts = args.split()
-        block_id = parts[0]
-        flags = parts[1:]
-        
-        UI.header(f"🔍 COMPREHENSIVE BLOCK VALIDATION - {block_id}")
-        
-        options = {
-            'validate_quantum': '--skip-quantum' not in flags,
-            'validate_transactions': '--full' in flags or '--skip-transactions' not in flags,
-            'tx_sample_size': 20 if '--full' in flags else 10
-        }
-        
-        # Call validation command
-        result = engine.client.post('/blockchain/blocks/command', {
-            'command': 'validate',
-            'block': block_id,
-            'options': options
-        })
-        
-        if not result.get('success'):
-            UI.error(f"Validation failed: {result.get('error', 'Unknown error')}")
-            return
-        
-        val_data = result.get('data', {})
-        overall_valid = val_data.get('overall_valid', False)
-        checks = val_data.get('checks', {})
-        
-        # Display overall result
-        if overall_valid:
-            UI.success(f"\n✓ BLOCK {block_id} IS VALID")
-        else:
-            UI.error(f"\n✗ BLOCK {block_id} FAILED VALIDATION")
-        
-        # Display detailed checks
-        UI.section("📋 Validation Checks")
-        
-        for check_name, check_data in checks.items():
-            if not isinstance(check_data, dict):
+    def h_system_config(flags, args):
+        try:
+            from globals import get_config, get_globals
+            if flags.get('key'):
+                return _ok({'key': flags['key'], 'value': get_config(flags['key'])})
+            gs = get_globals()
+            return _ok(dict(gs.config))
+        except Exception as e:
+            return _err(str(e))
+
+    def h_system_backup(flags, args):
+        if not s.is_admin():
+            return _err('Admin access required')
+        return _req('POST', '/api/system/backup', flags)
+
+    def h_system_restore(flags, args):
+        if not s.is_admin():
+            return _err('Admin access required')
+        backup_id = flags.get('id') or (args[0] if args else None)
+        if not backup_id:
+            return _err('Usage: system-restore --id=<backup_id>')
+        return _req('POST', f'/api/system/restore/{backup_id}', {})
+
+    # ── PARALLEL ──────────────────────────────────────────────────────────────
+
+    def h_parallel_execute(flags, args):
+        commands = args  # each positional arg is a command
+        if not commands:
+            commands = flags.get('commands', '').split(',') if flags.get('commands') else []
+        if not commands:
+            return _err('Usage: parallel-execute cmd1 cmd2 ... or --commands=cmd1,cmd2')
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        results = {}
+        with ThreadPoolExecutor(max_workers=min(len(commands), 8)) as pool:
+            futures = {pool.submit(_dispatch_from_globals, cmd.strip()): cmd.strip() for cmd in commands}
+            for fut in as_completed(futures):
+                cmd = futures[fut]
+                try:
+                    results[cmd] = fut.result()
+                except Exception as ex:
+                    results[cmd] = _err(str(ex))
+        return _ok({'results': results, 'count': len(results)})
+
+    def h_parallel_batch(flags, args):
+        return h_parallel_execute(flags, args)
+
+    def h_parallel_monitor(flags, args):
+        try:
+            from globals import get_globals
+            gs = get_globals()
+            return _ok({'active_threads': gs.metrics.active_connections,
+                        'total_commands': gs.metrics.commands_executed})
+        except Exception as e:
+            return _err(str(e))
+
+    # ── HELP ──────────────────────────────────────────────────────────────────
+
+    def h_help(flags, args):
+        """
+        help                    → overview
+        help --commands         → all commands
+        help --category=admin   → category listing
+        help-admin              → same as --category=admin
+        help-admin-users        → specific command help
+        """
+        from globals import COMMAND_REGISTRY
+        if flags.get('commands') or flags.get('all'):
+            return h_help_commands(flags, args)
+        cat = flags.get('category')
+        if cat:
+            return h_help_category({'category': cat}, args)
+        cmd = flags.get('command') or (args[0] if args else None)
+        if cmd:
+            return h_help_command({'': cmd}, [cmd])
+        # Overview
+        cats = {}
+        for name, entry in COMMAND_REGISTRY.items():
+            cats.setdefault(entry['category'], []).append(name)
+        lines = [
+            '╔══════════════════════════════════════════════════════════════╗',
+            '║           QTCL COMMAND HELP  — hyphen format                 ║',
+            '╠══════════════════════════════════════════════════════════════╣',
+            f'  {len(COMMAND_REGISTRY)} commands  ·  {len(cats)} categories',
+            '',
+            '  help --commands           list every command',
+            '  help --category=admin     all admin commands',
+            '  help-admin                same shorthand',
+            '  help-admin-users          help for admin-users',
+            '  <command> --help          inline help',
+            '',
+            '  CATEGORIES:',
+        ]
+        for cat in sorted(cats.keys()):
+            lines.append(f'    {cat:<22}  ({len(cats[cat])} commands)')
+        lines.append('╚══════════════════════════════════════════════════════════╝')
+        return _ok({'output': '\n'.join(lines)})
+
+    def h_help_commands(flags, args):
+        from globals import COMMAND_REGISTRY
+        cat_filter = flags.get('category', '')
+        by_cat = {}
+        for name, entry in sorted(COMMAND_REGISTRY.items()):
+            if cat_filter and entry['category'] != cat_filter:
                 continue
-            
-            valid = check_data.get('valid', False)
-            status_icon = '✓' if valid else '✗'
-            
-            UI.info(f"\n{status_icon} {check_name.replace('_', ' ').title()}")
-            
-            # Display check-specific details
-            if check_name == 'hash_integrity':
-                if 'computed' in check_data and 'stored' in check_data:
-                    UI.print_table(
-                        ['Type', 'Hash'],
-                        [
-                            ['Computed', check_data['computed'][:64]],
-                            ['Stored', check_data['stored'][:64]]
-                        ]
-                    )
-            
-            elif check_name == 'merkle_root':
-                if 'computed' in check_data and 'stored' in check_data:
-                    UI.print_table(
-                        ['Type', 'Root'],
-                        [
-                            ['Computed', check_data['computed'][:64]],
-                            ['Stored', check_data['stored'][:64]]
-                        ]
-                    )
-            
-            elif check_name == 'previous_link':
-                if 'expected' in check_data and 'actual' in check_data:
-                    UI.print_table(
-                        ['Type', 'Hash'],
-                        [
-                            ['Expected', str(check_data['expected'])[:64]],
-                            ['Actual', str(check_data['actual'])[:64]]
-                        ]
-                    )
-            
-            elif check_name == 'quantum_proof':
-                if 'proof_version' in check_data:
-                    UI.info(f"  Proof Version: {check_data['proof_version']}")
-            
-            elif check_name == 'temporal_coherence':
-                if 'value' in check_data and 'threshold' in check_data:
-                    UI.info(f"  Value: {check_data['value']:.4f} (threshold: {check_data['threshold']:.4f})")
-            
-            elif check_name == 'transactions':
-                if 'sampled' in check_data:
-                    UI.info(f"  Sampled: {check_data['sampled']} / {check_data.get('total', 0)}")
-                    UI.info(f"  Valid: {check_data.get('valid_count', 0)} / {check_data['sampled']}")
-            
-            if 'error' in check_data:
-                UI.error(f"  Error: {check_data['error']}")
-        
-        # Display metadata
-        metadata = val_data.get('_metadata', {})
-        if metadata:
-            UI.section("🔧 Validation Metadata")
-            UI.info(f"Correlation ID: {metadata.get('correlation_id', 'N/A')}")
-            UI.info(f"Duration: {metadata.get('duration_ms', 0):.2f} ms")
-        
-    except Exception as e:
-        UI.error(f"Block validation error: {e}")
-        logger.error(f"Block validation error: {e}", exc_info=True)
+            by_cat.setdefault(entry['category'], []).append((name, entry))
+        lines = [f'  ALL COMMANDS  ({len(COMMAND_REGISTRY)} total)\n']
+        for cat in sorted(by_cat.keys()):
+            lines.append(f'  ▸ {cat.upper()}')
+            for name, entry in sorted(by_cat[cat]):
+                auth = '[ADMIN]' if entry.get('requires_admin') else '[AUTH]' if entry.get('requires_auth') else ''
+                lines.append(f'      {name:<35}  {auth:<8}  {entry["description"][:50]}')
+        return _ok({'output': '\n'.join(lines)})
 
+    def h_help_category(flags, args):
+        from globals import COMMAND_REGISTRY
+        cat = flags.get('category') or (args[0] if args else '')
+        cat = cat.lower().strip()
+        if not cat:
+            return _err('Usage: help --category=<name>  or  help-<category>')
+        matches = {n: e for n, e in COMMAND_REGISTRY.items() if e['category'].lower() == cat}
+        if not matches:
+            all_cats = sorted({e['category'] for e in COMMAND_REGISTRY.values()})
+            return _err(f"Category '{cat}' not found. Available: {', '.join(all_cats)}")
+        lines = [f'  {cat.upper()} COMMANDS  ({len(matches)} total)', '']
+        for name, entry in sorted(matches.items()):
+            auth = '[ADMIN]' if entry.get('requires_admin') else '[AUTH]' if entry.get('requires_auth') else '[OPEN]'
+            lines.append(f'  {name:<35}  {auth}  {entry["description"]}')
+        return _ok({'output': '\n'.join(lines)})
 
-def cmd_block_quantum(engine, args: str = None):
-    """Perform comprehensive quantum measurements on block"""
-    from terminal_logic import UI
-    
-    try:
-        if not args:
-            UI.error("Usage: block/quantum <hash_or_height>")
-            return
-        
-        block_id = args.strip()
-        
-        UI.header(f"⚛️  QUANTUM MEASUREMENTS - Block {block_id}")
-        
-        # Call quantum measurement command
-        result = engine.client.post('/blockchain/blocks/command', {
-            'command': 'quantum_measure',
-            'block': block_id,
-            'options': {}
-        })
-        
-        if not result.get('success'):
-            UI.error(f"Quantum measurement failed: {result.get('error', 'Unknown error')}")
-            return
-        
-        qm = result.get('data', {})
-        
-        # Display entropy measurements
-        if 'entropy' in qm and not qm['entropy'].get('error'):
-            UI.section("📊 Entropy Analysis")
-            entropy = qm['entropy']
-            entropy_table = [
-                ['Shannon Entropy', f"{entropy.get('shannon_entropy', 0):.6f} bits"],
-                ['Byte Entropy', f"{entropy.get('byte_entropy', 0):.6f}"],
-                ['Data Length', f"{entropy.get('length_bytes', 0)} bytes"],
-                ['Hex Preview', entropy.get('hex_preview', 'N/A')]
-            ]
-            UI.print_table(['Metric', 'Value'], entropy_table)
-            
-            # Entropy quality assessment
-            shannon = entropy.get('shannon_entropy', 0)
-            if shannon >= 7.9:
-                UI.success("  ✓ Excellent entropy quality (near-ideal)")
-            elif shannon >= 7.5:
-                UI.info("  ✓ Good entropy quality")
-            elif shannon >= 7.0:
-                UI.warning("  ⚠ Moderate entropy quality")
-            else:
-                UI.error("  ✗ Poor entropy quality")
-        
-        # Display coherence measurements
-        if 'coherence' in qm and not qm['coherence'].get('error'):
-            UI.section("🌊 Coherence Measurements")
-            coherence = qm['coherence']
-            coherence_table = [
-                ['Temporal Coherence', f"{coherence.get('temporal', 0):.6f}"],
-                ['W-State Fidelity', f"{coherence.get('w_state_fidelity', 0):.6f}"],
-                ['Quality Rating', coherence.get('quality', 'unknown').upper()]
-            ]
-            UI.print_table(['Metric', 'Value'], coherence_table)
-        
-        # Display finality measurements
-        if 'finality' in qm and not qm['finality'].get('error'):
-            UI.section("🎯 Finality Status")
-            finality = qm['finality']
-            finality_table = [
-                ['Confirmations', f"{finality.get('confirmations', 0):,}"],
-                ['Is Finalized', '✓ YES' if finality.get('is_finalized') else '✗ NO'],
-                ['Finality Score', f"{finality.get('finality_score', 0):.2%}"],
-                ['GHZ Collapse', '✓ Verified' if finality.get('ghz_collapse_verified') else '✗ Not Verified']
-            ]
-            UI.print_table(['Metric', 'Value'], finality_table)
-        
-        # Display entanglement measurements
-        if 'entanglement' in qm and not qm['entanglement'].get('error'):
-            UI.section("🔗 Validator Entanglement")
-            entanglement = qm['entanglement']
-            ent_table = [
-                ['Validator Count', f"{entanglement.get('validator_count', 0)}"],
-                ['Entanglement Strength', f"{entanglement.get('entanglement_strength', 0):.6f}"]
-            ]
-            UI.print_table(['Metric', 'Value'], ent_table)
-            
-            # Display W-state components
-            w_components = entanglement.get('w_state_components', {})
-            if w_components:
-                UI.info("\nW-State Components:")
-                comp_table = [[k.replace('validator_', 'Validator '), f"{v:.6f}"] 
-                              for k, v in w_components.items()]
-                UI.print_table(['Validator', 'Amplitude'], comp_table)
-        
-        # Display metadata
-        metadata = qm.get('_metadata', {})
-        if metadata:
-            UI.section("🔧 Measurement Metadata")
-            UI.info(f"Correlation ID: {metadata.get('correlation_id', 'N/A')}")
-            UI.info(f"Duration: {metadata.get('duration_ms', 0):.2f} ms")
-            UI.info(f"Timestamp: {metadata.get('timestamp', 'N/A')}")
-        
-    except Exception as e:
-        UI.error(f"Quantum measurement error: {e}")
-        logger.error(f"Quantum measurement error: {e}", exc_info=True)
-
-
-def cmd_block_batch(engine, args: str = None):
-    """Query multiple blocks efficiently with parallel processing"""
-    from terminal_logic import UI
-    
-    try:
-        if not args:
-            UI.error("Usage: block/batch <block1> <block2> ... or <start>-<end>")
-            return
-        
-        parts = args.split()
-        flags = [p for p in parts if p.startswith('--')]
-        refs = [p for p in parts if not p.startswith('--')]
-        
-        # Handle range notation
-        block_refs = []
-        for ref in refs:
-            if '-' in ref and all(x.isdigit() or x == '-' for x in ref):
-                try:
-                    start, end = map(int, ref.split('-'))
-                    block_refs.extend(range(start, end + 1))
-                except:
-                    block_refs.append(ref)
-            else:
-                block_refs.append(ref)
-        
-        if not block_refs:
-            UI.error("No valid block references provided")
-            return
-        
-        UI.header(f"📦 BATCH QUERY - {len(block_refs)} blocks")
-        
-        options = {
-            'include_quantum': '--quantum' in flags,
-            'include_transactions': '--full' in flags
-        }
-        
-        # Call batch query command
-        result = engine.client.post('/blockchain/blocks/command', {
-            'command': 'batch_query',
-            'blocks': block_refs,
-            'options': options
-        })
-        
-        if not result.get('success'):
-            UI.error(f"Batch query failed: {result.get('error', 'Unknown error')}")
-            return
-        
-        batch_data = result.get('data', {})
-        
-        UI.info(f"Batch Size: {batch_data.get('batch_size', 0)}")
-        UI.info(f"Success: {batch_data.get('success_count', 0)}")
-        UI.info(f"Errors: {batch_data.get('error_count', 0)}")
-        
-        # Display results table
-        results = batch_data.get('results', [])
-        if results:
-            UI.section("📊 Results")
-            results_table = []
-            for r in results[:20]:  # Limit display to 20
-                if 'error' in r:
-                    results_table.append([
-                        r.get('block_ref', 'N/A'),
-                        'ERROR',
-                        r['error'][:50]
-                    ])
-                else:
-                    results_table.append([
-                        r.get('block_hash', 'N/A')[:16] + '...',
-                        r.get('height', 'N/A'),
-                        r.get('status', 'unknown')
-                    ])
-            
-            UI.print_table(['Block Hash', 'Height', 'Status'], results_table)
-            
-            if len(results) > 20:
-                UI.info(f"\n... and {len(results) - 20} more results")
-        
-    except Exception as e:
-        UI.error(f"Batch query error: {e}")
-        logger.error(f"Batch query error: {e}", exc_info=True)
-
-
-def cmd_block_integrity(engine, args: str = None):
-    """Verify blockchain integrity across a range of blocks"""
-    from terminal_logic import UI
-    
-    try:
-        parts = (args or '').split() if args else []
-        
-        options = {}
-        
-        if '--recent' in parts:
-            idx = parts.index('--recent')
-            if idx + 1 < len(parts):
-                count = int(parts[idx + 1])
-                # Get tip to calculate range
-                tip_result = engine.client.get('/blockchain/tip')
-                if tip_result.get('success'):
-                    tip_height = tip_result['data'].get('height', 0)
-                    options['start_height'] = max(0, tip_height - count)
-                    options['end_height'] = tip_height
-        elif len(parts) >= 2:
-            options['start_height'] = int(parts[0])
-            options['end_height'] = int(parts[1])
-        
-        UI.header("🔍 BLOCKCHAIN INTEGRITY CHECK")
-        
-        # Call integrity check command
-        result = engine.client.post('/blockchain/blocks/command', {
-            'command': 'chain_integrity',
-            'options': options
-        })
-        
-        if not result.get('success'):
-            UI.error(f"Integrity check failed: {result.get('error', 'Unknown error')}")
-            return
-        
-        integrity = result.get('data', {})
-        
-        # Display summary
-        UI.section("📊 Summary")
-        summary_table = [
-            ['Height Range', f"{integrity.get('start_height', 0):,} - {integrity.get('end_height', 0):,}"],
-            ['Blocks Checked', f"{integrity.get('blocks_checked', 0):,}"],
-            ['Valid Blocks', f"{integrity.get('valid_blocks', 0):,}"],
-            ['Invalid Blocks', f"{len(integrity.get('invalid_blocks', [])):,}"],
-            ['Broken Links', f"{len(integrity.get('broken_links', [])):,}"],
-            ['Orphaned Blocks', f"{len(integrity.get('orphaned_blocks', [])):,}"],
-            ['Integrity Score', f"{integrity.get('integrity_score', 0):.2%}"]
+    def h_help_command(flags, args):
+        from globals import COMMAND_REGISTRY
+        name = flags.get('command') or (args[0] if args else '')
+        name = name.strip()
+        if not name:
+            return _err('Usage: help --command=<name>')
+        entry = COMMAND_REGISTRY.get(name)
+        if not entry:
+            # Try prefix match
+            matches = [n for n in COMMAND_REGISTRY if n.startswith(name)]
+            if matches:
+                return h_help_commands({'category': ''}, [])
+            return _err(f"Command '{name}' not found")
+        lines = [
+            f'  COMMAND: {name}',
+            f'  Category:  {entry["category"]}',
+            f'  Requires:  {"ADMIN" if entry.get("requires_admin") else "AUTH" if entry.get("requires_auth") else "none"}',
+            f'  Description: {entry["description"]}',
         ]
-        UI.print_table(['Metric', 'Value'], summary_table)
-        
-        # Display issues
-        if integrity.get('invalid_blocks'):
-            UI.section("❌ Invalid Blocks")
-            for inv in integrity['invalid_blocks'][:10]:
-                UI.error(f"Height {inv.get('height')}: {inv.get('hash', 'N/A')[:16]}")
-        
-        if integrity.get('broken_links'):
-            UI.section("🔗 Broken Links")
-            for link in integrity['broken_links'][:10]:
-                UI.error(f"Height {link.get('height')}: {link.get('reason', 'Unknown')}")
-        
-        if integrity.get('orphaned_blocks'):
-            UI.section("👻 Orphaned Blocks")
-            orphaned_str = ', '.join(map(str, integrity['orphaned_blocks'][:20]))
-            UI.error(f"Heights: {orphaned_str}")
-            if len(integrity['orphaned_blocks']) > 20:
-                UI.info(f"... and {len(integrity['orphaned_blocks']) - 20} more")
-        
-        # Overall assessment
-        score = integrity.get('integrity_score', 0)
-        if score >= 0.99:
-            UI.success("\n✓ EXCELLENT - Chain integrity is solid")
-        elif score >= 0.95:
-            UI.info("\n✓ GOOD - Minor issues detected")
-        elif score >= 0.90:
-            UI.warning("\n⚠ FAIR - Several issues need attention")
-        else:
-            UI.error("\n✗ POOR - Significant integrity problems detected")
-        
-    except Exception as e:
-        UI.error(f"Integrity check error: {e}")
-        logger.error(f"Integrity check error: {e}", exc_info=True)
+        if entry.get('usage'):
+            lines.append(f'  Usage: {entry["usage"]}')
+        return _ok({'output': '\n'.join(lines)})
 
+    # ── MASTER MAP ────────────────────────────────────────────────────────────
 
-# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-# REGISTRATION FUNCTION
-# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-def register_block_commands(engine):
-    """
-    Register all comprehensive block commands with the TerminalEngine.
-    
-    This function should be called after TerminalEngine initialization to inject
-    all the block commands into the command registry.
-    
-    Args:
-        engine: TerminalEngine instance
-    """
-    from terminal_logic import CommandMeta, CommandCategory
-    
-    try:
-        # Register block/details
-        engine.registry.register(
-            'block/details',
-            lambda args: cmd_block_details(engine, args),
-            CommandMeta(
-                'block/details',
-                CommandCategory.BLOCKCHAIN,
-                'Comprehensive block details with quantum measurements',
-                requires_auth=False
-            )
-        )
-        
-        # Register block/validate
-        engine.registry.register(
-            'block/validate',
-            lambda args: cmd_block_validate(engine, args),
-            CommandMeta(
-                'block/validate',
-                CommandCategory.BLOCKCHAIN,
-                'Comprehensive block validation with quantum proof verification',
-                requires_auth=False
-            )
-        )
-        
-        # Register block/quantum
-        engine.registry.register(
-            'block/quantum',
-            lambda args: cmd_block_quantum(engine, args),
-            CommandMeta(
-                'block/quantum',
-                CommandCategory.BLOCKCHAIN,
-                'Perform comprehensive quantum measurements on block',
-                requires_auth=False
-            )
-        )
-        
-        # Register block/batch
-        engine.registry.register(
-            'block/batch',
-            lambda args: cmd_block_batch(engine, args),
-            CommandMeta(
-                'block/batch',
-                CommandCategory.BLOCKCHAIN,
-                'Query multiple blocks efficiently with parallel processing',
-                requires_auth=False
-            )
-        )
-        
-        # Register block/integrity
-        engine.registry.register(
-            'block/integrity',
-            lambda args: cmd_block_integrity(engine, args),
-            CommandMeta(
-                'block/integrity',
-                CommandCategory.BLOCKCHAIN,
-                'Verify blockchain integrity across range of blocks',
-                requires_auth=False
-            )
-        )
-        
-        logger.info("✓ Comprehensive block commands registered successfully")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Failed to register block commands: {e}")
-        return False
-
-
-# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-# AUTO-REGISTRATION ON IMPORT
-# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-# This module can be imported and will automatically register commands if TerminalEngine is available
-def auto_register():
-    """Attempt to auto-register commands if terminal_logic is already loaded"""
-    try:
-        import terminal_logic
-        if hasattr(terminal_logic, 'TERMINAL_ENGINE_INSTANCE'):
-            engine = terminal_logic.TERMINAL_ENGINE_INSTANCE
-            return register_block_commands(engine)
-    except:
-        pass
-    return False
-
-# Uncomment to enable auto-registration on import
-# auto_register()
-
-logger.info("✓ Terminal block commands module loaded")
-def main():
-    import argparse
-    
-    parser=argparse.ArgumentParser(description='QTCL Terminal Orchestrator v5.0')
-    parser.add_argument('--api-url',help='API server URL')
-    parser.add_argument('--debug',action='store_true',help='Enable debug logging')
-    
-    args=parser.parse_args()
-    
-    if args.api_url:Config.API_BASE_URL=args.api_url
-    if args.debug:logger.setLevel(logging.DEBUG)
-    
-    engine=TerminalEngine()
-    
-    # Register block commands (integrated from terminal_block_commands.py)
-    try:
-        if register_block_commands(engine):
-            logger.info("✓ Block commands registered successfully")
-        else:
-            logger.warning("⚠ Block commands registration returned False")
-    except Exception as e:
-        logger.warning(f"⚠ Block commands registration failed: {e}")
-    
-    engine.run()
-
-if __name__=='__main__':
-    main()
-
-# ═════════════════════════════════════════════════════════════════════════════════════════════════
-# INTEGRATION WITH COMMAND EXECUTION ENGINE (v5.0)
-# ═════════════════════════════════════════════════════════════════════════════════════════════════
-
-def register_terminal_hooks():
-    """Register terminal_logic with SystemIntegrationRegistry for command execution"""
-    try:
-        from oracle_integration_layer import SystemIntegrationRegistry
-        from functools import partial
-        
-        registry = SystemIntegrationRegistry.get_instance()
-        
-        # Register execute_command hook for each major category
-        async def terminal_execute_hook(category, action, flags, args):
-            """Bridge from CommandExecutor to terminal_logic"""
-            try:
-                # Create command string from parts
-                cmd = f"{category}/{action}"
-                if flags:
-                    for k, v in flags.items():
-                        if v is True:
-                            cmd += f" --{k}"
-                        else:
-                            cmd += f" --{k}={v}"
-                if args:
-                    cmd += " " + " ".join(args)
-                
-                logger.info(f"[Terminal] Executing via hooks: {cmd}")
-                
-                # Execute the command through terminal logic
-                return {
-                    'status': 'executed',
-                    'command': cmd,
-                    'category': category,
-                    'action': action,
-                    'flags': flags,
-                    'args': args
-                }
-            except Exception as e:
-                logger.error(f"[Terminal] Hook execution error: {e}")
-                return {'error': str(e)}
-        
-        # Register for all command categories
-        categories = [
-            'auth', 'user', 'transaction', 'wallet', 'block',
-            'quantum', 'oracle', 'defi', 'governance', 'nft',
-            'contract', 'bridge', 'admin', 'system', 'parallel'
-        ]
-        
-        for category in categories:
-            registry.register_hook(
-                'terminal',
-                f'execute_{category}',
-                partial(terminal_execute_hook, category)
-            )
-        
-        logger.info("[Terminal] ✓ Registered with SystemIntegrationRegistry for command execution")
-        return True
-    
-    except ImportError:
-        logger.debug("[Terminal] SystemIntegrationRegistry not available - standalone mode")
-        return False
-    except Exception as e:
-        logger.error(f"[Terminal] Hook registration error: {e}")
-        return False
-
-# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-# QUANTUM PARALLEL EXECUTOR - SUPERPOSITION-BASED COMMAND PROCESSING
-# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-class QuantumParallelExecutor:
-    """Execute commands across parallel quantum dimensions for massive performance gains"""
-    
-    def __init__(self, max_workers: int = 16, max_processes: int = 4):
-        self.max_workers = max_workers
-        self.max_processes = max_processes
-        try:
-            import concurrent.futures
-            self.thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-            self.process_pool = concurrent.futures.ProcessPoolExecutor(max_workers=max_processes)
-            self.available = True
-        except Exception as e:
-            logger.warning(f"[QuantumExecutor] Could not initialize pools: {e}")
-            self.thread_pool = None
-            self.process_pool = None
-            self.available = False
-        
-        self.metrics = {'total': 0, 'parallel': 0, 'cache_hits': 0}
-        self.cache = {}
-        logger.info(f"[QuantumExecutor] Initialized (available: {self.available})")
-    
-    async def execute_parallel(self, commands: list, strategy: str = "adaptive"):
-        """Execute multiple commands in parallel"""
-        if not self.available:
-            # Fallback to sequential
-            results = []
-            for cmd in commands:
-                try:
-                    parts = cmd.split()
-                    result = GlobalCommandRegistry.execute_command(parts[0], *parts[1:])
-                    results.append({'command': cmd, 'status': 'success', 'output': result})
-                except Exception as e:
-                    results.append({'command': cmd, 'status': 'error', 'error': str(e)})
-            return results
-        
-        import asyncio
-        tasks = []
-        for cmd in commands:
-            task = asyncio.create_task(self._execute_single(cmd))
-            tasks.append(task)
-        
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        self.metrics['total'] += len(commands)
-        self.metrics['parallel'] += 1
-        return [r if not isinstance(r, Exception) else {'command': commands[i], 'error': str(r)} for i, r in enumerate(results)]
-    
-    async def _execute_single(self, command: str):
-        """Execute single command async"""
-        import asyncio
-        loop = asyncio.get_event_loop()
-        
-        def _exec():
-            parts = command.split()
-            result = GlobalCommandRegistry.execute_command(parts[0], *parts[1:])
-            return {'command': command, 'status': 'success', 'output': result}
-        
-        try:
-            result = await loop.run_in_executor(self.thread_pool if self.thread_pool else None, _exec)
-            return result
-        except Exception as e:
-            return {'command': command, 'status': 'error', 'error': str(e)}
-
-# Global quantum executor instance
-QUANTUM_EXECUTOR = QuantumParallelExecutor()
-
-# Add quantum parallel command to GlobalCommandRegistry.PARALLEL_COMMANDS
-# This needs to be added before ALL_COMMANDS is constructed
-def _register_quantum_parallel():
-    """Register quantum parallel command after class definition"""
-    GlobalCommandRegistry.PARALLEL_COMMANDS['parallel/quantum'] = lambda *args, **kwargs: asyncio.run(QUANTUM_EXECUTOR.execute_parallel(list(args), kwargs.get('strategy', 'adaptive')))
-    # Rebuild ALL_COMMANDS to include new parallel/quantum command
-    GlobalCommandRegistry.ALL_COMMANDS = {
-        **GlobalCommandRegistry.HELP_COMMANDS,
-        **GlobalCommandRegistry.QUANTUM_COMMANDS,
-        **GlobalCommandRegistry.TRANSACTION_COMMANDS,
-        **GlobalCommandRegistry.WALLET_COMMANDS,
-        **GlobalCommandRegistry.ORACLE_COMMANDS,
-        **GlobalCommandRegistry.AUTH_COMMANDS,
-        **GlobalCommandRegistry.USER_COMMANDS,
-        **GlobalCommandRegistry.BLOCK_COMMANDS,
-        **GlobalCommandRegistry.DEFI_COMMANDS,
-        **GlobalCommandRegistry.GOVERNANCE_COMMANDS,
-        **GlobalCommandRegistry.NFT_COMMANDS,
-        **GlobalCommandRegistry.CONTRACT_COMMANDS,
-        **GlobalCommandRegistry.BRIDGE_COMMANDS,
-        **GlobalCommandRegistry.ADMIN_COMMANDS,
-        **GlobalCommandRegistry.SYSTEM_COMMANDS,
-        **GlobalCommandRegistry.PARALLEL_COMMANDS,
+    return {
+        # AUTH
+        'login':                h_login,
+        'logout':               h_logout,
+        'register':             h_register,
+        'whoami':               h_whoami,
+        'auth-2fa-setup':       lambda f,a: _req('POST', '/api/auth/2fa/setup', f),
+        'auth-token-refresh':   lambda f,a: _req('POST', '/api/auth/refresh', f),
+        # USER
+        'user-profile':         h_user_profile,
+        'user-settings':        lambda f,a: _req('GET', '/api/users/profile/me'),
+        'user-list':            h_user_list,
+        'user-details':         h_user_details,
+        # TRANSACTION
+        'transaction-create':   h_tx_create,
+        'transaction-track':    h_tx_track,
+        'transaction-cancel':   h_tx_cancel,
+        'transaction-list':     h_tx_list,
+        'transaction-stats':    h_tx_stats,
+        'transaction-analyze':  lambda f,a: _req('GET', '/api/transactions/analyze', params=f),
+        'transaction-export':   lambda f,a: _req('GET', '/api/transactions/export', params=f),
+        # WALLET
+        'wallet-create':        h_wallet_create,
+        'wallet-list':          h_wallet_list,
+        'wallet-balance':       h_wallet_balance,
+        'wallet-import':        h_wallet_import,
+        'wallet-export':        h_wallet_export,
+        'wallet-multisig-create': h_multisig_create,
+        'wallet-multisig-sign': lambda f,a: _req('POST', '/api/wallets/multisig/sign', f),
+        # BLOCK
+        'block-list':           h_block_list,
+        'block-details':        h_block_details,
+        'block-stats':          h_block_stats,
+        'block-validate':       h_block_validate,
+        'block-explorer':       h_block_explorer,
+        'block-quantum':        lambda f,a: _req('GET', f'/api/blocks/{f.get("block","latest")}/quantum'),
+        'block-batch':          lambda f,a: _req('POST', '/api/blocks/batch', f),
+        'block-integrity':      lambda f,a: _req('GET', '/api/blocks/integrity', params=f),
+        # QUANTUM
+        'quantum-status':       h_quantum_status,
+        'quantum-entropy':      h_quantum_entropy,
+        'quantum-circuit':      h_quantum_circuit,
+        'quantum-validator':    h_quantum_validator,
+        'quantum-finality':     h_quantum_finality,
+        'quantum-transaction':  h_quantum_transaction,
+        'quantum-oracle':       lambda f,a: _req('GET', '/api/quantum/oracle', params=f),
+        'quantum-pq-rotate':    lambda f,a: _req('POST', '/api/quantum/pq-rotate', f),
+        'quantum-heartbeat-monitor': h_quantum_heartbeat_monitor,
+        # ORACLE
+        'oracle-time':          h_oracle_time,
+        'oracle-price':         h_oracle_price,
+        'oracle-random':        h_oracle_random,
+        'oracle-feed':          h_oracle_feed,
+        'oracle-event':         h_oracle_event,
+        # DEFI
+        'defi-stake':           h_defi_stake,
+        'defi-unstake':         h_defi_unstake,
+        'defi-borrow':          h_defi_borrow,
+        'defi-repay':           h_defi_repay,
+        'defi-yield':           h_defi_yield,
+        'defi-pool':            h_defi_pool,
+        # GOVERNANCE
+        'governance-vote':      h_governance_vote,
+        'governance-proposal':  h_governance_proposal,
+        'governance-delegate':  h_governance_delegate,
+        'governance-stats':     h_governance_stats,
+        # NFT
+        'nft-mint':             h_nft_mint,
+        'nft-transfer':         h_nft_transfer,
+        'nft-burn':             h_nft_burn,
+        'nft-metadata':         h_nft_metadata,
+        'nft-collection':       h_nft_collection,
+        # CONTRACT
+        'contract-deploy':      h_contract_deploy,
+        'contract-execute':     h_contract_execute,
+        'contract-compile':     h_contract_compile,
+        'contract-state':       h_contract_state,
+        # BRIDGE
+        'bridge-initiate':      h_bridge_initiate,
+        'bridge-status':        h_bridge_status,
+        'bridge-history':       h_bridge_history,
+        'bridge-wrapped':       h_bridge_wrapped,
+        # ADMIN
+        'admin-users':          h_admin_users,
+        'admin-approval':       h_admin_approval,
+        'admin-monitoring':     h_admin_monitoring,
+        'admin-settings':       h_admin_settings,
+        'admin-audit':          h_admin_audit,
+        'admin-emergency':      h_admin_emergency,
+        # SYSTEM
+        'system-status':        h_system_status,
+        'system-health':        h_system_health,
+        'system-config':        h_system_config,
+        'system-backup':        h_system_backup,
+        'system-restore':       h_system_restore,
+        # PARALLEL
+        'parallel-execute':     h_parallel_execute,
+        'parallel-batch':       h_parallel_batch,
+        'parallel-monitor':     h_parallel_monitor,
+        # HELP
+        'help':                 h_help,
+        'help-commands':        h_help_commands,
+        'help-category':        h_help_category,
+        'help-command':         h_help_command,
+        # WSGI
+        'wsgi-status':          lambda f,a: _ok(WSGIGlobals.summary()),
+        'wsgi-cache-stats':     lambda f,a: _ok(WSGIGlobals.cache_get('_stats') or {}),
     }
-    logger.info("[QuantumExecutor] ✓ Registered parallel/quantum command")
-
-# Execute registration
-_register_quantum_parallel()
-
-# Auto-register on module load (only if not main)
-if __name__ != '__main__':
-    from functools import partial
-    register_terminal_hooks()
-    logger.info("""
-╔═════════════════════════════════════════════════════════════════════════════════════════════════╗
-║                                                                                                 ║
-║             ✨ TERMINAL LOGIC - COMMAND EXECUTION ENGINE INTEGRATION v5.0 ✨                   ║
-║             🌌 WITH QUANTUM PARALLEL EXECUTOR 🌌                                                ║
-║                                                                                                 ║
-║             Terminal logic is ready to bridge with command execution system                    ║
-║             All 50+ command categories accessible via main_app CommandExecutor                 ║
-║             + Quantum parallel execution for massive performance gains                         ║
-║                                                                                                 ║
-╚═════════════════════════════════════════════════════════════════════════════════════════════════╝
-""")
 
 
-# ════════════════════════════════════════════════════════════════════════════════════════════════════════
-# LEVEL 2 SUBLOGIC - TERMINAL COMMAND ORCHESTRATOR FOR ALL SYSTEMS
-# ════════════════════════════════════════════════════════════════════════════════════════════════════════
+def _dispatch_from_globals(raw: str) -> dict:
+    """
+    Standalone dispatch that reads from globals.COMMAND_REGISTRY.
+    Used by parallel execution so each command doesn't need an engine ref.
+    """
+    try:
+        from globals import COMMAND_REGISTRY
+        name, args, flags = parse_command(raw)
+        handler_entry = COMMAND_REGISTRY.get(name)
+        if not handler_entry:
+            return {'status': 'error', 'error': f"Command '{name}' not found",
+                    'suggestions': [n for n in COMMAND_REGISTRY if n.startswith(name[:4])]}
+        handler = handler_entry['handler']
+        return handler(flags, args)
+    except Exception as e:
+        return {'status': 'error', 'error': str(e)}
 
-class TerminalCommandOrchestrator:
-    """Terminal system orchestrating commands across all subsystems"""
-    
-    _instance = None
-    _lock = threading.RLock()
-    
-    def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-        return cls._instance
-    
-    def __init__(self):
-        self.command_history = []
-        self.system_connections = {}
-        self.initialize_system_connections()
-    
-    def initialize_system_connections(self):
-        """Initialize connections to all systems"""
-        self.system_connections = {
-            'quantum': {'available': True, 'commands': ['circuit', 'execute', 'rng']},
-            'blockchain': {'available': True, 'commands': ['create_tx', 'deploy_contract', 'query']},
-            'defi': {'available': True, 'commands': ['create_pool', 'trade', 'liquidity']},
-            'oracle': {'available': True, 'commands': ['update_price', 'get_prices', 'feeds']},
-            'ledger': {'available': True, 'commands': ['query', 'sync', 'status']},
-            'auth': {'available': True, 'commands': ['login', 'verify', 'token']},
-            'admin': {'available': True, 'commands': ['status', 'config', 'metrics']}
+
+def register_all_commands(engine: 'TerminalEngine'):
+    """
+    Populate globals.COMMAND_REGISTRY with every hyphenated command.
+    Called once at app startup by wsgi_config.
+    Returns number of commands registered.
+    """
+    from globals import COMMAND_REGISTRY
+
+    handlers = _build_api_handlers(engine)
+
+    # Category map — drives help system
+    CATEGORIES = {
+        'login': 'auth', 'logout': 'auth', 'register': 'auth', 'whoami': 'auth',
+        'auth-2fa-setup': 'auth', 'auth-token-refresh': 'auth',
+        'user-profile': 'user', 'user-settings': 'user', 'user-list': 'user', 'user-details': 'user',
+        'transaction-create': 'transaction', 'transaction-track': 'transaction',
+        'transaction-cancel': 'transaction', 'transaction-list': 'transaction',
+        'transaction-stats': 'transaction', 'transaction-analyze': 'transaction',
+        'transaction-export': 'transaction',
+        'wallet-create': 'wallet', 'wallet-list': 'wallet', 'wallet-balance': 'wallet',
+        'wallet-import': 'wallet', 'wallet-export': 'wallet',
+        'wallet-multisig-create': 'wallet', 'wallet-multisig-sign': 'wallet',
+        'block-list': 'block', 'block-details': 'block', 'block-stats': 'block',
+        'block-validate': 'block', 'block-explorer': 'block', 'block-quantum': 'block',
+        'block-batch': 'block', 'block-integrity': 'block',
+        'quantum-status': 'quantum', 'quantum-entropy': 'quantum', 'quantum-circuit': 'quantum',
+        'quantum-validator': 'quantum', 'quantum-finality': 'quantum',
+        'quantum-transaction': 'quantum', 'quantum-oracle': 'quantum',
+        'quantum-pq-rotate': 'quantum', 'quantum-heartbeat-monitor': 'quantum',
+        'oracle-time': 'oracle', 'oracle-price': 'oracle', 'oracle-random': 'oracle',
+        'oracle-feed': 'oracle', 'oracle-event': 'oracle',
+        'defi-stake': 'defi', 'defi-unstake': 'defi', 'defi-borrow': 'defi',
+        'defi-repay': 'defi', 'defi-yield': 'defi', 'defi-pool': 'defi',
+        'governance-vote': 'governance', 'governance-proposal': 'governance',
+        'governance-delegate': 'governance', 'governance-stats': 'governance',
+        'nft-mint': 'nft', 'nft-transfer': 'nft', 'nft-burn': 'nft',
+        'nft-metadata': 'nft', 'nft-collection': 'nft',
+        'contract-deploy': 'contract', 'contract-execute': 'contract',
+        'contract-compile': 'contract', 'contract-state': 'contract',
+        'bridge-initiate': 'bridge', 'bridge-status': 'bridge',
+        'bridge-history': 'bridge', 'bridge-wrapped': 'bridge',
+        'admin-users': 'admin', 'admin-approval': 'admin', 'admin-monitoring': 'admin',
+        'admin-settings': 'admin', 'admin-audit': 'admin', 'admin-emergency': 'admin',
+        'system-status': 'system', 'system-health': 'system', 'system-config': 'system',
+        'system-backup': 'system', 'system-restore': 'system',
+        'parallel-execute': 'parallel', 'parallel-batch': 'parallel', 'parallel-monitor': 'parallel',
+        'help': 'help', 'help-commands': 'help', 'help-category': 'help', 'help-command': 'help',
+        'wsgi-status': 'system', 'wsgi-cache-stats': 'system',
+    }
+
+    DESCRIPTIONS = {
+        'login': 'Authenticate with email + password',
+        'logout': 'End current session',
+        'register': 'Create new QTCL account',
+        'whoami': 'Show current session info',
+        'auth-2fa-setup': 'Setup two-factor authentication',
+        'auth-token-refresh': 'Refresh JWT auth token',
+        'user-profile': 'View your profile',
+        'user-settings': 'Manage your settings',
+        'user-list': 'List all users [ADMIN]',
+        'user-details': 'Get user details by ID',
+        'transaction-create': 'Create a new transaction',
+        'transaction-track': 'Track transaction status',
+        'transaction-cancel': 'Cancel pending transaction',
+        'transaction-list': 'List your transactions',
+        'transaction-stats': 'Show transaction statistics',
+        'transaction-analyze': 'Analyze transaction patterns',
+        'transaction-export': 'Export transaction history',
+        'wallet-create': 'Create a new wallet',
+        'wallet-list': 'List your wallets',
+        'wallet-balance': 'Check wallet balance',
+        'wallet-import': 'Import wallet from key/mnemonic',
+        'wallet-export': 'Export wallet credentials',
+        'wallet-multisig-create': 'Create multi-signature wallet',
+        'wallet-multisig-sign': 'Sign multi-sig transaction',
+        'block-list': 'List recent blocks',
+        'block-details': 'Get block details by number or hash',
+        'block-stats': 'Show blockchain statistics',
+        'block-validate': 'Validate a block with quantum proofs',
+        'block-explorer': 'Search blocks by query',
+        'block-quantum': 'Quantum measurements on a block',
+        'block-batch': 'Query multiple blocks in parallel',
+        'block-integrity': 'Verify blockchain integrity range',
+        'quantum-status': 'Quantum engine status & metrics',
+        'quantum-entropy': 'Current quantum entropy measurement',
+        'quantum-circuit': 'Build and run a quantum circuit',
+        'quantum-validator': 'Quantum validator node status',
+        'quantum-finality': 'Check quantum finality for TX',
+        'quantum-transaction': 'Execute quantum-secured transaction',
+        'quantum-oracle': 'Quantum oracle qubit finality',
+        'quantum-pq-rotate': 'Rotate post-quantum keypair',
+        'quantum-heartbeat-monitor': 'Live quantum heartbeat monitor',
+        'oracle-time': 'Get oracle time feed',
+        'oracle-price': 'Get price oracle for symbol',
+        'oracle-random': 'QRNG random number',
+        'oracle-feed': 'Show all oracle data feeds',
+        'oracle-event': 'Oracle event stream',
+        'defi-stake': 'Stake QTCL tokens',
+        'defi-unstake': 'Unstake tokens from pool',
+        'defi-borrow': 'Borrow from lending pool',
+        'defi-repay': 'Repay outstanding loan',
+        'defi-yield': 'View yield farming opportunities',
+        'defi-pool': 'View/manage liquidity pools',
+        'governance-vote': 'Vote on a governance proposal',
+        'governance-proposal': 'Create or view proposals',
+        'governance-delegate': 'Delegate voting power',
+        'governance-stats': 'Governance participation stats',
+        'nft-mint': 'Mint a new NFT',
+        'nft-transfer': 'Transfer NFT to address',
+        'nft-burn': 'Burn (destroy) an NFT',
+        'nft-metadata': 'View or update NFT metadata',
+        'nft-collection': 'View or manage NFT collection',
+        'contract-deploy': 'Deploy a smart contract',
+        'contract-execute': 'Execute contract function',
+        'contract-compile': 'Compile contract source',
+        'contract-state': 'Read contract state',
+        'bridge-initiate': 'Initiate cross-chain bridge transfer',
+        'bridge-status': 'Check bridge operation status',
+        'bridge-history': 'View bridge transfer history',
+        'bridge-wrapped': 'Manage wrapped asset tokens',
+        'admin-users': 'Manage users — list/ban/role [ADMIN]',
+        'admin-approval': 'TX approval queue [ADMIN]',
+        'admin-monitoring': 'System monitoring dashboard [ADMIN]',
+        'admin-settings': 'System settings control [ADMIN]',
+        'admin-audit': 'Full audit trail [ADMIN]',
+        'admin-emergency': 'Emergency halt/resume [ADMIN]',
+        'system-status': 'Full system status from globals',
+        'system-health': 'System health check',
+        'system-config': 'View system configuration',
+        'system-backup': 'Backup system data [ADMIN]',
+        'system-restore': 'Restore from backup [ADMIN]',
+        'parallel-execute': 'Execute multiple commands in parallel',
+        'parallel-batch': 'Batch command execution',
+        'parallel-monitor': 'Monitor parallel task pool',
+        'help': 'Help overview and categories',
+        'help-commands': 'List all commands by category',
+        'help-category': 'List commands in a category',
+        'help-command': 'Detailed help for a command',
+        'wsgi-status': 'WSGI globals bridge status',
+        'wsgi-cache-stats': 'WSGI cache statistics',
+    }
+
+    ADMIN_CMDS = {'admin-users','admin-approval','admin-monitoring','admin-settings',
+                  'admin-audit','admin-emergency','system-backup','system-restore','user-list'}
+    OPEN_CMDS  = {'help','help-commands','help-category','help-command',
+                  'login','register','system-health','system-status','wsgi-status'}
+
+    for name, handler in handlers.items():
+        COMMAND_REGISTRY[name] = {
+            'handler':       handler,
+            'category':      CATEGORIES.get(name, 'general'),
+            'description':   DESCRIPTIONS.get(name, f'{name} command'),
+            'requires_admin': name in ADMIN_CMDS,
+            'requires_auth': name not in OPEN_CMDS,
         }
-    
-    def execute_command(self, command_str):
-        """Execute command across systems"""
-        parts = command_str.split()
-        if not parts:
-            return {'error': 'Empty command'}
-        
-        system = parts[0].lower()
-        action = parts[1].lower() if len(parts) > 1 else None
-        params = parts[2:] if len(parts) > 2 else []
-        
-        execution_record = {
-            'command': command_str,
-            'system': system,
-            'action': action,
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'result': None,
-            'status': 'executing'
-        }
-        
-        # Route to appropriate system
-        if system == 'quantum' and self.system_connections['quantum']['available']:
-            try:
-                from quantum_api import get_quantum_integration
-                quantum = get_quantum_integration()
-                execution_record['result'] = self._exec_quantum(quantum, action, params)
-                execution_record['status'] = 'success'
-            except Exception as e:
-                execution_record['status'] = 'error'
-                execution_record['error'] = str(e)
-        
-        elif system == 'blockchain' and self.system_connections['blockchain']['available']:
-            try:
-                from blockchain_api import get_blockchain_integration
-                blockchain = get_blockchain_integration()
-                execution_record['result'] = self._exec_blockchain(blockchain, action, params)
-                execution_record['status'] = 'success'
-            except Exception as e:
-                execution_record['status'] = 'error'
-                execution_record['error'] = str(e)
-        
-        elif system == 'defi' and self.system_connections['defi']['available']:
-            try:
-                from defi_api import get_defi_integration
-                defi = get_defi_integration()
-                execution_record['result'] = self._exec_defi(defi, action, params)
-                execution_record['status'] = 'success'
-            except Exception as e:
-                execution_record['status'] = 'error'
-                execution_record['error'] = str(e)
-        
-        elif system == 'oracle' and self.system_connections['oracle']['available']:
-            try:
-                from oracle_api import get_oracle_integration
-                oracle = get_oracle_integration()
-                execution_record['result'] = self._exec_oracle(oracle, action, params)
-                execution_record['status'] = 'success'
-            except Exception as e:
-                execution_record['status'] = 'error'
-                execution_record['error'] = str(e)
-        
-        elif system == 'status':
-            execution_record['result'] = self._exec_status()
-            execution_record['status'] = 'success'
-        
-        else:
-            execution_record['status'] = 'error'
-            execution_record['error'] = f'Unknown system: {system}'
-        
-        self.command_history.append(execution_record)
-        return execution_record
-    
-    def _exec_quantum(self, quantum, action, params):
-        """Execute quantum commands"""
-        return quantum.get_system_status()
-    
-    def _exec_blockchain(self, blockchain, action, params):
-        """Execute blockchain commands"""
-        return blockchain.get_system_status()
-    
-    def _exec_defi(self, defi, action, params):
-        """Execute DeFi commands"""
-        return defi.get_system_status()
-    
-    def _exec_oracle(self, oracle, action, params):
-        """Execute oracle commands"""
-        return oracle.get_system_status()
-    
-    def _exec_status(self):
-        """Get complete system status"""
-        status = {
-            'terminal': 'active',
-            'systems': {}
-        }
-        
-        try:
-            from quantum_api import get_quantum_integration
-            status['systems']['quantum'] = get_quantum_integration().get_system_status()
-        except:
-            pass
-        
-        try:
-            from blockchain_api import get_blockchain_integration
-            status['systems']['blockchain'] = get_blockchain_integration().get_system_status()
-        except:
-            pass
-        
-        try:
-            from defi_api import get_defi_integration
-            status['systems']['defi'] = get_defi_integration().get_system_status()
-        except:
-            pass
-        
-        try:
-            from oracle_api import get_oracle_integration
-            status['systems']['oracle'] = get_oracle_integration().get_system_status()
-        except:
-            pass
-        
-        try:
-            from ledger_manager import get_ledger_integration
-            status['systems']['ledger'] = get_ledger_integration().get_system_status()
-        except:
-            pass
-        
-        return status
-    
-    # ═══════════════════════════════════════════════════════════════════════════════════════════
-    # MASTER REGISTRY INTEGRATION - UNIFIED COMMAND SYSTEM
-    # ═══════════════════════════════════════════════════════════════════════════════════════════
-    
-    def get_command_count(self):
-        """Get accurate total command count from wsgi MASTER_REGISTRY"""
-        _init_master_registry()
-        if not MASTER_REGISTRY_AVAILABLE or not MASTER_REGISTRY:
-            return len(self.registry.commands)
-        
-        try:
-            return len(MASTER_REGISTRY.commands)
-        except:
-            return len(self.registry.commands)
-    
-    def list_commands(self, category=None):
-        """Get command list from wsgi MASTER_REGISTRY, fallback to local registry"""
-        _init_master_registry()
-        if not MASTER_REGISTRY_AVAILABLE or not MASTER_REGISTRY:
-            return sorted(list(self.registry.commands.keys()))
-        
-        try:
-            with MASTER_REGISTRY.lock:
-                if category:
-                    return MASTER_REGISTRY.categories.get(category, [])
-                return sorted(list(MASTER_REGISTRY.commands.keys()))
-        except:
-            return sorted(list(self.registry.commands.keys()))
-    
-    def get_help(self, command_name=None):
-        """Get command help from wsgi MASTER_REGISTRY, fallback to local"""
-        _init_master_registry()
-        if not MASTER_REGISTRY_AVAILABLE or not MASTER_REGISTRY:
-            if command_name:
-                cmd = self.registry.commands.get(command_name)
-                if cmd:
-                    return f"{cmd.meta.name}: {cmd.meta.description}"
-            return "Help not available - no MASTER_REGISTRY"
-        
-        try:
-            if not command_name:
-                return MASTER_REGISTRY.get_help_text()
-            return MASTER_REGISTRY.get_help_text(command_name)
-        except:
-            if command_name:
-                cmd = self.registry.commands.get(command_name)
-                if cmd:
-                    return f"{cmd.meta.name}: {cmd.meta.description}"
-            return "Help unavailable"
-    
-    def search_commands(self, query):
-        """Search commands in wsgi MASTER_REGISTRY, fallback to local"""
-        _init_master_registry()
-        if not MASTER_REGISTRY_AVAILABLE or not MASTER_REGISTRY:
-            query_lower = query.lower()
-            return [cmd for cmd in self.registry.commands.keys() if query_lower in cmd.lower()]
-        
-        try:
-            matches = MASTER_REGISTRY.search_commands(query)
-            return [m.name for m in matches]
-        except:
-            query_lower = query.lower()
-            return [cmd for cmd in self.registry.commands.keys() if query_lower in cmd.lower()]
 
-TERMINAL_ORCHESTRATOR = TerminalCommandOrchestrator()
+    logger.info(f'[terminal_logic] ✓ Registered {len(COMMAND_REGISTRY)} commands into globals.COMMAND_REGISTRY')
+    return len(COMMAND_REGISTRY)
 
-def execute_terminal_command(cmd):
-    """Execute terminal command"""
-    return TERMINAL_ORCHESTRATOR.execute_command(cmd)
+
+if __name__ == '__main__':
+    engine = TerminalEngine()
+    engine.run()

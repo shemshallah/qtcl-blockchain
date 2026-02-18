@@ -17,15 +17,11 @@
 import threading
 import logging
 import time
-import secrets
-import hashlib
-import uuid
-import queue
 from typing import Optional, Dict, Any, List, Callable, Set, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 from collections import defaultdict, deque
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import json
 from functools import wraps, lru_cache
 from contextlib import contextmanager
@@ -1656,3 +1652,109 @@ def get_orchestrator():
     if SYSTEM_ORCHESTRATOR is None:
         initialize_system_orchestration()
     return SYSTEM_ORCHESTRATOR
+
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════
+# MASTER COMMAND REGISTRY — single dict populated at boot by terminal_logic.register_all_commands()
+#
+# Structure: { 'command-name': { 'handler': callable, 'category': str,
+#                                'description': str, 'requires_auth': bool,
+#                                'requires_admin': bool } }
+#
+# This dict IS the master registry list. wsgi_config reads it for dispatch + /api/commands.
+# terminal_logic populates it. globals owns it.
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+COMMAND_REGISTRY: Dict[str, Dict] = {}
+
+
+def get_command_registry() -> Dict[str, Dict]:
+    """Get the master command registry."""
+    return COMMAND_REGISTRY
+
+
+def dispatch_command(raw: str, is_admin: bool = False, is_authenticated: bool = False) -> Dict[str, Any]:
+    """
+    Dispatch a raw command string through COMMAND_REGISTRY.
+    Handles hyphen commands + flag parsing at globals level.
+
+    Args:
+        raw:              e.g. 'admin-users --limit=10' or 'help-admin'
+        is_admin:         caller has admin privileges
+        is_authenticated: caller is logged in
+
+    Returns: dict with 'status', 'result' or 'error'
+    """
+    import re
+
+    if not raw or not raw.strip():
+        return {'status': 'error', 'error': 'Empty command'}
+
+    tokens = raw.strip().split()
+    name   = tokens[0].lower()
+    args   = []
+    flags  = {}
+
+    # ── Smart help- prefix expansion ──────────────────────────────────────────
+    # 'help-admin'         → {'category': 'admin'}  routed to 'help-category'
+    # 'help-admin-users'   → {'command': 'admin-users'}  routed to 'help-command'
+    if name.startswith('help-') and name not in COMMAND_REGISTRY:
+        suffix = name[5:]  # strip 'help-'
+        if suffix in {e['category'] for e in COMMAND_REGISTRY.values()}:
+            name = 'help-category'
+            flags = {'category': suffix}
+        else:
+            # Assume it's a command name
+            name  = 'help-command'
+            flags = {'command': suffix}
+    else:
+        for tok in tokens[1:]:
+            m = re.match(r'^--([a-zA-Z0-9_-]+)(?:=(.+))?$', tok)
+            if m:
+                key = m.group(1).replace('-', '_')
+                flags[key] = m.group(2) if m.group(2) is not None else True
+            else:
+                args.append(tok)
+
+    # ── Inline --help flag ────────────────────────────────────────────────────
+    if flags.get('help'):
+        entry = COMMAND_REGISTRY.get(name, {})
+        return {
+            'status': 'success',
+            'result': {
+                'output': (
+                    f'  COMMAND: {name}\n'
+                    f'  Category: {entry.get("category","?")}\n'
+                    f'  Auth: {"ADMIN" if entry.get("requires_admin") else "AUTH" if entry.get("requires_auth") else "none"}\n'
+                    f'  Description: {entry.get("description","?")}'
+                )
+            }
+        }
+
+    entry = COMMAND_REGISTRY.get(name)
+    if not entry:
+        # Fuzzy suggestion
+        candidates = [n for n in COMMAND_REGISTRY if n.startswith(name[:min(4, len(name))])]
+        return {
+            'status':      'error',
+            'error':       f"Command '{name}' not found. Try 'help-commands'.",
+            'suggestions': candidates[:5],
+        }
+
+    # ── Auth check ────────────────────────────────────────────────────────────
+    if entry.get('requires_admin') and not is_admin:
+        return {'status': 'error', 'error': f"'{name}' requires admin privileges"}
+    if entry.get('requires_auth') and not is_authenticated and not is_admin:
+        return {'status': 'error', 'error': f"'{name}' requires authentication. Run: login --email=x --password=y"}
+
+    try:
+        result = entry['handler'](flags, args)
+        # Track metrics
+        try:
+            get_globals().metrics.commands_executed += 1
+        except Exception:
+            pass
+        return result
+    except Exception as exc:
+        logger.error(f'[dispatch_command] {name} raised: {exc}', exc_info=True)
+        return {'status': 'error', 'error': str(exc)}
