@@ -49,6 +49,18 @@ logger.info("[Main] Importing Flask and global state...")
 
 from flask import Flask, request, jsonify, g, send_file
 from flask_cors import CORS
+from datetime import timezone
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# IMPORT WSGI REGISTRY (UNIFIED COMMAND SOURCE)
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+try:
+    from wsgi_config import MASTER_REGISTRY, load_all_commands
+    WSGI_REGISTRY_AVAILABLE = True
+except ImportError:
+    WSGI_REGISTRY_AVAILABLE = False
+    MASTER_REGISTRY = None
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 # IMPORT GLOBALS (EXPANDED)
@@ -82,14 +94,12 @@ except ImportError as e:
 
 logger.info("[Main] Importing terminal engine for command execution...")
 try:
-    from terminal_logic import TerminalEngine, GlobalCommandRegistry, CommandRegistry
+    from terminal_logic import TerminalEngine
     TERMINAL_ENGINE = None
     logger.info("✅ [Main] Terminal engine imported")
 except ImportError as e:
     logger.warning(f"⚠️ [Main] Terminal engine not available: {e}")
     TERMINAL_ENGINE = None
-    GlobalCommandRegistry = None
-    CommandRegistry = None
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 # INITIALIZE GLOBAL STATE (LEVEL 1 LOGIC)
@@ -305,9 +315,18 @@ class MasterApplicationOrchestrator:
         # List all commands endpoint
         @self.app.route('/api/commands', methods=['GET'])
         def list_commands():
-            """List all available commands from GlobalCommandRegistry"""
+            """List all available commands from MASTER_REGISTRY"""
             try:
-                from terminal_logic import GlobalCommandRegistry
+                if not WSGI_REGISTRY_AVAILABLE or not MASTER_REGISTRY:
+                    return jsonify({
+                        'status': 'error',
+                        'error': 'MASTER_REGISTRY not available',
+                        'commands': [],
+                        'total': 0
+                    }), 500
+                
+                # Ensure registry is loaded
+                load_all_commands()
                 
                 category_map = {
                     'help': 'Help & Documentation',
@@ -329,40 +348,17 @@ class MasterApplicationOrchestrator:
                 }
                 
                 commands = []
-                command_set = set()
+                with MASTER_REGISTRY.lock:
+                    for cmd_name in sorted(MASTER_REGISTRY.commands.keys()):
+                        cmd_meta = MASTER_REGISTRY.commands[cmd_name]
+                        category = cmd_meta.category if hasattr(cmd_meta, 'category') else 'system'
+                        commands.append({
+                            'command': cmd_name,
+                            'category': category,
+                            'description': cmd_meta.description if hasattr(cmd_meta, 'description') else 'Command',
+                            'category_description': category_map.get(category, '')
+                        })
                 
-                registry_categories = {
-                    'help': getattr(GlobalCommandRegistry, 'HELP_COMMANDS', {}),
-                    'auth': getattr(GlobalCommandRegistry, 'AUTH_COMMANDS', {}),
-                    'user': getattr(GlobalCommandRegistry, 'USER_COMMANDS', {}),
-                    'transaction': getattr(GlobalCommandRegistry, 'TRANSACTION_COMMANDS', {}),
-                    'wallet': getattr(GlobalCommandRegistry, 'WALLET_COMMANDS', {}),
-                    'block': getattr(GlobalCommandRegistry, 'BLOCK_COMMANDS', {}),
-                    'quantum': getattr(GlobalCommandRegistry, 'QUANTUM_COMMANDS', {}),
-                    'oracle': getattr(GlobalCommandRegistry, 'ORACLE_COMMANDS', {}),
-                    'defi': getattr(GlobalCommandRegistry, 'DEFI_COMMANDS', {}),
-                    'governance': getattr(GlobalCommandRegistry, 'GOVERNANCE_COMMANDS', {}),
-                    'nft': getattr(GlobalCommandRegistry, 'NFT_COMMANDS', {}),
-                    'contract': getattr(GlobalCommandRegistry, 'CONTRACT_COMMANDS', {}),
-                    'bridge': getattr(GlobalCommandRegistry, 'BRIDGE_COMMANDS', {}),
-                    'admin': getattr(GlobalCommandRegistry, 'ADMIN_COMMANDS', {}),
-                    'system': getattr(GlobalCommandRegistry, 'SYSTEM_COMMANDS', {}),
-                    'parallel': getattr(GlobalCommandRegistry, 'PARALLEL_COMMANDS', {}),
-                }
-                
-                for category, cmd_dict in registry_categories.items():
-                    if isinstance(cmd_dict, dict):
-                        for cmd_name in cmd_dict.keys():
-                            if cmd_name not in command_set:
-                                commands.append({
-                                    'command': cmd_name,
-                                    'category': category,
-                                    'description': category_map.get(category, 'Command'),
-                                    'category_description': category_map.get(category, '')
-                                })
-                                command_set.add(cmd_name)
-                
-                commands.sort(key=lambda x: (x['category'], x['command']))
                 active_categories = sorted(list(set(c['category'] for c in commands)))
                 
                 return jsonify({
@@ -374,6 +370,7 @@ class MasterApplicationOrchestrator:
                     'timestamp': datetime.now(timezone.utc).isoformat()
                 }), 200
             except Exception as e:
+                logger.error(f"[API] /commands error: {e}")
                 return jsonify({
                     'status': 'error',
                     'error': str(e),
