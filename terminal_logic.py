@@ -159,17 +159,30 @@ def _init_wsgi_globals():
 # MASTER REGISTRY INTEGRATION - UNIFIED COMMAND SOURCE
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 
-# Import MASTER_REGISTRY from wsgi_config - THIS IS THE SINGLE SOURCE OF TRUTH
-try:
-    from wsgi_config import MASTER_REGISTRY, CommandScope, ExecutionContext, load_all_commands
-    MASTER_REGISTRY_AVAILABLE = True
-    logging.info("✓ MASTER_REGISTRY imported from wsgi_config - using unified command registry")
-except ImportError:
-    MASTER_REGISTRY_AVAILABLE = False
-    MASTER_REGISTRY = None
-    CommandScope = None
-    ExecutionContext = None
-    logging.warning("⚠ MASTER_REGISTRY not available from wsgi_config - terminal_logic operating in standalone mode")
+# Lazy initialization - import on first use to avoid circular imports
+MASTER_REGISTRY_AVAILABLE = False
+MASTER_REGISTRY = None
+CommandScope = None
+ExecutionContext = None
+
+def _init_master_registry():
+    """Lazy initialize MASTER_REGISTRY from wsgi_config on first use"""
+    global MASTER_REGISTRY_AVAILABLE, MASTER_REGISTRY, CommandScope, ExecutionContext
+    if MASTER_REGISTRY_AVAILABLE:
+        return True
+    
+    try:
+        from wsgi_config import MASTER_REGISTRY as _MR, CommandScope as _CS, ExecutionContext as _EC
+        MASTER_REGISTRY = _MR
+        CommandScope = _CS
+        ExecutionContext = _EC
+        MASTER_REGISTRY_AVAILABLE = True
+        logging.info("✓ MASTER_REGISTRY initialized from wsgi_config - using unified command registry")
+        return True
+    except ImportError as e:
+        logging.warning(f"⚠ MASTER_REGISTRY not available from wsgi_config: {e}")
+        MASTER_REGISTRY_AVAILABLE = False
+        return False
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 # DEPENDENCY INSTALLATION
@@ -6804,8 +6817,8 @@ class TerminalCommandOrchestrator:
     
     def get_command_count(self):
         """Get accurate total command count from wsgi MASTER_REGISTRY"""
+        _init_master_registry()
         if not MASTER_REGISTRY_AVAILABLE or not MASTER_REGISTRY:
-            # Fallback to local registry
             return len(self.registry.commands)
         
         try:
@@ -6815,8 +6828,8 @@ class TerminalCommandOrchestrator:
     
     def list_commands(self, category=None):
         """Get command list from wsgi MASTER_REGISTRY, fallback to local registry"""
+        _init_master_registry()
         if not MASTER_REGISTRY_AVAILABLE or not MASTER_REGISTRY:
-            # Use local registry
             return sorted(list(self.registry.commands.keys()))
         
         try:
@@ -6829,8 +6842,8 @@ class TerminalCommandOrchestrator:
     
     def get_help(self, command_name=None):
         """Get command help from wsgi MASTER_REGISTRY, fallback to local"""
+        _init_master_registry()
         if not MASTER_REGISTRY_AVAILABLE or not MASTER_REGISTRY:
-            # Use local registry help
             if command_name:
                 cmd = self.registry.commands.get(command_name)
                 if cmd:
@@ -6842,7 +6855,6 @@ class TerminalCommandOrchestrator:
                 return MASTER_REGISTRY.get_help_text()
             return MASTER_REGISTRY.get_help_text(command_name)
         except:
-            # Fallback to local
             if command_name:
                 cmd = self.registry.commands.get(command_name)
                 if cmd:
@@ -6851,8 +6863,8 @@ class TerminalCommandOrchestrator:
     
     def search_commands(self, query):
         """Search commands in wsgi MASTER_REGISTRY, fallback to local"""
+        _init_master_registry()
         if not MASTER_REGISTRY_AVAILABLE or not MASTER_REGISTRY:
-            # Use local registry
             query_lower = query.lower()
             return [cmd for cmd in self.registry.commands.keys() if query_lower in cmd.lower()]
         
@@ -6860,7 +6872,6 @@ class TerminalCommandOrchestrator:
             matches = MASTER_REGISTRY.search_commands(query)
             return [m.name for m in matches]
         except:
-            # Fallback to local
             query_lower = query.lower()
             return [cmd for cmd in self.registry.commands.keys() if query_lower in cmd.lower()]
 

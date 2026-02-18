@@ -945,24 +945,25 @@ def _init_terminal(globals_inst: GlobalState):
     logger.info("[Globals] Initializing terminal...")
     try:
         from terminal_logic import TerminalEngine
-        try:
-            from wsgi_config import MASTER_REGISTRY, load_all_commands
-            load_all_commands()
-            wsgi_registry_available = True
-        except ImportError:
-            wsgi_registry_available = False
-            MASTER_REGISTRY = None
         
         engine = TerminalEngine()
         with globals_inst.lock:
             globals_inst.terminal.engine = engine
-            # Use WSGI MASTER_REGISTRY as source of truth for commands
-            if wsgi_registry_available and MASTER_REGISTRY:
-                globals_inst.terminal.command_registry = MASTER_REGISTRY.commands
-                logger.info(f"[Globals] ✓ Using WSGI MASTER_REGISTRY - {len(MASTER_REGISTRY.commands)} commands available")
-            else:
+            
+            # Try to use WSGI MASTER_REGISTRY as source of truth
+            try:
+                from wsgi_config import MASTER_REGISTRY
+                # Don't call load_all_commands here - it will be called by wsgi_config itself
+                if MASTER_REGISTRY and hasattr(MASTER_REGISTRY, 'commands'):
+                    globals_inst.terminal.command_registry = MASTER_REGISTRY.commands
+                    cmd_count = len(MASTER_REGISTRY.commands) if MASTER_REGISTRY.commands else 0
+                    logger.info(f"[Globals] ✓ Using WSGI MASTER_REGISTRY - {cmd_count} commands available")
+                else:
+                    globals_inst.terminal.command_registry = {}
+                    logger.warning("[Globals] ⚠ MASTER_REGISTRY empty, command registry will be populated by wsgi_config")
+            except (ImportError, AttributeError) as e:
+                logger.warning(f"[Globals] ⚠ WSGI registry not available ({type(e).__name__}), using engine registry")
                 globals_inst.terminal.command_registry = {}
-                logger.warning("[Globals] ⚠ WSGI registry not available, command registry empty")
         
         logger.info("[Globals] ✅ Terminal initialized")
     
