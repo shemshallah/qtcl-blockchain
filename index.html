@@ -162,79 +162,6 @@ html,body{width:100%;height:100%;overflow:hidden;font-family:'Fira Code','Menlo'
 #exec-btn:hover{background:rgba(0,212,255,0.18);border-color:var(--cyan);box-shadow:0 0 10px rgba(0,212,255,0.2)}
 #exec-btn:active{transform:scale(0.98)}
 
-/* ─── MOBILE OPTIMIZATIONS ─── */
-@media (max-width: 768px) {
-  #app{
-    height:100vh;
-    max-height:100vh;
-    overflow:hidden;
-  }
-  
-  #content{
-    overflow:hidden;
-    max-height:calc(100vh - 95px);
-  }
-  
-  #inputbar{
-    padding:10px 12px;
-    gap:8px;
-    position:fixed;
-    bottom:0;
-    left:0;
-    right:0;
-    width:100%;
-    height:auto;
-    min-height:50px;
-    border-top:2px solid var(--border);
-    border-bottom:none;
-    box-shadow:0 -4px 20px rgba(0,0,0,0.9);
-    z-index:9999;
-    background:var(--bg);
-  }
-  
-  #terminal-view{
-    flex:1;
-    overflow:hidden;
-    display:flex;
-    flex-direction:column;
-    height:calc(100vh - 95px);
-  }
-  
-  #output{
-    flex:1;
-    overflow-y:auto;
-    overflow-x:hidden;
-    padding:12px 14px;
-    padding-bottom:20px;
-  }
-  
-  .input-ps1{
-    font-size:11px;
-    min-width:35px;
-  }
-  
-  #cmd{
-    font-size:16px;
-    padding:12px 8px;
-    min-height:38px;
-    border:1px solid var(--border-light);
-    border-radius:3px;
-    background:rgba(255,255,255,0.01);
-  }
-  
-  #cmd:focus{
-    border:1px solid var(--cyan);
-    background:rgba(0,212,255,0.05);
-  }
-  
-  #exec-btn{
-    padding:10px 12px;
-    font-size:12px;
-    min-width:55px;
-    min-height:38px;
-  }
-}\n
-
 /* ─── INFO TAB ─── */
 #info-view{
   flex:1;display:none;overflow-y:auto;overflow-x:hidden;
@@ -287,15 +214,6 @@ html,body{width:100%;height:100%;overflow:hidden;font-family:'Fira Code','Menlo'
   font-weight:bold;padding-bottom:6px;border-bottom:1px solid var(--border);
 }
 
-/* ─── INPUT FOCUS INDICATOR ─── */
-#inputbar {
-  border-top: 3px solid var(--cyan);
-}
-
-#cmd:focus {
-  background: rgba(0,212,255,0.05);
-}
-
 /* ─── SPINNER ─── */
 .spinner{
   display:inline-block;width:12px;height:12px;border:2px solid var(--dim);
@@ -304,12 +222,84 @@ html,body{width:100%;height:100%;overflow:hidden;font-family:'Fira Code','Menlo'
 }
 @keyframes spin{to{transform:rotate(360deg)}}
 
-/* ─── RESPONSIVE ─── */
+/* ─── MOBILE OPTIMIZATIONS ─── */
 @media (max-width: 768px) {
+  #app{
+    height:100vh;
+    max-height:100vh;
+    overflow:hidden;
+  }
+  
+  #content{
+    overflow:hidden;
+    max-height:calc(100vh - 95px);
+  }
+  
+  #inputbar{
+    padding:10px 12px;
+    gap:8px;
+    position:fixed;
+    bottom:0;
+    left:0;
+    right:0;
+    width:100%;
+    height:auto;
+    min-height:50px;
+    border-top:2px solid var(--border);
+    border-bottom:none;
+    box-shadow:0 -4px 20px rgba(0,0,0,0.9);
+    z-index:9999;
+    background:var(--bg);
+    display:flex !important;
+    visibility:visible !important;
+    opacity:1 !important;
+  }
+  
+  #terminal-view{
+    flex:1;
+    overflow:hidden;
+    display:flex;
+    flex-direction:column;
+    height:calc(100vh - 95px);
+  }
+  
+  #output{
+    flex:1;
+    overflow-y:auto;
+    overflow-x:hidden;
+    padding:12px 14px;
+    padding-bottom:60px;
+  }
+  
+  .input-ps1{
+    font-size:11px;
+    min-width:35px;
+  }
+  
+  #cmd{
+    font-size:16px;
+    padding:12px 8px;
+    min-height:38px;
+    border:1px solid var(--border-light);
+    border-radius:3px;
+    background:rgba(255,255,255,0.02);
+  }
+  
+  #cmd:focus{
+    border:1px solid var(--cyan);
+    background:rgba(0,212,255,0.05);
+  }
+  
+  #exec-btn{
+    padding:10px 12px;
+    font-size:12px;
+    min-width:55px;
+    min-height:38px;
+  }
+
   .brand-name{font-size:11px}
   .tab{padding:0 14px;font-size:9px}
   #topbar{height:45px}
-  #inputbar{padding:10px 14px;gap:8px}
   .info-grid{grid-template-columns:1fr}
   #statusbar{gap:10px;padding-right:14px}
 }
@@ -358,7 +348,7 @@ html,body{width:100%;height:100%;overflow:hidden;font-family:'Fira Code','Menlo'
       <div id="inputbar">
         <span class="input-ps1">QTCL ›</span>
         <input type="text" id="cmd" placeholder="Type 'help' for commands…" spellcheck="false" autocomplete="off">
-        <button id="exec-btn" onclick="execute()">RUN</button>
+        <button id="exec-btn">RUN</button>
       </div>
     </div>
 
@@ -388,91 +378,6 @@ const state = {
   isMobile: /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
 };
 
-// ─── MOBILE FOCUS MANAGEMENT ───
-function setupMobileFocus() {
-  if (!state.isMobile) return;
-  
-  // Force input to always be visible on mobile
-  const inputBar = document.getElementById('inputbar');
-  const terminalView = document.getElementById('terminal-view');
-  
-  // Auto-focus on page load
-  setTimeout(() => state.cmdInput.focus(), 100);
-  
-  // Keep input visible - fix viewport when keyboard appears
-  window.addEventListener('resize', () => {
-    setTimeout(() => {
-      if (state.cmdInput === document.activeElement) {
-        state.cmdInput.scrollIntoView({ behavior: 'instant', block: 'end' });
-      }
-    }, 100);
-  });
-  
-  // Aggressive focus on any terminal click
-  terminalView.addEventListener('click', (e) => {
-    if (e.target.id !== 'exec-btn') {
-      e.preventDefault();
-      state.cmdInput.focus();
-    }
-  });
-  
-  // Focus on any touch
-  terminalView.addEventListener('touchstart', (e) => {
-    if (!e.target.closest('#inputbar')) {
-      state.cmdInput.focus();
-    }
-  });
-  
-  // Keep refocusing if it loses focus
-  document.addEventListener('blur', () => {
-    if (state.isMobile && document.hidden === false) {
-      setTimeout(() => state.cmdInput.focus(), 50);
-    }
-  }, true);
-  
-  // When input gets focus - show it
-  state.cmdInput.addEventListener('focus', () => {
-    inputBar.style.display = 'flex';
-    inputBar.style.visibility = 'visible';
-    inputBar.style.opacity = '1';
-    
-    setTimeout(() => {
-      state.cmdInput.scrollIntoView({ behavior: 'smooth', block: 'end' });
-      // Scroll the input bar into view on mobile
-      if (state.isMobile) {
-        window.scrollTo(0, document.body.scrollHeight);
-      }
-    }, 100);
-  });
-  
-  // Make sure input bar never hides
-  state.cmdInput.addEventListener('blur', () => {
-    setTimeout(() => {
-      inputBar.style.display = 'flex';
-      inputBar.style.visibility = 'visible';
-      inputBar.style.opacity = '1';
-    }, 100);
-  });
-  
-  // Prevent accidental scrolling that hides input
-  document.addEventListener('touchmove', (e) => {
-    if (!e.target.closest('#output')) {
-      e.preventDefault();
-    }
-  }, { passive: false });
-  
-  // Ensure input is always accessible
-  setInterval(() => {
-    if (state.isMobile) {
-      const inputBar = document.getElementById('inputbar');
-      inputBar.style.display = 'flex';
-      inputBar.style.visibility = 'visible';
-      inputBar.style.opacity = '1';
-      inputBar.style.position = 'fixed';
-      inputBar.style.zIndex = '9999';
-    }
-  }, 500);
-
 // ─── TAB SWITCHING ───
 function switchTab(name) {
   const tabs = document.querySelectorAll('.tab');
@@ -485,7 +390,7 @@ function switchTab(name) {
   if (name === 'terminal') {
     termView.style.display = 'flex';
     infoView.classList.remove('active');
-    state.cmdInput.focus();
+    setTimeout(() => state.cmdInput.focus(), 50);
   } else {
     termView.style.display = 'none';
     infoView.classList.add('active');
@@ -514,7 +419,7 @@ function escapeHtml(text) {
   return div.innerHTML;
 }
 
-// ─── COMMAND EXECUTION (DEEPLY INTEGRATED WITH GLOBALS) ───
+// ─── COMMAND EXECUTION ───
 async function execute() {
   const raw = state.cmdInput.value.trim();
   if (!raw || state.isLoading) return;
@@ -535,7 +440,6 @@ async function execute() {
   state.cmdInput.disabled = true;
 
   try {
-    // Execute via /api/command endpoint with full globals integration
     const res = await fetch('/api/command', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -577,23 +481,19 @@ async function execute() {
     state.isLoading = false;
     state.cmdInput.disabled = false;
     state.output.scrollTop = state.output.scrollHeight;
-    state.cmdInput.focus();
     
-    // Mobile: ensure input stays visible after command
     if (state.isMobile) {
       setTimeout(() => {
-        const inputBar = document.getElementById('inputbar');
-        inputBar.style.display = 'flex';
-        inputBar.style.visibility = 'visible';
-        inputBar.style.opacity = '1';
         state.cmdInput.focus();
         state.cmdInput.scrollIntoView({ behavior: 'instant', block: 'end' });
-      }, 100);
+      }, 50);
+    } else {
+      state.cmdInput.focus();
     }
   }
 }
 
-// ─── DYNAMIC COMMAND LOADING FROM /api/commands ───
+// ─── DYNAMIC COMMAND LOADING ───
 async function loadCommands() {
   try {
     addLine('Loading command registry from globals…', 'dim');
@@ -621,7 +521,7 @@ async function loadCommands() {
   }
 }
 
-// ─── DYNAMIC HELP (SCRAPES FROM GLOBALS REGISTRY) ───
+// ─── DYNAMIC HELP ───
 function showDynamicHelp() {
   addLine('', 'dim');
   addLine('╔════════════════════════════════════════════════════════╗', 'system');
@@ -699,7 +599,10 @@ state.cmdInput.addEventListener('keydown', e => {
   }
 });
 
-// ─── STATUS POLLING (INTEGRATES WITH GLOBALS VIA /api/status) ───
+// ─── BUTTON EVENT ───
+document.getElementById('exec-btn').addEventListener('click', execute);
+
+// ─── STATUS POLLING ───
 async function loadStatus() {
   try {
     const r = await fetch('/api/status');
@@ -733,12 +636,11 @@ function setDot(id, cls) {
 
 setInterval(loadStatus, 12000);
 
-// ─── INFO GRID (DEEP GLOBALS INTEGRATION) ───
+// ─── INFO GRID ───
 function renderInfoGrid() {
   const container = document.getElementById('info-content');
   container.innerHTML = '';
 
-  // System Architecture Card
   const archCard = document.createElement('div');
   archCard.className = 'info-card';
   archCard.innerHTML = `
@@ -749,7 +651,6 @@ function renderInfoGrid() {
     <div class="info-row"><span class="info-key">Finality Proofs</span><span class="info-val purple">8-GHZ Circuit</span></div>
   `;
   
-  // Quantum Subsystem Card
   const qCard = document.createElement('div');
   qCard.className = 'info-card';
   qCard.innerHTML = `
@@ -760,7 +661,6 @@ function renderInfoGrid() {
     <div class="info-row"><span class="info-key">Entropy Pool</span><span class="info-val">${state.statusData.quantum?.entropy || '—'}</span></div>
   `;
   
-  // Ledger Status Card
   const ledgerCard = document.createElement('div');
   ledgerCard.className = 'info-card';
   ledgerCard.innerHTML = `
@@ -771,7 +671,6 @@ function renderInfoGrid() {
     <div class="info-row"><span class="info-key">Uptime</span><span class="info-val">${state.statusData.uptime ? Math.round(state.statusData.uptime) + 's' : '—'}</span></div>
   `;
   
-  // DeFi & Oracle Card
   const defiCard = document.createElement('div');
   defiCard.className = 'info-card';
   defiCard.innerHTML = `
@@ -790,7 +689,6 @@ function renderInfoGrid() {
   grid.appendChild(defiCard);
   container.appendChild(grid);
 
-  // Command Quick Launch by Category (from globals registry)
   const cats = Object.keys(state.commandsByCategory).sort();
   
   if (cats.length === 0) {
@@ -835,9 +733,6 @@ function runQuick(cmd) {
 
 // ─── BOOT SEQUENCE ───
 async function boot() {
-  // Setup mobile focus first
-  setupMobileFocus();
-  
   const BOOT = [
     { t: 0, msg: '╔═══════════════════════════════════════════════════════════╗', cls: 'system' },
     { t: 30, msg: '║     QUANTUM TEMPORAL COHERENCE LEDGER  v5.0               ║', cls: 'system' },
@@ -864,7 +759,6 @@ async function boot() {
     addLine(msg, cls);
   }
 
-  // Load commands and status from globals
   await loadCommands();
   loadStatus();
 }
