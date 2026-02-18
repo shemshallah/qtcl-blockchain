@@ -64,7 +64,61 @@ getcontext().prec=50
 logger=logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO,format='[%(asctime)s] %(levelname)s: %(message)s')
 
-JWT_SECRET=os.getenv('JWT_SECRET',secrets.token_urlsafe(96))
+def _load_stable_jwt_secret() -> str:
+    """
+    Load JWT_SECRET with guaranteed cross-restart stability.
+
+    Resolution order:
+      1. JWT_SECRET environment variable  (production override — always wins)
+      2. On-disk key file                 (~/.qtcl/.jwt_secret or /var/lib/qtcl/.jwt_secret)
+         — created on first run, reused forever until the file is deleted
+      3. Ephemeral random secret          (last resort; logs a loud warning so you don't miss it)
+
+    Using an ephemeral secret is the root cause of "Admin access required" after
+    restarts: tokens signed with the old random secret fail verification on the
+    next boot.  This function makes sure that never happens again.
+    """
+    # 1. Env-var wins unconditionally.
+    env_secret = os.getenv('JWT_SECRET', '').strip()
+    if env_secret:
+        return env_secret
+
+    # 2. Key-file persistence (try writable paths in priority order).
+    candidate_dirs = [
+        os.path.join(os.path.expanduser('~'), '.qtcl'),
+        '/var/lib/qtcl',
+        os.path.dirname(os.path.abspath(__file__)),   # project root fallback
+    ]
+    for base in candidate_dirs:
+        key_path = os.path.join(base, '.jwt_secret')
+        try:
+            if os.path.isfile(key_path):
+                with open(key_path, 'r') as fh:
+                    stored = fh.read().strip()
+                if len(stored) >= 64:          # sanity-check: must be substantial
+                    logger.info(f'[Auth] JWT_SECRET loaded from {key_path}')
+                    return stored
+            # File doesn't exist yet — generate and save it.
+            os.makedirs(base, mode=0o700, exist_ok=True)
+            new_secret = secrets.token_urlsafe(96)          # 128-byte URL-safe string
+            with open(key_path, 'w') as fh:
+                fh.write(new_secret)
+            os.chmod(key_path, 0o600)           # owner-read-only
+            logger.info(f'[Auth] JWT_SECRET generated and saved to {key_path}')
+            return new_secret
+        except (OSError, IOError, PermissionError):
+            continue                            # try next candidate path
+
+    # 3. Last-resort ephemeral secret — loud warning so ops notices.
+    ephemeral = secrets.token_urlsafe(96)
+    logger.warning(
+        '[Auth] ⚠️  Could not persist JWT_SECRET to disk — using EPHEMERAL secret. '
+        'All existing tokens will be INVALIDATED on next restart. '
+        'Set the JWT_SECRET env-var or ensure ~/.qtcl/ is writable to fix this.'
+    )
+    return ephemeral
+
+JWT_SECRET = _load_stable_jwt_secret()
 JWT_ALGORITHM='HS512'
 JWT_EXPIRATION_HOURS=int(os.getenv('JWT_EXPIRATION_HOURS','24'))
 TOKEN_REFRESH_WINDOW=1

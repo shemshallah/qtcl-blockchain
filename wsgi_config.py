@@ -46,6 +46,7 @@ from globals import (
     COMMAND_REGISTRY, dispatch_command,
     get_heartbeat, get_lattice, get_db_pool, get_auth_manager,
     get_oracle, get_defi, get_ledger, get_blockchain, get_metrics,
+    bootstrap_admin_session, revoke_session,
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -283,22 +284,30 @@ def _parse_auth(req):
 
     Token resolution order:
       1. Authorization: Bearer <token> header  (standard)
-      2. globals.auth.session_store            (set by h_login — works without JWT env var)
-      3. JWT decode via auth_mgr               (stateless verification)
-      4. ADMIN_SECRET env var                  (admin bypass)
+      2. globals.auth.session_store            (populated by h_login OR bootstrap_admin_session)
+      3. JWT stateless verify via auth_mgr     (checks BOTH role AND is_admin payload field)
+      4. ADMIN_SECRET env var bypass           (ops escape-hatch)
+
+    Verified tokens are cached in session_store so subsequent requests in the same
+    process skip the signature verification overhead.
+
+    BUG FIXED: previous version ignored payload.get('is_admin') and only checked
+    role string — tokens issued with is_admin:true but non-standard role strings
+    were silently denied admin access.
     """
     # ── 1. Extract token from header ────────────────────────────────────────
-    token = req.headers.get('Authorization', '').replace('Bearer ', '').strip()
+    auth_header = req.headers.get('Authorization', '')
+    token = auth_header.replace('Bearer ', '').replace('bearer ', '').strip()
 
     if not token:
         return False, False
 
-    # ── 2. Check globals session store (populated by h_login) ───────────────
+    # ── 2. Check globals session store (fast path — no crypto overhead) ─────
     try:
         gs = get_globals()
         session_entry = gs.auth.session_store.get(token)
         if session_entry and session_entry.get('authenticated'):
-            is_admin = session_entry.get('is_admin', False)
+            is_admin = bool(session_entry.get('is_admin', False))
             return True, is_admin
     except Exception:
         pass
@@ -310,11 +319,33 @@ def _parse_auth(req):
             payload = auth_mgr.verify_token(token)
             if payload:
                 role = payload.get('role', 'user')
-                return True, role in ('admin', 'superadmin')
-    except Exception:
-        pass
-    if token and token == os.getenv('ADMIN_SECRET', ''):
+                # Check BOTH the role string AND the explicit is_admin boolean claim.
+                # A token carrying is_admin:true must be honoured regardless of role casing.
+                is_admin = (
+                    bool(payload.get('is_admin', False))
+                    or role in ('admin', 'superadmin', 'super_admin')
+                )
+                # Cache the verified session so subsequent requests are O(1)
+                try:
+                    gs = get_globals()
+                    gs.auth.session_store[token] = {
+                        'authenticated': True,
+                        'user_id': payload.get('user_id', ''),
+                        'role': role,
+                        'is_admin': is_admin,
+                        'cached_at': datetime.now(timezone.utc).isoformat(),
+                    }
+                except Exception:
+                    pass
+                return True, is_admin
+    except Exception as _jwt_err:
+        logger.debug(f'[_parse_auth] JWT verify failed: {_jwt_err}')
+
+    # ── 4. ADMIN_SECRET env bypass ───────────────────────────────────────────
+    admin_secret = os.getenv('ADMIN_SECRET', '').strip()
+    if admin_secret and token == admin_secret:
         return True, True
+
     return False, False
 
 
@@ -433,7 +464,56 @@ def api_command():
             return jsonify({'status': 'error', 'error': str(exc)}), 500
 
 
-@app.route('/api/commands/batch', methods=['POST'])
+@app.route('/api/admin/bootstrap-session', methods=['POST'])
+def api_bootstrap_session():
+    """
+    POST /api/admin/bootstrap-session
+    Body: { "token": "<jwt>", "admin_secret": "<ADMIN_SECRET env value>" }
+
+    Injects the provided JWT into the in-memory session_store as an admin session.
+    Required when JWT_SECRET rotated between restarts and the existing token can no
+    longer be signature-verified.  Guarded by ADMIN_SECRET so only ops can call it.
+    """
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        provided_secret = body.get('admin_secret', '').strip()
+        token = body.get('token', '').strip()
+
+        required_secret = os.getenv('ADMIN_SECRET', '').strip()
+        if not required_secret:
+            return jsonify({'status': 'error', 'error': 'ADMIN_SECRET not configured on server'}), 501
+        if provided_secret != required_secret:
+            return jsonify({'status': 'error', 'error': 'Invalid admin_secret'}), 403
+        if not token:
+            return jsonify({'status': 'error', 'error': 'token required'}), 400
+
+        ok = bootstrap_admin_session(token)
+        if ok:
+            return jsonify({'status': 'success', 'message': 'Admin session bootstrapped — token is now trusted'}), 200
+        return jsonify({'status': 'error', 'error': 'Bootstrap failed — check server logs'}), 500
+    except Exception as exc:
+        logger.error(f'[/api/admin/bootstrap-session] {exc}')
+        return jsonify({'status': 'error', 'error': str(exc)}), 500
+
+
+@app.route('/api/admin/revoke-session', methods=['POST'])
+def api_revoke_session():
+    """Revoke a cached session token immediately."""
+    try:
+        is_auth, is_admin = _parse_auth(request)
+        if not is_admin:
+            return jsonify({'status': 'error', 'error': 'Admin required'}), 403
+        body = request.get_json(force=True, silent=True) or {}
+        token = body.get('token', '').strip()
+        if not token:
+            return jsonify({'status': 'error', 'error': 'token required'}), 400
+        revoke_session(token)
+        return jsonify({'status': 'success', 'message': 'Session revoked'}), 200
+    except Exception as exc:
+        return jsonify({'status': 'error', 'error': str(exc)}), 500
+
+
+
 def api_commands_batch():
     """Execute multiple commands in parallel with aggregated results."""
     try:
