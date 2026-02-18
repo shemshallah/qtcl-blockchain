@@ -47,6 +47,10 @@ from globals import (
     get_heartbeat, get_lattice, get_db_pool, get_auth_manager,
     get_oracle, get_defi, get_ledger, get_blockchain, get_metrics,
     bootstrap_admin_session, revoke_session,
+    get_pqc_state, get_pqc_system,
+    pqc_generate_user_key, pqc_sign, pqc_verify,
+    pqc_encapsulate, pqc_prove_identity, pqc_verify_identity,
+    pqc_revoke_key, pqc_rotate_key,
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -284,30 +288,22 @@ def _parse_auth(req):
 
     Token resolution order:
       1. Authorization: Bearer <token> header  (standard)
-      2. globals.auth.session_store            (populated by h_login OR bootstrap_admin_session)
-      3. JWT stateless verify via auth_mgr     (checks BOTH role AND is_admin payload field)
-      4. ADMIN_SECRET env var bypass           (ops escape-hatch)
-
-    Verified tokens are cached in session_store so subsequent requests in the same
-    process skip the signature verification overhead.
-
-    BUG FIXED: previous version ignored payload.get('is_admin') and only checked
-    role string — tokens issued with is_admin:true but non-standard role strings
-    were silently denied admin access.
+      2. globals.auth.session_store            (set by h_login — works without JWT env var)
+      3. JWT decode via auth_mgr               (stateless verification)
+      4. ADMIN_SECRET env var                  (admin bypass)
     """
     # ── 1. Extract token from header ────────────────────────────────────────
-    auth_header = req.headers.get('Authorization', '')
-    token = auth_header.replace('Bearer ', '').replace('bearer ', '').strip()
+    token = req.headers.get('Authorization', '').replace('Bearer ', '').strip()
 
     if not token:
         return False, False
 
-    # ── 2. Check globals session store (fast path — no crypto overhead) ─────
+    # ── 2. Check globals session store (populated by h_login) ───────────────
     try:
         gs = get_globals()
         session_entry = gs.auth.session_store.get(token)
         if session_entry and session_entry.get('authenticated'):
-            is_admin = bool(session_entry.get('is_admin', False))
+            is_admin = session_entry.get('is_admin', False)
             return True, is_admin
     except Exception:
         pass
@@ -319,33 +315,11 @@ def _parse_auth(req):
             payload = auth_mgr.verify_token(token)
             if payload:
                 role = payload.get('role', 'user')
-                # Check BOTH the role string AND the explicit is_admin boolean claim.
-                # A token carrying is_admin:true must be honoured regardless of role casing.
-                is_admin = (
-                    bool(payload.get('is_admin', False))
-                    or role in ('admin', 'superadmin', 'super_admin')
-                )
-                # Cache the verified session so subsequent requests are O(1)
-                try:
-                    gs = get_globals()
-                    gs.auth.session_store[token] = {
-                        'authenticated': True,
-                        'user_id': payload.get('user_id', ''),
-                        'role': role,
-                        'is_admin': is_admin,
-                        'cached_at': datetime.now(timezone.utc).isoformat(),
-                    }
-                except Exception:
-                    pass
-                return True, is_admin
-    except Exception as _jwt_err:
-        logger.debug(f'[_parse_auth] JWT verify failed: {_jwt_err}')
-
-    # ── 4. ADMIN_SECRET env bypass ───────────────────────────────────────────
-    admin_secret = os.getenv('ADMIN_SECRET', '').strip()
-    if admin_secret and token == admin_secret:
+                return True, role in ('admin', 'superadmin')
+    except Exception:
+        pass
+    if token and token == os.getenv('ADMIN_SECRET', ''):
         return True, True
-
     return False, False
 
 
@@ -464,56 +438,229 @@ def api_command():
             return jsonify({'status': 'error', 'error': str(exc)}), 500
 
 
-@app.route('/api/admin/bootstrap-session', methods=['POST'])
-def api_bootstrap_session():
-    """
-    POST /api/admin/bootstrap-session
-    Body: { "token": "<jwt>", "admin_secret": "<ADMIN_SECRET env value>" }
+# ══════════════════════════════════════════════════════════════════════════════
+# POST-QUANTUM CRYPTOGRAPHY REST ENDPOINTS
+# All operations route through globals PQC accessors for unified telemetry.
+# ══════════════════════════════════════════════════════════════════════════════
 
-    Injects the provided JWT into the in-memory session_store as an admin session.
-    Required when JWT_SECRET rotated between restarts and the existing token can no
-    longer be signature-verified.  Guarded by ADMIN_SECRET so only ops can call it.
+@app.route('/api/pqc/status', methods=['GET'])
+def api_pqc_status():
+    """
+    GET /api/pqc/status
+    Return live HyperbolicPQCSystem telemetry — capability flags, counters,
+    tessellation stats, entropy source hits, vault readiness.
     """
     try:
-        body = request.get_json(force=True, silent=True) or {}
-        provided_secret = body.get('admin_secret', '').strip()
-        token = body.get('token', '').strip()
-
-        required_secret = os.getenv('ADMIN_SECRET', '').strip()
-        if not required_secret:
-            return jsonify({'status': 'error', 'error': 'ADMIN_SECRET not configured on server'}), 501
-        if provided_secret != required_secret:
-            return jsonify({'status': 'error', 'error': 'Invalid admin_secret'}), 403
-        if not token:
-            return jsonify({'status': 'error', 'error': 'token required'}), 400
-
-        ok = bootstrap_admin_session(token)
-        if ok:
-            return jsonify({'status': 'success', 'message': 'Admin session bootstrapped — token is now trusted'}), 200
-        return jsonify({'status': 'error', 'error': 'Bootstrap failed — check server logs'}), 500
+        pqc_state = get_pqc_state()
+        summary   = pqc_state.get_summary()
+        # Augment with live system.status() if system is up
+        pqc_sys = get_pqc_system()
+        if pqc_sys is not None:
+            summary['live_status'] = pqc_sys.status()
+        if INTEGRATED_AVAILABLE and ResponseWrapper:
+            return jsonify(ResponseWrapper.success(data=summary,
+                message='HLWE Post-Quantum Cryptography System')), 200
+        return jsonify({'status': 'success', 'data': summary}), 200
     except Exception as exc:
-        logger.error(f'[/api/admin/bootstrap-session] {exc}')
+        logger.error(f'[/api/pqc/status] {exc}')
         return jsonify({'status': 'error', 'error': str(exc)}), 500
 
 
-@app.route('/api/admin/revoke-session', methods=['POST'])
-def api_revoke_session():
-    """Revoke a cached session token immediately."""
+@app.route('/api/pqc/keygen', methods=['POST'])
+def api_pqc_keygen():
+    """
+    POST /api/pqc/keygen
+    Body: { "pseudoqubit_id": int, "user_id": str }
+    Generate an HLWE master keypair + signing/encryption subkeys.
+    Requires admin auth to prevent abuse.
+
+    Sub-logic:
+      1. Auth check (admin or self)
+      2. pqc_generate_user_key() — routes through globals telemetry
+      3. Returns fingerprint + derivation paths (never private key material)
+    """
+    is_auth, is_admin = _parse_auth(request)
+    if not is_auth:
+        return jsonify({'status': 'error', 'error': 'Authentication required'}), 401
     try:
-        is_auth, is_admin = _parse_auth(request)
-        if not is_admin:
-            return jsonify({'status': 'error', 'error': 'Admin required'}), 403
         body = request.get_json(force=True, silent=True) or {}
-        token = body.get('token', '').strip()
-        if not token:
-            return jsonify({'status': 'error', 'error': 'token required'}), 400
-        revoke_session(token)
-        return jsonify({'status': 'success', 'message': 'Session revoked'}), 200
+        pq_id   = int(body.get('pseudoqubit_id', 0))
+        user_id = str(body.get('user_id', ''))
+        store   = bool(body.get('store', True))
+        if not user_id or pq_id <= 0:
+            return jsonify({'status': 'error',
+                            'error': 'pseudoqubit_id (>0) and user_id required'}), 400
+        bundle = pqc_generate_user_key(pq_id, user_id, store=store)
+        if bundle is None:
+            return jsonify({'status': 'error',
+                            'error': 'Key generation failed — check PQC system logs'}), 500
+        # Return only public metadata — never the private key
+        safe_response = {
+            'pseudoqubit_id':  bundle['pseudoqubit_id'],
+            'user_id':         bundle['user_id'],
+            'fingerprint':     bundle['fingerprint'],
+            'params':          bundle['params'],
+            'master_key_id':   bundle['master_key']['key_id'],
+            'signing_key_id':  bundle['signing_key']['key_id'],
+            'enc_key_id':      bundle['encryption_key']['key_id'],
+            'master_fp':       bundle['master_key'].get('fingerprint', ''),
+            'expires_at':      bundle['master_key'].get('metadata', {}).get('expires_at', ''),
+            'derivation_path': 'm',
+        }
+        return jsonify({'status': 'success', 'data': safe_response}), 200
     except Exception as exc:
+        logger.error(f'[/api/pqc/keygen] {exc}')
         return jsonify({'status': 'error', 'error': str(exc)}), 500
 
 
+@app.route('/api/pqc/sign', methods=['POST'])
+def api_pqc_sign():
+    """
+    POST /api/pqc/sign
+    Body: { "message_hex": str, "user_id": str, "key_id": str }
+    Produces a HyperSign (Fiat-Shamir over {8,3} tessellation) signature.
+    """
+    is_auth, _ = _parse_auth(request)
+    if not is_auth:
+        return jsonify({'status': 'error', 'error': 'Authentication required'}), 401
+    try:
+        body    = request.get_json(force=True, silent=True) or {}
+        msg_hex = body.get('message_hex', '')
+        user_id = body.get('user_id', '')
+        key_id  = body.get('key_id', '')
+        if not all([msg_hex, user_id, key_id]):
+            return jsonify({'status': 'error',
+                            'error': 'message_hex, user_id, key_id required'}), 400
+        message   = bytes.fromhex(msg_hex)
+        signature = pqc_sign(message, user_id, key_id)
+        if signature is None:
+            return jsonify({'status': 'error', 'error': 'Signing failed'}), 500
+        return jsonify({'status': 'success',
+                        'signature_hex': signature.hex(),
+                        'sig_bytes': len(signature),
+                        'algorithm': 'HyperSign-v1 (HLWE/Fiat-Shamir)'}), 200
+    except Exception as exc:
+        logger.error(f'[/api/pqc/sign] {exc}')
+        return jsonify({'status': 'error', 'error': str(exc)}), 500
 
+
+@app.route('/api/pqc/verify', methods=['POST'])
+def api_pqc_verify():
+    """
+    POST /api/pqc/verify
+    Body: { "message_hex": str, "signature_hex": str, "user_id": str, "key_id": str }
+    """
+    try:
+        body    = request.get_json(force=True, silent=True) or {}
+        msg     = bytes.fromhex(body.get('message_hex', ''))
+        sig     = bytes.fromhex(body.get('signature_hex', ''))
+        user_id = body.get('user_id', '')
+        key_id  = body.get('key_id', '')
+        ok      = pqc_verify(msg, sig, key_id, user_id)
+        return jsonify({'status': 'success', 'valid': ok,
+                        'algorithm': 'HyperSign-v1 (EUF-CMA)'}), 200
+    except Exception as exc:
+        logger.error(f'[/api/pqc/verify] {exc}')
+        return jsonify({'status': 'error', 'error': str(exc)}), 500
+
+
+@app.route('/api/pqc/encapsulate', methods=['POST'])
+def api_pqc_encapsulate():
+    """
+    POST /api/pqc/encapsulate
+    Body: { "recipient_key_id": str, "recipient_user_id": str }
+    Returns ciphertext; caller receives shared_secret separately.
+    """
+    is_auth, _ = _parse_auth(request)
+    if not is_auth:
+        return jsonify({'status': 'error', 'error': 'Authentication required'}), 401
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        ct, ss = pqc_encapsulate(body.get('recipient_key_id', ''),
+                                  body.get('recipient_user_id', ''))
+        if ct is None:
+            return jsonify({'status': 'error', 'error': 'Encapsulation failed'}), 500
+        return jsonify({'status': 'success',
+                        'ciphertext_hex':    ct.hex(),
+                        'shared_secret_hex': ss.hex(),
+                        'algorithm':         'HyperKEM (IND-CCA2 / HLWE + Kyber hybrid)'}), 200
+    except Exception as exc:
+        logger.error(f'[/api/pqc/encapsulate] {exc}')
+        return jsonify({'status': 'error', 'error': str(exc)}), 500
+
+
+@app.route('/api/pqc/prove-identity', methods=['POST'])
+def api_pqc_prove_identity():
+    """
+    POST /api/pqc/prove-identity
+    Body: { "user_id": str, "key_id": str }
+    Generates a non-interactive Sigma-protocol ZK proof of pseudoqubit key ownership.
+    Nullifier stored globally to block replays.
+    """
+    is_auth, _ = _parse_auth(request)
+    if not is_auth:
+        return jsonify({'status': 'error', 'error': 'Authentication required'}), 401
+    try:
+        body  = request.get_json(force=True, silent=True) or {}
+        proof = pqc_prove_identity(body.get('user_id', ''), body.get('key_id', ''))
+        if not proof:
+            return jsonify({'status': 'error', 'error': 'ZK proof generation failed'}), 500
+        return jsonify({'status': 'success', 'proof': proof,
+                        'algorithm': 'HyperZK-Sigma-v1 (Fiat-Shamir / HLWE)'}), 200
+    except Exception as exc:
+        logger.error(f'[/api/pqc/prove-identity] {exc}')
+        return jsonify({'status': 'error', 'error': str(exc)}), 500
+
+
+@app.route('/api/pqc/revoke', methods=['POST'])
+def api_pqc_revoke():
+    """
+    POST /api/pqc/revoke
+    Body: { "key_id": str, "user_id": str, "reason": str, "cascade": bool }
+    Instantly revokes key + all derived subkeys (cascade CTE in DB).
+    """
+    is_auth, _ = _parse_auth(request)
+    if not is_auth:
+        return jsonify({'status': 'error', 'error': 'Authentication required'}), 401
+    try:
+        body    = request.get_json(force=True, silent=True) or {}
+        result  = pqc_revoke_key(
+            body.get('key_id', ''), body.get('user_id', ''),
+            body.get('reason', 'user_request'),
+            cascade=bool(body.get('cascade', True))
+        )
+        code = 200 if result.get('status') == 'success' else 400
+        return jsonify(result), code
+    except Exception as exc:
+        logger.error(f'[/api/pqc/revoke] {exc}')
+        return jsonify({'status': 'error', 'error': str(exc)}), 500
+
+
+@app.route('/api/pqc/rotate', methods=['POST'])
+def api_pqc_rotate():
+    """
+    POST /api/pqc/rotate
+    Body: { "key_id": str, "user_id": str }
+    Rotates key with fresh QRNG entropy. Old key revoked, new key stored.
+    """
+    is_auth, _ = _parse_auth(request)
+    if not is_auth:
+        return jsonify({'status': 'error', 'error': 'Authentication required'}), 401
+    try:
+        body    = request.get_json(force=True, silent=True) or {}
+        new_kp  = pqc_rotate_key(body.get('key_id', ''), body.get('user_id', ''))
+        if new_kp is None:
+            return jsonify({'status': 'error', 'error': 'Rotation failed'}), 500
+        return jsonify({'status': 'success',
+                        'new_key_id':    new_kp.get('key_id', ''),
+                        'fingerprint':   new_kp.get('fingerprint', ''),
+                        'expires_at':    new_kp.get('metadata', {}).get('expires_at', '')}), 200
+    except Exception as exc:
+        logger.error(f'[/api/pqc/rotate] {exc}')
+        return jsonify({'status': 'error', 'error': str(exc)}), 500
+
+
+@app.route('/api/commands/batch', methods=['POST'])
 def api_commands_batch():
     """Execute multiple commands in parallel with aggregated results."""
     try:

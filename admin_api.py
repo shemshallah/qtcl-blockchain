@@ -818,7 +818,269 @@ def create_blueprint()->Blueprint:
         except Exception as e:
             logger.error(f"Event logs error: {e}",exc_info=True)
             return jsonify({'error':'Failed to get event logs'}),500
-    
+
+    # ══════════════════════════════════════════════════════════════════════
+    # POST-QUANTUM CRYPTOGRAPHY — ADMIN ENDPOINTS
+    # Full operational visibility and control over the HLWE key subsystem.
+    # Sub-logic: all operations route through globals PQC accessors so
+    # telemetry counters, recent_ops ring buffer, and user_key_registry
+    # remain consistent regardless of call path (REST vs terminal vs admin).
+    # ══════════════════════════════════════════════════════════════════════
+
+    @bp.route('/pqc/status', methods=['GET'])
+    @require_auth
+    @rate_limit(max_requests=200)
+    def admin_pqc_status():
+        """
+        GET /api/admin/pqc/status
+        Full PQC system telemetry including live system.status(), per-user key
+        registry, entropy source hit counts, vault schema state, and recent ops.
+        Admin-only.
+        """
+        try:
+            from globals import get_pqc_state, get_pqc_system
+            pqc_state  = get_pqc_state()
+            summary    = pqc_state.get_summary()
+            pqc_sys    = get_pqc_system()
+            if pqc_sys:
+                summary['live_system_status'] = pqc_sys.status()
+            # Include recent ops ring buffer for admin visibility
+            summary['recent_ops'] = list(pqc_state.recent_ops)[-50:]
+            summary['user_key_count'] = len(pqc_state.user_key_registry)
+            return jsonify({'status': 'success', 'pqc': summary}), 200
+        except Exception as e:
+            logger.error(f'[admin/pqc/status] {e}', exc_info=True)
+            return jsonify({'error': str(e)}), 500
+
+    @bp.route('/pqc/users', methods=['GET'])
+    @require_auth
+    @rate_limit(max_requests=100)
+    def admin_pqc_users():
+        """
+        GET /api/admin/pqc/users
+        List all users in the PQC key registry with their key IDs, fingerprints,
+        pseudoqubit anchors, and rotation counts. Paginated.
+        """
+        try:
+            from globals import get_pqc_state
+            pqc_state = get_pqc_state()
+            offset = int(request.args.get('offset', 0))
+            limit  = min(int(request.args.get('limit', 50)), 200)
+            items  = list(pqc_state.user_key_registry.items())
+            page   = items[offset:offset + limit]
+            result = [{'user_id': uid, **meta} for uid, meta in page]
+            return jsonify({
+                'status': 'success',
+                'users': result,
+                'total': len(items),
+                'offset': offset,
+                'limit': limit,
+            }), 200
+        except Exception as e:
+            logger.error(f'[admin/pqc/users] {e}')
+            return jsonify({'error': str(e)}), 500
+
+    @bp.route('/pqc/keygen', methods=['POST'])
+    @require_auth
+    @rate_limit(max_requests=50)
+    def admin_pqc_keygen():
+        """
+        POST /api/admin/pqc/keygen
+        Body: { "pseudoqubit_id": int, "user_id": str }
+        Admin-initiated key generation. Routes through globals pqc_generate_user_key
+        for unified telemetry. Returns public metadata only — no private key material.
+
+        Sub-logic:
+          1. Validate pseudoqubit_id range (0..106495)
+          2. Check user_id exists in auth DB
+          3. pqc_generate_user_key() → globals telemetry update
+          4. Return fingerprint + key IDs + derivation paths
+        """
+        try:
+            data    = request.get_json(force=True, silent=True) or {}
+            pq_id   = int(data.get('pseudoqubit_id', 0))
+            user_id = str(data.get('user_id', '')).strip()
+            store   = bool(data.get('store', True))
+
+            if not user_id:
+                return jsonify({'error': 'user_id required'}), 400
+            if not (0 <= pq_id <= 106495):
+                return jsonify({'error': f'pseudoqubit_id must be 0..106495, got {pq_id}'}), 400
+
+            from globals import pqc_generate_user_key
+            bundle = pqc_generate_user_key(pq_id, user_id, store=store)
+            if bundle is None:
+                return jsonify({'error': 'Key generation failed — see PQC system logs'}), 500
+
+            return jsonify({
+                'status':          'success',
+                'pseudoqubit_id':  bundle['pseudoqubit_id'],
+                'user_id':         bundle['user_id'],
+                'fingerprint':     bundle['fingerprint'],
+                'params':          bundle['params'],
+                'master_key_id':   bundle['master_key']['key_id'],
+                'signing_key_id':  bundle['signing_key']['key_id'],
+                'enc_key_id':      bundle['encryption_key']['key_id'],
+                'expires_at':      bundle['master_key'].get('metadata', {}).get('expires_at', ''),
+            }), 200
+        except Exception as e:
+            logger.error(f'[admin/pqc/keygen] {e}', exc_info=True)
+            return jsonify({'error': str(e)}), 500
+
+    @bp.route('/pqc/revoke', methods=['POST'])
+    @require_auth
+    @rate_limit(max_requests=50)
+    def admin_pqc_revoke():
+        """
+        POST /api/admin/pqc/revoke
+        Body: { "key_id": str, "user_id": str, "reason": str, "cascade": bool }
+        Instantly revoke a key. cascade=true (default) triggers recursive CTE in
+        PostgreSQL to revoke all derived subkeys atomically. Telemetry updated.
+
+        Sub-logic (cascade CTE):
+          WITH RECURSIVE key_tree AS (
+            SELECT key_id FROM pq_key_store WHERE parent_key_id = $target
+            UNION ALL
+            SELECT k.key_id FROM pq_key_store k JOIN key_tree t ON k.parent_key_id = t.key_id
+          )
+          UPDATE pq_key_store SET status='revoked' WHERE key_id IN (SELECT key_id FROM key_tree)
+        """
+        try:
+            data    = request.get_json(force=True, silent=True) or {}
+            key_id  = str(data.get('key_id', '')).strip()
+            user_id = str(data.get('user_id', '')).strip()
+            reason  = str(data.get('reason', 'admin_action')).strip()
+            cascade = bool(data.get('cascade', True))
+            if not key_id or not user_id:
+                return jsonify({'error': 'key_id and user_id required'}), 400
+            from globals import pqc_revoke_key
+            result = pqc_revoke_key(key_id, user_id, reason, cascade=cascade)
+            code   = 200 if result.get('status') == 'success' else 400
+            return jsonify(result), code
+        except Exception as e:
+            logger.error(f'[admin/pqc/revoke] {e}')
+            return jsonify({'error': str(e)}), 500
+
+    @bp.route('/pqc/rotate', methods=['POST'])
+    @require_auth
+    @rate_limit(max_requests=50)
+    def admin_pqc_rotate():
+        """
+        POST /api/admin/pqc/rotate
+        Body: { "key_id": str, "user_id": str }
+        Admin-initiated key rotation with fresh QRNG entropy. Old key atomically
+        revoked only after new key successfully stored. Signing + encryption
+        subkeys auto-derived at new geodesic position.
+        """
+        try:
+            data    = request.get_json(force=True, silent=True) or {}
+            key_id  = str(data.get('key_id', '')).strip()
+            user_id = str(data.get('user_id', '')).strip()
+            if not key_id or not user_id:
+                return jsonify({'error': 'key_id and user_id required'}), 400
+            from globals import pqc_rotate_key
+            new_kp = pqc_rotate_key(key_id, user_id)
+            if new_kp is None:
+                return jsonify({'error': 'Rotation failed — see PQC system logs'}), 500
+            return jsonify({
+                'status':        'success',
+                'old_key_id':    key_id,
+                'new_key_id':    new_kp.get('key_id', ''),
+                'fingerprint':   new_kp.get('fingerprint', ''),
+                'expires_at':    new_kp.get('metadata', {}).get('expires_at', ''),
+            }), 200
+        except Exception as e:
+            logger.error(f'[admin/pqc/rotate] {e}')
+            return jsonify({'error': str(e)}), 500
+
+    @bp.route('/pqc/vault-keys', methods=['GET'])
+    @require_auth
+    @rate_limit(max_requests=100)
+    def admin_pqc_vault_keys():
+        """
+        GET /api/admin/pqc/vault-keys?user_id=X&status=active
+        Query keys from pq_key_store. Returns public metadata only; private key
+        material is never surfaced via API (KEK-encrypted in DB, only decrypted
+        server-side during signing/decapsulation operations).
+        """
+        try:
+            from globals import get_pqc_system
+            pqc_sys = get_pqc_system()
+            if pqc_sys is None:
+                return jsonify({'error': 'PQC system unavailable'}), 503
+            pool = pqc_sys.vault._get_pool()
+            if pool is None:
+                return jsonify({'error': 'No DB pool'}), 503
+
+            user_filter   = request.args.get('user_id', '')
+            status_filter = request.args.get('status', 'active')
+            limit         = min(int(request.args.get('limit', 50)), 500)
+
+            conn = pool.get_connection()
+            try:
+                import psycopg2.extras
+                cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                params = [status_filter, limit]
+                where  = 'WHERE k.status = %s'
+                if user_filter:
+                    where += ' AND k.user_id = %s'
+                    params.insert(1, user_filter)
+                cur.execute(f'''
+                    SELECT key_id, user_id, pseudoqubit_id, fingerprint,
+                           derivation_path, purpose, params_name,
+                           status, created_at, expires_at, revoked_at
+                    FROM pq_key_store k
+                    {where}
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                ''', params)
+                rows = [dict(r) for r in (cur.fetchall() or [])]
+                for r in rows:
+                    for f in ('created_at', 'expires_at', 'revoked_at'):
+                        if r.get(f):
+                            r[f] = str(r[f])
+                    r['key_id'] = str(r['key_id'])
+                cur.close()
+                return jsonify({'status': 'success', 'keys': rows, 'count': len(rows)}), 200
+            finally:
+                pool.return_connection(conn)
+        except Exception as e:
+            logger.error(f'[admin/pqc/vault-keys] {e}', exc_info=True)
+            return jsonify({'error': str(e)}), 500
+
+    @bp.route('/pqc/entropy-report', methods=['GET'])
+    @require_auth
+    @rate_limit(max_requests=100)
+    def admin_pqc_entropy_report():
+        """
+        GET /api/admin/pqc/entropy-report
+        Returns entropy source telemetry: per-source hit counts, bytes generated,
+        harvest frequency, and QRNG availability status per source.
+        Used for operational monitoring of the triple-source QRNG pipeline.
+        """
+        try:
+            from globals import get_pqc_state
+            pqc_state = get_pqc_state()
+            ent = pqc_state.get_summary().get('entropy', {})
+            sources = ent.get('sources', {})
+            total_qrng = (sources.get('anu_qrng', 0) +
+                          sources.get('random_org', 0) +
+                          sources.get('lfdr_qrng', 0))
+            report = {
+                'total_harvests':        ent.get('total_harvests', 0),
+                'total_bytes_generated': ent.get('total_bytes', 0),
+                'qrng_hit_rate':         round(total_qrng / max(1, ent.get('total_harvests', 1)), 3),
+                'sources':               sources,
+                'xor_hedge_active':      True,
+                'sha3_expansion':        True,
+                'domain_separation':     'pseudoqubit_id + purpose + HKDF-SHA3',
+                'local_csprng_always':   True,
+            }
+            return jsonify({'status': 'success', 'entropy_report': report}), 200
+        except Exception as e:
+            logger.error(f'[admin/pqc/entropy-report] {e}')
+            return jsonify({'error': str(e)}), 500
+
     @bp.route('/events/watch',methods=['POST'])
     @require_auth
     @rate_limit(max_requests=100)

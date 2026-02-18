@@ -17,12 +17,16 @@
 import threading
 import logging
 import time
+import json
+import uuid
+import secrets
+import hashlib
+import queue
 from typing import Optional, Dict, Any, List, Callable, Set, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 from collections import defaultdict, deque
-from datetime import datetime, timedelta
-import json
+from datetime import datetime, timedelta, timezone
 from functools import wraps, lru_cache
 from contextlib import contextmanager
 from decimal import Decimal
@@ -265,6 +269,155 @@ class DatabaseState:
             self.last_error_time = datetime.utcnow()
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════
+# POST-QUANTUM CRYPTOGRAPHY STATE (PQC — LEVEL 2 DEEP INTEGRATION)
+# Tracks every aspect of the Hyperbolic PQC system at runtime.
+# Sub-logic: HyperbolicPQCSystem → KeyVaultManager → RevocationEngine → ZK nullifier store
+# Sub²-logic: QuantumEntropyHarvester rate-limit telemetry per source
+# Sub³-logic: Per-user key tree metrics (depth, rotation count, share count)
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class PQCState:
+    """
+    Live telemetry for the Hyperbolic Post-Quantum Cryptography subsystem.
+
+    Architectural hierarchy:
+      Level 0 — HyperbolicMath          : {8,3}-tessellation primitive ops
+      Level 1 — HLWESampler             : keypair generation on Poincaré disk
+      Level 2 — HyperKEM / HyperSign    : IND-CCA2 encapsulation + EUF-CMA signing
+      Level 3 — HyperbolicKeyGenerator  : HD key tree (master → subkeys)
+      Level 4 — HyperbolicSecretSharing, HyperZKProver : threshold sharing + ZK
+      Level 5 — KeyVaultManager         : AES-256-GCM encrypted DB vault + revocation
+    """
+    # ── System handle ────────────────────────────────────────────────────────
+    system: Optional[Any] = None          # HyperbolicPQCSystem singleton
+    initialized: bool = False
+    init_error: Optional[str] = None
+    params_name: str = 'HLWE-256'         # HLWE-128 / HLWE-192 / HLWE-256
+
+    # ── Capability flags (set during init from system.status()) ─────────────
+    mpmath_available: bool = False        # 150-decimal precision arithmetic
+    liboqs_available: bool = False        # CRYSTALS-Kyber + Dilithium hybrid
+    cryptography_available: bool = False  # AES-256-GCM vault encryption
+    kyber_hybrid: bool = False            # HLWE + Kyber dual-encap
+    dilithium_hybrid: bool = False        # HLWE + Dilithium dual-sign
+
+    # ── Key lifecycle counters ───────────────────────────────────────────────
+    keys_generated: int = 0              # total master keys created
+    keys_active: int = 0                 # live, non-expired, non-revoked
+    keys_rotated: int = 0               # successful rotations
+    keys_revoked: int = 0               # total revocations (including cascades)
+    subkeys_derived: int = 0            # signing / encryption / session subkeys
+    shares_issued: int = 0              # secret-sharing shares created
+
+    # ── Cryptographic operation counters ─────────────────────────────────────
+    signatures_produced: int = 0
+    signatures_verified: int = 0
+    encapsulations: int = 0
+    decapsulations: int = 0
+    zk_proofs_produced: int = 0
+    zk_proofs_verified: int = 0
+    zk_replays_blocked: int = 0
+
+    # ── QRNG entropy telemetry (sub²-logic) ─────────────────────────────────
+    entropy_harvests: int = 0
+    entropy_bytes_generated: int = 0
+    anu_source_hits: int = 0
+    random_org_hits: int = 0
+    lfdr_hits: int = 0
+    local_csprng_hits: int = 0           # always incremented (always used)
+
+    # ── Vault metrics ─────────────────────────────────────────────────────────
+    vault_stores: int = 0
+    vault_retrievals: int = 0
+    vault_schema_ready: bool = False
+
+    # ── ZK nullifier store (in-memory replay protection) ─────────────────────
+    zk_nullifiers: Set[str] = field(default_factory=set)
+
+    # ── Per-user key tree registry (sub³-logic) ───────────────────────────────
+    # user_id → { master_key_id, signing_key_id, enc_key_id, rotation_count, ... }
+    user_key_registry: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
+    # ── Tessellation metrics ───────────────────────────────────────────────────
+    tessellation_depth: int = 5          # {8,3} subdivision depth
+    total_pseudoqubits: int = 106496     # 8 × 4^5 × 13 = 106,496 lattice positions
+    pseudoqubits_assigned: int = 0       # live count from DB
+
+    # ── Recent operation log (ring buffer) ────────────────────────────────────
+    recent_ops: deque = field(default_factory=lambda: deque(maxlen=200))
+
+    def record_op(self, op: str, user_id: str = '', key_id: str = '',
+                  success: bool = True, detail: str = ''):
+        """Append an operation to the recent-ops ring buffer."""
+        self.recent_ops.append({
+            'op': op, 'user_id': user_id,
+            'key_id': key_id[:8] + '…' if len(key_id) > 8 else key_id,
+            'success': success, 'detail': detail,
+            'ts': datetime.now(timezone.utc).isoformat(),
+        })
+
+    def register_user_keys(self, user_id: str, bundle: Dict[str, Any]):
+        """Persist key IDs for a user in the in-memory registry."""
+        self.user_key_registry[user_id] = {
+            'master_key_id':    bundle.get('master_key', {}).get('key_id', ''),
+            'signing_key_id':   bundle.get('signing_key', {}).get('key_id', ''),
+            'enc_key_id':       bundle.get('encryption_key', {}).get('key_id', ''),
+            'fingerprint':      bundle.get('fingerprint', ''),
+            'pseudoqubit_id':   bundle.get('pseudoqubit_id', 0),
+            'params':           bundle.get('params', self.params_name),
+            'issued_at':        datetime.now(timezone.utc).isoformat(),
+            'rotation_count':   self.user_key_registry.get(user_id, {}).get('rotation_count', 0),
+        }
+
+    def get_summary(self) -> Dict[str, Any]:
+        """Return a JSON-serialisable status snapshot for health/status endpoints."""
+        return {
+            'initialized':          self.initialized,
+            'params':               self.params_name,
+            'hard_problem':         'HLWE — PSL(2,ℝ) / {8,3} tessellation',
+            'security_bits':        int(self.params_name.split('-')[-1]) if '-' in self.params_name else 256,
+            'mpmath':               self.mpmath_available,
+            'liboqs_hybrid':        self.liboqs_available,
+            'kyber_hybrid':         self.kyber_hybrid,
+            'dilithium_hybrid':     self.dilithium_hybrid,
+            'vault_schema_ready':   self.vault_schema_ready,
+            'keys': {
+                'generated':        self.keys_generated,
+                'active':           self.keys_active,
+                'rotated':          self.keys_rotated,
+                'revoked':          self.keys_revoked,
+                'subkeys_derived':  self.subkeys_derived,
+            },
+            'operations': {
+                'signatures_produced':  self.signatures_produced,
+                'signatures_verified':  self.signatures_verified,
+                'encapsulations':       self.encapsulations,
+                'decapsulations':       self.decapsulations,
+                'zk_proofs':            self.zk_proofs_produced,
+                'zk_replays_blocked':   self.zk_replays_blocked,
+            },
+            'entropy': {
+                'total_harvests':   self.entropy_harvests,
+                'total_bytes':      self.entropy_bytes_generated,
+                'sources': {
+                    'anu_qrng':     self.anu_source_hits,
+                    'random_org':   self.random_org_hits,
+                    'lfdr_qrng':    self.lfdr_hits,
+                    'local_csprng': self.local_csprng_hits,
+                }
+            },
+            'tessellation': {
+                'scheme':               '{8,3} hyperbolic',
+                'depth':                self.tessellation_depth,
+                'total_positions':      self.total_pseudoqubits,
+                'assigned':             self.pseudoqubits_assigned,
+            },
+            'users_with_keys':      len(self.user_key_registry),
+            'error':                self.init_error,
+        }
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
 # AUTHENTICATION STATE (ORIGINAL + EXPANDED)
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -465,6 +618,7 @@ class GlobalState:
     defi: DeFiState = field(default_factory=DeFiState)
     oracle: OracleState = field(default_factory=OracleState)
     ledger: LedgerState = field(default_factory=LedgerState)
+    pqc: PQCState = field(default_factory=PQCState)   # Hyperbolic PQC subsystem
     
     # ════════════════════════════════════════════════════════════════════════════════════════
     # APPLICATION STATE
@@ -559,6 +713,7 @@ class GlobalState:
                     'healthy': self.database.healthy,
                     'connection_count': self.database.connection_count,
                 },
+                'pqc': self.pqc.get_summary(),
                 'metrics': self.metrics.get_stats(),
                 'init_status': self.init_status.value,
                 'functions_registered': len(self.all_functions),
@@ -652,6 +807,9 @@ def initialize_globals() -> bool:
         # Establish integrations
         _establish_integrations(globals_inst)
         
+        # Initialize Post-Quantum Cryptography subsystem (non-fatal — system runs without it)
+        _init_pqc(globals_inst)
+        
         # Wire quantum lattice subsystems (non-fatal)
         try:
             wire_heartbeat_to_globals()
@@ -665,6 +823,8 @@ def initialize_globals() -> bool:
         
         logger.info("✅ Global Architecture Master initialized successfully")
         logger.info(f"✅ Functions registered: {len(globals_inst.all_functions)}")
+        pqc_ok = globals_inst.pqc.initialized
+        logger.info(f"{'✅' if pqc_ok else '⚠️ '} Post-Quantum Cryptography: {'HLWE-'+globals_inst.pqc.params_name if pqc_ok else 'unavailable (non-fatal)'}")
         return True
     
     except Exception as e:
@@ -1051,6 +1211,106 @@ def _init_terminal(globals_inst: GlobalState):
         globals_inst.terminal.command_registry = {}  # will be filled by register_all_commands()
     logger.info("[Globals] ✅ Terminal slot ready")
 
+
+def _init_pqc(globals_inst: GlobalState):
+    """
+    Initialize the Hyperbolic Post-Quantum Cryptography subsystem.
+
+    Sub-logic hierarchy:
+      Level 1 — Import HyperbolicPQCSystem singleton (lazy, thread-safe)
+      Level 2 — Call system.status() to populate capability flags in PQCState
+      Level 3 — Ensure KeyVaultManager DB schema is created
+      Level 4 — Seed pseudoqubit count from live DB
+      Level 5 — Register PQC telemetry hooks on entropy harvester
+
+    Non-fatal: if pq_key_system.py is unavailable the rest of the application
+    continues normally; pqc.initialized remains False and endpoints degrade gracefully.
+    """
+    logger.info("[Init] Initializing Post-Quantum Cryptography subsystem (HLWE / {8,3})...")
+    pqc_state = globals_inst.pqc
+
+    try:
+        from pq_key_system import get_pqc_system, HLWE_256
+        pqc_sys = get_pqc_system(HLWE_256)
+
+        # ── Level 2: populate capability flags from live status ───────────────
+        status = pqc_sys.status()
+        with globals_inst.lock:
+            pqc_state.system               = pqc_sys
+            pqc_state.params_name          = status.get('params', 'HLWE-256')
+            pqc_state.mpmath_available     = status.get('mpmath_precision', '') != 'float64'
+            pqc_state.liboqs_available     = bool(status.get('liboqs', False))
+            pqc_state.cryptography_available = True   # if import succeeded
+            pqc_state.kyber_hybrid         = bool(status.get('kyber_hybrid', False))
+            pqc_state.dilithium_hybrid     = bool(status.get('dilithium_hybrid', False))
+
+        # ── Level 3: vault schema ─────────────────────────────────────────────
+        try:
+            schema_ok = pqc_sys.vault.ensure_schema()
+            with globals_inst.lock:
+                pqc_state.vault_schema_ready = schema_ok
+            if schema_ok:
+                logger.info("[Init/PQC] ✅ Key vault schema ready (pq_key_store, pq_key_revocations, pq_zk_nullifiers)")
+        except Exception as _se:
+            logger.warning(f"[Init/PQC] Vault schema deferred: {_se}")
+
+        # ── Level 4: seed pseudoqubit count from DB ───────────────────────────
+        try:
+            pool = globals_inst.database.pool
+            if pool is not None:
+                conn = pool.get_connection()
+                try:
+                    cur = conn.cursor()
+                    cur.execute("SELECT COUNT(*) FROM pseudoqubits WHERE status='assigned'")
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        with globals_inst.lock:
+                            pqc_state.pseudoqubits_assigned = int(row[0])
+                    cur.close()
+                finally:
+                    pool.return_connection(conn)
+        except Exception as _pe:
+            logger.debug(f"[Init/PQC] Pseudoqubit count skipped: {_pe}")
+
+        # ── Level 5: hook entropy telemetry ───────────────────────────────────
+        # Monkey-patch QuantumEntropyHarvester.harvest to count hits in PQCState.
+        # This is safe: harvest() is pure-function, lock-free on the telemetry side.
+        try:
+            orig_harvest = pqc_sys.entropy.harvest.__func__ if hasattr(pqc_sys.entropy.harvest, '__func__') else None
+            _pqc_state_ref = pqc_state  # closure capture
+
+            def _instrumented_harvest(self_e, n_bytes: int = 64, require_remote: bool = False):
+                result = pqc_sys.entropy.__class__.harvest(self_e, n_bytes, require_remote)
+                _pqc_state_ref.entropy_harvests += 1
+                _pqc_state_ref.entropy_bytes_generated += len(result)
+                _pqc_state_ref.local_csprng_hits += 1
+                return result
+
+            import types
+            pqc_sys.entropy.harvest = types.MethodType(_instrumented_harvest, pqc_sys.entropy)
+        except Exception as _he:
+            logger.debug(f"[Init/PQC] Entropy hook skipped: {_he}")
+
+        with globals_inst.lock:
+            pqc_state.initialized = True
+
+        logger.info(
+            f"[Init] ✅ PQC initialized — {pqc_state.params_name} | "
+            f"mpmath={'✓' if pqc_state.mpmath_available else '✗'} | "
+            f"liboqs={'✓' if pqc_state.liboqs_available else '✗'} | "
+            f"vault={'✓' if pqc_state.vault_schema_ready else '⚠'}"
+        )
+
+    except ImportError as _ie:
+        logger.warning(f"[Init/PQC] pq_key_system not importable (non-fatal): {_ie}")
+        with globals_inst.lock:
+            pqc_state.init_error = str(_ie)
+    except Exception as _e:
+        logger.error(f"[Init/PQC] Initialization error (non-fatal): {_e}")
+        with globals_inst.lock:
+            pqc_state.init_error = str(_e)
+
+
 def _build_function_registry(globals_inst: GlobalState):
     """Build comprehensive function registry"""
     logger.info("[Init] Building function registry...")
@@ -1169,6 +1429,216 @@ def get_oracle():
 def get_ledger():
     """Get ledger state"""
     return get_globals().ledger
+
+def get_pqc_state() -> 'PQCState':
+    """Get the live PQC telemetry state object."""
+    return get_globals().pqc
+
+def get_pqc_system() -> Optional[Any]:
+    """
+    Get the HyperbolicPQCSystem singleton stored in globals.
+    Returns None if pq_key_system.py failed to initialise.
+
+    Sub-logic:
+      1. Check globals.pqc.system (fast path — already initialised)
+      2. If None and pq_key_system importable, lazy-init and wire into globals
+      3. Thread-safe: single initialisation guaranteed via globals lock
+    """
+    gs = get_globals()
+    if gs.pqc.system is not None:
+        return gs.pqc.system
+    # Lazy-init path (called before _init_pqc ran, or after deferred import)
+    with gs.lock:
+        if gs.pqc.system is None:
+            _init_pqc(gs)
+    return gs.pqc.system
+
+
+def pqc_generate_user_key(pseudoqubit_id: int, user_id: str,
+                           store: bool = True) -> Optional[Dict[str, Any]]:
+    """
+    Generate a complete HLWE key bundle for a user and update PQC telemetry.
+
+    Sub-logic:
+      L1 — Retrieve HyperbolicPQCSystem via get_pqc_system()
+      L2 — Call system.generate_user_key(pq_id, user_id, store=store)
+      L3 — Register key IDs in PQCState.user_key_registry
+      L4 — Increment PQCState counters (keys_generated, subkeys_derived)
+      L5 — Append to recent_ops ring buffer
+
+    Returns bundle dict or None on failure.
+    """
+    pqc = get_pqc_system()
+    if pqc is None:
+        logger.warning("[globals/pqc_generate_user_key] PQC system unavailable")
+        return None
+    try:
+        bundle = pqc.generate_user_key(pseudoqubit_id, user_id, store=store)
+        gs = get_globals()
+        with gs.lock:
+            gs.pqc.keys_generated   += 1
+            gs.pqc.keys_active      += 1
+            gs.pqc.subkeys_derived  += 2   # signing + encryption
+            gs.pqc.register_user_keys(user_id, bundle)
+            gs.pqc.record_op('keygen', user_id=user_id,
+                             key_id=bundle.get('master_key', {}).get('key_id', ''),
+                             success=True)
+        logger.info(f"[globals/pqc] Key generated for user={user_id} pq={pseudoqubit_id} "
+                    f"fp={bundle.get('fingerprint','?')}")
+        return bundle
+    except Exception as exc:
+        logger.error(f"[globals/pqc_generate_user_key] {exc}")
+        get_globals().pqc.record_op('keygen', user_id=user_id, success=False, detail=str(exc))
+        return None
+
+
+def pqc_sign(message: bytes, user_id: str, key_id: str) -> Optional[bytes]:
+    """Sign a message using stored signing key; updates telemetry."""
+    pqc = get_pqc_system()
+    if pqc is None:
+        return None
+    try:
+        sig = pqc.sign(message, user_id, key_id)
+        gs  = get_globals()
+        with gs.lock:
+            gs.pqc.signatures_produced += 1
+            gs.pqc.record_op('sign', user_id=user_id, key_id=key_id,
+                             success=sig is not None)
+        return sig
+    except Exception as exc:
+        logger.error(f"[globals/pqc_sign] {exc}")
+        return None
+
+
+def pqc_verify(message: bytes, signature: bytes,
+               key_id: str, user_id: str) -> bool:
+    """Verify a HyperSign signature; updates telemetry."""
+    pqc = get_pqc_system()
+    if pqc is None:
+        return False
+    try:
+        ok = pqc.verify(message, signature, key_id, user_id)
+        gs = get_globals()
+        with gs.lock:
+            gs.pqc.signatures_verified += 1
+            gs.pqc.record_op('verify', user_id=user_id, key_id=key_id, success=ok)
+        return ok
+    except Exception as exc:
+        logger.error(f"[globals/pqc_verify] {exc}")
+        return False
+
+
+def pqc_encapsulate(recipient_key_id: str,
+                    recipient_user_id: str) -> Tuple[Optional[bytes], Optional[bytes]]:
+    """KEM encapsulate; returns (ciphertext, shared_secret). Updates telemetry."""
+    pqc = get_pqc_system()
+    if pqc is None:
+        return None, None
+    try:
+        ct, ss = pqc.encapsulate(recipient_key_id, recipient_user_id)
+        gs = get_globals()
+        with gs.lock:
+            gs.pqc.encapsulations += 1
+            gs.pqc.record_op('encap', user_id=recipient_user_id,
+                             key_id=recipient_key_id, success=ct is not None)
+        return ct, ss
+    except Exception as exc:
+        logger.error(f"[globals/pqc_encapsulate] {exc}")
+        return None, None
+
+
+def pqc_prove_identity(user_id: str, key_id: str) -> Optional[Dict[str, Any]]:
+    """Generate ZK ownership proof; updates telemetry + nullifier store."""
+    pqc = get_pqc_system()
+    if pqc is None:
+        return None
+    try:
+        proof = pqc.prove_identity(user_id, key_id)
+        gs    = get_globals()
+        with gs.lock:
+            gs.pqc.zk_proofs_produced += 1
+            if proof and proof.get('nullifier'):
+                gs.pqc.zk_nullifiers.add(proof['nullifier'])
+            gs.pqc.record_op('zk_prove', user_id=user_id, key_id=key_id,
+                             success=bool(proof))
+        return proof
+    except Exception as exc:
+        logger.error(f"[globals/pqc_prove_identity] {exc}")
+        return None
+
+
+def pqc_verify_identity(proof: Dict[str, Any],
+                        key_id: str, user_id: str) -> bool:
+    """Verify ZK ownership proof; blocks replayed nullifiers."""
+    pqc = get_pqc_system()
+    if pqc is None:
+        return False
+    gs = get_globals()
+    # Fast nullifier check in global store before hitting the PQC system
+    nullifier = proof.get('nullifier', '')
+    if nullifier and nullifier in gs.pqc.zk_nullifiers:
+        with gs.lock:
+            gs.pqc.zk_replays_blocked += 1
+        logger.warning(f"[globals/pqc] ZK replay blocked: nullifier={nullifier[:16]}…")
+        return False
+    try:
+        ok = pqc.verify_identity(proof, key_id, user_id)
+        with gs.lock:
+            gs.pqc.zk_proofs_verified += 1
+            if ok and nullifier:
+                gs.pqc.zk_nullifiers.add(nullifier)
+            gs.pqc.record_op('zk_verify', user_id=user_id, key_id=key_id, success=ok)
+        return ok
+    except Exception as exc:
+        logger.error(f"[globals/pqc_verify_identity] {exc}")
+        return False
+
+
+def pqc_revoke_key(key_id: str, user_id: str,
+                   reason: str, cascade: bool = True) -> Dict[str, Any]:
+    """Instantly revoke a key + cascade to subkeys; updates telemetry."""
+    pqc = get_pqc_system()
+    if pqc is None:
+        return {'status': 'error', 'error': 'PQC system unavailable'}
+    try:
+        result = pqc.revoke(key_id, user_id, reason, cascade=cascade)
+        gs     = get_globals()
+        if result.get('status') == 'success':
+            with gs.lock:
+                gs.pqc.keys_revoked += 1 + result.get('cascade_count', 0)
+                gs.pqc.keys_active   = max(0, gs.pqc.keys_active - 1)
+                gs.pqc.record_op('revoke', user_id=user_id, key_id=key_id,
+                                 success=True,
+                                 detail=f"cascade={result.get('cascade_count',0)}")
+        return result
+    except Exception as exc:
+        logger.error(f"[globals/pqc_revoke_key] {exc}")
+        return {'status': 'error', 'error': str(exc)}
+
+
+def pqc_rotate_key(key_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+    """Rotate a key with fresh entropy; updates telemetry."""
+    pqc = get_pqc_system()
+    if pqc is None:
+        return None
+    try:
+        new_bundle = pqc.rotate(key_id, user_id)
+        gs = get_globals()
+        if new_bundle:
+            with gs.lock:
+                gs.pqc.keys_rotated  += 1
+                gs.pqc.keys_revoked  += 1    # old key is revoked
+                gs.pqc.keys_generated += 1
+                gs.pqc.subkeys_derived += 2
+                gs.pqc.register_user_keys(user_id, new_bundle)
+                gs.pqc.record_op('rotate', user_id=user_id, key_id=key_id,
+                                 success=True,
+                                 detail=f"new_key={new_bundle.get('key_id','')[:8]}")
+        return new_bundle
+    except Exception as exc:
+        logger.error(f"[globals/pqc_rotate_key] {exc}")
+        return None
+
 
 def get_config(key: str, default: Any = None) -> Any:
     """Get configuration value"""
