@@ -465,19 +465,61 @@ def create_blueprint()->Blueprint:
         return decorator
     
     def require_auth(f):
-        """Authentication decorator"""
+        """Authentication decorator — validates Bearer token via globals auth manager."""
         @wraps(f)
         def decorated_function(*args,**kwargs):
             auth_header=request.headers.get('Authorization','')
-            if not auth_header.startswith('Bearer '):
-                g.authenticated=False
-                g.user_id=None
-                g.is_admin=False
-            else:
-                g.authenticated=True
-                g.user_id=f"user_{secrets.token_hex(8)}"
-                g.is_admin=True
-            return f(*args,**kwargs)
+            token = auth_header.replace('Bearer ','').strip() if auth_header.startswith('Bearer ') else ''
+            
+            g.authenticated = False
+            g.user_id       = None
+            g.is_admin      = False
+            g.user_role     = 'user'
+            
+            if not token:
+                return jsonify({'error':'Authentication required','code':'NO_TOKEN'}),401
+            
+            # ── Priority 1: globals session_store (populated by h_login) ─────
+            try:
+                from globals import get_globals as _gg
+                _gs = _gg()
+                session_entry = _gs.auth.session_store.get(token)
+                if session_entry and session_entry.get('authenticated'):
+                    g.authenticated = True
+                    g.user_id       = session_entry.get('user_id','')
+                    g.user_role     = session_entry.get('role','user')
+                    g.is_admin      = session_entry.get('is_admin', g.user_role in ('admin','superadmin'))
+                    return f(*args,**kwargs)
+            except Exception:
+                pass
+            
+            # ── Priority 2: JWT stateless verification ────────────────────────
+            try:
+                from globals import get_auth_manager as _gam
+                auth_mgr = _gam()
+                if auth_mgr:
+                    payload = auth_mgr.verify_token(token)
+                    if payload:
+                        role = payload.get('role','user')
+                        g.authenticated = True
+                        g.user_id       = payload.get('user_id','')
+                        g.user_role     = role
+                        g.is_admin      = payload.get('is_admin', role in ('admin','superadmin','super_admin'))
+                        return f(*args,**kwargs)
+            except Exception:
+                pass
+            
+            # ── Priority 3: ADMIN_SECRET bypass ──────────────────────────────
+            import os as _os
+            admin_secret = _os.getenv('ADMIN_SECRET','')
+            if admin_secret and token == admin_secret:
+                g.authenticated = True
+                g.user_id       = 'admin_bypass'
+                g.user_role     = 'admin'
+                g.is_admin      = True
+                return f(*args,**kwargs)
+            
+            return jsonify({'error':'Invalid or expired token','code':'INVALID_TOKEN'}),401
         return decorated_function
     
     def require_admin(f):

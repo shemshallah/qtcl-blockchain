@@ -1170,8 +1170,18 @@ class SessionManager:
     
     def register(self,email:str,password:str,name:str)->Tuple[bool,Any]:
         """
-        Register via Supabase Auth. Returns (success, result_dict_or_error_str).
-        On success result_dict contains: uid, email, pseudoqubit_id, name, role.
+        UNIFIED REGISTRATION — single logic stream.
+        
+        Priority order:
+          1. auth_handlers.AuthHandlers.auth_register()
+             → PostgreSQL users table (db_builder_v2 pool)
+             → Issues HLWE post-quantum keypair via pq_key_system
+             → Sends welcome email with quantum metrics
+          2. SupabaseAuthManager.register_user() (legacy fallback if PG unavailable)
+          3. Legacy /api/auth/register endpoint (final fallback)
+        
+        Both Supabase and local paths are REMOVED as primary — auth_handlers
+        is the canonical registration source.
         """
         # ── Validate password locally before hitting auth ───────────────────
         if len(password) < Config.PASSWORD_MIN_LENGTH:
@@ -1183,10 +1193,41 @@ class SessionManager:
         if Config.PASSWORD_REQUIRE_DIGITS and not any(c.isdigit() for c in password):
             return False, "Password must contain at least one digit"
 
+        # ── Priority 1: auth_handlers (PostgreSQL + PQ keypair) ─────────────
+        try:
+            from auth_handlers import AuthHandlers as _AH, ValidationEngine as _VE
+            result = _AH.auth_register(email=email, username=name, password=password)
+            if result.get('status') == 'success':
+                logger.info(f"[SessionManager.register] auth_handlers registered {email}")
+                return True, {
+                    'uid':            result.get('user_id'),
+                    'email':          result.get('email', email),
+                    'name':           result.get('username', name),
+                    'pseudoqubit_id': result.get('pseudoqubit_id', 'N-A'),
+                    'role':           'user',
+                    'pq_key_id':      result.get('pq_key_id'),
+                    'pq_fingerprint': result.get('pq_fingerprint'),
+                    'pq_params':      result.get('pq_params'),
+                    'message':        result.get('message', 'Registration successful'),
+                }
+            # Convert auth_handlers error format
+            err_code = result.get('code','')
+            err_msg  = result.get('error','Registration failed')
+            if err_code == 'EMAIL_EXISTS':
+                return False, 'Email already registered'
+            if err_code == 'VALIDATION_ERROR':
+                return False, err_msg
+            # Non-fatal auth_handlers error — fall through to Supabase
+            logger.warning(f"[SessionManager.register] auth_handlers non-success ({err_code}), trying Supabase")
+        except Exception as _e:
+            logger.warning(f"[SessionManager.register] auth_handlers path failed: {_e}, trying Supabase")
+        
+        # ── Priority 2: Supabase Auth (fallback) ─────────────────────────────
         ok, result = SupabaseAuthManager.register_user(email, password, name)
         if ok:
             return True, result
-        # Fallback to legacy API
+        
+        # ── Priority 3: Legacy API endpoint ──────────────────────────────────
         success,api_result=self.client.request('POST','/api/auth/register',
             {'email':email,'password':password,'name':name})
         if success:
@@ -5010,12 +5051,19 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             from globals import get_globals as _gg
             _gs = _gg()
             if token:
+                _role = str(getattr(s.session, 'role', 'user'))
+                _is_admin = s.is_admin()
                 _gs.auth.session_store[token] = {
                     'user_id':  getattr(s.session, 'user_id', ''),
                     'email':    email,
-                    'is_admin': s.is_admin(),
+                    'role':     _role,
+                    'is_admin': _is_admin,
                     'authenticated': True,
                 }
+                # Also update role_cache for quick lookups
+                _uid = getattr(s.session, 'user_id', '')
+                if _uid:
+                    _gs.auth.role_cache[_uid] = _role
         except Exception:
             pass
         return _ok({
@@ -5596,6 +5644,154 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             lines.append(f'  Usage: {entry["usage"]}')
         return _ok({'output': '\n'.join(lines)})
 
+    # ── PQ KEY COMMANDS ────────────────────────────────────────────────────────
+
+    def h_pq_status(flags, args):
+        """Show PQ keypair status for current user."""
+        if not s.is_authenticated():
+            return _err('Not authenticated. Run: login --email=x --password=y')
+        try:
+            from globals import get_pqc_system as _gpqc
+            pqc = _gpqc()
+            if pqc:
+                status = pqc.status()
+                return _ok({'output': json.dumps(status, indent=2)})
+            return _err('PQC system unavailable')
+        except Exception as e:
+            return _err(f'PQC status error: {e}')
+
+    def h_pq_keygen(flags, args):
+        """Manually issue/re-issue PQ keypair for current user."""
+        if not s.is_authenticated():
+            return _err('Not authenticated')
+        uid = s.get_user_id()
+        pq_id_str = getattr(s.session, 'pseudoqubit_id', '0')
+        try:
+            pq_int = int(pq_id_str) if str(pq_id_str).isdigit() else 0
+        except Exception:
+            pq_int = 0
+        try:
+            from globals import get_pqc_system as _gpqc
+            pqc = _gpqc()
+            if not pqc:
+                return _err('PQC system unavailable')
+            bundle = pqc.generate_user_key(pseudoqubit_id=pq_int, user_id=uid, store=True)
+            return _ok({
+                'fingerprint':  bundle.get('fingerprint',''),
+                'master_key_id': bundle.get('master_key',{}).get('key_id',''),
+                'signing_key_id': bundle.get('signing_key',{}).get('key_id',''),
+                'encryption_key_id': bundle.get('encryption_key',{}).get('key_id',''),
+                'params': bundle.get('params',''),
+                'pseudoqubit_id': pq_int,
+                'message': 'PQ keypair generated and stored in encrypted vault',
+            })
+        except Exception as e:
+            return _err(f'PQ keygen failed: {e}')
+
+    def h_pq_rotate(flags, args):
+        """Rotate PQ keypair (revoke old, generate new with fresh entropy)."""
+        if not s.is_authenticated():
+            return _err('Not authenticated')
+        key_id = flags.get('key_id') or flags.get('id') or (args[0] if args else None)
+        if not key_id:
+            return _err('Usage: pq-rotate --key_id=<master_key_id>')
+        uid = s.get_user_id()
+        try:
+            from globals import get_pqc_system as _gpqc
+            pqc = _gpqc()
+            if not pqc:
+                return _err('PQC system unavailable')
+            new_kp = pqc.rotate(key_id=key_id, user_id=uid)
+            if not new_kp:
+                return _err('Key rotation failed — check key_id and authentication')
+            return _ok({
+                'new_master_key_id': new_kp.get('key_id',''),
+                'fingerprint':       new_kp.get('fingerprint',''),
+                'message': 'Key rotated. Old key revoked, new keypair active.',
+            })
+        except Exception as e:
+            return _err(f'PQ rotate failed: {e}')
+
+    def h_pq_revoke(flags, args):
+        """Revoke a PQ key (and all derived subkeys)."""
+        if not s.is_authenticated():
+            return _err('Not authenticated')
+        key_id = flags.get('key_id') or flags.get('id') or (args[0] if args else None)
+        reason = flags.get('reason', 'user_request')
+        if not key_id:
+            return _err('Usage: pq-revoke --key_id=<id> [--reason=lost_device]')
+        uid = s.get_user_id()
+        try:
+            from globals import get_pqc_system as _gpqc
+            pqc = _gpqc()
+            if not pqc:
+                return _err('PQC system unavailable')
+            result = pqc.revoke(key_id=key_id, user_id=uid, reason=reason, cascade=True)
+            return _ok(result) if result.get('status') == 'success' else _err(result.get('error','Revocation failed'))
+        except Exception as e:
+            return _err(f'PQ revoke failed: {e}')
+
+    def h_pq_prove(flags, args):
+        """Generate ZK proof of PQ key ownership."""
+        if not s.is_authenticated():
+            return _err('Not authenticated')
+        key_id = flags.get('key_id') or flags.get('id') or (args[0] if args else None)
+        if not key_id:
+            return _err('Usage: pq-prove --key_id=<id>')
+        uid = s.get_user_id()
+        try:
+            from globals import get_pqc_system as _gpqc
+            pqc = _gpqc()
+            if not pqc:
+                return _err('PQC system unavailable')
+            proof = pqc.prove_identity(user_id=uid, key_id=key_id)
+            if not proof:
+                return _err('ZK proof generation failed')
+            return _ok({
+                'nullifier':      proof.get('nullifier','')[:32]+'…',
+                'challenge':      proof.get('challenge','')[:16]+'…',
+                'pq_id':          proof.get('pseudoqubit_id'),
+                'anchor_dist':    round(proof.get('anchor_dist',0), 6),
+                'algorithm':      proof.get('algorithm',''),
+                'proved_at':      proof.get('proved_at',''),
+                'message': 'ZK proof of pseudoqubit ownership generated',
+            })
+        except Exception as e:
+            return _err(f'PQ prove failed: {e}')
+
+    def h_admin_set_role(flags, args):
+        """Admin: Set user role (admin only)."""
+        if not s.is_admin():
+            return _err('Admin access required')
+        user_id = flags.get('user_id') or flags.get('id') or (args[0] if args else None)
+        role    = flags.get('role') or (args[1] if len(args)>1 else None)
+        if not user_id or not role:
+            return _err('Usage: admin-set-role --user_id=<id> --role=<admin|user|founder>')
+        valid_roles = ('admin','user','founder','operator','auditor')
+        if role.lower() not in valid_roles:
+            return _err(f"Role must be one of: {', '.join(valid_roles)}")
+        try:
+            from auth_handlers import AuthDatabase as _ADB
+            _ADB.execute(
+                "UPDATE users SET role=%s, updated_at=NOW() WHERE user_id=%s",
+                (role.lower(), user_id)
+            )
+            # Invalidate role cache in globals
+            try:
+                from globals import get_globals as _gg
+                _gs = _gg()
+                _gs.auth.role_cache.pop(user_id, None)
+                # Invalidate any session_store entries for this user
+                for token, sess in list(_gs.auth.session_store.items()):
+                    if sess.get('user_id') == user_id:
+                        sess['role'] = role.lower()
+                        sess['is_admin'] = role.lower() in ('admin','superadmin')
+            except Exception:
+                pass
+            return _ok({'message': f'Role updated: {user_id} → {role.lower()}'})
+        except Exception as e:
+            return _err(f'Role update failed: {e}')
+
     # ── MASTER MAP ────────────────────────────────────────────────────────────
 
     return {
@@ -5606,6 +5802,12 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         'whoami':               h_whoami,
         'auth-2fa-setup':       lambda f,a: _req('POST', '/api/auth/2fa/setup', f),
         'auth-token-refresh':   lambda f,a: _req('POST', '/api/auth/refresh', f),
+        # PQ KEY OPERATIONS
+        'pq-status':            h_pq_status,
+        'pq-keygen':            h_pq_keygen,
+        'pq-rotate':            h_pq_rotate,
+        'pq-revoke':            h_pq_revoke,
+        'pq-prove':             h_pq_prove,
         # USER
         'user-profile':         h_user_profile,
         'user-settings':        lambda f,a: _req('GET', '/api/users/profile/me'),
@@ -5687,6 +5889,7 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         'admin-settings':       h_admin_settings,
         'admin-audit':          h_admin_audit,
         'admin-emergency':      h_admin_emergency,
+        'admin-set-role':       h_admin_set_role,   # ← NEW: change user role
         # SYSTEM
         'system-status':        h_system_status,
         'system-health':        h_system_health,
@@ -5761,6 +5964,9 @@ def register_all_commands(engine: 'TerminalEngine'):
     CATEGORIES = {
         'login': 'auth', 'logout': 'auth', 'register': 'auth', 'whoami': 'auth',
         'auth-2fa-setup': 'auth', 'auth-token-refresh': 'auth',
+        # PQ key operations
+        'pq-status': 'pq', 'pq-keygen': 'pq', 'pq-rotate': 'pq',
+        'pq-revoke': 'pq', 'pq-prove': 'pq',
         'user-profile': 'user', 'user-settings': 'user', 'user-list': 'user', 'user-details': 'user',
         'transaction-create': 'transaction', 'transaction-track': 'transaction',
         'transaction-cancel': 'transaction', 'transaction-list': 'transaction',
@@ -5790,6 +5996,7 @@ def register_all_commands(engine: 'TerminalEngine'):
         'bridge-history': 'bridge', 'bridge-wrapped': 'bridge',
         'admin-users': 'admin', 'admin-approval': 'admin', 'admin-monitoring': 'admin',
         'admin-settings': 'admin', 'admin-audit': 'admin', 'admin-emergency': 'admin',
+        'admin-set-role': 'admin',
         'system-status': 'system', 'system-health': 'system', 'system-config': 'system',
         'system-backup': 'system', 'system-restore': 'system',
         'parallel-execute': 'parallel', 'parallel-batch': 'parallel', 'parallel-monitor': 'parallel',
@@ -5800,10 +6007,18 @@ def register_all_commands(engine: 'TerminalEngine'):
     DESCRIPTIONS = {
         'login': 'Authenticate with email + password',
         'logout': 'End current session',
-        'register': 'Create new QTCL account',
+        'register': 'Create new QTCL account (issues HLWE post-quantum keypair)',
         'whoami': 'Show current session info',
         'auth-2fa-setup': 'Setup two-factor authentication',
         'auth-token-refresh': 'Refresh JWT auth token',
+        # PQ key descriptions
+        'pq-status':  'Show HyperbolicPQCSystem status and capabilities',
+        'pq-keygen':  'Issue/re-issue HLWE post-quantum keypair for current user',
+        'pq-rotate':  'Rotate PQ keypair: revoke old, generate new with fresh entropy',
+        'pq-revoke':  'Revoke a PQ key and all derived subkeys (cascade)',
+        'pq-prove':   'Generate ZK proof of pseudoqubit ownership (sigma protocol)',
+        # Admin
+        'admin-set-role': 'Admin: Change user role [ADMIN]',
         'user-profile': 'View your profile',
         'user-settings': 'Manage your settings',
         'user-list': 'List all users [ADMIN]',
@@ -5890,7 +6105,8 @@ def register_all_commands(engine: 'TerminalEngine'):
     }
 
     ADMIN_CMDS = {'admin-users','admin-approval','admin-monitoring','admin-settings',
-                  'admin-audit','admin-emergency','system-backup','system-restore','user-list'}
+                  'admin-audit','admin-emergency','system-backup','system-restore','user-list',
+                  'admin-set-role'}
     OPEN_CMDS  = {'help','help-commands','help-category','help-command',
                   'login','register','system-health','system-status','wsgi-status'}
 

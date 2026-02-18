@@ -1104,8 +1104,8 @@ class TokenManager:
     """JWT token creation and validation"""
     
     @staticmethod
-    def create_token(user_id:str,email:str,username:str,token_type:TokenType=TokenType.ACCESS)->str:
-        """Create JWT token"""
+    def create_token(user_id:str,email:str,username:str,token_type:TokenType=TokenType.ACCESS,role:str='user')->str:
+        """Create JWT token — role is embedded in payload for stateless verification."""
         now=datetime.now(timezone.utc)
         expires=now+timedelta(hours=JWT_EXPIRATION_HOURS if token_type==TokenType.ACCESS else 7*24)
         
@@ -1113,6 +1113,8 @@ class TokenManager:
             'user_id':user_id,
             'email':email,
             'username':username,
+            'role':role,                      # ← CRITICAL: role in JWT for stateless auth
+            'is_admin': role in ('admin','superadmin','super_admin'),
             'iat':now.timestamp(),
             'exp':expires.timestamp(),
             'type':token_type.value,
@@ -1321,6 +1323,10 @@ class UserManager:
                 if isinstance(metadata,str):
                     metadata=json.loads(metadata)
                 
+                # Extract role from DB column (same logic as get_user_by_email)
+                db_role_id = result.get('role', 'user') or 'user'
+                roles_list_id = [db_role_id]
+
                 return UserProfile(
                     user_id=result['user_id'],
                     email=result['email'],
@@ -1338,7 +1344,8 @@ class UserManager:
                     last_login=result.get('last_login'),
                     login_attempts=result.get('failed_login_attempts',0),
                     locked_until=result.get('account_locked_until'),
-                    security_level=SecurityLevel[metadata.get('security_level','ENHANCED')]
+                    security_level=SecurityLevel[metadata.get('security_level','ENHANCED')],
+                    roles=roles_list_id
                 )
         except Exception as e:
             logger.error(f"[UserManager] Fetch user by ID failed: {e}")
@@ -1410,21 +1417,21 @@ class SessionManager:
     """Session lifecycle management"""
     
     @staticmethod
-    def create_session(user_id:str,ip_address:str,user_agent:str)->Tuple[str,str,str]:
-        """Create new session"""
+    def create_session(user_id:str,ip_address:str,user_agent:str,role:str='user')->Tuple[str,str,str]:
+        """Create new session — role embedded in both access and refresh tokens."""
         try:
             session_id=str(uuid.uuid4())
+            # Fetch user ONCE — not 4 times
+            _u=UserManager.get_user_by_id(user_id)
+            _email   = _u.email    if _u else ''
+            _username= _u.username if _u else ''
+            _role    = (_u.roles[0] if _u and _u.roles else None) or role
+
             access_token=TokenManager.create_token(
-                user_id,
-                UserManager.get_user_by_id(user_id).email if UserManager.get_user_by_id(user_id) else '',
-                UserManager.get_user_by_id(user_id).username if UserManager.get_user_by_id(user_id) else '',
-                TokenType.ACCESS
+                user_id,_email,_username,TokenType.ACCESS,_role
             )
             refresh_token=TokenManager.create_token(
-                user_id,
-                UserManager.get_user_by_id(user_id).email if UserManager.get_user_by_id(user_id) else '',
-                UserManager.get_user_by_id(user_id).username if UserManager.get_user_by_id(user_id) else '',
-                TokenType.REFRESH
+                user_id,_email,_username,TokenType.REFRESH,_role
             )
             
             now=datetime.now(timezone.utc)
@@ -1490,6 +1497,35 @@ class AuthHandlers:
             password_hash=hash_password(password)
             user=UserManager.create_user(email,username,password_hash)
             
+            # ── ISSUE POST-QUANTUM KEYPAIR (pq_key_system.py) ──────────────────
+            pq_bundle = None
+            pq_fingerprint = None
+            pq_key_id = None
+            try:
+                from pq_key_system import get_pqc_system
+                _pqc = get_pqc_system()
+                _pq_int = int(user.pseudoqubit_id) if isinstance(user.pseudoqubit_id, (int, float)) else 0
+                pq_bundle = _pqc.generate_user_key(
+                    pseudoqubit_id=_pq_int,
+                    user_id=user.user_id,
+                    store=True                          # store encrypted in pq_key_store table
+                )
+                pq_fingerprint = pq_bundle.get('fingerprint','')
+                pq_key_id      = pq_bundle.get('master_key',{}).get('key_id','')
+                # Persist fingerprint + key_id into user metadata in DB
+                try:
+                    AuthDatabase.execute(
+                        "UPDATE users SET metadata = metadata || %s::jsonb WHERE user_id = %s",
+                        (json.dumps({'pq_key_id': pq_key_id, 'pq_fingerprint': pq_fingerprint}),
+                         user.user_id)
+                    )
+                except Exception as _me:
+                    logger.warning(f"[Auth/Register] Metadata update non-fatal: {_me}")
+                logger.info(f"[Auth/Register] PQ keypair issued: {pq_fingerprint} for {user.user_id}")
+            except Exception as _pqe:
+                logger.warning(f"[Auth/Register] PQ keygen non-fatal (system continues): {_pqe}")
+            # ────────────────────────────────────────────────────────────────────
+
             metrics=QuantumMetricsGenerator.generate(SecurityLevel.ENHANCED)
             AuthHandlers._email_sender.send_welcome_email(email,username,user.pseudoqubit_id,metrics)
             
@@ -1513,7 +1549,12 @@ class AuthHandlers:
                 'pseudoqubit_id':user.pseudoqubit_id,
                 'quantum_metrics':metrics.to_json(),
                 'verification_token':verification_token,
-                'message':'Registration successful. Welcome email sent with quantum metrics.'
+                # PQ key information issued at registration
+                'pq_key_id':    pq_key_id,
+                'pq_fingerprint': pq_fingerprint,
+                'pq_params':    pq_bundle.get('params','HLWE-256') if pq_bundle else None,
+                'pq_public_key': pq_bundle.get('master_key',{}).get('public_key',{}) if pq_bundle else None,
+                'message':'Registration successful. Welcome email sent with quantum metrics. Post-quantum keypair issued.'
             }
         except ValueError as e:
             logger.warning(f"[Auth/Register] Validation error: {e}")
@@ -1572,16 +1613,17 @@ class AuthHandlers:
                     logger.warning(f"[Auth/Login] Auto-activation failed (non-fatal): {_ae}")
             
             # ── Create session ──────────────────────────────────────────────
+            _role = user.roles[0] if user.roles else 'user'
             session_id=None; access_token=None; refresh_token=None
             try:
                 session_id,access_token,refresh_token=SessionManager.create_session(
-                    user.user_id,ip_address or 'unknown',user_agent or 'unknown'
+                    user.user_id,ip_address or 'unknown',user_agent or 'unknown',role=_role
                 )
             except Exception as _se:
                 logger.warning(f"[Auth/Login] Session table write failed (non-fatal): {_se}")
-                # Mint tokens manually so login still succeeds
-                access_token=TokenManager.create_token(user.user_id,user.email,user.username,TokenType.ACCESS)
-                refresh_token=TokenManager.create_token(user.user_id,user.email,user.username,TokenType.REFRESH)
+                # Mint tokens manually so login still succeeds — include role
+                access_token=TokenManager.create_token(user.user_id,user.email,user.username,TokenType.ACCESS,_role)
+                refresh_token=TokenManager.create_token(user.user_id,user.email,user.username,TokenType.REFRESH,_role)
                 session_id=str(uuid.uuid4())
             
             UserManager.update_last_login(user.user_id,ip_address or 'unknown')
@@ -1593,8 +1635,17 @@ class AuthHandlers:
             try:
                 from globals import get_globals
                 gs=get_globals()
-                gs.auth.users[user.user_id]={'email':user.email,'username':user.username,'pseudoqubit_id':user.pseudoqubit_id}
+                gs.auth.users[user.user_id]={'email':user.email,'username':user.username,'pseudoqubit_id':user.pseudoqubit_id,'role':_role}
                 gs.auth.active_sessions+=1
+                # Mirror into session_store so _parse_auth JWT-less path works
+                if access_token:
+                    gs.auth.session_store[access_token] = {
+                        'user_id':  user.user_id,
+                        'email':    user.email,
+                        'role':     _role,
+                        'is_admin': _role in ('admin','superadmin','super_admin'),
+                        'authenticated': True,
+                    }
             except Exception:
                 pass
             
@@ -1857,13 +1908,13 @@ class JWTTokenManager:
     # ── Instance-method wrappers ──────────────────────────────────────────────
 
     def create_token(self, user_id: str, email: str, username: str,
-                     token_type: str = 'access') -> str:
+                     token_type: str = 'access', role: str = 'user') -> str:
         tt = TokenType.ACCESS
         try:
             tt = TokenType(token_type)
         except Exception:
             pass
-        return TokenManager.create_token(user_id, email, username, tt)
+        return TokenManager.create_token(user_id, email, username, tt, role)
 
     def verify_token(self, token: str) -> Optional[Dict[str, Any]]:
         """Returns payload dict on success, None on any failure — never raises."""
