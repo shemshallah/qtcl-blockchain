@@ -1280,6 +1280,10 @@ class UserManager:
             or result['email'].split('@')[0]
         )
         
+        # Extract roles from database
+        db_role = result.get('role', 'user')
+        roles_list = [db_role] if db_role else ['user']
+        
         try:
             return UserProfile(
                 user_id=result['user_id'],
@@ -1298,7 +1302,8 @@ class UserManager:
                 last_login=result.get('last_login'),
                 login_attempts=int(result.get('failed_login_attempts', 0) or 0),
                 locked_until=result.get('account_locked_until'),
-                security_level=sec_level
+                security_level=sec_level,
+                roles=roles_list
             )
         except Exception as e:
             logger.error(f"[UserManager] UserProfile construction failed: {e}", exc_info=True)
@@ -1604,6 +1609,8 @@ class AuthHandlers:
                 'refresh_token':refresh_token,
                 'expires_in':f'{JWT_EXPIRATION_HOURS}h',
                 'security_level':user.security_level.name,
+                'role': user.roles[0] if user.roles else 'user',
+                'is_admin': 'admin' in user.roles,
                 'message':f'Login successful. Welcome back, {user.username}!'
             }
         except ValueError as e:

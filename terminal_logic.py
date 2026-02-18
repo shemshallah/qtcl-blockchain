@@ -1110,7 +1110,8 @@ class SessionManager:
                 self.session.email          = email
                 self.session.name           = result.get('username', 'User')
                 self.session.pseudoqubit_id = str(result.get('pseudoqubit_id', 'N-A'))
-                raw_role = 'user'
+                # CRITICAL FIX: Use the role returned from auth_handlers, not hardcoded 'user'
+                raw_role = result.get('role', 'user').lower() if result.get('role') else 'user'
                 try:    self.session.role = UserRole(raw_role)
                 except: self.session.role = UserRole.USER
                 self.session.is_authenticated = True
