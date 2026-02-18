@@ -6852,6 +6852,44 @@ except Exception as e:
     print(f"⚠️  [DB] Failed to initialize db_manager: {e}")
     db_manager = None
 
+# ─── Compatibility exports ────────────────────────────────────────────────────
+# globals.py imports: from db_builder_v2 import DB_POOL, init_db
+# DB_POOL is a canonical alias for the db_manager singleton.
+DB_POOL = db_manager
+
+
+def init_db() -> bool:
+    """
+    Compatibility shim imported by globals._init_database().
+    DatabaseBuilder already wired up the schema in __init__; this just
+    validates the pool is alive and returns True/False.
+    Never raises — caller continues on failure.
+    """
+    global db_manager
+    if db_manager is None:
+        try:
+            db_manager = DatabaseBuilder(
+                host=POOLER_HOST, user=POOLER_USER, password=POOLER_PASSWORD,
+                port=POOLER_PORT, database=POOLER_DB, pool_size=DB_POOL_MAX_CONNECTIONS
+            )
+            logger.info("[init_db] ✅ DatabaseBuilder re-initialized on demand")
+            return True
+        except Exception as exc:
+            logger.warning(f"[init_db] ⚠ Could not init db: {exc}")
+            return False
+    try:
+        conn = db_manager.get_connection()
+        if conn:
+            db_manager.return_connection(conn)
+            logger.info("[init_db] ✅ Pool validated — connection alive")
+            return True
+        return False
+    except Exception as exc:
+        logger.warning(f"[init_db] Pool check skipped: {exc}")
+        return False
+
+
+
 
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════

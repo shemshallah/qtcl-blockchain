@@ -1667,3 +1667,54 @@ def verify_transaction_signature(tx):
     """Verify transaction signature"""
     auth = AUTH_INTEGRATION
     return auth.verify_transaction_signature(tx)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# JWTTokenManager — public name expected by globals._init_authentication()
+# Wraps TokenManager with an instance-method interface + safe verify_token()
+# that returns None instead of raising (wsgi_config._parse_auth needs this).
+# ══════════════════════════════════════════════════════════════════════════════
+
+class JWTTokenManager:
+    """
+    Public interface for JWT operations used by globals.py and wsgi_config.
+    Delegates to TokenManager. verify_token() returns None on failure instead
+    of raising so _parse_auth() can safely call it without try/except.
+    """
+
+    def __init__(self):
+        self._tm = TokenManager()
+
+    # ── Instance-method wrappers ──────────────────────────────────────────────
+
+    def create_token(self, user_id: str, email: str, username: str,
+                     token_type: str = 'access') -> str:
+        tt = TokenType.ACCESS
+        try:
+            tt = TokenType(token_type)
+        except Exception:
+            pass
+        return TokenManager.create_token(user_id, email, username, tt)
+
+    def verify_token(self, token: str) -> Optional[Dict[str, Any]]:
+        """Returns payload dict on success, None on any failure — never raises."""
+        if not token:
+            return None
+        try:
+            return TokenManager.verify_token(token)
+        except (ValueError, Exception):
+            return None
+
+    def revoke_token(self, token: str) -> bool:
+        """Compatibility stub — stateless JWT; always returns True."""
+        return True
+
+    # ── Static convenience ────────────────────────────────────────────────────
+
+    @staticmethod
+    def quick_verify(token: str) -> Optional[Dict[str, Any]]:
+        """Static alias — same behaviour as instance verify_token."""
+        try:
+            return TokenManager.verify_token(token)
+        except Exception:
+            return None
