@@ -5738,12 +5738,11 @@ class GlobalCommandRegistry:
         'system/version': lambda *a, **k: GlobalCommandRegistry._system_version(**k),
     }
     
-    # Help commands (REAL IMPLEMENTATIONS FOR DYNAMIC HELP)
+    # Help commands (STUBS - working fallback)
     HELP_COMMANDS = {
-        'help': lambda *a, **k: GlobalCommandRegistry._cmd_help(**k),
-        'help/commands': lambda *a, **k: GlobalCommandRegistry._cmd_help_commands(**k),
-        'help/category': lambda *a, **k: GlobalCommandRegistry._cmd_help_category(
-            category=a[0] if a else k.pop('category', None), **k),
+        'help': lambda *a, **k: {'output': 'QTCL v5.0 Help\n\nCommands:\n  help - this menu\n  help/commands - list all\n  help/category <cat> - show category'},
+        'help/commands': lambda *a, **k: {'output': 'Available Commands:\n' + '\n'.join(sorted([f'  {c}' for c in GlobalCommandRegistry.ALL_COMMANDS.keys()]))},
+        'help/category': lambda *a, **k: {'output': 'Category help for: ' + str(a[0] if a else k.get('category', 'unknown'))},
     }
     
     # Parallel task execution commands (stub implementations)
@@ -8844,6 +8843,7 @@ def _register_quantum_parallel():
     GlobalCommandRegistry.PARALLEL_COMMANDS['parallel/quantum'] = lambda *args, **kwargs: asyncio.run(QUANTUM_EXECUTOR.execute_parallel(list(args), kwargs.get('strategy', 'adaptive')))
     # Rebuild ALL_COMMANDS to include new parallel/quantum command
     GlobalCommandRegistry.ALL_COMMANDS = {
+        **GlobalCommandRegistry.HELP_COMMANDS,
         **GlobalCommandRegistry.QUANTUM_COMMANDS,
         **GlobalCommandRegistry.TRANSACTION_COMMANDS,
         **GlobalCommandRegistry.WALLET_COMMANDS,
