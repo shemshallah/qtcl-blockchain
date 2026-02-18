@@ -40,6 +40,12 @@ import decimal,socket
 from decimal import Decimal,getcontext
 getcontext().prec=28
 
+# ════════════════════════════════════════════════════════════════════════════════
+# FLASK IMPORTS
+# ════════════════════════════════════════════════════════════════════════════════
+from flask import Flask, Blueprint, request, jsonify, Response, send_from_directory
+from flask_cors import CORS
+
 PROJECT_ROOT=os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:sys.path.insert(0,PROJECT_ROOT)
 
@@ -98,7 +104,6 @@ try:
         
     except Exception as e:
         logger.error(f"[Init] ✗ Failed to import heartbeat: {e}", exc_info=True)
-        import traceback
         logger.error(traceback.format_exc())
 
 except Exception as e:
@@ -1814,15 +1819,136 @@ def register_all_api_listeners_with_heartbeat():
     return success_count==len(listeners_registration)
 
 
-def create_app()->Flask:
+def create_command_center_blueprint() -> Blueprint:
+    """
+    Core command center Blueprint — all primary QTCL REST routes.
+    Registered first by create_app() before per-module blueprints.
+    """
+    bp = Blueprint('command_center', __name__)
+    
+    @bp.route('/', methods=['GET'])
+    def home():
+        html_path = os.path.join(PROJECT_ROOT, 'index.html')
+        if os.path.exists(html_path):
+            with open(html_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            return Response(content, status=200, mimetype='text/html')
+        return Response(
+            '<html><body><h1>QTCL Command Center</h1><p><a href="/api/status">Status</a></p></body></html>',
+            status=200, mimetype='text/html'
+        )
+    
+    @bp.route('/health', methods=['GET'])
+    def health():
+        return jsonify({'status': 'healthy', 'ready': GLOBAL_STATE.system_ready,
+                        'commands': len(MASTER_REGISTRY.commands),
+                        'timestamp': datetime.now(timezone.utc).isoformat()}), 200
+    
+    @bp.route('/api/status', methods=['GET'])
+    def api_status():
+        return jsonify(GLOBAL_STATE.get_snapshot()), 200
+    
+    @bp.route('/api/execute', methods=['POST'])
+    def execute():
+        try:
+            data = request.get_json(force=True) or {}
+            cmd_line = data.get('command', data.get('cmd', ''))
+            if not cmd_line:
+                return jsonify({'error': 'No command provided'}), 400
+            user_id = data.get('user_id') or request.headers.get('X-User-ID')
+            auth_token = data.get('auth_token') or request.headers.get('Authorization', '').replace('Bearer ', '')
+            parts = cmd_line.strip().split(maxsplit=1)
+            cmd_name = parts[0]
+            params = {}
+            if len(parts) > 1:
+                try:
+                    params = json.loads(parts[1]) if parts[1].startswith('{') else {}
+                except Exception:
+                    params = {}
+            ctx = ExecutionContext(command=cmd_name, user_id=user_id, auth_token=auth_token,
+                                   parameters=params, user_role='admin' if user_id == 'admin' else 'user')
+            result = MASTER_REGISTRY.execute(ctx)
+            return jsonify({'success': result.success, 'output': result.output,
+                            'error': result.error, 'elapsed_ms': result.elapsed_ms,
+                            'status': result.status.value}), 200 if result.success else 400
+        except Exception as e:
+            logger.error(f"[API/execute] {e}")
+            return jsonify({'error': str(e)}), 500
+    
+    @bp.route('/api/commands', methods=['GET'])
+    def list_commands():
+        try:
+            load_all_commands()
+            with MASTER_REGISTRY.lock:
+                commands = [
+                    {'command': name, 'description': meta.description,
+                     'category': meta.category, 'scope': meta.scope.value}
+                    for name, meta in sorted(MASTER_REGISTRY.commands.items())
+                ]
+            return jsonify({'status': 'success', 'commands': commands,
+                            'total': len(commands),
+                            'timestamp': datetime.now(timezone.utc).isoformat()}), 200
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+    
+    @bp.route('/api/help', methods=['GET'])
+    def api_help():
+        cmd = request.args.get('command')
+        return jsonify({'help': MASTER_REGISTRY.get_help_text(cmd)}), 200
+    
+    @bp.route('/api/history', methods=['GET'])
+    def api_history():
+        limit = int(request.args.get('limit', 100))
+        with GLOBAL_STATE.lock:
+            history = list(GLOBAL_STATE.command_history)[-limit:]
+        return jsonify({'history': history, 'total': len(history)}), 200
+    
+    @bp.route('/api/metrics', methods=['GET'])
+    def api_metrics():
+        return jsonify(asdict(GLOBAL_STATE.metrics)), 200
+    
+    @bp.route('/api/audit', methods=['GET'])
+    def api_audit():
+        limit = int(request.args.get('limit', 100))
+        with GLOBAL_STATE.lock:
+            audit = [asdict(e) for e in list(GLOBAL_STATE.audit_log)[-limit:]]
+        return jsonify({'audit': audit, 'total': len(audit)}), 200
+    
+    @bp.route('/api/registry', methods=['GET'])
+    def api_registry():
+        return jsonify(MASTER_REGISTRY.get_registry_stats()), 200
+    
+    @bp.route('/api/heartbeat', methods=['POST', 'GET'])
+    def api_heartbeat():
+        """Heartbeat endpoint — keeps server alive, accepts internal pulses."""
+        data = {}
+        if request.method == 'POST':
+            try:
+                data = request.get_json(force=True) or {}
+            except Exception:
+                pass
+        return jsonify({'status': 'alive', 'received': data,
+                        'timestamp': datetime.now(timezone.utc).isoformat()}), 200
+    
+    @bp.route('/api/errors', methods=['GET'])
+    def api_errors():
+        limit = int(request.args.get('limit', 100))
+        with GLOBAL_STATE.lock:
+            errors = list(GLOBAL_STATE.error_log)[-limit:]
+        return jsonify({'errors': errors, 'total': len(errors)}), 200
+    
+    logger.info("[Blueprint] ✓ command_center blueprint created with all core routes")
+    return bp
+
+
+def create_app() -> Flask:
     """Create Flask application"""
     app=Flask(__name__)
     app.config['JSON_SORT_KEYS']=False
-    CORS(app)
+    CORS(app,resources={r"/*": {"origins": "*"}})
     bp=create_command_center_blueprint()
     app.register_blueprint(bp)
     
-    # ✅ ADD HEARTBEAT STATUS ENDPOINT
     @app.route('/quantum/heartbeat/status', methods=['GET'])
     def heartbeat_status():
         """Get quantum heartbeat status"""
@@ -1923,39 +2049,12 @@ def create_app()->Flask:
             'timestamp': time.time()
         }), 200
     
-    @app.route('/',methods=['GET'])
-    def home():
-        return open(os.path.join(PROJECT_ROOT,'index.html')).read() if os.path.exists(os.path.join(PROJECT_ROOT,'index.html')) else '<html><body><h1>QTCL</h1><p><a href=/api>API</a></p></body></html>',200,{'Content-Type':'text/html'}
     @app.errorhandler(404)
-    def e404(e):return jsonify({'error':'not found'}),404
+    def e404(e):return jsonify({'error':'not found','path':request.path}),404
     @app.errorhandler(500)
-    def e500(e):return jsonify({'error':'error'}),500
+    def e500(e):return jsonify({'error':'internal server error'}),500
     
-    # Add heartbeat monitoring to every request
-    _request_count = [0]  # Use list to make it mutable in nested function
-    _last_pulse_check = [HEARTBEAT.pulse_count if HEARTBEAT else 0]
-    
-    @app.after_request
-    def monitor_heartbeat(response):
-        """Monitor heartbeat status on every request"""
-        _request_count[0] += 1
-        
-        # Every 10 requests, log heartbeat status
-        if _request_count[0] % 10 == 0 and HEARTBEAT and HEARTBEAT.running:
-            current_pulse = HEARTBEAT.pulse_count
-            pulse_delta = current_pulse - _last_pulse_check[0]
-            
-            if pulse_delta > 0:
-                logger.debug(f"[Heartbeat] ✓ Pulsing: {current_pulse} pulses, "
-                            f"+{pulse_delta} since last check, {len(HEARTBEAT.listeners)} listeners")
-            else:
-                logger.warning(f"[Heartbeat] ⚠️ Stalled: {current_pulse} pulses, "
-                              f"no pulse change since last check")
-            
-            _last_pulse_check[0] = current_pulse
-        
-        return response
-    
+    print("[create_app] ✓ Flask app created with all routes")
     return app
 
 def initialize_command_center()->None:
@@ -1980,7 +2079,6 @@ def initialize_command_center()->None:
                 logger.info(f"[Init] ✓ Heartbeat already running - Pulses={HEARTBEAT.pulse_count}")
         except Exception as e:
             logger.error(f"[Init] ❌ Failed to start heartbeat: {e}")
-            import traceback
             logger.error(traceback.format_exc())
     else:
         logger.warning("[Init] ⚠️ HEARTBEAT NOT AVAILABLE - Quantum subsystems offline")
@@ -2267,16 +2365,27 @@ except Exception as e:
 if app is None:
     logger.error("[WSGI] Creating minimal Flask app as fallback")
     app=Flask(__name__)
-    @app.errorhandler(500)
-    @app.errorhandler(400)
-    @app.errorhandler(404)
-    def error_handler(error):
-        return jsonify({'error':'Application initialization error','details':initialization_error or str(error)}),500
+    CORS(app,resources={r"/*": {"origins": "*"}})
+    
+    @app.route('/',methods=['GET'])
+    def fallback_home():
+        html_path=os.path.join(PROJECT_ROOT,'index.html')
+        if os.path.exists(html_path):
+            with open(html_path,'r',encoding='utf-8') as f:
+                content=f.read()
+            return Response(content,status=200,mimetype='text/html')
+        return Response('<html><body><h1>QTCL - Initializing</h1></body></html>',status=200,mimetype='text/html')
+    
     @app.route('/health',methods=['GET'])
-    def health():
+    def fallback_health():
         if initialization_error:
             return jsonify({'status':'unhealthy','error':initialization_error}),503
         return jsonify({'status':'healthy'}),200
+    
+    @app.errorhandler(Exception)
+    def fallback_error(error):
+        return jsonify({'error':'Application initialization error',
+                        'details':initialization_error or str(error)}),500
 
 application=app
 
