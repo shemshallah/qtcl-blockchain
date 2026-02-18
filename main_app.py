@@ -1241,10 +1241,18 @@ class MasterApplicationOrchestrator:
 # APPLICATION CREATION & ENTRY POINT
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+# Initialize master orchestrator (handles system initialization)
+# but DO NOT use its app - use the main app instead (line 968)
 MASTER_ORCHESTRATOR = MasterApplicationOrchestrator()
-app = MASTER_ORCHESTRATOR.get_app()
+
+# NOTE: MasterApplicationOrchestrator.app creates its own Flask app that OVERWRITES 
+# the main app. This breaks the /api/commands endpoint which has the fix for 'help' commands.
+# SOLUTION: Keep using the main app defined at line 968 (create_app())
+# This ensures all the fixed routes are used.
+
+# DO NOT USE: app = MASTER_ORCHESTRATOR.get_app()  # ← This was overwriting our fixed app!
+# The main app defined at line 968 is already assigned and includes all fixes
 
 if __name__ == '__main__':
-    print("[Main] Starting QTCL application...")
-    print(f"[Main] System status: {MASTER_ORCHESTRATOR.get_system_status()}")
+    print("[Main] Starting QTCL application with fixed command routes...")
     app.run(host='0.0.0.0', port=5000, debug=False)
