@@ -277,23 +277,6 @@ class AuthenticationState:
     users: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     failed_attempts: Dict[str, List[datetime]] = field(default_factory=lambda: defaultdict(list))
     mfa_enabled: bool = False
-    # Role cache: user_id → role string (populated on login, cleared on logout)
-    role_cache: Dict[str, str] = field(default_factory=dict)
-    
-    def get_user_role(self, user_id: str) -> str:
-        """Get cached role for user; falls back to DB if needed."""
-        cached = self.role_cache.get(user_id)
-        if cached:
-            return cached
-        # Check session store for any session belonging to this user
-        for session in self.session_store.values():
-            if session.get('user_id') == user_id:
-                return session.get('role', 'user')
-        return 'user'
-    
-    def is_admin(self, user_id: str) -> bool:
-        """Check if user has admin role."""
-        return self.get_user_role(user_id) in ('admin', 'superadmin', 'super_admin')
     
     def get_failed_attempts(self, user_id: str, window_minutes: int = 15) -> int:
         """Get failed login attempts in time window"""
@@ -493,13 +476,6 @@ class GlobalState:
     config: Dict[str, Any] = field(default_factory=dict)
     
     # ════════════════════════════════════════════════════════════════════════════════════════
-    # CRYPTOGRAPHY SYSTEMS (PQ KEY SYSTEM)
-    # ════════════════════════════════════════════════════════════════════════════════════════
-    
-    pqc_system: Optional[Any] = None          # HyperbolicPQCSystem singleton reference
-    pqc_initialized: bool = False
-    
-    # ════════════════════════════════════════════════════════════════════════════════════════
     # SESSION MANAGEMENT
     # ════════════════════════════════════════════════════════════════════════════════════════
     
@@ -670,14 +646,17 @@ def initialize_globals() -> bool:
         # Initialize terminal
         _init_terminal(globals_inst)
         
-        # Initialize PQC system (lazy — may skip if deps unavailable)
-        _init_pqc(globals_inst)
-        
         # Build function registry
         _build_function_registry(globals_inst)
         
         # Establish integrations
         _establish_integrations(globals_inst)
+        
+        # Wire quantum lattice subsystems (non-fatal)
+        try:
+            wire_heartbeat_to_globals()
+        except Exception as _whe:
+            logger.warning(f"[Globals] Lattice wiring deferred: {_whe}")
         
         with globals_inst.lock:
             globals_inst.initialized = True
@@ -1061,28 +1040,6 @@ def _init_authentication(globals_inst: GlobalState):
     except Exception as e:
         logger.warning(f"[Globals] Auth init error (continuing): {e}")
 
-def _init_pqc(globals_inst: GlobalState):
-    """
-    Initialise the HyperbolicPQCSystem and bind to globals.
-    
-    PQC system is non-critical — if deps (mpmath, cryptography) are missing,
-    we log a warning and continue. The system will lazy-init on first use via
-    get_pqc_system().
-    
-    On success: pq_key_store schema is created in the DB pool.
-    """
-    logger.info("[Globals] Initialising PQC system...")
-    try:
-        from pq_key_system import get_pqc_system as _get_pqc, HLWE_256
-        pqc = _get_pqc(HLWE_256)
-        with globals_inst.lock:
-            globals_inst.pqc_system = pqc
-            globals_inst.pqc_initialized = True
-        logger.info("[Globals] ✅ HyperbolicPQCSystem initialised (HLWE-256)")
-    except Exception as e:
-        logger.warning(f"[Globals] PQC system deferred (will lazy-init): {e}")
-
-
 def _init_terminal(globals_inst: GlobalState):
     """
     Register terminal subsystem in globals state.
@@ -1213,32 +1170,6 @@ def get_ledger():
     """Get ledger state"""
     return get_globals().ledger
 
-def get_pqc_system():
-    """
-    Get the HyperbolicPQCSystem singleton — lazy-initialised via pq_key_system.
-    
-    This is the SINGLE entry point for all post-quantum key operations.
-    The PQC system is bound to the globals DB pool so keys are stored in the
-    same PostgreSQL database as users and pseudoqubits.
-    
-    Returns HyperbolicPQCSystem instance or None if unavailable.
-    """
-    gs = get_globals()
-    if gs.pqc_system is not None:
-        return gs.pqc_system
-    # Lazy init
-    try:
-        from pq_key_system import get_pqc_system as _get_pqc, HLWE_256
-        pqc = _get_pqc(HLWE_256)
-        with gs.lock:
-            gs.pqc_system = pqc
-            gs.pqc_initialized = True
-        logger.info("[Globals] ✅ PQC system lazily initialised and bound to globals")
-        return pqc
-    except Exception as e:
-        logger.warning(f"[Globals] PQC system unavailable: {e}")
-        return None
-
 def get_config(key: str, default: Any = None) -> Any:
     """Get configuration value"""
     return get_globals().config.get(key, default)
@@ -1337,30 +1268,48 @@ def clear_request_context():
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 
 def wire_heartbeat_to_globals():
-    """Wire heartbeat from wsgi_config into GLOBALS after it's initialized"""
+    """Wire heartbeat + lattice subsystems from quantum_lattice_control_live_complete into GLOBALS."""
+    try:
+        from quantum_lattice_control_live_complete import (
+            LATTICE,
+            HEARTBEAT         as _HB,
+            LATTICE_NEURAL_REFRESH,
+            W_STATE_ENHANCED,
+            NOISE_BATH_ENHANCED,
+        )
+        globals_instance = get_globals()
+        with globals_instance.lock:
+            globals_instance.quantum.heartbeat      = _HB
+            globals_instance.quantum.lattice        = LATTICE
+            globals_instance.quantum.neural_network = LATTICE_NEURAL_REFRESH
+            globals_instance.quantum.w_state_manager= W_STATE_ENHANCED
+            globals_instance.quantum.noise_bath     = NOISE_BATH_ENHANCED
+        # Start heartbeat if not running
+        if _HB is not None and not _HB.running:
+            _HB.start()
+        logger.info("[Globals] ✅ Lattice + Heartbeat wired to GLOBALS")
+        return True
+    except ImportError as ie:
+        logger.warning(f"[Globals] quantum_lattice not importable: {ie}")
+    except Exception as e:
+        logger.error(f"[Globals] Failed to wire heartbeat: {e}")
+    # Fallback: try wsgi_config
     try:
         from wsgi_config import HEARTBEAT, LATTICE, LATTICE_NEURAL_REFRESH, W_STATE_ENHANCED, NOISE_BATH_ENHANCED
-        
         if HEARTBEAT is not None:
             globals_instance = get_globals()
             with globals_instance.lock:
-                globals_instance.quantum.heartbeat = HEARTBEAT
-                globals_instance.quantum.lattice = LATTICE
+                globals_instance.quantum.heartbeat      = HEARTBEAT
+                globals_instance.quantum.lattice        = LATTICE
                 globals_instance.quantum.neural_network = LATTICE_NEURAL_REFRESH
-                globals_instance.quantum.w_state_manager = W_STATE_ENHANCED
-                globals_instance.quantum.noise_bath = NOISE_BATH_ENHANCED
-            
-            logger.info("[Globals] ✓ Heartbeat wired to GLOBALS")
+                globals_instance.quantum.w_state_manager= W_STATE_ENHANCED
+                globals_instance.quantum.noise_bath     = NOISE_BATH_ENHANCED
+            logger.info("[Globals] ✓ Heartbeat wired via wsgi_config fallback")
             return True
-        else:
-            logger.warning("[Globals] ⚠️  Heartbeat not available from wsgi_config")
-            return False
-    except ImportError:
-        logger.debug("[Globals] Skipping heartbeat wiring (wsgi_config not yet loaded)")
-        return False
-    except Exception as e:
-        logger.error(f"[Globals] Failed to wire heartbeat: {e}")
-        return False
+    except Exception:
+        pass
+    logger.warning("[Globals] ⚠️  Heartbeat wiring failed — quantum subsystems offline")
+    return False
 
 def get_heartbeat():
     """Get heartbeat instance"""

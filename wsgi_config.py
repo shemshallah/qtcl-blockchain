@@ -63,6 +63,26 @@ except ImportError as e:
     ORACLE_PRICE_PROVIDER = None
     logger.warning('[wsgi] Integrated oracle system not available: %s', e)
 
+# ── Quantum Lattice singletons ────────────────────────────────────────────────
+try:
+    from quantum_lattice_control_live_complete import (
+        LATTICE,
+        HEARTBEAT         as LATTICE_HEARTBEAT,
+        LATTICE_NEURAL_REFRESH,
+        W_STATE_ENHANCED,
+        NOISE_BATH_ENHANCED,
+    )
+    _LATTICE_AVAILABLE = True
+    logger.info('[wsgi] quantum_lattice_control_live_complete loaded ✓')
+except Exception as _le:
+    LATTICE = None
+    LATTICE_HEARTBEAT = None
+    LATTICE_NEURAL_REFRESH = None
+    W_STATE_ENHANCED = None
+    NOISE_BATH_ENHANCED = None
+    _LATTICE_AVAILABLE = False
+    logger.warning(f'[wsgi] quantum_lattice not available: {_le}')
+
 logger.info('[wsgi] globals imported — initialising...')
 try:
     initialize_globals()
@@ -91,17 +111,31 @@ def _expose_components():
         logger.warning(f'[wsgi] DB singleton not available: {_e}')
         DB = None
     
-    # HEARTBEAT — from globals.quantum.heartbeat
+    # HEARTBEAT — prefer lattice heartbeat (already started), fall back to globals
     try:
-        HEARTBEAT = get_heartbeat()
-    except Exception:
+        if _LATTICE_AVAILABLE and LATTICE_HEARTBEAT is not None:
+            HEARTBEAT = LATTICE_HEARTBEAT
+            if not HEARTBEAT.running:
+                HEARTBEAT.start()
+        else:
+            HEARTBEAT = get_heartbeat()
+    except Exception as _he:
+        logger.warning(f'[wsgi] HEARTBEAT init error: {_he}')
         HEARTBEAT = None
-    
-    # QUANTUM — quantum subsystems bundle
+
+    # Wire lattice subsystems into globals.quantum
     try:
         gs = get_globals()
+        if _LATTICE_AVAILABLE:
+            gs.quantum.heartbeat       = HEARTBEAT
+            gs.quantum.lattice         = LATTICE
+            gs.quantum.neural_network  = LATTICE_NEURAL_REFRESH
+            gs.quantum.w_state_manager = W_STATE_ENHANCED
+            gs.quantum.noise_bath      = NOISE_BATH_ENHANCED
+            logger.info('[wsgi] ✅ Lattice subsystems wired into globals.quantum')
         QUANTUM = gs.quantum
-    except Exception:
+    except Exception as _qe:
+        logger.warning(f'[wsgi] QUANTUM wiring error: {_qe}')
         QUANTUM = None
     
     # Placeholders — extend these when real implementations are wired
