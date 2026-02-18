@@ -1175,6 +1175,187 @@ class ParallelExecutor:
         for w in self.workers:w.join(timeout=1)
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
+# BLOCK COMMAND DATABASE — SQLite audit schema for block query logging, caching, quantum proofs
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+
+_BLOCK_CMD_DB_PATH: Optional[str] = None
+_BLOCK_CMD_DB_LOCK = threading.RLock()
+_BLOCK_CMD_DB_CONN: Optional[object] = None  # sqlite3 connection, lazy-opened
+
+
+def _init_block_command_database() -> bool:
+    """
+    Create (or verify) the SQLite schema used by block commands for:
+      • command_logs         — every block command executed, with user + correlation ID
+      • block_queries        — per-block access log with result counts and latency
+      • block_details_cache  — TTL-backed detail cache with access counter
+      • search_logs          — free-text block search queries and result counts
+      • block_statistics     — time-series block-level metrics for trending
+      • quantum_measurements — coherence, entropy, and finality probe results
+
+    Runs at TerminalEngine boot. If the DB file or Supabase is unavailable the
+    function logs a warning and returns False — the engine continues fine without it.
+    All block handlers guard their DB calls with try/except so nothing breaks.
+    """
+    global _BLOCK_CMD_DB_PATH, _BLOCK_CMD_DB_CONN
+
+    with _BLOCK_CMD_DB_LOCK:
+        # ── Resolve path: prefer /tmp for writable ephemeral FS ──────────────
+        db_dir = os.environ.get('BLOCK_CMD_DB_DIR', '/tmp')
+        db_file = os.path.join(db_dir, 'qtcl_block_commands.db')
+        _BLOCK_CMD_DB_PATH = db_file
+
+        try:
+            import sqlite3 as _sqlite3
+            conn = _sqlite3.connect(db_file, check_same_thread=False, timeout=10)
+            conn.row_factory = _sqlite3.Row
+            _BLOCK_CMD_DB_CONN = conn
+            cur = conn.cursor()
+
+            # ── DDL: command_logs ─────────────────────────────────────────────
+            cur.execute("""CREATE TABLE IF NOT EXISTS command_logs (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                correlation_id TEXT NOT NULL,
+                command     TEXT NOT NULL,
+                user_id     TEXT,
+                ip_address  TEXT,
+                params      TEXT,
+                success     INTEGER DEFAULT 1,
+                duration_ms REAL,
+                error_msg   TEXT,
+                created_at  REAL DEFAULT (unixepoch('now','subsec'))
+            )""")
+
+            # ── DDL: block_queries ────────────────────────────────────────────
+            cur.execute("""CREATE TABLE IF NOT EXISTS block_queries (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                block_id    TEXT NOT NULL,
+                query_type  TEXT NOT NULL,
+                result_count INTEGER DEFAULT 0,
+                cache_hit   INTEGER DEFAULT 0,
+                duration_ms REAL,
+                created_at  REAL DEFAULT (unixepoch('now','subsec'))
+            )""")
+
+            # ── DDL: block_details_cache ──────────────────────────────────────
+            cur.execute("""CREATE TABLE IF NOT EXISTS block_details_cache (
+                block_id    TEXT PRIMARY KEY,
+                block_data  TEXT NOT NULL,
+                access_count INTEGER DEFAULT 1,
+                expires_at  REAL NOT NULL,
+                created_at  REAL DEFAULT (unixepoch('now','subsec'))
+            )""")
+
+            # ── DDL: search_logs ──────────────────────────────────────────────
+            cur.execute("""CREATE TABLE IF NOT EXISTS search_logs (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                query       TEXT NOT NULL,
+                result_count INTEGER DEFAULT 0,
+                search_type TEXT DEFAULT 'block',
+                duration_ms REAL,
+                created_at  REAL DEFAULT (unixepoch('now','subsec'))
+            )""")
+
+            # ── DDL: block_statistics ─────────────────────────────────────────
+            cur.execute("""CREATE TABLE IF NOT EXISTS block_statistics (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                block_height    INTEGER,
+                tx_count        INTEGER,
+                gas_used        INTEGER,
+                block_time_ms   REAL,
+                validator_id    TEXT,
+                quantum_entropy REAL,
+                recorded_at     REAL DEFAULT (unixepoch('now','subsec'))
+            )""")
+
+            # ── DDL: quantum_measurements ─────────────────────────────────────
+            cur.execute("""CREATE TABLE IF NOT EXISTS quantum_measurements (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                block_id    TEXT NOT NULL,
+                coherence   REAL,
+                entropy     REAL,
+                finality    REAL,
+                proof_hash  TEXT,
+                valid       INTEGER DEFAULT 1,
+                measured_at REAL DEFAULT (unixepoch('now','subsec'))
+            )""")
+
+            # ── Indexes ───────────────────────────────────────────────────────
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_cmdlog_cmd      ON command_logs(command)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_cmdlog_created  ON command_logs(created_at)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_blkq_block      ON block_queries(block_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_blkstats_height ON block_statistics(block_height)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_qmeas_block     ON quantum_measurements(block_id)")
+
+            conn.commit()
+            logger.info(f"[BlockCmdDB] ✅ Schema ready at {db_file} — 6 tables, 5 indexes")
+            return True
+
+        except Exception as exc:
+            logger.warning(f"[BlockCmdDB] ⚠ Could not initialise block command DB: {exc} — "
+                           "block commands will run without audit logging")
+            _BLOCK_CMD_DB_CONN = None
+            return False
+
+
+def _block_cmd_log(command: str, correlation_id: str = None, user_id: str = None,
+                   params: dict = None, success: bool = True, duration_ms: float = 0.0,
+                   error_msg: str = None) -> None:
+    """Insert a row into command_logs — fire-and-forget, never raises."""
+    if not _BLOCK_CMD_DB_CONN:
+        return
+    try:
+        with _BLOCK_CMD_DB_LOCK:
+            _BLOCK_CMD_DB_CONN.execute(
+                "INSERT INTO command_logs (correlation_id,command,user_id,params,success,duration_ms,error_msg) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (correlation_id or str(uuid.uuid4())[:8], command, user_id,
+                 json.dumps(params or {}), 1 if success else 0, duration_ms, error_msg)
+            )
+            _BLOCK_CMD_DB_CONN.commit()
+    except Exception:
+        pass  # never crash the calling command
+
+
+def _block_cache_get(block_id: str) -> Optional[dict]:
+    """Retrieve cached block data if not expired. Returns None on miss or expiry."""
+    if not _BLOCK_CMD_DB_CONN:
+        return None
+    try:
+        with _BLOCK_CMD_DB_LOCK:
+            now = time.time()
+            row = _BLOCK_CMD_DB_CONN.execute(
+                "SELECT block_data FROM block_details_cache WHERE block_id=? AND expires_at>?",
+                (str(block_id), now)
+            ).fetchone()
+            if row:
+                _BLOCK_CMD_DB_CONN.execute(
+                    "UPDATE block_details_cache SET access_count=access_count+1 WHERE block_id=?",
+                    (str(block_id),)
+                )
+                _BLOCK_CMD_DB_CONN.commit()
+                return json.loads(row[0])
+    except Exception:
+        pass
+    return None
+
+
+def _block_cache_set(block_id: str, data: dict, ttl_seconds: int = 300) -> None:
+    """Write block data into cache with TTL. Fire-and-forget."""
+    if not _BLOCK_CMD_DB_CONN:
+        return
+    try:
+        with _BLOCK_CMD_DB_LOCK:
+            _BLOCK_CMD_DB_CONN.execute(
+                "INSERT OR REPLACE INTO block_details_cache (block_id,block_data,expires_at) VALUES (?,?,?)",
+                (str(block_id), json.dumps(data), time.time() + ttl_seconds)
+            )
+            _BLOCK_CMD_DB_CONN.commit()
+    except Exception:
+        pass
+
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
 # TERMINAL ENGINE CORE
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 

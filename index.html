@@ -440,15 +440,31 @@ async function execute() {
   state.cmdInput.disabled = true;
 
   try {
+    // Parse via executor so --flag=value and slash-notation are handled correctly
+    const parsed   = window.qtclExecutor
+      ? window.qtclExecutor.parse(raw)
+      : { command: raw.replace(/\//g, '-'), args: [], kwargs: {} };
+    const cmdStr   = window.qtclExecutor
+      ? window.qtclExecutor.buildCommandString(parsed.command, parsed.args, parsed.kwargs)
+      : parsed.command;
+
+    const token = window.qtclExecutor ? window.qtclExecutor.getToken() : '';
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
     const res = await fetch('/api/command', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command: raw, args: [], kwargs: {} })
+      method:  'POST',
+      headers,
+      body: JSON.stringify({ command: cmdStr, args: [], kwargs: {} })
     });
 
     const data = await res.json().catch(() => ({ error: 'Invalid JSON response' }));
 
-    if (res.ok && (data.status === 'success' || data.result)) {
+    // Capture auth tokens from login responses
+    const tok = data.result?.token || data.result?.access_token || data.token;
+    if (tok && window.qtclExecutor) window.qtclExecutor.setToken(tok);
+
+    if (res.ok && (data.status === 'success' || data.result !== undefined)) {
       const result = data.result;
       if (!result) {
         addLine('✓ OK', 'success');
@@ -469,8 +485,8 @@ async function execute() {
         String(result).split('\n').forEach(l => { if (l.trim()) addLine(l, 'success'); });
       }
     } else {
-      const err = data.error || `HTTP ${res.status}`;
-      addLine('✗ ' + err, 'error');
+      const errMsg = data.error || `HTTP ${res.status}`;
+      addLine('✗ ' + errMsg, 'error');
       if (data.suggestions && data.suggestions.length) {
         addLine('Similar: ' + data.suggestions.join(', '), 'warning');
       }
@@ -481,7 +497,6 @@ async function execute() {
     state.isLoading = false;
     state.cmdInput.disabled = false;
     state.output.scrollTop = state.output.scrollHeight;
-    
     if (state.isMobile) {
       setTimeout(() => {
         state.cmdInput.focus();
@@ -528,56 +543,57 @@ function showDynamicHelp() {
   addLine('║  QTCL v5.0 — COMMAND REFERENCE & SYNTAX GUIDE          ║', 'system');
   addLine('╚════════════════════════════════════════════════════════╝', 'system');
   addLine('', 'dim');
-  
+
   addLine('📱 MOBILE UX TIPS:', 'info');
   addLine('  • Input box auto-focuses at bottom of screen', 'dim');
   addLine('  • Click/tap terminal → input focuses', 'dim');
   addLine('  • Keyboard opens automatically', 'dim');
   addLine('  • Press RUN button or Enter to execute', 'dim');
   addLine('', 'dim');
-  
-  addLine('🎯 COMMAND SYNTAX (CRITICAL - READ THIS):', 'warning');
-  addLine('  Format: category/command (with forward slash /)', 'text');
+
+  addLine('🎯 COMMAND SYNTAX — HYPHEN-SEPARATED (canonical format):', 'warning');
+  addLine('  Format: category-command --flag=value --bool-flag', 'text');
   addLine('', 'dim');
-  addLine('  RIGHT EXAMPLES:', 'success');
-  addLine('    ✓ admin/users       (admin category, users command)', 'dim');
-  addLine('    ✓ quantum/status    (quantum category, status command)', 'dim');
-  addLine('    ✓ block/history 10  (blockchain, history with param)', 'dim');
-  addLine('    ✓ system/health     (system category, health command)', 'dim');
+  addLine('  EXAMPLES:', 'success');
+  addLine('    ✓ admin-users                   list all users', 'dim');
+  addLine('    ✓ admin-users --limit=20 --role=admin', 'dim');
+  addLine('    ✓ quantum-status                quantum engine metrics', 'dim');
+  addLine('    ✓ block-details --block=42      block by number', 'dim');
+  addLine('    ✓ oracle-price --symbol=BTCUSD  live price feed', 'dim');
+  addLine('    ✓ system-health                 full health check', 'dim');
+  addLine('    ✓ login --email=x --password=y  authenticate', 'dim');
+  addLine('    ✓ help-commands                 list all commands', 'dim');
+  addLine('    ✓ help-category --category=defi show defi commands', 'dim');
   addLine('', 'dim');
-  addLine('  WRONG EXAMPLES (DON\'T USE):', 'error');
-  addLine('    ✗ help admin              (missing /category)', 'dim');
-  addLine('    ✗ admin                   (just category, not command)', 'dim');
-  addLine('    ✗ quantum status          (missing /)', 'dim');
-  addLine('    ✗ block 1                 (should be block/details 1)', 'dim');
+  addLine('  NOTE: quantum/status also works — slash auto-converts to hyphen', 'dim');
   addLine('', 'dim');
-  
+
   addLine('📖 HELP COMMANDS:', 'info');
-  addLine('  help                       This menu', 'dim');
-  addLine('  help/commands             List ALL 82+ commands', 'dim');
-  addLine('  help/category admin       Show admin commands only', 'dim');
-  addLine('  help/category quantum     Show quantum commands only', 'dim');
-  addLine('  help/category blockchain  Show blockchain commands only', 'dim');
+  addLine('  help                    This menu', 'dim');
+  addLine('  help-commands           List ALL registered commands', 'dim');
+  addLine('  help-category --category=admin    Show admin commands', 'dim');
+  addLine('  help-category --category=quantum  Show quantum commands', 'dim');
+  addLine('  help-category --category=defi     Show DeFi commands', 'dim');
   addLine('', 'dim');
-  
+
   if (Object.keys(state.commandsByCategory).length === 0) {
-    addLine('(Commands not yet loaded - visit INFO tab to load)', 'dim');
+    addLine('(Commands not yet loaded — visit INFO tab to load)', 'dim');
   } else {
-    addLine('📂 COMMAND CATEGORIES (15 total):', 'info');
+    addLine('📂 COMMAND CATEGORIES:', 'info');
     const categories = Object.keys(state.commandsByCategory).sort();
     categories.forEach(cat => {
-      const cmds = state.commandsByCategory[cat];
-      const count = cmds.length;
-      addLine(`  ${cat.padEnd(15)} (${count} commands) - type: help/category ${cat}`, 'dim');
+      const count = state.commandsByCategory[cat].length;
+      addLine(`  ${cat.padEnd(16)} (${count} commands)   help-category --category=${cat}`, 'dim');
     });
   }
-  
+
   addLine('', 'dim');
   addLine('💡 QUICK START:', 'info');
-  addLine('  1. Type: help/commands     (see all available)', 'dim');
-  addLine('  2. Type: help/category admin     (see admin commands)', 'dim');
-  addLine('  3. Type: admin/users       (execute a command)', 'dim');
-  addLine('  4. Click INFO tab for system status & quick launch', 'dim');
+  addLine('  1. help-commands           — see everything available', 'dim');
+  addLine('  2. system-health           — check all systems', 'dim');
+  addLine('  3. quantum-status          — quantum engine metrics', 'dim');
+  addLine('  4. oracle-price --symbol=BTCUSD  — live price', 'dim');
+  addLine('  5. Click INFO tab          — visual system status', 'dim');
   addLine('', 'dim');
 }
 
@@ -743,10 +759,11 @@ async function boot() {
     { t: 80, msg: 'Loading command registry from globals…', cls: 'info' },
     { t: 60, msg: 'Connecting to PostgreSQL ledger…', cls: 'info' },
     { t: 100, msg: '', cls: 'info' },
-    { t: 60, msg: 'Type  help          — list all commands from globals', cls: 'dim' },
-    { t: 40, msg: 'Type  system-status — full system health', cls: 'dim' },
-    { t: 40, msg: 'Type  version       — build version info', cls: 'dim' },
-    { t: 40, msg: 'Click INFO tab      — system details & quick command launch', cls: 'dim' },
+    { t: 60, msg: 'Type  help            — list all commands from globals', cls: 'dim' },
+    { t: 40, msg: 'Type  system-health   — full system health check', cls: 'dim' },
+    { t: 40, msg: 'Type  quantum-status  — quantum engine metrics', cls: 'dim' },
+    { t: 40, msg: 'Type  help-commands   — all 82+ registered commands', cls: 'dim' },
+    { t: 40, msg: 'Click INFO tab        — system details & quick launch', cls: 'dim' },
     { t: 80, msg: '', cls: 'info' },
     { t: 60, msg: 'Ready.', cls: 'success' },
     { t: 20, msg: '', cls: 'info' },
@@ -766,5 +783,6 @@ async function boot() {
 state.cmdInput.focus();
 boot();
 </script>
+<script src="/command_executor.js"></script>
 </body>
 </html>

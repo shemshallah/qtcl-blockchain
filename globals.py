@@ -350,6 +350,7 @@ class ApplicationMetrics:
     """Application-wide metrics"""
     http_requests: int = 0
     http_errors: int = 0
+    commands_executed: int = 0
     quantum_pulses: int = 0
     transactions_processed: int = 0
     blocks_created: int = 0
@@ -909,66 +910,63 @@ def _init_logic_hierarchy(globals_inst: GlobalState):
 
 
 def _init_database(globals_inst: GlobalState):
-    """Initialize database connection pool"""
+    """Initialize database connection pool — tolerates missing env-vars gracefully."""
     logger.info("[Globals] Initializing database...")
     try:
-        from db_builder_v2 import DB_POOL, init_db
-        
+        # db_builder_v2 exposes `db_manager` (DatabaseBuilder singleton).
+        # We also accept DB_POOL as an alias if present.
+        import db_builder_v2 as _db_mod
+
+        pool = getattr(_db_mod, 'DB_POOL', None) or getattr(_db_mod, 'db_manager', None)
+        init_fn = getattr(_db_mod, 'init_db', None)
+
         with globals_inst.lock:
-            globals_inst.database.pool = DB_POOL
-            globals_inst.database.healthy = True
-        
-        init_db()
-        logger.info("[Globals] ✅ Database initialized")
-    
+            globals_inst.database.pool = pool
+            globals_inst.database.healthy = pool is not None
+
+        if init_fn:
+            init_fn()
+
+        if pool is not None:
+            logger.info("[Globals] ✅ Database initialized (pool ready)")
+        else:
+            logger.warning("[Globals] ⚠ db_builder_v2 loaded but no pool found — DB degraded")
+
     except ImportError as e:
         logger.warning(f"[Globals] Database not available: {e}")
         globals_inst.database.healthy = False
+    except Exception as e:
+        logger.warning(f"[Globals] Database init error (continuing): {e}")
+        globals_inst.database.healthy = False
 
 def _init_authentication(globals_inst: GlobalState):
-    """Initialize authentication systems"""
+    """Initialize authentication systems — tries JWTTokenManager then TokenManager."""
     logger.info("[Globals] Initializing authentication...")
     try:
-        from auth_handlers import JWTTokenManager
-        
-        jwt_manager = JWTTokenManager()
+        import auth_handlers as _ah_mod
+        # Primary public name is JWTTokenManager; fall back to TokenManager
+        cls = getattr(_ah_mod, 'JWTTokenManager', None) or getattr(_ah_mod, 'TokenManager', None)
+        if cls is None:
+            raise ImportError("Neither JWTTokenManager nor TokenManager found in auth_handlers")
+        jwt_manager = cls()
         with globals_inst.lock:
             globals_inst.auth.jwt_manager = jwt_manager
-        
-        logger.info("[Globals] ✅ Authentication initialized")
-    
+        logger.info(f"[Globals] ✅ Authentication initialized via {cls.__name__}")
     except ImportError as e:
         logger.warning(f"[Globals] Auth not available: {e}")
+    except Exception as e:
+        logger.warning(f"[Globals] Auth init error (continuing): {e}")
 
 def _init_terminal(globals_inst: GlobalState):
-    """Initialize terminal/command execution"""
-    logger.info("[Globals] Initializing terminal...")
-    try:
-        from terminal_logic import TerminalEngine
-        
-        engine = TerminalEngine()
-        with globals_inst.lock:
-            globals_inst.terminal.engine = engine
-            
-            # Try to use WSGI MASTER_REGISTRY as source of truth
-            try:
-                from wsgi_config import MASTER_REGISTRY
-                # Don't call load_all_commands here - it will be called by wsgi_config itself
-                if MASTER_REGISTRY and hasattr(MASTER_REGISTRY, 'commands'):
-                    globals_inst.terminal.command_registry = MASTER_REGISTRY.commands
-                    cmd_count = len(MASTER_REGISTRY.commands) if MASTER_REGISTRY.commands else 0
-                    logger.info(f"[Globals] ✓ Using WSGI MASTER_REGISTRY - {cmd_count} commands available")
-                else:
-                    globals_inst.terminal.command_registry = {}
-                    logger.warning("[Globals] ⚠ MASTER_REGISTRY empty, command registry will be populated by wsgi_config")
-            except (ImportError, AttributeError) as e:
-                logger.warning(f"[Globals] ⚠ WSGI registry not available ({type(e).__name__}), using engine registry")
-                globals_inst.terminal.command_registry = {}
-        
-        logger.info("[Globals] ✅ Terminal initialized")
-    
-    except ImportError as e:
-        logger.warning(f"[Globals] Terminal not available: {e}")
+    """
+    Register terminal subsystem in globals state.
+    NOTE: TerminalEngine is NOT instantiated here — wsgi_config._boot_terminal() owns that.
+    Doing it here too caused double-init crashes. globals just marks the subsystem ready.
+    """
+    logger.info("[Globals] Initializing terminal slot (engine boots via wsgi_config)...")
+    with globals_inst.lock:
+        globals_inst.terminal.command_registry = {}  # will be filled by register_all_commands()
+    logger.info("[Globals] ✅ Terminal slot ready")
 
 def _build_function_registry(globals_inst: GlobalState):
     """Build comprehensive function registry"""
@@ -1691,7 +1689,9 @@ def dispatch_command(raw: str, is_admin: bool = False, is_authenticated: bool = 
         return {'status': 'error', 'error': 'Empty command'}
 
     tokens = raw.strip().split()
-    name   = tokens[0].lower()
+    # Normalise: frontend sends category/command (slash) OR category-command (hyphen).
+    # Backend registry is 100% hyphen-keyed. Replace every / with - so both work.
+    name   = tokens[0].lower().replace('/', '-')
     args   = []
     flags  = {}
 
