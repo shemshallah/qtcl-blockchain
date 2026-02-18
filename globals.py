@@ -944,12 +944,25 @@ def _init_terminal(globals_inst: GlobalState):
     """Initialize terminal/command execution"""
     logger.info("[Globals] Initializing terminal...")
     try:
-        from terminal_logic import TerminalEngine, GlobalCommandRegistry
+        from terminal_logic import TerminalEngine
+        try:
+            from wsgi_config import MASTER_REGISTRY, load_all_commands
+            load_all_commands()
+            wsgi_registry_available = True
+        except ImportError:
+            wsgi_registry_available = False
+            MASTER_REGISTRY = None
         
         engine = TerminalEngine()
         with globals_inst.lock:
             globals_inst.terminal.engine = engine
-            globals_inst.terminal.command_registry = getattr(GlobalCommandRegistry, 'ALL_COMMANDS', {})
+            # Use WSGI MASTER_REGISTRY as source of truth for commands
+            if wsgi_registry_available and MASTER_REGISTRY:
+                globals_inst.terminal.command_registry = MASTER_REGISTRY.commands
+                logger.info(f"[Globals] ✓ Using WSGI MASTER_REGISTRY - {len(MASTER_REGISTRY.commands)} commands available")
+            else:
+                globals_inst.terminal.command_registry = {}
+                logger.warning("[Globals] ⚠ WSGI registry not available, command registry empty")
         
         logger.info("[Globals] ✅ Terminal initialized")
     
