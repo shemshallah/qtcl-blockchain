@@ -4241,12 +4241,25 @@ class DatabaseBuilder:
         last_error = None
         
         for attempt in range(max_retries):
+            conn = None
             try:
                 conn = self.pool.getconn()
                 conn.set_session(autocommit=True)
                 return conn
             except psycopg2.pool.PoolError as e:
                 last_error = e
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay * (attempt + 1))
+            except Exception as e:
+                # set_session() or getconn() raised a non-PoolError (e.g. OperationalError
+                # on a dead connection). Return the bad connection to the pool so psycopg2
+                # can close it cleanly, then retry.
+                last_error = e
+                if conn is not None:
+                    try:
+                        self.pool.putconn(conn, close=True)
+                    except Exception:
+                        pass
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay * (attempt + 1))
         

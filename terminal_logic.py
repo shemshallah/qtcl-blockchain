@@ -620,12 +620,12 @@ class SupabaseAuthManager:
             return cls._login_local_fallback(email, password)
 
         try:
-            auth_url = f"{cls.SUPABASE_URL}-auth-v1-token?grant_type=password"
+            auth_url = f"{cls.SUPABASE_URL}/auth/v1/token?grant_type=password"
             payload = {'email': email, 'password': password}
             resp = requests.post(
                 auth_url, json=payload,
                 headers={'apikey': cls.SUPABASE_ANON or cls.SUPABASE_KEY,
-                         'Content-Type': 'application-json'},
+                         'Content-Type': 'application/json'},
                 timeout=15
             )
 
@@ -669,7 +669,7 @@ class SupabaseAuthManager:
         # Try Supabase REST
         if cls.SUPABASE_URL:
             try:
-                url = f"{cls.SUPABASE_URL}-rest-v1-qtcl_users?uid=eq.{uid}&select=pseudoqubit_id"
+                url = f"{cls.SUPABASE_URL}/rest/v1/qtcl_users?uid=eq.{uid}&select=pseudoqubit_id"
                 resp = requests.get(url, headers=cls._auth_headers(), timeout=5)
                 if resp.status_code == 200:
                     data = resp.json()
@@ -907,7 +907,7 @@ class Config:
     
     @classmethod
     def verify_api_connection(cls)->bool:
-        try:r=requests.get(f"{cls.API_BASE_URL}-health",timeout=5);return r.status_code==200
+        try:r=requests.get(f"{cls.API_BASE_URL}/health",timeout=5);return r.status_code==200
         except:return False
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1121,9 +1121,11 @@ class SessionManager:
                 return True, msg
             else:
                 err = result.get('error', 'Authentication failed')
-                # Non-retriable errors: wrong password, account locked
+                # Only bail immediately on account lockout — for INVALID_CREDENTIALS
+                # or VALIDATION_ERROR still fall through to Supabase auth, because
+                # the user's password may be in Supabase auth.users (not public.users)
                 code = result.get('code', '')
-                if code in ('INVALID_CREDENTIALS', 'ACCOUNT_LOCKED', 'VALIDATION_ERROR'):
+                if code in ('ACCOUNT_LOCKED',):
                     return False, err
                 # Otherwise fall through to Supabase
         except Exception as _e:

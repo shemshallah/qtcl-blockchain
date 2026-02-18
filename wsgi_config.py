@@ -114,6 +114,19 @@ MONITOR         = None
 QUANTUM         = None
 ERROR_BUDGET    = None
 
+class RequestCorrelation:
+    """Stub — correlates requests across modules via a thread-local ID."""
+    import threading as _tl
+    _local = _tl.local()
+
+    @classmethod
+    def get_id(cls) -> str:
+        return getattr(cls._local, 'request_id', '')
+
+    @classmethod
+    def set_id(cls, rid: str):
+        cls._local.request_id = rid
+
 _expose_components()
 
 # ── Populate globals blockchain/auth/ledger stats from live DB ────────────────

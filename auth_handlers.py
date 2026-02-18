@@ -214,6 +214,7 @@ class GlobalQuantumState:
     
     def _get_last_registered_pq(self)->int:
         """Get last registered pseudoqubit ID from database"""
+        conn=None
         try:
             if WSGI_AVAILABLE and DB:
                 conn=DB.get_connection()
@@ -226,15 +227,21 @@ class GlobalQuantumState:
                 """,('assigned',))
                 result=cur.fetchone()
                 cur.close()
-                conn.close()
                 return result['max_id'] if result else 0
         except Exception as e:
             logger.warning(f"[GlobalQuantumState] Could not fetch last PQ: {e}")
+        finally:
+            if conn is not None:
+                try:
+                    DB.return_connection(conn)
+                except Exception:
+                    pass
         return 0
     
     def get_next_pseudoqubit(self)->Optional[int]:
         """Get next available pseudoqubit ID (incremental)"""
         with self.PSEUDOQUBIT_COUNTER_LOCK:
+            conn=None
             try:
                 if WSGI_AVAILABLE and DB:
                     conn=DB.get_connection()
@@ -255,15 +262,19 @@ class GlobalQuantumState:
                             SET status = %s, updated_at = NOW()
                             WHERE pseudoqubit_id = %s
                         """,('assigned',pq_id))
-                        conn.commit()
+                        # NOTE: conn is autocommit=True — no explicit commit needed
                         cur.close()
-                        conn.close()
                         logger.info(f"[GlobalQuantumState] Assigned PQ {pq_id}, next available iteration")
                         return pq_id
                     cur.close()
-                    conn.close()
             except Exception as e:
                 logger.error(f"[GlobalQuantumState] Failed to get next PQ: {e}")
+            finally:
+                if conn is not None:
+                    try:
+                        DB.return_connection(conn)
+                    except Exception:
+                        pass
         return None
     
     def clean_expired_cache(self):
