@@ -4887,7 +4887,36 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         if not email or not pw:
             return _err('Usage: login --email=x --password=y')
         ok, msg = s.login(email, pw)
-        return _ok({'message': msg, 'authenticated': ok}) if ok else _err(msg)
+        if not ok:
+            return _err(msg)
+        # Return token — command_executor.js reads data.result?.token and stores in
+        # localStorage, then sends Authorization: Bearer <token> on every subsequent
+        # request so _parse_auth returns (True, is_admin) and auth gates pass.
+        token = getattr(s.session, 'token', '') or ''
+        # Mirror into globals.auth.session_store so _parse_auth can validate without
+        # depending on JWT_SECRET being set in the environment.
+        try:
+            from globals import get_globals as _gg
+            _gs = _gg()
+            if token:
+                _gs.auth.session_store[token] = {
+                    'user_id':  getattr(s.session, 'user_id', ''),
+                    'email':    email,
+                    'is_admin': s.is_admin(),
+                    'authenticated': True,
+                }
+        except Exception:
+            pass
+        return _ok({
+            'message':        msg,
+            'authenticated':  True,
+            'token':          token,
+            'access_token':   token,
+            'user_id':        getattr(s.session, 'user_id', ''),
+            'email':          email,
+            'pseudoqubit_id': getattr(s.session, 'pseudoqubit_id', 'N-A'),
+            'role':           str(getattr(s.session, 'role', 'user')),
+        })
 
     def h_logout(flags, args):
         s.logout()

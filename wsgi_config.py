@@ -217,10 +217,31 @@ app.config['JSON_SORT_KEYS'] = False
 
 
 def _parse_auth(req):
-    """Returns (is_authenticated, is_admin)"""
+    """Returns (is_authenticated, is_admin).
+
+    Token resolution order:
+      1. Authorization: Bearer <token> header  (standard)
+      2. globals.auth.session_store            (set by h_login — works without JWT env var)
+      3. JWT decode via auth_mgr               (stateless verification)
+      4. ADMIN_SECRET env var                  (admin bypass)
+    """
+    # ── 1. Extract token from header ────────────────────────────────────────
     token = req.headers.get('Authorization', '').replace('Bearer ', '').strip()
+
     if not token:
         return False, False
+
+    # ── 2. Check globals session store (populated by h_login) ───────────────
+    try:
+        gs = get_globals()
+        session_entry = gs.auth.session_store.get(token)
+        if session_entry and session_entry.get('authenticated'):
+            is_admin = session_entry.get('is_admin', False)
+            return True, is_admin
+    except Exception:
+        pass
+
+    # ── 3. JWT stateless verification ───────────────────────────────────────
     try:
         auth_mgr = get_auth_manager()
         if auth_mgr:
