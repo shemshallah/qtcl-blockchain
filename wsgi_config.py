@@ -569,48 +569,6 @@ def api_oracle_status():
         if INTEGRATED_AVAILABLE and ResponseWrapper:
             return jsonify(ResponseWrapper.error(error=str(exc), error_code='STATUS_ERROR')), 500
 
-@app.route('/api/execute', methods=['POST'])
-def api_command():
-    """
-    Universal hyphenated command dispatcher.
-
-    Body: { "command": "admin-users --limit=10" }
-          { "command": "help-admin" }
-          { "command": "oracle-price", "kwargs": {"symbol": "BTCUSD"} }
-
-    Response: { "status": "success"|"error", "result": {...} }
-              { "status": "error", "error": "...", "suggestions": [...] }
-    """
-    try:
-        body = request.get_json(force=True, silent=True) or {}
-        raw  = (body.get('command') or body.get('cmd') or '').strip()
-        if not raw:
-            return jsonify({'status': 'error', 'error': 'No command provided'}), 400
-
-        extra_args = body.get('args', [])
-        extra_kw   = body.get('kwargs', {})
-        if extra_args:
-            raw += ' ' + ' '.join(str(a) for a in extra_args if a)
-        if extra_kw:
-            for k, v in extra_kw.items():
-                if v is not None and v != '':
-                    raw += f' --{k}={v}'
-
-        is_auth, is_admin = _parse_auth(request)
-        result = dispatch_command(raw, is_admin=is_admin, is_authenticated=is_auth)
-
-        try:
-            get_globals().metrics.commands_executed += 1
-        except Exception:
-            pass
-
-        return jsonify(result), 200 if result.get('status') == 'success' else 400
-
-    except Exception as exc:
-        logger.error(f'[/api/command] {exc}\n{traceback.format_exc()}')
-        return jsonify({'status': 'error', 'error': str(exc)}), 500
-
-
 @app.route('/api/commands', methods=['GET'])
 def api_commands():
     """Full command registry — drives frontend category/command lists."""
