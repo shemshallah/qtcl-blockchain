@@ -137,22 +137,65 @@ html,body{width:100%;height:100%;overflow:hidden;font-family:'Fira Code','Menlo'
   border-top:2px solid var(--border);
   background:linear-gradient(90deg,var(--bg) 0%,var(--bg2) 100%);
   flex-shrink:0;
+  position:relative;
+  z-index:1000;
+  box-shadow:0 -2px 10px rgba(0,0,0,0.5);
 }
 .input-ps1{color:var(--cyan);opacity:0.8;user-select:none;font-size:13px;flex-shrink:0;font-weight:bold}
 #cmd{
   flex:1;background:transparent;border:none;outline:none;
   color:var(--text);font-family:inherit;font-size:13px;caret-color:var(--cyan);
+  padding:8px 4px;
 }
 #cmd::placeholder{color:var(--dim)}
-#cmd:focus{color:var(--text)}
+#cmd:focus{color:var(--text);outline:none;border-bottom:1px solid var(--cyan)}
 #exec-btn{
-  padding:7px 18px;background:rgba(0,212,255,0.08);
+  padding:8px 16px;background:rgba(0,212,255,0.08);
   border:1px solid var(--border-light);color:var(--cyan);
   cursor:pointer;border-radius:3px;font-size:11px;letter-spacing:1px;
   font-family:inherit;transition:var(--transition);text-transform:uppercase;font-weight:bold;
+  min-width:50px;
 }
 #exec-btn:hover{background:rgba(0,212,255,0.18);border-color:var(--cyan);box-shadow:0 0 10px rgba(0,212,255,0.2)}
 #exec-btn:active{transform:scale(0.98)}
+
+/* ─── MOBILE OPTIMIZATIONS ─── */
+@media (max-width: 768px) {
+  #inputbar{
+    padding:14px 16px;gap:10px;
+    position:fixed;
+    bottom:0;
+    left:0;
+    right:0;
+    width:100%;
+    border-top:2px solid var(--border);
+    box-shadow:0 -2px 15px rgba(0,0,0,0.8);
+  }
+  
+  #terminal-view{
+    padding-bottom:65px;
+  }
+  
+  #output{
+    padding-bottom:10px;
+  }
+  
+  .input-ps1{
+    font-size:12px;
+  }
+  
+  #cmd{
+    font-size:15px;
+    padding:10px 8px;
+    min-height:40px;
+  }
+  
+  #exec-btn{
+    padding:10px 14px;
+    font-size:12px;
+    min-width:60px;
+  }
+}
 
 /* ─── INFO TAB ─── */
 #info-view{
@@ -298,8 +341,40 @@ const state = {
   statusData: {},
   allCommands: [],
   commandsByCategory: {},
-  isLoading: false
+  isLoading: false,
+  isMobile: /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
 };
+
+// ─── MOBILE FOCUS MANAGEMENT ───
+function setupMobileFocus() {
+  if (!state.isMobile) return;
+  
+  // Auto-focus input field on page load
+  setTimeout(() => state.cmdInput.focus(), 100);
+  
+  // Auto-focus when clicking anywhere in terminal area
+  document.getElementById('terminal-view').addEventListener('click', (e) => {
+    // Don't focus if clicking on output text for selection
+    if (e.target.id === 'output') {
+      state.cmdInput.focus();
+    }
+  });
+  
+  // Keep input visible by focusing when user taps anywhere
+  document.addEventListener('touchend', (e) => {
+    if (!e.target.closest('#inputbar')) {
+      // Slight delay to prevent keyboard from closing
+      setTimeout(() => state.cmdInput.focus(), 100);
+    }
+  });
+  
+  // Show keyboard when focusing
+  state.cmdInput.addEventListener('focus', () => {
+    setTimeout(() => {
+      state.cmdInput.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }, 300);
+  });
+}
 
 // ─── TAB SWITCHING ───
 function switchTab(name) {
@@ -440,26 +515,60 @@ async function loadCommands() {
 // ─── DYNAMIC HELP (SCRAPES FROM GLOBALS REGISTRY) ───
 function showDynamicHelp() {
   addLine('', 'dim');
-  addLine('╔════════════════════════════════════════════════════╗', 'system');
-  addLine('║  QUANTUM TEMPORAL COHERENCE LEDGER — COMMAND LIST   ║', 'system');
-  addLine('╚════════════════════════════════════════════════════╝', 'system');
+  addLine('╔════════════════════════════════════════════════════════╗', 'system');
+  addLine('║  QTCL v5.0 — COMMAND REFERENCE & SYNTAX GUIDE          ║', 'system');
+  addLine('╚════════════════════════════════════════════════════════╝', 'system');
+  addLine('', 'dim');
+  
+  addLine('📱 MOBILE UX TIPS:', 'info');
+  addLine('  • Input box auto-focuses at bottom of screen', 'dim');
+  addLine('  • Click/tap terminal → input focuses', 'dim');
+  addLine('  • Keyboard opens automatically', 'dim');
+  addLine('  • Press RUN button or Enter to execute', 'dim');
+  addLine('', 'dim');
+  
+  addLine('🎯 COMMAND SYNTAX (CRITICAL - READ THIS):', 'warning');
+  addLine('  Format: category/command (with forward slash /)', 'text');
+  addLine('', 'dim');
+  addLine('  RIGHT EXAMPLES:', 'success');
+  addLine('    ✓ admin/users       (admin category, users command)', 'dim');
+  addLine('    ✓ quantum/status    (quantum category, status command)', 'dim');
+  addLine('    ✓ block/history 10  (blockchain, history with param)', 'dim');
+  addLine('    ✓ system/health     (system category, health command)', 'dim');
+  addLine('', 'dim');
+  addLine('  WRONG EXAMPLES (DON\'T USE):', 'error');
+  addLine('    ✗ help admin              (missing /category)', 'dim');
+  addLine('    ✗ admin                   (just category, not command)', 'dim');
+  addLine('    ✗ quantum status          (missing /)', 'dim');
+  addLine('    ✗ block 1                 (should be block/details 1)', 'dim');
+  addLine('', 'dim');
+  
+  addLine('📖 HELP COMMANDS:', 'info');
+  addLine('  help                       This menu', 'dim');
+  addLine('  help/commands             List ALL 82+ commands', 'dim');
+  addLine('  help/category admin       Show admin commands only', 'dim');
+  addLine('  help/category quantum     Show quantum commands only', 'dim');
+  addLine('  help/category blockchain  Show blockchain commands only', 'dim');
   addLine('', 'dim');
   
   if (Object.keys(state.commandsByCategory).length === 0) {
-    addLine('(No commands loaded - visit INFO tab to load)', 'dim');
-    return;
+    addLine('(Commands not yet loaded - visit INFO tab to load)', 'dim');
+  } else {
+    addLine('📂 COMMAND CATEGORIES (15 total):', 'info');
+    const categories = Object.keys(state.commandsByCategory).sort();
+    categories.forEach(cat => {
+      const cmds = state.commandsByCategory[cat];
+      const count = cmds.length;
+      addLine(`  ${cat.padEnd(15)} (${count} commands) - type: help/category ${cat}`, 'dim');
+    });
   }
   
-  const categories = Object.keys(state.commandsByCategory).sort();
-  categories.forEach(cat => {
-    const cmds = state.commandsByCategory[cat];
-    const names = cmds.map(c => c.command).sort().join('  ');
-    addLine(`${cat.toUpperCase().padEnd(15)} ${names}`, 'info');
-  });
-  
   addLine('', 'dim');
-  addLine('type <command> to execute', 'dim');
-  addLine('click INFO tab for system details & quick launch', 'dim');
+  addLine('💡 QUICK START:', 'info');
+  addLine('  1. Type: help/commands     (see all available)', 'dim');
+  addLine('  2. Type: help/category admin     (see admin commands)', 'dim');
+  addLine('  3. Type: admin/users       (execute a command)', 'dim');
+  addLine('  4. Click INFO tab for system status & quick launch', 'dim');
   addLine('', 'dim');
 }
 
@@ -617,6 +726,9 @@ function runQuick(cmd) {
 
 // ─── BOOT SEQUENCE ───
 async function boot() {
+  // Setup mobile focus first
+  setupMobileFocus();
+  
   const BOOT = [
     { t: 0, msg: '╔═══════════════════════════════════════════════════════════╗', cls: 'system' },
     { t: 30, msg: '║     QUANTUM TEMPORAL COHERENCE LEDGER  v5.0               ║', cls: 'system' },
