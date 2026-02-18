@@ -5907,7 +5907,7 @@ class GlobalCommandRegistry:
     # ═════════════════════════════════════════════════════════════════════════════════════════
     
     @classmethod
-    def _cmd_help(**kwargs):
+    def _cmd_help(cls, **kwargs):
         """Show help for all commands - dynamically loaded from globals registry"""
         try:
             from globals import get_globals
@@ -5952,7 +5952,7 @@ class GlobalCommandRegistry:
             return {'error': str(e), 'output': f'Help error: {e}'}
     
     @classmethod
-    def _cmd_help_commands(**kwargs):
+    def _cmd_help_commands(cls, **kwargs):
         """List all commands with detailed information"""
         output = []
         output.append('ALL AVAILABLE COMMANDS:')
@@ -5967,7 +5967,7 @@ class GlobalCommandRegistry:
         return {'output': '\n'.join(output)}
     
     @classmethod
-    def _cmd_help_category(category=None, **kwargs):
+    def _cmd_help_category(cls, category=None, **kwargs):
         """Show help for a specific command category"""
         if not category:
             return {'error': 'Category not specified. Usage: help/category <name>'}
