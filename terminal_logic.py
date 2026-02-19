@@ -987,11 +987,7 @@ class Config:
     PASSWORD_REQUIRE_LOWERCASE=True;PASSWORD_REQUIRE_DIGITS=True
     THREAD_POOL_SIZE=4;BATCH_SIZE=100
     TABLE_FORMAT='grid';ENABLE_COLORS=True;LOADING_ANIMATION_FRAMES=10
-    # ── Admin email list — expand via ADMIN_EMAILS env var (comma-separated) ─
-    # SECURITY: emails here bypass DB role and always get admin access.
-    _env_admins = [e.strip().lower() for e in os.getenv('ADMIN_EMAILS', '').split(',') if e.strip()]
-    ADMIN_EMAILS = list({'admin@qtcl.io', 'root@qtcl.io', 'system@qtcl.io',
-                         'shemshallah@gmail.com', *_env_admins})
+    ADMIN_EMAILS=['admin@qtcl.io','root@qtcl.io','system@qtcl.io']
     ADMIN_DETECT_ROLE=True;ADMIN_FEATURES_ENABLED=True
     PARALLEL_TIMEOUT=300;PARALLEL_MAX_WORKERS=8
     
@@ -5106,81 +5102,49 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
 
 
     def h_login(flags, args):
-        # ── Input extraction ───────────────────────────────────────────────
         email = flags.get('email') or (args[0] if args else None)
         pw    = flags.get('password') or (args[1] if len(args) > 1 else None)
         if not email or not pw:
             return _err('Usage: login --email=x --password=y')
-
-        # ── SECURITY: Sanitize inputs against prompt/command injection ─────
-        # Strip null bytes, newlines, CRLF, and shell metacharacters from both
-        # fields. A real email or password never contains these.
-        _BAD_CHARS = '\x00\r\n\t\x1b;|&$`<>{}()\\'
-        email_clean = email.strip()
-        pw_clean    = pw  # password may contain special chars — only strip nulls/newlines
-        for _ch in '\x00\r\n\x1b':
-            email_clean = email_clean.replace(_ch, '')
-            pw_clean    = pw_clean.replace(_ch, '')
-        # Email format fast-check — reject anything with whitespace or obvious injection
-        if ' ' in email_clean or len(email_clean) > 254 or '@' not in email_clean:
-            return _err('Invalid email format')
-        if len(pw_clean) < 6 or len(pw_clean) > 1024:
-            return _err('Invalid password length')
-
-        ok, msg = s.login(email_clean, pw_clean)
+        ok, msg = s.login(email, pw)
         if not ok:
             return _err(msg)
-
+        # Return token — command_executor.js reads data.result?.token and stores in
+        # localStorage, then sends Authorization: Bearer <token> on every subsequent
+        # request so _parse_auth returns (True, is_admin) and auth gates pass.
         token = getattr(s.session, 'token', '') or ''
-
-        # ── Resolve role safely — fix "UserRole.USER" serialization bug ────
-        _role_obj = getattr(s.session, 'role', None)
-        if _role_obj is None:
-            _role_str = 'user'
-        elif hasattr(_role_obj, 'value'):
-            _role_str = str(_role_obj.value).lower()      # UserRole.ADMIN → "admin"
-        else:
-            _role_str = str(_role_obj).lower()
-
-        # ── ADMIN OVERRIDE: if email is in trusted admin list, force admin ─
-        # This means even if the DB has role='user', the session gets admin.
-        _email_lower = email_clean.lower()
-        _admin_emails_lower = {e.lower() for e in Config.ADMIN_EMAILS}
-        if _email_lower in _admin_emails_lower:
-            _role_str = 'admin'
-            # Also upgrade the session object so is_admin() works correctly
-            try:
-                s.session.role = UserRole.ADMIN
-            except Exception:
-                pass
-
-        _is_admin = _role_str in ('admin', 'superadmin', 'super_admin')
-
-        # ── Mirror into globals.auth.session_store ─────────────────────────
+        # Mirror into globals.auth.session_store so _parse_auth can validate without
+        # depending on JWT_SECRET being set in the environment.
+        # CRITICAL FIX: Store 'role' key so admin_api.require_auth decorator reads it correctly.
+        # CRITICAL FIX: Derive is_admin from role STRING not s.is_admin() singleton (which is
+        #               stateful and wrong across concurrent/multi-user sessions).
         try:
             from globals import get_globals as _gg
             _gs = _gg()
             if token:
+                _role_obj  = getattr(s.session, 'role', None)
+                _role_str  = (_role_obj.value if hasattr(_role_obj, 'value') else str(_role_obj)).lower() \
+                             if _role_obj else 'user'
+                _is_admin  = _role_str in ('admin', 'superadmin', 'super_admin') or \
+                             email in Config.ADMIN_EMAILS
                 _gs.auth.session_store[token] = {
                     'user_id':       getattr(s.session, 'user_id', ''),
-                    'email':         email_clean,
-                    'role':          _role_str,
-                    'is_admin':      _is_admin,
+                    'email':         email,
+                    'role':          _role_str,          # ← CRITICAL: admin_api reads this
+                    'is_admin':      _is_admin,          # ← CRITICAL: wsgi_config reads this
                     'authenticated': True,
                 }
         except Exception:
             pass
-
         return _ok({
             'message':        msg,
             'authenticated':  True,
             'token':          token,
             'access_token':   token,
             'user_id':        getattr(s.session, 'user_id', ''),
-            'email':          email_clean,
+            'email':          email,
             'pseudoqubit_id': getattr(s.session, 'pseudoqubit_id', 'N-A'),
-            'role':           _role_str,        # ← always "admin"/"user" never "UserRole.X"
-            'is_admin':       _is_admin,
+            'role':           str(getattr(s.session, 'role', 'user')),
         })
 
     def h_logout(flags, args):
@@ -5204,17 +5168,6 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         name  = flags.get('name', flags.get('username', ''))
         if not all([email, pw, name]):
             return _err('Usage: register --email=x --password=y --name=z')
-        # ── SECURITY: Sanitize inputs ──────────────────────────────────────
-        for _ch in '\x00\r\n\x1b':
-            email = email.replace(_ch, '')
-            pw    = pw.replace(_ch, '')
-            name  = name.replace(_ch, '')
-        email = email.strip()[:254]
-        name  = name.strip()[:100]
-        if '@' not in email or '.' not in email.split('@')[-1]:
-            return _err('Invalid email format')
-        if len(pw) < 6:
-            return _err('Password too short')
         ok, result = s.register(email, pw, name)
         return _ok(result if isinstance(result, dict) else {'message': str(result)}) if ok else _err(str(result))
 
@@ -5270,9 +5223,35 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         return _req('GET', '/api/transactions', params=params)
 
     def h_tx_create(flags, args):
-        body = {k: v for k, v in flags.items() if k in ('to', 'amount', 'type', 'memo', 'currency')}
-        if not body.get('to') or not body.get('amount'):
-            return _err('Usage: transaction-create --to=<addr> --amount=<n> [--type=transfer] [--memo=x]')
+        to_addr = flags.get('to') or flags.get('to_address')
+        amount  = flags.get('amount')
+        if not to_addr or not amount:
+            return _err('Usage: transaction-create --to=<addr_or_email> --amount=<n> [--memo=x] [--type=transfer]')
+
+        # ── SECURITY: sanitize ─────────────────────────────────────────────
+        for _ch in '\x00\r\n\x1b':
+            to_addr = to_addr.replace(_ch, '')
+        to_addr = to_addr.strip()[:254]
+        try:
+            float(amount)           # validate numeric before sending
+        except (ValueError, TypeError):
+            return _err(f'Invalid amount: {amount!r} — must be a number')
+
+        # ── Resolve from_address from authenticated session ────────────────
+        from_addr = ''
+        try:
+            from_addr = s.session.email or s.session.user_id or ''
+        except Exception:
+            pass
+
+        body = {
+            'from_address': from_addr,
+            'to_address':   to_addr,
+            'amount':       amount,
+            'tx_type':      flags.get('type', 'transfer'),
+            'memo':         flags.get('memo', ''),
+            'currency':     flags.get('currency', 'QTCL'),
+        }
         return _req('POST', '/api/transactions/submit', body)
 
     def h_tx_track(flags, args):

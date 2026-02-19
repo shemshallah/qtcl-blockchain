@@ -1692,19 +1692,15 @@ def create_blueprint()->Blueprint:
     /api/epochs/*, /api/chain/*, /api/qrng/*
     """
     bp=Blueprint('blockchain_api',__name__,url_prefix='/api')
-    # ── Resolve db_manager at call-time (not module-import time) ─────────────
+    # Resolve db_manager at call-time, not import-time
     _db_mgr = None
     try:
-        from globals import get_db_pool as _gdp
-        _db_mgr = _gdp()
-    except Exception:
-        pass
+        from globals import get_db_pool as _gdp; _db_mgr = _gdp()
+    except Exception: pass
     if _db_mgr is None:
         try:
-            import wsgi_config as _wc
-            _db_mgr = getattr(_wc, 'DB', None)
-        except Exception:
-            pass
+            import wsgi_config as _wc; _db_mgr = getattr(_wc, 'DB', None)
+        except Exception: pass
     db=BlockchainDB(_db_mgr)
     chain=BlockChainState()
     mempool=QuantumMempool()
@@ -2065,21 +2061,34 @@ def create_blueprint()->Blueprint:
     @rate_limit(100,60)
     def submit_transaction():
         """Submit transaction through full quantum routing pipeline."""
-        correlation_id=RequestCorrelation.start_operation('submit_transaction')
-        with PROFILER.profile('submit_transaction'):
+        # ── Safe no-op stubs for None singletons ─────────────────────────
+        import contextlib
+        class _NoopCtx:
+            def __enter__(self): return self
+            def __exit__(self,*a): pass
+        _profiler  = PROFILER     if (PROFILER   and hasattr(PROFILER,'profile'))   else None
+        _ebudget   = ERROR_BUDGET if (ERROR_BUDGET and hasattr(ERROR_BUDGET,'deduct')) else None
+        _rc        = RequestCorrelation if (RequestCorrelation and hasattr(RequestCorrelation,'start_operation')) else None
+        profile_ctx = _profiler.profile('submit_transaction') if _profiler else _NoopCtx()
+
+        correlation_id = _rc.start_operation('submit_transaction') if _rc else str(uuid.uuid4())
+        with profile_ctx:
             try:
                 data=request.get_json() or {}
-                from_address=data.get('from_address','').strip()
-                to_address=data.get('to_address','').strip()
+                # Accept both terminal alias ('to','from') and canonical names
+                from_address=(data.get('from_address') or data.get('from') or '').strip()
+                to_address  =(data.get('to_address')   or data.get('to')   or '').strip()
                 amount=Decimal(str(data.get('amount',0)))
                 fee=Decimal(str(data.get('fee','0.001')))
-                tx_type_str=data.get('tx_type','transfer')
+                tx_type_str=data.get('tx_type') or data.get('type','transfer')
                 try:tx_type=TransactionType(tx_type_str)
                 except:tx_type=TransactionType.TRANSFER
 
+                if not to_address:
+                    return jresp({'error':'to_address is required'},400)
                 if amount<=0:
-                    ERROR_BUDGET.deduct(0.05)
-                    RequestCorrelation.end_operation(correlation_id, success=False)
+                    if _ebudget: _ebudget.deduct(0.05)
+                    if _rc: _rc.end_operation(correlation_id, success=False)
                     return jresp({'error':'Amount must be positive'},400)
 
                 # Nonce
@@ -2136,7 +2145,7 @@ def create_blueprint()->Blueprint:
                 )
                 mempool.add(mem_entry)
 
-                RequestCorrelation.end_operation(correlation_id, success=True)
+                if _rc: _rc.end_operation(correlation_id, success=True)
                 return jresp({
                     'tx_hash':tx_hash,
                     'status':tx_record['status'],
@@ -2150,9 +2159,9 @@ def create_blueprint()->Blueprint:
                     'estimated_confirmation_blocks':cfg['finality_confirmations']
                 },201)
             except Exception as e:
-                ERROR_BUDGET.deduct(0.10)
+                if _ebudget: _ebudget.deduct(0.10)
                 logger.error("[API] submit_transaction error: %s",traceback.format_exc())
-                RequestCorrelation.end_operation(correlation_id, success=False)
+                if _rc: _rc.end_operation(correlation_id, success=False)
                 return jresp({'error':str(e)},500)
 
     @bp.route('/transactions/<tx_hash>/status',methods=['GET'])

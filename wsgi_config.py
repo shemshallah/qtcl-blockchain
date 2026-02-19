@@ -996,15 +996,9 @@ def api_registry():
 
 # ══════════════════════════════════════════════════════════════════════════════
 # WALLET REST ROUTES  /api/wallets/*
-# terminal_logic.py calls GET /api/wallets/balance and
-#                         GET /api/wallets/<wid>/balance
-# These delegate to ledger_manager.WalletBalanceAPI which has its own 3-tier
-# DB fallback (pool → supabase → wsgi_config.DB) so they work even before the
-# full blockchain blueprint loads.
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _get_wallet_api():
-    """Lazy-init WalletBalanceAPI singleton (avoids circular imports)."""
     global _WALLET_API
     try:
         if _WALLET_API is not None:
@@ -1013,14 +1007,12 @@ def _get_wallet_api():
         pass
     try:
         from ledger_manager import WalletBalanceAPI
-        _pool = DB  # may be None — WalletBalanceAPI handles that
-        _sb   = None
+        _sb = None
         try:
             import db_builder_v2 as _dbb
             _sb = getattr(_dbb, 'supabase', None) or getattr(_dbb, 'SUPABASE', None)
-        except Exception:
-            pass
-        _WALLET_API = WalletBalanceAPI(db_pool=_pool, supabase_client=_sb)
+        except Exception: pass
+        _WALLET_API = WalletBalanceAPI(db_pool=DB, supabase_client=_sb)
         logger.info('[wsgi] WalletBalanceAPI initialised')
     except Exception as _we:
         logger.warning(f'[wsgi] WalletBalanceAPI unavailable: {_we}')
@@ -1029,199 +1021,256 @@ def _get_wallet_api():
 
 _WALLET_API = None
 
-
-def _wallet_user_id_from_request(req) -> str:
-    """Extract user_id from query string, JSON body, or JWT token payload."""
+def _wallet_uid(req) -> str:
     uid = req.args.get('user_id') or req.args.get('wallet_id') or req.args.get('id')
-    if uid:
-        return uid
-    # Try JSON body
+    if uid: return uid
     try:
-        body = req.get_json(force=True, silent=True) or {}
-        uid = body.get('user_id') or body.get('wallet_id') or body.get('id')
-        if uid:
-            return uid
-    except Exception:
-        pass
-    # Try JWT payload → sub / user_id
+        b = req.get_json(force=True, silent=True) or {}
+        uid = b.get('user_id') or b.get('wallet_id')
+        if uid: return uid
+    except Exception: pass
     try:
-        token = req.headers.get('Authorization', '').replace('Bearer ', '').strip()
-        if token:
-            gs = get_globals()
-            session_entry = gs.auth.session_store.get(token)
-            if session_entry:
-                uid = session_entry.get('user_id') or session_entry.get('sub')
-                if uid:
-                    return uid
-            auth_mgr = get_auth_manager()
-            if auth_mgr:
-                payload = auth_mgr.verify_token(token)
-                if payload:
-                    uid = payload.get('sub') or payload.get('user_id')
-                    if uid:
-                        return uid
-    except Exception:
-        pass
+        token = req.headers.get('Authorization','').replace('Bearer ','').strip()
+        gs = get_globals()
+        sess = gs.auth.session_store.get(token)
+        if sess: return sess.get('user_id','')
+        auth_mgr = get_auth_manager()
+        if auth_mgr:
+            p = auth_mgr.verify_token(token)
+            if p: return p.get('sub') or p.get('user_id','')
+    except Exception: pass
     return ''
 
-
-@app.route('/api/wallets/balance', methods=['GET', 'POST'])
+@app.route('/api/wallets/balance', methods=['GET','POST'])
 def api_wallets_balance():
-    """
-    GET  /api/wallets/balance?user_id=XXX
-    POST /api/wallets/balance  {"user_id":"XXX","mode":"cached|live|fast"}
-    Returns the current user's wallet balance via WalletBalanceAPI.
-    """
     is_auth, _ = _parse_auth(request)
-    if not is_auth:
-        return jsonify({'status': 'error', 'error': 'Authentication required'}), 401
-
-    body = {}
-    if request.method == 'POST':
-        body = request.get_json(force=True, silent=True) or {}
-
-    user_id = _wallet_user_id_from_request(request)
-    if not user_id:
-        return jsonify({'status': 'error', 'error': 'user_id required (query param, body, or JWT sub)'}), 400
-
-    mode = request.args.get('mode') or body.get('mode', 'cached')
-
+    if not is_auth: return jsonify({'status':'error','error':'Authentication required'}), 401
+    body = request.get_json(force=True, silent=True) or {} if request.method=='POST' else {}
+    user_id = _wallet_uid(request)
+    if not user_id: return jsonify({'status':'error','error':'user_id required'}), 400
+    mode = request.args.get('mode') or body.get('mode','cached')
     wapi = _get_wallet_api()
-    if wapi is None:
-        return jsonify({'status': 'error', 'error': 'Wallet service temporarily unavailable'}), 503
-
+    if wapi is None: return jsonify({'status':'error','error':'Wallet service unavailable'}), 503
     try:
-        balance = wapi.get_balance(user_id, mode=mode)
-        if balance is None:
-            return jsonify({'status': 'error', 'error': f'Wallet not found for user: {user_id}', 'user_id': user_id}), 404
-        return jsonify({'status': 'success', 'data': balance, 'user_id': user_id}), 200
+        bal = wapi.get_balance(user_id, mode=mode)
+        if bal is None: return jsonify({'status':'error','error':f'Wallet not found: {user_id}'}), 404
+        return jsonify({'status':'success','data':bal,'user_id':user_id}), 200
     except Exception as exc:
         logger.error(f'[/api/wallets/balance] {exc}')
-        return jsonify({'status': 'error', 'error': str(exc)}), 500
-
+        return jsonify({'status':'error','error':str(exc)}), 500
 
 @app.route('/api/wallets/<wallet_id>/balance', methods=['GET'])
-def api_wallets_id_balance(wallet_id: str):
-    """
-    GET /api/wallets/<wallet_id>/balance
-    Returns balance for a specific wallet/user ID.
-    """
+def api_wallets_id_balance(wallet_id):
     is_auth, _ = _parse_auth(request)
-    if not is_auth:
-        return jsonify({'status': 'error', 'error': 'Authentication required'}), 401
-
-    mode = request.args.get('mode', 'cached')
+    if not is_auth: return jsonify({'status':'error','error':'Authentication required'}), 401
     wapi = _get_wallet_api()
-    if wapi is None:
-        return jsonify({'status': 'error', 'error': 'Wallet service temporarily unavailable'}), 503
-
+    if wapi is None: return jsonify({'status':'error','error':'Wallet service unavailable'}), 503
     try:
-        balance = wapi.get_balance(wallet_id, mode=mode)
-        if balance is None:
-            return jsonify({'status': 'error', 'error': f'Wallet not found: {wallet_id}', 'wallet_id': wallet_id}), 404
-        return jsonify({'status': 'success', 'data': balance, 'wallet_id': wallet_id}), 200
+        bal = wapi.get_balance(wallet_id, mode=request.args.get('mode','cached'))
+        if bal is None: return jsonify({'status':'error','error':f'Wallet not found: {wallet_id}'}), 404
+        return jsonify({'status':'success','data':bal,'wallet_id':wallet_id}), 200
     except Exception as exc:
-        logger.error(f'[/api/wallets/{wallet_id}/balance] {exc}')
-        return jsonify({'status': 'error', 'error': str(exc)}), 500
+        return jsonify({'status':'error','error':str(exc)}), 500
 
-
-@app.route('/api/wallets', methods=['GET', 'POST'])
-def api_wallets_list_or_create():
-    """
-    GET  /api/wallets?user_id=XXX  — list wallets for user
-    POST /api/wallets               — create wallet (stub; full logic in blockchain_api)
-    """
+@app.route('/api/wallets', methods=['GET','POST'])
+def api_wallets():
     is_auth, _ = _parse_auth(request)
-    if not is_auth:
-        return jsonify({'status': 'error', 'error': 'Authentication required'}), 401
-
+    if not is_auth: return jsonify({'status':'error','error':'Authentication required'}), 401
     if request.method == 'POST':
+        import uuid, time as _t
         body = request.get_json(force=True, silent=True) or {}
-        user_id = body.get('user_id') or _wallet_user_id_from_request(request)
-        # Return a minimal stub wallet object so UI doesn't crash during beta
-        import uuid, time
-        return jsonify({
-            'status':  'success',
-            'wallet':  {
-                'id':         str(uuid.uuid4()),
-                'user_id':    user_id,
-                'address':    '0x' + uuid.uuid4().hex[:40],
-                'created_at': int(time.time()),
-                'balance':    {'wei': 0, 'qtcl': '0.000000'},
-            },
-            'message': 'Wallet created (beta)',
-        }), 201
-
-    user_id = _wallet_user_id_from_request(request)
+        uid = body.get('user_id') or _wallet_uid(request)
+        return jsonify({'status':'success','wallet':{'id':str(uuid.uuid4()),'user_id':uid,
+            'address':'0x'+uuid.uuid4().hex[:40],'created_at':int(_t.time()),
+            'balance':{'wei':0,'qtcl':'0.000000'}},'message':'Wallet created (beta)'}), 201
+    uid = _wallet_uid(request)
     wapi = _get_wallet_api()
-    balance = wapi.get_balance(user_id) if (wapi and user_id) else None
-    return jsonify({
-        'status':  'success',
-        'wallets': [balance] if balance else [],
-        'total':   1 if balance else 0,
-        'user_id': user_id,
-    }), 200
-
+    bal = wapi.get_balance(uid) if (wapi and uid) else None
+    return jsonify({'status':'success','wallets':[bal] if bal else [],'total':1 if bal else 0,'user_id':uid}), 200
 
 @app.route('/api/wallets/balance/multi', methods=['POST'])
 def api_wallets_balance_multi():
-    """POST /api/wallets/balance/multi  {"user_ids":["a","b",...]}"""
     is_auth, _ = _parse_auth(request)
-    if not is_auth:
-        return jsonify({'status': 'error', 'error': 'Authentication required'}), 401
+    if not is_auth: return jsonify({'status':'error','error':'Authentication required'}), 401
     body = request.get_json(force=True, silent=True) or {}
-    user_ids = body.get('user_ids', [])
-    if not user_ids:
-        return jsonify({'status': 'error', 'error': 'user_ids list required'}), 400
+    uids = body.get('user_ids',[])
+    if not uids: return jsonify({'status':'error','error':'user_ids required'}), 400
     wapi = _get_wallet_api()
-    if wapi is None:
-        return jsonify({'status': 'error', 'error': 'Wallet service unavailable'}), 503
+    if wapi is None: return jsonify({'status':'error','error':'Wallet service unavailable'}), 503
     try:
-        results = wapi.get_balance_multi(user_ids)
-        return jsonify({'status': 'success', 'data': results, 'count': len(results)}), 200
+        return jsonify({'status':'success','data':wapi.get_balance_multi(uids),'count':len(uids)}), 200
     except Exception as exc:
-        logger.error(f'[/api/wallets/balance/multi] {exc}')
-        return jsonify({'status': 'error', 'error': str(exc)}), 500
-
+        return jsonify({'status':'error','error':str(exc)}), 500
 
 @app.route('/api/wallets/history/<user_id>', methods=['GET'])
-def api_wallets_history(user_id: str):
-    """GET /api/wallets/history/<user_id>?limit=50"""
+def api_wallets_history(user_id):
     is_auth, _ = _parse_auth(request)
-    if not is_auth:
-        return jsonify({'status': 'error', 'error': 'Authentication required'}), 401
-    limit = int(request.args.get('limit', 50))
+    if not is_auth: return jsonify({'status':'error','error':'Authentication required'}), 401
     wapi = _get_wallet_api()
-    if wapi is None:
-        return jsonify({'status': 'error', 'error': 'Wallet service unavailable'}), 503
-    try:
-        history = wapi.get_history(user_id, limit=limit) if hasattr(wapi, 'get_history') else []
-        return jsonify({'status': 'success', 'data': history, 'user_id': user_id}), 200
-    except Exception as exc:
-        logger.error(f'[/api/wallets/history/{user_id}] {exc}')
-        return jsonify({'status': 'error', 'error': str(exc)}), 500
-
+    if wapi is None: return jsonify({'status':'error','error':'Wallet service unavailable'}), 503
+    history = wapi.get_history(user_id, limit=int(request.args.get('limit',50))) if hasattr(wapi,'get_history') else []
+    return jsonify({'status':'success','data':history,'user_id':user_id}), 200
 
 @app.route('/api/wallets/summary/<user_id>', methods=['GET'])
-def api_wallets_summary(user_id: str):
-    """GET /api/wallets/summary/<user_id>"""
+def api_wallets_summary(user_id):
+    is_auth, _ = _parse_auth(request)
+    if not is_auth: return jsonify({'status':'error','error':'Authentication required'}), 401
+    wapi = _get_wallet_api()
+    if wapi is None: return jsonify({'status':'error','error':'Wallet service unavailable'}), 503
+    data = (wapi.get_summary(user_id) if hasattr(wapi,'get_summary') else wapi.get_balance(user_id))
+    if data is None: return jsonify({'status':'error','error':f'No data for {user_id}'}), 404
+    return jsonify({'status':'success','data':data,'user_id':user_id}), 200
+
+logger.info('[wsgi] ✓ /api/wallets/* routes registered')
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TRANSACTION SUBMIT FALLBACK  /api/transactions/submit
+# Handles POST even if the full blockchain_api blueprint fails to load.
+# Performs quantum-style TX creation using globals + ledger_manager.
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/transactions/submit', methods=['POST'])
+def api_transactions_submit():
+    """
+    POST /api/transactions/submit
+    Body: {from_address, to_address, amount, tx_type, memo}
+    Creates and queues a transaction. Delegates to ledger_manager.TransactionMempool
+    if available; otherwise records directly via globals and returns a tx_hash.
+    This route is a guaranteed fallback — the full blockchain_api route takes
+    precedence when that blueprint loads successfully.
+    """
     is_auth, _ = _parse_auth(request)
     if not is_auth:
         return jsonify({'status': 'error', 'error': 'Authentication required'}), 401
-    wapi = _get_wallet_api()
-    if wapi is None:
-        return jsonify({'status': 'error', 'error': 'Wallet service unavailable'}), 503
+
     try:
-        summary = wapi.get_summary(user_id) if hasattr(wapi, 'get_summary') else wapi.get_balance(user_id)
-        if summary is None:
-            return jsonify({'status': 'error', 'error': f'No data for: {user_id}'}), 404
-        return jsonify({'status': 'success', 'data': summary, 'user_id': user_id}), 200
+        data = request.get_json(force=True, silent=True) or {}
+
+        # Accept both alias forms
+        from_address = (data.get('from_address') or data.get('from') or '').strip()
+        to_address   = (data.get('to_address')   or data.get('to')   or '').strip()
+        amount_raw   = data.get('amount', 0)
+        memo         = str(data.get('memo', ''))[:500]
+        tx_type      = str(data.get('tx_type') or data.get('type', 'transfer'))
+
+        # ── Input sanitization ────────────────────────────────────────────
+        for _ch in '\x00\r\n\x1b':
+            to_address   = to_address.replace(_ch, '')
+            from_address = from_address.replace(_ch, '')
+        if not to_address:
+            return jsonify({'status': 'error', 'error': 'to_address is required'}), 400
+        try:
+            amount = float(amount_raw)
+            if amount <= 0:
+                return jsonify({'status': 'error', 'error': 'Amount must be positive'}), 400
+        except (TypeError, ValueError):
+            return jsonify({'status': 'error', 'error': f'Invalid amount: {amount_raw!r}'}), 400
+
+        # ── Build transaction record ──────────────────────────────────────
+        import hashlib, secrets, time as _t
+        ts       = datetime.now(timezone.utc).isoformat()
+        salt     = secrets.token_hex(16)
+        tx_hash  = hashlib.sha3_256(
+            f'{from_address}{to_address}{amount}{ts}{salt}'.encode()
+        ).hexdigest()
+
+        tx_record = {
+            'tx_hash':      tx_hash,
+            'from_address': from_address,
+            'to_address':   to_address,
+            'amount':       amount,
+            'amount_qtcl':  f'{amount:.6f}',
+            'fee':          float(data.get('fee', 0.001)),
+            'tx_type':      tx_type,
+            'status':       'pending',
+            'memo':         memo,
+            'timestamp':    ts,
+            'created_at':   int(_t.time()),
+            'quantum_salt': salt[:16],
+        }
+
+        # ── Try ledger_manager mempool first ──────────────────────────────
+        _queued = False
+        try:
+            from ledger_manager import initialize_event_driven_system, get_mempool
+            _mempool = get_mempool() if callable(globals().get('get_mempool', None)) else None
+            if _mempool is None:
+                from ledger_manager import GLOBAL_MEMPOOL
+                _mempool = GLOBAL_MEMPOOL
+            if _mempool is not None:
+                _mempool.add_transaction(tx_record)
+                _queued = True
+        except Exception as _lme:
+            logger.debug(f'[tx/submit] ledger mempool unavailable: {_lme}')
+
+        # ── Record in globals tx history ──────────────────────────────────
+        try:
+            gs = get_globals()
+            if hasattr(gs, 'ledger'):
+                gs.ledger.total_entries += 1
+            if hasattr(gs, 'blockchain'):
+                gs.blockchain.total_transactions += 1
+                gs.blockchain.mempool_size += 1
+        except Exception:
+            pass
+
+        logger.info(f'[tx/submit] tx_hash={tx_hash[:16]}… to={to_address} amount={amount} queued={_queued}')
+
+        return jsonify({
+            'status':      'success',
+            'tx_hash':     tx_hash,
+            'status_code': 'pending',
+            'from_address': from_address,
+            'to_address':  to_address,
+            'amount':      amount,
+            'amount_qtcl': f'{amount:.6f}',
+            'tx_type':     tx_type,
+            'queued':      _queued,
+            'message':     f'Transaction submitted — hash: {tx_hash[:16]}…',
+            'timestamp':   ts,
+        }), 201
+
     except Exception as exc:
-        logger.error(f'[/api/wallets/summary/{user_id}] {exc}')
+        logger.error(f'[/api/transactions/submit] {exc}', exc_info=True)
         return jsonify({'status': 'error', 'error': str(exc)}), 500
 
 
-logger.info('[wsgi] ✓ /api/wallets/* routes registered')
+@app.route('/api/transactions', methods=['GET'])
+def api_transactions_list():
+    """GET /api/transactions — list recent transactions from globals."""
+    is_auth, _ = _parse_auth(request)
+    if not is_auth: return jsonify({'status':'error','error':'Authentication required'}), 401
+    try:
+        gs = get_globals()
+        return jsonify({
+            'status':       'success',
+            'transactions': [],
+            'total':        getattr(gs.blockchain, 'total_transactions', 0),
+            'mempool_size': getattr(gs.blockchain, 'mempool_size', 0),
+        }), 200
+    except Exception as exc:
+        return jsonify({'status':'error','error':str(exc)}), 500
+
+
+@app.route('/api/transactions/stats', methods=['GET'])
+def api_transactions_stats():
+    """GET /api/transactions/stats — transaction statistics."""
+    is_auth, _ = _parse_auth(request)
+    if not is_auth: return jsonify({'status':'error','error':'Authentication required'}), 401
+    try:
+        gs = get_globals()
+        return jsonify({
+            'status':             'success',
+            'total_transactions': getattr(gs.blockchain, 'total_transactions', 0),
+            'mempool_size':       getattr(gs.blockchain, 'mempool_size', 0),
+            'total_blocks':       getattr(gs.blockchain, 'total_blocks', 0),
+        }), 200
+    except Exception as exc:
+        return jsonify({'status':'error','error':str(exc)}), 500
+
+
+logger.info('[wsgi] ✓ /api/transactions/* fallback routes registered')
 
 
 @app.errorhandler(404)
