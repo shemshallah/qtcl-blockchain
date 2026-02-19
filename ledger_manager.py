@@ -70,6 +70,779 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # GLOBAL DB WRAPPER - Provides ThreadedConnectionPool-like interface
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# MOD-1/2 CONSTANTS & MODULE-LEVEL GLOBALS
+# Auto-seal threshold, persist layer, wallet API — all wired by MasterModificationOrchestrator
+# or by initialize_event_driven_system() at startup.
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+
+TX_AUTO_SEAL_THRESHOLD     = 100        # Mempool seal: block created at this TX count
+TX_PERSIST_ON_ADD          = True       # Persist every TX to DB on add_transaction()
+SEAL_DEBOUNCE_SECONDS      = 0.5        # Min seconds between consecutive auto-seals
+TX_PERSIST_BATCH_SIZE      = 50         # Async write queue batch size
+TX_HISTORY_DEFAULT_LIMIT   = 50         # Default TX history query limit
+WALLET_CACHE_TTL_SECONDS   = 30         # Wallet balance cache TTL
+MAX_WALLET_BATCH           = 100        # Max wallets in one batch query
+BALANCE_SCALE_FACTOR       = 10 ** 18  # QTCL wei per QTCL
+TX_DB_RETRY_ATTEMPTS       = 3          # Retry failed DB writes N times
+TX_DB_RETRY_DELAY_SEC      = 0.2        # Delay between DB write retries
+
+# Module-level handles: populated by MasterModificationOrchestrator / register_tx_engine()
+GLOBAL_TX_PERSIST_LAYER:    Optional[Any] = None
+GLOBAL_AUTO_SEAL_CONTROLLER: Optional[Any] = None
+GLOBAL_WALLET_BALANCE_API:  Optional[Any] = None
+
+# ── Utility helpers used by both MOD-1 and MOD-2 ─────────────────────────────────────────────
+
+def _lm_now_iso() -> str:
+    return datetime.now(timezone.utc if hasattr(datetime, 'timezone') else None).isoformat()  # type: ignore[arg-type]
+
+def _lm_safe_float(v: Any, default: float = 0.0) -> float:
+    try: return float(v)
+    except: return default
+
+def _lm_safe_int(v: Any, default: int = 0) -> int:
+    try: return int(v)
+    except: return default
+
+def _lm_tx_quantum_hash(tx_id: str, user_id: str, target_id: str, amount: float) -> str:
+    payload = f'{tx_id}:{user_id}:{target_id}:{amount:.8f}:{time.time()}'
+    return '0x' + hashlib.sha3_256(payload.encode()).hexdigest()
+
+def _lm_db_retry(fn: Callable, *args, attempts: int = TX_DB_RETRY_ATTEMPTS,
+                  delay: float = TX_DB_RETRY_DELAY_SEC, **kwargs):
+    """Execute fn with retry; return (success, result_or_exception)."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return True, fn(*args, **kwargs)
+        except Exception as e:
+            if attempt < attempts:
+                time.sleep(delay * attempt)
+            else:
+                logger.error(f'[LM/DB-RETRY] All {attempts} attempts failed: {e}')
+                return False, e
+    return False, Exception('unreachable')
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# MOD-1: TX PERSISTENCE LAYER
+# Async background writer with in-process queue, retry logic, and psycopg2 + supabase support.
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+
+class TxPersistRecord:
+    """Thin value object: one row for the transactions table."""
+    __slots__ = ('tx_id','from_user_id','to_user_id','amount','status','tx_type',
+                 'quantum_hash','entropy_score','created_at','block_number',
+                 'finality_conf','oracle_bit','ghz_stages','extra',
+                 'pqc_fingerprint','pqc_signed','zk_nullifier')
+
+    def __init__(self, tx_id: str, from_user_id: str, to_user_id: str, amount: float,
+                 status: str, tx_type: str, quantum_hash: str, entropy_score: float,
+                 created_at: str, block_number: Optional[int] = None,
+                 finality_conf: float = 0.0, oracle_bit: int = 0,
+                 ghz_stages: int = 0, extra: Optional[Dict] = None,
+                 pqc_fingerprint: Optional[str] = None,
+                 pqc_signed: bool = False,
+                 zk_nullifier: Optional[str] = None):
+        self.tx_id          = tx_id
+        self.from_user_id   = from_user_id
+        self.to_user_id     = to_user_id
+        self.amount         = amount
+        self.status         = status
+        self.tx_type        = tx_type
+        self.quantum_hash   = quantum_hash
+        self.entropy_score  = entropy_score
+        self.created_at     = created_at
+        self.block_number   = block_number
+        self.finality_conf  = finality_conf
+        self.oracle_bit     = oracle_bit
+        self.ghz_stages     = ghz_stages
+        self.extra          = extra or {}
+        self.pqc_fingerprint = pqc_fingerprint
+        self.pqc_signed     = pqc_signed
+        self.zk_nullifier   = zk_nullifier
+
+
+class TxPersistenceLayer:
+    """
+    MOD-1 Component A: Async DB persistence for every add_transaction().
+
+    Architecture:
+      • Non-blocking: add → queue → background thread → batch flush → DB write (with retry)
+      • Dual backend: psycopg2 pool primary, supabase client fallback
+      • Instrumented: stats exposed to globals.tx_engine.persist_writes/errors/dropped
+      • PQC-aware: stores pqc_fingerprint + pqc_signed + zk_nullifier per TX row
+    """
+
+    def __init__(self, db_pool=None, supabase_client=None):
+        self.db_pool    = db_pool
+        self.supabase   = supabase_client
+        self._queue: queue.Queue = queue.Queue(maxsize=20_000)
+        self._lock      = threading.Lock()
+        self._stats     = defaultdict(int)
+        self._executor  = ThreadPoolExecutor(max_workers=2, thread_name_prefix='lm_tx_persist')
+        self._running   = True
+        self._writer    = threading.Thread(target=self._bg_writer, daemon=True, name='LM_TxPersistWriter')
+        self._writer.start()
+        logger.info(f'[TxPersist] Init. pool={db_pool is not None}, supabase={supabase_client is not None}')
+
+    def persist_async(self, rec: TxPersistRecord) -> None:
+        """Non-blocking enqueue — best effort; drops if queue is full."""
+        try:
+            self._queue.put_nowait(rec)
+        except queue.Full:
+            with self._lock:
+                self._stats['dropped'] += 1
+            logger.error(f'[TxPersist] Queue full — dropped TX {rec.tx_id}')
+            try:
+                from globals import get_tx_engine_state
+                get_tx_engine_state().persist_dropped += 1
+            except Exception:
+                pass
+
+    def persist_sync(self, rec: TxPersistRecord) -> Tuple[bool, str]:
+        """Blocking write; returns (success, message)."""
+        return self._write_record(rec)
+
+    def get_stats(self) -> Dict:
+        with self._lock:
+            return dict(self._stats)
+
+    def shutdown(self) -> None:
+        self._running = False
+        self._queue.put(None)
+        self._writer.join(timeout=6.0)
+        self._executor.shutdown(wait=False)
+
+    def _bg_writer(self) -> None:
+        batch: List[TxPersistRecord] = []
+        while self._running:
+            try:
+                item = self._queue.get(timeout=0.25)
+                if item is None:
+                    break
+                batch.append(item)
+                while len(batch) < TX_PERSIST_BATCH_SIZE:
+                    try:
+                        batch.append(self._queue.get_nowait())
+                    except queue.Empty:
+                        break
+                self._flush_batch(batch)
+                batch = []
+            except queue.Empty:
+                if batch:
+                    self._flush_batch(batch)
+                    batch = []
+
+    def _flush_batch(self, records: List[TxPersistRecord]) -> None:
+        for rec in records:
+            ok, _ = self._write_record(rec)
+            with self._lock:
+                self._stats['written' if ok else 'errors'] += 1
+            try:
+                from globals import get_tx_engine_state
+                ts = get_tx_engine_state()
+                if ok:
+                    ts.persist_writes += 1
+                else:
+                    ts.persist_errors += 1
+            except Exception:
+                pass
+
+    def _write_record(self, rec: TxPersistRecord) -> Tuple[bool, str]:
+        if self.db_pool:
+            ok, _ = _lm_db_retry(self._psycopg2_write, rec)
+            if ok:
+                return True, f'DB write OK: {rec.tx_id}'
+        if self.supabase:
+            ok, _ = _lm_db_retry(self._supabase_write, rec)
+            if ok:
+                return True, f'Supabase write OK: {rec.tx_id}'
+        # Last resort: try global DB from wsgi_config
+        try:
+            from wsgi_config import DB as _WSGI_DB
+            ok, _ = _lm_db_retry(self._wsgi_db_write, rec, _WSGI_DB)
+            if ok:
+                return True, f'WSGI_DB write OK: {rec.tx_id}'
+        except Exception:
+            pass
+        return False, f'No DB for {rec.tx_id}'
+
+    def _psycopg2_write(self, rec: TxPersistRecord) -> None:
+        conn = self.db_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO transactions (
+                        id, from_user_id, to_user_id, amount, status, tx_type,
+                        quantum_hash, entropy_score, created_at, block_number,
+                        finality_confidence, oracle_collapse_bit, ghz_stages, extra_data,
+                        pqc_fingerprint, pqc_signed, zk_nullifier
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        status = EXCLUDED.status,
+                        block_number = EXCLUDED.block_number,
+                        finality_confidence = EXCLUDED.finality_confidence,
+                        oracle_collapse_bit = EXCLUDED.oracle_collapse_bit,
+                        ghz_stages = EXCLUDED.ghz_stages,
+                        pqc_fingerprint = COALESCE(EXCLUDED.pqc_fingerprint, transactions.pqc_fingerprint),
+                        pqc_signed = transactions.pqc_signed OR EXCLUDED.pqc_signed,
+                        extra_data = EXCLUDED.extra_data
+                """, (
+                    rec.tx_id, rec.from_user_id, rec.to_user_id, rec.amount,
+                    rec.status, rec.tx_type, rec.quantum_hash, rec.entropy_score,
+                    rec.created_at, rec.block_number, rec.finality_conf,
+                    rec.oracle_bit, rec.ghz_stages, json.dumps(rec.extra),
+                    rec.pqc_fingerprint, rec.pqc_signed, rec.zk_nullifier,
+                ))
+                conn.commit()
+        finally:
+            self.db_pool.putconn(conn)
+
+    def _supabase_write(self, rec: TxPersistRecord) -> None:
+        row = {
+            'id': rec.tx_id, 'from_user_id': rec.from_user_id,
+            'to_user_id': rec.to_user_id, 'amount': rec.amount,
+            'status': rec.status, 'tx_type': rec.tx_type,
+            'quantum_hash': rec.quantum_hash, 'entropy_score': rec.entropy_score,
+            'created_at': rec.created_at, 'block_number': rec.block_number,
+            'finality_confidence': rec.finality_conf,
+            'oracle_collapse_bit': rec.oracle_bit, 'ghz_stages': rec.ghz_stages,
+            'extra_data': rec.extra or {},
+            'pqc_fingerprint': rec.pqc_fingerprint,
+            'pqc_signed': rec.pqc_signed,
+            'zk_nullifier': rec.zk_nullifier,
+        }
+        self.supabase.table('transactions').upsert(row).execute()
+
+    def _wsgi_db_write(self, rec: TxPersistRecord, db) -> None:
+        """Write via wsgi_config.DB global (get_connection / return_connection interface)."""
+        conn = db.get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO transactions (
+                    id, from_user_id, to_user_id, amount, status, tx_type,
+                    quantum_hash, entropy_score, created_at, block_number,
+                    finality_confidence, oracle_collapse_bit, ghz_stages, extra_data,
+                    pqc_fingerprint, pqc_signed, zk_nullifier
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (id) DO UPDATE SET
+                    status = EXCLUDED.status,
+                    block_number = EXCLUDED.block_number,
+                    finality_confidence = EXCLUDED.finality_confidence
+            """, (
+                rec.tx_id, rec.from_user_id, rec.to_user_id, rec.amount,
+                rec.status, rec.tx_type, rec.quantum_hash, rec.entropy_score,
+                rec.created_at, rec.block_number, rec.finality_conf,
+                rec.oracle_bit, rec.ghz_stages, json.dumps(rec.extra),
+                rec.pqc_fingerprint, rec.pqc_signed, rec.zk_nullifier,
+            ))
+            conn.commit()
+            cur.close()
+        finally:
+            db.return_connection(conn)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# MOD-1: AUTO-SEAL CONTROLLER
+# Thread-safe 100-TX threshold controller with debounce + callback system.
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+
+class SealTrigger(Enum):
+    AUTO_THRESHOLD  = 'auto_100tx'
+    MANUAL_API      = 'manual_api'
+    ADMIN_FORCE     = 'admin_force'
+    TIME_BASED      = 'time_based'
+
+
+class AutoSealController:
+    """
+    MOD-1 Component B: Debounced auto-seal at TX_AUTO_SEAL_THRESHOLD (100 TX).
+
+    Design:
+      • check_and_maybe_seal() called after every add_transaction()
+      • Debounce prevents double-fire within SEAL_DEBOUNCE_SECONDS
+      • Multiple callbacks supported (block creator + telemetry hooks)
+      • Full audit trail in _seal_history (deque, maxlen=1000)
+      • Thread-safe: single RLock guards threshold + last_seal_time
+    """
+
+    def __init__(self, threshold: int = TX_AUTO_SEAL_THRESHOLD,
+                 debounce_sec: float = SEAL_DEBOUNCE_SECONDS):
+        self.threshold      = threshold
+        self.debounce_sec   = debounce_sec
+        self._lock          = threading.RLock()
+        self._callbacks: List[Callable] = []
+        self._history: deque = deque(maxlen=1000)
+        self._last_seal     = 0.0
+        self._total         = 0
+        self._auto          = 0
+        self._executor      = ThreadPoolExecutor(max_workers=2, thread_name_prefix='auto_seal')
+        logger.info(f'[AutoSeal] Init. threshold={threshold}, debounce={debounce_sec}s')
+
+    def register_callback(self, cb: Callable) -> None:
+        with self._lock:
+            if cb not in self._callbacks:
+                self._callbacks.append(cb)
+        logger.info(f'[AutoSeal] Registered callback: {cb.__name__}')
+
+    def check_and_maybe_seal(self, pending_count: int,
+                              trigger: SealTrigger = SealTrigger.AUTO_THRESHOLD) -> Optional[Dict]:
+        """Returns seal event dict if seal was triggered, else None."""
+        if pending_count < self.threshold and trigger == SealTrigger.AUTO_THRESHOLD:
+            return None
+        with self._lock:
+            now = time.time()
+            if (now - self._last_seal) < self.debounce_sec and trigger == SealTrigger.AUTO_THRESHOLD:
+                return None
+            event = {
+                'seal_id':      'seal_' + secrets.token_hex(6),
+                'trigger':      trigger.value,
+                'tx_count':     pending_count,
+                'triggered_at': now,
+                'block_number': None,
+                'block_hash':   None,
+                'success':      False,
+                'error':        None,
+                'completed_at': None,
+            }
+            self._last_seal = now
+            self._total += 1
+            if trigger == SealTrigger.AUTO_THRESHOLD:
+                self._auto += 1
+        self._executor.submit(self._fire, event)
+        logger.info(f'[AutoSeal] 🔒 Seal triggered: {event["seal_id"]} | {pending_count} TX | {trigger.value}')
+        return event
+
+    def force_seal(self, reason: str = 'admin') -> Optional[Dict]:
+        logger.info(f'[AutoSeal] Force seal: {reason}')
+        return self.check_and_maybe_seal(0, SealTrigger.ADMIN_FORCE)
+
+    def get_history(self, limit: int = 20) -> List[Dict]:
+        with self._lock:
+            return list(self._history)[-limit:]
+
+    def get_stats(self) -> Dict:
+        with self._lock:
+            return {
+                'threshold':            self.threshold,
+                'total_seals':          self._total,
+                'auto_seals':           self._auto,
+                'callbacks_registered': len(self._callbacks),
+                'history_length':       len(self._history),
+            }
+
+    def _fire(self, event: Dict) -> None:
+        cbs = list(self._callbacks)
+        for cb in cbs:
+            try:
+                result = cb(event)
+                if result and isinstance(result, dict):
+                    event['block_number'] = result.get('block_number')
+                    event['block_hash']   = result.get('block_hash')
+                elif result and hasattr(result, 'block_number'):
+                    event['block_number'] = getattr(result, 'block_number', None)
+                    event['block_hash']   = getattr(result, 'block_hash', None)
+                event['success']      = True
+                event['completed_at'] = time.time()
+                logger.info(f'[AutoSeal] ✓ {cb.__name__} OK for {event["seal_id"]}')
+            except Exception as e:
+                event['error']        = str(e)
+                event['completed_at'] = time.time()
+                logger.error(f'[AutoSeal] ✗ {cb.__name__} failed: {e}', exc_info=True)
+        with self._lock:
+            self._history.append(event)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# MOD-2: WALLET BALANCE API
+# Full DB-backed wallet balance + history with cache + PQC key info injection.
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+
+class WalletBalanceAPI:
+    """
+    MOD-2: Rich wallet balance REST layer.
+
+    Sub-logic:
+      L0 — get_balance()       → CachedWalletBalance (global cache → DB → supabase)
+      L1 — get_balance_multi() → batch up to MAX_WALLET_BATCH users
+      L2 — get_history()       → TX history affecting balance (DB or supabase)
+      L3 — get_summary()       → balance + history + pending + PQC key info
+
+    PQC integration:
+      Each balance response includes the user's PQC fingerprint and pseudoqubit_id
+      pulled from globals.wallet.key_bindings — zero-latency, no DB hit.
+    """
+
+    def __init__(self, db_pool=None, supabase_client=None, cache_layer=None):
+        self.db_pool    = db_pool
+        self.supabase   = supabase_client
+        self.cache      = cache_layer
+        self._lock      = threading.Lock()
+        self._stats     = defaultdict(int)
+        logger.info(f'[WalletAPI] Init. DB={db_pool is not None}, SB={supabase_client is not None}, Cache={cache_layer is not None}')
+
+    def get_balance(self, user_id: str, mode: str = 'cached') -> Optional[Dict]:
+        """
+        Return wallet balance dict for user_id.
+        mode: 'cached' (TTL 30s) | 'live' (bypass cache) | 'fast' (supabase only)
+        """
+        with self._lock:
+            self._stats['queries'] += 1
+
+        # ── Fast path: global in-memory cache ────────────────────────────────
+        if mode == 'cached':
+            try:
+                from globals import get_wallet_balance_cached
+                cached = get_wallet_balance_cached(user_id)
+                if cached:
+                    with self._lock:
+                        self._stats['cache_hits'] += 1
+                    return cached.to_api_dict()
+            except Exception:
+                pass
+
+        # ── DB primary ───────────────────────────────────────────────────────
+        wb = None
+        if self.db_pool and mode != 'fast':
+            try:
+                wb = self._db_get_balance(user_id)
+            except Exception as e:
+                logger.warning(f'[WalletAPI] DB balance error: {e}')
+
+        # ── Supabase fallback ─────────────────────────────────────────────────
+        if wb is None and self.supabase:
+            try:
+                wb = self._supabase_get_balance(user_id)
+            except Exception as e:
+                logger.warning(f'[WalletAPI] Supabase balance error: {e}')
+
+        # ── wsgi_config.DB fallback ───────────────────────────────────────────
+        if wb is None:
+            try:
+                from wsgi_config import DB as _WSGI_DB
+                wb = self._wsgi_get_balance(user_id, _WSGI_DB)
+            except Exception:
+                pass
+
+        if wb is None:
+            with self._lock:
+                self._stats['not_found'] += 1
+            return None
+
+        # ── Inject PQC key info from globals ──────────────────────────────────
+        try:
+            from globals import get_wallet_state, update_wallet_balance_cache
+            ws = get_wallet_state()
+            binding = ws.get_binding(user_id)
+            if binding:
+                wb['pqc'] = binding.to_dict()
+            # Update global in-memory cache
+            update_wallet_balance_cache(
+                user_id=user_id,
+                balance_wei=int(wb.get('balance', {}).get('wei', 0)),
+                staked_wei=int(wb.get('staked', {}).get('wei', 0)),
+                locked_wei=int(wb.get('locked', {}).get('wei', 0)),
+                email=wb.get('email'),
+                last_tx_id=wb.get('last_tx_id'),
+            )
+        except Exception:
+            pass
+
+        return wb
+
+    def get_balance_multi(self, user_ids: List[str]) -> Dict[str, Optional[Dict]]:
+        """Batch balance fetch for up to MAX_WALLET_BATCH users."""
+        user_ids = user_ids[:MAX_WALLET_BATCH]
+        results: Dict[str, Optional[Dict]] = {}
+        if self.db_pool:
+            try:
+                results.update(self._db_batch_balance(user_ids))
+            except Exception as e:
+                logger.warning(f'[WalletAPI] Batch DB error: {e}')
+        missing = [uid for uid in user_ids if uid not in results]
+        for uid in missing:
+            results[uid] = self.get_balance(uid, mode='fast')
+        with self._lock:
+            self._stats['batch_queries'] += 1
+        return results
+
+    def get_history(self, user_id: str, limit: int = TX_HISTORY_DEFAULT_LIMIT,
+                    since: Optional[datetime] = None) -> List[Dict]:
+        """Fetch TX history affecting user balance, desc by time."""
+        with self._lock:
+            self._stats['history_queries'] += 1
+        if self.db_pool:
+            try:
+                return self._db_get_history(user_id, limit, since)
+            except Exception as e:
+                logger.warning(f'[WalletAPI] DB history error: {e}')
+        if self.supabase:
+            try:
+                return self._supabase_get_history(user_id, limit)
+            except Exception as e:
+                logger.warning(f'[WalletAPI] Supabase history error: {e}')
+        # wsgi fallback
+        try:
+            from wsgi_config import DB as _WSGI_DB
+            return self._wsgi_get_history(user_id, limit, _WSGI_DB)
+        except Exception:
+            pass
+        return []
+
+    def get_summary(self, user_id: str) -> Dict:
+        """Complete wallet summary: balance + recent TX + pending + PQC key + stats."""
+        wb      = self.get_balance(user_id, mode='live')
+        history = self.get_history(user_id, limit=10)
+        pending = self._get_pending_txs(user_id)
+        pqc_info: Optional[Dict] = None
+        try:
+            from globals import get_wallet_state
+            binding = get_wallet_state().get_binding(user_id)
+            if binding:
+                pqc_info = binding.to_dict()
+        except Exception:
+            pass
+        return {
+            'user_id':              user_id,
+            'balance':              wb,
+            'recent_transactions':  history,
+            'pending_transactions': pending,
+            'pending_count':        len(pending),
+            'pqc_key':              pqc_info,
+            'query_time':           _lm_now_iso(),
+        }
+
+    def get_stats(self) -> Dict:
+        with self._lock:
+            return dict(self._stats)
+
+    # ── DB layer ──────────────────────────────────────────────────────────────
+
+    def _db_get_balance(self, user_id: str) -> Optional[Dict]:
+        conn = self.db_pool.getconn()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT uid, email,
+                           COALESCE(balance, 0)::BIGINT        AS balance_wei,
+                           COALESCE(staked_amount, 0)::BIGINT  AS staked_wei,
+                           COALESCE(locked_amount, 0)::BIGINT  AS locked_wei
+                    FROM users WHERE uid = %s AND is_active = TRUE
+                """, (user_id,))
+                row = cur.fetchone()
+                if not row:
+                    return None
+                bal    = int(row['balance_wei'])
+                staked = int(row['staked_wei'])
+                locked = int(row['locked_wei'])
+                avail  = max(0, bal - staked - locked)
+                # Last TX
+                cur.execute("""
+                    SELECT id FROM transactions
+                    WHERE from_user_id = %s OR to_user_id = %s
+                    ORDER BY created_at DESC LIMIT 1
+                """, (user_id, user_id))
+                tx_row = cur.fetchone()
+                return {
+                    'user_id':  str(row['uid']), 'email': row['email'],
+                    'balance':  {'wei': bal,    'qtcl': round(bal / BALANCE_SCALE_FACTOR, 8)},
+                    'staked':   {'wei': staked, 'qtcl': round(staked / BALANCE_SCALE_FACTOR, 8)},
+                    'locked':   {'wei': locked, 'qtcl': round(locked / BALANCE_SCALE_FACTOR, 8)},
+                    'available':{'wei': avail,  'qtcl': round(avail / BALANCE_SCALE_FACTOR, 8)},
+                    'last_tx_id': str(tx_row['id']) if tx_row else None,
+                    'pqc': None,
+                }
+        finally:
+            self.db_pool.putconn(conn)
+
+    def _db_batch_balance(self, user_ids: List[str]) -> Dict[str, Optional[Dict]]:
+        conn = self.db_pool.getconn()
+        results: Dict[str, Optional[Dict]] = {}
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT uid, email,
+                           COALESCE(balance, 0)::BIGINT       AS balance_wei,
+                           COALESCE(staked_amount, 0)::BIGINT AS staked_wei,
+                           COALESCE(locked_amount, 0)::BIGINT AS locked_wei
+                    FROM users WHERE uid = ANY(%s) AND is_active = TRUE
+                """, (user_ids,))
+                for row in cur.fetchall():
+                    uid    = str(row['uid'])
+                    bal    = int(row['balance_wei'])
+                    staked = int(row['staked_wei'])
+                    locked = int(row['locked_wei'])
+                    avail  = max(0, bal - staked - locked)
+                    results[uid] = {
+                        'user_id': uid, 'email': row['email'],
+                        'balance':  {'wei': bal,    'qtcl': round(bal / BALANCE_SCALE_FACTOR, 8)},
+                        'staked':   {'wei': staked, 'qtcl': round(staked / BALANCE_SCALE_FACTOR, 8)},
+                        'locked':   {'wei': locked, 'qtcl': round(locked / BALANCE_SCALE_FACTOR, 8)},
+                        'available':{'wei': avail,  'qtcl': round(avail / BALANCE_SCALE_FACTOR, 8)},
+                        'pqc':      None,
+                    }
+        finally:
+            self.db_pool.putconn(conn)
+        return results
+
+    def _db_get_history(self, user_id: str, limit: int,
+                        since: Optional[datetime]) -> List[Dict]:
+        conn = self.db_pool.getconn()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                if since:
+                    cur.execute("""
+                        SELECT id, from_user_id, to_user_id, amount, status, tx_type,
+                               created_at, block_number, finality_confidence,
+                               oracle_collapse_bit, ghz_stages, pqc_fingerprint, pqc_signed
+                        FROM transactions
+                        WHERE (from_user_id = %s OR to_user_id = %s) AND created_at >= %s
+                        ORDER BY created_at DESC LIMIT %s
+                    """, (user_id, user_id, since.isoformat(), limit))
+                else:
+                    cur.execute("""
+                        SELECT id, from_user_id, to_user_id, amount, status, tx_type,
+                               created_at, block_number, finality_confidence,
+                               oracle_collapse_bit, ghz_stages, pqc_fingerprint, pqc_signed
+                        FROM transactions
+                        WHERE from_user_id = %s OR to_user_id = %s
+                        ORDER BY created_at DESC LIMIT %s
+                    """, (user_id, user_id, limit))
+                rows = cur.fetchall()
+                return [dict(r) for r in rows]
+        finally:
+            self.db_pool.putconn(conn)
+
+    def _supabase_get_balance(self, user_id: str) -> Optional[Dict]:
+        res = self.supabase.table('users').select(
+            'uid, email, balance, staked_amount, locked_amount'
+        ).eq('uid', user_id).eq('is_active', True).execute()
+        if not res.data:
+            return None
+        u = res.data[0]
+        bal    = _lm_safe_int(u.get('balance', 0))
+        staked = _lm_safe_int(u.get('staked_amount', 0))
+        locked = _lm_safe_int(u.get('locked_amount', 0))
+        avail  = max(0, bal - staked - locked)
+        return {
+            'user_id': str(u['uid']), 'email': u.get('email'),
+            'balance':  {'wei': bal,    'qtcl': round(bal / BALANCE_SCALE_FACTOR, 8)},
+            'staked':   {'wei': staked, 'qtcl': round(staked / BALANCE_SCALE_FACTOR, 8)},
+            'locked':   {'wei': locked, 'qtcl': round(locked / BALANCE_SCALE_FACTOR, 8)},
+            'available':{'wei': avail,  'qtcl': round(avail / BALANCE_SCALE_FACTOR, 8)},
+            'last_tx_id': None, 'pqc': None,
+        }
+
+    def _supabase_get_history(self, user_id: str, limit: int) -> List[Dict]:
+        res = self.supabase.table('transactions').select(
+            'id, from_user_id, to_user_id, amount, status, tx_type, '
+            'created_at, block_number, pqc_fingerprint, pqc_signed'
+        ).or_(f'from_user_id.eq.{user_id},to_user_id.eq.{user_id}'
+              ).order('created_at', desc=True).limit(limit).execute()
+        return res.data or []
+
+    def _wsgi_get_balance(self, user_id: str, db) -> Optional[Dict]:
+        conn = db.get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT uid, email,
+                       COALESCE(balance, 0)::BIGINT        AS balance_wei,
+                       COALESCE(staked_amount, 0)::BIGINT  AS staked_wei,
+                       COALESCE(locked_amount, 0)::BIGINT  AS locked_wei
+                FROM users WHERE uid = %s AND is_active = TRUE
+            """, (user_id,))
+            row = cur.fetchone()
+            cur.close()
+            if not row:
+                return None
+            uid_val, email, bal, staked, locked = row
+            bal    = _lm_safe_int(bal)
+            staked = _lm_safe_int(staked)
+            locked = _lm_safe_int(locked)
+            avail  = max(0, bal - staked - locked)
+            return {
+                'user_id': str(uid_val), 'email': email,
+                'balance':  {'wei': bal,    'qtcl': round(bal / BALANCE_SCALE_FACTOR, 8)},
+                'staked':   {'wei': staked, 'qtcl': round(staked / BALANCE_SCALE_FACTOR, 8)},
+                'locked':   {'wei': locked, 'qtcl': round(locked / BALANCE_SCALE_FACTOR, 8)},
+                'available':{'wei': avail,  'qtcl': round(avail / BALANCE_SCALE_FACTOR, 8)},
+                'last_tx_id': None, 'pqc': None,
+            }
+        finally:
+            db.return_connection(conn)
+
+    def _wsgi_get_history(self, user_id: str, limit: int, db) -> List[Dict]:
+        conn = db.get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT id, from_user_id, to_user_id, amount, status, tx_type,
+                       created_at, block_number, pqc_fingerprint, pqc_signed
+                FROM transactions
+                WHERE from_user_id = %s OR to_user_id = %s
+                ORDER BY created_at DESC LIMIT %s
+            """, (user_id, user_id, limit))
+            cols = ['id','from_user_id','to_user_id','amount','status','tx_type',
+                    'created_at','block_number','pqc_fingerprint','pqc_signed']
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+            cur.close()
+            return rows
+        finally:
+            db.return_connection(conn)
+
+    def _get_pending_txs(self, user_id: str) -> List[Dict]:
+        """Get pending/encoded TXs from DB for user."""
+        sources = []
+        # Try DB pool first
+        if self.db_pool:
+            try:
+                conn = self.db_pool.getconn()
+                try:
+                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                        cur.execute("""
+                            SELECT id, from_user_id, to_user_id, amount, status, tx_type,
+                                   created_at, pqc_fingerprint, pqc_signed
+                            FROM transactions
+                            WHERE (from_user_id = %s OR to_user_id = %s)
+                              AND status IN ('pending','encoded','superposition','ghz_encoding')
+                            ORDER BY created_at DESC LIMIT 20
+                        """, (user_id, user_id))
+                        sources = [dict(r) for r in cur.fetchall()]
+                finally:
+                    self.db_pool.putconn(conn)
+                return sources
+            except Exception as e:
+                logger.warning(f'[WalletAPI] Pending TX query error: {e}')
+        # wsgi fallback
+        try:
+            from wsgi_config import DB as _WSGI_DB
+            return self._wsgi_get_pending(user_id, _WSGI_DB)
+        except Exception:
+            pass
+        return []
+
+    def _wsgi_get_pending(self, user_id: str, db) -> List[Dict]:
+        conn = db.get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT id, from_user_id, to_user_id, amount, status, tx_type, created_at
+                FROM transactions
+                WHERE (from_user_id = %s OR to_user_id = %s)
+                  AND status IN ('pending','encoded','superposition','ghz_encoding')
+                ORDER BY created_at DESC LIMIT 20
+            """, (user_id, user_id))
+            cols = ['id','from_user_id','to_user_id','amount','status','tx_type','created_at']
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+            cur.close()
+            return rows
+        finally:
+            db.return_connection(conn)
+
+
 class GlobalDBWrapper:
     """
     Wrapper to make global DB compatible with ThreadedConnectionPool interface.
@@ -292,15 +1065,27 @@ class Block:
 
 class TransactionMempool:
     """
-    Holds transactions waiting to be included in a block.
-    
+    MOD-1 ENHANCED: Holds transactions waiting for block inclusion.
+
+    Enhancements over v1:
+      • TX DB persistence on every add_transaction() via GLOBAL_TX_PERSIST_LAYER (async, non-blocking)
+      • Auto-seal trigger at TX_AUTO_SEAL_THRESHOLD (100) via GLOBAL_AUTO_SEAL_CONTROLLER
+      • PQC-aware: extracts pqc_fingerprint / pqc_signed / zk_nullifier from TX dict
+      • Telemetry: reports pending count, pending value, total added/sealed to globals
+      • Rich stats endpoint: get_rich_stats()
+      • Fully backward-compatible: all original methods preserved
+
+    Design philosophy:
+      Zero-latency add_transaction() — DB write is async (queued), seal check is O(1).
+      Everything that could block lives in background threads.
+
     CORE IDEA:
     - Transactions are added here when they are finalized (confirmed)
     - Mempool is not a persistent store, just holds pending transactions
     - When transactions are included in a block, they're removed from mempool
     - Block creation is triggered by events (transactions arriving),
       not by a timer
-    
+
     This eliminates empty blocks:
     - Before: Every 10 seconds a block is created (even if empty)
       → 8,640 blocks/day × 2.5 KB = 21.6 MB/day = 631 MB/year
@@ -308,16 +1093,23 @@ class TransactionMempool:
       → ~50 blocks/day × 2.5 KB = 125 KB/day = 45 MB/year
       → 350x improvement!
     """
-    
+
     def __init__(self):
-        self.pending_txs = deque()
-        self.lock = threading.Lock()
-        logger.info("[MEMPOOL] TransactionMempool initialized")
-    
+        self.pending_txs    = deque()
+        self.lock           = threading.Lock()
+        self._total_added   = 0
+        self._total_sealed  = 0
+        self._pending_wei   = 0
+        logger.info('[MEMPOOL] TransactionMempool (MOD-1 Enhanced) initialized')
+
     def add_transaction(self, tx: Dict) -> None:
         """
         Add transaction to mempool after confirmation.
-        
+
+        MOD-1a: Async DB persistence via GLOBAL_TX_PERSIST_LAYER (non-blocking, batched).
+        MOD-1b: Auto-seal check via GLOBAL_AUTO_SEAL_CONTROLLER at 100 TX threshold.
+        PQC:     Extracts pqc_fingerprint/pqc_signed/zk_nullifier from TX dict.
+
         Args:
             tx: Transaction dictionary with keys:
                 - tx_id: Transaction ID
@@ -329,47 +1121,127 @@ class TransactionMempool:
                 - quantum_hash: Quantum state hash
                 - entropy_score: Entropy percentage
                 - validator_agreement: Validator agreement score
+                - pqc_fingerprint: (optional) HLWE key fingerprint of sender
+                - pqc_signed: (optional) bool — was TX PQC-signed?
+                - zk_nullifier: (optional) ZK proof nullifier for replay protection
         """
+        # ── MOD-1a: DB persist async (must happen BEFORE lock to avoid latency) ──
+        if GLOBAL_TX_PERSIST_LAYER is not None and TX_PERSIST_ON_ADD:
+            try:
+                tx_id = tx.get('tx_id') or tx.get('id') or 'tx_' + secrets.token_hex(8)
+                rec = TxPersistRecord(
+                    tx_id=tx_id,
+                    from_user_id=str(tx.get('from_user_id', '')),
+                    to_user_id=str(tx.get('to_user_id', '')),
+                    amount=_lm_safe_float(tx.get('amount', 0)),
+                    status=str(tx.get('status', 'pending')),
+                    tx_type=str(tx.get('tx_type', 'quantum_transfer')),
+                    quantum_hash=str(tx.get('quantum_hash', _lm_tx_quantum_hash(
+                        tx_id, str(tx.get('from_user_id', '')),
+                        str(tx.get('to_user_id', '')),
+                        _lm_safe_float(tx.get('amount', 0))
+                    ))),
+                    entropy_score=_lm_safe_float(
+                        tx.get('quantum_entropy') or tx.get('entropy_score', 0.5)
+                    ),
+                    created_at=_lm_now_iso(),
+                    block_number=tx.get('block_number'),
+                    finality_conf=_lm_safe_float(tx.get('finality_confidence', 0.0)),
+                    oracle_bit=_lm_safe_int(tx.get('oracle_collapse', 0)),
+                    ghz_stages=_lm_safe_int(tx.get('ghz_stages', 0)),
+                    extra={
+                        'quantum_coherence': tx.get('quantum_coherence'),
+                        'raw_status':        tx.get('status'),
+                        'ghz_pipeline':      tx.get('ghz_pipeline'),
+                    },
+                    pqc_fingerprint=tx.get('pqc_fingerprint'),
+                    pqc_signed=bool(tx.get('pqc_signed', False)),
+                    zk_nullifier=tx.get('zk_nullifier'),
+                )
+                GLOBAL_TX_PERSIST_LAYER.persist_async(rec)
+            except Exception as _pe:
+                logger.warning(f'[MEMPOOL] TX persist error (non-fatal): {_pe}')
+
+        # ── Core: add to deque ────────────────────────────────────────────────────
         with self.lock:
             self.pending_txs.append(tx)
+            self._total_added += 1
+            try:
+                amount_wei = int(_lm_safe_float(tx.get('amount', 0)) * BALANCE_SCALE_FACTOR)
+                self._pending_wei += amount_wei
+            except Exception:
+                pass
             pending_count = len(self.pending_txs)
-            logger.info(f"[MEMPOOL] TX added. Pending: {pending_count}")
-    
+
+        logger.info(f'[MEMPOOL] TX added. Pending: {pending_count}/{TX_AUTO_SEAL_THRESHOLD}')
+
+        # ── MOD-1b: Auto-seal check ───────────────────────────────────────────────
+        if GLOBAL_AUTO_SEAL_CONTROLLER is not None and pending_count >= TX_AUTO_SEAL_THRESHOLD:
+            try:
+                event = GLOBAL_AUTO_SEAL_CONTROLLER.check_and_maybe_seal(
+                    pending_count, SealTrigger.AUTO_THRESHOLD
+                )
+                if event:
+                    logger.info(f'[MEMPOOL] 🔒 Auto-seal fired: {event.get("seal_id")} at {pending_count} TX')
+            except Exception as _se:
+                logger.error(f'[MEMPOOL] Auto-seal error (non-fatal): {_se}')
+
+        # ── Update globals telemetry ──────────────────────────────────────────────
+        try:
+            from globals import get_globals
+            get_globals().blockchain.add_transaction(tx)
+        except Exception:
+            pass
+
     def get_pending_count(self) -> int:
-        """
-        Get number of pending transactions waiting for next block.
-        
-        Returns:
-            Integer count of pending transactions
-        """
+        """Get number of pending transactions waiting for next block."""
         with self.lock:
             return len(self.pending_txs)
-    
+
     def get_pending_transactions(self) -> List[Dict]:
-        """
-        View pending transactions without removing them.
-        Useful for monitoring and API endpoints.
-        
-        Returns:
-            List of pending transaction dictionaries
-        """
+        """View pending transactions without removing them."""
         with self.lock:
             return list(self.pending_txs)
-    
+
     def get_and_clear_pending(self) -> List[Dict]:
-        """
-        Get all pending transactions and clear mempool.
-        Called when creating a new block.
-        
-        Returns:
-            List of pending transactions (mempool is then empty)
-        """
+        """Get all pending transactions and clear mempool. Called when creating a new block."""
         with self.lock:
             txs = list(self.pending_txs)
             self.pending_txs.clear()
+            self._pending_wei = 0
+            self._total_sealed += len(txs)
             if txs:
-                logger.debug(f"[MEMPOOL] Cleared {len(txs)} transactions for block creation")
+                logger.debug(f'[MEMPOOL] Cleared {len(txs)} transactions for block creation')
             return txs
+
+    def get_rich_stats(self) -> Dict:
+        """MOD-1: Rich stats including pending wei, seal progress, persist telemetry."""
+        with self.lock:
+            pending = len(self.pending_txs)
+            pending_wei = self._pending_wei
+        seal_stats: Dict = {}
+        persist_stats: Dict = {}
+        if GLOBAL_AUTO_SEAL_CONTROLLER:
+            try:
+                seal_stats = GLOBAL_AUTO_SEAL_CONTROLLER.get_stats()
+            except Exception:
+                pass
+        if GLOBAL_TX_PERSIST_LAYER:
+            try:
+                persist_stats = GLOBAL_TX_PERSIST_LAYER.get_stats()
+            except Exception:
+                pass
+        return {
+            'pending_count':        pending,
+            'threshold':            TX_AUTO_SEAL_THRESHOLD,
+            'pct_to_seal':          round(pending / TX_AUTO_SEAL_THRESHOLD * 100, 1),
+            'pending_value_wei':    pending_wei,
+            'pending_value_qtcl':   round(pending_wei / BALANCE_SCALE_FACTOR, 8),
+            'total_added':          self._total_added,
+            'total_sealed':         self._total_sealed,
+            'persist_stats':        persist_stats,
+            'seal_stats':           seal_stats,
+        }
 
 
 class EventDrivenBlockCreator:
@@ -538,37 +1410,107 @@ global_block_creator: Optional[EventDrivenBlockCreator] = None
 def initialize_event_driven_system(
     block_builder: 'BlockBuilder',
     db_pool: ThreadedConnectionPool
-) -> Tuple[TransactionMempool, EventDrivenBlockCreator]:
+) -> Tuple[TransactionMempool, 'EventDrivenBlockCreator']:
     """
     Initialize global mempool and event-driven block creator.
-    
-    MUST BE CALLED ONCE when application starts, before any transactions
-    are processed.
-    
+
+    MOD-1 ENHANCED: Also initialises TxPersistenceLayer + AutoSealController,
+    wires them into the global mempool, and registers the block-creator auto-seal callback.
+    Additionally wires everything into globals.tx_engine via register_tx_engine().
+
+    Sub-logic:
+      L1 — Create TransactionMempool (MOD-1 enhanced with auto-seal + persist)
+      L2 — Create EventDrivenBlockCreator
+      L3 — Create TxPersistenceLayer (async DB write queue)
+      L4 — Create AutoSealController (100 TX threshold)
+      L5 — Create WalletBalanceAPI (balance + history REST layer)
+      L6 — Wire auto-seal callback → block_creator.create_block_from_mempool()
+      L7 — Register all objects in globals.tx_engine + globals.wallet via register_tx_engine()
+      L8 — Set module-level GLOBAL_* handles for add_transaction() to read
+
+    MUST BE CALLED ONCE when application starts, before any transactions are processed.
+
     Args:
         block_builder: BlockBuilder instance for creating blocks
         db_pool: Database connection pool
-        
+
     Returns:
         Tuple of (mempool, block_creator) for use throughout application
-        
-    Example:
-        >>> from ledger_manager import initialize_event_driven_system, BlockBuilder
-        >>> from db_config import DatabaseConnection
-        >>> 
-        >>> db_pool = DatabaseConnection.get_pool()
-        >>> block_builder = BlockBuilder(validator_address="0xValidator001")
-        >>> mempool, creator = initialize_event_driven_system(block_builder, db_pool)
     """
     global global_mempool, global_block_creator
-    
+    global GLOBAL_TX_PERSIST_LAYER, GLOBAL_AUTO_SEAL_CONTROLLER, GLOBAL_WALLET_BALANCE_API
+
+    logger.info('[INIT] ═══════════════════════════════════════════════════════════════')
+    logger.info('[INIT] Initializing MOD-1/2 enhanced event-driven ledger system...')
+
+    # ── L1: TransactionMempool (will read GLOBAL_TX_PERSIST_LAYER + GLOBAL_AUTO_SEAL_CONTROLLER) ──
     global_mempool = TransactionMempool()
+
+    # ── L2: EventDrivenBlockCreator ─────────────────────────────────────────────────────────────
     global_block_creator = EventDrivenBlockCreator(block_builder, db_pool)
-    
-    logger.info("[INIT] ✓ Event-driven block creation system initialized successfully")
-    logger.info(f"[INIT]   - Mempool: {global_mempool}")
-    logger.info(f"[INIT]   - Block Creator: {global_block_creator}")
-    
+
+    # ── L3: TxPersistenceLayer ───────────────────────────────────────────────────────────────────
+    _supabase = None
+    try:
+        _supabase = get_supabase_client()
+    except Exception:
+        pass
+    _db_pool_compat = _GLOBAL_DB_POOL  # GlobalDBWrapper wrapping global DB
+    persist_layer = TxPersistenceLayer(db_pool=_db_pool_compat, supabase_client=_supabase)
+    GLOBAL_TX_PERSIST_LAYER = persist_layer
+    logger.info('[INIT] ✓ TxPersistenceLayer created (async background writer running)')
+
+    # ── L4: AutoSealController ───────────────────────────────────────────────────────────────────
+    seal_controller = AutoSealController(
+        threshold=TX_AUTO_SEAL_THRESHOLD,
+        debounce_sec=SEAL_DEBOUNCE_SECONDS
+    )
+    GLOBAL_AUTO_SEAL_CONTROLLER = seal_controller
+    logger.info(f'[INIT] ✓ AutoSealController created (threshold={TX_AUTO_SEAL_THRESHOLD} TX)')
+
+    # ── L5: WalletBalanceAPI ─────────────────────────────────────────────────────────────────────
+    wallet_api = WalletBalanceAPI(
+        db_pool=_db_pool_compat,
+        supabase_client=_supabase,
+        cache_layer=None,
+    )
+    GLOBAL_WALLET_BALANCE_API = wallet_api
+    logger.info('[INIT] ✓ WalletBalanceAPI created (balance/history/summary endpoints ready)')
+
+    # ── L6: Wire auto-seal callback → block creator ──────────────────────────────────────────────
+    def _auto_seal_block_creator_callback(event):
+        """Callback: create a block from mempool when auto-seal fires."""
+        result = global_block_creator.create_block_from_mempool(global_mempool)
+        if result:
+            event['block_number'] = getattr(result, 'block_number', None)
+            event['block_hash']   = getattr(result, 'block_hash', None)
+            logger.info(f'[AutoSeal→BlockCreator] ✓ Block #{event.get("block_number")} sealed via auto-seal')
+        return result
+
+    _auto_seal_block_creator_callback.__name__ = 'auto_seal_block_creator'
+    seal_controller.register_callback(_auto_seal_block_creator_callback)
+    logger.info('[INIT] ✓ Auto-seal callback wired to block creator')
+
+    # ── L7: Register all in globals ──────────────────────────────────────────────────────────────
+    try:
+        from globals import register_tx_engine
+        register_tx_engine(
+            ghz_engine      = None,          # GHZ engine registered by quantum_api
+            mempool         = global_mempool,
+            seal_controller = seal_controller,
+            persist_layer   = persist_layer,
+            wallet_api      = wallet_api,
+        )
+        logger.info('[INIT] ✓ TX engine components registered in globals')
+    except Exception as _ge:
+        logger.warning(f'[INIT] globals.register_tx_engine skipped: {_ge}')
+
+    logger.info('[INIT] ✓ Event-driven block creation system initialized successfully')
+    logger.info(f'[INIT]   - Mempool: {global_mempool}')
+    logger.info(f'[INIT]   - Block Creator: {global_block_creator}')
+    logger.info(f'[INIT]   - Auto-seal threshold: {TX_AUTO_SEAL_THRESHOLD} TX')
+    logger.info('[INIT] ═══════════════════════════════════════════════════════════════')
+
     return global_mempool, global_block_creator
 
 

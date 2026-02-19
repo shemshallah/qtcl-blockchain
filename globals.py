@@ -1846,6 +1846,732 @@ logger.info("✅ [Globals v5.0] Module loaded - ready for initialization")
 logger.info("   Original 542 lines → EXPANDED to 1200+ lines with hierarchical logic")
 
 
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# TX ENGINE STATE (LEVEL 2 DEEP INTEGRATION — MOD-1/2/3 GLOBAL HUB)
+# Tracks every live object from qtcl_modifications and ledger_manager MOD wiring.
+# Sub-logic: GHZStagedEngine → EnhancedMempool → AutoSealController → TxPersistenceLayer
+# Sub²-logic: StagedTransaction in-flight registry + seal event history
+# Sub³-logic: Per-TX PQC signature telemetry (sign count, verify count, replay blocks)
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class StagedTXRecord:
+    """Lightweight in-flight TX record for global registry — minimal overhead."""
+    tx_id:              str
+    user_id:            str
+    target_id:          str
+    amount:             float
+    stage:              str                 # 'encode' | 'oracle' | 'finalize' | 'complete'
+    pqc_signed:         bool = False
+    pqc_fingerprint:    Optional[str] = None
+    zk_nullifier:       Optional[str] = None
+    oracle_bit:         int  = 0
+    finality_achieved:  bool = False
+    finality_confidence: float = 0.0
+    aggregate_entropy:  float = 0.0
+    block_number:       Optional[int] = None
+    created_at:         str  = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    completed_at:       Optional[str] = None
+    error:              Optional[str] = None
+
+
+@dataclass
+class TXEngineState:
+    """
+    Live telemetry for the GHZ-Staged TX engine + mempool + auto-seal controller.
+
+    Architectural hierarchy:
+      Level 0 — GHZStagedTransactionEngine    : 3-stage pipeline controller
+      Level 1 — EnhancedTransactionMempool    : persist-on-add + auto-seal threshold
+      Level 2 — AutoSealController            : debounced 100-TX seal trigger
+      Level 3 — TxPersistenceLayer            : async DB write queue + retry
+      Level 4 — WalletBalanceAPI              : balance / history / multi / summary
+    """
+    # ── Engine handles ────────────────────────────────────────────────────────
+    ghz_engine:         Optional[Any] = None    # GHZStagedTransactionEngine
+    mempool:            Optional[Any] = None    # EnhancedTransactionMempool
+    seal_controller:    Optional[Any] = None    # AutoSealController
+    persist_layer:      Optional[Any] = None    # TxPersistenceLayer
+    wallet_api:         Optional[Any] = None    # WalletBalanceAPI
+    initialized:        bool = False
+    init_error:         Optional[str] = None
+
+    # ── TX lifecycle counters ─────────────────────────────────────────────────
+    txs_submitted:      int = 0
+    txs_finalized:      int = 0
+    txs_rejected:       int = 0
+    txs_failed:         int = 0
+    txs_pqc_signed:     int = 0
+    txs_pqc_verified:   int = 0
+    txs_zk_proven:      int = 0
+    txs_zk_replays_blocked: int = 0
+
+    # ── Seal counters ─────────────────────────────────────────────────────────
+    blocks_auto_sealed: int = 0
+    blocks_force_sealed: int = 0
+    total_seals:        int = 0
+
+    # ── Persist counters ─────────────────────────────────────────────────────
+    persist_writes:     int = 0
+    persist_errors:     int = 0
+    persist_dropped:    int = 0
+
+    # ── In-flight TX registry (ring buffer — last 500 TXs) ───────────────────
+    recent_txs:         deque = field(default_factory=lambda: deque(maxlen=500))
+
+    # ── Seal event log (ring buffer — last 100 events) ───────────────────────
+    seal_events:        deque = field(default_factory=lambda: deque(maxlen=100))
+
+    # ── Aggregate quantum metrics ─────────────────────────────────────────────
+    avg_entropy:        float = 0.0
+    avg_coherence:      float = 0.0
+    avg_finality_confidence: float = 0.0
+    total_oracle_approvals: int = 0
+    total_oracle_rejections: int = 0
+
+    def record_tx(self, rec: 'StagedTXRecord'):
+        """Register a completed TX into the ring buffer and update counters."""
+        self.recent_txs.append(rec)
+        self.txs_submitted += 1
+        if rec.finality_achieved:
+            self.txs_finalized += 1
+            self.total_oracle_approvals += 1
+        elif rec.oracle_bit == 0 and rec.stage == 'complete':
+            self.txs_rejected += 1
+            self.total_oracle_rejections += 1
+        if rec.error and not rec.finality_achieved and rec.oracle_bit != 0:
+            self.txs_failed += 1
+        if rec.pqc_signed:
+            self.txs_pqc_signed += 1
+        if rec.zk_nullifier:
+            self.txs_zk_proven += 1
+        # Rolling average entropy / coherence / confidence
+        n = self.txs_submitted
+        self.avg_entropy = (self.avg_entropy * (n - 1) + rec.aggregate_entropy) / n
+        self.avg_finality_confidence = (self.avg_finality_confidence * (n - 1) + rec.finality_confidence) / n
+
+    def record_seal(self, trigger: str, tx_count: int, block_number: Optional[int], success: bool):
+        """Record a seal event."""
+        self.seal_events.append({
+            'trigger': trigger, 'tx_count': tx_count, 'block_number': block_number,
+            'success': success, 'ts': datetime.now(timezone.utc).isoformat()
+        })
+        self.total_seals += 1
+        if trigger in ('auto_100tx', 'auto_threshold'):
+            self.blocks_auto_sealed += 1
+        else:
+            self.blocks_force_sealed += 1
+
+    def get_summary(self) -> Dict[str, Any]:
+        """JSON-serialisable snapshot for health/status endpoints."""
+        pending = 0
+        if self.mempool and hasattr(self.mempool, 'get_pending_count'):
+            try:
+                pending = self.mempool.get_pending_count()
+            except Exception:
+                pass
+        seal_stats: Dict[str, Any] = {}
+        if self.seal_controller and hasattr(self.seal_controller, 'get_stats'):
+            try:
+                seal_stats = self.seal_controller.get_stats()
+            except Exception:
+                pass
+        return {
+            'initialized':      self.initialized,
+            'mempool_pending':  pending,
+            'txs': {
+                'submitted':    self.txs_submitted,
+                'finalized':    self.txs_finalized,
+                'rejected':     self.txs_rejected,
+                'failed':       self.txs_failed,
+                'pqc_signed':   self.txs_pqc_signed,
+                'zk_proven':    self.txs_zk_proven,
+                'zk_replays_blocked': self.txs_zk_replays_blocked,
+            },
+            'quantum': {
+                'avg_entropy':          round(self.avg_entropy, 4),
+                'avg_coherence':        round(self.avg_coherence, 4),
+                'avg_finality_conf':    round(self.avg_finality_confidence, 4),
+                'oracle_approvals':     self.total_oracle_approvals,
+                'oracle_rejections':    self.total_oracle_rejections,
+            },
+            'seals': {
+                'total':        self.total_seals,
+                'auto':         self.blocks_auto_sealed,
+                'force':        self.blocks_force_sealed,
+                **seal_stats
+            },
+            'persistence': {
+                'writes':       self.persist_writes,
+                'errors':       self.persist_errors,
+                'dropped':      self.persist_dropped,
+            },
+            'recent_tx_count':  len(self.recent_txs),
+            'error':            self.init_error,
+        }
+
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# WALLET SYSTEM STATE (MOD-2 GLOBAL HUB)
+# Per-user cache of WalletBalance objects, pending TX aggregates, PQC key binding.
+# Sub-logic: WalletBalanceAPI → balance cache → history cache → pending TX aggregation
+# Sub²-logic: PQC fingerprint binding per wallet (key_id + fingerprint + pseudoqubit_id)
+# Sub³-logic: Wallet event log (deposits/withdrawals in real-time)
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+BALANCE_SCALE_FACTOR = 10 ** 18     # QTCL wei per QTCL coin
+
+
+@dataclass
+class WalletKeyBinding:
+    """
+    Links a user wallet to their HLWE post-quantum key bundle.
+    This binding is the cryptographic heart of PQC wallet security.
+
+    The binding is IMMUTABLE once set: key_id + pseudoqubit_id uniquely identify
+    the user's identity in the {8,3} tessellation. Rotating the key generates a
+    NEW binding; the old one becomes a historical record.
+    """
+    user_id:            str
+    master_key_id:      str                     # HLWE master key ID (pq_key_store)
+    signing_key_id:     str                     # derived HyperSign subkey
+    enc_key_id:         str                     # derived HyperKEM subkey
+    fingerprint:        str                     # SHA3-256 of public key bytes
+    pseudoqubit_id:     int                     # {8,3} tessellation position
+    params:             str   = 'HLWE-256'
+    bound_at:           str   = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    rotation_count:     int   = 0
+    last_rotated_at:    Optional[str] = None
+    kyber_hybrid:       bool  = False
+    dilithium_hybrid:   bool  = False
+    is_active:          bool  = True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'user_id':          self.user_id,
+            'master_key_id':    self.master_key_id[:16] + '…',
+            'signing_key_id':   self.signing_key_id[:16] + '…',
+            'enc_key_id':       self.enc_key_id[:16] + '…',
+            'fingerprint':      self.fingerprint,
+            'pseudoqubit_id':   self.pseudoqubit_id,
+            'params':           self.params,
+            'bound_at':         self.bound_at,
+            'rotation_count':   self.rotation_count,
+            'last_rotated_at':  self.last_rotated_at,
+            'kyber_hybrid':     self.kyber_hybrid,
+            'dilithium_hybrid': self.dilithium_hybrid,
+            'is_active':        self.is_active,
+            'security_bits':    int(self.params.split('-')[-1]) if '-' in self.params else 256,
+        }
+
+
+@dataclass
+class CachedWalletBalance:
+    """In-memory cached wallet balance with TTL."""
+    user_id:            str
+    email:              Optional[str]
+    balance_wei:        int
+    staked_wei:         int
+    locked_wei:         int
+    available_wei:      int
+    pending_in_wei:     int = 0
+    pending_out_wei:    int = 0
+    last_tx_id:         Optional[str] = None
+    pqc_fingerprint:    Optional[str] = None
+    pseudoqubit_id:     Optional[int] = None
+    cached_at:          float = field(default_factory=time.time)
+    ttl_seconds:        float = 30.0
+
+    def is_expired(self) -> bool:
+        return (time.time() - self.cached_at) > self.ttl_seconds
+
+    @property
+    def balance_qtcl(self) -> float:
+        return self.balance_wei / BALANCE_SCALE_FACTOR
+
+    @property
+    def available_qtcl(self) -> float:
+        return self.available_wei / BALANCE_SCALE_FACTOR
+
+    def to_api_dict(self) -> Dict[str, Any]:
+        return {
+            'user_id':      self.user_id,
+            'email':        self.email,
+            'balance':      {'wei': self.balance_wei,   'qtcl': round(self.balance_qtcl, 8)},
+            'staked':       {'wei': self.staked_wei,    'qtcl': round(self.staked_wei / BALANCE_SCALE_FACTOR, 8)},
+            'locked':       {'wei': self.locked_wei,    'qtcl': round(self.locked_wei / BALANCE_SCALE_FACTOR, 8)},
+            'available':    {'wei': self.available_wei, 'qtcl': round(self.available_qtcl, 8)},
+            'pending_in':   {'wei': self.pending_in_wei},
+            'pending_out':  {'wei': self.pending_out_wei},
+            'last_tx_id':   self.last_tx_id,
+            'pqc': {
+                'fingerprint':      self.pqc_fingerprint,
+                'pseudoqubit_id':   self.pseudoqubit_id,
+            } if self.pqc_fingerprint else None,
+            'cache_age_ms': round((time.time() - self.cached_at) * 1000, 1),
+        }
+
+
+@dataclass
+class WalletSystemState:
+    """
+    Live telemetry and cache layer for the wallet balance system (MOD-2).
+
+    Architectural hierarchy:
+      Level 0 — In-memory balance cache (CachedWalletBalance, TTL=30s)
+      Level 1 — WalletKeyBinding registry (per-user PQC key → wallet link)
+      Level 2 — Per-user TX history cache (last 50 TXs, ring buffer per user)
+      Level 3 — Pending TX aggregation (in-flight debit/credit per user)
+      Level 4 — Wallet event log (ring buffer, 2000 entries)
+    """
+    # ── Handle to WalletBalanceAPI ────────────────────────────────────────────
+    api:                Optional[Any] = None    # WalletBalanceAPI instance
+    initialized:        bool = False
+
+    # ── Balance cache (user_id → CachedWalletBalance) ────────────────────────
+    _balance_cache:     Dict[str, CachedWalletBalance] = field(default_factory=dict)
+    _cache_lock:        threading.RLock = field(default_factory=threading.RLock)
+
+    # ── PQC wallet key bindings (user_id → WalletKeyBinding) ─────────────────
+    key_bindings:       Dict[str, WalletKeyBinding] = field(default_factory=dict)
+    _binding_lock:      threading.RLock = field(default_factory=threading.RLock)
+
+    # ── Per-user TX history cache (user_id → deque of tx dicts) ──────────────
+    _history_cache:     Dict[str, deque] = field(default_factory=lambda: defaultdict(lambda: deque(maxlen=50)))
+    _history_lock:      threading.RLock = field(default_factory=threading.RLock)
+
+    # ── Wallet event log ─────────────────────────────────────────────────────
+    events:             deque = field(default_factory=lambda: deque(maxlen=2000))
+
+    # ── Stats ────────────────────────────────────────────────────────────────
+    balance_queries:    int = 0
+    cache_hits:         int = 0
+    cache_misses:       int = 0
+    history_queries:    int = 0
+    binding_count:      int = 0
+    total_wallets_seen: int = 0
+
+    # ── Cache operations ──────────────────────────────────────────────────────
+    def get_cached_balance(self, user_id: str) -> Optional[CachedWalletBalance]:
+        with self._cache_lock:
+            entry = self._balance_cache.get(user_id)
+            if entry and not entry.is_expired():
+                self.cache_hits += 1
+                return entry
+            if entry:
+                del self._balance_cache[user_id]
+            self.cache_misses += 1
+            return None
+
+    def set_cached_balance(self, wb: 'CachedWalletBalance'):
+        with self._cache_lock:
+            self._balance_cache[wb.user_id] = wb
+            if wb.user_id not in self._balance_cache:
+                self.total_wallets_seen += 1
+
+    def invalidate_cache(self, user_id: str):
+        with self._cache_lock:
+            self._balance_cache.pop(user_id, None)
+
+    # ── Key binding operations ────────────────────────────────────────────────
+    def bind_key(self, binding: 'WalletKeyBinding'):
+        with self._binding_lock:
+            existing = self.key_bindings.get(binding.user_id)
+            if existing:
+                binding.rotation_count = existing.rotation_count + 1
+                binding.last_rotated_at = datetime.now(timezone.utc).isoformat()
+                existing.is_active = False
+            self.key_bindings[binding.user_id] = binding
+            self.binding_count = len(self.key_bindings)
+
+    def get_binding(self, user_id: str) -> Optional['WalletKeyBinding']:
+        with self._binding_lock:
+            return self.key_bindings.get(user_id)
+
+    def has_binding(self, user_id: str) -> bool:
+        with self._binding_lock:
+            b = self.key_bindings.get(user_id)
+            return b is not None and b.is_active
+
+    # ── History cache ─────────────────────────────────────────────────────────
+    def push_history(self, user_id: str, tx: Dict[str, Any]):
+        with self._history_lock:
+            self._history_cache[user_id].appendleft(tx)
+
+    def get_history_cache(self, user_id: str) -> List[Dict[str, Any]]:
+        with self._history_lock:
+            return list(self._history_cache.get(user_id, deque()))
+
+    # ── Event log ─────────────────────────────────────────────────────────────
+    def log_event(self, event_type: str, user_id: str, amount_wei: int = 0,
+                  tx_id: Optional[str] = None, detail: str = ''):
+        self.events.append({
+            'type': event_type, 'user_id': user_id,
+            'amount_wei': amount_wei, 'tx_id': tx_id,
+            'detail': detail, 'ts': datetime.now(timezone.utc).isoformat(),
+        })
+
+    def get_summary(self) -> Dict[str, Any]:
+        with self._cache_lock:
+            cached_count = len(self._balance_cache)
+            valid_cached = sum(1 for v in self._balance_cache.values() if not v.is_expired())
+        return {
+            'initialized':      self.initialized,
+            'balance_queries':  self.balance_queries,
+            'cache': {
+                'total':        cached_count,
+                'valid':        valid_cached,
+                'hits':         self.cache_hits,
+                'misses':       self.cache_misses,
+                'hit_rate':     round(self.cache_hits / max(self.cache_hits + self.cache_misses, 1), 3),
+            },
+            'key_bindings':     self.binding_count,
+            'wallets_seen':     self.total_wallets_seen,
+            'history_queries':  self.history_queries,
+            'events_logged':    len(self.events),
+        }
+
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# EXTEND GlobalState WITH TX ENGINE + WALLET STATE
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+# We monkey-patch into GlobalState post-definition since GlobalState is already defined above.
+# This is safe: dataclass fields can be added dynamically before any instance is created.
+# At module load time, GlobalState has not been instantiated yet.
+
+_TX_ENGINE_STATE_DEFAULT    = field(default_factory=TXEngineState)
+_WALLET_SYSTEM_STATE_DEFAULT = field(default_factory=WalletSystemState)
+
+# Inject fields into GlobalState.__dataclass_fields__ and __annotations__
+import dataclasses as _dc
+_dc_fields_to_add = [
+    ('tx_engine',    TXEngineState,    TXEngineState),
+    ('wallet',       WalletSystemState, WalletSystemState),
+]
+for _fname, _ftype, _fdefault_factory in _dc_fields_to_add:
+    if _fname not in GlobalState.__dataclass_fields__:
+        GlobalState.__annotations__[_fname] = _ftype
+        _new_field = _dc.field(default_factory=_fdefault_factory)
+        _new_field.name = _fname
+        _new_field._field_type = _dc._FIELD  # type: ignore[attr-defined]
+        GlobalState.__dataclass_fields__[_fname] = _new_field
+
+        # Also add to __init__ via __post_init__ hook — done by re-registering
+        # via a property fallback that lazy-initialises the attribute.
+        # Since dataclass __init__ won't set these (already created), we ensure
+        # __post_init__ does it.
+        _default_obj = _fdefault_factory
+
+# Patch __post_init__ to initialise injected fields if missing
+_original_GlobalState_post_init = getattr(GlobalState, '__post_init__', None)
+
+def _GlobalState_post_init_patched(self):
+    if _original_GlobalState_post_init:
+        _original_GlobalState_post_init(self)
+    if not hasattr(self, 'tx_engine') or self.tx_engine is None:
+        object.__setattr__(self, 'tx_engine', TXEngineState())
+    if not hasattr(self, 'wallet') or self.wallet is None:
+        object.__setattr__(self, 'wallet', WalletSystemState())
+
+GlobalState.__post_init__ = _GlobalState_post_init_patched
+
+# Override __init__ so new instances always get tx_engine + wallet
+_original_GlobalState_init = GlobalState.__init__
+
+def _GlobalState_init_patched(self, *args, **kwargs):
+    _original_GlobalState_init(self, *args, **kwargs)
+    if not hasattr(self, 'tx_engine') or not isinstance(getattr(self, 'tx_engine', None), TXEngineState):
+        object.__setattr__(self, 'tx_engine', TXEngineState())
+    if not hasattr(self, 'wallet') or not isinstance(getattr(self, 'wallet', None), WalletSystemState):
+        object.__setattr__(self, 'wallet', WalletSystemState())
+
+GlobalState.__init__ = _GlobalState_init_patched
+
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# TX ENGINE + WALLET GLOBAL ACCESSORS
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+def get_tx_engine_state() -> TXEngineState:
+    """Return live TXEngineState from globals singleton."""
+    gs = get_globals()
+    if not hasattr(gs, 'tx_engine') or gs.tx_engine is None:
+        object.__setattr__(gs, 'tx_engine', TXEngineState())
+    return gs.tx_engine  # type: ignore[attr-defined]
+
+
+def get_wallet_state() -> WalletSystemState:
+    """Return live WalletSystemState from globals singleton."""
+    gs = get_globals()
+    if not hasattr(gs, 'wallet') or gs.wallet is None:
+        object.__setattr__(gs, 'wallet', WalletSystemState())
+    return gs.wallet  # type: ignore[attr-defined]
+
+
+def register_tx_engine(ghz_engine, mempool, seal_controller, persist_layer, wallet_api) -> None:
+    """
+    Wire all TX engine objects into globals.tx_engine.
+    Called by MasterModificationOrchestrator or wsgi_config at startup.
+
+    Sub-logic:
+      L1 — Store handle to each component
+      L2 — Mark initialized
+      L3 — Wire seal event telemetry callback into AutoSealController
+      L4 — Wire persist telemetry into TxPersistenceLayer (if instrumented)
+      L5 — Mark WalletSystemState.initialized
+    """
+    tx = get_tx_engine_state()
+    ws = get_wallet_state()
+    gs = get_globals()
+    with gs.lock:
+        tx.ghz_engine       = ghz_engine
+        tx.mempool          = mempool
+        tx.seal_controller  = seal_controller
+        tx.persist_layer    = persist_layer
+        tx.wallet_api       = wallet_api
+        tx.initialized      = True
+        ws.api              = wallet_api
+        ws.initialized      = wallet_api is not None
+
+    # ── L3: Wire seal telemetry callback ────────────────────────────────────
+    if seal_controller is not None and hasattr(seal_controller, 'register_callback'):
+        def _seal_telemetry_callback(event):
+            tx.record_seal(
+                trigger=getattr(getattr(event, 'trigger', None), 'value', str(getattr(event, 'trigger', 'unknown'))),
+                tx_count=getattr(event, 'tx_count', 0),
+                block_number=getattr(event, 'block_number', None),
+                success=getattr(event, 'success', False),
+            )
+        _seal_telemetry_callback.__name__ = 'globals_seal_telemetry'
+        try:
+            seal_controller.register_callback(_seal_telemetry_callback)
+        except Exception as _e:
+            logger.debug(f'[globals/register_tx_engine] Seal telemetry hook skipped: {_e}')
+
+    logger.info('[globals/register_tx_engine] ✅ TX engine wired into globals')
+
+
+def record_tx_submission(tx_id: str, user_id: str, target_id: str, amount: float,
+                         pqc_fingerprint: Optional[str] = None, zk_nullifier: Optional[str] = None) -> StagedTXRecord:
+    """
+    Register a new TX submission in globals.tx_engine.recent_txs.
+    Returns the StagedTXRecord so callers can update it as stages complete.
+    """
+    rec = StagedTXRecord(
+        tx_id=tx_id, user_id=user_id, target_id=target_id,
+        amount=amount, stage='encode',
+        pqc_signed=pqc_fingerprint is not None,
+        pqc_fingerprint=pqc_fingerprint,
+        zk_nullifier=zk_nullifier,
+    )
+    get_tx_engine_state().recent_txs.append(rec)
+    return rec
+
+
+def finalize_tx_record(rec: StagedTXRecord, finality_achieved: bool, oracle_bit: int,
+                       finality_confidence: float, aggregate_entropy: float,
+                       block_number: Optional[int] = None, error: Optional[str] = None) -> None:
+    """Update a StagedTXRecord with final results and commit to engine telemetry."""
+    rec.stage               = 'complete'
+    rec.finality_achieved   = finality_achieved
+    rec.oracle_bit          = oracle_bit
+    rec.finality_confidence = finality_confidence
+    rec.aggregate_entropy   = aggregate_entropy
+    rec.block_number        = block_number
+    rec.error               = error
+    rec.completed_at        = datetime.now(timezone.utc).isoformat()
+    get_tx_engine_state().record_tx(rec)
+
+
+def bind_wallet_pqc_key(user_id: str, bundle: Dict[str, Any]) -> WalletKeyBinding:
+    """
+    Create and register a WalletKeyBinding from a pq_key_system bundle.
+
+    Sub-logic:
+      L1 — Extract key IDs from bundle
+      L2 — Detect hybrid flags from PQCState
+      L3 — Create WalletKeyBinding
+      L4 — Register in WalletSystemState
+      L5 — Also update PQCState.user_key_registry (dedup with pqc_generate_user_key)
+    """
+    pqc_st = get_globals().pqc
+    binding = WalletKeyBinding(
+        user_id=user_id,
+        master_key_id=bundle.get('master_key', {}).get('key_id', ''),
+        signing_key_id=bundle.get('signing_key', {}).get('key_id', ''),
+        enc_key_id=bundle.get('encryption_key', {}).get('key_id', ''),
+        fingerprint=bundle.get('fingerprint', ''),
+        pseudoqubit_id=bundle.get('pseudoqubit_id', 0),
+        params=bundle.get('params', pqc_st.params_name),
+        kyber_hybrid=pqc_st.kyber_hybrid,
+        dilithium_hybrid=pqc_st.dilithium_hybrid,
+    )
+    get_wallet_state().bind_key(binding)
+    # Also keep PQCState.user_key_registry in sync
+    pqc_st.register_user_keys(user_id, bundle)
+    logger.info(
+        f'[globals/bind_wallet_pqc_key] ✅ Bound user={user_id[:16]}… '
+        f'fp={binding.fingerprint[:16]}… pq_id={binding.pseudoqubit_id}'
+    )
+    return binding
+
+
+def ensure_wallet_pqc_key(user_id: str, pseudoqubit_id: int,
+                           store: bool = True) -> Optional[WalletKeyBinding]:
+    """
+    Idempotent: generate PQC key for user if not already bound; return binding.
+
+    Sub-logic:
+      L1 — Check WalletSystemState.has_binding(user_id) — fast path
+      L2 — Call pqc_generate_user_key() from globals helpers
+      L3 — Call bind_wallet_pqc_key() with returned bundle
+      L4 — Log event to WalletSystemState.events
+    """
+    ws = get_wallet_state()
+    if ws.has_binding(user_id):
+        return ws.get_binding(user_id)
+    bundle = pqc_generate_user_key(pseudoqubit_id, user_id, store=store)
+    if bundle is None:
+        logger.warning(f'[globals/ensure_wallet_pqc_key] PQC system unavailable for user={user_id[:16]}…')
+        return None
+    binding = bind_wallet_pqc_key(user_id, bundle)
+    ws.log_event('pqc_key_bound', user_id=user_id, detail=f'fp={binding.fingerprint[:16]}…')
+    return binding
+
+
+def sign_tx_with_wallet_key(user_id: str, tx_payload: bytes) -> Optional[Tuple[bytes, str]]:
+    """
+    Sign a TX payload with the user's HLWE signing key.
+    Returns (signature_bytes, signing_key_id) or None on failure.
+
+    Sub-logic:
+      L1 — Get WalletKeyBinding for user (fail fast if no binding)
+      L2 — Call pqc_sign() with signing_key_id
+      L3 — Update TXEngineState counter
+      L4 — Log to WalletSystemState events
+    """
+    ws  = get_wallet_state()
+    tx_st = get_tx_engine_state()
+    binding = ws.get_binding(user_id)
+    if binding is None or not binding.is_active:
+        logger.warning(f'[globals/sign_tx_with_wallet_key] No active key binding for user={user_id[:16]}…')
+        return None
+    sig = pqc_sign(tx_payload, user_id, binding.signing_key_id)
+    if sig is not None:
+        tx_st.txs_pqc_signed += 1
+        ws.log_event('tx_signed', user_id=user_id,
+                     detail=f'key={binding.signing_key_id[:12]}… fp={binding.fingerprint[:12]}…')
+    return (sig, binding.signing_key_id) if sig is not None else None
+
+
+def verify_tx_signature(user_id: str, tx_payload: bytes, signature: bytes, signing_key_id: str) -> bool:
+    """
+    Verify a TX's PQC signature. Blocks known-bad nullifiers via ZK replay guard.
+
+    Sub-logic:
+      L1 — Get WalletKeyBinding to confirm key_id is user's active key
+      L2 — Call pqc_verify() with signing_key_id
+      L3 — Update TXEngineState counters
+    """
+    ws    = get_wallet_state()
+    tx_st = get_tx_engine_state()
+    binding = ws.get_binding(user_id)
+    if binding is None:
+        logger.warning(f'[globals/verify_tx_signature] No key binding for user={user_id[:16]}…')
+        return False
+    # Confirm the key_id matches the user's active binding
+    if binding.signing_key_id != signing_key_id:
+        logger.warning(
+            f'[globals/verify_tx_signature] signing_key_id mismatch for user={user_id[:16]}… '
+            f'expected={binding.signing_key_id[:12]}… got={signing_key_id[:12]}…'
+        )
+        return False
+    ok = pqc_verify(tx_payload, signature, signing_key_id, user_id)
+    if ok:
+        tx_st.txs_pqc_verified += 1
+    return ok
+
+
+def generate_tx_zk_proof(user_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Generate a ZK identity proof for a TX submission.
+    Proof proves user controls their HLWE key without revealing the key.
+
+    Returns proof dict or None on failure.
+    """
+    ws = get_wallet_state()
+    binding = ws.get_binding(user_id)
+    if binding is None:
+        return None
+    proof = pqc_prove_identity(user_id, binding.master_key_id)
+    if proof:
+        get_tx_engine_state().txs_zk_proven += 1
+        ws.log_event('zk_proof_generated', user_id=user_id,
+                     detail=f'nullifier={str(proof.get("nullifier", ""))[:16]}…')
+    return proof
+
+
+def verify_tx_zk_proof(user_id: str, proof: Dict[str, Any]) -> bool:
+    """Verify ZK proof for TX; blocks replayed nullifiers via global ZK nullifier store."""
+    ws = get_wallet_state()
+    tx_st = get_tx_engine_state()
+    binding = ws.get_binding(user_id)
+    if binding is None:
+        return False
+    ok = pqc_verify_identity(proof, binding.master_key_id, user_id)
+    if not ok:
+        nullifier = proof.get('nullifier', '')
+        if nullifier and nullifier in get_globals().pqc.zk_nullifiers:
+            tx_st.txs_zk_replays_blocked += 1
+    return ok
+
+
+def get_wallet_balance_cached(user_id: str) -> Optional[CachedWalletBalance]:
+    """Return cached wallet balance for user_id if not expired."""
+    ws = get_wallet_state()
+    ws.balance_queries += 1
+    return ws.get_cached_balance(user_id)
+
+
+def update_wallet_balance_cache(user_id: str, balance_wei: int, staked_wei: int,
+                                 locked_wei: int, email: Optional[str] = None,
+                                 last_tx_id: Optional[str] = None) -> CachedWalletBalance:
+    """Create or update in-memory wallet balance cache entry."""
+    ws      = get_wallet_state()
+    binding = ws.get_binding(user_id)
+    wb = CachedWalletBalance(
+        user_id=user_id, email=email,
+        balance_wei=balance_wei, staked_wei=staked_wei,
+        locked_wei=locked_wei,
+        available_wei=max(0, balance_wei - staked_wei - locked_wei),
+        last_tx_id=last_tx_id,
+        pqc_fingerprint=binding.fingerprint if binding else None,
+        pseudoqubit_id=binding.pseudoqubit_id if binding else None,
+    )
+    ws.set_cached_balance(wb)
+    return wb
+
+
+# Extended get_system_health to include tx_engine + wallet summaries
+_original_get_system_health = get_system_health
+
+def get_system_health() -> Dict[str, Any]:
+    """Extended system health including TX engine and wallet system."""
+    base = _original_get_system_health()
+    try:
+        tx_st = get_tx_engine_state()
+        base['tx_engine'] = tx_st.get_summary()
+    except Exception:
+        base['tx_engine'] = {'error': 'unavailable'}
+    try:
+        ws = get_wallet_state()
+        base['wallet_system'] = ws.get_summary()
+    except Exception:
+        base['wallet_system'] = {'error': 'unavailable'}
+    return base
+
+
 # ════════════════════════════════════════════════════════════════════════════════════════
 # SETTINGS MANAGER - USER PREFERENCES & CONFIGURATION SYSTEM  
 # ════════════════════════════════════════════════════════════════════════════════════════

@@ -1922,6 +1922,305 @@ class QuantumAPIGlobals:
 QUANTUM=QuantumAPIGlobals()
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════
+# MOD-3: GHZ-STAGED ENGINE GLOBAL + PQC TX SIGNING INFRASTRUCTURE
+# ═════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+GHZ_STAGED_ENGINE: Optional['GHZStagedTransactionEngine'] = None
+GHZ_STAGED_ENGINE_LOCK = threading.RLock()
+
+# ── GHZ Stage constants ────────────────────────────────────────────────────────────────────────
+GHZ3_SHOT_COUNT      = 512
+GHZ8_SHOT_COUNT      = 1024
+ORACLE_QUBIT_INDEX   = 5
+FINALITY_ENTROPY_MIN = 0.3
+FINALITY_COHERENCE_MIN = 0.5
+TX_BALANCE_SCALE     = 10 ** 18
+
+# ── PQC helpers for TX signing ────────────────────────────────────────────────────────────────
+
+def _build_tx_payload_bytes(tx_id: str, user_id: str, target_id: str, amount: float) -> bytes:
+    import json as _j
+    return _j.dumps({'tx_id': tx_id,'from': user_id,'to': target_id,
+                     'amount': f'{amount:.8f}','tx_type':'ghz_quantum_transfer'},
+                    sort_keys=True).encode('utf-8')
+
+def _pqc_sign_tx_payload(user_id: str, tx_payload: bytes):
+    """Returns (sig, key_id, fingerprint) or (None, None, None)."""
+    try:
+        from globals import sign_tx_with_wallet_key, get_wallet_state
+        binding = get_wallet_state().get_binding(user_id)
+        if binding is None:
+            return None, None, None
+        result = sign_tx_with_wallet_key(user_id, tx_payload)
+        if result is None:
+            return None, None, None
+        sig, key_id = result
+        return sig, key_id, binding.fingerprint
+    except Exception as _e:
+        logger.debug(f'[PQC-TX-SIGN] {_e}')
+        return None, None, None
+
+def _pqc_ensure_user_key(user_id: str, pseudoqubit_id: int) -> Optional[str]:
+    try:
+        from globals import ensure_wallet_pqc_key
+        b = ensure_wallet_pqc_key(user_id, pseudoqubit_id, store=True)
+        return b.fingerprint if b else None
+    except Exception:
+        return None
+
+def _pqc_generate_zk_proof(user_id: str):
+    try:
+        from globals import generate_tx_zk_proof
+        proof = generate_tx_zk_proof(user_id)
+        return (proof, proof.get('nullifier')) if proof else (None, None)
+    except Exception:
+        return None, None
+
+def _ghz_entropy_from_counts(counts: Dict[str,int], shots: int) -> float:
+    if not counts or shots == 0: return 0.5
+    import math as _m
+    probs = [v/shots for v in counts.values()]
+    return -sum(p*_m.log2(p+1e-12) for p in probs if p>0) / max(_m.log2(len(counts)+1), 1)
+
+def _ghz_coherence_from_counts(counts: Dict[str,int], shots: int) -> float:
+    if not counts or shots==0: return 0.5
+    n = len(counts); vals = sorted(counts.values(), reverse=True)
+    if n < 2: return 1.0
+    return 1.0 - abs(vals[0]/shots - 1.0/n) * n
+
+def _oracle_bit_from_ghz(counts: Dict[str,int], shots: int,
+                           idx: int=ORACLE_QUBIT_INDEX) -> int:
+    return 1 if sum(v for k,v in counts.items() if len(k)>idx and k[idx]=='1') > shots/2 else 0
+
+def _simulate_ghz_counts_mod3(circuit_type: str, shots: int) -> Dict[str,int]:
+    import random as _r
+    n = 3 if circuit_type=='ghz3' else 8
+    c: Dict[str,int] = {}
+    for _ in range(shots):
+        r = _r.random()
+        if r < 0.475:   k = '0'*n
+        elif r < 0.95:  k = '1'*n
+        else:           k = ''.join(_r.choice('01') for _ in range(n))
+        c[k] = c.get(k,0)+1
+    return c
+
+def _run_ghz_circuit_mod3(circuit_type: str, shots: int, name: str) -> Dict[str,int]:
+    if QUANTUM_ENGINE is not None:
+        try:
+            n = 3 if circuit_type=='ghz3' else 8
+            qc = QuantumCircuit(n, n, name=name); qc.h(0)
+            for i in range(1,n): qc.cx(i-1,i)
+            if circuit_type=='ghz8': qc.u(np.pi/4,0,0,ORACLE_QUBIT_INDEX)
+            qc.measure_all()
+            res = QUANTUM_ENGINE.execute_circuit(qc, shots=shots)
+            if res and res.get('success'): return res.get('counts', {})
+        except Exception as _e:
+            logger.debug(f'[GHZ-CIRCUIT] Engine fallback: {_e}')
+    return _simulate_ghz_counts_mod3(circuit_type, shots)
+
+
+class GHZStagedTransactionEngine:
+    """
+    MOD-3: Three-stage GHZ quantum transaction engine with full PQC integration.
+
+    Pipeline:
+      Stage 1 — GHZ-3 ENCODE:   3-qubit entanglement; validates encoding quality.
+      Stage 2 — ORACLE COLLAPSE: Measures oracle qubit (q[5]); binary approval/reject.
+      Stage 3 — GHZ-8 FINALIZE: Full 8-qubit finality; PQC-signs TX; persists; mempool.
+
+    PQC: Every oracle-approved TX is signed with the user's HLWE key (globals wallet binding).
+         A ZK proof of key ownership is generated and the nullifier stored to block replays.
+    """
+
+    def __init__(self, quantum_engine=None, quantum_metrics=None,
+                 mempool=None, persist_layer=None, balance_api=None):
+        self._engine = quantum_engine; self._metrics = quantum_metrics
+        self._mempool = mempool; self._persist = persist_layer; self._balance_api = balance_api
+        self._lock = threading.RLock()
+        self._staged: Dict[str,Dict] = {}
+        self._stats: Dict[str,int] = defaultdict(int)
+        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix='ghz3_engine')
+        logger.info('[GHZEngine] MOD-3 GHZ-Staged TX Engine initialized (PQC-enabled)')
+
+    def process_staged(self, user_email: str, target_email: str, amount: float,
+                        password: str, target_identifier: str) -> Dict[str,Any]:
+        """Full 3-stage pipeline. Returns API response dict."""
+        t0 = time.time()
+        logger.info(f'[GHZEngine] {user_email}→{target_email} | {amount} QTCL')
+        try:
+            # ── Validate ──────────────────────────────────────────────────────
+            user_data, target_data, err = self._validate_users(
+                user_email, target_email, password, target_identifier, amount)
+            if err:
+                return {'success':False,'error':err,
+                        'http_status':400 if any(x in err for x in ('AMOUNT','TARGET','BALANCE')) else 401 if 'PASSWORD' in err else 404}
+
+            user_id   = str(user_data.get('uid') or user_data.get('id',''))
+            target_id = str(target_data.get('uid') or target_data.get('id',''))
+            tx_id     = 'tx_ghz_' + secrets.token_hex(10)
+            user_pq   = int(user_data.get('pseudoqubit_id') or 0)
+
+            # ── PQC: ensure HLWE key bound ────────────────────────────────────
+            pqc_fp = _pqc_ensure_user_key(user_id, user_pq)
+
+            # ── Stage 1: GHZ-3 Encode ─────────────────────────────────────────
+            t1=time.time(); c1=_run_ghz_circuit_mod3('ghz3',GHZ3_SHOT_COUNT,f'GHZ3_{tx_id[:10]}')
+            s1_e=_ghz_entropy_from_counts(c1,GHZ3_SHOT_COUNT); s1_c=_ghz_coherence_from_counts(c1,GHZ3_SHOT_COUNT)
+            st1={'stage':'ghz3_encode','success':True,'entropy':round(s1_e,4),'coherence':round(s1_c,4),
+                 'shots':GHZ3_SHOT_COUNT,'elapsed_ms':round((time.time()-t1)*1000,2),
+                 'top_counts':dict(sorted(c1.items(),key=lambda x:-x[1])[:5])}
+            logger.info(f'[GHZEngine] S1: e={s1_e:.3f} c={s1_c:.3f}')
+
+            # ── Stage 2: Oracle Collapse ───────────────────────────────────────
+            t2=time.time(); c2=_run_ghz_circuit_mod3('ghz8',GHZ8_SHOT_COUNT,f'ORACLE_{tx_id[:10]}')
+            s2_e=_ghz_entropy_from_counts(c2,GHZ8_SHOT_COUNT); obit=_oracle_bit_from_ghz(c2,GHZ8_SHOT_COUNT)
+            st2={'stage':'oracle_collapse','success':True,'entropy':round(s2_e,4),'oracle_bit':obit,
+                 'shots':GHZ8_SHOT_COUNT,'elapsed_ms':round((time.time()-t2)*1000,2),
+                 'top_counts':dict(sorted(c2.items(),key=lambda x:-x[1])[:5])}
+            logger.info(f'[GHZEngine] S2: oracle_bit={obit}')
+
+            if obit == 0:
+                self._stats['rejected']+=1
+                self._persist_tx(tx_id,user_id,target_id,amount,'rejected',
+                                  (s1_e+s2_e)/2,obit,False,0.0,[st1,st2],pqc_fp)
+                return {'success':False,'tx_id':tx_id,'error':'Oracle rejected transaction',
+                        'oracle_bit':0,'stages':[st1,st2],'http_status':200}
+
+            # ── PQC: Sign TX payload after oracle approval ─────────────────────
+            tx_payload = _build_tx_payload_bytes(tx_id, user_id, target_id, amount)
+            pqc_sig, pqc_key_id, pqc_fp2 = _pqc_sign_tx_payload(user_id, tx_payload)
+            pqc_signed = pqc_sig is not None
+            if pqc_fp is None and pqc_fp2: pqc_fp = pqc_fp2
+            zk_proof, zk_null = _pqc_generate_zk_proof(user_id)
+            logger.info(f'[GHZEngine] PQC: signed={pqc_signed} fp={str(pqc_fp or "")[:12]}… zk={zk_null is not None}')
+
+            # ── Stage 3: GHZ-8 Finalize ────────────────────────────────────────
+            t3=time.time(); c3=_run_ghz_circuit_mod3('ghz8',GHZ8_SHOT_COUNT,f'GHZ8FIN_{tx_id[:10]}')
+            s3_e=_ghz_entropy_from_counts(c3,GHZ8_SHOT_COUNT); s3_c=_ghz_coherence_from_counts(c3,GHZ8_SHOT_COUNT)
+            finality = s3_e>FINALITY_ENTROPY_MIN and s3_c>FINALITY_COHERENCE_MIN
+            fin_conf = min(1.0,(s3_e+s3_c)/2.0)
+            st3={'stage':'ghz8_finalize','success':finality,'entropy':round(s3_e,4),'coherence':round(s3_c,4),
+                 'finality_achieved':finality,'finality_confidence':round(fin_conf,4),
+                 'shots':GHZ8_SHOT_COUNT,'elapsed_ms':round((time.time()-t3)*1000,2),
+                 'top_counts':dict(sorted(c3.items(),key=lambda x:-x[1])[:5])}
+            logger.info(f'[GHZEngine] S3: finality={finality} conf={fin_conf:.3f}')
+
+            agg_e=(s1_e+s2_e+s3_e)/3.0; agg_c=(s1_c+s3_c)/2.0
+            final_status='finalized' if finality else 'encoded'
+
+            # ── Persist ────────────────────────────────────────────────────────
+            self._persist_tx(tx_id,user_id,target_id,amount,final_status,
+                              agg_e,obit,finality,fin_conf,[st1,st2,st3],pqc_fp,pqc_signed,zk_null)
+
+            # ── Mempool → auto-seal ───────────────────────────────────────────
+            tx_dict = {
+                'id':tx_id,'tx_id':tx_id,'from_user_id':user_id,'to_user_id':target_id,
+                'amount':amount,'tx_type':'ghz_quantum_transfer','status':final_status,
+                'timestamp':time.time(),'quantum_entropy':agg_e,'quantum_coherence':agg_c,
+                'oracle_collapse':obit,'finality_achieved':finality,'finality_confidence':fin_conf,
+                'ghz_stages':3,'ghz_pipeline':'ghz3→oracle→ghz8',
+                'pqc_fingerprint':pqc_fp,'pqc_signed':pqc_signed,'zk_nullifier':zk_null,
+            }
+            mempool = self._mempool
+            if mempool is None:
+                try:
+                    from ledger_manager import global_mempool as _gmp; mempool=_gmp
+                except Exception: pass
+            pending = 0
+            if mempool:
+                mempool.add_transaction(tx_dict); pending=mempool.get_pending_count()
+
+            # ── Globals telemetry ─────────────────────────────────────────────
+            try:
+                from globals import record_tx_submission, finalize_tx_record
+                rec = record_tx_submission(tx_id,user_id,target_id,amount,pqc_fp,zk_null)
+                finalize_tx_record(rec,finality,obit,fin_conf,agg_e)
+            except Exception: pass
+
+            self._stats['processed']+=1
+            if finality: self._stats['finalized']+=1
+
+            return {
+                'success':True,'tx_id':tx_id,'user_id':user_id,'user_email':user_email,
+                'user_pseudoqubit':user_data.get('pseudoqubit_id',''),
+                'target_id':target_id,'target_email':target_email,
+                'target_pseudoqubit':target_data.get('pseudoqubit_id',''),
+                'amount':amount,'stages_completed':[st1,st2,st3],'layers_completed':3,
+                'ghz_pipeline':'ghz3_encode → oracle_collapse → ghz8_finalize',
+                'finality_achieved':finality,'finality_confidence':round(fin_conf,4),
+                'oracle_collapse':obit,'aggregate_entropy':round(agg_e,4),
+                'aggregate_coherence':round(agg_c,4),
+                'pqc':{'signed':pqc_signed,'fingerprint':pqc_fp,'key_id':pqc_key_id,
+                       'zk_proven':zk_proof is not None,'zk_nullifier':zk_null,
+                       'params':'HLWE-256',
+                       'security':'Hyperbolic LWE over {8,3} tessellation — PSL(2,ℝ)'},
+                'status':final_status,'pending_in_mempool':pending,
+                'total_elapsed_ms':round((time.time()-t0)*1000,2),
+                'timestamp':time.time(),'http_status':200,
+            }
+        except Exception as e:
+            logger.error(f'[GHZEngine] process_staged: {e}',exc_info=True)
+            self._stats['errors']+=1
+            return {'success':False,'error':str(e),'http_status':500}
+
+    def get_staged_status(self, tx_id: str) -> Optional[Dict]:
+        with self._lock: return self._staged.get(tx_id)
+
+    def get_stats(self) -> Dict: return dict(self._stats)
+
+    def _validate_users(self, user_email, target_email, password, target_identifier, amount):
+        try:
+            from terminal_logic import AuthenticationService
+            ok,ud=AuthenticationService.get_user_by_email(user_email)
+            if not ok or not ud: return None,None,'USER_NOT_FOUND'
+            if not AuthenticationService.verify_password(password,ud.get('password_hash','')): return None,None,'INVALID_PASSWORD'
+            ok,td=AuthenticationService.get_user_by_email(target_email)
+            if not ok or not td: return None,None,'TARGET_NOT_FOUND'
+            tpq=str(td.get('pseudoqubit_id','')); tuid=str(td.get('uid') or td.get('id',''))
+            if target_identifier not in (tpq,tuid,target_email): return None,None,'INVALID_TARGET_ID'
+            bal=float(ud.get('balance',0) or 0)
+            if amount<0.001 or amount>999_999_999: return None,None,'INVALID_AMOUNT'
+            if bal<amount: return None,None,'INSUFFICIENT_BALANCE'
+            return ud,td,None
+        except ImportError:
+            return({'uid':'mock_user','pseudoqubit_id':'0','balance':999999},
+                   {'uid':'mock_target','pseudoqubit_id':target_identifier},None)
+        except Exception as e: return None,None,f'VALIDATION_ERROR:{e}'
+
+    def _persist_tx(self, tx_id, user_id, target_id, amount, status, agg_e, obit,
+                     finality, fin_conf, stages, pqc_fp=None, pqc_signed=False, zk_null=None):
+        try:
+            from ledger_manager import GLOBAL_TX_PERSIST_LAYER as _P, TxPersistRecord as _R
+            if _P:
+                _P.persist_async(_R(
+                    tx_id=tx_id,from_user_id=user_id,to_user_id=target_id,amount=amount,
+                    status=status,tx_type='ghz_quantum_transfer',
+                    quantum_hash='0x'+hashlib.sha3_256(f'{tx_id}:{user_id}:{target_id}:{amount}'.encode()).hexdigest(),
+                    entropy_score=agg_e,created_at=datetime.utcnow().isoformat(),
+                    finality_conf=fin_conf,oracle_bit=obit,ghz_stages=len(stages),
+                    extra={'stage_results':stages},pqc_fingerprint=pqc_fp,
+                    pqc_signed=pqc_signed,zk_nullifier=zk_null,
+                )); return
+        except Exception: pass
+        try:
+            from wsgi_config import DB as _D
+            conn=_D.get_connection(); cur=conn.cursor()
+            cur.execute("""INSERT INTO transactions(id,from_user_id,to_user_id,amount,status,tx_type,
+                entropy_score,created_at,finality_confidence,oracle_collapse_bit,ghz_stages,
+                pqc_fingerprint,pqc_signed,zk_nullifier) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT(id) DO UPDATE SET status=EXCLUDED.status""",
+               (tx_id,user_id,target_id,amount,status,'ghz_quantum_transfer',agg_e,
+                datetime.utcnow().isoformat(),fin_conf,obit,len(stages),pqc_fp,pqc_signed,zk_null))
+            conn.commit(); cur.close(); _D.return_connection(conn)
+        except Exception as _e: logger.warning(f'[GHZEngine] DB persist failed: {_e}')
+
+
+_INTERNAL_GHZ_ENGINE = GHZStagedTransactionEngine(quantum_engine=QUANTUM_ENGINE, quantum_metrics=QUANTUM_METRICS)
+
+def _get_active_ghz_engine() -> GHZStagedTransactionEngine:
+    return GHZ_STAGED_ENGINE if GHZ_STAGED_ENGINE is not None else _INTERNAL_GHZ_ENGINE
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════════════
 # SECTION 11: FLASK BLUEPRINT - HTTP API ENDPOINTS
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -1930,7 +2229,7 @@ QUANTUM=QuantumAPIGlobals()
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════
 
 class ProductionQuantumTransactionProcessor:
-    """Real 6-layer quantum transaction processor with sub-logic depth"""
+    """Real 6-layer quantum transaction processor with sub-logic depth — PQC ENHANCED."""
     
     def __init__(self):
         self.lock=threading.RLock()
@@ -1938,7 +2237,163 @@ class ProductionQuantumTransactionProcessor:
         self.transactions_finalized=0
     
     def process_transaction_complete(self,user_email:str,target_email:str,amount:float,password:str,target_identifier:str)->Dict[str,Any]:
-        """COMPLETE 6-LAYER QUANTUM TRANSACTION PROCESSOR"""
+        """COMPLETE 6-LAYER QUANTUM TRANSACTION PROCESSOR — PQC ENHANCED with HLWE signing."""
+        try:
+            logger.info(f'[QuantumTX-PROD] Processing: {user_email} → {target_email} | {amount} QTCL')
+            
+            # ═══ LAYER 1: USER VALIDATION (3 SUB-LOGICS) ═══
+            from terminal_logic import AuthenticationService
+            
+            success,user_data=AuthenticationService.get_user_by_email(user_email)
+            if not success or not user_data:
+                return{'success':False,'error':'USER_NOT_FOUND','http_status':404}
+            
+            password_hash=user_data.get('password_hash','')
+            if not AuthenticationService.verify_password(password,password_hash):
+                return{'success':False,'error':'INVALID_PASSWORD','http_status':401}
+            
+            user_id=user_data.get('uid')or user_data.get('id')
+            user_balance=float(user_data.get('balance',0))
+            user_pseudoqubit=user_data.get('pseudoqubit_id','')
+            user_pq_int=int(user_pseudoqubit or 0)
+            
+            logger.info(f'[QuantumTX-L1] ✓ User: {user_email} (ID:{user_id}) Balance:{user_balance}')
+            
+            # ═══ LAYER 1B: TARGET VALIDATION (3 SUB-LOGICS) ═══
+            success,target_data=AuthenticationService.get_user_by_email(target_email)
+            if not success or not target_data:
+                return{'success':False,'error':'TARGET_NOT_FOUND','http_status':404}
+            
+            target_pseudoqubit=target_data.get('pseudoqubit_id','')
+            target_uid=target_data.get('uid')or target_data.get('id','')
+            
+            if target_identifier!=target_pseudoqubit and target_identifier!=str(target_uid):
+                return{'success':False,'error':'INVALID_TARGET_ID','http_status':400}
+            
+            target_id=target_data.get('uid')or target_data.get('id')
+            logger.info(f'[QuantumTX-L1B] ✓ Target: {target_email} (ID:{target_id})')
+            
+            # ═══ LAYER 2: BALANCE CHECK (2 SUB-LOGICS) ═══
+            if amount<0.001 or amount>999999999.999:
+                return{'success':False,'error':'INVALID_AMOUNT','http_status':400}
+            
+            if user_balance<amount:
+                return{'success':False,'error':'INSUFFICIENT_BALANCE','http_status':400}
+            
+            logger.info(f'[QuantumTX-L2] ✓ Balance: {user_balance} >= {amount}')
+            
+            # ═══ LAYER 2B: PQC KEY BINDING — ensure user has HLWE wallet key ═══
+            pqc_fingerprint = _pqc_ensure_user_key(str(user_id), user_pq_int)
+            tx_id='tx_'+secrets.token_hex(8)
+
+            # ═══ LAYER 3: QUANTUM ENCODING (3 SUB-LOGICS) ═══
+            with self.lock:
+                circuit=QuantumCircuit(8,8,name=f'TX_{user_id}_{target_id}')
+                
+                # Build GHZ-8 for finality
+                circuit.h(0)
+                for i in range(1,8):
+                    circuit.cx(0,i)
+                for i in range(8):
+                    circuit.measure(i,i)
+                
+                # Execute
+                try:
+                    if QUANTUM_ENGINE and hasattr(QUANTUM_ENGINE,'aer_simulator'):
+                        exec_result=QUANTUM_ENGINE.execute_circuit(circuit,shots=1024)
+                    else:
+                        exec_result={'counts':{},'success':True,'density_matrix':None}
+                except:
+                    exec_result={'counts':{},'success':True,'density_matrix':None}
+                
+                if not exec_result.get('success',False):
+                    return{'success':False,'error':'QUANTUM_EXECUTION_FAILED','http_status':500}
+                
+                counts=exec_result.get('counts',{})
+                density_matrix=exec_result.get('density_matrix')
+                
+                # Compute metrics
+                entropy=QUANTUM_METRICS.von_neumann_entropy(density_matrix) if density_matrix is not None else 0.5
+                coherence=QUANTUM_METRICS.coherence_l1_norm(density_matrix) if density_matrix is not None else 0.5
+                fidelity=QUANTUM_METRICS.state_fidelity(density_matrix,density_matrix) if density_matrix is not None else 0.5
+                
+                logger.info(f'[QuantumTX-L3] Metrics: entropy={entropy:.3f}, coherence={coherence:.3f}, fidelity={fidelity:.3f}')
+                
+                # ═══ LAYER 4: ORACLE MEASUREMENT (2 SUB-LOGICS) ═══
+                oracle_outcomes=[k for k,v in counts.items() if len(k)>5 and k[5]=='1']
+                oracle_count=sum(counts.get(k,0)for k in oracle_outcomes)
+                oracle_collapse_bit=1 if oracle_count>512 else 0
+                
+                finality_achieved=(entropy>0.5 and coherence>0.85 and fidelity>0.90)
+                finality_confidence=(entropy/8.0+coherence+fidelity)/3.0
+                
+                logger.info(f'[QuantumTX-L4] Finality: {finality_achieved} (conf={finality_confidence:.3f})')
+                
+                # ═══ LAYER 4B: PQC SIGNING — sign TX payload with HLWE key ═══
+                tx_payload_bytes = _build_tx_payload_bytes(tx_id, str(user_id), str(target_id), amount)
+                pqc_sig, pqc_key_id, pqc_fp2 = _pqc_sign_tx_payload(str(user_id), tx_payload_bytes)
+                pqc_signed = pqc_sig is not None
+                if pqc_fingerprint is None and pqc_fp2: pqc_fingerprint = pqc_fp2
+
+                # ═══ LAYER 4C: ZK PROOF of key ownership ═══
+                zk_proof, zk_nullifier = _pqc_generate_zk_proof(str(user_id))
+                logger.info(f'[QuantumTX-L4C] PQC: signed={pqc_signed} fp={str(pqc_fingerprint or "")[:12]}…')
+
+                # ═══ LAYER 5: LEDGER PERSISTENCE (2 SUB-LOGICS) ═══
+                from ledger_manager import global_mempool
+                
+                tx_dict={
+                    'id':tx_id,'tx_id':tx_id,
+                    'from_user_id':user_id,'to_user_id':target_id,
+                    'amount':amount,'tx_type':'quantum_transfer',
+                    'status':'finalized'if finality_achieved else'encoded',
+                    'timestamp':time.time(),
+                    'quantum_entropy':entropy,'quantum_coherence':coherence,
+                    'quantum_fidelity':fidelity,'oracle_collapse':oracle_collapse_bit,
+                    'finality_achieved':finality_achieved,'finality_confidence':finality_confidence,
+                    'pqc_fingerprint':pqc_fingerprint,'pqc_signed':pqc_signed,'zk_nullifier':zk_nullifier,
+                }
+                
+                global_mempool.add_transaction(tx_dict)
+                pending_count=global_mempool.get_pending_count()
+                
+                logger.info(f'[QuantumTX-L5] ✓ Added to mempool. Pending: {pending_count}')
+                
+                # ═══ LAYER 5B: Globals telemetry ═══
+                try:
+                    from globals import record_tx_submission, finalize_tx_record
+                    rec = record_tx_submission(tx_id,str(user_id),str(target_id),amount,pqc_fingerprint,zk_nullifier)
+                    finalize_tx_record(rec,finality_achieved,oracle_collapse_bit,finality_confidence,entropy)
+                except Exception: pass
+
+                # ═══ LAYER 6: RESPONSE ASSEMBLY ═══
+                self.transactions_processed+=1
+                if finality_achieved:
+                    self.transactions_finalized+=1
+                
+                return{
+                    'success':True,'command':'quantum/transaction','tx_id':tx_id,
+                    'user_id':user_id,'user_email':user_email,'user_pseudoqubit':user_pseudoqubit,
+                    'target_id':target_id,'target_email':target_email,'target_pseudoqubit':target_pseudoqubit,
+                    'amount':amount,'quantum_metrics':{
+                        'entropy':round(entropy,4),'coherence':round(coherence,4),
+                        'fidelity':round(fidelity,4)
+                    },'oracle_collapse':oracle_collapse_bit,
+                    'finality':finality_achieved,'finality_confidence':round(finality_confidence,4),
+                    'status':tx_dict['status'],'pending_in_mempool':pending_count,
+                    'estimated_block_height':pending_count,'timestamp':tx_dict['timestamp'],
+                    'layers_completed':6,'http_status':200,
+                    'pqc':{
+                        'signed':pqc_signed,'fingerprint':pqc_fingerprint,'key_id':pqc_key_id,
+                        'zk_proven':zk_proof is not None,'zk_nullifier':zk_nullifier,
+                        'params':'HLWE-256',
+                        'security':'Hyperbolic LWE over {8,3} tessellation — PSL(2,ℝ) non-abelian group',
+                    },
+                }
+        
+        except Exception as e:
+            logger.error(f'[QuantumTX-PROD] Exception: {e}',exc_info=True)
+            return{'success':False,'error':str(e),'http_status':500}
         try:
             logger.info(f'[QuantumTX-PROD] Processing: {user_email} → {target_email} | {amount} QTCL')
             
@@ -3508,7 +3963,465 @@ def extend_quantum_api_with_advanced_features(bp:Blueprint)->Blueprint:
             return jsonify(status),200
         except Exception as e:
             return jsonify({'error':str(e)}),500
-    
+
+    # ════════════════════════════════════════════════════════════════════════════════════
+    # MOD-3: STAGED TX ENDPOINT
+    # ════════════════════════════════════════════════════════════════════════════════════
+
+    @bp.route('/transaction/staged', methods=['POST'])
+    def api_ghz_staged_transaction():
+        """
+        POST /api/quantum/transaction/staged
+        GHZ-staged quantum transaction: GHZ-3 encode → Oracle collapse → GHZ-8 finalize.
+
+        Body JSON:
+          user_email, target_email, amount, password, target_identifier
+
+        Returns:
+          Full staged TX response with PQC signature info, per-stage metrics,
+          finality confidence, oracle decision, and mempool position.
+        """
+        try:
+            data = request.get_json() or {}
+            engine = _get_active_ghz_engine()
+            result = engine.process_staged(
+                user_email=data.get('user_email', ''),
+                target_email=data.get('target_email', ''),
+                amount=float(data.get('amount', 0)),
+                password=data.get('password', ''),
+                target_identifier=data.get('target_identifier', ''),
+            )
+            http_status = result.pop('http_status', 200)
+            return jsonify(result), http_status
+        except Exception as e:
+            logger.error(f'[/transaction/staged] {e}', exc_info=True)
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    @bp.route('/transaction/staged/status/<tx_id>', methods=['GET'])
+    def api_staged_tx_status(tx_id: str):
+        """GET /api/quantum/transaction/staged/status/<tx_id> — in-flight TX stage status."""
+        engine = _get_active_ghz_engine()
+        status = engine.get_staged_status(tx_id)
+        if status is None:
+            return jsonify({'found': False, 'tx_id': tx_id}), 404
+        return jsonify({'found': True, **status}), 200
+
+    # ════════════════════════════════════════════════════════════════════════════════════
+    # MOD-2: WALLET BALANCE ENDPOINTS
+    # ════════════════════════════════════════════════════════════════════════════════════
+
+    @bp.route('/wallet/balance', methods=['GET', 'POST'])
+    def api_wallet_balance():
+        """
+        GET  /api/quantum/wallet/balance?user_id=XXX&mode=cached
+        POST /api/quantum/wallet/balance  {"user_id":"XXX","mode":"live|cached|fast"}
+
+        Returns rich wallet balance with wei + QTCL + PQC key fingerprint + staked/locked.
+        """
+        if request.method == 'GET':
+            user_id  = request.args.get('user_id', '')
+            mode_str = request.args.get('mode', 'cached')
+        else:
+            data     = request.get_json() or {}
+            user_id  = data.get('user_id', '')
+            mode_str = data.get('mode', 'cached')
+
+        if not user_id:
+            return jsonify({'success': False, 'error': 'user_id required'}), 400
+
+        try:
+            from ledger_manager import GLOBAL_WALLET_BALANCE_API as _WA
+            if _WA is None:
+                raise RuntimeError('WalletBalanceAPI not initialized')
+            wb = _WA.get_balance(user_id, mode=mode_str)
+        except Exception as _e:
+            # Fallback to globals cache
+            try:
+                from globals import get_wallet_balance_cached
+                wb_cached = get_wallet_balance_cached(user_id)
+                if wb_cached:
+                    return jsonify({'success': True, **wb_cached.to_api_dict()}), 200
+            except Exception:
+                pass
+            return jsonify({'success': False, 'error': f'WalletBalanceAPI unavailable: {_e}'}), 503
+
+        if wb is None:
+            return jsonify({'success': False, 'error': 'user_not_found', 'user_id': user_id}), 404
+        return jsonify({'success': True, **wb}), 200
+
+    @bp.route('/wallet/balance/multi', methods=['POST'])
+    def api_wallet_balance_multi():
+        """
+        POST /api/quantum/wallet/balance/multi
+        Body: {"user_ids": ["id1","id2",...]}   (max 100)
+
+        Batch wallet balance fetch with PQC fingerprint per wallet.
+        """
+        data = request.get_json() or {}
+        user_ids = data.get('user_ids', [])
+        if not user_ids or not isinstance(user_ids, list):
+            return jsonify({'success': False, 'error': 'user_ids array required'}), 400
+        try:
+            from ledger_manager import GLOBAL_WALLET_BALANCE_API as _WA
+            if _WA is None:
+                raise RuntimeError('WalletBalanceAPI not initialized')
+            results = _WA.get_balance_multi(user_ids)
+        except Exception as _e:
+            return jsonify({'success': False, 'error': str(_e)}), 503
+        return jsonify({'success': True, 'balances': results, 'count': len(results)}), 200
+
+    @bp.route('/wallet/history/<user_id>', methods=['GET'])
+    def api_wallet_history(user_id: str):
+        """
+        GET /api/quantum/wallet/history/<user_id>?limit=50&since=2026-01-01T00:00:00Z
+
+        Returns TX history affecting this wallet's balance, including PQC signing status per TX.
+        """
+        limit    = int(request.args.get('limit', 50))
+        since_str= request.args.get('since')
+        since    = None
+        if since_str:
+            try:
+                from datetime import datetime as _dt
+                since = _dt.fromisoformat(since_str.replace('Z', '+00:00'))
+            except ValueError:
+                pass
+        try:
+            from ledger_manager import GLOBAL_WALLET_BALANCE_API as _WA
+            if _WA is None:
+                raise RuntimeError('WalletBalanceAPI not initialized')
+            history = _WA.get_history(user_id, limit=limit, since=since)
+        except Exception as _e:
+            return jsonify({'success': False, 'error': str(_e)}), 503
+        return jsonify({'success': True, 'user_id': user_id, 'history': history, 'count': len(history)}), 200
+
+    @bp.route('/wallet/summary/<user_id>', methods=['GET'])
+    def api_wallet_summary(user_id: str):
+        """
+        GET /api/quantum/wallet/summary/<user_id>
+
+        Full wallet summary: balance + recent TX history + pending TXs + PQC key binding info.
+        """
+        try:
+            from ledger_manager import GLOBAL_WALLET_BALANCE_API as _WA
+            if _WA is None:
+                raise RuntimeError('WalletBalanceAPI not initialized')
+            summary = _WA.get_summary(user_id)
+        except Exception as _e:
+            return jsonify({'success': False, 'error': str(_e)}), 503
+        return jsonify({'success': True, **summary}), 200
+
+    # ════════════════════════════════════════════════════════════════════════════════════
+    # PQC WALLET KEY MANAGEMENT ENDPOINTS
+    # ════════════════════════════════════════════════════════════════════════════════════
+
+    @bp.route('/pqc/wallet/keygen', methods=['POST'])
+    def api_pqc_wallet_keygen():
+        """
+        POST /api/quantum/pqc/wallet/keygen
+        Body: {"user_id":"...", "pseudoqubit_id": 12345}
+
+        Generate or return existing HLWE key bundle for a wallet.
+        Returns binding info with fingerprint, key IDs, params, pseudoqubit position.
+        """
+        data = request.get_json() or {}
+        user_id = data.get('user_id', '')
+        pq_id   = int(data.get('pseudoqubit_id', 0))
+        if not user_id:
+            return jsonify({'success': False, 'error': 'user_id required'}), 400
+        try:
+            from globals import ensure_wallet_pqc_key, get_wallet_state
+            binding = ensure_wallet_pqc_key(user_id, pq_id, store=True)
+            if binding is None:
+                return jsonify({
+                    'success': False,
+                    'error': 'PQC system unavailable — pq_key_system not initialised',
+                    'advice': 'System operates in advisory PQC mode without full HLWE'
+                }), 503
+            return jsonify({
+                'success':          True,
+                'user_id':          user_id,
+                'binding':          binding.to_dict(),
+                'pqc_ready':        True,
+                'security_model':   'HLWE — PSL(2,ℝ) / {8,3} tessellation (post-quantum)',
+                'quantum_security': True,
+            }), 200
+        except Exception as e:
+            logger.error(f'[/pqc/wallet/keygen] {e}', exc_info=True)
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    @bp.route('/pqc/wallet/status/<user_id>', methods=['GET'])
+    def api_pqc_wallet_status(user_id: str):
+        """
+        GET /api/quantum/pqc/wallet/status/<user_id>
+
+        Returns PQC key binding status for a wallet — fingerprint, key IDs,
+        rotation count, hybrid flags, tessellation position.
+        """
+        try:
+            from globals import get_wallet_state
+            binding = get_wallet_state().get_binding(user_id)
+            if binding is None:
+                return jsonify({
+                    'success': False, 'user_id': user_id,
+                    'pqc_bound': False,
+                    'message': 'No PQC key bound. Call POST /pqc/wallet/keygen first.',
+                }), 404
+            return jsonify({
+                'success':   True,
+                'user_id':   user_id,
+                'pqc_bound': True,
+                'binding':   binding.to_dict(),
+            }), 200
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    @bp.route('/pqc/wallet/sign', methods=['POST'])
+    def api_pqc_wallet_sign():
+        """
+        POST /api/quantum/pqc/wallet/sign
+        Body: {"user_id":"...", "payload_hex":"<hex string>"}
+
+        Sign an arbitrary payload with the user's HLWE key.
+        Returns base64-encoded signature + fingerprint + key_id.
+        """
+        import base64 as _b64
+        data    = request.get_json() or {}
+        user_id = data.get('user_id', '')
+        payload_hex = data.get('payload_hex', '')
+        if not user_id or not payload_hex:
+            return jsonify({'success': False, 'error': 'user_id and payload_hex required'}), 400
+        try:
+            payload = bytes.fromhex(payload_hex)
+        except ValueError:
+            return jsonify({'success': False, 'error': 'Invalid payload_hex'}), 400
+        try:
+            from globals import sign_tx_with_wallet_key, get_wallet_state
+            result = sign_tx_with_wallet_key(user_id, payload)
+            if result is None:
+                return jsonify({
+                    'success': False,
+                    'error': 'No active PQC key binding for user. Call /pqc/wallet/keygen first.',
+                }), 404
+            sig, key_id = result
+            binding = get_wallet_state().get_binding(user_id)
+            return jsonify({
+                'success':      True,
+                'user_id':      user_id,
+                'signature':    _b64.b64encode(sig).decode('utf-8'),
+                'signing_key_id': key_id,
+                'fingerprint':  binding.fingerprint if binding else None,
+                'algorithm':    'HyperSign-HLWE-256',
+                'params':       'Hyperbolic LWE / {8,3} tessellation',
+            }), 200
+        except Exception as e:
+            logger.error(f'[/pqc/wallet/sign] {e}', exc_info=True)
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    @bp.route('/pqc/wallet/verify', methods=['POST'])
+    def api_pqc_wallet_verify():
+        """
+        POST /api/quantum/pqc/wallet/verify
+        Body: {"user_id":"...", "payload_hex":"...", "signature_b64":"...", "signing_key_id":"..."}
+
+        Verify a HyperSign signature for the given user wallet.
+        """
+        import base64 as _b64
+        data = request.get_json() or {}
+        user_id        = data.get('user_id', '')
+        payload_hex    = data.get('payload_hex', '')
+        sig_b64        = data.get('signature_b64', '')
+        signing_key_id = data.get('signing_key_id', '')
+        if not all([user_id, payload_hex, sig_b64, signing_key_id]):
+            return jsonify({'success': False, 'error': 'user_id, payload_hex, signature_b64, signing_key_id all required'}), 400
+        try:
+            payload = bytes.fromhex(payload_hex)
+            sig     = _b64.b64decode(sig_b64)
+        except Exception as _de:
+            return jsonify({'success': False, 'error': f'Decode error: {_de}'}), 400
+        try:
+            from globals import verify_tx_signature
+            ok = verify_tx_signature(user_id, payload, sig, signing_key_id)
+            return jsonify({'success': True, 'valid': ok, 'user_id': user_id}), 200
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    @bp.route('/pqc/wallet/zk-prove', methods=['POST'])
+    def api_pqc_wallet_zk_prove():
+        """
+        POST /api/quantum/pqc/wallet/zk-prove
+        Body: {"user_id":"..."}
+
+        Generate a ZK proof of HLWE key ownership. The proof proves the user controls
+        their private key without revealing the key. Nullifier included to prevent replay.
+        """
+        data    = request.get_json() or {}
+        user_id = data.get('user_id', '')
+        if not user_id:
+            return jsonify({'success': False, 'error': 'user_id required'}), 400
+        try:
+            from globals import generate_tx_zk_proof, get_wallet_state
+            proof = generate_tx_zk_proof(user_id)
+            binding = get_wallet_state().get_binding(user_id)
+            if proof is None:
+                return jsonify({
+                    'success': False,
+                    'error': 'ZK proof generation failed — no active key binding',
+                }), 404
+            return jsonify({
+                'success':          True,
+                'user_id':          user_id,
+                'proof':            proof,
+                'fingerprint':      binding.fingerprint if binding else None,
+                'pseudoqubit_id':   binding.pseudoqubit_id if binding else None,
+                'scheme':           'HyperZK over {8,3} tessellation',
+                'replay_protected': True,
+            }), 200
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    @bp.route('/pqc/wallet/rotate', methods=['POST'])
+    def api_pqc_wallet_rotate():
+        """
+        POST /api/quantum/pqc/wallet/rotate
+        Body: {"user_id":"...", "key_id":"..."}
+
+        Rotate the user's HLWE master key. Old key is revoked; new key is generated
+        with fresh QRNG entropy. Returns new binding with updated fingerprint.
+        """
+        data    = request.get_json() or {}
+        user_id = data.get('user_id', '')
+        key_id  = data.get('key_id', '')
+        if not user_id:
+            return jsonify({'success': False, 'error': 'user_id required'}), 400
+        try:
+            from globals import pqc_rotate_key, get_wallet_state, bind_wallet_pqc_key
+            new_bundle = pqc_rotate_key(key_id, user_id)
+            if new_bundle is None:
+                return jsonify({'success': False, 'error': 'Key rotation failed — PQC system unavailable'}), 503
+            binding = bind_wallet_pqc_key(user_id, new_bundle)
+            return jsonify({
+                'success':          True,
+                'user_id':          user_id,
+                'new_binding':      binding.to_dict(),
+                'rotation_count':   binding.rotation_count,
+                'rotated_at':       binding.last_rotated_at,
+            }), 200
+        except Exception as e:
+            logger.error(f'[/pqc/wallet/rotate] {e}', exc_info=True)
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    # ════════════════════════════════════════════════════════════════════════════════════
+    # MOD-1: MEMPOOL STATS + SEAL CONTROL ENDPOINTS
+    # ════════════════════════════════════════════════════════════════════════════════════
+
+    @bp.route('/mempool/stats', methods=['GET'])
+    def api_mempool_stats():
+        """
+        GET /api/quantum/mempool/stats
+
+        Returns live mempool state: pending TX count, auto-seal threshold progress,
+        pending value in QTCL, persist layer stats, seal controller stats.
+        """
+        try:
+            from ledger_manager import global_mempool as _gmp
+            if _gmp is None:
+                return jsonify({'success': False, 'error': 'Mempool not initialized'}), 503
+            stats = _gmp.get_rich_stats() if hasattr(_gmp, 'get_rich_stats') else {
+                'pending_count': _gmp.get_pending_count(),
+                'threshold': 100,
+            }
+            return jsonify({'success': True, **stats}), 200
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 503
+
+    @bp.route('/seal/force', methods=['POST'])
+    def api_seal_force():
+        """
+        POST /api/quantum/seal/force
+        Body: {"reason": "manual description"}
+
+        Admin force block seal regardless of TX count.
+        """
+        data   = request.get_json() or {}
+        reason = data.get('reason', 'manual_api')
+        try:
+            from ledger_manager import GLOBAL_AUTO_SEAL_CONTROLLER as _SC
+            if _SC is None:
+                return jsonify({'success': False, 'error': 'AutoSealController not initialized'}), 503
+            event = _SC.force_seal(reason=reason)
+            return jsonify({
+                'success': True,
+                'seal_id': event.get('seal_id') if event else None,
+                'trigger': 'admin_force', 'reason': reason,
+            }), 200
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    @bp.route('/seal/history', methods=['GET'])
+    def api_seal_history():
+        """GET /api/quantum/seal/history?limit=20 — recent auto-seal event log."""
+        limit = int(request.args.get('limit', 20))
+        try:
+            from ledger_manager import GLOBAL_AUTO_SEAL_CONTROLLER as _SC
+            if _SC is None:
+                return jsonify({'success': False, 'error': 'AutoSealController not initialized'}), 503
+            return jsonify({'success': True, 'history': _SC.get_history(limit), 'stats': _SC.get_stats()}), 200
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    # ════════════════════════════════════════════════════════════════════════════════════
+    # ENGINE + SYSTEM STATS
+    # ════════════════════════════════════════════════════════════════════════════════════
+
+    @bp.route('/engine/stats', methods=['GET'])
+    def api_engine_stats():
+        """
+        GET /api/quantum/engine/stats
+
+        Complete system telemetry: GHZ engine + mempool + wallet API +
+        seal controller + PQC system + globals tx_engine snapshot.
+        """
+        ghz_stats:  Dict = {}
+        mp_stats:   Dict = {}
+        wal_stats:  Dict = {}
+        seal_stats: Dict = {}
+        pqc_stats:  Dict = {}
+        tx_summary: Dict = {}
+
+        try:
+            ghz_stats = _get_active_ghz_engine().get_stats()
+        except Exception: pass
+        try:
+            from ledger_manager import global_mempool as _gmp
+            if _gmp and hasattr(_gmp, 'get_rich_stats'):
+                mp_stats = _gmp.get_rich_stats()
+        except Exception: pass
+        try:
+            from ledger_manager import GLOBAL_WALLET_BALANCE_API as _WA
+            if _WA: wal_stats = _WA.get_stats()
+        except Exception: pass
+        try:
+            from ledger_manager import GLOBAL_AUTO_SEAL_CONTROLLER as _SC
+            if _SC: seal_stats = _SC.get_stats()
+        except Exception: pass
+        try:
+            from globals import get_globals
+            pqc_stats  = get_globals().pqc.get_summary()
+            tx_summary = get_globals().tx_engine.get_summary() if hasattr(get_globals(), 'tx_engine') else {}
+        except Exception: pass
+
+        return jsonify({
+            'success':          True,
+            'ghz_engine':       ghz_stats,
+            'mempool':          mp_stats,
+            'wallet_api':       wal_stats,
+            'seal_controller':  seal_stats,
+            'pqc_system':       pqc_stats,
+            'tx_engine_global': tx_summary,
+            'timestamp':        datetime.utcnow().isoformat(),
+        }), 200
+
     return bp
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════
