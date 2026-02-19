@@ -3046,8 +3046,33 @@ def dispatch_command(raw: str, is_admin: bool = False, is_authenticated: bool = 
         is_authenticated: caller is logged in
 
     Returns: dict with 'status', 'result' or 'error'
+    
+    🔴 CRITICAL FIX (2025-02-19):
+    If COMMAND_REGISTRY is empty (size 0), this indicates terminal_logic
+    failed to boot properly. Check wsgi_config logs for _boot_terminal()
+    errors. Common causes:
+    1. Missing dependencies (bcrypt, PyJWT, psycopg2)
+    2. globals not fully initialized
+    3. ensure_packages() pip install failure in externally-managed Python environment
     """
     import re
+
+    # 🔴 DIAGNOSTIC: Empty registry detection
+    if len(COMMAND_REGISTRY) == 0:
+        return {
+            'status': 'error',
+            'error': 'COMMAND_REGISTRY is empty — terminal_logic failed to boot',
+            'debug_info': {
+                'registry_size': 0,
+                'possible_causes': [
+                    'terminal_logic.py import failed (check logs)',
+                    'Missing dependencies: bcrypt, PyJWT, psycopg2',
+                    'globals not fully initialized',
+                    'TerminalEngine instantiation failed'
+                ],
+                'action': 'Check wsgi_config.log for _boot_terminal() error details'
+            }
+        }
 
     if not raw or not raw.strip():
         return {'status': 'error', 'error': 'Empty command'}

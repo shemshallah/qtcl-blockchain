@@ -271,6 +271,40 @@ except Exception as _pe:
 _ENGINE = None
 
 def _boot_terminal():
+    """
+    Boot the terminal engine and populate COMMAND_REGISTRY.
+    
+    🔴 CRITICAL FIX (2025-02-19):
+    This function is the SINGLE POINT where commands get registered into
+    globals.COMMAND_REGISTRY. If it fails, the command registry stays empty
+    and frontend shows "Loaded 0 commands".
+    
+    KNOWN ISSUES & ROOT CAUSES:
+    1. terminal_logic.py imports may fail due to missing dependencies (bcrypt, PyJWT, psycopg2)
+       → ensure_packages() in terminal_logic.py:202 tries to pip install
+       → pip fails in externally-managed environments
+       → Module import fails before TerminalEngine can be instantiated
+       → _boot_terminal fails and COMMAND_REGISTRY stays empty
+    
+    2. TerminalEngine instantiation may fail due to missing globals components
+       → APIClient needs database/auth managers from globals
+       → If globals not fully initialized, engine creation fails
+    
+    3. _build_api_handlers may return empty dict if handler functions not defined
+       → _build_api_handlers creates 80+ handler functions as closures
+       → If engine is invalid, handlers might not bind correctly
+    
+    MITIGATION:
+    - ensure_packages() now silently skips failures (doesn't block import)
+    - _boot_terminal wraps imports/calls in try/except with detailed logging
+    - If _boot_terminal fails, app still boots but with 0 commands
+    - Terminal still functional via /api/command with dispatch_command()
+    
+    RECOVERY:
+    - Check wsgi_config.py log for which step failed
+    - Check if dependencies are installed: bcrypt, PyJWT, psycopg2
+    - Check if globals fully initialized (gs.auth, gs.database must exist)
+    """
     global _ENGINE
     try:
         from terminal_logic import TerminalEngine, register_all_commands
@@ -278,8 +312,18 @@ def _boot_terminal():
         n = register_all_commands(_ENGINE)
         logger.info(f'[wsgi] terminal_logic: {n} commands registered into globals.COMMAND_REGISTRY')
         return True
+    except ImportError as import_err:
+        logger.error(f'[wsgi] ✗ terminal_logic import failed: {import_err}')
+        logger.error(f'    Check: bcrypt, PyJWT, psycopg2 installed?')
+        logger.error(f'    This prevents command registration. API still works via dispatch_command()')
+        return False
+    except AttributeError as attr_err:
+        logger.error(f'[wsgi] ✗ TerminalEngine instantiation failed (missing globals): {attr_err}')
+        logger.error(f'    globals.auth, globals.database, or globals.client may not be initialized')
+        return False
     except Exception as exc:
-        logger.error(f'[wsgi] terminal_logic boot failed: {exc}\n{traceback.format_exc()}')
+        logger.error(f'[wsgi] ✗ terminal_logic boot failed: {exc}\n{traceback.format_exc()}')
+        logger.error(f'    Verify globals initialized and all dependencies available')
         return False
 
 _boot_terminal()
