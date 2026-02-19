@@ -5526,13 +5526,22 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             "FROM blocks ORDER BY height DESC LIMIT %s OFFSET %s",
             (limit, offset)
         )
-        if rows is not None:
-            meta = _db_exec("SELECT COUNT(*) AS c, MAX(height) AS h FROM blocks", fetch_one=True)
-            total = int(meta['c'] or 0) if meta else 0
-            max_h = int(meta['h'] or 0) if meta else 0
-            return _ok({'blocks': [_clean_block(r) for r in rows],
+        
+        # CRITICAL FIX: rows is a list of RealDictCursor objects, need to convert each
+        if rows is not None and len(rows) > 0:
+            # Convert RealDictCursor objects to plain dicts
+            converted_rows = [dict(r) if hasattr(r, 'items') else r for r in rows]
+            
+            # Get metadata
+            meta_row = _db_exec("SELECT COUNT(*) AS c, MAX(height) AS h FROM blocks", fetch_one=True)
+            meta = dict(meta_row) if meta_row is not None else {}
+            
+            total = int(meta.get('c') or 0)
+            max_h = int(meta.get('h') or 0)
+            
+            return _ok({'blocks': [_clean_block(r) for r in converted_rows],
                         'total_blocks': total, 'chain_height': max_h,
-                        'count': len(rows), 'source': 'database'})
+                        'count': len(converted_rows), 'source': 'database'})
 
         return _ok({'blocks': [], 'total_blocks': 0, 'chain_height': 0, 'count': 0})
 
@@ -5629,36 +5638,58 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             
             # If database is available, query it for authoritative counts
             if db_available:
-                counts = _db_exec(
+                # Query for block counts
+                counts_row = _db_exec(
                     "SELECT COUNT(*) AS total_blocks, MAX(height) AS chain_height FROM blocks",
                     fetch_one=True
                 )
-                if counts and counts.get('total_blocks'):
+                
+                # CRITICAL FIX: Ensure we convert RealDictCursor to plain dict
+                counts = dict(counts_row) if counts_row is not None else None
+                
+                # Log the result for debugging
+                _log_debug(f'h_block_stats: counts_row={counts_row}, counts={counts}')
+                
+                # Check if we got valid results (don't check if count is 0, blocks might be empty)
+                if counts is not None:
                     total_blocks = int(counts.get('total_blocks') or 0)
                     chain_height = int(counts.get('chain_height') or 0) if counts.get('chain_height') is not None else 0
                     
-                    tx_counts = _db_exec(
+                    _log_debug(f'h_block_stats: total_blocks={total_blocks}, chain_height={chain_height}')
+                    
+                    # Get transaction stats
+                    tx_counts_row = _db_exec(
                         "SELECT COUNT(*) AS total, "
                         "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending FROM transactions",
                         fetch_one=True
-                    ) or {}
+                    )
+                    tx_counts = dict(tx_counts_row) if tx_counts_row is not None else {}
                     
-                    avg_row = _db_exec(
-                        "SELECT AVG(b1.timestamp - b2.timestamp) AS avg_secs "
-                        "FROM blocks b1 JOIN blocks b2 ON b1.height = b2.height + 1 "
-                        "WHERE b1.height > (SELECT MAX(height) - 100 FROM blocks)",
-                        fetch_one=True
-                    ) or {}
+                    # Get average block time (if blocks exist)
+                    if total_blocks > 1:
+                        avg_row_data = _db_exec(
+                            "SELECT AVG(b1.timestamp - b2.timestamp) AS avg_secs "
+                            "FROM blocks b1 JOIN blocks b2 ON b1.height = b2.height + 1 "
+                            "WHERE b1.height > (SELECT MAX(height) - 100 FROM blocks)",
+                            fetch_one=True
+                        )
+                        avg_row = dict(avg_row_data) if avg_row_data is not None else {}
+                    else:
+                        avg_row = {}
                     
-                    finalized = _db_exec(
+                    # Get finalized count
+                    finalized_row = _db_exec(
                         "SELECT COUNT(*) AS c FROM blocks WHERE finalized = TRUE", fetch_one=True
-                    ) or {}
+                    )
+                    finalized = dict(finalized_row) if finalized_row is not None else {}
                     
-                    avg_ent = _db_exec(
+                    # Get average entropy
+                    avg_ent_row = _db_exec(
                         "SELECT AVG(entropy_score) AS avg FROM blocks "
                         "WHERE height > (SELECT MAX(height) - 100 FROM blocks)",
                         fetch_one=True
-                    ) or {}
+                    )
+                    avg_ent = dict(avg_ent_row) if avg_ent_row is not None else {}
                     
                     return _ok({
                         'total_blocks':       total_blocks,
@@ -5673,6 +5704,8 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
                         'difficulty':         bc.difficulty or 0,
                         'source':             'database',
                     })
+                else:
+                    _log_debug('h_block_stats: counts query returned None')
             
             # FALLBACK: Database not available, use globals in-memory data
             return _ok({
@@ -5693,7 +5726,8 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             
         except Exception as e:
             import traceback
-            _log_debug(f'h_block_stats error: {e}\n{traceback.format_exc()}')
+            error_trace = traceback.format_exc()
+            _log_debug(f'h_block_stats error: {e}\n{error_trace}')
             return _err(f'Block stats error: {str(e)}')
 
     def h_block_validate(flags, args):
