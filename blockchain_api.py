@@ -1614,6 +1614,7 @@ class QuantumBlockBuilder:
         )
 
     @staticmethod
+    def validate_quantum_block(block: 'QuantumBlock', previous_block: Optional['QuantumBlock'] = None) -> Tuple[bool, str]:
         """Comprehensive quantum block validation."""
         if previous_block:
             if block.height!=previous_block.height+1:
@@ -6785,3 +6786,300 @@ BLOCKCHAIN_INTEGRATION = BlockchainSystemIntegration()
 
 def get_blockchain_integration():
     return BLOCKCHAIN_INTEGRATION
+
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# EXPANSION v6.1: ENHANCED QUANTUM VALIDATION & ATOMIC TRANSACTION OPERATIONS
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+class QuantumValidationAugmented:
+    """Enhanced quantum validation with comprehensive error tracking."""
+    
+    def __init__(self):
+        self.validation_log: deque = deque(maxlen=10000)
+        self.lock = threading.RLock()
+        self.validation_cache: Dict[str, bool] = {}
+    
+    def validate_quantum_proof(self, proof: Dict[str, Any], tx_id: str) -> Tuple[bool, Optional[str]]:
+        """Validate quantum proof with error details."""
+        start_time = time.time()
+        
+        try:
+            with self.lock:
+                # Check cache first
+                if tx_id in self.validation_cache:
+                    return self.validation_cache[tx_id], None
+            
+            # Basic structure validation
+            required_fields = ['ghz_state', 'measurement_bases', 'measurement_outcomes', 'timestamp']
+            for field in required_fields:
+                if field not in proof:
+                    return False, f"Missing quantum proof field: {field}"
+            
+            # Timestamp validation
+            proof_time = datetime.fromisoformat(proof.get('timestamp', ''))
+            if (datetime.now(timezone.utc) - proof_time).total_seconds() > 3600:
+                return False, "Quantum proof timestamp too old (>1 hour)"
+            
+            # GHZ state validation
+            ghz_state = proof.get('ghz_state', {})
+            if not isinstance(ghz_state, dict):
+                return False, "Invalid GHZ state format"
+            
+            state_keys = {'entanglement_degree', 'fidelity', 'coherence_time_us'}
+            for key in state_keys:
+                if key not in ghz_state:
+                    return False, f"Missing GHZ state property: {key}"
+            
+            # Measurement validation
+            measurements = proof.get('measurement_outcomes', {})
+            if len(measurements) < GHZ_QUBITS:
+                return False, f"Insufficient measurement outcomes: {len(measurements)} < {GHZ_QUBITS}"
+            
+            # Cache result
+            with self.lock:
+                self.validation_cache[tx_id] = True
+                self.validation_log.append({
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'tx_id': tx_id,
+                    'valid': True,
+                    'duration_ms': (time.time() - start_time) * 1000,
+                })
+            
+            return True, None
+        
+        except ValueError as ve:
+            return False, f"Quantum proof format error: {str(ve)}"
+        except Exception as e:
+            with self.lock:
+                self.validation_log.append({
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'tx_id': tx_id,
+                    'valid': False,
+                    'error': str(e),
+                    'duration_ms': (time.time() - start_time) * 1000,
+                })
+            return False, f"Quantum proof validation exception: {str(e)}"
+    
+    def get_validation_stats(self) -> Dict[str, Any]:
+        """Get validation statistics."""
+        with self.lock:
+            logs = list(self.validation_log)
+            total = len(logs)
+            valid_count = sum(1 for log in logs if log.get('valid', False))
+            
+            if total == 0:
+                return {'total': 0, 'valid': 0, 'invalid': 0, 'success_rate': 0}
+            
+            return {
+                'total': total,
+                'valid': valid_count,
+                'invalid': total - valid_count,
+                'success_rate': valid_count / total,
+                'avg_duration_ms': sum(log.get('duration_ms', 0) for log in logs) / total,
+            }
+
+class AtomicTransactionExecutor:
+    """Executes transactions atomically with rollback support."""
+    
+    def __init__(self):
+        self.executing_txs: Set[str] = set()
+        self.tx_state_snapshots: Dict[str, Dict[str, Any]] = {}
+        self.lock = threading.RLock()
+        self.execution_log: deque = deque(maxlen=5000)
+    
+    def begin_atomic_tx(self, tx_id: str, state_snapshot: Dict[str, Any]) -> None:
+        """Begin atomic transaction with state snapshot."""
+        with self.lock:
+            if tx_id in self.executing_txs:
+                raise ValueError(f"Transaction {tx_id} already executing")
+            
+            self.executing_txs.add(tx_id)
+            self.tx_state_snapshots[tx_id] = json.loads(json.dumps(state_snapshot))
+            logger.debug(f"Atomic TX {tx_id} started")
+    
+    def commit_atomic_tx(self, tx_id: str, final_state: Dict[str, Any]) -> bool:
+        """Commit atomic transaction."""
+        with self.lock:
+            if tx_id not in self.executing_txs:
+                logger.warning(f"Transaction {tx_id} not found in executing set")
+                return False
+            
+            try:
+                self.executing_txs.remove(tx_id)
+                if tx_id in self.tx_state_snapshots:
+                    del self.tx_state_snapshots[tx_id]
+                
+                self.execution_log.append({
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'tx_id': tx_id,
+                    'status': 'committed',
+                    'state_snapshot_size': len(json.dumps(final_state)),
+                })
+                logger.debug(f"Atomic TX {tx_id} committed")
+                return True
+            except Exception as e:
+                logger.error(f"Error committing TX {tx_id}: {e}")
+                return False
+    
+    def rollback_atomic_tx(self, tx_id: str) -> Dict[str, Any]:
+        """Rollback atomic transaction to snapshot."""
+        with self.lock:
+            if tx_id not in self.executing_txs:
+                logger.warning(f"Transaction {tx_id} not found for rollback")
+                return {}
+            
+            try:
+                snapshot = self.tx_state_snapshots.get(tx_id, {})
+                self.executing_txs.remove(tx_id)
+                if tx_id in self.tx_state_snapshots:
+                    del self.tx_state_snapshots[tx_id]
+                
+                self.execution_log.append({
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'tx_id': tx_id,
+                    'status': 'rolled_back',
+                    'reason': 'Explicit rollback',
+                })
+                logger.info(f"Atomic TX {tx_id} rolled back to snapshot")
+                return snapshot
+            except Exception as e:
+                logger.error(f"Error rolling back TX {tx_id}: {e}")
+                return {}
+    
+    def get_execution_status(self) -> Dict[str, Any]:
+        """Get transaction execution status."""
+        with self.lock:
+            return {
+                'executing_transactions': len(self.executing_txs),
+                'executing_tx_ids': list(self.executing_txs),
+                'total_executions_logged': len(self.execution_log),
+                'recent_executions': list(self.execution_log)[-20:],
+            }
+
+class TransactionAuditTrail:
+    """Comprehensive audit trail for all blockchain transactions."""
+    
+    def __init__(self):
+        self.audit_log: deque = deque(maxlen=100000)
+        self.lock = threading.RLock()
+        self.tx_audit_map: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    
+    def log_transaction_event(self, tx_id: str, event_type: str, event_data: Dict[str, Any]) -> None:
+        """Log a transaction event with full context."""
+        entry = {
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'tx_id': tx_id,
+            'event_type': event_type,
+            'data': event_data,
+            'sequence_number': len(self.audit_log),
+        }
+        
+        with self.lock:
+            self.audit_log.append(entry)
+            self.tx_audit_map[tx_id].append(entry)
+            logger.debug(f"Audit: TX {tx_id} - {event_type}")
+    
+    def get_transaction_audit_trail(self, tx_id: str) -> List[Dict[str, Any]]:
+        """Get complete audit trail for a transaction."""
+        with self.lock:
+            return list(self.tx_audit_map.get(tx_id, []))
+    
+    def get_audit_summary(self, limit: int = 100) -> Dict[str, Any]:
+        """Get recent audit log entries."""
+        with self.lock:
+            recent = list(self.audit_log)[-limit:]
+            event_counts = Counter(entry['event_type'] for entry in recent)
+            
+            return {
+                'total_logged_events': len(self.audit_log),
+                'recent_events': recent,
+                'event_type_counts': dict(event_counts),
+                'unique_transactions_logged': len(self.tx_audit_map),
+            }
+
+class BlockchainConsistencyChecker:
+    """Verifies blockchain consistency and detects anomalies."""
+    
+    def __init__(self, blockchain):
+        self.blockchain = blockchain
+        self.lock = threading.RLock()
+        self.consistency_checks: List[Dict[str, Any]] = []
+        self.anomalies: deque = deque(maxlen=1000)
+    
+    def verify_blockchain_integrity(self) -> Tuple[bool, List[str]]:
+        """Verify complete blockchain integrity."""
+        issues = []
+        
+        try:
+            # Check block sequence
+            with self.lock:
+                for i, block in enumerate(self.blockchain.blocks):
+                    if block.height != i:
+                        issues.append(f"Block height mismatch at index {i}: expected {i}, got {block.height}")
+                    
+                    if i > 0:
+                        prev_block = self.blockchain.blocks[i - 1]
+                        if block.previous_hash != prev_block.block_hash:
+                            issues.append(f"Hash chain broken at block {i}")
+                    
+                    # Verify transaction count matches
+                    if len(block.transactions) > TARGET_TX_PER_BLOCK * 2:
+                        issues.append(f"Block {i} exceeds reasonable transaction count: {len(block.transactions)}")
+            
+            # Log check
+            check_result = {
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'block_count': len(self.blockchain.blocks),
+                'issues_found': len(issues),
+                'integrity_valid': len(issues) == 0,
+                'issues': issues,
+            }
+            self.consistency_checks.append(check_result)
+            
+            if issues:
+                for issue in issues:
+                    self.anomalies.append({
+                        'timestamp': datetime.now(timezone.utc).isoformat(),
+                        'issue': issue,
+                    })
+            
+            return len(issues) == 0, issues
+        
+        except Exception as e:
+            logger.error(f"Error during consistency check: {e}")
+            return False, [f"Consistency check exception: {str(e)}"]
+    
+    def get_consistency_report(self) -> Dict[str, Any]:
+        """Get comprehensive consistency report."""
+        with self.lock:
+            total_checks = len(self.consistency_checks)
+            passed_checks = sum(1 for c in self.consistency_checks if c['integrity_valid'])
+            
+            return {
+                'total_checks_performed': total_checks,
+                'passed_checks': passed_checks,
+                'failed_checks': total_checks - passed_checks,
+                'success_rate': passed_checks / total_checks if total_checks > 0 else 0,
+                'recent_checks': list(self.consistency_checks)[-5:],
+                'detected_anomalies': list(self.anomalies),
+            }
+
+# Global instances
+QUANTUM_VALIDATOR = QuantumValidationAugmented()
+ATOMIC_EXECUTOR = AtomicTransactionExecutor()
+AUDIT_TRAIL = TransactionAuditTrail()
+
+def get_quantum_validator():
+    """Get global quantum validator."""
+    return QUANTUM_VALIDATOR
+
+def get_atomic_executor():
+    """Get global atomic executor."""
+    return ATOMIC_EXECUTOR
+
+def get_audit_trail():
+    """Get global audit trail."""
+    return AUDIT_TRAIL
+
+logger.info("[blockchain_api] ✓ Quantum validation, atomic operations, and audit trail initialized")

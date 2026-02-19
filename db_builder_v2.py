@@ -5163,10 +5163,6 @@ class DatabaseBuilder:
             else:
                 logger.warning(f"{CLR.Y}[PQ-SCHEMA] db_builder_pq_schema.py not found — "
                                f"encryption schema NOT installed{CLR.E}")
-            
-        except Exception as e:
-            logger.error(f"{CLR.R}Error initializing genesis data: {e}{CLR.E}")
-            raise
     
     def populate_pseudoqubits(self, count=106496):
         """

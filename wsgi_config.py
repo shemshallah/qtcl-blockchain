@@ -1349,3 +1349,316 @@ if __name__ == '__main__':
     port  = int(os.getenv('PORT', 5000))
     debug = os.getenv('FLASK_ENV') == 'development'
     app.run(host='0.0.0.0', port=port, debug=debug)
+
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# EXPANSION v6.1: ENHANCED REQUEST/RESPONSE HANDLING & CIRCUIT BREAKERS
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+class RequestValidator:
+    """Validates incoming requests for security and correctness."""
+    
+    MAX_PAYLOAD_SIZE = 10_000_000  # 10MB
+    MAX_COMMAND_LENGTH = 1000
+    ALLOWED_CONTENT_TYPES = {'application/json', 'application/x-www-form-urlencoded', 'text/plain'}
+    
+    @classmethod
+    def validate_request(cls, req: request) -> Tuple[bool, Optional[str]]:
+        """Validate incoming request."""
+        # Check content length
+        if req.content_length and req.content_length > cls.MAX_PAYLOAD_SIZE:
+            return False, f"Payload too large: {req.content_length} > {cls.MAX_PAYLOAD_SIZE}"
+        
+        # Check content type
+        if req.content_type and not any(ct in req.content_type for ct in cls.ALLOWED_CONTENT_TYPES):
+            return False, f"Invalid content type: {req.content_type}"
+        
+        return True, None
+
+class ResponseWrapper:
+    """Standardized response wrapper for all API responses."""
+    
+    def __init__(self, status: str = 'success', data: Any = None, error: Optional[str] = None,
+                 metadata: Optional[Dict] = None, timestamp: Optional[datetime] = None):
+        self.status = status
+        self.data = data
+        self.error = error
+        self.metadata = metadata or {}
+        self.timestamp = timestamp or datetime.now(timezone.utc).isoformat()
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            'status': self.status,
+            'data': self.data,
+            'error': self.error,
+            'metadata': self.metadata,
+            'timestamp': self.timestamp,
+        }
+    
+    def to_json(self) -> str:
+        """Convert to JSON string."""
+        return json.dumps(self.to_dict(), default=str)
+
+class CircuitBreaker:
+    """Implements circuit breaker pattern for fault tolerance."""
+    
+    def __init__(self, name: str, failure_threshold: int = 5, timeout_seconds: int = 60):
+        self.name = name
+        self.failure_threshold = failure_threshold
+        self.timeout_seconds = timeout_seconds
+        self.failure_count = 0
+        self.success_count = 0
+        self.last_failure_time: Optional[datetime] = None
+        self.state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+        self.lock = threading.RLock()
+    
+    def record_success(self) -> None:
+        """Record a successful operation."""
+        with self.lock:
+            self.failure_count = 0
+            self.success_count += 1
+            if self.state == "HALF_OPEN":
+                self.state = "CLOSED"
+                logger.info(f"Circuit breaker '{self.name}' closed after successful operation")
+    
+    def record_failure(self) -> None:
+        """Record a failed operation."""
+        with self.lock:
+            self.failure_count += 1
+            self.last_failure_time = datetime.now(timezone.utc)
+            
+            if self.failure_count >= self.failure_threshold:
+                self.state = "OPEN"
+                logger.warning(f"Circuit breaker '{self.name}' opened after {self.failure_count} failures")
+    
+    def can_execute(self) -> bool:
+        """Check if operation can execute."""
+        with self.lock:
+            if self.state == "CLOSED":
+                return True
+            
+            if self.state == "OPEN":
+                if self.last_failure_time:
+                    elapsed = (datetime.now(timezone.utc) - self.last_failure_time).total_seconds()
+                    if elapsed > self.timeout_seconds:
+                        self.state = "HALF_OPEN"
+                        logger.info(f"Circuit breaker '{self.name}' half-open, testing...")
+                        return True
+                return False
+            
+            if self.state == "HALF_OPEN":
+                return True
+            
+            return False
+    
+    def get_status(self) -> Dict[str, Any]:
+        """Get current circuit breaker status."""
+        with self.lock:
+            return {
+                'name': self.name,
+                'state': self.state,
+                'failure_count': self.failure_count,
+                'success_count': self.success_count,
+                'last_failure': self.last_failure_time.isoformat() if self.last_failure_time else None,
+            }
+
+class RateLimiter:
+    """Token bucket rate limiter with per-IP tracking."""
+    
+    def __init__(self, requests_per_second: float = 100, burst_size: int = 200):
+        self.requests_per_second = requests_per_second
+        self.burst_size = burst_size
+        self.buckets: Dict[str, Dict[str, Any]] = {}
+        self.lock = threading.RLock()
+    
+    def allow_request(self, identifier: str) -> Tuple[bool, Dict[str, Any]]:
+        """Check if request is allowed under rate limit."""
+        with self.lock:
+            now = time.time()
+            
+            if identifier not in self.buckets:
+                self.buckets[identifier] = {
+                    'tokens': self.burst_size,
+                    'last_update': now,
+                    'requests': 0,
+                }
+            
+            bucket = self.buckets[identifier]
+            elapsed = now - bucket['last_update']
+            bucket['tokens'] = min(
+                self.burst_size,
+                bucket['tokens'] + elapsed * self.requests_per_second
+            )
+            bucket['last_update'] = now
+            
+            if bucket['tokens'] >= 1:
+                bucket['tokens'] -= 1
+                bucket['requests'] += 1
+                return True, {
+                    'allowed': True,
+                    'remaining_tokens': int(bucket['tokens']),
+                    'total_requests': bucket['requests'],
+                }
+            else:
+                return False, {
+                    'allowed': False,
+                    'remaining_tokens': 0,
+                    'retry_after_seconds': 1.0 / self.requests_per_second,
+                }
+    
+    def get_stats(self, identifier: str) -> Optional[Dict[str, Any]]:
+        """Get rate limit stats for identifier."""
+        with self.lock:
+            bucket = self.buckets.get(identifier)
+            if bucket:
+                return {
+                    'identifier': identifier,
+                    'tokens': bucket['tokens'],
+                    'requests': bucket['requests'],
+                    'last_update': datetime.fromtimestamp(bucket['last_update']).isoformat(),
+                }
+            return None
+
+# Global circuit breakers and rate limiters
+COMMAND_CIRCUIT_BREAKER = CircuitBreaker('command_executor', failure_threshold=3, timeout_seconds=30)
+DATABASE_CIRCUIT_BREAKER = CircuitBreaker('database', failure_threshold=5, timeout_seconds=60)
+EXTERNAL_API_CIRCUIT_BREAKER = CircuitBreaker('external_api', failure_threshold=10, timeout_seconds=120)
+
+REQUEST_RATE_LIMITER = RateLimiter(requests_per_second=100, burst_size=500)
+ADMIN_RATE_LIMITER = RateLimiter(requests_per_second=10, burst_size=20)
+
+def get_client_ip(req: request) -> str:
+    """Extract client IP from request, handling proxies."""
+    if req.headers.get('X-Forwarded-For'):
+        return req.headers.get('X-Forwarded-For').split(',')[0].strip()
+    if req.headers.get('X-Real-IP'):
+        return req.headers.get('X-Real-IP')
+    return req.remote_addr or 'unknown'
+
+@app.before_request
+def before_request_handler():
+    """Enhanced pre-request validation and tracking."""
+    try:
+        client_ip = get_client_ip(request)
+        g.client_ip = client_ip
+        g.request_start_time = time.time()
+        g.request_id = uuid.uuid4().hex[:12]
+        
+        # Rate limiting
+        is_admin = request.path.startswith('/admin')
+        limiter = ADMIN_RATE_LIMITER if is_admin else REQUEST_RATE_LIMITER
+        allowed, rate_info = limiter.allow_request(client_ip)
+        
+        if not allowed:
+            logger.warning(f"Rate limit exceeded for {client_ip} on {request.path}")
+            return ResponseWrapper(
+                status='error',
+                error=f"Rate limit exceeded. Retry after {rate_info['retry_after_seconds']}s"
+            ).to_dict(), 429
+        
+        # Request validation
+        valid, error_msg = RequestValidator.validate_request(request)
+        if not valid:
+            logger.warning(f"Invalid request from {client_ip}: {error_msg}")
+            return ResponseWrapper(status='error', error=error_msg).to_dict(), 400
+        
+    except Exception as e:
+        logger.error(f"Error in before_request handler: {e}")
+        return ResponseWrapper(status='error', error='Request validation failed').to_dict(), 500
+
+@app.after_request
+def after_request_handler(response):
+    """Enhanced post-request logging and metrics."""
+    try:
+        if hasattr(g, 'request_start_time'):
+            elapsed = time.time() - g.request_start_time
+            request_id = getattr(g, 'request_id', 'unknown')
+            client_ip = getattr(g, 'client_ip', 'unknown')
+            
+            logger.info(
+                f"[{request_id}] {request.method} {request.path} - "
+                f"Status: {response.status_code} - "
+                f"IP: {client_ip} - "
+                f"Duration: {elapsed:.3f}s"
+            )
+            
+            response.headers['X-Request-ID'] = request_id
+            response.headers['X-Response-Time'] = f"{elapsed:.3f}s"
+    except Exception as e:
+        logger.error(f"Error in after_request handler: {e}")
+    
+    return response
+
+@app.errorhandler(404)
+def handle_404(e):
+    """Handle 404 errors."""
+    return ResponseWrapper(
+        status='error',
+        error='Endpoint not found',
+        metadata={'path': request.path, 'method': request.method}
+    ).to_dict(), 404
+
+@app.errorhandler(500)
+def handle_500(e):
+    """Handle 500 errors."""
+    return ResponseWrapper(
+        status='error',
+        error='Internal server error',
+        metadata={'error_type': type(e).__name__}
+    ).to_dict(), 500
+
+# Enhanced status endpoint with circuit breaker and rate limiter status
+@app.route('/system/status', methods=['GET'])
+def system_status():
+    """Get comprehensive system status including circuit breakers and rate limits."""
+    try:
+        error_tracker = get_error_tracker()
+        health_monitor = get_health_monitor()
+        
+        overall_health, component_health = health_monitor.get_system_health()
+        
+        status_data = {
+            'health': {
+                'overall': overall_health.value,
+                'components': {k: v.value for k, v in component_health.items()},
+            },
+            'circuit_breakers': {
+                'command': COMMAND_CIRCUIT_BREAKER.get_status(),
+                'database': DATABASE_CIRCUIT_BREAKER.get_status(),
+                'external_api': EXTERNAL_API_CIRCUIT_BREAKER.get_status(),
+            },
+            'error_summary': error_tracker.get_error_summary(),
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }
+        
+        return ResponseWrapper(status='success', data=status_data).to_dict(), 200
+    except Exception as e:
+        logger.error(f"Error in system_status: {e}")
+        return ResponseWrapper(status='error', error=str(e)).to_dict(), 500
+
+# Enhanced diagnostic endpoint
+@app.route('/system/diagnostics', methods=['GET'])
+def system_diagnostics():
+    """Get detailed system diagnostics."""
+    try:
+        error_tracker = get_error_tracker()
+        
+        diagnostics = {
+            'recent_errors': error_tracker.get_recent_errors(limit=20),
+            'all_error_summary': error_tracker.get_error_summary(),
+            'circuit_breakers': {
+                'command': COMMAND_CIRCUIT_BREAKER.get_status(),
+                'database': DATABASE_CIRCUIT_BREAKER.get_status(),
+                'external_api': EXTERNAL_API_CIRCUIT_BREAKER.get_status(),
+            },
+            'uptime_seconds': time.time() - getattr(app, 'start_time', time.time()),
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }
+        
+        return ResponseWrapper(status='success', data=diagnostics).to_dict(), 200
+    except Exception as e:
+        logger.error(f"Error in system_diagnostics: {e}")
+        return ResponseWrapper(status='error', error=str(e)).to_dict(), 500
+
+logger.info("[WSGI] ✓ Circuit breakers, rate limiters, and enhanced request/response handlers initialized")
