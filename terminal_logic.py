@@ -5607,76 +5607,94 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         return _err(f'Block {num} not found')
 
     def h_block_stats(flags, args):
-        """Blockchain statistics — always go to DB for accuracy, globals as enrichment."""
-        # Check globals for live-chain metrics (non-zero only)
-        globals_data = {}
+        """Blockchain statistics — uses globals as primary source, DB as authoritative backup."""
+        # FIRST: Try globals (in-memory, always fast)
         try:
-            from globals import get_blockchain
-            bc = get_blockchain()
-            if bc:
-                globals_data = {
-                    'consensus_state':  bc.consensus_state,
-                    'network_hashrate': bc.network_hashrate or 0,
-                    'difficulty':       bc.difficulty or 0,
-                    'avg_block_time':   getattr(bc, 'average_block_time', 0) or 0,
-                    'mempool_size':     bc.mempool_size or 0,
-                }
+            from globals import get_globals, get_db_pool
+            gs = get_globals()
+            bc = gs.blockchain
+            db_pool = get_db_pool()
+            
+            # Check if we can access database
+            db_available = False
+            db_error = None
+            if db_pool is not None:
+                try:
+                    conn = db_pool.get_connection()
+                    if conn:
+                        db_pool.return_connection(conn)
+                        db_available = True
+                except Exception as e:
+                    db_error = str(e)
+            
+            # If database is available, query it for authoritative counts
+            if db_available:
+                counts = _db_exec(
+                    "SELECT COUNT(*) AS total_blocks, MAX(height) AS chain_height FROM blocks",
+                    fetch_one=True
+                )
+                if counts and counts.get('total_blocks'):
+                    total_blocks = int(counts.get('total_blocks') or 0)
+                    chain_height = int(counts.get('chain_height') or 0) if counts.get('chain_height') is not None else 0
+                    
+                    tx_counts = _db_exec(
+                        "SELECT COUNT(*) AS total, "
+                        "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending FROM transactions",
+                        fetch_one=True
+                    ) or {}
+                    
+                    avg_row = _db_exec(
+                        "SELECT AVG(b1.timestamp - b2.timestamp) AS avg_secs "
+                        "FROM blocks b1 JOIN blocks b2 ON b1.height = b2.height + 1 "
+                        "WHERE b1.height > (SELECT MAX(height) - 100 FROM blocks)",
+                        fetch_one=True
+                    ) or {}
+                    
+                    finalized = _db_exec(
+                        "SELECT COUNT(*) AS c FROM blocks WHERE finalized = TRUE", fetch_one=True
+                    ) or {}
+                    
+                    avg_ent = _db_exec(
+                        "SELECT AVG(entropy_score) AS avg FROM blocks "
+                        "WHERE height > (SELECT MAX(height) - 100 FROM blocks)",
+                        fetch_one=True
+                    ) or {}
+                    
+                    return _ok({
+                        'total_blocks':       total_blocks,
+                        'chain_height':       chain_height,
+                        'total_transactions': int(tx_counts.get('total') or 0),
+                        'mempool_size':       int(tx_counts.get('pending') or 0),
+                        'finalized_blocks':   int(finalized.get('c') or 0),
+                        'avg_block_time':     round(float(avg_row.get('avg_secs') or 0), 2),
+                        'avg_entropy':        round(float(avg_ent.get('avg') or 0), 4),
+                        'consensus_state':    bc.consensus_state or 'active',
+                        'network_hashrate':   bc.network_hashrate or 0,
+                        'difficulty':         bc.difficulty or 0,
+                        'source':             'database',
+                    })
+            
+            # FALLBACK: Database not available, use globals in-memory data
+            return _ok({
+                'total_blocks':       bc.total_blocks or 0,
+                'chain_height':       bc.chain_height or 0,
+                'total_transactions': bc.total_transactions or 0,
+                'mempool_size':       bc.mempool_size or 0,
+                'consensus_state':    bc.consensus_state or 'active',
+                'network_hashrate':   bc.network_hashrate or 0,
+                'difficulty':         bc.difficulty or 0,
+                'source':             'globals (database not available)',
+                'message': (
+                    'Database connection unavailable. '
+                    'Showing in-memory data from globals. '
+                    'Check environment: SUPABASE_HOST, SUPABASE_USER, SUPABASE_PASSWORD'
+                ),
+            })
+            
         except Exception as e:
-            _log_debug(f'h_block_stats globals: {e}')
-
-        # Always query DB for authoritative counts (genesis is height=0, don't skip!)
-        counts = _db_exec(
-            "SELECT COUNT(*) AS total_blocks, MAX(height) AS chain_height FROM blocks",
-            fetch_one=True
-        )
-        if counts is None:
-            return _ok({'total_blocks': 0, 'chain_height': 0,
-                        'message': 'Database not available', 'source': 'error'})
-
-        total_blocks = int(counts.get('total_blocks') or 0)
-        chain_height = int(counts.get('chain_height') or 0) if counts.get('chain_height') is not None else 0
-
-        if total_blocks == 0:
-            return _ok({'total_blocks': 0, 'chain_height': 0,
-                        'message': 'No blocks in database yet', 'source': 'empty'})
-
-        tx_counts = _db_exec(
-            "SELECT COUNT(*) AS total, "
-            "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending FROM transactions",
-            fetch_one=True
-        ) or {}
-
-        # timestamp is BIGINT (unix epoch seconds) — arithmetic subtraction works
-        avg_row = _db_exec(
-            "SELECT AVG(b1.timestamp - b2.timestamp) AS avg_secs "
-            "FROM blocks b1 JOIN blocks b2 ON b1.height = b2.height + 1 "
-            "WHERE b1.height > (SELECT MAX(height) - 100 FROM blocks)",
-            fetch_one=True
-        ) or {}
-
-        finalized = _db_exec(
-            "SELECT COUNT(*) AS c FROM blocks WHERE finalized = TRUE", fetch_one=True
-        ) or {}
-
-        avg_ent = _db_exec(
-            "SELECT AVG(entropy_score) AS avg FROM blocks "
-            "WHERE height > (SELECT MAX(height) - 100 FROM blocks)",
-            fetch_one=True
-        ) or {}
-
-        return _ok({
-            'total_blocks':       total_blocks,
-            'chain_height':       chain_height,
-            'total_transactions': int(tx_counts.get('total') or 0),
-            'mempool_size':       globals_data.get('mempool_size') or int(tx_counts.get('pending') or 0),
-            'finalized_blocks':   int(finalized.get('c') or 0),
-            'avg_block_time':     round(float(avg_row.get('avg_secs') or 0), 2),
-            'avg_entropy':        round(float(avg_ent.get('avg') or 0), 4),
-            'consensus_state':    globals_data.get('consensus_state', 'active'),
-            'network_hashrate':   globals_data.get('network_hashrate', 0),
-            'difficulty':         globals_data.get('difficulty', 0),
-            'source':             'database',
-        })
+            import traceback
+            _log_debug(f'h_block_stats error: {e}\n{traceback.format_exc()}')
+            return _err(f'Block stats error: {str(e)}')
 
     def h_block_validate(flags, args):
         """Validate block — DB query by height or hash."""
@@ -6434,23 +6452,87 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             return _err(f'System status error: {e}')
 
     def h_system_health(flags, args):
+        """System health check — includes database connectivity and detailed diagnostics."""
         try:
-            from globals import get_globals
+            from globals import get_globals, get_db_pool
             gs = get_globals()
+            
+            # Quantum subsystems status
             q  = gs.quantum
             hb = q.heartbeat
-            return _ok({
-                'status':              gs.health.name if hasattr(gs.health,'name') else 'unknown',
+            
+            # Database status check
+            db_pool = get_db_pool()
+            db_status = 'unknown'
+            db_connected = False
+            db_error = None
+            
+            if db_pool is None:
+                db_status = 'not_initialized'
+                db_connected = False
+                db_error = 'Database pool not initialized — check SUPABASE_* environment variables'
+            else:
+                try:
+                    # Try to get a connection to verify database is reachable
+                    conn = db_pool.get_connection()
+                    if conn:
+                        db_pool.return_connection(conn)
+                        db_status = 'connected'
+                        db_connected = True
+                    else:
+                        db_status = 'pool_error'
+                        db_error = 'Pool returned None connection'
+                except Exception as db_conn_err:
+                    db_status = 'connection_failed'
+                    db_connected = False
+                    db_error = str(db_conn_err)
+            
+            # Blockchain stats from globals
+            bc_stats = {
+                'chain_height': gs.blockchain.chain_height,
+                'total_blocks': gs.blockchain.total_blocks,
+                'total_transactions': gs.blockchain.total_transactions,
+                'mempool_size': gs.blockchain.mempool_size,
+            }
+            
+            health_response = {
+                'status':              gs.health.name if hasattr(gs.health, 'name') else 'unknown',
                 'initialized':         gs.initialized,
-                'lattice_ready':       q.lattice is not None,
-                'neural_ready':        q.neural_network is not None,
-                'w_state_ready':       q.w_state_manager is not None,
-                'noise_bath_ready':    q.noise_bath is not None,
-                'heartbeat_running':   hb.running if hb else False,
-                'heartbeat_pulses':    hb.pulse_count if hb else 0,
-            })
+                'system_health': {
+                    'overall': 'healthy' if (db_connected and hb and hb.running) else ('degraded' if db_connected else 'offline'),
+                    'database': {
+                        'status': db_status,
+                        'connected': db_connected,
+                        'error': db_error,
+                    },
+                    'heartbeat': {
+                        'running': hb.running if hb else False,
+                        'pulses': hb.pulse_count if hb else 0,
+                    },
+                    'quantum': {
+                        'lattice_ready': q.lattice is not None,
+                        'neural_ready': q.neural_network is not None,
+                        'w_state_ready': q.w_state_manager is not None,
+                        'noise_bath_ready': q.noise_bath is not None,
+                    },
+                    'blockchain': bc_stats,
+                },
+            }
+            
+            # If database not connected, add helpful diagnostic message
+            if not db_connected:
+                health_response['diagnostic_message'] = (
+                    'Database connection unavailable. '
+                    'Check environment: SUPABASE_HOST, SUPABASE_USER, SUPABASE_PASSWORD, SUPABASE_DB'
+                )
+            
+            return _ok(health_response)
+            
         except Exception as e:
-            return _err(f'Health check error: {e}')
+            import traceback
+            return _err(f'Health check error: {e}\n{traceback.format_exc()}')
+
+
 
     def h_system_config(flags, args):
         try:

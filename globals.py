@@ -1076,34 +1076,74 @@ def _init_logic_hierarchy(globals_inst: GlobalState):
 
 
 def _init_database(globals_inst: GlobalState):
-    """Initialize database connection pool — tolerates missing env-vars gracefully."""
-    logger.info("[Globals] Initializing database...")
+    """Initialize database connection pool — with detailed logging for debugging."""
+    logger.info("[Globals] Initializing database connection pool...")
+    
     try:
         import db_builder_v2 as _db_mod
-
-        pool = getattr(_db_mod, 'DB_POOL', None) or getattr(_db_mod, 'db_manager', None)
+        logger.debug("[Globals] db_builder_v2 module loaded successfully")
+        
+        # Try to get the pool that was initialized during db_builder_v2 import
+        pool = getattr(_db_mod, 'DB_POOL', None)
+        db_manager = getattr(_db_mod, 'db_manager', None)
         init_fn = getattr(_db_mod, 'init_db', None)
-
+        
+        logger.debug(f"[Globals] DB_POOL from db_builder_v2: {pool is not None}")
+        logger.debug(f"[Globals] db_manager from db_builder_v2: {db_manager is not None}")
+        
+        # Use whichever is available (prefer DB_POOL, fallback to db_manager)
+        final_pool = pool or db_manager
+        
         with globals_inst.lock:
-            globals_inst.database.pool = pool
-            globals_inst.database.healthy = pool is not None
-
-        if init_fn:
-            init_fn()
-
-        if pool is not None:
-            logger.info("[Globals] ✅ Database initialized (pool ready)")
-            # ── Eagerly populate in-memory stats from live DB ─────────────
-            _populate_blockchain_stats(globals_inst, pool)
+            globals_inst.database.pool = final_pool
+            globals_inst.database.healthy = final_pool is not None
+        
+        # If pool exists, validate it
+        if final_pool is not None:
+            logger.info("[Globals] ✅ Database pool obtained from db_builder_v2")
+            try:
+                # Try to get a connection to verify the pool works
+                conn = final_pool.get_connection()
+                if conn:
+                    final_pool.return_connection(conn)
+                    logger.info("[Globals] ✅ Database pool validation successful (connection alive)")
+                    # Eagerly populate in-memory stats from live DB
+                    _populate_blockchain_stats(globals_inst, final_pool)
+                else:
+                    logger.warning("[Globals] ⚠️  Pool exists but get_connection() returned None")
+                    with globals_inst.lock:
+                        globals_inst.database.healthy = False
+            except Exception as conn_err:
+                logger.warning(f"[Globals] ⚠️  Database pool exists but connection test failed: {conn_err}")
+                logger.warning("[Globals] Database will be available for lazy-load on first use")
+                # Don't mark as unhealthy — pool might recover on next request
         else:
-            logger.warning("[Globals] ⚠ db_builder_v2 loaded but no pool found — DB degraded")
+            logger.warning("[Globals] ⚠️  db_builder_v2.DB_POOL is None — database not initialized")
+            logger.warning("[Globals] Database will be lazy-loaded on first use (commands will work)")
+            
+            # Try calling init_fn to attempt initialization
+            if init_fn:
+                try:
+                    init_result = init_fn()
+                    logger.info(f"[Globals] init_db() returned: {init_result}")
+                except Exception as init_err:
+                    logger.debug(f"[Globals] init_db() failed: {init_err}")
+            
+            with globals_inst.lock:
+                globals_inst.database.healthy = False
 
     except ImportError as e:
-        logger.warning(f"[Globals] Database not available: {e}")
-        globals_inst.database.healthy = False
+        logger.error(f"[Globals] ❌ db_builder_v2 import failed: {e}")
+        logger.error("[Globals] Database will NOT be available — check logs above")
+        with globals_inst.lock:
+            globals_inst.database.healthy = False
+        
     except Exception as e:
-        logger.warning(f"[Globals] Database init error (continuing): {e}")
-        globals_inst.database.healthy = False
+        logger.error(f"[Globals] ❌ Database initialization error: {e}")
+        import traceback
+        logger.debug(f"[Globals] Traceback: {traceback.format_exc()}")
+        with globals_inst.lock:
+            globals_inst.database.healthy = False
 
 
 def _populate_blockchain_stats(globals_inst: GlobalState, pool):
