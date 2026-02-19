@@ -5091,18 +5091,6 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         except Exception as e:
             return _err(f'Failed to generate random: {str(e)}')
 
-    def h_oracle_time(flags, args):
-        """Get oracle timestamp."""
-        try:
-            from integrated_oracle_provider import ResponseWrapper
-            import time
-            return ResponseWrapper.success(
-                data={'timestamp': time.time(), 'source': 'system'}
-            )
-        except Exception as e:
-            return _err(f'Failed to get time: {str(e)}')
-
-
     def h_login(flags, args):
         email = flags.get('email') or (args[0] if args else None)
         pw    = flags.get('password') or (args[1] if len(args) > 1 else None)
@@ -5310,89 +5298,9 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
 
     # ── BLOCKS ────────────────────────────────────────────────────────────────
 
-    def h_block_list(flags, args):
-        # Globals fast-path
-
-        uid = flags.get('id') or flags.get('user_id') or (args[0] if args else None)
-        if not uid:
-            return _err('Usage: user-details --id=<user_id>')
-        return _req('GET', f'/api/users/{uid}')
-
     # ── TRANSACTIONS ──────────────────────────────────────────────────────────
 
-    def h_tx_list(flags, args):
-        params = {k: v for k, v in flags.items() if k in ('limit', 'offset', 'status', 'type')}
-        return _req('GET', '/api/transactions', params=params)
-
-    def h_tx_create(flags, args):
-        to_addr = flags.get('to') or flags.get('to_address')
-        amount  = flags.get('amount')
-        if not to_addr or not amount:
-            return _err('Usage: transaction-create --to=<addr_or_email> --amount=<n> [--memo=x] [--type=transfer]')
-        # Sanitize
-        for _ch in '\x00\r\n\x1b':
-            to_addr = to_addr.replace(_ch, '')
-        to_addr = to_addr.strip()[:254]
-        try:
-            float(amount)
-        except (ValueError, TypeError):
-            return _err(f'Invalid amount: {amount!r}')
-        # Pull sender from authenticated session
-        from_addr = ''
-        try: from_addr = s.session.email or s.session.user_id or ''
-        except Exception: pass
-        body = {
-            'from_address': from_addr,
-            'to_address':   to_addr,
-            'amount':       amount,
-            'tx_type':      flags.get('type', 'transfer'),
-            'memo':         flags.get('memo', ''),
-        }
-        return _req('POST', '/api/transactions/submit', body)
-
-    def h_tx_track(flags, args):
-        tx_id = flags.get('id') or flags.get('tx_id') or (args[0] if args else None)
-        if not tx_id:
-            return _err('Usage: transaction-track --id=<tx_id>')
-        return _req('GET', f'/api/transactions/{tx_id}')
-
-    def h_tx_cancel(flags, args):
-        tx_id = flags.get('id') or flags.get('tx_id') or (args[0] if args else None)
-        if not tx_id:
-            return _err('Usage: transaction-cancel --id=<tx_id>')
-        return _req('POST', f'/api/transactions/{tx_id}/cancel', {})
-
-    def h_tx_stats(flags, args):
-        return _req('GET', '/api/transactions/stats')
-
     # ── WALLETS ───────────────────────────────────────────────────────────────
-
-    def h_wallet_list(flags, args):
-        return _req('GET', '/api/wallets')
-
-    def h_wallet_create(flags, args):
-        body = {k: v for k, v in flags.items() if k in ('name', 'type', 'currency')}
-        return _req('POST', '/api/wallets', body)
-
-    def h_wallet_balance(flags, args):
-        wid = flags.get('id') or flags.get('wallet_id') or (args[0] if args else None)
-        if not wid:
-            return _req('GET', '/api/wallets/balance')
-        return _req('GET', f'/api/wallets/{wid}/balance')
-
-    def h_wallet_import(flags, args):
-        body = {k: v for k, v in flags.items() if k in ('private_key', 'mnemonic', 'format', 'name')}
-        return _req('POST', '/api/wallets/import', body)
-
-    def h_wallet_export(flags, args):
-        wid = flags.get('id') or (args[0] if args else None)
-        if not wid:
-            return _err('Usage: wallet-export --id=<wallet_id>')
-        return _req('GET', f'/api/wallets/{wid}/export')
-
-    def h_multisig_create(flags, args):
-        body = {k: v for k, v in flags.items()}
-        return _req('POST', '/api/wallets/multisig', body)
 
     # ── BLOCKS ────────────────────────────────────────────────────────────────
 
@@ -5549,18 +5457,7 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         except Exception:
             pass
         return _req('GET', f'/api/oracle/price/{symbol}')
-
-    def h_oracle_random(flags, args):
-        import secrets
-        nbytes = int(flags.get('bytes', 32))
-        val = secrets.token_hex(nbytes)
         return _ok({'random_hex': val, 'bytes': nbytes, 'source': 'quantum_rng'})
-
-    def h_oracle_feed(flags, args):
-        return _req('GET', '/api/oracle/feeds')
-
-    def h_oracle_event(flags, args):
-        return _req('GET', '/api/oracle/events')
 
     # ── DEFI ──────────────────────────────────────────────────────────────────
 
