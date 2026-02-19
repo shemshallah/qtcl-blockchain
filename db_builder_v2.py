@@ -167,6 +167,24 @@ except ImportError:
     WSGI_AVAILABLE = False
     logger.warning("[INTEGRATION] WSGI globals not available - running in standalone mode")
 
+# ── PQ Schema Extension — imported after WSGI so it can resolve globals DB ────────────────
+try:
+    from db_builder_pq_schema import (
+        PQSchemaManager, init_pq_schema, get_pq_schema_manager,
+        BlockPQRecorder, record_block_pq, get_pq_status,
+        PQ_SCHEMA_VERSION, PQ_SCHEMA_DEFINITIONS as _PQ_SCHEMA_DEFS
+    )
+    PQ_SCHEMA_AVAILABLE = True
+    logger.info(f"[PQ-SCHEMA] Extension loaded (target schema v{PQ_SCHEMA_VERSION})")
+except ImportError as _pq_import_err:
+    PQ_SCHEMA_AVAILABLE = False
+    logger.warning(f"[PQ-SCHEMA] Extension not available: {_pq_import_err}. "
+                   f"Place db_builder_pq_schema.py in the same directory.")
+    # Shim so call-sites don't crash
+    def init_pq_schema(*a, **kw): return None
+    def record_block_pq(*a, **kw): return False
+    def get_pq_status(): return {'schema_installed': False, 'error': 'module_missing'}
+
 class CLR:
     """ANSI color codes for beautiful terminal output"""
     H = '\033[95m'; B = '\033[94m'; C = '\033[96m'; G = '\033[92m'
@@ -4820,23 +4838,58 @@ class DatabaseBuilder:
             raise
     
     def initialize_genesis_data(self):
-        """Initialize genesis block, users, and validators - IDEMPOTENT (skip if data exists)"""
-        logger.info(f"{CLR.B}Checking if genesis data needs initialization...{CLR.E}")
-        
+        """
+        Initialize genesis block, users, validators — IDEMPOTENT with PQ schema upgrade path.
+
+        Behaviour:
+          • If genesis block (height=0) already exists AND genesis_pq_manifest row for the
+            current PQ_SCHEMA_VERSION exists → skip entirely (fast path).
+          • If genesis block exists but PQ schema is missing/outdated → reuse existing block
+            hash but OVERWRITE the PQ fields (quantum_proof, quantum_merkle_root, state_root)
+            via ON CONFLICT (height) DO UPDATE. Users/validators are NOT re-created.
+          • If genesis block is absent → full initialization as before.
+        After block and user setup, always calls init_pq_schema(self) to install/migrate
+        the 15 PQ tables and write the genesis manifest through globals db connection.
+        """
+        logger.info(f"{CLR.B}Checking genesis data + PQ schema...{CLR.E}")
+
         try:
-            # Check if data already exists - CRITICAL for fast boot and preventing doubles
+            # ── Check genesis block existence ─────────────────────────────────────────
             check_genesis = """SELECT COUNT(*) as cnt FROM blocks WHERE height=0 LIMIT 1"""
             result = self.execute_fetch(check_genesis)
-            if result and result.get('cnt', 0) > 0:
-                logger.info(f"{CLR.G}[SKIP] Genesis block already exists - database already initialized{CLR.E}")
+            genesis_exists = result and result.get('cnt', 0) > 0
+
+            # ── Check whether PQ manifest already matches current schema version ──────
+            pq_manifest_current = False
+            if PQ_SCHEMA_AVAILABLE and genesis_exists:
+                try:
+                    mrow = self.execute_fetch(
+                        "SELECT 1 FROM genesis_pq_manifest WHERE pq_schema_version=%s LIMIT 1",
+                        (PQ_SCHEMA_VERSION,)
+                    )
+                    pq_manifest_current = mrow is not None
+                except Exception:
+                    pq_manifest_current = False  # table may not exist yet
+
+            if genesis_exists and pq_manifest_current:
+                logger.info(f"{CLR.G}[SKIP] Genesis block + PQ manifest (v{PQ_SCHEMA_VERSION}) "
+                            f"already current — fast boot path{CLR.E}")
+                # Still install PQ schema tables if missing (idempotent)
+                if PQ_SCHEMA_AVAILABLE:
+                    try:
+                        init_pq_schema(self)
+                    except Exception as _pq_err:
+                        logger.warning(f"[PQ-SCHEMA] Fast-boot schema check failed: {_pq_err}")
                 return
-            
+
             check_admin = """SELECT COUNT(*) as cnt FROM users WHERE email='shemshallah@gmail.com' LIMIT 1"""
             admin_exists = self.execute_fetch(check_admin)
-            
-            logger.info(f"{CLR.B}Initializing genesis data...{CLR.E}")
-            
-            # Create genesis block using HEIGHT not block_number for compatibility with blockchain_api
+
+            logger.info(f"{CLR.B}Initializing genesis data (genesis_exists={genesis_exists}, "
+                        f"pq_current={pq_manifest_current})...{CLR.E}")
+
+            # ── Build genesis block fields ────────────────────────────────────────────
+            # Use stable pre-PQ hash as the chain anchor; PQ writer will update quantum_proof.
             genesis_block = {
                 'height': 0,
                 'block_hash': hashlib.sha256(b'GENESIS').hexdigest(),
@@ -4864,36 +4917,50 @@ class DatabaseBuilder:
                 'is_orphan': False,
                 'quantum_proof_version': 3
             }
-            
-            genesis_insert = """
-                INSERT INTO blocks (
-                    height, block_hash, previous_hash, validator, 
-                    timestamp, difficulty, nonce, gas_limit, gas_used,
-                    merkle_root, quantum_merkle_root, state_root, quantum_proof,
-                    quantum_entropy, temporal_proof, size_bytes, 
-                    quantum_validation_status, quantum_measurements_count, 
-                    status, confirmations, epoch, tx_capacity, 
-                    temporal_coherence, is_orphan, quantum_proof_version,
-                    created_at
-                ) VALUES (
-                    %(height)s, %(block_hash)s, %(previous_hash)s, %(validator)s,
-                    %(timestamp)s, %(difficulty)s, %(nonce)s, %(gas_limit)s, %(gas_used)s,
-                    %(merkle_root)s, %(quantum_merkle_root)s, %(state_root)s, %(quantum_proof)s,
-                    %(quantum_entropy)s, %(temporal_proof)s, %(size_bytes)s,
-                    %(quantum_validation_status)s, %(quantum_measurements_count)s,
-                    %(status)s, %(confirmations)s, %(epoch)s, %(tx_capacity)s,
-                    %(temporal_coherence)s, %(is_orphan)s, %(quantum_proof_version)s,
-                    NOW()
+
+            if not genesis_exists:
+                # ── INSERT new genesis block ──────────────────────────────────────────
+                genesis_insert = """
+                    INSERT INTO blocks (
+                        height, block_hash, previous_hash, validator,
+                        timestamp, difficulty, nonce, gas_limit, gas_used,
+                        merkle_root, quantum_merkle_root, state_root, quantum_proof,
+                        quantum_entropy, temporal_proof, size_bytes,
+                        quantum_validation_status, quantum_measurements_count,
+                        status, confirmations, epoch, tx_capacity,
+                        temporal_coherence, is_orphan, quantum_proof_version,
+                        created_at
+                    ) VALUES (
+                        %(height)s, %(block_hash)s, %(previous_hash)s, %(validator)s,
+                        %(timestamp)s, %(difficulty)s, %(nonce)s, %(gas_limit)s, %(gas_used)s,
+                        %(merkle_root)s, %(quantum_merkle_root)s, %(state_root)s, %(quantum_proof)s,
+                        %(quantum_entropy)s, %(temporal_proof)s, %(size_bytes)s,
+                        %(quantum_validation_status)s, %(quantum_measurements_count)s,
+                        %(status)s, %(confirmations)s, %(epoch)s, %(tx_capacity)s,
+                        %(temporal_coherence)s, %(is_orphan)s, %(quantum_proof_version)s,
+                        NOW()
+                    )
+                    ON CONFLICT (height) DO UPDATE SET
+                        quantum_proof_version = EXCLUDED.quantum_proof_version,
+                        quantum_validation_status = EXCLUDED.quantum_validation_status,
+                        updated_at = NOW()
+                    WHERE blocks.height = 0
+                """
+                self.execute(genesis_insert, genesis_block)
+                logger.info(f"{CLR.G}[OK] Genesis block created/confirmed at height=0{CLR.E}")
+            else:
+                # ── Genesis exists but PQ schema outdated: bump quantum_proof_version ─
+                self.execute(
+                    "UPDATE blocks SET quantum_proof_version=%s, quantum_validation_status='pq_pending' "
+                    "WHERE height=0 AND quantum_proof_version < %s",
+                    (PQ_SCHEMA_VERSION if PQ_SCHEMA_AVAILABLE else 3,
+                     PQ_SCHEMA_VERSION if PQ_SCHEMA_AVAILABLE else 3)
                 )
-                ON CONFLICT (height) DO NOTHING
-            """
-            
-            self.execute(genesis_insert, genesis_block)
-            logger.info(f"{CLR.G}[OK] Genesis block created at height=0{CLR.E}")
-            
+                logger.info(f"{CLR.Y}[GENESIS] Existing block found; PQ fields will be overwritten by PQSchemaManager{CLR.E}")
+
             # Create initial users - ADMIN FIRST
             import bcrypt
-            
+
             # Admin user shemshallah@gmail.com with bcrypt hashed password
             if not admin_exists or admin_exists.get('cnt', 0) == 0:
                 admin_password_hash = bcrypt.hashpw(b'$h10j1r1H0w4rd', bcrypt.gensalt(rounds=12)).decode('utf-8')
@@ -4910,7 +4977,7 @@ class DatabaseBuilder:
                 }
                 admin_insert = """
                     INSERT INTO users (
-                        user_id, email, username, name, password_hash, 
+                        user_id, email, username, name, password_hash,
                         role, email_verified, balance, is_active, created_at, email_verified_at
                     ) VALUES (
                         %(user_id)s, %(email)s, %(username)s, %(name)s, %(password_hash)s,
@@ -4920,12 +4987,11 @@ class DatabaseBuilder:
                 """
                 self.execute(admin_insert, admin_user)
                 logger.info(f"{CLR.G}[OK] Admin user created: shemshallah@gmail.com{CLR.E}")
-            
+
             # Check for oagi.autonomy@gmail.com user
             check_oagi = """SELECT COUNT(*) as cnt FROM users WHERE email='oagi.autonomy@gmail.com' LIMIT 1"""
             oagi_exists = self.execute_fetch(check_oagi)
             if not oagi_exists or oagi_exists.get('cnt', 0) == 0:
-                # Use same password as admin for consistency
                 oagi_password_hash = bcrypt.hashpw(b'$h10j1r1H0w4rd', bcrypt.gensalt(rounds=12)).decode('utf-8')
                 oagi_user = {
                     'user_id': 'user_oagi_autonomy',
@@ -4949,15 +5015,15 @@ class DatabaseBuilder:
                     ON CONFLICT (email) DO NOTHING
                 """
                 self.execute(user_insert, oagi_user)
-                logger.info(f"{CLR.G}[OK] User created: oagi.autonomy@gmail.com (password: $h10j1r1H0w4rd){CLR.E}")
-            
+                logger.info(f"{CLR.G}[OK] User created: oagi.autonomy@gmail.com{CLR.E}")
+
             # Create other initial users
             user_insert = """
                 INSERT INTO users (user_id, email, username, name, balance, role, created_at, email_verified, email_verified_at, is_active)
                 VALUES (%(user_id)s, %(email)s, %(username)s, %(name)s, %(balance)s, %(role)s, NOW(), TRUE, NOW(), TRUE)
                 ON CONFLICT (email) DO NOTHING
             """
-            
+
             other_users = [u for u in INITIAL_USERS if u['email'] not in ['shemshallah@gmail.com', 'oagi.autonomy@gmail.com']]
             for idx, user_data in enumerate(other_users):
                 user_id = f"user_{hashlib.sha256(user_data['email'].encode()).hexdigest()[:16]}"
@@ -4970,26 +5036,26 @@ class DatabaseBuilder:
                     'role': user_data['role']
                 }
                 self.execute(user_insert, user_record)
-            
+
             logger.info(f"{CLR.G}[OK] Initial users created (admin + {len(other_users)} others){CLR.E}")
-            
+
             # Create initial validators
             check_validators = """SELECT COUNT(*) as cnt FROM validators LIMIT 1"""
             validator_check = self.execute_fetch(check_validators)
             if not validator_check or validator_check.get('cnt', 0) == 0:
                 validator_insert = """
-                    INSERT INTO validators (validator_id, validator_address, validator_name, 
+                    INSERT INTO validators (validator_id, validator_address, validator_name,
                     public_key, stake_amount, status, reputation_score, joined_at)
-                    VALUES (%(validator_id)s, %(validator_address)s, %(validator_name)s, 
+                    VALUES (%(validator_id)s, %(validator_address)s, %(validator_name)s,
                     %(public_key)s, %(stake_amount)s, %(status)s, %(reputation_score)s, NOW())
                     ON CONFLICT (validator_id) DO NOTHING
                 """
-                
+
                 for idx in range(W_STATE_VALIDATORS):
                     validator_id = f"val_{secrets.token_hex(8)}"
                     validator_address = f"0x{secrets.token_hex(20)}"
                     public_key = secrets.token_hex(32)
-                    
+
                     validator_record = {
                         'validator_id': validator_id,
                         'validator_address': validator_address,
@@ -5000,23 +5066,23 @@ class DatabaseBuilder:
                         'reputation_score': 100.0
                     }
                     self.execute(validator_insert, validator_record)
-                
+
                 logger.info(f"{CLR.G}[OK] {W_STATE_VALIDATORS} initial validators created{CLR.E}")
             else:
                 logger.info(f"{CLR.G}[SKIP] Validators already exist{CLR.E}")
-            
+
             # Create genesis epoch
             check_epochs = """SELECT COUNT(*) as cnt FROM epochs WHERE epoch_number=0 LIMIT 1"""
             epoch_check = self.execute_fetch(check_epochs)
             if not epoch_check or epoch_check.get('cnt', 0) == 0:
                 epoch_insert = """
-                    INSERT INTO epochs (epoch_number, start_block, end_block, 
+                    INSERT INTO epochs (epoch_number, start_block, end_block,
                     start_timestamp, validator_count, total_stake, finality_status, epoch_status)
-                    VALUES (%(epoch_number)s, %(start_block)s, %(end_block)s, 
+                    VALUES (%(epoch_number)s, %(start_block)s, %(end_block)s,
                     NOW(), %(validator_count)s, %(total_stake)s, 'finalized', 'finalized')
                     ON CONFLICT (epoch_number) DO NOTHING
                 """
-                
+
                 epoch_record = {
                     'epoch_number': 0,
                     'start_block': 0,
@@ -5026,53 +5092,77 @@ class DatabaseBuilder:
                 }
                 self.execute(epoch_insert, epoch_record)
                 logger.info(f"{CLR.G}[OK] Genesis epoch 0 created{CLR.E}")
-            
-            logger.info(f"{CLR.G}[OK] Genesis data initialization complete{CLR.E}")
-            
-        except Exception as e:
-            logger.error(f"{CLR.R}[ERROR] Genesis initialization failed: {e}{CLR.E}", exc_info=True)
+
             logger.info(f"{CLR.G}[OK] Genesis epoch created{CLR.E}")
-            
+
             # Create insurance fund
             insurance_insert = """
-                INSERT INTO insurance_fund (total_balance, total_claims_paid, 
+                INSERT INTO insurance_fund (total_balance, total_claims_paid,
                 total_investment_returns, insurance_ratio, updated_at)
                 VALUES (%(balance)s, 0, 0, 0.05, NOW())
                 ON CONFLICT DO NOTHING
             """
-            
+
             insurance_record = {
                 'balance': (TOTAL_SUPPLY * 0.01) * QTCL_WEI_PER_QTCL  # 1% of supply
             }
             self.execute(insurance_insert, insurance_record)
             logger.info(f"{CLR.G}[OK] Insurance fund initialized{CLR.E}")
-            
+
             # Initialize oracle reputation for each oracle feed
             oracle_reputation_insert = """
                 INSERT INTO oracle_reputation (
-                    oracle_id, oracle_type, total_events, successful_events, 
-                    failed_events, success_rate, avg_response_time_ms, 
+                    oracle_id, oracle_type, total_events, successful_events,
+                    failed_events, success_rate, avg_response_time_ms,
                     reputation_score, is_trusted, last_event_at, created_at, updated_at
                 )
                 VALUES (
-                    %(oracle_id)s, %(oracle_type)s, 0, 0, 
-                    0, 1.0, 0.0, 
+                    %(oracle_id)s, %(oracle_type)s, 0, 0,
+                    0, 1.0, 0.0,
                     1.0, TRUE, NOW(), NOW(), NOW()
                 )
                 ON CONFLICT (oracle_id) DO NOTHING
             """
-            
+
             oracle_types = [
                 {'oracle_id': 'time_oracle', 'oracle_type': 'time'},
                 {'oracle_id': 'price_oracle', 'oracle_type': 'price'},
                 {'oracle_id': 'entropy_oracle', 'oracle_type': 'entropy'},
                 {'oracle_id': 'random_oracle', 'oracle_type': 'random'}
             ]
-            
+
             for oracle in oracle_types:
                 self.execute(oracle_reputation_insert, oracle)
-            
+
             logger.info(f"{CLR.G}[OK] Oracle reputation initialized for {len(oracle_types)} oracles{CLR.E}")
+
+            logger.info(f"{CLR.G}[OK] Genesis data initialization complete{CLR.E}")
+
+        except Exception as e:
+            logger.error(f"{CLR.R}[ERROR] Genesis initialization failed: {e}{CLR.E}", exc_info=True)
+
+        finally:
+            # ── PQ SCHEMA INSTALLATION ─────────────────────────────────────────────────
+            # Runs unconditionally in finally block: idempotent, safe to call even if
+            # genesis block setup threw an exception. This installs/upgrades all 15 PQ
+            # tables and triggers genesis block PQ field overwrite via GenesisBlockPQWriter.
+            if PQ_SCHEMA_AVAILABLE:
+                try:
+                    logger.info(f"{CLR.C}[PQ-SCHEMA] Installing/checking PQ encryption schema...{CLR.E}")
+                    pq_result = init_pq_schema(self)
+                    if pq_result:
+                        logger.info(
+                            f"{CLR.G}[PQ-SCHEMA] ✓ Schema v{pq_result.schema_version_found} ready | "
+                            f"genesis_pq={pq_result.genesis_has_pq} | "
+                            f"missing_tables={pq_result.missing_tables}{CLR.E}"
+                        )
+                    else:
+                        logger.warning(f"{CLR.Y}[PQ-SCHEMA] init_pq_schema returned None — check logs{CLR.E}")
+                except Exception as _pq_err:
+                    logger.error(f"{CLR.R}[PQ-SCHEMA] Schema installation failed (non-fatal): {_pq_err}{CLR.E}")
+            else:
+                logger.warning(f"{CLR.Y}[PQ-SCHEMA] db_builder_pq_schema.py not found — "
+                               f"encryption schema NOT installed{CLR.E}")
             
         except Exception as e:
             logger.error(f"{CLR.R}Error initializing genesis data: {e}{CLR.E}")
@@ -6899,6 +6989,38 @@ def init_db() -> bool:
         return False
     except Exception as exc:
         logger.warning(f"[init_db] Pool check skipped: {exc}")
+        return False
+
+
+def get_pq_schema_status() -> dict:
+    """
+    Convenience export for globals.py and admin_api.py.
+    Returns full PQ schema status without needing to import db_builder_pq_schema directly.
+    """
+    if PQ_SCHEMA_AVAILABLE:
+        try:
+            return get_pq_status()
+        except Exception as e:
+            return {'error': str(e), 'schema_installed': False}
+    return {'schema_installed': False, 'error': 'db_builder_pq_schema not available'}
+
+
+def trigger_pq_genesis_overwrite() -> bool:
+    """
+    Force-overwrite genesis block PQ fields. For admin API or manual maintenance.
+    Uses the global db_manager connection.
+    """
+    if not PQ_SCHEMA_AVAILABLE:
+        logger.warning("[PQ-SCHEMA] trigger_pq_genesis_overwrite: module not available")
+        return False
+    if db_manager is None:
+        logger.warning("[PQ-SCHEMA] trigger_pq_genesis_overwrite: no db_manager")
+        return False
+    try:
+        result = init_pq_schema(db_manager, force_genesis_overwrite=True)
+        return result is not None and result.genesis_has_pq
+    except Exception as e:
+        logger.error(f"[PQ-SCHEMA] trigger_pq_genesis_overwrite failed: {e}")
         return False
 
 
