@@ -1279,39 +1279,9 @@ def create_blueprint()->Blueprint:
 # DEFERRED BLUEPRINT CREATION - Safe lazy loading for DeFi
 # ════════════════════════════════════════════════════════════════════════════════════════
 
-_blueprint_instance=None
-_blueprint_creation_lock=threading.RLock()
-
-def get_defi_blueprint()->Blueprint:
-    """Get or create DeFi blueprint thread-safely"""
-    global _blueprint_instance
-    
-    with _blueprint_creation_lock:
-        if _blueprint_instance is None:
-            try:
-                _blueprint_instance=create_blueprint()
-                logger.info("[DeFi] Blueprint created and ready")
-            except Exception as e:
-                logger.error(f"[DeFi] Blueprint creation failed: {e}",exc_info=True)
-                raise RuntimeError(f"Cannot create DeFi blueprint: {e}")
-        
-        return _blueprint_instance
-
-class BlueprintProxy:
-    """Proxy that defers blueprint creation until first access"""
-    def __getattr__(self,name):
-        bp=get_defi_blueprint()
-        return getattr(bp,name)
-    
-    def __repr__(self):
-        return repr(get_defi_blueprint())
-
-# Use lazy loading
-try:
-    blueprint=get_defi_blueprint()
-except Exception as e:
-    logger.warning(f"[DeFi] Deferred blueprint creation - will create on first access")
-    blueprint=BlueprintProxy()
+# NOTE: get_defi_blueprint() is defined below (singleton version with _defi_blueprint_instance).
+# This placeholder is intentionally left to avoid breaking the import order.
+# The authoritative definition is ~100 lines below in the deferred-init section.
 
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════

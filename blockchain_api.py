@@ -5969,9 +5969,13 @@ def get_blockchain_heartbeat_status():
     return _blockchain_heartbeat.get_status()
 
 # Export blueprint for main_app.py
+# NOTE: renamed from create_blueprint() → create_simple_blockchain_blueprint()
+# to avoid shadowing the full blockchain blueprint factory at the top of this file.
 
-def create_blueprint():
-    """Create Flask blueprint for Blockchain API"""
+def create_simple_blockchain_blueprint():
+    """Create minimal Flask blueprint for Blockchain API status routes only.
+    The full production blueprint (all tx/block/mempool routes) is created by the
+    create_blueprint() function defined earlier in this module."""
     from flask import Blueprint, jsonify, request
     
     blockchain_db = None
@@ -5997,11 +6001,18 @@ def create_blueprint():
     return blueprint
 
 
-blueprint = create_blueprint()
+blueprint = create_simple_blockchain_blueprint()
 
-# Factory function for WSGI integration
+# Factory function for WSGI integration — returns minimal /api/blockchain/* stub
 def get_blockchain_blueprint():
-    """Factory function to get blockchain blueprint"""
+    """Factory function to get minimal blockchain status blueprint."""
+    return create_simple_blockchain_blueprint()
+
+# Factory function for WSGI integration — returns full production blueprint
+# with all /api/blocks/*, /api/transactions/*, /api/mempool/*, /api/quantum/* routes
+def get_full_blockchain_blueprint():
+    """Factory function to get the complete quantum blockchain API blueprint.
+    This is the one wsgi_config should register — it has all the real routes."""
     return create_blueprint()
 
 

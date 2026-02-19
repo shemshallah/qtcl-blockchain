@@ -297,6 +297,77 @@ CORS(app, resources={r'/*': {'origins': '*'}})
 app.config['JSON_SORT_KEYS'] = False
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# BLUEPRINT REGISTRATION — mount all sub-API blueprints onto the Flask app.
+# Previously these blueprints were defined in their modules but NEVER registered,
+# so /api/auth/*, /api/admin/*, /api/users/*, /api/transactions/* etc. all
+# returned 404 → index.html. This block fixes that.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _register_blueprints(flask_app):
+    """Register all sub-API blueprints. Each wrapped in its own try/except
+    so a failure in one module never prevents the others from mounting."""
+
+    # ── core_api: /api/auth/*, /api/users/*, /api/transactions/* ─────────────
+    try:
+        from core_api import get_core_blueprint
+        flask_app.register_blueprint(get_core_blueprint())
+        logger.info('[wsgi] ✓ core_api blueprint registered (/api/auth, /api/users, /api/transactions)')
+    except Exception as _e:
+        logger.error(f'[wsgi] ✗ core_api blueprint failed: {_e}')
+
+    # ── admin_api: /api/admin/* ───────────────────────────────────────────────
+    try:
+        from admin_api import get_admin_blueprint
+        flask_app.register_blueprint(get_admin_blueprint())
+        logger.info('[wsgi] ✓ admin_api blueprint registered (/api/admin)')
+    except Exception as _e:
+        logger.error(f'[wsgi] ✗ admin_api blueprint failed: {_e}')
+
+    # ── blockchain_api: /api/blocks, /api/transactions, /api/mempool etc. ─────
+    try:
+        from blockchain_api import get_full_blockchain_blueprint
+        flask_app.register_blueprint(get_full_blockchain_blueprint())
+        logger.info('[wsgi] ✓ blockchain_api (full) blueprint registered')
+    except Exception as _e:
+        logger.warning(f'[wsgi] Full blockchain blueprint unavailable ({_e}); trying fallback')
+        try:
+            from blockchain_api import get_blockchain_blueprint
+            flask_app.register_blueprint(get_blockchain_blueprint())
+            logger.info('[wsgi] ✓ blockchain_api (stub) blueprint registered (/api/blockchain)')
+        except Exception as _e2:
+            logger.error(f'[wsgi] ✗ blockchain_api blueprint failed: {_e2}')
+
+    # ── oracle_api: /api/oracle/* ─────────────────────────────────────────────
+    try:
+        from oracle_api import get_oracle_blueprint
+        flask_app.register_blueprint(get_oracle_blueprint())
+        logger.info('[wsgi] ✓ oracle_api blueprint registered (/api/oracle)')
+    except Exception as _e:
+        logger.error(f'[wsgi] ✗ oracle_api blueprint failed: {_e}')
+
+    # ── defi_api: /api/defi/* ─────────────────────────────────────────────────
+    try:
+        from defi_api import get_defi_blueprint
+        flask_app.register_blueprint(get_defi_blueprint())
+        logger.info('[wsgi] ✓ defi_api blueprint registered (/api/defi)')
+    except Exception as _e:
+        logger.error(f'[wsgi] ✗ defi_api blueprint failed: {_e}')
+
+    # ── quantum_api: /api/quantum/* ───────────────────────────────────────────
+    try:
+        from quantum_api import get_quantum_blueprint
+        flask_app.register_blueprint(get_quantum_blueprint())
+        logger.info('[wsgi] ✓ quantum_api blueprint registered (/api/quantum)')
+    except Exception as _e:
+        logger.error(f'[wsgi] ✗ quantum_api blueprint failed: {_e}')
+
+    logger.info('[wsgi] Blueprint registration complete')
+
+
+_register_blueprints(app)
+
+
 def _parse_auth(req):
     """Returns (is_authenticated, is_admin).
 
