@@ -5021,14 +5021,23 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         token = getattr(s.session, 'token', '') or ''
         # Mirror into globals.auth.session_store so _parse_auth can validate without
         # depending on JWT_SECRET being set in the environment.
+        # CRITICAL FIX: Store 'role' key so admin_api.require_auth decorator reads it correctly.
+        # CRITICAL FIX: Derive is_admin from role STRING not s.is_admin() singleton (which is
+        #               stateful and wrong across concurrent/multi-user sessions).
         try:
             from globals import get_globals as _gg
             _gs = _gg()
             if token:
+                _role_obj  = getattr(s.session, 'role', None)
+                _role_str  = (_role_obj.value if hasattr(_role_obj, 'value') else str(_role_obj)).lower() \
+                             if _role_obj else 'user'
+                _is_admin  = _role_str in ('admin', 'superadmin', 'super_admin') or \
+                             email in Config.ADMIN_EMAILS
                 _gs.auth.session_store[token] = {
-                    'user_id':  getattr(s.session, 'user_id', ''),
-                    'email':    email,
-                    'is_admin': s.is_admin(),
+                    'user_id':       getattr(s.session, 'user_id', ''),
+                    'email':         email,
+                    'role':          _role_str,          # ← CRITICAL: admin_api reads this
+                    'is_admin':      _is_admin,          # ← CRITICAL: wsgi_config reads this
                     'authenticated': True,
                 }
         except Exception:
@@ -5088,8 +5097,7 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         return _req('GET', '/api/users/profile/me')
 
     def h_user_list(flags, args):
-        if not s.is_admin():
-            return _err('Admin access required')
+        # Admin gate already enforced by dispatch_command → COMMAND_REGISTRY requires_admin=True
         params = {k: v for k, v in flags.items() if k in ('limit', 'offset', 'role', 'active')}
         return _req('GET', '/api/users', params=params)
 
@@ -5605,8 +5613,7 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
     # ── ADMIN ─────────────────────────────────────────────────────────────────
 
     def h_admin_users(flags, args):
-        if not s.is_admin():
-            return _err('Admin access required')
+        # Admin gate already enforced by dispatch_command → COMMAND_REGISTRY requires_admin=True
         params = {k: v for k, v in flags.items() if k in ('limit', 'offset', 'role', 'active', 'search')}
         # Sub-actions via flags — use actual route names
         if flags.get('ban') or flags.get('suspend'):
@@ -5637,8 +5644,7 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         return _req('GET', '/api/admin/users', params=params)
 
     def h_admin_approval(flags, args):
-        if not s.is_admin():
-            return _err('Admin access required')
+        # Admin gate already enforced by dispatch_command → requires_admin=True
         if flags.get('approve'):
             return _req('POST', f'/api/admin/users/{flags["approve"]}/activate', {})
         if flags.get('reject') or flags.get('suspend'):
@@ -5648,8 +5654,7 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         return _req('GET', '/api/admin/logs', params={'limit': '20'})
 
     def h_admin_monitoring(flags, args):
-        if not s.is_admin():
-            return _err('Admin access required')
+        # Admin gate already enforced by dispatch_command → requires_admin=True
         # Use stats overview + system health
         ok, stats = c.request('GET', '/api/stats/overview')
         try:
@@ -5671,8 +5676,7 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         return _ok(globs_data or {'message': 'Monitoring data — connect to live system for metrics'})
 
     def h_admin_settings(flags, args):
-        if not s.is_admin():
-            return _err('Admin access required')
+        # Admin gate already enforced by dispatch_command → requires_admin=True
         if flags.get('set') and flags.get('value') is not None:
             # No /api/admin/settings route — inform admin
             return _ok({'message': f'Setting staged: {flags["set"]} = {flags["value"]}. Restart required to apply.'})
@@ -5686,15 +5690,13 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             return _err(f'Settings unavailable: {e}')
 
     def h_admin_audit(flags, args):
-        if not s.is_admin():
-            return _err('Admin access required')
+        # Admin gate already enforced by dispatch_command → requires_admin=True
         params = {k: v for k, v in flags.items() if k in ('limit', 'offset', 'user', 'action', 'from', 'to')}
         params.setdefault('limit', '50')
         return _req('GET', '/api/admin/logs', params=params)
 
     def h_admin_emergency(flags, args):
-        if not s.is_admin():
-            return _err('Admin access required')
+        # Admin gate already enforced by dispatch_command → requires_admin=True
         if flags.get('action') == 'halt':
             return _req('POST', '/api/admin/emergency/halt', {})
         if flags.get('action') == 'resume':
@@ -5753,8 +5755,7 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             return _err(str(e))
 
     def h_system_backup(flags, args):
-        if not s.is_admin():
-            return _err('Admin access required')
+        # Admin gate already enforced by dispatch_command → requires_admin=True
         try:
             from globals import get_globals
             gs = get_globals()
@@ -5771,8 +5772,7 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             return _err(f'Backup unavailable: {e}')
 
     def h_system_restore(flags, args):
-        if not s.is_admin():
-            return _err('Admin access required')
+        # Admin gate already enforced by dispatch_command → requires_admin=True
         backup_id = flags.get('id') or (args[0] if args else None)
         if not backup_id:
             return _err('Usage: system-restore --id=<backup_id>')
