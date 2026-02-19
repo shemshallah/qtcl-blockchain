@@ -435,7 +435,7 @@ class SupabaseAuthManager:
         return {
             'apikey': key,
             'Authorization': f'Bearer {key}',
-            'Content-Type': 'application-json',
+            'Content-Type': 'application/json',
         }
 
     @classmethod
@@ -1078,7 +1078,7 @@ class APIClient:
     
     def set_auth_token(self,token:str):
         self.auth_token=token
-        self.session.headers.update({'Authorization':f'Bearer {token}','Content-Type':'application-json'})
+        self.session.headers.update({'Authorization':f'Bearer {token}','Content-Type':'application/json'})
         logger.info(f"Auth token set, length: {len(token)}")
     
     def clear_auth(self):
@@ -5108,46 +5108,48 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         pw    = flags.get('password') or (args[1] if len(args) > 1 else None)
         if not email or not pw:
             return _err('Usage: login --email=x --password=y')
-        # ── Sanitize: strip null bytes, newlines, control chars ───────────
-        for _ch in '\x00\r\n\x1b':
-            email = email.replace(_ch, '')
-            pw    = pw.replace(_ch, '')
-        email = email.strip()[:254]
-        if '@' not in email or len(pw) < 6:
-            return _err('Invalid credentials format')
         ok, msg = s.login(email, pw)
         if not ok:
             return _err(msg)
+        # Return token — command_executor.js reads data.result?.token and stores in
+        # localStorage, then sends Authorization: Bearer <token> on every subsequent
+        # request so _parse_auth returns (True, is_admin) and auth gates pass.
         token = getattr(s.session, 'token', '') or ''
-        # ── Resolve role — fix "UserRole.USER" serialization bug ──────────
-        _role_obj = getattr(s.session, 'role', None)
-        if hasattr(_role_obj, 'value'):
-            _role_str = str(_role_obj.value).lower()   # UserRole.ADMIN → "admin"
-        elif _role_obj:
-            _role_str = str(_role_obj).lower()
-        else:
-            _role_str = 'user'
-        # ── ADMIN OVERRIDE: force admin if email is in trusted list ───────
-        _admin_set = {e.lower() for e in Config.ADMIN_EMAILS}
-        if email.lower() in _admin_set:
-            _role_str = 'admin'
-            try: s.session.role = UserRole.ADMIN
-            except Exception: pass
-        _is_admin = _role_str in ('admin', 'superadmin', 'super_admin')
-        # ── Mirror into globals.auth.session_store ────────────────────────
+        # Mirror into globals.auth.session_store so _parse_auth can validate without
+        # depending on JWT_SECRET being set in the environment.
+        # CRITICAL FIX: Store 'role' key so admin_api.require_auth decorator reads it correctly.
+        # CRITICAL FIX: Derive is_admin from role STRING not s.is_admin() singleton (which is
+        #               stateful and wrong across concurrent/multi-user sessions).
         try:
             from globals import get_globals as _gg
             _gs = _gg()
             if token:
+                _role_obj  = getattr(s.session, 'role', None)
+                _role_str  = (_role_obj.value if hasattr(_role_obj, 'value') else str(_role_obj)).lower() \
+                             if _role_obj else 'user'
+                _is_admin  = _role_str in ('admin', 'superadmin', 'super_admin') or \
+                             email in Config.ADMIN_EMAILS
                 _gs.auth.session_store[token] = {
                     'user_id':       getattr(s.session, 'user_id', ''),
                     'email':         email,
-                    'role':          _role_str,
-                    'is_admin':      _is_admin,
+                    'role':          _role_str,          # ← CRITICAL: admin_api reads this
+                    'is_admin':      _is_admin,          # ← CRITICAL: wsgi_config reads this
                     'authenticated': True,
                 }
         except Exception:
             pass
+        # ── Resolve role — fix "UserRole.USER" enum repr bug ──────────────
+        _role_obj = getattr(s.session, 'role', None)
+        if hasattr(_role_obj, 'value'):
+            _role_str_out = str(_role_obj.value).lower()
+        elif _role_obj:
+            _role_str_out = str(_role_obj).lower()
+        else:
+            _role_str_out = 'user'
+        # Admin override
+        _admin_set = {e.lower() for e in Config.ADMIN_EMAILS}
+        if email.lower() in _admin_set:
+            _role_str_out = 'admin'
         return _ok({
             'message':        msg,
             'authenticated':  True,
@@ -5156,8 +5158,8 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             'user_id':        getattr(s.session, 'user_id', ''),
             'email':          email,
             'pseudoqubit_id': getattr(s.session, 'pseudoqubit_id', 'N-A'),
-            'role':           _role_str,    # always "admin"/"user" never "UserRole.X"
-            'is_admin':       _is_admin,
+            'role':           _role_str_out,
+            'is_admin':       _role_str_out in ('admin', 'superadmin'),
         })
 
     def h_logout(flags, args):
