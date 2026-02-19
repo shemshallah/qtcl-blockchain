@@ -4981,6 +4981,14 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
     c = engine.client       # APIClient
     s = engine.session      # SessionManager
 
+    def _log_debug(msg):
+        """Log debug message"""
+        try:
+            import logging
+            logging.getLogger('terminal_logic.blocks').debug(msg)
+        except Exception:
+            pass
+
     def _ok(data=None, message='OK'):
         return {'status': 'success', 'result': data or {}, 'message': message}
 
@@ -5305,29 +5313,108 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
     # ── BLOCKS ────────────────────────────────────────────────────────────────
 
     def h_block_list(flags, args):
-        # Globals fast-path
+        """List blocks with comprehensive information from globals + DB"""
         try:
-            from globals import get_globals
-            gs = get_globals()
-            h = gs.blockchain.chain_height
-            total = gs.blockchain.total_blocks
-            if h:
+            from globals import get_blockchain
+            bc = get_blockchain()
+            
+            # Get from globals first
+            if bc and bc.chain:
+                limit = int(flags.get('limit', 20))
+                offset = int(flags.get('offset', 0))
+                
+                blocks = []
+                for b in list(bc.chain)[-limit-offset:-offset if offset else None]:
+                    blocks.append({
+                        'height': b.get('height') or b.get('block_number', 0),
+                        'block_hash': b.get('block_hash', 'N/A'),
+                        'previous_hash': b.get('previous_hash', 'N/A'),
+                        'timestamp': b.get('timestamp', 'N/A'),
+                        'tx_count': len(b.get('transaction_list', [])),
+                        'validator': b.get('validator', 'N/A'),
+                        'entropy_score': float(b.get('entropy_score', 0)),
+                        'temporal_coherence': float(b.get('temporal_coherence', 0)),
+                        'finalized': b.get('finalized', False),
+                        'confirmations': b.get('confirmations', 0),
+                        'status': b.get('status', 'unknown'),
+                        'source': 'globals',
+                    })
+                
                 return _ok({
-                    'chain_height': h,
-                    'total_blocks': total,
-                    'note': 'Live count from globals — use API for full block list',
+                    'blocks': blocks,
+                    'chain_height': bc.chain_height,
+                    'total_blocks': bc.total_blocks,
+                    'mempool_size': bc.mempool_size,
+                    'count': len(blocks),
+                    'timestamp': 'now',
                 })
-        except Exception:
-            pass
+        except Exception as e:
+            _log_debug(f'h_block_list globals failed: {e}')
+        
+        # Fallback to API
         params = {k: v for k, v in flags.items() if k in ('limit', 'offset', 'order')}
         params.setdefault('limit', '20')
         return _req('GET', '/api/blocks', params=params)
 
     def h_block_details(flags, args):
+        """Get detailed block information with quantum measurements"""
         num = flags.get('block') or flags.get('number') or flags.get('hash') or (args[0] if args else None)
         if not num:
-            return _err('Usage: block-details --block=<number_or_hash>')
-        # Route is /api/blocks/<int:height> for numbers, /api/blocks/hash/<hash> for hashes
+            return _err('Usage: block-details <height_or_hash>')
+        
+        try:
+            from globals import get_blockchain
+            bc = get_blockchain()
+            
+            # Try to find in globals first
+            if bc and bc.chain:
+                target_height = None
+                try:
+                    target_height = int(num)
+                except ValueError:
+                    pass
+                
+                for b in bc.chain:
+                    b_height = b.get('height') or b.get('block_number')
+                    b_hash = b.get('block_hash')
+                    
+                    if (target_height and b_height == target_height) or (b_hash == num):
+                        tx_list = b.get('transaction_list', [])
+                        return _ok({
+                            'height': b_height,
+                            'block_hash': b_hash,
+                            'previous_hash': b.get('previous_hash', 'N/A'),
+                            'state_root': b.get('state_root', 'N/A'),
+                            'timestamp': b.get('timestamp', 'N/A'),
+                            'validator': b.get('validator', 'N/A'),
+                            'entropy_score': float(b.get('entropy_score', 0)),
+                            'temporal_coherence': float(b.get('temporal_coherence', 0)),
+                            'quantum_entropy': float(b.get('quantum_entropy', 0)),
+                            'floquet_cycle': b.get('floquet_cycle', 'N/A'),
+                            'gas_used': int(b.get('gas_used', 0)),
+                            'gas_limit': int(b.get('gas_limit', 0)),
+                            'difficulty': float(b.get('difficulty', 0)),
+                            'finalized': b.get('finalized', False),
+                            'finalized_at': b.get('finalized_at', None),
+                            'confirmations': int(b.get('confirmations', 0)),
+                            'status': b.get('status', 'unknown'),
+                            'tx_count': len(tx_list),
+                            'transaction_ids': [t.get('tx_id', t.get('tx_hash', 'unknown')) for t in tx_list],
+                            'transaction_summary': {
+                                'total': len(tx_list),
+                                'finalized': sum(1 for t in tx_list if t.get('status') == 'finalized'),
+                                'pending': sum(1 for t in tx_list if t.get('status') == 'pending'),
+                                'failed': sum(1 for t in tx_list if t.get('status') == 'failed'),
+                                'total_value': sum(float(t.get('amount', 0)) for t in tx_list),
+                                'avg_entropy': round(sum(float(t.get('entropy_score', 0)) for t in tx_list) / len(tx_list), 4) if tx_list else 0,
+                                'avg_fidelity': round(sum(float(t.get('ghz_fidelity', 0)) for t in tx_list) / len(tx_list), 4) if tx_list else 0,
+                            },
+                            'source': 'globals',
+                        })
+        except Exception as e:
+            _log_debug(f'h_block_details globals failed: {e}')
+        
+        # Fallback to API
         try:
             height = int(num)
             return _req('GET', f'/api/blocks/{height}')
@@ -5335,28 +5422,39 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             return _req('GET', f'/api/blocks/hash/{num}')
 
     def h_block_stats(flags, args):
-        # Globals fast-path
+        """Get comprehensive blockchain statistics from globals + DB"""
         try:
-            from globals import get_globals
-            gs = get_globals()
-            bc = gs.blockchain
-            return _ok({
-                'chain_height':       bc.chain_height,
-                'total_blocks':       bc.total_blocks,
-                'total_transactions': bc.total_transactions,
-                'mempool_size':       bc.mempool_size,
-                'consensus_state':    bc.consensus_state,
-                'network_hashrate':   bc.network_hashrate,
-                'difficulty':         bc.difficulty,
-            })
-        except Exception:
-            pass
+            from globals import get_blockchain
+            bc = get_blockchain()
+            
+            if bc:
+                return _ok({
+                    'chain_height': bc.chain_height,
+                    'total_blocks': bc.total_blocks,
+                    'total_transactions': bc.total_transactions,
+                    'mempool_size': bc.mempool_size,
+                    'consensus_state': bc.consensus_state,
+                    'network_hashrate': bc.network_hashrate or 0,
+                    'difficulty': bc.difficulty or 0,
+                    'avg_block_time': bc.average_block_time if hasattr(bc, 'average_block_time') else 0,
+                    'finalized_blocks': sum(1 for b in (bc.chain or []) if b.get('finalized', False)),
+                    'pending_blocks': sum(1 for b in (bc.chain or []) if not b.get('finalized', False)),
+                    'avg_entropy': round(sum(float(b.get('entropy_score', 0)) for b in (bc.chain or [])) / max(len(bc.chain or []), 1), 4),
+                    'timestamp': 'now',
+                    'source': 'globals',
+                })
+        except Exception as e:
+            _log_debug(f'h_block_stats globals failed: {e}')
+        
+        # Fallback to API
         return _req('GET', '/api/blocks/stats')
 
     def h_block_validate(flags, args):
+        """Validate block with quantum proof"""
         num = flags.get('block') or (args[0] if args else None)
         if not num:
-            return _err('Usage: block-validate --block=<number>')
+            return _err('Usage: block-validate <height>')
+        
         try:
             height = int(num)
             return _req('GET', f'/api/blocks/{height}/quantum-proof')
@@ -5364,15 +5462,111 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             return _req('GET', f'/api/blocks/hash/{num}')
 
     def h_block_explorer(flags, args):
+        """Search for blocks by height or hash"""
         query = flags.get('q') or flags.get('query') or (args[0] if args else '')
         if not query:
-            return _err('Usage: block-explorer --q=<hash_or_height>')
-        # Try integer height first, then hash
+            return _err('Usage: block-explorer <height_or_hash>')
+        
         try:
             height = int(query)
             return _req('GET', f'/api/blocks/{height}')
         except ValueError:
             return _req('GET', f'/api/blocks/hash/{query}')
+
+    # ── QUANTUM ───────────────────────────────────────────────────────────────
+
+    def h_block_quantum(flags, args):
+        """Get live quantum measurements for a block from GLOBALS"""
+        block_id = flags.get('block') or flags.get('id') or (args[0] if args else 'latest')
+        
+        try:
+            from globals import get_blockchain, get_lattice
+            bc = get_blockchain()
+            lattice = get_lattice()
+            
+            # Get block from globals
+            block = None
+            if bc and bc.chain:
+                try:
+                    bid = int(block_id)
+                    for b in bc.chain:
+                        if (b.get('height') or b.get('block_number')) == bid:
+                            block = b
+                            break
+                except ValueError:
+                    pass
+                
+                # If not found by ID, get latest
+                if not block and block_id == 'latest':
+                    block = bc.chain[-1] if bc.chain else None
+            
+            if block:
+                return _ok({
+                    'block_height': block.get('height') or block.get('block_number'),
+                    'block_hash': block.get('block_hash', 'N/A'),
+                    'quantum_entropy': float(block.get('quantum_entropy', 0)),
+                    'entropy_score': float(block.get('entropy_score', 0)),
+                    'temporal_coherence': float(block.get('temporal_coherence', 0)),
+                    'floquet_cycle': block.get('floquet_cycle', 'N/A'),
+                    'quantum_proof': block.get('quantum_proof', 'N/A'),
+                    'quantum_measurements': {
+                        'live': lattice.current_metrics if lattice else {},
+                        'block_metrics': {
+                            'coherence': float(block.get('quantum_entropy', 0)),
+                            'fidelity': float(block.get('temporal_coherence', 0)),
+                            'entropy': float(block.get('entropy_score', 0)),
+                        },
+                    },
+                    'source': 'globals',
+                })
+            else:
+                return _err(f'Block {block_id} not found in globals')
+        except Exception as e:
+            _log_debug(f'h_block_quantum globals failed: {e}')
+        
+        # Fallback to API
+        return _req('GET', f'/api/blocks/{block_id}/quantum')
+
+    def h_block_integrity(flags, args):
+        """Verify blockchain integrity"""
+        try:
+            from globals import get_blockchain
+            bc = get_blockchain()
+            
+            if bc and bc.chain:
+                limit = int(flags.get('limit', 50))
+                blocks_to_check = list(bc.chain)[-limit:]
+                broken_links = []
+                
+                for i in range(1, len(blocks_to_check)):
+                    curr = blocks_to_check[i]
+                    prev = blocks_to_check[i-1]
+                    
+                    curr_prev_hash = curr.get('previous_hash', '')
+                    prev_hash = prev.get('block_hash', '')
+                    
+                    if curr_prev_hash != prev_hash and prev_hash and curr_prev_hash:
+                        broken_links.append({
+                            'at_height': curr.get('height') or curr.get('block_number'),
+                            'expected_prev': prev_hash,
+                            'actual_prev': curr_prev_hash,
+                        })
+                
+                return _ok({
+                    'blocks_checked': len(blocks_to_check),
+                    'chain_intact': len(broken_links) == 0,
+                    'broken_links': broken_links,
+                    'height_range': {
+                        'from': blocks_to_check[0].get('height') or blocks_to_check[0].get('block_number'),
+                        'to': blocks_to_check[-1].get('height') or blocks_to_check[-1].get('block_number'),
+                    },
+                    'source': 'globals',
+                })
+        except Exception as e:
+            _log_debug(f'h_block_integrity globals failed: {e}')
+        
+        # Fallback to API
+        return _req('GET', '/api/blocks/integrity', params=flags)
 
     # ── QUANTUM ───────────────────────────────────────────────────────────────
 
@@ -5970,9 +6164,9 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         'block-stats':          h_block_stats,
         'block-validate':       h_block_validate,
         'block-explorer':       h_block_explorer,
-        'block-quantum':        lambda f,a: _req('GET', f'/api/blocks/{f.get("block","latest")}/quantum'),
+        'block-quantum':        h_block_quantum,
         'block-batch':          lambda f,a: _req('POST', '/api/blocks/batch', f),
-        'block-integrity':      lambda f,a: _req('GET', '/api/blocks/integrity', params=f),
+        'block-integrity':      h_block_integrity,
         # QUANTUM
         'quantum-status':       h_quantum_status,
         'quantum-entropy':      h_quantum_entropy,
