@@ -5214,56 +5214,7 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
 
     # ── TRANSACTIONS ──────────────────────────────────────────────────────────
 
-    def h_tx_list(flags, args):
-        # Globals fast-path: mempool + stats
-        try:
-            from globals import get_globals
-            gs = get_globals()
-            bc = gs.blockchain
-            if bc.mempool_size is not None:
-                params = {k: v for k, v in flags.items() if k in ('limit', 'offset', 'status', 'type')}
-                # Still hit API for actual tx data, but enrich with globals count
-                ok, data = c.request('GET', '/api/transactions', params=params)
-                if ok:
-                    data['mempool_size'] = bc.mempool_size
-                    data['total_transactions'] = bc.total_transactions
-                    return _ok(data)
-        except Exception:
-            pass
-        params = {k: v for k, v in flags.items() if k in ('limit', 'offset', 'status', 'type')}
-        return _req('GET', '/api/transactions', params=params)
-
-    def h_tx_create(flags, args):
-        body = {k: v for k, v in flags.items() if k in ('to', 'amount', 'type', 'memo', 'currency')}
-        if not body.get('to') or not body.get('amount'):
-            return _err('Usage: transaction-create --to=<addr> --amount=<n> [--type=transfer] [--memo=x]')
-        return _req('POST', '/api/transactions/submit', body)
-
-    def h_tx_track(flags, args):
-        tx_id = flags.get('id') or flags.get('tx_id') or (args[0] if args else None)
-        if not tx_id:
-            return _err('Usage: transaction-track --id=<tx_id>')
-        return _req('GET', f'/api/transactions/{tx_id}')
-
-    def h_tx_cancel(flags, args):
-        tx_id = flags.get('id') or flags.get('tx_id') or (args[0] if args else None)
-        if not tx_id:
-            return _err('Usage: transaction-cancel --id=<tx_id>')
-        return _req('POST', f'/api/transactions/{tx_id}/cancel', {})
-
-    def h_tx_stats(flags, args):
-        try:
-            from globals import get_globals
-            gs = get_globals()
-            bc = gs.blockchain
-            return _ok({
-                'total_transactions': bc.total_transactions,
-                'mempool_size':       bc.mempool_size,
-                'chain_height':       bc.chain_height,
-            })
-        except Exception:
-            pass
-        return _req('GET', '/api/transactions')
+    # h_tx_list, h_tx_create, h_tx_track, h_tx_stats — defined in block section above
 
     # ── WALLETS ───────────────────────────────────────────────────────────────
 
@@ -5312,9 +5263,12 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
 
     # ── BLOCKS ────────────────────────────────────────────────────────────────
 
-    # ── shared DB helper (uses db.execute / execute_fetch — RealDictCursor, auto conn mgmt) ──
+    # ── DB HELPERS ───────────────────────────────────────────────────────────
+    # Uses db.execute() / execute_fetch() — RealDictCursor, auto conn management
+    # Never makes HTTP calls. Silently returns None on any failure.
+
     def _db_exec(query, params=None, fetch_one=False):
-        """Direct DB query. Returns dict (fetch_one) or list of dicts, or None on failure."""
+        """Direct DB query via db_builder_v2 pool (RealDictCursor, auto conn mgmt)."""
         try:
             from globals import get_db_pool
             db = get_db_pool()
@@ -5325,103 +5279,90 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             else:
                 return db.execute(query, params, return_results=True) or []
         except Exception as e:
-            _log_debug(f'_db_exec failed: {e}')
+            _log_debug(f'_db_exec error: {e}')
             return None
 
-    def _safe_val(v, cast=None):
-        """Serialize DB values safely — handles datetime, Decimal, None."""
+    def _safe_val(v):
+        """Serialize a DB value to JSON-safe type."""
         if v is None:
             return None
-        if hasattr(v, 'isoformat'):          # datetime / date
+        if hasattr(v, 'isoformat'):          # datetime/date
             return v.isoformat()
-        cls = type(v).__name__
-        if cls == 'Decimal':
+        if type(v).__name__ == 'Decimal':
             return float(v)
-        if cast:
-            try:
-                return cast(v)
-            except Exception:
-                return v
         return v
 
     def _clean_block(row):
-        """Convert a RealDictRow from the blocks table to a JSON-safe plain dict."""
+        """Convert RealDictRow → plain JSON-safe dict."""
         if not row:
             return {}
-        d = dict(row)
-        for k, v in d.items():
-            d[k] = _safe_val(v)
-        return d
+        return {k: _safe_val(v) for k, v in dict(row).items()}
+
+    # ── BLOCK COMMANDS ────────────────────────────────────────────────────────
+    # Strategy for every block command:
+    #   1. Try globals in-memory chain (fastest, zero DB)
+    #   2. Fall back to DIRECT db.execute_fetch() / db.execute() — NO HTTP calls
+    # block_number column may not exist in the live DB (schema predates the column),
+    # so all numeric lookups use height only. Hash lookups use block_hash only.
 
     def h_block_list(flags, args):
-        """List blocks — globals chain first, then direct DB query."""
+        """List recent blocks — globals first, then direct DB."""
         limit  = int(flags.get('limit', 20))
         offset = int(flags.get('offset', 0))
 
-        # 1. In-memory globals chain (fastest)
+        # 1. In-memory globals chain
         try:
             from globals import get_blockchain
             bc = get_blockchain()
             if bc and bc.chain:
                 window = list(bc.chain)
-                window = window[-(limit + offset):]
                 if offset:
-                    window = window[:-offset]
-                blocks = []
-                for b in window:
-                    blocks.append({
-                        'height':            b.get('height') or b.get('block_number', 0),
-                        'block_number':      b.get('block_number') or b.get('height', 0),
-                        'block_hash':        b.get('block_hash', ''),
-                        'previous_hash':     b.get('previous_hash', ''),
-                        'timestamp':         b.get('timestamp'),
-                        'tx_count':          len(b.get('transaction_list', [])),
-                        'validator':         b.get('validator', ''),
-                        'entropy_score':     float(b.get('entropy_score', 0) or 0),
-                        'temporal_coherence':float(b.get('temporal_coherence', 0) or 0),
-                        'finalized':         bool(b.get('finalized', False)),
-                        'confirmations':     int(b.get('confirmations', 0) or 0),
-                        'status':            b.get('status', 'unknown'),
-                        'source':            'globals',
-                    })
+                    window = window[:len(window) - offset]
+                window = window[-limit:]
+                blocks = [{
+                    'height':            b.get('height') or b.get('block_number', 0),
+                    'block_hash':        b.get('block_hash', ''),
+                    'previous_hash':     b.get('previous_hash', ''),
+                    'timestamp':         b.get('timestamp'),
+                    'tx_count':          len(b.get('transaction_list', [])),
+                    'validator':         b.get('validator', ''),
+                    'entropy_score':     float(b.get('entropy_score', 0) or 0),
+                    'temporal_coherence':float(b.get('temporal_coherence', 0) or 0),
+                    'finalized':         bool(b.get('finalized', False)),
+                    'status':            b.get('status', 'unknown'),
+                    'source':            'globals',
+                } for b in window]
                 if blocks:
-                    return _ok({
-                        'blocks':       blocks,
-                        'chain_height': bc.chain_height,
-                        'total_blocks': bc.total_blocks,
-                        'mempool_size': bc.mempool_size,
-                        'count':        len(blocks),
-                    })
+                    return _ok({'blocks': blocks, 'chain_height': bc.chain_height,
+                                'total_blocks': bc.total_blocks, 'count': len(blocks)})
         except Exception as e:
-            _log_debug(f'h_block_list globals failed: {e}')
+            _log_debug(f'h_block_list globals: {e}')
 
-        # 2. Direct DB query — no HTTP call, uses db.execute() with RealDictCursor
+        # 2. Direct DB — avoid block_number column (may not exist in live DB)
         rows = _db_exec(
-            "SELECT height, block_number, block_hash, previous_hash, timestamp, "
-            "validator, entropy_score, temporal_coherence, finalized, confirmations, "
-            "status, gas_used, gas_limit, transactions "
+            "SELECT height, block_hash, previous_hash, timestamp, validator, "
+            "entropy_score, temporal_coherence, finalized, confirmations, status, "
+            "gas_used, gas_limit, transactions "
             "FROM blocks ORDER BY height DESC LIMIT %s OFFSET %s",
             (limit, offset)
         )
         if rows is not None:
-            total_row = _db_exec("SELECT COUNT(*) AS c, MAX(height) AS h FROM blocks", fetch_one=True)
-            total  = int(total_row['c'] or 0) if total_row else 0
-            max_h  = int(total_row['h'] or 0) if total_row else 0
-            blocks = [_clean_block(r) for r in rows]
-            return _ok({'blocks': blocks, 'total_blocks': total,
-                        'chain_height': max_h, 'count': len(blocks),
-                        'limit': limit, 'offset': offset, 'source': 'database'})
+            meta = _db_exec("SELECT COUNT(*) AS c, MAX(height) AS h FROM blocks", fetch_one=True)
+            total = int(meta['c'] or 0) if meta else 0
+            max_h = int(meta['h'] or 0) if meta else 0
+            return _ok({'blocks': [_clean_block(r) for r in rows],
+                        'total_blocks': total, 'chain_height': max_h,
+                        'count': len(rows), 'source': 'database'})
 
         return _ok({'blocks': [], 'total_blocks': 0, 'chain_height': 0, 'count': 0})
 
     def h_block_details(flags, args):
-        """Get detailed block info — globals first, then direct DB query."""
+        """Get block details — globals first, then direct DB by height OR hash."""
         num = (flags.get('block') or flags.get('number') or
                flags.get('hash') or (args[0] if args else None))
         if not num:
             return _err('Usage: block-details <height_or_hash>')
 
-        # Parse as height if numeric
         try:
             target_height = int(num)
             is_hash = False
@@ -5429,7 +5370,7 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             target_height = None
             is_hash = True
 
-        # 1. In-memory globals chain
+        # 1. In-memory globals
         try:
             from globals import get_blockchain
             bc = get_blockchain()
@@ -5437,15 +5378,10 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
                 for b in bc.chain:
                     b_height = b.get('height') or b.get('block_number')
                     b_hash   = b.get('block_hash', '')
-                    match = (
-                        (not is_hash and target_height is not None and b_height == target_height)
-                        or (is_hash and b_hash == str(num))
-                    )
-                    if match:
+                    if (not is_hash and target_height is not None and b_height == target_height) or                        (is_hash and b_hash == str(num)):
                         tx_list = b.get('transaction_list', [])
                         return _ok({
                             'height':            b_height,
-                            'block_number':      b.get('block_number') or b_height,
                             'block_hash':        b_hash,
                             'previous_hash':     b.get('previous_hash', ''),
                             'state_root':        b.get('state_root', ''),
@@ -5454,34 +5390,33 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
                             'entropy_score':     float(b.get('entropy_score', 0) or 0),
                             'temporal_coherence':float(b.get('temporal_coherence', 0) or 0),
                             'quantum_entropy':   float(b.get('quantum_entropy', 0) or 0),
-                            'floquet_cycle':     b.get('floquet_cycle'),
                             'gas_used':          int(b.get('gas_used', 0) or 0),
                             'gas_limit':         int(b.get('gas_limit', 0) or 0),
                             'difficulty':        float(b.get('difficulty', 0) or 0),
                             'finalized':         bool(b.get('finalized', False)),
-                            'finalized_at':      b.get('finalized_at'),
                             'confirmations':     int(b.get('confirmations', 0) or 0),
                             'status':            b.get('status', 'unknown'),
                             'tx_count':          len(tx_list),
-                            'transaction_ids':   [t.get('tx_id', t.get('tx_hash', '')) for t in tx_list],
                             'source':            'globals',
                         })
         except Exception as e:
-            _log_debug(f'h_block_details globals failed: {e}')
+            _log_debug(f'h_block_details globals: {e}')
 
-        # 2. Direct DB query — db.execute_fetch() returns RealDictRow or None
+        # 2. Direct DB — numeric: query by height only (block_number may not exist)
+        #                  hash:    query by block_hash
         if is_hash:
             row = _db_exec("SELECT * FROM blocks WHERE block_hash=%s LIMIT 1",
                            (str(num),), fetch_one=True)
         else:
-            row = _db_exec("SELECT * FROM blocks WHERE height=%s OR block_number=%s LIMIT 1",
-                           (target_height, target_height), fetch_one=True)
+            row = _db_exec("SELECT * FROM blocks WHERE height=%s LIMIT 1",
+                           (target_height,), fetch_one=True)
 
         if row:
             block = _clean_block(row)
-            # Fetch transaction ids for this block
+            # Fetch transaction IDs for this block
             tx_rows = _db_exec(
-                "SELECT tx_id, tx_hash, status FROM transactions WHERE height=%s OR block_hash=%s",
+                "SELECT tx_id, tx_hash, status FROM transactions "
+                "WHERE height=%s OR block_hash=%s",
                 (block.get('height'), block.get('block_hash', ''))
             ) or []
             block['tx_count']        = len(tx_rows)
@@ -5492,52 +5427,46 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         return _err(f'Block {num} not found')
 
     def h_block_stats(flags, args):
-        """Blockchain statistics — globals first, then direct DB query."""
-        # 1. In-memory globals
+        """Blockchain statistics — always go to DB for accuracy, globals as enrichment."""
+        # Check globals for live-chain metrics (non-zero only)
+        globals_data = {}
         try:
             from globals import get_blockchain
             bc = get_blockchain()
-            if bc and (bc.chain_height or bc.total_blocks):
-                chain = bc.chain or []
-                return _ok({
-                    'chain_height':       bc.chain_height,
-                    'total_blocks':       bc.total_blocks,
-                    'total_transactions': bc.total_transactions,
-                    'mempool_size':       bc.mempool_size,
-                    'consensus_state':    bc.consensus_state,
-                    'network_hashrate':   bc.network_hashrate or 0,
-                    'difficulty':         bc.difficulty or 0,
-                    'avg_block_time':     getattr(bc, 'average_block_time', 0) or 0,
-                    'finalized_blocks':   sum(1 for b in chain if b.get('finalized')),
-                    'pending_blocks':     sum(1 for b in chain if not b.get('finalized')),
-                    'avg_entropy':        round(
-                        sum(float(b.get('entropy_score', 0) or 0) for b in chain)
-                        / max(len(chain), 1), 4
-                    ),
-                    'source': 'globals',
-                })
+            if bc:
+                globals_data = {
+                    'consensus_state':  bc.consensus_state,
+                    'network_hashrate': bc.network_hashrate or 0,
+                    'difficulty':       bc.difficulty or 0,
+                    'avg_block_time':   getattr(bc, 'average_block_time', 0) or 0,
+                    'mempool_size':     bc.mempool_size or 0,
+                }
         except Exception as e:
-            _log_debug(f'h_block_stats globals failed: {e}')
+            _log_debug(f'h_block_stats globals: {e}')
 
-        # 2. Direct DB query
-        # NOTE: blocks.timestamp is BIGINT (unix epoch), not TIMESTAMP — subtract directly
+        # Always query DB for authoritative counts (genesis is height=0, don't skip!)
         counts = _db_exec(
-            "SELECT COUNT(*) AS total_blocks, MAX(height) AS chain_height, "
-            "MIN(height) AS min_height FROM blocks",
+            "SELECT COUNT(*) AS total_blocks, MAX(height) AS chain_height FROM blocks",
             fetch_one=True
         )
         if counts is None:
-            return _ok({"total_blocks": 0, "chain_height": 0, "source": "empty",
-                        "message": "No blocks in database yet"})
+            return _ok({'total_blocks': 0, 'chain_height': 0,
+                        'message': 'Database not available', 'source': 'error'})
+
+        total_blocks = int(counts.get('total_blocks') or 0)
+        chain_height = int(counts.get('chain_height') or 0) if counts.get('chain_height') is not None else 0
+
+        if total_blocks == 0:
+            return _ok({'total_blocks': 0, 'chain_height': 0,
+                        'message': 'No blocks in database yet', 'source': 'empty'})
 
         tx_counts = _db_exec(
             "SELECT COUNT(*) AS total, "
-            "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending "
-            "FROM transactions",
+            "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending FROM transactions",
             fetch_one=True
         ) or {}
 
-        # avg_block_time: timestamp is BIGINT (unix seconds), diff is numeric
+        # timestamp is BIGINT (unix epoch seconds) — arithmetic subtraction works
         avg_row = _db_exec(
             "SELECT AVG(b1.timestamp - b2.timestamp) AS avg_secs "
             "FROM blocks b1 JOIN blocks b2 ON b1.height = b2.height + 1 "
@@ -5545,80 +5474,66 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             fetch_one=True
         ) or {}
 
-        validators = _db_exec(
-            "SELECT COUNT(DISTINCT validator) AS c FROM blocks", fetch_one=True
-        ) or {}
-
         finalized = _db_exec(
             "SELECT COUNT(*) AS c FROM blocks WHERE finalized = TRUE", fetch_one=True
         ) or {}
 
-        avg_entropy = _db_exec(
+        avg_ent = _db_exec(
             "SELECT AVG(entropy_score) AS avg FROM blocks "
             "WHERE height > (SELECT MAX(height) - 100 FROM blocks)",
             fetch_one=True
         ) or {}
 
         return _ok({
-            "total_blocks":       int(counts.get("total_blocks") or 0),
-            "chain_height":       int(counts.get("chain_height") or 0),
-            "total_transactions": int(tx_counts.get("total") or 0),
-            "mempool_size":       int(tx_counts.get("pending") or 0),
-            "avg_block_time":     round(float(avg_row.get("avg_secs") or 0), 2),
-            "active_validators":  int(validators.get("c") or 0),
-            "finalized_blocks":   int(finalized.get("c") or 0),
-            "avg_entropy":        round(float(avg_entropy.get("avg") or 0), 4),
-            "source":             "database",
+            'total_blocks':       total_blocks,
+            'chain_height':       chain_height,
+            'total_transactions': int(tx_counts.get('total') or 0),
+            'mempool_size':       globals_data.get('mempool_size') or int(tx_counts.get('pending') or 0),
+            'finalized_blocks':   int(finalized.get('c') or 0),
+            'avg_block_time':     round(float(avg_row.get('avg_secs') or 0), 2),
+            'avg_entropy':        round(float(avg_ent.get('avg') or 0), 4),
+            'consensus_state':    globals_data.get('consensus_state', 'active'),
+            'network_hashrate':   globals_data.get('network_hashrate', 0),
+            'difficulty':         globals_data.get('difficulty', 0),
+            'source':             'database',
         })
 
     def h_block_validate(flags, args):
-        """Validate block — check status and quantum_proof from DB."""
+        """Validate block — DB query by height or hash."""
         num = flags.get('block') or flags.get('number') or (args[0] if args else None)
         if not num:
             return _err('Usage: block-validate <height>')
 
         try:
-            target = int(num)
             row = _db_exec(
-                "SELECT height, block_number, block_hash, quantum_proof, "
-                "quantum_validation_status, status, confirmations, finalized "
-                "FROM blocks WHERE height=%s OR block_number=%s LIMIT 1",
-                (target, target), fetch_one=True
-            )
+                "SELECT height, block_hash, quantum_proof, quantum_validation_status, "
+                "status, confirmations, finalized "
+                "FROM blocks WHERE height=%s LIMIT 1", (int(num),), fetch_one=True)
         except (ValueError, TypeError):
             row = _db_exec(
-                "SELECT height, block_number, block_hash, quantum_proof, "
-                "quantum_validation_status, status, confirmations, finalized "
-                "FROM blocks WHERE block_hash=%s LIMIT 1",
-                (str(num),), fetch_one=True
-            )
+                "SELECT height, block_hash, quantum_proof, quantum_validation_status, "
+                "status, confirmations, finalized "
+                "FROM blocks WHERE block_hash=%s LIMIT 1", (str(num),), fetch_one=True)
 
         if not row:
             return _err(f'Block {num} not found')
-
         b = _clean_block(row)
         valid = b.get('status') in ('finalized', 'confirmed', 'complete') or bool(b.get('finalized'))
-        return _ok({**b, 'valid': valid,
-                    'validation': b.get('quantum_validation_status', 'unknown')})
+        return _ok({**b, 'valid': valid, 'validation': b.get('quantum_validation_status', 'unknown')})
 
     def h_block_explorer(flags, args):
-        """Search blocks by height or hash — direct DB query."""
+        """Block explorer search — direct DB."""
         query = (flags.get('q') or flags.get('query') or
                  flags.get('block') or (args[0] if args else ''))
         if not query:
             return _err('Usage: block-explorer <height_or_hash>')
 
         try:
-            target = int(query)
-            row = _db_exec(
-                "SELECT * FROM blocks WHERE height=%s OR block_number=%s LIMIT 1",
-                (target, target), fetch_one=True
-            )
+            row = _db_exec("SELECT * FROM blocks WHERE height=%s LIMIT 1",
+                           (int(query),), fetch_one=True)
         except (ValueError, TypeError):
-            row = _db_exec(
-                "SELECT * FROM blocks WHERE block_hash=%s LIMIT 1",
-                (str(query),), fetch_one=True
-            )
+            row = _db_exec("SELECT * FROM blocks WHERE block_hash=%s LIMIT 1",
+                           (str(query),), fetch_one=True)
 
         if not row:
             return _err(f'Block {query} not found')
@@ -5627,10 +5542,9 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
     # ── QUANTUM ───────────────────────────────────────────────────────────────
 
     def h_block_quantum(flags, args):
-        """Quantum measurements for a block — globals first, then DB."""
+        """Quantum measurements for a block."""
         block_id = flags.get('block') or flags.get('id') or (args[0] if args else 'latest')
 
-        # 1. In-memory globals
         try:
             from globals import get_blockchain, get_lattice
             bc      = get_blockchain()
@@ -5644,13 +5558,11 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
                         bid = int(block_id)
                         for b in bc.chain:
                             if (b.get('height') or b.get('block_number')) == bid:
-                                block = b
-                                break
+                                block = b; break
                     except (ValueError, TypeError):
                         for b in bc.chain:
                             if b.get('block_hash') == str(block_id):
-                                block = b
-                                break
+                                block = b; break
             if block:
                 return _ok({
                     'block_height':      block.get('height') or block.get('block_number'),
@@ -5664,42 +5576,35 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
                     'source':            'globals',
                 })
         except Exception as e:
-            _log_debug(f'h_block_quantum globals failed: {e}')
+            _log_debug(f'h_block_quantum globals: {e}')
 
-        # 2. Direct DB query
         if block_id == 'latest':
             row = _db_exec(
-                "SELECT height, block_number, block_hash, quantum_entropy, quantum_proof, "
+                "SELECT height, block_hash, quantum_entropy, quantum_proof, "
                 "temporal_coherence, entropy_score, floquet_cycle "
-                "FROM blocks ORDER BY height DESC LIMIT 1",
-                fetch_one=True
-            )
+                "FROM blocks ORDER BY height DESC LIMIT 1", fetch_one=True)
         else:
             try:
-                t = int(block_id)
                 row = _db_exec(
-                    "SELECT height, block_number, block_hash, quantum_entropy, quantum_proof, "
+                    "SELECT height, block_hash, quantum_entropy, quantum_proof, "
                     "temporal_coherence, entropy_score, floquet_cycle "
-                    "FROM blocks WHERE height=%s OR block_number=%s LIMIT 1",
-                    (t, t), fetch_one=True
-                )
+                    "FROM blocks WHERE height=%s LIMIT 1",
+                    (int(block_id),), fetch_one=True)
             except (ValueError, TypeError):
                 row = _db_exec(
-                    "SELECT height, block_number, block_hash, quantum_entropy, quantum_proof, "
+                    "SELECT height, block_hash, quantum_entropy, quantum_proof, "
                     "temporal_coherence, entropy_score, floquet_cycle "
                     "FROM blocks WHERE block_hash=%s LIMIT 1",
-                    (str(block_id),), fetch_one=True
-                )
+                    (str(block_id),), fetch_one=True)
 
         if not row:
             return _err(f'Block {block_id} not found')
         return _ok({**_clean_block(row), 'source': 'database'})
 
     def h_block_integrity(flags, args):
-        """Verify chain integrity — globals first, then DB hash-chain walk."""
+        """Verify chain hash linkage — globals first, then DB."""
         limit = int(flags.get('limit', 50))
 
-        # 1. In-memory globals
         try:
             from globals import get_blockchain
             bc = get_blockchain()
@@ -5707,55 +5612,241 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
                 tail   = list(bc.chain)[-limit:]
                 broken = []
                 for i in range(1, len(tail)):
-                    curr_prev = tail[i].get('previous_hash', '')
-                    prev_hash = tail[i-1].get('block_hash', '')
-                    if curr_prev and prev_hash and curr_prev != prev_hash:
-                        broken.append({
-                            'at_height':   tail[i].get('height') or tail[i].get('block_number'),
-                            'expected':    prev_hash,
-                            'actual_prev': curr_prev,
-                        })
+                    if (tail[i].get('previous_hash') and tail[i-1].get('block_hash') and
+                            tail[i]['previous_hash'] != tail[i-1]['block_hash']):
+                        broken.append({'at_height': tail[i].get('height') or tail[i].get('block_number'),
+                                       'expected':  tail[i-1]['block_hash'],
+                                       'actual_prev': tail[i]['previous_hash']})
                 if tail:
-                    return _ok({
-                        'blocks_checked': len(tail),
-                        'chain_intact':   len(broken) == 0,
-                        'broken_links':   broken,
-                        'from_height':    tail[0].get('height') or tail[0].get('block_number'),
-                        'to_height':      tail[-1].get('height') or tail[-1].get('block_number'),
-                        'source':         'globals',
-                    })
+                    return _ok({'blocks_checked': len(tail), 'chain_intact': not broken,
+                                'broken_links': broken, 'source': 'globals',
+                                'from_height': tail[0].get('height'), 'to_height': tail[-1].get('height')})
         except Exception as e:
-            _log_debug(f'h_block_integrity globals failed: {e}')
+            _log_debug(f'h_block_integrity globals: {e}')
 
-        # 2. Direct DB query — fetch last N blocks ascending by height
         rows = _db_exec(
             "SELECT height, block_hash, previous_hash FROM "
             "(SELECT height, block_hash, previous_hash FROM blocks "
-            " ORDER BY height DESC LIMIT %s) sub ORDER BY height ASC",
-            (limit,)
+            " ORDER BY height DESC LIMIT %s) sub ORDER BY height ASC", (limit,))
+        if not rows:
+            return _ok({'blocks_checked': 0, 'chain_intact': True, 'broken_links': [], 'source': 'empty'})
+
+        broken = [{'at_height': rows[i].get('height'), 'expected': rows[i-1].get('block_hash'),
+                   'actual_prev': rows[i].get('previous_hash')}
+                  for i in range(1, len(rows))
+                  if rows[i].get('previous_hash') and rows[i-1].get('block_hash') and
+                     rows[i]['previous_hash'] != rows[i-1]['block_hash']]
+        return _ok({'blocks_checked': len(rows), 'chain_intact': not broken,
+                    'broken_links': broken, 'source': 'database',
+                    'from_height': rows[0].get('height') if rows else None,
+                    'to_height': rows[-1].get('height') if rows else None})
+
+    # ── TRANSACTIONS ──────────────────────────────────────────────────────────
+    # All transaction handlers write/read directly via DB — no HTTP calls.
+    # from_address is resolved from the authenticated session user_id/email.
+
+    def _get_session_user():
+        """Return (user_id, email) from current session, or (None, None)."""
+        try:
+            if s.is_authenticated():
+                return s.session.user_id or '', s.session.email or ''
+        except Exception:
+            pass
+        return None, None
+
+    def _tx_write_db(tx_hash, from_address, to_address, amount, tx_type, memo, ts):
+        """Write a transaction directly to the DB. Returns True on success."""
+        try:
+            from globals import get_db_pool
+            db = get_db_pool()
+            if db is None:
+                return False
+            import uuid
+            tx_id = str(uuid.uuid4())
+            db.execute(
+                """INSERT INTO transactions
+                   (tx_id, tx_hash, from_address, to_address, amount,
+                    tx_type, status, created_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s)
+                   ON CONFLICT (tx_hash) DO NOTHING""",
+                (tx_id, tx_hash, from_address, to_address,
+                 int(float(amount) * 10**18), tx_type, ts)
+            )
+            return True
+        except Exception as e:
+            _log_debug(f'_tx_write_db failed: {e}')
+            return False
+
+    def h_tx_list(flags, args):
+        """List transactions — direct DB query."""
+        limit  = int(flags.get('limit', 20))
+        offset = int(flags.get('offset', 0))
+        status = flags.get('status', '')
+        user_id, _ = _get_session_user()
+
+        # Build query with optional filters
+        where_clauses = []
+        params = []
+        if user_id:
+            where_clauses.append("(from_address=%s OR to_address=%s OR from_user_id=%s OR to_user_id=%s)")
+            params.extend([user_id, user_id, user_id, user_id])
+        if status:
+            where_clauses.append("status=%s")
+            params.append(status)
+
+        where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        rows = _db_exec(
+            f"SELECT tx_id, tx_hash, from_address, to_address, amount, tx_type, "
+            f"status, created_at, confirmations "
+            f"FROM transactions {where_sql} "
+            f"ORDER BY created_at DESC LIMIT %s OFFSET %s",
+            params + [limit, offset]
         )
         if rows is None:
-            return _ok({'blocks_checked': 0, 'chain_intact': True,
-                        'broken_links': [], 'source': 'empty'})
+            rows = []
 
-        broken = []
-        for i in range(1, len(rows)):
-            curr_prev = rows[i].get('previous_hash', '')
-            prev_hash = rows[i-1].get('block_hash', '')
-            if curr_prev and prev_hash and curr_prev != prev_hash:
-                broken.append({
-                    'at_height':   rows[i].get('height'),
-                    'expected':    prev_hash,
-                    'actual_prev': curr_prev,
+        count_row = _db_exec(f"SELECT COUNT(*) AS c FROM transactions {where_sql}",
+                             params if params else None, fetch_one=True)
+        total = int(count_row.get('c', 0)) if count_row else 0
+
+        txns = []
+        for r in rows:
+            t = _clean_block(r)
+            if 'amount' in t and t['amount'] is not None:
+                try:
+                    t['amount_qtcl'] = float(t['amount']) / 10**18
+                except Exception:
+                    pass
+            txns.append(t)
+
+        # Enrich with globals mempool size
+        try:
+            from globals import get_globals
+            gs = get_globals()
+            mempool_size = gs.blockchain.mempool_size or 0
+        except Exception:
+            mempool_size = 0
+
+        return _ok({'transactions': txns, 'total': total,
+                    'mempool_size': mempool_size, 'count': len(txns)})
+
+    def h_tx_create(flags, args):
+        """Submit a transaction — write directly to DB + update globals."""
+        to_addr = (flags.get('to') or flags.get('to_address') or
+                   (args[0] if args else '')).strip()
+        if not to_addr:
+            return _err('Usage: transaction-create --to=<address> --amount=<n> [--type=transfer] [--memo=x]')
+        try:
+            amount = float(flags.get('amount') or (args[1] if len(args) > 1 else 0))
+            if amount <= 0:
+                return _err('Amount must be positive')
+        except (ValueError, TypeError):
+            return _err(f'Invalid amount: {flags.get("amount")}')
+
+        # Resolve from_address from authenticated session
+        user_id, email = _get_session_user()
+        from_address = user_id or email or ''
+
+        tx_type = flags.get('type') or flags.get('tx_type', 'transfer')
+        memo    = flags.get('memo', '')
+
+        import hashlib, secrets, datetime as _dt
+        ts      = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        salt    = secrets.token_hex(16)
+        tx_hash = hashlib.sha3_256(
+            f'{from_address}{to_addr}{amount}{ts}{salt}'.encode()
+        ).hexdigest()
+
+        # Write to DB
+        written = _tx_write_db(tx_hash, from_address, to_addr, amount, tx_type, memo, ts)
+
+        # Also try to queue in mempool
+        queued = False
+        try:
+            import ledger_manager as _lm
+            mp = getattr(_lm, 'global_mempool', None)
+            if mp is None:
+                # Try to get from globals tx_engine
+                from globals import get_globals
+                gs = get_globals()
+                mp = getattr(gs.tx_engine, 'mempool', None) if hasattr(gs, 'tx_engine') else None
+            if mp and hasattr(mp, 'add_transaction'):
+                mp.add_transaction({
+                    'tx_hash': tx_hash, 'from_address': from_address,
+                    'to_address': to_addr, 'amount': amount, 'tx_type': tx_type,
+                    'status': 'pending', 'memo': memo, 'timestamp': ts,
                 })
+                queued = True
+        except Exception as e:
+            _log_debug(f'h_tx_create mempool: {e}')
+
+        # Update globals counters
+        try:
+            from globals import get_globals
+            gs = get_globals()
+            gs.blockchain.total_transactions = (gs.blockchain.total_transactions or 0) + 1
+            gs.blockchain.mempool_size = (gs.blockchain.mempool_size or 0) + 1
+        except Exception:
+            pass
 
         return _ok({
-            'blocks_checked': len(rows),
-            'chain_intact':   len(broken) == 0,
-            'broken_links':   broken,
-            'from_height':    rows[0].get('height') if rows else None,
-            'to_height':      rows[-1].get('height') if rows else None,
-            'source':         'database',
+            'tx_hash':      tx_hash,
+            'from_address': from_address,
+            'to_address':   to_addr,
+            'amount':       amount,
+            'tx_type':      tx_type,
+            'status_code':  'pending',
+            'queued':       queued,
+            'db_written':   written,
+            'message':      f'Transaction submitted — {tx_hash[:16]}…',
+            'timestamp':    ts,
+        })
+
+    def h_tx_track(flags, args):
+        """Track a transaction by hash or id."""
+        tx_id = flags.get('id') or flags.get('tx_id') or flags.get('hash') or (args[0] if args else None)
+        if not tx_id:
+            return _err('Usage: transaction-track --id=<tx_hash>')
+        row = _db_exec(
+            "SELECT tx_id, tx_hash, from_address, to_address, amount, tx_type, "
+            "status, created_at, confirmations, block_hash "
+            "FROM transactions WHERE tx_hash=%s OR tx_id=%s LIMIT 1",
+            (str(tx_id), str(tx_id)), fetch_one=True
+        )
+        if not row:
+            return _err(f'Transaction {tx_id} not found')
+        t = _clean_block(row)
+        if 'amount' in t and t['amount'] is not None:
+            try:
+                t['amount_qtcl'] = float(t['amount']) / 10**18
+            except Exception:
+                pass
+        return _ok(t)
+
+    def h_tx_stats(flags, args):
+        """Transaction statistics from DB."""
+        try:
+            from globals import get_globals
+            gs = get_globals()
+            bc = gs.blockchain
+        except Exception:
+            bc = None
+
+        counts = _db_exec(
+            "SELECT COUNT(*) AS total, "
+            "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending, "
+            "SUM(CASE WHEN status='finalized' OR status='confirmed' THEN 1 ELSE 0 END) AS finalized "
+            "FROM transactions", fetch_one=True
+        ) or {}
+
+        return _ok({
+            'total_transactions': int(counts.get('total') or 0),
+            'pending':            int(counts.get('pending') or 0),
+            'finalized':          int(counts.get('finalized') or 0),
+            'mempool_size':       getattr(bc, 'mempool_size', 0) if bc else 0,
+            'chain_height':       getattr(bc, 'chain_height', 0) if bc else 0,
+            'source':             'database',
         })
     # ── QUANTUM ───────────────────────────────────────────────────────────────
 

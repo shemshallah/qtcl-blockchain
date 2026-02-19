@@ -1098,19 +1098,18 @@ def api_registry():
 
 @app.route('/api/transactions/submit', methods=['POST'])
 def api_transactions_submit():
-    """POST /api/transactions/submit — create & queue a transaction."""
+    """POST /api/transactions/submit — create & persist a transaction."""
     is_auth, _ = _parse_auth(request)
     if not is_auth:
         return jsonify({'status': 'error', 'error': 'Authentication required'}), 401
     try:
-        data         = request.get_json(force=True, silent=True) or {}
-        from_address = (data.get('from_address') or data.get('from') or '').strip()
-        to_address   = (data.get('to_address')   or data.get('to')   or '').strip()
+        data       = request.get_json(force=True, silent=True) or {}
+        to_address = (data.get('to_address') or data.get('to') or '').strip()
         for _ch in '\x00\r\n\x1b':
-            to_address   = to_address.replace(_ch, '')
-            from_address = from_address.replace(_ch, '')
+            to_address = to_address.replace(_ch, '')
         if not to_address:
             return jsonify({'status': 'error', 'error': 'to_address is required'}), 400
+
         try:
             amount = float(data.get('amount', 0))
             if amount <= 0:
@@ -1118,7 +1117,19 @@ def api_transactions_submit():
         except (TypeError, ValueError):
             return jsonify({'status': 'error', 'error': f"Invalid amount: {data.get('amount')!r}"}), 400
 
-        import hashlib, secrets as _sec, time as _t
+        # Resolve from_address from the authenticated session (not just the request body)
+        from_address = (data.get('from_address') or data.get('from') or '').strip()
+        if not from_address:
+            # Pull from the session store entry for this bearer token
+            try:
+                _token = request.headers.get('Authorization', '').replace('Bearer ', '').strip()
+                _gs    = get_globals()
+                _sess  = _gs.auth.session_store.get(_token, {})
+                from_address = (_sess.get('user_id') or _sess.get('email') or '').strip()
+            except Exception:
+                pass
+
+        import hashlib, secrets as _sec
         ts      = datetime.now(timezone.utc).isoformat()
         salt    = _sec.token_hex(16)
         tx_hash = hashlib.sha3_256(
@@ -1127,11 +1138,37 @@ def api_transactions_submit():
         tx_type = str(data.get('tx_type') or data.get('type', 'transfer'))
         memo    = str(data.get('memo', ''))[:500]
 
-        # Try ledger mempool
+        # ── Write to DB ──────────────────────────────────────────────────────
+        _db_written = False
+        try:
+            _db = get_db_pool()
+            if _db:
+                import uuid as _uuid
+                _tx_id = str(_uuid.uuid4())
+                _db.execute(
+                    """INSERT INTO transactions
+                       (tx_id, tx_hash, from_address, to_address, amount,
+                        tx_type, status, created_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, 'pending', %s)
+                       ON CONFLICT (tx_hash) DO NOTHING""",
+                    (_tx_id, tx_hash, from_address, to_address,
+                     int(float(amount) * 10**18), tx_type, ts)
+                )
+                _db_written = True
+        except Exception as _dbe:
+            logger.warning(f'[tx/submit] DB write failed: {_dbe}')
+
+        # ── Queue in mempool ─────────────────────────────────────────────────
         _queued = False
         try:
-            from ledger_manager import GLOBAL_MEMPOOL as _mp
-            if _mp:
+            import ledger_manager as _lm
+            # ledger_manager uses lowercase global_mempool (not GLOBAL_MEMPOOL)
+            _mp = getattr(_lm, 'global_mempool', None)
+            if _mp is None:
+                # Try globals tx_engine
+                _tx_eng = getattr(get_globals(), 'tx_engine', None)
+                _mp = getattr(_tx_eng, 'mempool', None) if _tx_eng else None
+            if _mp and hasattr(_mp, 'add_transaction'):
                 _mp.add_transaction({
                     'tx_hash': tx_hash, 'from_address': from_address,
                     'to_address': to_address, 'amount': amount,
@@ -1139,19 +1176,18 @@ def api_transactions_submit():
                     'memo': memo, 'timestamp': ts,
                 })
                 _queued = True
-        except Exception:
-            pass
+        except Exception as _mpe:
+            logger.debug(f'[tx/submit] mempool queue skipped: {_mpe}')
 
-        # Update globals counters
+        # ── Update globals counters ───────────────────────────────────────────
         try:
-            gs = get_globals()
-            if hasattr(gs, 'blockchain'):
-                gs.blockchain.total_transactions = getattr(gs.blockchain, 'total_transactions', 0) + 1
-                gs.blockchain.mempool_size = getattr(gs.blockchain, 'mempool_size', 0) + 1
+            _gs = get_globals()
+            _gs.blockchain.total_transactions = (_gs.blockchain.total_transactions or 0) + 1
+            _gs.blockchain.mempool_size = (_gs.blockchain.mempool_size or 0) + 1
         except Exception:
             pass
 
-        logger.info(f'[tx/submit] {tx_hash[:16]}… → {to_address} amount={amount}')
+        logger.info(f'[tx/submit] {tx_hash[:16]}… {from_address} → {to_address} amount={amount} db={_db_written}')
         return jsonify({
             'status':       'success',
             'tx_hash':      tx_hash,
@@ -1161,6 +1197,7 @@ def api_transactions_submit():
             'amount':       amount,
             'tx_type':      tx_type,
             'queued':       _queued,
+            'db_written':   _db_written,
             'message':      f'Transaction submitted — {tx_hash[:16]}…',
             'timestamp':    ts,
         }), 201
@@ -1176,11 +1213,56 @@ def api_transactions_list():
     if not is_auth:
         return jsonify({'status': 'error', 'error': 'Authentication required'}), 401
     try:
+        limit  = int(request.args.get('limit', 20))
+        offset = int(request.args.get('offset', 0))
+        status = request.args.get('status', '')
+
+        _db = get_db_pool()
+        if _db is None:
+            return jsonify({'status': 'success', 'transactions': [], 'total': 0}), 200
+
+        where  = "WHERE status=%s" if status else ""
+        params = [status] if status else []
+
+        rows = _db.execute(
+            f"SELECT tx_id, tx_hash, from_address, to_address, amount, tx_type, "
+            f"status, created_at, confirmations "
+            f"FROM transactions {where} "
+            f"ORDER BY created_at DESC LIMIT %s OFFSET %s",
+            params + [limit, offset], return_results=True
+        ) or []
+
+        count_row = _db.execute_fetch(
+            f"SELECT COUNT(*) AS c FROM transactions {where}",
+            params if params else None
+        )
+        total = int(count_row.get('c', 0)) if count_row else 0
+
+        txns = []
+        for r in (rows or []):
+            t = dict(r)
+            for k, v in t.items():
+                if hasattr(v, 'isoformat'):
+                    t[k] = v.isoformat()
+                elif type(v).__name__ == 'Decimal':
+                    t[k] = float(v)
+            if 'amount' in t and t['amount'] is not None:
+                try:
+                    t['amount_qtcl'] = float(t['amount']) / 10**18
+                except Exception:
+                    pass
+            txns.append(t)
+
         gs = get_globals()
-        return jsonify({'status': 'success', 'transactions': [],
-                        'total': getattr(gs.blockchain, 'total_transactions', 0),
-                        'mempool_size': getattr(gs.blockchain, 'mempool_size', 0)}), 200
+        return jsonify({
+            'status':       'success',
+            'transactions': txns,
+            'total':        total,
+            'mempool_size': getattr(gs.blockchain, 'mempool_size', 0) if gs else 0,
+            'count':        len(txns),
+        }), 200
     except Exception as exc:
+        logger.error(f'[/api/transactions] {exc}')
         return jsonify({'status': 'error', 'error': str(exc)}), 500
 
 
@@ -1199,27 +1281,11 @@ def api_transactions_stats():
         return jsonify({'status': 'error', 'error': str(exc)}), 500
 
 
+logger.info('[wsgi] ✓ /api/transactions/* fallback routes registered')
 
-logger.info('[wsgi] ✓ /api/transactions/* routes registered')
 
-
-@app.errorhandler(404)
-def not_found(e):
-    # API paths must NEVER return HTML — terminal block handlers detect HTML as an error
-    if request.path.startswith('/api/'):
-        return jsonify({'status': 'error', 'error': 'Not found', 'path': request.path}), 404
-    html_path = os.path.join(PROJECT_ROOT, 'index.html')
-    if os.path.exists(html_path):
-        try:
-            return Response(open(html_path, encoding='utf-8').read(), 200, mimetype='text/html')
-        except Exception:
-            pass
-    return jsonify({'error': 'Not found', 'path': request.path}), 404
-
-@app.errorhandler(500)
-def server_error(e):
-    logger.error(f'[500] {e}')
-    return jsonify({'error': 'Internal server error', 'detail': str(e)}), 500
+# ── /api/transactions/submit  (guaranteed fallback — fires even if blockchain_api fails) ──
+# Blueprint route takes precedence when blockchain_api loads; this catches the gap.
 
 
 # ── WSGI entrypoint for gunicorn ──────────────────────────────────────────────
