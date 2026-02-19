@@ -8,7 +8,8 @@ try:
     GLOBALS_AVAILABLE = True
 except ImportError:
     GLOBALS_AVAILABLE = False
-    logger.warning(f"[{os.path.basename(input_path)}] Globals not available - using fallback")
+    import sys as _sys
+    print("[blockchain_api] WARNING: globals not available - using fallback", file=_sys.stderr)
 
 
 """

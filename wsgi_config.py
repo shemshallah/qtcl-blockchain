@@ -1199,88 +1199,21 @@ def api_transactions_stats():
         return jsonify({'status': 'error', 'error': str(exc)}), 500
 
 
-logger.info('[wsgi] ✓ /api/transactions/* fallback routes registered')
 
-
-# ── /api/transactions/submit  (guaranteed fallback — fires even if blockchain_api fails) ──
-# Blueprint route takes precedence when blockchain_api loads; this catches the gap.
-@app.route('/api/transactions/submit', methods=['POST'])
-def api_tx_submit():
-    is_auth, _ = _parse_auth(request)
-    if not is_auth:
-        return jsonify({'status': 'error', 'error': 'Authentication required'}), 401
-    try:
-        data = request.get_json(force=True, silent=True) or {}
-        from_address = (data.get('from_address') or data.get('from') or '').strip()
-        to_address   = (data.get('to_address')   or data.get('to')   or '').strip()
-        for _ch in '\x00\r\n\x1b':
-            to_address = to_address.replace(_ch, '')
-            from_address = from_address.replace(_ch, '')
-        if not to_address:
-            return jsonify({'status': 'error', 'error': 'to_address is required'}), 400
-        try:
-            amount = float(data.get('amount', 0))
-            if amount <= 0:
-                return jsonify({'status': 'error', 'error': 'Amount must be positive'}), 400
-        except (TypeError, ValueError):
-            return jsonify({'status': 'error', 'error': f"Invalid amount: {data.get('amount')!r}"}), 400
-
-        import hashlib, secrets as _sec, time as _t
-        ts      = datetime.now(timezone.utc).isoformat()
-        salt    = _sec.token_hex(16)
-        tx_hash = hashlib.sha3_256(f'{from_address}{to_address}{amount}{ts}{salt}'.encode()).hexdigest()
-        tx_type = str(data.get('tx_type') or data.get('type', 'transfer'))
-        memo    = str(data.get('memo', ''))[:500]
-
-        # Try ledger mempool
-        _queued = False
-        try:
-            from ledger_manager import GLOBAL_MEMPOOL as _mp
-            if _mp:
-                _mp.add_transaction({'tx_hash': tx_hash, 'from_address': from_address,
-                    'to_address': to_address, 'amount': amount, 'tx_type': tx_type,
-                    'status': 'pending', 'memo': memo, 'timestamp': ts})
-                _queued = True
-        except Exception:
-            pass
-
-        logger.info(f'[tx/submit] {tx_hash[:16]}… to={to_address} amount={amount}')
-        return jsonify({
-            'status':      'success',
-            'tx_hash':     tx_hash,
-            'status_code': 'pending',
-            'from_address': from_address,
-            'to_address':  to_address,
-            'amount':      amount,
-            'tx_type':     tx_type,
-            'queued':      _queued,
-            'message':     f'Transaction submitted — {tx_hash[:16]}…',
-            'timestamp':   ts,
-        }), 201
-    except Exception as exc:
-        logger.error(f'[/api/transactions/submit] {exc}', exc_info=True)
-        return jsonify({'status': 'error', 'error': str(exc)}), 500
-
-@app.route('/api/transactions', methods=['GET'])
-def api_tx_list():
-    is_auth, _ = _parse_auth(request)
-    if not is_auth:
-        return jsonify({'status': 'error', 'error': 'Authentication required'}), 401
-    try:
-        gs = get_globals()
-        return jsonify({'status': 'success', 'transactions': [],
-            'total': getattr(gs.blockchain, 'total_transactions', 0)}), 200
-    except Exception as exc:
-        return jsonify({'status': 'error', 'error': str(exc)}), 500
-
-logger.info('[wsgi] ✓ /api/transactions/* fallback routes registered')
+logger.info('[wsgi] ✓ /api/transactions/* routes registered')
 
 
 @app.errorhandler(404)
 def not_found(e):
+    # API paths must NEVER return HTML — terminal block handlers detect HTML as an error
+    if request.path.startswith('/api/'):
+        return jsonify({'status': 'error', 'error': 'Not found', 'path': request.path}), 404
     html_path = os.path.join(PROJECT_ROOT, 'index.html')
     if os.path.exists(html_path):
-        return Response(open(html_path, encoding='utf-8').read(), 200, mimetype='text/html')
+        try:
+            return Response(open(html_path, encoding='utf-8').read(), 200, mimetype='text/html')
+        except Exception:
+            pass
     return jsonify({'error': 'Not found', 'path': request.path}), 404
 
 @app.errorhandler(500)

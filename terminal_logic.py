@@ -5351,10 +5351,44 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         except Exception as e:
             _log_debug(f'h_block_list globals failed: {e}')
         
-        # Fallback to API
-        params = {k: v for k, v in flags.items() if k in ('limit', 'offset', 'order')}
-        params.setdefault('limit', '20')
-        return _req('GET', '/api/blocks', params=params)
+        # Fallback: direct DB query — no HTTP call to avoid HTML 404 issue
+        try:
+            from globals import get_db_pool
+            db = get_db_pool()
+            if db is not None:
+                limit = int(flags.get('limit', 20))
+                offset = int(flags.get('offset', 0))
+                _conn = db.get_connection() if hasattr(db, 'get_connection') else None
+                if _conn:
+                    try:
+                        with _conn.cursor() as _cur:
+                            _cur.execute(
+                                "SELECT height, block_hash, previous_hash, timestamp, validator, "
+                                "status, confirmations, quantum_entropy, temporal_coherence "
+                                "FROM blocks ORDER BY height DESC LIMIT %s OFFSET %s",
+                                (limit, offset)
+                            )
+                            rows = _cur.fetchall()
+                            cols = [d[0] for d in _cur.description] if _cur.description else []
+                        blocks = [dict(zip(cols, r)) for r in (rows or [])]
+                        # Get total count
+                        with _conn.cursor() as _cur2:
+                            _cur2.execute("SELECT COUNT(*) FROM blocks")
+                            total_row = _cur2.fetchone()
+                            total = int(total_row[0]) if total_row else 0
+                        for b in blocks:
+                            b['source'] = 'database'
+                            if hasattr(b.get('timestamp'), 'isoformat'):
+                                b['timestamp'] = b['timestamp'].isoformat()
+                        return _ok({'blocks': blocks, 'total_blocks': total,
+                                    'count': len(blocks), 'limit': limit, 'offset': offset})
+                    finally:
+                        db.return_connection(_conn)
+        except Exception as e:
+            _log_debug(f'h_block_list DB fallback failed: {e}')
+        
+        return _ok({'blocks': [], 'total_blocks': 0, 'count': 0,
+                    'message': 'No blocks available — chain may be empty'})
 
     def h_block_details(flags, args):
         """Get detailed block information with quantum measurements"""
@@ -5378,7 +5412,7 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
                     b_height = b.get('height') or b.get('block_number')
                     b_hash = b.get('block_hash')
                     
-                    if (target_height and b_height == target_height) or (b_hash == num):
+                    if (target_height is not None and b_height == target_height) or (b_hash == num):
                         tx_list = b.get('transaction_list', [])
                         return _ok({
                             'height': b_height,
@@ -5414,12 +5448,49 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         except Exception as e:
             _log_debug(f'h_block_details globals failed: {e}')
         
-        # Fallback to API
+        # Fallback: direct DB query — no HTTP call
         try:
-            height = int(num)
-            return _req('GET', f'/api/blocks/{height}')
-        except ValueError:
-            return _req('GET', f'/api/blocks/hash/{num}')
+            from globals import get_db_pool
+            db = get_db_pool()
+            if db is not None:
+                _conn = db.get_connection() if hasattr(db, 'get_connection') else None
+                if _conn:
+                    try:
+                        with _conn.cursor() as _cur:
+                            try:
+                                height_val = int(num)
+                                _cur.execute("SELECT * FROM blocks WHERE height=%s LIMIT 1", (height_val,))
+                            except ValueError:
+                                _cur.execute("SELECT * FROM blocks WHERE block_hash=%s LIMIT 1", (str(num),))
+                            row = _cur.fetchone()
+                            cols = [d[0] for d in _cur.description] if _cur.description else []
+                        if row:
+                            block = dict(zip(cols, row))
+                            # Serialize non-JSON-safe types
+                            for k, v in block.items():
+                                if hasattr(v, 'isoformat'):
+                                    block[k] = v.isoformat()
+                                elif hasattr(v, '__class__') and v.__class__.__name__ == 'Decimal':
+                                    block[k] = float(v)
+                            block['source'] = 'database'
+                            # Fetch transactions for this block
+                            with _conn.cursor() as _cur2:
+                                _cur2.execute(
+                                    "SELECT tx_hash, status, amount FROM transactions WHERE block_hash=%s",
+                                    (block.get('block_hash', ''),)
+                                )
+                                tx_rows = _cur2.fetchall() or []
+                            block['tx_count'] = len(tx_rows)
+                            block['transaction_ids'] = [r[0] for r in tx_rows]
+                            return _ok(block)
+                        else:
+                            return _err(f'Block {num} not found')
+                    finally:
+                        db.return_connection(_conn)
+        except Exception as e:
+            _log_debug(f'h_block_details DB fallback failed: {e}')
+        
+        return _err(f'Block {num} not found — chain may be empty or block does not exist')
 
     def h_block_stats(flags, args):
         """Get comprehensive blockchain statistics from globals + DB"""
@@ -5446,8 +5517,48 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         except Exception as e:
             _log_debug(f'h_block_stats globals failed: {e}')
         
-        # Fallback to API
-        return _req('GET', '/api/blocks/stats')
+        # Fallback: direct DB query — no HTTP call
+        try:
+            from globals import get_db_pool
+            db = get_db_pool()
+            if db is not None:
+                _conn = db.get_connection() if hasattr(db, 'get_connection') else None
+                if _conn:
+                    try:
+                        stats = {}
+                        with _conn.cursor() as _cur:
+                            _cur.execute("SELECT COUNT(*) as total, MAX(height) as max_height FROM blocks")
+                            row = _cur.fetchone()
+                            stats['total_blocks'] = int(row[0]) if row else 0
+                            stats['chain_height'] = int(row[1]) if row and row[1] is not None else 0
+                        with _conn.cursor() as _cur2:
+                            _cur2.execute("SELECT COUNT(*) FROM transactions")
+                            row2 = _cur2.fetchone()
+                            stats['total_transactions'] = int(row2[0]) if row2 else 0
+                        with _conn.cursor() as _cur3:
+                            _cur3.execute("SELECT COUNT(*) FROM transactions WHERE status='pending'")
+                            row3 = _cur3.fetchone()
+                            stats['mempool_size'] = int(row3[0]) if row3 else 0
+                        with _conn.cursor() as _cur4:
+                            _cur4.execute(
+                                "SELECT AVG(EXTRACT(EPOCH FROM (b1.timestamp - b2.timestamp))) "
+                                "FROM blocks b1 JOIN blocks b2 ON b1.height = b2.height + 1 "
+                                "WHERE b1.height > (SELECT MAX(height) - 100 FROM blocks)"
+                            )
+                            row4 = _cur4.fetchone()
+                            stats['avg_block_time'] = round(float(row4[0]), 2) if row4 and row4[0] else 0
+                        stats['source'] = 'database'
+                        return _ok(stats)
+                    except Exception as _qe:
+                        _log_debug(f'h_block_stats DB query error: {_qe}')
+                    finally:
+                        db.return_connection(_conn)
+        except Exception as e:
+            _log_debug(f'h_block_stats DB fallback failed: {e}')
+        
+        return _ok({'total_blocks': 0, 'chain_height': 0, 'total_transactions': 0,
+                    'mempool_size': 0, 'source': 'empty',
+                    'message': 'Chain stats unavailable — DB may be empty'})
 
     def h_block_validate(flags, args):
         """Validate block with quantum proof"""
@@ -5456,10 +5567,33 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             return _err('Usage: block-validate <height>')
         
         try:
-            height = int(num)
-            return _req('GET', f'/api/blocks/{height}/quantum-proof')
-        except ValueError:
-            return _req('GET', f'/api/blocks/hash/{num}')
+            from globals import get_db_pool
+            db = get_db_pool()
+            if db is not None:
+                _conn = db.get_connection() if hasattr(db, 'get_connection') else None
+                if _conn:
+                    try:
+                        with _conn.cursor() as _cur:
+                            try:
+                                _cur.execute("SELECT height, block_hash, quantum_proof, status, confirmations FROM blocks WHERE height=%s LIMIT 1", (int(num),))
+                            except (ValueError, TypeError):
+                                _cur.execute("SELECT height, block_hash, quantum_proof, status, confirmations FROM blocks WHERE block_hash=%s LIMIT 1", (str(num),))
+                            row = _cur.fetchone()
+                        if row:
+                            return _ok({
+                                'height': row[0], 'block_hash': row[1],
+                                'quantum_proof': row[2], 'status': row[3],
+                                'confirmations': row[4],
+                                'valid': row[3] in ('finalized', 'confirmed', 'complete'),
+                                'source': 'database',
+                            })
+                        return _err(f'Block {num} not found')
+                    finally:
+                        db.return_connection(_conn)
+        except Exception as e:
+            _log_debug(f'h_block_validate DB failed: {e}')
+        
+        return _err(f'Could not validate block {num}')
 
     def h_block_explorer(flags, args):
         """Search for blocks by height or hash"""
@@ -5468,10 +5602,35 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             return _err('Usage: block-explorer <height_or_hash>')
         
         try:
-            height = int(query)
-            return _req('GET', f'/api/blocks/{height}')
-        except ValueError:
-            return _req('GET', f'/api/blocks/hash/{query}')
+            from globals import get_db_pool
+            db = get_db_pool()
+            if db is not None:
+                _conn = db.get_connection() if hasattr(db, 'get_connection') else None
+                if _conn:
+                    try:
+                        with _conn.cursor() as _cur:
+                            try:
+                                _cur.execute("SELECT * FROM blocks WHERE height=%s LIMIT 1", (int(query),))
+                            except (ValueError, TypeError):
+                                _cur.execute("SELECT * FROM blocks WHERE block_hash=%s LIMIT 1", (str(query),))
+                            row = _cur.fetchone()
+                            cols = [d[0] for d in _cur.description] if _cur.description else []
+                        if row:
+                            block = dict(zip(cols, row))
+                            for k, v in block.items():
+                                if hasattr(v, 'isoformat'):
+                                    block[k] = v.isoformat()
+                                elif hasattr(v, '__class__') and v.__class__.__name__ == 'Decimal':
+                                    block[k] = float(v)
+                            block['source'] = 'database'
+                            return _ok(block)
+                        return _err(f'Block {query} not found')
+                    finally:
+                        db.return_connection(_conn)
+        except Exception as e:
+            _log_debug(f'h_block_explorer DB failed: {e}')
+        
+        return _err(f'Block {query} not found')
 
     # ── QUANTUM ───────────────────────────────────────────────────────────────
 
@@ -5519,13 +5678,50 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
                     },
                     'source': 'globals',
                 })
-            else:
-                return _err(f'Block {block_id} not found in globals')
         except Exception as e:
             _log_debug(f'h_block_quantum globals failed: {e}')
         
-        # Fallback to API
-        return _req('GET', f'/api/blocks/{block_id}/quantum')
+        # Fallback: direct DB query — no HTTP call
+        try:
+            from globals import get_db_pool
+            db = get_db_pool()
+            if db is not None:
+                _conn = db.get_connection() if hasattr(db, 'get_connection') else None
+                if _conn:
+                    try:
+                        with _conn.cursor() as _cur:
+                            if block_id == 'latest':
+                                _cur.execute(
+                                    "SELECT height, block_hash, quantum_entropy, quantum_proof, temporal_coherence "
+                                    "FROM blocks ORDER BY height DESC LIMIT 1"
+                                )
+                            else:
+                                try:
+                                    _cur.execute(
+                                        "SELECT height, block_hash, quantum_entropy, quantum_proof, temporal_coherence "
+                                        "FROM blocks WHERE height=%s LIMIT 1", (int(block_id),)
+                                    )
+                                except (ValueError, TypeError):
+                                    _cur.execute(
+                                        "SELECT height, block_hash, quantum_entropy, quantum_proof, temporal_coherence "
+                                        "FROM blocks WHERE block_hash=%s LIMIT 1", (str(block_id),)
+                                    )
+                            row = _cur.fetchone()
+                        if row:
+                            return _ok({
+                                'block_height': row[0], 'block_hash': row[1],
+                                'quantum_entropy': float(row[2]) if row[2] else 0,
+                                'quantum_proof': row[3],
+                                'temporal_coherence': float(row[4]) if row[4] else 0,
+                                'source': 'database',
+                            })
+                        return _err(f'Block {block_id} not found')
+                    finally:
+                        db.return_connection(_conn)
+        except Exception as e:
+            _log_debug(f'h_block_quantum DB fallback failed: {e}')
+        
+        return _err(f'Block {block_id} not found')
 
     def h_block_integrity(flags, args):
         """Verify blockchain integrity"""
@@ -5565,8 +5761,50 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         except Exception as e:
             _log_debug(f'h_block_integrity globals failed: {e}')
         
-        # Fallback to API
-        return _req('GET', '/api/blocks/integrity', params=flags)
+        # Fallback: direct DB integrity check — no HTTP call
+        try:
+            from globals import get_db_pool
+            db = get_db_pool()
+            if db is not None:
+                limit = int(flags.get('limit', 50))
+                _conn = db.get_connection() if hasattr(db, 'get_connection') else None
+                if _conn:
+                    try:
+                        with _conn.cursor() as _cur:
+                            _cur.execute(
+                                "SELECT height, block_hash, previous_hash FROM blocks "
+                                "ORDER BY height DESC LIMIT %s", (limit,)
+                            )
+                            rows = _cur.fetchall() or []
+                        # rows ordered DESC, reverse for ascending check
+                        rows = list(reversed(rows))
+                        broken_links = []
+                        for i in range(1, len(rows)):
+                            curr_h, curr_hash, curr_prev = rows[i]
+                            prev_h, prev_hash, _ = rows[i-1]
+                            if curr_prev and prev_hash and curr_prev != prev_hash:
+                                broken_links.append({
+                                    'at_height': curr_h,
+                                    'expected_prev': prev_hash,
+                                    'actual_prev': curr_prev,
+                                })
+                        return _ok({
+                            'blocks_checked': len(rows),
+                            'chain_intact': len(broken_links) == 0,
+                            'broken_links': broken_links,
+                            'height_range': {
+                                'from': rows[0][0] if rows else None,
+                                'to': rows[-1][0] if rows else None,
+                            },
+                            'source': 'database',
+                        })
+                    finally:
+                        db.return_connection(_conn)
+        except Exception as e:
+            _log_debug(f'h_block_integrity DB fallback failed: {e}')
+        
+        return _ok({'blocks_checked': 0, 'chain_intact': True, 'broken_links': [],
+                    'message': 'Could not check integrity — chain may be empty', 'source': 'empty'})
 
     # ── QUANTUM ───────────────────────────────────────────────────────────────
 
