@@ -2061,16 +2061,14 @@ def create_blueprint()->Blueprint:
     @rate_limit(100,60)
     def submit_transaction():
         """Submit transaction through full quantum routing pipeline."""
-        # ── Safe no-op stubs for None singletons ─────────────────────────
         import contextlib
         class _NoopCtx:
             def __enter__(self): return self
             def __exit__(self,*a): pass
-        _profiler  = PROFILER     if (PROFILER   and hasattr(PROFILER,'profile'))   else None
-        _ebudget   = ERROR_BUDGET if (ERROR_BUDGET and hasattr(ERROR_BUDGET,'deduct')) else None
-        _rc        = RequestCorrelation if (RequestCorrelation and hasattr(RequestCorrelation,'start_operation')) else None
+        _profiler = PROFILER     if (PROFILER     and hasattr(PROFILER,    'profile')) else None
+        _ebudget  = ERROR_BUDGET if (ERROR_BUDGET and hasattr(ERROR_BUDGET,'deduct'))  else None
+        _rc       = RequestCorrelation if (RequestCorrelation and hasattr(RequestCorrelation,'start_operation')) else None
         profile_ctx = _profiler.profile('submit_transaction') if _profiler else _NoopCtx()
-
         correlation_id = _rc.start_operation('submit_transaction') if _rc else str(uuid.uuid4())
         with profile_ctx:
             try:
