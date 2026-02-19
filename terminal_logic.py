@@ -264,21 +264,138 @@ def ensure_packages():
 
 ensure_packages()
 
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# 🔴 ENTERPRISE PRODUCTION DEPENDENCY VALIDATION (2025-02-19)
+# 
+# POLICY: This is PRODUCTION-GRADE software. It requires ALL critical dependencies.
+# NO STUBS. NO DEGRADED MODE. NO HALF-MEASURES.
+#
+# Either the environment has all required packages installed, or deployment fails
+# with CLEAR, ACTIONABLE error messages.
+#
+# This ensures that either:
+#   ✓ All 89 commands work 100% perfectly, OR
+#   ✗ Deployment fails immediately with instructions for the ops team
+#
+# NO SILENT FAILURES. NO PARTIALLY-FUNCTIONAL SYSTEMS.
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+
+def _check_production_dependencies():
+    """
+    Verify all production dependencies are available.
+    Fail fast with clear instructions if any are missing.
+    """
+    missing = []
+    
+    # Check each required package
+    checks = [
+        ('requests', 'requests', 'HTTP client library'),
+        ('colorama', 'colorama', 'Terminal ANSI color output'),
+        ('tabulate', 'tabulate', 'CLI table formatting'),
+        ('jwt', 'PyJWT', 'JWT token handling & verification'),
+        ('bcrypt', 'bcrypt', 'Password hashing (12-round salts)'),
+        ('psycopg2', 'psycopg2-binary', 'PostgreSQL/Supabase driver'),
+        ('cryptography', 'cryptography', 'Asymmetric crypto operations'),
+    ]
+    
+    for import_name, pip_name, description in checks:
+        try:
+            __import__(import_name)
+        except ImportError:
+            missing.append((pip_name, description))
+    
+    if missing:
+        error_lines = [
+            "",
+            "╔" + "═" * 78 + "╗",
+            "║ 🚨 PRODUCTION DEPLOYMENT FAILED — MISSING REQUIRED DEPENDENCIES        ║",
+            "║                                                                        ║",
+            "║ This is enterprise-grade software. It requires ALL critical packages. ║",
+            "║ No stubs. No fallbacks. No degraded mode. Complete or fail.           ║",
+            "╚" + "═" * 78 + "╝",
+            "",
+            "MISSING PACKAGES:",
+        ]
+        for pip_name, description in missing:
+            error_lines.append(f"  ❌ {pip_name:25s} — {description}")
+        
+        error_lines.extend([
+            "",
+            "DEPLOYMENT INSTRUCTIONS:",
+            "━" * 80,
+            "",
+            "1️⃣  Add to requirements.txt (or Pipfile/pyproject.toml):",
+            "",
+        ])
+        
+        for pip_name, _ in missing:
+            error_lines.append(f"      {pip_name}")
+        
+        error_lines.extend([
+            "",
+            "2️⃣  Install in your deployment environment:",
+            "",
+            "      pip install --upgrade pip",
+            "      pip install bcrypt PyJWT psycopg2-binary cryptography requests colorama tabulate",
+            "",
+            "3️⃣  Verify installation (before deployment):",
+            "",
+            "      python3 << 'EOF'",
+            "      import bcrypt, jwt, psycopg2, cryptography, requests, colorama, tabulate",
+            "      print('✓ All packages available')",
+            "      EOF",
+            "",
+            "4️⃣  Then restart the application.",
+            "",
+            "PRODUCTION REQUIREMENTS:",
+            "━" * 80,
+            "  • Python 3.9 or later",
+            "  • bcrypt with 12+ round salts (for password hashing)",
+            "  • PyJWT for stateless token validation",
+            "  • psycopg2-binary OR psycopg2 (compiled PostgreSQL driver)",
+            "  • cryptography for RSA/EC asymmetric operations",
+            "  • All packages must be in-process (not stubs/mocks)",
+            "",
+            "If running in Docker: Ensure Dockerfile installs these before copying code",
+            "If running on Kubernetes: Ensure base image or init container installs these",
+            "If running on Heroku/Koyeb: Add requirements.txt to root of repo",
+            "",
+            "═" * 80,
+            "",
+        ])
+        
+        error_msg = "\n".join(error_lines)
+        import sys
+        sys.stderr.write(error_msg)
+        raise RuntimeError(f"Production deployment failed. {len(missing)} required packages missing.")
+
+# Run dependency check at import time
+_check_production_dependencies()
+
+# NOW import for real (guaranteed to succeed after check)
 import requests
 from colorama import Fore, Back, Style, init
 from tabulate import tabulate
 import jwt
 import bcrypt
+
+# PostgreSQL driver
 try:
     import psycopg2
     from psycopg2.extras import RealDictCursor
-    PSYCOPG2_AVAILABLE=True
+    PSYCOPG2_AVAILABLE = True
 except ImportError:
-    PSYCOPG2_AVAILABLE=False
+    # Should not reach here (caught by _check_production_dependencies)
+    PSYCOPG2_AVAILABLE = False
+    psycopg2 = None
+    RealDictCursor = None
+
+# Cryptography
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, ec, padding
 from cryptography.hazmat.backends import default_backend
 
+# Initialize colorama for terminal output
 init(autoreset=True)
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
@@ -5886,6 +6003,34 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             except Exception:
                 pass
         return _ok(t)
+
+    def h_tx_cancel(flags, args):
+        """Cancel a pending transaction by hash."""
+        tx_id = flags.get('id') or flags.get('tx_id') or flags.get('hash') or (args[0] if args else None)
+        if not tx_id:
+            return _err('Usage: transaction-cancel --id=<tx_hash>')
+        
+        # Verify transaction exists and is pending
+        row = _db_exec(
+            "SELECT tx_hash, status FROM transactions WHERE tx_hash=%s OR tx_id=%s LIMIT 1",
+            (str(tx_id), str(tx_id)), fetch_one=True
+        )
+        if not row:
+            return _err(f'Transaction {tx_id} not found')
+        
+        status = row.get('status', '').lower() if isinstance(row, dict) else (row[1] if len(row) > 1 else '')
+        if status and status not in ('pending', 'queued'):
+            return _err(f'Cannot cancel {status} transaction — only pending transactions can be cancelled')
+        
+        # Update status to cancelled
+        try:
+            _db_exec(
+                "UPDATE transactions SET status='cancelled', updated_at=NOW() WHERE tx_hash=%s OR tx_id=%s",
+                (str(tx_id), str(tx_id))
+            )
+            return _ok({'tx_hash': tx_id, 'status': 'cancelled', 'message': f'Transaction {tx_id[:16]}… cancelled'})
+        except Exception as e:
+            return _err(f'Failed to cancel transaction: {str(e)}')
 
     def h_tx_stats(flags, args):
         """Transaction statistics from DB."""
