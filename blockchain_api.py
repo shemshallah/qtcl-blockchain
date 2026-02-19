@@ -1692,7 +1692,20 @@ def create_blueprint()->Blueprint:
     /api/epochs/*, /api/chain/*, /api/qrng/*
     """
     bp=Blueprint('blockchain_api',__name__,url_prefix='/api')
-    db=BlockchainDB(db_manager)
+    # ── Resolve db_manager at call-time (not module-import time) ─────────────
+    _db_mgr = None
+    try:
+        from globals import get_db_pool as _gdp
+        _db_mgr = _gdp()
+    except Exception:
+        pass
+    if _db_mgr is None:
+        try:
+            import wsgi_config as _wc
+            _db_mgr = getattr(_wc, 'DB', None)
+        except Exception:
+            pass
+    db=BlockchainDB(_db_mgr)
     chain=BlockChainState()
     mempool=QuantumMempool()
     router=QuantumTransactionRouter()
