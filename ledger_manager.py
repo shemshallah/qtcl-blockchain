@@ -6198,3 +6198,834 @@ LEDGER_INTEGRATION = LedgerSystemIntegration()
 
 def get_ledger_integration():
     return LEDGER_INTEGRATION
+
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# UNIFIED TRANSACTION + BLOCK REST API BLUEPRINT
+# Registered at /api prefix — collapses 4 data silos into authoritative single endpoints:
+#   Silo A → DB.execute() via wsgi_config.DB          (persisted truth, always primary)
+#   Silo B → global_mempool.pending_txs               (live queue, not yet on-chain)
+#   Silo C → globals.get_tx_engine_state().recent_txs (ring buffer, StagedTXRecord)
+#   Silo D → globals.get_blockchain().pending_transactions (in-memory fallback)
+# All reads are exception-safe. DB wins on conflict; pending sources overlay non-DB-present TXs.
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+def create_tx_block_blueprint():
+    """
+    Build Flask Blueprint with complete transaction + block REST API.
+    Designed to be registered with url_prefix='/api' in main_app.py.
+
+    Internal helper hierarchy:
+      _db_exec()          → thin wrapper around wsgi_config.DB.execute()
+      _silo_*()           → independent, exception-safe per-silo readers
+      _norm_tx()          → shape-normalises any TX dict regardless of origin
+      _unified_tx_list()  → merge + dedup across all 4 silos
+      _find_tx()          → cascading single-TX lookup
+      _agg_stats()        → cross-silo stat merge
+    """
+    from flask import Blueprint, jsonify, request, Response
+    from decimal import Decimal
+
+    bp = Blueprint('tx_block', __name__)
+    _log = logging.getLogger('ledger.tx_block_api')
+
+    # ─── DB helper (module-level wsgi_config.DB) ────────────────────────────────
+    def _db_exec(q, params=None, *, fetch=False):
+        """Execute against module-level DB singleton; return list or rowcount; never raises."""
+        try:
+            return DB.execute(q, params or (), return_results=fetch)
+        except Exception as _e:
+            _log.debug(f'[TxAPI] db_exec failed: {_e}')
+            return [] if fetch else 0
+
+    # ─── Silo readers ───────────────────────────────────────────────────────────
+    def _silo_bc():
+        """globals.blockchain — in-memory BlockchainState"""
+        try:
+            from globals import get_blockchain
+            return get_blockchain()
+        except Exception:
+            return None
+
+    def _silo_mempool_list():
+        """global_mempool.pending_txs — live deque"""
+        try:
+            gm = global_mempool
+            if gm is None:
+                return []
+            raw = list(gm.pending_txs) if hasattr(gm, 'pending_txs') else []
+            return [dict(t) | {'source': 'mempool'} for t in raw]
+        except Exception:
+            return []
+
+    def _silo_mempool_stats():
+        """global_mempool rich stats dict"""
+        try:
+            gm = global_mempool
+            if gm is None:
+                return {}
+            return gm.get_rich_stats() if hasattr(gm, 'get_rich_stats') else {
+                'pending_count': gm.get_pending_count() if hasattr(gm, 'get_pending_count') else 0
+            }
+        except Exception:
+            return {}
+
+    def _silo_ring():
+        """globals.tx_engine.recent_txs — StagedTXRecord ring buffer"""
+        try:
+            from globals import get_tx_engine_state
+            eng = get_tx_engine_state()
+            out = []
+            for r in list(eng.recent_txs):
+                d = r.__dict__ if hasattr(r, '__dict__') else {}
+                out.append({
+                    'tx_id': d.get('tx_id', ''),
+                    'tx_hash': d.get('tx_id', ''),
+                    'from_user_id': d.get('user_id', ''),
+                    'to_user_id': d.get('target_id', ''),
+                    'amount': d.get('amount', 0),
+                    'status': 'finalized' if d.get('finality_achieved') else 'pending',
+                    'tx_type': 'quantum_transfer',
+                    'stage': d.get('stage', ''),
+                    'finality_achieved': d.get('finality_achieved', False),
+                    'finality_confidence': d.get('finality_confidence', 0),
+                    'aggregate_entropy': d.get('aggregate_entropy', 0),
+                    'oracle_bit': d.get('oracle_bit', 0),
+                    'pqc_signed': d.get('pqc_signed', False),
+                    'block_number': d.get('block_number'),
+                    'created_at': d.get('created_at', ''),
+                    'source': 'engine_ring',
+                })
+            return out
+        except Exception:
+            return []
+
+    def _silo_globals_pending():
+        """globals.blockchain.pending_transactions — in-memory list"""
+        try:
+            bc = _silo_bc()
+            return [dict(t) | {'source': 'globals'} for t in (bc.pending_transactions or [])] if bc else []
+        except Exception:
+            return []
+
+    # ─── DB queries ─────────────────────────────────────────────────────────────
+    def _db_txs(limit=50, offset=0, status=None, tx_type=None):
+        clauses, params = [], []
+        if status:
+            clauses.append("t.status = %s"); params.append(status)
+        if tx_type:
+            clauses.append("t.tx_type = %s"); params.append(tx_type)
+        where = ('WHERE ' + ' AND '.join(clauses)) if clauses else ''
+        params += [limit, offset]
+        rows = _db_exec(f"""
+            SELECT t.tx_id, t.tx_hash, t.from_user_id, t.to_user_id,
+                   t.from_address, t.to_address, t.amount, t.tx_type, t.status,
+                   t.height, t.block_hash, t.transaction_index,
+                   t.quantum_state_hash, t.entropy_score, t.ghz_fidelity,
+                   t.validator_agreement, t.confirmations, t.finalized_at,
+                   t.created_at, t.error_message,
+                   b.block_number as confirmed_block_number,
+                   b.timestamp as block_timestamp
+            FROM transactions t
+            LEFT JOIN blocks b ON t.height = b.height
+            {where}
+            ORDER BY t.created_at DESC LIMIT %s OFFSET %s
+        """, tuple(params), fetch=True)
+        return [{k: float(v) if isinstance(v, Decimal) else v
+                 for k, v in dict(r).items()} | {'source': 'db'} for r in (rows or [])]
+
+    def _db_tx_by_id(identifier):
+        rows = _db_exec("""
+            SELECT t.tx_id, t.tx_hash, t.from_user_id, t.to_user_id,
+                   t.from_address, t.to_address, t.amount, t.tx_type, t.status,
+                   t.height, t.block_hash, t.transaction_index,
+                   t.quantum_state_hash, t.entropy_score, t.ghz_fidelity,
+                   t.w_fidelity, t.dominant_bitstring, t.validator_agreement,
+                   t.circuit_depth, t.circuit_size, t.execution_time_ms,
+                   t.confirmations, t.finalized_at, t.created_at, t.updated_at,
+                   t.error_message, t.metadata,
+                   b.block_number as confirmed_block_number,
+                   b.block_hash as confirmed_block_hash,
+                   b.timestamp as block_timestamp,
+                   b.validator as block_validator,
+                   b.entropy_score as block_entropy,
+                   f.is_finalized, f.confirmations_count, f.finality_score
+            FROM transactions t
+            LEFT JOIN blocks b ON t.height = b.height
+            LEFT JOIN finality_records f ON t.tx_id = f.tx_id
+            WHERE t.tx_id = %s OR t.tx_hash = %s LIMIT 1
+        """, (identifier, identifier), fetch=True)
+        if rows:
+            r = {k: float(v) if isinstance(v, Decimal) else v for k, v in dict(rows[0]).items()}
+            r['source'] = 'db'
+            return r
+        return None
+
+    def _db_tx_stats():
+        rows = _db_exec("""
+            SELECT COUNT(*) as total_transactions,
+                   COUNT(*) FILTER (WHERE status='pending')   as pending_count,
+                   COUNT(*) FILTER (WHERE status='finalized') as finalized_count,
+                   COUNT(*) FILTER (WHERE status='failed')    as failed_count,
+                   COUNT(*) FILTER (WHERE status='cancelled') as cancelled_count,
+                   COALESCE(SUM(CAST(amount AS FLOAT)),0)     as total_volume,
+                   COALESCE(AVG(CAST(amount AS FLOAT)),0)     as avg_amount,
+                   COALESCE(MAX(CAST(amount AS FLOAT)),0)     as max_amount,
+                   COALESCE(AVG(entropy_score),0)             as avg_entropy,
+                   COALESCE(AVG(ghz_fidelity),0)              as avg_ghz_fidelity,
+                   COALESCE(AVG(validator_agreement),0)       as avg_validator_agreement,
+                   MAX(created_at) as latest_tx_at
+            FROM transactions
+        """, fetch=True)
+        if rows:
+            return {k: float(v) if isinstance(v, Decimal) else (0 if v is None else v)
+                    for k, v in dict(rows[0]).items()}
+        return {}
+
+    def _db_block(height):
+        """Full block record + embedded TXs"""
+        rows = _db_exec("""
+            SELECT b.height, b.block_number, b.block_hash, b.previous_hash,
+                   b.state_root, b.transactions_root, b.timestamp,
+                   b.transactions as tx_count, b.validator, b.validator_signature,
+                   b.quantum_state_hash, b.entropy_score, b.floquet_cycle,
+                   b.merkle_root, b.quantum_merkle_root, b.quantum_proof,
+                   b.quantum_entropy, b.temporal_proof, b.temporal_coherence,
+                   b.difficulty, b.gas_used, b.gas_limit, b.miner_reward,
+                   b.confirmations, b.epoch, b.status, b.finalized,
+                   b.finalized_at, b.created_at, b.size_bytes,
+                   b.quantum_validation_status, b.quantum_measurements_count,
+                   b.quantum_proof_version, b.validation_entropy_avg
+            FROM blocks b WHERE b.height = %s OR b.block_number = %s LIMIT 1
+        """, (height, height), fetch=True)
+        if not rows:
+            return None
+        blk = {k: float(v) if isinstance(v, Decimal) else v for k, v in dict(rows[0]).items()}
+        tx_rows = _db_exec("""
+            SELECT tx_id, tx_hash, from_user_id, to_user_id, from_address,
+                   to_address, amount, tx_type, status, transaction_index,
+                   entropy_score, ghz_fidelity, validator_agreement, confirmations, created_at
+            FROM transactions WHERE height = %s
+            ORDER BY transaction_index ASC NULLS LAST, created_at ASC LIMIT 500
+        """, (blk['height'],), fetch=True)
+        blk['transaction_list'] = [{k: float(v) if isinstance(v, Decimal) else v
+                                    for k, v in dict(t).items()} for t in (tx_rows or [])]
+        blk['source'] = 'db'
+        return blk
+
+    def _db_block_by_hash(bh):
+        rows = _db_exec("SELECT height FROM blocks WHERE block_hash=%s LIMIT 1", (bh,), fetch=True)
+        return _db_block(rows[0]['height']) if rows else None
+
+    def _db_blocks_list(limit=20, offset=0):
+        rows = _db_exec("""
+            SELECT height, block_number, block_hash, previous_hash, timestamp,
+                   transactions as tx_count, validator, entropy_score, difficulty,
+                   status, finalized, confirmations, gas_used, gas_limit,
+                   quantum_validation_status, temporal_coherence, floquet_cycle, created_at
+            FROM blocks ORDER BY height DESC LIMIT %s OFFSET %s
+        """, (limit, offset), fetch=True)
+        return [{k: float(v) if isinstance(v, Decimal) else v
+                 for k, v in dict(r).items()} | {'source': 'db'} for r in (rows or [])]
+
+    def _db_block_stats():
+        rows = _db_exec("""
+            SELECT COUNT(*) as total_blocks, MAX(height) as chain_height,
+                   COALESCE(AVG(entropy_score),0) as avg_entropy,
+                   COALESCE(AVG(difficulty),0) as avg_difficulty,
+                   COALESCE(SUM(transactions),0) as total_txs_in_blocks,
+                   COALESCE(AVG(transactions),0) as avg_txs_per_block,
+                   COALESCE(AVG(gas_used),0) as avg_gas_used,
+                   COALESCE(AVG(temporal_coherence),0) as avg_temporal_coherence,
+                   COUNT(*) FILTER (WHERE finalized) as finalized_blocks,
+                   COUNT(*) FILTER (WHERE is_orphan) as orphan_blocks,
+                   MAX(created_at) as latest_block_at
+            FROM blocks
+        """, fetch=True)
+        if rows:
+            return {k: float(v) if isinstance(v, Decimal) else (0 if v is None else v)
+                    for k, v in dict(rows[0]).items()}
+        return {}
+
+    def _db_quantum_proof(height):
+        rows = _db_exec("""
+            SELECT height, block_hash, quantum_proof, quantum_entropy,
+                   quantum_state_hash, quantum_merkle_root, temporal_proof,
+                   entropy_score, temporal_coherence, floquet_cycle,
+                   quantum_validation_status, quantum_measurements_count,
+                   quantum_proof_version, validation_entropy_avg
+            FROM blocks WHERE height=%s OR block_number=%s LIMIT 1
+        """, (height, height), fetch=True)
+        if not rows:
+            return None
+        bq = {k: float(v) if isinstance(v, Decimal) else v for k, v in dict(rows[0]).items()}
+        measurements = []
+        try:
+            mrows = _db_exec("""
+                SELECT qubit_id, measurement_result, probability, phase_angle,
+                       coherence_time, created_at
+                FROM pseudoqubit_measurements WHERE block_height=%s ORDER BY qubit_id LIMIT 64
+            """, (bq['height'],), fetch=True)
+            measurements = [dict(r) for r in (mrows or [])]
+        except Exception:
+            pass
+        tx_entropy = {}
+        erows = _db_exec("""
+            SELECT COALESCE(AVG(entropy_score),0) as mean_entropy,
+                   COALESCE(STDDEV(entropy_score),0) as entropy_stddev,
+                   COALESCE(MIN(entropy_score),0) as min_entropy,
+                   COALESCE(MAX(entropy_score),0) as max_entropy,
+                   COALESCE(AVG(ghz_fidelity),0) as mean_ghz_fidelity,
+                   COALESCE(AVG(validator_agreement),0) as mean_validator_agreement,
+                   COUNT(*) as tx_count
+            FROM transactions WHERE height=%s
+        """, (bq['height'],), fetch=True)
+        if erows:
+            tx_entropy = {k: float(v) if isinstance(v, Decimal) else (0 if v is None else v)
+                          for k, v in dict(erows[0]).items()}
+        return {
+            'height': bq.get('height'),
+            'block_hash': bq.get('block_hash'),
+            'quantum_proof': bq.get('quantum_proof'),
+            'quantum_entropy': bq.get('quantum_entropy'),
+            'quantum_state_hash': bq.get('quantum_state_hash'),
+            'quantum_merkle_root': bq.get('quantum_merkle_root'),
+            'temporal_proof': bq.get('temporal_proof'),
+            'block_entropy_score': bq.get('entropy_score'),
+            'temporal_coherence': bq.get('temporal_coherence'),
+            'floquet_cycle': bq.get('floquet_cycle'),
+            'validation_status': bq.get('quantum_validation_status'),
+            'measurements_count': bq.get('quantum_measurements_count', 0),
+            'proof_version': bq.get('quantum_proof_version', 3),
+            'validation_entropy_avg': bq.get('validation_entropy_avg'),
+            'pseudoqubit_measurements': measurements,
+            'tx_entropy_distribution': tx_entropy,
+            'source': 'db',
+        }
+
+    # ─── Normaliser ─────────────────────────────────────────────────────────────
+    def _norm_tx(t):
+        tx_id = t.get('tx_id') or t.get('id') or ''
+        return {
+            'tx_id':               tx_id,
+            'tx_hash':             t.get('tx_hash') or t.get('hash') or tx_id,
+            'from_address':        t.get('from_address') or t.get('from_user_id') or '',
+            'to_address':          t.get('to_address') or t.get('to_user_id') or '',
+            'amount':              float(t.get('amount') or 0),
+            'tx_type':             t.get('tx_type', 'transfer'),
+            'status':              t.get('status', 'pending'),
+            'block_number':        t.get('confirmed_block_number') or t.get('height') or t.get('block_number'),
+            'block_hash':          t.get('block_hash') or t.get('confirmed_block_hash'),
+            'entropy_score':       float(t.get('entropy_score') or t.get('aggregate_entropy') or 0),
+            'ghz_fidelity':        float(t.get('ghz_fidelity') or 0),
+            'validator_agreement': float(t.get('validator_agreement') or 0),
+            'finality_achieved':   t.get('finality_achieved') or t.get('status') == 'finalized',
+            'finality_confidence': float(t.get('finality_confidence') or t.get('finality_score') or 0),
+            'pqc_signed':          bool(t.get('pqc_signed', False)),
+            'confirmations':       int(t.get('confirmations') or t.get('confirmations_count') or 0),
+            'created_at':          str(t.get('created_at') or ''),
+            'source':              t.get('source', 'unknown'),
+            'transaction_index':   t.get('transaction_index'),
+            'quantum_state_hash':  t.get('quantum_state_hash'),
+            'error_message':       t.get('error_message'),
+            'finalized_at':        t.get('finalized_at'),
+        }
+
+    # ─── Unified cross-silo operations ──────────────────────────────────────────
+    def _unified_tx_list(limit=50, offset=0, status=None, tx_type=None):
+        """Merge all 4 silos, deduplicate tx_id-keyed (DB wins), sort created_at DESC"""
+        seen = {}
+        for tx in _db_txs(limit=limit, offset=offset, status=status, tx_type=tx_type):
+            k = tx.get('tx_id') or tx.get('tx_hash') or ''
+            if k:
+                seen[k] = _norm_tx(tx)
+        for tx in _silo_mempool_list() + _silo_ring() + _silo_globals_pending():
+            k = tx.get('tx_id') or tx.get('id') or tx.get('tx_hash') or ''
+            if k and k not in seen:
+                n = _norm_tx(tx)
+                if status and n['status'] != status:
+                    continue
+                if tx_type and n['tx_type'] != tx_type:
+                    continue
+                seen[k] = n
+        ordered = sorted(seen.values(), key=lambda x: x.get('created_at') or '', reverse=True)
+        mp   = _silo_mempool_stats()
+        bc   = _silo_bc()
+        live = mp.get('pending_count', 0) or (bc.mempool_size if bc else 0)
+        return ordered[:limit], {
+            'total_unique': len(seen), 'db_count': len(_db_txs(limit=limit)),
+            'mempool_live': live, 'limit': limit, 'offset': offset,
+        }
+
+    def _find_tx(identifier):
+        """Cascade lookup: DB → mempool → ring → globals"""
+        db_tx = _db_tx_by_id(identifier)
+        if db_tx:
+            return _norm_tx(db_tx)
+        for tx in _silo_mempool_list() + _silo_ring() + _silo_globals_pending():
+            if identifier in (tx.get('tx_id',''), tx.get('id',''), tx.get('tx_hash','')):
+                return _norm_tx(tx)
+        return None
+
+    def _agg_stats():
+        """Cross-silo aggregate stats — DB ground truth + globals gap-fill"""
+        dbs  = _db_tx_stats()
+        mps  = _silo_mempool_stats()
+        blks = _db_block_stats()
+        bc   = _silo_bc()
+        eng  = {}
+        try:
+            from globals import get_tx_engine_state
+            e = get_tx_engine_state()
+            eng = {
+                'txs_submitted': e.txs_submitted, 'txs_finalized': e.txs_finalized,
+                'txs_rejected': e.txs_rejected, 'txs_failed': e.txs_failed,
+                'txs_pqc_signed': e.txs_pqc_signed, 'txs_zk_proven': e.txs_zk_proven,
+                'blocks_auto_sealed': e.blocks_auto_sealed,
+                'avg_entropy': e.avg_entropy, 'avg_coherence': e.avg_coherence,
+                'avg_finality_confidence': e.avg_finality_confidence,
+                'oracle_approvals': e.total_oracle_approvals,
+                'oracle_rejections': e.total_oracle_rejections,
+            }
+        except Exception:
+            pass
+        total_txs    = dbs.get('total_transactions') or (bc.total_transactions if bc else 0)
+        mempool_size = mps.get('pending_count', 0) or (bc.mempool_size if bc else 0)
+        chain_height = blks.get('chain_height') or (bc.chain_height if bc else 0)
+        return {
+            'status': 'success',
+            'total_transactions': total_txs,
+            'mempool_size': mempool_size,
+            'pending_count': dbs.get('pending_count', 0) or mempool_size,
+            'finalized_count': dbs.get('finalized_count', 0),
+            'failed_count': dbs.get('failed_count', 0),
+            'cancelled_count': dbs.get('cancelled_count', 0),
+            'total_volume_qtcl': dbs.get('total_volume', 0),
+            'avg_tx_amount': dbs.get('avg_amount', 0),
+            'max_tx_amount': dbs.get('max_amount', 0),
+            'avg_entropy': dbs.get('avg_entropy', 0) or eng.get('avg_entropy', 0),
+            'avg_ghz_fidelity': dbs.get('avg_ghz_fidelity', 0),
+            'avg_validator_agreement': dbs.get('avg_validator_agreement', 0),
+            'avg_finality_confidence': eng.get('avg_finality_confidence', 0),
+            'chain_height': chain_height,
+            'total_blocks': blks.get('total_blocks') or (bc.total_blocks if bc else 0),
+            'avg_txs_per_block': round(blks.get('avg_txs_per_block', 0), 2),
+            'finalized_blocks': blks.get('finalized_blocks', 0),
+            'mempool_details': mps,
+            'latest_tx_at': dbs.get('latest_tx_at'),
+            'latest_block_at': blks.get('latest_block_at'),
+            **eng,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }
+
+    # ════════════════════════════════════════════════════════════════════════════
+    # TRANSACTION ROUTES
+    # ════════════════════════════════════════════════════════════════════════════
+
+    @bp.route('/transactions', methods=['GET'])
+    def list_transactions():
+        try:
+            limit  = min(int(request.args.get('limit', 50)), 200)
+            offset = max(int(request.args.get('offset', 0)), 0)
+            status  = request.args.get('status')
+            fmt     = request.args.get('format', 'full')
+            tx_type = request.args.get('type')
+            txs, meta = _unified_tx_list(limit=limit, offset=offset, status=status, tx_type=tx_type)
+            if fmt == 'minimal':
+                txs = [{'tx_id': t['tx_id'], 'tx_hash': t['tx_hash'],
+                         'amount': t['amount'], 'status': t['status'],
+                         'created_at': t['created_at']} for t in txs]
+            bc = _silo_bc()
+            mps = _silo_mempool_stats()
+            return jsonify({
+                'status': 'success',
+                'transactions': txs,
+                'total': meta['total_unique'],
+                'mempool_size': mps.get('pending_count', 0) or (bc.mempool_size if bc else 0),
+                'meta': meta,
+            }), 200
+        except Exception as e:
+            _log.error(f'GET /transactions: {e}', exc_info=True)
+            return jsonify({'status': 'error', 'error': str(e)}), 500
+
+    @bp.route('/transactions/stats', methods=['GET'])
+    def transaction_stats():
+        try:
+            return jsonify(_agg_stats()), 200
+        except Exception as e:
+            _log.error(f'GET /transactions/stats: {e}', exc_info=True)
+            return jsonify({'status': 'error', 'error': str(e)}), 500
+
+    @bp.route('/transactions/analyze', methods=['GET'])
+    def analyze_transactions():
+        try:
+            dbs  = _db_tx_stats()
+            blks = _db_block_stats()
+            bc   = _silo_bc()
+            mps  = _silo_mempool_stats()
+            # Pull sample for entropy distribution
+            sample = _db_txs(limit=200)
+            entropies  = [float(t.get('entropy_score') or 0) for t in sample if t.get('entropy_score')]
+            fidelities = [float(t.get('ghz_fidelity') or 0) for t in sample if t.get('ghz_fidelity')]
+            agreements = [float(t.get('validator_agreement') or 0) for t in sample if t.get('validator_agreement')]
+            avg = lambda lst: sum(lst)/len(lst) if lst else 0.0
+            eng_s = {}
+            try:
+                from globals import get_tx_engine_state
+                e = get_tx_engine_state()
+                pqc_pct = (e.txs_pqc_signed / e.txs_submitted * 100) if e.txs_submitted else 0
+                zk_pct  = (e.txs_zk_proven  / e.txs_submitted * 100) if e.txs_submitted else 0
+                eng_s   = {'txs_submitted': e.txs_submitted, 'txs_finalized': e.txs_finalized,
+                            'ring_buffer_size': len(e.recent_txs),
+                            'pqc_signed_pct': round(pqc_pct, 2), 'zk_proven_pct': round(zk_pct, 2)}
+            except Exception:
+                pass
+            mempool_size = mps.get('pending_count', 0) or (bc.mempool_size if bc else 0)
+            threshold    = mps.get('threshold', 100)
+            total_txs = dbs.get('total_transactions', 1) or 1
+            return jsonify({
+                'status': 'success',
+                'analysis': {
+                    'total_transactions': dbs.get('total_transactions', 0),
+                    'finalized_transactions': dbs.get('finalized_count', 0),
+                    'finalization_rate': round(dbs.get('finalized_count', 0) / total_txs * 100, 2),
+                    'entropy': {'mean': round(avg(entropies), 4), 'max': round(max(entropies) if entropies else 0, 4),
+                                'min': round(min(entropies) if entropies else 0, 4), 'sample': len(entropies)},
+                    'ghz_fidelity': {'mean': round(avg(fidelities), 4), 'max': round(max(fidelities) if fidelities else 0, 4),
+                                     'sample': len(fidelities)},
+                    'validator_agreement': {'mean': round(avg(agreements), 4), 'sample': len(agreements)},
+                    'volume': {'total_qtcl': dbs.get('total_volume', 0),
+                               'avg_per_tx': round(dbs.get('avg_amount', 0), 6),
+                               'max_single_tx': dbs.get('max_amount', 0)},
+                    'security': eng_s,
+                    'mempool': {'pending_count': mempool_size, 'auto_seal_threshold': threshold,
+                                'seal_pressure_pct': round((mempool_size/threshold*100) if threshold else 0, 2)},
+                    'chain': {'height': blks.get('chain_height') or (bc.chain_height if bc else 0),
+                              'total_blocks': blks.get('total_blocks', 0),
+                              'avg_txs_per_block': round(blks.get('avg_txs_per_block', 0), 2),
+                              'finalized_blocks': blks.get('finalized_blocks', 0)},
+                },
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+            }), 200
+        except Exception as e:
+            _log.error(f'GET /transactions/analyze: {e}', exc_info=True)
+            return jsonify({'status': 'error', 'error': str(e)}), 500
+
+    @bp.route('/transactions/export', methods=['GET'])
+    def export_transactions():
+        try:
+            limit  = min(int(request.args.get('limit', 100)), 1000)
+            fmt    = request.args.get('format', 'json').lower()
+            status = request.args.get('status')
+            txs, meta = _unified_tx_list(limit=limit, status=status)
+            if fmt == 'csv':
+                fields = ['tx_id','tx_hash','from_address','to_address','amount','tx_type','status','created_at','block_number']
+                lines  = [','.join(fields)]
+                for tx in txs:
+                    lines.append(','.join(str(tx.get(f,'')) for f in fields))
+                return Response('\n'.join(lines), mimetype='text/csv',
+                                headers={'Content-Disposition': 'attachment; filename=transactions.csv'})
+            return jsonify({'status': 'success', 'format': 'json', 'transactions': txs,
+                            'total': meta['total_unique'],
+                            'exported_at': datetime.now(timezone.utc).isoformat()}), 200
+        except Exception as e:
+            return jsonify({'status': 'error', 'error': str(e)}), 500
+
+    @bp.route('/transactions/<string:tx_id>', methods=['GET'])
+    def get_transaction(tx_id):
+        try:
+            tx_id = tx_id.strip()
+            tx = _find_tx(tx_id)
+            if tx is None:
+                return jsonify({'status': 'not_found',
+                                'error': f'Transaction {tx_id!r} not found',
+                                'sources_checked': ['db','mempool','engine_ring','globals']}), 404
+            # Augment with block context
+            if tx.get('block_number') is not None:
+                blk = _db_block(int(tx['block_number']))
+                if blk:
+                    tx['block_context'] = {k: blk.get(k) for k in
+                        ('height','block_hash','timestamp','validator','entropy_score',
+                         'temporal_coherence','tx_count','finalized')}
+            return jsonify({'status': 'success', 'transaction': tx}), 200
+        except Exception as e:
+            _log.error(f'GET /transactions/{tx_id}: {e}', exc_info=True)
+            return jsonify({'status': 'error', 'error': str(e)}), 500
+
+    @bp.route('/transactions/submit', methods=['POST'])
+    def submit_transaction():
+        try:
+            data     = request.get_json() or {}
+            from_addr = (data.get('from_address') or data.get('from') or '').strip()
+            to_addr   = (data.get('to_address')   or data.get('to')   or '').strip()
+            amount    = float(data.get('amount', 0))
+            tx_type   = data.get('tx_type', 'transfer')
+            if not to_addr:
+                return jsonify({'status': 'error', 'error': 'to_address required'}), 400
+            if amount <= 0:
+                return jsonify({'status': 'error', 'error': 'amount must be > 0'}), 400
+            tx_id   = 'tx_' + secrets.token_hex(8)
+            tx_hash = hashlib.sha256(f'{from_addr}{to_addr}{amount}{tx_type}{time.time()}'.encode()).hexdigest()
+            ts      = datetime.now(timezone.utc).isoformat()
+            tx = {'tx_id': tx_id, 'tx_hash': tx_hash, 'from_address': from_addr,
+                  'to_address': to_addr, 'amount': amount, 'tx_type': tx_type,
+                  'status': 'pending', 'created_at': ts, 'source': 'submit'}
+            # Write to all live silos
+            try:
+                bc = _silo_bc()
+                if bc: bc.add_transaction(tx)
+            except Exception: pass
+            try:
+                gm = global_mempool
+                if gm: gm.add_transaction(tx)
+            except Exception: pass
+            # Async DB persist via TxPersistenceLayer
+            try:
+                if GLOBAL_TX_PERSIST_LAYER:
+                    GLOBAL_TX_PERSIST_LAYER.persist_async(TxPersistRecord(
+                        tx_id=tx_id, from_user_id=from_addr, to_user_id=to_addr,
+                        amount=amount, status='pending', tx_type=tx_type,
+                        quantum_hash='0x'+tx_hash, created_at=ts,
+                    ))
+            except Exception: pass
+            return jsonify({'status': 'success', 'status_code': 'pending', 'tx_id': tx_id,
+                            'tx_hash': tx_hash, 'from_address': from_addr, 'to_address': to_addr,
+                            'amount': amount, 'tx_type': tx_type, 'timestamp': ts}), 200
+        except Exception as e:
+            _log.error(f'POST /transactions/submit: {e}', exc_info=True)
+            return jsonify({'status': 'error', 'error': str(e)}), 500
+
+    @bp.route('/transactions/<string:tx_id>/cancel', methods=['POST'])
+    def cancel_transaction(tx_id):
+        try:
+            tx_id = tx_id.strip()
+            cancelled = False
+            # Remove from mempool deque
+            try:
+                gm = global_mempool
+                if gm and hasattr(gm, 'pending_txs'):
+                    new_q = deque()
+                    for tx in list(gm.pending_txs):
+                        if tx_id in (tx.get('tx_id',''), tx.get('id',''), tx.get('tx_hash','')):
+                            cancelled = True
+                        else:
+                            new_q.append(tx)
+                    gm.pending_txs = new_q
+            except Exception: pass
+            # Remove from globals.blockchain
+            try:
+                bc = _silo_bc()
+                if bc:
+                    orig = len(bc.pending_transactions)
+                    bc.pending_transactions = [t for t in bc.pending_transactions
+                        if tx_id not in (t.get('tx_id',''), t.get('tx_hash',''), t.get('id',''))]
+                    bc.mempool_size = len(bc.pending_transactions)
+                    if len(bc.pending_transactions) < orig:
+                        cancelled = True
+            except Exception: pass
+            # DB update
+            n = _db_exec("UPDATE transactions SET status='cancelled', updated_at=NOW() WHERE tx_id=%s OR tx_hash=%s",
+                         (tx_id, tx_id))
+            if n: cancelled = True
+            if not cancelled:
+                return jsonify({'status': 'not_found',
+                                'error': f'Transaction {tx_id!r} not found or already finalized'}), 404
+            return jsonify({'status': 'success', 'tx_id': tx_id, 'message': 'Transaction cancelled'}), 200
+        except Exception as e:
+            _log.error(f'POST /transactions/{tx_id}/cancel: {e}', exc_info=True)
+            return jsonify({'status': 'error', 'error': str(e)}), 500
+
+    # ════════════════════════════════════════════════════════════════════════════
+    # BLOCK ROUTES
+    # ════════════════════════════════════════════════════════════════════════════
+
+    @bp.route('/blocks', methods=['GET'])
+    def list_blocks():
+        try:
+            limit  = min(int(request.args.get('limit', 20)), 100)
+            offset = max(int(request.args.get('offset', 0)), 0)
+            blocks = _db_blocks_list(limit=limit, offset=offset)
+            bc     = _silo_bc()
+            height = (blocks[0].get('height') if blocks else None) or (bc.chain_height if bc else 0)
+            if not blocks and bc and bc.chain:
+                blocks = [{**b, 'source': 'globals'} for b in reversed(bc.chain[-limit:])]
+            return jsonify({'status': 'success', 'blocks': blocks,
+                            'total': len(blocks), 'chain_height': height}), 200
+        except Exception as e:
+            return jsonify({'status': 'error', 'error': str(e)}), 500
+
+    @bp.route('/blocks/stats', methods=['GET'])
+    def block_stats():
+        try:
+            dbs  = _db_block_stats()
+            txs  = _db_tx_stats()
+            bc   = _silo_bc()
+            mps  = _silo_mempool_stats()
+            return jsonify({
+                'status': 'success',
+                'chain_height': dbs.get('chain_height') or (bc.chain_height if bc else 0),
+                'total_blocks': dbs.get('total_blocks') or (bc.total_blocks if bc else 0),
+                'finalized_blocks': dbs.get('finalized_blocks', 0),
+                'orphan_blocks': dbs.get('orphan_blocks', 0),
+                'avg_txs_per_block': round(dbs.get('avg_txs_per_block', 0), 2),
+                'total_txs_in_blocks': dbs.get('total_txs_in_blocks', 0),
+                'avg_block_entropy': round(dbs.get('avg_entropy', 0), 4),
+                'avg_difficulty': round(dbs.get('avg_difficulty', 0), 4),
+                'avg_gas_used': int(dbs.get('avg_gas_used', 0)),
+                'avg_temporal_coherence': round(dbs.get('avg_temporal_coherence', 0), 4),
+                'total_transactions': txs.get('total_transactions', 0),
+                'mempool_size': mps.get('pending_count', 0) or (bc.mempool_size if bc else 0),
+                'consensus_mechanism': bc.consensus_mechanism if bc else 'QTCL_COHERENCE',
+                'latest_block_at': dbs.get('latest_block_at'),
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+            }), 200
+        except Exception as e:
+            return jsonify({'status': 'error', 'error': str(e)}), 500
+
+    @bp.route('/blocks/search', methods=['GET'])
+    def search_blocks():
+        try:
+            q = (request.args.get('q') or request.args.get('query') or '').strip()
+            if not q:
+                return jsonify({'status': 'error', 'error': 'Missing ?q='}), 400
+            results = {'blocks': [], 'transactions': [], 'query': q}
+            try:
+                blk = _db_block(int(q))
+                if blk: results['blocks'].append(blk)
+            except ValueError: pass
+            if (q.startswith('0x') or len(q) >= 32) and not results['blocks']:
+                blk = _db_block_by_hash(q)
+                if blk: results['blocks'].append(blk)
+            tx = _find_tx(q)
+            if tx:
+                results['transactions'].append(tx)
+                if tx.get('block_number') and not results['blocks']:
+                    blk = _db_block(int(tx['block_number']))
+                    if blk: results['blocks'].append(blk)
+            results.update({'found': bool(results['blocks'] or results['transactions']),
+                            'status': 'success'})
+            return jsonify(results), 200
+        except Exception as e:
+            return jsonify({'status': 'error', 'error': str(e)}), 500
+
+    @bp.route('/blocks/integrity', methods=['GET'])
+    def block_integrity():
+        try:
+            limit = min(int(request.args.get('limit', 50)), 200)
+            rows  = _db_exec("""
+                SELECT height, block_hash, previous_hash
+                FROM blocks ORDER BY height DESC LIMIT %s
+            """, (limit,), fetch=True)
+            rows  = sorted([dict(r) for r in (rows or [])], key=lambda x: x['height'])
+            broken = []
+            for i in range(1, len(rows)):
+                if rows[i-1]['block_hash'] != rows[i]['previous_hash']:
+                    broken.append({'at_height': rows[i]['height'],
+                                   'expected_prev': rows[i-1]['block_hash'],
+                                   'actual_prev': rows[i]['previous_hash']})
+            return jsonify({'status': 'success', 'blocks_checked': len(rows),
+                            'chain_intact': not broken, 'broken_links': broken,
+                            'height_range': {'from': rows[0]['height'] if rows else None,
+                                             'to': rows[-1]['height'] if rows else None},
+                            'timestamp': datetime.now(timezone.utc).isoformat()}), 200
+        except Exception as e:
+            return jsonify({'status': 'error', 'error': str(e)}), 500
+
+    @bp.route('/blocks/<int:height>', methods=['GET'])
+    def get_block(height):
+        try:
+            block = _db_block(height)
+            if block is None:
+                # Fallback to globals chain
+                bc = _silo_bc()
+                if bc and bc.chain:
+                    for b in bc.chain:
+                        if (b.get('block_number') or b.get('height')) == height:
+                            block = {**b, 'source': 'globals', 'transaction_list': []}
+                            break
+            if block is None:
+                return jsonify({'status': 'not_found',
+                                'error': f'Block {height} not found', 'height': height}), 404
+            tx_list = block.get('transaction_list', [])
+            block['tx_summary'] = {
+                'total': len(tx_list),
+                'finalized': sum(1 for t in tx_list if t.get('status') == 'finalized'),
+                'pending': sum(1 for t in tx_list if t.get('status') == 'pending'),
+                'total_value': sum(float(t.get('amount') or 0) for t in tx_list),
+                'avg_entropy': (sum(float(t.get('entropy_score') or 0) for t in tx_list) / len(tx_list)
+                                if tx_list else 0),
+                'avg_fidelity': (sum(float(t.get('ghz_fidelity') or 0) for t in tx_list) / len(tx_list)
+                                 if tx_list else 0),
+            }
+            return jsonify({'status': 'success', 'block': block}), 200
+        except Exception as e:
+            _log.error(f'GET /blocks/{height}: {e}', exc_info=True)
+            return jsonify({'status': 'error', 'error': str(e)}), 500
+
+    @bp.route('/blocks/hash/<string:block_hash>', methods=['GET'])
+    def get_block_by_hash(block_hash):
+        try:
+            block = _db_block_by_hash(block_hash.strip())
+            if block is None:
+                return jsonify({'status': 'not_found',
+                                'error': f'Block hash {block_hash!r} not found'}), 404
+            return jsonify({'status': 'success', 'block': block}), 200
+        except Exception as e:
+            return jsonify({'status': 'error', 'error': str(e)}), 500
+
+    @bp.route('/blocks/<int:height>/quantum-proof', methods=['GET'])
+    def block_quantum_proof(height):
+        try:
+            proof = _db_quantum_proof(height)
+            if proof is None:
+                bc = _silo_bc()
+                b_in_globals = None
+                if bc and bc.chain:
+                    for b in bc.chain:
+                        if (b.get('block_number') or b.get('height')) == height:
+                            b_in_globals = b; break
+                if b_in_globals is None:
+                    return jsonify({'status': 'not_found',
+                                    'error': f'Block {height} quantum proof not found'}), 404
+                proof = {'height': height, 'block_hash': b_in_globals.get('block_hash',''),
+                         'quantum_proof': b_in_globals.get('quantum_proof','N/A'),
+                         'quantum_entropy': b_in_globals.get('quantum_entropy',''),
+                         'entropy_score': b_in_globals.get('entropy_score', 0),
+                         'temporal_coherence': b_in_globals.get('temporal_coherence', 0),
+                         'source': 'globals', 'pseudoqubit_measurements': [], 'tx_entropy_distribution': {}}
+            return jsonify({'status': 'success', 'height': height, 'quantum_proof': proof,
+                            'verified': bool(proof.get('quantum_proof') and proof.get('quantum_proof') != 'N/A')}), 200
+        except Exception as e:
+            return jsonify({'status': 'error', 'error': str(e)}), 500
+
+    @bp.route('/blocks/<int:height>/quantum', methods=['GET'])
+    def block_quantum_snapshot(height):
+        try:
+            proof = _db_quantum_proof(height)
+            if proof is None:
+                return jsonify({'status': 'not_found', 'error': f'Block {height} not found'}), 404
+            live_q = {}
+            try:
+                from quantum_api import get_quantum_integration
+                qi = get_quantum_integration()
+                live_q = qi.get_system_status() if hasattr(qi, 'get_system_status') else {}
+            except Exception: pass
+            return jsonify({'status': 'success', 'height': height,
+                            'quantum_snapshot': {**proof, 'live_system': live_q}}), 200
+        except Exception as e:
+            return jsonify({'status': 'error', 'error': str(e)}), 500
+
+    @bp.route('/blocks/batch', methods=['POST'])
+    def batch_blocks():
+        try:
+            data    = request.get_json() or {}
+            heights = [int(h) for h in data.get('heights', [])[:50]]
+            if not heights:
+                return jsonify({'status': 'error', 'error': 'heights list required'}), 400
+            blocks = [b for b in (_db_block(h) for h in heights) if b]
+            return jsonify({'status': 'success', 'blocks': blocks,
+                            'requested': len(heights), 'found': len(blocks)}), 200
+        except Exception as e:
+            return jsonify({'status': 'error', 'error': str(e)}), 500
+
+    return bp

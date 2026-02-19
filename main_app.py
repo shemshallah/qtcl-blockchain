@@ -382,13 +382,74 @@ class MasterApplicationOrchestrator:
         @self.app.route('/api/command', methods=['POST'])
         def execute_command():
             from flask import request
-            if 'command' in self.all_systems:
-                cmd = request.json.get('cmd', '')
-                result = self.all_systems['terminal'].execute_command(cmd)
+            engine = self.all_systems.get('terminal')
+            if engine is None:
+                try:
+                    from terminal_logic import TerminalEngine
+                    engine = TerminalEngine()
+                except Exception as _ie:
+                    return jsonify({'error': f'Terminal not available: {_ie}'}), 503
+            try:
+                data   = request.get_json() or {}
+                cmd    = data.get('cmd', '') or data.get('command', '')
+                result = engine.execute_command(cmd)
                 return jsonify(result)
-            return jsonify({'error': 'Terminal not available'})
+            except Exception as _ce:
+                logger.error(f'[Main] /api/command error: {_ce}', exc_info=True)
+                return jsonify({'error': str(_ce)}), 500
         
-        print("[MasterOrch] ✓ Flask app created with all routes")
+        print("[MasterOrch] ✓ Flask app created with core routes")
+        
+        # ── Blueprint registration (all in-process, no extra files) ─────────────
+        # 1. Unified TX + Block API (lives in ledger_manager — owns the data)
+        try:
+            from ledger_manager import create_tx_block_blueprint as _lbp
+            self.app.register_blueprint(_lbp(), url_prefix='/api')
+            self.initialization_status['tx_block_api'] = 'ready'
+            print("[MasterOrch] ✓ TX+Block blueprint → /api/transactions + /api/blocks")
+        except Exception as _e:
+            self.initialization_status['tx_block_api'] = f'error: {_e}'
+            print(f"[MasterOrch] ✗ TX+Block blueprint: {_e}")
+        
+        # 2. Quantum API (extended — covers /api/quantum/*)
+        try:
+            from quantum_api import get_quantum_blueprint
+            self.app.register_blueprint(get_quantum_blueprint(), url_prefix='/api/quantum')
+            self.initialization_status['quantum_api'] = 'ready'
+            print("[MasterOrch] ✓ Quantum blueprint → /api/quantum")
+        except Exception as _e:
+            self.initialization_status['quantum_api'] = f'error: {_e}'
+            print(f"[MasterOrch] ✗ Quantum blueprint: {_e}")
+        
+        # 3. Core API (auth, users, keys — /api/auth/*, /api/users/*, etc.)
+        try:
+            from core_api import create_blueprint as _core_bp_fn
+            self.app.register_blueprint(_core_bp_fn(), url_prefix='/api')
+            self.initialization_status['core_api'] = 'ready'
+            print("[MasterOrch] ✓ Core blueprint → /api/auth + /api/users + /api/keys")
+        except Exception as _e:
+            self.initialization_status['core_api'] = f'error: {_e}'
+            print(f"[MasterOrch] ✗ Core blueprint: {_e}")
+        
+        # 4. DeFi API
+        try:
+            from defi_api import blueprint as _defi_bp
+            self.app.register_blueprint(_defi_bp)
+            self.initialization_status['defi_api'] = 'ready'
+            print("[MasterOrch] ✓ DeFi blueprint registered")
+        except Exception as _e:
+            self.initialization_status['defi_api'] = f'error: {_e}'
+            print(f"[MasterOrch] ✗ DeFi blueprint: {_e}")
+        
+        # 5. Oracle API
+        try:
+            from oracle_api import blueprint as _oracle_bp
+            self.app.register_blueprint(_oracle_bp)
+            self.initialization_status['oracle_api'] = 'ready'
+            print("[MasterOrch] ✓ Oracle blueprint registered")
+        except Exception as _e:
+            self.initialization_status['oracle_api'] = f'error: {_e}'
+            print(f"[MasterOrch] ✗ Oracle blueprint: {_e}")
     
     def get_app(self):
         """Get Flask app"""
