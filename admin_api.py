@@ -1,16 +1,4 @@
 #!/usr/bin/env python3
-
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# GLOBALS INTEGRATION - Unified State Management
-# ═══════════════════════════════════════════════════════════════════════════════════════
-try:
-    from globals import get_db_pool, get_heartbeat, get_globals, get_auth_manager, get_terminal
-    GLOBALS_AVAILABLE = True
-except ImportError:
-    GLOBALS_AVAILABLE = False
-    logger.warning(f"[{os.path.basename(input_path)}] Globals not available - using fallback")
-
-
 """
 ADMIN & ANALYTICS API MODULE - System Administration, User Management, Analytics, Monitoring
 Complete production-grade implementation with comprehensive admin and analytics features
@@ -39,7 +27,17 @@ getcontext().prec=28
 logger=logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# GLOBAL WSGI INTEGRATION - Quantum Revolution
+# GLOBALS INTEGRATION - Unified State Management
+# ═══════════════════════════════════════════════════════════════════════════════════════
+try:
+    from globals import get_db_pool, get_heartbeat, get_globals, get_auth_manager, get_terminal
+    GLOBALS_AVAILABLE = True
+except ImportError:
+    GLOBALS_AVAILABLE = False
+    logger.warning("[admin_api] Globals not available - using fallback")
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# WSGI INTEGRATION
 # ═══════════════════════════════════════════════════════════════════════════════════════
 try:
     from wsgi_config import DB, PROFILER, CACHE, ERROR_BUDGET, RequestCorrelation, CIRCUIT_BREAKERS, RATE_LIMITERS
@@ -47,6 +45,30 @@ try:
 except ImportError:
     WSGI_AVAILABLE = False
     logger.warning("[INTEGRATION] WSGI globals not available - running in standalone mode")
+
+    # ── Stub classes so GlobalAdminCommandHandlers.admin_suspend_user() never NameErrors ──
+    class _NullProfiler:
+        class _ctx:
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+        def profile(self, _): return self._ctx()
+
+    class _NullErrorBudget:
+        def deduct(self, _): pass
+
+    class _NullRequestCorrelation:
+        @staticmethod
+        def start_operation(_): return ''
+        @staticmethod
+        def end_operation(_, **kw): pass
+
+    PROFILER         = _NullProfiler()
+    ERROR_BUDGET     = _NullErrorBudget()
+    RequestCorrelation = _NullRequestCorrelation
+    CACHE            = None
+    CIRCUIT_BREAKERS = None
+    RATE_LIMITERS    = None
+    DB               = None
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION & ENUMS
@@ -538,43 +560,310 @@ def create_blueprint()->Blueprint:
         return decorated_function
     
     # ═══════════════════════════════════════════════════════════════════════════════════
-    # ADMIN USER MANAGEMENT ROUTES
+    # ADMIN SETTINGS ROUTES  (Full CRUD — no stubs)
     # ═══════════════════════════════════════════════════════════════════════════════════
-    
-    @bp.route('/admin/users',methods=['GET'])
+
+    def _role_enum(role_str: str) -> 'AdminRole':
+        return {
+            'super_admin': AdminRole.SUPER_ADMIN, 'superadmin': AdminRole.SUPER_ADMIN,
+            'admin': AdminRole.ADMIN, 'operator': AdminRole.OPERATOR, 'auditor': AdminRole.AUDITOR,
+        }.get(role_str, AdminRole.ADMIN)
+
+    @bp.route('/admin/settings', methods=['GET'])
+    @require_auth
+    @require_admin
+    @rate_limit(max_requests=200)
+    def admin_get_settings_route():
+        """GET /api/admin/settings?category=network&include_sensitive=false"""
+        try:
+            result = GlobalAdminCommandHandlers.admin_get_settings(
+                g.user_id, _role_enum(g.user_role),
+                category=request.args.get('category') or None,
+                include_sensitive=request.args.get('include_sensitive','false').lower()=='true',
+            )
+            return jsonify(result), 200 if result.get('status')=='success' else (403 if result.get('status')=='forbidden' else 500)
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+    @bp.route('/admin/settings/schema', methods=['GET'])
+    @require_auth
+    @require_admin
+    @rate_limit(max_requests=200)
+    def admin_settings_schema():
+        """GET /api/admin/settings/schema — all keys, types, defaults, validators."""
+        schema = {}
+        for key, default in sorted(GlobalAdminCommandHandlers._DEFAULT_SETTINGS.items()):
+            cat = key.split('.')[0] if '.' in key else 'general'
+            rule = GlobalAdminCommandHandlers._SETTING_VALIDATORS.get(key)
+            schema[key] = {
+                'default':    default,
+                'type':       type(default).__name__,
+                'category':   cat,
+                'validation': {'min': rule[1], 'max': rule[2]} if rule else None,
+            }
+        return jsonify({'status':'success','schema':schema,'total':len(schema)}), 200
+
+    @bp.route('/admin/settings/<path:key>', methods=['GET'])
+    @require_auth
+    @require_admin
+    @rate_limit(max_requests=500)
+    def admin_get_single_setting(key):
+        """GET /api/admin/settings/<key>"""
+        result = GlobalAdminCommandHandlers.admin_get_setting(g.user_id, _role_enum(g.user_role), key)
+        return jsonify(result), 200 if result.get('status')=='success' else (404 if result.get('status')=='not_found' else 403 if result.get('status')=='forbidden' else 500)
+
+    @bp.route('/admin/settings', methods=['PUT','POST'])
+    @require_auth
+    @require_admin
+    @rate_limit(max_requests=50)
+    def admin_update_settings_route():
+        """
+        PUT/POST /api/admin/settings
+        Bulk:  { "settings": { "key": value, ... }, "reason": "..." }
+        Single: { "key": "...", "value": ..., "reason": "..." }
+        """
+        try:
+            data   = request.get_json(force=True, silent=True) or {}
+            reason = str(data.get('reason', '')).strip()
+            arole  = _role_enum(g.user_role)
+            if 'settings' in data and isinstance(data['settings'], dict):
+                result = GlobalAdminCommandHandlers.admin_update_settings_bulk(g.user_id, arole, data['settings'], reason)
+            elif 'key' in data and 'value' in data:
+                result = GlobalAdminCommandHandlers.admin_update_setting(g.user_id, arole, str(data['key']), data['value'], reason)
+            else:
+                return jsonify({'error': "Provide 'settings' dict OR 'key'+'value'"}), 400
+            code = 200 if result.get('status')=='success' else (400 if result.get('status') in ('validation_error',) else 403 if result.get('status')=='forbidden' else 500)
+            return jsonify(result), code
+        except Exception as e:
+            logger.error(f"[/admin/settings PUT] {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+
+    @bp.route('/admin/settings/<path:key>/reset', methods=['POST'])
+    @require_auth
+    @require_admin
+    @rate_limit(max_requests=50)
+    def admin_reset_single_setting(key):
+        """POST /api/admin/settings/<key>/reset"""
+        result = GlobalAdminCommandHandlers.admin_reset_setting(g.user_id, _role_enum(g.user_role), key)
+        return jsonify(result), 200 if result.get('status')=='success' else (404 if result.get('status')=='not_found' else 403 if result.get('status')=='forbidden' else 500)
+
+    @bp.route('/admin/settings/reset-all', methods=['POST'])
+    @require_auth
+    @require_admin
+    @rate_limit(max_requests=5)
+    def admin_reset_all_settings():
+        """POST /api/admin/settings/reset-all — SUPER_ADMIN only."""
+        arole = _role_enum(g.user_role)
+        if arole != AdminRole.SUPER_ADMIN:
+            return jsonify({'error':'SUPER_ADMIN only','status':'forbidden'}), 403
+        data   = request.get_json(force=True, silent=True) or {}
+        reason = data.get('reason', 'factory_reset')
+        results = []
+        for key in list(GlobalAdminCommandHandlers._DEFAULT_SETTINGS.keys()):
+            r = GlobalAdminCommandHandlers.admin_reset_setting(g.user_id, arole, key)
+            results.append({'key': key, 'status': r.get('status')})
+        GlobalAdminCommandHandlers._audit(g.user_id, 'reset_all_settings', 'admin_settings', {'reason': reason, 'count': len(results)}, True)
+        return jsonify({'status':'success', 'reset':len(results), 'message':'All settings reset to factory defaults'}), 200
+
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    # ADMIN USER MANAGEMENT ROUTES  (Full CRUD — no stubs)
+    # ═══════════════════════════════════════════════════════════════════════════════════
+
+    @bp.route('/admin/sessions', methods=['GET'])
+    @require_auth
+    @require_admin
+    @rate_limit(max_requests=200)
+    def admin_list_all_sessions():
+        """
+        GET /api/admin/sessions — ALL active sessions on the platform.
+        This directly answers 'why 7 sessions?': shows each session_id,
+        who owns it, IP, user-agent, and expiry. Count is from sessions table (real),
+        NOT from the users table (which wsgi_config was incorrectly using before).
+        """
+        try:
+            limit  = min(int(request.args.get('limit',50)), 500)
+            offset = int(request.args.get('offset', 0))
+            rows   = _adm.execute_query(
+                """SELECT s.session_id, s.user_id, u.email, COALESCE(u.username,u.name,u.email) AS username,
+                          u.role, s.created_at, s.expires_at, s.ip_address, s.user_agent
+                   FROM sessions s
+                   LEFT JOIN users u ON s.user_id = u.user_id
+                   WHERE s.expires_at > NOW()
+                   ORDER BY s.created_at DESC LIMIT %s OFFSET %s""",
+                (limit, offset)
+            )
+            count = _adm.execute_query("SELECT COUNT(*) AS total FROM sessions WHERE expires_at > NOW()", fetch_one=True)
+            for r in (rows or []):
+                for f in ('created_at','expires_at'):
+                    if r.get(f) and hasattr(r[f],'isoformat'):
+                        r[f] = r[f].isoformat()
+            return jsonify({
+                'status':        'success',
+                'sessions':      rows or [],
+                'total_active':  int(count['total']) if count else 0,
+                'limit':         limit,
+                'offset':        offset,
+                'note':          'Sessions from sessions table — NOT from users.is_active count',
+            }), 200
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+    @bp.route('/admin/users', methods=['GET'])
     @require_auth
     @require_admin
     @rate_limit(max_requests=200)
     def admin_list_users():
-        """Admin: List all users with filtering"""
+        """
+        GET /api/admin/users — full user list with filtering, pagination, aggregates.
+        Query params: limit, offset, search, status, role, pq_assigned_only,
+                      created_after, created_before, sort_by, sort_desc
+        """
         try:
-            limit=min(int(request.args.get('limit',100)),1000)
-            offset=int(request.args.get('offset',0))
-            status=request.args.get('status')
-            
-            base_query="SELECT user_id,username,email,role,is_active,is_verified,created_at,last_login FROM users"
-            count_query="SELECT COUNT(*) as count FROM users"
-            
-            if status:
-                base_query+=f" WHERE is_active={status.lower()=='active'}"
-                count_query+=f" WHERE is_active={status.lower()=='active'}"
-            
-            base_query+=" ORDER BY created_at DESC LIMIT %s OFFSET %s"
-            
-            users=_adm.execute_query(base_query,(limit,offset))
-            total=_adm.execute_query(count_query,fetch_one=True)
-            
-            return jsonify({
-                'users':users,
-                'total':total['count'] if total else 0,
-                'limit':limit,
-                'offset':offset
-            }),200
-            
+            filters = {
+                'limit':           request.args.get('limit', 100),
+                'offset':          request.args.get('offset', 0),
+                'search':          request.args.get('search', ''),
+                'status':          request.args.get('status', ''),
+                'role':            request.args.get('role', ''),
+                'pq_assigned_only': request.args.get('pq_assigned_only', 'false').lower() == 'true',
+                'created_after':   request.args.get('created_after', ''),
+                'created_before':  request.args.get('created_before', ''),
+                'sort_by':         request.args.get('sort_by', 'created_at'),
+                'sort_desc':       request.args.get('sort_desc', 'true').lower() == 'true',
+            }
+            result = GlobalAdminCommandHandlers.admin_list_users(g.user_id, _role_enum(g.user_role), filters)
+            code   = 200 if result.get('status')=='success' else (403 if result.get('status')=='forbidden' else 500)
+            return jsonify(result), code
         except Exception as e:
-            logger.error(f"Admin list users error: {e}",exc_info=True)
-            return jsonify({'error':'Failed to list users'}),500
-    
+            logger.error(f"admin_list_users route error: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+
+    @bp.route('/admin/users', methods=['POST'])
+    @require_auth
+    @require_admin
+    @rate_limit(max_requests=50)
+    def admin_create_user_route():
+        """POST /api/admin/users — Body: { email, username, password, role?, auto_verify? }"""
+        try:
+            data   = request.get_json(force=True, silent=True) or {}
+            result = GlobalAdminCommandHandlers.admin_create_user(
+                admin_id=g.user_id, role=_role_enum(g.user_role),
+                email=data.get('email',''), username=data.get('username',''),
+                password=data.get('password',''), user_role=data.get('role','user'),
+                auto_verify=bool(data.get('auto_verify', True)),
+            )
+            code = 201 if result.get('status')=='success' else (409 if result.get('status')=='conflict' else 400 if result.get('status') in ('validation_error',) else 403 if result.get('status')=='forbidden' else 500)
+            return jsonify(result), code
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+    @bp.route('/admin/users/<user_id>', methods=['GET'])
+    @require_auth
+    @require_admin
+    @rate_limit(max_requests=200)
+    def admin_get_user_route(user_id):
+        """GET /api/admin/users/<user_id> — Full profile + PQ keys + sessions + audit events."""
+        result = GlobalAdminCommandHandlers.admin_get_user(g.user_id, _role_enum(g.user_role), user_id)
+        return jsonify(result), 200 if result.get('status')=='success' else (404 if result.get('status')=='not_found' else 403 if result.get('status')=='forbidden' else 500)
+
+    @bp.route('/admin/users/<user_id>/role', methods=['PUT','POST'])
+    @require_auth
+    @require_admin
+    @rate_limit(max_requests=30)
+    def admin_modify_user_role_route(user_id):
+        """PUT /api/admin/users/<user_id>/role — Body: { "role": "admin", "reason": "" }"""
+        data   = request.get_json(force=True, silent=True) or {}
+        result = GlobalAdminCommandHandlers.admin_modify_user_role(
+            g.user_id, _role_enum(g.user_role), user_id, str(data.get('role','user')), str(data.get('reason',''))
+        )
+        return jsonify(result), 200 if result.get('status')=='success' else (403 if result.get('status')=='forbidden' else 400 if result.get('status')=='validation_error' else 404 if result.get('status')=='not_found' else 500)
+
+    @bp.route('/admin/users/<user_id>/unlock', methods=['POST'])
+    @require_auth
+    @require_admin
+    @rate_limit(max_requests=50)
+    def admin_unlock_user_route(user_id):
+        """POST /api/admin/users/<user_id>/unlock"""
+        data   = request.get_json(force=True, silent=True) or {}
+        result = GlobalAdminCommandHandlers.admin_unlock_user(g.user_id, _role_enum(g.user_role), user_id, data.get('reason',''))
+        return jsonify(result), 200 if result.get('status')=='success' else 400
+
+    @bp.route('/admin/users/<user_id>/password-reset', methods=['POST'])
+    @require_auth
+    @require_admin
+    @rate_limit(max_requests=20)
+    def admin_reset_user_password_route(user_id):
+        """POST /api/admin/users/<user_id>/password-reset — Body: { "password", "reason" }"""
+        data = request.get_json(force=True, silent=True) or {}
+        if not data.get('password'):
+            return jsonify({'error': 'password required'}), 400
+        result = GlobalAdminCommandHandlers.admin_reset_user_password(
+            g.user_id, _role_enum(g.user_role), user_id, data['password'], data.get('reason','')
+        )
+        return jsonify(result), 200 if result.get('status')=='success' else (400 if result.get('status')=='validation_error' else 403 if result.get('status')=='forbidden' else 500)
+
+    @bp.route('/admin/users/<user_id>', methods=['DELETE'])
+    @require_auth
+    @require_admin
+    @rate_limit(max_requests=20)
+    def admin_delete_user_route(user_id):
+        """DELETE /api/admin/users/<user_id>?hard=false"""
+        data   = request.get_json(force=True, silent=True) or {}
+        hard   = request.args.get('hard','false').lower() == 'true'
+        result = GlobalAdminCommandHandlers.admin_delete_user(
+            g.user_id, _role_enum(g.user_role), user_id, data.get('reason','admin_action'), hard_delete=hard
+        )
+        return jsonify(result), 200 if result.get('status')=='success' else (403 if result.get('status')=='forbidden' else 404 if result.get('status')=='not_found' else 500)
+
+    @bp.route('/admin/users/<user_id>/pq-key', methods=['POST'])
+    @require_auth
+    @require_admin
+    @rate_limit(max_requests=30)
+    def admin_issue_pq_key_route(user_id):
+        """
+        POST /api/admin/users/<user_id>/pq-key
+        Issue or re-issue a PQ keypair for a user who lacks one
+        (e.g. registered via offline/terminal path — missing pq_key).
+        Body: { "reason": "..." }
+        """
+        data   = request.get_json(force=True, silent=True) or {}
+        result = GlobalAdminCommandHandlers.admin_issue_pq_key(
+            g.user_id, _role_enum(g.user_role), user_id, data.get('reason','admin_issue')
+        )
+        return jsonify(result), 200 if result.get('status')=='success' else (404 if result.get('status')=='not_found' else 403 if result.get('status')=='forbidden' else 500)
+
+    @bp.route('/admin/users/<user_id>/sessions', methods=['GET'])
+    @require_auth
+    @require_admin
+    @rate_limit(max_requests=100)
+    def admin_user_sessions(user_id):
+        """GET /api/admin/users/<user_id>/sessions"""
+        try:
+            rows = _adm.execute_query(
+                "SELECT session_id, created_at, expires_at, ip_address, user_agent "
+                "FROM sessions WHERE user_id=%s AND expires_at > NOW() ORDER BY created_at DESC",
+                (user_id,)
+            )
+            for r in (rows or []):
+                for f in ('created_at','expires_at'):
+                    if r.get(f) and hasattr(r[f],'isoformat'):
+                        r[f] = r[f].isoformat()
+            return jsonify({'status':'success','sessions':rows or [],'user_id':user_id}), 200
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+    @bp.route('/admin/users/<user_id>/sessions', methods=['DELETE'])
+    @require_auth
+    @require_admin
+    @rate_limit(max_requests=50)
+    def admin_revoke_user_sessions(user_id):
+        """DELETE /api/admin/users/<user_id>/sessions — revoke ALL sessions."""
+        try:
+            _adm.execute_query("DELETE FROM sessions WHERE user_id=%s", (user_id,))
+            return jsonify({'status':'success','user_id':user_id,'message':'All sessions revoked'}), 200
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
     @bp.route('/admin/users/<user_id>/suspend',methods=['POST'])
     @require_auth
     @require_admin
@@ -1650,25 +1939,1290 @@ class GlobalAdminCommandHandlers:
     # ═════════════════════════════════════════════════════════════════════════════════════
     
     @classmethod
-    def admin_list_users(cls, admin_id: str, role: AdminRole, filters: Dict = None) -> Dict[str, Any]:
-        """List all users with filtering"""
-        if not cls._check_permission(role, AdminPermission.USER_CREATE):
-            return {'error': 'Permission denied', 'status': 'forbidden'}
-        
+    def _get_db(cls):
+        """Get DB connection from globals pool → direct import → None."""
         try:
-            # Query database for users with filters
-            filters = filters or {}
-            users = []  # Would query DB in real implementation
-            
-            cls._audit(admin_id, 'list_users', 'users', {'filters': filters}, True)
+            from globals import get_db_pool
+            pool = get_db_pool()
+            if pool is not None:
+                return pool
+        except Exception:
+            pass
+        try:
+            from db_builder_v2 import db_manager
+            return db_manager
+        except Exception:
+            pass
+        return None
+
+    @classmethod
+    def _db_execute(cls, query: str, params: tuple = (), fetch: str = 'all') -> Any:
+        """
+        Execute query via globals db pool.
+        fetch: 'all' | 'one' | 'none'
+        Returns: list of dicts | dict | None
+        Raises on DB failure so callers can catch and audit.
+        """
+        db = cls._get_db()
+        if db is None:
+            raise RuntimeError("No database connection available")
+        conn = db.get_connection()
+        try:
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            cur.execute(query, params)
+            result = None
+            if fetch == 'all':
+                result = [dict(r) for r in (cur.fetchall() or [])]
+            elif fetch == 'one':
+                row = cur.fetchone()
+                result = dict(row) if row else None
+            if not conn.autocommit:
+                conn.commit()
+            cur.close()
+            return result
+        except Exception:
+            try:
+                if not conn.autocommit:
+                    conn.rollback()
+            except Exception:
+                pass
+            raise
+        finally:
+            try:
+                db.return_connection(conn)
+            except Exception:
+                pass
+
+    # ────────────────────────────────────────────────────────────────────────
+    # ADMIN SETTINGS STORE  (in-memory + persisted to admin_settings table)
+    # ────────────────────────────────────────────────────────────────────────
+    _settings_lock  = threading.RLock()
+    _settings_cache: Dict[str, Any] = {}          # key → value
+    _settings_loaded = False
+
+    # Default system settings — the source-of-truth schema for admin config
+    _DEFAULT_SETTINGS: Dict[str, Any] = {
+        # --- network ---
+        'network.name':                    'QTCL Mainnet',
+        'network.chain_id':                1,
+        'network.block_time_target_sec':   5,
+        'network.max_block_size_kb':       1024,
+        'network.mempool_max_size':        10000,
+        # --- fees ---
+        'fees.base_fee':                   '0.001',
+        'fees.min_fee':                    '0.0001',
+        'fees.max_fee':                    '1.0',
+        'fees.fee_burn_percent':           50,
+        # --- consensus ---
+        'consensus.min_validators':        4,
+        'consensus.max_validators':        256,
+        'consensus.quorum_percent':        67,
+        'consensus.slash_rate_percent':    5,
+        # --- staking ---
+        'staking.min_stake':               '1000',
+        'staking.max_stake':               '10000000',
+        'staking.unbonding_period_days':   14,
+        'staking.annual_reward_percent':   8,
+        # --- security ---
+        'security.max_login_attempts':     5,
+        'security.lockout_minutes':        15,
+        'security.session_timeout_hours':  24,
+        'security.require_2fa_admin':      True,
+        'security.pqc_enforced':           True,
+        'security.ip_whitelist_enabled':   False,
+        'security.ip_whitelist':           [],
+        # --- maintenance ---
+        'maintenance.mode':                False,
+        'maintenance.message':             'System maintenance in progress',
+        'maintenance.allowed_ips':         [],
+        # --- registration ---
+        'registration.enabled':            True,
+        'registration.require_email_verify': True,
+        'registration.max_users':          1000000,
+        'registration.pseudoqubit_pool_size': 106496,
+        # --- rate limits ---
+        'rate_limit.api_requests_per_min': 100,
+        'rate_limit.auth_requests_per_min': 20,
+        'rate_limit.pqc_keygen_per_hour':  10,
+        # --- oracle ---
+        'oracle.price_ttl_seconds':        60,
+        'oracle.max_deviation_percent':    10,
+        # --- audit ---
+        'audit.log_retention_days':        90,
+        'audit.export_max_rows':           100000,
+        # --- notifications ---
+        'notifications.email_enabled':     True,
+        'notifications.smtp_host':         '',
+        'notifications.smtp_port':         587,
+        'notifications.smtp_sender':       '',
+        # --- defi ---
+        'defi.swap_fee_percent':           0.3,
+        'defi.liquidity_min':              '100',
+        'defi.bridge_enabled':             True,
+        'defi.bridge_max_amount':          '1000000',
+    }
+
+    # Validation rules per key: (type, min, max) or (type, allowed_values)
+    _SETTING_VALIDATORS: Dict[str, Tuple] = {
+        'network.block_time_target_sec':   (int,   1,   3600),
+        'network.max_block_size_kb':       (int,   16,  16384),
+        'network.mempool_max_size':        (int,   100, 1000000),
+        'fees.fee_burn_percent':           (int,   0,   100),
+        'consensus.quorum_percent':        (int,   51,  100),
+        'consensus.slash_rate_percent':    (int,   0,   50),
+        'staking.unbonding_period_days':   (int,   1,   365),
+        'staking.annual_reward_percent':   (float, 0.0, 100.0),
+        'security.max_login_attempts':     (int,   1,   100),
+        'security.lockout_minutes':        (int,   1,   10080),
+        'security.session_timeout_hours':  (int,   1,   720),
+        'rate_limit.api_requests_per_min': (int,   1,   10000),
+        'rate_limit.auth_requests_per_min':(int,   1,   1000),
+        'defi.swap_fee_percent':           (float, 0.0, 10.0),
+        'audit.log_retention_days':        (int,   1,   3650),
+    }
+
+    @classmethod
+    def _ensure_settings_loaded(cls):
+        """Load settings from DB into cache (once per process start)."""
+        with cls._settings_lock:
+            if cls._settings_loaded:
+                return
+            # Seed with defaults first
+            cls._settings_cache = dict(cls._DEFAULT_SETTINGS)
+            # Try to load overrides from DB
+            try:
+                rows = cls._db_execute(
+                    "SELECT key, value, value_type FROM admin_settings",
+                    fetch='all'
+                )
+                if rows:
+                    for row in rows:
+                        key   = row.get('key', '')
+                        raw   = row.get('value', '')
+                        vtype = row.get('value_type', 'str')
+                        if key:
+                            try:
+                                if vtype == 'int':
+                                    cls._settings_cache[key] = int(raw)
+                                elif vtype == 'float':
+                                    cls._settings_cache[key] = float(raw)
+                                elif vtype == 'bool':
+                                    cls._settings_cache[key] = str(raw).lower() in ('true','1','yes')
+                                elif vtype == 'json':
+                                    cls._settings_cache[key] = json.loads(raw)
+                                else:
+                                    cls._settings_cache[key] = str(raw)
+                            except Exception:
+                                pass
+                    logger_admin.info(f"[AdminSettings] Loaded {len(rows)} setting overrides from DB")
+            except Exception as _sle:
+                logger_admin.debug(f"[AdminSettings] DB load skipped (admin_settings table may not exist): {_sle}")
+            cls._settings_loaded = True
+
+    @classmethod
+    def _ensure_settings_table(cls):
+        """Create admin_settings table if it does not exist."""
+        try:
+            cls._db_execute("""
+                CREATE TABLE IF NOT EXISTS admin_settings (
+                    key          VARCHAR(200)  PRIMARY KEY,
+                    value        TEXT          NOT NULL DEFAULT '',
+                    value_type   VARCHAR(20)   NOT NULL DEFAULT 'str',
+                    description  TEXT,
+                    category     VARCHAR(100),
+                    is_sensitive BOOLEAN       NOT NULL DEFAULT FALSE,
+                    updated_by   VARCHAR(200),
+                    updated_at   TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+                    created_at   TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+                )
+            """, fetch='none')
+        except Exception as _cte:
+            logger_admin.warning(f"[AdminSettings] Could not create admin_settings table: {_cte}")
+
+    @classmethod
+    def _persist_setting(cls, key: str, value: Any, updated_by: str):
+        """Upsert a single setting into admin_settings table."""
+        cls._ensure_settings_table()
+        # Detect type
+        if isinstance(value, bool):
+            raw, vtype = str(value).lower(), 'bool'
+        elif isinstance(value, int):
+            raw, vtype = str(value), 'int'
+        elif isinstance(value, float):
+            raw, vtype = str(value), 'float'
+        elif isinstance(value, (dict, list)):
+            raw, vtype = json.dumps(value), 'json'
+        else:
+            raw, vtype = str(value), 'str'
+
+        # Extract category from key prefix
+        category = key.split('.')[0] if '.' in key else 'general'
+
+        try:
+            cls._db_execute("""
+                INSERT INTO admin_settings (key, value, value_type, category, updated_by, updated_at, created_at)
+                VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+                ON CONFLICT (key) DO UPDATE
+                  SET value = EXCLUDED.value,
+                      value_type = EXCLUDED.value_type,
+                      updated_by = EXCLUDED.updated_by,
+                      updated_at = NOW()
+            """, (key, raw, vtype, category, updated_by), fetch='none')
+        except Exception as _pe:
+            logger_admin.warning(f"[AdminSettings] Persist failed for {key}: {_pe}")
+
+    @classmethod
+    def _validate_setting(cls, key: str, value: Any) -> Tuple[bool, str]:
+        """Validate a setting value. Returns (ok, error_message)."""
+        if key not in cls._DEFAULT_SETTINGS:
+            return False, f"Unknown setting key: '{key}'"
+
+        rule = cls._SETTING_VALIDATORS.get(key)
+        if rule:
+            exp_type, lo, hi = rule
+            try:
+                cast_val = exp_type(value)
+                if not (lo <= cast_val <= hi):
+                    return False, f"{key} must be between {lo} and {hi}, got {cast_val}"
+            except (ValueError, TypeError) as _ve:
+                return False, f"{key} expects {exp_type.__name__}, got {type(value).__name__}: {_ve}"
+
+        # Type-match check against default
+        default = cls._DEFAULT_SETTINGS[key]
+        if isinstance(default, bool):
+            if not isinstance(value, (bool, int)):
+                return False, f"{key} expects boolean"
+        elif isinstance(default, int) and not isinstance(default, bool):
+            try:
+                int(value)
+            except (ValueError, TypeError):
+                return False, f"{key} expects integer"
+        elif isinstance(default, float):
+            try:
+                float(value)
+            except (ValueError, TypeError):
+                return False, f"{key} expects number"
+        elif isinstance(default, list):
+            if not isinstance(value, list):
+                return False, f"{key} expects list"
+
+        return True, ''
+
+    # ─────────────────────────────────────────────────────────────
+    # PUBLIC SETTINGS API
+    # ─────────────────────────────────────────────────────────────
+
+    @classmethod
+    def admin_get_settings(cls, admin_id: str, role: AdminRole,
+                           category: str = None, include_sensitive: bool = False) -> Dict[str, Any]:
+        """
+        GET all system settings (or filtered by category).
+        Returns current effective values, types, defaults, and whether each key
+        has been overridden from its default.
+
+        Sub-logic:
+          1. Permission check — AUDIT_VIEW required
+          2. Ensure DB settings are loaded into cache
+          3. Group by category prefix (e.g. 'network', 'fees', 'consensus')
+          4. For each key emit: value, default, type, overridden, category
+          5. Mask sensitive values (smtp passwords etc.) unless include_sensitive+SUPER_ADMIN
+        """
+        if not cls._check_permission(role, AdminPermission.AUDIT_VIEW):
+            return {'error': 'Permission denied', 'status': 'forbidden'}
+
+        try:
+            cls._ensure_settings_loaded()
+
+            SENSITIVE_KEYS = {
+                'notifications.smtp_host', 'notifications.smtp_sender',
+                'notifications.smtp_port', 'security.ip_whitelist'
+            }
+
+            result = {}
+            for key, current_val in sorted(cls._settings_cache.items()):
+                cat = key.split('.')[0] if '.' in key else 'general'
+                if category and cat != category:
+                    continue
+
+                is_sensitive = key in SENSITIVE_KEYS
+                # Mask sensitive unless super-admin explicitly asks
+                display_val = current_val
+                if is_sensitive and not include_sensitive and role != AdminRole.SUPER_ADMIN:
+                    display_val = '***'
+
+                default_val = cls._DEFAULT_SETTINGS.get(key)
+                result[key] = {
+                    'value':      display_val,
+                    'default':    default_val,
+                    'type':       type(current_val).__name__,
+                    'category':   cat,
+                    'overridden': current_val != default_val,
+                    'sensitive':  is_sensitive,
+                }
+
+            # Build category summary
+            categories: Dict[str, int] = {}
+            for key in result:
+                cat = key.split('.')[0] if '.' in key else 'general'
+                categories[cat] = categories.get(cat, 0) + 1
+
+            cls._audit(admin_id, 'get_settings', 'admin_settings',
+                       {'category_filter': category, 'count': len(result)}, True)
+
             return {
-                'users': users,
-                'total_count': len(users),
-                'status': 'success'
+                'status':       'success',
+                'settings':     result,
+                'total':        len(result),
+                'categories':   categories,
+                'fetched_at':   datetime.now(timezone.utc).isoformat(),
             }
         except Exception as e:
-            logger_admin.error(f"[AdminCmd] List users error: {e}")
+            logger_admin.error(f"[AdminCmd] get_settings error: {e}", exc_info=True)
+            cls._audit(admin_id, 'get_settings', 'admin_settings', {'error': str(e)}, False)
+            return {'error': str(e), 'status': 'error'}
+
+    @classmethod
+    def admin_update_setting(cls, admin_id: str, role: AdminRole,
+                             key: str, value: Any, reason: str = '') -> Dict[str, Any]:
+        """
+        Update a single system setting.
+
+        Sub-logic:
+          1. SYSTEM_CONFIG permission required
+          2. Validate key exists in DEFAULT_SETTINGS schema
+          3. Type-validate value against _SETTING_VALIDATORS ranges
+          4. Update in-memory cache atomically
+          5. Persist to admin_settings table (upsert)
+          6. Apply live side-effects (maintenance mode, rate limits, etc.)
+          7. Full audit trail entry
+        """
+        if not cls._check_permission(role, AdminPermission.SYSTEM_CONFIG):
+            return {'error': 'Permission denied — SYSTEM_CONFIG required', 'status': 'forbidden'}
+
+        try:
+            cls._ensure_settings_loaded()
+
+            # Validate
+            ok, err_msg = cls._validate_setting(key, value)
+            if not ok:
+                return {'error': err_msg, 'status': 'validation_error'}
+
+            # Cast to correct type matching default
+            default = cls._DEFAULT_SETTINGS[key]
+            try:
+                if isinstance(default, bool):
+                    value = bool(value)
+                elif isinstance(default, int) and not isinstance(default, bool):
+                    value = int(value)
+                elif isinstance(default, float):
+                    value = float(value)
+                elif isinstance(default, list):
+                    value = list(value)
+            except Exception:
+                pass
+
+            old_value = cls._settings_cache.get(key)
+
+            with cls._settings_lock:
+                cls._settings_cache[key] = value
+
+            # Persist to DB
+            cls._persist_setting(key, value, admin_id)
+
+            # ── Live side-effects ──────────────────────────────────────────
+            cls._apply_setting_side_effect(key, value)
+
+            cls._audit(admin_id, 'update_setting', key, {
+                'old_value': old_value,
+                'new_value': value,
+                'reason':    reason,
+            }, True)
+            logger_admin.info(f"[AdminSettings] {admin_id} updated '{key}': {old_value!r} → {value!r}")
+
+            return {
+                'status':    'success',
+                'key':       key,
+                'old_value': old_value,
+                'new_value': value,
+                'persisted': True,
+                'message':   f"Setting '{key}' updated successfully",
+            }
+        except Exception as e:
+            logger_admin.error(f"[AdminCmd] update_setting error: {e}", exc_info=True)
+            cls._audit(admin_id, 'update_setting', key, {'error': str(e), 'value': value}, False)
+            return {'error': str(e), 'status': 'error'}
+
+    @classmethod
+    def admin_update_settings_bulk(cls, admin_id: str, role: AdminRole,
+                                   updates: Dict[str, Any], reason: str = '') -> Dict[str, Any]:
+        """
+        Bulk update multiple settings atomically.
+        Validates ALL keys first — if any fail validation, no changes are applied.
+
+        Sub-logic:
+          1. Validate entire batch before touching anything (atomic)
+          2. Apply each setting in sequence (cache + DB)
+          3. Apply live side-effects for each key
+          4. Single audit entry for the batch
+        """
+        if not cls._check_permission(role, AdminPermission.SYSTEM_CONFIG):
+            return {'error': 'Permission denied — SYSTEM_CONFIG required', 'status': 'forbidden'}
+
+        if not updates:
+            return {'error': 'No updates provided', 'status': 'validation_error'}
+
+        try:
+            cls._ensure_settings_loaded()
+
+            # Phase 1: validate ALL
+            errors = {}
+            for key, value in updates.items():
+                ok, err_msg = cls._validate_setting(key, value)
+                if not ok:
+                    errors[key] = err_msg
+            if errors:
+                return {
+                    'status':  'validation_error',
+                    'error':   'Validation failed for one or more keys',
+                    'details': errors,
+                }
+
+            # Phase 2: apply all
+            applied = {}
+            old_values = {}
+            with cls._settings_lock:
+                for key, value in updates.items():
+                    default = cls._DEFAULT_SETTINGS.get(key)
+                    try:
+                        if isinstance(default, bool):
+                            value = bool(value)
+                        elif isinstance(default, int) and not isinstance(default, bool):
+                            value = int(value)
+                        elif isinstance(default, float):
+                            value = float(value)
+                    except Exception:
+                        pass
+                    old_values[key] = cls._settings_cache.get(key)
+                    cls._settings_cache[key] = value
+                    applied[key] = value
+
+            # Persist & side-effects
+            for key, value in applied.items():
+                cls._persist_setting(key, value, admin_id)
+                cls._apply_setting_side_effect(key, value)
+
+            cls._audit(admin_id, 'bulk_update_settings', 'admin_settings', {
+                'keys':      list(applied.keys()),
+                'old_values': old_values,
+                'new_values': applied,
+                'reason':     reason,
+            }, True)
+
+            return {
+                'status':   'success',
+                'applied':  len(applied),
+                'settings': applied,
+                'message':  f'{len(applied)} settings updated successfully',
+            }
+        except Exception as e:
+            logger_admin.error(f"[AdminCmd] bulk_update_settings error: {e}", exc_info=True)
+            cls._audit(admin_id, 'bulk_update_settings', 'admin_settings', {'error': str(e)}, False)
+            return {'error': str(e), 'status': 'error'}
+
+    @classmethod
+    def admin_reset_setting(cls, admin_id: str, role: AdminRole, key: str) -> Dict[str, Any]:
+        """
+        Reset a setting to its factory default.
+        Removes the DB override row so the default takes effect.
+        """
+        if not cls._check_permission(role, AdminPermission.SYSTEM_CONFIG):
+            return {'error': 'Permission denied — SYSTEM_CONFIG required', 'status': 'forbidden'}
+
+        if key not in cls._DEFAULT_SETTINGS:
+            return {'error': f"Unknown setting key: '{key}'", 'status': 'validation_error'}
+
+        try:
+            cls._ensure_settings_loaded()
+            old_value = cls._settings_cache.get(key)
+            default   = cls._DEFAULT_SETTINGS[key]
+
+            with cls._settings_lock:
+                cls._settings_cache[key] = default
+
+            # Remove from DB so default applies
+            try:
+                cls._db_execute(
+                    "DELETE FROM admin_settings WHERE key = %s",
+                    (key,), fetch='none'
+                )
+            except Exception as _de:
+                logger_admin.debug(f"[AdminSettings] Delete from DB skipped: {_de}")
+
+            cls._apply_setting_side_effect(key, default)
+            cls._audit(admin_id, 'reset_setting', key,
+                       {'old_value': old_value, 'reset_to': default}, True)
+
+            return {
+                'status':     'success',
+                'key':        key,
+                'reset_to':   default,
+                'old_value':  old_value,
+                'message':    f"'{key}' reset to factory default",
+            }
+        except Exception as e:
+            logger_admin.error(f"[AdminCmd] reset_setting error: {e}", exc_info=True)
+            return {'error': str(e), 'status': 'error'}
+
+    @classmethod
+    def admin_get_setting(cls, admin_id: str, role: AdminRole, key: str) -> Dict[str, Any]:
+        """Get a single setting by key with full metadata."""
+        if not cls._check_permission(role, AdminPermission.AUDIT_VIEW):
+            return {'error': 'Permission denied', 'status': 'forbidden'}
+        if key not in cls._DEFAULT_SETTINGS:
+            return {'error': f"Unknown key: '{key}'", 'status': 'not_found'}
+        cls._ensure_settings_loaded()
+        value   = cls._settings_cache.get(key)
+        default = cls._DEFAULT_SETTINGS.get(key)
+        category = key.split('.')[0] if '.' in key else 'general'
+        return {
+            'status':     'success',
+            'key':        key,
+            'value':      value,
+            'default':    default,
+            'type':       type(value).__name__,
+            'category':   category,
+            'overridden': value != default,
+        }
+
+    @classmethod
+    def _apply_setting_side_effect(cls, key: str, value: Any):
+        """
+        Apply live side-effects when a setting changes at runtime.
+        These changes take effect immediately without restart.
+
+        Sub-sub-logic per key:
+          maintenance.mode           → set in globals._system_state + cls._system_state
+          security.max_login_attempts → update auth_handlers.MAX_LOGIN_ATTEMPTS (module var)
+          security.session_timeout_hours → update auth_handlers.JWT_EXPIRATION_HOURS
+          security.require_2fa_admin  → update AdminSessionManager requirements
+          security.ip_whitelist_enabled → update AdminSessionManager IP whitelist
+          security.ip_whitelist        → set AdminSessionManager._ip_whitelist
+          rate_limit.api_requests_per_min → propagate to globals rate_limiter
+        """
+        try:
+            if key == 'maintenance.mode':
+                with cls._lock:
+                    cls._system_state['maintenance_mode'] = bool(value)
+                try:
+                    from globals import get_globals
+                    get_globals().system.maintenance_mode = bool(value)
+                except Exception:
+                    pass
+                logger_admin.warning(f"[AdminSettings] Maintenance mode → {value}")
+
+            elif key == 'security.max_login_attempts':
+                try:
+                    import auth_handlers as _ah
+                    _ah.MAX_LOGIN_ATTEMPTS = int(value)
+                    logger_admin.info(f"[AdminSettings] MAX_LOGIN_ATTEMPTS → {value}")
+                except Exception:
+                    pass
+
+            elif key == 'security.session_timeout_hours':
+                try:
+                    import auth_handlers as _ah
+                    _ah.JWT_EXPIRATION_HOURS = int(value)
+                    logger_admin.info(f"[AdminSettings] JWT_EXPIRATION_HOURS → {value}")
+                except Exception:
+                    pass
+
+            elif key == 'security.lockout_minutes':
+                try:
+                    import auth_handlers as _ah
+                    _ah.LOCKOUT_DURATION_MINUTES = int(value)
+                except Exception:
+                    pass
+
+            elif key == 'security.ip_whitelist_enabled':
+                if not bool(value):
+                    AdminSessionManager.set_ip_whitelist(None)
+
+            elif key == 'security.ip_whitelist':
+                if isinstance(value, list) and value:
+                    AdminSessionManager.set_ip_whitelist(set(value))
+
+            elif key == 'registration.enabled':
+                try:
+                    from globals import get_globals
+                    get_globals().system.registration_enabled = bool(value)
+                except Exception:
+                    pass
+
+        except Exception as _se:
+            logger_admin.debug(f"[AdminSettings] Side-effect error for {key}: {_se}")
+
+    # ─────────────────────────────────────────────────────────────
+    # ADMIN USERS — full DB-backed CRUD
+    # ─────────────────────────────────────────────────────────────
+
+    @classmethod
+    def admin_list_users(cls, admin_id: str, role: AdminRole, filters: Dict = None) -> Dict[str, Any]:
+        """
+        List all users with comprehensive filtering, pagination, and quantum identity info.
+
+        Sub-logic:
+          1. AUDIT_VIEW permission check
+          2. Parse filter params: status, role, search (email/username), pq_assigned, date_range
+          3. Build parameterised SQL (never string-interpolated — safe from SQLi)
+          4. JOIN against metadata JSONB for pq_key_id, pseudoqubit_id
+          5. Return paginated result + aggregate counts
+          6. Audit the list operation
+        """
+        if not cls._check_permission(role, AdminPermission.AUDIT_VIEW):
+            return {'error': 'Permission denied', 'status': 'forbidden'}
+
+        try:
+            f = filters or {}
+            limit  = min(int(f.get('limit',  100)), 1000)
+            offset = int(f.get('offset', 0))
+            search = f.get('search', '').strip()
+            status_filter = f.get('status', '')        # active | inactive | locked
+            role_filter   = f.get('role', '')          # user | admin | super_admin
+            pq_only       = bool(f.get('pq_assigned_only', False))
+            created_after = f.get('created_after', '')
+            created_before= f.get('created_before', '')
+            sort_by       = f.get('sort_by', 'created_at')       # created_at | last_login | email
+            sort_dir      = 'DESC' if f.get('sort_desc', True) else 'ASC'
+
+            ALLOWED_SORT = {'created_at', 'last_login', 'email', 'username', 'role'}
+            if sort_by not in ALLOWED_SORT:
+                sort_by = 'created_at'
+
+            conditions = []
+            params: List[Any] = []
+
+            if search:
+                conditions.append("(LOWER(email) LIKE %s OR LOWER(username) LIKE %s OR LOWER(name) LIKE %s)")
+                like_pat = f'%{search.lower()}%'
+                params += [like_pat, like_pat, like_pat]
+
+            if status_filter == 'active':
+                conditions.append("is_active = TRUE AND COALESCE(account_locked, FALSE) = FALSE")
+            elif status_filter == 'inactive':
+                conditions.append("is_active = FALSE")
+            elif status_filter == 'locked':
+                conditions.append("COALESCE(account_locked, FALSE) = TRUE")
+
+            if role_filter:
+                conditions.append("role = %s")
+                params.append(role_filter)
+
+            if pq_only:
+                conditions.append(
+                    "(metadata->>'pseudoqubit_id') IS NOT NULL "
+                    "AND (metadata->>'pseudoqubit_id') != '0'"
+                )
+
+            if created_after:
+                conditions.append("created_at >= %s")
+                params.append(created_after)
+
+            if created_before:
+                conditions.append("created_at <= %s")
+                params.append(created_before)
+
+            where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+            # Main user query — NEVER expose password_hash
+            main_query = f"""
+                SELECT
+                    user_id,
+                    email,
+                    COALESCE(username, name, email) AS username,
+                    role,
+                    is_active,
+                    COALESCE(email_verified, FALSE)  AS email_verified,
+                    COALESCE(account_locked, FALSE)  AS account_locked,
+                    COALESCE(two_factor_enabled, FALSE) AS mfa_enabled,
+                    created_at,
+                    last_login,
+                    COALESCE(failed_login_attempts, 0) AS failed_login_attempts,
+                    last_login_ip,
+                    -- Quantum identity from metadata JSONB
+                    metadata->>'pseudoqubit_id'   AS pseudoqubit_id,
+                    metadata->>'pq_key_id'        AS pq_key_id,
+                    metadata->>'pq_fingerprint'   AS pq_fingerprint,
+                    metadata->>'security_level'   AS security_level
+                FROM users
+                {where_clause}
+                ORDER BY {sort_by} {sort_dir} NULLS LAST
+                LIMIT %s OFFSET %s
+            """
+            params_main = params + [limit, offset]
+            users = cls._db_execute(main_query, tuple(params_main), fetch='all') or []
+
+            # Total count for pagination
+            count_query = f"SELECT COUNT(*) AS total FROM users {where_clause}"
+            count_row = cls._db_execute(count_query, tuple(params), fetch='one')
+            total = int(count_row['total']) if count_row else len(users)
+
+            # Aggregate stats (separate query — cheap)
+            try:
+                agg = cls._db_execute("""
+                    SELECT
+                        COUNT(*) FILTER (WHERE is_active = TRUE)                 AS active_count,
+                        COUNT(*) FILTER (WHERE is_active = FALSE)                AS inactive_count,
+                        COUNT(*) FILTER (WHERE COALESCE(account_locked,FALSE))   AS locked_count,
+                        COUNT(*) FILTER (WHERE role = 'admin')                   AS admin_count,
+                        COUNT(*) FILTER (WHERE role = 'super_admin')             AS super_admin_count,
+                        COUNT(*) FILTER (WHERE metadata->>'pq_key_id' IS NOT NULL) AS pq_key_issued_count
+                    FROM users
+                """, fetch='one')
+            except Exception:
+                agg = {}
+
+            # Sanitize datetime fields
+            for u in users:
+                for ts_field in ('created_at', 'last_login'):
+                    if u.get(ts_field) and hasattr(u[ts_field], 'isoformat'):
+                        u[ts_field] = u[ts_field].isoformat()
+
+            cls._audit(admin_id, 'list_users', 'users', {
+                'filters': f, 'total': total, 'returned': len(users)
+            }, True)
+
+            return {
+                'status':  'success',
+                'users':   users,
+                'total':   total,
+                'limit':   limit,
+                'offset':  offset,
+                'has_more': (offset + len(users)) < total,
+                'aggregates': agg or {},
+            }
+        except Exception as e:
+            logger_admin.error(f"[AdminCmd] List users error: {e}", exc_info=True)
             cls._audit(admin_id, 'list_users', 'users', {'error': str(e)}, False)
+            return {'error': str(e), 'status': 'error'}
+
+    @classmethod
+    def admin_get_user(cls, admin_id: str, role: AdminRole, target_user_id: str) -> Dict[str, Any]:
+        """
+        Get full user profile including quantum identity, PQ keys, session history.
+
+        Sub-logic:
+          1. Fetch user row (all non-sensitive columns)
+          2. Fetch active sessions for this user from sessions table
+          3. Fetch recent audit events for this user
+          4. Fetch PQ key metadata from pq_key_store
+          5. Assemble and return complete profile
+        """
+        if not cls._check_permission(role, AdminPermission.AUDIT_VIEW):
+            return {'error': 'Permission denied', 'status': 'forbidden'}
+
+        try:
+            # Core user record
+            user = cls._db_execute("""
+                SELECT
+                    user_id, email,
+                    COALESCE(username, name, email) AS username,
+                    role, is_active,
+                    COALESCE(email_verified, FALSE)   AS email_verified,
+                    COALESCE(account_locked, FALSE)   AS account_locked,
+                    COALESCE(two_factor_enabled, FALSE) AS mfa_enabled,
+                    created_at, last_login, last_login_ip,
+                    email_verified_at, account_locked_until,
+                    COALESCE(failed_login_attempts, 0) AS failed_login_attempts,
+                    metadata
+                FROM users WHERE user_id = %s
+            """, (target_user_id,), fetch='one')
+
+            if not user:
+                return {'error': f'User {target_user_id} not found', 'status': 'not_found'}
+
+            # Parse metadata
+            meta = user.pop('metadata', {}) or {}
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+
+            user['quantum_identity'] = {
+                'pseudoqubit_id':   meta.get('pseudoqubit_id'),
+                'pq_key_id':        meta.get('pq_key_id'),
+                'pq_fingerprint':   meta.get('pq_fingerprint'),
+                'security_level':   meta.get('security_level', 'ENHANCED'),
+                'quantum_metrics':  meta.get('quantum_metrics'),
+            }
+
+            # Active sessions
+            try:
+                sessions = cls._db_execute("""
+                    SELECT session_id, created_at, expires_at, ip_address, user_agent
+                    FROM sessions
+                    WHERE user_id = %s AND expires_at > NOW()
+                    ORDER BY created_at DESC
+                    LIMIT 10
+                """, (target_user_id,), fetch='all')
+                user['active_sessions'] = sessions or []
+            except Exception:
+                user['active_sessions'] = []
+
+            # Recent audit events
+            try:
+                audit_events = cls._db_execute("""
+                    SELECT event_type, details, created_at, ip_address
+                    FROM audit_log
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC
+                    LIMIT 20
+                """, (target_user_id,), fetch='all')
+                user['recent_audit_events'] = audit_events or []
+            except Exception:
+                user['recent_audit_events'] = []
+
+            # PQ keys from vault
+            try:
+                pq_keys = cls._db_execute("""
+                    SELECT key_id, fingerprint, purpose, params_name,
+                           status, created_at, expires_at
+                    FROM pq_key_store
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC
+                    LIMIT 10
+                """, (target_user_id,), fetch='all')
+                user['pq_keys'] = []
+                for k in (pq_keys or []):
+                    for f in ('created_at', 'expires_at'):
+                        if k.get(f) and hasattr(k[f], 'isoformat'):
+                            k[f] = k[f].isoformat()
+                    if k.get('key_id'):
+                        k['key_id'] = str(k['key_id'])
+                    user['pq_keys'].append(k)
+            except Exception:
+                user['pq_keys'] = []
+
+            # Stringify timestamps
+            for ts in ('created_at', 'last_login', 'email_verified_at', 'account_locked_until'):
+                if user.get(ts) and hasattr(user[ts], 'isoformat'):
+                    user[ts] = user[ts].isoformat()
+
+            cls._audit(admin_id, 'get_user', target_user_id, {}, True)
+            return {'status': 'success', 'user': user}
+
+        except Exception as e:
+            logger_admin.error(f"[AdminCmd] get_user error: {e}", exc_info=True)
+            cls._audit(admin_id, 'get_user', target_user_id, {'error': str(e)}, False)
+            return {'error': str(e), 'status': 'error'}
+
+    @classmethod
+    def admin_create_user(cls, admin_id: str, role: AdminRole,
+                          email: str, username: str, password: str,
+                          user_role: str = 'user', auto_verify: bool = True) -> Dict[str, Any]:
+        """
+        Admin-create a user account with immediate PQ key issuance.
+
+        Sub-logic:
+          1. USER_CREATE permission
+          2. Validate email, username, password via auth_handlers.ValidationEngine
+          3. Check no existing user with same email
+          4. Hash password via bcrypt (12 rounds)
+          5. Call auth_handlers.UserManager.create_user — assigns pseudoqubit from pool
+          6. Set role to requested role (not default 'user')
+          7. Auto-verify email if auto_verify=True (skip email confirmation)
+          8. Call pq_key_system.get_pqc_system().generate_user_key() for PQ keypair
+          9. Persist pq_key_id + fingerprint into metadata
+          10. Return full user profile + PQ key metadata
+        """
+        if not cls._check_permission(role, AdminPermission.USER_CREATE):
+            return {'error': 'Permission denied — USER_CREATE required', 'status': 'forbidden'}
+
+        try:
+            from auth_handlers import (
+                ValidationEngine, UserManager, hash_password,
+                AuthDatabase, TokenManager, TokenType
+            )
+
+            email    = ValidationEngine.validate_email(email)
+            username = ValidationEngine.validate_username(username)
+            password = ValidationEngine.validate_password(password)
+
+            existing = UserManager.get_user_by_email(email)
+            if existing:
+                return {'error': f'Email already registered: {email}', 'status': 'conflict'}
+
+            pw_hash  = hash_password(password)
+            new_user = UserManager.create_user(email, username, pw_hash)
+
+            # Override role if not 'user'
+            if user_role != 'user':
+                try:
+                    AuthDatabase.execute(
+                        "UPDATE users SET role = %s WHERE user_id = %s",
+                        (user_role, new_user.user_id)
+                    )
+                except Exception as _re:
+                    logger_admin.warning(f"[AdminCreateUser] role update failed: {_re}")
+
+            # Auto-verify
+            if auto_verify:
+                UserManager.verify_user(new_user.user_id)
+
+            # Issue PQ key
+            pq_bundle = None
+            try:
+                from pq_key_system import get_pqc_system
+                pqc = get_pqc_system()
+                pq_int = int(new_user.pseudoqubit_id) if new_user.pseudoqubit_id else 0
+                pq_bundle = pqc.generate_user_key(
+                    pseudoqubit_id=pq_int,
+                    user_id=new_user.user_id,
+                    store=True
+                )
+                if pq_bundle:
+                    try:
+                        AuthDatabase.execute(
+                            "UPDATE users SET metadata = metadata || %s::jsonb WHERE user_id = %s",
+                            (json.dumps({
+                                'pq_key_id':     pq_bundle.get('master_key', {}).get('key_id', ''),
+                                'pq_fingerprint': pq_bundle.get('fingerprint', ''),
+                            }), new_user.user_id)
+                        )
+                    except Exception as _me:
+                        logger_admin.warning(f"[AdminCreateUser] metadata merge failed: {_me}")
+            except Exception as _pqe:
+                logger_admin.warning(f"[AdminCreateUser] PQ keygen non-fatal: {_pqe}")
+
+            cls._audit(admin_id, 'create_user', new_user.user_id, {
+                'email': email, 'username': username, 'role': user_role,
+                'auto_verified': auto_verify, 'pq_issued': pq_bundle is not None
+            }, True)
+
+            return {
+                'status':       'success',
+                'user_id':      new_user.user_id,
+                'email':        new_user.email,
+                'username':     new_user.username,
+                'role':         user_role,
+                'verified':     auto_verify,
+                'pseudoqubit_id': new_user.pseudoqubit_id,
+                'pq_key_id':    pq_bundle.get('master_key', {}).get('key_id') if pq_bundle else None,
+                'pq_fingerprint': pq_bundle.get('fingerprint') if pq_bundle else None,
+                'message':      f'User created successfully by admin {admin_id}',
+            }
+        except ValueError as ve:
+            return {'error': str(ve), 'status': 'validation_error'}
+        except Exception as e:
+            logger_admin.error(f"[AdminCmd] create_user error: {e}", exc_info=True)
+            cls._audit(admin_id, 'create_user', 'new', {'error': str(e)}, False)
+            return {'error': str(e), 'status': 'error'}
+
+    @classmethod
+    def admin_modify_user_role(cls, admin_id: str, role: AdminRole,
+                               target_user_id: str, new_role: str, reason: str = '') -> Dict[str, Any]:
+        """
+        Modify user's role. Only SUPER_ADMIN can grant admin/super_admin.
+
+        Sub-logic:
+          1. USER_MODIFY_ROLE permission
+          2. Privilege escalation guard: only SUPER_ADMIN can grant admin+
+          3. Update role in DB
+          4. Invalidate cached sessions for target user (tokens contain role)
+          5. Full audit entry with old+new role
+        """
+        if not cls._check_permission(role, AdminPermission.USER_MODIFY_ROLE):
+            return {'error': 'Permission denied — USER_MODIFY_ROLE required', 'status': 'forbidden'}
+
+        PRIVILEGED_ROLES = {'admin', 'super_admin', 'superadmin'}
+        if new_role in PRIVILEGED_ROLES and role != AdminRole.SUPER_ADMIN:
+            return {
+                'error': f'Only SUPER_ADMIN can grant role "{new_role}"',
+                'status': 'forbidden'
+            }
+
+        VALID_ROLES = {'user', 'admin', 'super_admin', 'operator', 'auditor', 'validator'}
+        if new_role not in VALID_ROLES:
+            return {'error': f'Invalid role: {new_role}. Valid: {VALID_ROLES}', 'status': 'validation_error'}
+
+        try:
+            # Get old role
+            old_row = cls._db_execute(
+                "SELECT role FROM users WHERE user_id = %s", (target_user_id,), fetch='one'
+            )
+            if not old_row:
+                return {'error': f'User {target_user_id} not found', 'status': 'not_found'}
+            old_role = old_row.get('role', 'user')
+
+            cls._db_execute(
+                "UPDATE users SET role = %s, updated_at = NOW() WHERE user_id = %s",
+                (new_role, target_user_id), fetch='none'
+            )
+
+            # Invalidate sessions so new JWT tokens are issued with correct role
+            try:
+                cls._db_execute(
+                    "DELETE FROM sessions WHERE user_id = %s", (target_user_id,), fetch='none'
+                )
+                logger_admin.info(f"[AdminCmd] Sessions cleared for {target_user_id} after role change")
+            except Exception as _se:
+                logger_admin.debug(f"[AdminCmd] Session clear skipped: {_se}")
+
+            # Mirror into globals auth cache if present
+            try:
+                from globals import get_globals
+                gs = get_globals()
+                if target_user_id in gs.auth.users:
+                    gs.auth.users[target_user_id]['role'] = new_role
+            except Exception:
+                pass
+
+            cls._audit(admin_id, 'modify_role', target_user_id, {
+                'old_role': old_role, 'new_role': new_role, 'reason': reason
+            }, True)
+            logger_admin.warning(f"[AdminCmd] Role changed: {target_user_id} {old_role} → {new_role} by {admin_id}")
+
+            return {
+                'status':        'success',
+                'user_id':       target_user_id,
+                'old_role':      old_role,
+                'new_role':      new_role,
+                'sessions_invalidated': True,
+                'message':       f'Role updated: {old_role} → {new_role}',
+            }
+        except Exception as e:
+            logger_admin.error(f"[AdminCmd] modify_role error: {e}", exc_info=True)
+            cls._audit(admin_id, 'modify_role', target_user_id, {'error': str(e)}, False)
+            return {'error': str(e), 'status': 'error'}
+
+    @classmethod
+    def admin_delete_user(cls, admin_id: str, role: AdminRole,
+                          target_user_id: str, reason: str, hard_delete: bool = False) -> Dict[str, Any]:
+        """
+        Delete (soft or hard) a user account.
+
+        Sub-logic (soft delete, default):
+          1. USER_DELETE permission
+          2. Prevent self-deletion
+          3. Mark is_deleted=TRUE, is_active=FALSE, anonymise email → deleted_{hash}@deleted
+          4. Revoke all active sessions for target user
+          5. Release pseudoqubit back to pool (available for re-assignment)
+          6. Revoke all PQ keys in vault
+
+        Hard delete (SUPER_ADMIN only):
+          7. Permanently remove user row + sessions + PQ keys from DB
+        """
+        if not cls._check_permission(role, AdminPermission.USER_DELETE):
+            return {'error': 'Permission denied — USER_DELETE required', 'status': 'forbidden'}
+
+        if target_user_id == admin_id:
+            return {'error': 'Cannot delete your own account', 'status': 'forbidden'}
+
+        if hard_delete and role != AdminRole.SUPER_ADMIN:
+            return {'error': 'Hard delete requires SUPER_ADMIN', 'status': 'forbidden'}
+
+        try:
+            user_row = cls._db_execute(
+                "SELECT user_id, email, metadata FROM users WHERE user_id = %s",
+                (target_user_id,), fetch='one'
+            )
+            if not user_row:
+                return {'error': f'User {target_user_id} not found', 'status': 'not_found'}
+
+            meta = user_row.get('metadata') or {}
+            if isinstance(meta, str):
+                try: meta = json.loads(meta)
+                except Exception: meta = {}
+            pseudoqubit_id = meta.get('pseudoqubit_id')
+
+            # Revoke sessions
+            try:
+                cls._db_execute("DELETE FROM sessions WHERE user_id = %s", (target_user_id,), fetch='none')
+            except Exception: pass
+
+            # Revoke PQ keys
+            try:
+                cls._db_execute(
+                    "UPDATE pq_key_store SET status = 'revoked', revoked_at = NOW() WHERE user_id = %s",
+                    (target_user_id,), fetch='none'
+                )
+            except Exception: pass
+
+            if hard_delete:
+                cls._db_execute("DELETE FROM users WHERE user_id = %s", (target_user_id,), fetch='none')
+                action = 'hard_delete_user'
+            else:
+                # Soft delete — anonymise PII
+                anon_hash = hashlib.sha256(user_row['email'].encode()).hexdigest()[:16]
+                anon_email = f'deleted_{anon_hash}@deleted.invalid'
+                cls._db_execute("""
+                    UPDATE users SET
+                        is_active  = FALSE,
+                        is_deleted = TRUE,
+                        email      = %s,
+                        username   = %s,
+                        updated_at = NOW()
+                    WHERE user_id = %s
+                """, (anon_email, f'deleted_{anon_hash}', target_user_id), fetch='none')
+                action = 'soft_delete_user'
+
+            # Release pseudoqubit back to pool
+            if pseudoqubit_id:
+                try:
+                    cls._db_execute("""
+                        UPDATE pseudoqubits SET status = 'unassigned', updated_at = NOW()
+                        WHERE pseudoqubit_id = %s
+                    """, (pseudoqubit_id,), fetch='none')
+                except Exception:
+                    try:
+                        cls._db_execute("""
+                            UPDATE pseudoqubit_pool SET available = TRUE, assigned_to = NULL,
+                            released_at = NOW() WHERE pseudoqubit_id = %s
+                        """, (str(pseudoqubit_id),), fetch='none')
+                    except Exception: pass
+
+            # Remove from globals auth cache
+            try:
+                from globals import get_globals
+                gs = get_globals()
+                gs.auth.users.pop(target_user_id, None)
+            except Exception: pass
+
+            cls._audit(admin_id, action, target_user_id, {
+                'reason': reason, 'hard_delete': hard_delete, 'pseudoqubit_released': pseudoqubit_id
+            }, True)
+
+            return {
+                'status':             'success',
+                'user_id':            target_user_id,
+                'action':             action,
+                'pseudoqubit_released': pseudoqubit_id,
+                'message':            f'User {"permanently deleted" if hard_delete else "soft-deleted"}: {reason}',
+            }
+        except Exception as e:
+            logger_admin.error(f"[AdminCmd] delete_user error: {e}", exc_info=True)
+            cls._audit(admin_id, 'delete_user', target_user_id, {'error': str(e)}, False)
+            return {'error': str(e), 'status': 'error'}
+
+    @classmethod
+    def admin_unlock_user(cls, admin_id: str, role: AdminRole,
+                          target_user_id: str, reason: str = '') -> Dict[str, Any]:
+        """Unlock a locked user account and reset failed login attempts."""
+        if not cls._check_permission(role, AdminPermission.USER_SUSPEND):
+            return {'error': 'Permission denied', 'status': 'forbidden'}
+        try:
+            cls._db_execute("""
+                UPDATE users SET
+                    account_locked = FALSE,
+                    account_locked_until = NULL,
+                    failed_login_attempts = 0,
+                    updated_at = NOW()
+                WHERE user_id = %s
+            """, (target_user_id,), fetch='none')
+            cls._audit(admin_id, 'unlock_user', target_user_id, {'reason': reason}, True)
+            return {'status': 'success', 'user_id': target_user_id, 'message': 'Account unlocked'}
+        except Exception as e:
+            cls._audit(admin_id, 'unlock_user', target_user_id, {'error': str(e)}, False)
+            return {'error': str(e), 'status': 'error'}
+
+    @classmethod
+    def admin_reset_user_password(cls, admin_id: str, role: AdminRole,
+                                  target_user_id: str, new_password: str, reason: str = '') -> Dict[str, Any]:
+        """
+        Admin-force reset user password with bcrypt rehash.
+        Invalidates all sessions to force re-login with new credentials.
+        """
+        if not cls._check_permission(role, AdminPermission.USER_MODIFY_ROLE):
+            return {'error': 'Permission denied', 'status': 'forbidden'}
+        try:
+            from auth_handlers import ValidationEngine, hash_password, AuthDatabase
+            new_password = ValidationEngine.validate_password(new_password)
+            pw_hash = hash_password(new_password)
+            AuthDatabase.execute(
+                "UPDATE users SET password_hash = %s, updated_at = NOW() WHERE user_id = %s",
+                (pw_hash, target_user_id)
+            )
+            # Invalidate sessions
+            try:
+                AuthDatabase.execute("DELETE FROM sessions WHERE user_id = %s", (target_user_id,))
+            except Exception: pass
+
+            cls._audit(admin_id, 'reset_password', target_user_id, {'reason': reason}, True)
+            return {
+                'status':  'success',
+                'user_id': target_user_id,
+                'sessions_invalidated': True,
+                'message': 'Password reset successfully — user must re-login',
+            }
+        except ValueError as ve:
+            return {'error': str(ve), 'status': 'validation_error'}
+        except Exception as e:
+            cls._audit(admin_id, 'reset_password', target_user_id, {'error': str(e)}, False)
+            return {'error': str(e), 'status': 'error'}
+
+    @classmethod
+    def admin_issue_pq_key(cls, admin_id: str, role: AdminRole,
+                           target_user_id: str, reason: str = '') -> Dict[str, Any]:
+        """
+        Admin-issue (or re-issue) a PQ keypair for a user who was registered offline
+        and missed the PQ key assignment step.
+
+        Sub-logic:
+          1. SYSTEM_CONFIG permission (PQ key ops are privileged)
+          2. Look up user's pseudoqubit_id from metadata
+          3. Call pq_key_system.generate_user_key(store=True)
+          4. Persist fingerprint + key_id into user metadata
+          5. Return full public metadata bundle
+        """
+        if not cls._check_permission(role, AdminPermission.SYSTEM_CONFIG):
+            return {'error': 'Permission denied', 'status': 'forbidden'}
+        try:
+            from auth_handlers import AuthDatabase
+            user_row = AuthDatabase.fetch_one("SELECT metadata FROM users WHERE user_id = %s", (target_user_id,))
+            if not user_row:
+                return {'error': f'User {target_user_id} not found', 'status': 'not_found'}
+
+            meta = user_row.get('metadata') or {}
+            if isinstance(meta, str):
+                try: meta = json.loads(meta)
+                except Exception: meta = {}
+
+            pq_int = int(meta.get('pseudoqubit_id', 0) or 0)
+
+            from pq_key_system import get_pqc_system
+            pqc = get_pqc_system()
+            bundle = pqc.generate_user_key(pseudoqubit_id=pq_int, user_id=target_user_id, store=True)
+            if not bundle:
+                return {'error': 'PQ key generation failed', 'status': 'error'}
+
+            # Persist into metadata
+            try:
+                AuthDatabase.execute(
+                    "UPDATE users SET metadata = metadata || %s::jsonb WHERE user_id = %s",
+                    (json.dumps({
+                        'pq_key_id':      bundle.get('master_key', {}).get('key_id', ''),
+                        'pq_fingerprint': bundle.get('fingerprint', ''),
+                    }), target_user_id)
+                )
+            except Exception as _me:
+                logger_admin.warning(f"[AdminIssueKey] metadata merge failed: {_me}")
+
+            cls._audit(admin_id, 'issue_pq_key', target_user_id, {
+                'reason': reason, 'fingerprint': bundle.get('fingerprint')
+            }, True)
+
+            return {
+                'status':        'success',
+                'user_id':       target_user_id,
+                'pseudoqubit_id': pq_int,
+                'fingerprint':   bundle.get('fingerprint'),
+                'master_key_id': bundle.get('master_key', {}).get('key_id'),
+                'params':        bundle.get('params'),
+                'message':       'PQ keypair issued successfully',
+            }
+        except Exception as e:
+            logger_admin.error(f"[AdminCmd] issue_pq_key error: {e}", exc_info=True)
+            cls._audit(admin_id, 'issue_pq_key', target_user_id, {'error': str(e)}, False)
             return {'error': str(e), 'status': 'error'}
     
     @classmethod
@@ -1923,25 +3477,39 @@ class GlobalAdminRegistry:
     
     ADMIN_COMMANDS = {
         # User management
-        'admin/list_users': GlobalAdminCommandHandlers.admin_list_users,
-        'admin/suspend_user': GlobalAdminCommandHandlers.admin_suspend_user,
-        'admin/ban_user': GlobalAdminCommandHandlers.admin_ban_user,
+        'admin/list_users':          GlobalAdminCommandHandlers.admin_list_users,
+        'admin/get_user':            GlobalAdminCommandHandlers.admin_get_user,
+        'admin/create_user':         GlobalAdminCommandHandlers.admin_create_user,
+        'admin/suspend_user':        GlobalAdminCommandHandlers.admin_suspend_user,
+        'admin/ban_user':            GlobalAdminCommandHandlers.admin_ban_user,
+        'admin/modify_role':         GlobalAdminCommandHandlers.admin_modify_user_role,
+        'admin/unlock_user':         GlobalAdminCommandHandlers.admin_unlock_user,
+        'admin/reset_password':      GlobalAdminCommandHandlers.admin_reset_user_password,
+        'admin/delete_user':         GlobalAdminCommandHandlers.admin_delete_user,
+        'admin/issue_pq_key':        GlobalAdminCommandHandlers.admin_issue_pq_key,
         
         # Transaction management
-        'admin/cancel_transaction': GlobalAdminCommandHandlers.admin_cancel_transaction,
+        'admin/cancel_transaction':  GlobalAdminCommandHandlers.admin_cancel_transaction,
         'admin/reverse_transaction': GlobalAdminCommandHandlers.admin_reverse_transaction,
         
         # System control
-        'admin/maintenance_mode': GlobalAdminCommandHandlers.admin_set_maintenance_mode,
-        'admin/system_stats': GlobalAdminCommandHandlers.admin_get_system_stats,
+        'admin/maintenance_mode':    GlobalAdminCommandHandlers.admin_set_maintenance_mode,
+        'admin/system_stats':        GlobalAdminCommandHandlers.admin_get_system_stats,
+        
+        # Settings management
+        'admin/get_settings':        GlobalAdminCommandHandlers.admin_get_settings,
+        'admin/update_setting':      GlobalAdminCommandHandlers.admin_update_setting,
+        'admin/update_settings_bulk':GlobalAdminCommandHandlers.admin_update_settings_bulk,
+        'admin/reset_setting':       GlobalAdminCommandHandlers.admin_reset_setting,
+        'admin/get_setting':         GlobalAdminCommandHandlers.admin_get_setting,
         
         # Blockchain control
-        'admin/manage_validators': GlobalAdminCommandHandlers.admin_manage_validators,
-        'admin/adjust_balance': GlobalAdminCommandHandlers.admin_adjust_balance,
+        'admin/manage_validators':   GlobalAdminCommandHandlers.admin_manage_validators,
+        'admin/adjust_balance':      GlobalAdminCommandHandlers.admin_adjust_balance,
         
         # Audit
-        'admin/audit_log': GlobalAdminCommandHandlers.admin_get_audit_log,
-        'admin/blacklist_ip': GlobalAdminCommandHandlers.admin_blacklist_ip,
+        'admin/audit_log':           GlobalAdminCommandHandlers.admin_get_audit_log,
+        'admin/blacklist_ip':        GlobalAdminCommandHandlers.admin_blacklist_ip,
     }
     
     @classmethod

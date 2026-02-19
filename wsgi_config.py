@@ -220,14 +220,28 @@ def _populate_globals_from_db():
             except Exception:
                 pass
             
-            # auth users & active sessions
+            # auth users & active sessions — DISTINCT: user count ≠ session count
             try:
-                cur.execute("SELECT COUNT(*) FROM users WHERE is_active=TRUE AND is_deleted=FALSE")
+                # Active users (for informational count only)
+                cur.execute("SELECT COUNT(*) FROM users WHERE is_active=TRUE")
                 row = cur.fetchone()
                 if row and row[0]:
-                    gs.auth.active_sessions = int(row[0])  # approximate user count
+                    gs.auth.total_users = int(row[0])
             except Exception:
                 pass
+
+            # Real active sessions — from sessions table, not user rows
+            try:
+                cur.execute(
+                    "SELECT COUNT(*) FROM sessions WHERE expires_at > NOW()"
+                )
+                row = cur.fetchone()
+                gs.auth.active_sessions = int(row[0]) if (row and row[0]) else 0
+                logger.info(f'[wsgi] auth.active_sessions (from sessions table) = {gs.auth.active_sessions}')
+            except Exception as _se:
+                # sessions table may not exist yet — start at 0 (correct)
+                gs.auth.active_sessions = 0
+                logger.debug(f'[wsgi] sessions table query skipped: {_se}')
             
             # ledger entries
             try:
