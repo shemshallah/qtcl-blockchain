@@ -378,25 +378,29 @@ class MasterApplicationOrchestrator:
                     'total': 0
                 }), 500
         
-        # Terminal command endpoint
+        # Terminal command endpoint - UNIFIED DISPATCH
         @self.app.route('/api/command', methods=['POST'])
         def execute_command():
             from flask import request
-            engine = self.all_systems.get('terminal')
-            if engine is None:
-                try:
-                    from terminal_logic import TerminalEngine
-                    engine = TerminalEngine()
-                except Exception as _ie:
-                    return jsonify({'error': f'Terminal not available: {_ie}'}), 503
+            from terminal_logic import _dispatch_from_globals
+            
             try:
                 data   = request.get_json() or {}
                 cmd    = data.get('cmd', '') or data.get('command', '')
-                result = engine.execute_command(cmd)
-                return jsonify(result)
+                
+                if not cmd:
+                    return jsonify({'status': 'error', 'error': 'No command provided'}), 400
+                
+                # Use unified globals-based dispatch
+                result = _dispatch_from_globals(cmd)
+                
+                # Ensure response has status code
+                status_code = 200 if result.get('status') != 'error' else 400
+                return jsonify(result), status_code
+                
             except Exception as _ce:
                 logger.error(f'[Main] /api/command error: {_ce}', exc_info=True)
-                return jsonify({'error': str(_ce)}), 500
+                return jsonify({'status': 'error', 'error': str(_ce)}), 500
         
         print("[MasterOrch] ✓ Flask app created with core routes")
         

@@ -5308,112 +5308,10 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             return _err('Usage: multisig-create --signers=addr1,addr2,addr3 --threshold=2')
         return _req('POST', '/api/ledger/multisig', body)
 
-    # ── BLOCKS ────────────────────────────────────────────────────────────────
-
-    def h_block_list(flags, args):
-        # Globals fast-path
-
-        uid = flags.get('id') or flags.get('user_id') or (args[0] if args else None)
-        if not uid:
-            return _err('Usage: user-details --id=<user_id>')
-        return _req('GET', f'/api/users/{uid}')
-
-    # ── TRANSACTIONS ──────────────────────────────────────────────────────────
-
-    def h_tx_list(flags, args):
-        params = {k: v for k, v in flags.items() if k in ('limit', 'offset', 'status', 'type')}
-        return _req('GET', '/api/transactions', params=params)
-
-    def h_tx_create(flags, args):
-        to_addr = flags.get('to') or flags.get('to_address')
-        amount  = flags.get('amount')
-        if not to_addr or not amount:
-            return _err('Usage: transaction-create --to=<addr_or_email> --amount=<n> [--memo=x] [--type=transfer]')
-        # Sanitize
-        for _ch in '\x00\r\n\x1b':
-            to_addr = to_addr.replace(_ch, '')
-        to_addr = to_addr.strip()[:254]
-        try:
-            float(amount)
-        except (ValueError, TypeError):
-            return _err(f'Invalid amount: {amount!r}')
-        # Pull sender from authenticated session
-        from_addr = ''
-        try: from_addr = s.session.email or s.session.user_id or ''
-        except Exception: pass
-        body = {
-            'from_address': from_addr,
-            'to_address':   to_addr,
-            'amount':       amount,
-            'tx_type':      flags.get('type', 'transfer'),
-            'memo':         flags.get('memo', ''),
-        }
-        return _req('POST', '/api/transactions/submit', body)
-
-    def h_tx_track(flags, args):
-        tx_id = flags.get('id') or flags.get('tx_id') or (args[0] if args else None)
-        if not tx_id:
-            return _err('Usage: transaction-track --id=<tx_id>')
-        return _req('GET', f'/api/transactions/{tx_id}')
-
-    def h_tx_cancel(flags, args):
-        tx_id = flags.get('id') or flags.get('tx_id') or (args[0] if args else None)
-        if not tx_id:
-            return _err('Usage: transaction-cancel --id=<tx_id>')
-        return _req('POST', f'/api/transactions/{tx_id}/cancel', {})
-
-    def h_tx_stats(flags, args):
-        return _req('GET', '/api/transactions/stats')
-
-    # ── WALLETS ───────────────────────────────────────────────────────────────
-
-    def h_wallet_list(flags, args):
-        return _req('GET', '/api/wallets')
-
-    def h_wallet_create(flags, args):
-        body = {k: v for k, v in flags.items() if k in ('name', 'type', 'currency')}
-        return _req('POST', '/api/wallets', body)
-
-    def h_wallet_balance(flags, args):
-        wid = flags.get('id') or flags.get('wallet_id') or (args[0] if args else None)
-        if not wid:
-            return _req('GET', '/api/wallets/balance')
-        return _req('GET', f'/api/wallets/{wid}/balance')
-
-    def h_wallet_import(flags, args):
-        body = {k: v for k, v in flags.items() if k in ('private_key', 'mnemonic', 'format', 'name')}
-        return _req('POST', '/api/wallets/import', body)
-
-    def h_wallet_export(flags, args):
-        wid = flags.get('id') or (args[0] if args else None)
-        if not wid:
-            return _err('Usage: wallet-export --id=<wallet_id>')
-        return _req('GET', f'/api/wallets/{wid}/export')
-
-    def h_multisig_create(flags, args):
-        body = {k: v for k, v in flags.items()}
-        return _req('POST', '/api/wallets/multisig', body)
-
-    # ── BLOCKS ────────────────────────────────────────────────────────────────
-
-    def h_block_list(flags, args):
-        # Globals fast-path
-        try:
-            from globals import get_globals
-            gs = get_globals()
-            h = gs.blockchain.chain_height
-            total = gs.blockchain.total_blocks
-            if h:
-                return _ok({
-                    'chain_height': h,
-                    'total_blocks': total,
-                    'note': 'Live count from globals — use API for full block list',
-                })
-        except Exception:
-            pass
-        params = {k: v for k, v in flags.items() if k in ('limit', 'offset', 'order')}
-        params.setdefault('limit', '20')
-        return _req('GET', '/api/blocks', params=params)
+    # ─────────────────────────────────────────────────────────────────────────────
+    # ALL DUPLICATE HANDLER DEFINITIONS REMOVED
+    # Kept GOOD versions from 5221-5309 (with globals fast-path & proper API calls)
+    # ─────────────────────────────────────────────────────────────────────────────
 
     def h_block_details(flags, args):
         num = flags.get('block') or flags.get('number') or flags.get('hash') or (args[0] if args else None)
@@ -5528,39 +5426,8 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         return _req('GET', '/api/quantum/heartbeat')
 
     # ── ORACLE ────────────────────────────────────────────────────────────────
+    # DUPLICATE ORACLE HANDLERS REMOVED (kept better implementations from lines 5058-5104)
 
-    def h_oracle_time(flags, args):
-        try:
-            from globals import get_oracle
-            oracle = get_oracle()
-            if oracle and oracle.last_update:
-                return _ok({'server_time': oracle.last_update.isoformat(), 'source': 'globals'})
-        except Exception:
-            pass
-        return _req('GET', '/api/oracle/time')
-
-    def h_oracle_price_OLD(flags, args):
-        symbol = flags.get('symbol') or flags.get('pair') or (args[0] if args else 'QTCL-USD')
-        try:
-            from globals import get_oracle
-            oracle = get_oracle()
-            if oracle and symbol in oracle.prices:
-                return _ok({'symbol': symbol, 'price': str(oracle.prices[symbol]), 'source': 'globals'})
-        except Exception:
-            pass
-        return _req('GET', f'/api/oracle/price/{symbol}')
-
-    def h_oracle_random(flags, args):
-        import secrets
-        nbytes = int(flags.get('bytes', 32))
-        val = secrets.token_hex(nbytes)
-        return _ok({'random_hex': val, 'bytes': nbytes, 'source': 'quantum_rng'})
-
-    def h_oracle_feed(flags, args):
-        return _req('GET', '/api/oracle/feeds')
-
-    def h_oracle_event(flags, args):
-        return _req('GET', '/api/oracle/events')
 
     # ── DEFI ──────────────────────────────────────────────────────────────────
 
