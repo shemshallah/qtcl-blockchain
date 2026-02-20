@@ -608,14 +608,27 @@ async function loadCommands() {
     const res = await fetch('/api/commands');
     if (res.ok) {
       const data = await res.json();
-      state.allCommands = data.commands || [];
+      // API returns commands as a plain object keyed by name — normalize to array
+      const raw = data.commands || data || {};
+      if (Array.isArray(raw)) {
+        state.allCommands = raw;
+      } else {
+        state.allCommands = Object.entries(raw).map(([name, info]) => ({
+          name,
+          category: info.category || 'misc',
+          description: info.description || '',
+          auth_required: info.auth_required || false,
+          ...info
+        }));
+      }
       state.commandsByCategory = {};
-      
+
       state.allCommands.forEach(cmd => {
-        if (!state.commandsByCategory[cmd.category]) {
-          state.commandsByCategory[cmd.category] = [];
+        const cat = cmd.category || 'misc';
+        if (!state.commandsByCategory[cat]) {
+          state.commandsByCategory[cat] = [];
         }
-        state.commandsByCategory[cmd.category].push(cmd);
+        state.commandsByCategory[cat].push(cmd);
       });
       
       addLine(`✓ Loaded ${state.allCommands.length} commands from registry`, 'success');
@@ -1039,8 +1052,8 @@ L5 — KeyVaultManager        : AES-256-GCM encrypted key store (PostgreSQL) + c
     state.commandsByCategory[category].forEach(cmd => {
       const tag = document.createElement('span');
       tag.className = 'cmd-tag';
-      tag.textContent = cmd.command;
-      tag.onclick = () => runQuick(cmd.command);
+      tag.textContent = cmd.name || cmd.command || '(unknown)';
+      tag.onclick = () => runQuick(cmd.name || cmd.command);
       cmdList.appendChild(tag);
     });
     
