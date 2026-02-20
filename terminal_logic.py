@@ -285,101 +285,144 @@ ensure_packages()
 def _check_production_dependencies():
     """
     Verify all production dependencies are available.
-    Fail fast with clear instructions if any are missing.
+
+    CRITICAL CHANGE (2025-02-20):
+    Previously this function raised RuntimeError on any missing package, which
+    blocked the entire terminal_logic module from loading.  When the module fails
+    to load, register_all_commands() is never called → COMMAND_REGISTRY stays at
+    77 stubs with no handlers → every command the user types returns "Unknown command".
+
+    NEW BEHAVIOUR:
+      • Missing packages are logged as ERRORS (highly visible) but do NOT raise.
+      • The module loads, commands register, the system degrades gracefully.
+      • Individual handlers that need a missing package fail at call-time with a
+        clear error message rather than silently breaking the whole registry.
+      • Operators can see exactly which packages are missing and install them without
+        the app being completely non-functional in the meantime.
     """
     missing = []
-    
-    # Check each required package
+
     checks = [
-        ('requests', 'requests', 'HTTP client library'),
-        ('colorama', 'colorama', 'Terminal ANSI color output'),
-        ('tabulate', 'tabulate', 'CLI table formatting'),
-        ('jwt', 'PyJWT', 'JWT token handling & verification'),
-        ('bcrypt', 'bcrypt', 'Password hashing (12-round salts)'),
-        ('psycopg2', 'psycopg2-binary', 'PostgreSQL/Supabase driver'),
-        ('cryptography', 'cryptography', 'Asymmetric crypto operations'),
+        ('requests',     'requests',         'HTTP client library'),
+        ('colorama',     'colorama',          'Terminal ANSI color output'),
+        ('tabulate',     'tabulate',          'CLI table formatting'),
+        ('jwt',          'PyJWT',             'JWT token handling & verification'),
+        ('bcrypt',       'bcrypt',            'Password hashing (12-round salts)'),
+        ('psycopg2',     'psycopg2-binary',   'PostgreSQL/Supabase driver'),
+        ('cryptography', 'cryptography',      'Asymmetric crypto operations'),
     ]
-    
+
     for import_name, pip_name, description in checks:
         try:
             __import__(import_name)
         except ImportError:
             missing.append((pip_name, description))
-    
+
     if missing:
-        error_lines = [
+        lines = [
             "",
             "╔" + "═" * 78 + "╗",
-            "║ 🚨 PRODUCTION DEPLOYMENT FAILED — MISSING REQUIRED DEPENDENCIES        ║",
-            "║                                                                        ║",
-            "║ This is enterprise-grade software. It requires ALL critical packages. ║",
-            "║ No stubs. No fallbacks. No degraded mode. Complete or fail.           ║",
+            "║ ⚠  MISSING PYTHON PACKAGES — SOME COMMANDS MAY FAIL AT CALL TIME       ║",
+            "║                                                                          ║",
+            "║ The terminal will still start and commands will register.               ║",
+            "║ Individual commands that need a missing package will show an error      ║",
+            "║ when called.  Install the packages below and restart to fix fully.      ║",
             "╚" + "═" * 78 + "╝",
             "",
             "MISSING PACKAGES:",
         ]
         for pip_name, description in missing:
-            error_lines.append(f"  ❌ {pip_name:25s} — {description}")
-        
-        error_lines.extend([
+            lines.append(f"  ❌ {pip_name:25s} — {description}")
+        lines.extend([
             "",
-            "DEPLOYMENT INSTRUCTIONS:",
-            "━" * 80,
-            "",
-            "1️⃣  Add to requirements.txt (or Pipfile/pyproject.toml):",
+            "Install with:",
+            "  pip install " + " ".join(p for p, _ in missing),
             "",
         ])
-        
-        for pip_name, _ in missing:
-            error_lines.append(f"      {pip_name}")
-        
-        error_lines.extend([
-            "",
-            "2️⃣  Install in your deployment environment:",
-            "",
-            "      pip install --upgrade pip",
-            "      pip install bcrypt PyJWT psycopg2-binary cryptography requests colorama tabulate",
-            "",
-            "3️⃣  Verify installation (before deployment):",
-            "",
-            "      python3 << 'EOF'",
-            "      import bcrypt, jwt, psycopg2, cryptography, requests, colorama, tabulate",
-            "      print('✓ All packages available')",
-            "      EOF",
-            "",
-            "4️⃣  Then restart the application.",
-            "",
-            "PRODUCTION REQUIREMENTS:",
-            "━" * 80,
-            "  • Python 3.9 or later",
-            "  • bcrypt with 12+ round salts (for password hashing)",
-            "  • PyJWT for stateless token validation",
-            "  • psycopg2-binary OR psycopg2 (compiled PostgreSQL driver)",
-            "  • cryptography for RSA/EC asymmetric operations",
-            "  • All packages must be in-process (not stubs/mocks)",
-            "",
-            "If running in Docker: Ensure Dockerfile installs these before copying code",
-            "If running on Kubernetes: Ensure base image or init container installs these",
-            "If running on Heroku/Koyeb: Add requirements.txt to root of repo",
-            "",
-            "═" * 80,
-            "",
-        ])
-        
-        error_msg = "\n".join(error_lines)
-        import sys
-        sys.stderr.write(error_msg)
-        raise RuntimeError(f"Production deployment failed. {len(missing)} required packages missing.")
+        import sys as _sys
+        _sys.stderr.write("\n".join(lines) + "\n")
+        # DO NOT RAISE — let the module load so commands can register
+        return False
 
-# Run dependency check at import time
+    return True
+
+# Run dependency check at import time (now warns but does NOT raise)
 _check_production_dependencies()
 
-# NOW import for real (guaranteed to succeed after check)
-import requests
-from colorama import Fore, Back, Style, init
-from tabulate import tabulate
-import jwt
-import bcrypt
+# Import packages with safe fallbacks so module always loads even if a dep is missing.
+# Individual handlers that need a missing package will fail at call-time with a clear error.
+
+try:
+    import requests
+    _REQUESTS_AVAILABLE = True
+except ImportError:
+    _REQUESTS_AVAILABLE = False
+    # Create a minimal stub so references to requests.Session() etc. fail loudly at call-time
+    class _RequestsStub:
+        class Session:
+            def __init__(self): pass
+            def request(self, *a, **kw): raise RuntimeError("'requests' package not installed — run: pip install requests")
+            def get(self, *a, **kw): raise RuntimeError("'requests' package not installed")
+            def post(self, *a, **kw): raise RuntimeError("'requests' package not installed")
+            headers = {}
+        exceptions = type('exc', (), {
+            'Timeout': TimeoutError,
+            'ConnectionError': ConnectionError,
+            'RequestException': Exception,
+        })()
+        def get(self, *a, **kw): raise RuntimeError("'requests' package not installed")
+        def post(self, *a, **kw): raise RuntimeError("'requests' package not installed")
+    requests = _RequestsStub()
+
+try:
+    from colorama import Fore, Back, Style, init
+    init(autoreset=True)
+    _COLORAMA_AVAILABLE = True
+except ImportError:
+    _COLORAMA_AVAILABLE = False
+    # Stub out color constants so all UI code still works (just without color)
+    class _ColorStub:
+        RED = GREEN = YELLOW = BLUE = MAGENTA = CYAN = WHITE = RESET = ''
+        BRIGHT = DIM = NORMAL = RESET_ALL = ''
+        def __getattr__(self, name): return ''
+    Fore = Back = Style = _ColorStub()
+    def init(**kwargs): pass
+
+try:
+    from tabulate import tabulate
+    _TABULATE_AVAILABLE = True
+except ImportError:
+    _TABULATE_AVAILABLE = False
+    def tabulate(rows, headers=None, tablefmt='simple', **kwargs):
+        """Minimal fallback tabulate — plain text only."""
+        lines = []
+        if headers:
+            lines.append('  '.join(str(h) for h in headers))
+            lines.append('-' * 60)
+        for row in rows:
+            lines.append('  '.join(str(c) for c in row))
+        return '\n'.join(lines)
+
+try:
+    import jwt
+    _JWT_AVAILABLE = True
+except ImportError:
+    _JWT_AVAILABLE = False
+    class _JWTStub:
+        def decode(self, *a, **kw): raise RuntimeError("'PyJWT' package not installed — run: pip install PyJWT")
+        def encode(self, *a, **kw): raise RuntimeError("'PyJWT' package not installed")
+    jwt = _JWTStub()
+
+try:
+    import bcrypt
+    _BCRYPT_AVAILABLE = True
+except ImportError:
+    _BCRYPT_AVAILABLE = False
+    class _BcryptStub:
+        def gensalt(self, rounds=12): return b'$2b$12$fakesaltonlyforfallback.'
+        def hashpw(self, pw, salt): raise RuntimeError("'bcrypt' package not installed — run: pip install bcrypt")
+        def checkpw(self, pw, hashed): raise RuntimeError("'bcrypt' package not installed")
+    bcrypt = _BcryptStub()
 
 # PostgreSQL driver
 try:
@@ -387,18 +430,21 @@ try:
     from psycopg2.extras import RealDictCursor
     PSYCOPG2_AVAILABLE = True
 except ImportError:
-    # Should not reach here (caught by _check_production_dependencies)
     PSYCOPG2_AVAILABLE = False
     psycopg2 = None
     RealDictCursor = None
 
 # Cryptography
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa, ec, padding
-from cryptography.hazmat.backends import default_backend
-
-# Initialize colorama for terminal output
-init(autoreset=True)
+try:
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa, ec, padding
+    from cryptography.hazmat.backends import default_backend
+    _CRYPTO_AVAILABLE = True
+except ImportError:
+    _CRYPTO_AVAILABLE = False
+    # Stubs — crypto operations will fail at call-time with a clear message
+    hashes = serialization = rsa = ec = padding = None
+    def default_backend(): return None
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 # WSGI GLOBALS BRIDGE — Dynamic import of production singletons at boot

@@ -187,36 +187,76 @@ except Exception as e:
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 _TERMINAL_INITIALIZED = False
+_TERMINAL_INIT_FAILED = False   # sticky failure flag — stop retrying after first failure
 _terminal_engine = None
+_terminal_lock = threading.Lock()  # guards the initialization critical section
+
 
 def _initialize_terminal_engine():
-    """Lazy initialization of terminal engine to avoid circular imports"""
-    global _TERMINAL_INITIALIZED, _terminal_engine
-    
-    if _TERMINAL_INITIALIZED:
+    """
+    Lazy, thread-safe initialization of the terminal engine.
+
+    Thread-safety:
+        Uses a double-checked locking pattern with a module-level threading.Lock.
+        Without the lock, concurrent WSGI requests each see _TERMINAL_INITIALIZED=False
+        and all spawn a full TerminalEngine (8 ParallelExecutor worker threads each).
+        Five concurrent requests → 40 orphan threads + log flood.
+
+    Failure semantics:
+        If the first init attempt fails the flag _TERMINAL_INIT_FAILED is set so
+        subsequent calls return immediately instead of retrying on every request.
+        The COMMAND_REGISTRY stubs populated by globals.py still work — callers
+        degrade gracefully without handlers but don't hammer the system.
+    """
+    global _TERMINAL_INITIALIZED, _TERMINAL_INIT_FAILED, _terminal_engine
+
+    # Fast-path: already done (or permanently failed)
+    if _TERMINAL_INITIALIZED or _TERMINAL_INIT_FAILED:
         return _terminal_engine
-    
-    try:
-        logger.info("[BOOTSTRAP] Initializing terminal engine...")
-        from terminal_logic import TerminalEngine, register_all_commands
-        
-        engine = TerminalEngine()
-        cmd_count = register_all_commands(engine)
-        
-        total_cmds = len(COMMAND_REGISTRY)
-        logger.info(f"[BOOTSTRAP] ✓ Registered {total_cmds} commands")
-        
-        if total_cmds < 80:
-            raise RuntimeError(f"Command registration incomplete: {total_cmds} (expected 89+)")
-        
-        _terminal_engine = engine
-        _TERMINAL_INITIALIZED = True
-        logger.info("[BOOTSTRAP] ✅ Terminal engine initialized")
-        return engine
-        
-    except Exception as e:
-        logger.error(f"[BOOTSTRAP] ❌ FATAL: Terminal engine failed: {e}")
-        raise
+
+    # Slow-path: take the lock and re-check inside
+    with _terminal_lock:
+        if _TERMINAL_INITIALIZED or _TERMINAL_INIT_FAILED:
+            return _terminal_engine
+
+        try:
+            logger.info("[BOOTSTRAP] Initializing terminal engine (thread-safe)...")
+            from terminal_logic import TerminalEngine, register_all_commands
+
+            engine = TerminalEngine()
+            cmd_count = register_all_commands(engine)
+
+            total_cmds = len(COMMAND_REGISTRY)
+            logger.info(f"[BOOTSTRAP] ✓ Registered {total_cmds} commands "
+                        f"({cmd_count} from terminal_logic handlers)")
+
+            if total_cmds < 10:
+                # Only hard-fail on truly empty registry — stubs count too
+                raise RuntimeError(
+                    f"Command registration catastrophically incomplete: {total_cmds} commands. "
+                    "Check terminal_logic import errors above."
+                )
+
+            if total_cmds < 80:
+                logger.warning(
+                    f"[BOOTSTRAP] ⚠ Only {total_cmds} commands registered (expected 89+). "
+                    "Some commands may be missing. Check terminal_logic dependency errors."
+                )
+
+            _terminal_engine = engine
+            _TERMINAL_INITIALIZED = True
+            logger.info("[BOOTSTRAP] ✅ Terminal engine initialized successfully")
+            return engine
+
+        except Exception as e:
+            _TERMINAL_INIT_FAILED = True   # stop retrying on every request
+            logger.error(
+                f"[BOOTSTRAP] ❌ Terminal engine initialization failed: {e}\n"
+                "  → Falling back to globals.py stub registry (basic commands still work).\n"
+                "  → Fix the error above and restart to enable full command set.",
+                exc_info=True,
+            )
+            return None
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # EXPORTS: Other modules import these from wsgi_config
@@ -305,11 +345,14 @@ def status():
 @app.route('/api/command', methods=['POST'])
 def execute_command():
     try:
+        # Ensure terminal engine is initialized (thread-safe, idempotent)
+        _initialize_terminal_engine()
+
         data = request.get_json() or {}
         command = data.get('command', 'help')
         args = data.get('args') or {}
         user_id = data.get('user_id')
-        
+
         if not user_id and 'Authorization' in request.headers:
             try:
                 import jwt
@@ -320,7 +363,7 @@ def execute_command():
                     user_id = payload.get('user_id')
             except:
                 pass
-        
+
         result = dispatch_command(command, args, user_id)
         return jsonify(result)
     except Exception as e:
@@ -330,22 +373,19 @@ def execute_command():
 @app.route('/api/commands', methods=['GET'])
 def commands():
     try:
-        # Try to initialize terminal engine (for dynamic handlers), but don't fail if it does
-        try:
-            _initialize_terminal_engine()  # Lazy load on first request
-        except Exception as e:
-            logger.warning(f"[/api/commands] Terminal engine init failed (non-fatal): {str(e)[:60]}")
-            # Fall through - COMMAND_REGISTRY is already populated from globals.py
-        
+        # Initialize terminal engine once (thread-safe, idempotent after first call)
+        # If it already initialized or permanently failed, this returns immediately
+        _initialize_terminal_engine()
+
         # Build serializable command list (filter out handler functions)
         serializable_commands = {}
         for cmd_name, cmd_info in COMMAND_REGISTRY.items():
             # Copy all fields EXCEPT 'handler' (which is a function, not JSON serializable)
             serializable_commands[cmd_name] = {
-                k: v for k, v in cmd_info.items() 
+                k: v for k, v in cmd_info.items()
                 if k != 'handler' and not callable(v)
             }
-        
+
         # Always return command registry (populated at module load time)
         return jsonify({
             'total': len(serializable_commands),
@@ -354,7 +394,6 @@ def commands():
         })
     except Exception as e:
         logger.error(f"[/api/commands] Unexpected error: {e}", exc_info=True)
-        # Return empty commands dict in case of catastrophic failure
         return jsonify({
             'total': 0,
             'commands': {},
@@ -402,6 +441,23 @@ def server_error(e):
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 application = app
+
+# ─── EAGER TERMINAL ENGINE INIT ───────────────────────────────────────────────
+# Initialize the terminal engine NOW at process startup rather than lazily on
+# the first incoming request.  This eliminates the race window where concurrent
+# requests would each try to initialize simultaneously.
+#
+# If terminal_logic has a dependency problem the error is logged clearly here
+# (during startup, where it's easy to spot) instead of surfacing on the first
+# user request.  _initialize_terminal_engine() is idempotent — subsequent
+# calls from the routes return immediately via the _TERMINAL_INITIALIZED flag.
+#
+# DO NOT call inside __name__ == '__main__' block — it must run in every WSGI
+# worker process (gunicorn pre-forks after this point).
+try:
+    _initialize_terminal_engine()
+except Exception as _boot_exc:
+    logger.error(f"[STARTUP] Terminal engine init at startup failed (non-fatal): {_boot_exc}")
 
 if __name__ == '__main__':
     # DO NOT initialize terminal engine here - it will lazy-load on first request

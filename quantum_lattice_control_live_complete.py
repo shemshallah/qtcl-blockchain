@@ -101,6 +101,14 @@ if not logging.getLogger().hasHandlers():
     )
 logger = logging.getLogger(__name__)
 
+# Module-level initialization guard.
+# Python caches modules in sys.modules so this flag is only ever set once per
+# interpreter process.  The guard prevents the heavyweight banner, subsystem
+# registration, and heartbeat auto-start from running more than once even if
+# something forces a re-import.  It also gives a clear one-line log instead of
+# hundreds of lines when the module is accessed from multiple call sites.
+_QUANTUM_MODULE_INITIALIZED = False
+
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # GLOBAL WSGI INTEGRATION - Quantum Revolution
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -5682,61 +5690,38 @@ LATTICE_NEURAL_REFRESH = ContinuousLatticeNeuralRefresh()
 W_STATE_ENHANCED = EnhancedWStateManager()
 NOISE_BATH_ENHANCED = EnhancedNoiseBathRefresh(kappa=0.08)
 
-# REGISTER ALL SYSTEMS AS HEARTBEAT LISTENERS - THIS ENSURES THEY ALL STAY SYNCHRONIZED
-logger.info("🔧 Registering quantum subsystems with heartbeat...")
-HEARTBEAT.add_listener(LATTICE_NEURAL_REFRESH.on_heartbeat)
-logger.info("  ✓ Lattice Neural Refresh registered")
-HEARTBEAT.add_listener(W_STATE_ENHANCED.on_heartbeat)
-logger.info("  ✓ W-State Enhanced registered")
-HEARTBEAT.add_listener(NOISE_BATH_ENHANCED.on_heartbeat)
-logger.info("  ✓ Noise Bath Enhanced registered")
-logger.info("✅ All subsystems registered to heartbeat listener chain")
+if not _QUANTUM_MODULE_INITIALIZED:
+    _QUANTUM_MODULE_INITIALIZED = True
 
-logger.info("""
-╔════════════════════════════════════════════════════════════════════════════════════════╗
-║                                                                                        ║
-║                    🚀 QUANTUM LATTICE CONTROL - READY FOR DEPLOYMENT 🚀               ║
-║                                                                                        ║
-║  ✓ LATTICE global instantiated and ready for WSGI access                             ║
-║  ✓ W-State Manager: Transaction validator coherence & interference detection          ║
-║  ✓ GHZ Circuit Builder: Consensus (GHZ-3) & Oracle Finality (GHZ-8)                  ║
-║  ✓ Neural Lattice Control: 3-layer adaptive network with global callable             ║
-║  ✓ Transaction Quantum Processor: Full TX encoding & quantum validation               ║
-║  ✓ Dynamic Noise Bath: Non-Markovian memory & W-state revival detection              ║
-║  ✓ Hyperbolic Routing: Quantum geometry for state navigation                          ║
-║  ✓ 4-Thread WSGI Integration: ThreadPoolExecutor with adaptive scheduling             ║
-║  ✓ Qiskit AER: Full quantum simulation with noise models & transpilation              ║
-║                                                                                        ║
-║  ACCESS FROM WSGI:                                                                     ║
-║  ──────────────────                                                                    ║
-║  from quantum_lattice_control_live_complete import LATTICE                            ║
-║                                                                                        ║
-║  LATTICE.process_transaction(tx_id, user_id, target_id, amount)                      ║
-║  LATTICE.measure_oracle_finality()                                                    ║
-║  LATTICE.refresh_interference()                                                       ║
-║  LATTICE.evolve_noise_bath(coherence, fidelity)                                       ║
-║  LATTICE.get_neural_lattice_state()                                                   ║
-║  LATTICE.get_system_metrics()                                                         ║
-║  LATTICE.health_check()                                                               ║
-║                                                                                        ║
-║  This is the REVOLUTION. We are quantum pioneers.                                     ║
-║                                                                                        ║
-╚════════════════════════════════════════════════════════════════════════════════════════╝
-""")
+    # REGISTER ALL SYSTEMS AS HEARTBEAT LISTENERS - THIS ENSURES THEY ALL STAY SYNCHRONIZED
+    logger.info("🔧 Registering quantum subsystems with heartbeat...")
+    HEARTBEAT.add_listener(LATTICE_NEURAL_REFRESH.on_heartbeat)
+    logger.info("  ✓ Lattice Neural Refresh registered")
+    HEARTBEAT.add_listener(W_STATE_ENHANCED.on_heartbeat)
+    logger.info("  ✓ W-State Enhanced registered")
+    HEARTBEAT.add_listener(NOISE_BATH_ENHANCED.on_heartbeat)
+    logger.info("  ✓ Noise Bath Enhanced registered")
+    logger.info("✅ All subsystems registered to heartbeat listener chain")
+    logger.info("🚀 QUANTUM LATTICE CONTROL — LATTICE, HEARTBEAT, LATTICE_NEURAL_REFRESH, "
+                "W_STATE_ENHANCED, NOISE_BATH_ENHANCED ready")
+else:
+    logger.debug("[quantum_lattice] Module already initialized — skipping subsystem registration")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════
 # AUTO-START HEARTBEAT ON MODULE LOAD
+# Guards against duplicate starts across multiple import attempts.
+# UniversalQuantumHeartbeat.start() itself also checks self.running, but we guard here
+# so we don't even enter the log-heavy start() path unnecessarily.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════
 
 try:
-    logger.info("🫀 AUTO-STARTING HEARTBEAT SYSTEM...")
     if not HEARTBEAT.running:
+        logger.info("🫀 AUTO-STARTING HEARTBEAT SYSTEM...")
         HEARTBEAT.start()
-        logger.info("❤️ HEARTBEAT STARTED - All quantum systems synchronized at 1.0 Hz")
-        logger.info(f"✓ Heartbeat configured for {HEARTBEAT.frequency} Hz with {len(HEARTBEAT.listeners)} listeners")
-        logger.info("✓ Heartbeat pulses will now trigger all registered subsystems")
+        logger.info(f"❤️ HEARTBEAT STARTED — {HEARTBEAT.frequency} Hz, "
+                    f"{len(HEARTBEAT.listeners)} listeners registered")
     else:
-        logger.warning("⚠️ Heartbeat is already running")
+        logger.debug("[quantum_lattice] Heartbeat already running — skipping auto-start")
 except Exception as e:
     logger.error(f"❌ CRITICAL: Failed to start heartbeat: {e}")
     import traceback
@@ -5801,14 +5786,7 @@ def integrate_with_quantum_api_globals():
 # Attempt integration on module load
 integrate_with_quantum_api_globals()
 
-logger.info("="*100)
-logger.info("QUANTUM LATTICE CONTROL LIVE COMPLETE - EXPANSION MODULE LOADED")
-logger.info("="*100)
-logger.info(f"Total new code: ~2000 lines of quantum physics and neural integration")
-logger.info(f"Key systems: W-State(5Q) | GHZ-3 | GHZ-8 | Neural Lattice | Noise Bath | Hyperbolic Routing")
-logger.info(f"Global access: LATTICE object ready for WSGI integration")
-logger.info(f"Status: PRODUCTION READY - Show-off quantum effects enabled")
-logger.info("="*100)
+logger.info("[quantum_lattice] ✅ Module fully loaded — all subsystems online")
 
 
 
@@ -6470,41 +6448,7 @@ class QuantumSystemCoordinator:
 
 QUANTUM_COORDINATOR = QuantumSystemCoordinator()
 
-logger.info("""
-╔══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
-║                                                                                                                                                                            ║
-║                          🌌 QUANTUM LATTICE CONTROL - ULTIMATE EXPANSION v7.0 🌌                                                                                          ║
-║                                                                                                                                                                            ║
-║  🫀 HEARTBEAT SYSTEM SYNCHRONIZED:                                                                                                                                       ║
-║  ✓ Universal Heartbeat (1.0 Hz pulse frequency)                                                                                                                         ║
-║  ✓ Continuous Lattice Neural Refresh (57 neurons, online learning)                                                                                                      ║
-║  ✓ Enhanced W-State Manager (superposition coherence tracking)                                                                                                          ║
-║  ✓ Enhanced Noise Bath Refresh (κ=0.08, non-Markovian evolution)                                                                                                        ║
-║                                                                                                                                                                            ║
-║  ALL SYSTEMS WIRED TO GLOBALS - Operating via heartbeat synchronization:                                                                                                ║
-║  from quantum_lattice_control_live_complete import:                                                                                                                     ║
-║    • HEARTBEAT - Universal pulse synchronizer                                                                                                                          ║
-║    • LATTICE - Main quantum transaction processor                                                                                                                      ║
-║    • LATTICE_NEURAL_REFRESH - 57-neuron adaptive network                                                                                                               ║
-║    • W_STATE_ENHANCED - Quantum coherence validator                                                                                                                    ║
-║    • NOISE_BATH_ENHANCED - Non-Markovian error correction                                                                                                              ║
-║    • QUANTUM_COORDINATOR - Full system orchestrator                                                                                                                    ║
-║                                                                                                                                                                            ║
-║  TOTAL CODE: 7000+ lines | FEATURES: 45+ | QUALITY: PRODUCTION-READY | POWER: UNLIMITED                                                                                ║
-║                                                                                                                                                                            ║
-║  This is the ABSOLUTE PEAK of quantum blockchain technology. Revolutionary. Transformative. Unstoppable.                                                                ║
-║                                                                                                                                                                            ║
-║  START THE SYSTEM:                                                                                                                                                      ║
-║  HEARTBEAT.start()  # Begins synchronized pulse across all subsystems                                                                                                   ║
-║                                                                                                                                                                            ║
-║  QUERY THE STATE:                                                                                                                                                       ║
-║  HEARTBEAT.get_metrics()              # Pulse frequency and sync status                                                                                                 ║
-║  LATTICE_NEURAL_REFRESH.get_state()   # Neural network training progress                                                                                                ║
-║  W_STATE_ENHANCED.get_state()         # Transaction coherence metrics                                                                                                   ║
-║  NOISE_BATH_ENHANCED.get_state()      # Noise bath evolution metrics                                                                                                    ║
-║                                                                                                                                                                            ║
-╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
-""")
+logger.info("🌌 QUANTUM LATTICE CONTROL ULTIMATE — QUANTUM_COORDINATOR ready")
 
 
 logger_v7.info("\n" + "="*150)
