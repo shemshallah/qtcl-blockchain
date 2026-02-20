@@ -39,6 +39,10 @@ import threading
 import queue
 import logging
 from typing import Dict, List, Optional, Tuple, Any, Callable, Set
+
+# ENTERPRISE LOGGING - Must be initialized before first use
+logger = logging.getLogger(__name__)
+
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from enum import Enum
@@ -62,23 +66,7 @@ from psycopg2 import sql
 import psycopg2
 
 # Legacy compatibility imports (for classes that still expect these)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# DATABASE ACCESS LAYER - ENTERPRISE ARCHITECTURE
-# Supports both Supabase client library and db_builder_v2 native connection
-# ═══════════════════════════════════════════════════════════════════════════════
-
-SUPABASE_AVAILABLE = True
-DATABASE_MODE = "auto"  # "supabase", "db_builder", or "auto"
-
-try:
-    from supabase import create_client, Client
-except ImportError:
-    SUPABASE_AVAILABLE = False
-    create_client = None
-    Client = None
-    logger.info("[DB-INIT] Supabase client library not available, will use db_builder_v2")
-
+from supabase import create_client, Client
 
 # Configuration
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -116,26 +104,6 @@ def _lm_now_iso() -> str:
 def _lm_safe_float(v: Any, default: float = 0.0) -> float:
     try: return float(v)
     except: return default
-
-
-def get_database_manager():
-    """Enterprise database manager factory - uses db_builder_v2 singleton"""
-    try:
-        from db_builder_v2 import db_manager
-        if db_manager is None:
-            raise RuntimeError("db_manager singleton not initialized")
-        return db_manager
-    except ImportError:
-        logger.error("[DB-INIT] CRITICAL: Cannot import db_builder_v2.db_manager")
-        raise
-
-# Initialize database manager at module load
-try:
-    db_manager = get_database_manager()
-    logger.info("[DB-INIT] ✅ Database manager initialized from db_builder_v2")
-except Exception as e:
-    logger.error(f"[DB-INIT] ❌ Database initialization failed: {e}")
-    raise
 
 def _lm_safe_int(v: Any, default: int = 0) -> int:
     try: return int(v)
@@ -915,7 +883,6 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout)
     ]
 )
-logger = logging.getLogger(__name__)
 
 # ============================================================================
 # CONSTANTS & CONFIGURATION
