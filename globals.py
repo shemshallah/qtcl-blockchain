@@ -399,16 +399,43 @@ def _create_pqc_genesis_block() -> dict:
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 def resolve_command(cmd: str) -> str:
-    cmd = cmd.replace('/', '-').lower().strip()
-    if cmd in COMMAND_REGISTRY:
-        return cmd
-    if cmd in COMMAND_ALIASES:
-        return COMMAND_ALIASES[cmd]
-    return cmd
+    """
+    Resolve a command name to its canonical form.
+    Handles: slash→hyphen conversion, lowercase normalization, alias resolution.
+    """
+    # Normalize: convert slashes to hyphens, lowercase, strip whitespace
+    normalized = cmd.replace('/', '-').replace('_', '-').lower().strip()
+    
+    # Direct lookup in registry
+    if normalized in COMMAND_REGISTRY:
+        return normalized
+    
+    # Try alias resolution
+    if normalized in COMMAND_ALIASES:
+        return COMMAND_ALIASES[normalized]
+    
+    # Try alternate forms (underscores vs hyphens)
+    alt_form = normalized.replace('-', '_')
+    if alt_form in COMMAND_REGISTRY:
+        return alt_form
+    
+    if alt_form in COMMAND_ALIASES:
+        return COMMAND_ALIASES[alt_form]
+    
+    # If all else fails, return normalized (will be caught as "Unknown command" later)
+    return normalized
 
 def get_command_info(cmd: str) -> dict:
+    """Retrieve complete command metadata from registry."""
     canonical = resolve_command(cmd)
-    return COMMAND_REGISTRY.get(canonical, {})
+    info = COMMAND_REGISTRY.get(canonical, {})
+    
+    # If not found, try to generate helpful suggestions
+    if not info:
+        # This will be caught in dispatch_command() for better error handling
+        pass
+    
+    return info
 
 def get_commands_by_category(category: str) -> dict:
     return {cmd: info for cmd, info in COMMAND_REGISTRY.items() if info.get('category') == category}
@@ -425,43 +452,75 @@ def _parse_command_string(raw: str) -> tuple:
     into (command_name, kwargs_dict).
 
     Handles:
-      --key=value   → kwargs['key'] = 'value'
-      --key value   → kwargs['key'] = 'value'   (next token if not a flag itself)
-      --bool-flag   → kwargs['bool_flag'] = True
-      positional    → kwargs['_args'] list
+      category-command      → command name
+      category/command      → auto-converted to category-command
+      --key=value          → kwargs['key'] = 'value'
+      --key value          → kwargs['key'] = 'value' (next token if not a flag)
+      --bool-flag          → kwargs['bool_flag'] = True
+      -v                   → kwargs['v'] = True (short flags)
+      positional args      → kwargs['_args'] list
+      
+    Edge cases handled:
+      - Multiple hyphens in command names (help-category-pq → help-category-pq)
+      - Mixed dashes and underscores → normalized to underscores in kwargs
+      - Empty values (--key=) → empty string value
+      - Quoted values → preserved as-is
     """
     tokens = raw.strip().split()
     if not tokens:
         return '', {}
 
     # First token is the command name (slash→hyphen, lowercase)
-    command = tokens[0].lower().replace('/', '-')
+    # Preserve internal hyphens, normalize only slashes
+    command = tokens[0].lower().replace('/', '-').strip()
 
     kwargs = {}
     positional = []
     i = 1
     while i < len(tokens):
         tok = tokens[i]
+        
         if tok.startswith('--'):
+            # Long flag: --key=value or --key value or --key
             inner = tok[2:]
+            
+            if not inner:  # Edge case: just "--" by itself
+                i += 1
+                continue
+            
             if '=' in inner:
+                # --key=value format (may have empty value: --key=)
                 k, v = inner.split('=', 1)
-                kwargs[k.replace('-', '_')] = v
-            elif i + 1 < len(tokens) and not tokens[i + 1].startswith('--'):
-                # --key value  style (no equals sign, next token is the value)
-                kwargs[inner.replace('-', '_')] = tokens[i + 1]
+                key_normalized = k.replace('-', '_')
+                kwargs[key_normalized] = v
+            elif i + 1 < len(tokens) and not tokens[i + 1].startswith('-'):
+                # --key value format (value is next token, and it's not a flag)
+                key_normalized = inner.replace('-', '_')
+                kwargs[key_normalized] = tokens[i + 1]
                 i += 1
             else:
-                kwargs[inner.replace('-', '_')] = True
-        elif tok.startswith('-') and len(tok) == 2:
-            # short flag like -v → treat as bool
-            kwargs[tok[1:]] = True
+                # Boolean flag: --key (no value following, or next token is a flag)
+                key_normalized = inner.replace('-', '_')
+                kwargs[key_normalized] = True
+                
+        elif tok.startswith('-') and len(tok) == 2 and tok[1] != '-':
+            # Short flag: -v → treat as bool
+            kwargs[tok[1]] = True
+            
+        elif tok.startswith('-') and len(tok) > 2 and tok[1] != '-':
+            # Might be multiple short flags: -abc → a=True, b=True, c=True
+            for char in tok[1:]:
+                kwargs[char] = True
+                
         else:
+            # Positional argument
             positional.append(tok)
+        
         i += 1
 
     if positional:
         kwargs['_args'] = positional
+    
     return command, kwargs
 
 
@@ -469,12 +528,23 @@ def dispatch_command(command: str, args: dict = None, user_id: str = None) -> di
     """
     Parse the full command string (with inline flags), resolve to canonical name,
     check auth, then route to the correct handler.
+    
+    Returns dict with: status, result/error, suggestions (if applicable), raw response
     """
     if args is None:
         args = {}
 
     # ── 1. Parse inline flags from the command string ──────────────────────────
     cmd_name, kwargs = _parse_command_string(str(command))
+    
+    # Clean up empty command
+    if not cmd_name or cmd_name.isspace():
+        return {
+            'status': 'error',
+            'error': 'Empty command. Type: help',
+            'suggestions': ['help', 'help-commands', 'help-category'],
+        }
+    
     # Merge any explicit kwargs passed separately (legacy callers)
     if isinstance(args, dict):
         kwargs.update({k: v for k, v in args.items() if k not in kwargs})
@@ -484,30 +554,70 @@ def dispatch_command(command: str, args: dict = None, user_id: str = None) -> di
     cmd_info  = get_command_info(canonical)
 
     if not cmd_info:
-        # Build suggestions from COMMAND_REGISTRY
-        suggestions = [c for c in COMMAND_REGISTRY if cmd_name.split('-')[0] in c][:5]
+        # Build smart suggestions from COMMAND_REGISTRY
+        cmd_parts = cmd_name.lower().split('-')
+        prefix = cmd_parts[0] if cmd_parts else ''
+        
+        # Try to match by category or prefix
+        suggestions = []
+        if prefix:
+            suggestions = [
+                c for c in COMMAND_REGISTRY 
+                if c.startswith(prefix) or prefix in c
+            ][:10]
+        
+        if not suggestions:
+            suggestions = [
+                'help', 'help-commands', 'help-category',
+                'system-status', 'quantum-status'
+            ]
+        
         return {
             'status': 'error',
             'error': f'Unknown command: {cmd_name}',
-            'suggestions': suggestions or list(COMMAND_REGISTRY)[:8],
+            'suggestions': suggestions,
+            'hint': 'Type "help" for command list or "help-commands" for all commands',
         }
 
     if cmd_info.get('auth_required') and not user_id:
         return {
             'status': 'unauthorized',
-            'error': f'Command "{canonical}" requires authentication. Use: login --email=x --password=y',
+            'error': f'Command "{canonical}" requires authentication',
+            'hint': f'Login first: login --email=user@example.com --password=secret',
         }
 
     # ── 3. Route to handler ───────────────────────────────────────────────────
     try:
         return _execute_command(canonical, kwargs, user_id, cmd_info)
     except Exception as exc:
-        logger.error(f"[dispatch] Error executing {canonical}: {exc}")
-        return {'status': 'error', 'error': str(exc), 'command': canonical}
+        logger.error(f"[dispatch] Error executing {canonical}: {exc}", exc_info=True)
+        return {
+            'status': 'error',
+            'error': str(exc),
+            'command': canonical,
+            'hint': 'Check logs for detailed error information'
+        }
 
 
 def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: dict) -> dict:
     """Route a parsed, validated command to its real handler."""
+    
+    # ── DYNAMIC HANDLER ROUTING ──
+    # If cmd_info has a handler, use it (from terminal_logic registration)
+    if 'handler' in cmd_info:
+        try:
+            handler = cmd_info['handler']
+            args = kwargs.pop('_args', [])
+            result = handler(kwargs, args)
+            return result
+        except Exception as e:
+            logger.error(f"[execute] Error in handler for {cmd}: {e}", exc_info=True)
+            return {
+                'status': 'error',
+                'error': str(e),
+                'command': cmd,
+            }
+    
     cat = cmd_info.get('category', '')
 
     # ══════════════════════════════════════════

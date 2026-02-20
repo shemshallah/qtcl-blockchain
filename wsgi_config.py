@@ -52,6 +52,59 @@ if GLOBALS_AVAILABLE:
     logger.info("✅ Global state initialized")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
+# CRITICAL: TERMINAL ENGINE INITIALIZATION - MUST RUN BEFORE APP STARTS
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# This is NOT optional. This MUST succeed. If it fails, app should not start.
+
+_TERMINAL_ENGINE_INITIALIZED = False
+
+if GLOBALS_AVAILABLE:
+    try:
+        logger.info("[BOOTSTRAP] Initializing Terminal Engine...")
+        from terminal_logic import TerminalEngine, register_all_commands
+        
+        # Instantiate the engine
+        _ENGINE = TerminalEngine()
+        logger.info("[BOOTSTRAP] ✓ TerminalEngine instantiated")
+        
+        # Register all commands - this MODIFIES globals.COMMAND_REGISTRY directly
+        cmd_count = register_all_commands(_ENGINE)
+        logger.info(f"[BOOTSTRAP] ✓ register_all_commands returned: {cmd_count} commands")
+        
+        # VERIFY registration actually happened
+        from globals import COMMAND_REGISTRY
+        total_cmds = len(COMMAND_REGISTRY)
+        logger.info(f"[BOOTSTRAP] ✓ COMMAND_REGISTRY now has {total_cmds} commands")
+        
+        if total_cmds < 80:  # Should have at least 89, warn if less
+            logger.error(f"[BOOTSTRAP] ❌ ERROR: Only {total_cmds} commands registered! Expected 89+")
+            logger.error(f"[BOOTSTRAP] Available commands: {list(COMMAND_REGISTRY.keys())}")
+            raise RuntimeError(f"Command registration failed: only {total_cmds} commands (expected 89+)")
+        
+        # Verify critical commands are present
+        critical_cmds = ['help', 'help-pq', 'help-commands', 'system-status']
+        missing = [cmd for cmd in critical_cmds if cmd not in COMMAND_REGISTRY]
+        if missing:
+            logger.error(f"[BOOTSTRAP] ❌ CRITICAL: Missing commands: {missing}")
+            raise RuntimeError(f"Critical commands missing: {missing}")
+        
+        logger.info(f"[BOOTSTRAP] ✅ VERIFIED: All critical commands present")
+        logger.info(f"[BOOTSTRAP] ✅ Terminal Engine initialization COMPLETE")
+        _TERMINAL_ENGINE_INITIALIZED = True
+        
+    except ImportError as e:
+        logger.error(f"[BOOTSTRAP] ❌ FATAL: Cannot import terminal_logic: {e}")
+        logger.error(f"[BOOTSTRAP] ❌ Ensure terminal_logic.py is in {os.path.dirname(os.path.abspath(__file__))}")
+        raise
+    except Exception as e:
+        logger.error(f"[BOOTSTRAP] ❌ FATAL: Terminal Engine initialization failed: {e}", exc_info=True)
+        raise
+
+if not _TERMINAL_ENGINE_INITIALIZED:
+    logger.error("[BOOTSTRAP] ❌ FATAL: Terminal Engine not initialized!")
+    raise RuntimeError("Terminal Engine initialization required but failed")
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
 # FLASK APP
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
