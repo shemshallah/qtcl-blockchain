@@ -357,6 +357,7 @@ def execute_command():
         raw_token = None
         role = None
         is_admin = False
+        jwt_decode_error = None
 
         auth_header = request.headers.get('Authorization', '')
         if auth_header.startswith('Bearer '):
@@ -368,23 +369,58 @@ def execute_command():
         if raw_token:
             try:
                 import jwt as _jwt
-                # Try env secret first, then fall back to auth_handlers secret
-                secret = os.getenv('JWT_SECRET', '')
-                if not secret:
+                # Collect all possible secrets to try (order: env → auth_handlers → globals)
+                secrets_to_try = []
+                
+                # 1. Try environment variable (production override)
+                env_secret = os.getenv('JWT_SECRET', '')
+                if env_secret:
+                    secrets_to_try.append(('ENV', env_secret))
+                
+                # 2. Try auth_handlers module (canonical location)
+                try:
+                    from auth_handlers import JWT_SECRET as _ahs_secret
+                    if _ahs_secret:
+                        secrets_to_try.append(('AUTH_HANDLERS', _ahs_secret))
+                except Exception as e:
+                    logger.debug(f"[auth] Could not import JWT_SECRET from auth_handlers: {e}")
+                
+                # 3. Try globals module (_get_jwt_secret)
+                try:
+                    from globals import _get_jwt_secret as _get_secret
+                    _gs = _get_secret()
+                    if _gs:
+                        secrets_to_try.append(('GLOBALS', _gs))
+                except Exception as e:
+                    logger.debug(f"[auth] Could not get JWT_SECRET from globals: {e}")
+                
+                jwt_payload = {}
+                decode_success = False
+                
+                # Try each secret until one works
+                for secret_source, secret in secrets_to_try:
                     try:
-                        from auth_handlers import JWT_SECRET as _ahs_secret
-                        secret = _ahs_secret
-                    except Exception:
-                        pass
-                if secret:
-                    jwt_payload = _jwt.decode(raw_token, secret, algorithms=['HS512', 'HS256'])
+                        jwt_payload = _jwt.decode(raw_token, secret, algorithms=['HS512', 'HS256'])
+                        decode_success = True
+                        logger.debug(f"[auth] JWT decoded successfully using {secret_source} secret")
+                        break
+                    except _jwt.InvalidSignatureError:
+                        continue  # Try next secret
+                    except Exception as e:
+                        jwt_decode_error = str(e)
+                        continue
+                
+                if decode_success and jwt_payload:
                     if not user_id:
                         user_id = jwt_payload.get('user_id')
                     role = jwt_payload.get('role', 'user')
                     is_admin = bool(jwt_payload.get('is_admin', False)) or role in ('admin', 'superadmin', 'super_admin')
-                    logger.debug(f"[auth] JWT decoded: user={user_id} role={role} admin={is_admin}")
+                    logger.info(f"[auth] ✓ JWT validated: user={user_id} role={role} admin={is_admin}")
+                elif raw_token:
+                    # Token present but decode failed - log more details for debugging
+                    logger.warning(f"[auth] ⚠️  JWT decode failed for token starting with {raw_token[:20]}... | Error: {jwt_decode_error}")
             except Exception as _je:
-                logger.debug(f"[auth] JWT decode failed (non-fatal): {_je}")
+                logger.error(f"[auth] Unexpected error during JWT processing: {_je}", exc_info=True)
 
         result = dispatch_command(command, args, user_id, token=raw_token, role=role)
         return jsonify(result)

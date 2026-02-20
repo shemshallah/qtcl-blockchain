@@ -203,8 +203,7 @@ def _init_quantum_singletons():
             try:
                 if not HEARTBEAT.running:
                     HEARTBEAT.start()
-                    logger.info(f"  ❤️  HEARTBEAT auto-started — "
-                                f"{HEARTBEAT.frequency} Hz, {len(HEARTBEAT.listeners)} listeners")
+                    logger.debug(f"  ❤️  HEARTBEAT auto-started — {HEARTBEAT.frequency} Hz, {len(HEARTBEAT.listeners)} listeners")
                 else:
                     logger.debug("  ❤️  HEARTBEAT already running")
             except Exception as e:
@@ -5548,8 +5547,8 @@ class UniversalQuantumHeartbeat:
     
     def _pulse_loop(self):
         """Main pulse loop - runs in dedicated thread"""
-        logger.info("❤️ HEARTBEAT PULSE LOOP STARTED - Ready to synchronize all subsystems")
-        logger.info(f"❤️ Initial state: running={self.running}, listeners={len(self.listeners)}, frequency={self.frequency} Hz")
+        logger.debug("❤️ HEARTBEAT PULSE LOOP STARTED - Ready to synchronize all subsystems")
+        logger.debug(f"❤️ Initial state: running={self.running}, listeners={len(self.listeners)}, frequency={self.frequency} Hz")
         pulse_errors = 0
         
         while self.running:
@@ -5566,10 +5565,10 @@ class UniversalQuantumHeartbeat:
                     if listener_count > 0:
                         # Pre-pulse logging
                         if self.pulse_count == 0:
-                            logger.info(f"❤️ FIRST PULSE! {listener_count} listeners ready")
+                            logger.debug(f"❤️ FIRST PULSE! {listener_count} listeners ready")
                             for i, listener in enumerate(listeners_copy):
                                 listener_name = getattr(listener, '__name__', f'listener_{i}')
-                                logger.info(f"  Listener {i+1}: {listener_name}")
+                                logger.debug(f"  Listener {i+1}: {listener_name}")
                         
                         # Execute each listener
                         pulse_start_time = time.time()
@@ -5606,9 +5605,9 @@ class UniversalQuantumHeartbeat:
                             else:
                                 self.avg_pulse_interval = 0.9 * self.avg_pulse_interval + 0.1 * time_since_last
                         
-                        # Regular pulse logging (every 10 pulses)
-                        if self.pulse_count % 10 == 0:
-                            logger.info(f"❤️ PULSE #{self.pulse_count:5d} | Listeners: {listeners_executed:2d} | Duration: {pulse_duration:6.2f}ms | Errors: {pulse_errors}")
+                        # Regular pulse logging (every 100 pulses)
+                        if self.pulse_count % 100 == 0:
+                            logger.debug(f"❤️ PULSE #{self.pulse_count:5d} | Listeners: {listeners_executed:2d} | Duration: {pulse_duration:6.2f}ms | Errors: {pulse_errors}")
                     
                     else:
                         logger.warning("⚠️ No listeners registered to heartbeat! Quantum systems not synchronized.")
@@ -5945,7 +5944,19 @@ class EnhancedNoiseBathRefresh:
 # The function is guarded by _QUANTUM_INIT_LOCK + _QUANTUM_MODULE_INITIALIZED flag.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-_init_quantum_singletons()
+_QUANTUM_SINGLETONS_INIT_CALLED = False
+_SINGLETON_INIT_LOCK = threading.RLock()
+
+def _safely_init_quantum_singletons():
+    """Idempotent wrapper ensuring _init_quantum_singletons() runs exactly once."""
+    global _QUANTUM_SINGLETONS_INIT_CALLED
+    with _SINGLETON_INIT_LOCK:
+        if _QUANTUM_SINGLETONS_INIT_CALLED:
+            return
+        _QUANTUM_SINGLETONS_INIT_CALLED = True
+        _init_quantum_singletons()
+
+_safely_init_quantum_singletons()
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PART 11: ADVANCED INTEGRATION WITH QUANTUM_API GLOBALS (when available)
@@ -5989,7 +6000,7 @@ def integrate_with_quantum_api_globals():
 # It is available for explicit post-init wiring to prevent circular import loops.
 # Call it manually AFTER all modules have finished loading if needed.
 
-logger.info("[quantum_lattice] ✅ Module fully loaded — all subsystems online")
+logger.debug("[quantum_lattice] ✅ Module fully loaded — all subsystems online")
 
 
 
@@ -8191,10 +8202,8 @@ def _init_v8_revival_system():
         if _V8_INITIALIZED:
             return
 
-        logger.info("╔═══════════════════════════════════════════════════════════╗")
-        logger.info("║  QUANTUM LATTICE v8 — PERPETUAL W-STATE REVIVAL ENGINE    ║")
-        logger.info("║  Initializing perpetual pseudoqubit superposition system  ║")
-        logger.info("╚═══════════════════════════════════════════════════════════╝")
+        # Log initialization start only at DEBUG level to reduce noise
+        logger.debug("[v8] Starting v8 revival system initialization (guarded by _V8_INIT_LOCK)")
 
         # Need the noise bath — get from existing LATTICE singleton or NOISE_BATH_ENHANCED
         source_bath = None
@@ -8239,20 +8248,20 @@ def _init_v8_revival_system():
         # ── Build v8 components ────────────────────────────────────────
         try:
             REVIVAL_ENGINE = WStateRevivalPhenomenonEngine(total_batches=52)
-            logger.info("  ✓ WStateRevivalPhenomenonEngine created")
+            logger.debug("  ✓ WStateRevivalPhenomenonEngine created")
         except Exception as e:
             logger.error(f"  ✗ RevivalEngine failed: {e}")
 
         try:
             PSEUDOQUBIT_GUARDIAN = PseudoQubitWStateGuardian(noise_bath=shim)
-            logger.info("  ✓ PseudoQubitWStateGuardian created (5 validator qubits locked)")
+            logger.debug("  ✓ PseudoQubitWStateGuardian created (5 validator qubits locked)")
         except Exception as e:
             logger.error(f"  ✗ Guardian failed: {e}")
 
         if REVIVAL_ENGINE is not None and PSEUDOQUBIT_GUARDIAN is not None:
             try:
                 RESONANCE_COUPLER = NoiseResonanceCoupler(shim, REVIVAL_ENGINE)
-                logger.info(f"  ✓ NoiseResonanceCoupler created (κ={RESONANCE_COUPLER.current_kappa:.4f})")
+                logger.debug(f"  ✓ NoiseResonanceCoupler created (κ={RESONANCE_COUPLER.current_kappa:.4f})")
             except Exception as e:
                 logger.error(f"  ✗ Coupler failed: {e}")
 
@@ -8263,7 +8272,7 @@ def _init_v8_revival_system():
                 # AdaptiveSigmaController is available as a fresh instance
                 _base_ctrl = AdaptiveSigmaController(learning_rate=0.008)
                 NEURAL_V2  = RevivalAmplifiedBatchNeuralRefresh(base_controller=_base_ctrl)
-                logger.info("  ✓ RevivalAmplifiedBatchNeuralRefresh v2 created (57+revival+pq heads)")
+                logger.debug("  ✓ RevivalAmplifiedBatchNeuralRefresh v2 created (57+revival+pq heads)")
             except Exception as e:
                 logger.error(f"  ✗ NeuralV2 failed: {e}")
         else:
@@ -8277,23 +8286,16 @@ def _init_v8_revival_system():
                     PSEUDOQUBIT_GUARDIAN, REVIVAL_ENGINE, RESONANCE_COUPLER, NEURAL_V2
                 )
                 PERPETUAL_MAINTAINER.start()
-                logger.info("  ✓ PerpetualWStateMaintainer started (10 Hz)")
+                logger.debug("  ✓ PerpetualWStateMaintainer started (10 Hz)")
             except Exception as e:
                 logger.error(f"  ✗ Maintainer failed: {e}")
 
         # Register with GLOBALS — deferred (cannot import wsgi_config at init time without loop)
         # _register_v8_with_globals() is called lazily by globals.py after full system load
-        logger.info("  ✓ v8 GLOBALS registration deferred to post-init (circular-import safe)")
+        logger.debug("  ✓ v8 GLOBALS registration deferred to post-init (circular-import safe)")
 
         _V8_INITIALIZED = True
-
-        logger.info("╔═══════════════════════════════════════════════════════════╗")
-        logger.info("║  QUANTUM LATTICE v8 ✅ ALL SYSTEMS ONLINE                 ║")
-        logger.info(f"║  Pseudoqubits 1-5: LOCKED in perpetual W-state           ║")
-        logger.info(f"║  Revival engine: SPECTRAL ANALYSIS ACTIVE                ║")
-        logger.info(f"║  Noise resonance: κ={RESONANCE_COUPLER.current_kappa if RESONANCE_COUPLER else 'N/A'}           ║")
-        logger.info(f"║  Perpetual guardian: 10 Hz inter-cycle maintenance       ║")
-        logger.info("╚═══════════════════════════════════════════════════════════╝")
+        logger.debug("[v8] Quantum Lattice v8 initialization complete")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
