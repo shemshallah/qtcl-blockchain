@@ -13,7 +13,7 @@ import os
 import sys
 import logging
 from datetime import datetime, timezone
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory, send_file
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -55,7 +55,9 @@ if GLOBALS_AVAILABLE:
 # FLASK APP
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-app = Flask(__name__)
+app = Flask(__name__,
+            static_folder=os.path.join(PROJECT_ROOT, 'static'),
+            static_url_path='/static')
 app.config['JSON_SORT_KEYS'] = False
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -94,6 +96,15 @@ SYSTEMS = {
 
 @app.route('/', methods=['GET'])
 def index():
+    """Serve index.html for browsers; return JSON for API clients."""
+    accept = request.headers.get('Accept', '')
+    # If the client explicitly wants HTML (browser), serve the frontend
+    if 'text/html' in accept:
+        try:
+            return send_from_directory(PROJECT_ROOT, 'index.html')
+        except Exception as e:
+            logger.warning(f"⚠️  Could not serve index.html: {e}")
+    # API clients / health checks get JSON
     return jsonify({
         'system': 'QTCL v5.0 - Quantum Lattice Control',
         'timestamp': datetime.now(timezone.utc).isoformat(),
@@ -106,6 +117,15 @@ def index():
             '/api/oracle', '/api/metrics',
         ],
     })
+
+@app.route('/index.html', methods=['GET'])
+def index_html():
+    """Explicit index.html route for any hardcoded links."""
+    try:
+        return send_from_directory(PROJECT_ROOT, 'index.html')
+    except Exception as e:
+        logger.error(f"❌ index.html not found at {PROJECT_ROOT}: {e}")
+        return jsonify({'error': 'Frontend not found', 'hint': 'index.html must be in project root'}), 404
 
 @app.route('/health', methods=['GET'])
 def health():
