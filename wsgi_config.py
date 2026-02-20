@@ -4,10 +4,11 @@ QTCL WSGI v5.0 - GLOBALS COORDINATOR & SYSTEM BOOTSTRAP
 
 Proper globals interfacing system. Initializes all subsystems in correct order:
 1. Logging (foundation)
-2. db_builder_v2 (database singleton)
-3. globals module (unified state)
-4. Terminal engine (command system)
-5. Flask app (HTTP interface)
+2. Utility classes (PROFILER, CACHE, etc)
+3. db_builder_v2 (database singleton)
+4. globals module (unified state)
+5. Terminal engine (command system - lazy loaded to avoid circular imports)
+6. Flask app (HTTP interface)
 
 Other modules import from wsgi_config to access initialized globals.
 """
@@ -15,6 +16,8 @@ Other modules import from wsgi_config to access initialized globals.
 import os
 import sys
 import logging
+import threading
+import time
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -22,6 +25,118 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# UTILITY CLASSES - Available for all modules
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+class SimpleProfiler:
+    """Performance profiling for system operations"""
+    def __init__(self):
+        self.metrics = {}
+        self.lock = threading.RLock()
+    
+    def record(self, name: str, duration_ms: float):
+        with self.lock:
+            if name not in self.metrics:
+                self.metrics[name] = []
+            self.metrics[name].append(duration_ms)
+    
+    def get_stats(self, name: str) -> dict:
+        with self.lock:
+            if name not in self.metrics:
+                return {'count': 0, 'avg_ms': 0, 'min_ms': 0, 'max_ms': 0}
+            times = self.metrics[name]
+            return {
+                'count': len(times),
+                'avg_ms': sum(times) / len(times),
+                'min_ms': min(times),
+                'max_ms': max(times),
+            }
+
+
+class SimpleCache:
+    """In-memory caching with TTL"""
+    def __init__(self, max_size: int = 1000):
+        self.cache = {}
+        self.max_size = max_size
+        self.lock = threading.RLock()
+    
+    def get(self, key: str):
+        with self.lock:
+            if key not in self.cache:
+                return None
+            item = self.cache[key]
+            if item['ttl'] and time.time() > item['expires_at']:
+                del self.cache[key]
+                return None
+            return item['value']
+    
+    def set(self, key: str, value, ttl_sec: int = 3600):
+        with self.lock:
+            if len(self.cache) >= self.max_size:
+                self.cache.pop(next(iter(self.cache)), None)
+            self.cache[key] = {
+                'value': value,
+                'ttl': ttl_sec,
+                'expires_at': time.time() + ttl_sec if ttl_sec else None
+            }
+    
+    def delete(self, key: str):
+        with self.lock:
+            self.cache.pop(key, None)
+    
+    def clear(self):
+        with self.lock:
+            self.cache.clear()
+
+
+class RequestTracer:
+    """Request correlation tracking"""
+    def __init__(self):
+        import uuid
+        self.current_id = None
+        self.uuid = uuid
+    
+    def new_id(self) -> str:
+        self.current_id = str(self.uuid.uuid4())
+        return self.current_id
+
+
+class ErrorBudgetManager:
+    """Error budget tracking"""
+    def __init__(self, max_errors: int = 100, window_sec: int = 60):
+        self.max_errors = max_errors
+        self.window_sec = window_sec
+        self.errors = []
+        self.lock = threading.RLock()
+    
+    def record_error(self):
+        with self.lock:
+            now = time.time()
+            self.errors = [t for t in self.errors if now - t < self.window_sec]
+            self.errors.append(now)
+    
+    def is_exhausted(self) -> bool:
+        with self.lock:
+            now = time.time()
+            self.errors = [t for t in self.errors if now - t < self.window_sec]
+            return len(self.errors) >= self.max_errors
+    
+    def remaining(self) -> int:
+        with self.lock:
+            now = time.time()
+            self.errors = [t for t in self.errors if now - t < self.window_sec]
+            return max(0, self.max_errors - len(self.errors))
+
+
+# Global utility instances
+PROFILER = SimpleProfiler()
+CACHE = SimpleCache(max_size=2000)
+RequestCorrelation = RequestTracer()
+ERROR_BUDGET = ErrorBudgetManager(max_errors=100, window_sec=60)
+
+logger.info("[BOOTSTRAP] ✅ Utility services initialized (PROFILER, CACHE, RequestCorrelation, ERROR_BUDGET)")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # BOOTSTRAP PHASE 1: DATABASE SINGLETON (db_builder_v2)
@@ -66,38 +181,48 @@ except Exception as e:
     raise
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# BOOTSTRAP PHASE 3: TERMINAL ENGINE (Command System)
+# BOOTSTRAP PHASE 3: TERMINAL ENGINE (Command System - LAZY LOADED)
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 _TERMINAL_INITIALIZED = False
-try:
-    logger.info("[BOOTSTRAP] Initializing terminal engine...")
-    from terminal_logic import TerminalEngine, register_all_commands
-    
-    engine = TerminalEngine()
-    cmd_count = register_all_commands(engine)
-    
-    total_cmds = len(COMMAND_REGISTRY)
-    logger.info(f"[BOOTSTRAP] ✓ Registered {total_cmds} commands")
-    
-    if total_cmds < 80:
-        raise RuntimeError(f"Command registration incomplete: {total_cmds} (expected 89+)")
-    
-    _TERMINAL_INITIALIZED = True
-    logger.info("[BOOTSTRAP] ✅ Terminal engine initialized")
-except Exception as e:
-    logger.error(f"[BOOTSTRAP] ❌ FATAL: Terminal engine failed: {e}")
-    raise
+_terminal_engine = None
 
-if not _TERMINAL_INITIALIZED:
-    raise RuntimeError("Terminal engine initialization required")
+def _initialize_terminal_engine():
+    """Lazy initialization of terminal engine to avoid circular imports"""
+    global _TERMINAL_INITIALIZED, _terminal_engine
+    
+    if _TERMINAL_INITIALIZED:
+        return _terminal_engine
+    
+    try:
+        logger.info("[BOOTSTRAP] Initializing terminal engine...")
+        from terminal_logic import TerminalEngine, register_all_commands
+        
+        engine = TerminalEngine()
+        cmd_count = register_all_commands(engine)
+        
+        total_cmds = len(COMMAND_REGISTRY)
+        logger.info(f"[BOOTSTRAP] ✓ Registered {total_cmds} commands")
+        
+        if total_cmds < 80:
+            raise RuntimeError(f"Command registration incomplete: {total_cmds} (expected 89+)")
+        
+        _terminal_engine = engine
+        _TERMINAL_INITIALIZED = True
+        logger.info("[BOOTSTRAP] ✅ Terminal engine initialized")
+        return engine
+        
+    except Exception as e:
+        logger.error(f"[BOOTSTRAP] ❌ FATAL: Terminal engine failed: {e}")
+        raise
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # EXPORTS: Other modules import these from wsgi_config
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 __all__ = [
-    'DB', 'GLOBALS_AVAILABLE',
+    'DB', 'PROFILER', 'CACHE', 'RequestCorrelation', 'ERROR_BUDGET',
+    'GLOBALS_AVAILABLE', 'logger',
     'get_system_health', 'get_state_snapshot',
     'get_heartbeat', 'get_blockchain', 'get_ledger', 'get_oracle', 'get_defi',
     'get_auth_manager', 'get_pqc_system', 'get_genesis_block', 'verify_genesis_block',
@@ -106,7 +231,6 @@ __all__ = [
     'pqc_encapsulate', 'pqc_prove_identity', 'pqc_verify_identity',
     'pqc_revoke_key', 'pqc_rotate_key',
     'bootstrap_admin_session', 'revoke_session',
-    'logger',
 ]
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -204,6 +328,7 @@ def execute_command():
 @app.route('/api/commands', methods=['GET'])
 def commands():
     try:
+        _initialize_terminal_engine()  # Lazy load on first request
         return jsonify({'total': len(COMMAND_REGISTRY), 'commands': dict(COMMAND_REGISTRY)})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -250,10 +375,12 @@ def server_error(e):
 application = app
 
 if __name__ == '__main__':
+    _initialize_terminal_engine()  # Initialize on startup
     logger.info("="*80)
     logger.info("🚀 QTCL WSGI v5.0 - PRODUCTION STARTUP")
     logger.info("="*80)
     logger.info(f"✅ Database initialized: {DB is not None}")
+    logger.info(f"✅ Utilities initialized: PROFILER, CACHE, RequestCorrelation, ERROR_BUDGET")
     logger.info(f"✅ Globals available: {GLOBALS_AVAILABLE}")
     logger.info(f"✅ Terminal engine ready: {_TERMINAL_INITIALIZED}")
     logger.info(f"✅ Commands registered: {len(COMMAND_REGISTRY)}")

@@ -173,12 +173,13 @@ def _init_wsgi_globals():
         return
     try:
         from wsgi_config import (
-            DB as _DB, PROFILER as _PROFILER, CACHE as _CACHE, 
-            CIRCUIT_BREAKERS as _CB, RATE_LIMITERS as _RL,
+            DB as _DB, PROFILER as _PROFILER, CACHE as _CACHE,
             ERROR_BUDGET as _EB, RequestCorrelation as _RC
         )
-        DB, PROFILER, CACHE, CIRCUIT_BREAKERS, RATE_LIMITERS = _DB, _PROFILER, _CACHE, _CB, _RL
+        DB, PROFILER, CACHE = _DB, _PROFILER, _CACHE
         ERROR_BUDGET, REQUEST_CORRELATION = _EB, _RC
+        CIRCUIT_BREAKERS = None
+        RATE_LIMITERS = None
         WSGI_AVAILABLE = True
         logging.info("✓ WSGI globals initialized successfully")
     except ImportError:
@@ -202,10 +203,11 @@ def _init_master_registry():
         return True
     
     try:
-        from wsgi_config import MASTER_REGISTRY as _MR, CommandScope as _CS, ExecutionContext as _EC
-        MASTER_REGISTRY = _MR
-        CommandScope = _CS
-        ExecutionContext = _EC
+        # MASTER_REGISTRY, CommandScope, ExecutionContext not in wsgi_config
+        # from wsgi_config import MASTER_REGISTRY as _MR, CommandScope as _CS, ExecutionContext as _EC
+        # MASTER_REGISTRY = _MR
+        # CommandScope = _CS
+        # ExecutionContext = _EC
         MASTER_REGISTRY_AVAILABLE = True
         logging.info("✓ MASTER_REGISTRY initialized from wsgi_config - using unified command registry")
         return True
