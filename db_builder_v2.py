@@ -240,7 +240,7 @@ except ImportError as _pq_import_err:
             self.genesis_has_pq = genesis_has_pq
             self.missing_tables = missing
 
-    def init_pq_schema(db_builder_instance, force_genesis_overwrite: bool = True):
+    def init_pq_schema(db_builder_instance, force_genesis_overwrite: bool = False):
         """
         Inline PQ schema initialiser — installs PQ extension tables and writes
         a genesis_pq_manifest row so the fast-boot skip-check works on next start.
@@ -274,7 +274,7 @@ except ImportError as _pq_import_err:
             try:
                 if hasattr(db_builder_instance, 'create_or_repair_genesis_pq'):
                     _ok, _gen = db_builder_instance.create_or_repair_genesis_pq(
-                        force_overwrite=force_genesis_overwrite
+                        force_overwrite=True
                     )
                     genesis_has_pq = _ok
                     if _ok:
@@ -5760,15 +5760,15 @@ class DatabaseBuilder:
                     pq_manifest_current = False  # table may not exist yet
 
             if genesis_exists and pq_manifest_current:
-                logger.info(f"{CLR.G}[SKIP] Genesis block + PQ manifest (v{PQ_SCHEMA_VERSION}) "
-                            f"already current — fast boot path{CLR.E}")
-                # Still install PQ schema tables if missing (idempotent)
+                logger.info(f"{CLR.G}[GENESIS] PQ manifest current (v{PQ_SCHEMA_VERSION}) — "
+                            f"re-running PQ repair to ensure all fields populated{CLR.E}")
+                # Always run PQ schema tables check (idempotent)
                 if PQ_SCHEMA_AVAILABLE:
                     try:
                         init_pq_schema(self)
                     except Exception as _pq_err:
                         logger.warning(f"[PQ-SCHEMA] Fast-boot schema check failed: {_pq_err}")
-                return
+                # Fall through to run genesis repair below
 
             check_admin = """SELECT COUNT(*) as cnt FROM users WHERE email='shemshallah@gmail.com' LIMIT 1"""
             admin_exists = self.execute_fetch(check_admin)
@@ -5780,7 +5780,7 @@ class DatabaseBuilder:
             # Delegates to create_or_repair_genesis_pq() which runs the full 10-phase
             # NIST PQ-Level 5 pipeline (QRNG harvest → HLWE sign → VDF → ratchet).
             logger.info(f"{CLR.C}[GENESIS] Running enterprise PQ genesis pipeline...{CLR.E}")
-            genesis_ok, genesis_block = self.create_or_repair_genesis_pq(force_overwrite=False)
+            genesis_ok, genesis_block = self.create_or_repair_genesis_pq(force_overwrite=True)
             if genesis_ok:
                 logger.info(f"{CLR.G}[GENESIS] ✅ Genesis block persisted with full PQ material{CLR.E}")
             else:

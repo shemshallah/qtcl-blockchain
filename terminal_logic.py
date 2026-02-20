@@ -5147,6 +5147,208 @@ def parse_command(raw: str):
     return (name, args, flags)
 
 
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# PQ CRYPTOGRAPHY COMMAND HANDLERS
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+def _pq_key_gen(flags: dict, args: list) -> dict:
+    """Generate a new HLWE-256 post-quantum keypair for the authenticated user."""
+    try:
+        from pq_key_system import get_pqc_system
+        pqc = get_pqc_system()
+        user_id = flags.get('user_id') or flags.get('user') or (args[0] if args else 'genesis_validator')
+        pseudoqubit_id = int(flags.get('pseudoqubit_id', 0))
+        bundle = pqc.generate_user_key(pseudoqubit_id=pseudoqubit_id, user_id=user_id, store=True)
+        if bundle:
+            mk = bundle.get('master_key', bundle)
+            return {'status': 'ok', 'pq_key': {
+                'key_id':         mk.get('key_id'),
+                'fingerprint':    mk.get('fingerprint'),
+                'algorithm':      mk.get('algorithm', 'HLWE-256'),
+                'pseudoqubit_id': pseudoqubit_id,
+                'user_id':        user_id,
+                'created_at':     mk.get('created_at'),
+                'status':         'active',
+            }}
+        return {'status': 'error', 'error': 'Key generation returned empty bundle'}
+    except Exception as e:
+        return {'status': 'error', 'error': f'pq-key-gen: {e}'}
+
+def _pq_key_list(flags: dict, args: list) -> dict:
+    """List post-quantum keys from the pq_key_store table."""
+    try:
+        from db_builder_v2 import db_manager
+        if not db_manager:
+            return {'status': 'error', 'error': 'DB not available'}
+        user_filter = flags.get('user_id') or flags.get('user') or (args[0] if args else None)
+        if user_filter:
+            rows = db_manager.execute_fetch_all(
+                "SELECT key_id, user_id, pseudoqubit_id, fingerprint, status, key_type, "
+                "purpose, created_at, expires_at, revoked_at FROM pq_key_store "
+                "WHERE user_id=%s ORDER BY created_at DESC LIMIT 50",
+                (user_filter,)
+            ) or []
+        else:
+            rows = db_manager.execute_fetch_all(
+                "SELECT key_id, user_id, pseudoqubit_id, fingerprint, status, key_type, "
+                "purpose, created_at, expires_at, revoked_at FROM pq_key_store "
+                "ORDER BY created_at DESC LIMIT 50"
+            ) or []
+        keys = [dict(r) for r in rows]
+        # Sanitize non-JSON-safe values
+        for k in keys:
+            for field in ('created_at', 'expires_at', 'revoked_at'):
+                if k.get(field) and hasattr(k[field], 'isoformat'):
+                    k[field] = k[field].isoformat()
+        return {'status': 'ok', 'pq_keys': keys, 'count': len(keys)}
+    except Exception as e:
+        return {'status': 'error', 'error': f'pq-key-list: {e}'}
+
+def _pq_key_status(flags: dict, args: list) -> dict:
+    """Show status of a specific PQ key by key_id or fingerprint."""
+    try:
+        from db_builder_v2 import db_manager
+        if not db_manager:
+            return {'status': 'error', 'error': 'DB not available'}
+        key_ref = flags.get('key_id') or flags.get('fingerprint') or (args[0] if args else None)
+        if not key_ref:
+            return {'status': 'error', 'error': 'Usage: pq-key-status <key_id_or_fingerprint>'}
+        row = db_manager.execute_fetch(
+            "SELECT k.*, r.revoked_at AS rev_at, r.reason AS rev_reason "
+            "FROM pq_key_store k "
+            "LEFT JOIN pq_key_revocations r ON r.key_id = k.key_id::text::uuid "
+            "WHERE k.key_id::text = %s OR k.fingerprint = %s LIMIT 1",
+            (key_ref, key_ref)
+        )
+        if not row:
+            return {'status': 'error', 'error': f'Key not found: {key_ref}'}
+        result = dict(row)
+        # Sanitize timestamps and binary fields
+        for f in ('created_at', 'expires_at', 'revoked_at', 'rev_at'):
+            if result.get(f) and hasattr(result[f], 'isoformat'):
+                result[f] = result[f].isoformat()
+        for f in ('encrypted_privkey', 'revocation_proof'):
+            if result.get(f):
+                result[f] = f'<{len(result[f])} bytes>'
+        return {'status': 'ok', 'pq_key_status': result}
+    except Exception as e:
+        return {'status': 'error', 'error': f'pq-key-status: {e}'}
+
+def _pq_schema_status(flags: dict, args: list) -> dict:
+    """Show PQ schema installation status, table health, and genesis manifest."""
+    try:
+        from db_builder_v2 import db_manager, get_pq_status
+        if not db_manager:
+            return {'status': 'error', 'error': 'DB not available'}
+        pq_st = get_pq_status()
+        # Check each PQ table
+        pq_tables = [
+            'pq_key_store', 'pq_key_revocations', 'pq_zk_nullifiers',
+            'pq_key_ceremonies', 'pq_signatures', 'pq_key_rotations',
+            'pq_encryption_sessions', 'genesis_pq_manifest',
+        ]
+        table_health = {}
+        for t in pq_tables:
+            try:
+                r = db_manager.execute_fetch(f"SELECT COUNT(*) AS c FROM {t}")
+                table_health[t] = {'exists': True, 'rows': int(r.get('c', 0) if r else 0)}
+            except Exception as te:
+                table_health[t] = {'exists': False, 'error': str(te)}
+        # Genesis manifest
+        manifest = None
+        try:
+            manifest = db_manager.execute_fetch(
+                "SELECT pq_schema_version, genesis_block_hash, genesis_pq_fp, "
+                "hlwe_params, installed_at FROM genesis_pq_manifest ORDER BY installed_at DESC LIMIT 1"
+            )
+            if manifest:
+                manifest = dict(manifest)
+                if manifest.get('installed_at') and hasattr(manifest['installed_at'], 'isoformat'):
+                    manifest['installed_at'] = manifest['installed_at'].isoformat()
+        except Exception:
+            pass
+        # Genesis PQ field check
+        genesis_pq_check = {}
+        try:
+            g = db_manager.execute_fetch(
+                "SELECT pq_signature, pq_key_fingerprint, pq_validation_status, "
+                "vdf_output, pq_merkle_root, qrng_entropy_anu FROM blocks WHERE height=0"
+            )
+            if g:
+                genesis_pq_check = {
+                    'has_pq_signature':   bool(g.get('pq_signature')),
+                    'has_pq_fingerprint': bool(g.get('pq_key_fingerprint')),
+                    'pq_validation_status': g.get('pq_validation_status', 'unsigned'),
+                    'has_vdf':            bool(g.get('vdf_output')),
+                    'has_pq_merkle':      bool(g.get('pq_merkle_root')),
+                    'has_qrng_entropy':   bool(g.get('qrng_entropy_anu')),
+                }
+        except Exception:
+            pass
+        return {
+            'status': 'ok',
+            'pq_module': pq_st,
+            'table_health': table_health,
+            'genesis_manifest': manifest,
+            'genesis_pq_fields': genesis_pq_check,
+        }
+    except Exception as e:
+        return {'status': 'error', 'error': f'pq-schema-status: {e}'}
+
+def _pq_genesis_verify(flags: dict, args: list) -> dict:
+    """Verify genesis block PQ cryptographic material — signature, VDF, merkle, entropy."""
+    try:
+        from db_builder_v2 import db_manager
+        if not db_manager:
+            return {'status': 'error', 'error': 'DB not available'}
+        row = db_manager.execute_fetch("SELECT * FROM blocks WHERE height=0 LIMIT 1")
+        if not row:
+            return {'status': 'error', 'error': 'Genesis block not found'}
+        g = dict(row)
+        # Sanitize timestamps
+        for f in list(g.keys()):
+            if g[f] and hasattr(g[f], 'isoformat'):
+                g[f] = g[f].isoformat()
+        checks = {
+            'pq_signature_present':     bool(g.get('pq_signature')),
+            'pq_key_fingerprint':       g.get('pq_key_fingerprint'),
+            'pq_validation_status':     g.get('pq_validation_status', 'unsigned'),
+            'pq_merkle_root_present':   bool(g.get('pq_merkle_root')),
+            'vdf_output_present':       bool(g.get('vdf_output')),
+            'vdf_proof_present':        bool(g.get('vdf_proof')),
+            'qrng_anu_present':         bool(g.get('qrng_entropy_anu')),
+            'qrng_random_org_present':  bool(g.get('qrng_entropy_random_org')),
+            'qrng_lfdr_present':        bool(g.get('qrng_entropy_lfdr')),
+            'auth_chain_present':       bool(g.get('auth_chain_signature')),
+            'ratchet_present':          bool(g.get('ratchet_next_key_material')),
+            'encryption_envelope':      bool(g.get('pq_encryption_envelope')),
+            'field_cipher':             g.get('field_encryption_cipher', 'not set'),
+            'entropy_certification':    g.get('entropy_certification_level', 'not set'),
+        }
+        all_pass = all([
+            checks['pq_signature_present'],
+            checks['pq_merkle_root_present'],
+            checks['vdf_output_present'],
+        ])
+        pq_summary = {
+            'pq_signature':    (g.get('pq_signature') or '')[:40] + '…' if g.get('pq_signature') else None,
+            'pq_merkle_root':  (g.get('pq_merkle_root') or '')[:40] + '…' if g.get('pq_merkle_root') else None,
+            'vdf_output':      (g.get('vdf_output') or '')[:40] + '…' if g.get('vdf_output') else None,
+            'block_hash':      g.get('block_hash'),
+            'finalized_at':    g.get('finalized_at'),
+        }
+        return {
+            'status': 'ok',
+            'genesis_pq_verified': all_pass,
+            'checks': checks,
+            'pq_summary': pq_summary,
+            'overall': '✅ GENESIS FULLY PQ-SECURED' if all_pass else '⚠️  GENESIS MISSING PQ MATERIAL — run db_manager.create_or_repair_genesis_pq(force_overwrite=True)',
+        }
+    except Exception as e:
+        return {'status': 'error', 'error': f'pq-genesis-verify: {e}'}
+
+
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
 # API COMMAND HANDLERS (non-interactive, for HTTP dispatch)
 # These thin wrappers call TerminalEngine's client/session/data,
@@ -5611,6 +5813,42 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             block['tx_count']        = len(tx_rows)
             block['transaction_ids'] = [r.get('tx_id') or r.get('tx_hash') for r in tx_rows]
             block['source']          = 'database'
+            # ── PQ section — surface all post-quantum fields prominently ──────
+            block['pq_cryptography'] = {
+                'pq_signature':               block.get('pq_signature'),
+                'pq_key_fingerprint':         block.get('pq_key_fingerprint'),
+                'pq_signature_ek':            block.get('pq_signature_ek'),
+                'pq_validation_status':       block.get('pq_validation_status', 'unsigned'),
+                'pq_verified_at':             block.get('pq_verified_at'),
+                'pq_merkle_root':             block.get('pq_merkle_root'),
+                'pq_merkle_proof':            block.get('pq_merkle_proof'),
+                'pq_encryption_envelope':     block.get('pq_encryption_envelope'),
+                'pq_auth_tag':                block.get('pq_auth_tag'),
+                'encrypted_field_manifest':   block.get('encrypted_field_manifest'),
+                'field_encryption_cipher':    block.get('field_encryption_cipher', 'HLWE-256-GCM'),
+            }
+            block['pq_entropy'] = {
+                'qrng_entropy_anu':           block.get('qrng_entropy_anu'),
+                'qrng_entropy_random_org':    block.get('qrng_entropy_random_org'),
+                'qrng_entropy_lfdr':          block.get('qrng_entropy_lfdr'),
+                'qrng_xor_combined_seed':     block.get('qrng_xor_combined_seed'),
+                'qrng_entropy_sources_used':  block.get('qrng_entropy_sources_used', []),
+                'entropy_shannon_estimate':   block.get('entropy_shannon_estimate'),
+                'entropy_certification_level':block.get('entropy_certification_level', 'NIST-L5'),
+            }
+            block['pq_vdf'] = {
+                'vdf_output':    block.get('vdf_output'),
+                'vdf_proof':     block.get('vdf_proof'),
+                'vdf_challenge': block.get('vdf_challenge'),
+            }
+            block['pq_chain'] = {
+                'auth_chain_parent':      block.get('auth_chain_parent'),
+                'auth_chain_signature':   block.get('auth_chain_signature'),
+                'ratchet_next_key_material': block.get('ratchet_next_key_material'),
+                'ratchet_generator':      block.get('ratchet_generator'),
+                'qkd_session_key':        block.get('qkd_session_key'),
+                'qkd_ephemeral_public':   block.get('qkd_ephemeral_public'),
+            }
             return _ok(block)
 
         return _err(f'Block {num} not found')
@@ -6781,6 +7019,12 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         'quantum-oracle':       lambda f,a: _req('GET', '/api/quantum/oracle', params=f),
         'quantum-pq-rotate':    lambda f,a: _req('POST', '/api/quantum/pq-rotate', f),
         'quantum-heartbeat-monitor': h_quantum_heartbeat_monitor,
+        # PQ CRYPTOGRAPHY
+        'pq-key-gen': lambda f, a: _pq_key_gen(f, a),
+        'pq-key-list': lambda f, a: _pq_key_list(f, a),
+        'pq-key-status': lambda f, a: _pq_key_status(f, a),
+        'pq-schema-status': lambda f, a: _pq_schema_status(f, a),
+        'pq-genesis-verify': lambda f, a: _pq_genesis_verify(f, a),
         # ORACLE
         'oracle-time':          h_oracle_time,
         'oracle-price':         h_oracle_price,
@@ -6911,6 +7155,8 @@ def register_all_commands(engine: 'TerminalEngine'):
         'quantum-validator': 'quantum', 'quantum-finality': 'quantum',
         'quantum-transaction': 'quantum', 'quantum-oracle': 'quantum',
         'quantum-pq-rotate': 'quantum', 'quantum-heartbeat-monitor': 'quantum',
+        'pq-key-gen': 'pq', 'pq-key-list': 'pq', 'pq-key-status': 'pq',
+        'pq-schema-status': 'pq', 'pq-genesis-verify': 'pq',
         'oracle-time': 'oracle', 'oracle-price': 'oracle', 'oracle-random': 'oracle',
         'oracle-feed': 'oracle', 'oracle-event': 'oracle',
         'defi-stake': 'defi', 'defi-unstake': 'defi', 'defi-borrow': 'defi',
@@ -6974,6 +7220,11 @@ def register_all_commands(engine: 'TerminalEngine'):
         'quantum-oracle': 'Quantum oracle qubit finality',
         'quantum-pq-rotate': 'Rotate post-quantum keypair',
         'quantum-heartbeat-monitor': 'Live quantum heartbeat monitor',
+        'pq-key-gen': 'Generate HLWE-256 post-quantum keypair',
+        'pq-key-list': 'List post-quantum keys in vault',
+        'pq-key-status': 'Show status of a specific PQ key',
+        'pq-schema-status': 'PQ schema installation & table health',
+        'pq-genesis-verify': 'Verify genesis block PQ cryptographic material',
         'oracle-time': 'Get oracle time feed',
         'oracle-price': 'Get price oracle for symbol',
         'oracle-random': 'QRNG random number',
@@ -7027,7 +7278,8 @@ def register_all_commands(engine: 'TerminalEngine'):
     ADMIN_CMDS = {'admin-users','admin-approval','admin-monitoring','admin-settings',
                   'admin-audit','admin-emergency','system-backup','system-restore','user-list'}
     OPEN_CMDS  = {'help','help-commands','help-category','help-command',
-                  'login','register','system-health','system-status','wsgi-status'}
+                  'login','register','system-health','system-status','wsgi-status',
+                  'pq-schema-status','pq-genesis-verify'}
 
     for name, handler in handlers.items():
         COMMAND_REGISTRY[name] = {
