@@ -14,6 +14,9 @@ import sys
 import logging
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, send_from_directory, send_file
+import threading
+from contextlib import contextmanager
+from typing import Optional, Dict, Any, List
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -21,6 +24,212 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# DATABASE CONNECTION POOLING - GLOBAL DB WRAPPER
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+class DBConnectionPool:
+    """Thread-safe PostgreSQL connection pool wrapper using psycopg2.pool.ThreadedConnectionPool"""
+    
+    def __init__(self, db_url: Optional[str] = None, min_conns: int = 2, max_conns: int = 10):
+        """Initialize connection pool"""
+        self.db_url = db_url or os.getenv('DATABASE_URL', '')
+        self.min_conns = min_conns
+        self.max_conns = max_conns
+        self.pool = None
+        self.lock = threading.RLock()
+        self._initialize_pool()
+    
+    def _initialize_pool(self):
+        """Initialize the connection pool (lazy)"""
+        if not self.db_url:
+            logger.warning("⚠️  DATABASE_URL not set; DB operations will fail until configured")
+            return
+        
+        try:
+            import psycopg2
+            from psycopg2.pool import ThreadedConnectionPool
+            
+            with self.lock:
+                if self.pool is None:
+                    self.pool = ThreadedConnectionPool(
+                        self.min_conns,
+                        self.max_conns,
+                        self.db_url,
+                        connect_timeout=5
+                    )
+                    logger.info(f"✅ Database connection pool initialized: {self.min_conns}-{self.max_conns} connections")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize DB pool: {e}")
+            self.pool = None
+    
+    @contextmanager
+    def get_connection(self):
+        """Get a connection from the pool (context manager)"""
+        if not self.pool:
+            self._initialize_pool()
+        
+        if not self.pool:
+            raise RuntimeError("Database pool not initialized and DATABASE_URL not available")
+        
+        conn = self.pool.getconn()
+        try:
+            yield conn
+        finally:
+            self.pool.putconn(conn)
+    
+    def execute(self, query: str, params: tuple = None, fetch_one: bool = False, 
+                fetch_all: bool = False) -> Any:
+        """Execute a query and return result"""
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(query, params or ())
+                    if fetch_one:
+                        return cur.fetchone()
+                    elif fetch_all:
+                        return cur.fetchall()
+                    else:
+                        conn.commit()
+                        return cur.rowcount
+        except Exception as e:
+            logger.error(f"❌ DB query error: {e}")
+            raise
+    
+    def executemany(self, query: str, params_list: List[tuple]) -> int:
+        """Execute multiple queries"""
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.executemany(query, params_list)
+                    conn.commit()
+                    return cur.rowcount
+        except Exception as e:
+            logger.error(f"❌ DB batch error: {e}")
+            raise
+    
+    def health_check(self) -> bool:
+        """Check if database is accessible"""
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                    return cur.fetchone() is not None
+        except Exception as e:
+            logger.error(f"❌ DB health check failed: {e}")
+            return False
+    
+    def close_all(self):
+        """Close all connections in pool"""
+        if self.pool:
+            with self.lock:
+                try:
+                    self.pool.closeall()
+                    logger.info("✅ All DB connections closed")
+                except Exception as e:
+                    logger.error(f"❌ Error closing DB pool: {e}")
+
+
+# Global DB instance
+DB = DBConnectionPool()
+
+# Compatibility aliases for RequestCorrelation, PROFILER, CACHE, ERROR_BUDGET
+class RequestCorrelation:
+    """Request correlation tracking"""
+    current_id: Optional[str] = None
+    
+    @classmethod
+    def new_id(cls) -> str:
+        import uuid
+        cls.current_id = str(uuid.uuid4())
+        return cls.current_id
+
+
+class SimpleProfiler:
+    """Basic profiler for performance tracking"""
+    def __init__(self):
+        self.metrics = {}
+    
+    def record(self, name: str, duration_ms: float):
+        if name not in self.metrics:
+            self.metrics[name] = []
+        self.metrics[name].append(duration_ms)
+    
+    def get_stats(self, name: str) -> Dict[str, float]:
+        if name not in self.metrics:
+            return {}
+        times = self.metrics[name]
+        return {
+            'count': len(times),
+            'avg_ms': sum(times) / len(times),
+            'min_ms': min(times),
+            'max_ms': max(times),
+        }
+
+
+class SimpleCache:
+    """Simple in-memory cache"""
+    def __init__(self, max_size: int = 1000):
+        self.cache = {}
+        self.max_size = max_size
+        self.lock = threading.RLock()
+    
+    def get(self, key: str) -> Optional[Any]:
+        with self.lock:
+            return self.cache.get(key)
+    
+    def set(self, key: str, value: Any, ttl_sec: int = 3600):
+        with self.lock:
+            if len(self.cache) >= self.max_size:
+                # Simple eviction: remove first item
+                self.cache.pop(next(iter(self.cache)), None)
+            self.cache[key] = {'value': value, 'ttl': ttl_sec}
+    
+    def delete(self, key: str):
+        with self.lock:
+            self.cache.pop(key, None)
+    
+    def clear(self):
+        with self.lock:
+            self.cache.clear()
+
+
+class ErrorBudget:
+    """Error budget tracking for graceful degradation"""
+    def __init__(self, max_errors: int = 100, window_sec: int = 60):
+        self.max_errors = max_errors
+        self.window_sec = window_sec
+        self.errors = []
+        self.lock = threading.RLock()
+    
+    def record_error(self):
+        with self.lock:
+            import time
+            now = time.time()
+            # Remove old errors outside window
+            self.errors = [t for t in self.errors if now - t < self.window_sec]
+            self.errors.append(now)
+    
+    def is_exhausted(self) -> bool:
+        with self.lock:
+            import time
+            now = time.time()
+            self.errors = [t for t in self.errors if now - t < self.window_sec]
+            return len(self.errors) >= self.max_errors
+    
+    def remaining(self) -> int:
+        with self.lock:
+            import time
+            now = time.time()
+            self.errors = [t for t in self.errors if now - t < self.window_sec]
+            return max(0, self.max_errors - len(self.errors))
+
+
+# Global instances
+PROFILER = SimpleProfiler()
+CACHE = SimpleCache(max_size=2000)
+ERROR_BUDGET = ErrorBudget(max_errors=100, window_sec=60)
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # IMPORT GLOBALS
@@ -351,6 +560,7 @@ if __name__ == '__main__':
     logger.info("="*80)
     logger.info(f"✅ Globals available: {GLOBALS_AVAILABLE}")
     logger.info(f"✅ Systems registered: {len(SYSTEMS)}")
+    logger.info(f"✅ Database pool initialized: {DB.pool is not None}")
     try:
         logger.info(f"✅ Commands available: {len(COMMAND_REGISTRY)}")
     except:

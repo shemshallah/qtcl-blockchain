@@ -1594,102 +1594,102 @@ def _init_block_command_database() -> bool:
 
 def _DEPRECATED_init_block_command_database_old() -> bool:
     """OLD IMPLEMENTATION - KEPT FOR REFERENCE ONLY"""
-        # ── Resolve path: prefer /tmp for writable ephemeral FS ──────────────
-        db_dir = os.environ.get('BLOCK_CMD_DB_DIR', '/tmp')
-        db_file = os.path.join(db_dir, 'qtcl_block_commands.db')
-        _BLOCK_CMD_DB_PATH = db_file
+    # ── Resolve path: prefer /tmp for writable ephemeral FS ──────────────
+    db_dir = os.environ.get('BLOCK_CMD_DB_DIR', '/tmp')
+    db_file = os.path.join(db_dir, 'qtcl_block_commands.db')
+    _BLOCK_CMD_DB_PATH = db_file
 
-        try:
-            import sqlite3 as _sqlite3
-            conn = _sqlite3.connect(db_file, check_same_thread=False, timeout=10)
-            conn.row_factory = _sqlite3.Row
-            _BLOCK_CMD_DB_CONN = conn
-            cur = conn.cursor()
+    try:
+        import sqlite3 as _sqlite3
+        conn = _sqlite3.connect(db_file, check_same_thread=False, timeout=10)
+        conn.row_factory = _sqlite3.Row
+        _BLOCK_CMD_DB_CONN = conn
+        cur = conn.cursor()
 
-            # ── DDL: command_logs ─────────────────────────────────────────────
-            cur.execute("""CREATE TABLE IF NOT EXISTS command_logs (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                correlation_id TEXT NOT NULL,
-                command     TEXT NOT NULL,
-                user_id     TEXT,
-                ip_address  TEXT,
-                params      TEXT,
-                success     INTEGER DEFAULT 1,
-                duration_ms REAL,
-                error_msg   TEXT,
-                created_at  REAL DEFAULT (unixepoch('now','subsec'))
-            )""")
+        # ── DDL: command_logs ─────────────────────────────────────────────
+        cur.execute("""CREATE TABLE IF NOT EXISTS command_logs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            correlation_id TEXT NOT NULL,
+            command     TEXT NOT NULL,
+            user_id     TEXT,
+            ip_address  TEXT,
+            params      TEXT,
+            success     INTEGER DEFAULT 1,
+            duration_ms REAL,
+            error_msg   TEXT,
+            created_at  REAL DEFAULT (unixepoch('now','subsec'))
+        )""")
 
-            # ── DDL: block_queries ────────────────────────────────────────────
-            cur.execute("""CREATE TABLE IF NOT EXISTS block_queries (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                block_id    TEXT NOT NULL,
-                query_type  TEXT NOT NULL,
-                result_count INTEGER DEFAULT 0,
-                cache_hit   INTEGER DEFAULT 0,
-                duration_ms REAL,
-                created_at  REAL DEFAULT (unixepoch('now','subsec'))
-            )""")
+        # ── DDL: block_queries ────────────────────────────────────────────
+        cur.execute("""CREATE TABLE IF NOT EXISTS block_queries (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            block_id    TEXT NOT NULL,
+            query_type  TEXT NOT NULL,
+            result_count INTEGER DEFAULT 0,
+            cache_hit   INTEGER DEFAULT 0,
+            duration_ms REAL,
+            created_at  REAL DEFAULT (unixepoch('now','subsec'))
+        )""")
 
-            # ── DDL: block_details_cache ──────────────────────────────────────
-            cur.execute("""CREATE TABLE IF NOT EXISTS block_details_cache (
-                block_id    TEXT PRIMARY KEY,
-                block_data  TEXT NOT NULL,
-                access_count INTEGER DEFAULT 1,
-                expires_at  REAL NOT NULL,
-                created_at  REAL DEFAULT (unixepoch('now','subsec'))
-            )""")
+        # ── DDL: block_details_cache ──────────────────────────────────────
+        cur.execute("""CREATE TABLE IF NOT EXISTS block_details_cache (
+            block_id    TEXT PRIMARY KEY,
+            block_data  TEXT NOT NULL,
+            access_count INTEGER DEFAULT 1,
+            expires_at  REAL NOT NULL,
+            created_at  REAL DEFAULT (unixepoch('now','subsec'))
+        )""")
 
-            # ── DDL: search_logs ──────────────────────────────────────────────
-            cur.execute("""CREATE TABLE IF NOT EXISTS search_logs (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                query       TEXT NOT NULL,
-                result_count INTEGER DEFAULT 0,
-                search_type TEXT DEFAULT 'block',
-                duration_ms REAL,
-                created_at  REAL DEFAULT (unixepoch('now','subsec'))
-            )""")
+        # ── DDL: search_logs ──────────────────────────────────────────────
+        cur.execute("""CREATE TABLE IF NOT EXISTS search_logs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            query       TEXT NOT NULL,
+            result_count INTEGER DEFAULT 0,
+            search_type TEXT DEFAULT 'block',
+            duration_ms REAL,
+            created_at  REAL DEFAULT (unixepoch('now','subsec'))
+        )""")
 
-            # ── DDL: block_statistics ─────────────────────────────────────────
-            cur.execute("""CREATE TABLE IF NOT EXISTS block_statistics (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                block_height    INTEGER,
-                tx_count        INTEGER,
-                gas_used        INTEGER,
-                block_time_ms   REAL,
-                validator_id    TEXT,
-                quantum_entropy REAL,
-                recorded_at     REAL DEFAULT (unixepoch('now','subsec'))
-            )""")
+        # ── DDL: block_statistics ─────────────────────────────────────────
+        cur.execute("""CREATE TABLE IF NOT EXISTS block_statistics (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            block_height    INTEGER,
+            tx_count        INTEGER,
+            gas_used        INTEGER,
+            block_time_ms   REAL,
+            validator_id    TEXT,
+            quantum_entropy REAL,
+            recorded_at     REAL DEFAULT (unixepoch('now','subsec'))
+        )""")
 
-            # ── DDL: quantum_measurements ─────────────────────────────────────
-            cur.execute("""CREATE TABLE IF NOT EXISTS quantum_measurements (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                block_id    TEXT NOT NULL,
-                coherence   REAL,
-                entropy     REAL,
-                finality    REAL,
-                proof_hash  TEXT,
-                valid       INTEGER DEFAULT 1,
-                measured_at REAL DEFAULT (unixepoch('now','subsec'))
-            )""")
+        # ── DDL: quantum_measurements ─────────────────────────────────────
+        cur.execute("""CREATE TABLE IF NOT EXISTS quantum_measurements (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            block_id    TEXT NOT NULL,
+            coherence   REAL,
+            entropy     REAL,
+            finality    REAL,
+            proof_hash  TEXT,
+            valid       INTEGER DEFAULT 1,
+            measured_at REAL DEFAULT (unixepoch('now','subsec'))
+        )""")
 
-            # ── Indexes ───────────────────────────────────────────────────────
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_cmdlog_cmd      ON command_logs(command)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_cmdlog_created  ON command_logs(created_at)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_blkq_block      ON block_queries(block_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_blkstats_height ON block_statistics(block_height)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_qmeas_block     ON quantum_measurements(block_id)")
+        # ── Indexes ───────────────────────────────────────────────────────
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_cmdlog_cmd      ON command_logs(command)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_cmdlog_created  ON command_logs(created_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_blkq_block      ON block_queries(block_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_blkstats_height ON block_statistics(block_height)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_qmeas_block     ON quantum_measurements(block_id)")
 
-            conn.commit()
-            logger.info(f"[BlockCmdDB] ✅ Schema ready at {db_file} — 6 tables, 5 indexes")
-            return True
+        conn.commit()
+        logger.info(f"[BlockCmdDB] ✅ Schema ready at {db_file} — 6 tables, 5 indexes")
+        return True
 
-        except Exception as exc:
-            logger.warning(f"[BlockCmdDB] ⚠ Could not initialise block command DB: {exc} — "
-                           "block commands will run without audit logging")
-            _BLOCK_CMD_DB_CONN = None
-            return False
+    except Exception as exc:
+        logger.warning(f"[BlockCmdDB] ⚠ Could not initialise block command DB: {exc} — "
+                       "block commands will run without audit logging")
+        _BLOCK_CMD_DB_CONN = None
+        return False
 
 
 def _block_cmd_log(command: str, correlation_id: str = None, user_id: str = None,
