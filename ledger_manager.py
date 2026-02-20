@@ -59,78 +59,38 @@ from cryptography.hazmat.primitives.asymmetric import ec, utils
 from cryptography.hazmat.backends import default_backend
 from cryptography.exceptions import InvalidSignature
 
-# Database - USE LAZY IMPORTS to avoid circular import during initialization
-# These will be resolved on first actual use, not at module import time
-_wsgi_config_cache = {}
-
-def _get_wsgi_global(name: str):
-    """Lazy getter for wsgi_config globals to avoid circular import deadlock."""
-    global _wsgi_config_cache
-    if name not in _wsgi_config_cache:
-        try:
-            # Only import wsgi_config when actually needed, not at module init
-            import wsgi_config as wsc
-            _wsgi_config_cache['DB'] = getattr(wsc, 'DB', None)
-            _wsgi_config_cache['PROFILER'] = getattr(wsc, 'PROFILER', None)
-            _wsgi_config_cache['CACHE'] = getattr(wsc, 'CACHE', None)
-            _wsgi_config_cache['RequestCorrelation'] = getattr(wsc, 'RequestCorrelation', None)
-            _wsgi_config_cache['ERROR_BUDGET'] = getattr(wsc, 'ERROR_BUDGET', None)
-        except ImportError:
-            # If wsgi_config not available yet (during circular import), use stubs
-            if 'PROFILER' not in _wsgi_config_cache:
-                _wsgi_config_cache['PROFILER'] = _StubProfiler()
-            if 'CACHE' not in _wsgi_config_cache:
-                _wsgi_config_cache['CACHE'] = _StubCache()
-            if 'RequestCorrelation' not in _wsgi_config_cache:
-                _wsgi_config_cache['RequestCorrelation'] = _StubTracer()
-            if 'ERROR_BUDGET' not in _wsgi_config_cache:
-                _wsgi_config_cache['ERROR_BUDGET'] = _StubErrorBudget()
-    return _wsgi_config_cache.get(name)
-
-class _StubProfiler:
-    """Stub profiler for use during initialization."""
-    def record(self, name: str, duration_ms: float): pass
-    def get_stats(self, name: str): return {'count': 0, 'avg_ms': 0, 'min_ms': 0, 'max_ms': 0}
-
-class _StubCache:
-    """Stub cache for use during initialization."""
-    def get(self, key: str): return None
-    def set(self, key: str, value, ttl_sec: int = 3600): pass
-    def delete(self, key: str): pass
-    def clear(self): pass
-
-class _StubTracer:
-    """Stub tracer for use during initialization."""
-    def new_id(self) -> str: return 'init-stub-id'
-
-class _StubErrorBudget:
-    """Stub error budget for use during initialization."""
-    def record_error(self): pass
-    def is_exhausted(self) -> bool: return False
-    def remaining(self) -> int: return 100
-
-# Lazy globals that resolve on first access
-DB = property(lambda self: _get_wsgi_global('DB')).__get__(None, type(None))
-PROFILER = property(lambda self: _get_wsgi_global('PROFILER')).__get__(None, type(None))
-CACHE = property(lambda self: _get_wsgi_global('CACHE')).__get__(None, type(None))
-RequestCorrelation = property(lambda self: _get_wsgi_global('RequestCorrelation')).__get__(None, type(None))
-ERROR_BUDGET = property(lambda self: _get_wsgi_global('ERROR_BUDGET')).__get__(None, type(None))
-
-# Legacy fallback - if these properties don't work, define them directly
-if not callable(DB):
-    DB = _get_wsgi_global('DB') or None
-if not callable(PROFILER):
-    PROFILER = _get_wsgi_global('PROFILER') or _StubProfiler()
-if not callable(CACHE):
-    CACHE = _get_wsgi_global('CACHE') or _StubCache()
-if not callable(RequestCorrelation):
-    RequestCorrelation = _get_wsgi_global('RequestCorrelation') or _StubTracer()
-if not callable(ERROR_BUDGET):
-    ERROR_BUDGET = _get_wsgi_global('ERROR_BUDGET') or _StubErrorBudget()
-
+# Database - Lazy import from wsgi_config (will be available by the time functions run)
+# Never import at module level - defer until function execution time
 from psycopg2.extras import RealDictCursor, execute_values, Json
 from psycopg2 import sql
 import psycopg2
+
+# These will be populated on first use via _get_wsgi_module()
+_wsgi_config_module = None
+
+def _get_wsgi_module():
+    """Get wsgi_config module on first actual use (guaranteed initialized by then)."""
+    global _wsgi_config_module
+    if _wsgi_config_module is None:
+        import wsgi_config
+        _wsgi_config_module = wsgi_config
+    return _wsgi_config_module
+
+# Lazy getters - accessed by functions that need these globals
+def get_DB():
+    return getattr(_get_wsgi_module(), 'DB', None)
+
+def get_PROFILER():
+    return getattr(_get_wsgi_module(), 'PROFILER', None)
+
+def get_CACHE():
+    return getattr(_get_wsgi_module(), 'CACHE', None)
+
+def get_RequestCorrelation():
+    return getattr(_get_wsgi_module(), 'RequestCorrelation', None)
+
+def get_ERROR_BUDGET():
+    return getattr(_get_wsgi_module(), 'ERROR_BUDGET', None)
 
 # Legacy compatibility imports (for classes that still expect these)
 from supabase import create_client, Client
@@ -921,18 +881,25 @@ class GlobalDBWrapper:
     """
     def getconn(self):
         """Get connection from global pool"""
-        return DB.get_connection()
+        return get_DB().get_connection()
     
     def putconn(self, conn):
         """Return connection to global pool"""
-        DB.return_connection(conn)
+        get_DB().return_connection(conn)
     
     def closeall(self):
         """No-op - global pool manages its own lifecycle"""
         pass
 
-# Create global DB wrapper instance
-_GLOBAL_DB_POOL = GlobalDBWrapper()
+# Lazy-initialize global DB wrapper instance on first use
+_GLOBAL_DB_POOL = None
+
+def _get_db_pool():
+    """Get or create global DB pool wrapper on first use."""
+    global _GLOBAL_DB_POOL
+    if _GLOBAL_DB_POOL is None:
+        _GLOBAL_DB_POOL = GlobalDBWrapper()
+    return _GLOBAL_DB_POOL
 
 # Helper to create legacy Supabase client (for compatibility)
 def get_supabase_client():
@@ -941,15 +908,16 @@ def get_supabase_client():
         return create_client(SUPABASE_URL, SUPABASE_KEY)
     return None
 
-# Logging setup
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('ledger_manager.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
+# Logging setup - only configure if not already configured
+if not logging.getLogger().hasHandlers():
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('ledger_manager.log'),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
 
 # ============================================================================
 # CONSTANTS & CONFIGURATION
@@ -1525,7 +1493,7 @@ def initialize_event_driven_system(
         _supabase = get_supabase_client()
     except Exception:
         pass
-    _db_pool_compat = _GLOBAL_DB_POOL  # GlobalDBWrapper wrapping global DB
+    _db_pool_compat = _get_db_pool()  # GlobalDBWrapper wrapping global DB
     persist_layer = TxPersistenceLayer(db_pool=_db_pool_compat, supabase_client=_supabase)
     GLOBAL_TX_PERSIST_LAYER = persist_layer
     logger.info('[INIT] ✓ TxPersistenceLayer created (async background writer running)')
@@ -5583,7 +5551,7 @@ def create_ledger_with_globals():
         # Use global DB wrapper instead of creating new pool
         ledger = QuantumLedgerManager(
             supabase_client=get_supabase_client(),
-            db_pool=_GLOBAL_DB_POOL
+            db_pool=_get_db_pool()
         )
         
         logger.info("[GLOBAL] ✓ Ledger initialized with global DB")

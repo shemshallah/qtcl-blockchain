@@ -19,7 +19,9 @@ import logging
 import threading
 import time
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+# Only configure logging once - subsequent imports should not reconfigure
+if not logging.getLogger().hasHandlers():
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -139,7 +141,7 @@ ERROR_BUDGET = ErrorBudgetManager(max_errors=100, window_sec=60)
 logger.info("[BOOTSTRAP] ✅ Utility services initialized (PROFILER, CACHE, RequestCorrelation, ERROR_BUDGET)")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# BOOTSTRAP PHASE 1: DATABASE SINGLETON (db_builder_v2) - BEFORE globals to break circular import
+# BOOTSTRAP PHASE 1: DATABASE SINGLETON (db_builder_v2)
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 DB = None
@@ -157,41 +159,23 @@ except Exception as e:
     raise
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# BOOTSTRAP PHASE 2: GLOBALS MODULE (Unified State) - Now ledger_manager can safely import PROFILER
+# BOOTSTRAP PHASE 2: GLOBALS MODULE (Unified State)
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 GLOBALS_AVAILABLE = False
 try:
-    logger.info("[BOOTSTRAP] Initializing globals module (ledger_manager will lazy-import PROFILER)...")
-    import globals as globals_module
-    globals_module.initialize_globals()
-    initialize_globals = globals_module.initialize_globals
-    get_globals = globals_module.get_globals
-    get_system_health = globals_module.get_system_health
-    get_state_snapshot = globals_module.get_state_snapshot
-    get_heartbeat = globals_module.get_heartbeat
-    get_blockchain = globals_module.get_blockchain
-    get_ledger = globals_module.get_ledger
-    get_oracle = globals_module.get_oracle
-    get_defi = globals_module.get_defi
-    get_auth_manager = globals_module.get_auth_manager
-    get_pqc_system = globals_module.get_pqc_system
-    get_genesis_block = globals_module.get_genesis_block
-    verify_genesis_block = globals_module.verify_genesis_block
-    get_metrics = globals_module.get_metrics
-    get_quantum = globals_module.get_quantum
-    dispatch_command = globals_module.dispatch_command
-    COMMAND_REGISTRY = globals_module.COMMAND_REGISTRY
-    pqc_generate_user_key = globals_module.pqc_generate_user_key
-    pqc_sign = globals_module.pqc_sign
-    pqc_verify = globals_module.pqc_verify
-    pqc_encapsulate = globals_module.pqc_encapsulate
-    pqc_prove_identity = globals_module.pqc_prove_identity
-    pqc_verify_identity = globals_module.pqc_verify_identity
-    pqc_revoke_key = globals_module.pqc_revoke_key
-    pqc_rotate_key = globals_module.pqc_rotate_key
-    bootstrap_admin_session = globals_module.bootstrap_admin_session
-    revoke_session = globals_module.revoke_session
+    logger.info("[BOOTSTRAP] Initializing globals module...")
+    from globals import (
+        initialize_globals, get_globals,
+        get_system_health, get_state_snapshot,
+        get_heartbeat, get_blockchain, get_ledger, get_oracle, get_defi,
+        get_auth_manager, get_pqc_system, get_genesis_block, verify_genesis_block,
+        get_metrics, get_quantum, dispatch_command, COMMAND_REGISTRY,
+        pqc_generate_user_key, pqc_sign, pqc_verify,
+        pqc_encapsulate, pqc_prove_identity, pqc_verify_identity,
+        pqc_revoke_key, pqc_rotate_key, bootstrap_admin_session, revoke_session,
+    )
+    initialize_globals()
     GLOBALS_AVAILABLE = True
     logger.info("[BOOTSTRAP] ✅ Globals module initialized")
 except Exception as e:
@@ -240,7 +224,7 @@ def _initialize_terminal_engine():
 
 __all__ = [
     'DB', 'PROFILER', 'CACHE', 'RequestCorrelation', 'ERROR_BUDGET',
-    'GLOBALS_AVAILABLE', 'logger', 'app', 'application',
+    'GLOBALS_AVAILABLE', 'logger',
     'get_system_health', 'get_state_snapshot',
     'get_heartbeat', 'get_blockchain', 'get_ledger', 'get_oracle', 'get_defi',
     'get_auth_manager', 'get_pqc_system', 'get_genesis_block', 'verify_genesis_block',
@@ -250,23 +234,6 @@ __all__ = [
     'pqc_revoke_key', 'pqc_rotate_key',
     'bootstrap_admin_session', 'revoke_session',
 ]
-
-# Ensure functions are available (late binding in case of re-imports)
-def _ensure_exports():
-    """Ensure all critical exports are available."""
-    global initialize_globals, get_globals, get_system_health, get_state_snapshot
-    global get_heartbeat, get_blockchain, get_ledger, get_oracle, get_defi
-    global get_auth_manager, get_pqc_system, get_genesis_block, verify_genesis_block
-    global get_metrics, get_quantum, dispatch_command, COMMAND_REGISTRY
-    global pqc_generate_user_key, pqc_sign, pqc_verify
-    global pqc_encapsulate, pqc_prove_identity, pqc_verify_identity
-    global pqc_revoke_key, pqc_rotate_key, bootstrap_admin_session, revoke_session
-    
-    if not GLOBALS_AVAILABLE:
-        # Functions should already be imported above, but provide fallbacks
-        pass
-
-_ensure_exports()
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # FLASK APPLICATION (HTTP Interface)
@@ -410,14 +377,15 @@ def server_error(e):
 application = app
 
 if __name__ == '__main__':
-    _initialize_terminal_engine()  # Initialize on startup
+    # DO NOT initialize terminal engine here - it will lazy-load on first request
+    # This avoids circular recursion during bootstrap
     logger.info("="*80)
     logger.info("🚀 QTCL WSGI v5.0 - PRODUCTION STARTUP")
     logger.info("="*80)
     logger.info(f"✅ Database initialized: {DB is not None}")
     logger.info(f"✅ Utilities initialized: PROFILER, CACHE, RequestCorrelation, ERROR_BUDGET")
     logger.info(f"✅ Globals available: {GLOBALS_AVAILABLE}")
-    logger.info(f"✅ Terminal engine ready: {_TERMINAL_INITIALIZED}")
-    logger.info(f"✅ Commands registered: {len(COMMAND_REGISTRY)}")
+    logger.info(f"✅ Terminal engine: LAZY-LOAD (initializes on first request)")
+    logger.info(f"✅ Commands will be registered: len(COMMAND_REGISTRY)={len(COMMAND_REGISTRY)}")
     logger.info("="*80)
     app.run(host='0.0.0.0', port=8000, debug=False)

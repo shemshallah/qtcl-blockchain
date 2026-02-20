@@ -17,8 +17,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 # Only configure logging once to prevent initialization explosion
-_logging_configured = logging.getLogger().hasHandlers()
-if not _logging_configured:
+if not logging.getLogger().hasHandlers():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -192,25 +191,13 @@ def initialize_globals():
         except Exception as e:
             logger.warning(f"⚠️  Blockchain: {str(e)[:60]}")
         
-        # Initialize Ledger - USE LAZY IMPORT to avoid circular dependency with wsgi_config
+        # Initialize Ledger
         try:
-            # Defer actual import to avoid circular deadlock during initialization
-            ledger = None
-            try:
-                # Try lazy import with deferred globals resolution
-                import importlib
-                ledger_mod = importlib.import_module('ledger_manager')
-                get_ledger_integration = getattr(ledger_mod, 'get_ledger_integration', None)
-                if get_ledger_integration:
-                    ledger = get_ledger_integration()
-            except Exception as inner_e:
-                logger.debug(f"Ledger deferred import: {str(inner_e)[:80]}")
-            
-            _GLOBAL_STATE['ledger'] = ledger
-            if ledger:
+            get_ledger_integration = _safe_import('ledger_manager', 'get_ledger_integration')
+            if get_ledger_integration:
+                ledger = get_ledger_integration()
+                _GLOBAL_STATE['ledger'] = ledger
                 logger.info("✅ Quantum ledger integration initialized")
-            else:
-                logger.info("⚠️  Ledger deferred (will lazy-load on first use)")
         except Exception as e:
             logger.warning(f"⚠️  Ledger: {str(e)[:60]}")
         
@@ -261,14 +248,16 @@ def initialize_globals():
         except Exception as e:
             logger.warning(f"⚠️  Admin: {str(e)[:60]}")
         
-        # Initialize Terminal
+        # Initialize Terminal - DEFER COMPLETELY (100% lazy-load on first request)
+        # TerminalEngine instantiation causes circular recursion during init
+        # It will be created on first call to dispatch_command or _initialize_terminal_engine()
         try:
             TerminalEngine = _safe_import('terminal_logic', 'TerminalEngine')
             if TerminalEngine:
-                _GLOBAL_STATE['terminal_engine'] = TerminalEngine()
-                logger.info("✅ Terminal engine with 100+ commands initialized")
+                _GLOBAL_STATE['terminal_engine'] = None  # Lazy-load marker
+                logger.info("✅ Terminal engine deferred (100% lazy-load on first request)")
         except Exception as e:
-            logger.warning(f"⚠️  Terminal: {str(e)[:60]}")
+            logger.warning(f"⚠️  Terminal deferred: {str(e)[:60]}")
         
         # Create Genesis Block
         try:
