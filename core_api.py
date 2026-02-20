@@ -2521,7 +2521,7 @@ def create_blueprint()->Blueprint:
             logger.error(f"[EntropyAudit] Error: {e}")
             return jsonify({'error': 'Entropy audit unavailable'}), 503
     
-    
+    return bp
 
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
