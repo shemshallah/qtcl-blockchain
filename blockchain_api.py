@@ -5473,59 +5473,255 @@ def create_blueprint()->Blueprint:
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
     def _handle_block_list(options,correlation_id):
-        """Block list: Paginated block retrieval with sorting"""
+        """
+        Block list: Paginated block retrieval — full enterprise PQ field emission.
+        Every block entry carries the complete post-quantum cryptographic surface:
+        HLWE signature, QRNG provenance, VDF binding, Merkle roots, auth chain,
+        entropy certification, and ratchet material.
+        """
         start_time=time.time()
         try:
             gs=None
-            try:
-                gs=get_globals()
-            except:
-                pass
-            
-            # L1: Parse pagination
-            page=max(int(options.get('page',1)),1)
-            per_page=min(int(options.get('per_page',50)),500)
-            offset=(page-1)*per_page
-            sort_by=str(options.get('sort_by','height'))
-            sort_order=str(options.get('sort_order','DESC')).upper()
-            
-            # Validate sort_by
-            allowed_sorts=['height','timestamp','difficulty','size_bytes']
+            try: gs=get_globals()
+            except: pass
+
+            # ── Pagination & sort ────────────────────────────────────────────────
+            page          = max(int(options.get('page',1)),1)
+            per_page      = min(int(options.get('per_page',50)),500)
+            offset        = (page-1)*per_page
+            sort_by       = str(options.get('sort_by','height'))
+            sort_order    = str(options.get('sort_order','DESC')).upper()
+            allowed_sorts = {'height','timestamp','difficulty','size_bytes','entropy_shannon_estimate','created_at'}
             if sort_by not in allowed_sorts: sort_by='height'
-            
-            # L2: Get total count
-            count_result=db._exec("SELECT COUNT(*) as total FROM blocks",fetch_one=True) if db else None
-            total=count_result.get('total',0) if count_result else 0
-            
-            # L3: Calculate pagination
-            per_page_safe=per_page if per_page>0 else 1
-            total_pages=(total+per_page_safe-1)//per_page_safe
-            
-            # L4: Query paginated blocks
-            query=f"SELECT block_hash,height,previous_hash,timestamp,validator,merkle_root,quantum_merkle_root,status,confirmations,difficulty,nonce,size_bytes,gas_used,gas_limit,total_fees,reward,epoch,tx_capacity,temporal_coherence,is_orphan,quantum_proof_version FROM blocks ORDER BY {sort_by} {sort_order} LIMIT %s OFFSET %s"
-            blocks=db._exec(query,(per_page,offset)) if db else []
-            
-            # L5: Format and return with pagination
-            formatted=[]
-            for b in blocks:
-                formatted.append({'hash':b.get('block_hash',''),'height':b.get('height',0),'timestamp':str(b.get('timestamp','')),'validator':b.get('validator',''),'status':b.get('status',''),'confirmations':b.get('confirmations',0),'difficulty':b.get('difficulty',0),'size_bytes':b.get('size_bytes',0)})
-            
-            # Update metrics
+            if sort_order not in ('ASC','DESC'): sort_order='DESC'
+
+            # ── Total count ──────────────────────────────────────────────────────
+            count_result = db._exec("SELECT COUNT(*) as total FROM blocks",fetch_one=True) if db else None
+            total        = (count_result or {}).get('total',0)
+            per_page_safe= max(per_page,1)
+            total_pages  = (total+per_page_safe-1)//per_page_safe
+
+            # ── Full PQ column fetch ─────────────────────────────────────────────
+            # Pull every enterprise PQ field so callers get the complete cryptographic picture.
+            _COLS = (
+                "block_hash,block_number,height,previous_hash,timestamp,validator,status,finalized,"
+                "finalized_at,created_at,updated_at,confirmations,difficulty,nonce,size_bytes,"
+                "gas_used,gas_limit,total_fees,burned_fees,reward,miner_reward,epoch,tx_capacity,"
+                "transactions,temporal_coherence,is_orphan,is_uncle,merkle_root,quantum_merkle_root,"
+                "state_root,quantum_proof,quantum_proof_version,quantum_state_hash,"
+                "quantum_validation_status,quantum_entropy,quantum_measurements_count,"
+                "entropy_score,temporal_proof,receipts_root,transactions_root,logs_bloom,"
+                "extra_data,mix_hash,uncle_rewards,uncle_position,floquet_cycle,"
+                # ── Enterprise PQ fields ─────────────────────────────────────────
+                "pq_signature,pq_key_fingerprint,pq_signature_ek,pq_validation_status,pq_verified_at,"
+                "consensus_state,"
+                # QRNG provenance
+                "qrng_entropy_anu,qrng_entropy_random_org,qrng_entropy_lfdr,"
+                "qrng_entropy_sources_used,qrng_xor_combined_seed,"
+                # QKD session key
+                "qkd_session_key,qkd_ephemeral_public,qkd_kem_ciphertext,"
+                # HLWE encryption envelope
+                "pq_encryption_envelope,pq_auth_tag,encrypted_field_manifest,field_encryption_cipher,"
+                # Post-quantum Merkle
+                "pq_merkle_root,pq_merkle_proof,"
+                # VDF temporal binding
+                "vdf_output,vdf_proof,vdf_challenge,"
+                # Entropy certification
+                "entropy_shannon_estimate,entropy_source_quality,entropy_certification_level,"
+                # Recursive auth chain
+                "auth_chain_parent,auth_chain_signature,"
+                # Homomorphic encryption
+                "he_context_serialized,he_encrypted_state_delta,"
+                # Forward-secrecy ratchet
+                "ratchet_next_key_material,ratchet_generator"
+            )
+            _SAFE_COLS = _COLS  # all literals — safe for f-string; no user input injected
+            query  = f"SELECT {_SAFE_COLS} FROM blocks ORDER BY {sort_by} {sort_order} LIMIT %s OFFSET %s"
+            blocks = db._exec(query,(per_page,offset)) if db else []
+
+            # ── Format ──────────────────────────────────────────────────────────
+            def _fmt_block(b):
+                """Emit complete block record — no field elision, full PQ surface."""
+                def _safe_float(v, default=0.0):
+                    try: return float(v) if v is not None else default
+                    except: return default
+                def _safe_int(v, default=0):
+                    try: return int(v) if v is not None else default
+                    except: return default
+                def _safe_str(v):
+                    return str(v) if v is not None else None
+                def _safe_json(v):
+                    if v is None: return {}
+                    if isinstance(v,(dict,list)): return v
+                    try: import json; return json.loads(v)
+                    except: return {}
+                def _safe_list(v):
+                    if v is None: return []
+                    if isinstance(v,list): return v
+                    try: import json; return json.loads(v)
+                    except: return [str(v)] if v else []
+
+                return {
+                    # ── Core identity ────────────────────────────────────────────
+                    'block_hash':               _safe_str(b.get('block_hash')),
+                    'block_number':             _safe_int(b.get('block_number')),
+                    'height':                   _safe_int(b.get('height')),
+                    'previous_hash':            _safe_str(b.get('previous_hash')),
+                    'timestamp':                _safe_str(b.get('timestamp')),
+                    'created_at':               _safe_str(b.get('created_at')),
+                    'updated_at':               _safe_str(b.get('updated_at')),
+                    'validator':                _safe_str(b.get('validator')),
+                    'status':                   _safe_str(b.get('status')),
+                    'finalized':                bool(b.get('finalized',False)),
+                    'finalized_at':             _safe_str(b.get('finalized_at')),
+                    'consensus_state':          _safe_str(b.get('consensus_state','active')),
+                    'confirmations':            _safe_int(b.get('confirmations')),
+                    'epoch':                    _safe_int(b.get('epoch')),
+                    'floquet_cycle':            _safe_int(b.get('floquet_cycle')),
+                    # ── Size / gas ──────────────────────────────────────────────
+                    'size_bytes':               _safe_int(b.get('size_bytes')),
+                    'difficulty':               _safe_int(b.get('difficulty')),
+                    'nonce':                    _safe_str(b.get('nonce')),
+                    'gas_used':                 _safe_int(b.get('gas_used')),
+                    'gas_limit':                _safe_int(b.get('gas_limit')),
+                    'tx_capacity':              _safe_int(b.get('tx_capacity')),
+                    'transactions':             _safe_int(b.get('transactions')),
+                    # ── Economics ────────────────────────────────────────────────
+                    'total_fees':               _safe_float(b.get('total_fees')),
+                    'burned_fees':              _safe_float(b.get('burned_fees')),
+                    'reward':                   _safe_float(b.get('reward')),
+                    'miner_reward':             _safe_float(b.get('miner_reward')),
+                    'uncle_rewards':            _safe_float(b.get('uncle_rewards')),
+                    # ── Classical Merkle / state roots ───────────────────────────
+                    'merkle_root':              _safe_str(b.get('merkle_root')),
+                    'state_root':               _safe_str(b.get('state_root')),
+                    'receipts_root':            _safe_str(b.get('receipts_root')),
+                    'transactions_root':        _safe_str(b.get('transactions_root')),
+                    'logs_bloom':               _safe_str(b.get('logs_bloom')),
+                    # ── Quantum / temporal ───────────────────────────────────────
+                    'quantum_merkle_root':      _safe_str(b.get('quantum_merkle_root')),
+                    'quantum_proof':            _safe_str(b.get('quantum_proof')),
+                    'quantum_proof_version':    _safe_int(b.get('quantum_proof_version')),
+                    'quantum_state_hash':       _safe_str(b.get('quantum_state_hash')),
+                    'quantum_validation_status':_safe_str(b.get('quantum_validation_status')),
+                    'quantum_entropy':          _safe_str(b.get('quantum_entropy')),
+                    'quantum_measurements_count':_safe_int(b.get('quantum_measurements_count')),
+                    'entropy_score':            _safe_float(b.get('entropy_score')),
+                    'temporal_coherence':       _safe_float(b.get('temporal_coherence')),
+                    'temporal_proof':           _safe_str(b.get('temporal_proof')),
+                    # ── Misc chain fields ────────────────────────────────────────
+                    'is_orphan':                bool(b.get('is_orphan',False)),
+                    'is_uncle':                 bool(b.get('is_uncle',False)),
+                    'uncle_position':           b.get('uncle_position'),
+                    'mix_hash':                 _safe_str(b.get('mix_hash')),
+                    'extra_data':               _safe_str(b.get('extra_data')),
+                    # ════════════════════════════════════════════════════════════
+                    # ENTERPRISE POST-QUANTUM CRYPTOGRAPHY FIELDS
+                    # ════════════════════════════════════════════════════════════
+                    'post_quantum': {
+                        # Phase 3 — HLWE-256 signature
+                        'pq_signature':             _safe_str(b.get('pq_signature')),
+                        'pq_key_fingerprint':       _safe_str(b.get('pq_key_fingerprint')),
+                        'pq_signature_ek':          _safe_str(b.get('pq_signature_ek')),
+                        'pq_validation_status':     _safe_str(b.get('pq_validation_status','unsigned')),
+                        'pq_verified_at':           _safe_str(b.get('pq_verified_at')),
+                        # Phase 1 — Triple-source QRNG provenance
+                        'qrng': {
+                            'anu_entropy':          _safe_str(b.get('qrng_entropy_anu')),
+                            'random_org_entropy':   _safe_str(b.get('qrng_entropy_random_org')),
+                            'lfdr_entropy':         _safe_str(b.get('qrng_entropy_lfdr')),
+                            'sources_used':         _safe_list(b.get('qrng_entropy_sources_used')),
+                            'xor_combined_seed':    _safe_str(b.get('qrng_xor_combined_seed')),
+                        },
+                        # Phase 2 — QKD session key
+                        'qkd': {
+                            'session_key':          _safe_str(b.get('qkd_session_key')),
+                            'ephemeral_public':     _safe_str(b.get('qkd_ephemeral_public')),
+                            'kem_ciphertext':       _safe_str(b.get('qkd_kem_ciphertext')),
+                        },
+                        # Phase 3 — HLWE encryption envelope
+                        'encryption': {
+                            'envelope':             _safe_json(b.get('pq_encryption_envelope')),
+                            'auth_tag':             _safe_str(b.get('pq_auth_tag')),
+                            'field_manifest':       _safe_json(b.get('encrypted_field_manifest')),
+                            'cipher':               _safe_str(b.get('field_encryption_cipher','HLWE-256-GCM')),
+                        },
+                        # Phase 4 — Post-quantum Merkle
+                        'pq_merkle': {
+                            'root':                 _safe_str(b.get('pq_merkle_root')),
+                            'proof':                _safe_json(b.get('pq_merkle_proof')),
+                        },
+                        # Phase 6 — RSA-VDF temporal binding
+                        'vdf': {
+                            'output':               _safe_str(b.get('vdf_output')),
+                            'proof':                _safe_str(b.get('vdf_proof')),
+                            'challenge':            _safe_str(b.get('vdf_challenge')),
+                        },
+                        # Phase 7 — Shannon entropy certification
+                        'entropy_certification': {
+                            'shannon_estimate':     _safe_float(b.get('entropy_shannon_estimate')),
+                            'source_quality':       _safe_json(b.get('entropy_source_quality')),
+                            'certification_level':  _safe_str(b.get('entropy_certification_level','NIST-L5')),
+                        },
+                        # Phase 8 — Recursive auth chain
+                        'auth_chain': {
+                            'parent_commitment':    _safe_str(b.get('auth_chain_parent')),
+                            'chain_signature':      _safe_str(b.get('auth_chain_signature')),
+                        },
+                        # Phase 9 — Homomorphic encryption (optional)
+                        'homomorphic': {
+                            'context_serialized':   _safe_str(b.get('he_context_serialized')),
+                            'encrypted_state_delta':_safe_str(b.get('he_encrypted_state_delta')),
+                        },
+                        # Phase 10 — Forward-secrecy ratchet
+                        'ratchet': {
+                            'next_key_material':    _safe_str(b.get('ratchet_next_key_material')),
+                            'generator':            _safe_str(b.get('ratchet_generator')),
+                        },
+                    }
+                }
+
+            formatted=[_fmt_block(b) for b in blocks]
+
+            # ── PQ coverage summary ──────────────────────────────────────────────
+            pq_signed   = sum(1 for b in formatted if b['post_quantum']['pq_signature'])
+            pq_verified = sum(1 for b in formatted if b['post_quantum']['pq_validation_status'] not in (None,'unsigned'))
+            pq_has_qrng = sum(1 for b in formatted if b['post_quantum']['qrng']['sources_used'])
+            pq_has_vdf  = sum(1 for b in formatted if b['post_quantum']['vdf']['output'])
+
+            # ── Metrics ──────────────────────────────────────────────────────────
             query_time_ms=(time.time()-start_time)*1000
             if gs and hasattr(gs,'block_command_metrics'):
                 gs.block_command_metrics.record_list_blocks_query(query_time_ms,len(formatted))
                 gs.metrics.api_calls['block_list']=gs.metrics.api_calls.get('block_list',0)+1
-            
-            return {'status':'success','blocks':formatted,'pagination':{'current_page':page,'per_page':per_page,'total_items':total,'total_pages':total_pages,'has_next':page<total_pages,'has_prev':page>1,'next_page':page+1 if page<total_pages else None,'prev_page':page-1 if page>1 else None},'metrics':{'query_time_ms':query_time_ms,'blocks_returned':len(formatted)},'correlation_id':correlation_id}
-        
+
+            return {
+                'status':      'success',
+                'blocks':      formatted,
+                'pq_coverage': {
+                    'total_blocks':      len(formatted),
+                    'pq_signed':         pq_signed,
+                    'pq_verified':       pq_verified,
+                    'has_qrng_entropy':  pq_has_qrng,
+                    'has_vdf_binding':   pq_has_vdf,
+                    'coverage_pct':      round(pq_signed/max(len(formatted),1)*100,2),
+                },
+                'pagination': {
+                    'current_page':page,'per_page':per_page,'total_items':total,
+                    'total_pages':total_pages,'has_next':page<total_pages,'has_prev':page>1,
+                    'next_page':page+1 if page<total_pages else None,
+                    'prev_page':page-1 if page>1 else None,
+                },
+                'metrics':      {'query_time_ms':query_time_ms,'blocks_returned':len(formatted)},
+                'correlation_id':correlation_id,
+            }
+
         except Exception as e:
             logger.error(f"[BLOCK_LIST] Error: {e}",exc_info=True)
             try:
                 gs=get_globals()
-                if gs and hasattr(gs,'block_command_metrics'):
-                    gs.block_command_metrics.record_error(str(e))
-            except:
-                pass
+                if gs and hasattr(gs,'block_command_metrics'): gs.block_command_metrics.record_error(str(e))
+            except: pass
             return {'status':'error','error':str(e),'correlation_id':correlation_id}
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -5533,34 +5729,39 @@ def create_blueprint()->Blueprint:
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
     def _handle_block_details(block_ref,options,correlation_id):
-        """Block details: Complete block information with transactions and validation"""
+        """
+        Block details: Complete block information — every enterprise PQ cryptographic
+        field surfaced in structured nested JSON. HLWE sig, QRNG provenance, VDF proof,
+        PQ-Merkle, auth chain, entropy cert, HE state, ratchet — all emitted verbatim.
+        """
         start_time=time.time()
         try:
             gs=None
-            try:
-                gs=get_globals()
-            except:
-                pass
-            
-            # L1: Find block by hash or height
-            block=None
-            if block_ref.isdigit():
-                result=db._exec("SELECT * FROM blocks WHERE height=%s LIMIT 1",(int(block_ref),),fetch_one=True) if db else None
-                block=result
+            try: gs=get_globals()
+            except: pass
+
+            # ── Resolve block ────────────────────────────────────────────────────
+            _by_height = str(block_ref).strip().lstrip('0') == '' or str(block_ref).strip().isdigit()
+            block = None
+            if _by_height:
+                block = db._exec("SELECT * FROM blocks WHERE height=%s LIMIT 1",(int(block_ref),),fetch_one=True) if db else None
             else:
-                result=db._exec("SELECT * FROM blocks WHERE block_hash=%s LIMIT 1",(block_ref,),fetch_one=True) if db else None
-                block=result
-            
+                block = db._exec("SELECT * FROM blocks WHERE block_hash=%s LIMIT 1",(str(block_ref),),fetch_one=True) if db else None
+                if not block and db:
+                    # fallback: try partial hash prefix
+                    block = db._exec("SELECT * FROM blocks WHERE block_hash LIKE %s LIMIT 1",(f"{block_ref}%",),fetch_one=True)
+
             if not block:
                 return {'status':'error','error':f'Block not found: {block_ref}','correlation_id':correlation_id}
-            
-            # L2: Get transactions
-            txs=db._exec("SELECT tx_hash,from_address,to_address,amount,timestamp,status,gas_used FROM transactions WHERE block_hash=%s ORDER BY tx_index ASC LIMIT 1000",(block.get('block_hash',''),)) if db else []
-            
-            # L3: Get validations
+            block=dict(block)
+
+            # ── Transactions ─────────────────────────────────────────────────────
+            txs=db._exec("SELECT tx_hash,from_address,to_address,amount,timestamp,status,gas_used,tx_index FROM transactions WHERE block_hash=%s ORDER BY tx_index ASC LIMIT 1000",(block.get('block_hash',''),)) if db else []
+
+            # ── Block validations ────────────────────────────────────────────────
             validations=db._exec("SELECT validation_type,is_valid,validator,timestamp FROM block_validations WHERE block_hash=%s",(block.get('block_hash',''),)) if db else []
-            
-            # L4: Get related blocks
+
+            # ── Related blocks ───────────────────────────────────────────────────
             related={}
             if block.get('previous_hash'):
                 prev=db._exec("SELECT height,block_hash FROM blocks WHERE block_hash=%s LIMIT 1",(block['previous_hash'],),fetch_one=True) if db else None
@@ -5568,57 +5769,200 @@ def create_blueprint()->Blueprint:
             if block.get('block_hash'):
                 nxt=db._exec("SELECT height,block_hash FROM blocks WHERE previous_hash=%s LIMIT 1",(block['block_hash'],),fetch_one=True) if db else None
                 if nxt: related['next']={'hash':nxt.get('block_hash'),'height':nxt.get('height')}
-            
-            # L5: Format detailed response
+
+            # ── Helpers ──────────────────────────────────────────────────────────
+            def _sf(v,d=0.0):
+                try: return float(v) if v is not None else d
+                except: return d
+            def _si(v,d=0):
+                try: return int(v) if v is not None else d
+                except: return d
+            def _ss(v): return str(v) if v is not None else None
+            def _sj(v):
+                if v is None: return {}
+                if isinstance(v,(dict,list)): return v
+                try: import json; return json.loads(v)
+                except: return {}
+            def _sl(v):
+                if v is None: return []
+                if isinstance(v,list): return v
+                try: import json; return json.loads(v)
+                except: return [str(v)] if v else []
+
+            # ── Validation map ───────────────────────────────────────────────────
             validation_map={}
             for v in validations:
                 vtype=v.get('validation_type','')
                 if vtype not in validation_map:
                     validation_map[vtype]={'type':vtype,'is_valid':v.get('is_valid',False),'validators':[]}
                 validation_map[vtype]['validators'].append(v.get('validator',''))
-            
+
+            # ── Full block payload ───────────────────────────────────────────────
             detailed_block={
-                'hash':block.get('block_hash',''),
-                'height':block.get('height',0),
-                'timestamp':str(block.get('timestamp','')),
-                'previous_hash':block.get('previous_hash',''),
-                'validator':block.get('validator',''),
-                'merkle_root':block.get('merkle_root',''),
-                'quantum_merkle_root':block.get('quantum_merkle_root',''),
-                'status':block.get('status',''),
-                'confirmations':block.get('confirmations',0),
-                'difficulty':block.get('difficulty',0),
-                'nonce':block.get('nonce',0),
-                'size_bytes':block.get('size_bytes',0),
-                'size_kb':block.get('size_bytes',0)/1024 if block.get('size_bytes') else 0,
-                'gas_used':block.get('gas_used',0),
-                'gas_limit':block.get('gas_limit',0),
-                'total_fees':float(block.get('total_fees',0)) if block.get('total_fees') else 0,
-                'reward':float(block.get('reward',0)) if block.get('reward') else 0,
-                'epoch':block.get('epoch',0),
-                'temporal_coherence':block.get('temporal_coherence',0),
-                'is_orphan':block.get('is_orphan',False),
-                'transactions':{'count':len(txs),'details':txs,'total_value':sum(float(t.get('amount',0)) for t in txs),'total_gas_used':sum(t.get('gas_used',0) for t in txs)},
-                'validations':{'validations':list(validation_map.values()),'is_confirmed':all(v['is_valid'] for v in validation_map.values()) if validation_map else False,'validator_count':len(set(v.get('validator','') for v in validations))},
-                'related_blocks':related
+                # ── Core identity ────────────────────────────────────────────────
+                'block_hash':                block.get('block_hash',''),
+                'block_number':              _si(block.get('block_number')),
+                'height':                    _si(block.get('height')),
+                'previous_hash':             _ss(block.get('previous_hash')),
+                'timestamp':                 _ss(block.get('timestamp')),
+                'created_at':                _ss(block.get('created_at')),
+                'updated_at':                _ss(block.get('updated_at')),
+                'validator':                 _ss(block.get('validator')),
+                'validator_signature':       _ss(block.get('validator_signature')),
+                'validated_at':              _ss(block.get('validated_at')),
+                'validation_entropy_avg':    block.get('validation_entropy_avg'),
+                'status':                    _ss(block.get('status')),
+                'finalized':                 bool(block.get('finalized',False)),
+                'finalized_at':              _ss(block.get('finalized_at')),
+                'consensus_state':           _ss(block.get('consensus_state','active')),
+                'confirmations':             _si(block.get('confirmations')),
+                'epoch':                     _si(block.get('epoch')),
+                'floquet_cycle':             _si(block.get('floquet_cycle')),
+                # ── Size / difficulty ────────────────────────────────────────────
+                'size_bytes':                _si(block.get('size_bytes')),
+                'size_kb':                   round(_si(block.get('size_bytes'))/1024,4),
+                'difficulty':                _si(block.get('difficulty')),
+                'total_difficulty':          _si(block.get('total_difficulty')),
+                'nonce':                     _ss(block.get('nonce')),
+                'mix_hash':                  _ss(block.get('mix_hash')),
+                'extra_data':                _ss(block.get('extra_data')),
+                # ── Gas ──────────────────────────────────────────────────────────
+                'gas_used':                  _si(block.get('gas_used')),
+                'gas_limit':                 _si(block.get('gas_limit')),
+                'gas_utilization_pct':       round(_si(block.get('gas_used'))/_si(block.get('gas_limit'),1)*100,4) if _si(block.get('gas_limit')) else 0,
+                'tx_capacity':               _si(block.get('tx_capacity')),
+                # ── Economics ────────────────────────────────────────────────────
+                'total_fees':                _sf(block.get('total_fees')),
+                'burned_fees':               _sf(block.get('burned_fees')),
+                'reward':                    _sf(block.get('reward')),
+                'miner_reward':              _sf(block.get('miner_reward')),
+                'uncle_rewards':             _sf(block.get('uncle_rewards')),
+                # ── Merkle / state roots ─────────────────────────────────────────
+                'merkle_root':               _ss(block.get('merkle_root')),
+                'quantum_merkle_root':       _ss(block.get('quantum_merkle_root')),
+                'state_root':                _ss(block.get('state_root')),
+                'receipts_root':             _ss(block.get('receipts_root')),
+                'transactions_root':         _ss(block.get('transactions_root')),
+                'logs_bloom':                _ss(block.get('logs_bloom')),
+                # ── Quantum / temporal ───────────────────────────────────────────
+                'quantum_proof':             _ss(block.get('quantum_proof')),
+                'quantum_proof_version':     _si(block.get('quantum_proof_version')),
+                'quantum_state_hash':        _ss(block.get('quantum_state_hash')),
+                'quantum_validation_status': _ss(block.get('quantum_validation_status')),
+                'quantum_entropy':           _ss(block.get('quantum_entropy')),
+                'quantum_measurements_count':_si(block.get('quantum_measurements_count')),
+                'entropy_score':             _sf(block.get('entropy_score')),
+                'temporal_coherence':        _sf(block.get('temporal_coherence')),
+                'temporal_proof':            _ss(block.get('temporal_proof')),
+                # ── Flags ────────────────────────────────────────────────────────
+                'is_orphan':                 bool(block.get('is_orphan',False)),
+                'is_uncle':                  bool(block.get('is_uncle',False)),
+                'uncle_position':            block.get('uncle_position'),
+                # ── Transactions ─────────────────────────────────────────────────
+                'transactions': {
+                    'count':      len(txs),
+                    'details':    txs,
+                    'total_value':sum(_sf(t.get('amount')) for t in txs),
+                    'total_gas':  sum(_si(t.get('gas_used')) for t in txs),
+                },
+                # ── Validations ──────────────────────────────────────────────────
+                'validations': {
+                    'validations':   list(validation_map.values()),
+                    'is_confirmed':  all(v['is_valid'] for v in validation_map.values()) if validation_map else False,
+                    'validator_count':len(set(v.get('validator','') for v in validations)),
+                },
+                'related_blocks': related,
+                # ════════════════════════════════════════════════════════════════════
+                # ENTERPRISE POST-QUANTUM CRYPTOGRAPHY — FULL 10-PHASE SURFACE
+                # ════════════════════════════════════════════════════════════════════
+                'post_quantum': {
+                    # Phase 3: HLWE-256 Signature
+                    'pq_signature':              _ss(block.get('pq_signature')),
+                    'pq_key_fingerprint':        _ss(block.get('pq_key_fingerprint')),
+                    'pq_signature_ek':           _ss(block.get('pq_signature_ek')),
+                    'pq_validation_status':      _ss(block.get('pq_validation_status','unsigned')),
+                    'pq_verified_at':            _ss(block.get('pq_verified_at')),
+                    'pq_has_signature':          block.get('pq_signature') is not None,
+                    # Phase 1: Triple-source QRNG entropy provenance
+                    'qrng': {
+                        'anu_entropy':           _ss(block.get('qrng_entropy_anu')),
+                        'random_org_entropy':    _ss(block.get('qrng_entropy_random_org')),
+                        'lfdr_entropy':          _ss(block.get('qrng_entropy_lfdr')),
+                        'sources_used':          _sl(block.get('qrng_entropy_sources_used')),
+                        'xor_combined_seed':     _ss(block.get('qrng_xor_combined_seed')),
+                        'source_count':          len(_sl(block.get('qrng_entropy_sources_used'))),
+                    },
+                    # Phase 2: QKD session key
+                    'qkd': {
+                        'session_key':           _ss(block.get('qkd_session_key')),
+                        'ephemeral_public':      _ss(block.get('qkd_ephemeral_public')),
+                        'kem_ciphertext':        _ss(block.get('qkd_kem_ciphertext')),
+                    },
+                    # Phase 3: HLWE encryption envelope
+                    'encryption': {
+                        'envelope':              _sj(block.get('pq_encryption_envelope')),
+                        'auth_tag':              _ss(block.get('pq_auth_tag')),
+                        'field_manifest':        _sj(block.get('encrypted_field_manifest')),
+                        'cipher':                _ss(block.get('field_encryption_cipher','HLWE-256-GCM')),
+                    },
+                    # Phase 4: Post-quantum Merkle
+                    'pq_merkle': {
+                        'root':                  _ss(block.get('pq_merkle_root')),
+                        'proof':                 _sj(block.get('pq_merkle_proof')),
+                    },
+                    # Phase 6: RSA-VDF temporal binding
+                    'vdf': {
+                        'output':                _ss(block.get('vdf_output')),
+                        'proof':                 _ss(block.get('vdf_proof')),
+                        'challenge':             _ss(block.get('vdf_challenge')),
+                        'has_vdf_binding':       block.get('vdf_output') is not None,
+                    },
+                    # Phase 7: Shannon entropy certification
+                    'entropy_certification': {
+                        'shannon_estimate_bits': _sf(block.get('entropy_shannon_estimate')),
+                        'source_quality':        _sj(block.get('entropy_source_quality')),
+                        'certification_level':   _ss(block.get('entropy_certification_level','NIST-L5')),
+                        'nist_compliant':        block.get('entropy_certification_level','') in ('NIST-L5','NIST-L4','NIST-L3'),
+                    },
+                    # Phase 8: Recursive auth chain
+                    'auth_chain': {
+                        'parent_commitment':     _ss(block.get('auth_chain_parent')),
+                        'chain_signature':       _ss(block.get('auth_chain_signature')),
+                        'is_genesis_anchor':     block.get('auth_chain_parent','') in ('','0'*64,None),
+                    },
+                    # Phase 9: Homomorphic encryption (optional BFV/BGV context)
+                    'homomorphic': {
+                        'context_serialized':    _ss(block.get('he_context_serialized')),
+                        'encrypted_state_delta': _ss(block.get('he_encrypted_state_delta')),
+                        'he_enabled':            block.get('he_context_serialized') is not None,
+                    },
+                    # Phase 10: Forward-secrecy ratchet
+                    'ratchet': {
+                        'next_key_material':     _ss(block.get('ratchet_next_key_material')),
+                        'generator':             _ss(block.get('ratchet_generator')),
+                    },
+                },
             }
-            
-            # Update metrics
+
+            # ── Metrics ──────────────────────────────────────────────────────────
             query_time_ms=(time.time()-start_time)*1000
             if gs and hasattr(gs,'block_command_metrics'):
                 gs.block_command_metrics.record_details_query(query_time_ms)
                 gs.metrics.api_calls['block_details']=gs.metrics.api_calls.get('block_details',0)+1
-            
-            return {'status':'success','block':detailed_block,'metrics':{'query_time_ms':query_time_ms,'transactions_found':len(txs)},'correlation_id':correlation_id}
-        
+
+            return {
+                'status':         'success',
+                'block':          detailed_block,
+                'metrics':        {'query_time_ms':query_time_ms,'transactions_found':len(txs)},
+                'correlation_id': correlation_id,
+            }
+
         except Exception as e:
             logger.error(f"[BLOCK_DETAILS] Error: {e}",exc_info=True)
             try:
                 gs=get_globals()
-                if gs and hasattr(gs,'block_command_metrics'):
-                    gs.block_command_metrics.record_error(str(e))
-            except:
-                pass
+                if gs and hasattr(gs,'block_command_metrics'): gs.block_command_metrics.record_error(str(e))
+            except: pass
             return {'status':'error','error':str(e),'correlation_id':correlation_id}
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -5626,64 +5970,228 @@ def create_blueprint()->Blueprint:
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
     def _handle_block_stats(options,correlation_id):
-        """Block stats: Comprehensive blockchain statistics"""
+        """
+        Block stats: Comprehensive blockchain statistics — includes full enterprise
+        PQ aggregate breakdown: signature coverage, QRNG sourcing, VDF binding rates,
+        entropy certification distribution, auth chain integrity, ratchet deployment.
+        """
         start_time=time.time()
         try:
             gs=None
-            try:
-                gs=get_globals()
-            except:
-                pass
-            
-            # L1: Get basic stats
-            basic=db._exec("SELECT COUNT(*) as total_blocks,MAX(height) as max_height,MIN(timestamp) as first_block_time,MAX(timestamp) as latest_block_time,AVG(CAST(size_bytes AS FLOAT)) as avg_size_bytes,SUM(CAST(size_bytes AS FLOAT)) as total_size_bytes,AVG(CAST(gas_used AS FLOAT)) as avg_gas_used,AVG(CAST(difficulty AS FLOAT)) as avg_difficulty,SUM(CAST(reward AS FLOAT)) as total_reward,SUM(CAST(total_fees AS FLOAT)) as total_fees,COUNT(DISTINCT validator) as unique_validators FROM blocks",fetch_one=True) if db else {}
-            
-            # L2: Get performance stats
-            perf=db._exec("SELECT AVG(CAST(size_bytes AS FLOAT)) as avg_size_bytes,STDDEV(CAST(size_bytes AS FLOAT)) as stdev_size_bytes FROM blocks",fetch_one=True) if db else {}
-            
-            # L3: Get distribution by status
-            dist=db._exec("SELECT status,COUNT(*) as count FROM blocks GROUP BY status") if db else []
-            distribution={d.get('status','unknown'):{' count':d.get('count',0)} for d in dist}
-            
-            # L4: Get top validators
-            validators=db._exec("SELECT validator,COUNT(*) as blocks_mined,SUM(CAST(reward AS FLOAT)) as total_reward FROM blocks WHERE validator IS NOT NULL GROUP BY validator ORDER BY blocks_mined DESC LIMIT 10") if db else []
-            
-            # L5: Compile stats
+            try: gs=get_globals()
+            except: pass
+
+            # ── Basic chain stats ────────────────────────────────────────────────
+            basic=db._exec(
+                "SELECT COUNT(*) as total_blocks,MAX(height) as max_height,"
+                "MIN(timestamp) as first_block_time,MAX(timestamp) as latest_block_time,"
+                "AVG(CAST(size_bytes AS FLOAT)) as avg_size_bytes,"
+                "SUM(CAST(size_bytes AS FLOAT)) as total_size_bytes,"
+                "AVG(CAST(gas_used AS FLOAT)) as avg_gas_used,"
+                "AVG(CAST(difficulty AS FLOAT)) as avg_difficulty,"
+                "SUM(CAST(reward AS FLOAT)) as total_reward,"
+                "SUM(CAST(total_fees AS FLOAT)) as total_fees,"
+                "COUNT(DISTINCT validator) as unique_validators,"
+                "SUM(CASE WHEN finalized THEN 1 ELSE 0 END) as finalized_count,"
+                "SUM(CASE WHEN is_orphan THEN 1 ELSE 0 END) as orphan_count "
+                "FROM blocks",fetch_one=True) if db else {}
+
+            # ── Enterprise PQ aggregate stats ────────────────────────────────────
+            pq_stats=db._exec(
+                "SELECT "
+                # Signature coverage
+                "COUNT(CASE WHEN pq_signature IS NOT NULL THEN 1 END) as pq_signed,"
+                "COUNT(CASE WHEN pq_validation_status='validated' THEN 1 END) as pq_validated,"
+                "COUNT(CASE WHEN pq_validation_status='unsigned' OR pq_validation_status IS NULL THEN 1 END) as pq_unsigned,"
+                "COUNT(CASE WHEN pq_key_fingerprint IS NOT NULL THEN 1 END) as has_key_fingerprint,"
+                # QRNG coverage
+                "COUNT(CASE WHEN qrng_entropy_anu IS NOT NULL THEN 1 END) as has_anu_entropy,"
+                "COUNT(CASE WHEN qrng_entropy_random_org IS NOT NULL THEN 1 END) as has_random_org_entropy,"
+                "COUNT(CASE WHEN qrng_entropy_lfdr IS NOT NULL THEN 1 END) as has_lfdr_entropy,"
+                "COUNT(CASE WHEN qrng_xor_combined_seed IS NOT NULL THEN 1 END) as has_xor_seed,"
+                # QKD
+                "COUNT(CASE WHEN qkd_session_key IS NOT NULL THEN 1 END) as has_qkd_session_key,"
+                # HLWE encryption envelope
+                "COUNT(CASE WHEN pq_auth_tag IS NOT NULL THEN 1 END) as has_pq_auth_tag,"
+                # VDF
+                "COUNT(CASE WHEN vdf_output IS NOT NULL THEN 1 END) as has_vdf,"
+                "COUNT(CASE WHEN vdf_proof IS NOT NULL THEN 1 END) as has_vdf_proof,"
+                # PQ Merkle
+                "COUNT(CASE WHEN pq_merkle_root IS NOT NULL THEN 1 END) as has_pq_merkle,"
+                # Auth chain
+                "COUNT(CASE WHEN auth_chain_signature IS NOT NULL THEN 1 END) as has_auth_chain,"
+                # Entropy certification
+                "AVG(CASE WHEN entropy_shannon_estimate > 0 THEN entropy_shannon_estimate END) as avg_shannon_entropy,"
+                "MIN(entropy_shannon_estimate) as min_shannon_entropy,"
+                "MAX(entropy_shannon_estimate) as max_shannon_entropy,"
+                "COUNT(CASE WHEN entropy_certification_level='NIST-L5' THEN 1 END) as nist_l5_count,"
+                # HE
+                "COUNT(CASE WHEN he_context_serialized IS NOT NULL THEN 1 END) as has_he_context,"
+                # Ratchet
+                "COUNT(CASE WHEN ratchet_next_key_material IS NOT NULL THEN 1 END) as has_ratchet,"
+                # Consensus
+                "COUNT(CASE WHEN consensus_state='active' THEN 1 END) as active_consensus "
+                "FROM blocks",fetch_one=True) if db else {}
+
+            # ── Entropy cert distribution ────────────────────────────────────────
+            cert_dist=db._exec(
+                "SELECT entropy_certification_level,COUNT(*) as count FROM blocks "
+                "WHERE entropy_certification_level IS NOT NULL "
+                "GROUP BY entropy_certification_level ORDER BY count DESC") if db else []
+
+            # ── QRNG source distribution ─────────────────────────────────────────
+            qrng_src=db._exec(
+                "SELECT COUNT(CASE WHEN qrng_entropy_anu IS NOT NULL AND qrng_entropy_random_org IS NOT NULL AND qrng_entropy_lfdr IS NOT NULL THEN 1 END) as triple_source,"
+                "COUNT(CASE WHEN (qrng_entropy_anu IS NOT NULL OR qrng_entropy_random_org IS NOT NULL OR qrng_entropy_lfdr IS NOT NULL) AND NOT (qrng_entropy_anu IS NOT NULL AND qrng_entropy_random_org IS NOT NULL AND qrng_entropy_lfdr IS NOT NULL) THEN 1 END) as partial_source,"
+                "COUNT(CASE WHEN qrng_entropy_anu IS NULL AND qrng_entropy_random_org IS NULL AND qrng_entropy_lfdr IS NULL THEN 1 END) as no_qrng "
+                "FROM blocks",fetch_one=True) if db else {}
+
+            # ── Status distribution ──────────────────────────────────────────────
+            dist=db._exec("SELECT status,COUNT(*) as count FROM blocks GROUP BY status ORDER BY count DESC") if db else []
+
+            # ── Top validators ───────────────────────────────────────────────────
+            validators=db._exec(
+                "SELECT validator,COUNT(*) as blocks_mined,"
+                "SUM(CAST(reward AS FLOAT)) as total_reward,"
+                "COUNT(CASE WHEN pq_signature IS NOT NULL THEN 1 END) as pq_signed_blocks "
+                "FROM blocks WHERE validator IS NOT NULL "
+                "GROUP BY validator ORDER BY blocks_mined DESC LIMIT 10") if db else []
+
+            def _sf(v,d=0.0):
+                try: return float(v) if v is not None else d
+                except: return d
+            def _si(v,d=0):
+                try: return int(v) if v is not None else d
+                except: return d
+
+            total_blocks=_si(basic.get('total_blocks'))
+
+            def _pct(n): return round(_si(n)/max(total_blocks,1)*100,2)
+
             stats={
                 'basic':{
-                    'total_blocks':basic.get('total_blocks',0),
-                    'chain_height':basic.get('max_height',0),
-                    'first_block_time':str(basic.get('first_block_time','')),
-                    'latest_block_time':str(basic.get('latest_block_time','')),
-                    'avg_block_size_kb':basic.get('avg_size_bytes',0)/1024 if basic.get('avg_size_bytes') else 0,
-                    'total_size_gb':basic.get('total_size_bytes',0)/(1024**3) if basic.get('total_size_bytes') else 0,
-                    'avg_gas_per_block':basic.get('avg_gas_used',0),
-                    'avg_difficulty':basic.get('avg_difficulty',0),
-                    'total_reward_issued':basic.get('total_reward',0),
-                    'total_fees_collected':basic.get('total_fees',0),
-                    'unique_validators':basic.get('unique_validators',0)
+                    'total_blocks':          total_blocks,
+                    'chain_height':          _si(basic.get('max_height')),
+                    'first_block_time':      str(basic.get('first_block_time','')),
+                    'latest_block_time':     str(basic.get('latest_block_time','')),
+                    'finalized_count':       _si(basic.get('finalized_count')),
+                    'orphan_count':          _si(basic.get('orphan_count')),
+                    'avg_block_size_kb':     round(_sf(basic.get('avg_size_bytes'))/1024,4),
+                    'total_size_gb':         round(_sf(basic.get('total_size_bytes'))/(1024**3),8),
+                    'avg_gas_per_block':     round(_sf(basic.get('avg_gas_used')),2),
+                    'avg_difficulty':        round(_sf(basic.get('avg_difficulty')),4),
+                    'total_reward_issued':   _sf(basic.get('total_reward')),
+                    'total_fees_collected':  _sf(basic.get('total_fees')),
+                    'unique_validators':     _si(basic.get('unique_validators')),
                 },
-                'distribution':distribution,
-                'top_validators':[{'validator':v.get('validator',''),'blocks_mined':v.get('blocks_mined',0),'total_reward':v.get('total_reward',0)} for v in validators],
-                'command_metrics':gs.block_command_metrics.get_comprehensive_stats() if gs and hasattr(gs,'block_command_metrics') else {}
+                'distribution':{d.get('status','unknown'):d.get('count',0) for d in dist},
+                'top_validators':[{
+                    'validator':       v.get('validator',''),
+                    'blocks_mined':    _si(v.get('blocks_mined')),
+                    'total_reward':    _sf(v.get('total_reward')),
+                    'pq_signed_blocks':_si(v.get('pq_signed_blocks')),
+                    'pq_coverage_pct': round(_si(v.get('pq_signed_blocks'))/_si(v.get('blocks_mined'),1)*100,2),
+                } for v in validators],
+                # ════════════════════════════════════════════════════════════════
+                # ENTERPRISE POST-QUANTUM STATISTICS
+                # ════════════════════════════════════════════════════════════════
+                'post_quantum': {
+                    # Signature coverage
+                    'signature_coverage': {
+                        'pq_signed':           _si(pq_stats.get('pq_signed')),
+                        'pq_validated':        _si(pq_stats.get('pq_validated')),
+                        'pq_unsigned':         _si(pq_stats.get('pq_unsigned')),
+                        'has_key_fingerprint': _si(pq_stats.get('has_key_fingerprint')),
+                        'signed_pct':          _pct(pq_stats.get('pq_signed')),
+                        'validated_pct':       _pct(pq_stats.get('pq_validated')),
+                    },
+                    # QRNG provenance
+                    'qrng_coverage': {
+                        'has_anu_entropy':         _si(pq_stats.get('has_anu_entropy')),
+                        'has_random_org_entropy':  _si(pq_stats.get('has_random_org_entropy')),
+                        'has_lfdr_entropy':        _si(pq_stats.get('has_lfdr_entropy')),
+                        'has_xor_combined_seed':   _si(pq_stats.get('has_xor_seed')),
+                        'triple_source_blocks':    _si(qrng_src.get('triple_source')),
+                        'partial_source_blocks':   _si(qrng_src.get('partial_source')),
+                        'no_qrng_blocks':          _si(qrng_src.get('no_qrng')),
+                        'triple_source_pct':       _pct(qrng_src.get('triple_source')),
+                    },
+                    # QKD
+                    'qkd_coverage': {
+                        'has_qkd_session_key':  _si(pq_stats.get('has_qkd_session_key')),
+                        'qkd_pct':              _pct(pq_stats.get('has_qkd_session_key')),
+                    },
+                    # Encryption envelope
+                    'encryption_coverage': {
+                        'has_pq_auth_tag':   _si(pq_stats.get('has_pq_auth_tag')),
+                        'auth_tag_pct':      _pct(pq_stats.get('has_pq_auth_tag')),
+                    },
+                    # VDF temporal binding
+                    'vdf_coverage': {
+                        'has_vdf':       _si(pq_stats.get('has_vdf')),
+                        'has_vdf_proof': _si(pq_stats.get('has_vdf_proof')),
+                        'vdf_pct':       _pct(pq_stats.get('has_vdf')),
+                    },
+                    # PQ Merkle
+                    'pq_merkle_coverage': {
+                        'has_pq_merkle': _si(pq_stats.get('has_pq_merkle')),
+                        'merkle_pct':    _pct(pq_stats.get('has_pq_merkle')),
+                    },
+                    # Entropy certification
+                    'entropy_certification': {
+                        'avg_shannon_bits':    round(_sf(pq_stats.get('avg_shannon_entropy')),6),
+                        'min_shannon_bits':    round(_sf(pq_stats.get('min_shannon_entropy')),6),
+                        'max_shannon_bits':    round(_sf(pq_stats.get('max_shannon_entropy')),6),
+                        'nist_l5_count':       _si(pq_stats.get('nist_l5_count')),
+                        'nist_l5_pct':         _pct(pq_stats.get('nist_l5_count')),
+                        'cert_distribution':   {c.get('entropy_certification_level','unknown'):c.get('count',0) for c in cert_dist},
+                    },
+                    # Auth chain
+                    'auth_chain_coverage': {
+                        'has_auth_chain':  _si(pq_stats.get('has_auth_chain')),
+                        'auth_chain_pct':  _pct(pq_stats.get('has_auth_chain')),
+                    },
+                    # HE
+                    'homomorphic_coverage': {
+                        'has_he_context':  _si(pq_stats.get('has_he_context')),
+                        'he_pct':          _pct(pq_stats.get('has_he_context')),
+                    },
+                    # Ratchet
+                    'ratchet_coverage': {
+                        'has_ratchet':  _si(pq_stats.get('has_ratchet')),
+                        'ratchet_pct':  _pct(pq_stats.get('has_ratchet')),
+                    },
+                    # Overall PQ health score (0-100)
+                    'pq_health_score': round(sum([
+                        _pct(pq_stats.get('pq_signed'))          * 0.30,
+                        _pct(pq_stats.get('pq_validated'))       * 0.20,
+                        _pct(qrng_src.get('triple_source'))      * 0.15,
+                        _pct(pq_stats.get('has_vdf'))            * 0.15,
+                        _pct(pq_stats.get('has_auth_chain'))     * 0.10,
+                        _pct(pq_stats.get('nist_l5_count'))      * 0.10,
+                    ]),2),
+                },
+                'command_metrics': gs.block_command_metrics.get_comprehensive_stats() if gs and hasattr(gs,'block_command_metrics') else {},
             }
-            
-            # Update metrics
+
             query_time_ms=(time.time()-start_time)*1000
             if gs and hasattr(gs,'block_command_metrics'):
                 gs.block_command_metrics.record_stats_query(query_time_ms)
                 gs.metrics.api_calls['block_stats']=gs.metrics.api_calls.get('block_stats',0)+1
-            
-            return {'status':'success','stats':stats,'metrics':{'query_time_ms':query_time_ms},'correlation_id':correlation_id}
-        
+
+            return {
+                'status':         'success',
+                'stats':          stats,
+                'metrics':        {'query_time_ms':query_time_ms},
+                'correlation_id': correlation_id,
+            }
+
         except Exception as e:
             logger.error(f"[BLOCK_STATS] Error: {e}",exc_info=True)
             try:
                 gs=get_globals()
-                if gs and hasattr(gs,'block_command_metrics'):
-                    gs.block_command_metrics.record_error(str(e))
-            except:
-                pass
+                if gs and hasattr(gs,'block_command_metrics'): gs.block_command_metrics.record_error(str(e))
+            except: pass
             return {'status':'error','error':str(e),'correlation_id':correlation_id}
         """
         Block history: returns a paginated list of recent blocks from DB + chain stats.

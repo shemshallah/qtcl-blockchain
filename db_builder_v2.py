@@ -4926,6 +4926,12 @@ class DatabaseBuilder:
 
         Returns (success: bool, genesis_dict: dict)
         """
+        # ── Honour GENESIS_OVERWRITE env var if caller didn't force explicitly ──
+        _env_ow = os.environ.get('GENESIS_OVERWRITE', '').strip().upper() in ('TRUE', '1', 'YES', 'FORCE', 'ON')
+        force_overwrite = force_overwrite or _env_ow
+        if force_overwrite:
+            logger.warning(f"{CLR.Y}[GENESIS-PQ] ⚑  force_overwrite=True — existing genesis will be replaced{CLR.E}")
+
         conn = None
         try:
             conn = self.get_connection()
@@ -4942,6 +4948,8 @@ class DatabaseBuilder:
                 if has_pq and not force_overwrite:
                     logger.info(f"{CLR.G}[GENESIS-PQ] Genesis already has PQ material — skipping{CLR.E}")
                     return True, existing
+                elif not has_pq and not force_overwrite:
+                    logger.info(f"{CLR.Y}[GENESIS-PQ] Genesis missing PQ material — will patch{CLR.E}")
 
             # ─────────────────────────────────────────────────────────────────
             # Phase 1: Triple-source QRNG entropy harvest
@@ -8185,7 +8193,10 @@ def get_database_heartbeat_status():
 # TOP-LEVEL CONVENIENCE FUNCTION — callable from any module, mirrors the standalone script API
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 
-def initialize_blockchain_with_genesis(db_url: Optional[str] = None) -> Tuple[bool, dict]:
+def initialize_blockchain_with_genesis(
+    db_url: Optional[str] = None,
+    force_genesis_overwrite: Optional[bool] = None,
+) -> Tuple[bool, dict]:
     """
     Single-call complete blockchain initialization:
 
@@ -8195,12 +8206,31 @@ def initialize_blockchain_with_genesis(db_url: Optional[str] = None) -> Tuple[bo
       4. Block command audit (detects "1 block but empty list" paradox)
       5. Auto-repair if paradox detected
 
+    GENESIS_OVERWRITE flag (three sources, highest priority wins):
+      • force_genesis_overwrite kwarg (explicit Python call)
+      • GENESIS_OVERWRITE env var   (e.g. GENESIS_OVERWRITE=TRUE docker/systemd)
+      • Paradox auto-repair always forces overwrite regardless
+
     Compatible with the standalone genesis_block_creator script's API.
     Returns (success: bool, detailed_report: dict)
     """
+    # ── Resolve GENESIS_OVERWRITE from env if not explicitly passed ────────
+    _env_flag = os.environ.get('GENESIS_OVERWRITE', '').strip().upper()
+    _env_overwrite = _env_flag in ('TRUE', '1', 'YES', 'FORCE', 'ON')
+    genesis_overwrite: bool = force_genesis_overwrite if force_genesis_overwrite is not None else _env_overwrite
+    if genesis_overwrite:
+        logger.warning(
+            f"[INIT] ⚑  GENESIS_OVERWRITE=TRUE — existing genesis block WILL be replaced "
+            f"(source: {'kwarg' if force_genesis_overwrite is not None else 'env'})"
+        )
     report: dict = {
         'timestamp': datetime.now(timezone.utc).isoformat(),
         'db_url_override': db_url is not None,
+        'genesis_overwrite_flag': genesis_overwrite,
+        'genesis_overwrite_source': (
+            'kwarg' if force_genesis_overwrite is not None
+            else ('env:GENESIS_OVERWRITE' if _env_overwrite else 'none')
+        ),
         'steps': {},
         'success': False,
     }
@@ -8249,8 +8279,8 @@ def initialize_blockchain_with_genesis(db_url: Optional[str] = None) -> Tuple[bo
             logger.warning(f"[INIT] PQ migration had errors: {migrate['errors']}")
 
         # ── Step 2: Genesis block with full PQ pipeline ──────────────────────
-        logger.info("[INIT] Step 2/4 — Genesis block (NIST PQ-L5)...")
-        genesis_ok, genesis_block = builder.create_or_repair_genesis_pq(force_overwrite=False)
+        logger.info(f"[INIT] Step 2/4 — Genesis block (NIST PQ-L5) [overwrite={genesis_overwrite}]...")
+        genesis_ok, genesis_block = builder.create_or_repair_genesis_pq(force_overwrite=genesis_overwrite)
         report['steps']['genesis_creation'] = {
             'success': genesis_ok,
             'height': genesis_block.get('height'),
