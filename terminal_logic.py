@@ -5650,19 +5650,30 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
     # Never makes HTTP calls. Silently returns None on any failure.
 
     def _db_exec(query, params=None, fetch_one=False):
-        """Direct DB query via db_builder_v2 pool (RealDictCursor, auto conn mgmt)."""
+        """Direct DB query — always via db_builder_v2 pool. Errors are logged visibly, never silently swallowed."""
         try:
             from globals import get_db_pool
             db = get_db_pool()
             if db is None:
-                return None
+                logger.warning("[_db_exec] DB pool not available")
+                return None if fetch_one else []
             if fetch_one:
+                # execute_fetch returns None on error, never raises
                 return db.execute_fetch(query, params)
             else:
-                return db.execute(query, params, return_results=True) or []
+                # execute_fetch_all returns [] on error, never raises
+                if hasattr(db, "execute_fetch_all"):
+                    return db.execute_fetch_all(query, params)
+                # Fallback: use execute_fetch path if execute_fetch_all not yet deployed
+                try:
+                    result = db.execute(query, params, return_results=True)
+                    return result if result is not None else []
+                except Exception as _e:
+                    logger.error(f"[_db_exec] multi-row query error: {_e}")
+                    return []
         except Exception as e:
-            _log_debug(f'_db_exec error: {e}')
-            return None
+            logger.error(f"[_db_exec] error: {e}")
+            return None if fetch_one else []
 
     def _safe_val(v):
         """Serialize a DB value to JSON-safe type."""
@@ -5688,67 +5699,35 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
     # so all numeric lookups use height only. Hash lookups use block_hash only.
 
     def h_block_list(flags, args):
-        """List recent blocks — globals first, then direct DB."""
+        """List recent blocks — DB authoritative source (globals.chain is not populated from DB on startup)."""
         limit  = int(flags.get('limit', 20))
         offset = int(flags.get('offset', 0))
 
-        # 1. In-memory globals chain
-        try:
-            from globals import get_blockchain
-            bc = get_blockchain()
-            if bc and bc.chain:
-                window = list(bc.chain)
-                if offset:
-                    window = window[:len(window) - offset]
-                window = window[-limit:]
-                blocks = [{
-                    'height':            b.get('height') or b.get('block_number', 0),
-                    'block_hash':        b.get('block_hash', ''),
-                    'previous_hash':     b.get('previous_hash', ''),
-                    'timestamp':         b.get('timestamp'),
-                    'tx_count':          len(b.get('transaction_list', [])),
-                    'validator':         b.get('validator', ''),
-                    'entropy_score':     float(b.get('entropy_score', 0) or 0),
-                    'temporal_coherence':float(b.get('temporal_coherence', 0) or 0),
-                    'finalized':         bool(b.get('finalized', False)),
-                    'status':            b.get('status', 'unknown'),
-                    'source':            'globals',
-                } for b in window]
-                if blocks:
-                    return _ok({'blocks': blocks, 'chain_height': bc.chain_height,
-                                'total_blocks': bc.total_blocks, 'count': len(blocks)})
-        except Exception as e:
-            _log_debug(f'h_block_list globals: {e}')
-
-        # 2. Direct DB — avoid block_number column (may not exist in live DB)
+        # Always query DB directly — bc.chain is in-memory only and never loaded from DB on boot
         rows = _db_exec(
             "SELECT height, block_hash, previous_hash, timestamp, validator, "
             "entropy_score, temporal_coherence, finalized, confirmations, status, "
-            "gas_used, gas_limit, transactions "
+            "gas_used, gas_limit, transactions, pq_validation_status, pq_key_fingerprint "
             "FROM blocks ORDER BY height DESC LIMIT %s OFFSET %s",
             (limit, offset)
         )
-        
-        # CRITICAL FIX: rows is a list of RealDictCursor objects, need to convert each
-        if rows is not None and len(rows) > 0:
-            # Convert RealDictCursor objects to plain dicts
-            converted_rows = [dict(r) if hasattr(r, 'items') else r for r in rows]
-            
-            # Get metadata
-            meta_row = _db_exec("SELECT COUNT(*) AS c, MAX(height) AS h FROM blocks", fetch_one=True)
-            meta = dict(meta_row) if meta_row is not None else {}
-            
-            total = int(meta.get('c') or 0)
-            max_h = int(meta.get('h') or 0)
-            
-            return _ok({'blocks': [_clean_block(r) for r in converted_rows],
-                        'total_blocks': total, 'chain_height': max_h,
-                        'count': len(converted_rows), 'source': 'database'})
 
-        return _ok({'blocks': [], 'total_blocks': 0, 'chain_height': 0, 'count': 0})
+        meta_row = _db_exec("SELECT COUNT(*) AS c, MAX(height) AS h FROM blocks", fetch_one=True)
+        meta  = dict(meta_row) if meta_row else {}
+        total = int(meta.get('c') or 0)
+        max_h = int(meta.get('h') or 0) if meta.get('h') is not None else 0
+
+        blocks = [_clean_block(r) for r in (rows or [])]
+        return _ok({
+            'blocks':       blocks,
+            'total_blocks': total,
+            'chain_height': max_h,
+            'count':        len(blocks),
+            'source':       'database',
+        })
 
     def h_block_details(flags, args):
-        """Get block details — globals first, then direct DB by height OR hash."""
+        """Get block details — DB authoritative source (bc.chain is never loaded from DB on startup)."""
         num = (flags.get('block') or flags.get('number') or
                flags.get('hash') or (args[0] if args else None))
         if not num:
@@ -5761,40 +5740,7 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             target_height = None
             is_hash = True
 
-        # 1. In-memory globals
-        try:
-            from globals import get_blockchain
-            bc = get_blockchain()
-            if bc and bc.chain:
-                for b in bc.chain:
-                    b_height = b.get('height') or b.get('block_number')
-                    b_hash   = b.get('block_hash', '')
-                    if (not is_hash and target_height is not None and b_height == target_height) or                        (is_hash and b_hash == str(num)):
-                        tx_list = b.get('transaction_list', [])
-                        return _ok({
-                            'height':            b_height,
-                            'block_hash':        b_hash,
-                            'previous_hash':     b.get('previous_hash', ''),
-                            'state_root':        b.get('state_root', ''),
-                            'timestamp':         b.get('timestamp'),
-                            'validator':         b.get('validator', ''),
-                            'entropy_score':     float(b.get('entropy_score', 0) or 0),
-                            'temporal_coherence':float(b.get('temporal_coherence', 0) or 0),
-                            'quantum_entropy':   float(b.get('quantum_entropy', 0) or 0),
-                            'gas_used':          int(b.get('gas_used', 0) or 0),
-                            'gas_limit':         int(b.get('gas_limit', 0) or 0),
-                            'difficulty':        float(b.get('difficulty', 0) or 0),
-                            'finalized':         bool(b.get('finalized', False)),
-                            'confirmations':     int(b.get('confirmations', 0) or 0),
-                            'status':            b.get('status', 'unknown'),
-                            'tx_count':          len(tx_list),
-                            'source':            'globals',
-                        })
-        except Exception as e:
-            _log_debug(f'h_block_details globals: {e}')
-
-        # 2. Direct DB — numeric: query by height only (block_number may not exist)
-        #                  hash:    query by block_hash
+        # Always query DB directly
         if is_hash:
             row = _db_exec("SELECT * FROM blocks WHERE block_hash=%s LIMIT 1",
                            (str(num),), fetch_one=True)
@@ -5804,7 +5750,6 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
 
         if row:
             block = _clean_block(row)
-            # Fetch transaction IDs for this block
             tx_rows = _db_exec(
                 "SELECT tx_id, tx_hash, status FROM transactions "
                 "WHERE height=%s OR block_hash=%s",
@@ -5813,7 +5758,7 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
             block['tx_count']        = len(tx_rows)
             block['transaction_ids'] = [r.get('tx_id') or r.get('tx_hash') for r in tx_rows]
             block['source']          = 'database'
-            # ── PQ section — surface all post-quantum fields prominently ──────
+            # ── PQ section — structured sub-objects for all PQ fields ───────
             block['pq_cryptography'] = {
                 'pq_signature':               block.get('pq_signature'),
                 'pq_key_fingerprint':         block.get('pq_key_fingerprint'),
@@ -5842,12 +5787,12 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
                 'vdf_challenge': block.get('vdf_challenge'),
             }
             block['pq_chain'] = {
-                'auth_chain_parent':      block.get('auth_chain_parent'),
-                'auth_chain_signature':   block.get('auth_chain_signature'),
+                'auth_chain_parent':         block.get('auth_chain_parent'),
+                'auth_chain_signature':      block.get('auth_chain_signature'),
                 'ratchet_next_key_material': block.get('ratchet_next_key_material'),
-                'ratchet_generator':      block.get('ratchet_generator'),
-                'qkd_session_key':        block.get('qkd_session_key'),
-                'qkd_ephemeral_public':   block.get('qkd_ephemeral_public'),
+                'ratchet_generator':         block.get('ratchet_generator'),
+                'qkd_session_key':           block.get('qkd_session_key'),
+                'qkd_ephemeral_public':      block.get('qkd_ephemeral_public'),
             }
             return _ok(block)
 

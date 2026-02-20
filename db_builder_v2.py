@@ -179,172 +179,12 @@ try:
     logger.info(f"[PQ-SCHEMA] Extension loaded (target schema v{PQ_SCHEMA_VERSION})")
 except ImportError as _pq_import_err:
     PQ_SCHEMA_AVAILABLE = False
-    logger.warning(f"[PQ-SCHEMA] External module not found ({_pq_import_err}). Using inline PQ schema implementation.")
-
-    # ── Inline PQ schema constants ────────────────────────────────────────────
-    PQ_SCHEMA_VERSION = "2.0.0"
-
-    # ── Inline PQ schema tables not already in SCHEMA_DEFINITIONS ─────────────
-    _INLINE_PQ_TABLES = {
-        'pq_key_revocations': """
-            CREATE TABLE IF NOT EXISTS pq_key_revocations (
-                revocation_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                key_id              UUID NOT NULL,
-                user_id             TEXT NOT NULL,
-                reason              TEXT,
-                revoked_at          TIMESTAMPTZ DEFAULT NOW(),
-                revocation_proof    BYTEA,
-                cascade_count       INTEGER DEFAULT 0,
-                initiated_by        TEXT
-            )
-        """,
-        'pq_zk_nullifiers': """
-            CREATE TABLE IF NOT EXISTS pq_zk_nullifiers (
-                nullifier           TEXT PRIMARY KEY,
-                pseudoqubit_id      INTEGER NOT NULL,
-                proved_at           TIMESTAMPTZ DEFAULT NOW(),
-                expires_at          TIMESTAMPTZ
-            )
-        """,
-        'pq_key_ceremonies': """
-            CREATE TABLE IF NOT EXISTS pq_key_ceremonies (
-                ceremony_id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                ceremony_type       TEXT NOT NULL,
-                participants        JSONB NOT NULL DEFAULT '[]',
-                entropy_hashes      JSONB,
-                final_key_id        UUID,
-                completed_at        TIMESTAMPTZ,
-                status              TEXT DEFAULT 'pending'
-            )
-        """,
-        'genesis_pq_manifest': """
-            CREATE TABLE IF NOT EXISTS genesis_pq_manifest (
-                manifest_id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                pq_schema_version   TEXT NOT NULL UNIQUE,
-                genesis_block_hash  TEXT,
-                genesis_pq_sig      TEXT,
-                genesis_pq_fp       TEXT,
-                entropy_sources     JSONB,
-                installed_at        TIMESTAMPTZ DEFAULT NOW(),
-                hlwe_params         TEXT DEFAULT 'HLWE-256',
-                vdf_iterations      INTEGER DEFAULT 100000,
-                merkle_root         TEXT,
-                notes               TEXT
-            )
-        """,
-    }
-
-    class _InlinePQResult:
-        def __init__(self, version, genesis_has_pq, missing):
-            self.schema_version_found = version
-            self.genesis_has_pq = genesis_has_pq
-            self.missing_tables = missing
-
-    def init_pq_schema(db_builder_instance, force_genesis_overwrite: bool = False):
-        """
-        Inline PQ schema initialiser — installs PQ extension tables and writes
-        a genesis_pq_manifest row so the fast-boot skip-check works on next start.
-        Also calls create_or_repair_genesis_pq() to ensure genesis has PQ material.
-        """
-        try:
-            missing = []
-            # ── Step 0: Add PQ columns to blocks table FIRST (idempotent ALTER TABLE) ──
-            # This MUST happen before genesis creation or any SELECT on PQ columns.
-            if hasattr(db_builder_instance, 'ensure_pq_enterprise_columns'):
-                try:
-                    col_result = db_builder_instance.ensure_pq_enterprise_columns()
-                    added = col_result.get('columns_added', [])
-                    if added:
-                        logger.info(f"[PQ-SCHEMA-INLINE] ✓ Added {len(added)} PQ columns to blocks table")
-                except Exception as _ce:
-                    logger.warning(f"[PQ-SCHEMA-INLINE] PQ column migration error: {_ce}")
-
-            for tname, ddl in _INLINE_PQ_TABLES.items():
-                try:
-                    db_builder_instance.execute(ddl)
-                except Exception as _te:
-                    logger.warning(f"[PQ-SCHEMA-INLINE] Table {tname} error: {_te}")
-                    missing.append(tname)
-
-            # Create indexes for the new tables
-            _pq_indexes = [
-                "CREATE INDEX IF NOT EXISTS idx_pq_key_rev_key  ON pq_key_revocations(key_id)",
-                "CREATE INDEX IF NOT EXISTS idx_pq_key_rev_user ON pq_key_revocations(user_id)",
-                "CREATE INDEX IF NOT EXISTS idx_pq_zk_pid       ON pq_zk_nullifiers(pseudoqubit_id)",
-            ]
-            for idx_sql in _pq_indexes:
-                try:
-                    db_builder_instance.execute(idx_sql)
-                except Exception:
-                    pass
-
-            logger.info(f"[PQ-SCHEMA-INLINE] ✓ PQ extension tables created/verified (missing={missing})")
-
-            # ── Ensure genesis block has PQ material ──────────────────────────
-            genesis_has_pq = False
-            try:
-                if hasattr(db_builder_instance, 'create_or_repair_genesis_pq'):
-                    _ok, _gen = db_builder_instance.create_or_repair_genesis_pq(
-                        force_overwrite=True
-                    )
-                    genesis_has_pq = _ok
-                    if _ok:
-                        logger.info("[PQ-SCHEMA-INLINE] ✓ Genesis block has full PQ material")
-                    else:
-                        logger.warning("[PQ-SCHEMA-INLINE] Genesis PQ pipeline reported failure — check logs")
-            except Exception as _ge:
-                logger.warning(f"[PQ-SCHEMA-INLINE] Genesis PQ repair skipped: {_ge}")
-
-            # ── Write manifest row so next boot takes the fast path ──────────
-            try:
-                _gen_hash = None
-                _gen_sig  = None
-                _gen_fp   = None
-                try:
-                    # Only query block_hash which always exists; PQ columns may not yet exist
-                    _gr = db_builder_instance.execute_fetch(
-                        "SELECT block_hash FROM blocks WHERE height=0 LIMIT 1"
-                    )
-                    if _gr:
-                        _gen_hash = _gr.get('block_hash')
-                    # Now try the PQ columns — they should exist after ensure_pq_enterprise_columns
-                    try:
-                        _gr2 = db_builder_instance.execute_fetch(
-                            "SELECT pq_signature, pq_key_fingerprint FROM blocks WHERE height=0 LIMIT 1"
-                        )
-                        if _gr2:
-                            _gen_sig = _gr2.get('pq_signature')
-                            _gen_fp  = _gr2.get('pq_key_fingerprint')
-                    except Exception:
-                        pass  # columns may not exist on very first boot — that's fine
-                except Exception:
-                    pass
-
-                db_builder_instance.execute("""
-                    INSERT INTO genesis_pq_manifest
-                        (pq_schema_version, genesis_block_hash, genesis_pq_sig,
-                         genesis_pq_fp, hlwe_params, notes)
-                    VALUES (%s, %s, %s, %s, 'HLWE-256', 'inline schema init')
-                    ON CONFLICT (pq_schema_version) DO UPDATE
-                        SET genesis_block_hash = EXCLUDED.genesis_block_hash,
-                            genesis_pq_sig     = EXCLUDED.genesis_pq_sig,
-                            genesis_pq_fp      = EXCLUDED.genesis_pq_fp,
-                            installed_at       = NOW()
-                """, (PQ_SCHEMA_VERSION, _gen_hash, _gen_sig, _gen_fp))
-                logger.info(f"[PQ-SCHEMA-INLINE] ✓ genesis_pq_manifest v{PQ_SCHEMA_VERSION} written")
-            except Exception as _me:
-                logger.warning(f"[PQ-SCHEMA-INLINE] Manifest write error: {_me}")
-
-            return _InlinePQResult(PQ_SCHEMA_VERSION, genesis_has_pq, missing)
-
-        except Exception as _top:
-            logger.error(f"[PQ-SCHEMA-INLINE] Fatal error: {_top}", exc_info=True)
-            return None
-
+    logger.warning(f"[PQ-SCHEMA] Extension not available: {_pq_import_err}. "
+                   f"Place db_builder_pq_schema.py in the same directory.")
+    # Shim so call-sites don't crash
+    def init_pq_schema(*a, **kw): return None
     def record_block_pq(*a, **kw): return False
-    def get_pq_status(): return {'schema_installed': True, 'version': PQ_SCHEMA_VERSION, 'mode': 'inline'}
-
-    PQ_SCHEMA_AVAILABLE = True   # inline implementation is available
+    def get_pq_status(): return {'schema_installed': False, 'error': 'module_missing'}
 
 class CLR:
     """ANSI color codes for beautiful terminal output"""
@@ -5216,7 +5056,8 @@ class DatabaseBuilder:
             # ─────────────────────────────────────────────────────────────────
             seed_bytes       = xor_seed_bytes
             freq             = Counter(seed_bytes)
-            # Shannon entropy H = -Σ p·log₂(p), normalized to bits/byte [0, 8]
+            h_shannon        = -sum((c/64) * (c/64).bit_length() for c in freq.values() if c > 0)
+            # Normalize to [0, 8] range using Shannon formula H = -Σ p·log₂(p)
             h_shannon = sum(-(c/64) * math.log2(c/64) for c in freq.values() if c > 0)
             entropy_quality  = {s: {'used': True, 'bytes_harvested': 32} for s in sources_used}
             entropy_quality['local_csprng'] = {'used': True, 'bytes_harvested': 64}
@@ -5338,7 +5179,7 @@ class DatabaseBuilder:
             # UPSERT genesis block — ON CONFLICT repairs existing rows
             # ─────────────────────────────────────────────────────────────────
             cols = list(genesis_block.keys())
-            vals = [json.dumps(v) if isinstance(v, dict) else v for v in genesis_block.values()]
+            vals = [json.dumps(v) if isinstance(v, (dict, list)) else v for v in genesis_block.values()]
             placeholders = ','.join(['%s'] * len(cols))
             col_names    = ','.join(cols)
 
@@ -5428,7 +5269,7 @@ class DatabaseBuilder:
         return data
     
     def execute(self, query, params=None, return_results=False):
-        """Execute query with automatic connection management and null byte cleaning"""
+        """Execute query with automatic connection management, null byte cleaning, and safe rollback."""
         conn = None
         try:
             conn = self.get_connection()
@@ -5436,24 +5277,40 @@ class DatabaseBuilder:
                 cur.execute(query, params or ())
                 if return_results:
                     results = cur.fetchall()
-                    # Clean null bytes from string fields
+                    conn.commit()
                     return self._clean_null_bytes(results)
+                conn.commit()
                 return cur.rowcount
         except Exception as e:
+            # CRITICAL: rollback so this connection is NOT left in aborted-tx state
+            if conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
             logger.error(f"{CLR.R}Error executing query: {e}{CLR.E}")
             raise
         finally:
             if conn:
                 self.return_connection(conn)
-    
+
     def execute_fetch(self, query, params=None):
-        """Execute query and fetch one result (for checking existence, etc)"""
+        """Execute query and fetch one result. Never raises."""
         try:
             results = self.execute(query, params, return_results=True)
             return results[0] if results else None
         except Exception as e:
             logger.error(f"{CLR.R}Error fetching result: {e}{CLR.E}")
             return None
+
+    def execute_fetch_all(self, query, params=None):
+        """Execute query and fetch all rows as plain list of dicts. Never raises."""
+        try:
+            results = self.execute(query, params, return_results=True)
+            return results if results else []
+        except Exception as e:
+            logger.error(f"{CLR.R}Error fetching all results: {e}{CLR.E}")
+            return []
     
     def execute_many(self, query, data_list):
         """Execute multiple inserts efficiently using execute_values"""
@@ -5779,15 +5636,15 @@ class DatabaseBuilder:
                     pq_manifest_current = False  # table may not exist yet
 
             if genesis_exists and pq_manifest_current:
-                logger.info(f"{CLR.G}[GENESIS] PQ manifest current (v{PQ_SCHEMA_VERSION}) — "
-                            f"re-running PQ repair to ensure all fields populated{CLR.E}")
-                # Always run PQ schema tables check (idempotent)
+                logger.info(f"{CLR.G}[SKIP] Genesis block + PQ manifest (v{PQ_SCHEMA_VERSION}) "
+                            f"already current — fast boot path{CLR.E}")
+                # Still install PQ schema tables if missing (idempotent)
                 if PQ_SCHEMA_AVAILABLE:
                     try:
                         init_pq_schema(self)
                     except Exception as _pq_err:
                         logger.warning(f"[PQ-SCHEMA] Fast-boot schema check failed: {_pq_err}")
-                # Fall through to run genesis repair below
+                return
 
             check_admin = """SELECT COUNT(*) as cnt FROM users WHERE email='shemshallah@gmail.com' LIMIT 1"""
             admin_exists = self.execute_fetch(check_admin)
@@ -5799,7 +5656,7 @@ class DatabaseBuilder:
             # Delegates to create_or_repair_genesis_pq() which runs the full 10-phase
             # NIST PQ-Level 5 pipeline (QRNG harvest → HLWE sign → VDF → ratchet).
             logger.info(f"{CLR.C}[GENESIS] Running enterprise PQ genesis pipeline...{CLR.E}")
-            genesis_ok, genesis_block = self.create_or_repair_genesis_pq(force_overwrite=True)
+            genesis_ok, genesis_block = self.create_or_repair_genesis_pq(force_overwrite=False)
             if genesis_ok:
                 logger.info(f"{CLR.G}[GENESIS] ✅ Genesis block persisted with full PQ material{CLR.E}")
             else:
@@ -7894,20 +7751,6 @@ try:
         pool_size=DB_POOL_MAX_CONNECTIONS
     )
     print("✅ [DB] Global db_manager singleton initialized")
-
-    # ── Run PQ schema installation + genesis PQ repair on every cold start ───
-    # This is idempotent: CREATE TABLE IF NOT EXISTS + ON CONFLICT DO UPDATE.
-    # Skips fast if genesis_pq_manifest already has current version.
-    try:
-        _pq_init_result = init_pq_schema(db_manager, force_genesis_overwrite=False)
-        if _pq_init_result:
-            print(f"✅ [DB] PQ schema v{_pq_init_result.schema_version_found} ready "
-                  f"| genesis_pq={_pq_init_result.genesis_has_pq} "
-                  f"| missing={_pq_init_result.missing_tables}")
-        else:
-            print("⚠️  [DB] PQ schema init returned None — check logs")
-    except Exception as _pq_boot_err:
-        print(f"⚠️  [DB] PQ schema boot error: {_pq_boot_err}")
 except Exception as e:
     print(f"⚠️  [DB] Failed to initialize db_manager: {e}")
     db_manager = None
