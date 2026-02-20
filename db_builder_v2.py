@@ -240,7 +240,7 @@ except ImportError as _pq_import_err:
             self.genesis_has_pq = genesis_has_pq
             self.missing_tables = missing
 
-    def init_pq_schema(db_builder_instance, force_genesis_overwrite: bool = False):
+    def init_pq_schema(db_builder_instance, force_genesis_overwrite: bool = True):
         """
         Inline PQ schema initialiser — installs PQ extension tables and writes
         a genesis_pq_manifest row so the fast-boot skip-check works on next start.
