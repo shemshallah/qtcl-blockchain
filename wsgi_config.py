@@ -330,10 +330,27 @@ def execute_command():
 @app.route('/api/commands', methods=['GET'])
 def commands():
     try:
-        _initialize_terminal_engine()  # Lazy load on first request
-        return jsonify({'total': len(COMMAND_REGISTRY), 'commands': dict(COMMAND_REGISTRY)})
+        # Try to initialize terminal engine (for dynamic handlers), but don't fail if it does
+        try:
+            _initialize_terminal_engine()  # Lazy load on first request
+        except Exception as e:
+            logger.warning(f"[/api/commands] Terminal engine init failed (non-fatal): {str(e)[:60]}")
+            # Fall through - COMMAND_REGISTRY is already populated from globals.py
+        
+        # Always return command registry (populated at module load time)
+        return jsonify({
+            'total': len(COMMAND_REGISTRY),
+            'commands': dict(COMMAND_REGISTRY),
+            'status': 'success'
+        })
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"[/api/commands] Unexpected error: {e}", exc_info=True)
+        return jsonify({
+            'total': len(COMMAND_REGISTRY),
+            'commands': dict(COMMAND_REGISTRY),
+            'error': str(e),
+            'status': 'degraded'
+        }), 200  # Return 200 even with error - commands are still available
 
 @app.route('/api/genesis', methods=['GET'])
 def genesis():

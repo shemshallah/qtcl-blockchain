@@ -92,8 +92,30 @@ def get_RequestCorrelation():
 def get_ERROR_BUDGET():
     return getattr(_get_wsgi_module(), 'ERROR_BUDGET', None)
 
-# Legacy compatibility imports (for classes that still expect these)
-from supabase import create_client, Client
+# Supabase - LAZY IMPORT (optional, may not be available in all environments)
+# Make this lazy so module can import even if supabase is not installed
+_supabase_available = False
+_supabase_create_client = None
+
+def _ensure_supabase():
+    """Lazy import supabase - only if needed and available."""
+    global _supabase_available, _supabase_create_client
+    if _supabase_available:
+        return _supabase_create_client
+    try:
+        from supabase import create_client
+        _supabase_create_client = create_client
+        _supabase_available = True
+        return _supabase_create_client
+    except ImportError:
+        logger.debug("[ledger_manager] Supabase not available - using psycopg2 only")
+        _supabase_available = False
+        return None
+
+# For compatibility, define a getter
+def get_supabase_create_client():
+    """Get supabase create_client function (lazy)."""
+    return _ensure_supabase()
 
 # Configuration
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -903,9 +925,15 @@ def _get_db_pool():
 
 # Helper to create legacy Supabase client (for compatibility)
 def get_supabase_client():
-    """Create Supabase client for components that still use it"""
+    """Create Supabase client for components that still use it (lazy import)"""
     if SUPABASE_URL and SUPABASE_KEY:
-        return create_client(SUPABASE_URL, SUPABASE_KEY)
+        create_client_fn = get_supabase_create_client()
+        if create_client_fn:
+            try:
+                return create_client_fn(SUPABASE_URL, SUPABASE_KEY)
+            except Exception as e:
+                logger.debug(f"[ledger_manager] Supabase client creation failed: {e}")
+                return None
     return None
 
 # Logging setup - only configure if not already configured
