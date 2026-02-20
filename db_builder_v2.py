@@ -248,6 +248,17 @@ except ImportError as _pq_import_err:
         """
         try:
             missing = []
+            # ── Step 0: Add PQ columns to blocks table FIRST (idempotent ALTER TABLE) ──
+            # This MUST happen before genesis creation or any SELECT on PQ columns.
+            if hasattr(db_builder_instance, 'ensure_pq_enterprise_columns'):
+                try:
+                    col_result = db_builder_instance.ensure_pq_enterprise_columns()
+                    added = col_result.get('columns_added', [])
+                    if added:
+                        logger.info(f"[PQ-SCHEMA-INLINE] ✓ Added {len(added)} PQ columns to blocks table")
+                except Exception as _ce:
+                    logger.warning(f"[PQ-SCHEMA-INLINE] PQ column migration error: {_ce}")
+
             for tname, ddl in _INLINE_PQ_TABLES.items():
                 try:
                     db_builder_instance.execute(ddl)
@@ -290,13 +301,22 @@ except ImportError as _pq_import_err:
                 _gen_sig  = None
                 _gen_fp   = None
                 try:
+                    # Only query block_hash which always exists; PQ columns may not yet exist
                     _gr = db_builder_instance.execute_fetch(
-                        "SELECT block_hash, pq_signature, pq_key_fingerprint FROM blocks WHERE height=0 LIMIT 1"
+                        "SELECT block_hash FROM blocks WHERE height=0 LIMIT 1"
                     )
                     if _gr:
                         _gen_hash = _gr.get('block_hash')
-                        _gen_sig  = _gr.get('pq_signature')
-                        _gen_fp   = _gr.get('pq_key_fingerprint')
+                    # Now try the PQ columns — they should exist after ensure_pq_enterprise_columns
+                    try:
+                        _gr2 = db_builder_instance.execute_fetch(
+                            "SELECT pq_signature, pq_key_fingerprint FROM blocks WHERE height=0 LIMIT 1"
+                        )
+                        if _gr2:
+                            _gen_sig = _gr2.get('pq_signature')
+                            _gen_fp  = _gr2.get('pq_key_fingerprint')
+                    except Exception:
+                        pass  # columns may not exist on very first boot — that's fine
                 except Exception:
                     pass
 
@@ -5196,8 +5216,7 @@ class DatabaseBuilder:
             # ─────────────────────────────────────────────────────────────────
             seed_bytes       = xor_seed_bytes
             freq             = Counter(seed_bytes)
-            h_shannon        = -sum((c/64) * (c/64).bit_length() for c in freq.values() if c > 0)
-            # Normalize to [0, 8] range using Shannon formula H = -Σ p·log₂(p)
+            # Shannon entropy H = -Σ p·log₂(p), normalized to bits/byte [0, 8]
             h_shannon = sum(-(c/64) * math.log2(c/64) for c in freq.values() if c > 0)
             entropy_quality  = {s: {'used': True, 'bytes_harvested': 32} for s in sources_used}
             entropy_quality['local_csprng'] = {'used': True, 'bytes_harvested': 64}

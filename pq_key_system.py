@@ -1464,7 +1464,13 @@ class HyperbolicKeyGenerator:
         sub_keypair = self.sampler.generate_keypair(sub_pq_id, sub_entropy)
         
         now         = datetime.now(timezone.utc)
-        parent_exp  = datetime.fromisoformat(master_meta.get('expires_at', now.isoformat()))
+        _exp_raw    = master_meta.get('expires_at', now.isoformat())
+        if isinstance(_exp_raw, datetime):
+            parent_exp = _exp_raw
+        elif isinstance(_exp_raw, str):
+            parent_exp = datetime.fromisoformat(_exp_raw.replace('Z', '+00:00'))
+        else:
+            parent_exp = now + timedelta(days=365)
         
         sub_meta = KeyMetadata(
             key_id          = sub_keypair['key_id'],
