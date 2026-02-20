@@ -2059,3 +2059,278 @@ class JWTTokenManager:
             return TokenManager.verify_token(token)
         except Exception:
             return None
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# ADVANCED SESSION MANAGEMENT
+# Device tracking, IP binding, token refresh, session binding
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+class DeviceManager:
+    """Track and manage trusted devices."""
+    
+    def __init__(self):
+        self._devices: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.RLock()
+    
+    def register_device(self, user_id: str, device_id: str, device_info: Dict[str, Any]) -> str:
+        with self._lock:
+            key = f"{user_id}:{device_id}"
+            fingerprint = hashlib.sha3_256(
+                json.dumps(device_info, sort_keys=True).encode()
+            ).hexdigest()
+            
+            self._devices[key] = {
+                'user_id': user_id,
+                'device_id': device_id,
+                'fingerprint': fingerprint,
+                'device_name': device_info.get('name'),
+                'os': device_info.get('os'),
+                'browser': device_info.get('browser'),
+                'registered_at': datetime.now(timezone.utc).isoformat(),
+                'last_seen': datetime.now(timezone.utc).isoformat(),
+                'trusted': False,
+                'mfa_override': False,
+            }
+            return fingerprint
+    
+    def mark_device_trusted(self, user_id: str, device_id: str) -> bool:
+        with self._lock:
+            key = f"{user_id}:{device_id}"
+            if key in self._devices:
+                self._devices[key]['trusted'] = True
+                self._devices[key]['trusted_at'] = datetime.now(timezone.utc).isoformat()
+                return True
+            return False
+    
+    def is_device_trusted(self, user_id: str, device_id: str) -> bool:
+        with self._lock:
+            key = f"{user_id}:{device_id}"
+            return self._devices.get(key, {}).get('trusted', False)
+    
+    def get_user_devices(self, user_id: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            return [dev for key, dev in self._devices.items() if dev['user_id'] == user_id]
+
+class SessionBindingManager:
+    """Bind sessions to device fingerprints and IP addresses."""
+    
+    def __init__(self):
+        self._bindings: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.RLock()
+    
+    def create_binding(self, session_id: str, device_fingerprint: str,
+                      ip_address: str, user_agent: str) -> bool:
+        with self._lock:
+            self._bindings[session_id] = {
+                'session_id': session_id,
+                'device_fingerprint': device_fingerprint,
+                'ip_address': ip_address,
+                'user_agent': user_agent,
+                'created_at': datetime.now(timezone.utc).isoformat(),
+                'binding_hash': hashlib.sha3_256(
+                    f"{device_fingerprint}{ip_address}{user_agent}".encode()
+                ).hexdigest(),
+            }
+            return True
+    
+    def verify_binding(self, session_id: str, current_device_fp: str,
+                      current_ip: str, current_ua: str) -> Tuple[bool, str]:
+        with self._lock:
+            if session_id not in self._bindings:
+                return False, "No binding found"
+            
+            binding = self._bindings[session_id]
+            
+            # Device fingerprint must match
+            if binding['device_fingerprint'] != current_device_fp:
+                return False, "Device fingerprint mismatch"
+            
+            # IP address must match (can be lenient with IP ranges)
+            current_ip_prefix = '.'.join(current_ip.split('.')[:3])
+            binding_ip_prefix = '.'.join(binding['ip_address'].split('.')[:3])
+            if current_ip_prefix != binding_ip_prefix:
+                return False, "IP address mismatch"
+            
+            return True, "Binding verified"
+
+class TokenRefreshManager:
+    """Manage JWT token refresh with rolling expiration."""
+    
+    def __init__(self, refresh_window_hours: int = 2):
+        self._refresh_tokens: Dict[str, Dict[str, Any]] = {}
+        self._revoked: Set[str] = set()
+        self.refresh_window = timedelta(hours=refresh_window_hours)
+        self._lock = threading.RLock()
+    
+    def create_refresh_token(self, user_id: str, session_id: str,
+                            original_exp: int) -> str:
+        with self._lock:
+            refresh_token_id = secrets.token_urlsafe(32)
+            
+            self._refresh_tokens[refresh_token_id] = {
+                'user_id': user_id,
+                'session_id': session_id,
+                'original_exp': original_exp,
+                'created_at': datetime.now(timezone.utc).isoformat(),
+                'last_used': None,
+                'refresh_count': 0,
+                'max_refreshes': 20,
+            }
+            return refresh_token_id
+    
+    def use_refresh_token(self, refresh_token_id: str) -> Tuple[bool, Dict[str, Any]]:
+        with self._lock:
+            if refresh_token_id in self._revoked:
+                return False, {}
+            
+            if refresh_token_id not in self._refresh_tokens:
+                return False, {}
+            
+            token_data = self._refresh_tokens[refresh_token_id]
+            
+            # Check max refreshes
+            if token_data['refresh_count'] >= token_data['max_refreshes']:
+                return False, {}
+            
+            # Update usage
+            token_data['refresh_count'] += 1
+            token_data['last_used'] = datetime.now(timezone.utc).isoformat()
+            
+            return True, token_data
+    
+    def revoke_refresh_token(self, refresh_token_id: str) -> bool:
+        with self._lock:
+            if refresh_token_id in self._refresh_tokens:
+                self._revoked.add(refresh_token_id)
+                return True
+            return False
+
+class EnhancedRateLimiter:
+    """Rate limiting with per-user, per-IP, and per-endpoint tracking."""
+    
+    def __init__(self, default_limit: int = 100, window_seconds: int = 60):
+        self.default_limit = default_limit
+        self.window = timedelta(seconds=window_seconds)
+        self._user_limits: Dict[str, deque] = defaultdict(deque)
+        self._ip_limits: Dict[str, deque] = defaultdict(deque)
+        self._endpoint_limits: Dict[str, Dict[str, deque]] = defaultdict(lambda: defaultdict(deque))
+        self._lock = threading.RLock()
+    
+    def check_rate_limit(self, user_id: str = None, ip_address: str = None,
+                        endpoint: str = None, limit: int = None) -> Tuple[bool, int]:
+        """Check rate limit. Returns (allowed, remaining_requests)."""
+        with self._lock:
+            now = datetime.now(timezone.utc)
+            limit = limit or self.default_limit
+            
+            checks = []
+            
+            # User limit
+            if user_id:
+                self._user_limits[user_id] = deque(
+                    t for t in self._user_limits[user_id]
+                    if now - t < self.window
+                )
+                remaining = limit - len(self._user_limits[user_id])
+                if remaining <= 0:
+                    return False, 0
+                self._user_limits[user_id].append(now)
+                checks.append(remaining)
+            
+            # IP limit (tighter)
+            if ip_address:
+                self._ip_limits[ip_address] = deque(
+                    t for t in self._ip_limits[ip_address]
+                    if now - t < self.window
+                )
+                ip_limit = limit // 2  # IP limit is 50% of user limit
+                remaining = ip_limit - len(self._ip_limits[ip_address])
+                if remaining <= 0:
+                    return False, 0
+                self._ip_limits[ip_address].append(now)
+                checks.append(remaining)
+            
+            # Endpoint limit (per user per endpoint)
+            if endpoint and user_id:
+                key = f"{user_id}:{endpoint}"
+                self._endpoint_limits[user_id][key] = deque(
+                    t for t in self._endpoint_limits[user_id][key]
+                    if now - t < self.window
+                )
+                endpoint_limit = min(limit // 5, 20)  # Endpoint limit per second
+                remaining = endpoint_limit - len(self._endpoint_limits[user_id][key])
+                if remaining <= 0:
+                    return False, 0
+                self._endpoint_limits[user_id][key].append(now)
+                checks.append(remaining)
+            
+            return True, min(checks) if checks else limit
+
+class SessionSecurityManager:
+    """Advanced session security with automatic invalidation."""
+    
+    def __init__(self):
+        self._sessions: Dict[str, Dict[str, Any]] = {}
+        self._suspicious: Set[str] = set()
+        self._lock = threading.RLock()
+    
+    def create_secure_session(self, user_id: str, device_fp: str,
+                            ip_address: str, user_agent: str) -> Dict[str, Any]:
+        with self._lock:
+            session_id = secrets.token_urlsafe(32)
+            now = datetime.now(timezone.utc)
+            
+            session = {
+                'session_id': session_id,
+                'user_id': user_id,
+                'device_fingerprint': device_fp,
+                'ip_address': ip_address,
+                'user_agent': user_agent,
+                'created_at': now.isoformat(),
+                'last_activity': now.isoformat(),
+                'activity_count': 0,
+                'request_count': 0,
+                'security_score': 100.0,
+                'suspicious_flags': [],
+            }
+            
+            self._sessions[session_id] = session
+            return session
+    
+    def record_activity(self, session_id: str, activity_type: str) -> bool:
+        with self._lock:
+            if session_id not in self._sessions:
+                return False
+            
+            session = self._sessions[session_id]
+            session['last_activity'] = datetime.now(timezone.utc).isoformat()
+            session['activity_count'] += 1
+            session['request_count'] += 1
+            
+            # Anomaly detection
+            if session['request_count'] > 500 and (
+                datetime.now(timezone.utc).timestamp() -
+                datetime.fromisoformat(session['created_at']).timestamp() < 60
+            ):
+                session['suspicious_flags'].append('rapid_requests')
+                session['security_score'] *= 0.8
+            
+            return True
+    
+    def get_session_security_score(self, session_id: str) -> float:
+        with self._lock:
+            if session_id not in self._sessions:
+                return 0.0
+            return self._sessions[session_id]['security_score']
+    
+    def invalidate_if_suspicious(self, session_id: str, threshold: float = 50.0) -> bool:
+        with self._lock:
+            if session_id not in self._sessions:
+                return False
+            
+            session = self._sessions[session_id]
+            if session['security_score'] < threshold:
+                self._suspicious.add(session_id)
+                return True
+            return False
+

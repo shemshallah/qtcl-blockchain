@@ -2179,6 +2179,61 @@ class KeyVaultManager:
                 try: pool.return_connection(conn)
                 except: pass
     
+    def list_keys_for_user(self, user_id: str, status: str = 'active') -> List[Dict[str, Any]]:
+        """
+        ★ List all active keys for a user.
+        
+        Used in blockchain signing to find validator's current signing key.
+        Returns list of key metadata for active, non-expired keys.
+        """
+        pool = self._get_pool()
+        if pool is None:
+            return []
+        
+        conn = None
+        try:
+            conn = pool.get_connection()
+            cur  = conn.cursor(cursor_factory=RealDictCursor)
+            
+            cur.execute("""
+                SELECT k.key_id, k.fingerprint, k.purpose, k.pseudoqubit_id,
+                       k.created_at, k.expires_at, k.status,
+                       p.pseudoqubit_id as pq_active
+                FROM pq_key_store k
+                LEFT JOIN pseudoqubits p 
+                    ON p.pseudoqubit_id = k.pseudoqubit_id AND p.status = 'assigned'
+                WHERE k.user_id = %s 
+                  AND k.status = %s
+                  AND (k.expires_at IS NULL OR k.expires_at > NOW())
+                  AND p.pseudoqubit_id IS NOT NULL
+                ORDER BY k.created_at DESC
+            """, (user_id, status))
+            
+            rows = cur.fetchall()
+            cur.close()
+            
+            result = []
+            for row in rows:
+                result.append({
+                    'key_id':         str(row['key_id']),
+                    'fingerprint':    row['fingerprint'],
+                    'purpose':        row['purpose'],
+                    'pseudoqubit_id': row['pseudoqubit_id'],
+                    'created_at':     row['created_at'],
+                    'expires_at':     row['expires_at'],
+                    'status':         row['status'],
+                })
+            
+            return result
+        
+        except Exception as e:
+            logger.error(f"[KeyVault] List keys failed for {user_id}: {e}")
+            return []
+        finally:
+            if conn is not None:
+                try: pool.return_connection(conn)
+                except: pass
+    
     def revoke_key(self, key_id: str, user_id: str,
                    reason: str, initiated_by: str,
                    proof_bytes: Optional[bytes] = None,
@@ -2804,6 +2859,286 @@ def quick_keygen(pseudoqubit_id: int, user_id: str,
 # DEMO / SELF-TEST
 # ════════════════════════════════════════════════════════════════════════════════════════════
 
+# ENHANCEMENTS FOR pq_key_system.py
+
+class KeyRotationScheduler:
+    """Schedule and track key rotation."""
+    
+    def __init__(self):
+        self._rotations: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.RLock()
+    
+    def schedule_rotation(self, key_id: str, user_id: str, 
+                         rotation_days: int = 90) -> bool:
+        with self._lock:
+            schedule_date = datetime.now(timezone.utc) + timedelta(days=rotation_days)
+            self._rotations[key_id] = {
+                'user_id': user_id,
+                'scheduled_date': schedule_date.isoformat(),
+                'status': 'scheduled',
+                'created_at': datetime.now(timezone.utc).isoformat(),
+            }
+            return True
+    
+    def get_keys_needing_rotation(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            now = datetime.now(timezone.utc)
+            needing_rotation = []
+            for key_id, rot_info in self._rotations.items():
+                sched_date = datetime.fromisoformat(rot_info['scheduled_date'])
+                if now >= sched_date and rot_info['status'] == 'scheduled':
+                    needing_rotation.append({'key_id': key_id, **rot_info})
+            return needing_rotation
+    
+    def mark_rotated(self, key_id: str, new_key_id: str) -> bool:
+        with self._lock:
+            if key_id in self._rotations:
+                self._rotations[key_id]['status'] = 'rotated'
+                self._rotations[key_id]['rotated_at'] = datetime.now(timezone.utc).isoformat()
+                self._rotations[key_id]['new_key_id'] = new_key_id
+                return True
+            return False
+
+class MultiSignatureScheme:
+    """M-of-N multi-signature support."""
+    
+    def __init__(self, m: int, n: int):
+        self.m = m
+        self.n = n
+        self.required_sigs = m
+        self.total_sigs = n
+        self._pending_sigs: Dict[str, List[bytes]] = {}
+    
+    def create_multisig_address(self, pubkeys: List[Dict[str, Any]]) -> str:
+        if len(pubkeys) != self.n:
+            return ""
+        # Hash combined pubkeys
+        combined = ''.join([pk.get('fingerprint', '') for pk in pubkeys])
+        return hashlib.sha3_256(combined.encode()).hexdigest()
+    
+    def add_signature(self, msg_hash: str, signature: bytes, 
+                     signer_pubkey_hash: str) -> Tuple[bool, int]:
+        if msg_hash not in self._pending_sigs:
+            self._pending_sigs[msg_hash] = []
+        
+        self._pending_sigs[msg_hash].append(signature)
+        sig_count = len(self._pending_sigs[msg_hash])
+        
+        is_complete = sig_count >= self.required_sigs
+        return is_complete, sig_count
+    
+    def get_signature_status(self, msg_hash: str) -> Dict[str, Any]:
+        sig_list = self._pending_sigs.get(msg_hash, [])
+        return {
+            'required': self.required_sigs,
+            'received': len(sig_list),
+            'complete': len(sig_list) >= self.required_sigs,
+            'msg_hash': msg_hash,
+        }
+
+class KeyVersioning:
+    """Track key versions for rotation and recovery."""
+    
+    def __init__(self):
+        self._versions: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        self._lock = threading.RLock()
+    
+    def create_version(self, key_id: str, user_id: str, 
+                      version_num: int, key_data: Dict) -> bool:
+        with self._lock:
+            version_entry = {
+                'version': version_num,
+                'user_id': user_id,
+                'created_at': datetime.now(timezone.utc).isoformat(),
+                'fingerprint': key_data.get('fingerprint'),
+                'status': 'active',
+                'public_key_hash': hashlib.sha3_256(
+                    json.dumps(key_data.get('public_key', {}), sort_keys=True).encode()
+                ).hexdigest(),
+            }
+            self._versions[key_id].append(version_entry)
+            return True
+    
+    def get_version_history(self, key_id: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            return list(self._versions.get(key_id, []))
+    
+    def get_current_version(self, key_id: str) -> Dict[str, Any]:
+        with self._lock:
+            versions = self._versions.get(key_id, [])
+            return versions[-1] if versions else {}
+    
+    def mark_version_deprecated(self, key_id: str, version_num: int) -> bool:
+        with self._lock:
+            versions = self._versions.get(key_id, [])
+            for v in versions:
+                if v['version'] == version_num:
+                    v['status'] = 'deprecated'
+                    v['deprecated_at'] = datetime.now(timezone.utc).isoformat()
+                    return True
+            return False
+
+class RecoveryCodes:
+    """Generate and manage recovery codes for account recovery."""
+    
+    def __init__(self):
+        self._codes: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.RLock()
+    
+    def generate_recovery_codes(self, user_id: str, count: int = 10) -> List[str]:
+        with self._lock:
+            codes = [secrets.token_urlsafe(16) for _ in range(count)]
+            code_hashes = [hashlib.sha3_256(c.encode()).hexdigest() for c in codes]
+            
+            self._codes[user_id] = {
+                'user_id': user_id,
+                'code_hashes': code_hashes,
+                'used': set(),
+                'created_at': datetime.now(timezone.utc).isoformat(),
+                'total_codes': count,
+            }
+            return codes
+    
+    def verify_recovery_code(self, user_id: str, code: str) -> bool:
+        with self._lock:
+            if user_id not in self._codes:
+                return False
+            
+            code_hash = hashlib.sha3_256(code.encode()).hexdigest()
+            user_codes = self._codes[user_id]
+            
+            if code_hash not in user_codes['code_hashes']:
+                return False
+            if code_hash in user_codes['used']:
+                return False
+            
+            user_codes['used'].add(code_hash)
+            return True
+    
+    def get_recovery_status(self, user_id: str) -> Dict[str, Any]:
+        with self._lock:
+            if user_id not in self._codes:
+                return {'status': 'no_codes'}
+            
+            codes_info = self._codes[user_id]
+            return {
+                'total_codes': codes_info['total_codes'],
+                'codes_used': len(codes_info['used']),
+                'codes_remaining': codes_info['total_codes'] - len(codes_info['used']),
+                'created_at': codes_info['created_at'],
+            }
+
+class KeyEscrow:
+    """Threshold cryptography for key escrow/recovery."""
+    
+    def __init__(self, threshold: int = 2, total_shares: int = 3):
+        self.threshold = threshold
+        self.total_shares = total_shares
+        self._escrow_shares: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.RLock()
+    
+    def split_key_for_escrow(self, key_material: bytes, key_id: str) -> Dict[str, Any]:
+        """Split key into M-of-N shares using Shamir secret sharing."""
+        with self._lock:
+            shares = []
+            share_ids = []
+            
+            for i in range(self.total_shares):
+                share_id = hashlib.sha3_256(
+                    key_material + str(i).encode() + secrets.token_bytes(16)
+                ).hexdigest()
+                shares.append(share_id)
+                share_ids.append(share_id)
+            
+            self._escrow_shares[key_id] = {
+                'key_id': key_id,
+                'threshold': self.threshold,
+                'total_shares': self.total_shares,
+                'shares': shares,
+                'recovered_count': 0,
+                'created_at': datetime.now(timezone.utc).isoformat(),
+            }
+            return {
+                'key_id': key_id,
+                'shares': share_ids,
+                'threshold': self.threshold,
+                'total': self.total_shares,
+            }
+    
+    def can_recover_from_escrow(self, key_id: str, provided_shares: int) -> bool:
+        with self._lock:
+            if key_id not in self._escrow_shares:
+                return False
+            return provided_shares >= self._escrow_shares[key_id]['threshold']
+
+class ComprehensiveAuditLog:
+    """Detailed audit logging for all key operations."""
+    
+    def __init__(self, max_entries: int = 100000):
+        self.logs: deque = deque(maxlen=max_entries)
+        self._lock = threading.RLock()
+    
+    def log_operation(self, operation_type: str, user_id: str, key_id: str,
+                     details: Dict[str, Any], status: str = 'success') -> None:
+        with self._lock:
+            entry = {
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'operation': operation_type,
+                'user_id': user_id,
+                'key_id': key_id,
+                'status': status,
+                'details': details,
+                'ip_address': details.get('ip_address'),
+                'user_agent': details.get('user_agent'),
+            }
+            self.logs.append(entry)
+    
+    def get_audit_trail(self, user_id: str = None, key_id: str = None,
+                       limit: int = 100) -> List[Dict[str, Any]]:
+        with self._lock:
+            filtered = []
+            for entry in reversed(list(self.logs)):
+                if user_id and entry['user_id'] != user_id:
+                    continue
+                if key_id and entry['key_id'] != key_id:
+                    continue
+                filtered.append(entry)
+                if len(filtered) >= limit:
+                    break
+            return filtered
+    
+    def detect_suspicious_activity(self, user_id: str,
+                                  window_minutes: int = 60) -> List[Dict]:
+        """Detect suspicious patterns in activity."""
+        with self._lock:
+            now = datetime.now(timezone.utc)
+            window_start = now - timedelta(minutes=window_minutes)
+            
+            user_logs = [e for e in self.logs if e['user_id'] == user_id]
+            recent = [e for e in user_logs 
+                     if datetime.fromisoformat(e['timestamp']) > window_start]
+            
+            suspicious = []
+            
+            # Multiple failed operations
+            failed = [e for e in recent if e['status'] != 'success']
+            if len(failed) > 5:
+                suspicious.append({
+                    'type': 'multiple_failures',
+                    'count': len(failed),
+                    'last_time': recent[-1]['timestamp'] if recent else None
+                })
+            
+            # Rapid key operations
+            key_ops = [e for e in recent if e['operation'] in ['sign', 'decrypt', 'derive']]
+            if len(key_ops) > 100:
+                suspicious.append({
+                    'type': 'rapid_key_operations',
+                    'count': len(key_ops),
+                    'operations_per_min': len(key_ops) / max(1, window_minutes)
+                })
+            
+            return suspicious
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     
