@@ -5338,7 +5338,7 @@ class DatabaseBuilder:
             # UPSERT genesis block — ON CONFLICT repairs existing rows
             # ─────────────────────────────────────────────────────────────────
             cols = list(genesis_block.keys())
-            vals = [json.dumps(v) if isinstance(v, (dict, list)) else v for v in genesis_block.values()]
+            vals = [json.dumps(v) if isinstance(v, dict) else v for v in genesis_block.values()]
             placeholders = ','.join(['%s'] * len(cols))
             col_names    = ','.join(cols)
 
