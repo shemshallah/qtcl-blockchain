@@ -101,13 +101,150 @@ if not logging.getLogger().hasHandlers():
     )
 logger = logging.getLogger(__name__)
 
-# Module-level initialization guard.
-# Python caches modules in sys.modules so this flag is only ever set once per
-# interpreter process.  The guard prevents the heavyweight banner, subsystem
-# registration, and heartbeat auto-start from running more than once even if
-# something forces a re-import.  It also gives a clear one-line log instead of
-# hundreds of lines when the module is accessed from multiple call sites.
+# Module-level initialization guard — one flag + one lock.
+# Python caches modules in sys.modules so this runs once per interpreter process.
+# The RLock makes the guard safe even if multiple threads somehow hit the import
+# simultaneously (e.g. two WSGI workers sharing the same Python process via threads).
 _QUANTUM_MODULE_INITIALIZED = False
+_QUANTUM_INIT_LOCK = threading.RLock()
+
+# ─── Singleton placeholders (populated inside _init_quantum_singletons) ────────
+LATTICE             = None
+HEARTBEAT           = None
+LATTICE_NEURAL_REFRESH = None
+W_STATE_ENHANCED    = None
+NOISE_BATH_ENHANCED = None
+QUANTUM_COORDINATOR = None
+
+
+def _init_quantum_singletons():
+    """
+    Create ALL quantum singletons exactly once per process.
+
+    Guarded by _QUANTUM_INIT_LOCK so that even if two threads race to import
+    this module simultaneously they both end up with the same objects.
+
+    Called automatically at the bottom of this file after all classes are defined.
+    """
+    global LATTICE, HEARTBEAT, LATTICE_NEURAL_REFRESH
+    global W_STATE_ENHANCED, NOISE_BATH_ENHANCED, QUANTUM_COORDINATOR
+    global _QUANTUM_MODULE_INITIALIZED
+
+    with _QUANTUM_INIT_LOCK:
+        if _QUANTUM_MODULE_INITIALIZED:
+            logger.debug("[quantum_lattice] Module already initialized — skipping singleton creation")
+            return
+
+        logger.info("[quantum_lattice] Initializing quantum singletons (first time in this process)...")
+
+        # ── Core lattice ────────────────────────────────────────────────────────
+        try:
+            LATTICE = QuantumLatticeGlobal()
+            logger.info("  ✓ LATTICE (QuantumLatticeGlobal) created")
+        except Exception as e:
+            logger.error(f"  ✗ LATTICE creation failed: {e}")
+
+        # ── Heartbeat ───────────────────────────────────────────────────────────
+        try:
+            HEARTBEAT = UniversalQuantumHeartbeat(frequency=1.0)
+            logger.info("  ✓ HEARTBEAT (1.0 Hz) created")
+        except Exception as e:
+            logger.error(f"  ✗ HEARTBEAT creation failed: {e}")
+
+        # ── Enhanced subsystems ─────────────────────────────────────────────────
+        try:
+            LATTICE_NEURAL_REFRESH = ContinuousLatticeNeuralRefresh()
+            logger.info("  ✓ LATTICE_NEURAL_REFRESH (57-neuron) created")
+        except Exception as e:
+            logger.error(f"  ✗ LATTICE_NEURAL_REFRESH creation failed: {e}")
+
+        try:
+            W_STATE_ENHANCED = EnhancedWStateManager()
+            logger.info("  ✓ W_STATE_ENHANCED created")
+        except Exception as e:
+            logger.error(f"  ✗ W_STATE_ENHANCED creation failed: {e}")
+
+        try:
+            NOISE_BATH_ENHANCED = EnhancedNoiseBathRefresh(kappa=0.08)
+            logger.info("  ✓ NOISE_BATH_ENHANCED (κ=0.08) created")
+        except Exception as e:
+            logger.error(f"  ✗ NOISE_BATH_ENHANCED creation failed: {e}")
+
+        # ── Register subsystems as heartbeat listeners ───────────────────────────
+        if HEARTBEAT is not None:
+            _listeners = {
+                'LATTICE_NEURAL_REFRESH': LATTICE_NEURAL_REFRESH,
+                'W_STATE_ENHANCED':       W_STATE_ENHANCED,
+                'NOISE_BATH_ENHANCED':    NOISE_BATH_ENHANCED,
+            }
+            for name, subsys in _listeners.items():
+                if subsys is not None and hasattr(subsys, 'on_heartbeat'):
+                    try:
+                        HEARTBEAT.add_listener(subsys.on_heartbeat)
+                        logger.info(f"  ✓ {name} registered with HEARTBEAT")
+                    except Exception as e:
+                        logger.warning(f"  ⚠ {name} heartbeat registration failed: {e}")
+        else:
+            logger.warning("  ⚠ HEARTBEAT unavailable — subsystem listeners not registered")
+
+        # ── Coordinator ─────────────────────────────────────────────────────────
+        try:
+            QUANTUM_COORDINATOR = QuantumSystemCoordinator()
+            logger.info("  ✓ QUANTUM_COORDINATOR created")
+        except Exception as e:
+            logger.error(f"  ✗ QUANTUM_COORDINATOR creation failed: {e}")
+
+        # ── Mark initialized ────────────────────────────────────────────────────
+        _QUANTUM_MODULE_INITIALIZED = True
+        logger.info("[quantum_lattice] ✅ All quantum singletons ready")
+
+        # ── Auto-start heartbeat ────────────────────────────────────────────────
+        if HEARTBEAT is not None:
+            try:
+                if not HEARTBEAT.running:
+                    HEARTBEAT.start()
+                    logger.info(f"  ❤️  HEARTBEAT auto-started — "
+                                f"{HEARTBEAT.frequency} Hz, {len(HEARTBEAT.listeners)} listeners")
+                else:
+                    logger.debug("  ❤️  HEARTBEAT already running")
+            except Exception as e:
+                logger.error(f"  ✗ HEARTBEAT auto-start failed: {e}")
+
+
+def _register_with_globals_lazy():
+    """
+    Register quantum singletons with the global state registry.
+    Called lazily to avoid circular imports (wsgi_config → globals → quantum_lattice → wsgi_config).
+    Safe to call multiple times — subsequent calls are no-ops.
+    """
+    try:
+        # Only import wsgi_config AFTER it has fully loaded (lazy call)
+        import wsgi_config as _wc
+        _GLOBALS = getattr(_wc, 'GLOBALS', None)
+        if _GLOBALS is None:
+            return
+        _singletons = {
+            'HEARTBEAT':             HEARTBEAT,
+            'LATTICE':               LATTICE,
+            'LATTICE_NEURAL_REFRESH': LATTICE_NEURAL_REFRESH,
+            'W_STATE_ENHANCED':      W_STATE_ENHANCED,
+            'NOISE_BATH_ENHANCED':   NOISE_BATH_ENHANCED,
+            'QUANTUM_COORDINATOR':   QUANTUM_COORDINATOR,
+        }
+        _descs = {
+            'HEARTBEAT':              'Universal Heartbeat (1.0 Hz)',
+            'LATTICE':                'Main Quantum Lattice',
+            'LATTICE_NEURAL_REFRESH': '57-neuron continuous neural refresh',
+            'W_STATE_ENHANCED':       'W-state coherence manager',
+            'NOISE_BATH_ENHANCED':    'Non-Markovian noise bath (κ=0.08)',
+            'QUANTUM_COORDINATOR':    'Quantum system coordinator',
+        }
+        for name, obj in _singletons.items():
+            if obj is not None:
+                _GLOBALS.register(name, obj, category='QUANTUM_SUBSYSTEMS', description=_descs[name])
+        logger.info("[quantum_lattice] ✅ Quantum singletons registered with GLOBALS")
+    except Exception as e:
+        logger.debug(f"[quantum_lattice] GLOBALS registration deferred: {e}")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # GLOBAL WSGI INTEGRATION - Quantum Revolution
@@ -5677,73 +5814,11 @@ class EnhancedNoiseBathRefresh:
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PART 10: GLOBAL LATTICE INSTANTIATION & WSGI INTEGRATION
+# All singletons are created exactly once via _init_quantum_singletons().
+# The function is guarded by _QUANTUM_INIT_LOCK + _QUANTUM_MODULE_INITIALIZED flag.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-# CREATE THE GLOBAL LATTICE - accessible from everywhere
-LATTICE = QuantumLatticeGlobal()
-
-# CREATE THE GLOBAL HEARTBEAT
-HEARTBEAT = UniversalQuantumHeartbeat(frequency=1.0)
-
-# CREATE THE ENHANCED SUBSYSTEMS
-LATTICE_NEURAL_REFRESH = ContinuousLatticeNeuralRefresh()
-W_STATE_ENHANCED = EnhancedWStateManager()
-NOISE_BATH_ENHANCED = EnhancedNoiseBathRefresh(kappa=0.08)
-
-if not _QUANTUM_MODULE_INITIALIZED:
-    _QUANTUM_MODULE_INITIALIZED = True
-
-    # REGISTER ALL SYSTEMS AS HEARTBEAT LISTENERS - THIS ENSURES THEY ALL STAY SYNCHRONIZED
-    logger.info("🔧 Registering quantum subsystems with heartbeat...")
-    HEARTBEAT.add_listener(LATTICE_NEURAL_REFRESH.on_heartbeat)
-    logger.info("  ✓ Lattice Neural Refresh registered")
-    HEARTBEAT.add_listener(W_STATE_ENHANCED.on_heartbeat)
-    logger.info("  ✓ W-State Enhanced registered")
-    HEARTBEAT.add_listener(NOISE_BATH_ENHANCED.on_heartbeat)
-    logger.info("  ✓ Noise Bath Enhanced registered")
-    logger.info("✅ All subsystems registered to heartbeat listener chain")
-    logger.info("🚀 QUANTUM LATTICE CONTROL — LATTICE, HEARTBEAT, LATTICE_NEURAL_REFRESH, "
-                "W_STATE_ENHANCED, NOISE_BATH_ENHANCED ready")
-else:
-    logger.debug("[quantum_lattice] Module already initialized — skipping subsystem registration")
-
-# ═══════════════════════════════════════════════════════════════════════════════════════════════════════
-# AUTO-START HEARTBEAT ON MODULE LOAD
-# Guards against duplicate starts across multiple import attempts.
-# UniversalQuantumHeartbeat.start() itself also checks self.running, but we guard here
-# so we don't even enter the log-heavy start() path unnecessarily.
-# ═══════════════════════════════════════════════════════════════════════════════════════════════════════
-
-try:
-    if not HEARTBEAT.running:
-        logger.info("🫀 AUTO-STARTING HEARTBEAT SYSTEM...")
-        HEARTBEAT.start()
-        logger.info(f"❤️ HEARTBEAT STARTED — {HEARTBEAT.frequency} Hz, "
-                    f"{len(HEARTBEAT.listeners)} listeners registered")
-    else:
-        logger.debug("[quantum_lattice] Heartbeat already running — skipping auto-start")
-except Exception as e:
-    logger.error(f"❌ CRITICAL: Failed to start heartbeat: {e}")
-    import traceback
-    traceback.print_exc()
-
-# ═══════════════════════════════════════════════════════════════════════════════════════════════════════
-# AUTO-REGISTER WITH GLOBALS IF AVAILABLE
-# ═══════════════════════════════════════════════════════════════════════════════════════════════════════
-
-try:
-    from wsgi_config import GLOBALS
-    logger.info("📍 Registering quantum systems with GLOBALS...")
-    GLOBALS.register('HEARTBEAT', HEARTBEAT, category='QUANTUM_SUBSYSTEMS', description='Universal Heartbeat (1.0 Hz)')
-    GLOBALS.register('LATTICE', LATTICE, category='QUANTUM_SUBSYSTEMS', description='Main Quantum Lattice')
-    GLOBALS.register('LATTICE_NEURAL_REFRESH', LATTICE_NEURAL_REFRESH, category='QUANTUM_SUBSYSTEMS', description='57-neuron neural network')
-    GLOBALS.register('W_STATE_ENHANCED', W_STATE_ENHANCED, category='QUANTUM_SUBSYSTEMS', description='W-state coherence manager')
-    GLOBALS.register('NOISE_BATH_ENHANCED', NOISE_BATH_ENHANCED, category='QUANTUM_SUBSYSTEMS', description='Non-Markovian noise bath')
-    logger.info("✅ All quantum systems registered with GLOBALS")
-except ImportError:
-    logger.warning("⚠️ GLOBALS not available yet - will register during bootstrap")
-except Exception as e:
-    logger.warning(f"⚠️ Could not register with GLOBALS: {e}")
+_init_quantum_singletons()
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PART 11: ADVANCED INTEGRATION WITH QUANTUM_API GLOBALS (when available)
@@ -6444,9 +6519,15 @@ class QuantumSystemCoordinator:
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # INSTANTIATE GLOBAL QUANTUM COORDINATOR
+# Created inside _init_quantum_singletons() above — referenced here for clarity.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-QUANTUM_COORDINATOR = QuantumSystemCoordinator()
+if QUANTUM_COORDINATOR is None:
+    try:
+        QUANTUM_COORDINATOR = QuantumSystemCoordinator()
+        logger.info("🌌 QUANTUM_COORDINATOR fallback creation — was None after init")
+    except Exception as _e:
+        logger.error(f"❌ QUANTUM_COORDINATOR fallback failed: {_e}")
 
 logger.info("🌌 QUANTUM LATTICE CONTROL ULTIMATE — QUANTUM_COORDINATOR ready")
 
@@ -6506,28 +6587,48 @@ class NOISE_EVOLUTION_FIX:
      coherence_estimate=np.mean(recent_coherence)
   except Exception as e:logger_v7.warning(f"Noise evolution error: {e}")
 
-PATCH_LATTICE_NEURAL_REFRESH=LATTICE_NEURAL_REFRESH
-PATCH_NOISE_BATH=NOISE_BATH_ENHANCED
+logger_v7.info("✅ NEURAL TRAINING FIX classes defined")
+logger_v7.info("✅ NOISE EVOLUTION FIX classes defined")
 
-ORIGINAL_LATTICE_ON_HEARTBEAT=LATTICE_NEURAL_REFRESH.on_heartbeat if hasattr(LATTICE_NEURAL_REFRESH,'on_heartbeat') else None
-ORIGINAL_NOISE_ON_HEARTBEAT=NOISE_BATH_ENHANCED.on_heartbeat if hasattr(NOISE_BATH_ENHANCED,'on_heartbeat') else None
+# ─── Apply heartbeat patches — guarded so they run only once ─────────────────
+_PATCHES_APPLIED = False
 
-def patched_lattice_on_heartbeat(pulse_time):
- NEURAL_TRAINING_FIX.train_neural_on_heartbeat(PATCH_LATTICE_NEURAL_REFRESH)
- if ORIGINAL_LATTICE_ON_HEARTBEAT:
-  try:ORIGINAL_LATTICE_ON_HEARTBEAT(pulse_time)
-  except:pass
+def _apply_heartbeat_patches():
+    """
+    Monkey-patch LATTICE_NEURAL_REFRESH.on_heartbeat and NOISE_BATH_ENHANCED.on_heartbeat
+    to inject actual neural training and noise evolution on each pulse.
+    Safe to call multiple times — idempotent after first application.
+    """
+    global _PATCHES_APPLIED
+    if _PATCHES_APPLIED:
+        return
+    if LATTICE_NEURAL_REFRESH is None or NOISE_BATH_ENHANCED is None:
+        logger_v7.warning("Heartbeat patches skipped — singletons not yet created")
+        return
 
-def patched_noise_on_heartbeat(pulse_time):
- NOISE_EVOLUTION_FIX.evolve_noise_on_heartbeat(PATCH_NOISE_BATH)
- if ORIGINAL_NOISE_ON_HEARTBEAT:
-  try:ORIGINAL_NOISE_ON_HEARTBEAT(pulse_time)
-  except:pass
+    _orig_lattice_hb = getattr(LATTICE_NEURAL_REFRESH, 'on_heartbeat', None)
+    _orig_noise_hb   = getattr(NOISE_BATH_ENHANCED,    'on_heartbeat', None)
+    _patch_lnr = LATTICE_NEURAL_REFRESH
+    _patch_nb  = NOISE_BATH_ENHANCED
 
-LATTICE_NEURAL_REFRESH.on_heartbeat=patched_lattice_on_heartbeat
-NOISE_BATH_ENHANCED.on_heartbeat=patched_noise_on_heartbeat
+    def patched_lattice_on_heartbeat(pulse_time):
+        NEURAL_TRAINING_FIX.train_neural_on_heartbeat(_patch_lnr)
+        if _orig_lattice_hb:
+            try: _orig_lattice_hb(pulse_time)
+            except Exception: pass
 
-logger_v7.info("✅ NEURAL TRAINING FIX APPLIED - on_heartbeat now executes actual training")
-logger_v7.info("✅ NOISE EVOLUTION FIX APPLIED - on_heartbeat now executes actual evolution")
-logger_v7.info("="*150 + "\n")
+    def patched_noise_on_heartbeat(pulse_time):
+        NOISE_EVOLUTION_FIX.evolve_noise_on_heartbeat(_patch_nb)
+        if _orig_noise_hb:
+            try: _orig_noise_hb(pulse_time)
+            except Exception: pass
+
+    LATTICE_NEURAL_REFRESH.on_heartbeat = patched_lattice_on_heartbeat
+    NOISE_BATH_ENHANCED.on_heartbeat    = patched_noise_on_heartbeat
+    _PATCHES_APPLIED = True
+    logger_v7.info("✅ NEURAL TRAINING FIX APPLIED — on_heartbeat executes actual training")
+    logger_v7.info("✅ NOISE EVOLUTION FIX APPLIED — on_heartbeat executes actual evolution")
+
+_apply_heartbeat_patches()
+logger_v7.info("=" * 150 + "\n")
 

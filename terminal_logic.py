@@ -5519,6 +5519,99 @@ def _pq_genesis_verify(flags: dict, args: list) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
+# WSGI STATUS — Safe dict-only access (get_globals() returns plain dict, NOT attribute object)
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+def _wsgi_status_handler() -> dict:
+    """
+    Build a safe wsgi-status payload.
+    get_globals() returns a plain dict, so we use .get() throughout — no attribute access.
+    Falls back gracefully if any sub-component is missing.
+    """
+    summary = {}
+    try:
+        from wsgi_config import WSGIGlobals
+        summary = WSGIGlobals.summary() or {}
+    except Exception as e:
+        summary = {'wsgi_summary_error': str(e)}
+
+    globals_health: dict = {}
+    try:
+        import globals as _g
+        gs = _g.get_globals()
+        if isinstance(gs, dict):
+            # dict-style access — get_globals() returns a plain dict
+            bc = gs.get('blockchain') or {}
+            auth = gs.get('auth') or {}
+            db = gs.get('database') or {}
+            ledger = gs.get('ledger') or {}
+            defi = gs.get('defi') or {}
+            globals_health = {
+                'blockchain': {
+                    'chain_height':  bc.get('chain_height', bc.get('height', 0)),
+                    'pending_tx':    bc.get('mempool_size', bc.get('pending_tx', 0)),
+                    'total_tx':      bc.get('total_transactions', bc.get('total_tx', 0)),
+                    'chain_tip':     bc.get('chain_tip'),
+                },
+                'auth': {
+                    'active_sessions': auth.get('active_sessions', 0),
+                    'users_cached':    len(auth.get('users', {})),
+                },
+                'database': {
+                    'healthy':         db.get('healthy', False),
+                    'pool_available':  db.get('pool') is not None,
+                },
+                'ledger': {'entries': ledger.get('total_entries', ledger.get('entries', 0))},
+                'defi':   {'pools':   defi.get('active_pools', defi.get('pools', 0))},
+            }
+        else:
+            # Attribute-style object (legacy fallback)
+            globals_health = {
+                'blockchain': {
+                    'chain_height': getattr(getattr(gs, 'blockchain', {}), 'chain_height', 0),
+                    'pending_tx':   getattr(getattr(gs, 'blockchain', {}), 'mempool_size', 0),
+                    'total_tx':     getattr(getattr(gs, 'blockchain', {}), 'total_transactions', 0),
+                },
+                'auth': {
+                    'active_sessions': getattr(getattr(gs, 'auth', {}), 'active_sessions', 0),
+                    'users_cached':    len(getattr(getattr(gs, 'auth', {}), 'users', {})),
+                },
+                'database': {
+                    'healthy':        getattr(getattr(gs, 'database', {}), 'healthy', False),
+                    'pool_available': getattr(getattr(gs, 'database', {}), 'pool', None) is not None,
+                },
+                'ledger': {'entries': getattr(getattr(gs, 'ledger', {}), 'total_entries', 0)},
+                'defi':   {'pools':   getattr(getattr(gs, 'defi', {}), 'active_pools', 0)},
+            }
+    except Exception as e:
+        globals_health = {'error': f'globals not available: {str(e)[:120]}'}
+
+    # Pull live quantum heartbeat status (serialization-safe)
+    quantum_health: dict = {}
+    try:
+        from quantum_lattice_control_live_complete import HEARTBEAT, LATTICE
+        import json as _json
+        def _safe_serial(d):
+            return _json.loads(_json.dumps(d, default=lambda o: float(o) if hasattr(o, '__float__') else str(o)))
+        hbm = _safe_serial(HEARTBEAT.get_metrics())
+        quantum_health = {
+            'heartbeat_running': hbm.get('running', False),
+            'pulse_count': hbm.get('pulse_count', 0),
+            'heartbeat_hz': hbm.get('frequency', 0),
+            'lattice_ops': _safe_serial(LATTICE.get_system_metrics()).get('operations_count', 0),
+        }
+    except Exception as e:
+        quantum_health = {'note': f'quantum singletons not loaded: {str(e)[:80]}'}
+
+    return {
+        **summary,
+        'globals_health': globals_health,
+        'quantum_health': quantum_health,
+        'timestamp': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
 # API COMMAND HANDLERS (non-interactive, for HTTP dispatch)
 # These thin wrappers call TerminalEngine's client/session/data,
 # bypassing interactive prompts, and return plain dicts for JSON serialisation.
@@ -7196,28 +7289,7 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
         'help-category':        h_help_category,
         'help-command':         h_help_command,
         # WSGI
-        'wsgi-status': lambda f, a: _ok({
-            **WSGIGlobals.summary(),
-            'globals_health': (lambda gs: {
-                'blockchain': {
-                    'chain_height': gs.blockchain.chain_height,
-                    'pending_tx':   gs.blockchain.mempool_size,
-                    'total_tx':     gs.blockchain.total_transactions,
-                },
-                'auth': {
-                    'active_sessions': gs.auth.active_sessions,
-                    'users_cached':    len(gs.auth.users),
-                },
-                'database': {
-                    'healthy': gs.database.healthy,
-                    'pool_available': gs.database.pool is not None,
-                },
-                'ledger': {'entries': gs.ledger.total_entries},
-                'defi':   {'pools': gs.defi.active_pools},
-            })(
-                __import__('globals').get_globals()
-            ) if True else {}
-        }),
+        'wsgi-status': lambda f, a: _ok(_wsgi_status_handler()),
         'wsgi-cache-stats':     lambda f,a: _ok(WSGIGlobals.cache_get('_stats') or {}),
     }
 

@@ -353,18 +353,40 @@ def execute_command():
         args = data.get('args') or {}
         user_id = data.get('user_id')
 
-        if not user_id and 'Authorization' in request.headers:
-            try:
-                import jwt
-                token = request.headers['Authorization'].replace('Bearer ', '')
-                secret = os.getenv('JWT_SECRET', '')
-                if secret:
-                    payload = jwt.decode(token, secret, algorithms=['HS256', 'HS512'])
-                    user_id = payload.get('user_id')
-            except:
-                pass
+        # ── JWT extraction — decode once, carry full payload downstream ────────
+        raw_token = None
+        role = None
+        is_admin = False
 
-        result = dispatch_command(command, args, user_id)
+        auth_header = request.headers.get('Authorization', '')
+        if auth_header.startswith('Bearer '):
+            raw_token = auth_header[7:].strip()
+        # Also accept token in JSON body (some clients send it there)
+        if not raw_token:
+            raw_token = data.get('token') or data.get('access_token')
+
+        if raw_token:
+            try:
+                import jwt as _jwt
+                # Try env secret first, then fall back to auth_handlers secret
+                secret = os.getenv('JWT_SECRET', '')
+                if not secret:
+                    try:
+                        from auth_handlers import JWT_SECRET as _ahs_secret
+                        secret = _ahs_secret
+                    except Exception:
+                        pass
+                if secret:
+                    jwt_payload = _jwt.decode(raw_token, secret, algorithms=['HS512', 'HS256'])
+                    if not user_id:
+                        user_id = jwt_payload.get('user_id')
+                    role = jwt_payload.get('role', 'user')
+                    is_admin = bool(jwt_payload.get('is_admin', False)) or role in ('admin', 'superadmin', 'super_admin')
+                    logger.debug(f"[auth] JWT decoded: user={user_id} role={role} admin={is_admin}")
+            except Exception as _je:
+                logger.debug(f"[auth] JWT decode failed (non-fatal): {_je}")
+
+        result = dispatch_command(command, args, user_id, token=raw_token, role=role)
         return jsonify(result)
     except Exception as e:
         logger.error(f"Command execution failed: {e}")

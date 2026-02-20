@@ -120,6 +120,9 @@ _GLOBAL_STATE = {
     'lock': threading.RLock(),
     'heartbeat': None,
     'lattice': None,
+    'lattice_neural_refresh': None,   # ContinuousLatticeNeuralRefresh
+    'w_state_enhanced': None,          # EnhancedWStateManager
+    'noise_bath_enhanced': None,       # EnhancedNoiseBathRefresh
     'quantum_coordinator': None,
     'blockchain': None,
     'db_pool': None,
@@ -159,18 +162,26 @@ def initialize_globals():
         logger.info("🚀 INITIALIZING COMPREHENSIVE GLOBAL STATE")
         logger.info("="*80)
         
-        # Initialize Quantum Systems
+        # Initialize Quantum Systems — import ALL 5 singletons + coordinator
         try:
-            HEARTBEAT = _safe_import('quantum_lattice_control_live_complete', 'HEARTBEAT')
-            LATTICE = _safe_import('quantum_lattice_control_live_complete', 'LATTICE')
-            QUANTUM_COORDINATOR = _safe_import('quantum_lattice_control_live_complete', 'QUANTUM_COORDINATOR')
-            _GLOBAL_STATE['heartbeat'] = HEARTBEAT
-            _GLOBAL_STATE['lattice'] = LATTICE
-            _GLOBAL_STATE['quantum_coordinator'] = QUANTUM_COORDINATOR
-            if HEARTBEAT:
-                logger.info("✅ Quantum heartbeat synchronized - all subsystems connected")
+            # _init_quantum_singletons() in quantum_lattice runs first (guarded),
+            # so by the time we import the names they already exist in the module.
+            import quantum_lattice_control_live_complete as _qlc
+            _qlc._init_quantum_singletons()   # idempotent — no-op if already done
+
+            _GLOBAL_STATE['heartbeat']             = _qlc.HEARTBEAT
+            _GLOBAL_STATE['lattice']               = _qlc.LATTICE
+            _GLOBAL_STATE['lattice_neural_refresh'] = _qlc.LATTICE_NEURAL_REFRESH
+            _GLOBAL_STATE['w_state_enhanced']       = _qlc.W_STATE_ENHANCED
+            _GLOBAL_STATE['noise_bath_enhanced']    = _qlc.NOISE_BATH_ENHANCED
+            _GLOBAL_STATE['quantum_coordinator']    = _qlc.QUANTUM_COORDINATOR
+
+            _alive = [k for k in ('heartbeat','lattice','lattice_neural_refresh',
+                                  'w_state_enhanced','noise_bath_enhanced','quantum_coordinator')
+                      if _GLOBAL_STATE[k] is not None]
+            logger.info(f"✅ Quantum subsystems loaded: {', '.join(_alive)}")
         except Exception as e:
-            logger.warning(f"⚠️  Quantum systems: {str(e)[:60]}")
+            logger.warning(f"⚠️  Quantum systems: {str(e)[:120]}")
         
         # Initialize Database
         try:
@@ -270,7 +281,15 @@ def initialize_globals():
         logger.info("="*80)
         logger.info("✅ COMPREHENSIVE GLOBAL STATE INITIALIZATION COMPLETE")
         logger.info("="*80)
-        
+
+        # After setting initialized=True, tell quantum_lattice to register itself
+        # with GLOBALS if wsgi_config is already available (non-circular at this point).
+        try:
+            from quantum_lattice_control_live_complete import _register_with_globals_lazy
+            _register_with_globals_lazy()
+        except Exception as _rge:
+            logger.debug(f"[globals] quantum GLOBALS registration deferred: {_rge}")
+
         return _GLOBAL_STATE
 
 def get_globals() -> dict:
@@ -290,6 +309,59 @@ def get_heartbeat():
 def get_lattice():
     state = get_globals()
     return state['lattice'] or {'status': 'not_initialized'}
+
+def get_lattice_neural_refresh():
+    """Return the ContinuousLatticeNeuralRefresh singleton (57-neuron network)."""
+    state = get_globals()
+    obj = state.get('lattice_neural_refresh')
+    if obj is None:
+        # Lazy fallback — try direct import (module may have loaded after init)
+        try:
+            from quantum_lattice_control_live_complete import LATTICE_NEURAL_REFRESH
+            state['lattice_neural_refresh'] = LATTICE_NEURAL_REFRESH
+            return LATTICE_NEURAL_REFRESH
+        except Exception:
+            pass
+    return obj
+
+def get_w_state_enhanced():
+    """Return the EnhancedWStateManager singleton."""
+    state = get_globals()
+    obj = state.get('w_state_enhanced')
+    if obj is None:
+        try:
+            from quantum_lattice_control_live_complete import W_STATE_ENHANCED
+            state['w_state_enhanced'] = W_STATE_ENHANCED
+            return W_STATE_ENHANCED
+        except Exception:
+            pass
+    return obj
+
+def get_noise_bath_enhanced():
+    """Return the EnhancedNoiseBathRefresh singleton (κ=0.08)."""
+    state = get_globals()
+    obj = state.get('noise_bath_enhanced')
+    if obj is None:
+        try:
+            from quantum_lattice_control_live_complete import NOISE_BATH_ENHANCED
+            state['noise_bath_enhanced'] = NOISE_BATH_ENHANCED
+            return NOISE_BATH_ENHANCED
+        except Exception:
+            pass
+    return obj
+
+def get_quantum_coordinator():
+    """Return the QuantumSystemCoordinator singleton."""
+    state = get_globals()
+    obj = state.get('quantum_coordinator')
+    if obj is None:
+        try:
+            from quantum_lattice_control_live_complete import QUANTUM_COORDINATOR
+            state['quantum_coordinator'] = QUANTUM_COORDINATOR
+            return QUANTUM_COORDINATOR
+        except Exception:
+            pass
+    return obj
 
 def get_db_pool():
     state = get_globals()
@@ -856,7 +928,7 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
     # QUANTUM
     # ══════════════════════════════════════════
     if cmd in ('quantum-status', 'quantum-stats'):
-        # Pull live data from quantum singletons — serialization-safe
+        # Pull live data from stored global singletons — no re-import needed
         hb_metrics = {}
         lattice_metrics = {}
         neural_state = {}
@@ -864,31 +936,33 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
         noise_state = {}
         health = {}
         try:
-            from quantum_lattice_control_live_complete import (
-                HEARTBEAT, LATTICE, LATTICE_NEURAL_REFRESH,
-                W_STATE_ENHANCED, NOISE_BATH_ENHANCED, QUANTUM_COORDINATOR
-            )
-            hb_metrics = HEARTBEAT.get_metrics() if hasattr(HEARTBEAT, 'get_metrics') else {}
-            lattice_metrics = LATTICE.get_system_metrics() if hasattr(LATTICE, 'get_system_metrics') else {}
-            neural_state = LATTICE_NEURAL_REFRESH.get_state() if hasattr(LATTICE_NEURAL_REFRESH, 'get_state') else {}
-            w_state = W_STATE_ENHANCED.get_state() if hasattr(W_STATE_ENHANCED, 'get_state') else {}
-            noise_state = NOISE_BATH_ENHANCED.get_state() if hasattr(NOISE_BATH_ENHANCED, 'get_state') else {}
-            health = LATTICE.health_check() if hasattr(LATTICE, 'health_check') else {}
-            # Strip numpy / non-serializable types safely
             import json as _json
             def _clean(d):
                 try:
                     return _json.loads(_json.dumps(d, default=lambda o: float(o) if hasattr(o,'__float__') else str(o)))
                 except Exception:
                     return {}
-            hb_metrics = _clean(hb_metrics)
-            lattice_metrics = _clean(lattice_metrics)
-            neural_state = _clean(neural_state)
-            w_state = _clean(w_state)
-            noise_state = _clean(noise_state)
-            health = _clean(health)
+
+            _hb  = get_heartbeat()
+            _lat = get_lattice()
+            _lnr = get_lattice_neural_refresh()
+            _ws  = get_w_state_enhanced()
+            _nb  = get_noise_bath_enhanced()
+
+            if hasattr(_hb, 'get_metrics'):
+                hb_metrics = _clean(_hb.get_metrics())
+            if hasattr(_lat, 'get_system_metrics'):
+                lattice_metrics = _clean(_lat.get_system_metrics())
+            if hasattr(_lnr, 'get_state'):
+                neural_state = _clean(_lnr.get_state())
+            if hasattr(_ws, 'get_state'):
+                w_state = _clean(_ws.get_state())
+            if hasattr(_nb, 'get_state'):
+                noise_state = _clean(_nb.get_state())
+            if hasattr(_lat, 'health_check'):
+                health = _clean(_lat.health_check())
         except Exception as _e:
-            logger.debug(f"[quantum-stats] quantum singletons unavailable: {_e}")
+            logger.debug(f"[quantum-stats] singleton access error: {_e}")
 
         return {'status': 'success', 'result': {
             'quantum_engine': 'QTCL-QE v5.0',
@@ -927,9 +1001,10 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
         # Pull QRNG metrics if available
         qrng_sources = {}
         try:
-            from quantum_lattice_control_live_complete import LATTICE
-            lm = LATTICE.get_system_metrics() if hasattr(LATTICE, 'get_system_metrics') else {}
-            qrng_sources['lattice_ops'] = lm.get('operations_count', 0)
+            _lat = get_lattice()
+            if hasattr(_lat, 'get_system_metrics'):
+                lm = _lat.get_system_metrics()
+                qrng_sources['lattice_ops'] = lm.get('operations_count', 0)
         except Exception:
             pass
         return {'status': 'success', 'result': {
@@ -979,14 +1054,14 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
     if cmd == 'quantum-ghz':
         ghz_state = {}
         try:
-            from quantum_lattice_control_live_complete import LATTICE, W_STATE_ENHANCED
-            w = W_STATE_ENHANCED.get_state()
-            lm = LATTICE.get_system_metrics()
             import json as _j
             def _cl(d):
                 try: return _j.loads(_j.dumps(d, default=lambda o: float(o) if hasattr(o,'__float__') else str(o)))
                 except: return {}
-            w = _cl(w); lm = _cl(lm)
+            _ws = get_w_state_enhanced()
+            _lat = get_lattice()
+            w = _cl(_ws.get_state()) if hasattr(_ws, 'get_state') else {}
+            lm = _cl(_lat.get_system_metrics()) if hasattr(_lat, 'get_system_metrics') else {}
             ghz_state = {
                 'ghz_state': 'GHZ-8',
                 'fidelity': w.get('fidelity_avg', 0.9987),
@@ -1009,13 +1084,14 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
 
     if cmd == 'quantum-wstate':
         try:
-            from quantum_lattice_control_live_complete import W_STATE_ENHANCED, HEARTBEAT
             import json as _j
             def _cl(d):
                 try: return _j.loads(_j.dumps(d, default=lambda o: float(o) if hasattr(o,'__float__') else str(o)))
                 except: return {}
-            ws = _cl(W_STATE_ENHANCED.get_state())
-            hbm = _cl(HEARTBEAT.get_metrics())
+            _ws = get_w_state_enhanced()
+            _hb = get_heartbeat()
+            ws = _cl(_ws.get_state()) if hasattr(_ws, 'get_state') else {}
+            hbm = _cl(_hb.get_metrics()) if hasattr(_hb, 'get_metrics') else {}
             fidelity_avg = ws.get('fidelity_avg', 0.96)
             consensus = 'healthy' if fidelity_avg > 0.90 else 'degraded'
             return {'status': 'success', 'result': {
@@ -1041,14 +1117,16 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
 
     if cmd == 'quantum-coherence':
         try:
-            from quantum_lattice_control_live_complete import NOISE_BATH_ENHANCED, W_STATE_ENHANCED, HEARTBEAT
             import json as _j
             def _cl(d):
                 try: return _j.loads(_j.dumps(d, default=lambda o: float(o) if hasattr(o,'__float__') else str(o)))
                 except: return {}
-            noise = _cl(NOISE_BATH_ENHANCED.get_state())
-            ws = _cl(W_STATE_ENHANCED.get_state())
-            hbm = _cl(HEARTBEAT.get_metrics())
+            _nb = get_noise_bath_enhanced()
+            _ws = get_w_state_enhanced()
+            _hb = get_heartbeat()
+            noise = _cl(_nb.get_state()) if hasattr(_nb, 'get_state') else {}
+            ws = _cl(_ws.get_state()) if hasattr(_ws, 'get_state') else {}
+            hbm = _cl(_hb.get_metrics()) if hasattr(_hb, 'get_metrics') else {}
             fid_pres = noise.get('fidelity_preservation_rate', 0.99)
             diss = noise.get('dissipation_rate', 0.01)
             coherence_time_ms = round(1000.0 / (diss * 10 + 0.001), 2)
@@ -1096,13 +1174,14 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
         # Pull live coherence data
         coherence_data = {}
         try:
-            from quantum_lattice_control_live_complete import W_STATE_ENHANCED, NOISE_BATH_ENHANCED
             import json as _j
             def _cl(d):
                 try: return _j.loads(_j.dumps(d, default=lambda o: float(o) if hasattr(o,'__float__') else str(o)))
                 except: return {}
-            ws = _cl(W_STATE_ENHANCED.get_state())
-            nb = _cl(NOISE_BATH_ENHANCED.get_state())
+            _ws = get_w_state_enhanced()
+            _nb = get_noise_bath_enhanced()
+            ws = _cl(_ws.get_state()) if hasattr(_ws, 'get_state') else {}
+            nb = _cl(_nb.get_state()) if hasattr(_nb, 'get_state') else {}
             coherence_data = {
                 'bath_fidelity': nb.get('fidelity_preservation_rate', 0.99),
                 'entanglement_strength': ws.get('entanglement_strength', 0.998),
@@ -1147,9 +1226,10 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
         # Pull lattice ops count
         lattice_ops = 0
         try:
-            from quantum_lattice_control_live_complete import LATTICE
-            lm = LATTICE.get_system_metrics()
-            lattice_ops = lm.get('operations_count', 0) if isinstance(lm, dict) else 0
+            _lat = get_lattice()
+            if hasattr(_lat, 'get_system_metrics'):
+                lm = _lat.get_system_metrics()
+                lattice_ops = lm.get('operations_count', 0) if isinstance(lm, dict) else 0
         except Exception:
             pass
         return {'status': 'success', 'result': {
