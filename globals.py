@@ -134,14 +134,30 @@ _GLOBAL_STATE = {
 }
 
 def _safe_import(module_path: str, item_name: str, fallback=None):
-    """Safely import with circuit breaker."""
+    """Safely import with circuit breaker.
+
+    Handles:
+    - Missing modules (ModuleNotFoundError)
+    - Circular / partially-initialized modules (ImportError)
+    - Modules whose own top-level code raises (any Exception at import time)
+    - Missing attributes (returns fallback silently)
+    """
     try:
-        module = __import__(module_path, fromlist=[item_name])
+        import importlib
+        module = importlib.import_module(module_path)
         item = getattr(module, item_name, fallback)
-        logger.info(f"✅ Loaded {item_name} from {module_path}")
+        if item is fallback:
+            logger.warning(f"⚠️  {module_path} loaded but missing attribute '{item_name}'")
+        else:
+            logger.info(f"✅ Loaded {item_name} from {module_path}")
         return item
+    except ImportError as e:
+        msg = str(e)
+        tag = "Circular/partial import" if "partially initialized" in msg or "circular" in msg.lower() else "Import error"
+        logger.warning(f"⚠️  {tag} — {item_name} from {module_path}: {msg[:80]}")
+        return fallback
     except Exception as e:
-        logger.warning(f"⚠️  Failed to load {item_name} from {module_path}: {str(e)[:60]}")
+        logger.warning(f"⚠️  Failed to load {item_name} from {module_path}: {str(e)[:80]}")
         return fallback
 
 def initialize_globals():

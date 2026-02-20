@@ -243,6 +243,11 @@ def server_error(error):
 # RUN
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# WSGI ENTRYPOINT — gunicorn expects 'application', not 'app'
+# ═══════════════════════════════════════════════════════════════════════════════════════
+application = app  # <-- THIS is what gunicorn:  wsgi_config:application  resolves to
+
 if __name__ == '__main__':
     logger.info("="*80)
     logger.info("🚀 QTCL WSGI v5.0 STARTING")

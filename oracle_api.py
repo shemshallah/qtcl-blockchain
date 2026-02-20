@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
-
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# GLOBALS INTEGRATION - Unified State Management
-# ═══════════════════════════════════════════════════════════════════════════════════════
-try:
-    from globals import get_db_pool, get_heartbeat, get_globals, get_auth_manager, get_terminal
-    GLOBALS_AVAILABLE = True
-except ImportError:
-    GLOBALS_AVAILABLE = False
-    logger.warning(f"[{os.path.basename(input_path)}] Globals not available - using fallback")
+# NOTE: globals integration moved to after logger/os are initialized (see below)
 
 
 """
@@ -148,14 +139,18 @@ getcontext().prec = 28
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# GLOBAL WSGI INTEGRATION - Quantum Revolution
+# GLOBALS INTEGRATION — initialized here, AFTER logger and os are available
 # ═══════════════════════════════════════════════════════════════════════════════════════
+GLOBALS_AVAILABLE = False
 try:
-    from wsgi_config import DB, PROFILER, CACHE, ERROR_BUDGET, RequestCorrelation, CIRCUIT_BREAKERS, RATE_LIMITERS
-    WSGI_AVAILABLE = True
-except ImportError:
-    WSGI_AVAILABLE = False
-    logger.warning("[INTEGRATION] WSGI globals not available - running in standalone mode")
+    from globals import get_db_pool, get_heartbeat, get_globals, get_auth_manager
+    GLOBALS_AVAILABLE = True
+    logger.info("[oracle_api] ✅ Globals integration loaded")
+except ImportError as _ge:
+    logger.warning("[oracle_api] ⚠️  Globals not available - running in standalone mode: %s", _ge)
+
+# NOTE: wsgi_config (DB/PROFILER/CACHE/etc.) not imported here —
+# those objects don't exist in wsgi_config.py; all DB access goes through globals/db_builder_v2.
 
 logger.info("""
 ╔════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
@@ -1238,6 +1233,41 @@ class OracleBrainsSystem:
             OracleSelfMeasurement.record_error(str(e))
             return {'error': str(e)}
     
+    # ── Heartbeat-callable measurement helpers ─────────────────────────────────
+    def measure_time_oracle(self) -> Dict[str, Any]:
+        """Advance TimeOracle scan: emit events for any transactions past age threshold."""
+        triggered = 0
+        with GlobalMetricsSystem._global_lock:
+            active = dict(GlobalMetricsSystem.ACTIVE_TRANSACTIONS)
+        for tx_id, tx in active.items():
+            event = self.time_oracle.trigger_event(tx_id, tx.creation_timestamp)
+            if event:
+                self.event_queue.append(event)
+                triggered += 1
+        return {'triggered': triggered, 'queue_size': len(self.event_queue)}
+
+    def measure_price_oracle(self) -> Dict[str, Any]:
+        """Refresh PriceOracle cache for tracked symbols."""
+        symbols = ['BTC', 'ETH', 'QTCL']
+        updated = {}
+        for sym in symbols:
+            price = self.price_oracle.fetch_price(sym)
+            if price is not None:
+                updated[sym] = price
+        return {'updated_symbols': updated}
+
+    def measure_entropy_oracle(self) -> Dict[str, Any]:
+        """Measure current system entropy and log it."""
+        event = self.entropy_oracle.create_oracle_event('heartbeat_entropy')
+        if event:
+            self.event_queue.append(event)
+        stats = self.entropy_oracle.get_statistics()
+        return {'entropy_stats': stats}
+
+    def get_status(self) -> Dict[str, Any]:
+        """Alias for get_system_diagnostics — satisfies hasattr checks in routes."""
+        return self.get_system_diagnostics()
+
     def get_transaction_status(self, tx_id: str) -> Dict[str, Any]:
         """Get transaction status"""
         with GlobalMetricsSystem._global_lock:
@@ -1312,9 +1342,13 @@ def get_oracle_instance() -> OracleBrainsSystem:
 try:
     from flask import Blueprint, request, jsonify, g
     
-    def create_oracle_blueprint():
-        """Create Flask blueprint for oracle API"""
-        blueprint = Blueprint('oracle_api', __name__, url_prefix='/api/oracle')
+    def create_oracle_brains_blueprint():
+        """Create Flask blueprint for the raw oracle quantum-brains processing endpoints.
+        
+        Named 'oracle_brains' (not 'oracle_api') to avoid collision with the main
+        create_oracle_api_blueprint() factory which owns the '/api/oracle' prefix.
+        """
+        blueprint = Blueprint('oracle_brains', __name__, url_prefix='/api/oracle/brains')
         oracle = get_oracle_instance()
         
         @blueprint.route('/transaction/process', methods=['POST'])
@@ -1331,15 +1365,17 @@ try:
                 target_approved = data.get('target_approved', False)
                 validators = data.get('validators', [])
                 
-                # Process asynchronously
-                import asyncio
-                loop = asyncio.get_event_loop() if hasattr(asyncio, 'get_event_loop') else asyncio.new_event_loop()
-                result = loop.run_until_complete(
-                    oracle.process_transaction(
-                        tx_id, user_id, target_id, amount,
-                        user_approved, target_approved, validators
+                # Run async process in a fresh loop (safe for sync Flask context on Py 3.10+)
+                loop = asyncio.new_event_loop()
+                try:
+                    result = loop.run_until_complete(
+                        oracle.process_transaction(
+                            tx_id, user_id, target_id, amount,
+                            user_approved, target_approved, validators
+                        )
                     )
-                )
+                finally:
+                    loop.close()
                 
                 return jsonify(result)
             
@@ -1377,7 +1413,7 @@ try:
         return blueprint
     
     ORACLE_BLUEPRINT_AVAILABLE = True
-    logger.info("[OracleBrains] Flask blueprint available for main_app integration")
+    logger.info("[OracleBrains] Flask oracle_brains blueprint available for main_app integration")
 
 except ImportError:
     ORACLE_BLUEPRINT_AVAILABLE = False
@@ -1686,8 +1722,8 @@ def create_oracle_api_blueprint():
 blueprint = create_oracle_api_blueprint()
 
 def get_oracle_blueprint():
-    """Factory function for WSGI integration."""
-    return create_oracle_api_blueprint()
+    """Factory function for WSGI integration — returns the module-level singleton blueprint."""
+    return blueprint
 
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -2364,6 +2400,8 @@ class OracleSystemIntegration:
         return cls._instance
     
     def __init__(self):
+        if getattr(self, '_initialized', False):
+            return  # singleton: __init__ called again on every OracleSystemIntegration() — skip
         self.feeds = {}
         self.price_cache = {}
         self.feed_history = []
@@ -2373,6 +2411,7 @@ class OracleSystemIntegration:
         self.defi_price_updates = 0
         self.ledger_price_records = 0
         
+        self._initialized = True
         self.initialize_integrations()
     
     def initialize_integrations(self):
@@ -2499,6 +2538,13 @@ _wire_oracle_hooks_into_registry()
 def get_oracle_price_provider() -> UnifiedOraclePriceProvider:
     """Return the canonical UnifiedOraclePriceProvider singleton."""
     return ORACLE_PRICE_PROVIDER
+
+# ── Register oracle with heartbeat at module load ──────────────────────────
+# Deferred via try/except so startup never fails if heartbeat isn't up yet.
+try:
+    register_oracle_with_heartbeat()
+except Exception as _hb_err:
+    logger.debug("[oracle_api] Heartbeat registration deferred: %s", _hb_err)
 
 logger.info("""
 ╔═══════════════════════════════════════════════════════════════════════════════════════════════╗
