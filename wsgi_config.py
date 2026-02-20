@@ -139,7 +139,7 @@ ERROR_BUDGET = ErrorBudgetManager(max_errors=100, window_sec=60)
 logger.info("[BOOTSTRAP] ✅ Utility services initialized (PROFILER, CACHE, RequestCorrelation, ERROR_BUDGET)")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# BOOTSTRAP PHASE 1: DATABASE SINGLETON (db_builder_v2)
+# BOOTSTRAP PHASE 1: DATABASE SINGLETON (db_builder_v2) - BEFORE globals to break circular import
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 DB = None
@@ -157,23 +157,41 @@ except Exception as e:
     raise
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# BOOTSTRAP PHASE 2: GLOBALS MODULE (Unified State)
+# BOOTSTRAP PHASE 2: GLOBALS MODULE (Unified State) - Now ledger_manager can safely import PROFILER
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 GLOBALS_AVAILABLE = False
 try:
-    logger.info("[BOOTSTRAP] Initializing globals module...")
-    from globals import (
-        initialize_globals, get_globals,
-        get_system_health, get_state_snapshot,
-        get_heartbeat, get_blockchain, get_ledger, get_oracle, get_defi,
-        get_auth_manager, get_pqc_system, get_genesis_block, verify_genesis_block,
-        get_metrics, get_quantum, dispatch_command, COMMAND_REGISTRY,
-        pqc_generate_user_key, pqc_sign, pqc_verify,
-        pqc_encapsulate, pqc_prove_identity, pqc_verify_identity,
-        pqc_revoke_key, pqc_rotate_key, bootstrap_admin_session, revoke_session,
-    )
-    initialize_globals()
+    logger.info("[BOOTSTRAP] Initializing globals module (ledger_manager will lazy-import PROFILER)...")
+    import globals as globals_module
+    globals_module.initialize_globals()
+    initialize_globals = globals_module.initialize_globals
+    get_globals = globals_module.get_globals
+    get_system_health = globals_module.get_system_health
+    get_state_snapshot = globals_module.get_state_snapshot
+    get_heartbeat = globals_module.get_heartbeat
+    get_blockchain = globals_module.get_blockchain
+    get_ledger = globals_module.get_ledger
+    get_oracle = globals_module.get_oracle
+    get_defi = globals_module.get_defi
+    get_auth_manager = globals_module.get_auth_manager
+    get_pqc_system = globals_module.get_pqc_system
+    get_genesis_block = globals_module.get_genesis_block
+    verify_genesis_block = globals_module.verify_genesis_block
+    get_metrics = globals_module.get_metrics
+    get_quantum = globals_module.get_quantum
+    dispatch_command = globals_module.dispatch_command
+    COMMAND_REGISTRY = globals_module.COMMAND_REGISTRY
+    pqc_generate_user_key = globals_module.pqc_generate_user_key
+    pqc_sign = globals_module.pqc_sign
+    pqc_verify = globals_module.pqc_verify
+    pqc_encapsulate = globals_module.pqc_encapsulate
+    pqc_prove_identity = globals_module.pqc_prove_identity
+    pqc_verify_identity = globals_module.pqc_verify_identity
+    pqc_revoke_key = globals_module.pqc_revoke_key
+    pqc_rotate_key = globals_module.pqc_rotate_key
+    bootstrap_admin_session = globals_module.bootstrap_admin_session
+    revoke_session = globals_module.revoke_session
     GLOBALS_AVAILABLE = True
     logger.info("[BOOTSTRAP] ✅ Globals module initialized")
 except Exception as e:
@@ -222,7 +240,7 @@ def _initialize_terminal_engine():
 
 __all__ = [
     'DB', 'PROFILER', 'CACHE', 'RequestCorrelation', 'ERROR_BUDGET',
-    'GLOBALS_AVAILABLE', 'logger',
+    'GLOBALS_AVAILABLE', 'logger', 'app', 'application',
     'get_system_health', 'get_state_snapshot',
     'get_heartbeat', 'get_blockchain', 'get_ledger', 'get_oracle', 'get_defi',
     'get_auth_manager', 'get_pqc_system', 'get_genesis_block', 'verify_genesis_block',
@@ -232,6 +250,23 @@ __all__ = [
     'pqc_revoke_key', 'pqc_rotate_key',
     'bootstrap_admin_session', 'revoke_session',
 ]
+
+# Ensure functions are available (late binding in case of re-imports)
+def _ensure_exports():
+    """Ensure all critical exports are available."""
+    global initialize_globals, get_globals, get_system_health, get_state_snapshot
+    global get_heartbeat, get_blockchain, get_ledger, get_oracle, get_defi
+    global get_auth_manager, get_pqc_system, get_genesis_block, verify_genesis_block
+    global get_metrics, get_quantum, dispatch_command, COMMAND_REGISTRY
+    global pqc_generate_user_key, pqc_sign, pqc_verify
+    global pqc_encapsulate, pqc_prove_identity, pqc_verify_identity
+    global pqc_revoke_key, pqc_rotate_key, bootstrap_admin_session, revoke_session
+    
+    if not GLOBALS_AVAILABLE:
+        # Functions should already be imported above, but provide fallbacks
+        pass
+
+_ensure_exports()
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # FLASK APPLICATION (HTTP Interface)

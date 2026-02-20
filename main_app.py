@@ -17,6 +17,10 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+# Configure logging ONLY if not already configured
+if not logging.getLogger().hasHandlers():
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -25,7 +29,7 @@ try:
     from wsgi_config import app, application, COMMAND_REGISTRY, dispatch_command
     logger.info('[main_app] ✓ Delegating to wsgi_config — single unified app')
 except Exception as _e:
-    logger.error(f'[main_app] FATAL: Could not import wsgi_config: {_e}')
+    logger.error(f'[main_app] FATAL: Could not import wsgi_config: {_e}', exc_info=True)
     raise
 
 if __name__ == '__main__':

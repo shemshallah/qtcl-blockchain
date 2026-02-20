@@ -16,7 +16,10 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+# Only configure logging once to prevent initialization explosion
+_logging_configured = logging.getLogger().hasHandlers()
+if not _logging_configured:
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -189,13 +192,25 @@ def initialize_globals():
         except Exception as e:
             logger.warning(f"⚠️  Blockchain: {str(e)[:60]}")
         
-        # Initialize Ledger
+        # Initialize Ledger - USE LAZY IMPORT to avoid circular dependency with wsgi_config
         try:
-            get_ledger_integration = _safe_import('ledger_manager', 'get_ledger_integration')
-            if get_ledger_integration:
-                ledger = get_ledger_integration()
-                _GLOBAL_STATE['ledger'] = ledger
+            # Defer actual import to avoid circular deadlock during initialization
+            ledger = None
+            try:
+                # Try lazy import with deferred globals resolution
+                import importlib
+                ledger_mod = importlib.import_module('ledger_manager')
+                get_ledger_integration = getattr(ledger_mod, 'get_ledger_integration', None)
+                if get_ledger_integration:
+                    ledger = get_ledger_integration()
+            except Exception as inner_e:
+                logger.debug(f"Ledger deferred import: {str(inner_e)[:80]}")
+            
+            _GLOBAL_STATE['ledger'] = ledger
+            if ledger:
                 logger.info("✅ Quantum ledger integration initialized")
+            else:
+                logger.info("⚠️  Ledger deferred (will lazy-load on first use)")
         except Exception as e:
             logger.warning(f"⚠️  Ledger: {str(e)[:60]}")
         

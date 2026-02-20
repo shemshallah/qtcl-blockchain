@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 
 import logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+if not logging.getLogger().hasHandlers():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 # GLOBALS INTEGRATION - Unified State Management

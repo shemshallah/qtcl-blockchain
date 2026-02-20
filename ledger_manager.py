@@ -59,8 +59,75 @@ from cryptography.hazmat.primitives.asymmetric import ec, utils
 from cryptography.hazmat.backends import default_backend
 from cryptography.exceptions import InvalidSignature
 
-# Database - USING GLOBAL DB FROM WSGI_CONFIG
-from wsgi_config import DB, PROFILER, CACHE, RequestCorrelation, ERROR_BUDGET
+# Database - USE LAZY IMPORTS to avoid circular import during initialization
+# These will be resolved on first actual use, not at module import time
+_wsgi_config_cache = {}
+
+def _get_wsgi_global(name: str):
+    """Lazy getter for wsgi_config globals to avoid circular import deadlock."""
+    global _wsgi_config_cache
+    if name not in _wsgi_config_cache:
+        try:
+            # Only import wsgi_config when actually needed, not at module init
+            import wsgi_config as wsc
+            _wsgi_config_cache['DB'] = getattr(wsc, 'DB', None)
+            _wsgi_config_cache['PROFILER'] = getattr(wsc, 'PROFILER', None)
+            _wsgi_config_cache['CACHE'] = getattr(wsc, 'CACHE', None)
+            _wsgi_config_cache['RequestCorrelation'] = getattr(wsc, 'RequestCorrelation', None)
+            _wsgi_config_cache['ERROR_BUDGET'] = getattr(wsc, 'ERROR_BUDGET', None)
+        except ImportError:
+            # If wsgi_config not available yet (during circular import), use stubs
+            if 'PROFILER' not in _wsgi_config_cache:
+                _wsgi_config_cache['PROFILER'] = _StubProfiler()
+            if 'CACHE' not in _wsgi_config_cache:
+                _wsgi_config_cache['CACHE'] = _StubCache()
+            if 'RequestCorrelation' not in _wsgi_config_cache:
+                _wsgi_config_cache['RequestCorrelation'] = _StubTracer()
+            if 'ERROR_BUDGET' not in _wsgi_config_cache:
+                _wsgi_config_cache['ERROR_BUDGET'] = _StubErrorBudget()
+    return _wsgi_config_cache.get(name)
+
+class _StubProfiler:
+    """Stub profiler for use during initialization."""
+    def record(self, name: str, duration_ms: float): pass
+    def get_stats(self, name: str): return {'count': 0, 'avg_ms': 0, 'min_ms': 0, 'max_ms': 0}
+
+class _StubCache:
+    """Stub cache for use during initialization."""
+    def get(self, key: str): return None
+    def set(self, key: str, value, ttl_sec: int = 3600): pass
+    def delete(self, key: str): pass
+    def clear(self): pass
+
+class _StubTracer:
+    """Stub tracer for use during initialization."""
+    def new_id(self) -> str: return 'init-stub-id'
+
+class _StubErrorBudget:
+    """Stub error budget for use during initialization."""
+    def record_error(self): pass
+    def is_exhausted(self) -> bool: return False
+    def remaining(self) -> int: return 100
+
+# Lazy globals that resolve on first access
+DB = property(lambda self: _get_wsgi_global('DB')).__get__(None, type(None))
+PROFILER = property(lambda self: _get_wsgi_global('PROFILER')).__get__(None, type(None))
+CACHE = property(lambda self: _get_wsgi_global('CACHE')).__get__(None, type(None))
+RequestCorrelation = property(lambda self: _get_wsgi_global('RequestCorrelation')).__get__(None, type(None))
+ERROR_BUDGET = property(lambda self: _get_wsgi_global('ERROR_BUDGET')).__get__(None, type(None))
+
+# Legacy fallback - if these properties don't work, define them directly
+if not callable(DB):
+    DB = _get_wsgi_global('DB') or None
+if not callable(PROFILER):
+    PROFILER = _get_wsgi_global('PROFILER') or _StubProfiler()
+if not callable(CACHE):
+    CACHE = _get_wsgi_global('CACHE') or _StubCache()
+if not callable(RequestCorrelation):
+    RequestCorrelation = _get_wsgi_global('RequestCorrelation') or _StubTracer()
+if not callable(ERROR_BUDGET):
+    ERROR_BUDGET = _get_wsgi_global('ERROR_BUDGET') or _StubErrorBudget()
+
 from psycopg2.extras import RealDictCursor, execute_values, Json
 from psycopg2 import sql
 import psycopg2

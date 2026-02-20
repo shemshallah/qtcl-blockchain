@@ -89,14 +89,16 @@ except ImportError:
 # LOGGING CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)-8s] %(threadName)-12s %(name)s: %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('quantum_lattice_live.log')
-    ]
-)
+# Only configure logging if root logger has no handlers yet
+if not logging.getLogger().hasHandlers():
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)-8s] %(threadName)-12s %(name)s: %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler('quantum_lattice_live.log')
+        ]
+    )
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
