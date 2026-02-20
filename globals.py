@@ -176,10 +176,10 @@ def initialize_globals():
         
         # Initialize Quantum Systems — import ALL 5 singletons + coordinator
         try:
-            # _init_quantum_singletons() in quantum_lattice runs first (guarded),
-            # so by the time we import the names they already exist in the module.
+            # _init_quantum_singletons() already runs at module load via _safely_init_quantum_singletons()
+            # (see quantum_lattice_control_live_complete.py:5959)
+            # Here we just import and reference the already-created singletons
             import quantum_lattice_control_live_complete as _qlc
-            _qlc._init_quantum_singletons()   # idempotent — no-op if already done
 
             _GLOBAL_STATE['heartbeat']             = _qlc.HEARTBEAT
             _GLOBAL_STATE['lattice']               = _qlc.LATTICE

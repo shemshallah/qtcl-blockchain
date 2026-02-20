@@ -188,11 +188,15 @@ def _init_quantum_singletons():
             logger.warning("  ⚠ HEARTBEAT unavailable — subsystem listeners not registered")
 
         # ── Coordinator ─────────────────────────────────────────────────────────
-        try:
-            QUANTUM_COORDINATOR = QuantumSystemCoordinator()
-            logger.info("  ✓ QUANTUM_COORDINATOR created")
-        except Exception as e:
-            logger.error(f"  ✗ QUANTUM_COORDINATOR creation failed: {e}")
+        if QUANTUM_COORDINATOR is None:  # Only try if not already created
+            try:
+                QUANTUM_COORDINATOR = QuantumSystemCoordinator()
+                logger.info("  ✓ QUANTUM_COORDINATOR created")
+            except NameError as ne:
+                # Class not yet defined (can happen if there are import order issues)
+                logger.debug(f"  ℹ QUANTUM_COORDINATOR deferred: {ne}")
+            except Exception as e:
+                logger.error(f"  ✗ QUANTUM_COORDINATOR creation failed: {e}")
 
         # ── Mark initialized ────────────────────────────────────────────────────
         _QUANTUM_MODULE_INITIALIZED = True
