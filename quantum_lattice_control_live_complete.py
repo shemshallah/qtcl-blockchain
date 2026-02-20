@@ -211,12 +211,18 @@ def _init_quantum_singletons():
                 logger.error(f"  ✗ HEARTBEAT auto-start failed: {e}")
 
 
+_GLOBALS_REGISTERED = False  # singleton guard — never register twice
+
 def _register_with_globals_lazy():
     """
     Register quantum singletons with the global state registry.
     Called lazily to avoid circular imports (wsgi_config → globals → quantum_lattice → wsgi_config).
-    Safe to call multiple times — subsequent calls are no-ops.
+    Safe to call multiple times — subsequent calls are no-ops via _GLOBALS_REGISTERED flag.
     """
+    global _GLOBALS_REGISTERED
+    if _GLOBALS_REGISTERED:
+        return
+    _GLOBALS_REGISTERED = True  # set first to prevent re-entry even if below raises
     try:
         # Only import wsgi_config AFTER it has fully loaded (lazy call)
         import wsgi_config as _wc
@@ -5979,8 +5985,9 @@ def integrate_with_quantum_api_globals():
         logger.error(f"Error integrating with quantum_api: {e}")
         return False
 
-# Attempt integration on module load
-integrate_with_quantum_api_globals()
+# NOTE: integrate_with_quantum_api_globals() is NOT called at module load.
+# It is available for explicit post-init wiring to prevent circular import loops.
+# Call it manually AFTER all modules have finished loading if needed.
 
 logger.info("[quantum_lattice] ✅ Module fully loaded — all subsystems online")
 
@@ -8213,18 +8220,19 @@ def _init_v8_revival_system():
 
         shim = _PseudoqubitBathShim()
 
-        # Hook: if a production QuantumLatticeControlLiveV5 was already created and exposed
-        # its noise bath, use that. Otherwise fall back to shim.
-        # Check wsgi_config for QUANTUM_SYSTEM
+        # Hook: if a production QuantumLatticeControlLiveV5 was already created, use its bath.
+        # Use sys.modules to avoid triggering any new imports during init.
         try:
-            import wsgi_config as _wc
-            _qs = getattr(_wc, 'QUANTUM_SYSTEM', None)
-            if _qs is not None:
-                _engine = getattr(_qs, 'quantum_engine', _qs)
-                _nb     = getattr(_engine, 'noise_bath', None)
-                if _nb is not None and hasattr(_nb, 'coherence') and len(_nb.coherence) >= 5:
-                    shim = _nb
-                    logger.info("   [v8] Attached to production NonMarkovianNoiseBath")
+            import sys as _sys
+            _wc = _sys.modules.get('wsgi_config')
+            if _wc is not None:
+                _qs = getattr(_wc, 'QUANTUM_SYSTEM', None)
+                if _qs is not None:
+                    _engine = getattr(_qs, 'quantum_engine', _qs)
+                    _nb     = getattr(_engine, 'noise_bath', None)
+                    if _nb is not None and hasattr(_nb, 'coherence') and len(_nb.coherence) >= 5:
+                        shim = _nb
+                        logger.info("   [v8] Attached to production NonMarkovianNoiseBath")
         except Exception:
             pass
 
@@ -8273,24 +8281,9 @@ def _init_v8_revival_system():
             except Exception as e:
                 logger.error(f"  ✗ Maintainer failed: {e}")
 
-        # Register with GLOBALS if available
-        try:
-            import wsgi_config as _wc2
-            _GLOBALS = getattr(_wc2, 'GLOBALS', None)
-            if _GLOBALS is not None:
-                for name, obj in [
-                    ('PSEUDOQUBIT_GUARDIAN', PSEUDOQUBIT_GUARDIAN),
-                    ('REVIVAL_ENGINE',       REVIVAL_ENGINE),
-                    ('RESONANCE_COUPLER',    RESONANCE_COUPLER),
-                    ('NEURAL_V2',            NEURAL_V2),
-                    ('PERPETUAL_MAINTAINER', PERPETUAL_MAINTAINER),
-                ]:
-                    if obj is not None:
-                        _GLOBALS.register(name, obj, category='QUANTUM_V8',
-                                         description=f'v8 revival component: {name}')
-                logger.info("  ✓ v8 components registered with GLOBALS")
-        except Exception:
-            pass
+        # Register with GLOBALS — deferred (cannot import wsgi_config at init time without loop)
+        # _register_v8_with_globals() is called lazily by globals.py after full system load
+        logger.info("  ✓ v8 GLOBALS registration deferred to post-init (circular-import safe)")
 
         _V8_INITIALIZED = True
 
@@ -8337,6 +8330,37 @@ def get_sigma_modifier_for_batch(batch_id: int, global_batch: int) -> float:
     if REVIVAL_ENGINE is None:
         return 1.0
     return REVIVAL_ENGINE.get_sigma_modifier(batch_id, global_batch)
+
+# ── Deferred v8 GLOBALS registration (call after all modules loaded) ─────────
+_V8_GLOBALS_REGISTERED = False
+
+def _register_v8_with_globals():
+    """
+    Register v8 revival components into globals._GLOBAL_STATE.
+    Called lazily by globals.initialize_globals() AFTER full system load.
+    Uses sys.modules only — zero new imports, zero circular risk.
+    """
+    global _V8_GLOBALS_REGISTERED
+    if _V8_GLOBALS_REGISTERED:
+        return
+    _V8_GLOBALS_REGISTERED = True
+    try:
+        import sys as _sys
+        _gs = _sys.modules.get('globals')
+        if _gs is None:
+            return
+        _state = getattr(_gs, '_GLOBAL_STATE', None)
+        if _state is None:
+            return
+        _state['pseudoqubit_guardian']  = PSEUDOQUBIT_GUARDIAN
+        _state['revival_engine']         = REVIVAL_ENGINE
+        _state['resonance_coupler']      = RESONANCE_COUPLER
+        _state['neural_v2']              = NEURAL_V2
+        _state['perpetual_maintainer']   = PERPETUAL_MAINTAINER
+        _state['revival_pipeline']       = REVIVAL_PIPELINE
+        logger.info("[quantum_lattice v8] ✅ v8 components wired into _GLOBAL_STATE")
+    except Exception as _e:
+        logger.debug(f"[quantum_lattice v8] _register_v8_with_globals deferred: {_e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════

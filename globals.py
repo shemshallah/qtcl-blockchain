@@ -65,6 +65,11 @@ COMMAND_REGISTRY = {
     'quantum-measurement': {'category': 'quantum', 'description': 'Quantum measurement results', 'auth_required': False},
     'quantum-stats': {'category': 'quantum', 'description': 'Quantum subsystem statistics', 'auth_required': False},
     'quantum-qrng': {'category': 'quantum', 'description': 'QRNG entropy sources & cache', 'auth_required': False},
+    'quantum-v8': {'category': 'quantum', 'description': 'v8 W-state revival engine — full diagnostics', 'auth_required': False},
+    'quantum-pseudoqubits': {'category': 'quantum', 'description': 'Pseudoqubit 1-5 validator W-state & coherence floors', 'auth_required': False},
+    'quantum-revival': {'category': 'quantum', 'description': 'Spectral revival prediction & next peak', 'auth_required': False},
+    'quantum-maintainer': {'category': 'quantum', 'description': 'Perpetual W-state maintainer (10 Hz daemon) status', 'auth_required': False},
+    'quantum-resonance': {'category': 'quantum', 'description': 'Noise-resonance coupler — stochastic resonance metrics', 'auth_required': False},
     'oracle-price': {'category': 'oracle', 'description': 'Get current price from oracle', 'auth_required': False},
     'oracle-feed': {'category': 'oracle', 'description': 'Get oracle price feed', 'auth_required': False},
     'oracle-history': {'category': 'oracle', 'description': 'Get oracle data history', 'auth_required': False},
@@ -137,6 +142,13 @@ _GLOBAL_STATE = {
     'terminal_engine': None,
     'genesis_block': None,
     'metrics': None,
+    # ── v8 revival system ──────────────────────────────────────────────────────
+    'pseudoqubit_guardian':  None,
+    'revival_engine':        None,
+    'resonance_coupler':     None,
+    'neural_v2':             None,
+    'perpetual_maintainer':  None,
+    'revival_pipeline':      None,
 }
 
 def _safe_import(module_path: str, item_name: str, fallback=None):
@@ -282,13 +294,24 @@ def initialize_globals():
         logger.info("✅ COMPREHENSIVE GLOBAL STATE INITIALIZATION COMPLETE")
         logger.info("="*80)
 
-        # After setting initialized=True, tell quantum_lattice to register itself
-        # with GLOBALS if wsgi_config is already available (non-circular at this point).
+        # Deferred quantum singleton + v8 registration — use already-loaded module
+        # from sys.modules to avoid any circular import risk.
         try:
-            from quantum_lattice_control_live_complete import _register_with_globals_lazy
-            _register_with_globals_lazy()
+            import sys as _sys
+            _qlc = _sys.modules.get('quantum_lattice_control_live_complete')
+            if _qlc is not None:
+                # Core singletons
+                _reg = getattr(_qlc, '_register_with_globals_lazy', None)
+                if _reg:
+                    _reg()
+                # v8 revival system
+                _reg_v8 = getattr(_qlc, '_register_v8_with_globals', None)
+                if _reg_v8:
+                    _reg_v8()
+            else:
+                logger.debug("[globals] quantum_lattice not yet in sys.modules — registration deferred")
         except Exception as _rge:
-            logger.debug(f"[globals] quantum GLOBALS registration deferred: {_rge}")
+            logger.debug(f"[globals] quantum registration deferred: {_rge}")
 
         return _GLOBAL_STATE
 
@@ -349,6 +372,73 @@ def get_noise_bath_enhanced():
         except Exception:
             pass
     return obj
+
+# ── v8 Revival System getters ─────────────────────────────────────────────────
+
+def _v8_lazy(slot: str, attr: str):
+    """Generic lazy getter for v8 components stored in _GLOBAL_STATE."""
+    state = get_globals()
+    obj = state.get(slot)
+    if obj is None:
+        try:
+            import sys as _sys
+            _qlc = _sys.modules.get('quantum_lattice_control_live_complete')
+            if _qlc is None:
+                import quantum_lattice_control_live_complete as _qlc
+            obj = getattr(_qlc, attr, None)
+            if obj is not None:
+                state[slot] = obj
+        except Exception:
+            pass
+    return obj
+
+def get_pseudoqubit_guardian():
+    return _v8_lazy('pseudoqubit_guardian', 'PSEUDOQUBIT_GUARDIAN')
+
+def get_revival_engine():
+    return _v8_lazy('revival_engine', 'REVIVAL_ENGINE')
+
+def get_resonance_coupler():
+    return _v8_lazy('resonance_coupler', 'RESONANCE_COUPLER')
+
+def get_neural_v2():
+    return _v8_lazy('neural_v2', 'NEURAL_V2')
+
+def get_perpetual_maintainer():
+    return _v8_lazy('perpetual_maintainer', 'PERPETUAL_MAINTAINER')
+
+def get_revival_pipeline():
+    return _v8_lazy('revival_pipeline', 'REVIVAL_PIPELINE')
+
+def get_v8_status() -> dict:
+    """Aggregate all v8 revival metrics — used by quantum-v8 and quantum-pseudoqubits commands."""
+    import json as _j
+    def _cl(d):
+        try:
+            return _j.loads(_j.dumps(d, default=lambda o: float(o) if hasattr(o, '__float__') else str(o)))
+        except Exception:
+            return {}
+
+    guardian  = get_pseudoqubit_guardian()
+    revival   = get_revival_engine()
+    coupler   = get_resonance_coupler()
+    neural    = get_neural_v2()
+    maintainer = get_perpetual_maintainer()
+
+    g_status = _cl(guardian.get_guardian_status())   if guardian   and hasattr(guardian,   'get_guardian_status')   else {}
+    r_report = _cl(revival.get_spectral_report())    if revival    and hasattr(revival,    'get_spectral_report')   else {}
+    c_metrics = _cl(coupler.get_coupler_metrics())   if coupler    and hasattr(coupler,    'get_coupler_metrics')   else {}
+    n_status = _cl(neural.get_neural_status())       if neural     and hasattr(neural,     'get_neural_status')     else {}
+    m_status = _cl(maintainer.get_maintainer_status()) if maintainer and hasattr(maintainer, 'get_maintainer_status') else {}
+
+    return {
+        'initialized':        guardian is not None,
+        'guardian':           g_status,
+        'revival_spectral':   r_report,
+        'resonance_coupler':  c_metrics,
+        'neural_v2':          n_status,
+        'maintainer':         m_status,
+    }
 
 def get_quantum_coordinator():
     """Return the QuantumSystemCoordinator singleton."""
@@ -806,10 +896,14 @@ def dispatch_command(command: str, args: dict = None, user_id: str = None,
 
     # ── 4. Auth checks ────────────────────────────────────────────────────────
     if cmd_info.get('auth_required') and not user_id:
+        # Enhanced debugging: provide more info about what's missing
+        token_provided = bool(token)
+        logger.warning(f"[dispatch] ⚠️  Auth required for '{canonical}' but user_id is None | token_provided={token_provided}")
         return {
             'status': 'unauthorized',
             'error': f'Command "{canonical}" requires authentication.',
             'hint': 'Login first: login --email=you@example.com --password=secret',
+            'debug_info': {'token_provided': token_provided, 'command': canonical} if token_provided else None,
         }
 
     if cmd_info.get('requires_admin') and not _is_admin:
@@ -935,6 +1029,7 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
         w_state = {}
         noise_state = {}
         health = {}
+        v8_summary = {}
         try:
             import json as _json
             def _clean(d):
@@ -961,17 +1056,32 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
                 noise_state = _clean(_nb.get_state())
             if hasattr(_lat, 'health_check'):
                 health = _clean(_lat.health_check())
+            # v8 revival summary
+            v8_full = get_v8_status()
+            g = v8_full.get('guardian', {})
+            m = v8_full.get('maintainer', {})
+            v8_summary = {
+                'initialized':         v8_full['initialized'],
+                'pseudoqubits_locked': v8_full['initialized'],
+                'total_pulses':        g.get('total_pulses_fired', 0),
+                'floor_violations':    g.get('floor_violations', 0),
+                'maintainer_hz':       m.get('actual_hz', 0.0),
+                'maintainer_running':  m.get('running', False),
+                'coherence_floor':     0.89,
+                'w_state_target':      0.9997,
+            }
         except Exception as _e:
             logger.debug(f"[quantum-stats] singleton access error: {_e}")
 
         return {'status': 'success', 'result': {
-            'quantum_engine': 'QTCL-QE v5.0',
+            'quantum_engine': 'QTCL-QE v8.0',
             'heartbeat': hb_metrics or {'running': False, 'note': 'heartbeat not started'},
             'lattice': lattice_metrics,
             'neural_network': neural_state,
             'w_state_manager': w_state,
             'noise_bath': noise_state,
             'health': health,
+            'v8_revival': v8_summary,
             'subsystems': {
                 'lattice': 'HLWE-256',
                 'w_state_validators': w_state.get('superposition_count', 5),
@@ -986,6 +1096,7 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
                 'pulse_count': hb_metrics.get('pulse_count', 0),
                 'pulse_frequency_hz': hb_metrics.get('frequency', 1.0),
                 'transactions_processed': lattice_metrics.get('transactions_processed', 0),
+                'v8_pseudoqubits_guardian': v8_summary.get('total_pulses', 0),
             },
         }}
 
@@ -1246,6 +1357,164 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
                 'secrets_module': {'description': 'Python cryptographic RNG', 'active': True},
             },
             'generated_at': datetime.now(timezone.utc).isoformat(),
+        }}
+
+    # ── v8 revival engine commands ────────────────────────────────────────────
+    if cmd in ('quantum-v8', 'quantum-pseudoqubits') and cmd == 'quantum-v8':
+        v8 = get_v8_status()
+        g = v8.get('guardian', {})
+        r = v8.get('revival_spectral', {})
+        c = v8.get('resonance_coupler', {})
+        n = v8.get('neural_v2', {})
+        m = v8.get('maintainer', {})
+        return {'status': 'success', 'result': {
+            'v8_initialized': v8['initialized'],
+            'pseudoqubit_ids': [1, 2, 3, 4, 5],
+            'w_state_target': 0.9997,
+            'coherence_floor': 0.89,
+            'guardian': {
+                'total_pulses':      g.get('total_pulses_fired', 0),
+                'fuel_harvested':    g.get('total_fuel_harvested', 0.0),
+                'floor_violations':  g.get('floor_violations', 0),
+                'clean_streaks':     g.get('clean_cycle_streaks', 0),
+                'qubit_coherences':  g.get('qubit_coherences', {}),
+            },
+            'revival_spectral': {
+                'dominant_period':   r.get('dominant_period_batches', 0),
+                'spectral_entropy':  r.get('spectral_entropy', 0.0),
+                'micro_revivals':    r.get('micro_revivals', 0),
+                'meso_revivals':     r.get('meso_revivals', 0),
+                'macro_revivals':    r.get('macro_revivals', 0),
+                'next_peak_batch':   r.get('next_predicted_peak', None),
+                'pre_amplification': r.get('pre_amplification_active', False),
+            },
+            'resonance_coupler': {
+                'resonance_score':   c.get('resonance_score', 0.0),
+                'correlation_time':  c.get('bath_correlation_time', 0.0),
+                'kappa_current':     c.get('current_kappa', 0.08),
+                'kappa_adjustments': c.get('kappa_adjustments', 0),
+                'coupling_efficiency': c.get('coupling_efficiency', 0.0),
+            },
+            'neural_v2': {
+                'revival_loss':      n.get('revival_loss', None),
+                'pq_health_loss':    n.get('pq_loss', None),
+                'gate_modifier':     n.get('current_gate_modifier', 1.0),
+                'iterations':        n.get('total_iterations', 0),
+                'converged':         n.get('converged', False),
+            },
+            'maintainer': {
+                'running':           m.get('running', False),
+                'maintenance_cycles': m.get('maintenance_cycles', 0),
+                'inter_cycle_revivals': m.get('inter_cycle_revivals', 0),
+                'uptime_seconds':    m.get('uptime_seconds', 0.0),
+                'actual_hz':         m.get('actual_hz', 0.0),
+            },
+        }}
+
+    if cmd == 'quantum-pseudoqubits':
+        v8 = get_v8_status()
+        g = v8.get('guardian', {})
+        qc = g.get('qubit_coherences', {})
+        qfuel = g.get('qubit_fuel_tanks', {})
+        pseudoqubits = []
+        for i in [1, 2, 3, 4, 5]:
+            key = str(i)
+            pseudoqubits.append({
+                'id': i,
+                'coherence':     qc.get(key, qc.get(i, 0.0)),
+                'fuel_tank':     qfuel.get(key, qfuel.get(i, 0.0)),
+                'above_floor':   qc.get(key, qc.get(i, 0.0)) >= 0.89,
+                'w_state_locked': qc.get(key, qc.get(i, 0.0)) >= 0.89,
+            })
+        floor_violations = g.get('floor_violations', 0)
+        total_pulses     = g.get('total_pulses_fired', 0)
+        return {'status': 'success', 'result': {
+            'pseudoqubits':      pseudoqubits,
+            'w_state_target':    0.9997,
+            'coherence_floor':   0.89,
+            'floor_violations':  floor_violations,
+            'total_revival_pulses': total_pulses,
+            'all_above_floor':   all(p['above_floor'] for p in pseudoqubits),
+            'locked_count':      sum(1 for p in pseudoqubits if p['w_state_locked']),
+            'v8_initialized':    v8['initialized'],
+        }}
+
+    if cmd == 'quantum-revival':
+        revival = get_revival_engine()
+        if revival is None:
+            return {'status': 'error', 'error': 'v8 revival engine not initialized'}
+        import json as _j
+        def _cl(d):
+            try: return _j.loads(_j.dumps(d, default=lambda o: float(o) if hasattr(o,'__float__') else str(o)))
+            except: return {}
+        current_batch = int(kwargs.get('batch', 0))
+        report = _cl(revival.get_spectral_report()) if hasattr(revival, 'get_spectral_report') else {}
+        pred   = _cl(revival.predict_next_revival(current_batch)) if hasattr(revival, 'predict_next_revival') else {}
+        return {'status': 'success', 'result': {
+            'current_batch':         current_batch,
+            'next_revival_peak':     pred.get('predicted_peak_batch', None),
+            'batches_until_peak':    pred.get('batches_until_peak', None),
+            'revival_type':          pred.get('revival_type', 'unknown'),
+            'sigma_modifier':        pred.get('sigma_modifier', 1.0),
+            'dominant_frequency':    report.get('dominant_frequency', 0.0),
+            'dominant_period_batches': report.get('dominant_period_batches', 0),
+            'spectral_entropy':      report.get('spectral_entropy', 0.0),
+            'revival_scales': {
+                'micro_period':  5,
+                'meso_period':   13,
+                'macro_period':  52,
+                'micro_revivals': report.get('micro_revivals', 0),
+                'meso_revivals':  report.get('meso_revivals', 0),
+                'macro_revivals': report.get('macro_revivals', 0),
+            },
+            'pre_amplification_active': report.get('pre_amplification_active', False),
+            'spectral_window_batches':  report.get('spectral_window', 256),
+        }}
+
+    if cmd == 'quantum-maintainer':
+        maintainer = get_perpetual_maintainer()
+        if maintainer is None:
+            return {'status': 'error', 'error': 'v8 perpetual maintainer not initialized'}
+        import json as _j
+        def _cl(d):
+            try: return _j.loads(_j.dumps(d, default=lambda o: float(o) if hasattr(o,'__float__') else str(o)))
+            except: return {}
+        m = _cl(maintainer.get_maintainer_status()) if hasattr(maintainer, 'get_maintainer_status') else {}
+        return {'status': 'success', 'result': {
+            'running':               m.get('running', False),
+            'maintenance_cycles':    m.get('maintenance_cycles', 0),
+            'inter_cycle_revivals':  m.get('inter_cycle_revivals', 0),
+            'spectral_updates':      m.get('spectral_updates', 0),
+            'resonance_adaptations': m.get('resonance_adaptations', 0),
+            'uptime_seconds':        m.get('uptime_seconds', 0.0),
+            'target_hz':             10,
+            'actual_hz':             m.get('actual_hz', 0.0),
+            'coherence_trend':       m.get('coherence_trend', 'stable'),
+            'last_maintenance_at':   m.get('last_maintenance_at', None),
+            'daemon_thread':         True,
+        }}
+
+    if cmd == 'quantum-resonance':
+        coupler = get_resonance_coupler()
+        if coupler is None:
+            return {'status': 'error', 'error': 'v8 resonance coupler not initialized'}
+        import json as _j
+        def _cl(d):
+            try: return _j.loads(_j.dumps(d, default=lambda o: float(o) if hasattr(o,'__float__') else str(o)))
+            except: return {}
+        c = _cl(coupler.get_coupler_metrics()) if hasattr(coupler, 'get_coupler_metrics') else {}
+        return {'status': 'success', 'result': {
+            'resonance_score':      c.get('resonance_score', 0.0),
+            'bath_correlation_time': c.get('bath_correlation_time', 0.0),
+            'w_state_frequency':    c.get('w_state_frequency', 0.0),
+            'kappa_current':        c.get('current_kappa', 0.08),
+            'kappa_initial':        0.08,
+            'kappa_adjustments':    c.get('kappa_adjustments', 0),
+            'coupling_efficiency':  c.get('coupling_efficiency', 0.0),
+            'optimal_noise_variance': c.get('optimal_noise_variance', 0.0),
+            'stochastic_resonance_active': c.get('resonance_score', 0.0) > 0.7,
+            'physics': 'τ_c · ω_W ≈ 1  →  bath memory × W-freq = resonance condition',
+            'noise_fuel_coupling':  0.0034,
         }}
 
     # ══════════════════════════════════════════
