@@ -150,9 +150,27 @@ def api_status():
 def execute_command():
     try:
         data = request.get_json() or {}
+        # Accept the full command string (may include inline --flags)
         command = data.get('command', 'help')
-        args = data.get('args', {})
-        user_id = data.get('user_id')
+
+        # args/kwargs from body (legacy callers); new executor embeds them in command string
+        args = data.get('args') or data.get('kwargs') or {}
+
+        # Resolve user_id: prefer explicit body field, then decode Bearer JWT
+        user_id = data.get('user_id') or None
+        if not user_id:
+            auth_header = request.headers.get('Authorization', '')
+            if auth_header.startswith('Bearer '):
+                token = auth_header[7:]
+                try:
+                    import jwt as _jwt
+                    secret = __import__('os').getenv('JWT_SECRET', '')
+                    if secret:
+                        payload = _jwt.decode(token, secret, algorithms=['HS256', 'HS512'])
+                        user_id = payload.get('user_id') or payload.get('sub')
+                except Exception:
+                    pass  # invalid/expired token — user_id stays None
+
         result = dispatch_command(command, args, user_id)
         return jsonify(result)
     except Exception as e:
