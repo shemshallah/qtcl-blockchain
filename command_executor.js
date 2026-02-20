@@ -49,10 +49,20 @@ class QTCLCommandExecutor {
      *
      * Handles:
      *   category/command      → category-command   (slash → hyphen)
-     *   category-command      → as-is
-     *   --key=value           → kwargs.key = value
-     *   --bool-flag           → kwargs.bool_flag = true
-     *   positionalArg         → args array
+     *   category-command      → as-is (preserves internal hyphens)
+     *   help-pq              → as-is (category-subcategory supported)
+     *   --key=value          → kwargs.key = value
+     *   --key value          → kwargs.key = value (if value doesn't start with --)
+     *   --bool-flag          → kwargs.bool_flag = true (no value = boolean)
+     *   -v                   → kwargs.v = true (short flags)
+     *   -abc                 → kwargs.a = true, kwargs.b = true, kwargs.c = true (chained)
+     *   positionalArg        → args array
+     *
+     * Examples:
+     *   "oracle-price --symbol=BTCUSD --verbose"
+     *   "help-pq"
+     *   "block-details --block=42 --format=json"
+     *   "transaction-list --limit=20 --pending"
      *
      * @param {string} raw  e.g. "oracle-price --symbol=BTCUSD --verbose"
      * @returns {{ command: string, args: string[], kwargs: Object }}
@@ -62,19 +72,40 @@ class QTCLCommandExecutor {
         if (!tokens.length) return { command: '', args: [], kwargs: {} };
 
         // Normalise slash → hyphen in command name only
+        // IMPORTANT: Preserve internal hyphens! (help-pq must stay help-pq, not help_pq)
         const command = tokens[0].toLowerCase().replace(/\//g, '-');
         const args    = [];
         const kwargs  = {};
 
         for (let i = 1; i < tokens.length; i++) {
             const tok = tokens[i];
-            // --key=value  or  --key (boolean flag)
-            const flagMatch = tok.match(/^--([a-zA-Z0-9_-]+)(?:=(.+))?$/);
+            
+            // Try to match long flags: --key=value or --key
+            const flagMatch = tok.match(/^--([a-zA-Z0-9_-]+)(?:=(.*))?$/);
             if (flagMatch) {
-                // Normalise key: hyphens → underscores to match Python flag names
+                // Normalise key: hyphens → underscores for Python compatibility
+                // But preserve if user explicitly used underscores
                 const key = flagMatch[1].replace(/-/g, '_');
-                kwargs[key] = flagMatch[2] !== undefined ? flagMatch[2] : true;
-            } else {
+                const value = flagMatch[2];
+                
+                if (value !== undefined) {
+                    // --key=value (includes --key= with empty value)
+                    kwargs[key] = value;
+                } else {
+                    // --key (no value) → boolean flag
+                    kwargs[key] = true;
+                }
+            }
+            // Try to match short flags: -x or -abc (multiple short flags)
+            else if (tok.match(/^-[a-zA-Z0-9]+$/) && !tok.match(/^--/)) {
+                const shortFlags = tok.slice(1);
+                for (const char of shortFlags) {
+                    // Each character is a separate boolean flag
+                    kwargs[char] = true;
+                }
+            }
+            else {
+                // Positional argument (doesn't start with -)
                 args.push(tok);
             }
         }
@@ -88,22 +119,45 @@ class QTCLCommandExecutor {
      * back into one string — this is the most robust approach regardless of
      * which kwargs the specific handler reads.
      *
-     * @param {string} command  hyphen-command name
+     * Handles:
+     *   - Positional args (inserted before flags)
+     *   - Key=value flags (--key=value)
+     *   - Boolean flags (--key with no value)
+     *   - Empty string values (--key= is preserved)
+     *   - Hyphenated flag names (converted from underscores)
+     *
+     * @param {string} command  hyphen-command name (e.g., "help-pq")
      * @param {string[]} args   positional args
-     * @param {Object} kwargs   flag map
-     * @returns {string}        e.g. "oracle-price --symbol=BTCUSD"
+     * @param {Object} kwargs   flag map {key: value}
+     * @returns {string}        e.g. "oracle-price --symbol=BTCUSD --verbose"
      */
     buildCommandString(command, args, kwargs) {
         let parts = [command];
+        
         // Positional args first (handlers read them from args[])
-        parts = parts.concat(args);
-        // Then flags
+        if (Array.isArray(args) && args.length > 0) {
+            parts = parts.concat(args);
+        }
+        
+        // Then flags: convert underscores back to hyphens for CLI convention
         for (const [k, v] of Object.entries(kwargs)) {
             if (v === true || v === '') {
-                parts.push(`--${k}`);
+                // Boolean flag or empty value flag
+                // Convert underscores to hyphens: bool_flag → bool-flag
+                const flagName = k.replace(/_/g, '-');
+                if (v === '') {
+                    parts.push(`--${flagName}=`);
+                } else {
+                    parts.push(`--${flagName}`);
+                }
             } else if (v !== false && v !== null && v !== undefined) {
-                parts.push(`--${k}=${v}`);
+                // Value flag
+                const flagName = k.replace(/_/g, '-');
+                // Escape value if it contains spaces
+                const safeValue = String(v).includes(' ') ? `"${v}"` : String(v);
+                parts.push(`--${flagName}=${safeValue}`);
             }
+            // Silently skip false/null/undefined values
         }
         return parts.join(' ');
     }
@@ -111,20 +165,29 @@ class QTCLCommandExecutor {
     // ── EXECUTE ──────────────────────────────────────────────────────────────
 
     /**
-     * Execute a parsed command.
+     * Execute a parsed command with full diagnostics.
      *
-     * @param {string} command     Hyphen-separated command name
+     * @param {string} command     Hyphen-separated command name (e.g., "help-pq")
      * @param {string[]} args      Positional arguments
      * @param {Object} kwargs      Flag key→value map
      * @returns {Promise<Object>}  { status, result?, error?, suggestions?, raw }
      */
     async execute(command, args = [], kwargs = {}) {
+        // Normalize args and kwargs
+        const normalizedArgs = Array.isArray(args) ? args : [];
+        const normalizedKwargs = (typeof kwargs === 'object' && kwargs !== null) ? kwargs : {};
+        
         // Build the canonical command string (backend parses inline flags)
-        const cmdStr = this.buildCommandString(command, args, kwargs);
+        const cmdStr = this.buildCommandString(command, normalizedArgs, normalizedKwargs);
         const t0 = performance.now();
 
-        console.log(`[Executor] → ${cmdStr}`, { args, kwargs });
-        this.emit('before-execute', { command, args, kwargs, cmdStr });
+        console.log(`[Executor exec] → "${cmdStr}"`, { 
+            command,
+            args: normalizedArgs,
+            kwargs: normalizedKwargs,
+            parsed_from: cmdStr
+        });
+        this.emit('before-execute', { command, args: normalizedArgs, kwargs: normalizedKwargs, cmdStr });
 
         const token = this.getToken();
         const headers = { 'Content-Type': 'application/json' };
@@ -143,7 +206,8 @@ class QTCLCommandExecutor {
             });
 
             const data = await resp.json().catch(() => ({
-                status: 'error', error: 'Invalid JSON from server'
+                status: 'error',
+                error: 'Invalid JSON from server'
             }));
 
             const duration = Math.round(performance.now() - t0);
@@ -164,6 +228,7 @@ class QTCLCommandExecutor {
                     status:      'error',
                     error:       data.error || `HTTP ${resp.status}`,
                     suggestions: data.suggestions || [],
+                    hint:        data.hint || null,
                     command:     cmdStr,
                     duration,
                     raw:         data
@@ -185,22 +250,46 @@ class QTCLCommandExecutor {
         this.history.unshift({ command: cmdStr, timestamp: new Date(), result, duration: result.duration });
         if (this.history.length > this.maxHistory) this.history.length = this.maxHistory;
 
-        console.log(`[Executor] ← ${cmdStr} (${result.duration}ms) ${result.status}`, result);
+        console.log(`[Executor result] ← "${cmdStr}" (${result.duration}ms) ${result.status}`, result);
         this.emit('after-execute', result);
         return result;
     }
 
     /**
      * Parse a raw string then execute — the main entry point for the terminal.
+     * This is the user-facing method that's called from the terminal UI.
      *
-     * @param {string} rawString  e.g. "oracle-price --symbol=BTCUSD"
-     * @returns {Promise<Object>}
+     * @param {string} rawString  e.g. "oracle-price --symbol=BTCUSD" or "help-pq"
+     * @returns {Promise<Object>} {status, result, error, command, duration}
      */
     async executeRaw(rawString) {
-        const { command, args, kwargs } = this.parse(rawString);
-        if (!command) {
-            return { status: 'error', error: 'Empty command', command: '' };
+        const trimmed = rawString.trim();
+        
+        if (!trimmed) {
+            return {
+                status: 'error',
+                error: 'Empty command',
+                command: '',
+                suggestions: ['help', 'help-commands', 'help-category'],
+                duration: 0
+            };
         }
+        
+        // Parse the raw input
+        const { command, args, kwargs } = this.parse(trimmed);
+        
+        if (!command) {
+            return {
+                status: 'error',
+                error: 'Could not parse command',
+                command: '',
+                duration: 0
+            };
+        }
+        
+        // Log parse results for debugging
+        console.log(`[Executor parseRaw] Parsed: command="${command}", args=${JSON.stringify(args)}, kwargs=${JSON.stringify(kwargs)}`);
+        
         return this.execute(command, args, kwargs);
     }
 
