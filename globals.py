@@ -99,6 +99,7 @@ COMMAND_REGISTRY = {
     'system-metrics': {'category': 'system', 'description': 'Performance metrics', 'auth_required': False},
     'help': {'category': 'help', 'description': 'General help & command syntax', 'auth_required': False},
     'help-commands': {'category': 'help', 'description': 'List all registered commands', 'auth_required': False},
+    'help-pq': {'category': 'help', 'description': 'Post-quantum cryptography help & reference', 'auth_required': False},
     'help-category': {'category': 'help', 'description': 'Show commands in category', 'auth_required': False},
     'help-command': {'category': 'help', 'description': 'Get detailed help for command', 'auth_required': False},
 }
@@ -634,6 +635,9 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
 
     if cmd == 'help-command':
         return _help_command(kwargs)
+    
+    if cmd == 'help-pq':
+        return _help_pq(kwargs)
 
     # ══════════════════════════════════════════
     # SYSTEM
@@ -1086,6 +1090,45 @@ def _help_command(kwargs: dict) -> dict:
         'command': canonical, 'category': info['category'],
         'description': info['description'], 'auth_required': info.get('auth_required', False),
     }}
+
+
+def _help_pq(kwargs: dict) -> dict:
+    """Post-quantum cryptography reference and help."""
+    detailed = kwargs.get('detailed', kwargs.get('verbose', False))
+    topic = kwargs.get('topic', kwargs.get('_args', [''])[0] if kwargs.get('_args') else '')
+    
+    pq_content = {
+        'status': 'success',
+        'result': {
+            'title': 'Post-Quantum Cryptography (PQC) Reference',
+            'description': 'QTCL v5.0 uses NIST-standardized post-quantum cryptographic algorithms',
+            'algorithms': {
+                'signature': {'name': 'ML-DSA (CRYSTALS-Dilithium)', 'description': 'Lattice-based digital signature'},
+                'kem': {'name': 'ML-KEM (CRYSTALS-Kyber)', 'description': 'Lattice-based key encapsulation'},
+                'hash': {'name': 'SHA3-256 / SHA3-512', 'description': 'Quantum-resistant hash functions'}
+            },
+            'commands': [
+                'pq-key-gen — Generate new HLWE-256 keypair',
+                'pq-key-list — List post-quantum keys in vault',
+                'quantum-pq-rotate — Perform PQ key rotation',
+                'pq-genesis-verify — Verify genesis block PQC material'
+            ],
+            'features': [
+                'Quantum-resistant signatures on all transactions',
+                'Post-quantum encrypted communications',
+                'Key rotation with finality proofs',
+                'NIST SP 800-208 Migration Guidelines compliance'
+            ]
+        }
+    }
+    
+    if detailed or topic:
+        if topic == 'algorithms':
+            return {'status': 'success', 'result': pq_content['result']['algorithms']}
+        elif topic == 'commands':
+            return {'status': 'success', 'result': pq_content['result']['commands']}
+    
+    return pq_content
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # POST-QUANTUM CRYPTOGRAPHY

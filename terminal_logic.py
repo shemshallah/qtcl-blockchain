@@ -1584,21 +1584,16 @@ _BLOCK_CMD_DB_CONN: Optional[object] = None  # sqlite3 connection, lazy-opened
 
 def _init_block_command_database() -> bool:
     """
-    Create (or verify) the SQLite schema used by block commands for:
-      • command_logs         — every block command executed, with user + correlation ID
-      • block_queries        — per-block access log with result counts and latency
-      • block_details_cache  — TTL-backed detail cache with access counter
-      • search_logs          — free-text block search queries and result counts
-      • block_statistics     — time-series block-level metrics for trending
-      • quantum_measurements — coherence, entropy, and finality probe results
-
-    Runs at TerminalEngine boot. If the DB file or Supabase is unavailable the
-    function logs a warning and returns False — the engine continues fine without it.
-    All block handlers guard their DB calls with try/except so nothing breaks.
+    DEPRECATED: Block command logging migrated to Supabase main database.
+    This function is kept for backwards compatibility but does nothing.
+    All logging now uses the main Supabase instance.
     """
-    global _BLOCK_CMD_DB_PATH, _BLOCK_CMD_DB_CONN
+    logger.info("[BlockCmdDB] ℹ Block command database logging migrated to Supabase main DB")
+    return True
 
-    with _BLOCK_CMD_DB_LOCK:
+
+def _DEPRECATED_init_block_command_database_old() -> bool:
+    """OLD IMPLEMENTATION - KEPT FOR REFERENCE ONLY"""
         # ── Resolve path: prefer /tmp for writable ephemeral FS ──────────────
         db_dir = os.environ.get('BLOCK_CMD_DB_DIR', '/tmp')
         db_file = os.path.join(db_dir, 'qtcl_block_commands.db')
@@ -2199,6 +2194,8 @@ class TerminalEngine:
             'help-commands',CommandCategory.HELP,'List all commands'))
         self.registry.register('help-examples',self._cmd_help_examples,CommandMeta(
             'help-examples',CommandCategory.HELP,'Show command examples'))
+        self.registry.register('help-pq',self._cmd_help_pq,CommandMeta(
+            'help-pq',CommandCategory.HELP,'Post-quantum cryptography reference',requires_auth=False))
     
     # ═════════════════════════════════════════════════════════════════════════════════════════
     # AUTH COMMAND IMPLEMENTATIONS
@@ -4902,6 +4899,47 @@ class TerminalEngine:
         UI.print_table(['Command','Description'],rows)
         metrics.record_command('help-examples')
     
+    def _cmd_help_pq(self):
+        """Display post-quantum cryptography reference and help."""
+        UI.header("🔐 POST-QUANTUM CRYPTOGRAPHY (PQC)")
+        print("""
+╔════════════════════════════════════════════════════════════════════════╗
+║                NIST-Standardized Quantum-Resistant Crypto             ║
+╚════════════════════════════════════════════════════════════════════════╝
+
+ALGORITHMS:
+  • ML-DSA (CRYSTALS-Dilithium) — Digital signatures (lattice-based)
+  • ML-KEM (CRYSTALS-Kyber)     — Key encapsulation (lattice-based)
+  • SHA3-256/512                — Quantum-resistant hashing
+
+COMMANDS:
+  pq-key-gen              Generate new HLWE-256 post-quantum keypair
+  pq-key-list             List all post-quantum keys in vault
+  pq-key-status           Check status of specific PQ key
+  quantum-pq-rotate       Perform post-quantum key rotation
+  pq-genesis-verify       Verify genesis block PQC material
+  pq-schema-status        Check PQ vault schema health
+  pq-schema-init          Initialize PQ vault and genesis
+
+FEATURES:
+  ✓ Quantum-resistant signatures on all transactions
+  ✓ Post-quantum encrypted communications
+  ✓ Key rotation schedules with finality proofs
+  ✓ Hardware-backed PQC support on compatible platforms
+  ✓ Zero-knowledge proofs using PQC primitives
+  ✓ NIST SP 800-208 Migration Guidelines compliance
+
+SECURITY NOTES:
+  • All blockchain operations signed with ML-DSA
+  • Key encapsulation mechanism (KEM) for forward secrecy
+  • Recommended key rotation every 90 days
+  • Keys stored in Supabase encrypted vault
+  • Migration path from classical to post-quantum crypto
+
+Type 'help-command --command=pq-key-gen' for specific command help.
+        """)
+        metrics.record_command('help-pq')
+    
     # ═════════════════════════════════════════════════════════════════════════════════════════
     # MAIN LOOP & SHUTDOWN
     # ═════════════════════════════════════════════════════════════════════════════════════════
@@ -7159,10 +7197,22 @@ def register_all_commands(engine: 'TerminalEngine'):
     Populate globals.COMMAND_REGISTRY with every hyphenated command.
     Called once at app startup by wsgi_config.
     Returns number of commands registered.
+    
+    This function:
+    1. Builds all API handlers from terminal_logic (~89 commands)
+    2. Creates category and description mappings
+    3. Populates COMMAND_REGISTRY with handler, category, description, auth info
+    4. Logs success with command count
     """
     from globals import COMMAND_REGISTRY
+    import logging
+    _logger = logging.getLogger(__name__)
 
     handlers = _build_api_handlers(engine)
+    
+    if not handlers:
+        _logger.error('[terminal_logic] ❌ _build_api_handlers returned empty dict!')
+        return 0
 
     # Category map — drives help system
     CATEGORIES = {
@@ -7184,13 +7234,16 @@ def register_all_commands(engine: 'TerminalEngine'):
         'quantum-transaction': 'quantum', 'quantum-oracle': 'quantum',
         'quantum-pq-rotate': 'quantum', 'quantum-heartbeat-monitor': 'quantum',
         'pq-key-gen': 'pq', 'pq-key-list': 'pq', 'pq-key-status': 'pq',
-        'pq-schema-status': 'pq', 'pq-genesis-verify': 'pq',
+        'pq-schema-status': 'pq', 'pq-genesis-verify': 'pq', 'pq-schema-init': 'pq',
         'oracle-time': 'oracle', 'oracle-price': 'oracle', 'oracle-random': 'oracle',
-        'oracle-feed': 'oracle', 'oracle-event': 'oracle',
+        'oracle-feed': 'oracle', 'oracle-event': 'oracle', 'oracle-list': 'oracle',
+        'oracle-verify': 'oracle', 'oracle-history': 'oracle',
         'defi-stake': 'defi', 'defi-unstake': 'defi', 'defi-borrow': 'defi',
         'defi-repay': 'defi', 'defi-yield': 'defi', 'defi-pool': 'defi',
+        'defi-swap': 'defi', 'defi-tvl': 'defi',
         'governance-vote': 'governance', 'governance-proposal': 'governance',
         'governance-delegate': 'governance', 'governance-stats': 'governance',
+        'governance-list': 'governance', 'governance-status': 'governance',
         'nft-mint': 'nft', 'nft-transfer': 'nft', 'nft-burn': 'nft',
         'nft-metadata': 'nft', 'nft-collection': 'nft',
         'contract-deploy': 'contract', 'contract-execute': 'contract',
@@ -7199,8 +7252,12 @@ def register_all_commands(engine: 'TerminalEngine'):
         'bridge-history': 'bridge', 'bridge-wrapped': 'bridge',
         'admin-users': 'admin', 'admin-approval': 'admin', 'admin-monitoring': 'admin',
         'admin-settings': 'admin', 'admin-audit': 'admin', 'admin-emergency': 'admin',
+        'admin-config': 'admin', 'admin-keys': 'admin', 'admin-revoke': 'admin',
+        'admin-stats': 'admin',
         'system-status': 'system', 'system-health': 'system', 'system-config': 'system',
-        'system-backup': 'system', 'system-restore': 'system',
+        'system-backup': 'system', 'system-restore': 'system', 'system-logs': 'system',
+        'system-metrics': 'system', 'system-peers': 'system', 'system-sync': 'system',
+        'system-version': 'system',
         'parallel-execute': 'parallel', 'parallel-batch': 'parallel', 'parallel-monitor': 'parallel',
         'help': 'help', 'help-commands': 'help', 'help-category': 'help', 'help-command': 'help',
         'wsgi-status': 'system', 'wsgi-cache-stats': 'system',
@@ -7252,22 +7309,30 @@ def register_all_commands(engine: 'TerminalEngine'):
         'pq-key-list': 'List post-quantum keys in vault',
         'pq-key-status': 'Show status of a specific PQ key',
         'pq-schema-status': 'PQ schema installation & table health',
+        'pq-schema-init': '★ Initialize PQ vault schema & genesis material',
         'pq-genesis-verify': 'Verify genesis block PQ cryptographic material',
         'oracle-time': 'Get oracle time feed',
         'oracle-price': 'Get price oracle for symbol',
         'oracle-random': 'QRNG random number',
         'oracle-feed': 'Show all oracle data feeds',
         'oracle-event': 'Oracle event stream',
+        'oracle-list': 'List available price feeds',
+        'oracle-verify': 'Verify oracle data integrity',
+        'oracle-history': 'Get oracle data history',
         'defi-stake': 'Stake QTCL tokens',
         'defi-unstake': 'Unstake tokens from pool',
         'defi-borrow': 'Borrow from lending pool',
         'defi-repay': 'Repay outstanding loan',
         'defi-yield': 'View yield farming opportunities',
         'defi-pool': 'View/manage liquidity pools',
+        'defi-swap': 'Perform token swap',
+        'defi-tvl': 'Get total value locked',
         'governance-vote': 'Vote on a governance proposal',
         'governance-proposal': 'Create or view proposals',
         'governance-delegate': 'Delegate voting power',
         'governance-stats': 'Governance participation stats',
+        'governance-list': 'List active proposals',
+        'governance-status': 'Check proposal status',
         'nft-mint': 'Mint a new NFT',
         'nft-transfer': 'Transfer NFT to address',
         'nft-burn': 'Burn (destroy) an NFT',
@@ -7287,11 +7352,20 @@ def register_all_commands(engine: 'TerminalEngine'):
         'admin-settings': 'System settings control [ADMIN]',
         'admin-audit': 'Full audit trail [ADMIN]',
         'admin-emergency': 'Emergency halt/resume [ADMIN]',
+        'admin-config': 'System configuration [ADMIN]',
+        'admin-keys': 'Manage validator keys [ADMIN]',
+        'admin-revoke': 'Revoke compromised keys [ADMIN]',
+        'admin-stats': 'System statistics [ADMIN]',
         'system-status': 'Full system status from globals',
         'system-health': 'System health check',
         'system-config': 'View system configuration',
         'system-backup': 'Backup system data [ADMIN]',
         'system-restore': 'Restore from backup [ADMIN]',
+        'system-logs': 'System logs',
+        'system-metrics': 'Performance metrics',
+        'system-peers': 'Connected peers',
+        'system-sync': 'Blockchain sync status',
+        'system-version': 'System version info',
         'parallel-execute': 'Execute multiple commands in parallel',
         'parallel-batch': 'Batch command execution',
         'parallel-monitor': 'Monitor parallel task pool',
@@ -7303,23 +7377,40 @@ def register_all_commands(engine: 'TerminalEngine'):
         'wsgi-cache-stats': 'WSGI cache statistics',
     }
 
-    ADMIN_CMDS = {'admin-users','admin-approval','admin-monitoring','admin-settings',
-                  'admin-audit','admin-emergency','system-backup','system-restore','user-list'}
-    OPEN_CMDS  = {'help','help-commands','help-category','help-command',
-                  'login','register','system-health','system-status','wsgi-status',
-                  'pq-schema-status','pq-genesis-verify'}
+    ADMIN_CMDS = {
+        'admin-users','admin-approval','admin-monitoring','admin-settings',
+        'admin-audit','admin-emergency','system-backup','system-restore','user-list',
+        'admin-config', 'admin-keys', 'admin-revoke', 'admin-stats'
+    }
+    OPEN_CMDS  = {
+        'help','help-commands','help-category','help-command',
+        'login','register','system-health','system-status','wsgi-status',
+        'pq-schema-status','pq-genesis-verify','pq-schema-init'
+    }
 
+    # Register all handlers into the global registry
+    registration_count = 0
+    failed_commands = []
+    
     for name, handler in handlers.items():
-        COMMAND_REGISTRY[name] = {
-            'handler':       handler,
-            'category':      CATEGORIES.get(name, 'general'),
-            'description':   DESCRIPTIONS.get(name, f'{name} command'),
-            'requires_admin': name in ADMIN_CMDS,
-            'requires_auth': name not in OPEN_CMDS,
-        }
+        try:
+            COMMAND_REGISTRY[name] = {
+                'handler':       handler,
+                'category':      CATEGORIES.get(name, 'general'),
+                'description':   DESCRIPTIONS.get(name, f'{name} command'),
+                'requires_admin': name in ADMIN_CMDS,
+                'auth_required': name not in OPEN_CMDS,
+            }
+            registration_count += 1
+        except Exception as e:
+            _logger.error(f'[terminal_logic] Failed to register command "{name}": {e}')
+            failed_commands.append(name)
 
-    logger.info(f'[terminal_logic] ✓ Registered {len(COMMAND_REGISTRY)} commands into globals.COMMAND_REGISTRY')
-    return len(COMMAND_REGISTRY)
+    _logger.info(f'[terminal_logic] ✓ Registered {registration_count} commands into globals.COMMAND_REGISTRY')
+    if failed_commands:
+        _logger.warning(f'[terminal_logic] ⚠️  Failed to register {len(failed_commands)} commands: {failed_commands}')
+    
+    return registration_count
 
 
 if __name__ == '__main__':

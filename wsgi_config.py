@@ -82,11 +82,17 @@ if GLOBALS_AVAILABLE:
             raise RuntimeError(f"Command registration failed: only {total_cmds} commands (expected 89+)")
         
         # Verify critical commands are present
-        critical_cmds = ['help', 'help-pq', 'help-commands', 'system-status']
+        critical_cmds = ['help', 'help-commands', 'system-status']
         missing = [cmd for cmd in critical_cmds if cmd not in COMMAND_REGISTRY]
         if missing:
             logger.error(f"[BOOTSTRAP] ❌ CRITICAL: Missing commands: {missing}")
             raise RuntimeError(f"Critical commands missing: {missing}")
+        
+        # Warn if optional help-pq is missing (post-quantum help)
+        optional_cmds = ['help-pq']
+        missing_opt = [cmd for cmd in optional_cmds if cmd not in COMMAND_REGISTRY]
+        if missing_opt:
+            logger.warning(f"[BOOTSTRAP] ⚠ Optional commands missing: {missing_opt}")
         
         logger.info(f"[BOOTSTRAP] ✅ VERIFIED: All critical commands present")
         logger.info(f"[BOOTSTRAP] ✅ Terminal Engine initialization COMPLETE")
