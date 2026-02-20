@@ -337,20 +337,30 @@ def commands():
             logger.warning(f"[/api/commands] Terminal engine init failed (non-fatal): {str(e)[:60]}")
             # Fall through - COMMAND_REGISTRY is already populated from globals.py
         
+        # Build serializable command list (filter out handler functions)
+        serializable_commands = {}
+        for cmd_name, cmd_info in COMMAND_REGISTRY.items():
+            # Copy all fields EXCEPT 'handler' (which is a function, not JSON serializable)
+            serializable_commands[cmd_name] = {
+                k: v for k, v in cmd_info.items() 
+                if k != 'handler' and not callable(v)
+            }
+        
         # Always return command registry (populated at module load time)
         return jsonify({
-            'total': len(COMMAND_REGISTRY),
-            'commands': dict(COMMAND_REGISTRY),
+            'total': len(serializable_commands),
+            'commands': serializable_commands,
             'status': 'success'
         })
     except Exception as e:
         logger.error(f"[/api/commands] Unexpected error: {e}", exc_info=True)
+        # Return empty commands dict in case of catastrophic failure
         return jsonify({
-            'total': len(COMMAND_REGISTRY),
-            'commands': dict(COMMAND_REGISTRY),
-            'error': str(e),
-            'status': 'degraded'
-        }), 200  # Return 200 even with error - commands are still available
+            'total': 0,
+            'commands': {},
+            'status': 'error',
+            'error': str(e)
+        }), 200  # Return 200 even with error
 
 @app.route('/api/genesis', methods=['GET'])
 def genesis():
