@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
 
+# ═════════════════════════════════════════════════════════════════════════════════════
+# ENTERPRISE-GRADE LOGGING INITIALIZATION
+# MUST be first to prevent NameError: name 'logger' is not defined
+# ═════════════════════════════════════════════════════════════════════════════════════
+import logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # GLOBALS INTEGRATION - Unified State Management
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -146,7 +155,6 @@ except ImportError:
     GLOBALS=DummyGLOBALS()
 
 getcontext().prec=32
-logger=logging.getLogger(__name__)
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════
 # SECTION 1: GLOBAL QUANTUM ENGINE STATE & CONFIGURATION
