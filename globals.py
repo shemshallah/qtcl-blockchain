@@ -2,36 +2,28 @@
 """
 ╔════════════════════════════════════════════════════════════════════════════════════════════════╗
 ║                                                                                                ║
-║        🌟 GLOBALS.PY v5.0 - GLOBAL ARCHITECTURE MASTER WITH HIERARCHICAL LOGIC 🌟             ║
+║   🌟 GLOBALS.PY v5.1 - MASTER GLOBAL STATE WITH PQ-CRYPTOGRAPHY AS SOURCE OF TRUTH 🌟        ║
 ║                                                                                                ║
-║             Single source of truth for entire QTCL application - EXPANDED                     ║
-║    All quantum, blockchain, database, defi, oracle, ledger, auth state centralized here      ║
-║   5-level hierarchical logic: Root → Logic → SubLogic → Sub²Logic → Sub³Logic → Sub⁴Logic   ║
-║     Thread-safe, lazy-initialized, fully instrumented, quantum-coherent & monitorable        ║
-║      Every function mapped, every module integrated, every global utilized maximally         ║
-║          Original 542 lines EXPANDED to 1200+ lines with full architecture                   ║
+║  Single source of truth for entire QTCL application with comprehensive PQ integration        ║
+║  All quantum, blockchain, database, defi, oracle, ledger, auth, and PQC state here          ║
+║  5-level hierarchical logic: Root → Logic → SubLogic → Sub²Logic → Sub³Logic → Sub⁴Logic   ║
+║  Thread-safe, lazy-initialized, fully instrumented, quantum-coherent & monitorable          ║
+║  PQCSystem as cryptographic foundation for all block creation and transaction signing       ║
 ║                                                                                                ║
 ╚════════════════════════════════════════════════════════════════════════════════════════════════╝
 """
 
-import threading
-import logging
-import time
-import json
-import uuid
-import secrets
-import hashlib
-import queue
-from typing import Optional, Dict, Any, List, Callable, Set, Tuple
-from dataclasses import dataclass, field
+import threading,logging,time,json,uuid,secrets,hashlib,queue,traceback,os
+from typing import Optional,Dict,Any,List,Callable,Set,Tuple
+from dataclasses import dataclass,field,asdict
 from enum import Enum
-from collections import defaultdict, deque
-from datetime import datetime, timedelta, timezone
-from functools import wraps, lru_cache
+from collections import defaultdict,deque
+from datetime import datetime,timedelta,timezone
+from functools import wraps,lru_cache
 from contextlib import contextmanager
 from decimal import Decimal
 
-logger = logging.getLogger(__name__)
+logger=logging.getLogger(__name__)
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 # ENUMS & CONSTANTS (LEVEL 0)
@@ -174,6 +166,22 @@ class BlockchainState:
     last_block_time: Optional[datetime] = None
     consensus_mechanism: str = "QTCL_COHERENCE"
     
+    # ★ CRITICAL FIX: Add missing consensus & difficulty attributes
+    consensus_state: str = "active"
+    network_hashrate: float = 0.0
+    difficulty: float = 1.0
+    total_difficulty: float = 1.0
+    quantum_entropy_avg: float = 0.5
+    temporal_coherence: float = 0.9
+    finalized_blocks: int = 0
+    active_validators: int = 0
+    fork_depth: int = 0
+    
+    # ★ PQ cryptography metrics
+    pq_signatures_verified: int = 0
+    pq_keys_active: int = 0
+    last_pq_verified_block: int = 0
+    
     def add_transaction(self, tx: Dict[str, Any]):
         """Add pending transaction"""
         self.pending_transactions.append(tx)
@@ -186,6 +194,17 @@ class BlockchainState:
         self.chain_height = len(self.chain)
         self.total_blocks += 1
         self.last_block_time = datetime.utcnow()
+        
+        # Update metrics from block if available
+        if 'consensus_state' in block:
+            self.consensus_state = block['consensus_state']
+        if 'difficulty' in block:
+            self.difficulty = float(block['difficulty'])
+        if 'entropy_score' in block:
+            self.quantum_entropy_avg = (self.quantum_entropy_avg + float(block['entropy_score'])) / 2
+        if 'pq_signature' in block and block['pq_signature']:
+            self.pq_signatures_verified += 1
+            self.last_pq_verified_block = len(self.chain) - 1
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 # DEFI STATE (NEW - DEEP INTEGRATION)
@@ -245,6 +264,15 @@ class LedgerState:
         self.total_entries += 1
         self.last_entry_time = datetime.utcnow()
 
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# DATABASE STATE (ORIGINAL)
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# POST-QUANTUM CRYPTOGRAPHY STATE (PQC - CORE CRYPTOGRAPHIC FOUNDATION)
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+@dataclass
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 # DATABASE STATE (ORIGINAL)
 # ════════════════════════════════════════════════════════════════════════════════════════════════

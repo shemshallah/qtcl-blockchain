@@ -2761,6 +2761,73 @@ SCHEMA_DEFINITIONS = {
     """,
     
     # =======================================================================
+    # SECTION 1b: POST-QUANTUM CRYPTOGRAPHY & KEY MANAGEMENT
+    # =======================================================================
+    
+    'pq_key_store': """
+        CREATE TABLE IF NOT EXISTS pq_key_store (
+            key_id UUID PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+            pseudoqubit_id INTEGER NOT NULL,
+            encrypted_privkey BYTEA NOT NULL,
+            public_key_json JSONB NOT NULL,
+            metadata_json JSONB,
+            fingerprint VARCHAR(255) NOT NULL,
+            status VARCHAR(50) DEFAULT 'active',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            expires_at TIMESTAMP WITH TIME ZONE,
+            revoked_at TIMESTAMP WITH TIME ZONE,
+            revocation_proof BYTEA,
+            entropy_sources TEXT[],
+            key_type VARCHAR(50) DEFAULT 'master',
+            purpose VARCHAR(50),
+            UNIQUE(user_id, pseudoqubit_id, purpose)
+        )
+    """,
+    
+    'pq_key_rotations': """
+        CREATE TABLE IF NOT EXISTS pq_key_rotations (
+            rotation_id BIGSERIAL PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+            old_key_id UUID REFERENCES pq_key_store(key_id),
+            new_key_id UUID REFERENCES pq_key_store(key_id),
+            rotation_type VARCHAR(50),
+            rotation_reason VARCHAR(255),
+            timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            performed_by TEXT
+        )
+    """,
+    
+    'pq_signatures': """
+        CREATE TABLE IF NOT EXISTS pq_signatures (
+            signature_id BIGSERIAL PRIMARY KEY,
+            message_hash VARCHAR(255) NOT NULL,
+            signature_data TEXT NOT NULL,
+            signer_key_id UUID REFERENCES pq_key_store(key_id),
+            signer_user_id TEXT REFERENCES users(user_id) ON DELETE SET NULL,
+            signature_timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            verified BOOLEAN DEFAULT FALSE,
+            verified_at TIMESTAMP WITH TIME ZONE,
+            verification_error TEXT
+        )
+    """,
+    
+    'pq_encryption_sessions': """
+        CREATE TABLE IF NOT EXISTS pq_encryption_sessions (
+            session_id UUID PRIMARY KEY,
+            recipient_user_id TEXT REFERENCES users(user_id) ON DELETE CASCADE,
+            sender_user_id TEXT REFERENCES users(user_id) ON DELETE SET NULL,
+            encapsulated_key BYTEA NOT NULL,
+            ephemeral_public_key JSONB,
+            session_secret BYTEA,
+            encryption_algorithm VARCHAR(100) DEFAULT 'HLWE-256',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            expires_at TIMESTAMP WITH TIME ZONE,
+            used_for_tx_count INTEGER DEFAULT 0
+        )
+    """,
+    
+    # =======================================================================
     # SECTION 2: HYPERBOLIC GEOMETRY & TESSELLATION (6 TABLES)
     # =======================================================================
     
@@ -3231,6 +3298,8 @@ SCHEMA_DEFINITIONS = {
             transactions INTEGER DEFAULT 0,
             validator TEXT,
             validator_signature TEXT,
+            pq_signature TEXT,
+            pq_key_fingerprint VARCHAR(255),
             quantum_state_hash VARCHAR(255),
             entropy_score DOUBLE PRECISION DEFAULT 0.0,
             floquet_cycle INTEGER DEFAULT 0,
@@ -3253,7 +3322,9 @@ SCHEMA_DEFINITIONS = {
             quantum_validation_status VARCHAR(50) DEFAULT 'unvalidated',
             quantum_measurements_count INTEGER DEFAULT 0,
             quantum_proof_version INTEGER DEFAULT 3,
+            pq_validation_status VARCHAR(50) DEFAULT 'unsigned',
             validated_at TIMESTAMP WITH TIME ZONE,
+            pq_verified_at TIMESTAMP WITH TIME ZONE,
             validation_entropy_avg NUMERIC(5,4),
             extra_data TEXT,
             nonce VARCHAR(255),
@@ -3294,6 +3365,12 @@ SCHEMA_DEFINITIONS = {
             height BIGINT REFERENCES blocks(height),
             block_hash VARCHAR(255),
             transaction_index INTEGER,
+            pq_encrypted_payload BYTEA,
+            pq_encryption_key_id VARCHAR(255),
+            pq_signature TEXT,
+            pq_signer_key_fp VARCHAR(255),
+            pq_verified BOOLEAN DEFAULT FALSE,
+            pq_verified_at TIMESTAMP WITH TIME ZONE,
             quantum_state_hash VARCHAR(255),
             commitment_hash VARCHAR(255),
             entropy_score DOUBLE PRECISION,
@@ -6956,6 +7033,232 @@ except Exception as e:
 # DB_POOL is a canonical alias for the db_manager singleton.
 DB_POOL = db_manager
 
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# BLOCK & TRANSACTION PERSISTENCE WITH PQ CRYPTOGRAPHY
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+def persist_block_with_pq_signature(block_data:Dict,pq_signature:Optional[str]=None,pq_key_fp:Optional[str]=None)->bool:
+	"""Store block in database with PQ cryptographic signature"""
+	try:
+		if db_manager is None:
+			logger.warning("[persist_block_with_pq_signature] db_manager not initialized")
+			return False
+		
+		conn=db_manager.get_connection()
+		if not conn:
+			return False
+		
+		try:
+			cursor=conn.cursor()
+			
+			# Insert block with PQ signature fields
+			insert_sql="""
+				INSERT INTO blocks (
+					height, block_number, block_hash, previous_hash,
+					timestamp, validator, merkle_root, quantum_merkle_root,
+					quantum_entropy, state_root, quantum_proof, nonce,
+					temporal_coherence, status, pq_signature, pq_key_fingerprint,
+					pq_validation_status, created_at
+				) VALUES (
+					%(height)s, %(block_number)s, %(block_hash)s, %(previous_hash)s,
+					%(timestamp)s, %(validator)s, %(merkle_root)s, %(quantum_merkle_root)s,
+					%(quantum_entropy)s, %(state_root)s, %(quantum_proof)s, %(nonce)s,
+					%(temporal_coherence)s, %(status)s, %(pq_signature)s, %(pq_key_fingerprint)s,
+					%(pq_validation_status)s, NOW()
+				)
+			"""
+			
+			params={
+				'height':block_data.get('height',0),
+				'block_number':block_data.get('block_number',0),
+				'block_hash':block_data.get('block_hash',''),
+				'previous_hash':block_data.get('previous_hash',''),
+				'timestamp':int(block_data.get('timestamp',time.time())),
+				'validator':block_data.get('validator',''),
+				'merkle_root':block_data.get('merkle_root',''),
+				'quantum_merkle_root':block_data.get('quantum_merkle_root',''),
+				'quantum_entropy':block_data.get('quantum_entropy',''),
+				'state_root':block_data.get('state_root',''),
+				'quantum_proof':block_data.get('quantum_proof',''),
+				'nonce':block_data.get('nonce',''),
+				'temporal_coherence':float(block_data.get('temporal_coherence',0.9)),
+				'status':block_data.get('status','pending'),
+				'pq_signature':pq_signature or '',
+				'pq_key_fingerprint':pq_key_fp or '',
+				'pq_validation_status':'verified' if pq_signature else 'unsigned'
+			}
+			
+			cursor.execute(insert_sql,params)
+			conn.commit()
+			logger.info(f"[persist_block_with_pq_signature] Block {block_data.get('height')} persisted with PQ signature")
+			return True
+		
+		except Exception as e:
+			conn.rollback()
+			logger.error(f"[persist_block_with_pq_signature] Insert error: {e}")
+			return False
+		
+		finally:
+			cursor.close()
+			db_manager.return_connection(conn)
+	
+	except Exception as e:
+		logger.error(f"[persist_block_with_pq_signature] Connection error: {e}")
+		return False
+
+def persist_pq_encrypted_transaction(tx_data:Dict,encrypted_envelope:Dict)->bool:
+	"""Store encrypted transaction with PQ encryption metadata"""
+	try:
+		if db_manager is None:
+			return False
+		
+		conn=db_manager.get_connection()
+		if not conn:
+			return False
+		
+		try:
+			cursor=conn.cursor()
+			
+			# Insert transaction with PQ encryption
+			insert_sql="""
+				INSERT INTO transactions (
+					tx_id, from_user_id, to_user_id, amount, tx_type, status,
+					pq_encrypted_payload, pq_encryption_key_id, pq_signature,
+					pq_signer_key_fp, pq_verified, created_at
+				) VALUES (
+					%(tx_id)s, %(from_user_id)s, %(to_user_id)s, %(amount)s,
+					%(tx_type)s, %(status)s, %(pq_encrypted_payload)s,
+					%(pq_encryption_key_id)s, %(pq_signature)s, %(pq_signer_key_fp)s,
+					%(pq_verified)s, NOW()
+				)
+			"""
+			
+			params={
+				'tx_id':tx_data.get('tx_id',str(uuid.uuid4())),
+				'from_user_id':tx_data.get('from_user_id',''),
+				'to_user_id':tx_data.get('to_user_id',''),
+				'amount':int(tx_data.get('amount',0)),
+				'tx_type':tx_data.get('tx_type','transfer'),
+				'status':tx_data.get('status','pending'),
+				'pq_encrypted_payload':encrypted_envelope.get('ciphertext','').encode() if isinstance(encrypted_envelope.get('ciphertext',''),str) else encrypted_envelope.get('ciphertext',b''),
+				'pq_encryption_key_id':encrypted_envelope.get('session_id',''),
+				'pq_signature':tx_data.get('pq_signature',''),
+				'pq_signer_key_fp':tx_data.get('pq_signer_key_fp',''),
+				'pq_verified':False
+			}
+			
+			cursor.execute(insert_sql,params)
+			conn.commit()
+			logger.info(f"[persist_pq_encrypted_transaction] TX {params['tx_id'][:8]} persisted encrypted")
+			return True
+		
+		except Exception as e:
+			conn.rollback()
+			logger.error(f"[persist_pq_encrypted_transaction] Insert error: {e}")
+			return False
+		
+		finally:
+			cursor.close()
+			db_manager.return_connection(conn)
+	
+	except Exception as e:
+		logger.error(f"[persist_pq_encrypted_transaction] Connection error: {e}")
+		return False
+
+def retrieve_pq_encrypted_transaction(tx_id:str)->Optional[Dict]:
+	"""Retrieve encrypted transaction from database"""
+	try:
+		if db_manager is None:
+			return None
+		
+		conn=db_manager.get_connection()
+		if not conn:
+			return None
+		
+		try:
+			cursor=conn.cursor()
+			
+			query="""
+				SELECT tx_id, from_user_id, to_user_id, amount, tx_type, status,
+					   pq_encrypted_payload, pq_encryption_key_id, pq_signature,
+					   pq_signer_key_fp, pq_verified, created_at
+				FROM transactions
+				WHERE tx_id=%s
+				LIMIT 1
+			"""
+			
+			cursor.execute(query,(tx_id,))
+			row=cursor.fetchone()
+			
+			if row:
+				return {
+					'tx_id':row[0],
+					'from_user_id':row[1],
+					'to_user_id':row[2],
+					'amount':row[3],
+					'tx_type':row[4],
+					'status':row[5],
+					'pq_encrypted_payload':row[6],
+					'pq_encryption_key_id':row[7],
+					'pq_signature':row[8],
+					'pq_signer_key_fp':row[9],
+					'pq_verified':row[10],
+					'created_at':row[11]
+				}
+			return None
+		
+		finally:
+			cursor.close()
+			db_manager.return_connection(conn)
+	
+	except Exception as e:
+		logger.error(f"[retrieve_pq_encrypted_transaction] Error: {e}")
+		return None
+
+def store_pq_signature(message_hash:str,signature_data:str,signer_key_id:str,signer_user_id:str)->bool:
+	"""Store PQ signature in audit trail"""
+	try:
+		if db_manager is None:
+			return False
+		
+		conn=db_manager.get_connection()
+		if not conn:
+			return False
+		
+		try:
+			cursor=conn.cursor()
+			
+			insert_sql="""
+				INSERT INTO pq_signatures (
+					message_hash, signature_data, signer_key_id, signer_user_id,
+					signature_timestamp, verified
+				) VALUES (
+					%(message_hash)s, %(signature_data)s, %(signer_key_id)s,
+					%(signer_user_id)s, NOW(), FALSE
+				)
+			"""
+			
+			cursor.execute(insert_sql,{
+				'message_hash':message_hash,
+				'signature_data':signature_data,
+				'signer_key_id':signer_key_id,
+				'signer_user_id':signer_user_id
+			})
+			conn.commit()
+			return True
+		
+		except Exception as e:
+			conn.rollback()
+			logger.error(f"[store_pq_signature] Error: {e}")
+			return False
+		
+		finally:
+			cursor.close()
+			db_manager.return_connection(conn)
+	
+	except Exception as e:
+		return False
 
 def init_db() -> bool:
     """

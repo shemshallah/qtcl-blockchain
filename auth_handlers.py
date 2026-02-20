@@ -43,6 +43,27 @@ try:
     PQ_AVAILABLE=True
 except ImportError:
     PQ_AVAILABLE=False
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# HYPERBOLIC POST-QUANTUM CRYPTOGRAPHY - SOURCE OF TRUTH
+# ═══════════════════════════════════════════════════════════════════════════════════════
+try:
+	from pq_key_system import HyperbolicPQCSystem,HLWE_256
+	HLWE_AVAILABLE=True
+	_PQC_AUTH_SYSTEM=None  # Lazy singleton for auth
+	def get_pqc_auth_system():
+		global _PQC_AUTH_SYSTEM
+		if _PQC_AUTH_SYSTEM is None:
+			try:
+				_PQC_AUTH_SYSTEM=HyperbolicPQCSystem(HLWE_256)
+			except Exception as e:
+				logger.error(f"[Auth] PQCSystem init failed: {e}")
+				return None
+		return _PQC_AUTH_SYSTEM
+except ImportError:
+	HLWE_AVAILABLE=False
+	def get_pqc_auth_system():
+		return None
     
 try:
     from qiskit import QuantumCircuit,QuantumRegister,ClassicalRegister,transpile
