@@ -542,6 +542,158 @@ def server_error(e):
     logger.error(f"500 error: {e}")
     return jsonify({'error': 'Server error'}), 500
 
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# INSTANCE KEEP-ALIVE HEARTBEAT
+# ═══════════════════════════════════════════════════════════════════════════════════════
+#
+# WHY THIS EXISTS:
+#   Koyeb (and most PaaS platforms) put instances to sleep after a period of inactivity.
+#   "Inactivity" is measured at the LOAD BALANCER level — no inbound traffic → sleep.
+#   A self-ping to localhost does NOT count; it must hit the public-facing URL so the
+#   platform's traffic counter sees it.
+#
+#   Without this: instance sleeps → first real user request wakes it up (cold start
+#   takes 15-60s) → users see timeouts → Koyeb may fully stop the instance if it keeps
+#   sleeping (as seen in the logs: "Instance stopping" after ~67 minutes of no traffic).
+#
+# HOW IT WORKS:
+#   A single daemon thread starts after all WSGI workers are forked. It sleeps for
+#   HEARTBEAT_INTERVAL_SECONDS then fires a GET to the app's public health endpoint.
+#   The public URL is resolved from env vars in priority order:
+#     1. KOYEB_PUBLIC_DOMAIN  (set automatically by Koyeb)
+#     2. APP_URL              (custom override — set in Koyeb env vars if needed)
+#     3. RENDER_EXTERNAL_URL  (Render.com compatibility)
+#     4. FLY_APP_NAME         (Fly.io: constructs https://<name>.fly.dev)
+#     5. localhost:PORT        (last resort — won't prevent sleep on most platforms,
+#                               but keeps the health endpoint warm and logs alive)
+#
+# INTERVAL:
+#   5 minutes (300s). Koyeb free tier sleeps at 10 minutes of inactivity.
+#   Paid tiers don't sleep but the ping still prevents resource reclaim on idle apps.
+#   Do NOT reduce below 60s — excessive self-pings waste your plan's request quota.
+#
+# IF THIS IS REMOVED:
+#   The instance will sleep after the inactivity timeout (10 min free / longer paid).
+#   The next user request hits a cold-start delay. On Koyeb free tier, enough cold
+#   starts in a row trigger the "Instance stopped" lifecycle event seen in the logs.
+#
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+HEARTBEAT_INTERVAL_SECONDS = 300   # 5 minutes — safely under any platform's sleep threshold
+_HEARTBEAT_THREAD: threading.Thread = None
+_HEARTBEAT_STOP    = threading.Event()
+
+
+def _resolve_public_url() -> str:
+    """
+    Resolve this instance's externally-reachable base URL.
+    Tried in priority order; first non-empty result wins.
+    """
+    # 1. Koyeb injects KOYEB_PUBLIC_DOMAIN automatically (e.g. "my-app-abc123.koyeb.app")
+    koyeb_domain = os.getenv("KOYEB_PUBLIC_DOMAIN", "").strip()
+    if koyeb_domain:
+        scheme = "https"
+        return f"{scheme}://{koyeb_domain}"
+
+    # 2. Manual override — set APP_URL=https://my-app.koyeb.app in Koyeb env vars
+    app_url = os.getenv("APP_URL", "").strip().rstrip("/")
+    if app_url:
+        return app_url
+
+    # 3. Render.com
+    render_url = os.getenv("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+    if render_url:
+        return render_url
+
+    # 4. Fly.io
+    fly_app = os.getenv("FLY_APP_NAME", "").strip()
+    if fly_app:
+        return f"https://{fly_app}.fly.dev"
+
+    # 5. Localhost fallback — won't prevent platform sleep but keeps logs + health warm
+    port = os.getenv("PORT", "5000")
+    return f"http://127.0.0.1:{port}"
+
+
+def _heartbeat_loop():
+    """
+    Background daemon: ping the public health endpoint every HEARTBEAT_INTERVAL_SECONDS.
+    Runs as a daemon thread so it never blocks gunicorn shutdown — if the master receives
+    SIGTERM the thread dies automatically when the process exits.
+
+    Uses a short-timeout requests.get() so a slow/unreachable network never hangs
+    the thread indefinitely.  Any exception is caught and logged; the loop always
+    continues regardless of individual ping failures.
+    """
+    import urllib.request
+    import urllib.error
+
+    # Stagger startup: wait one full interval before first ping so we don't fire
+    # during gunicorn's own startup health checks.
+    logger.info(f"[HEARTBEAT] Keep-alive thread started — pinging every {HEARTBEAT_INTERVAL_SECONDS}s")
+    _HEARTBEAT_STOP.wait(timeout=HEARTBEAT_INTERVAL_SECONDS)
+
+    while not _HEARTBEAT_STOP.is_set():
+        base_url = _resolve_public_url()
+        target   = f"{base_url}/health"
+        try:
+            # urllib.request has no external dependencies (no requests needed here).
+            # Timeout = 15s: short enough to fail fast, long enough for cold-start response.
+            req = urllib.request.Request(target, headers={"User-Agent": "QTCL-Heartbeat/1.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                status = resp.status
+                if status == 200:
+                    logger.debug(f"[HEARTBEAT] ✅ {target} → {status}")
+                else:
+                    logger.warning(f"[HEARTBEAT] ⚠️  {target} → HTTP {status}")
+        except urllib.error.URLError as e:
+            # Network unreachable, DNS failure, connection refused, etc.
+            logger.warning(f"[HEARTBEAT] ⚠️  Ping failed ({type(e).__name__}): {e.reason} — will retry in {HEARTBEAT_INTERVAL_SECONDS}s")
+        except Exception as e:
+            logger.warning(f"[HEARTBEAT] ⚠️  Unexpected error: {e} — will retry in {HEARTBEAT_INTERVAL_SECONDS}s")
+
+        # Wait for next interval (or stop signal).
+        # Using Event.wait() instead of time.sleep() means the thread exits immediately
+        # when _HEARTBEAT_STOP.set() is called during shutdown — no stale zombie threads.
+        _HEARTBEAT_STOP.wait(timeout=HEARTBEAT_INTERVAL_SECONDS)
+
+    logger.info("[HEARTBEAT] Keep-alive thread stopped cleanly.")
+
+
+def _start_heartbeat():
+    """
+    Launch the keep-alive heartbeat thread.
+    Called once at WSGI application module load time (every gunicorn worker process).
+    The thread is daemon=True so it never blocks gunicorn's SIGTERM→exit sequence.
+
+    Guard: only start ONE thread per worker process.  If wsgi_config is imported
+    multiple times in the same process (e.g. during test collection), the guard
+    prevents thread explosion.
+    """
+    global _HEARTBEAT_THREAD
+    if _HEARTBEAT_THREAD is not None and _HEARTBEAT_THREAD.is_alive():
+        return  # Already running in this worker process
+
+    _HEARTBEAT_STOP.clear()
+    _HEARTBEAT_THREAD = threading.Thread(
+        target=_heartbeat_loop,
+        name="qtcl-keep-alive",
+        daemon=True,          # Dies automatically when gunicorn worker process exits
+    )
+    _HEARTBEAT_THREAD.start()
+    logger.info(
+        f"[HEARTBEAT] 🟢 Instance keep-alive active — interval={HEARTBEAT_INTERVAL_SECONDS}s | "
+        f"target={_resolve_public_url()}/health"
+    )
+
+
+# Fire immediately when this module is imported by gunicorn.
+# Each worker process imports wsgi_config independently, so each gets its own heartbeat
+# thread — that's fine, it just means N pings per interval (N = worker count).
+# All pings are idempotent GETs to /health; the load balancer sees live traffic from each.
+_start_heartbeat()
+
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # WSGI ENTRYPOINT
 # ═══════════════════════════════════════════════════════════════════════════════════════
