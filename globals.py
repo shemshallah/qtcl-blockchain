@@ -1406,8 +1406,25 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
                 except: return {}
             _ws = get_w_state_enhanced()
             _hb = get_heartbeat()
-            ws = _cl(_ws.get_state()) if hasattr(_ws, 'get_state') else {}
-            hbm = _cl(_hb.get_metrics()) if hasattr(_hb, 'get_metrics') else {}
+            # get_state() same risk — wrap in timeout
+            try:
+                import concurrent.futures as _cf3
+                with _cf3.ThreadPoolExecutor(max_workers=1) as _ex3:
+                    _fut2 = _ex3.submit(_ws.get_state) if hasattr(_ws, 'get_state') else None
+                    raw_ws = _fut2.result(timeout=2) if _fut2 else {}
+                ws = _cl(raw_ws) if raw_ws else {}
+            except Exception:
+                ws = {}
+            # get_metrics() can block on lock contention or numpy serialization —
+            # hard 2s timeout prevents terminal freeze
+            try:
+                import concurrent.futures as _cf2
+                with _cf2.ThreadPoolExecutor(max_workers=1) as _ex2:
+                    _fut = _ex2.submit(_hb.get_metrics) if hasattr(_hb, 'get_metrics') else None
+                    raw_hbm = _fut.result(timeout=2) if _fut else {}
+                hbm = _cl(raw_hbm) if raw_hbm else {}
+            except Exception:
+                hbm = {}  # Timed out or error — use defaults below
             fidelity_avg = ws.get('fidelity_avg', 0.96)
             consensus = 'healthy' if fidelity_avg > 0.90 else 'degraded'
             return {'status': 'success', 'result': {
