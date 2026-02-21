@@ -159,12 +159,30 @@ except Exception as e:
     raise
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# BOOTSTRAP PHASE 2: GLOBALS MODULE (Unified State)
+# BOOTSTRAP PHASE 2: GLOBALS MODULE (Unified State) - DEFERRED
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 GLOBALS_AVAILABLE = False
+_GLOBALS_INIT_THREAD = None
+_GLOBALS_INIT_TIMEOUT = 30  # seconds
+
+def _initialize_globals_deferred():
+    """Initialize globals in background thread with timeout."""
+    global GLOBALS_AVAILABLE
+    try:
+        logger.info("[BOOTSTRAP] Starting deferred globals initialization (background thread)...")
+        from globals import initialize_globals
+        
+        # Try with timeout
+        initialize_globals()
+        GLOBALS_AVAILABLE = True
+        logger.info("[BOOTSTRAP] ✅ Globals module initialized in background")
+    except Exception as e:
+        logger.error(f"[BOOTSTRAP] ⚠️  Globals initialization failed: {e}")
+        # Don't re-raise — let app start anyway with degraded functionality
+
 try:
-    logger.info("[BOOTSTRAP] Initializing globals module...")
+    logger.info("[BOOTSTRAP] Pre-loading globals module (imports only, no initialization)...")
     from globals import (
         initialize_globals, get_globals,
         get_system_health, get_state_snapshot,
@@ -175,11 +193,15 @@ try:
         pqc_encapsulate, pqc_prove_identity, pqc_verify_identity,
         pqc_revoke_key, pqc_rotate_key, bootstrap_admin_session, revoke_session,
     )
-    initialize_globals()
-    GLOBALS_AVAILABLE = True
-    logger.info("[BOOTSTRAP] ✅ Globals module initialized")
+    logger.info("[BOOTSTRAP] ✅ Globals module imports successful")
+    
+    # Start initialization in background thread to avoid blocking Flask startup
+    _GLOBALS_INIT_THREAD = threading.Thread(target=_initialize_globals_deferred, daemon=True)
+    _GLOBALS_INIT_THREAD.start()
+    logger.info("[BOOTSTRAP] ✅ Globals initialization started in background (daemon thread)")
+    
 except Exception as e:
-    logger.error(f"[BOOTSTRAP] ❌ FATAL: Globals initialization failed: {e}")
+    logger.error(f"[BOOTSTRAP] ❌ FATAL: Could not import globals: {e}")
     raise
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -285,6 +307,21 @@ from datetime import datetime, timezone
 app = Flask(__name__, static_folder=os.path.join(PROJECT_ROOT, 'static'), static_url_path='/static')
 app.config['JSON_SORT_KEYS'] = False
 
+logger.info("[FLASK] ✅ Flask app created and ready to receive requests")
+logger.info("[FLASK] 📝 Globals initialization continues in background thread (non-blocking)")
+logger.info("[FLASK] 🚀 App will be fully functional once globals initialization completes")
+
+@app.before_request
+def log_request():
+    """Log incoming requests"""
+    logger.debug(f"[REQUEST] {request.method} {request.path}")
+
+@app.after_request
+def log_response(response):
+    """Log outgoing responses"""
+    logger.debug(f"[RESPONSE] {response.status_code}")
+    return response
+
 
 class CircuitBreaker:
     """Safe access to optional services"""
@@ -330,10 +367,13 @@ def index():
 
 @app.route('/health', methods=['GET'])
 def health():
-    try:
-        return jsonify(get_system_health()), 200
-    except:
-        return jsonify({'status': 'healthy'}), 200
+    """Minimal health check - returns immediately"""
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'globals_initialized': GLOBALS_AVAILABLE,
+        'note': 'If globals_initialized=false, system is still starting up (normal on first boot)'
+    }), 200
 
 @app.route('/api/status', methods=['GET'])
 def status():

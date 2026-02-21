@@ -213,18 +213,37 @@ def initialize_globals():
             logger.info("="*80)
 
             # Initialize Quantum Systems — import already-created singletons
+            # Use try/except to gracefully handle import errors
             try:
-                import quantum_lattice_control_live_complete as _qlc
-                _GLOBAL_STATE['heartbeat']              = _qlc.HEARTBEAT
-                _GLOBAL_STATE['lattice']                = _qlc.LATTICE
-                _GLOBAL_STATE['lattice_neural_refresh'] = _qlc.LATTICE_NEURAL_REFRESH
-                _GLOBAL_STATE['w_state_enhanced']       = _qlc.W_STATE_ENHANCED
-                _GLOBAL_STATE['noise_bath_enhanced']    = _qlc.NOISE_BATH_ENHANCED
-                _GLOBAL_STATE['quantum_coordinator']    = _qlc.QUANTUM_COORDINATOR
-                _alive = [k for k in ('heartbeat', 'lattice', 'lattice_neural_refresh',
-                                      'w_state_enhanced', 'noise_bath_enhanced', 'quantum_coordinator')
-                          if _GLOBAL_STATE[k] is not None]
-                logger.info(f"✅ Quantum subsystems loaded: {', '.join(_alive)}")
+                logger.info("  Loading quantum subsystems (this may take a moment)...")
+                import signal
+                
+                def timeout_handler(signum, frame):
+                    raise TimeoutError("Quantum system initialization took too long (>15s)")
+                
+                # Set 15 second timeout for quantum import
+                old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+                signal.alarm(15)
+                
+                try:
+                    import quantum_lattice_control_live_complete as _qlc
+                    signal.alarm(0)  # Cancel alarm
+                    signal.signal(signal.SIGALRM, old_handler)
+                    
+                    _GLOBAL_STATE['heartbeat']              = _qlc.HEARTBEAT
+                    _GLOBAL_STATE['lattice']                = _qlc.LATTICE
+                    _GLOBAL_STATE['lattice_neural_refresh'] = _qlc.LATTICE_NEURAL_REFRESH
+                    _GLOBAL_STATE['w_state_enhanced']       = _qlc.W_STATE_ENHANCED
+                    _GLOBAL_STATE['noise_bath_enhanced']    = _qlc.NOISE_BATH_ENHANCED
+                    _GLOBAL_STATE['quantum_coordinator']    = _qlc.QUANTUM_COORDINATOR
+                    _alive = [k for k in ('heartbeat', 'lattice', 'lattice_neural_refresh',
+                                          'w_state_enhanced', 'noise_bath_enhanced', 'quantum_coordinator')
+                              if _GLOBAL_STATE[k] is not None]
+                    logger.info(f"✅ Quantum subsystems loaded: {', '.join(_alive)}")
+                except (TimeoutError, Exception) as e:
+                    signal.alarm(0)  # Cancel alarm
+                    signal.signal(signal.SIGALRM, old_handler)
+                    logger.warning(f"⚠️  Quantum systems (timeout protection): {str(e)[:120]}")
             except Exception as e:
                 logger.warning(f"⚠️  Quantum systems: {str(e)[:120]}")
 
