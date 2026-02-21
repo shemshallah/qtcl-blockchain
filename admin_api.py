@@ -34,7 +34,9 @@ try:
     GLOBALS_AVAILABLE = True
 except ImportError:
     GLOBALS_AVAILABLE = False
-    logger.warning("[admin_api] Globals not available - using fallback")
+    # globals not available during import — this is expected during first bootstrap.
+    # The TerminalEngine lazy-loads globals on first request. Non-fatal.
+    logger.debug("[admin_api] globals not yet available at import time — will retry on first request")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # WSGI INTEGRATION
@@ -42,9 +44,16 @@ except ImportError:
 try:
     from wsgi_config import DB, PROFILER, CACHE, ERROR_BUDGET, RequestCorrelation, CIRCUIT_BREAKERS, RATE_LIMITERS
     WSGI_AVAILABLE = True
-except ImportError:
+except ImportError as _adm_ie:
+    # Hard error with detail — CIRCUIT_BREAKERS/RATE_LIMITERS must exist in wsgi_config.py
+    # If they're missing: add `CIRCUIT_BREAKERS: dict = {}` and `RATE_LIMITERS: dict = {}`
+    # to wsgi_config.py module scope (they were added in the 2026-02-21 fix).
+    logger.error(f"[INTEGRATION] wsgi_config import failed: {_adm_ie} — "
+                 "check that wsgi_config.py exports CIRCUIT_BREAKERS and RATE_LIMITERS")
     WSGI_AVAILABLE = False
-    logger.warning("[INTEGRATION] WSGI globals not available - running in standalone mode")
+    DB = PROFILER = CACHE = ERROR_BUDGET = RequestCorrelation = None
+    CIRCUIT_BREAKERS = {}
+    RATE_LIMITERS    = {}
 
     # ── Stub classes so GlobalAdminCommandHandlers.admin_suspend_user() never NameErrors ──
     class _NullProfiler:

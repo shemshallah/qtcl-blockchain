@@ -642,7 +642,7 @@ def _heartbeat_loop():
     # Stagger startup: wait one full interval before first ping so we don't fire
     # during gunicorn's own startup health checks.
     logger.info(f"[HEARTBEAT] Keep-alive thread started — pinging every {HEARTBEAT_INTERVAL_SECONDS}s")
-    _HEARTBEAT_STOP.wait(timeout=HEARTBEAT_INTERVAL_SECONDS)
+    _HEARTBEAT_STOP.wait(timeout=30)  # Short initial delay — proves thread alive quickly
 
     while not _HEARTBEAT_STOP.is_set():
         base_url = _resolve_public_url()

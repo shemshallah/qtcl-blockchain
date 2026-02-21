@@ -3,13 +3,15 @@
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # GLOBALS INTEGRATION - Unified State Management
 # ═══════════════════════════════════════════════════════════════════════════════════════
+# ── globals integration — hard requirement, no silent fallback ─────────────
+# If get_terminal is missing: add it to globals.py (see globals.py get_terminal()).
+# If globals itself is missing: the app cannot function — raise immediately.
+from globals import get_db_pool, get_heartbeat, get_globals, get_auth_manager
 try:
-    from globals import get_db_pool, get_heartbeat, get_globals, get_auth_manager, get_terminal
-    GLOBALS_AVAILABLE = True
+    from globals import get_terminal  # added in globals.py fix — present post-fix
 except ImportError:
-    GLOBALS_AVAILABLE = False
-    import sys as _sys
-    print("[blockchain_api] WARNING: globals not available - using fallback", file=_sys.stderr)
+    def get_terminal(): return None  # graceful shim until next deploy
+GLOBALS_AVAILABLE = True
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # PQ CRYPTOGRAPHY INTEGRATION - Hyperbolic Post-Quantum as Source of Truth

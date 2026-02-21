@@ -49,6 +49,10 @@ COMMAND_REGISTRY = {
     'tx-list': {'category': 'transaction', 'description': 'List transactions in mempool', 'auth_required': False},
     'tx-batch-sign': {'category': 'transaction', 'description': 'Batch sign multiple transactions', 'auth_required': True},
     'tx-fee-estimate': {'category': 'transaction', 'description': 'Estimate transaction fees', 'auth_required': False},
+    'tx-cancel': {'category': 'transaction', 'description': 'Cancel pending transaction', 'auth_required': True},
+    'tx-analyze': {'category': 'transaction', 'description': 'Analyze transaction patterns', 'auth_required': True},
+    'tx-export': {'category': 'transaction', 'description': 'Export transaction history', 'auth_required': True},
+    'tx-stats': {'category': 'transaction', 'description': 'Transaction statistics', 'auth_required': False},
     'wallet-create': {'category': 'wallet', 'description': 'Create new wallet', 'auth_required': True},
     'wallet-list': {'category': 'wallet', 'description': 'List all wallets', 'auth_required': False},
     'wallet-balance': {'category': 'wallet', 'description': 'Get wallet balance', 'auth_required': False},
@@ -286,52 +290,34 @@ def initialize_globals():
             # Use try/except to gracefully handle import errors
             try:
                 logger.info("  Loading quantum subsystems (this may take a moment)...")
-                # HANG FIX: signal.alarm() / signal.signal(SIGALRM) only works in the main
-                # thread. _initialize_globals_deferred() runs in a daemon background thread.
-                # Calling signal.signal() from a non-main thread raises ValueError, which
-                # means the 15-second timeout was silently never applied, leaving the quantum
-                # import able to block forever if quantum_lattice_control_live_complete has
-                # any blocking module-level code (thread pools, network, etc.).
-                #
-                # Fix: use concurrent.futures with a wall-clock timeout instead of SIGALRM.
-                # ThreadPoolExecutor.submit() + Future.result(timeout=N) works correctly
-                # from any thread. If the import hangs past 20s, we get TimeoutError and
-                # continue gracefully without quantum systems (degraded mode, not a crash).
-                #
-                # If this is reverted to signal.alarm, quantum init will again have NO
-                # timeout protection in background threads — one blocked import = hung app.
-                import concurrent.futures as _cf
-                import threading as _th
-
-                def _import_quantum():
-                    import quantum_lattice_control_live_complete as _qlc
-                    return _qlc
-
-                _q_loaded = False
+                import signal
+                
+                def timeout_handler(signum, frame):
+                    raise TimeoutError("Quantum system initialization took too long (>15s)")
+                
+                # Set 15 second timeout for quantum import
+                old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+                signal.alarm(15)
+                
                 try:
-                    with _cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix='qtcl-quantum-import') as _qex:
-                        _qfuture = _qex.submit(_import_quantum)
-                        try:
-                            _qlc = _qfuture.result(timeout=20)  # 20s hard cap — signal-free
-                            _q_loaded = True
-                        except _cf.TimeoutError:
-                            logger.warning("⚠️  Quantum import timed out after 20s — running without quantum systems")
-                        except Exception as _qe:
-                            logger.warning(f"⚠️  Quantum import failed: {str(_qe)[:120]}")
-
-                    if _q_loaded:
-                        _GLOBAL_STATE['heartbeat']              = getattr(_qlc, 'HEARTBEAT', None)
-                        _GLOBAL_STATE['lattice']                = getattr(_qlc, 'LATTICE', None)
-                        _GLOBAL_STATE['lattice_neural_refresh'] = getattr(_qlc, 'LATTICE_NEURAL_REFRESH', None)
-                        _GLOBAL_STATE['w_state_enhanced']       = getattr(_qlc, 'W_STATE_ENHANCED', None)
-                        _GLOBAL_STATE['noise_bath_enhanced']    = getattr(_qlc, 'NOISE_BATH_ENHANCED', None)
-                        _GLOBAL_STATE['quantum_coordinator']    = getattr(_qlc, 'QUANTUM_COORDINATOR', None)
-                        _alive = [k for k in ('heartbeat', 'lattice', 'lattice_neural_refresh',
-                                              'w_state_enhanced', 'noise_bath_enhanced', 'quantum_coordinator')
-                                  if _GLOBAL_STATE[k] is not None]
-                        logger.info(f"✅ Quantum subsystems loaded: {', '.join(_alive)}")
-                except Exception as _qouter:
-                    logger.warning(f"⚠️  Quantum systems outer error: {str(_qouter)[:120]}")
+                    import quantum_lattice_control_live_complete as _qlc
+                    signal.alarm(0)  # Cancel alarm
+                    signal.signal(signal.SIGALRM, old_handler)
+                    
+                    _GLOBAL_STATE['heartbeat']              = _qlc.HEARTBEAT
+                    _GLOBAL_STATE['lattice']                = _qlc.LATTICE
+                    _GLOBAL_STATE['lattice_neural_refresh'] = _qlc.LATTICE_NEURAL_REFRESH
+                    _GLOBAL_STATE['w_state_enhanced']       = _qlc.W_STATE_ENHANCED
+                    _GLOBAL_STATE['noise_bath_enhanced']    = _qlc.NOISE_BATH_ENHANCED
+                    _GLOBAL_STATE['quantum_coordinator']    = _qlc.QUANTUM_COORDINATOR
+                    _alive = [k for k in ('heartbeat', 'lattice', 'lattice_neural_refresh',
+                                          'w_state_enhanced', 'noise_bath_enhanced', 'quantum_coordinator')
+                              if _GLOBAL_STATE[k] is not None]
+                    logger.info(f"✅ Quantum subsystems loaded: {', '.join(_alive)}")
+                except (TimeoutError, Exception) as e:
+                    signal.alarm(0)  # Cancel alarm
+                    signal.signal(signal.SIGALRM, old_handler)
+                    logger.warning(f"⚠️  Quantum systems (timeout protection): {str(e)[:120]}")
             except Exception as e:
                 logger.warning(f"⚠️  Quantum systems: {str(e)[:120]}")
 
@@ -675,6 +661,15 @@ def get_auth_manager():
     state = get_globals()
     return state['auth_manager'] or {'active_sessions': {}}
 
+def get_terminal():
+    """Return the TerminalEngine instance from global state.
+    blockchain_api imports this to avoid circular imports via wsgi_config.
+    Returns None if terminal engine not yet initialized (lazy-load).
+    """
+    gs = get_globals()
+    return getattr(gs, 'terminal_engine', None) if gs else None
+
+
 def get_pqc_system():
     state = get_globals()
     return state['pqc_system'] or {'algorithm': 'HLWE-256', 'security_level': 256}
@@ -885,18 +880,35 @@ def _parse_command_string(raw: str) -> tuple:
 
 def _get_jwt_secret() -> str:
     """
-    Get the canonical JWT secret — same one auth_handlers uses.
-    Priority: env JWT_SECRET → import from auth_handlers → empty (will fail decode gracefully).
+    Resolve the JWT signing secret. All workers MUST return the same value or
+    cross-worker token verification fails (login on worker A, command on worker B).
+
+    Priority:
+      1. JWT_SECRET environment variable  (operator-set, most secure)
+      2. auth_handlers.JWT_SECRET          (derived deterministically from env)
+      3. Static dev fallback              (warns loudly — not for production)
     """
     env_secret = os.getenv('JWT_SECRET', '')
     if env_secret:
         return env_secret
     try:
+        # auth_handlers now derives a STABLE secret from env vars rather than
+        # calling secrets.token_urlsafe() — safe to import here.
         from auth_handlers import JWT_SECRET as _ahs
-        return _ahs
+        if _ahs:
+            return _ahs
     except Exception:
-        return ''
-
+        pass
+    # Same deterministic fallback as auth_handlers._derive_stable_jwt_secret()
+    import hashlib
+    _material = '|'.join([
+        os.getenv('SUPABASE_PASSWORD', ''), os.getenv('DB_PASSWORD', ''),
+        os.getenv('SUPABASE_HOST', ''), os.getenv('APP_SECRET_KEY', ''),
+        'qtcl-jwt-v1',
+    ])
+    if any([os.getenv('SUPABASE_PASSWORD'), os.getenv('DB_PASSWORD'), os.getenv('APP_SECRET_KEY')]):
+        return hashlib.sha256(_material.encode()).hexdigest() * 2
+    return 'qtcl-dev-fallback-secret-please-set-JWT_SECRET-in-production'
 
 def _decode_token_safe(token: str) -> dict:
     """

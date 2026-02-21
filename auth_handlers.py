@@ -85,7 +85,45 @@ getcontext().prec=50
 logger=logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO,format='[%(asctime)s] %(levelname)s: %(message)s')
 
-JWT_SECRET=os.getenv('JWT_SECRET',secrets.token_urlsafe(96))
+
+# ── JWT_SECRET: deterministic derivation ────────────────────────────────────
+# CRITICAL: Must be identical across all gunicorn workers.
+# secrets.token_urlsafe(96) generates a different value per-process import
+# (each of 4 workers gets a unique secret → cross-worker JWT decode fails).
+# Solution: derive from stable env vars using HKDF-like construction so all
+# workers produce the same secret regardless of import order or timing.
+def _derive_stable_jwt_secret() -> str:
+    _explicit = os.getenv('JWT_SECRET', '')
+    if _explicit:
+        return _explicit  # Operator-provided secret — always use this
+    # Collect stable material from env (any subset is fine; hash normalises length)
+    import hashlib, hmac as _hmac
+    _material = '|'.join([
+        os.getenv('SUPABASE_PASSWORD', ''),
+        os.getenv('SUPABASE_HOST', ''),
+        os.getenv('SUPABASE_USER', ''),
+        os.getenv('SUPABASE_DB', ''),
+        os.getenv('DB_PASSWORD', ''),
+        os.getenv('DB_HOST', ''),
+        os.getenv('APP_SECRET_KEY', ''),
+        'qtcl-jwt-v1',   # domain separator — change this to rotate all tokens
+    ])
+    if not any([
+        os.getenv('SUPABASE_PASSWORD'),
+        os.getenv('DB_PASSWORD'),
+        os.getenv('APP_SECRET_KEY'),
+    ]):
+        # No stable material available — log a clear warning and use a static
+        # dev fallback.  In production, set JWT_SECRET in Koyeb env vars.
+        import logging as _log
+        _log.getLogger('auth_handlers').warning(
+            '[JWT] ⚠️  No stable secret material found. '
+            'Set JWT_SECRET environment variable in Koyeb for production security.'
+        )
+        return 'qtcl-dev-fallback-secret-please-set-JWT_SECRET-in-production'
+    return hashlib.sha256(_material.encode()).hexdigest() * 2  # 128-char hex secret
+
+JWT_SECRET = _derive_stable_jwt_secret()
 JWT_ALGORITHM='HS512'
 JWT_EXPIRATION_HOURS=int(os.getenv('JWT_EXPIRATION_HOURS','24'))
 TOKEN_REFRESH_WINDOW=1
