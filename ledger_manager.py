@@ -63,6 +63,7 @@ from cryptography.exceptions import InvalidSignature
 # Never import at module level - defer until function execution time
 from psycopg2.extras import RealDictCursor, execute_values, Json
 from psycopg2 import sql
+from psycopg2.pool import ThreadedConnectionPool
 import psycopg2
 
 # These will be populated on first use via _get_wsgi_module()

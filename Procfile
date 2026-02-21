@@ -1,26 +1,80 @@
-# QUANTUM TEMPORAL COHERENCE LEDGER - PROCFILE (KOYEB)
-# Production-Grade Process Management - Truly YAML-Safe
+# QUANTUM TEMPORAL COHERENCE LEDGER — Procfile
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# SCALING ARCHITECTURE
+# ─────────────────────────────────────────────────────────────────────────────
+# This blockchain's load profile is unusual: each Gunicorn worker boots a full
+# 106,496-qubit lattice, a 57-neuron adaptive controller, a non-Markovian noise
+# bath, W-state managers, and an Aer quantum circuit simulator. That stack uses
+# ~400-600MB RAM per worker and takes ~2-3s to initialize.
+#
+# Scaling strategy:
+#   • Vertical first — more threads per worker, not more workers.
+#     Workers = RAM cost. Threads = (almost) free within a worker.
+#   • gthread worker class lets each worker serve N concurrent requests
+#     without blocking the process, which is essential when some endpoints
+#     (block-create, quantum-circuit, pq-key-gen) are CPU/I/O heavy.
+#   • DO NOT use --preload. The quantum heartbeat is a daemon thread auto-
+#     started at import time. fork() after preload kills threads in workers —
+#     your heartbeat, neural refresh, and W-state maintainer would be dead.
+#     Each worker MUST import fresh so its own thread group starts.
+#   • DO NOT add more process types for heartbeat / oracle / scheduler / defi.
+#     All of those are daemon threads already running inside each web worker
+#     (registered as HEARTBEAT listeners). Separate processes would duplicate
+#     state and fight the workers over DB connections.
+#
+# CONNECTION POOL MATH (Supabase/Postgres default max_connections = 60):
+#   Workers × (threads + parallel_batch_workers) ≤ max_connections
+#   2 workers × (4 threads + 3 batch workers) = 14 connections — safe.
+#   Scale to 4 workers only if you upgrade to pgBouncer or a higher tier.
+#
+# KOYEB NOTES:
+#   Koyeb runs exactly one process type per service deployment. Use the `web`
+#   type for your main deployment. The `release` command runs once per deploy
+#   before traffic is switched over. Other types only run if you create
+#   additional services in your Koyeb dashboard pointing at the same repo.
+#
+# ═══════════════════════════════════════════════════════════════════════════════
 
-web: gunicorn -w 4 -b 0.0.0.0:${PORT:-5000} --worker-class sync --timeout 300 --access-logfile - --error-logfile - wsgi_config:application
+# ── PRIMARY WEB SERVICE ───────────────────────────────────────────────────────
+# -w 2            2 workers. Each holds the full quantum stack in memory.
+#                 Raise to 4 only when you have >2GB RAM headroom AND
+#                 a connection pooler in front of Postgres.
+# gthread         Thread-based workers. Non-blocking: while one thread awaits a
+#                 DB write, the other 3 keep serving requests. Essential here
+#                 because block-create and quantum-circuit calls are slow.
+# --threads 4     4 threads per worker = 8 concurrent request handlers total.
+#                 Each thread shares the worker's quantum state (safe — all
+#                 mutable state is RLock-protected inside the quantum classes).
+# --timeout 120   Quantum circuit simulation + PQ key generation can take 30-60s
+#                 under load. 120s gives headroom without hanging forever.
+# --graceful-timeout 30
+#                 On SIGTERM (deploy/scale event), give in-flight block
+#                 finality and TX signing requests 30s to complete cleanly.
+# --keep-alive 5  Blockchain clients (wallets, dApps) make burst requests.
+#                 Keep-alive reduces TLS handshake overhead for sequential calls.
+# --max-requests 1000
+#                 Recycle workers after 1000 requests to prevent slow memory
+#                 growth from quantum state accumulation over many cycles.
+# --max-requests-jitter 100
+#                 Stagger worker recycling so both workers don't restart at once,
+#                 which would drop all in-flight requests simultaneously.
+web: gunicorn \
+  -w 2 \
+  --worker-class gthread \
+  --threads 4 \
+  --timeout 120 \
+  --graceful-timeout 30 \
+  --keep-alive 5 \
+  --max-requests 1000 \
+  --max-requests-jitter 100 \
+  --access-logfile - \
+  --error-logfile - \
+  -b 0.0.0.0:${PORT:-5000} \
+  wsgi_config:application
 
-worker: python -c "import sys,logging,time; logging.basicConfig(level=logging.INFO); sys.path.insert(0, '.'); from quantum_lattice_control_live_complete import LATTICE; from db_builder_v2 import db_manager; print('[WORKER] Started'); [(print('[WORKER] Processing...'), time.sleep(10)) for _ in iter(int, 1)]"
-
-oracle: python -c "import sys,logging,time; logging.basicConfig(level=logging.INFO); sys.path.insert(0, '.'); from oracle_api import blueprint; print('[ORACLE] Started'); [(print('[ORACLE] Feed...'), time.sleep(30)) for _ in iter(int, 1)]"
-
+# ── RELEASE PHASE ────────────────────────────────────────────────────────────
+# Runs once before each deployment, before traffic is switched over.
+# db_builder_v2.py creates/migrates all tables and seeds the genesis block.
+# If this fails, the deployment is aborted — protects against schema drift.
 release: python db_builder_v2.py
-
-scheduler: python -c "import sys,logging,time; logging.basicConfig(level=logging.INFO); sys.path.insert(0, '.'); from quantum_lattice_control_live_complete import HEARTBEAT; print('[SCHEDULER] Started'); [(print('[SCHEDULER] Health...'), time.sleep(60)) for _ in iter(int, 1)]"
-
-finality: python -c "import sys,logging,time; logging.basicConfig(level=logging.INFO); sys.path.insert(0, '.'); from blockchain_api import blueprint; print('[FINALITY] Started'); [(print('[FINALITY] Check...'), time.sleep(5)) for _ in iter(int, 1)]"
-
-cache-warmer: python -c "import sys,logging,time; logging.basicConfig(level=logging.INFO); sys.path.insert(0, '.'); print('[CACHE] Started'); [(print('[CACHE] Warm...'), time.sleep(300)) for _ in iter(int, 1)]"
-
-cleanup: python -c "import sys,logging,time; logging.basicConfig(level=logging.INFO); sys.path.insert(0, '.'); print('[CLEANUP] Started'); [(print('[CLEANUP] Clean...'), time.sleep(300)) for _ in iter(int, 1)]"
-
-defi-monitor: python -c "import sys,logging,time; logging.basicConfig(level=logging.INFO); sys.path.insert(0, '.'); from defi_api import blueprint; print('[DEFI] Started'); [(print('[DEFI] Monitor...'), time.sleep(60)) for _ in iter(int, 1)]"
-
-governance: python -c "import sys,logging,time; logging.basicConfig(level=logging.INFO); sys.path.insert(0, '.'); print('[GOVERNANCE] Started'); [(print('[GOVERNANCE] Vote...'), time.sleep(120)) for _ in iter(int, 1)]"
-
-admin: python -c "import sys,logging,time; logging.basicConfig(level=logging.INFO); sys.path.insert(0, '.'); from admin_api import AdminSessionManager, blueprint; print('[ADMIN] Started'); [(print('[ADMIN] Ready...'), time.sleep(30)) for _ in iter(int, 1)]"
-
-heartbeat: python -c "import sys,logging,time; logging.basicConfig(level=logging.INFO); sys.path.insert(0, '.'); from quantum_lattice_control_live_complete import HEARTBEAT; print('[HEARTBEAT] Started'); [(print('[HEARTBEAT] Pulse...'), time.sleep(10)) for _ in iter(int, 1)]"
