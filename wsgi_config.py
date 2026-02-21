@@ -138,6 +138,15 @@ CACHE = SimpleCache(max_size=2000)
 RequestCorrelation = RequestTracer()
 ERROR_BUDGET = ErrorBudgetManager(max_errors=100, window_sec=60)
 
+# ── EXPORTED STUBS — required by downstream module imports ──────────────────────────
+# blockchain_api, defi_api, admin_api, db_builder_v2 all import these by name:
+#   from wsgi_config import ... CIRCUIT_BREAKERS, RATE_LIMITERS
+# Without these stubs, ImportError fires, those modules fall back to standalone mode,
+# and DB/CACHE/PROFILER all resolve to None throughout the system.
+# Individual APIs implement their own circuit-breaking; these are coordination stubs.
+CIRCUIT_BREAKERS: dict = {}   # subsystem-level breakers live in each API module
+RATE_LIMITERS:    dict = {}   # subsystem-level limiters live in each API module
+
 logger.info("[BOOTSTRAP] ✅ Utility services initialized (PROFILER, CACHE, RequestCorrelation, ERROR_BUDGET)")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -294,6 +303,7 @@ def _initialize_terminal_engine():
 
 __all__ = [
     'DB', 'PROFILER', 'CACHE', 'RequestCorrelation', 'ERROR_BUDGET',
+    'CIRCUIT_BREAKERS', 'RATE_LIMITERS',
     'GLOBALS_AVAILABLE', 'logger',
     'get_system_health', 'get_state_snapshot',
     'get_heartbeat', 'get_blockchain', 'get_ledger', 'get_oracle', 'get_defi',
@@ -644,7 +654,7 @@ def _heartbeat_loop():
             with urllib.request.urlopen(req, timeout=15) as resp:
                 status = resp.status
                 if status == 200:
-                    logger.debug(f"[HEARTBEAT] ✅ {target} → {status}")
+                    logger.info(f"[HEARTBEAT] 💓 ping {target} → HTTP {status} (instance alive)")
                 else:
                     logger.warning(f"[HEARTBEAT] ⚠️  {target} → HTTP {status}")
         except urllib.error.URLError as e:
