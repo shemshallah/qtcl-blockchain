@@ -1928,6 +1928,7 @@ class AuthSystemIntegration:
     def __init__(self):
         self.users = {}
         self.sessions = {}
+        self.session_store = self.sessions  # Alias for compatibility with terminal_logic
         self.permissions = {}
         
         # System integrations

@@ -32,7 +32,7 @@ COMMAND_REGISTRY = {
     'pq-key-status': {'category': 'pq', 'description': 'Show status of a specific PQ key', 'auth_required': True},
     'pq-schema-status': {'category': 'pq', 'description': 'PQ schema installation & table health', 'auth_required': False},
     'pq-schema-init': {'category': 'pq', 'description': '★ Initialize PQ vault schema & genesis material', 'auth_required': False},
-    'block-create': {'category': 'block', 'description': 'Create new block with mempool transactions', 'auth_required': True},
+    'block-create': {'category': 'block', 'description': 'Create new block with mempool transactions', 'auth_required': True, 'requires_admin': True},
     'block-details': {'category': 'block', 'description': 'Get detailed block information', 'auth_required': False},
     'block-list': {'category': 'block', 'description': 'List blocks by height range', 'auth_required': False},
     'block-verify': {'category': 'block', 'description': 'Verify block PQ signature & chain-of-custody', 'auth_required': False},
@@ -322,6 +322,12 @@ def initialize_globals():
             logger.info("✅ COMPREHENSIVE GLOBAL STATE INITIALIZATION COMPLETE")
             logger.info("="*80)
 
+            # ── Create compatibility aliases for common access patterns ──────────────
+            if _GLOBAL_STATE.get('auth_manager'):
+                _GLOBAL_STATE['auth'] = _GLOBAL_STATE['auth_manager']  # terminal_logic uses gs.auth
+            if _GLOBAL_STATE.get('blockchain'):
+                _GLOBAL_STATE['blockchain_api'] = _GLOBAL_STATE['blockchain']
+
             # Deferred quantum registration (avoid circular import risk)
             try:
                 import sys as _sys
@@ -344,11 +350,61 @@ def initialize_globals():
 
         return _GLOBAL_STATE
 
-def get_globals() -> dict:
-    """Get the global state dictionary."""
+class _GlobalStateWrapper:
+    """Hybrid dict/object wrapper enabling both gs.quantum and gs['quantum'] access."""
+    def __init__(self, state_dict):
+        object.__setattr__(self, '_state', state_dict)
+    
+    def __getattr__(self, name):
+        if name.startswith('_'):
+            return object.__getattribute__(self, name)
+        state = object.__getattribute__(self, '_state')
+        return state.get(name, None)
+    
+    def __setattr__(self, name, value):
+        if name.startswith('_'):
+            object.__setattr__(self, name, value)
+        else:
+            state = object.__getattribute__(self, '_state')
+            state[name] = value
+    
+    def __getitem__(self, key):
+        state = object.__getattribute__(self, '_state')
+        return state[key]
+    
+    def __setitem__(self, key, value):
+        state = object.__getattribute__(self, '_state')
+        state[key] = value
+    
+    def get(self, key, default=None):
+        state = object.__getattribute__(self, '_state')
+        return state.get(key, default)
+    
+    def __contains__(self, key):
+        state = object.__getattribute__(self, '_state')
+        return key in state
+    
+    def __iter__(self):
+        state = object.__getattribute__(self, '_state')
+        return iter(state)
+    
+    def keys(self):
+        state = object.__getattribute__(self, '_state')
+        return state.keys()
+    
+    def values(self):
+        state = object.__getattribute__(self, '_state')
+        return state.values()
+    
+    def items(self):
+        state = object.__getattribute__(self, '_state')
+        return state.items()
+
+def get_globals():
+    """Get the global state wrapper (supports both dict and object notation)."""
     if not _GLOBAL_STATE['initialized']:
         initialize_globals()
-    return _GLOBAL_STATE
+    return _GlobalStateWrapper(_GLOBAL_STATE)
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # SYSTEM GETTERS
@@ -2006,3 +2062,75 @@ def revoke_session(session_id: str) -> dict:
         'status': 'revoked',
         'revoked_at': datetime.now(timezone.utc).isoformat(),
     }
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# COMMAND DISPATCH WITH AUTHENTICATION & ADMIN CHECKS
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+def dispatch_command(command: str, args: dict, user_id: str = None, token: str = None, role: str = None) -> dict:
+    """
+    Dispatch command with built-in authentication and admin checks.
+    
+    Verifies:
+    1. Command exists in COMMAND_REGISTRY
+    2. Auth required vs. provided
+    3. Admin required vs. user role
+    4. Executes handler with proper context
+    
+    Args:
+        command: Command name (e.g., 'system-health')
+        args: Command arguments dict
+        user_id: Optional user ID from auth context
+        token: Optional JWT token
+        role: Optional user role from token
+    
+    Returns:
+        dict with status, data or error
+    """
+    try:
+        # ── Lookup command in registry ────────────────────────────────────
+        entry = COMMAND_REGISTRY.get(command)
+        if not entry:
+            return {
+                'status': 'error',
+                'error': f"Unknown command: {command}",
+                'suggestions': [c for c in COMMAND_REGISTRY.keys() if c.startswith(command[:4])]
+            }
+        
+        # ── Check authentication requirement ──────────────────────────────
+        auth_required = entry.get('auth_required', False)
+        requires_admin = entry.get('requires_admin', False)
+        
+        if auth_required and not token and not user_id:
+            return {
+                'status': 'error',
+                'error': f'Command "{command}" requires authentication'
+            }
+        
+        # ── Check admin requirement ──────────────────────────────────────
+        if requires_admin:
+            is_admin = role in ('admin', 'superadmin', 'super_admin') if role else False
+            if not is_admin:
+                return {
+                    'status': 'error',
+                    'error': f'Command "{command}" requires admin access'
+                }
+        
+        # ── Execute handler ──────────────────────────────────────────────
+        handler = entry.get('handler')
+        if not handler or not callable(handler):
+            return {
+                'status': 'error',
+                'error': f'Command "{command}" handler not callable'
+            }
+        
+        # Call handler with args and empty flags (legacy compatible)
+        result = handler(args or {}, [])
+        return result if isinstance(result, dict) else {'status': 'ok', 'result': result}
+    
+    except Exception as e:
+        logger.error(f"[dispatch_command] Error executing '{command}': {e}", exc_info=True)
+        return {
+            'status': 'error',
+            'error': str(e)
+        }
