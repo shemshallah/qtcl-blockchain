@@ -18,6 +18,7 @@ import sys
 import logging
 import threading
 import time
+import traceback
 
 # Only configure logging once - subsequent imports should not reconfigure
 if not logging.getLogger().hasHandlers():
@@ -157,18 +158,70 @@ DB = None
 DB_POOL = None
 
 def _initialize_database_deferred():
-    """Initialize database in background thread."""
+    """
+    Initialize database in background thread with health verification.
+    
+    Robust initialization strategy:
+    1. Attempt to import and initialize db_manager
+    2. Verify credentials are loaded (non-empty host)
+    3. Perform connection health check
+    4. Log detailed diagnostics on any failure
+    """
     global DB, DB_POOL
     try:
         logger.info("[BOOTSTRAP] Starting deferred database initialization (background thread)...")
-        from db_builder_v2 import db_manager, DB_POOL as _pool
+        from db_builder_v2 import db_manager, DB_POOL as _pool, POOLER_HOST, POOLER_USER, POOLER_PASSWORD, POOLER_PORT, POOLER_DB
+        
+        if db_manager is None:
+            logger.error("[BOOTSTRAP] ❌ db_manager is None — likely a credential/pool creation failure")
+            logger.error(f"[BOOTSTRAP] Debug: Credentials check:")
+            logger.error(f"[BOOTSTRAP]   POOLER_HOST={POOLER_HOST}")
+            logger.error(f"[BOOTSTRAP]   POOLER_USER={POOLER_USER}")
+            logger.error(f"[BOOTSTRAP]   POOLER_PASSWORD={'<set>' if POOLER_PASSWORD else '<empty>'}")
+            logger.error(f"[BOOTSTRAP]   POOLER_PORT={POOLER_PORT}")
+            logger.error(f"[BOOTSTRAP]   POOLER_DB={POOLER_DB}")
+            return
+        
+        # Verify pool was created successfully
+        if db_manager.pool is None:
+            logger.error(f"[BOOTSTRAP] ❌ Database pool creation failed: {db_manager.pool_error}")
+            logger.error(f"[BOOTSTRAP] This indicates invalid credentials or network connectivity issues")
+            return
+        
+        # Perform health check: try to get a connection and run a simple query
+        logger.info("[BOOTSTRAP] Running database health check...")
+        try:
+            test_conn = db_manager.get_connection()
+            if test_conn is None:
+                logger.error("[BOOTSTRAP] ❌ Could not obtain test connection from pool")
+                return
+            
+            cursor = test_conn.cursor()
+            cursor.execute("SELECT version()")
+            version = cursor.fetchone()
+            cursor.close()
+            db_manager.return_connection(test_conn)
+            
+            logger.info(f"[BOOTSTRAP] ✅ Database health check passed")
+            logger.info(f"[BOOTSTRAP] ✅ PostgreSQL version: {version[0][:60]}...")
+            
+        except Exception as health_error:
+            logger.error(f"[BOOTSTRAP] ❌ Health check failed: {health_error}")
+            logger.error(f"[BOOTSTRAP] This indicates connectivity issues with the database server")
+            logger.error(f"[BOOTSTRAP] Check: firewall rules, network connectivity, credentials")
+            return
         
         DB = db_manager
         DB_POOL = _pool
         logger.info("[BOOTSTRAP] ✅ Database singleton ready (db_builder_v2.db_manager)")
+        logger.info("[BOOTSTRAP] ✅ Connection pool initialized and verified")
+        
+    except ImportError as ie:
+        logger.error(f"[BOOTSTRAP] ❌ Failed to import db_builder_v2: {ie}")
+        logger.error(f"[BOOTSTRAP] This typically means a syntax error or missing dependency in db_builder_v2.py")
     except Exception as e:
-        logger.error(f"[BOOTSTRAP] ⚠️  Database initialization failed: {e}")
-        # Don't re-raise — let app start anyway with degraded functionality
+        logger.error(f"[BOOTSTRAP] ❌ Database initialization failed: {e}")
+        logger.error(f"[BOOTSTRAP] Traceback: {traceback.format_exc()}")
 
 # Start database initialization in background (non-blocking)
 _DB_INIT_THREAD = threading.Thread(target=_initialize_database_deferred, daemon=True)
@@ -385,13 +438,49 @@ def index():
 
 @app.route('/health', methods=['GET'])
 def health():
-    """Minimal health check - returns immediately"""
+    """
+    Comprehensive health check including database connectivity.
+    Fast endpoint: returns immediately even if DB is down, but includes DB status.
+    """
+    try:
+        from db_builder_v2 import verify_database_connection
+        db_status = verify_database_connection(verbose=False)
+    except Exception as e:
+        db_status = {'healthy': False, 'connected': False, 'errors': [str(e)]}
+    
     return jsonify({
-        'status': 'healthy',
+        'status': 'healthy' if db_status.get('connected') else 'degraded',
         'timestamp': datetime.now(timezone.utc).isoformat(),
         'globals_initialized': GLOBALS_AVAILABLE,
-        'note': 'If globals_initialized=false, system is still starting up (normal on first boot)'
-    }), 200
+        'database': {
+            'connected': db_status.get('connected', False),
+            'host': db_status.get('host'),
+            'port': db_status.get('port'),
+            'database': db_status.get('database'),
+        },
+        'note': 'If database.connected=false, check Koyeb env vars and database credentials'
+    }), 200 if db_status.get('connected') else 503
+
+@app.route('/api/db-diagnostics', methods=['GET'])
+def db_diagnostics():
+    """
+    Detailed database diagnostics endpoint - useful for debugging connection issues.
+    Only available in non-production environments (set ALLOW_DIAGNOSTICS=true)
+    """
+    allow_diag = os.getenv('ALLOW_DIAGNOSTICS', 'false').lower() == 'true'
+    if not allow_diag and os.getenv('FLASK_ENV') == 'production':
+        return jsonify({'error': 'Diagnostics endpoint disabled in production'}), 403
+    
+    try:
+        from db_builder_v2 import verify_database_connection
+        result = verify_database_connection(verbose=True)
+        return jsonify(result), 200 if result.get('healthy') else 503
+    except Exception as e:
+        logger.error(f"[DIAG] Error during diagnostics: {e}")
+        return jsonify({
+            'error': str(e),
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }), 500
 
 @app.route('/api/status', methods=['GET'])
 def status():

@@ -915,117 +915,203 @@ from pathlib import Path
 
 def _verify_admin_and_load_credentials(allow_undefined=True):
     """
-    Load Supabase credentials with graceful fallback.
+    ENTERPRISE-GRADE credential loading with multi-source support.
+    
+    Supports:
+    1. Native PostgreSQL: DATABASE_URL env var
+    2. Supabase: SUPABASE_HOST, SUPABASE_USER, SUPABASE_PASSWORD
+    3. Standard PostgreSQL connection string: POSTGRES_URL, DB_URL
+    4. Standard PostgreSQL PG* env vars: PGHOST, PGUSER, PGPASSWORD
+    5. Legacy .env file fallback
     
     STRATEGY (in priority order):
-    1. Environment variables (production)
-    2. .env file (development)
-    3. Safe defaults (DEGRADED MODE)
+    1. DATABASE_URL or POSTGRES_URL or DB_URL (standard PostgreSQL URL format)
+    2. SUPABASE_HOST + SUPABASE_USER + SUPABASE_PASSWORD
+    3. Standard PG* environment variables (PGHOST, PGUSER, PGPASSWORD, PGPORT, PGDATABASE)
+    4. .env file (development)
+    5. Safe defaults (DEGRADED MODE)
+    
+    Returns normalized dict with host, user, password, database, port
     
     If allow_undefined=True (default), returns safe defaults instead of raising.
     This allows the APP TO START in degraded mode even if DB not configured.
     Database operations will fail gracefully until credentials are configured.
-    
-    If allow_undefined=False, raises RuntimeError (original strict behavior).
     """
     admin_email = os.getenv('ADMIN_EMAIL', 'shemshallah@gmail.com')
     
+    # ──────────────────────────────────────────────────────────────────────────────
+    # PRIORITY 1: DATABASE_URL (PostgreSQL connection string format)
+    # Standard PostgreSQL URL: postgresql://user:password@host:port/database
+    # ──────────────────────────────────────────────────────────────────────────────
+    db_url = (
+        os.getenv('DATABASE_URL') or 
+        os.getenv('POSTGRES_URL') or 
+        os.getenv('DB_URL')
+    )
+    
+    if db_url and db_url.startswith('postgres'):
+        try:
+            import urllib.parse as urlparse
+            parsed = urlparse.urlparse(db_url)
+            logger.info(f"[CREDS] Loading from DATABASE_URL: {parsed.hostname}:{parsed.port}")
+            return {
+                'password': parsed.password or '',
+                'host': parsed.hostname or 'localhost',
+                'user': parsed.username or 'postgres',
+                'database': (parsed.path or '/postgres').lstrip('/') or 'postgres',
+                'port': parsed.port or 5432,
+                'admin_email': admin_email,
+                'source': 'DATABASE_URL'
+            }
+        except Exception as e:
+            logger.warning(f"[CREDS] Failed to parse DATABASE_URL: {e}")
+    
+    # ──────────────────────────────────────────────────────────────────────────────
+    # PRIORITY 2: SUPABASE_* environment variables
+    # ──────────────────────────────────────────────────────────────────────────────
     password = os.getenv('SUPABASE_PASSWORD')
     host = os.getenv('SUPABASE_HOST')
     user = os.getenv('SUPABASE_USER')
+    database = os.getenv('SUPABASE_DB', 'postgres')
+    port = int(os.getenv('SUPABASE_PORT', '5432'))
     
-    # Fallback to .env file if env vars not set
-    if not password or not host or not user:
-        env_path = Path('.env')
-        if env_path.exists():
-            try:
-                with open(env_path) as f:
-                    for line in f:
-                        line = line.strip()
-                        if line.startswith('SUPABASE_PASSWORD='):
-                            password = line.split('=', 1)[1].strip().strip("'\"")
-                        elif line.startswith('SUPABASE_HOST='):
-                            host = line.split('=', 1)[1].strip().strip("'\"")
-                        elif line.startswith('SUPABASE_USER='):
-                            user = line.split('=', 1)[1].strip().strip("'\"")
-                        elif line.startswith('ADMIN_EMAIL='):
-                            admin_email = line.split('=', 1)[1].strip().strip("'\"")
-            except Exception as e:
-                logger.warning(f"Could not read .env file: {e}")
+    if host and user and password:
+        logger.info(f"[CREDS] Loading from SUPABASE_*: {host}:{port}")
+        return {
+            'password': password,
+            'host': host,
+            'user': user,
+            'database': database,
+            'port': port,
+            'admin_email': admin_email,
+            'source': 'SUPABASE_*'
+        }
     
-    # ────────────────────────────────────────────────────────────────────────────
-    # If credentials incomplete, use safe defaults or fail
-    # ────────────────────────────────────────────────────────────────────────────
-    if not password or not host or not user:
-        if allow_undefined:
-            # Safe defaults — app starts in DEGRADED MODE
-            password = password or "$h10j1r1H0w4rd"
-            host = host or "aws-0-us-west-2.pooler.supabase.com"
-            user = user or "postgres.rslvlsqwkfmdtebqsvtw"
-            
-            logger.warning(
-                f"\n{'='*80}\n"
-                f"[DB] DEGRADED MODE — Credentials incomplete\n"
-                f"{'='*80}\n"
-                f"⚠️  Database operations will FAIL until configured.\n"
-                f"\n"
-                f"To fix:\n"
-                f"  1. Run: python setup_supabase.py\n"
-                f"  2. Or set env vars:\n"
-                f"     export SUPABASE_HOST='<host>'\n"
-                f"     export SUPABASE_USER='<user>'\n"
-                f"     export SUPABASE_PASSWORD='<password>'\n"
-                f"  3. Or create .env file with credentials\n"
-                f"\n"
-                f"Get credentials: https://app.supabase.com/project/_/settings/database\n"
-                f"{'='*80}\n"
-            )
-        else:
-            # Hard fail (strict mode)
-            raise RuntimeError(
-                f"\n{'='*80}\n"
-                f"❌ SUPABASE credentials not configured!\n"
-                f"{'='*80}\n\n"
-                f"Admin Email: {admin_email}\n\n"
-                f"Setup Instructions:\n"
-                f"1. Run configuration wizard:\n"
-                f"   python setup_supabase.py\n\n"
-                f"2. Or set environment variables:\n"
-                f"   export SUPABASE_HOST='<host>'\n"
-                f"   export SUPABASE_USER='<user>'\n"
-                f"   export SUPABASE_PASSWORD='<password>'\n\n"
-                f"3. Or create .env file:\n"
-                f"   SUPABASE_HOST=aws-0-us-west-2.pooler.supabase.com\n"
-                f"   SUPABASE_USER=postgres.xxxxx\n"
-                f"   SUPABASE_PASSWORD=<password>\n"
-                f"   ADMIN_EMAIL=shemshallah@gmail.com\n\n"
-                f"Get credentials: https://app.supabase.com/project/_/settings/database\n"
-                f"{'='*80}\n"
-            )
+    # ──────────────────────────────────────────────────────────────────────────────
+    # PRIORITY 3: Standard PostgreSQL environment variables (PGHOST, PGUSER, etc.)
+    # These are the standard libpq environment variables used across PostgreSQL tools
+    # ──────────────────────────────────────────────────────────────────────────────
+    pg_host = os.getenv('PGHOST')
+    pg_user = os.getenv('PGUSER')
+    pg_password = os.getenv('PGPASSWORD')
+    pg_port = int(os.getenv('PGPORT', '5432'))
+    pg_database = os.getenv('PGDATABASE', 'postgres')
     
-    # Fallback to auth token-based verification (optional)
-    auth_token = os.getenv('SUPABASE_AUTH_TOKEN')
-    if auth_token and (not password or password == "$h10j1r1H0w4rd"):
+    if pg_host and pg_user and pg_password:
+        logger.info(f"[CREDS] Loading from PG* env vars: {pg_host}:{pg_port}")
+        return {
+            'password': pg_password,
+            'host': pg_host,
+            'user': pg_user,
+            'database': pg_database,
+            'port': pg_port,
+            'admin_email': admin_email,
+            'source': 'PG*'
+        }
+    
+    # ──────────────────────────────────────────────────────────────────────────────
+    # PRIORITY 4: .env file (development)
+    # ──────────────────────────────────────────────────────────────────────────────
+    env_path = Path('.env')
+    if env_path.exists():
         try:
-            supabase_url = os.getenv('SUPABASE_URL', '')
-            headers = {'Authorization': f'Bearer {auth_token}'}
-            response = requests.get(f"{supabase_url}/auth/v1/user", headers=headers, timeout=5)
+            env_vars = {}
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
+                        key, val = line.split('=', 1)
+                        env_vars[key.strip()] = val.strip().strip("'\"")
             
-            if response.status_code == 200:
-                user_data = response.json()
-                token_email = user_data.get('email', '')
-                if token_email.lower() == admin_email.lower():
-                    logger.info(f"✓ Admin authentication verified for {admin_email}")
-                    password = auth_token
+            # Try Supabase format from .env
+            if 'SUPABASE_HOST' in env_vars and 'SUPABASE_USER' in env_vars and 'SUPABASE_PASSWORD' in env_vars:
+                logger.info(f"[CREDS] Loading from .env (Supabase): {env_vars.get('SUPABASE_HOST')}")
+                return {
+                    'password': env_vars['SUPABASE_PASSWORD'],
+                    'host': env_vars['SUPABASE_HOST'],
+                    'user': env_vars['SUPABASE_USER'],
+                    'database': env_vars.get('SUPABASE_DB', 'postgres'),
+                    'port': int(env_vars.get('SUPABASE_PORT', '5432')),
+                    'admin_email': env_vars.get('ADMIN_EMAIL', admin_email),
+                    'source': '.env (Supabase)'
+                }
+            
+            # Try PostgreSQL format from .env
+            if 'PGHOST' in env_vars and 'PGUSER' in env_vars and 'PGPASSWORD' in env_vars:
+                logger.info(f"[CREDS] Loading from .env (PostgreSQL): {env_vars.get('PGHOST')}")
+                return {
+                    'password': env_vars['PGPASSWORD'],
+                    'host': env_vars['PGHOST'],
+                    'user': env_vars['PGUSER'],
+                    'database': env_vars.get('PGDATABASE', 'postgres'),
+                    'port': int(env_vars.get('PGPORT', '5432')),
+                    'admin_email': env_vars.get('ADMIN_EMAIL', admin_email),
+                    'source': '.env (PostgreSQL)'
+                }
         except Exception as e:
-            logger.debug(f"Auth token verification skipped: {e}")
+            logger.warning(f"[CREDS] Could not read .env file: {e}")
     
-    return {
-        'password': password,
-        'host': host or "aws-0-us-west-2.pooler.supabase.com",
-        'user': user or "postgres.rslvlsqwkfmdtebqsvtw",
-        'admin_email': admin_email
-    }
+    # ──────────────────────────────────────────────────────────────────────────────
+    # FALLBACK: Safe defaults or hard fail
+    # ──────────────────────────────────────────────────────────────────────────────
+    if allow_undefined:
+        # DEGRADED MODE — app starts but DB operations will fail
+        logger.warning(
+            f"\n{'='*80}\n"
+            f"⚠️  [DB] DEGRADED MODE — Credentials not configured\n"
+            f"{'='*80}\n"
+            f"Database operations will FAIL until configured.\n"
+            f"\n"
+            f"KOYEB DEPLOYMENT: Set these env vars in Koyeb dashboard:\n"
+            f"  Option 1 (recommended):\n"
+            f"    DATABASE_URL=postgresql://user:pass@host:port/dbname\n"
+            f"\n"
+            f"  Option 2:\n"
+            f"    SUPABASE_HOST=<host>\n"
+            f"    SUPABASE_USER=<user>\n"
+            f"    SUPABASE_PASSWORD=<password>\n"
+            f"    SUPABASE_DB=postgres\n"
+            f"\n"
+            f"  Option 3:\n"
+            f"    PGHOST=<host>\n"
+            f"    PGUSER=<user>\n"
+            f"    PGPASSWORD=<password>\n"
+            f"    PGDATABASE=postgres\n"
+            f"\n"
+            f"LOCAL DEVELOPMENT: Create .env file with same vars\n"
+            f"{'='*80}\n"
+        )
+        return {
+            'password': '',
+            'host': 'localhost',
+            'user': 'postgres',
+            'database': 'postgres',
+            'port': 5432,
+            'admin_email': admin_email,
+            'source': 'FALLBACK (degraded mode)'
+        }
+    else:
+        # STRICT MODE — hard fail
+        raise RuntimeError(
+            f"\n{'='*80}\n"
+            f"❌ DATABASE CREDENTIALS NOT CONFIGURED\n"
+            f"{'='*80}\n\n"
+            f"No credentials found in:\n"
+            f"  1. DATABASE_URL / POSTGRES_URL / DB_URL env vars\n"
+            f"  2. SUPABASE_* env vars\n"
+            f"  3. PG* env vars (PGHOST, PGUSER, PGPASSWORD)\n"
+            f"  4. .env file\n\n"
+            f"KOYEB DEPLOYMENT:\n"
+            f"  Set env vars in Koyeb dashboard:\n"
+            f"  DATABASE_URL=postgresql://user:pass@host:port/dbname\n"
+            f"  OR: SUPABASE_HOST, SUPABASE_USER, SUPABASE_PASSWORD\n"
+            f"  OR: PGHOST, PGUSER, PGPASSWORD\n"
+            f"\n"
+            f"LOCAL DEVELOPMENT:\n"
+            f"  Create .env file with database credentials\n"
+            f"  Or set environment variables before running\n"
+            f"{'='*80}\n"
+        )
 
 # Load credentials gracefully — app can start even if DB not configured
 # Use allow_undefined=True to get safe defaults instead of raising
@@ -4598,42 +4684,88 @@ class DatabaseBuilder:
             self.pool = None
     
     def get_connection(self, timeout=CONNECTION_TIMEOUT):
-        """Get connection from pool with retry logic and graceful degradation"""
+        """
+        ENTERPRISE-GRADE connection management with:
+        - Exponential backoff retry (1s, 2s, 4s)
+        - Connection health verification
+        - Automatic dead connection cleanup
+        - Detailed error diagnostics for debugging
+        """
         if self.pool is None:
             error_msg = self.pool_error or "Database pool not initialized"
-            logger.warning(f"[DB] Connection unavailable: {error_msg}")
+            logger.error(f"[DB-CONN] ❌ Pool unavailable: {error_msg}")
+            logger.error(f"[DB-CONN] Credentials check: host={self.host}, user={self.user}, port={self.port}")
             return None
         
-        max_retries = 3
-        retry_delay = 1
+        max_retries = 5  # More aggressive retry
+        base_delay = 1.0
         last_error = None
         
         for attempt in range(max_retries):
             conn = None
             try:
+                # Attempt to get connection from pool
                 conn = self.pool.getconn()
+                
+                # Verify connection is actually alive (not just a stale cached connection)
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT 1")
+                    cursor.close()
+                except Exception as health_check_error:
+                    logger.warning(f"[DB-CONN] Health check failed on attempt {attempt + 1}: {health_check_error}")
+                    if conn:
+                        try:
+                            self.pool.putconn(conn, close=True)
+                        except Exception:
+                            pass
+                    raise health_check_error
+                
+                # Connection is healthy
                 conn.set_session(autocommit=True)
+                logger.debug(f"[DB-CONN] ✓ Got connection on attempt {attempt + 1}")
                 return conn
+                
             except psycopg2.pool.PoolError as e:
                 last_error = e
+                logger.warning(f"[DB-CONN] Pool error (attempt {attempt + 1}/{max_retries}): {e}")
                 if attempt < max_retries - 1:
-                    time.sleep(retry_delay * (attempt + 1))
-            except Exception as e:
-                # set_session() or getconn() raised a non-PoolError (e.g. OperationalError
-                # on a dead connection). Return the bad connection to the pool so psycopg2
-                # can close it cleanly, then retry.
+                    wait_time = base_delay * (2 ** attempt)  # Exponential backoff
+                    logger.info(f"[DB-CONN] Retrying in {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                    
+            except psycopg2.OperationalError as e:
                 last_error = e
+                logger.warning(f"[DB-CONN] Operational error (attempt {attempt + 1}/{max_retries}): {e}")
                 if conn is not None:
                     try:
                         self.pool.putconn(conn, close=True)
                     except Exception:
                         pass
                 if attempt < max_retries - 1:
-                    time.sleep(retry_delay * (attempt + 1))
+                    wait_time = base_delay * (2 ** attempt)
+                    logger.info(f"[DB-CONN] Retrying in {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                    
+            except Exception as e:
+                last_error = e
+                logger.error(f"[DB-CONN] Unexpected error (attempt {attempt + 1}/{max_retries}): {type(e).__name__}: {e}")
+                if conn is not None:
+                    try:
+                        self.pool.putconn(conn, close=True)
+                    except Exception:
+                        pass
+                if attempt < max_retries - 1:
+                    wait_time = base_delay * (2 ** attempt)
+                    logger.info(f"[DB-CONN] Retrying in {wait_time:.1f}s...")
+                    time.sleep(wait_time)
         
-        raise Exception(f"Failed to get connection after {max_retries} attempts: {last_error}")
-    
-    def return_connection(self, conn):
+        # All retries exhausted
+        error_detail = f"Failed to get connection after {max_retries} attempts\nLast error: {last_error}"
+        logger.error(f"[DB-CONN] ❌ {error_detail}")
+        logger.error(f"[DB-CONN] Debug info: host={self.host}, port={self.port}, database={self.database}, user={self.user}")
+        logger.error(f"[DB-CONN] Pool status: pool={'initialized' if self.pool else 'None'}, pool_size={self.pool_size}")
+        raise Exception(error_detail)
         """Return connection to pool"""
         if conn:
             self.pool.putconn(conn)
@@ -7952,7 +8084,111 @@ DB_POOL = db_manager
 # BLOCK & TRANSACTION PERSISTENCE WITH PQ CRYPTOGRAPHY
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 
-def persist_block_with_pq_signature(block_data:Dict,pq_signature:Optional[str]=None,pq_key_fp:Optional[str]=None)->bool:
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# DATABASE HEALTH CHECK AND DIAGNOSTICS
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+def verify_database_connection(db_manager=None, verbose=True) -> Dict[str, Any]:
+    """
+    Comprehensive database connection verification and diagnostics.
+    
+    Returns:
+        {
+            'healthy': bool,
+            'connected': bool,
+            'pool_initialized': bool,
+            'credentials_source': str,
+            'host': str,
+            'port': int,
+            'database': str,
+            'version': str,
+            'connection_time_ms': float,
+            'errors': List[str],
+            'warnings': List[str]
+        }
+    """
+    result = {
+        'healthy': False,
+        'connected': False,
+        'pool_initialized': False,
+        'credentials_source': _creds.get('source', 'unknown'),
+        'host': POOLER_HOST,
+        'port': POOLER_PORT,
+        'database': POOLER_DB,
+        'user': POOLER_USER,
+        'version': None,
+        'connection_time_ms': 0,
+        'errors': [],
+        'warnings': []
+    }
+    
+    if db_manager is None:
+        db_manager = globals().get('db_manager')
+    
+    if db_manager is None:
+        result['errors'].append("db_manager is None")
+        if verbose:
+            logger.error(f"[DB-CHECK] ❌ {result['errors'][0]}")
+        return result
+    
+    # Check pool
+    if db_manager.pool is None:
+        result['errors'].append(f"Pool not initialized: {db_manager.pool_error}")
+        if verbose:
+            logger.error(f"[DB-CHECK] ❌ Pool creation failed: {db_manager.pool_error}")
+        return result
+    
+    result['pool_initialized'] = True
+    
+    # Try connection
+    conn = None
+    try:
+        import time as time_module
+        start = time_module.time()
+        conn = db_manager.get_connection()
+        elapsed_ms = (time_module.time() - start) * 1000
+        result['connection_time_ms'] = elapsed_ms
+        
+        if conn is None:
+            result['errors'].append("get_connection() returned None")
+            if verbose:
+                logger.error(f"[DB-CHECK] ❌ Could not obtain connection")
+            return result
+        
+        # Test connection
+        cursor = conn.cursor()
+        cursor.execute("SELECT version(), current_database()")
+        version, current_db = cursor.fetchone()
+        cursor.close()
+        
+        result['connected'] = True
+        result['version'] = version
+        result['healthy'] = True
+        
+        if verbose:
+            logger.info(f"[DB-CHECK] ✅ Database connection healthy")
+            logger.info(f"[DB-CHECK]   Host: {POOLER_HOST}:{POOLER_PORT}")
+            logger.info(f"[DB-CHECK]   Database: {current_db}")
+            logger.info(f"[DB-CHECK]   Connection time: {elapsed_ms:.0f}ms")
+            logger.info(f"[DB-CHECK]   PostgreSQL: {version[:60]}...")
+        
+        return result
+        
+    except Exception as e:
+        result['errors'].append(str(e))
+        if verbose:
+            logger.error(f"[DB-CHECK] ❌ Connection failed: {e}")
+            logger.error(f"[DB-CHECK]   Host: {POOLER_HOST}:{POOLER_PORT}")
+            logger.error(f"[DB-CHECK]   User: {POOLER_USER}")
+            logger.error(f"[DB-CHECK]   Database: {POOLER_DB}")
+            logger.error(f"[DB-CHECK]   Error type: {type(e).__name__}")
+        return result
+    finally:
+        if conn:
+            try:
+                db_manager.return_connection(conn)
+            except Exception:
+                pass
 	"""
 	Store block in database with full enterprise PQ cryptographic fields.
 	Writes all 40+ PQ columns from ENTERPRISE_PQ_ENCRYPTION_GUIDE.md.
