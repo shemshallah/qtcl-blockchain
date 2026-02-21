@@ -141,22 +141,30 @@ ERROR_BUDGET = ErrorBudgetManager(max_errors=100, window_sec=60)
 logger.info("[BOOTSTRAP] ✅ Utility services initialized (PROFILER, CACHE, RequestCorrelation, ERROR_BUDGET)")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# BOOTSTRAP PHASE 1: DATABASE SINGLETON (db_builder_v2)
+# BOOTSTRAP PHASE 1: DATABASE SINGLETON (db_builder_v2) - DEFERRED
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 DB = None
-try:
-    logger.info("[BOOTSTRAP] Initializing database layer (db_builder_v2)...")
-    from db_builder_v2 import db_manager, DB_POOL
-    
-    if db_manager is None:
-        raise RuntimeError("db_manager singleton is None")
-    
-    DB = db_manager
-    logger.info("[BOOTSTRAP] ✅ Database singleton ready (db_builder_v2.db_manager)")
-except Exception as e:
-    logger.error(f"[BOOTSTRAP] ❌ FATAL: Database initialization failed: {e}")
-    raise
+DB_POOL = None
+
+def _initialize_database_deferred():
+    """Initialize database in background thread."""
+    global DB, DB_POOL
+    try:
+        logger.info("[BOOTSTRAP] Starting deferred database initialization (background thread)...")
+        from db_builder_v2 import db_manager, DB_POOL as _pool
+        
+        DB = db_manager
+        DB_POOL = _pool
+        logger.info("[BOOTSTRAP] ✅ Database singleton ready (db_builder_v2.db_manager)")
+    except Exception as e:
+        logger.error(f"[BOOTSTRAP] ⚠️  Database initialization failed: {e}")
+        # Don't re-raise — let app start anyway with degraded functionality
+
+# Start database initialization in background (non-blocking)
+_DB_INIT_THREAD = threading.Thread(target=_initialize_database_deferred, daemon=True)
+_DB_INIT_THREAD.start()
+logger.info("[BOOTSTRAP] ✅ Database initialization started in background (daemon thread)")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # BOOTSTRAP PHASE 2: GLOBALS MODULE (Unified State) - DEFERRED
