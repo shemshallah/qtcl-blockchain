@@ -163,18 +163,34 @@ def _safe_import(module_path: str, item_name: str, fallback=None):
         return fallback
 
 def initialize_globals():
-    """Initialize all global system managers."""
+    """Initialize all global system managers. Multiprocess-safe for Procfile workers."""
     global _GLOBAL_STATE
+    import os
+    
+    current_pid = os.getpid()
     
     with _GLOBAL_STATE['lock']:
+        # If already initialized IN THIS PROCESS, return immediately
         if _GLOBAL_STATE['initialized']:
-            return _GLOBAL_STATE
+            # Different process? Allow re-initialization for this new process
+            if '_init_pid' not in _GLOBAL_STATE:
+                _GLOBAL_STATE['_init_pid'] = current_pid
+            elif _GLOBAL_STATE['_init_pid'] != current_pid:
+                logger.debug(f"[globals] Process {current_pid} detected (parent was {_GLOBAL_STATE['_init_pid']}) — reinitializing")
+                _GLOBAL_STATE['_init_pid'] = current_pid
+            else:
+                # Same process, already initialized - return
+                return _GLOBAL_STATE
+        
+        # Mark this process as initializer
+        if '_init_pid' not in _GLOBAL_STATE:
+            _GLOBAL_STATE['_init_pid'] = current_pid
         
         logger.info("="*80)
         logger.info("🚀 INITIALIZING COMPREHENSIVE GLOBAL STATE")
         logger.info("="*80)
         
-        # Initialize Quantum Systems — import ALL 5 singletons + coordinator
+        # Initialize Quantum Systems — import already-created singletons
         try:
             # _init_quantum_singletons() already runs at module load via _safely_init_quantum_singletons()
             # (see quantum_lattice_control_live_complete.py:5959)

@@ -5950,14 +5950,37 @@ class EnhancedNoiseBathRefresh:
 
 _QUANTUM_SINGLETONS_INIT_CALLED = False
 _SINGLETON_INIT_LOCK = threading.RLock()
+_SINGLETON_INIT_PID = None  # Track which process initialized
 
 def _safely_init_quantum_singletons():
-    """Idempotent wrapper ensuring _init_quantum_singletons() runs exactly once."""
-    global _QUANTUM_SINGLETONS_INIT_CALLED
+    """
+    Idempotent wrapper ensuring _init_quantum_singletons() runs exactly once per process.
+    Handles multiple processes starting simultaneously (Koyeb Procfile case).
+    """
+    global _QUANTUM_SINGLETONS_INIT_CALLED, _SINGLETON_INIT_PID
+    import os
+    
+    current_pid = os.getpid()
+    
+    # Fast path: already initialized in THIS process
+    if _QUANTUM_SINGLETONS_INIT_CALLED and _SINGLETON_INIT_PID == current_pid:
+        return
+    
     with _SINGLETON_INIT_LOCK:
-        if _QUANTUM_SINGLETONS_INIT_CALLED:
+        # Double-check after acquiring lock
+        if _QUANTUM_SINGLETONS_INIT_CALLED and _SINGLETON_INIT_PID == current_pid:
             return
+        
+        # Different process? Allow it to initialize its own copy
+        if _SINGLETON_INIT_PID is not None and _SINGLETON_INIT_PID != current_pid:
+            logger.debug(f"[quantum_lattice] Process {current_pid} initializing (parent was {_SINGLETON_INIT_PID})")
+            _init_quantum_singletons()
+            _SINGLETON_INIT_PID = current_pid
+            return
+        
+        # First time in this process
         _QUANTUM_SINGLETONS_INIT_CALLED = True
+        _SINGLETON_INIT_PID = current_pid
         _init_quantum_singletons()
 
 _safely_init_quantum_singletons()
