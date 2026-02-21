@@ -1957,7 +1957,7 @@ class KeyVaultManager:
         
         conn = None
         try:
-            conn = pool.get_connection()
+            conn = pool.getconn()
             cur  = conn.cursor()
             
             cur.execute("""
@@ -2032,7 +2032,7 @@ class KeyVaultManager:
             return False
         finally:
             if conn is not None:
-                try: pool.return_connection(conn)
+                try: pool.putconn(conn)
                 except: pass
     
     def store_key(self, keypair: Dict[str, Any]) -> bool:
@@ -2056,7 +2056,7 @@ class KeyVaultManager:
         
         conn = None
         try:
-            conn = pool.get_connection()
+            conn = pool.getconn()
             cur  = conn.cursor()
             
             # Clean keypair for storage (remove in-memory secret)
@@ -2098,7 +2098,7 @@ class KeyVaultManager:
             return False
         finally:
             if conn is not None:
-                try: pool.return_connection(conn)
+                try: pool.putconn(conn)
                 except: pass
     
     def retrieve_key(self, key_id: str, user_id: str,
@@ -2115,7 +2115,7 @@ class KeyVaultManager:
         
         conn = None
         try:
-            conn = pool.get_connection()
+            conn = pool.getconn()
             cur  = conn.cursor(cursor_factory=RealDictCursor)
             
             cur.execute("""
@@ -2176,7 +2176,7 @@ class KeyVaultManager:
             return None
         finally:
             if conn is not None:
-                try: pool.return_connection(conn)
+                try: pool.putconn(conn)
                 except: pass
     
     def list_keys_for_user(self, user_id: str, status: str = 'active') -> List[Dict[str, Any]]:
@@ -2192,7 +2192,7 @@ class KeyVaultManager:
         
         conn = None
         try:
-            conn = pool.get_connection()
+            conn = pool.getconn()
             cur  = conn.cursor(cursor_factory=RealDictCursor)
             
             cur.execute("""
@@ -2231,7 +2231,7 @@ class KeyVaultManager:
             return []
         finally:
             if conn is not None:
-                try: pool.return_connection(conn)
+                try: pool.putconn(conn)
                 except: pass
     
     def revoke_key(self, key_id: str, user_id: str,
@@ -2255,7 +2255,7 @@ class KeyVaultManager:
         
         conn = None
         try:
-            conn = pool.get_connection()
+            conn = pool.getconn()
             cur  = conn.cursor(cursor_factory=RealDictCursor)
             
             now = datetime.now(timezone.utc)
@@ -2321,7 +2321,7 @@ class KeyVaultManager:
             return {'status': 'error', 'error': str(e)}
         finally:
             if conn is not None:
-                try: pool.return_connection(conn)
+                try: pool.putconn(conn)
                 except: pass
     
     def rotate_key(self, old_key_id: str, user_id: str,
