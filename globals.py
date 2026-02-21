@@ -2067,9 +2067,13 @@ def revoke_session(session_id: str) -> dict:
 # COMMAND DISPATCH WITH AUTHENTICATION & ADMIN CHECKS
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-def dispatch_command(command: str, args: dict, user_id: str = None, token: str = None, role: str = None) -> dict:
+def dispatch_command(command: str, args: dict = None, user_id: str = None, token: str = None, role: str = None) -> dict:
     """
     Dispatch command with built-in authentication and admin checks.
+    
+    Handles both:
+    1. Pre-parsed: dispatch_command("login", {"email": "...", "password": "..."})
+    2. Raw string: dispatch_command("login --email=... --password=...")
     
     Verifies:
     1. Command exists in COMMAND_REGISTRY
@@ -2078,8 +2082,8 @@ def dispatch_command(command: str, args: dict, user_id: str = None, token: str =
     4. Executes handler with proper context
     
     Args:
-        command: Command name (e.g., 'system-health')
-        args: Command arguments dict
+        command: Command name or full command string (e.g., 'system-health' or 'login --email=x')
+        args: Command arguments dict (merged with parsed flags if command is raw string)
         user_id: Optional user ID from auth context
         token: Optional JWT token
         role: Optional user role from token
@@ -2088,13 +2092,42 @@ def dispatch_command(command: str, args: dict, user_id: str = None, token: str =
         dict with status, data or error
     """
     try:
+        # ── Check if command is a raw string (contains spaces or flags) ────────────
+        positional_args = []
+        if ' ' in command and not command.startswith(' '):
+            # Parse raw command string
+            import re
+            tokens = command.strip().split()
+            cmd_name = tokens[0].lower()
+            parsed_flags = {}
+            
+            for tok in tokens[1:]:
+                m = re.match(r'^--([a-zA-Z0-9_-]+)(?:=(.+))?$', tok)
+                if m:
+                    key = m.group(1).replace('-', '_')
+                    val = m.group(2)
+                    parsed_flags[key] = val if val is not None else True
+                else:
+                    positional_args.append(tok)
+            
+            # Merge with provided args, with parsed flags taking precedence
+            if args is None:
+                args = {}
+            args = {**args, **parsed_flags}  # Parsed flags override
+            command = cmd_name  # Update command to just the name
+        else:
+            # Command is already parsed; args dict is flags, no positional args provided
+            if args is None:
+                args = {}
+        
         # ── Lookup command in registry ────────────────────────────────────
         entry = COMMAND_REGISTRY.get(command)
         if not entry:
+            suggestions = [c for c in COMMAND_REGISTRY.keys() if c.startswith(command[:4]) if command]
             return {
                 'status': 'error',
                 'error': f"Unknown command: {command}",
-                'suggestions': [c for c in COMMAND_REGISTRY.keys() if c.startswith(command[:4])]
+                'suggestions': suggestions
             }
         
         # ── Check authentication requirement ──────────────────────────────
@@ -2124,8 +2157,8 @@ def dispatch_command(command: str, args: dict, user_id: str = None, token: str =
                 'error': f'Command "{command}" handler not callable'
             }
         
-        # Call handler with args and empty flags (legacy compatible)
-        result = handler(args or {}, [])
+        # Call handler with flags dict and positional args list
+        result = handler(args, positional_args)
         return result if isinstance(result, dict) else {'status': 'ok', 'result': result}
     
     except Exception as e:
