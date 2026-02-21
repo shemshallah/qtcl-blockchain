@@ -98,14 +98,13 @@ def get_ERROR_BUDGET():
 _supabase_available = False
 _supabase_create_client = None
 
-# `Client` is used as a type hint in several class __init__ signatures.
-# Resolve it at import time so class definitions don't raise NameError
-# when supabase is not installed.
+# `Client` appears as a type hint in several class __init__ signatures below.
+# Resolve it at import-time so those class definitions never raise NameError.
 try:
-    from supabase import Client  # real type when package is present
+    from supabase import Client          # real type when package is installed
 except ImportError:
-    class Client:  # type: ignore[no-redef]
-        """Stub — supabase package not installed; type hints only."""
+    class Client:                        # type: ignore[no-redef]
+        """Stub — supabase not installed; satisfies type annotations only."""
         pass
 
 def _ensure_supabase():

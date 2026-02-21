@@ -328,19 +328,157 @@ class NoiseAloneWStateRefresh:
 # Always available — no external file dependency
 PARALLEL_REFRESH_AVAILABLE = True
 
-try:
-    from lightweight_heartbeat import LightweightHeartbeat
-except ImportError:
-    # Create dummy heartbeat if not available
-    class LightweightHeartbeat:
-        def __init__(self, *args, **kwargs):
+# ── LightweightHeartbeat — inline implementation (no external file needed) ────
+# Posts a JSON keep-alive + live lattice metrics to KEEPALIVE_URL every
+# `interval_seconds` seconds (default 30).  Retry with back-off on 5xx.
+class LightweightHeartbeat:
+    """
+    Daemon-threaded HTTP keep-alive poster.
+    Collects metrics from the LATTICE / HEARTBEAT / W_STATE singletons
+    (lazy — avoids circular-import issues at class-definition time)
+    and POSTs them to `endpoint` every `interval_seconds` seconds.
+    """
+    _BACKOFF   = 1.5   # seconds before first retry
+    _MAX_RETRY = 3
+    _TIMEOUT   = 8
+
+    def __init__(self, endpoint: str = None, interval_seconds: float = 30.0, **_):
+        import os as _os
+        _app = _os.getenv('APP_URL', 'http://localhost:5000').rstrip('/')
+        self.endpoint  = endpoint or _os.getenv('KEEPALIVE_URL', f"{_app}/api/heartbeat")
+        self.interval  = float(interval_seconds)
+        self._running  = False
+        self._thread   = None
+        self._lock     = threading.Lock()
+        self._beats    = 0
+        self._started  = time.time()
+        self._last_ok  = None
+        self._last_err = None
+        logger.info(f"[LightweightHeartbeat] ready → {self.endpoint}  interval={self.interval}s")
+
+    def start(self):
+        with self._lock:
+            if self._running:
+                return
+            self._running = True
+            self._thread  = threading.Thread(
+                target=self._loop, daemon=True, name="LightweightHeartbeat")
+            self._thread.start()
+        logger.info(f"[LightweightHeartbeat] ✅ started")
+
+    def stop(self):
+        with self._lock:
+            self._running = False
+        if self._thread:
+            self._thread.join(timeout=5.0)
+
+    def beat(self):
+        """Fire a single POST immediately (callable externally)."""
+        self._post_once()
+
+    # ── internals ────────────────────────────────────────────────────────────
+
+    def _loop(self):
+        time.sleep(5.0)   # let startup settle
+        while self._running:
+            try:
+                self._post_once()
+            except Exception as exc:
+                logger.debug(f"[LightweightHeartbeat] _post_once: {exc}")
+            deadline = time.time() + self.interval
+            while self._running and time.time() < deadline:
+                time.sleep(0.5)
+
+    def _metrics(self) -> dict:
+        """Pull live data from module-level singletons (safe if not ready yet)."""
+        out = {}
+        try:
+            import sys as _sys
+            _m = _sys.modules.get('quantum_lattice_control_live_complete')
+            if _m is None:
+                return out
+            # UniversalQuantumHeartbeat pulse metrics
+            _hb = getattr(_m, 'HEARTBEAT', None)
+            if _hb and hasattr(_hb, 'get_metrics'):
+                try:
+                    hbm = _hb.get_metrics()
+                    out['heartbeat'] = {
+                        'pulse_count':   hbm.get('pulse_count', 0),
+                        'sync_count':    hbm.get('sync_count', 0),
+                        'frequency_hz':  hbm.get('frequency', 1.0),
+                        'running':       hbm.get('running', False),
+                        'error_count':   hbm.get('error_count', 0),
+                        'listeners':     hbm.get('listeners', 0),
+                    }
+                except Exception:
+                    pass
+            # QuantumLatticeGlobal system metrics
+            _lat = getattr(_m, 'LATTICE', None)
+            if _lat and hasattr(_lat, 'get_system_metrics'):
+                try:
+                    lm = _lat.get_system_metrics()
+                    # flatten to JSON-safe scalars only
+                    def _j(v):
+                        if isinstance(v, (int, float, bool, str)) or v is None:
+                            return v
+                        if isinstance(v, (list, tuple)):
+                            return [_j(x) for x in v]
+                        if isinstance(v, dict):
+                            return {k: _j(vv) for k, vv in v.items()}
+                        return str(v)
+                    out['lattice'] = _j(lm)
+                except Exception:
+                    pass
+            # W-state coherence
+            _ws = getattr(_m, 'W_STATE_ENHANCED', None)
+            if _ws and hasattr(_ws, 'get_state'):
+                try:
+                    ws = _ws.get_state()
+                    out['w_state'] = {k: ws.get(k) for k in ('coherence','fidelity','running') if k in ws}
+                except Exception:
+                    pass
+        except Exception:
             pass
-        def start(self):
-            pass
-        def stop(self):
-            pass
-        def beat(self):
-            pass
+        return out
+
+    def _post_once(self):
+        import json as _json
+        from datetime import datetime as _dt, timezone as _tz
+        payload = {
+            'timestamp':  _dt.now(_tz.utc).isoformat(),
+            'uptime_s':   time.time() - self._started,
+            'beat_count': self._beats + 1,
+            'status':     'alive',
+            'metrics':    self._metrics(),
+        }
+        data = _json.dumps(payload).encode()
+        headers = {'Content-Type': 'application/json'}
+        delay = self._BACKOFF
+        for attempt in range(1, self._MAX_RETRY + 1):
+            try:
+                try:
+                    import requests as _req
+                    r = _req.post(self.endpoint, data=data, headers=headers,
+                                  timeout=self._TIMEOUT)
+                    code = r.status_code
+                except ImportError:
+                    import urllib.request as _ur
+                    req = _ur.Request(self.endpoint, data=data, headers=headers, method='POST')
+                    with _ur.urlopen(req, timeout=self._TIMEOUT) as resp:
+                        code = resp.status
+                with self._lock:
+                    self._last_ok  = code
+                    self._last_err = None
+                    self._beats   += 1
+                logger.debug(f"[LightweightHeartbeat] ❤️  beat #{self._beats} → HTTP {code}")
+                return
+            except Exception as exc:
+                with self._lock:
+                    self._last_err = str(exc)
+                if attempt < self._MAX_RETRY:
+                    time.sleep(delay)
+                    delay *= 2
+        logger.warning(f"[LightweightHeartbeat] all {self._MAX_RETRY} attempts failed: {self._last_err}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LOGGING CONFIGURATION
