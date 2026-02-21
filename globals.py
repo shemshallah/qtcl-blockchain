@@ -122,7 +122,8 @@ for cmd, info in COMMAND_REGISTRY.items():
 
 _GLOBAL_STATE = {
     'initialized': False,
-    'lock': threading.RLock(),
+    '_initializing': False,          # re-entrancy guard (prevents RLock recursion loop)
+    'lock': threading.Lock(),        # NON-reentrant: if same thread re-enters, it deadlocks loudly
     'heartbeat': None,
     'lattice': None,
     'lattice_neural_refresh': None,   # ContinuousLatticeNeuralRefresh
@@ -163,171 +164,183 @@ def _safe_import(module_path: str, item_name: str, fallback=None):
         return fallback
 
 def initialize_globals():
-    """Initialize all global system managers. Multiprocess-safe for Procfile workers."""
+    """Initialize all global system managers. Multiprocess-safe for Procfile workers.
+
+    Two bugs fixed vs. the original:
+    1. Re-entrancy loop: AuthSystemIntegration.__init__ (and similar constructors) call
+       get_globals() → initialize_globals() while we are still inside the first call.
+       The original used RLock (reentrant), so 'initialized' was still False and the full
+       init ran again inside itself.  Fix: _initializing sentinel + plain Lock.
+    2. _init_pid fall-through: when a forked worker inherited initialized=True but a
+       different PID, the code updated _init_pid but fell through to re-run all init.
+       Fix: explicit return after updating _init_pid for a new PID.
+    """
     global _GLOBAL_STATE
     import os
-    
+
     current_pid = os.getpid()
-    
+
+    # ── Fast paths (no lock needed for reads) ────────────────────────────────
+    if _GLOBAL_STATE['initialized'] and _GLOBAL_STATE.get('_init_pid') == current_pid:
+        return _GLOBAL_STATE
+    # Re-entrancy guard: a subsystem constructor called us while we're mid-init.
+    # Return the partially-built state; the constructor will find what it needs.
+    if _GLOBAL_STATE.get('_initializing'):
+        return _GLOBAL_STATE
+
     with _GLOBAL_STATE['lock']:
-        # If already initialized IN THIS PROCESS, return immediately
-        if _GLOBAL_STATE['initialized']:
-            # Different process? Allow re-initialization for this new process
-            if '_init_pid' not in _GLOBAL_STATE:
-                _GLOBAL_STATE['_init_pid'] = current_pid
-            elif _GLOBAL_STATE['_init_pid'] != current_pid:
-                logger.debug(f"[globals] Process {current_pid} detected (parent was {_GLOBAL_STATE['_init_pid']}) — reinitializing")
-                _GLOBAL_STATE['_init_pid'] = current_pid
-            else:
-                # Same process, already initialized - return
-                return _GLOBAL_STATE
-        
-        # Mark this process as initializer
-        if '_init_pid' not in _GLOBAL_STATE:
+        # Double-checked locking.
+        if _GLOBAL_STATE['initialized'] and _GLOBAL_STATE.get('_init_pid') == current_pid:
+            return _GLOBAL_STATE
+        if _GLOBAL_STATE.get('_initializing'):
+            return _GLOBAL_STATE
+
+        # If a forked worker inherits initialized=True but a different PID, just update
+        # the PID and return — no need to re-run initialization.
+        if _GLOBAL_STATE['initialized'] and _GLOBAL_STATE.get('_init_pid') != current_pid:
+            logger.debug(f"[globals] Fork detected (parent PID {_GLOBAL_STATE.get('_init_pid')} "
+                         f"→ worker PID {current_pid}) — reusing parent state")
             _GLOBAL_STATE['_init_pid'] = current_pid
-        
-        logger.info("="*80)
-        logger.info("🚀 INITIALIZING COMPREHENSIVE GLOBAL STATE")
-        logger.info("="*80)
-        
-        # Initialize Quantum Systems — import already-created singletons
-        try:
-            # _init_quantum_singletons() already runs at module load via _safely_init_quantum_singletons()
-            # (see quantum_lattice_control_live_complete.py:5959)
-            # Here we just import and reference the already-created singletons
-            import quantum_lattice_control_live_complete as _qlc
+            return _GLOBAL_STATE
 
-            _GLOBAL_STATE['heartbeat']             = _qlc.HEARTBEAT
-            _GLOBAL_STATE['lattice']               = _qlc.LATTICE
-            _GLOBAL_STATE['lattice_neural_refresh'] = _qlc.LATTICE_NEURAL_REFRESH
-            _GLOBAL_STATE['w_state_enhanced']       = _qlc.W_STATE_ENHANCED
-            _GLOBAL_STATE['noise_bath_enhanced']    = _qlc.NOISE_BATH_ENHANCED
-            _GLOBAL_STATE['quantum_coordinator']    = _qlc.QUANTUM_COORDINATOR
+        # Claim the slot — any re-entrant call will see _initializing=True and bail.
+        _GLOBAL_STATE['_initializing'] = True
+        _GLOBAL_STATE['_init_pid'] = current_pid
 
-            _alive = [k for k in ('heartbeat','lattice','lattice_neural_refresh',
-                                  'w_state_enhanced','noise_bath_enhanced','quantum_coordinator')
-                      if _GLOBAL_STATE[k] is not None]
-            logger.info(f"✅ Quantum subsystems loaded: {', '.join(_alive)}")
-        except Exception as e:
-            logger.warning(f"⚠️  Quantum systems: {str(e)[:120]}")
-        
-        # Initialize Database
         try:
-            db_manager = _safe_import('db_builder_v2', 'db_manager')
-            _GLOBAL_STATE['db_manager'] = db_manager
-            if db_manager:
-                _GLOBAL_STATE['db_pool'] = getattr(db_manager, 'pool', None)
-                logger.info("✅ Database connection pool initialized")
-        except Exception as e:
-            logger.warning(f"⚠️  Database: {str(e)[:60]}")
-        
-        # Initialize Blockchain
-        try:
-            blockchain = _safe_import('blockchain_api', 'blockchain')
-            _GLOBAL_STATE['blockchain'] = blockchain
-            if blockchain:
-                logger.info("✅ Blockchain system initialized")
-        except Exception as e:
-            logger.warning(f"⚠️  Blockchain: {str(e)[:60]}")
-        
-        # Initialize Ledger
-        try:
-            get_ledger_integration = _safe_import('ledger_manager', 'get_ledger_integration')
-            if get_ledger_integration:
-                ledger = get_ledger_integration()
-                _GLOBAL_STATE['ledger'] = ledger
-                logger.info("✅ Quantum ledger integration initialized")
-        except Exception as e:
-            logger.warning(f"⚠️  Ledger: {str(e)[:60]}")
-        
-        # Initialize Oracle
-        try:
-            get_oracle_instance = _safe_import('oracle_api', 'get_oracle_instance')
-            if get_oracle_instance:
-                oracle = get_oracle_instance()
-                _GLOBAL_STATE['oracle'] = oracle
-                logger.info("✅ Oracle unified brains system initialized")
-        except Exception as e:
-            logger.warning(f"⚠️  Oracle: {str(e)[:60]}")
-        
-        # Initialize DeFi
-        try:
-            get_defi_blueprint = _safe_import('defi_api', 'get_defi_blueprint')
-            if get_defi_blueprint:
-                _GLOBAL_STATE['defi'] = get_defi_blueprint()
-                logger.info("✅ DeFi engine initialized")
-        except Exception as e:
-            logger.warning(f"⚠️  DeFi: {str(e)[:60]}")
-        
-        # Initialize Auth
-        try:
-            AuthSystemIntegration = _safe_import('auth_handlers', 'AuthSystemIntegration')
-            if AuthSystemIntegration:
-                _GLOBAL_STATE['auth_manager'] = AuthSystemIntegration()
-                logger.info("✅ Authentication system initialized")
-        except Exception as e:
-            logger.warning(f"⚠️  Auth: {str(e)[:60]}")
-        
-        # Initialize PQC
-        try:
-            get_pqc_system = _safe_import('pq_key_system', 'get_pqc_system')
-            if get_pqc_system:
-                pqc = get_pqc_system()
-                _GLOBAL_STATE['pqc_system'] = pqc
-                logger.info("✅ Post-quantum cryptography system initialized")
-        except Exception as e:
-            logger.warning(f"⚠️  PQC: {str(e)[:60]}")
-        
-        # Initialize Admin
-        try:
-            AdminSessionManager = _safe_import('admin_api', 'AdminSessionManager')
-            if AdminSessionManager:
-                _GLOBAL_STATE['admin_system'] = AdminSessionManager()
-                logger.info("✅ Admin fortress security system initialized")
-        except Exception as e:
-            logger.warning(f"⚠️  Admin: {str(e)[:60]}")
-        
-        # Initialize Terminal - DEFER COMPLETELY (100% lazy-load on first request)
-        # TerminalEngine instantiation causes circular recursion during init
-        # It will be created on first call to dispatch_command or _initialize_terminal_engine()
-        try:
-            TerminalEngine = _safe_import('terminal_logic', 'TerminalEngine')
-            if TerminalEngine:
-                _GLOBAL_STATE['terminal_engine'] = None  # Lazy-load marker
-                logger.info("✅ Terminal engine deferred (100% lazy-load on first request)")
-        except Exception as e:
-            logger.warning(f"⚠️  Terminal deferred: {str(e)[:60]}")
-        
-        # Create Genesis Block
-        try:
-            _GLOBAL_STATE['genesis_block'] = _create_pqc_genesis_block()
-            logger.info("✅ PQC genesis block created and verified")
-        except Exception as e:
-            logger.warning(f"⚠️  Genesis block: {str(e)[:60]}")
-        
-        _GLOBAL_STATE['initialized'] = True
-        logger.info("="*80)
-        logger.info("✅ COMPREHENSIVE GLOBAL STATE INITIALIZATION COMPLETE")
-        logger.info("="*80)
+            logger.info("="*80)
+            logger.info("🚀 INITIALIZING COMPREHENSIVE GLOBAL STATE")
+            logger.info("="*80)
 
-        # Deferred quantum singleton + v8 registration — use already-loaded module
-        # from sys.modules to avoid any circular import risk.
-        try:
-            import sys as _sys
-            _qlc = _sys.modules.get('quantum_lattice_control_live_complete')
-            if _qlc is not None:
-                # Core singletons
-                _reg = getattr(_qlc, '_register_with_globals_lazy', None)
-                if _reg:
-                    _reg()
-                # v8 revival system
-                _reg_v8 = getattr(_qlc, '_register_v8_with_globals', None)
-                if _reg_v8:
-                    _reg_v8()
-            else:
-                logger.debug("[globals] quantum_lattice not yet in sys.modules — registration deferred")
-        except Exception as _rge:
-            logger.debug(f"[globals] quantum registration deferred: {_rge}")
+            # Initialize Quantum Systems — import already-created singletons
+            try:
+                import quantum_lattice_control_live_complete as _qlc
+                _GLOBAL_STATE['heartbeat']              = _qlc.HEARTBEAT
+                _GLOBAL_STATE['lattice']                = _qlc.LATTICE
+                _GLOBAL_STATE['lattice_neural_refresh'] = _qlc.LATTICE_NEURAL_REFRESH
+                _GLOBAL_STATE['w_state_enhanced']       = _qlc.W_STATE_ENHANCED
+                _GLOBAL_STATE['noise_bath_enhanced']    = _qlc.NOISE_BATH_ENHANCED
+                _GLOBAL_STATE['quantum_coordinator']    = _qlc.QUANTUM_COORDINATOR
+                _alive = [k for k in ('heartbeat', 'lattice', 'lattice_neural_refresh',
+                                      'w_state_enhanced', 'noise_bath_enhanced', 'quantum_coordinator')
+                          if _GLOBAL_STATE[k] is not None]
+                logger.info(f"✅ Quantum subsystems loaded: {', '.join(_alive)}")
+            except Exception as e:
+                logger.warning(f"⚠️  Quantum systems: {str(e)[:120]}")
+
+            # Initialize Database
+            try:
+                db_manager = _safe_import('db_builder_v2', 'db_manager')
+                _GLOBAL_STATE['db_manager'] = db_manager
+                if db_manager:
+                    _GLOBAL_STATE['db_pool'] = getattr(db_manager, 'pool', None)
+                    logger.info("✅ Database connection pool initialized")
+            except Exception as e:
+                logger.warning(f"⚠️  Database: {str(e)[:60]}")
+
+            # Initialize Blockchain
+            try:
+                blockchain = _safe_import('blockchain_api', 'blockchain')
+                _GLOBAL_STATE['blockchain'] = blockchain
+                if blockchain:
+                    logger.info("✅ Blockchain system initialized")
+            except Exception as e:
+                logger.warning(f"⚠️  Blockchain: {str(e)[:60]}")
+
+            # Initialize Ledger
+            try:
+                get_ledger_integration = _safe_import('ledger_manager', 'get_ledger_integration')
+                if get_ledger_integration:
+                    _GLOBAL_STATE['ledger'] = get_ledger_integration()
+                    logger.info("✅ Quantum ledger integration initialized")
+            except Exception as e:
+                logger.warning(f"⚠️  Ledger: {str(e)[:60]}")
+
+            # Initialize Oracle
+            try:
+                get_oracle_instance = _safe_import('oracle_api', 'get_oracle_instance')
+                if get_oracle_instance:
+                    _GLOBAL_STATE['oracle'] = get_oracle_instance()
+                    logger.info("✅ Oracle unified brains system initialized")
+            except Exception as e:
+                logger.warning(f"⚠️  Oracle: {str(e)[:60]}")
+
+            # Initialize DeFi
+            try:
+                get_defi_blueprint = _safe_import('defi_api', 'get_defi_blueprint')
+                if get_defi_blueprint:
+                    _GLOBAL_STATE['defi'] = get_defi_blueprint()
+                    logger.info("✅ DeFi engine initialized")
+            except Exception as e:
+                logger.warning(f"⚠️  DeFi: {str(e)[:60]}")
+
+            # Initialize Auth
+            try:
+                AuthSystemIntegration = _safe_import('auth_handlers', 'AuthSystemIntegration')
+                if AuthSystemIntegration:
+                    _GLOBAL_STATE['auth_manager'] = AuthSystemIntegration()
+                    logger.info("✅ Authentication system initialized")
+            except Exception as e:
+                logger.warning(f"⚠️  Auth: {str(e)[:60]}")
+
+            # Initialize PQC
+            try:
+                get_pqc_system = _safe_import('pq_key_system', 'get_pqc_system')
+                if get_pqc_system:
+                    _GLOBAL_STATE['pqc_system'] = get_pqc_system()
+                    logger.info("✅ Post-quantum cryptography system initialized")
+            except Exception as e:
+                logger.warning(f"⚠️  PQC: {str(e)[:60]}")
+
+            # Initialize Admin
+            try:
+                AdminSessionManager = _safe_import('admin_api', 'AdminSessionManager')
+                if AdminSessionManager:
+                    _GLOBAL_STATE['admin_system'] = AdminSessionManager()
+                    logger.info("✅ Admin fortress security system initialized")
+            except Exception as e:
+                logger.warning(f"⚠️  Admin: {str(e)[:60]}")
+
+            # Initialize Terminal — DEFERRED (100% lazy-load on first request)
+            try:
+                TerminalEngine = _safe_import('terminal_logic', 'TerminalEngine')
+                if TerminalEngine:
+                    _GLOBAL_STATE['terminal_engine'] = None  # Lazy-load marker
+                    logger.info("✅ Terminal engine deferred (100% lazy-load on first request)")
+            except Exception as e:
+                logger.warning(f"⚠️  Terminal deferred: {str(e)[:60]}")
+
+            # Create Genesis Block
+            try:
+                _GLOBAL_STATE['genesis_block'] = _create_pqc_genesis_block()
+                logger.info("✅ PQC genesis block created and verified")
+            except Exception as e:
+                logger.warning(f"⚠️  Genesis block: {str(e)[:60]}")
+
+            _GLOBAL_STATE['initialized'] = True
+            logger.info("="*80)
+            logger.info("✅ COMPREHENSIVE GLOBAL STATE INITIALIZATION COMPLETE")
+            logger.info("="*80)
+
+            # Deferred quantum registration (avoid circular import risk)
+            try:
+                import sys as _sys
+                _qlc = _sys.modules.get('quantum_lattice_control_live_complete')
+                if _qlc is not None:
+                    _reg = getattr(_qlc, '_register_with_globals_lazy', None)
+                    if _reg:
+                        _reg()
+                    _reg_v8 = getattr(_qlc, '_register_v8_with_globals', None)
+                    if _reg_v8:
+                        _reg_v8()
+                else:
+                    logger.debug("[globals] quantum_lattice not yet in sys.modules — registration deferred")
+            except Exception as _rge:
+                logger.debug(f"[globals] quantum registration deferred: {_rge}")
+
+        finally:
+            # Always clear the in-progress flag so future callers are not blocked.
+            _GLOBAL_STATE['_initializing'] = False
 
         return _GLOBAL_STATE
 
