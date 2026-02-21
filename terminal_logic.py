@@ -7635,24 +7635,36 @@ def register_all_commands(engine: 'TerminalEngine'):
     }
 
     # Register all handlers into the global registry
+    # For commands already in registry (essential commands), inject the handler
+    # For new commands, create full entry
     registration_count = 0
+    injected_count = 0
     failed_commands = []
     
     for name, handler in handlers.items():
         try:
-            COMMAND_REGISTRY[name] = {
-                'handler':       handler,
-                'category':      CATEGORIES.get(name, 'general'),
-                'description':   DESCRIPTIONS.get(name, f'{name} command'),
-                'requires_admin': name in ADMIN_CMDS,
-                'auth_required': name not in OPEN_CMDS,
-            }
+            # Check if command already exists in registry (with None handler)
+            existing_entry = COMMAND_REGISTRY.get(name)
+            if existing_entry and existing_entry.get('handler') is None:
+                # Inject handler into existing entry (preserves original metadata)
+                existing_entry['handler'] = handler
+                injected_count += 1
+                logger.debug(f'[terminal_logic] Injected handler for "{name}"')
+            else:
+                # Create new entry (for commands not in essential list)
+                COMMAND_REGISTRY[name] = {
+                    'handler':       handler,
+                    'category':      CATEGORIES.get(name, 'general'),
+                    'description':   DESCRIPTIONS.get(name, f'{name} command'),
+                    'requires_admin': name in ADMIN_CMDS,
+                    'auth_required': name not in OPEN_CMDS,
+                }
             registration_count += 1
         except Exception as e:
             _logger.error(f'[terminal_logic] Failed to register command "{name}": {e}')
             failed_commands.append(name)
 
-    _logger.info(f'[terminal_logic] ✓ Registered {registration_count} commands into globals.COMMAND_REGISTRY')
+    _logger.info(f'[terminal_logic] ✓ Registered {registration_count} commands (injected {injected_count} essential handlers)')
     if failed_commands:
         _logger.warning(f'[terminal_logic] ⚠️  Failed to register {len(failed_commands)} commands: {failed_commands}')
     

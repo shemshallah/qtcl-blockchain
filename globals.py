@@ -111,6 +111,76 @@ COMMAND_REGISTRY = {
     'help-command': {'category': 'help', 'description': 'Get detailed help for command', 'auth_required': False},
 }
 
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# ESSENTIAL COMMANDS - Registered immediately (handlers set to None, injected later)
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# These commands must exist in COMMAND_REGISTRY before terminal engine initializes
+# so dispatch_command doesn't return "unknown command" but "initializing" instead.
+
+_ESSENTIAL_COMMANDS = {
+    'login': {
+        'handler': None,  # ← Injected by register_all_commands()
+        'category': 'auth',
+        'description': 'Authenticate with email + password',
+        'auth_required': False,
+        'requires_admin': False,
+    },
+    'register': {
+        'handler': None,
+        'category': 'auth',
+        'description': 'Register new user account',
+        'auth_required': False,
+        'requires_admin': False,
+    },
+    'help': {
+        'handler': None,
+        'category': 'help',
+        'description': 'Show help',
+        'auth_required': False,
+        'requires_admin': False,
+    },
+    'help-commands': {
+        'handler': None,
+        'category': 'help',
+        'description': 'List all commands',
+        'auth_required': False,
+        'requires_admin': False,
+    },
+    'logout': {
+        'handler': None,
+        'category': 'auth',
+        'description': 'Logout user',
+        'auth_required': True,
+        'requires_admin': False,
+    },
+    'system-health': {
+        'handler': None,
+        'category': 'system',
+        'description': 'System health check',
+        'auth_required': False,
+        'requires_admin': False,
+    },
+    'system-status': {
+        'handler': None,
+        'category': 'system',
+        'description': 'System status',
+        'auth_required': False,
+        'requires_admin': False,
+    },
+    'wsgi-status': {
+        'handler': None,
+        'category': 'system',
+        'description': 'WSGI globals bridge status',
+        'auth_required': False,
+        'requires_admin': False,
+    },
+}
+
+# Merge essential commands into COMMAND_REGISTRY
+for cmd_name, cmd_info in _ESSENTIAL_COMMANDS.items():
+    if cmd_name not in COMMAND_REGISTRY:
+        COMMAND_REGISTRY[cmd_name] = cmd_info
+
 COMMAND_ALIASES = {}
 for cmd, info in COMMAND_REGISTRY.items():
     for alias in info.get('aliases', []):
@@ -2083,8 +2153,75 @@ def revoke_session(session_id: str) -> dict:
     }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# COMMAND DISPATCH WITH AUTHENTICATION & ADMIN CHECKS
+# UNIFIED COMMAND PARSING (Single source of truth)
 # ═══════════════════════════════════════════════════════════════════════════════════════
+
+def _parse_raw_command(raw: str) -> tuple:
+    """
+    Parse raw command string into (command_name, flags_dict, positional_args).
+    
+    SINGLE UNIFIED PARSER - used by dispatch_command and all other parsing.
+    
+    Examples:
+        "login --email=x@y.com --password=secret" 
+        → ("login", {"email": "x@y.com", "password": "secret"}, [])
+        
+        "block-details 42 --verbose"
+        → ("block-details", {"verbose": True}, ["42"])
+        
+        "help"
+        → ("help", {}, [])
+    
+    Returns: (command_name, flags_dict, positional_args)
+    """
+    import re
+    
+    tokens = raw.strip().split()
+    if not tokens:
+        return '', {}, []
+    
+    cmd_name = tokens[0].lower()
+    flags = {}
+    positional = []
+    
+    i = 1
+    while i < len(tokens):
+        tok = tokens[i]
+        
+        # Long flag: --key=value or --key or --key value
+        if tok.startswith('--'):
+            inner = tok[2:].strip()
+            if not inner:
+                i += 1
+                continue
+            
+            if '=' in inner:
+                # --key=value format
+                key, val = inner.split('=', 1)
+                flags[key.replace('-', '_')] = val
+            else:
+                # --key or --key value format
+                key = inner.replace('-', '_')
+                # Check if next token is a value (not a flag)
+                if i + 1 < len(tokens) and not tokens[i + 1].startswith('-'):
+                    val = tokens[i + 1]
+                    flags[key] = val
+                    i += 1  # Skip next token (it's the value)
+                else:
+                    flags[key] = True  # Boolean flag
+        
+        # Short flag: -v or -abc
+        elif tok.startswith('-'):
+            for char in tok[1:]:
+                flags[char] = True
+        
+        # Positional argument
+        else:
+            positional.append(tok)
+        
+        i += 1
+    
+    return cmd_name, flags, positional
 
 def dispatch_command(command: str, args: dict = None, user_id: str = None, token: str = None, role: str = None) -> dict:
     """
@@ -2096,9 +2233,10 @@ def dispatch_command(command: str, args: dict = None, user_id: str = None, token
     
     Verifies:
     1. Command exists in COMMAND_REGISTRY
-    2. Auth required vs. provided
-    3. Admin required vs. user role
-    4. Executes handler with proper context
+    2. Handler is registered (or returns 'initializing' status if pending)
+    3. Auth required vs. provided
+    4. Admin required vs. user role
+    5. Executes handler with proper context
     
     Args:
         command: Command name or full command string (e.g., 'system-health' or 'login --email=x')
@@ -2108,34 +2246,21 @@ def dispatch_command(command: str, args: dict = None, user_id: str = None, token
         role: Optional user role from token
     
     Returns:
-        dict with status, data or error
+        dict with status, data, error, or 'initializing' status
     """
     try:
-        # ── Check if command is a raw string (contains spaces or flags) ────────────
         positional_args = []
+        
+        # Detect if command is a raw string (contains spaces)
         if ' ' in command and not command.startswith(' '):
-            # Parse raw command string
-            import re
-            tokens = command.strip().split()
-            cmd_name = tokens[0].lower()
-            parsed_flags = {}
-            
-            for tok in tokens[1:]:
-                m = re.match(r'^--([a-zA-Z0-9_-]+)(?:=(.+))?$', tok)
-                if m:
-                    key = m.group(1).replace('-', '_')
-                    val = m.group(2)
-                    parsed_flags[key] = val if val is not None else True
-                else:
-                    positional_args.append(tok)
-            
-            # Merge with provided args, with parsed flags taking precedence
+            # Parse raw command string using unified parser
+            cmd_name, parsed_flags, positional_args = _parse_raw_command(command)
             if args is None:
                 args = {}
-            args = {**args, **parsed_flags}  # Parsed flags override
-            command = cmd_name  # Update command to just the name
+            args = {**args, **parsed_flags}  # Parsed flags override provided args
+            command = cmd_name
         else:
-            # Command is already parsed; args dict is flags, no positional args provided
+            # Command is already parsed; args dict is flags
             if args is None:
                 args = {}
         
@@ -2147,6 +2272,17 @@ def dispatch_command(command: str, args: dict = None, user_id: str = None, token
                 'status': 'error',
                 'error': f"Unknown command: {command}",
                 'suggestions': suggestions
+            }
+        
+        # ── CRITICAL: Check if handler is registered ──────────────────────
+        # If handler is None, system is still initializing
+        handler = entry.get('handler')
+        if handler is None:
+            return {
+                'status': 'initializing',
+                'error': f'System initializing, command "{command}" not yet available',
+                'message': 'Please retry in 1-2 seconds',
+                'retry_after_seconds': 2
             }
         
         # ── Check authentication requirement ──────────────────────────────
@@ -2169,8 +2305,7 @@ def dispatch_command(command: str, args: dict = None, user_id: str = None, token
                 }
         
         # ── Execute handler ──────────────────────────────────────────────
-        handler = entry.get('handler')
-        if not handler or not callable(handler):
+        if not callable(handler):
             return {
                 'status': 'error',
                 'error': f'Command "{command}" handler not callable'
