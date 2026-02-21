@@ -148,14 +148,29 @@ if mpmath_available:
 # LOGGING CONFIGURATION
 # ===============================================================================
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] [%(name)s] %(levelname)s: %(message)s',
-    handlers=[
-        logging.FileHandler('qtcl_db_builder_v2_ultimate.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
+# HANG FIX: FileHandler must use /tmp — Koyeb's /app layer is read-only.
+# If you write to a path like 'qtcl_db_builder_v2_ultimate.log' (relative = /app/),
+# Python raises PermissionError at module import time, causing ImportError, which
+# breaks the entire bootstrap chain. /tmp is always writable in Koyeb containers.
+# If you ever move this back to a relative path, the module will fail to import silently.
+import os as _os_logging
+_LOG_FILE = _os_logging.path.join('/tmp', 'qtcl_db_builder_v2_ultimate.log')
+try:
+    _file_handler = logging.FileHandler(_LOG_FILE)
+except Exception:
+    _file_handler = logging.NullHandler()
+
+# Only configure root logger if not already done (prevent double-handler explosion
+# when multiple modules call basicConfig; subsequent calls are no-ops).
+if not logging.getLogger().hasHandlers():
+    logging.basicConfig(
+        level=logging.INFO,
+        format='[%(asctime)s] [%(name)s] %(levelname)s: %(message)s',
+        handlers=[_file_handler, logging.StreamHandler(sys.stdout)]
+    )
+else:
+    # Root logger already configured — just attach file handler to our module logger.
+    _file_handler.setFormatter(logging.Formatter('[%(asctime)s] [%(name)s] %(levelname)s: %(message)s'))
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -8478,15 +8493,40 @@ def main():
 
     logger.info(f"{CLR.BOLD}{CLR.H}Starting QTCL Database Builder V2 — Enterprise PQ Edition...{CLR.E}\n")
 
+    # ── HANG FIX: --schema-only flag for Koyeb release phase ─────────────────
+    # Full 8-phase orchestration (populate_pq=True) inserts 106,496 pseudoqubits
+    # and makes 3 external QRNG API calls — this can take 5-30 minutes and will
+    # FREEZE the Koyeb release phase before gunicorn ever starts.
+    #
+    # --schema-only runs only phases 1-4 (CREATE TABLE IF NOT EXISTS + genesis upsert
+    # + PQ column migration). No QRNG calls. No pseudoqubit population. No ANALYZE.
+    # Idempotent — safe to run on every deploy. Completes in <30 seconds.
+    #
+    # If this flag is removed and full orchestration is put back in release, Koyeb
+    # will hang because the release command must finish before `web:` gunicorn starts.
+    _schema_only = '--schema-only' in sys.argv
+    if _schema_only:
+        logger.info(f"{CLR.BOLD}{CLR.C}[RELEASE MODE] --schema-only: skipping QRNG/pseudoqubits/validation/optimize{CLR.E}")
+
     orchestrator = DatabaseOrchestrator()
 
     try:
-        # ── Full 8-phase orchestration ─────────────────────────────────────────
-        success = orchestrator.initialize_all(
-            populate_pq=True,
-            run_validations=True,
-            optimize=True
-        )
+        # ── Schema-only vs full orchestration ────────────────────────────────
+        if _schema_only:
+            # SAFE FOR KOYEB RELEASE PHASE: Fast, no external network calls
+            success = orchestrator.initialize_all(
+                populate_pq=False,       # Skip 106,496-row pseudoqubit insert
+                run_validations=False,   # Skip validation suite
+                optimize=False           # Skip ANALYZE (can be slow on large tables)
+            )
+        else:
+            # FULL BOOTSTRAP: For manual one-time setup only — never use in Procfile release
+            # ── Full 8-phase orchestration ─────────────────────────────────────────
+            success = orchestrator.initialize_all(
+                populate_pq=True,
+                run_validations=True,
+                optimize=True
+            )
 
         if success:
             orchestrator.run_demo_queries()

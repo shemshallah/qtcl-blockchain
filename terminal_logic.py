@@ -172,14 +172,19 @@ def _init_wsgi_globals():
     if WSGI_AVAILABLE:
         return
     try:
-        from wsgi_config import (
-            DB as _DB, PROFILER as _PROFILER, CACHE as _CACHE,
-            ERROR_BUDGET as _EB, RequestCorrelation as _RC
-        )
-        DB, PROFILER, CACHE = _DB, _PROFILER, _CACHE
-        ERROR_BUDGET, REQUEST_CORRELATION = _EB, _RC
-        CIRCUIT_BREAKERS = None
-        RATE_LIMITERS = None
+        # HANG FIX: Use getattr-based import instead of named imports for optional attributes.
+        # wsgi_config exports: DB, PROFILER, CACHE, ERROR_BUDGET, RequestCorrelation.
+        # It does NOT export CIRCUIT_BREAKERS or RATE_LIMITERS — importing them by name
+        # raises ImportError which kills WSGI globals wiring and leaves DB/CACHE as None.
+        # getattr with a default of None handles both present and absent attributes safely.
+        import wsgi_config as _wc
+        DB                = getattr(_wc, 'DB', None)
+        PROFILER          = getattr(_wc, 'PROFILER', None)
+        CACHE             = getattr(_wc, 'CACHE', None)
+        ERROR_BUDGET      = getattr(_wc, 'ERROR_BUDGET', None)
+        REQUEST_CORRELATION = getattr(_wc, 'RequestCorrelation', None)
+        CIRCUIT_BREAKERS  = getattr(_wc, 'CIRCUIT_BREAKERS', None)   # not in wsgi_config — stays None
+        RATE_LIMITERS     = getattr(_wc, 'RATE_LIMITERS', None)       # not in wsgi_config — stays None
         WSGI_AVAILABLE = True
         logging.info("✓ WSGI globals initialized successfully")
     except ImportError:
@@ -244,10 +249,22 @@ def ensure_packages():
     NOW: Function continues silently if pip fails, and module imports successfully.
     Commands are then registered and command registry populates correctly.
     """
+    # HANG FIX: import names MUST match what Python uses at import time (not pip names).
+    # Wrong key → __import__ always fails → pip install runs on every startup → 10-60s hang.
+    # Correct mapping:  importable_name → pip package name
+    # 'PyJWT' is WRONG — the module is imported as 'jwt', not 'PyJWT'.
+    # 'python_dateutil' is WRONG — the module is imported as 'dateutil', not 'python_dateutil'.
+    # If these are wrong again, every gunicorn restart will silently pip-install for 30s.
     packages={
-        'requests':'requests','colorama':'colorama','tabulate':'tabulate','PyJWT':'PyJWT',
-        'cryptography':'cryptography','pydantic':'pydantic','python_dateutil':'python-dateutil',
-        'bcrypt':'bcrypt','psycopg2':'psycopg2-binary'
+        'requests':     'requests',
+        'colorama':     'colorama',
+        'tabulate':     'tabulate',
+        'jwt':          'PyJWT',          # import jwt  (NOT import PyJWT)
+        'cryptography': 'cryptography',
+        'pydantic':     'pydantic',
+        'dateutil':     'python-dateutil', # import dateutil  (NOT import python_dateutil)
+        'bcrypt':       'bcrypt',
+        'psycopg2':     'psycopg2-binary'
     }
     for module,pip_name in packages.items():
         try:
@@ -1120,9 +1137,32 @@ class SupabaseAuthManager:
 # LOGGING & METRICS
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 
-logging.basicConfig(level=logging.INFO,format='[%(asctime)s][%(levelname)s]%(message)s',
-    handlers=[logging.FileHandler('qtcl_terminal_complete.log'),logging.StreamHandler(sys.stdout)])
-logger=logging.getLogger(__name__)
+# HANG FIX: FileHandler MUST use /tmp — /app is read-only on Koyeb.
+# Relative path 'qtcl_terminal_complete.log' resolves to /app/qtcl_terminal_complete.log
+# which raises PermissionError at module import time → ImportError → commands never load.
+# If you move this back to a relative path, the terminal engine will silently fail to
+# import and COMMAND_REGISTRY will stay at 0 handlers with no error in the Koyeb UI.
+import os as _os_tl
+_TL_LOG_FILE = _os_tl.path.join('/tmp', 'qtcl_terminal_complete.log')
+try:
+    _tl_file_handler = logging.FileHandler(_TL_LOG_FILE)
+except Exception:
+    _tl_file_handler = logging.NullHandler()
+
+# Guard: only call basicConfig if root logger has no handlers yet.
+# Multiple modules calling basicConfig causes duplicate log lines and can
+# interfere with gunicorn's log capture (gunicorn configures the root logger too).
+if not logging.getLogger().hasHandlers():
+    logging.basicConfig(
+        level=logging.INFO,
+        format='[%(asctime)s][%(levelname)s]%(message)s',
+        handlers=[_tl_file_handler, logging.StreamHandler(sys.stdout)]
+    )
+else:
+    # Root already configured — attach our file handler directly to the module logger
+    # so file logging still works without duplicating stdout entries.
+    _tl_file_handler.setFormatter(logging.Formatter('[%(asctime)s][%(levelname)s]%(message)s'))
+logger = logging.getLogger(__name__)
 
 class Metrics:
     def __init__(self):
@@ -1833,8 +1873,29 @@ class TerminalEngine:
         self._setup_signal_handlers()
     
     def _setup_signal_handlers(self):
-        signal.signal(signal.SIGINT,lambda s,f:self.shutdown())
-        signal.signal(signal.SIGTERM,lambda s,f:self.shutdown())
+        # HANG FIX: NEVER override gunicorn's signal handlers inside a WSGI worker.
+        # Gunicorn uses SIGTERM to gracefully stop workers for rolling restarts and
+        # deploys. If TerminalEngine overrides SIGTERM → self.shutdown(), gunicorn's
+        # graceful shutdown is blocked → Koyeb deploy hangs waiting for old workers to die.
+        # signal.signal() also raises ValueError in non-main threads (gunicorn uses
+        # threads with gthread worker class). We guard both conditions here.
+        #
+        # If this check is removed, every rolling deploy will hang for ~120 seconds
+        # (gunicorn timeout) waiting for the old worker to exit.
+        import threading as _tl_threading
+        in_main_thread = isinstance(threading.current_thread(), threading.main_class if hasattr(threading,'main_class') else type(threading.main_thread()))
+        is_wsgi = os.getenv('SERVER_SOFTWARE', '').startswith('gunicorn') or                   os.getenv('GUNICORN_CMD_ARGS') is not None or                   'gunicorn' in ' '.join(sys.argv)
+        if is_wsgi:
+            # Running under gunicorn — do NOT touch SIGINT/SIGTERM.
+            # Gunicorn manages worker lifecycle signals; overriding them causes hangs.
+            return
+        try:
+            signal.signal(signal.SIGINT, lambda s, f: self.shutdown())
+            signal.signal(signal.SIGTERM, lambda s, f: self.shutdown())
+        except (ValueError, OSError):
+            # ValueError: signal only works in main thread — safe to ignore in threads.
+            # OSError: can occur in some container environments — non-fatal.
+            pass
     
     def _discover_wsgi_commands(self):
         """
