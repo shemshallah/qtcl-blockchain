@@ -4778,9 +4778,14 @@ class DatabaseBuilder:
         logger.error(f"[DB-CONN] Debug info: host={self.host}, port={self.port}, database={self.database}, user={self.user}")
         logger.error(f"[DB-CONN] Pool status: pool={'initialized' if self.pool else 'None'}, pool_size={self.pool_size}")
         raise Exception(error_detail)
+    
+    def return_connection(self, conn):
         """Return connection to pool"""
-        if conn:
-            self.pool.putconn(conn)
+        if conn and self.pool:
+            try:
+                self.pool.putconn(conn)
+            except Exception as e:
+                logger.warning(f"[DB-CONN] Error returning connection to pool: {e}")
     
     def validate_schema_recursively(self):
         """
@@ -8198,7 +8203,11 @@ def verify_database_connection(db_manager=None, verbose=True) -> Dict[str, Any]:
     finally:
         if conn:
             try:
-                db_manager.return_connection(conn)
+                # Try to return connection to pool (handles both old and new DatabaseBuilder versions)
+                if hasattr(db_manager, 'return_connection'):
+                    db_manager.return_connection(conn)
+                elif hasattr(db_manager, 'pool') and db_manager.pool:
+                    db_manager.pool.putconn(conn)
             except Exception:
                 pass
 
