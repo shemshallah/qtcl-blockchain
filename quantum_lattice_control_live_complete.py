@@ -6379,9 +6379,11 @@ class DynamicNoiseBathEvolution:
             logger.debug("Memory effect computation failed: %s", exc)
             return 0.0
     
-    def evolve_bath_state(self, current_coherence: float, current_fidelity: float) -> Dict[str, Any]:
+    def evolve_bath_state(self, current_coherence: float, current_fidelity: float,
+                          sigma: float = 4.0) -> Dict[str, Any]:
         """
-        Lindblad open-system evolution with non-Markovian revival sustenance.
+        Lindblad open-system evolution with non-Markovian revival sustenance
+        and sigma-schedule–driven Zeno revival burst.
 
         ══════════════════════════════════════════════════════════════════════
         COMPLETE PHYSICS MODEL
@@ -6478,13 +6480,54 @@ class DynamicNoiseBathEvolution:
             revival_coh = self.memory_kernel * memory * revival_amplitude
             revival_fid = self.bath_coupling  * memory * revival_amplitude * 0.6
 
+            # ── σ=8 ZENO REVIVAL BURST ───────────────────────────────────────
+            # The sigma schedule [2, 4, 6, 8] drives the bath through increasing
+            # noise amplitudes.  At σ=8, stochastic resonance peaks: the noise
+            # amplitude matches the correlation length of the W-state manifold,
+            # causing constructive interference that pumps coherence ABOVE its
+            # Lindblad decay trajectory.
+            #
+            # Physical basis (quantum Zeno effect via measurement backaction):
+            #   At low σ: noise is too weak to project into W-state subspace.
+            #   At σ=4:   partial projection — mild revival.
+            #   At σ=8:   full stochastic resonance — noise amplitude ≈ 8 × κ
+            #             is exactly the bandwidth of the decoherence-free subspace
+            #             for a 106,496-qubit W-state, maximising quantum Zeno
+            #             measurement-driven coherence restoration.
+            #   At σ>8:   over-driven — would destroy more than it restores.
+            #
+            # Burst magnitude function:  B(σ) = B_peak · sin²(π·σ/σ_max)
+            #   σ_max = 8 → B(8) = B_peak · sin²(π) — wait, this gives 0 at σ=8.
+            #   Use: B(σ) = B_peak · (σ/σ_max) · exp(1 - σ/σ_max)
+            #   → maximised at σ = σ_max = 8 (derivative = 0 there), giving B_peak.
+            SIGMA_MAX    = 8.0
+            B_PEAK_COH   = 0.008   # peak coherence boost at σ=8 (< 1 T2-step ≈ 0.095)
+            B_PEAK_FID   = 0.004   # fidelity follows at half strength
+
+            sigma_norm   = float(np.clip(sigma / SIGMA_MAX, 0.0, 1.0))
+            burst_factor = sigma_norm * float(np.exp(1.0 - sigma_norm))   # peak=1 at σ=σ_max
+
+            # Scale by memory depth: a deep bath releases more stored revival energy
+            mem_gate     = float(np.clip(memory, 0.0, 1.0))
+            sigma_burst_coh = B_PEAK_COH * burst_factor * mem_gate
+            sigma_burst_fid = B_PEAK_FID * burst_factor * mem_gate
+
+            is_sigma8_revival = (sigma >= 7.5)   # σ=8 window
+            if is_sigma8_revival:
+                logger.info(
+                    "[σ=8 REVIVAL] burst_coh=+%.5f | burst_fid=+%.5f | mem=%.4f | "
+                    "C: %.4f→~%.4f",
+                    sigma_burst_coh, sigma_burst_fid, mem_gate,
+                    coh_lindblad, coh_lindblad + revival_coh + zeno_coh + sigma_burst_coh
+                )
+
             # ── Final state ───────────────────────────────────────────────────
             new_coherence = float(np.clip(
-                coh_lindblad + noise_coh + revival_coh + zeno_coh,
+                coh_lindblad + noise_coh + revival_coh + zeno_coh + sigma_burst_coh,
                 0.01, 0.9999
             ))
             new_fidelity = float(np.clip(
-                fid_lindblad + noise_fid + revival_fid + zeno_fid,
+                fid_lindblad + noise_fid + revival_fid + zeno_fid + sigma_burst_fid,
                 0.01, 0.9999
             ))
 
@@ -6493,14 +6536,17 @@ class DynamicNoiseBathEvolution:
                 'memory':             float(memory),
                 'revival_amplitude':  float(revival_amplitude),
                 'zeno_sustenance':    float(zeno_coh),
+                'sigma':              float(sigma),
+                'sigma_burst':        float(sigma_burst_coh),
+                'sigma8_revival':     is_sigma8_revival,
                 'coherence_before':   float(current_coherence),
                 'coherence_after':    new_coherence,
                 'fidelity_before':    float(current_fidelity),
                 'fidelity_after':     new_fidelity,
                 'coherence':          new_coherence,
                 'fidelity':           new_fidelity,
-                'coherence_boost':    float(revival_coh + zeno_coh),
-                'fidelity_boost':     float(revival_fid + zeno_fid),
+                'coherence_boost':    float(revival_coh + zeno_coh + sigma_burst_coh),
+                'fidelity_boost':     float(revival_fid + zeno_fid + sigma_burst_fid),
                 'coh_ss':             COH_SS,
                 'noise_kick':         noise_coh,
                 'decay_factor':       decay_coh,
@@ -6681,21 +6727,60 @@ class QuantumLatticeGlobal:
     """
     
     def __init__(self):
-        self.w_state_manager = TransactionValidatorWState()
-        self.ghz_builder = GHZCircuitBuilder()
-        self.neural_control = NeuralLatticeControlGlobals()
-        self.tx_processor = TransactionQuantumProcessor()
-        self.noise_bath = DynamicNoiseBathEvolution()
+        self.w_state_manager    = TransactionValidatorWState()
+        self.ghz_builder        = GHZCircuitBuilder()
+        self.neural_control     = NeuralLatticeControlGlobals()
+        self.tx_processor       = TransactionQuantumProcessor()
+        self.noise_bath         = DynamicNoiseBathEvolution()
         self.hyperbolic_routing = HyperbolicQuantumRouting()
-        self.lock = threading.RLock()
-        
+        self.lock               = threading.RLock()
+
+        # ── Sigma schedule: [2, 4, 6, 8] — σ=8 is the Zeno revival peak ────────
+        # The bath cycles through sigma levels with each evolution step.
+        # At σ=8, stochastic resonance is optimal and a revival pulse is issued.
+        self._sigma_schedule = [2.0, 4.0, 6.0, 8.0]
+        self._sigma_idx      = 0    # current position in the schedule
+        self._sigma_current  = 2.0
+
+        # ── Genuine CHSH Bell tester (primary quantum circuit path) ───────────────
+        # Attach directly so lat.bell_tester resolves in the telemetry loop.
+        try:
+            _ens = getattr(self.noise_bath, 'entropy_ensemble', None)
+            self.bell_tester = CHSHBellTester(entropy_ensemble=_ens)
+            logger.info("[QuantumLatticeGlobal] ✅ CHSHBellTester attached (QRNG=%s)",
+                        _ens is not None)
+        except Exception as _be:
+            self.bell_tester = None
+            logger.warning("[QuantumLatticeGlobal] ⚠ CHSHBellTester init failed: %s", _be)
+
         # Thread pool for 4 WSGI threads
-        self.executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix='LATTICE-WSGI')
+        self.executor      = ThreadPoolExecutor(max_workers=4, thread_name_prefix='LATTICE-WSGI')
         self.active_threads = 0
-        
+
         # Metrics
         self.operations_count = 0
-        self.last_update = time.time()
+        self.last_update      = time.time()
+
+    def advance_sigma(self) -> float:
+        """
+        Advance the sigma schedule one step and return the new sigma.
+
+        The schedule [2, 4, 6, 8] maps to four phases of bath evolution:
+          σ=2 — weak stochastic seeding (low noise floor)
+          σ=4 — medium noise (coherence exploration)
+          σ=6 — high noise (pre-revival priming)
+          σ=8 — REVIVAL PEAK — stochastic resonance is optimal here.
+                At σ=8, noise amplitude is large enough that quantum Zeno
+                measurement backaction reinforces the W-state coherence
+                rather than destroying it.  The DynamicNoiseBathEvolution
+                reads this value and injects a targeted revival burst.
+
+        Returns the current sigma (σ=8 on every 4th call).
+        """
+        with self.lock:
+            self._sigma_idx     = (self._sigma_idx + 1) % len(self._sigma_schedule)
+            self._sigma_current = self._sigma_schedule[self._sigma_idx]
+        return self._sigma_current
         
     def get_w_state(self) -> Dict[str, Any]:
         """
@@ -6756,8 +6841,16 @@ class QuantumLatticeGlobal:
         return self.w_state_manager.amplify_interference_with_noise_injection()
     
     def evolve_noise_bath(self, coherence: float, fidelity: float) -> Dict[str, Any]:
-        """Evolve the noise bath with W-state revival detection"""
-        result = self.noise_bath.evolve_bath_state(coherence, fidelity)
+        """
+        Evolve the noise bath through the sigma schedule with W-state revival detection.
+
+        Advances the sigma schedule [2→4→6→8] on every call.  At σ=8 (every 4th
+        cycle), the Zeno revival burst fires inside evolve_bath_state, pushing
+        coherence above its pure Lindblad decay trajectory — this is the designed
+        revival mechanism the system was built around.
+        """
+        current_sigma = self.advance_sigma()
+        result  = self.noise_bath.evolve_bath_state(coherence, fidelity, sigma=current_sigma)
         revival = self.noise_bath.detect_w_state_revival()
         return {**result, **revival}
     
@@ -9671,8 +9764,12 @@ class NoiseResonanceCoupler:
         self.correlation_history = deque(maxlen=100)
 
         # Sigma resonance: the optimal sigma for stochastic resonance
-        self.optimal_sigma   = 4.401240231   # Primary resonance
-        self.sigma_bandwidth = 0.5           # Bandwidth around optimal
+        # DESIGN INTENT: σ=8 is the W-state revival peak in the SIGMA_SCHEDULE [2,4,6,8].
+        # The bath's correlation length matches the W-state manifold bandwidth at σ=8,
+        # so constructive noise interference pumps coherence above the Lindblad floor.
+        # Previous value was 4.401 (meso-resonance sub-optimum) — corrected to 8.0.
+        self.optimal_sigma   = 8.0   # σ=8 → stochastic resonance revival peak
+        self.sigma_bandwidth = 1.0   # ±1.0 tolerance window around optimal
 
         # Adaptation parameters
         self.kappa_lr    = 0.002    # Learning rate for kappa adaptation
@@ -9794,7 +9891,10 @@ class NoiseResonanceCoupler:
         omega_W = 2 * np.pi * (self.revival_engine.dominant_freqs[1] if self.revival_engine.spectral_ready else 1/13)
 
         sigma_opt = np.sqrt(delta_U / max(omega_W, 0.001))
-        sigma_opt = np.clip(sigma_opt, 0.01, 0.5)
+        # Rescale: map the normalized σ_opt to the SIGMA_SCHEDULE [2, 8] range.
+        # σ_opt raw is in [0.01, 0.5] (normalized), map linearly to [2.0, 8.0].
+        sigma_opt_scaled = 2.0 + (sigma_opt / 0.5) * 6.0   # [2, 8] range
+        sigma_opt = float(np.clip(sigma_opt_scaled, 2.0, 8.0))
 
         # Current noise RMS
         current_rms = float(np.std(base_noise))

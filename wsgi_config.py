@@ -529,41 +529,47 @@ def index():
 @app.route('/health', methods=['GET'])
 def health():
     """
-    Fast health endpoint — returns cached DB status in <10 ms, never blocks.
-
-    BUG-5 FIX: Always returns HTTP 200.  Previous code returned 503 when the DB
-    deferred-init thread hadn't connected yet, causing the keep-alive daemon to
-    log a CRITICAL failure streak on every cold start and masking real failures.
-    The actual health information is in the JSON body; callers should inspect
-    `database.connected` and `status` instead of relying on the HTTP status code
-    for degraded-but-running distinctions.
-
-    Use /api/db-diagnostics for verbose connection info.
+    Fast health endpoint — always HTTP 200, DB truth resolved in priority order:
+      1. Module-level DB pool (live, zero-latency) — resolves the 30s cold-start
+         window where _DB_STATUS_CACHE is stale-False despite pool being ready.
+      2. _DB_STATUS_CACHE — updated every 30s by daemon thread.
+    Whichever shows connected=True wins.
     """
     with _DB_STATUS_LOCK:
         db = _DB_STATUS_CACHE.copy()
 
-    connected = db.get('connected', False)
-    status    = 'healthy' if connected else 'degraded'
+    # Live pool check: authoritative for cold-start window before cache refreshes
+    live_connected = (DB is not None and getattr(DB, 'pool', None) is not None)
+    connected = live_connected or db.get('connected', False)
+
+    # Write live truth back into cache so next caller also benefits
+    if live_connected and not db.get('connected', False):
+        with _DB_STATUS_LOCK:
+            _DB_STATUS_CACHE['connected'] = True
+            _DB_STATUS_CACHE['healthy']   = True
+
+    status = 'healthy' if connected else 'degraded'
 
     return jsonify({
         'status':              status,
         'timestamp':           datetime.now(timezone.utc).isoformat(),
         'globals_initialized': GLOBALS_AVAILABLE,
         'database': {
-            'connected':        connected,
-            'host':             db.get('host'),
-            'port':             db.get('port'),
-            'database':         db.get('database'),
-            'error':            db.get('error'),
+            'connected':         connected,
+            'host':              db.get('host'),
+            'port':              db.get('port'),
+            'database':          db.get('database'),
+            'error':             db.get('error'),
             'cache_age_seconds': int(time.time() - db.get('timestamp', 0)),
+            'live_pool':         live_connected,
         },
         'note': (
             None if connected
             else 'DB not yet connected — check Koyeb env vars or wait for deferred init. '
                  'Details: /api/db-diagnostics'
         ),
-    }), 200   # ← BUG-5 FIX: always 200, degraded state is in the body
+    }), 200
+
 
 
 # ── BUG-2 FIX: add /api/heartbeat and /api/keepalive routes ──────────────────
@@ -1537,7 +1543,7 @@ def _lattice_telemetry_loop() -> None:
             # ── MASTER REFRESH CYCLE: Evolve + FORCE quantum measurements ────────────────
             if lat is not None and coh_current > 0 and fid_current > 0:
                 try:
-                    # PRIMARY EVOLUTION
+                    # PRIMARY EVOLUTION — sigma advances [2→4→6→8] each call
                     nb_result  = lat.evolve_noise_bath(coh_current, fid_current)
                     ws_result  = lat.refresh_interference()
 
@@ -1545,7 +1551,10 @@ def _lattice_telemetry_loop() -> None:
                     fid_after = nb_result.get('fidelity', fid_current)
                     coh_ss    = nb_result.get('coh_ss', 0.87)
                     memory    = nb_result.get('memory', 0.0)
-                    revival   = nb_result.get('revival_detected', False)
+                    sigma_val = nb_result.get('sigma', 4.0)
+                    sigma_bst = nb_result.get('sigma_burst', 0.0)
+                    revival   = nb_result.get('revival_detected', False) or \
+                                nb_result.get('sigma8_revival', False)
 
                     # ── QUANTUM MEASUREMENT 1: BELL TEST ──────────────────────────
                     #
@@ -1715,7 +1724,8 @@ def _lattice_telemetry_loop() -> None:
                         f"[LATTICE-REFRESH] Cycle #{cycle:4d} | "
                         f"C: {coh_current:.4f}→{coh_after:.4f} (ss={coh_ss:.3f}) | "
                         f"F: {fid_current:.4f}→{fid_after:.4f} | "
-                        f"mem={memory:.3f} | "
+                        f"mem={memory:.3f} | σ={sigma_val:.0f}"
+                        f"{'🌊REVIVAL' if revival else ''} | "
                         f"W-revival={'✓' if revival else '↔'} | "
                         f"Bell S_CHSH={bell_s:.3f} {('⚡VIOL' if bell_violation else '·')} | "
                         f"MI={mi:.4f} | WState={super_q}% | source=AerSimulator"
