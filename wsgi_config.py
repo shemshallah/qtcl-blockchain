@@ -396,6 +396,11 @@ app.config['JSON_SORT_KEYS'] = False
 
 logger.info("[FLASK] ✅ Flask app created")
 
+# ── Start background blueprint registration (non-blocking) ────────────────────
+# This must happen AFTER Flask app is created but BEFORE any requests arrive.
+# It runs in a background thread so HTTP requests (health checks, etc.) are not blocked.
+
+
 
 @app.before_request
 def _before():
@@ -962,16 +967,35 @@ def _register_blueprints() -> None:
 # after the worker has fully initialized and any deferred imports have completed.
 
 _BLUEPRINTS_REGISTERED = False
+_BLUEPRINT_THREAD = None
 
-@app.before_request
-def _lazy_register_blueprints():
+def _register_blueprints_background():
+    """Register blueprints in background thread (non-blocking to HTTP requests)"""
     global _BLUEPRINTS_REGISTERED
-    if not _BLUEPRINTS_REGISTERED:
+    try:
+        logger.info("[BLUEPRINT/BG] Starting background blueprint registration...")
+        _register_blueprints()
         _BLUEPRINTS_REGISTERED = True
-        try:
-            _register_blueprints()
-        except Exception as exc:
-            logger.error(f"[BLUEPRINT/LAZY] Failed to register blueprints on first request: {exc}")
+        logger.info("[BLUEPRINT/BG] ✅ Background blueprint registration complete")
+    except Exception as exc:
+        logger.error(f"[BLUEPRINT/BG] Failed during background registration: {exc}", exc_info=True)
+        _BLUEPRINTS_REGISTERED = True  # Mark as attempted even if failed
+
+def _start_blueprint_registration_thread():
+    """Start background thread for blueprint registration (called immediately after app creation)"""
+    global _BLUEPRINT_THREAD
+    if _BLUEPRINT_THREAD is None or not _BLUEPRINT_THREAD.is_alive():
+        _BLUEPRINT_THREAD = threading.Thread(
+            target=_register_blueprints_background,
+            daemon=True,
+            name="BlueprintRegistration"
+        )
+        _BLUEPRINT_THREAD.start()
+        logger.info("[BLUEPRINT/BG] 🔄 Background blueprint registration thread started (non-blocking)")
+
+
+# ── Start blueprint registration immediately (runs in background) ────────────────────
+_start_blueprint_registration_thread()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
