@@ -1124,8 +1124,8 @@ ADMIN_EMAIL = _creds['admin_email']
 POOLER_PORT = int(os.getenv('SUPABASE_PORT', '5432'))
 POOLER_DB = os.getenv('SUPABASE_DB', 'postgres')
 CONNECTION_TIMEOUT = 30
-DB_POOL_MIN_CONNECTIONS = 5  # Increased from 2: keep more connections ready
-DB_POOL_MAX_CONNECTIONS = 50  # CRITICAL FIX: Increased from 10 → allows 5-10 concurrent batch operations (1M routes = 100+ batches)
+DB_POOL_MIN_CONNECTIONS = 2  # Keep 2 warm connections ready
+DB_POOL_MAX_CONNECTIONS = 10  # Supabase Session mode: max 10 concurrent. If you need more, use Transaction mode instead.
 
 # ===============================================================================
 # NETWORK & SYSTEM CONFIGURATION

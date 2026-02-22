@@ -1891,6 +1891,49 @@ class KeyVaultManager:
                     pass
         return self._pool_fn
     
+    def _get_connection(self):
+        """
+        Get a database connection, handling both DatabaseBuilder and raw psycopg2 pools.
+        
+        Returns: (conn, pool_obj) where pool_obj is used for returning the connection
+        """
+        pool = self._get_pool()
+        if pool is None:
+            return None, None
+        
+        try:
+            # Check if it's a DatabaseBuilder object (has get_connection method)
+            if hasattr(pool, 'get_connection') and callable(getattr(pool, 'get_connection')):
+                conn = pool.get_connection()
+                return conn, pool  # DatabaseBuilder has return_connection method
+            
+            # Otherwise assume it's a psycopg2 pool (has getconn method)
+            elif hasattr(pool, 'getconn') and callable(getattr(pool, 'getconn')):
+                conn, pool = self._get_connection()
+                return conn, pool  # psycopg2 pool has putconn method
+            
+            else:
+                logger.warning("[KeyVault] Pool object has no get_connection or getconn method")
+                return None, None
+        except Exception as e:
+            logger.warning(f"[KeyVault] Error getting connection: {e}")
+            return None, None
+    
+    def _return_connection(self, conn, pool):
+        """Return a connection to the pool, handling both DatabaseBuilder and raw psycopg2 pools."""
+        if conn is None or pool is None:
+            return
+        
+        try:
+            # Check if it's a DatabaseBuilder object
+            if hasattr(pool, 'return_connection') and callable(getattr(pool, 'return_connection')):
+                pool.return_connection(conn)
+            # Otherwise assume it's a psycopg2 pool
+            elif hasattr(pool, 'putconn') and callable(getattr(pool, 'putconn')):
+                self._return_connection(conn, pool)
+        except Exception as e:
+            logger.warning(f"[KeyVault] Error returning connection: {e}")
+    
     def _get_kek(self, user_id: str, key_id: str) -> bytes:
         """
         Derive the Key Encryption Key for a specific key.
@@ -1950,14 +1993,12 @@ class KeyVaultManager:
     
     def ensure_schema(self) -> bool:
         """Create key vault tables if they don't exist."""
-        pool = self._get_pool()
-        if pool is None:
-            logger.warning("[KeyVault] No DB pool available for schema creation")
+        conn, pool = self._get_connection()
+        if conn is None:
+            logger.warning("[KeyVault] No DB connection available for schema creation")
             return False
         
-        conn = None
         try:
-            conn = pool.getconn()
             cur  = conn.cursor()
             
             cur.execute("""
@@ -2032,8 +2073,7 @@ class KeyVaultManager:
             return False
         finally:
             if conn is not None:
-                try: pool.putconn(conn)
-                except: pass
+                self._return_connection(conn, pool)
     
     def store_key(self, keypair: Dict[str, Any]) -> bool:
         """
@@ -2042,11 +2082,6 @@ class KeyVaultManager:
         The private key is encrypted under a per-key KEK before storage.
         No plaintext private key material ever touches the DB.
         """
-        pool = self._get_pool()
-        if pool is None:
-            logger.error("[KeyVault] No DB pool — cannot store key")
-            return False
-        
         key_id  = keypair['key_id']
         user_id = keypair.get('user_id', 'unknown')
         meta    = keypair.get('metadata', {})
@@ -2054,9 +2089,12 @@ class KeyVaultManager:
         kek = self._get_kek(user_id, key_id)
         encrypted_privkey = self._encrypt_privkey(keypair['private_key'], kek, key_id)
         
-        conn = None
+        conn, pool = self._get_connection()
+        if conn is None:
+            logger.error("[KeyVault] No DB connection — cannot store key")
+            return False
+        
         try:
-            conn = pool.getconn()
             cur  = conn.cursor()
             
             # Clean keypair for storage (remove in-memory secret)
@@ -2098,7 +2136,7 @@ class KeyVaultManager:
             return False
         finally:
             if conn is not None:
-                try: pool.putconn(conn)
+                try: self._return_connection(conn, pool)
                 except: pass
     
     def retrieve_key(self, key_id: str, user_id: str,
@@ -2109,13 +2147,11 @@ class KeyVaultManager:
         include_private: if True, decrypt and return private key material.
                          Should only be called in a secure, authenticated context.
         """
-        pool = self._get_pool()
-        if pool is None:
+        conn, pool = self._get_connection()
+        if conn is None:
             return None
         
-        conn = None
         try:
-            conn = pool.getconn()
             cur  = conn.cursor(cursor_factory=RealDictCursor)
             
             cur.execute("""
@@ -2176,7 +2212,7 @@ class KeyVaultManager:
             return None
         finally:
             if conn is not None:
-                try: pool.putconn(conn)
+                try: self._return_connection(conn, pool)
                 except: pass
     
     def list_keys_for_user(self, user_id: str, status: str = 'active') -> List[Dict[str, Any]]:
@@ -2186,13 +2222,11 @@ class KeyVaultManager:
         Used in blockchain signing to find validator's current signing key.
         Returns list of key metadata for active, non-expired keys.
         """
-        pool = self._get_pool()
-        if pool is None:
+        conn, pool = self._get_connection()
+        if conn is None:
             return []
         
-        conn = None
         try:
-            conn = pool.getconn()
             cur  = conn.cursor(cursor_factory=RealDictCursor)
             
             cur.execute("""
@@ -2231,7 +2265,7 @@ class KeyVaultManager:
             return []
         finally:
             if conn is not None:
-                try: pool.putconn(conn)
+                try: self._return_connection(conn, pool)
                 except: pass
     
     def revoke_key(self, key_id: str, user_id: str,
@@ -2249,13 +2283,11 @@ class KeyVaultManager:
         
         Returns revocation summary including how many keys were cascade-revoked.
         """
-        pool = self._get_pool()
-        if pool is None:
-            return {'status': 'error', 'error': 'No DB pool'}
+        conn, pool = self._get_connection()
+        if conn is None:
+            return {'status': 'error', 'error': 'No DB connection'}
         
-        conn = None
         try:
-            conn = pool.getconn()
             cur  = conn.cursor(cursor_factory=RealDictCursor)
             
             now = datetime.now(timezone.utc)
@@ -2321,7 +2353,7 @@ class KeyVaultManager:
             return {'status': 'error', 'error': str(e)}
         finally:
             if conn is not None:
-                try: pool.putconn(conn)
+                try: self._return_connection(conn, pool)
                 except: pass
     
     def rotate_key(self, old_key_id: str, user_id: str,
