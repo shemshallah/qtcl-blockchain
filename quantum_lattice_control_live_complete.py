@@ -5465,8 +5465,8 @@ class NeuralLatticeControlGlobals:
     
     def forward_pass(self, input_vector: np.ndarray) -> np.ndarray:
         """Forward pass through neural lattice with activation tracking"""
-        if not np or input_vector is None:
-            return np.zeros(self.num_neurons) if np else None
+        if input_vector is None or input_vector.size == 0:
+            return np.zeros(self.num_neurons)
         
         try:
             with self.lock:
@@ -5488,7 +5488,7 @@ class NeuralLatticeControlGlobals:
             return x
         except Exception as e:
             logger.error(f"Error in neural lattice forward pass: {e}")
-            return np.zeros(self.num_neurons) if np else None
+            return np.zeros(self.num_neurons)
     
     def adaptive_backward_pass(self, gradient: np.ndarray, noise_coherence: float = None, 
                                learning_rate: Optional[float] = None) -> None:
@@ -5606,7 +5606,7 @@ class NeuralLatticeControlGlobals:
                     'adaptive_learning_rate': self.adaptive_lr,
                     'forward_passes': self.forward_passes,
                     'backward_passes': self.backward_passes,
-                    'weights_shape': [w.shape for w in self.weights] if np else [],
+                    'weights_shape': [w.shape for w in self.weights] if self.weights else [],
                     'total_parameters': sum(w.size + b.size for w, b in zip(self.weights, self.biases)),
                     # NEW: Evolution and convergence metrics
                     'total_weight_updates': self.total_weight_updates,
@@ -5651,12 +5651,12 @@ class TransactionQuantumProcessor:
         try:
             # Hash the transaction ID to quantum phase
             tx_hash = hashlib.sha256(tx_id.encode()).digest()
-            phase_user = (int.from_bytes(tx_hash[:4], 'big') % 256) * (2 * np.pi / 256) if np else 0.0
-            phase_target = (int.from_bytes(tx_hash[4:8], 'big') % 256) * (2 * np.pi / 256) if np else 0.0
+            phase_user = (int.from_bytes(tx_hash[:4], 'big') % 256) * (2 * np.pi / 256)
+            phase_target = (int.from_bytes(tx_hash[4:8], 'big') % 256) * (2 * np.pi / 256)
             
             # Amount encodes into rotation angles
-            amount_normalized = min(amount / 1000.0, 1.0)  # Normalize to [0, 1]
-            rotation_angle = amount_normalized * np.pi if np else 0.0
+            amount_normalized = min(max(amount / 1000.0, 0.0), 1.0)  # Normalize to [0, 1]
+            rotation_angle = amount_normalized * np.pi
             
             return {
                 'tx_id': tx_id,
@@ -5805,8 +5805,6 @@ class DynamicNoiseBathEvolution:
         
     def ornstein_uhlenbeck_kernel(self, t: float, tau: float = 0.1) -> float:
         """Non-Markovian Ornstein-Uhlenbeck kernel for memory effects"""
-        if not np:
-            return 0.0
         return np.exp(-np.abs(t) / tau) * np.cos(2 * np.pi * t / tau)
     
     def compute_memory_effect(self, time_window: float = 0.1) -> float:
@@ -5820,14 +5818,15 @@ class DynamicNoiseBathEvolution:
         
         # Autocorrelation in recent data
         values = [float(h.get('coherence', 0.9)) for h in recent]
-        mean = np.mean(values) if np else 0.0
-        if np:
+        mean = np.mean(values)
+        try:
             variance = np.var(values)
             if variance < 1e-10:
                 return 0.0
             autocov = np.mean([(values[i] - mean) * (values[i-1] - mean) for i in range(1, len(values))])
             memory = autocov / variance if variance > 0 else 0.0
-        else:
+        except Exception as e:
+            logger.debug(f"Memory effect computation failed: {e}")
             memory = 0.0
         
         return max(0.0, min(1.0, memory))
@@ -6095,13 +6094,22 @@ class QuantumLatticeGlobal:
         self.last_update = time.time()
         
     def get_w_state(self) -> Dict[str, Any]:
-        """Get current W-state from manager"""
-        return {
-            'refresh_count': self.w_state_manager.refresh_count,
-            'coherence_avg': float(np.mean(self.w_state_manager.coherence_vector)) if np else 0.0,
-            'fidelity_avg': float(np.mean(self.w_state_manager.fidelity_vector)) if np else 0.0,
-            'entanglement_strength': self.w_state_manager.entanglement_strength
-        }
+        """Get current W-state from manager with safe metric extraction"""
+        try:
+            return {
+                'refresh_count': self.w_state_manager.refresh_count,
+                'coherence_avg': float(self.w_state_manager.coherence_avg) if self.w_state_manager.coherence_avg is not None else 0.0,
+                'fidelity_avg': float(self.w_state_manager.fidelity_avg) if self.w_state_manager.fidelity_avg is not None else 0.0,
+                'entanglement_strength': float(self.w_state_manager.entanglement_strength)
+            }
+        except (AttributeError, TypeError, ValueError) as e:
+            logger.warning(f"W-state metric extraction failed: {e}, returning safe defaults")
+            return {
+                'refresh_count': 0,
+                'coherence_avg': 0.0,
+                'fidelity_avg': 0.0,
+                'entanglement_strength': 0.0
+            }
     
     def process_transaction(self, tx_id: str, user_id: int, target_id: int, amount: float) -> Dict[str, Any]:
         """Process transaction using quantum validation"""
