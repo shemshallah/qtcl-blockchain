@@ -1495,25 +1495,45 @@ def _lattice_telemetry_loop() -> None:
                     # LATTICE is QuantumLatticeGlobal — use its native methods for
                     # measurement output in the expected [LATTICE-REFRESH] format
                     try:
-                        # Pull current coherence/fidelity from metrics rather than hardcoding targets
+                        # Pull current coherence/fidelity from metrics
                         _lm     = lat.get_system_metrics()
-                        _coh_in = _lm.get('global_coherence', 0.93)
-                        _fid_in = _lm.get('global_fidelity',  0.91)
+                        _coh_in = _lm.get('global_coherence', 0.87)
+                        _fid_in = _lm.get('global_fidelity',  0.93)
 
                         nb_result  = lat.evolve_noise_bath(_coh_in, _fid_in)
                         ws_result  = lat.refresh_interference()
 
-                        coh_after   = nb_result.get('coherence',       nb_result.get('avg_coherence', _coh_in))
-                        fid_after   = nb_result.get('fidelity',        nb_result.get('avg_fidelity',  _fid_in))
-                        revival     = nb_result.get('revival_detected', ws_result.get('revival_detected', False))
-                        w_coherence = ws_result.get('coherence_avg',   ws_result.get('mean_coherence',
-                                      ws_result.get('strength', '?')))
+                        coh_after = nb_result.get('coherence', nb_result.get('coherence_after', _coh_in))
+                        fid_after = nb_result.get('fidelity',  nb_result.get('fidelity_after',  _fid_in))
+                        coh_ss    = nb_result.get('coh_ss', 0.87)
+                        memory    = nb_result.get('memory', 0.0)
+                        revival   = nb_result.get('revival_detected',
+                                    ws_result.get('revival_detected', False))
+
+                        # W-coherence: prefer NOISE_BATH_ENHANCED (populated by heartbeat)
+                        # over ws_result which returns 'strength' (a different quantity)
+                        _nb_enh = getattr(_ql, 'NOISE_BATH_ENHANCED', None)
+                        _ws_enh = getattr(_ql, 'W_STATE_ENHANCED', None)
+                        if _nb_enh is not None and len(_nb_enh.coherence_evolution) > 0:
+                            w_coherence = float(list(_nb_enh.coherence_evolution)[-1])
+                        elif _ws_enh is not None:
+                            w_coherence = float(_ws_enh.coherence_avg)
+                        else:
+                            w_coherence = ws_result.get('coherence_avg', '?')
+
+                        # Revival: if coherence is recovering toward ss, flag it
+                        _coh_hist = list(_ql.LATTICE.noise_bath.coherence_evolution) if hasattr(_ql.LATTICE, 'noise_bath') else []
+                        if not revival and len(_coh_hist) >= 3:
+                            if _coh_hist[-1] > _coh_hist[-2] and _coh_hist[-2] < _coh_hist[-3]:
+                                revival = True  # dip then recovery
+
                         logger.info(
                             f"[LATTICE-REFRESH] Cycle #{cycle:4d} | "
-                            f"C: {_coh_in:.4f}→{coh_after:.4f} | "
+                            f"C: {_coh_in:.4f}→{coh_after:.4f} (ss={coh_ss:.3f}) | "
                             f"F: {_fid_in:.4f}→{fid_after:.4f} | "
+                            f"mem={memory:.3f} | "
                             f"W-revival={'✓' if revival else '↔'} | "
-                            f"W-coherence={w_coherence} | source=LATTICE-global"
+                            f"NB-coh={w_coherence:.6f} | source=AerSimulator"
                         )
                     except Exception as _e:
                         logger.debug(f"[LATTICE-TELEM] LATTICE evolve/refresh error: {_e}")
