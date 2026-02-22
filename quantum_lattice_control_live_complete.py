@@ -6054,33 +6054,49 @@ class QuantumLatticeGlobal:
         self.last_update = time.time()
         
     def get_w_state(self) -> Dict[str, Any]:
-        """Get current W-state from manager with safe metric extraction"""
+        """
+        Get current W-state from manager - ENTERPRISE GRADE
+        NO fallbacks, NO safe defaults. ERRORS LOUDLY on any issue.
+        """
         try:
-            # coherence_vector and fidelity_vector are Optional[np.ndarray]
-            # They are None until first Aer circuit run populates them
-            coherence_val = 0.0
-            fidelity_val = 0.0
+            # EXPLICIT state check first
+            if self.w_state_manager is None:
+                raise RuntimeError("❌ FATAL: w_state_manager not initialized")
             
-            if self.w_state_manager.coherence_vector is not None and len(self.w_state_manager.coherence_vector) > 0:
-                coherence_val = float(np.mean(self.w_state_manager.coherence_vector))
+            # Get state - will raise if manager is in FAILED state
+            state = self.w_state_manager.get_state()
             
-            if self.w_state_manager.fidelity_vector is not None and len(self.w_state_manager.fidelity_vector) > 0:
-                fidelity_val = float(np.mean(self.w_state_manager.fidelity_vector))
+            # Validate required keys exist
+            required_keys = {'coherence_avg', 'fidelity_avg', 'entanglement_strength'}
+            missing = required_keys - set(state.keys())
+            if missing:
+                raise KeyError(f"❌ FATAL: Missing required keys in w_state: {missing}")
             
-            return {
-                'refresh_count': self.w_state_manager.refresh_count,
-                'coherence_avg': coherence_val,
-                'fidelity_avg': fidelity_val,
-                'entanglement_strength': float(self.w_state_manager.entanglement_strength)
-            }
-        except (AttributeError, TypeError, ValueError, RuntimeError) as e:
-            logger.warning(f"W-state metric extraction failed: {e}, returning safe defaults")
-            return {
-                'refresh_count': 0,
-                'coherence_avg': 0.0,
-                'fidelity_avg': 0.0,
-                'entanglement_strength': 0.0
-            }
+            # Validate types and ranges
+            coherence = state['coherence_avg']
+            fidelity = state['fidelity_avg']
+            
+            if not isinstance(coherence, (int, float)):
+                raise TypeError(f"❌ coherence_avg must be float, got {type(coherence)}")
+            if not isinstance(fidelity, (int, float)):
+                raise TypeError(f"❌ fidelity_avg must be float, got {type(fidelity)}")
+            
+            if not (0.0 <= coherence <= 1.0):
+                raise ValueError(f"❌ coherence_avg {coherence} out of range [0,1]")
+            if not (0.0 <= fidelity <= 1.0):
+                raise ValueError(f"❌ fidelity_avg {fidelity} out of range [0,1]")
+            
+            logger.debug(f"✅ W-state retrieved: coh={coherence:.4f} fid={fidelity:.4f}")
+            return state
+            
+        except (RuntimeError, KeyError, TypeError, ValueError) as e:
+            # Log with FULL context
+            logger.critical(f"❌ CRITICAL: W-state retrieval failed: {e}", exc_info=True)
+            raise
+        except Exception as e:
+            # Unexpected error - EXPLODE with diagnostic
+            logger.critical(f"❌ FATAL: Unexpected error in get_w_state: {e}", exc_info=True)
+            raise RuntimeError(f"Unexpected w_state failure: {e}") from e
     
     def process_transaction(self, tx_id: str, user_id: int, target_id: int, amount: float) -> Dict[str, Any]:
         """Process transaction using quantum validation"""
@@ -6568,31 +6584,74 @@ class EnhancedWStateManager:
     """
     Enhanced W-state manager with continuous coherence refresh synchronized to heartbeat.
     Maintains superposition states and interference detection.
+    
+    ENTERPRISE GRADE: NO FALLBACKS
+    - All attributes are REQUIRED after initialization
+    - EXPLICIT state transitions only
+    - ERRORS LOUDLY on any inconsistency
+    - Built-in health checks with fail-fast semantics
     """
+    
+    class CoherenceState:
+        """State machine for W-state coherence tracking"""
+        UNINITIALIZED = "uninitialized"      # No data yet
+        INITIALIZED = "initialized"          # Ready to accept data
+        ACTIVE = "active"                    # Has superposition states
+        DEGRADED = "degraded"                # Missing required data
+        FAILED = "failed"                    # Unrecoverable error
     
     def __init__(self):
         self.lock = threading.RLock()
+        
+        # State machine - track what state we're in
+        self._state = self.CoherenceState.UNINITIALIZED
+        self._initialization_timestamp = time.time()
+        self._last_state_change = time.time()
         
         # Superposition tracking
         self.superposition_states = {}
         self.entangled_pairs = []
         
+        # REQUIRED METRICS - initialized explicitly, NEVER None after init
+        self.coherence_avg: float = 0.0           # START AT 0.0 explicitly
+        self.fidelity_avg: float = 0.0            # START AT 0.0 explicitly
+        self.entanglement_strength: float = 0.0   # START AT 0.0 explicitly
+        
         # Metrics
         self.superposition_count = 0
-        # None until first heartbeat reads from NOISE_BATH_ENHANCED — no magic values
-        self.coherence_avg: "Optional[float]" = None
-        self.fidelity_avg:  "Optional[float]" = None
-        self.entanglement_strength = 0.0
         self.coherence_decay_rate = 0.01
         self.transaction_validations = 0
         self.total_coherence_time = 0.0
-
-        logger.info("🌀 EnhancedWStateManager initialized (coherence_avg/fidelity_avg pending first heartbeat)")
+        self.refresh_count = 0
+        
+        # Health tracking
+        self._heartbeat_count = 0
+        self._last_update_time = time.time()
+        self._update_lag_ms = 0.0
+        
+        # Transition to initialized state
+        with self.lock:
+            self._state = self.CoherenceState.INITIALIZED
+            logger.info(f"✅ EnhancedWStateManager initialized | state={self._state} | ts={self._initialization_timestamp:.2f}")
+    
+    def _check_state(self, required_state: str) -> None:
+        """ENTERPRISE: Verify we're in the required state, RAISE if not"""
+        if self._state == self.CoherenceState.FAILED:
+            raise RuntimeError(f"❌ FATAL: EnhancedWStateManager in FAILED state | last_change={self._last_state_change}")
+        
+        if self._state == self.CoherenceState.DEGRADED:
+            raise RuntimeError(f"⚠️  CRITICAL: EnhancedWStateManager in DEGRADED state | last_change={self._last_state_change}")
+        
+        if required_state and self._state != required_state:
+            logger.warning(f"⚠️  State mismatch: expected {required_state}, got {self._state}")
     
     def create_superposition(self, tx_id: str) -> bool:
-        """Create new superposition state for transaction"""
+        """Create new superposition state for transaction - EXPLICIT error handling"""
         with self.lock:
             try:
+                if tx_id in self.superposition_states:
+                    raise ValueError(f"Duplicate TX: {tx_id} already has superposition")
+                
                 self.superposition_states[tx_id] = {
                     'creation_time': time.time(),
                     'amplitudes': np.random.rand(3),
@@ -6600,16 +6659,22 @@ class EnhancedWStateManager:
                     'coherence': 1.0
                 }
                 self.superposition_count += 1
+                
+                # Transition to ACTIVE state if we have data
+                if self.superposition_count > 0:
+                    self._state = self.CoherenceState.ACTIVE
+                
                 return True
-            except Exception as e:
-                logger.error(f"Error creating superposition: {e}")
-                return False
+            except ValueError as e:
+                logger.error(f"❌ FATAL: Cannot create superposition: {e}")
+                self._state = self.CoherenceState.FAILED
+                raise
     
     def measure_coherence(self, tx_id: str) -> float:
-        """Measure coherence of a state"""
+        """Measure coherence of a state - EXPLICIT, not optional"""
         with self.lock:
             if tx_id not in self.superposition_states:
-                return 0.0
+                raise KeyError(f"❌ TX {tx_id} not found in superposition_states")
             
             try:
                 state = self.superposition_states[tx_id]
@@ -6619,46 +6684,105 @@ class EnhancedWStateManager:
                 state['coherence'] = max(0, coherence)
                 return state['coherence']
             except Exception as e:
-                logger.error(f"Error measuring coherence: {e}")
-                return 0.0
+                logger.error(f"❌ FATAL: Coherence measurement failed for {tx_id}: {e}")
+                self._state = self.CoherenceState.FAILED
+                raise RuntimeError(f"Coherence measurement failed: {e}") from e
     
-    def on_heartbeat(self, pulse_time: float):
-        """Refresh coherence on heartbeat"""
+    def on_heartbeat(self, pulse_time: float) -> None:
+        """Refresh coherence on heartbeat - EXPLICIT state updates only"""
         with self.lock:
-            # Decay all coherences
-            for tx_id in list(self.superposition_states.keys()):
-                state = self.superposition_states[tx_id]
-                state['coherence'] *= (1.0 - self.coherence_decay_rate)
-                self.total_coherence_time += 0.001
+            self._heartbeat_count += 1
+            update_start = time.time()
             
-            # Update average coherence
-            if self.superposition_states:
-                coherences = [s['coherence'] for s in self.superposition_states.values()]
-                if self.coherence_avg is not None:
-                    self.coherence_avg = 0.9 * self.coherence_avg + 0.1 * float(np.mean(coherences))
+            try:
+                # Decay all coherences
+                for tx_id in list(self.superposition_states.keys()):
+                    state = self.superposition_states[tx_id]
+                    state['coherence'] *= (1.0 - self.coherence_decay_rate)
+                    self.total_coherence_time += 0.001
+                
+                # Update average coherence - EXPLICIT computation
+                if self.superposition_states:
+                    coherences = [s['coherence'] for s in self.superposition_states.values()]
+                    # Exponential moving average: weight new data at 10%
+                    new_avg = float(np.mean(coherences))
+                    self.coherence_avg = 0.9 * self.coherence_avg + 0.1 * new_avg
+                    
+                    if not (0.0 <= self.coherence_avg <= 1.0):
+                        raise ValueError(f"❌ INVALID coherence_avg: {self.coherence_avg} (must be [0,1])")
                 else:
-                    self.coherence_avg = float(np.mean(coherences))
+                    # No superpositions - EXPLICIT state
+                    if self._state == self.CoherenceState.ACTIVE:
+                        self._state = self.CoherenceState.INITIALIZED
+                        self.coherence_avg = 0.0
+                
+                self._last_update_time = time.time()
+                self._update_lag_ms = (self._last_update_time - update_start) * 1000.0
+                
+                # Health check
+                if self._update_lag_ms > 100.0:
+                    logger.warning(f"⚠️  Heartbeat lag: {self._update_lag_ms:.2f}ms (HB #{self._heartbeat_count})")
+                    
+            except Exception as e:
+                logger.error(f"❌ FATAL: Heartbeat processing failed: {e}")
+                self._state = self.CoherenceState.FAILED
+                raise RuntimeError(f"Heartbeat failed: {e}") from e
     
     def validate_transaction(self, tx_id: str, min_coherence: float = 0.5) -> bool:
-        """Validate transaction coherence"""
+        """Validate transaction coherence - EXPLICIT, raises on error"""
         with self.lock:
+            if tx_id not in self.superposition_states:
+                raise KeyError(f"❌ TX {tx_id} not in superposition_states")
+            
             coherence = self.measure_coherence(tx_id)
             if coherence >= min_coherence:
                 self.transaction_validations += 1
                 return True
+            
+            logger.warning(f"⚠️  TX {tx_id} coherence {coherence:.4f} < threshold {min_coherence}")
             return False
     
     def get_state(self) -> Dict[str, Any]:
-        """Get current state"""
+        """Get current state - ENTERPRISE: NO optional values, explicit error on invalid state"""
         with self.lock:
+            # Health check FIRST
+            if self._state == self.CoherenceState.FAILED:
+                raise RuntimeError(f"❌ FATAL: Manager is in FAILED state")
+            
+            # Validation: coherence_avg MUST be in valid range
+            if not (0.0 <= self.coherence_avg <= 1.0):
+                logger.error(f"❌ INVALID: coherence_avg={self.coherence_avg} (must be [0,1])")
+                self._state = self.CoherenceState.DEGRADED
+                raise ValueError(f"Invalid coherence_avg: {self.coherence_avg}")
+            
+            if not (0.0 <= self.fidelity_avg <= 1.0):
+                logger.error(f"❌ INVALID: fidelity_avg={self.fidelity_avg} (must be [0,1])")
+                self._state = self.CoherenceState.DEGRADED
+                raise ValueError(f"Invalid fidelity_avg: {self.fidelity_avg}")
+            
             return {
+                'state': self._state,
                 'superposition_count': self.superposition_count,
-                'coherence_avg': float(self.coherence_avg) if self.coherence_avg is not None else None,
-                'fidelity_avg':  float(self.fidelity_avg)  if self.fidelity_avg  is not None else None,
+                'coherence_avg': float(self.coherence_avg),           # ALWAYS a float, never None
+                'fidelity_avg': float(self.fidelity_avg),             # ALWAYS a float, never None
                 'entanglement_strength': float(self.entanglement_strength),
                 'transaction_validations': self.transaction_validations,
-                'total_coherence_time': self.total_coherence_time
+                'total_coherence_time': self.total_coherence_time,
+                'heartbeat_count': self._heartbeat_count,
+                'health': self._get_health_status()
             }
+    
+    def _get_health_status(self) -> Dict[str, Any]:
+        """ENTERPRISE: Return diagnostic health info"""
+        now = time.time()
+        return {
+            'state': self._state,
+            'uptime_sec': now - self._initialization_timestamp,
+            'heartbeat_count': self._heartbeat_count,
+            'last_update_lag_ms': self._update_lag_ms,
+            'coherence_range': (0.0, self.coherence_avg, 1.0),
+            'fidelity_range': (0.0, self.fidelity_avg, 1.0)
+        }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════

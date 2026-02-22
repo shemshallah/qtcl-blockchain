@@ -1424,19 +1424,36 @@ def _lattice_telemetry_loop() -> None:
             if ws is not None and hasattr(ws, 'get_state'):
                 try:
                     wsm = ws.get_state()
+                    
+                    # ENTERPRISE: Type checking - no "?" or "pending"
                     coh_w = wsm.get('coherence_avg')
                     fid_w = wsm.get('fidelity_avg')
-                    coh_str = f"{coh_w:.6f}" if coh_w is not None else "pending"
-                    fid_str = f"{fid_w:.6f}" if fid_w is not None else "pending"
+                    
+                    if coh_w is None or fid_w is None:
+                        raise ValueError(f"❌ CRITICAL: Missing coherence metrics | coh={coh_w} fid={fid_w}")
+                    
+                    if not isinstance(coh_w, (int, float)) or not isinstance(fid_w, (int, float)):
+                        raise TypeError(f"❌ CRITICAL: Invalid metric types | coh type={type(coh_w)} fid type={type(fid_w)}")
+                    
+                    # Strict range validation
+                    if not (0.0 <= coh_w <= 1.0) or not (0.0 <= fid_w <= 1.0):
+                        raise ValueError(f"❌ CRITICAL: Metrics out of range | coh={coh_w} fid={fid_w}")
+                    
+                    state_info = wsm.get('state', 'UNKNOWN')
                     logger.info(
                         f"[LATTICE-W]   cycle=#{cycle} | "
-                        f"coherence_avg={coh_str} | "
-                        f"fidelity_avg={fid_str} | "
-                        f"superpositions={wsm.get('superposition_count','?')} | "
-                        f"validations={wsm.get('transaction_validations','?')}"
+                        f"state={state_info} | "
+                        f"coherence_avg={coh_w:.6f} | "
+                        f"fidelity_avg={fid_w:.6f} | "
+                        f"superpositions={wsm.get('superposition_count', 0)} | "
+                        f"validations={wsm.get('transaction_validations', 0)}"
                     )
+                except (ValueError, TypeError, KeyError, RuntimeError) as _e:
+                    # ENTERPRISE: Log as ERROR not DEBUG - this is visible failure
+                    logger.error(f"❌ [LATTICE-W] CRITICAL FAILURE: {_e}", exc_info=True)
                 except Exception as _e:
-                    logger.debug(f"[LATTICE-TELEM] W_STATE metrics error: {_e}")
+                    # Unexpected error - EXPOSE it
+                    logger.error(f"❌ [LATTICE-W] FATAL UNEXPECTED ERROR: {_e}", exc_info=True)
 
             # ── NOISE BATH ────────────────────────────────────────────────────
             nb = getattr(_ql, 'NOISE_BATH_ENHANCED', None)
