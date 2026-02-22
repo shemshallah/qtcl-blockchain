@@ -419,11 +419,75 @@ SERVICES = {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
-# ROUTES
+# ROUTES & BACKGROUND SERVICES
 # ═══════════════════════════════════════════════════════════════════════════════════════
+
+# ─── Database Status Cache ───────────────────────────────────────────────────
+# Health checks run in background to avoid blocking request handlers
+# This cache gets updated by a background thread every 30 seconds
+_DB_STATUS_CACHE = {
+    'connected': False,
+    'healthy': False,
+    'host': 'unknown',
+    'port': 5432,
+    'database': 'unknown',
+    'timestamp': 0,
+    'error': None
+}
+_DB_STATUS_LOCK = threading.Lock()
+_DB_STATUS_UPDATE_INTERVAL = 30  # Update cache every 30 seconds
+
+
+def _update_database_status_cache():
+    """Background thread: update cached database status without blocking requests"""
+    global _DB_STATUS_CACHE
+    
+    while True:
+        try:
+            time.sleep(_DB_STATUS_UPDATE_INTERVAL)
+            
+            # Only update if enough time has passed
+            now = time.time()
+            if now - _DB_STATUS_CACHE.get('timestamp', 0) < _DB_STATUS_UPDATE_INTERVAL:
+                continue
+            
+            # Try to get fresh database status (with short timeout)
+            try:
+                from db_builder_v2 import verify_database_connection
+                result = verify_database_connection(verbose=False)
+                
+                with _DB_STATUS_LOCK:
+                    _DB_STATUS_CACHE.update({
+                        'connected': result.get('connected', False),
+                        'healthy': result.get('healthy', False),
+                        'host': result.get('host', 'unknown'),
+                        'port': result.get('port', 5432),
+                        'database': result.get('database', 'unknown'),
+                        'timestamp': now,
+                        'error': None
+                    })
+            except Exception as e:
+                with _DB_STATUS_LOCK:
+                    _DB_STATUS_CACHE.update({
+                        'connected': False,
+                        'healthy': False,
+                        'timestamp': now,
+                        'error': str(e)[:100]
+                    })
+        
+        except Exception as e:
+            logger.debug(f"[DB-STATUS-CACHE] Background update error: {e}")
+            time.sleep(5)  # Retry after 5 seconds on error
+
+
+# Start background database status updater
+_db_status_thread = threading.Thread(target=_update_database_status_cache, daemon=True)
+_db_status_thread.start()
+
 
 @app.route('/', methods=['GET'])
 def index():
+    """Root endpoint - returns API status"""
     accept = request.headers.get('Accept', '')
     if 'text/html' in accept:
         try:
@@ -436,30 +500,31 @@ def index():
         'timestamp': datetime.now(timezone.utc).isoformat(),
     })
 
+
 @app.route('/health', methods=['GET'])
 def health():
     """
-    Comprehensive health check including database connectivity.
-    Fast endpoint: returns immediately even if DB is down, but includes DB status.
+    FAST health check - returns cached database status from background thread.
+    Returns in <10ms (never blocks on database operations).
+    
+    For detailed diagnostics, use /api/db-diagnostics instead.
     """
-    try:
-        from db_builder_v2 import verify_database_connection
-        db_status = verify_database_connection(verbose=False)
-    except Exception as e:
-        db_status = {'healthy': False, 'connected': False, 'errors': [str(e)]}
+    with _DB_STATUS_LOCK:
+        db_cache = _DB_STATUS_CACHE.copy()
     
     return jsonify({
-        'status': 'healthy' if db_status.get('connected') else 'degraded',
+        'status': 'healthy' if db_cache.get('connected') else 'degraded',
         'timestamp': datetime.now(timezone.utc).isoformat(),
         'globals_initialized': GLOBALS_AVAILABLE,
         'database': {
-            'connected': db_status.get('connected', False),
-            'host': db_status.get('host'),
-            'port': db_status.get('port'),
-            'database': db_status.get('database'),
+            'connected': db_cache.get('connected', False),
+            'host': db_cache.get('host'),
+            'port': db_cache.get('port'),
+            'database': db_cache.get('database'),
+            'cache_age_seconds': int(time.time() - db_cache.get('timestamp', 0))
         },
-        'note': 'If database.connected=false, check Koyeb env vars and database credentials'
-    }), 200 if db_status.get('connected') else 503
+        'note': 'If database.connected=false, check Koyeb env vars. For details: /api/db-diagnostics'
+    }), 200 if db_cache.get('connected') else 503
 
 @app.route('/api/db-diagnostics', methods=['GET'])
 def db_diagnostics():
