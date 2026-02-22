@@ -1930,7 +1930,7 @@ class KeyVaultManager:
                 pool.return_connection(conn)
             # Otherwise assume it's a psycopg2 pool
             elif hasattr(pool, 'putconn') and callable(getattr(pool, 'putconn')):
-                self._return_connection(conn, pool)
+                pool.putconn(conn)  # ← FIX: Call the pool's putconn(), not self._return_connection() recursively
         except Exception as e:
             logger.warning(f"[KeyVault] Error returning connection: {e}")
     
