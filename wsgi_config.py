@@ -799,8 +799,53 @@ def genesis():
 
 @app.route('/api/quantum', methods=['GET'])
 def quantum_summary():
-    """BUG-6 FIX: quantum summary uses get_quantum() not get_heartbeat()."""
-    return jsonify(SERVICES['quantum'].get())
+    """Comprehensive quantum/lattice metrics - BUG-6 FIX: uses get_quantum() not get_heartbeat()"""
+    try:
+        from quantum_lattice_control_live_complete import (
+            HEARTBEAT, LATTICE_NEURAL_REFRESH, W_STATE_ENHANCED, NOISE_BATH_ENHANCED, LATTICE
+        )
+        
+        metrics = {'status': 'online', 'timestamp': time.time()}
+        
+        # Heartbeat metrics
+        if HEARTBEAT is not None:
+            metrics['heartbeat'] = HEARTBEAT.get_metrics()
+        
+        # Lattice neural refresh metrics
+        if LATTICE_NEURAL_REFRESH is not None:
+            try:
+                metrics['lattice_neural'] = LATTICE_NEURAL_REFRESH.get_state()
+            except:
+                pass
+        
+        # W-state metrics
+        if W_STATE_ENHANCED is not None:
+            try:
+                metrics['w_state'] = W_STATE_ENHANCED.get_metrics()
+            except:
+                pass
+        
+        # Noise bath metrics
+        if NOISE_BATH_ENHANCED is not None:
+            try:
+                metrics['noise_bath'] = NOISE_BATH_ENHANCED.get_metrics()
+            except:
+                pass
+        
+        # Lattice metrics
+        if LATTICE is not None:
+            try:
+                metrics['lattice'] = LATTICE.get_system_metrics()
+            except:
+                pass
+        
+        return jsonify(metrics)
+    except Exception as e:
+        logger.error(f"[/api/quantum] {e}")
+        return jsonify(SERVICES['quantum'].get())  # Fallback to old method if everything fails
+
+
+
 
 
 @app.route('/api/blockchain', methods=['GET'])
