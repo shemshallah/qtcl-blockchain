@@ -1419,17 +1419,22 @@ def _lattice_telemetry_loop() -> None:
                 except Exception as _e:
                     logger.debug(f"[LATTICE-TELEM] HEARTBEAT metrics error: {_e}")
 
-            # ── W-STATE coherence (REAL quantum metrics from LATTICE) ─────────────
+            # ── W-STATE coherence (REAL quantum metrics from LATTICE.noise_bath) ─
             import numpy as np
             lattice = getattr(_ql, 'LATTICE', None)
-            noise_bath = getattr(_ql, 'NOISE_BATH_ENHANCED', None)
             
-            if lattice is not None and lattice.coherence is not None and len(lattice.coherence) > 0:
+            if lattice is not None:
                 try:
-                    # Pull real coherence/fidelity from LATTICE
-                    coh_w = float(np.mean(lattice.coherence))
-                    fid_w = float(np.mean(lattice.fidelity))
-                    super_q = int(np.sum(lattice.coherence > 0.85))
+                    # Get W-state from LATTICE
+                    w_state = lattice.get_w_state()
+                    coh_w = float(w_state.get('coherence_avg', 0.0))
+                    fid_w = float(w_state.get('fidelity_avg', 0.0))
+                    super_q = int(w_state.get('entanglement_strength', 0) * 100)  # Scale to count
+                    
+                    # Get noise bath evolution data
+                    noise_bath = getattr(lattice, 'noise_bath', None)
+                    coh_evol = list(noise_bath.coherence_evolution) if noise_bath and hasattr(noise_bath, 'coherence_evolution') else []
+                    fid_evol = list(noise_bath.fidelity_evolution) if noise_bath and hasattr(noise_bath, 'fidelity_evolution') else []
                     
                     # Bell violation measurement
                     bell_s = 0.0
@@ -1439,26 +1444,28 @@ def _lattice_telemetry_loop() -> None:
                     mi = 0.0
                     kappa = 0.08
                     
+                    # Try to get Bell metrics if available
                     if noise_bath is not None and hasattr(noise_bath, 'bell_detector'):
                         try:
-                            bell_result = noise_bath.bell_detector.on_measurement(lattice.coherence, lattice.fidelity)
-                            bell_s = float(bell_result.get('chsh_s', 0.0))
-                            depth = int(bell_result.get('entanglement_depth', 0))
-                            if bell_result.get('chsh_violation', False):
-                                viol_flag = "⚡VIOLATION"
-                            validations = int(getattr(noise_bath.bell_detector, 'chsh_violation_events', 0))
-                            kappa = float(getattr(noise_bath, 'kappa', 0.08))
+                            # Use evolution data if available
+                            if coh_evol and fid_evol:
+                                coh_arr = np.array(coh_evol[-100:])  # Last 100 cycles
+                                fid_arr = np.array(fid_evol[-100:])
+                                bell_result = noise_bath.bell_detector.on_measurement(coh_arr, fid_arr)
+                                bell_s = float(bell_result.get('chsh_s', 0.0))
+                                depth = int(bell_result.get('entanglement_depth', 0))
+                                if bell_result.get('chsh_violation', False):
+                                    viol_flag = "⚡VIOLATION"
+                                validations = int(getattr(noise_bath.bell_detector, 'chsh_violation_events', 0))
+                                kappa = float(getattr(noise_bath, 'kappa', 0.08))
+                                
+                                # MI from evolution
+                                if len(coh_arr) > 10:
+                                    corr = np.corrcoef(coh_arr, fid_arr)[0, 1]
+                                    if not np.isnan(corr):
+                                        mi = float(np.clip(abs(corr), 0, 1))
                         except Exception:
                             pass
-                    
-                    # Mutual information calculation
-                    try:
-                        if len(lattice.coherence) > 10:
-                            corr = np.corrcoef(lattice.coherence, lattice.fidelity)[0, 1]
-                            if not np.isnan(corr):
-                                mi = float(np.clip(abs(corr), 0, 1))
-                    except Exception:
-                        mi = 0.0
                     
                     # ENTERPRISE: Type checking - strict validation
                     if not isinstance(coh_w, (int, float)) or not isinstance(fid_w, (int, float)):
