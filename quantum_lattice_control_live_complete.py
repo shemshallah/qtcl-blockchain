@@ -5173,6 +5173,34 @@ class TransactionValidatorWState:
             logger.error(f"Error amplifying interference: {e}")
             return interference_data
     
+    def get_state(self) -> Dict[str, Any]:
+        """Get current W-state metrics - ENTERPRISE GRADE with validation"""
+        with self.lock:
+            # Compute averages from vectors
+            coherence_val = 0.0
+            fidelity_val = 0.0
+            
+            if self.coherence_vector is not None and len(self.coherence_vector) > 0:
+                coherence_val = float(np.mean(self.coherence_vector))
+            
+            if self.fidelity_vector is not None and len(self.fidelity_vector) > 0:
+                fidelity_val = float(np.mean(self.fidelity_vector))
+            
+            # Validate ranges - EXPLICIT error on bad values
+            if not (0.0 <= coherence_val <= 1.0):
+                raise ValueError(f"❌ Invalid coherence_val: {coherence_val} (must be [0,1])")
+            if not (0.0 <= fidelity_val <= 1.0):
+                raise ValueError(f"❌ Invalid fidelity_val: {fidelity_val} (must be [0,1])")
+            
+            return {
+                'refresh_count': self.refresh_count,
+                'coherence_avg': coherence_val,
+                'fidelity_avg': fidelity_val,
+                'entanglement_strength': float(self.entanglement_strength),
+                'superposition_count': len(self.transaction_history),
+                'transaction_validations': len(self.transaction_history)
+            }
+    
     def refresh_transaction_w_state(self) -> Dict[str, Any]:
         """Refresh W-state after every transaction - keep it ready and coherent"""
         try:
