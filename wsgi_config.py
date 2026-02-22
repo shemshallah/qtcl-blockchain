@@ -586,10 +586,30 @@ def api_heartbeat_receiver():
     if request.method == 'POST':
         try:
             payload = request.get_json(silent=True) or {}
-            logger.debug(
-                f"[HB-RECV] quantum keepalive beat | "
-                f"lattice_coherence={payload.get('lattice_coherence', 'n/a')} | "
-                f"heartbeat_running={payload.get('heartbeat', {}).get('running', 'n/a')}"
+            # ── Extract nested lattice fields for readable INFO-level output ─────
+            hb_sub   = payload.get('heartbeat', {})
+            ws_sub   = payload.get('w_state', {})
+            lat_sub  = payload.get('lattice', {})
+            beat_n   = payload.get('beat_count', hb_sub.get('pulse_count', '?'))
+            coherence = (
+                payload.get('lattice_coherence')
+                or lat_sub.get('global_coherence')
+                or lat_sub.get('coherence')
+                or ws_sub.get('coherence_avg')
+                or 'n/a'
+            )
+            fidelity = (
+                lat_sub.get('global_fidelity')
+                or lat_sub.get('fidelity')
+                or ws_sub.get('fidelity_avg')
+                or 'n/a'
+            )
+            listeners = hb_sub.get('listeners', hb_sub.get('listener_count', '?'))
+            running   = hb_sub.get('running', '?')
+            logger.info(
+                f"[LATTICE-BEAT] beat=#{beat_n} | "
+                f"coherence={coherence} | fidelity={fidelity} | "
+                f"hb.running={running} | listeners={listeners}"
             )
         except Exception:
             pass   # malformed body — accept and discard
@@ -1336,7 +1356,172 @@ _start_keepalive()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# WSGI ENTRYPOINT
+# LATTICE TELEMETRY DAEMON — periodic INFO-level quantum measurement output
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# WHY: UniversalQuantumHeartbeat listeners (W_STATE, LATTICE_NEURAL, NOISE_BATH)
+#      update state on every 1 Hz pulse but emit ZERO log output.
+#      WStateEnhancedCoherenceRefresh.refresh_full_lattice() (the source of
+#      [LATTICE-REFRESH] logs) is only called inside run_continuous() — not from
+#      any heartbeat listener.
+#      This daemon bridges that gap: every LATTICE_TELEMETRY_INTERVAL seconds it
+#      reads the live singleton state and logs it at INFO so measurements appear
+#      in Koyeb's log stream without code changes to the quantum_lattice module.
+
+LATTICE_TELEMETRY_INTERVAL = 30   # seconds — matches LightweightHeartbeat interval
+
+
+def _lattice_telemetry_loop() -> None:
+    """
+    Daemon: emit INFO-level quantum lattice measurement snapshot every 30 s.
+
+    Reads W_STATE_ENHANCED, NOISE_BATH_ENHANCED, LATTICE_NEURAL_REFRESH, LATTICE,
+    and HEARTBEAT from quantum_lattice_control_live_complete module globals.
+    Triggers one refresh_full_lattice() cycle per interval if LATTICE has a noise
+    bath attached, producing [LATTICE-REFRESH] log lines organically.
+    """
+    import time as _time
+
+    # Wait for quantum module to initialize before first measurement
+    _time.sleep(45)
+
+    logger.info(
+        f"[LATTICE-TELEM] 🌌 Telemetry daemon started — "
+        f"emitting measurements every {LATTICE_TELEMETRY_INTERVAL}s"
+    )
+
+    cycle = 0
+    while True:
+        try:
+            _time.sleep(LATTICE_TELEMETRY_INTERVAL)
+            cycle += 1
+
+            # ── Import live singletons ────────────────────────────────────────
+            try:
+                import quantum_lattice_control_live_complete as _ql
+            except ImportError:
+                logger.warning("[LATTICE-TELEM] quantum_lattice module not importable yet")
+                continue
+
+            # ── HEARTBEAT status ──────────────────────────────────────────────
+            hb = getattr(_ql, 'HEARTBEAT', None)
+            if hb is not None and hasattr(hb, 'get_metrics'):
+                try:
+                    hbm = hb.get_metrics()
+                    logger.info(
+                        f"[LATTICE-HB]  cycle=#{cycle} | "
+                        f"pulses={hbm.get('pulse_count','?')} | "
+                        f"listeners={hbm.get('listeners','?')} | "
+                        f"running={hbm.get('running','?')} | "
+                        f"avg_interval={hbm.get('avg_pulse_interval', 0):.4f}s | "
+                        f"errors={hbm.get('error_count','?')}"
+                    )
+                except Exception as _e:
+                    logger.debug(f"[LATTICE-TELEM] HEARTBEAT metrics error: {_e}")
+
+            # ── W-STATE coherence ─────────────────────────────────────────────
+            ws = getattr(_ql, 'W_STATE_ENHANCED', None)
+            if ws is not None and hasattr(ws, 'get_state'):
+                try:
+                    wsm = ws.get_state()
+                    logger.info(
+                        f"[LATTICE-W]   cycle=#{cycle} | "
+                        f"coherence_avg={wsm.get('coherence_avg', 0):.6f} | "
+                        f"fidelity_avg={wsm.get('fidelity_avg', 0):.6f} | "
+                        f"superpositions={wsm.get('superposition_count','?')} | "
+                        f"validations={wsm.get('transaction_validations','?')}"
+                    )
+                except Exception as _e:
+                    logger.debug(f"[LATTICE-TELEM] W_STATE metrics error: {_e}")
+
+            # ── NOISE BATH ────────────────────────────────────────────────────
+            nb = getattr(_ql, 'NOISE_BATH_ENHANCED', None)
+            if nb is not None and hasattr(nb, 'get_metrics'):
+                try:
+                    nbm = nb.get_metrics()
+                    logger.info(
+                        f"[LATTICE-NB]  cycle=#{cycle} | "
+                        f"coherence={nbm.get('global_coherence', nbm.get('coherence', '?'))} | "
+                        f"fidelity={nbm.get('global_fidelity', nbm.get('fidelity', '?'))} | "
+                        f"kappa={nbm.get('kappa','?')}"
+                    )
+                except Exception as _e:
+                    logger.debug(f"[LATTICE-TELEM] NOISE_BATH metrics error: {_e}")
+
+            # ── LATTICE system metrics ────────────────────────────────────────
+            lat = getattr(_ql, 'LATTICE', None)
+            if lat is not None and hasattr(lat, 'get_system_metrics'):
+                try:
+                    lm = lat.get_system_metrics()
+                    coh = lm.get('global_coherence', lm.get('coherence', '?'))
+                    fid = lm.get('global_fidelity',  lm.get('fidelity',  '?'))
+                    logger.info(
+                        f"[LATTICE-SYS] cycle=#{cycle} | "
+                        f"coherence={coh} | fidelity={fid} | "
+                        f"qubits={lm.get('num_qubits', lm.get('qubit_count','106496'))}"
+                    )
+                except Exception as _e:
+                    logger.debug(f"[LATTICE-TELEM] LATTICE system metrics error: {_e}")
+
+            # ── NEURAL REFRESH state ──────────────────────────────────────────
+            lnr = getattr(_ql, 'LATTICE_NEURAL_REFRESH', None)
+            if lnr is not None and hasattr(lnr, 'get_state'):
+                try:
+                    nm = lnr.get_state()
+                    logger.info(
+                        f"[LATTICE-NN]  cycle=#{cycle} | "
+                        f"status={nm.get('convergence_status','?')} | "
+                        f"activations={nm.get('activation_count','?')} | "
+                        f"lr={nm.get('learning_rate', 0):.2e} | "
+                        f"grad={nm.get('avg_error_gradient', 0):.6f}"
+                    )
+                except Exception as _e:
+                    logger.debug(f"[LATTICE-TELEM] LATTICE_NEURAL metrics error: {_e}")
+
+            # ── Trigger one refresh_full_lattice cycle (produces [LATTICE-REFRESH] lines) ──
+            # WStateEnhancedCoherenceRefresh is the source of [LATTICE-REFRESH] logs.
+            # It's on the LATTICE object's w_state_refresh attribute (QuantumLatticeGlobal).
+            if lat is not None:
+                w_refresh = getattr(lat, 'w_state_refresh', None)
+                entropy   = getattr(lat, 'entropy_ensemble', None) or getattr(_ql, 'ENTROPY_ENSEMBLE', None)
+                if w_refresh is not None and entropy is not None and hasattr(w_refresh, 'refresh_full_lattice'):
+                    try:
+                        w_refresh.refresh_full_lattice(entropy)
+                    except Exception as _e:
+                        logger.debug(f"[LATTICE-TELEM] refresh_full_lattice error: {_e}")
+                else:
+                    # LATTICE is QuantumLatticeGlobal — use its native methods for
+                    # measurement output in the expected [LATTICE-REFRESH] format
+                    try:
+                        nb_result  = lat.evolve_noise_bath(0.93, 0.91)   # target C/F from config
+                        ws_result  = lat.refresh_interference()
+                        coh_after  = nb_result.get('coherence', nb_result.get('avg_coherence', '?'))
+                        fid_after  = nb_result.get('fidelity',  nb_result.get('avg_fidelity',  '?'))
+                        revival    = nb_result.get('revival_detected', ws_result.get('revival_detected', False))
+                        w_coherence = ws_result.get('coherence_avg', ws_result.get('mean_coherence', '?'))
+                        logger.info(
+                            f"[LATTICE-REFRESH] Cycle #{cycle:4d} | "
+                            f"C→{coh_after} | F→{fid_after} | "
+                            f"W-revival={'✓' if revival else '↔'} | "
+                            f"W-coherence={w_coherence} | source=LATTICE-global"
+                        )
+                    except Exception as _e:
+                        logger.debug(f"[LATTICE-TELEM] LATTICE evolve/refresh error: {_e}")
+
+        except Exception as exc:
+            logger.error(f"[LATTICE-TELEM] Unexpected error in telemetry loop: {exc}", exc_info=True)
+            _time.sleep(10)
+
+
+threading.Thread(
+    target=_lattice_telemetry_loop,
+    daemon=True,
+    name="lattice-telemetry",
+).start()
+logger.info(
+    f"[LATTICE-TELEM] 🌌 Lattice measurement daemon started "
+    f"(interval={LATTICE_TELEMETRY_INTERVAL}s, first output in ~45s)"
+)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 application = app   # gunicorn / uwsgi look for `application`
