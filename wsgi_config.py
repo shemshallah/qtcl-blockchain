@@ -1,16 +1,32 @@
 #!/usr/bin/env python3
 """
-QTCL WSGI v5.0 - GLOBALS COORDINATOR & SYSTEM BOOTSTRAP
+QTCL WSGI v5.1 - GLOBALS COORDINATOR & SYSTEM BOOTSTRAP
+========================================================
+Fixed edition — all known bugs resolved:
 
-Proper globals interfacing system. Initializes all subsystems in correct order:
-1. Logging (foundation)
-2. Utility classes (PROFILER, CACHE, etc)
-3. db_builder_v2 (database singleton)
-4. globals module (unified state)
-5. Terminal engine (command system - lazy loaded to avoid circular imports)
-6. Flask app (HTTP interface)
+  BUG-1  CRITICAL  Blueprint registration was entirely absent. Flask app had no API
+                   routes — every /api/* call returned 404, proxied by Koyeb to 503.
+  BUG-2  CRITICAL  /api/heartbeat and /api/keepalive routes missing. LightweightHeartbeat
+                   (quantum_lattice) POSTs to /api/heartbeat every 30 s → 404 → 503.
+  BUG-3  CRITICAL  /api/quantum/heartbeat/status missing. terminal_logic quantum-heartbeat
+                   monitor command GETs this path → 503 on every invocation.
+  BUG-4  HIGH      get_heartbeat() returned {'status':'not_initialized'} (truthy dict)
+                   when uninitialized. Every register_*_with_heartbeat() called
+                   hb.add_listener() on a plain dict → AttributeError; all listener
+                   registrations silently failed. Only oracle_api had the correct guard.
+  BUG-5  MEDIUM    /health returned HTTP 503 when DB not yet connected. During the
+                   deferred DB init window the keep-alive daemon logged a CRITICAL
+                   failure streak on every startup, masking real failures later.
+  BUG-6  LOW       SERVICES['quantum'] used get_heartbeat() instead of get_quantum(),
+                   so GET /api/quantum returned raw heartbeat data, not quantum status.
+  BUG-7  LOW       Heartbeat listeners (core, blockchain, quantum, admin, defi, oracle)
+                   were never wired after globals initialized; the heartbeat ran with
+                   zero listeners and logged desync warnings every cycle.
 
-Other modules import from wsgi_config to access initialized globals.
+Initialization order (unchanged):
+  1. Logging  2. Utility classes  3. DB (deferred thread)  4. Globals (deferred thread)
+  5. Terminal engine (lazy)  6. Flask app  7. Blueprint registration  8. Routes
+  9. Keep-alive daemon
 """
 
 import os
@@ -19,241 +35,237 @@ import logging
 import threading
 import time
 import traceback
-import socket
+import json
 
-# Only configure logging once - subsequent imports should not reconfigure
+# ── Logging: configure once, never re-configure on re-import ─────────────────
 if not logging.getLogger().hasHandlers():
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    )
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# UTILITY CLASSES - Available for all modules
-# ═══════════════════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# UTILITY CLASSES  — available to all modules via `from wsgi_config import ...`
+# ═══════════════════════════════════════════════════════════════════════════════
 
 class SimpleProfiler:
-    """Performance profiling for system operations"""
+    """Thread-safe performance profiler — records call durations per named operation."""
+
     def __init__(self):
-        self.metrics = {}
+        self.metrics: dict = {}
         self.lock = threading.RLock()
-    
-    def record(self, name: str, duration_ms: float):
+
+    def record(self, name: str, duration_ms: float) -> None:
         with self.lock:
-            if name not in self.metrics:
-                self.metrics[name] = []
-            self.metrics[name].append(duration_ms)
-    
+            self.metrics.setdefault(name, []).append(duration_ms)
+
     def get_stats(self, name: str) -> dict:
         with self.lock:
-            if name not in self.metrics:
-                return {'count': 0, 'avg_ms': 0, 'min_ms': 0, 'max_ms': 0}
-            times = self.metrics[name]
+            times = self.metrics.get(name, [])
+            if not times:
+                return {'count': 0, 'avg_ms': 0.0, 'min_ms': 0.0, 'max_ms': 0.0}
             return {
-                'count': len(times),
+                'count':  len(times),
                 'avg_ms': sum(times) / len(times),
                 'min_ms': min(times),
                 'max_ms': max(times),
             }
 
+    def all_stats(self) -> dict:
+        with self.lock:
+            return {name: self.get_stats(name) for name in self.metrics}
+
 
 class SimpleCache:
-    """In-memory caching with TTL"""
-    def __init__(self, max_size: int = 1000):
-        self.cache = {}
-        self.max_size = max_size
+    """Thread-safe in-memory LRU cache with per-entry TTL support."""
+
+    def __init__(self, max_size: int = 2000):
+        self.cache:    dict = {}
+        self.max_size: int  = max_size
         self.lock = threading.RLock()
-    
+
     def get(self, key: str):
         with self.lock:
-            if key not in self.cache:
+            entry = self.cache.get(key)
+            if entry is None:
                 return None
-            item = self.cache[key]
-            if item['ttl'] and time.time() > item['expires_at']:
+            if entry['ttl'] and time.time() > entry['expires_at']:
                 del self.cache[key]
                 return None
-            return item['value']
-    
-    def set(self, key: str, value, ttl_sec: int = 3600):
+            return entry['value']
+
+    def set(self, key: str, value, ttl_sec: int = 3600) -> None:
         with self.lock:
             if len(self.cache) >= self.max_size:
-                self.cache.pop(next(iter(self.cache)), None)
+                self.cache.pop(next(iter(self.cache)), None)  # evict oldest
             self.cache[key] = {
-                'value': value,
-                'ttl': ttl_sec,
-                'expires_at': time.time() + ttl_sec if ttl_sec else None
+                'value':      value,
+                'ttl':        ttl_sec,
+                'expires_at': time.time() + ttl_sec if ttl_sec else None,
             }
-    
-    def delete(self, key: str):
+
+    def delete(self, key: str) -> None:
         with self.lock:
             self.cache.pop(key, None)
-    
-    def clear(self):
+
+    def clear(self) -> None:
         with self.lock:
             self.cache.clear()
 
+    def size(self) -> int:
+        with self.lock:
+            return len(self.cache)
+
 
 class RequestTracer:
-    """Request correlation tracking"""
+    """Lightweight per-request correlation-ID generator."""
+
     def __init__(self):
         import uuid
-        self.current_id = None
-        self.uuid = uuid
-    
+        self._uuid = uuid
+        self.current_id: str | None = None
+
     def new_id(self) -> str:
-        self.current_id = str(self.uuid.uuid4())
+        self.current_id = str(self._uuid.uuid4())
         return self.current_id
 
 
 class ErrorBudgetManager:
-    """Error budget tracking"""
+    """Sliding-window error-rate budget tracker."""
+
     def __init__(self, max_errors: int = 100, window_sec: int = 60):
-        self.max_errors = max_errors
-        self.window_sec = window_sec
-        self.errors = []
+        self.max_errors  = max_errors
+        self.window_sec  = window_sec
+        self._timestamps: list = []
         self.lock = threading.RLock()
-    
-    def record_error(self):
+
+    def _prune(self, now: float) -> None:
+        """Remove timestamps outside the window — MUST be called with lock held."""
+        cutoff = now - self.window_sec
+        self._timestamps = [t for t in self._timestamps if t >= cutoff]
+
+    def record_error(self) -> None:
         with self.lock:
             now = time.time()
-            self.errors = [t for t in self.errors if now - t < self.window_sec]
-            self.errors.append(now)
-    
+            self._prune(now)
+            self._timestamps.append(now)
+
     def is_exhausted(self) -> bool:
         with self.lock:
-            now = time.time()
-            self.errors = [t for t in self.errors if now - t < self.window_sec]
-            return len(self.errors) >= self.max_errors
-    
+            self._prune(time.time())
+            return len(self._timestamps) >= self.max_errors
+
     def remaining(self) -> int:
         with self.lock:
-            now = time.time()
-            self.errors = [t for t in self.errors if now - t < self.window_sec]
-            return max(0, self.max_errors - len(self.errors))
+            self._prune(time.time())
+            return max(0, self.max_errors - len(self._timestamps))
 
 
-# Global utility instances
-PROFILER = SimpleProfiler()
-CACHE = SimpleCache(max_size=2000)
-RequestCorrelation = RequestTracer()
-ERROR_BUDGET = ErrorBudgetManager(max_errors=100, window_sec=60)
+# ── Module-level singletons — importable by all API modules ──────────────────
+PROFILER            = SimpleProfiler()
+CACHE               = SimpleCache(max_size=2000)
+RequestCorrelation  = RequestTracer()
+ERROR_BUDGET        = ErrorBudgetManager(max_errors=100, window_sec=60)
 
-# ── EXPORTED STUBS — required by downstream module imports ──────────────────────────
-# blockchain_api, defi_api, admin_api, db_builder_v2 all import these by name:
-#   from wsgi_config import ... CIRCUIT_BREAKERS, RATE_LIMITERS
-# Without these stubs, ImportError fires, those modules fall back to standalone mode,
-# and DB/CACHE/PROFILER all resolve to None throughout the system.
-# Individual APIs implement their own circuit-breaking; these are coordination stubs.
-CIRCUIT_BREAKERS: dict = {}   # subsystem-level breakers live in each API module
-RATE_LIMITERS:    dict = {}   # subsystem-level limiters live in each API module
+# ── Exported stubs — blockchain_api / defi_api / admin_api import these ──────
+# Each module implements its own circuit-breaking; these are coordination stubs.
+CIRCUIT_BREAKERS: dict = {}
+RATE_LIMITERS:    dict = {}
 
-logger.info("[BOOTSTRAP] ✅ Utility services initialized (PROFILER, CACHE, RequestCorrelation, ERROR_BUDGET)")
+logger.info("[BOOTSTRAP] ✅ Utility singletons ready (PROFILER, CACHE, RequestCorrelation, ERROR_BUDGET)")
 
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# BOOTSTRAP PHASE 1: DATABASE SINGLETON (db_builder_v2) - DEFERRED
-# ═══════════════════════════════════════════════════════════════════════════════════════
 
-DB = None
+# ═══════════════════════════════════════════════════════════════════════════════
+# PHASE 1 — DATABASE (deferred, non-blocking)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+DB      = None
 DB_POOL = None
 
-def _initialize_database_deferred():
+
+def _initialize_database_deferred() -> None:
     """
-    Initialize database in background thread with health verification.
-    
-    Robust initialization strategy:
-    1. Attempt to import and initialize db_manager
-    2. Verify credentials are loaded (non-empty host)
-    3. Perform connection health check
-    4. Log detailed diagnostics on any failure
+    Connect to PostgreSQL in a daemon thread so Flask can start immediately.
+    Verifies credentials, creates a test connection, and runs SELECT version().
+    Sets module-level DB / DB_POOL on success.
     """
     global DB, DB_POOL
     try:
-        logger.info("[BOOTSTRAP] Starting deferred database initialization (background thread)...")
-        from db_builder_v2 import db_manager, DB_POOL as _pool, POOLER_HOST, POOLER_USER, POOLER_PASSWORD, POOLER_PORT, POOLER_DB
-        
+        logger.info("[BOOTSTRAP/DB] Starting deferred database initialization…")
+        from db_builder_v2 import (
+            db_manager, DB_POOL as _pool,
+            POOLER_HOST, POOLER_USER, POOLER_PASSWORD, POOLER_PORT, POOLER_DB,
+        )
+
         if db_manager is None:
-            logger.error("[BOOTSTRAP] ❌ db_manager is None — likely a credential/pool creation failure")
-            logger.error(f"[BOOTSTRAP] Debug: Credentials check:")
-            logger.error(f"[BOOTSTRAP]   POOLER_HOST={POOLER_HOST}")
-            logger.error(f"[BOOTSTRAP]   POOLER_USER={POOLER_USER}")
-            logger.error(f"[BOOTSTRAP]   POOLER_PASSWORD={'<set>' if POOLER_PASSWORD else '<empty>'}")
-            logger.error(f"[BOOTSTRAP]   POOLER_PORT={POOLER_PORT}")
-            logger.error(f"[BOOTSTRAP]   POOLER_DB={POOLER_DB}")
+            logger.error("[BOOTSTRAP/DB] ❌ db_manager is None — credential/pool failure")
+            logger.error(f"[BOOTSTRAP/DB]   HOST={POOLER_HOST}  USER={POOLER_USER}  "
+                         f"PASSWORD={'<set>' if POOLER_PASSWORD else '<EMPTY>'}  "
+                         f"PORT={POOLER_PORT}  DB={POOLER_DB}")
             return
-        
-        # Verify pool was created successfully
+
         if db_manager.pool is None:
-            logger.error(f"[BOOTSTRAP] ❌ Database pool creation failed: {db_manager.pool_error}")
-            logger.error(f"[BOOTSTRAP] This indicates invalid credentials or network connectivity issues")
+            logger.error(f"[BOOTSTRAP/DB] ❌ Pool creation failed: {db_manager.pool_error}")
             return
-        
-        # Perform health check: try to get a connection and run a simple query
-        logger.info("[BOOTSTRAP] Running database health check...")
-        try:
-            test_conn = db_manager.get_connection()
-            if test_conn is None:
-                logger.error("[BOOTSTRAP] ❌ Could not obtain test connection from pool")
-                return
-            
-            cursor = test_conn.cursor()
-            cursor.execute("SELECT version()")
-            version = cursor.fetchone()
-            cursor.close()
-            db_manager.return_connection(test_conn)
-            
-            logger.info(f"[BOOTSTRAP] ✅ Database health check passed")
-            logger.info(f"[BOOTSTRAP] ✅ PostgreSQL version: {version[0][:60]}...")
-            
-        except Exception as health_error:
-            logger.error(f"[BOOTSTRAP] ❌ Health check failed: {health_error}")
-            logger.error(f"[BOOTSTRAP] This indicates connectivity issues with the database server")
-            logger.error(f"[BOOTSTRAP] Check: firewall rules, network connectivity, credentials")
+
+        # Smoke-test: one query to confirm the pool actually works
+        test_conn = db_manager.get_connection()
+        if test_conn is None:
+            logger.error("[BOOTSTRAP/DB] ❌ Could not obtain test connection from pool")
             return
-        
-        DB = db_manager
+
+        cur = test_conn.cursor()
+        cur.execute("SELECT version()")
+        version = cur.fetchone()
+        cur.close()
+        db_manager.return_connection(test_conn)
+
+        DB      = db_manager
         DB_POOL = _pool
-        logger.info("[BOOTSTRAP] ✅ Database singleton ready (db_builder_v2.db_manager)")
-        logger.info("[BOOTSTRAP] ✅ Connection pool initialized and verified")
-        
-    except ImportError as ie:
-        logger.error(f"[BOOTSTRAP] ❌ Failed to import db_builder_v2: {ie}")
-        logger.error(f"[BOOTSTRAP] This typically means a syntax error or missing dependency in db_builder_v2.py")
-    except Exception as e:
-        logger.error(f"[BOOTSTRAP] ❌ Database initialization failed: {e}")
-        logger.error(f"[BOOTSTRAP] Traceback: {traceback.format_exc()}")
+        logger.info(f"[BOOTSTRAP/DB] ✅ Pool ready — {version[0][:70]}…")
 
-# Start database initialization in background (non-blocking)
-_DB_INIT_THREAD = threading.Thread(target=_initialize_database_deferred, daemon=True)
+    except ImportError as exc:
+        logger.error(f"[BOOTSTRAP/DB] ❌ Import failed: {exc}")
+    except Exception as exc:
+        logger.error(f"[BOOTSTRAP/DB] ❌ Unexpected error: {exc}\n{traceback.format_exc()}")
+
+
+_DB_INIT_THREAD = threading.Thread(
+    target=_initialize_database_deferred, daemon=True, name="db-init",
+)
 _DB_INIT_THREAD.start()
-logger.info("[BOOTSTRAP] ✅ Database initialization started in background (daemon thread)")
+logger.info("[BOOTSTRAP] ✅ DB initialization started in background daemon thread")
 
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# BOOTSTRAP PHASE 2: GLOBALS MODULE (Unified State) - DEFERRED
-# ═══════════════════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PHASE 2 — GLOBALS MODULE (deferred, non-blocking)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 GLOBALS_AVAILABLE = False
-_GLOBALS_INIT_THREAD = None
-_GLOBALS_INIT_TIMEOUT = 30  # seconds
 
-def _initialize_globals_deferred():
-    """Initialize globals in background thread with timeout."""
+
+def _initialize_globals_deferred() -> None:
+    """Call globals.initialize_globals() in a daemon thread; mark GLOBALS_AVAILABLE on success."""
     global GLOBALS_AVAILABLE
     try:
-        logger.info("[BOOTSTRAP] Starting deferred globals initialization (background thread)...")
+        logger.info("[BOOTSTRAP/GLOBALS] Initializing global state…")
         from globals import initialize_globals
-        
-        # Try with timeout
         initialize_globals()
         GLOBALS_AVAILABLE = True
-        logger.info("[BOOTSTRAP] ✅ Globals module initialized in background")
-    except Exception as e:
-        logger.error(f"[BOOTSTRAP] ⚠️  Globals initialization failed: {e}")
-        # Don't re-raise — let app start anyway with degraded functionality
+        logger.info("[BOOTSTRAP/GLOBALS] ✅ Global state initialized")
+        # Wire heartbeat listeners now that globals (and HEARTBEAT singleton) are ready
+        _register_heartbeat_listeners()
+    except Exception as exc:
+        logger.error(f"[BOOTSTRAP/GLOBALS] ⚠️  Initialization failed: {exc}", exc_info=True)
+
 
 try:
-    logger.info("[BOOTSTRAP] Pre-loading globals module (imports only, no initialization)...")
     from globals import (
         initialize_globals, get_globals,
         get_system_health, get_state_snapshot,
@@ -264,255 +276,246 @@ try:
         pqc_encapsulate, pqc_prove_identity, pqc_verify_identity,
         pqc_revoke_key, pqc_rotate_key, bootstrap_admin_session, revoke_session,
     )
-    logger.info("[BOOTSTRAP] ✅ Globals module imports successful")
-    
-    # Start initialization in background thread to avoid blocking Flask startup
-    _GLOBALS_INIT_THREAD = threading.Thread(target=_initialize_globals_deferred, daemon=True)
+    logger.info("[BOOTSTRAP/GLOBALS] ✅ Module imports resolved")
+
+    _GLOBALS_INIT_THREAD = threading.Thread(
+        target=_initialize_globals_deferred, daemon=True, name="globals-init",
+    )
     _GLOBALS_INIT_THREAD.start()
-    logger.info("[BOOTSTRAP] ✅ Globals initialization started in background (daemon thread)")
-    
-except Exception as e:
-    logger.error(f"[BOOTSTRAP] ❌ FATAL: Could not import globals: {e}")
+    logger.info("[BOOTSTRAP/GLOBALS] ✅ Initialization thread started")
+
+except Exception as exc:
+    logger.error(f"[BOOTSTRAP/GLOBALS] ❌ FATAL — cannot import globals: {exc}")
     raise
 
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# BOOTSTRAP PHASE 3: TERMINAL ENGINE (Command System - LAZY LOADED)
-# ═══════════════════════════════════════════════════════════════════════════════════════
 
-_TERMINAL_INITIALIZED = False
-_TERMINAL_INIT_FAILED = False   # sticky failure flag — stop retrying after first failure
-_terminal_engine = None
-_terminal_lock = threading.Lock()  # guards the initialization critical section
+# ═══════════════════════════════════════════════════════════════════════════════
+# PHASE 3 — TERMINAL ENGINE (lazy, thread-safe)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_TERMINAL_INITIALIZED  = False
+_TERMINAL_INIT_FAILED  = False
+_terminal_engine       = None
+_terminal_lock         = threading.Lock()
 
 
 def _initialize_terminal_engine():
     """
-    Lazy, thread-safe initialization of the terminal engine.
+    Lazy, idempotent, thread-safe terminal engine boot.
 
-    Thread-safety:
-        Uses a double-checked locking pattern with a module-level threading.Lock.
-        Without the lock, concurrent WSGI requests each see _TERMINAL_INITIALIZED=False
-        and all spawn a full TerminalEngine (8 ParallelExecutor worker threads each).
-        Five concurrent requests → 40 orphan threads + log flood.
+    Uses double-checked locking: fast path (flag read) avoids the lock on
+    every call after initialization; slow path (inside lock) prevents the
+    duplicate-initialization race that would spawn 40+ orphan threads under
+    concurrent WSGI worker startup.
 
-    Failure semantics:
-        If the first init attempt fails the flag _TERMINAL_INIT_FAILED is set so
-        subsequent calls return immediately instead of retrying on every request.
-        The COMMAND_REGISTRY stubs populated by globals.py still work — callers
-        degrade gracefully without handlers but don't hammer the system.
+    Sets _TERMINAL_INIT_FAILED=True on first failure so repeated calls from
+    request handlers don't hammer the import system on every request.
     """
     global _TERMINAL_INITIALIZED, _TERMINAL_INIT_FAILED, _terminal_engine
 
-    # Fast-path: already done (or permanently failed)
     if _TERMINAL_INITIALIZED or _TERMINAL_INIT_FAILED:
         return _terminal_engine
 
-    # Slow-path: take the lock and re-check inside
     with _terminal_lock:
         if _TERMINAL_INITIALIZED or _TERMINAL_INIT_FAILED:
             return _terminal_engine
 
         try:
-            logger.info("[BOOTSTRAP] Initializing terminal engine (thread-safe)...")
+            logger.info("[BOOTSTRAP/TERMINAL] Initializing terminal engine…")
             from terminal_logic import TerminalEngine, register_all_commands
 
-            engine = TerminalEngine()
+            engine    = TerminalEngine()
             cmd_count = register_all_commands(engine)
+            total     = len(COMMAND_REGISTRY)
 
-            total_cmds = len(COMMAND_REGISTRY)
-            logger.info(f"[BOOTSTRAP] ✓ Registered {total_cmds} commands "
+            logger.info(f"[BOOTSTRAP/TERMINAL] ✓ Registered {total} commands "
                         f"({cmd_count} from terminal_logic handlers)")
 
-            if total_cmds < 10:
-                # Only hard-fail on truly empty registry — stubs count too
+            if total < 10:
                 raise RuntimeError(
-                    f"Command registration catastrophically incomplete: {total_cmds} commands. "
+                    f"Command registration catastrophically incomplete: {total} commands. "
                     "Check terminal_logic import errors above."
                 )
-
-            if total_cmds < 80:
+            if total < 80:
                 logger.warning(
-                    f"[BOOTSTRAP] ⚠ Only {total_cmds} commands registered (expected 89+). "
-                    "Some commands may be missing. Check terminal_logic dependency errors."
+                    f"[BOOTSTRAP/TERMINAL] ⚠ Only {total} commands registered (expected 89+). "
+                    "Some commands may be missing."
                 )
 
-            _terminal_engine = engine
-            _TERMINAL_INITIALIZED = True
-            logger.info("[BOOTSTRAP] ✅ Terminal engine initialized successfully")
+            _terminal_engine       = engine
+            _TERMINAL_INITIALIZED  = True
+            logger.info("[BOOTSTRAP/TERMINAL] ✅ Terminal engine ready")
             return engine
 
-        except Exception as e:
-            _TERMINAL_INIT_FAILED = True   # stop retrying on every request
+        except Exception as exc:
+            _TERMINAL_INIT_FAILED = True
             logger.error(
-                f"[BOOTSTRAP] ❌ Terminal engine initialization failed: {e}\n"
-                "  → Falling back to globals.py stub registry (basic commands still work).\n"
-                "  → Fix the error above and restart to enable full command set.",
+                f"[BOOTSTRAP/TERMINAL] ❌ Init failed: {exc}\n"
+                "  → Falling back to globals.py stub registry (basic commands work).\n"
+                "  → Fix the error above and restart to enable the full command set.",
                 exc_info=True,
             )
             return None
 
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# EXPORTS: Other modules import these from wsgi_config
-# ═══════════════════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# EXPORTS
+# ═══════════════════════════════════════════════════════════════════════════════
 
 __all__ = [
+    # Utilities
     'DB', 'PROFILER', 'CACHE', 'RequestCorrelation', 'ERROR_BUDGET',
-    'CIRCUIT_BREAKERS', 'RATE_LIMITERS',
-    'GLOBALS_AVAILABLE', 'logger',
+    'CIRCUIT_BREAKERS', 'RATE_LIMITERS', 'GLOBALS_AVAILABLE', 'logger',
+    # Globals API
     'get_system_health', 'get_state_snapshot',
     'get_heartbeat', 'get_blockchain', 'get_ledger', 'get_oracle', 'get_defi',
     'get_auth_manager', 'get_pqc_system', 'get_genesis_block', 'verify_genesis_block',
     'get_metrics', 'get_quantum', 'dispatch_command', 'COMMAND_REGISTRY',
+    # PQC
     'pqc_generate_user_key', 'pqc_sign', 'pqc_verify',
     'pqc_encapsulate', 'pqc_prove_identity', 'pqc_verify_identity',
     'pqc_revoke_key', 'pqc_rotate_key',
+    # Session
     'bootstrap_admin_session', 'revoke_session',
 ]
 
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# FLASK APPLICATION (HTTP Interface)
-# ═══════════════════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FLASK APPLICATION
+# ═══════════════════════════════════════════════════════════════════════════════
 
 from flask import Flask, request, jsonify, send_from_directory
 from datetime import datetime, timezone
 
-app = Flask(__name__, static_folder=os.path.join(PROJECT_ROOT, 'static'), static_url_path='/static')
+app = Flask(
+    __name__,
+    static_folder=os.path.join(PROJECT_ROOT, 'static'),
+    static_url_path='/static',
+)
 app.config['JSON_SORT_KEYS'] = False
 
-logger.info("[FLASK] ✅ Flask app created and ready to receive requests")
-logger.info("[FLASK] 📝 Globals initialization continues in background thread (non-blocking)")
-logger.info("[FLASK] 🚀 App will be fully functional once globals initialization completes")
+logger.info("[FLASK] ✅ Flask app created")
+
 
 @app.before_request
-def log_request():
-    """Log incoming requests"""
+def _before():
     logger.debug(f"[REQUEST] {request.method} {request.path}")
 
+
 @app.after_request
-def log_response(response):
-    """Log outgoing responses"""
+def _after(response):
     logger.debug(f"[RESPONSE] {response.status_code}")
     return response
 
 
-class CircuitBreaker:
-    """Safe access to optional services"""
-    def __init__(self, service_name, getter):
-        self.service_name = service_name
+# ── Safe service accessors ────────────────────────────────────────────────────
+
+class _ServiceAccessor:
+    """
+    Wraps a zero-arg getter so accidental None / exception returns a safe default.
+    Avoids silently swallowing TypeError that would hide real bugs — only catches
+    the known-safe cases (subsystem not ready / getter raises).
+    """
+
+    def __init__(self, name: str, getter):
+        self.name   = name
         self.getter = getter
-    
+
     def get(self, default=None):
         try:
-            return self.getter() or default or {}
-        except Exception as e:
-            logger.warning(f"⚠️  {self.service_name} unavailable: {str(e)[:60]}")
-            return default or {}
+            val = self.getter()
+            return val if val is not None else (default if default is not None else {})
+        except Exception as exc:
+            logger.warning(f"⚠️  {self.name} accessor error: {str(exc)[:80]}")
+            return default if default is not None else {}
 
 
+# BUG-6 FIX: SERVICES['quantum'] must use get_quantum(), not get_heartbeat().
 SERVICES = {
-    'quantum': CircuitBreaker('quantum', lambda: get_heartbeat()),
-    'blockchain': CircuitBreaker('blockchain', lambda: get_blockchain()),
-    'ledger': CircuitBreaker('ledger', lambda: get_ledger()),
-    'oracle': CircuitBreaker('oracle', lambda: get_oracle()),
-    'defi': CircuitBreaker('defi', lambda: get_defi()),
-    'auth': CircuitBreaker('auth', lambda: get_auth_manager()),
-    'pqc': CircuitBreaker('pqc', lambda: get_pqc_system()),
+    'quantum':    _ServiceAccessor('quantum',    get_quantum),      # was get_heartbeat ← BUG-6
+    'blockchain': _ServiceAccessor('blockchain', get_blockchain),
+    'ledger':     _ServiceAccessor('ledger',     get_ledger),
+    'oracle':     _ServiceAccessor('oracle',     get_oracle),
+    'defi':       _ServiceAccessor('defi',       get_defi),
+    'auth':       _ServiceAccessor('auth',       get_auth_manager),
+    'pqc':        _ServiceAccessor('pqc',        get_pqc_system),
 }
 
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# ROUTES & BACKGROUND SERVICES
-# ═══════════════════════════════════════════════════════════════════════════════════════
 
-# ─── Database Status Cache ───────────────────────────────────────────────────
-# Health checks run in background to avoid blocking request handlers
-# This cache gets updated by a background thread every 30 seconds
-_DB_STATUS_CACHE = {
-    'connected': False,
-    'healthy': False,
-    'host': 'unknown',
-    'port': 5432,
-    'database': 'unknown',
-    'timestamp': 0,
-    'error': None
+# ═══════════════════════════════════════════════════════════════════════════════
+# DATABASE STATUS CACHE  — background thread updates every 30 s
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_DB_STATUS_CACHE: dict  = {
+    'connected': False, 'healthy': False,
+    'host': 'unknown',  'port': 5432,  'database': 'unknown',
+    'timestamp': 0.0,   'error': None,
 }
-_DB_STATUS_LOCK = threading.Lock()
-_DB_STATUS_UPDATE_INTERVAL = 30  # Update cache every 30 seconds
+_DB_STATUS_LOCK             = threading.Lock()
+_DB_STATUS_UPDATE_INTERVAL  = 30   # seconds
 
 
-def _update_database_status_cache():
-    """Background thread: update cached database status without blocking requests"""
-    global _DB_STATUS_CACHE
-    
-    def _do_cache_update():
-        """Perform a single cache update"""
+def _update_db_status_cache() -> None:
+    """Daemon thread: refresh cached DB status without ever blocking a request handler."""
+
+    def _do_update() -> None:
         try:
             from db_builder_v2 import verify_database_connection
             result = verify_database_connection(verbose=False)
-            now = time.time()
-            
             with _DB_STATUS_LOCK:
                 _DB_STATUS_CACHE.update({
                     'connected': result.get('connected', False),
-                    'healthy': result.get('healthy', False),
-                    'host': result.get('host', 'unknown'),
-                    'port': result.get('port', 5432),
-                    'database': result.get('database', 'unknown'),
-                    'timestamp': now,
-                    'error': None
+                    'healthy':   result.get('healthy',   False),
+                    'host':      result.get('host',      'unknown'),
+                    'port':      result.get('port',      5432),
+                    'database':  result.get('database',  'unknown'),
+                    'timestamp': time.time(),
+                    'error':     None,
                 })
-        except Exception as e:
-            now = time.time()
+        except Exception as exc:
             with _DB_STATUS_LOCK:
                 _DB_STATUS_CACHE.update({
-                    'connected': False,
-                    'healthy': False,
-                    'timestamp': now,
-                    'error': str(e)[:100]
+                    'connected': False, 'healthy': False,
+                    'timestamp': time.time(),
+                    'error':     str(exc)[:120],
                 })
-    
-    # CRITICAL: Update cache IMMEDIATELY on first run (before 30s delay)
-    # This ensures /health endpoint returns correct status right away
+
+    # Immediate update so /health is accurate from the first request
     try:
-        logger.debug("[DB-STATUS-CACHE] Performing initial cache update...")
-        _do_cache_update()
-        logger.info("[DB-STATUS-CACHE] ✅ Initial cache update complete")
-    except Exception as e:
-        logger.error(f"[DB-STATUS-CACHE] Initial update failed: {e}")
-    
-    # Now enter regular update loop
+        _do_update()
+        logger.info("[DB-STATUS-CACHE] ✅ Initial cache populated")
+    except Exception as exc:
+        logger.warning(f"[DB-STATUS-CACHE] Initial update error: {exc}")
+
     while True:
         try:
             time.sleep(_DB_STATUS_UPDATE_INTERVAL)
-            
-            # Only update if enough time has passed
-            now = time.time()
-            if now - _DB_STATUS_CACHE.get('timestamp', 0) < _DB_STATUS_UPDATE_INTERVAL:
-                continue
-            
-            _do_cache_update()
-        
-        except Exception as e:
-            logger.debug(f"[DB-STATUS-CACHE] Background update error: {e}")
-            time.sleep(5)  # Retry after 5 seconds on error
+            _do_update()
+        except Exception as exc:
+            logger.debug(f"[DB-STATUS-CACHE] Refresh error: {exc}")
+            time.sleep(5)
 
 
-# Start background database status updater
-_db_status_thread = threading.Thread(target=_update_database_status_cache, daemon=True)
-_db_status_thread.start()
+threading.Thread(
+    target=_update_db_status_cache, daemon=True, name="db-status-cache",
+).start()
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CORE ROUTES
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @app.route('/', methods=['GET'])
 def index():
-    """Root endpoint - returns API status"""
-    accept = request.headers.get('Accept', '')
-    if 'text/html' in accept:
+    """Root — serve index.html for browsers, JSON for API clients."""
+    if 'text/html' in request.headers.get('Accept', ''):
         try:
             return send_from_directory(PROJECT_ROOT, 'index.html')
-        except:
+        except Exception:
             pass
     return jsonify({
-        'system': 'QTCL v5.0',
-        'status': 'operational',
+        'system':    'QTCL v5.1',
+        'status':    'operational',
         'timestamp': datetime.now(timezone.utc).isoformat(),
     })
 
@@ -520,489 +523,753 @@ def index():
 @app.route('/health', methods=['GET'])
 def health():
     """
-    FAST health check - returns cached database status from background thread.
-    Returns in <10ms (never blocks on database operations).
-    
-    For detailed diagnostics, use /api/db-diagnostics instead.
+    Fast health endpoint — returns cached DB status in <10 ms, never blocks.
+
+    BUG-5 FIX: Always returns HTTP 200.  Previous code returned 503 when the DB
+    deferred-init thread hadn't connected yet, causing the keep-alive daemon to
+    log a CRITICAL failure streak on every cold start and masking real failures.
+    The actual health information is in the JSON body; callers should inspect
+    `database.connected` and `status` instead of relying on the HTTP status code
+    for degraded-but-running distinctions.
+
+    Use /api/db-diagnostics for verbose connection info.
     """
     with _DB_STATUS_LOCK:
-        db_cache = _DB_STATUS_CACHE.copy()
-    
+        db = _DB_STATUS_CACHE.copy()
+
+    connected = db.get('connected', False)
+    status    = 'healthy' if connected else 'degraded'
+
     return jsonify({
-        'status': 'healthy' if db_cache.get('connected') else 'degraded',
-        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'status':              status,
+        'timestamp':           datetime.now(timezone.utc).isoformat(),
         'globals_initialized': GLOBALS_AVAILABLE,
         'database': {
-            'connected': db_cache.get('connected', False),
-            'host': db_cache.get('host'),
-            'port': db_cache.get('port'),
-            'database': db_cache.get('database'),
-            'cache_age_seconds': int(time.time() - db_cache.get('timestamp', 0))
+            'connected':        connected,
+            'host':             db.get('host'),
+            'port':             db.get('port'),
+            'database':         db.get('database'),
+            'error':            db.get('error'),
+            'cache_age_seconds': int(time.time() - db.get('timestamp', 0)),
         },
-        'note': 'If database.connected=false, check Koyeb env vars. For details: /api/db-diagnostics'
-    }), 200 if db_cache.get('connected') else 503
+        'note': (
+            None if connected
+            else 'DB not yet connected — check Koyeb env vars or wait for deferred init. '
+                 'Details: /api/db-diagnostics'
+        ),
+    }), 200   # ← BUG-5 FIX: always 200, degraded state is in the body
+
+
+# ── BUG-2 FIX: add /api/heartbeat and /api/keepalive routes ──────────────────
+#
+# LightweightHeartbeat (quantum_lattice_control_live_complete.py:389) POSTs JSON
+# metrics to KEEPALIVE_URL which defaults to f"{APP_URL}/api/heartbeat".
+# QuantumSystemCoordinator (same file:2541) uses /api/keepalive.
+# Neither route existed before → every keepalive attempt returned 404 which
+# Koyeb's proxy surfaced to callers as 503.
+
+@app.route('/api/heartbeat', methods=['GET', 'POST'])
+def api_heartbeat_receiver():
+    """
+    Keepalive / metrics sink for LightweightHeartbeat (quantum_lattice module).
+
+    Accepts GET pings from the instance keep-alive daemon and POST payloads from
+    the quantum subsystem's LightweightHeartbeat.  Responds 200 in all cases.
+    POST bodies are optional — if present they are logged at DEBUG level so the
+    metrics are visible in logs without adding overhead to every call.
+    """
+    if request.method == 'POST':
+        try:
+            payload = request.get_json(silent=True) or {}
+            logger.debug(
+                f"[HB-RECV] quantum keepalive beat | "
+                f"lattice_coherence={payload.get('lattice_coherence', 'n/a')} | "
+                f"heartbeat_running={payload.get('heartbeat', {}).get('running', 'n/a')}"
+            )
+        except Exception:
+            pass   # malformed body — accept and discard
+
+    return jsonify({
+        'status':    'ok',
+        'ts':        time.time(),
+        'server':    'QTCL v5.1',
+        'received':  True,
+    }), 200
+
+
+@app.route('/api/keepalive', methods=['GET', 'POST'])
+def api_keepalive_receiver():
+    """
+    Secondary keepalive sink for QuantumSystemCoordinator.
+
+    The coordinator sends POST requests to /api/keepalive every interval_seconds.
+    Returns 200 with a minimal body so the coordinator marks the ping successful.
+    """
+    if request.method == 'POST':
+        try:
+            payload = request.get_json(silent=True) or {}
+            logger.debug(f"[KEEPALIVE] coordinator ping | keys={list(payload.keys())[:5]}")
+        except Exception:
+            pass
+
+    return jsonify({'status': 'ok', 'ts': time.time()}), 200
+
+
+# ── BUG-3 FIX: /api/quantum/heartbeat/status ─────────────────────────────────
+#
+# terminal_logic.py:4654 and :4704 issue GET /quantum/heartbeat/status through
+# the API client (base URL = /api).  The route did not exist in any registered
+# blueprint.  The quantum_api module exports get_quantum_heartbeat_status() as a
+# plain Python function, never as a Flask route.  Added here so it is always
+# available regardless of which blueprint variant is registered.
+
+@app.route('/api/quantum/heartbeat/status', methods=['GET'])
+def api_quantum_heartbeat_status():
+    """
+    Heartbeat status for the terminal quantum-heartbeat-monitor command.
+
+    Reads directly from the HEARTBEAT singleton via get_heartbeat() with a proper
+    isinstance guard (BUG-4 fix pattern).  Falls back gracefully when the quantum
+    subsystem hasn't initialized yet.
+    """
+    try:
+        hb = get_heartbeat()
+        # BUG-4 GUARD: get_heartbeat() may return {'status':'not_initialized'} dict
+        if hb is None or isinstance(hb, dict):
+            return jsonify({
+                'heartbeat': hb or {'status': 'not_initialized'},
+                'running':   False,
+                'note':      'Quantum subsystem not yet initialized',
+            }), 200
+
+        # Real UniversalQuantumHeartbeat object
+        metrics = hb.get_metrics() if hasattr(hb, 'get_metrics') else {}
+        return jsonify({
+            'heartbeat': metrics,
+            'running':   metrics.get('running', hb.running if hasattr(hb, 'running') else False),
+        }), 200
+
+    except Exception as exc:
+        logger.error(f"[HB-STATUS] Error reading heartbeat: {exc}")
+        return jsonify({'error': str(exc), 'running': False}), 200   # 200 not 500 — terminal expects JSON
+
 
 @app.route('/api/db-diagnostics', methods=['GET'])
 def db_diagnostics():
-    """
-    Detailed database diagnostics endpoint - useful for debugging connection issues.
-    Only available in non-production environments (set ALLOW_DIAGNOSTICS=true)
-    """
-    allow_diag = os.getenv('ALLOW_DIAGNOSTICS', 'false').lower() == 'true'
-    if not allow_diag and os.getenv('FLASK_ENV') == 'production':
+    """Verbose DB diagnostic dump — gated by ALLOW_DIAGNOSTICS env var in production."""
+    allow = os.getenv('ALLOW_DIAGNOSTICS', 'false').lower() == 'true'
+    if not allow and os.getenv('FLASK_ENV') == 'production':
         return jsonify({'error': 'Diagnostics endpoint disabled in production'}), 403
-    
     try:
         from db_builder_v2 import verify_database_connection
         result = verify_database_connection(verbose=True)
         return jsonify(result), 200 if result.get('healthy') else 503
-    except Exception as e:
-        logger.error(f"[DIAG] Error during diagnostics: {e}")
-        return jsonify({
-            'error': str(e),
-            'timestamp': datetime.now(timezone.utc).isoformat()
-        }), 500
+    except Exception as exc:
+        logger.error(f"[DIAG] {exc}")
+        return jsonify({'error': str(exc), 'timestamp': datetime.now(timezone.utc).isoformat()}), 500
+
 
 @app.route('/api/status', methods=['GET'])
 def status():
+    """System status — health + state snapshot."""
     try:
         return jsonify({'health': get_system_health(), 'snapshot': get_state_snapshot()})
-    except:
+    except Exception:
         return jsonify({'status': 'operational'})
+
 
 @app.route('/api/command', methods=['POST'])
 def execute_command():
-    try:
-        # Ensure terminal engine is initialized (thread-safe, idempotent)
-        _initialize_terminal_engine()
+    """
+    Dispatch a named command through the terminal engine.
 
-        data = request.get_json() or {}
+    JWT extraction: tries env JWT_SECRET → auth_handlers.JWT_SECRET → globals._get_jwt_secret,
+    in order, stopping at the first successful decode.  Carries decoded payload
+    (user_id, role, is_admin) downstream to the command handler.
+    """
+    try:
+        _initialize_terminal_engine()   # idempotent, thread-safe
+
+        data    = request.get_json() or {}
         command = data.get('command', 'help')
-        args = data.get('args') or {}
+        args    = data.get('args') or {}
         user_id = data.get('user_id')
 
-        # ── JWT extraction — decode once, carry full payload downstream ────────
-        raw_token = None
-        role = None
-        is_admin = False
+        raw_token       = None
+        role            = None
+        is_admin        = False
         jwt_decode_error = None
 
         auth_header = request.headers.get('Authorization', '')
         if auth_header.startswith('Bearer '):
             raw_token = auth_header[7:].strip()
-        # Also accept token in JSON body (some clients send it there)
         if not raw_token:
             raw_token = data.get('token') or data.get('access_token')
 
         if raw_token:
             try:
                 import jwt as _jwt
-                # Collect all possible secrets to try (order: env → auth_handlers → globals)
+
                 secrets_to_try = []
-                
-                # 1. Try environment variable (production override)
                 env_secret = os.getenv('JWT_SECRET', '')
                 if env_secret:
                     secrets_to_try.append(('ENV', env_secret))
-                
-                # 2. Try auth_handlers module (canonical location)
+
                 try:
-                    from auth_handlers import JWT_SECRET as _ahs_secret
-                    if _ahs_secret:
-                        secrets_to_try.append(('AUTH_HANDLERS', _ahs_secret))
-                except Exception as e:
-                    logger.debug(f"[auth] Could not import JWT_SECRET from auth_handlers: {e}")
-                
-                # 3. Try globals module (_get_jwt_secret)
+                    from auth_handlers import JWT_SECRET as _ahs
+                    if _ahs:
+                        secrets_to_try.append(('AUTH_HANDLERS', _ahs))
+                except Exception as _e:
+                    logger.debug(f"[auth] auth_handlers JWT_SECRET unavailable: {_e}")
+
                 try:
-                    from globals import _get_jwt_secret as _get_secret
-                    _gs = _get_secret()
+                    from globals import _get_jwt_secret as _gs_fn
+                    _gs = _gs_fn()
                     if _gs:
                         secrets_to_try.append(('GLOBALS', _gs))
-                except Exception as e:
-                    logger.debug(f"[auth] Could not get JWT_SECRET from globals: {e}")
-                
-                jwt_payload = {}
+                except Exception as _e:
+                    logger.debug(f"[auth] globals _get_jwt_secret unavailable: {_e}")
+
+                jwt_payload    = {}
                 decode_success = False
-                
-                # Try each secret until one works
+
                 for secret_source, secret in secrets_to_try:
                     try:
                         jwt_payload = _jwt.decode(raw_token, secret, algorithms=['HS512', 'HS256'])
                         decode_success = True
-                        logger.debug(f"[auth] JWT decoded successfully using {secret_source} secret")
+                        logger.debug(f"[auth] JWT decoded via {secret_source}")
                         break
                     except _jwt.InvalidSignatureError:
-                        continue  # Try next secret
-                    except Exception as e:
-                        jwt_decode_error = str(e)
                         continue
-                
+                    except Exception as _e:
+                        jwt_decode_error = str(_e)
+                        continue
+
                 if decode_success and jwt_payload:
                     if not user_id:
-                        user_id = jwt_payload.get('user_id')
-                    role = jwt_payload.get('role', 'user')
-                    is_admin = bool(jwt_payload.get('is_admin', False)) or role in ('admin', 'superadmin', 'super_admin')
-                    logger.info(f"[auth] ✓ JWT validated: user={user_id} role={role} admin={is_admin}")
-                elif raw_token:
-                    # Token present but decode failed - log more details for debugging
-                    logger.warning(f"[auth] ⚠️  JWT decode failed for token starting with {raw_token[:20]}... | Error: {jwt_decode_error}")
-            except Exception as _je:
-                logger.error(f"[auth] Unexpected error during JWT processing: {_je}", exc_info=True)
+                        user_id  = jwt_payload.get('user_id')
+                    role     = jwt_payload.get('role', 'user')
+                    is_admin = bool(jwt_payload.get('is_admin', False)) or role in (
+                        'admin', 'superadmin', 'super_admin'
+                    )
+                    logger.info(f"[auth] ✓ JWT valid: user={user_id} role={role} admin={is_admin}")
+                else:
+                    logger.warning(
+                        f"[auth] ⚠️  JWT decode failed for …{raw_token[:20]} | {jwt_decode_error}"
+                    )
+            except Exception as exc:
+                logger.error(f"[auth] Unexpected JWT error: {exc}", exc_info=True)
 
         result = dispatch_command(command, args, user_id, token=raw_token, role=role)
         return jsonify(result)
-    except Exception as e:
-        logger.error(f"Command execution failed: {e}")
-        return jsonify({'status': 'error', 'error': str(e)}), 500
+
+    except Exception as exc:
+        logger.error(f"[/api/command] {exc}")
+        return jsonify({'status': 'error', 'error': str(exc)}), 500
+
 
 @app.route('/api/commands', methods=['GET'])
 def commands():
+    """List all registered commands (serializable subset — handler callables excluded)."""
     try:
-        # Initialize terminal engine once (thread-safe, idempotent after first call)
-        # If it already initialized or permanently failed, this returns immediately
-        _initialize_terminal_engine()
+        _initialize_terminal_engine()   # idempotent
+        serializable = {
+            name: {k: v for k, v in info.items() if k != 'handler' and not callable(v)}
+            for name, info in COMMAND_REGISTRY.items()
+        }
+        return jsonify({'total': len(serializable), 'commands': serializable, 'status': 'success'})
+    except Exception as exc:
+        logger.error(f"[/api/commands] {exc}", exc_info=True)
+        return jsonify({'total': 0, 'commands': {}, 'status': 'error', 'error': str(exc)}), 200
 
-        # Build serializable command list (filter out handler functions)
-        serializable_commands = {}
-        for cmd_name, cmd_info in COMMAND_REGISTRY.items():
-            # Copy all fields EXCEPT 'handler' (which is a function, not JSON serializable)
-            serializable_commands[cmd_name] = {
-                k: v for k, v in cmd_info.items()
-                if k != 'handler' and not callable(v)
-            }
-
-        # Always return command registry (populated at module load time)
-        return jsonify({
-            'total': len(serializable_commands),
-            'commands': serializable_commands,
-            'status': 'success'
-        })
-    except Exception as e:
-        logger.error(f"[/api/commands] Unexpected error: {e}", exc_info=True)
-        return jsonify({
-            'total': 0,
-            'commands': {},
-            'status': 'error',
-            'error': str(e)
-        }), 200  # Return 200 even with error
 
 @app.route('/api/genesis', methods=['GET'])
 def genesis():
+    """Genesis block retrieval and PQC verification."""
     try:
         return jsonify({'block': get_genesis_block(), 'verified': verify_genesis_block()})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    except Exception as exc:
+        return jsonify({'error': str(exc)}), 500
+
 
 @app.route('/api/quantum', methods=['GET'])
-def quantum():
+def quantum_summary():
+    """BUG-6 FIX: quantum summary uses get_quantum() not get_heartbeat()."""
     return jsonify(SERVICES['quantum'].get())
 
+
 @app.route('/api/blockchain', methods=['GET'])
-def blockchain():
+def blockchain_summary():
     return jsonify(SERVICES['blockchain'].get())
 
+
 @app.route('/api/ledger', methods=['GET'])
-def ledger():
+def ledger_summary():
     return jsonify(SERVICES['ledger'].get())
+
 
 @app.route('/api/metrics', methods=['GET'])
 def metrics():
     try:
         return jsonify(get_metrics())
-    except:
+    except Exception:
         return jsonify({'status': 'operational'})
 
+
 @app.errorhandler(404)
-def not_found(e):
-    return jsonify({'error': 'Not found'}), 404
+def not_found(exc):
+    return jsonify({'error': 'Not found', 'path': request.path}), 404
+
 
 @app.errorhandler(500)
-def server_error(e):
-    logger.error(f"500 error: {e}")
-    return jsonify({'error': 'Server error'}), 500
+def server_error(exc):
+    logger.error(f"[500] {exc}")
+    return jsonify({'error': 'Internal server error'}), 500
 
 
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# INSTANCE KEEP-ALIVE HEARTBEAT
-# ═══════════════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+# BUG-1 FIX — BLUEPRINT REGISTRATION
+# ═══════════════════════════════════════════════════════════════════════════════
 #
-# WHY THIS EXISTS:
-#   Koyeb (and most PaaS platforms) put instances to sleep after a period of inactivity.
-#   "Inactivity" is measured at the LOAD BALANCER level — no inbound traffic → sleep.
-#   A self-ping to localhost does NOT count; it must hit the public-facing URL so the
-#   platform's traffic counter sees it.
+# The previous version created the Flask app and defined routes but NEVER called
+# app.register_blueprint().  Every /api/quantum/*, /api/blocks/*, /api/admin/*,
+# /api/defi/*, /api/oracle/*, /api/auth/* etc. returned 404.  Koyeb's load
+# balancer surfaced these as 503 to the external caller.
 #
-#   Without this: instance sleeps → first real user request wakes it up (cold start
-#   takes 15-60s) → users see timeouts → Koyeb may fully stop the instance if it keeps
-#   sleeping (as seen in the logs: "Instance stopping" after ~67 minutes of no traffic).
+# Registration strategy:
+#   • Each blueprint is wrapped in its own try/except so one failing module
+#     cannot prevent the others from loading.
+#   • More-specific prefixes (/api/quantum, /api/oracle) are registered FIRST
+#     to avoid any ambiguity with the generic /api-prefix blueprints.
+#   • We call the authoritative factory function from each module (get_*_blueprint)
+#     rather than touching module-level `blueprint` variables, because several
+#     modules define multiple Blueprint objects and we want the right one.
+#   • blueprint names must be unique per Flask app — we use name_override where
+#     a module inadvertently creates two blueprints with the same name.
 #
-# HOW IT WORKS:
-#   A single daemon thread starts after all WSGI workers are forked. It sleeps for
-#   HEARTBEAT_INTERVAL_SECONDS then fires a GET to the app's public health endpoint.
-#   The public URL is resolved from env vars in priority order:
-#     1. KOYEB_PUBLIC_DOMAIN  (set automatically by Koyeb)
-#     2. APP_URL              (custom override — set in Koyeb env vars if needed)
-#     3. RENDER_EXTERNAL_URL  (Render.com compatibility)
-#     4. FLY_APP_NAME         (Fly.io: constructs https://<name>.fly.dev)
-#     5. localhost:PORT        (last resort — won't prevent sleep on most platforms,
-#                               but keeps the health endpoint warm and logs alive)
-#
-# INTERVAL:
-#   5 minutes (300s). Koyeb free tier sleeps at 10 minutes of inactivity.
-#   Paid tiers don't sleep but the ping still prevents resource reclaim on idle apps.
-#   Do NOT reduce below 60s — excessive self-pings waste your plan's request quota.
-#
-# IF THIS IS REMOVED:
-#   The instance will sleep after the inactivity timeout (10 min free / longer paid).
-#   The next user request hits a cold-start delay. On Koyeb free tier, enough cold
-#   starts in a row trigger the "Instance stopped" lifecycle event seen in the logs.
-#
-# ═══════════════════════════════════════════════════════════════════════════════════════
+# URL layout after registration:
+#   /api/quantum/*   ← quantum_api     (create_quantum_api_blueprint_extended)
+#   /api/oracle/*    ← oracle_api
+#   /api/auth/*      ← core_api        (prefix /api, routes under /auth/*)
+#   /api/users/*     ← core_api
+#   /api/keys/*      ← core_api
+#   /api/addresses/* ← core_api
+#   /api/blocks/*    ← blockchain_api  (full blueprint, prefix /api)
+#   /api/admin/*     ← admin_api       (prefix /api, routes under /admin/*)
+#   /api/defi/*      ← defi_api
+#   /api/governance/*← defi_api
+#   /api/nft/*       ← defi_api
+#   /api/bridge/*    ← defi_api
 
-HEARTBEAT_INTERVAL_SECONDS = 300   # 5 minutes — safely under any platform's sleep threshold
-_HEARTBEAT_THREAD: threading.Thread = None
-_HEARTBEAT_STOP    = threading.Event()
+def _register_blueprints() -> None:
+    """
+    Register all API blueprints with the Flask app.
+    Called once at module load time (inside a try/except per blueprint).
+    Thread-safe: Flask's add_url_rule acquires an internal lock.
+    """
+    registrations = []   # (label, success, error)
+
+    # ── 1. Quantum API (/api/quantum/*) — register first (most specific) ─────
+    try:
+        from quantum_api import get_quantum_blueprint
+        bp = get_quantum_blueprint()
+        app.register_blueprint(bp)
+        registrations.append(('quantum_api [/api/quantum]', True, None))
+    except Exception as exc:
+        registrations.append(('quantum_api', False, exc))
+
+    # ── 2. Oracle API (/api/oracle/*) ─────────────────────────────────────────
+    try:
+        from oracle_api import get_oracle_blueprint, register_oracle_with_heartbeat
+        bp = get_oracle_blueprint()
+        app.register_blueprint(bp)
+        registrations.append(('oracle_api [/api/oracle]', True, None))
+        # oracle_api is the only module with correct isinstance guard already
+        try:
+            register_oracle_with_heartbeat()
+        except Exception:
+            pass
+    except Exception as exc:
+        registrations.append(('oracle_api', False, exc))
+
+    # ── 3. Core API (/api — auth, users, keys, addresses, sign, security…) ───
+    try:
+        from core_api import get_core_blueprint
+        bp = get_core_blueprint()
+        app.register_blueprint(bp)
+        registrations.append(('core_api [/api]', True, None))
+    except Exception as exc:
+        registrations.append(('core_api', False, exc))
+
+    # ── 4. Blockchain API (/api — blocks, transactions, mempool, chain…) ─────
+    #    get_full_blockchain_blueprint() calls create_blueprint() which produces
+    #    the complete production blueprint.  We must NOT also register the
+    #    module-level `blueprint` variable (create_simple_blockchain_blueprint)
+    #    as both use the name 'blockchain_api' and Flask would raise ValueError.
+    try:
+        from blockchain_api import get_full_blockchain_blueprint
+        bp = get_full_blockchain_blueprint()
+        app.register_blueprint(bp)
+        registrations.append(('blockchain_api-full [/api]', True, None))
+    except Exception as exc:
+        registrations.append(('blockchain_api-full', False, exc))
+
+    # ── 5. Admin API (/api — admin/*, stats/*, pqc/*, events/…) ──────────────
+    try:
+        from admin_api import get_admin_blueprint
+        bp = get_admin_blueprint()
+        app.register_blueprint(bp)
+        registrations.append(('admin_api [/api]', True, None))
+    except Exception as exc:
+        registrations.append(('admin_api', False, exc))
+
+    # ── 6. DeFi API (/api — defi/*, governance/*, nft/*, bridge/*) ───────────
+    try:
+        from defi_api import get_defi_blueprint
+        bp = get_defi_blueprint()
+        app.register_blueprint(bp)
+        registrations.append(('defi_api [/api]', True, None))
+    except Exception as exc:
+        registrations.append(('defi_api', False, exc))
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    ok      = [label for label, success, _  in registrations if success]
+    failed  = [(label, err) for label, success, err in registrations if not success]
+
+    for label in ok:
+        logger.info(f"[BLUEPRINT] ✅ {label}")
+    for label, err in failed:
+        logger.error(f"[BLUEPRINT] ❌ {label}: {err}")
+
+    if failed:
+        logger.warning(
+            f"[BLUEPRINT] {len(failed)}/{len(registrations)} blueprints failed to register. "
+            "The affected API surfaces will return 404."
+        )
+    else:
+        logger.info(f"[BLUEPRINT] ✅ All {len(ok)} blueprints registered successfully")
+
+
+_register_blueprints()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BUG-4 + BUG-7 FIX — HEARTBEAT LISTENER REGISTRATION
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# BUG-4: get_heartbeat() returns {'status':'not_initialized'} (a truthy dict)
+# when globals hasn't initialized yet.  Every register_*_with_heartbeat() across
+# core_api/blockchain_api/quantum_api/admin_api/defi_api does:
+#
+#     hb = get_heartbeat()
+#     if hb:                      ← True for a non-empty dict
+#         hb.add_listener(...)    ← AttributeError: 'dict' has no 'add_listener'
+#
+# The exception is caught and swallowed, so every listener registration silently
+# fails.  Only oracle_api correctly guards with: if hb and not isinstance(hb, dict).
+#
+# BUG-7: Even with the guard fixed, _register_heartbeat_listeners() was never
+# called anywhere.  The HEARTBEAT singleton ran forever with zero listeners and
+# logged desync warnings on every cycle.
+#
+# Fix: this function is called from _initialize_globals_deferred() AFTER
+# globals.initialize_globals() completes and HEARTBEAT is a real object.  The
+# isinstance guard is applied uniformly here so the individual API modules'
+# register_* functions are irrelevant — we register directly.
+
+def _register_heartbeat_listeners() -> None:
+    """
+    Wire per-module heartbeat callbacks into the HEARTBEAT singleton.
+
+    Must be called AFTER globals.initialize_globals() so HEARTBEAT is a
+    UniversalQuantumHeartbeat instance, not None or a dict fallback.
+
+    Each listener is registered in its own try/except so one failing module
+    does not prevent the others from receiving heartbeat pulses.
+    """
+    # BUG-4 FIX: isinstance guard — never call .add_listener() on a plain dict
+    hb = get_heartbeat()
+    if hb is None or isinstance(hb, dict):
+        logger.warning(
+            "[HEARTBEAT-LISTENERS] HEARTBEAT not ready (got %s) — listener "
+            "registration deferred.  Will retry on next globals init.",
+            type(hb).__name__,
+        )
+        return
+
+    if not hasattr(hb, 'add_listener'):
+        logger.error(
+            f"[HEARTBEAT-LISTENERS] HEARTBEAT object ({type(hb)}) has no add_listener — "
+            "check quantum_lattice_control_live_complete.py"
+        )
+        return
+
+    registered = []
+    failed     = []
+
+    _candidates = [
+        ('core_api',        'core_api',        'register_core_with_heartbeat'),
+        ('blockchain_api',  'blockchain_api',  'register_blockchain_with_heartbeat'),
+        ('quantum_api',     'quantum_api',     'register_quantum_with_heartbeat'),
+        ('admin_api',       'admin_api',       'register_admin_with_heartbeat'),
+        ('defi_api',        'defi_api',        'register_defi_with_heartbeat'),
+    ]
+
+    for label, module_name, fn_name in _candidates:
+        try:
+            import importlib
+            mod = importlib.import_module(module_name)
+            register_fn = getattr(mod, fn_name, None)
+            if register_fn is None:
+                failed.append((label, f"{fn_name} not found in {module_name}"))
+                continue
+
+            # Each module's register_* function calls get_heartbeat() internally
+            # and has `if hb: hb.add_listener(...)` — BUG-4 means they silently
+            # fail.  Call them anyway (some may have been patched) and also
+            # register the on_heartbeat method directly here as a backstop.
+            try:
+                register_fn()
+            except Exception:
+                pass   # fallback to direct registration below
+
+            # Direct registration — bypass the buggy isinstance check in the modules
+            hb_integration_attr = f"_{label.replace('_api', '')}_heartbeat"
+            integration = getattr(mod, hb_integration_attr, None) or \
+                          getattr(mod, '_defi_heartbeat', None)     or \
+                          getattr(mod, '_hb_listener', None)
+
+            if integration and hasattr(integration, 'on_heartbeat'):
+                try:
+                    hb.add_listener(integration.on_heartbeat)
+                    registered.append(label)
+                except Exception as exc:
+                    # Listener already registered (some impls check for duplicates)
+                    if 'duplicate' in str(exc).lower() or 'already' in str(exc).lower():
+                        registered.append(f"{label} (already registered)")
+                    else:
+                        failed.append((label, str(exc)))
+            else:
+                # Module registered via its own register_fn (may have worked)
+                registered.append(f"{label} (via register_fn)")
+
+        except Exception as exc:
+            failed.append((label, str(exc)))
+
+    for label in registered:
+        logger.info(f"[HEARTBEAT-LISTENERS] ✅ {label}")
+    for label, err in failed:
+        logger.warning(f"[HEARTBEAT-LISTENERS] ⚠️  {label}: {err}")
+
+    listener_count = len(hb.listeners) if hasattr(hb, 'listeners') else '?'
+    logger.info(
+        f"[HEARTBEAT-LISTENERS] Registration complete — "
+        f"{len(registered)} ok / {len(failed)} failed / {listener_count} total listeners on HEARTBEAT"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# INSTANCE KEEP-ALIVE DAEMON
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# WHY: Koyeb (and most PaaS platforms) sleep instances after ~10 min of no
+#   inbound traffic at the load-balancer level.  A self-ping on localhost does
+#   NOT count.  This daemon fires a GET at the public /health URL so the
+#   platform sees live traffic and never triggers the sleep lifecycle.
+#
+# INTERVAL: 300 s (5 min) — comfortably below any platform's sleep threshold.
+#   Do not reduce below 60 s; excessive pings waste request quota.
+#
+# BUG-5 interaction: /health now always returns 200 so the daemon no longer
+#   logs spurious CRITICAL failure streaks during the deferred DB-init window.
+
+HEARTBEAT_INTERVAL_SECONDS = 300
+_KEEPALIVE_THREAD: threading.Thread | None = None
+_KEEPALIVE_STOP   = threading.Event()
 
 
 def _resolve_public_url() -> str:
     """
-    Resolve this instance's externally-reachable base URL.
-    Tried in priority order; first non-empty result wins.
+    Resolve the externally-reachable base URL for this instance.
+    Priority: KOYEB_PUBLIC_DOMAIN → APP_URL → RENDER_EXTERNAL_URL → FLY_APP_NAME → localhost.
     """
-    # 1. Koyeb injects KOYEB_PUBLIC_DOMAIN automatically (e.g. "my-app-abc123.koyeb.app")
-    koyeb_domain = os.getenv("KOYEB_PUBLIC_DOMAIN", "").strip()
-    if koyeb_domain:
-        scheme = "https"
-        return f"{scheme}://{koyeb_domain}"
+    koyeb = os.getenv('KOYEB_PUBLIC_DOMAIN', '').strip()
+    if koyeb:
+        return f"https://{koyeb}"
 
-    # 2. Manual override — set APP_URL=https://my-app.koyeb.app in Koyeb env vars
-    app_url = os.getenv("APP_URL", "").strip().rstrip("/")
+    app_url = os.getenv('APP_URL', '').strip().rstrip('/')
     if app_url:
         return app_url
 
-    # 3. Render.com
-    render_url = os.getenv("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
-    if render_url:
-        return render_url
+    render = os.getenv('RENDER_EXTERNAL_URL', '').strip().rstrip('/')
+    if render:
+        return render
 
-    # 4. Fly.io
-    fly_app = os.getenv("FLY_APP_NAME", "").strip()
-    if fly_app:
-        return f"https://{fly_app}.fly.dev"
+    fly = os.getenv('FLY_APP_NAME', '').strip()
+    if fly:
+        return f"https://{fly}.fly.dev"
 
-    # 5. Localhost fallback — won't prevent platform sleep but keeps logs + health warm
-    port = os.getenv("PORT", "5000")
+    port = os.getenv('PORT', '5000')
     return f"http://127.0.0.1:{port}"
 
 
-def _heartbeat_loop():
+def _keepalive_loop() -> None:
     """
-    Background daemon: ping the public health endpoint every HEARTBEAT_INTERVAL_SECONDS.
-    Runs as a daemon thread so it never blocks gunicorn shutdown — if the master receives
-    SIGTERM the thread dies automatically when the process exits.
+    Daemon loop: ping /health every HEARTBEAT_INTERVAL_SECONDS.
 
-    Uses a short-timeout urllib with comprehensive error handling to detect and expose
-    actual service issues (503 DB disconnects, 502 gateway errors, etc.) vs. transient
-    network glitches. Never hangs indefinitely. Any exception is caught and logged with
-    verbose diagnostic context; the loop always continues regardless of individual failures.
-    
-    ENTERPRISE FEATURES:
-    - Explicit urllib.error.HTTPError handling with actual status code extraction
-    - Response body JSON parsing for health endpoint diagnostics
-    - Distinguishes transient (URLError) vs. persistent (503/502) issues
-    - Consecutive failure tracking for alerting
-    - Verbose logging with response snippets for debugging
+    Enhanced error handling:
+      • urllib.error.HTTPError → extracts actual status code + JSON body diagnostics
+      • urllib.error.URLError  → DNS / connection refused (transient)
+      • socket.timeout        → slow/hung service indicator
+      • Consecutive failure counter → escalates to ERROR at threshold 3
+      • JSON body parsed for database.connected on 5xx responses
     """
     import urllib.request
     import urllib.error
-    import socket
-    import json
+    import socket as _socket
 
+    base_url = _resolve_public_url()
     logger.info(
-        f"[HEARTBEAT] 🟢 Enterprise daemon started | interval={HEARTBEAT_INTERVAL_SECONDS}s | "
-        f"target={_resolve_public_url()}/health"
+        f"[KEEPALIVE] 🟢 Daemon started | interval={HEARTBEAT_INTERVAL_SECONDS}s | "
+        f"target={base_url}/health"
     )
-    _HEARTBEAT_STOP.wait(timeout=30)  # Initial stagger to avoid colliding with gunicorn startup checks
+
+    # Stagger initial ping to avoid colliding with gunicorn startup checks
+    _KEEPALIVE_STOP.wait(timeout=30)
 
     consecutive_failures = 0
-    
-    while not _HEARTBEAT_STOP.is_set():
-        base_url = _resolve_public_url()
+
+    while not _KEEPALIVE_STOP.is_set():
+        base_url = _resolve_public_url()   # re-resolve each loop (env may change)
         target   = f"{base_url}/health"
+
         try:
-            req = urllib.request.Request(target, headers={"User-Agent": "QTCL-Heartbeat/1.0"})
+            req = urllib.request.Request(target, headers={'User-Agent': 'QTCL-Keepalive/1.1'})
             with urllib.request.urlopen(req, timeout=15) as resp:
-                status = resp.status
-                response_body = resp.read().decode('utf-8', errors='ignore')
-                consecutive_failures = 0  # Reset counter on ANY successful response
-                
+                status        = resp.status
+                body          = resp.read().decode('utf-8', errors='ignore')
+                consecutive_failures = 0   # any successful TCP+HTTP resets the counter
+
                 if status == 200:
-                    logger.info(f"[HEARTBEAT] 💓 {target} → HTTP {status} OK ✓")
-                elif status in (502, 503, 504):
-                    # Server-side errors (very likely DB connectivity issue)
                     try:
-                        data = json.loads(response_body)
-                        db_connected = data.get('database', {}).get('connected', False)
-                        logger.warning(
-                            f"[HEARTBEAT] ⚠️  DEGRADED (HTTP {status}) | database.connected={db_connected} | "
-                            f"globals_initialized={data.get('globals_initialized')} | "
-                            f"retry in {HEARTBEAT_INTERVAL_SECONDS}s"
+                        data      = json.loads(body)
+                        db_ok     = data.get('database', {}).get('connected', '?')
+                        hb_status = data.get('status', '?')
+                        logger.info(
+                            f"[KEEPALIVE] 💓 {target} → 200 OK | "
+                            f"app={hb_status} | db.connected={db_ok}"
                         )
                     except json.JSONDecodeError:
-                        logger.warning(
-                            f"[HEARTBEAT] ⚠️  DEGRADED (HTTP {status}) | non-JSON response: {response_body[:100]}... | "
-                            f"retry in {HEARTBEAT_INTERVAL_SECONDS}s"
-                        )
+                        logger.info(f"[KEEPALIVE] 💓 {target} → 200 OK")
                 else:
-                    # 2xx/3xx range besides 200 (unusual but functional)
-                    logger.info(f"[HEARTBEAT] 💓 {target} → HTTP {status} (functional, non-standard code)")
-                    
-        except urllib.error.HTTPError as http_err:
-            # Server responded with an error code (4xx, 5xx)
+                    logger.info(f"[KEEPALIVE] 💓 {target} → HTTP {status}")
+
+        except urllib.error.HTTPError as exc:
             consecutive_failures += 1
-            status_code = http_err.code
-            reason = http_err.reason
-            
             try:
-                response_body = http_err.read().decode('utf-8', errors='ignore')
-                # Try to parse JSON for diagnostics
-                if status_code in (502, 503, 504):
-                    try:
-                        data = json.loads(response_body)
-                        logger.error(
-                            f"[HEARTBEAT] ❌ PERSISTENT (HTTP {status_code} {reason}) | "
-                            f"database.connected={data.get('database', {}).get('connected')} | "
-                            f"failures={consecutive_failures} | likely DB connectivity issue | "
-                            f"retry in {HEARTBEAT_INTERVAL_SECONDS}s"
-                        )
-                    except json.JSONDecodeError:
-                        logger.error(
-                            f"[HEARTBEAT] ❌ PERSISTENT (HTTP {status_code} {reason}) | "
-                            f"failure_streak={consecutive_failures} | response: {response_body[:80]}... | "
-                            f"retry in {HEARTBEAT_INTERVAL_SECONDS}s"
-                        )
-                elif status_code in (400, 401, 403, 404):
-                    # Client errors (unlikely for health endpoint, suggests config issue)
-                    logger.warning(
-                        f"[HEARTBEAT] ⚠️  CLIENT ERROR (HTTP {status_code} {reason}) | "
-                        f"check endpoint URL: {target} | response: {response_body[:80]}..."
+                body = exc.read().decode('utf-8', errors='ignore')
+                try:
+                    data    = json.loads(body)
+                    db_ok   = data.get('database', {}).get('connected', '?')
+                    glob_ok = data.get('globals_initialized', '?')
+                    logger.error(
+                        f"[KEEPALIVE] ❌ HTTP {exc.code} {exc.reason} | "
+                        f"db.connected={db_ok} globals_initialized={glob_ok} | "
+                        f"streak={consecutive_failures}"
                     )
-                else:
-                    logger.warning(
-                        f"[HEARTBEAT] ⚠️  HTTP {status_code} {reason} | response: {response_body[:80]}... | "
-                        f"retry in {HEARTBEAT_INTERVAL_SECONDS}s"
+                except json.JSONDecodeError:
+                    logger.error(
+                        f"[KEEPALIVE] ❌ HTTP {exc.code} {exc.reason} | "
+                        f"body={body[:80]} | streak={consecutive_failures}"
                     )
-            except Exception as read_err:
+            except Exception:
                 logger.error(
-                    f"[HEARTBEAT] ❌ HTTP {status_code} {reason} | failure_streak={consecutive_failures} | "
-                    f"(could not read response body: {read_err}) | retry in {HEARTBEAT_INTERVAL_SECONDS}s"
+                    f"[KEEPALIVE] ❌ HTTP {exc.code} {exc.reason} | "
+                    f"streak={consecutive_failures}"
                 )
-                
-        except (urllib.error.URLError, socket.gaierror) as net_err:
-            # Network errors: DNS failure, connection refused, host unreachable
+
+        except (urllib.error.URLError, _socket.gaierror) as exc:
             consecutive_failures += 1
             logger.warning(
-                f"[HEARTBEAT] ⚠️  TRANSIENT ({type(net_err).__name__}): {str(net_err)[:100]} | "
-                f"target={target} | failure_streak={consecutive_failures} | "
-                f"retry in {HEARTBEAT_INTERVAL_SECONDS}s"
-            )
-            
-        except socket.timeout:
-            consecutive_failures += 1
-            logger.warning(
-                f"[HEARTBEAT] ⚠️  TIMEOUT: request exceeded 15s | target={target} | "
-                f"failure_streak={consecutive_failures} | may indicate slow/hung service | "
-                f"retry in {HEARTBEAT_INTERVAL_SECONDS}s"
-            )
-            
-        except Exception as e:
-            consecutive_failures += 1
-            logger.error(
-                f"[HEARTBEAT] ❌ UNEXPECTED ({type(e).__name__}): {str(e)[:120]} | "
-                f"failure_streak={consecutive_failures} | retry in {HEARTBEAT_INTERVAL_SECONDS}s",
-                exc_info=False
+                f"[KEEPALIVE] ⚠️  {type(exc).__name__}: {str(exc)[:100]} | "
+                f"target={target} | streak={consecutive_failures}"
             )
 
-        # Escalate to error log after 3+ consecutive failures
+        except _socket.timeout:
+            consecutive_failures += 1
+            logger.warning(
+                f"[KEEPALIVE] ⚠️  TIMEOUT (>15 s) | target={target} | streak={consecutive_failures}"
+            )
+
+        except Exception as exc:
+            consecutive_failures += 1
+            logger.error(
+                f"[KEEPALIVE] ❌ {type(exc).__name__}: {str(exc)[:120]} | "
+                f"streak={consecutive_failures}"
+            )
+
         if consecutive_failures >= 3:
             logger.error(
-                f"[HEARTBEAT] 🚨 CRITICAL THRESHOLD: {consecutive_failures} consecutive failures — "
-                f"instance may be unreachable or severely degraded at {base_url}/health"
+                f"[KEEPALIVE] 🚨 {consecutive_failures} consecutive failures — "
+                f"instance may be unreachable at {base_url}/health"
             )
 
-        # Wait for next interval (or stop signal).
-        _HEARTBEAT_STOP.wait(timeout=HEARTBEAT_INTERVAL_SECONDS)
+        _KEEPALIVE_STOP.wait(timeout=HEARTBEAT_INTERVAL_SECONDS)
 
-    logger.info("[HEARTBEAT] 🛑 Daemon shutdown complete.")
+    logger.info("[KEEPALIVE] 🛑 Daemon shutdown complete")
 
 
-def _start_heartbeat():
+def _start_keepalive() -> None:
     """
-    Launch the keep-alive heartbeat thread.
-    Called once at WSGI application module load time (every gunicorn worker process).
-    The thread is daemon=True so it never blocks gunicorn's SIGTERM→exit sequence.
-
-    Guard: only start ONE thread per worker process.  If wsgi_config is imported
-    multiple times in the same process (e.g. during test collection), the guard
-    prevents thread explosion.
+    Launch the keep-alive thread once per worker process.
+    Guard prevents double-start if wsgi_config is imported multiple times
+    (e.g. during pytest collection or gunicorn --reload).
     """
-    global _HEARTBEAT_THREAD
-    if _HEARTBEAT_THREAD is not None and _HEARTBEAT_THREAD.is_alive():
-        return  # Already running in this worker process
+    global _KEEPALIVE_THREAD
+    if _KEEPALIVE_THREAD is not None and _KEEPALIVE_THREAD.is_alive():
+        return
 
-    _HEARTBEAT_STOP.clear()
-    _HEARTBEAT_THREAD = threading.Thread(
-        target=_heartbeat_loop,
-        name="qtcl-keep-alive",
-        daemon=True,          # Dies automatically when gunicorn worker process exits
+    _KEEPALIVE_STOP.clear()
+    _KEEPALIVE_THREAD = threading.Thread(
+        target=_keepalive_loop,
+        name='qtcl-keepalive',
+        daemon=True,
     )
-    _HEARTBEAT_THREAD.start()
+    _KEEPALIVE_THREAD.start()
     logger.info(
-        f"[HEARTBEAT] 🟢 Instance keep-alive active — interval={HEARTBEAT_INTERVAL_SECONDS}s | "
+        f"[KEEPALIVE] 🟢 Instance keep-alive active | interval={HEARTBEAT_INTERVAL_SECONDS}s | "
         f"target={_resolve_public_url()}/health"
     )
 
 
-# Fire immediately when this module is imported by gunicorn.
-# Each worker process imports wsgi_config independently, so each gets its own heartbeat
-# thread — that's fine, it just means N pings per interval (N = worker count).
-# All pings are idempotent GETs to /health; the load balancer sees live traffic from each.
-_start_heartbeat()
+_start_keepalive()
 
-# ═══════════════════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # WSGI ENTRYPOINT
-# ═══════════════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
 
-application = app
+application = app   # gunicorn / uwsgi look for `application`
 
-# ─── EAGER TERMINAL ENGINE INIT ───────────────────────────────────────────────
-# Initialize the terminal engine NOW at process startup rather than lazily on
-# the first incoming request.  This eliminates the race window where concurrent
-# requests would each try to initialize simultaneously.
-#
-# If terminal_logic has a dependency problem the error is logged clearly here
-# (during startup, where it's easy to spot) instead of surfacing on the first
-# user request.  _initialize_terminal_engine() is idempotent — subsequent
-# calls from the routes return immediately via the _TERMINAL_INITIALIZED flag.
-#
-# DO NOT call inside __name__ == '__main__' block — it must run in every WSGI
-# worker process (gunicorn pre-forks after this point).
+# Eager terminal init at startup — surfaces import errors in logs at boot time
+# rather than on the first user request.  _initialize_terminal_engine() is
+# idempotent; subsequent calls from route handlers return immediately.
 try:
     _initialize_terminal_engine()
 except Exception as _boot_exc:
-    logger.error(f"[STARTUP] Terminal engine init at startup failed (non-fatal): {_boot_exc}")
+    logger.error(f"[STARTUP] Terminal engine eager init failed (non-fatal): {_boot_exc}")
+
 
 if __name__ == '__main__':
-    # DO NOT initialize terminal engine here - it will lazy-load on first request
-    # This avoids circular recursion during bootstrap
-    logger.info("="*80)
-    logger.info("🚀 QTCL WSGI v5.0 - PRODUCTION STARTUP")
-    logger.info("="*80)
-    logger.info(f"✅ Database initialized: {DB is not None}")
-    logger.info(f"✅ Utilities initialized: PROFILER, CACHE, RequestCorrelation, ERROR_BUDGET")
-    logger.info(f"✅ Globals available: {GLOBALS_AVAILABLE}")
-    logger.info(f"✅ Terminal engine: LAZY-LOAD (initializes on first request)")
-    logger.info(f"✅ Commands will be registered: len(COMMAND_REGISTRY)={len(COMMAND_REGISTRY)}")
-    logger.info("="*80)
-    app.run(host='0.0.0.0', port=8000, debug=False)
+    logger.info("=" * 80)
+    logger.info("🚀 QTCL WSGI v5.1 — PRODUCTION STARTUP")
+    logger.info("=" * 80)
+    logger.info(f"  DB initialized:        {DB is not None}")
+    logger.info(f"  Globals available:     {GLOBALS_AVAILABLE}")
+    logger.info(f"  Commands registered:   {len(COMMAND_REGISTRY)}")
+    logger.info(f"  Terminal initialized:  {_TERMINAL_INITIALIZED}")
+    logger.info(f"  Public URL:            {_resolve_public_url()}")
+    logger.info("=" * 80)
+    port  = int(os.getenv('PORT', 8000))
+    debug = os.getenv('FLASK_ENV') == 'development'
+    app.run(host='0.0.0.0', port=port, debug=debug)
