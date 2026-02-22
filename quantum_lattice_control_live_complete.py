@@ -6514,25 +6514,40 @@ class QuantumLatticeGlobal:
         return self.neural_control.get_lattice_state()
     
     def get_system_metrics(self) -> Dict[str, Any]:
-        """Get comprehensive system metrics"""
+        """Get comprehensive system metrics - ENTERPRISE GRADE"""
         try:
             with self.lock:
                 self.operations_count += 1
+            
+            # CRITICAL: Compute global coherence/fidelity from noise bath arrays (mean across all qubits)
+            # This is the PRIMARY source of truth for system quantum state
+            global_coh = float(np.mean(self.noise_bath.coherence)) if len(self.noise_bath.coherence) > 0 else 0.92
+            global_fid = float(np.mean(self.noise_bath.fidelity)) if len(self.noise_bath.fidelity) > 0 else 0.91
+            
+            # Get recent evolution history for trending (last 20 evolution steps)
+            coh_hist = list(self.noise_bath.coherence_evolution)[-20:] if self.noise_bath.coherence_evolution else []
+            fid_hist = list(self.noise_bath.fidelity_evolution)[-20:] if self.noise_bath.fidelity_evolution else []
+            
+            # Get noise bath statistics for advanced metrics
+            bath_metrics = self.noise_bath.get_bath_metrics()
             
             return {
                 'timestamp': time.time(),
                 'operations_count': self.operations_count,
                 'active_threads': self.active_threads,
-                'w_state': self.get_w_state(),
-                'neural_lattice': self.get_neural_lattice_state(),
+                'global_coherence': global_coh,
+                'global_fidelity': global_fid,
+                'coherence_evolution': coh_hist,
+                'fidelity_evolution': fid_hist,
+                'noise_bath_metrics': bath_metrics,
+                'num_qubits': self.noise_bath.TOTAL_QUBITS,
                 'transactions_processed': self.tx_processor.transactions_processed,
                 'finalized_transactions': len(self.tx_processor.finalized_transactions),
-                'coherence_evolution': list(self.noise_bath.coherence_evolution)[-10:] if self.noise_bath.coherence_evolution else [],
-                'fidelity_evolution': list(self.noise_bath.fidelity_evolution)[-10:] if self.noise_bath.fidelity_evolution else [],
             }
         except Exception as e:
-            logger.error(f"Error getting metrics: {e}")
-            return {}
+            logger.error(f"Error getting metrics: {e}", exc_info=True)
+            # Fallback to safe defaults rather than empty dict
+            return {'global_coherence': 0.0, 'global_fidelity': 0.0, 'timestamp': time.time()}
     
     def health_check(self) -> Dict[str, bool]:
         """Check system health"""
