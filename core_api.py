@@ -27,7 +27,22 @@ from collections import defaultdict,deque,Counter
 from flask import Blueprint,request,jsonify,g,Response,session,make_response
 import psycopg2
 from psycopg2.extras import RealDictCursor,execute_batch,execute_values,Json
-from db_builder_v2 import db_manager
+
+# ── Lazy db_manager access — avoid circular import during fork ──────────────
+def _get_db_manager():
+    """Retrieve db_manager at call-time, not import-time, to avoid circular deps."""
+    try:
+        if 'db_builder_v2' in sys.modules:
+            mod = sys.modules['db_builder_v2']
+            if hasattr(mod, 'db_manager'):
+                return getattr(mod, 'db_manager')
+        from db_builder_v2 import db_manager as _dm
+        return _dm
+    except Exception as exc:
+        logger.warning(f"[db_manager] Failed to get db_manager: {exc}")
+        return None
+
+db_manager = None  # Will be populated at blueprint creation time
 
 try:
     from cryptography.hazmat.primitives import hashes,serialization,hmac as crypto_hmac
@@ -845,8 +860,14 @@ class DatabaseInitializer:
 def create_blueprint()->Blueprint:
     """Factory function to create Core API blueprint with dependencies"""
     
+    # Lazy-load db_manager at blueprint creation time, not module import time
+    _db_mgr = _get_db_manager()
+    if _db_mgr is None:
+        logger.error("[core_api] db_manager unavailable — blueprint will have degraded DB access")
+        _db_mgr = None  # Will be None, routes will handle it gracefully
+    
     bp=Blueprint('core_api',__name__,url_prefix='/api')
-    core_db=CoreDatabaseManager(db_manager)
+    core_db=CoreDatabaseManager(_db_mgr)
     
     config={
         'jwt_secret':os.getenv('JWT_SECRET',secrets.token_urlsafe(64)),

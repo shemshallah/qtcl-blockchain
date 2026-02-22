@@ -476,8 +476,14 @@ class AdminDatabaseManager:
 def create_blueprint()->Blueprint:
     """Factory function to create Admin API blueprint"""
     
+    # Lazy-load db_manager at blueprint creation time, not module import time
+    _db_mgr = _get_db_manager_admin()
+    if _db_mgr is None:
+        logger.error("[admin_api] db_manager unavailable — blueprint will have degraded DB access")
+        _db_mgr = None  # Will be None, routes will handle it gracefully
+    
     bp=Blueprint('admin_api',__name__,url_prefix='/api')
-    _adm=AdminDatabaseManager(db_manager)  # wrapper with execute_query shim
+    _adm=AdminDatabaseManager(_db_mgr)  # wrapper with execute_query shim
     admin_db=_adm
     metrics_collector=MetricsCollector()
     event_streamer=EventStreamer()
@@ -1702,7 +1708,21 @@ def create_blueprint()->Blueprint:
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 import logging
-from db_builder_v2 import db_manager
+
+# ── Lazy db_manager access — avoid circular import during fork ──────────────
+def _get_db_manager_admin():
+    """Retrieve db_manager at call-time, not import-time, to avoid circular deps."""
+    try:
+        if 'db_builder_v2' in sys.modules:
+            mod = sys.modules['db_builder_v2']
+            if hasattr(mod, 'db_manager'):
+                return getattr(mod, 'db_manager')
+        from db_builder_v2 import db_manager as _dm
+        return _dm
+    except Exception as exc:
+        logger.warning(f"[db_manager/admin] Failed to get db_manager: {exc}")
+        return None
+
 logger_admin = logging.getLogger('admin_fortress')
 logger_admin.info("""
 ╔════════════════════════════════════════════════════════════════════════════════════════════════╗

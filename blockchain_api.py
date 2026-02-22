@@ -3772,7 +3772,7 @@ def create_blueprint()->Blueprint:
     router=QuantumTransactionRouter()
     finality_engine=QuantumFinalityEngine()
 
-    cfg=config or {
+    cfg={
         'max_block_size':2_000_000,
         'tx_per_block':TARGET_TX_PER_BLOCK,
         'min_gas_price':Decimal('0.000001'),

@@ -893,6 +893,7 @@ def _register_blueprints() -> None:
         registrations.append(('oracle_api', False, exc))
 
     # ── 3. Core API (/api — auth, users, keys, addresses, sign, security…) ───
+    # Use sys.modules to defer db_builder_v2 access until after all module inits
     try:
         from core_api import get_core_blueprint
         bp = get_core_blueprint()
@@ -915,6 +916,7 @@ def _register_blueprints() -> None:
         registrations.append(('blockchain_api-full', False, exc))
 
     # ── 5. Admin API (/api — admin/*, stats/*, pqc/*, events/…) ──────────────
+    # Use sys.modules to defer db_builder_v2 access until after all module inits
     try:
         from admin_api import get_admin_blueprint
         bp = get_admin_blueprint()
@@ -950,7 +952,26 @@ def _register_blueprints() -> None:
         logger.info(f"[BLUEPRINT] ✅ All {len(ok)} blueprints registered successfully")
 
 
-_register_blueprints()
+# ── DEFERRED BLUEPRINT REGISTRATION — avoid circular import on gunicorn fork ──
+# Do NOT call _register_blueprints() at module load time. Gunicorn's forking model
+# loads wsgi_config in the parent process, then forks workers. If db_builder_v2 is
+# mid-initialization during fork, workers inherit a half-constructed module.
+# Solution: register blueprints lazily on the first HTTP request.
+#
+# Flask's before_request hook ensures registration happens once per worker
+# after the worker has fully initialized and any deferred imports have completed.
+
+_BLUEPRINTS_REGISTERED = False
+
+@app.before_request
+def _lazy_register_blueprints():
+    global _BLUEPRINTS_REGISTERED
+    if not _BLUEPRINTS_REGISTERED:
+        _BLUEPRINTS_REGISTERED = True
+        try:
+            _register_blueprints()
+        except Exception as exc:
+            logger.error(f"[BLUEPRINT/LAZY] Failed to register blueprints on first request: {exc}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
