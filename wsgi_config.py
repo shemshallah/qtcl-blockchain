@@ -19,6 +19,7 @@ import logging
 import threading
 import time
 import traceback
+import socket
 
 # Only configure logging once - subsequent imports should not reconfigure
 if not logging.getLogger().hasHandlers():
@@ -786,43 +787,139 @@ def _heartbeat_loop():
     Runs as a daemon thread so it never blocks gunicorn shutdown — if the master receives
     SIGTERM the thread dies automatically when the process exits.
 
-    Uses a short-timeout requests.get() so a slow/unreachable network never hangs
-    the thread indefinitely.  Any exception is caught and logged; the loop always
-    continues regardless of individual ping failures.
+    Uses a short-timeout urllib with comprehensive error handling to detect and expose
+    actual service issues (503 DB disconnects, 502 gateway errors, etc.) vs. transient
+    network glitches. Never hangs indefinitely. Any exception is caught and logged with
+    verbose diagnostic context; the loop always continues regardless of individual failures.
+    
+    ENTERPRISE FEATURES:
+    - Explicit urllib.error.HTTPError handling with actual status code extraction
+    - Response body JSON parsing for health endpoint diagnostics
+    - Distinguishes transient (URLError) vs. persistent (503/502) issues
+    - Consecutive failure tracking for alerting
+    - Verbose logging with response snippets for debugging
     """
     import urllib.request
     import urllib.error
+    import socket
+    import json
 
-    # Stagger startup: wait one full interval before first ping so we don't fire
-    # during gunicorn's own startup health checks.
-    logger.info(f"[HEARTBEAT] Keep-alive thread started — pinging every {HEARTBEAT_INTERVAL_SECONDS}s")
-    _HEARTBEAT_STOP.wait(timeout=30)  # Short initial delay — proves thread alive quickly
+    logger.info(
+        f"[HEARTBEAT] 🟢 Enterprise daemon started | interval={HEARTBEAT_INTERVAL_SECONDS}s | "
+        f"target={_resolve_public_url()}/health"
+    )
+    _HEARTBEAT_STOP.wait(timeout=30)  # Initial stagger to avoid colliding with gunicorn startup checks
 
+    consecutive_failures = 0
+    
     while not _HEARTBEAT_STOP.is_set():
         base_url = _resolve_public_url()
         target   = f"{base_url}/health"
         try:
-            # urllib.request has no external dependencies (no requests needed here).
-            # Timeout = 15s: short enough to fail fast, long enough for cold-start response.
             req = urllib.request.Request(target, headers={"User-Agent": "QTCL-Heartbeat/1.0"})
             with urllib.request.urlopen(req, timeout=15) as resp:
                 status = resp.status
+                response_body = resp.read().decode('utf-8', errors='ignore')
+                consecutive_failures = 0  # Reset counter on ANY successful response
+                
                 if status == 200:
-                    logger.info(f"[HEARTBEAT] 💓 ping {target} → HTTP {status} (instance alive)")
+                    logger.info(f"[HEARTBEAT] 💓 {target} → HTTP {status} OK ✓")
+                elif status in (502, 503, 504):
+                    # Server-side errors (very likely DB connectivity issue)
+                    try:
+                        data = json.loads(response_body)
+                        db_connected = data.get('database', {}).get('connected', False)
+                        logger.warning(
+                            f"[HEARTBEAT] ⚠️  DEGRADED (HTTP {status}) | database.connected={db_connected} | "
+                            f"globals_initialized={data.get('globals_initialized')} | "
+                            f"retry in {HEARTBEAT_INTERVAL_SECONDS}s"
+                        )
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            f"[HEARTBEAT] ⚠️  DEGRADED (HTTP {status}) | non-JSON response: {response_body[:100]}... | "
+                            f"retry in {HEARTBEAT_INTERVAL_SECONDS}s"
+                        )
                 else:
-                    logger.warning(f"[HEARTBEAT] ⚠️  {target} → HTTP {status}")
-        except urllib.error.URLError as e:
-            # Network unreachable, DNS failure, connection refused, etc.
-            logger.warning(f"[HEARTBEAT] ⚠️  Ping failed ({type(e).__name__}): {e.reason} — will retry in {HEARTBEAT_INTERVAL_SECONDS}s")
+                    # 2xx/3xx range besides 200 (unusual but functional)
+                    logger.info(f"[HEARTBEAT] 💓 {target} → HTTP {status} (functional, non-standard code)")
+                    
+        except urllib.error.HTTPError as http_err:
+            # Server responded with an error code (4xx, 5xx)
+            consecutive_failures += 1
+            status_code = http_err.code
+            reason = http_err.reason
+            
+            try:
+                response_body = http_err.read().decode('utf-8', errors='ignore')
+                # Try to parse JSON for diagnostics
+                if status_code in (502, 503, 504):
+                    try:
+                        data = json.loads(response_body)
+                        logger.error(
+                            f"[HEARTBEAT] ❌ PERSISTENT (HTTP {status_code} {reason}) | "
+                            f"database.connected={data.get('database', {}).get('connected')} | "
+                            f"failures={consecutive_failures} | likely DB connectivity issue | "
+                            f"retry in {HEARTBEAT_INTERVAL_SECONDS}s"
+                        )
+                    except json.JSONDecodeError:
+                        logger.error(
+                            f"[HEARTBEAT] ❌ PERSISTENT (HTTP {status_code} {reason}) | "
+                            f"failure_streak={consecutive_failures} | response: {response_body[:80]}... | "
+                            f"retry in {HEARTBEAT_INTERVAL_SECONDS}s"
+                        )
+                elif status_code in (400, 401, 403, 404):
+                    # Client errors (unlikely for health endpoint, suggests config issue)
+                    logger.warning(
+                        f"[HEARTBEAT] ⚠️  CLIENT ERROR (HTTP {status_code} {reason}) | "
+                        f"check endpoint URL: {target} | response: {response_body[:80]}..."
+                    )
+                else:
+                    logger.warning(
+                        f"[HEARTBEAT] ⚠️  HTTP {status_code} {reason} | response: {response_body[:80]}... | "
+                        f"retry in {HEARTBEAT_INTERVAL_SECONDS}s"
+                    )
+            except Exception as read_err:
+                logger.error(
+                    f"[HEARTBEAT] ❌ HTTP {status_code} {reason} | failure_streak={consecutive_failures} | "
+                    f"(could not read response body: {read_err}) | retry in {HEARTBEAT_INTERVAL_SECONDS}s"
+                )
+                
+        except (urllib.error.URLError, socket.gaierror) as net_err:
+            # Network errors: DNS failure, connection refused, host unreachable
+            consecutive_failures += 1
+            logger.warning(
+                f"[HEARTBEAT] ⚠️  TRANSIENT ({type(net_err).__name__}): {str(net_err)[:100]} | "
+                f"target={target} | failure_streak={consecutive_failures} | "
+                f"retry in {HEARTBEAT_INTERVAL_SECONDS}s"
+            )
+            
+        except socket.timeout:
+            consecutive_failures += 1
+            logger.warning(
+                f"[HEARTBEAT] ⚠️  TIMEOUT: request exceeded 15s | target={target} | "
+                f"failure_streak={consecutive_failures} | may indicate slow/hung service | "
+                f"retry in {HEARTBEAT_INTERVAL_SECONDS}s"
+            )
+            
         except Exception as e:
-            logger.warning(f"[HEARTBEAT] ⚠️  Unexpected error: {e} — will retry in {HEARTBEAT_INTERVAL_SECONDS}s")
+            consecutive_failures += 1
+            logger.error(
+                f"[HEARTBEAT] ❌ UNEXPECTED ({type(e).__name__}): {str(e)[:120]} | "
+                f"failure_streak={consecutive_failures} | retry in {HEARTBEAT_INTERVAL_SECONDS}s",
+                exc_info=False
+            )
+
+        # Escalate to error log after 3+ consecutive failures
+        if consecutive_failures >= 3:
+            logger.error(
+                f"[HEARTBEAT] 🚨 CRITICAL THRESHOLD: {consecutive_failures} consecutive failures — "
+                f"instance may be unreachable or severely degraded at {base_url}/health"
+            )
 
         # Wait for next interval (or stop signal).
-        # Using Event.wait() instead of time.sleep() means the thread exits immediately
-        # when _HEARTBEAT_STOP.set() is called during shutdown — no stale zombie threads.
         _HEARTBEAT_STOP.wait(timeout=HEARTBEAT_INTERVAL_SECONDS)
 
-    logger.info("[HEARTBEAT] Keep-alive thread stopped cleanly.")
+    logger.info("[HEARTBEAT] 🛑 Daemon shutdown complete.")
 
 
 def _start_heartbeat():

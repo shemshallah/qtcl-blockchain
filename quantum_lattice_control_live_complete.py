@@ -248,12 +248,22 @@ class NoiseAloneWStateRefresh:
                 'fidelity_delta': float,
                 'refresh_count': int,
             }
+            
+        ENTERPRISE LOGGING:
+        - Always logs refresh metrics (not gated by verbose flag)
+        - Includes entropy source, memory state, and revival kernel diagnostics
+        - Logs before/after coherence & fidelity deltas
+        - Flags state regressions or anomalies
         """
         try:
             with self._lock:
                 N = self.bath.TOTAL_QUBITS
                 coh_before = float(np.mean(self.bath.coherence))
                 fid_before  = float(np.mean(self.bath.fidelity))
+                
+                # Diagnostic: entropy source
+                entropy_sample_8 = entropy_ensemble.fetch_quantum_bytes(8) if hasattr(entropy_ensemble, 'fetch_quantum_bytes') else np.array([])
+                entropy_source = "RNG" if hasattr(entropy_ensemble, 'fetch_quantum_bytes') else "fallback"
 
                 # Fetch entropy bytes for full-lattice noise (3 passes × N values)
                 rng_bytes = entropy_ensemble.fetch_quantum_bytes(N * 3)
@@ -263,7 +273,8 @@ class NoiseAloneWStateRefresh:
                 noise_p3 = raw_noise[2*N:]
 
                 # Non-Markovian memory correction — weighted average of past noise
-                if len(self._noise_memory) > 0:
+                mem_len = len(self._noise_memory)
+                if mem_len > 0:
                     mem_stack = np.stack(list(self._noise_memory), axis=0)
                     weights = np.exp(-np.arange(len(self._noise_memory), 0, -1, dtype=float)
                                     * self.cfg.memory_strength)
@@ -296,31 +307,61 @@ class NoiseAloneWStateRefresh:
                 # Commit only if we improved (or stayed neutral) — never regress
                 coh_after = float(np.mean(coh))
                 fid_after  = float(np.mean(fid))
-                if coh_after >= coh_before * 0.995:   # allow up to 0.5% natural drift
+                coh_improved = coh_after >= coh_before * 0.995
+                fid_improved = fid_after >= fid_before * 0.995
+                
+                if coh_improved:
                     self.bath.coherence[:] = coh
-                if fid_after >= fid_before * 0.995:
+                if fid_improved:
                     self.bath.fidelity[:] = fid
 
                 self._noise_memory.append(noise_p2.copy())  # store primary pass for memory
                 self._refresh_count += 1
 
-                if self.cfg.verbose:
-                    self._log.info(
-                        "W-refresh #%d — C: %.4f→%.4f  F: %.4f→%.4f",
-                        self._refresh_count, coh_before, coh_after, fid_before, fid_after
+                # ENTERPRISE LOGGING: Always log with full diagnostics
+                coh_delta = float(np.mean(self.bath.coherence)) - coh_before
+                fid_delta = float(np.mean(self.bath.fidelity)) - fid_before
+                
+                self._log.info(
+                    "[LATTICE-REFRESH] Cycle #%-4d | C: %.4f→%.4f (Δ%+.4f %s) | "
+                    "F: %.4f→%.4f (Δ%+.4f %s) | "
+                    "entropy=%s | mem_depth=%d/%d | κ=%.3f | σ=[%.1f, %.1f, %.1f]",
+                    self._refresh_count,
+                    coh_before, coh_after, coh_delta, "✓" if coh_improved else "↔",
+                    fid_before, fid_after, fid_delta, "✓" if fid_improved else "↔",
+                    entropy_source, mem_len, self.cfg.memory_depth,
+                    self.cfg.memory_strength,
+                    self._SIGMA_LOW, self.cfg.primary_resonance, self.cfg.secondary_resonance
+                )
+                
+                # Flag anomalies
+                if coh_delta < -0.001:
+                    self._log.warning(
+                        "[LATTICE-REFRESH] ⚠️  Coherence REGRESSED by %.4f — "
+                        "entropy quality or configuration issue suspected",
+                        coh_delta
+                    )
+                if fid_delta < -0.001:
+                    self._log.warning(
+                        "[LATTICE-REFRESH] ⚠️  Fidelity REGRESSED by %.4f — "
+                        "noise bath may be degraded",
+                        fid_delta
                     )
 
                 return {
                     'success': True,
                     'global_coherence': float(np.mean(self.bath.coherence)),
                     'global_fidelity':  float(np.mean(self.bath.fidelity)),
-                    'coherence_delta':  float(np.mean(self.bath.coherence)) - coh_before,
-                    'fidelity_delta':   float(np.mean(self.bath.fidelity)) - fid_before,
+                    'coherence_delta':  coh_delta,
+                    'fidelity_delta':   fid_delta,
                     'refresh_count':    self._refresh_count,
                 }
 
         except Exception as exc:
-            self._log.error("refresh_full_lattice failed: %s", exc, exc_info=True)
+            self._log.error(
+                "[LATTICE-REFRESH] ❌ FAILED at cycle #%d: %s",
+                self._refresh_count, exc, exc_info=True
+            )
             return {'success': False, 'global_coherence': 0.0, 'global_fidelity': 0.0,
                     'error': str(exc)}
 
