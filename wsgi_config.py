@@ -46,6 +46,12 @@ if not logging.getLogger().hasHandlers():
     )
 logger = logging.getLogger(__name__)
 
+# Suppress Qiskit's verbose transpiler/passmanager logging
+logging.getLogger('qiskit.passmanager').setLevel(logging.WARNING)
+logging.getLogger('qiskit.compiler').setLevel(logging.WARNING)
+logging.getLogger('qiskit.transpiler').setLevel(logging.WARNING)
+logging.getLogger('qiskit').setLevel(logging.WARNING)
+
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
