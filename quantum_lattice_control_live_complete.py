@@ -4943,11 +4943,13 @@ class TransactionValidatorWState:
             if qc is None:
                 return None
             
-            # Transpile and execute
-            simulator = StatevectorSimulator()
-            job = execute(qc, simulator)
+            # Transpile and run via AerSimulator statevector method (Qiskit 1.x API)
+            simulator = AerSimulator(method='statevector')
+            qc_t = transpile(qc, simulator)
+            qc_t.save_statevector()
+            job = simulator.run(qc_t)
             result = job.result()
-            statevector = result.get_statevector(qc)
+            statevector = result.get_statevector(qc_t)
             
             with self.lock:
                 self.w_state_vector = statevector
@@ -5021,18 +5023,19 @@ class TransactionValidatorWState:
                 noise_model = NoiseModel()
                 
                 # Weak depolarizing on single qubits (breaks symmetry, forces W-state)
-                depol_error = depolarizing_error(0.002, 1)
-                noise_model.add_all_qubit_quantum_error(depol_error, ['u1', 'u2', 'u3'])
+                depol_error_1q = depolarizing_error(0.002, 1)
+                noise_model.add_all_qubit_quantum_error(depol_error_1q, ['u1', 'u2', 'u3'])
                 
-                # Amplitude damping with memory-preserving kernel
-                ampdamp_error = amplitude_damping_error(0.001)
-                noise_model.add_all_qubit_quantum_error(ampdamp_error, ['cx'])
+                # 2-qubit depolarizing on cx (amplitude_damping is 1q-only — cannot apply to cx)
+                depol_error_2q = depolarizing_error(0.004, 2)
+                noise_model.add_all_qubit_quantum_error(depol_error_2q, ['cx'])
                 
-                # Execute with noise
+                # Execute with noise (Qiskit 1.x: transpile + backend.run)
                 simulator = AerSimulator(noise_model=noise_model)
-                job = execute(qc, simulator, shots=2048)
+                qc_t = transpile(qc, simulator)
+                job = simulator.run(qc_t, shots=2048)
                 result = job.result()
-                counts = result.get_counts(qc)
+                counts = result.get_counts(qc_t)
                 
                 # Re-measure with noise to amplify interference detection
                 new_data = self.detect_interference_pattern()
@@ -5194,11 +5197,12 @@ class GHZCircuitBuilder:
             # Measure oracle qubit
             qc.measure(oracle_qubit, oracle_qubit)
             
-            # Execute
+            # Execute (Qiskit 1.x: transpile + backend.run)
             simulator = AerSimulator()
-            job = execute(qc, simulator, shots=1024)
+            qc_t = transpile(qc, simulator)
+            job = simulator.run(qc_t, shots=1024)
             result = job.result()
-            counts = result.get_counts(qc)
+            counts = result.get_counts(qc_t)
             
             # Extract oracle qubit measurement
             # Most likely outcome determines finality
@@ -5860,16 +5864,25 @@ class QuantumLatticeGlobal:
             with self.lock:
                 self.operations_count += 1
             
+            # Compute scalar coherence / fidelity from evolution history and w_state
+            coh_hist = list(self.noise_bath.coherence_evolution)[-10:] if self.noise_bath.coherence_evolution else []
+            fid_hist = list(self.noise_bath.fidelity_evolution)[-10:] if self.noise_bath.fidelity_evolution else []
+            w_info   = self.get_w_state()
+
             return {
                 'timestamp': time.time(),
                 'operations_count': self.operations_count,
                 'active_threads': self.active_threads,
-                'w_state': self.get_w_state(),
+                'w_state': w_info,
                 'neural_lattice': self.get_neural_lattice_state(),
                 'transactions_processed': self.tx_processor.transactions_processed,
                 'finalized_transactions': len(self.tx_processor.finalized_transactions),
-                'coherence_evolution': list(self.noise_bath.coherence_evolution)[-10:] if self.noise_bath.coherence_evolution else [],
-                'fidelity_evolution': list(self.noise_bath.fidelity_evolution)[-10:] if self.noise_bath.fidelity_evolution else [],
+                'coherence_evolution': coh_hist,
+                'fidelity_evolution':  fid_hist,
+                # Scalar convenience fields for monitoring / telemetry
+                'global_coherence': float(coh_hist[-1]) if coh_hist else float(w_info.get('coherence_avg', 0.0)),
+                'global_fidelity':  float(fid_hist[-1]) if fid_hist else float(w_info.get('fidelity_avg', 0.99)),
+                'num_qubits': 106496,
             }
         except Exception as e:
             logger.error(f"Error getting metrics: {e}")

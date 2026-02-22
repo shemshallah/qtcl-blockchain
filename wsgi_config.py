@@ -1453,12 +1453,14 @@ def _lattice_telemetry_loop() -> None:
             if lat is not None and hasattr(lat, 'get_system_metrics'):
                 try:
                     lm = lat.get_system_metrics()
-                    coh = lm.get('global_coherence', lm.get('coherence', '?'))
-                    fid = lm.get('global_fidelity',  lm.get('fidelity',  '?'))
+                    coh = lm.get('global_coherence', lm.get('w_state', {}).get('coherence_avg', '?'))
+                    fid = lm.get('global_fidelity',  lm.get('w_state', {}).get('fidelity_avg',  '?'))
                     logger.info(
                         f"[LATTICE-SYS] cycle=#{cycle} | "
-                        f"coherence={coh} | fidelity={fid} | "
-                        f"qubits={lm.get('num_qubits', lm.get('qubit_count','106496'))}"
+                        f"coherence={coh:.6f} | fidelity={fid:.6f} | "
+                        f"qubits={lm.get('num_qubits', 106496)} | "
+                        f"ops={lm.get('operations_count','?')} | "
+                        f"txs={lm.get('transactions_processed','?')}"
                     )
                 except Exception as _e:
                     logger.debug(f"[LATTICE-TELEM] LATTICE system metrics error: {_e}")
@@ -1493,15 +1495,23 @@ def _lattice_telemetry_loop() -> None:
                     # LATTICE is QuantumLatticeGlobal — use its native methods for
                     # measurement output in the expected [LATTICE-REFRESH] format
                     try:
-                        nb_result  = lat.evolve_noise_bath(0.93, 0.91)   # target C/F from config
+                        # Pull current coherence/fidelity from metrics rather than hardcoding targets
+                        _lm     = lat.get_system_metrics()
+                        _coh_in = _lm.get('global_coherence', 0.93)
+                        _fid_in = _lm.get('global_fidelity',  0.91)
+
+                        nb_result  = lat.evolve_noise_bath(_coh_in, _fid_in)
                         ws_result  = lat.refresh_interference()
-                        coh_after  = nb_result.get('coherence', nb_result.get('avg_coherence', '?'))
-                        fid_after  = nb_result.get('fidelity',  nb_result.get('avg_fidelity',  '?'))
-                        revival    = nb_result.get('revival_detected', ws_result.get('revival_detected', False))
-                        w_coherence = ws_result.get('coherence_avg', ws_result.get('mean_coherence', '?'))
+
+                        coh_after   = nb_result.get('coherence',       nb_result.get('avg_coherence', _coh_in))
+                        fid_after   = nb_result.get('fidelity',        nb_result.get('avg_fidelity',  _fid_in))
+                        revival     = nb_result.get('revival_detected', ws_result.get('revival_detected', False))
+                        w_coherence = ws_result.get('coherence_avg',   ws_result.get('mean_coherence',
+                                      ws_result.get('strength', '?')))
                         logger.info(
                             f"[LATTICE-REFRESH] Cycle #{cycle:4d} | "
-                            f"C→{coh_after} | F→{fid_after} | "
+                            f"C: {_coh_in:.4f}→{coh_after:.4f} | "
+                            f"F: {_fid_in:.4f}→{fid_after:.4f} | "
                             f"W-revival={'✓' if revival else '↔'} | "
                             f"W-coherence={w_coherence} | source=LATTICE-global"
                         )
