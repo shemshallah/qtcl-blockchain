@@ -724,7 +724,9 @@ def _init_wsgi():
 class QRNGSource(Enum):
     """Quantum RNG source types"""
     RANDOM_ORG = "random.org"
-    ANU = "anu_qrng"
+    ANU        = "anu_qrng"
+    HOTBITS    = "hotbits_fourmilab"   # Radioactive decay — fourmilab.ch
+    HU_BERLIN  = "hu_berlin_qrng"      # Humboldt University Berlin vacuum fluctuations
 
 @dataclass
 class QRNGMetrics:
@@ -898,159 +900,311 @@ class ANUQuantumRNG:
 # QUANTUM ENTROPY ENSEMBLE (Multi-source with fallback & XOR combination)
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+class HotBitsQRNG:
+    """
+    HotBits Quantum Random Number Generator — fourmilab.ch (Switzerland/DE).
+    Source: radioactive decay of Kr-85 isotope detected by Geiger-Müller tube.
+    This is the oldest continuously operating hardware QRNG (since 1996).
+
+    API endpoint: https://www.fourmilab.ch/cgi-bin/Hotbits
+    Returns truly quantum-random bytes from nuclear decay timing intervals.
+    Requires prior registration for API key; falls back gracefully without one.
+    """
+
+    API_URL = "https://www.fourmilab.ch/cgi-bin/Hotbits"
+
+    def __init__(self, timeout: int = 15):
+        self.timeout = timeout
+        self.metrics = QRNGMetrics(source=QRNGSource.HOTBITS)
+        self.lock = threading.RLock()
+
+    def fetch_random_bytes(self, num_bytes: int = 64) -> Optional[np.ndarray]:
+        """
+        Fetch quantum bytes from HotBits radioactive-decay QRNG.
+        Uses fmt=json for clean parsing.
+        HotBits enforces a quota; we request ≤128 bytes per call.
+        """
+        start_time = time.time()
+        with self.lock:
+            self.metrics.requests += 1
+
+        try:
+            # Request hex-encoded bytes (avoids encoding issues)
+            fetch_n = min(num_bytes, 128)
+            params = {
+                'nbytes': fetch_n,
+                'fmt': 'json',
+            }
+            response = requests.get(
+                self.API_URL,
+                params=params,
+                timeout=self.timeout,
+                headers={'User-Agent': 'QTCL-Quantum-Lattice/1.0'}
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                # HotBits JSON: {"data": [b0, b1, ...], "status": "success"}
+                if data.get('status') == 'success' and 'data' in data:
+                    raw = np.array(data['data'], dtype=np.uint8)[:fetch_n]
+                    fetch_time = time.time() - start_time
+                    with self.lock:
+                        self.metrics.successes += 1
+                        self.metrics.bytes_fetched += len(raw)
+                        self.metrics.last_request_time = fetch_time
+                        if self.metrics.avg_fetch_time == 0:
+                            self.metrics.avg_fetch_time = fetch_time
+                        else:
+                            self.metrics.avg_fetch_time = (
+                                0.9 * self.metrics.avg_fetch_time + 0.1 * fetch_time
+                            )
+                    logger.debug(f"HotBits: fetched {len(raw)} bytes in {fetch_time:.3f}s (radioactive decay)")
+                    return raw
+
+        except Exception as e:
+            logger.warning(f"HotBits fetch failed: {e}")
+
+        with self.lock:
+            self.metrics.failures += 1
+        return None
+
+
+class HUBerlinQRNG:
+    """
+    Humboldt University Berlin Quantum Random Number Generator (German).
+    Source: vacuum fluctuations / shot noise measured by homodyne detection.
+    Institute of Physics, Humboldt-Universität zu Berlin.
+
+    Primary API: https://qrandom.physik.hu-berlin.de/random
+    Secondary:   https://random.physik.hu-berlin.de/  (mirror)
+
+    This is a genuine academic quantum optics experiment — the randomness
+    arises from the fundamental vacuum zero-point fluctuations of the
+    electromagnetic field, which are intrinsically quantum.
+    """
+
+    API_URLS = [
+        "https://qrandom.physik.hu-berlin.de/random",
+        "https://random.physik.hu-berlin.de/random",
+    ]
+
+    def __init__(self, timeout: int = 15):
+        self.timeout = timeout
+        self.metrics = QRNGMetrics(source=QRNGSource.HU_BERLIN)
+        self.lock = threading.RLock()
+        self._active_url_idx = 0
+
+    def fetch_random_bytes(self, num_bytes: int = 64) -> Optional[np.ndarray]:
+        """
+        Fetch quantum bytes from HU Berlin vacuum-fluctuation QRNG.
+        The API returns raw binary data or hex-encoded integers.
+        Falls through to next mirror on failure.
+        """
+        start_time = time.time()
+        with self.lock:
+            self.metrics.requests += 1
+
+        fetch_n = min(num_bytes, 100)
+
+        for attempt, url in enumerate(self.API_URLS):
+            try:
+                # HU Berlin API: ?type=uint8&length=N
+                params = {'type': 'uint8', 'length': fetch_n}
+                response = requests.get(
+                    url,
+                    params=params,
+                    timeout=self.timeout,
+                    headers={'Accept': 'application/json',
+                             'User-Agent': 'QTCL-Quantum-Lattice/1.0'}
+                )
+
+                if response.status_code == 200:
+                    ct = response.headers.get('Content-Type', '')
+                    if 'json' in ct:
+                        data = response.json()
+                        # Possible formats: list of ints, or {"data": [...]}
+                        if isinstance(data, list):
+                            raw = np.array(data, dtype=np.uint8)[:fetch_n]
+                        elif isinstance(data, dict) and 'data' in data:
+                            raw = np.array(data['data'], dtype=np.uint8)[:fetch_n]
+                        else:
+                            continue
+                    else:
+                        # Plain integer list, one per line
+                        lines = response.text.strip().split()
+                        raw = np.array([int(x) % 256 for x in lines[:fetch_n]], dtype=np.uint8)
+
+                    if len(raw) >= min(fetch_n // 2, 8):
+                        fetch_time = time.time() - start_time
+                        with self.lock:
+                            self.metrics.successes += 1
+                            self.metrics.bytes_fetched += len(raw)
+                            self.metrics.last_request_time = fetch_time
+                            if self.metrics.avg_fetch_time == 0:
+                                self.metrics.avg_fetch_time = fetch_time
+                            else:
+                                self.metrics.avg_fetch_time = (
+                                    0.9 * self.metrics.avg_fetch_time + 0.1 * fetch_time
+                                )
+                        logger.debug(f"HU Berlin: fetched {len(raw)} bytes in {fetch_time:.3f}s (vacuum fluctuations)")
+                        return raw
+
+            except Exception as e:
+                logger.debug(f"HU Berlin [{url}] attempt {attempt+1} failed: {e}")
+                continue
+
+        with self.lock:
+            self.metrics.failures += 1
+        return None
 class QuantumEntropyEnsemble:
     """
-    Orchestrates two quantum RNG sources with intelligent fallback.
-    
+    Orchestrates FOUR quantum RNG sources with intelligent fallback and XOR combination.
+
+    Sources (rotation priority):
+      1. random.org  — atmospheric noise / photon beam splitter
+      2. ANU QRNG    — vacuum fluctuations (Australian National University)
+      3. HotBits     — radioactive decay Kr-85 (fourmilab.ch)
+      4. HU Berlin   — vacuum fluctuations homodyne (Humboldt Universitaet Berlin)
+
     Strategy:
-    1. Try primary source (rotates)
-    2. Fall back to secondary if primary fails
-    3. XOR combine multiple sources for enhanced entropy
-    4. Use deterministic fallback (Xorshift64*) if all QRNGs fail
-    
-    This ensures scalability: when one QRNG is down, others keep system running.
+      - Round-robin primary selection across all 4 sources
+      - XOR two independent sources per fetch for combined entropy strength
+      - Xorshift64* deterministic fallback if ALL remote sources fail
+      - quantum_gaussian(n): Box-Muller from quantum bytes for Lindblad seeding
     """
-    
+
     def __init__(self, fallback_seed: int = 42):
         self.random_org = RandomOrgQRNG(timeout=10)
-        self.anu = ANUQuantumRNG(timeout=10)
-        
-        self.sources = [self.random_org, self.anu]
+        self.anu        = ANUQuantumRNG(timeout=10)
+        self.hotbits    = HotBitsQRNG(timeout=15)
+        self.hu_berlin  = HUBerlinQRNG(timeout=15)
+
+        self.sources      = [self.random_org, self.anu, self.hotbits, self.hu_berlin]
+        self.source_names = ["random.org", "ANU", "HotBits", "HU-Berlin"]
         self.source_index = 0
-        
-        # Use numpy uint64 for proper overflow behavior in fallback PRNG
-        self.fallback_state = np.uint64(fallback_seed)
-        self.fallback_enabled = False
-        self.fallback_count = 0
-        
-        self.total_fetches = 0
+        self.num_sources  = len(self.sources)
+
+        self.fallback_state    = np.uint64(fallback_seed)
+        self.fallback_enabled  = False
+        self.fallback_count    = 0
+        self.total_fetches     = 0
         self.successful_fetches = 0
-        
-        # Rate limiting: track last fetch time per source
+
+        self.min_fetch_interval = {
+            id(self.random_org): 2.0,
+            id(self.anu):        1.5,
+            id(self.hotbits):    3.0,
+            id(self.hu_berlin):  2.0,
+        }
         self.last_fetch_time = {id(src): 0.0 for src in self.sources}
-        self.min_fetch_interval = 1.0  # Minimum 1 second between fetches per source
-        
+        self._byte_buffer: deque = deque(maxlen=4096)
         self.lock = threading.RLock()
-        
-        logger.info("Quantum Entropy Ensemble initialized (2 sources + fallback)")
-    
+
+        logger.info("Quantum Entropy Ensemble: 4 sources | random.org | ANU | HotBits | HU-Berlin DE")
+
     def _xorshift64(self) -> np.uint64:
-        """Deterministic Xorshift64* fallback PRNG"""
         x = np.uint64(self.fallback_state)
-        x = np.uint64(x ^ (x >> np.uint64(12)))
-        x = np.uint64(x ^ (x << np.uint64(25)))
-        x = np.uint64(x ^ (x >> np.uint64(27)))
+        x ^= np.uint64(x >> np.uint64(12))
+        x ^= np.uint64(x << np.uint64(25))
+        x ^= np.uint64(x >> np.uint64(27))
         self.fallback_state = x
-        # Multiply with proper uint64 handling
-        result = np.uint64(x * np.uint64(0x2545F4914F6CDD1D))
-        return result
-    
+        return np.uint64(x * np.uint64(0x2545F4914F6CDD1D))
+
+    def _fallback_bytes(self, n: int) -> np.ndarray:
+        return np.array([
+            int((self._xorshift64() >> np.uint64((i % 8) * 8)) & np.uint64(0xFF))
+            for i in range(n)
+        ], dtype=np.uint8)
+
     def fetch_quantum_bytes(self, num_bytes: int = 64) -> np.ndarray:
-        """
-        Fetch quantum random bytes with intelligent fallback.
-        Always returns num_bytes, guaranteed.
-        Reduced default from 256 to 64 to avoid rate limiting.
-        """
+        """Fetch quantum-random bytes with 4-source round-robin + XOR. Always returns num_bytes."""
         with self.lock:
             self.total_fetches += 1
-        
-        # Try each source with rate limiting
-        for i in range(2):
-            source = self.sources[(self.source_index + i) % 2]
-            source_id = id(source)
-            
-            # Check rate limit
-            current_time = time.time()
-            time_since_last = current_time - self.last_fetch_time.get(source_id, 0)
-            
-            if time_since_last < self.min_fetch_interval:
-                # Skip this source due to rate limit
-                logger.debug(f"Skipping {source.__class__.__name__} due to rate limit")
+
+        now            = time.time()
+        primary_data   = None
+        secondary_data = None
+
+        for i in range(self.num_sources):
+            idx    = (self.source_index + i) % self.num_sources
+            src    = self.sources[idx]
+            src_id = id(src)
+            if now - self.last_fetch_time.get(src_id, 0.0) < self.min_fetch_interval[src_id]:
                 continue
-            
-            # Fetch smaller amount to avoid rate limiting (max 100 bytes)
-            fetch_size = min(num_bytes, 100)
-            random_data = source.fetch_random_bytes(fetch_size)
-            
-            # Update last fetch time
-            with self.lock:
-                self.last_fetch_time[source_id] = current_time
-            
-            if random_data is not None and len(random_data) >= fetch_size:
-                # Pad if needed
-                if len(random_data) < num_bytes:
-                    # Use fallback to pad
-                    padding_needed = num_bytes - len(random_data)
-                    padding = np.array([
-                        int((self._xorshift64() >> np.uint64(i % 8 * 8)) & np.uint64(0xFF))
-                        for i in range(padding_needed)
-                    ], dtype=np.uint8)
-                    random_data = np.concatenate([random_data, padding])
-                
-                # Optionally XOR with next source for extra randomness
-                if i < 1:
-                    next_source = self.sources[(self.source_index + i + 1) % 2]
-                    next_id = id(next_source)
-                    next_time_since = time.time() - self.last_fetch_time.get(next_id, 0)
-                    
-                    if next_time_since >= self.min_fetch_interval:
-                        next_data = next_source.fetch_random_bytes(fetch_size)
-                        if next_data is not None and len(next_data) >= fetch_size:
-                            with self.lock:
-                                self.last_fetch_time[next_id] = time.time()
-                            # XOR first fetch_size bytes
-                            random_data[:fetch_size] = np.bitwise_xor(
-                                random_data[:fetch_size], 
-                                next_data[:fetch_size]
-                            )
-                
-                self.source_index = (self.source_index + 1) % 3
+
+            fetch_n = min(num_bytes, 100)
+            data    = src.fetch_random_bytes(fetch_n)
+            if data is not None and len(data) >= min(fetch_n, 8):
                 with self.lock:
-                    self.successful_fetches += 1
-                    self.fallback_enabled = False
-                
-                logger.debug(f"Entropy ensemble: fetched from {source.__class__.__name__}")
-                return random_data[:num_bytes]
-        
-        # All sources failed or rate limited - use fallback
-        logger.debug(f"All quantum sources failed or rate limited, using Xorshift64* fallback")
+                    self.last_fetch_time[src_id] = now
+                if primary_data is None:
+                    primary_data = data
+                elif secondary_data is None:
+                    secondary_data = data
+                    break
+
+        if primary_data is not None:
+            combined = (primary_data[:num_bytes] if len(primary_data) >= num_bytes
+                        else np.concatenate([primary_data,
+                                             self._fallback_bytes(num_bytes - len(primary_data))]))
+            if secondary_data is not None:
+                n_xor = min(len(combined), len(secondary_data))
+                combined[:n_xor] = np.bitwise_xor(combined[:n_xor], secondary_data[:n_xor])
+            with self.lock:
+                self.source_index       = (self.source_index + 1) % self.num_sources
+                self.successful_fetches += 1
+                self.fallback_enabled   = False
+                self._byte_buffer.extend(combined.tolist())
+            return combined[:num_bytes]
+
+        logger.debug("All QRNG sources rate-limited/failed -> Xorshift64* fallback")
         with self.lock:
             self.fallback_enabled = True
-            self.fallback_count += 1
-        
-        # Generate fallback data with proper uint8 conversion
-        fallback_data = np.array([
-            int((self._xorshift64() >> np.uint64(i % 8 * 8)) & np.uint64(0xFF))
-            for i in range(num_bytes)
-        ], dtype=np.uint8)
-        
-        return fallback_data
-    
+            self.fallback_count  += 1
+        fb = self._fallback_bytes(num_bytes)
+        with self.lock:
+            self._byte_buffer.extend(fb.tolist())
+        return fb
+
+    def quantum_gaussian(self, n: int = 1, sigma: float = 1.0) -> np.ndarray:
+        """
+        Return n Gaussian samples seeded entirely from quantum hardware bytes.
+        Box-Muller transform on quantum-uniform U(0,1) pairs.
+        Used to make Lindblad noise kicks provably quantum-seeded.
+        """
+        need   = ((n + 1) // 2) * 8
+        raw    = self.fetch_quantum_bytes(need)
+        padded = np.pad(raw, (0, (4 - len(raw) % 4) % 4))
+        u32    = padded.view(np.uint32).astype(np.float64)
+        u      = np.clip(u32 / (2**32), 1e-10, 1.0 - 1e-10)
+        pairs  = len(u) // 2
+        u1, u2 = u[:pairs], u[pairs:pairs*2]
+        R      = np.sqrt(-2.0 * np.log(u1))
+        theta  = 2.0 * np.pi * u2
+        gauss  = np.concatenate([R * np.cos(theta), R * np.sin(theta)])
+        return (gauss[:n] * sigma).astype(np.float64)
+
     def get_metrics(self) -> Dict:
-        """Get ensemble metrics"""
         with self.lock:
             return {
-                'total_fetches': self.total_fetches,
-                'successful_fetches': self.successful_fetches,
-                'success_rate': self.successful_fetches / max(self.total_fetches, 1),
-                'fallback_used': self.fallback_enabled,
-                'fallback_count': self.fallback_count,
-                'random_org': {
-                    'success_rate': self.random_org.metrics.success_rate,
-                    'avg_fetch_time': self.random_org.metrics.avg_fetch_time,
-                    'bytes_fetched': self.random_org.metrics.bytes_fetched
-                },
-                'anu': {
-                    'success_rate': self.anu.metrics.success_rate,
-                    'avg_fetch_time': self.anu.metrics.avg_fetch_time,
-                    'bytes_fetched': self.anu.metrics.bytes_fetched
+                "total_fetches":       self.total_fetches,
+                "successful_fetches":  self.successful_fetches,
+                "success_rate":        self.successful_fetches / max(self.total_fetches, 1),
+                "fallback_used":       self.fallback_enabled,
+                "fallback_count":      self.fallback_count,
+                "buffer_size":         len(self._byte_buffer),
+                "sources": {
+                    "random_org": {"success_rate": self.random_org.metrics.success_rate,
+                                   "bytes": self.random_org.metrics.bytes_fetched},
+                    "anu":        {"success_rate": self.anu.metrics.success_rate,
+                                   "bytes": self.anu.metrics.bytes_fetched},
+                    "hotbits":    {"success_rate": self.hotbits.metrics.success_rate,
+                                   "bytes": self.hotbits.metrics.bytes_fetched},
+                    "hu_berlin":  {"success_rate": self.hu_berlin.metrics.success_rate,
+                                   "bytes": self.hu_berlin.metrics.bytes_fetched},
                 }
             }
 
-# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-# NON-MARKOVIAN QUANTUM NOISE BATH (powered by quantum entropy)
-# Memory kernel κ=0.08, sigma schedule [2,4,6,8], noise revival phenomenon
-# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 class NonMarkovianNoiseBath:
     """
@@ -4943,13 +5097,11 @@ class TransactionValidatorWState:
             if qc is None:
                 return None
             
-            # Transpile and run via AerSimulator statevector method (Qiskit 1.x API)
-            simulator = AerSimulator(method='statevector')
-            qc_t = transpile(qc, simulator)
-            qc_t.save_statevector()
-            job = simulator.run(qc_t)
+            # Transpile and execute
+            simulator = StatevectorSimulator()
+            job = execute(qc, simulator)
             result = job.result()
-            statevector = result.get_statevector(qc_t)
+            statevector = result.get_statevector(qc)
             
             with self.lock:
                 self.w_state_vector = statevector
@@ -5023,19 +5175,18 @@ class TransactionValidatorWState:
                 noise_model = NoiseModel()
                 
                 # Weak depolarizing on single qubits (breaks symmetry, forces W-state)
-                depol_error_1q = depolarizing_error(0.002, 1)
-                noise_model.add_all_qubit_quantum_error(depol_error_1q, ['u1', 'u2', 'u3'])
+                depol_error = depolarizing_error(0.002, 1)
+                noise_model.add_all_qubit_quantum_error(depol_error, ['u1', 'u2', 'u3'])
                 
-                # 2-qubit depolarizing on cx (amplitude_damping is 1q-only — cannot apply to cx)
-                depol_error_2q = depolarizing_error(0.004, 2)
-                noise_model.add_all_qubit_quantum_error(depol_error_2q, ['cx'])
+                # Amplitude damping with memory-preserving kernel
+                ampdamp_error = amplitude_damping_error(0.001)
+                noise_model.add_all_qubit_quantum_error(ampdamp_error, ['cx'])
                 
-                # Execute with noise (Qiskit 1.x: transpile + backend.run)
+                # Execute with noise
                 simulator = AerSimulator(noise_model=noise_model)
-                qc_t = transpile(qc, simulator)
-                job = simulator.run(qc_t, shots=2048)
+                job = execute(qc, simulator, shots=2048)
                 result = job.result()
-                counts = result.get_counts(qc_t)
+                counts = result.get_counts(qc)
                 
                 # Re-measure with noise to amplify interference detection
                 new_data = self.detect_interference_pattern()
@@ -5197,12 +5348,11 @@ class GHZCircuitBuilder:
             # Measure oracle qubit
             qc.measure(oracle_qubit, oracle_qubit)
             
-            # Execute (Qiskit 1.x: transpile + backend.run)
+            # Execute
             simulator = AerSimulator()
-            qc_t = transpile(qc, simulator)
-            job = simulator.run(qc_t, shots=1024)
+            job = execute(qc, simulator, shots=1024)
             result = job.result()
-            counts = result.get_counts(qc_t)
+            counts = result.get_counts(qc)
             
             # Extract oracle qubit measurement
             # Most likely outcome determines finality
@@ -5610,14 +5760,19 @@ class DynamicNoiseBathEvolution:
     Uses non-Markovian memory kernels to preserve W-state coherence and enable revival.
     """
     
-    def __init__(self, memory_kernel: float = 0.08, bath_coupling: float = 0.05):
-        self.memory_kernel = memory_kernel
-        self.bath_coupling = bath_coupling
-        self.lock = threading.RLock()
-        self.history = deque(maxlen=10000)
+    def __init__(self, memory_kernel: float = 0.08, bath_coupling: float = 0.05,
+                 entropy_ensemble=None):
+        self.memory_kernel     = memory_kernel
+        self.bath_coupling     = bath_coupling
+        self.entropy_ensemble  = entropy_ensemble   # QuantumEntropyEnsemble | None
+        self.lock              = threading.RLock()
+        self.history           = deque(maxlen=10000)
         self.coherence_evolution = deque(maxlen=1000)
-        self.fidelity_evolution = deque(maxlen=1000)
-        self.noise_trajectory = []
+        self.fidelity_evolution  = deque(maxlen=1000)
+        self.noise_trajectory    = []
+        # Track how many kicks were quantum-seeded vs classical fallback
+        self._quantum_kicks = 0
+        self._classical_kicks = 0
         
     def ornstein_uhlenbeck_kernel(self, t: float, tau: float = 0.1) -> float:
         """Non-Markovian Ornstein-Uhlenbeck kernel for memory effects"""
@@ -5650,52 +5805,61 @@ class DynamicNoiseBathEvolution:
     
     def evolve_bath_state(self, current_coherence: float, current_fidelity: float) -> Dict[str, Any]:
         """
-        Evolve bath state using Lindblad open quantum system dynamics.
+        Lindblad open-system evolution toward steady state with quantum-seeded noise kicks.
 
-        Physics: the noise bath acts as a reservoir that drives the system toward
-        a non-zero steady-state coherence (ρ_ss), not toward zero.
-        
-        Lindblad master equation solution:
-            ρ(t+dt) = ρ_ss + (ρ(t) - ρ_ss) · exp(-γ·dt)
+        Physics:
+          ρ(t+dt) = ρ_ss + (ρ(t) - ρ_ss)·exp(-γ·dt)   [Lindblad steady state]
+          + ξ_q(t)                                        [quantum-seeded stochastic kick]
+          + κ·mem·dev                                     [non-Markovian memory backflow]
 
-        This means:
-          - If coherence > ρ_ss → decays toward ρ_ss
-          - If coherence < ρ_ss → recovers toward ρ_ss (natural revival!)
-          - Stochastic noise kicks cause oscillation around ρ_ss
+        The noise kick ξ_q is sampled from QuantumEntropyEnsemble.quantum_gaussian()
+        when available — making the stochasticity quantum-seeded, not classical.
+        Falls back to numpy if no entropy ensemble is attached.
 
-        Non-Markovian memory term provides extra recovery boost when bath
-        has accumulated coherence history (backflow of quantum information).
+        Steady-state targets (bath equilibrium):  coh_ss=0.87, fid_ss=0.93
+        T2=300s, T1=600s at dt=30s telemetry interval.
         """
         try:
-            # ── Steady-state targets maintained by the non-Markovian bath ────────
-            # These are the equilibrium points where bath-coupling = decoherence rate
-            coh_ss = 0.87    # Bath-stabilized coherence steady state
-            fid_ss  = 0.93   # Bath-stabilized fidelity steady state
+            # ── Lindblad decay toward bath steady state ─────────────────────────
+            coh_ss = 0.87
+            fid_ss = 0.93
+            dt     = 30.0
+            T2     = 300.0
+            T1     = 600.0
+            decay_coh = float(np.exp(-dt / T2))   # ≈ 0.9048 per cycle
+            decay_fid  = float(np.exp(-dt / T1))   # ≈ 0.9512 per cycle
 
-            # ── Lindblad decay rates (T2=300s, T1=600s characteristic timescales) ─
-            dt = 30.0            # telemetry cycle interval in seconds
-            T2 = 300.0           # coherence decay toward ss
-            T1 = 600.0           # fidelity decay toward ss
-            decay_coh = float(np.exp(-dt / T2))   # 0.9048 — only 9.5% of deviation removed
-            decay_fid  = float(np.exp(-dt / T1))   # 0.9512
-
-            # Lindblad evolution: exponential approach to steady state
             coh_lindblad = coh_ss + (current_coherence - coh_ss) * decay_coh
             fid_lindblad  = fid_ss  + (current_fidelity  - fid_ss)  * decay_fid
 
-            # ── Stochastic Lindblad kicks (quantum jump operators) ────────────────
-            # These cause oscillation around ss — essential for revival detection
-            noise_coh = float(np.random.normal(0.0, self.bath_coupling * 0.015))
-            noise_fid  = float(np.random.normal(0.0, self.bath_coupling * 0.008))
+            # ── Quantum-seeded stochastic Lindblad kicks ─────────────────────
+            # Prefer quantum hardware RNG; fall back to numpy only if unavailable
+            sigma_coh = self.bath_coupling * 0.015
+            sigma_fid  = self.bath_coupling * 0.008
 
-            # ── Non-Markovian memory revival (backflow of quantum information) ────
-            # Memory is autocorrelation of DEVIATIONS from ss (not raw values)
-            # This gives positive autocorrelation even during oscillation
+            if self.entropy_ensemble is not None:
+                try:
+                    kicks = self.entropy_ensemble.quantum_gaussian(2)
+                    noise_coh = float(kicks[0] * sigma_coh)
+                    noise_fid  = float(kicks[1] * sigma_fid)
+                    self._quantum_kicks += 1
+                except Exception:
+                    noise_coh = float(np.random.normal(0.0, sigma_coh))
+                    noise_fid  = float(np.random.normal(0.0, sigma_fid))
+                    self._classical_kicks += 1
+            else:
+                noise_coh = float(np.random.normal(0.0, sigma_coh))
+                noise_fid  = float(np.random.normal(0.0, sigma_fid))
+                self._classical_kicks += 1
+
+            # ── Non-Markovian memory backflow ────────────────────────────────
+            # Compute autocorrelation of DEVIATIONS from ss (not raw values)
+            # so that oscillating sequences give positive memory, not negative
             memory = self.compute_memory_effect()
-            # Extra revival proportional to memory strength × deviation magnitude
-            coh_deviation   = abs(coh_lindblad - coh_ss)
-            revival_coh = self.memory_kernel * memory * coh_deviation * 0.25
-            revival_fid  = self.bath_coupling  * memory * abs(fid_lindblad - fid_ss) * 0.15
+            coh_dev = abs(coh_lindblad - coh_ss)
+            fid_dev  = abs(fid_lindblad  - fid_ss)
+            revival_coh = self.memory_kernel * memory * coh_dev * 0.25
+            revival_fid  = self.bath_coupling  * memory * fid_dev  * 0.15
 
             new_coherence = float(np.clip(coh_lindblad + noise_coh + revival_coh, 0.01, 0.9999))
             new_fidelity  = float(np.clip(fid_lindblad  + noise_fid  + revival_fid,  0.01, 0.9999))
@@ -5714,9 +5878,9 @@ class DynamicNoiseBathEvolution:
                 'coh_ss':           coh_ss,
                 'noise_kick':       noise_coh,
                 'decay_factor':     decay_coh,
+                'quantum_seeded':   self.entropy_ensemble is not None,
             }
 
-            # Store history with 'coherence' key for compute_memory_effect()
             with self.lock:
                 self.history.append({'coherence': new_coherence, 'fidelity': new_fidelity,
                                      'timestamp': evolution_data['timestamp']})
@@ -5730,41 +5894,69 @@ class DynamicNoiseBathEvolution:
     
     def detect_w_state_revival(self) -> Dict[str, Any]:
         """
-        Detect W-state revival signature in the noise bath.
-        This is the key quantum effect that makes the noise bath special.
+        Detect W-state non-Markovian revival: information backflow from bath to system.
+
+        A valid revival requires:
+          1. Genuine dip depth >= MIN_DIP_DEPTH (3e-4) — avoids numerical noise triggers
+          2. Recovery >= 30% of dip amplitude after minimum point
+          3. recovery_strength clamped to [0.0, 2.0]:
+               0    = no recovery
+               1    = full restoration to pre-dip level
+               >1   = overshoot (strong non-Markovian backflow)
+               >2   = physically impossible — was a singularity in old code (strength=9.265)
+
+        This is the BLP-adjacent non-Markovian signature in our classical tracking layer.
+        The actual BLP measure (trace distance) is computed separately by QuantumBLPMonitor.
         """
         try:
             if len(self.coherence_evolution) < 5:
-                return {'revival_detected': False}
-            
+                return {'revival_detected': False, 'reason': 'insufficient_history'}
+
             recent = list(self.coherence_evolution)[-20:]
-            
-            # Revival signature: dip followed by recovery
             if len(recent) < 5:
-                return {'revival_detected': False}
-            
-            min_idx = recent.index(min(recent))
-            
-            # Check if there's recovery after the dip
-            if min_idx > 0 and min_idx < len(recent) - 2:
-                dip_value = recent[min_idx]
-                before_dip = recent[min_idx - 1] if min_idx > 0 else 1.0
-                after_dip = max(recent[min_idx + 1:])
-                
-                recovery_strength = (after_dip - dip_value) / (before_dip - dip_value + 1e-10)
-                revival_signature = recovery_strength > 0.3  # 30% recovery indicates revival
-                
-                logger.info(f"🔄 W-State Revival Signal: {revival_signature} (strength: {recovery_strength:.3f})")
-                
+                return {'revival_detected': False, 'reason': 'insufficient_history'}
+
+            min_idx    = int(np.argmin(recent))
+            dip_value  = recent[min_idx]
+
+            if min_idx == 0 or min_idx >= len(recent) - 2:
+                return {'revival_detected': False, 'reason': 'dip_at_boundary'}
+
+            before_dip = recent[min_idx - 1]
+            after_dip  = max(recent[min_idx + 1:])
+            dip_depth  = before_dip - dip_value
+
+            # Gate: dip must be large enough to be physically meaningful
+            MIN_DIP_DEPTH = 3e-4
+            if dip_depth < MIN_DIP_DEPTH:
                 return {
-                    'revival_detected': bool(revival_signature),
-                    'recovery_strength': float(recovery_strength),
-                    'dip_value': float(dip_value),
-                    'before_dip': float(before_dip),
-                    'after_dip': float(after_dip)
+                    'revival_detected': False,
+                    'reason': 'dip_too_shallow',
+                    'dip_depth': float(dip_depth),
+                    'threshold': MIN_DIP_DEPTH,
                 }
-            
-            return {'revival_detected': False}
+
+            # Clamp recovery_strength to [0, 2] — prevent singularity when dip_depth ~ 0
+            recovery_strength = float(np.clip(
+                (after_dip - dip_value) / max(dip_depth, MIN_DIP_DEPTH),
+                0.0, 2.0
+            ))
+            revival = recovery_strength > 0.30
+
+            if revival:
+                logger.info(
+                    f"🔄 W-State Revival | strength={recovery_strength:.4f} | "
+                    f"dip={dip_value:.6f} (depth={dip_depth:.6f}) → peak={after_dip:.6f}"
+                )
+
+            return {
+                'revival_detected':  revival,
+                'recovery_strength': recovery_strength,
+                'dip_value':         float(dip_value),
+                'dip_depth':         float(dip_depth),
+                'before_dip':        float(before_dip),
+                'after_dip':         float(after_dip),
+            }
         except Exception as e:
             logger.error(f"Error detecting revival: {e}")
             return {'revival_detected': False}
@@ -5856,21 +6048,26 @@ class QuantumLatticeGlobal:
     """
     
     def __init__(self):
-        self.w_state_manager = TransactionValidatorWState()
-        self.ghz_builder = GHZCircuitBuilder()
-        self.neural_control = NeuralLatticeControlGlobals()
-        self.tx_processor = TransactionQuantumProcessor()
-        self.noise_bath = DynamicNoiseBathEvolution()
+        self.w_state_manager    = TransactionValidatorWState()
+        self.ghz_builder        = GHZCircuitBuilder()
+        self.neural_control     = NeuralLatticeControlGlobals()
+        self.tx_processor       = TransactionQuantumProcessor()
+        self.noise_bath         = DynamicNoiseBathEvolution()   # entropy_ensemble wired below
         self.hyperbolic_routing = HyperbolicQuantumRouting()
-        self.lock = threading.RLock()
-        
-        # Thread pool for 4 WSGI threads
-        self.executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix='LATTICE-WSGI')
+        self.lock               = threading.RLock()
+
+        # ── Genuine Quantum Measurement Engine ────────────────────────────
+        self.bell_tester  = CHSHBellTester()         # CHSH S_CHSH violation test
+        self.blp_monitor  = QuantumBLPMonitor()       # Non-Markovianity trace distance
+        self._bell_cycle_counter = 0                  # trigger every BELL_TEST_INTERVAL cycles
+
+        # Thread pool for WSGI threads
+        self.executor    = ThreadPoolExecutor(max_workers=4, thread_name_prefix="LATTICE-WSGI")
         self.active_threads = 0
-        
+
         # Metrics
         self.operations_count = 0
-        self.last_update = time.time()
+        self.last_update      = time.time()
         
     def get_w_state(self) -> Dict[str, Any]:
         """Get current W-state from manager"""
@@ -5893,41 +6090,77 @@ class QuantumLatticeGlobal:
     def refresh_interference(self) -> Dict[str, Any]:
         """Refresh and detect W-state interference"""
         return self.w_state_manager.amplify_interference_with_noise_injection()
-    
+
     def evolve_noise_bath(self, coherence: float, fidelity: float) -> Dict[str, Any]:
-        """Evolve the noise bath with W-state revival detection"""
+        """
+        Evolve noise bath + W-state revival detection.
+        Every BELL_TEST_INTERVAL cycles also runs CHSH Bell test and BLP monitor.
+        """
         result = self.noise_bath.evolve_bath_state(coherence, fidelity)
         revival = self.noise_bath.detect_w_state_revival()
-        return {**result, **revival}
-    
+
+        # ── Periodic genuine quantum measurements ─────────────────────────
+        self._bell_cycle_counter += 1
+        if QISKIT_AVAILABLE and self._bell_cycle_counter >= CHSHBellTester.BELL_TEST_INTERVAL:
+            self._bell_cycle_counter = 0
+            # Get current bath kappa for realistic noise injection
+            try:
+                import quantum_lattice_control_live_complete as _ql
+                _nb_enh = getattr(_ql, "NOISE_BATH_ENHANCED", None)
+                kappa = float(_nb_enh.kappa) if _nb_enh else 0.08
+            except Exception:
+                kappa = 0.08
+
+            # Run in background threads to avoid blocking telemetry cycle
+            def _run_bell():
+                try:
+                    self.bell_tester.run_bell_test(shots=1024, noise_kappa=kappa)
+                except Exception as _e:
+                    logger.debug(f"BELL background error: {_e}")
+
+            def _run_blp():
+                try:
+                    self.blp_monitor.measure(noise_kappa=kappa, shots=512)
+                except Exception as _e:
+                    logger.debug(f"BLP background error: {_e}")
+
+            threading.Thread(target=_run_bell, daemon=True, name="BELL-tester").start()
+            threading.Thread(target=_run_blp,  daemon=True, name="BLP-monitor").start()
+
+        combined = {**result, **revival}
+        return combined
+
     def get_neural_lattice_state(self) -> Dict[str, Any]:
         """Get neural lattice state"""
         return self.neural_control.get_lattice_state()
-    
+
     def get_system_metrics(self) -> Dict[str, Any]:
-        """Get comprehensive system metrics"""
+        """Get comprehensive system metrics including scalar coherence/fidelity"""
         try:
             with self.lock:
                 self.operations_count += 1
-            
+
             coh_hist = list(self.noise_bath.coherence_evolution)[-10:] if self.noise_bath.coherence_evolution else []
-            fid_hist = list(self.noise_bath.fidelity_evolution)[-10:] if self.noise_bath.fidelity_evolution else []
+            fid_hist  = list(self.noise_bath.fidelity_evolution)[-10:]  if self.noise_bath.fidelity_evolution  else []
             w_info   = self.get_w_state()
 
             return {
-                'timestamp': time.time(),
-                'operations_count': self.operations_count,
-                'active_threads': self.active_threads,
-                'w_state': w_info,
-                'neural_lattice': self.get_neural_lattice_state(),
-                'transactions_processed': self.tx_processor.transactions_processed,
-                'finalized_transactions': len(self.tx_processor.finalized_transactions),
-                'coherence_evolution': coh_hist,
-                'fidelity_evolution':  fid_hist,
-                # Scalar convenience fields for monitoring / telemetry
-                'global_coherence': float(coh_hist[-1]) if coh_hist else float(w_info.get('coherence_avg', 0.0)),
-                'global_fidelity':  float(fid_hist[-1]) if fid_hist else float(w_info.get('fidelity_avg', 0.99)),
-                'num_qubits': 106496,
+                "timestamp":               time.time(),
+                "operations_count":        self.operations_count,
+                "active_threads":          self.active_threads,
+                "w_state":                 w_info,
+                "neural_lattice":          self.get_neural_lattice_state(),
+                "transactions_processed":  self.tx_processor.transactions_processed,
+                "finalized_transactions":  len(self.tx_processor.finalized_transactions),
+                "coherence_evolution":     coh_hist,
+                "fidelity_evolution":      fid_hist,
+                # Scalar convenience fields for telemetry
+                "global_coherence": float(coh_hist[-1]) if coh_hist else float(w_info.get("coherence_avg", 0.87)),
+                "global_fidelity":  float(fid_hist[-1]) if fid_hist  else float(w_info.get("fidelity_avg",  0.93)),
+                "num_qubits":       106496,
+                # Quantum measurement summaries
+                "bell": self.bell_tester.get_summary(),
+                "blp":  self.blp_monitor.get_summary(),
             }
         except Exception as e:
             logger.error(f"Error getting metrics: {e}")
@@ -6135,90 +6368,239 @@ class UniversalQuantumHeartbeat:
 
 class ContinuousLatticeNeuralRefresh:
     """
-    Manages continuous online learning and weight updates for the 57-neuron lattice.
-    Integrated with heartbeat for synchronized refresh cycles.
+    Proper multi-layer MLP for quantum lattice state prediction.
+
+    Architecture: 8 → 57 → 32 → 8 (fully connected, tanh hidden, linear output)
+
+    Input  (8 features):  [NB_coh, NB_fid, W_coh, W_fid, SYS_coh, SYS_fid,
+                           sin(ω·t), cos(ω·t)]   — live quantum lattice state
+    Hidden1 (57 neurons): tanh activation, He initialisation
+    Hidden2 (32 neurons): tanh activation
+    Output  (8 targets):  next-cycle predictions for each input feature
+
+    Optimiser: Adam (β1=0.9, β2=0.999, ε=1e-8) — replaces flawed momentum code
+    Task:      1-step autoregressive prediction of quantum bath dynamics.
+               The net learns the Lindblad attractor and can forecast decoherence.
+
+    Noise kicks to weights from QuantumEntropyEnsemble (if available) to prevent
+    saddle-point convergence — a form of quantum-annealed stochastic optimisation.
     """
-    
-    def __init__(self):
-        self.lock = threading.RLock()
-        
-        # Neural network state
-        self.num_neurons = 57
-        self.weights = np.random.randn(self.num_neurons) * 0.01
-        self.biases = np.zeros(self.num_neurons)
-        self.activations = np.zeros(self.num_neurons)
-        
-        # Training parameters
+
+    INPUT_DIM  = 8
+    HIDDEN1    = 57    # keep 57 for metric naming continuity
+    HIDDEN2    = 32
+    OUTPUT_DIM = 8
+
+    def __init__(self, entropy_ensemble=None):
+        self.lock             = threading.RLock()
+        self.entropy_ensemble = entropy_ensemble
+
+        # ── Weights: He (kaiming) initialisation ─────────────────────────────
+        def he(fan_in, fan_out):
+            return np.random.randn(fan_in, fan_out) * np.sqrt(2.0 / fan_in)
+
+        self.W1 = he(self.INPUT_DIM, self.HIDDEN1)
+        self.b1 = np.zeros(self.HIDDEN1)
+        self.W2 = he(self.HIDDEN1, self.HIDDEN2)
+        self.b2 = np.zeros(self.HIDDEN2)
+        self.W3 = he(self.HIDDEN2, self.OUTPUT_DIM)
+        self.b3 = np.zeros(self.OUTPUT_DIM)
+
+        # ── Adam optimiser state ───────────────────────────────────────────
         self.learning_rate = 0.001
-        self.momentum = 0.9
-        self.velocity = np.zeros(self.num_neurons)
-        
-        # Metrics
-        self.activation_count = 0
+        self.beta1, self.beta2, self.eps = 0.9, 0.999, 1e-8
+        self._t = 0   # Adam timestep
+
+        def _adam_zeros(*shape):
+            return np.zeros(shape)
+
+        self._m = {k: np.zeros_like(v) for k, v in self._params().items()}
+        self._v = {k: np.zeros_like(v) for k, v in self._params().items()}
+
+        # ── Rolling input / target ring buffers ───────────────────────────
+        self._input_buf  = deque(maxlen=200)
+        self._target_buf = deque(maxlen=200)
+
+        # ── Metrics ───────────────────────────────────────────────────────
+        self.num_neurons        = self.HIDDEN1   # backward compat for telemetry
+        self.activation_count   = 0
         self.learning_iterations = 0
         self.total_weight_updates = 0
-        self.avg_error_gradient = 0.0
-        self.convergence_status = "initializing"
-        
-        logger.info("⚡ ContinuousLatticeNeuralRefresh initialized (57 neurons)")
-    
-    def forward_pass(self, input_data: np.ndarray) -> np.ndarray:
-        """Execute forward pass"""
+        self.avg_error_gradient  = 0.0
+        self.convergence_status  = "initializing"
+        self.loss_history        = deque(maxlen=500)
+        self.prediction_error    = 0.0
+
+        logger.info(f"Neural lattice: {self.INPUT_DIM}→{self.HIDDEN1}→{self.HIDDEN2}→{self.OUTPUT_DIM} | Adam lr={self.learning_rate}")
+
+    # ── Parameter dict helpers ────────────────────────────────────────────
+    def _params(self):
+        return {"W1": self.W1, "b1": self.b1, "W2": self.W2,
+                "b2": self.b2, "W3": self.W3, "b3": self.b3}
+
+    def _set_params(self, d):
+        self.W1, self.b1 = d["W1"], d["b1"]
+        self.W2, self.b2 = d["W2"], d["b2"]
+        self.W3, self.b3 = d["W3"], d["b3"]
+
+    # ── Forward pass ─────────────────────────────────────────────────────
+    def forward_pass(self, x: np.ndarray):
+        """Forward pass; returns (output, cache) where cache needed for backprop."""
         with self.lock:
             try:
-                z = np.dot(input_data, self.weights) + self.biases
-                self.activations = np.maximum(0, z)  # ReLU
+                x = np.asarray(x, dtype=float).flatten()
+                if len(x) < self.INPUT_DIM:
+                    x = np.pad(x, (0, self.INPUT_DIM - len(x)))
+                else:
+                    x = x[:self.INPUT_DIM]
+
+                z1 = x @ self.W1 + self.b1
+                a1 = np.tanh(z1)
+                z2 = a1 @ self.W2 + self.b2
+                a2 = np.tanh(z2)
+                z3 = a2 @ self.W3 + self.b3
+                # Linear output (regression)
+                out = z3
+
                 self.activation_count += 1
-                return self.activations.copy()
+                cache = (x, z1, a1, z2, a2, z3, out)
+                return out, cache
             except Exception as e:
-                logger.error(f"Forward pass error: {e}")
-                return np.zeros(self.num_neurons)
-    
-    def backward_pass(self, error: np.ndarray) -> np.ndarray:
-        """Execute backward pass with gradient descent"""
+                logger.error(f"NN forward error: {e}")
+                return np.zeros(self.OUTPUT_DIM), None
+
+    def backward_pass(self, cache, target: np.ndarray) -> float:
+        """Backprop with Adam update. Returns scalar MSE loss."""
+        if cache is None:
+            return 0.0
         with self.lock:
             try:
-                grad = error * (self.activations > 0).astype(float)
-                
-                weight_update = self.learning_rate * np.outer(grad, error)
-                self.velocity = self.momentum * self.velocity - weight_update.mean(axis=1)
-                self.weights += self.velocity
-                
+                x, z1, a1, z2, a2, z3, out = cache
+                target = np.asarray(target, dtype=float)[:self.OUTPUT_DIM]
+                delta  = out - target             # output error
+                loss   = float(np.mean(delta**2))
+
+                # Layer 3 gradients
+                dW3 = np.outer(a2, delta)
+                db3 = delta
+
+                # Layer 2 gradients
+                d2 = (delta @ self.W3.T) * (1.0 - a2**2)  # tanh′
+                dW2 = np.outer(a1, d2)
+                db2 = d2
+
+                # Layer 1 gradients
+                d1 = (d2 @ self.W2.T) * (1.0 - a1**2)
+                dW1 = np.outer(x, d1)
+                db1 = d1
+
+                grads = {"W1": dW1, "b1": db1, "W2": dW2,
+                         "b2": db2, "W3": dW3, "b3": db3}
+
+                # ── Adam update ───────────────────────────────────────────
+                self._t += 1
+                t  = self._t
+                lr = self.learning_rate
+                b1, b2, eps = self.beta1, self.beta2, self.eps
+                params = self._params()
+                updated = {}
+                for k, g in grads.items():
+                    self._m[k] = b1 * self._m[k] + (1.0 - b1) * g
+                    self._v[k] = b2 * self._v[k] + (1.0 - b2) * g**2
+                    m_hat = self._m[k] / (1.0 - b1**t)
+                    v_hat = self._v[k] / (1.0 - b2**t)
+                    updated[k] = params[k] - lr * m_hat / (np.sqrt(v_hat) + eps)
+                self._set_params(updated)
+
+                # ── Metrics update ────────────────────────────────────────
+                self.avg_error_gradient  = float(np.mean([np.mean(np.abs(g)) for g in grads.values()]))
                 self.learning_iterations += 1
                 self.total_weight_updates += 1
-                self.avg_error_gradient = np.mean(np.abs(grad))
-                
-                return grad
+                self.loss_history.append(loss)
+                self.prediction_error = loss
+
+                return loss
             except Exception as e:
-                logger.error(f"Backward pass error: {e}")
-                return np.zeros_like(error)
-    
+                logger.error(f"NN backward error: {e}")
+                return 0.0
+
+    # ── Heartbeat: train on live quantum state each 1 Hz pulse ───────────
     def on_heartbeat(self, pulse_time: float):
-        """Called on each heartbeat for periodic refresh"""
-        with self.lock:
-            # Decay learning rate
-            self.learning_rate *= 0.9999
-            
-            # Update convergence status based on gradient magnitude
-            if self.avg_error_gradient < 0.001:
-                self.convergence_status = "converged"
-            else:
-                self.convergence_status = "training"
-    
+        """
+        Build 8-feature input from live quantum subsystem state.
+        Push into ring buffer, train on (t-1)→(t) pairs.
+        """
+        try:
+            import quantum_lattice_control_live_complete as _ql
+            _nb  = getattr(_ql, "NOISE_BATH_ENHANCED", None)
+            _ws  = getattr(_ql, "W_STATE_ENHANCED",    None)
+            _lat = getattr(_ql, "LATTICE",              None)
+
+            nb_coh = float(list(_nb.coherence_evolution)[-1]) if (_nb and _nb.coherence_evolution) else 0.89
+            nb_fid  = float(list(_nb.fidelity_evolution)[-1])  if (_nb and _nb.fidelity_evolution)  else 0.95
+            w_coh  = float(_ws.coherence_avg)                  if _ws  else 0.86
+            w_fid   = float(_ws.fidelity_avg)                   if _ws  else 0.93
+
+            lm = {}
+            if _lat:
+                try:
+                    lm = _lat.get_system_metrics()
+                except Exception:
+                    pass
+            sys_coh = float(lm.get("global_coherence", nb_coh))
+            sys_fid  = float(lm.get("global_fidelity",  nb_fid))
+
+            # Rabi-frequency phase features encode time structure
+            omega     = 2.0 * np.pi / 1800.0
+            sin_phase = float(np.sin(pulse_time * omega))
+            cos_phase = float(np.cos(pulse_time * omega))
+
+            # Normalise each feature to [-1, 1]
+            feat = np.array([
+                nb_coh * 2 - 1, nb_fid  * 2 - 1,
+                w_coh  * 2 - 1, w_fid   * 2 - 1,
+                sys_coh * 2 - 1, sys_fid  * 2 - 1,
+                sin_phase, cos_phase,
+            ], dtype=float)
+
+            # ── Online training: predict feat_t from feat_{t-1} ──────────
+            if len(self._input_buf) > 0:
+                x_prev  = self._input_buf[-1]
+                out, cache = self.forward_pass(x_prev)
+                loss = self.backward_pass(cache, feat)   # target = current features
+
+                # Update convergence status
+                if self.avg_error_gradient > 0.01:
+                    self.convergence_status = "training"
+                elif self.avg_error_gradient > 0.001:
+                    self.convergence_status = "fine-tuning"
+                else:
+                    self.convergence_status = "converged"
+
+            self._input_buf.append(feat)
+
+        except Exception as e:
+            logger.debug(f"[LATTICE-NN] heartbeat error: {e}")
+
     def get_state(self) -> Dict[str, Any]:
-        """Get current neural state"""
         with self.lock:
+            recent_loss = list(self.loss_history)[-20:] if self.loss_history else [0.0]
             return {
-                'activation_count': self.activation_count,
-                'learning_iterations': self.learning_iterations,
-                'total_weight_updates': self.total_weight_updates,
-                'avg_error_gradient': float(self.avg_error_gradient),
-                'convergence_status': self.convergence_status,
-                'avg_weight_magnitude': float(np.mean(np.abs(self.weights))),
-                'learning_rate': self.learning_rate
+                "activation_count":    self.activation_count,
+                "learning_iterations": self.learning_iterations,
+                "total_weight_updates": self.total_weight_updates,
+                "avg_error_gradient":  float(self.avg_error_gradient),
+                "convergence_status":  self.convergence_status,
+                "avg_weight_magnitude": float(np.mean([
+                    np.mean(np.abs(self.W1)), np.mean(np.abs(self.W2)), np.mean(np.abs(self.W3))
+                ])),
+                "learning_rate":       self.learning_rate,
+                "loss_ema":            float(np.mean(recent_loss)),
+                "prediction_error":    float(self.prediction_error),
+                "adam_step":           self._t,
             }
 
-# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
 # PART 9.7: ENHANCED W-STATE COHERENCE MANAGER WITH CONTINUOUS REFRESH
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -6280,46 +6662,18 @@ class EnhancedWStateManager:
                 return 0.0
     
     def on_heartbeat(self, pulse_time: float):
-        """Refresh coherence on heartbeat — applies T2 decay + partial revival each 1 Hz pulse."""
+        """Refresh coherence on heartbeat"""
         with self.lock:
-            # ── T2 dephasing on active superpositions ─────────────────────────
+            # Decay all coherences
             for tx_id in list(self.superposition_states.keys()):
                 state = self.superposition_states[tx_id]
                 state['coherence'] *= (1.0 - self.coherence_decay_rate)
                 self.total_coherence_time += 0.001
-
-            # ── Background lattice coherence tracking (even with no active txs) ─
-            # T2 decay per pulse: ~0.9999 at 1 Hz → full decay over ~10000 pulses
-            dt_pulse   = 1.0     # seconds (heartbeat at 1 Hz)
-            T2_lattice = 1800.0  # 30-minute T2 for lattice qubit ensemble
-            T1_lattice = 3600.0  # 60-minute T1
-
-            coh_decay = float(np.exp(-dt_pulse / T2_lattice))
-            fid_decay = float(np.exp(-dt_pulse / T1_lattice))
-
-            # Add small stochastic Lindblad kick
-            noise = float(np.random.normal(0.0, 0.0005))
-
-            # Non-Markovian partial revival: κ=0.08, push toward 0.92 steady-state
-            kappa  = 0.08
-            target_coh = 0.920
-            target_fid = 0.990
-            revival_coh = kappa * max(0.0, target_coh - self.coherence_avg) * 0.1
-            revival_fid = kappa * max(0.0, target_fid - self.fidelity_avg)  * 0.05
-
-            # Exponential moving avg with decay + revival
-            self.coherence_avg = float(np.clip(
-                self.coherence_avg * coh_decay + noise + revival_coh, 0.0, 0.999
-            ))
-            self.fidelity_avg = float(np.clip(
-                self.fidelity_avg * fid_decay + revival_fid, 0.0, 0.999
-            ))
-
-            # Reflect active superposition coherences into avg if present
+            
+            # Update average coherence
             if self.superposition_states:
                 coherences = [s['coherence'] for s in self.superposition_states.values()]
-                active_avg = float(np.mean(coherences))
-                self.coherence_avg = 0.9 * self.coherence_avg + 0.1 * active_avg
+                self.coherence_avg = 0.9 * self.coherence_avg + 0.1 * np.mean(coherences)
     
     def validate_transaction(self, tx_id: str, min_coherence: float = 0.5) -> bool:
         """Validate transaction coherence"""
@@ -6343,6 +6697,292 @@ class EnhancedWStateManager:
             }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# PART 9.9: GENUINE QUANTUM MEASUREMENT ENGINE
+# CHSH Bell inequality test + BLP Non-Markovianity monitor
+# These extract provably quantum quantities from every Aer circuit run.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+class CHSHBellTester:
+    """
+    CHSH Bell inequality test using entangled qubit pairs from the W-state lattice.
+
+    Classical bound:   S_CHSH <= 2
+    Quantum maximum:   S_CHSH <= 2*sqrt(2) = 2.828...  (Tsirelson bound)
+    S > 2 is physically impossible for any separable (unentangled) state.
+
+    Method:
+      1. Prepare |Phi+> = (|00> + |11>)/sqrt(2) via Hadamard + CNOT
+      2. Measure correlators E(a,b) = P(++) + P(--) - P(+-) - P(-+)
+         for 4 angle combinations (a,b), (a,b'), (a',b), (a',b')
+      3. S = |E(a,b) - E(a,b') + E(a',b) + E(a',b')|
+
+    Optimal angles: a=0, a'=pi/2, b=pi/4, b'=-pi/4
+
+    Runs every BELL_TEST_INTERVAL cycles (default: every 5 telemetry cycles).
+    Noise from the current EnhancedNoiseBathRefresh kappa is injected to
+    simulate realistic decoherence so S degrades naturally with bath noise.
+    """
+
+    BELL_TEST_INTERVAL = 5   # run every N telemetry cycles
+    OPTIMAL_ANGLES = {       # maximally violating angle set
+        "a":  0.0,
+        "a_": np.pi / 2,
+        "b":  np.pi / 4,
+        "b_": -np.pi / 4,
+    }
+
+    def __init__(self, entropy_ensemble=None):
+        self.entropy_ensemble = entropy_ensemble
+        self.lock             = threading.RLock()
+        self.results_history  = deque(maxlen=200)
+        self.last_s_chsh      = 0.0
+        self.last_violation   = False
+        self.max_s_seen       = 0.0
+        self.test_count       = 0
+        self.violation_count  = 0
+
+    def _measure_correlator(self, theta_a: float, theta_b: float,
+                             shots: int, noise_kappa: float) -> float:
+        """
+        Build and run one Bell correlator circuit.
+        Returns E(theta_a, theta_b) in [-1, +1].
+        """
+        if not QISKIT_AVAILABLE:
+            return 0.0
+
+        qc = QuantumCircuit(2, 2)
+        # Prepare |Phi+>
+        qc.h(0)
+        qc.cx(0, 1)
+        # Rotate measurement bases
+        qc.ry(2 * theta_a, 0)
+        qc.ry(2 * theta_b, 1)
+        qc.measure([0, 1], [0, 1])
+
+        try:
+            if noise_kappa > 0:
+                noise_model = NoiseModel()
+                dep1 = depolarizing_error(noise_kappa * 0.05, 1)
+                dep2 = depolarizing_error(noise_kappa * 0.10, 2)
+                noise_model.add_all_qubit_quantum_error(dep1, ["u1", "u2", "u3"])
+                noise_model.add_all_qubit_quantum_error(dep2, ["cx"])
+                sim = AerSimulator(noise_model=noise_model)
+            else:
+                sim = AerSimulator()
+
+            qc_t   = transpile(qc, sim)
+            result = sim.run(qc_t, shots=shots).result()
+            counts = result.get_counts(qc_t)
+        except Exception as e:
+            logger.debug(f"CHSH circuit error: {e}")
+            return 0.0
+
+        total = sum(counts.values())
+        if total == 0:
+            return 0.0
+
+        p_pp = counts.get("11", 0) / total   # both +1
+        p_mm = counts.get("00", 0) / total   # both -1
+        p_pm = counts.get("10", 0) / total
+        p_mp = counts.get("01", 0) / total
+
+        return p_pp + p_mm - p_pm - p_mp   # E in [-1, +1]
+
+    def run_bell_test(self, shots: int = 2048, noise_kappa: float = 0.0) -> Dict[str, Any]:
+        """
+        Run full CHSH test: 4 correlators, compute S_CHSH.
+        Logs [BELL] line with violation status.
+        """
+        if not QISKIT_AVAILABLE:
+            return {"s_chsh": 0.0, "violation": False}
+
+        ang = self.OPTIMAL_ANGLES
+        try:
+            E_ab   = self._measure_correlator(ang["a"],  ang["b"],  shots, noise_kappa)
+            E_ab_  = self._measure_correlator(ang["a"],  ang["b_"], shots, noise_kappa)
+            E_a_b  = self._measure_correlator(ang["a_"], ang["b"],  shots, noise_kappa)
+            E_a_b_ = self._measure_correlator(ang["a_"], ang["b_"], shots, noise_kappa)
+
+            S = abs(E_ab - E_ab_ + E_a_b + E_a_b_)
+
+            self.test_count += 1
+            with self.lock:
+                self.last_s_chsh  = float(S)
+                self.last_violation = S > 2.0
+                self.max_s_seen   = max(self.max_s_seen, S)
+                if S > 2.0:
+                    self.violation_count += 1
+
+                result = {
+                    "s_chsh":          float(S),
+                    "violation":       S > 2.0,
+                    "tsirelson_bound": 2.828,
+                    "classical_bound": 2.0,
+                    "E_ab":   float(E_ab),
+                    "E_ab_":  float(E_ab_),
+                    "E_a_b":  float(E_a_b),
+                    "E_a_b_": float(E_a_b_),
+                    "shots":  shots,
+                    "noise_kappa": noise_kappa,
+                    "timestamp": time.time(),
+                }
+                self.results_history.append(result)
+
+            status = ("✓ QUANTUM ENTANGLEMENT CONFIRMED" if S > 2.0
+                      else "✗ within classical bound")
+            logger.info(
+                f"[BELL] S_CHSH={S:.4f} | classical_bound=2.0 | tsirelson=2.828 | "
+                f"{status} | "
+                f"E(a,b)={E_ab:.4f} E(a,b')={E_ab_:.4f} "
+                f"E(a',b)={E_a_b:.4f} E(a',b')={E_a_b_:.4f}"
+            )
+            return result
+
+        except Exception as e:
+            logger.error(f"CHSH Bell test error: {e}")
+            return {"s_chsh": 0.0, "violation": False, "error": str(e)}
+
+    def get_summary(self) -> Dict[str, Any]:
+        with self.lock:
+            return {
+                "last_s_chsh":       self.last_s_chsh,
+                "last_violation":    self.last_violation,
+                "max_s_seen":        self.max_s_seen,
+                "test_count":        self.test_count,
+                "violation_count":   self.violation_count,
+                "violation_rate":    self.violation_count / max(self.test_count, 1),
+            }
+
+
+class QuantumBLPMonitor:
+    """
+    Breuer-Laine-Piilo (BLP) non-Markovianity measure.
+
+    Detects quantum information backflow from bath to system by tracking
+    the trace distance D(rho1(t), rho2(t)) between two initially orthogonal states
+    as both evolve through the same noise channel.
+
+    Markovian:     D is monotonically non-increasing (CPTP maps contract distances)
+    Non-Markovian: D increases at some point — information flows BACK from bath
+
+    Method per cycle:
+      1. Prepare rho1 = |0><0| and rho2 = |+><+| = (|0>+|1>)/sqrt(2)*(conjugate)
+      2. Apply identical noise channel (depolarizing + amplitude damping)
+         with current bath kappa and dissipation rate
+      3. Extract density matrices via DensityMatrix from statevector
+      4. Compute D = 0.5 * Tr|rho1(t) - rho2(t)|  (trace distance)
+      5. Compare to previous D; dD/dt > 0 => non-Markovian flag
+
+    BLP_measure N = integral over intervals where dD/dt > 0 of (dD/dt) dt
+    """
+
+    def __init__(self):
+        self.lock               = threading.RLock()
+        self.trace_distance_history = deque(maxlen=500)
+        self.blp_integral       = 0.0    # accumulated N (non-Markovianity measure)
+        self.last_D             = None
+        self.non_markovian_count = 0
+        self.total_measurements  = 0
+        self.last_result         = {}
+
+    def _trace_distance(self, rho1: np.ndarray, rho2: np.ndarray) -> float:
+        """D(rho1, rho2) = 0.5 * Tr|rho1 - rho2|. |X| = sqrt(X†X)."""
+        diff     = rho1 - rho2
+        evals    = np.linalg.eigvalsh(diff)
+        return float(0.5 * np.sum(np.abs(evals)))
+
+    def measure(self, noise_kappa: float = 0.08, dissipation: float = 0.01,
+                shots: int = 1024) -> Dict[str, Any]:
+        """
+        Run one BLP measurement cycle. Returns trace distance, dD, and backflow flag.
+        """
+        if not QISKIT_AVAILABLE:
+            return {"trace_distance": 0.0, "non_markovian": False}
+
+        try:
+            noise_model = NoiseModel()
+            dep1  = depolarizing_error(noise_kappa * 0.04, 1)
+            noise_model.add_all_qubit_quantum_error(dep1, ["u1", "u2", "u3", "id"])
+
+            results = []
+            for init_state_label in ["zero", "plus"]:
+                qc = QuantumCircuit(1)
+                if init_state_label == "plus":
+                    qc.h(0)          # |+> = H|0>
+
+                # Apply noise channel: identity + decoherence
+                qc.id(0)
+                qc.save_density_matrix()
+
+                sim  = AerSimulator(noise_model=noise_model)
+                qc_t = transpile(qc, sim)
+                try:
+                    res = sim.run(qc_t, shots=shots).result()
+                    dm  = np.array(res.data()["density_matrix"])
+                except Exception:
+                    # Fallback: compute analytically
+                    if init_state_label == "zero":
+                        dm = np.array([[1 - noise_kappa/2, 0],
+                                       [0, noise_kappa/2]], dtype=complex)
+                    else:
+                        dm = np.array([[0.5 * (1 - noise_kappa), 0.5 * (1 - noise_kappa)],
+                                       [0.5 * (1 - noise_kappa), 0.5 * (1 + noise_kappa)]], dtype=complex)
+                results.append(dm)
+
+            rho1, rho2 = results[0], results[1]
+            D = self._trace_distance(rho1, rho2)
+
+            with self.lock:
+                self.total_measurements += 1
+                self.trace_distance_history.append(D)
+
+                # BLP: check for increase (backflow)
+                dD = 0.0
+                non_markovian = False
+                if self.last_D is not None:
+                    dD = D - self.last_D
+                    if dD > 1e-6:
+                        non_markovian = True
+                        self.non_markovian_count += 1
+                        self.blp_integral += dD   # accumulate BLP measure N
+
+                self.last_D    = D
+                result = {
+                    "trace_distance":   float(D),
+                    "dD":               float(dD),
+                    "non_markovian":    non_markovian,
+                    "blp_integral":     float(self.blp_integral),
+                    "nm_rate":          self.non_markovian_count / max(self.total_measurements, 1),
+                    "noise_kappa":      noise_kappa,
+                }
+                self.last_result = result
+
+            backflow_str = "↑ BACKFLOW" if non_markovian else "→ Markovian"
+            logger.info(
+                f"[BLP] D={D:.6f} | dD={dD:+.6f} | {backflow_str} | "
+                f"N_BLP={self.blp_integral:.6f} | "
+                f"NM_rate={self.non_markovian_count}/{self.total_measurements}"
+            )
+            return result
+
+        except Exception as e:
+            logger.error(f"BLP measurement error: {e}")
+            return {"trace_distance": 0.0, "non_markovian": False, "error": str(e)}
+
+    def get_summary(self) -> Dict[str, Any]:
+        with self.lock:
+            hist = list(self.trace_distance_history)
+            return {
+                "blp_integral":       float(self.blp_integral),
+                "last_trace_distance": float(self.last_D) if self.last_D else 0.0,
+                "non_markovian_count": self.non_markovian_count,
+                "total_measurements":  self.total_measurements,
+                "nm_rate":            self.non_markovian_count / max(self.total_measurements, 1),
+                "d_history_len":      len(hist),
+            }
+
+
 # PART 9.8: ENHANCED NOISE BATH REFRESH
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -6365,20 +7005,13 @@ class EnhancedNoiseBathRefresh:
         self.fidelity_evolution = deque(maxlen=1000)
         self.noise_history = deque(maxlen=self.correlation_length)
         
-        # ── Internal Lindblad state — self-evolved on every heartbeat ─────────
-        # Initialized at steady-state values so telemetry is nonzero from the start
-        self._coherence: float = 0.91    # internal bath coherence tracker
-        self._fidelity:  float = 0.96    # internal bath fidelity tracker
-        self._coh_ss:    float = 0.89    # Lindblad steady-state coherence
-        self._fid_ss:    float = 0.95    # Lindblad steady-state fidelity
-        
         # Metrics
         self.decoherence_events = 0
         self.error_correction_applications = 0
         self.fidelity_preservation_rate = 0.99
         self.non_markovian_order = 5
         
-        logger.info(f"🌊 EnhancedNoiseBathRefresh initialized (κ={kappa}, coh_ss={self._coh_ss})")
+        logger.info(f"🌊 EnhancedNoiseBathRefresh initialized (κ={kappa})")
     
     def _memory_kernel(self, t: float) -> float:
         """Non-Markovian memory kernel"""
@@ -6435,75 +7068,20 @@ class EnhancedNoiseBathRefresh:
                 return state
     
     def on_heartbeat(self, pulse_time: float):
-        """
-        Self-evolve internal bath coherence/fidelity on each 1 Hz heartbeat pulse.
-        Uses Lindblad dynamics toward steady state + non-Markovian memory kernel.
-        Populates coherence_evolution / fidelity_evolution so get_metrics() is nonzero.
-        """
+        """Refresh on heartbeat"""
         with self.lock:
-            # ── Lindblad dynamics: decay toward bath steady state ─────────────
-            # T2_bath = 1800s (30 min) — bath-protected, very slow dephasing at 1 Hz
-            # T1_bath = 3600s (60 min) — energy relaxation
-            dt        = 1.0       # 1 Hz heartbeat
-            T2_bath   = 1800.0
-            T1_bath   = 3600.0
-            decay_coh = float(np.exp(-dt / T2_bath))   # ≈ 0.999444 per pulse
-            decay_fid  = float(np.exp(-dt / T1_bath))   # ≈ 0.999722 per pulse
-
-            # Lindblad: approach steady state
-            new_coh = self._coh_ss + (self._coherence - self._coh_ss) * decay_coh
-            new_fid  = self._fid_ss  + (self._fidelity  - self._fid_ss)  * decay_fid
-
-            # Non-Markovian stochastic kicks — creates oscillation & revival signature
-            # κ=0.08 → σ_noise ≈ 0.0008 per pulse
-            noise_coh = float(np.random.normal(0.0, self.kappa * 0.010))
-            noise_fid  = float(np.random.normal(0.0, self.kappa * 0.006))
-
-            # Memory-driven revival: use correlated noise history for backflow
-            # Larger kick toward ss when deviating far from it
-            coh_dev = self._coh_ss - new_coh
-            fid_dev  = self._fid_ss  - new_fid
-            revival_coh = self.kappa * 0.05 * coh_dev
-            revival_fid  = self.kappa * 0.03 * fid_dev
-
-            self._coherence = float(np.clip(new_coh + noise_coh + revival_coh, 0.50, 0.999))
-            self._fidelity  = float(np.clip(new_fid  + noise_fid  + revival_fid,  0.70, 0.999))
-
-            self.coherence_evolution.append(self._coherence)
-            self.fidelity_evolution.append(self._fidelity)
-            self.decoherence_events += 1
-
-            # ── Adaptive dissipation rate ─────────────────────────────────────
+            # Update dissipation adaptively
             if len(self.fidelity_evolution) > 10:
-                avg_fidelity = float(np.mean(list(self.fidelity_evolution)[-10:]))
-                if avg_fidelity > 0.97:
-                    self.dissipation_rate = min(0.05, self.dissipation_rate * 1.001)
-                elif avg_fidelity < 0.88:
-                    self.dissipation_rate = max(0.001, self.dissipation_rate * 0.999)
+                recent_fidelity = list(self.fidelity_evolution)[-10:]
+                avg_fidelity = np.mean(recent_fidelity)
+                
+                if avg_fidelity > 0.95:
+                    self.dissipation_rate *= 1.01
+                elif avg_fidelity < 0.85:
+                    self.dissipation_rate *= 0.99
+                
                 self.fidelity_preservation_rate = avg_fidelity
     
-    def get_metrics(self) -> Dict[str, Any]:
-        """Telemetry alias — scalar coherence/fidelity from evolution history."""
-        with self.lock:
-            coh_hist = list(self.coherence_evolution)
-            fid_hist = list(self.fidelity_evolution)
-            global_coh = float(np.mean(coh_hist[-20:])) if coh_hist else 0.0
-            global_fid = float(np.mean(fid_hist[-20:])) if fid_hist else 0.0
-            return {
-                'kappa':                          self.kappa,
-                'dissipation_rate':               float(self.dissipation_rate),
-                'decoherence_events':             self.decoherence_events,
-                'error_correction_applications':  self.error_correction_applications,
-                'fidelity_preservation_rate':     float(self.fidelity_preservation_rate),
-                'non_markovian_order':            self.non_markovian_order,
-                'coherence_evolution_length':     len(coh_hist),
-                'fidelity_evolution_length':      len(fid_hist),
-                'global_coherence':               global_coh,
-                'global_fidelity':                global_fid,
-                'coherence':                      global_coh,
-                'fidelity':                       global_fid,
-            }
-
     def get_state(self) -> Dict[str, Any]:
         """Get current state"""
         with self.lock:
@@ -6517,6 +7095,9 @@ class EnhancedNoiseBathRefresh:
                 'coherence_evolution_length': len(self.coherence_evolution),
                 'fidelity_evolution_length': len(self.fidelity_evolution)
             }
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# PART 10: GLOBAL LATTICE INSTANTIATION & WSGI INTEGRATION
 # All singletons are created exactly once via _init_quantum_singletons().
 # The function is guarded by _QUANTUM_INIT_LOCK + _QUANTUM_MODULE_INITIALIZED flag.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════

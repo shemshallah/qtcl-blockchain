@@ -1480,6 +1480,29 @@ def _lattice_telemetry_loop() -> None:
                 except Exception as _e:
                     logger.debug(f"[LATTICE-TELEM] LATTICE_NEURAL metrics error: {_e}")
 
+            # ── Genuine quantum observables from last Aer statevector run ─────
+            # These are the true quantum quantities: purity, S_vN, entanglement entropy,
+            # l₁ coherence, W-state fidelity. Sourced from TransactionValidatorWState.
+            try:
+                _w_mgr = getattr(lat, 'w_state_manager', None) if lat else None
+                if _w_mgr is not None:
+                    qobs = getattr(_w_mgr, 'quantum_observables', {})
+                    if qobs and qobs.get('timestamp', 0) > 0:
+                        age = time.time() - qobs['timestamp']
+                        logger.info(
+                            f"[QUANTUM-OBS] cycle=#{cycle} | "
+                            f"purity={qobs.get('purity', '?'):.6f} | "
+                            f"S_vN={qobs.get('von_neumann_entropy', '?'):.6f}bits | "
+                            f"S_ent={qobs.get('entanglement_entropy', '?'):.6f}bits | "
+                            f"C_l1={qobs.get('l1_coherence', '?'):.4f} | "
+                            f"F_W={qobs.get('w_state_fidelity', '?'):.6f} | "
+                            f"age={age:.0f}s"
+                        )
+                    else:
+                        logger.debug(f"[LATTICE-TELEM] quantum_observables not yet populated")
+            except Exception as _e:
+                logger.debug(f"[LATTICE-TELEM] QUANTUM-OBS error: {_e}")
+
             # ── Trigger one refresh_full_lattice cycle (produces [LATTICE-REFRESH] lines) ──
             # WStateEnhancedCoherenceRefresh is the source of [LATTICE-REFRESH] logs.
             # It's on the LATTICE object's w_state_refresh attribute (QuantumLatticeGlobal).
@@ -1535,6 +1558,30 @@ def _lattice_telemetry_loop() -> None:
                             f"W-revival={'✓' if revival else '↔'} | "
                             f"NB-coh={w_coherence:.6f} | source=AerSimulator"
                         )
+
+                        # ── CHSH Bell + BLP summary from last background run ──
+                        try:
+                            _bell = getattr(lat, 'bell_tester', None)
+                            _blp  = getattr(lat, 'blp_monitor',  None)
+                            if _bell and _bell.test_count > 0:
+                                bs = _bell.get_summary()
+                                viol = "✓ ENTANGLEMENT" if bs.get('last_violation') else "· classical"
+                                logger.info(
+                                    f"[BELL] last S_CHSH={bs.get('last_s_chsh', 0):.4f} | "
+                                    f"max={bs.get('max_s_seen', 0):.4f} | "
+                                    f"violations={bs.get('violation_count', 0)}/{bs.get('test_count', 0)} | "
+                                    f"{viol}"
+                                )
+                            if _blp and _blp.total_measurements > 0:
+                                bp = _blp.get_summary()
+                                nm = "↑ BACKFLOW" if bp.get('nm_rate', 0) > 0.1 else "→ Markovian-like"
+                                logger.info(
+                                    f"[BLP] D={bp.get('last_trace_distance', 0):.6f} | "
+                                    f"N_BLP={bp.get('blp_integral', 0):.6f} | "
+                                    f"NM_rate={bp.get('nm_rate', 0):.3f} | {nm}"
+                                )
+                        except Exception as _be:
+                            logger.debug(f"[LATTICE-TELEM] BELL/BLP summary error: {_be}")
                     except Exception as _e:
                         logger.debug(f"[LATTICE-TELEM] LATTICE evolve/refresh error: {_e}")
 
