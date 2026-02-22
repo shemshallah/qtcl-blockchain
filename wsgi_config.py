@@ -1419,19 +1419,48 @@ def _lattice_telemetry_loop() -> None:
                 except Exception as _e:
                     logger.debug(f"[LATTICE-TELEM] HEARTBEAT metrics error: {_e}")
 
-            # ── W-STATE coherence ─────────────────────────────────────────────
-            ws = getattr(_ql, 'W_STATE_ENHANCED', None)
-            if ws is not None and hasattr(ws, 'get_state'):
+            # ── W-STATE coherence (REAL quantum metrics from LATTICE) ─────────────
+            import numpy as np
+            lattice = getattr(_ql, 'LATTICE', None)
+            noise_bath = getattr(_ql, 'NOISE_BATH_ENHANCED', None)
+            
+            if lattice is not None and lattice.coherence is not None and len(lattice.coherence) > 0:
                 try:
-                    wsm = ws.get_state()
+                    # Pull real coherence/fidelity from LATTICE
+                    coh_w = float(np.mean(lattice.coherence))
+                    fid_w = float(np.mean(lattice.fidelity))
+                    super_q = int(np.sum(lattice.coherence > 0.85))
                     
-                    # ENTERPRISE: Type checking - no "?" or "pending"
-                    coh_w = wsm.get('coherence_avg')
-                    fid_w = wsm.get('fidelity_avg')
+                    # Bell violation measurement
+                    bell_s = 0.0
+                    depth = 0
+                    viol_flag = ""
+                    validations = 0
+                    mi = 0.0
+                    kappa = 0.08
                     
-                    if coh_w is None or fid_w is None:
-                        raise ValueError(f"❌ CRITICAL: Missing coherence metrics | coh={coh_w} fid={fid_w}")
+                    if noise_bath is not None and hasattr(noise_bath, 'bell_detector'):
+                        try:
+                            bell_result = noise_bath.bell_detector.on_measurement(lattice.coherence, lattice.fidelity)
+                            bell_s = float(bell_result.get('chsh_s', 0.0))
+                            depth = int(bell_result.get('entanglement_depth', 0))
+                            if bell_result.get('chsh_violation', False):
+                                viol_flag = "⚡VIOLATION"
+                            validations = int(getattr(noise_bath.bell_detector, 'chsh_violation_events', 0))
+                            kappa = float(getattr(noise_bath, 'kappa', 0.08))
+                        except Exception:
+                            pass
                     
+                    # Mutual information calculation
+                    try:
+                        if len(lattice.coherence) > 10:
+                            corr = np.corrcoef(lattice.coherence, lattice.fidelity)[0, 1]
+                            if not np.isnan(corr):
+                                mi = float(np.clip(abs(corr), 0, 1))
+                    except Exception:
+                        mi = 0.0
+                    
+                    # ENTERPRISE: Type checking - strict validation
                     if not isinstance(coh_w, (int, float)) or not isinstance(fid_w, (int, float)):
                         raise TypeError(f"❌ CRITICAL: Invalid metric types | coh type={type(coh_w)} fid type={type(fid_w)}")
                     
@@ -1439,14 +1468,16 @@ def _lattice_telemetry_loop() -> None:
                     if not (0.0 <= coh_w <= 1.0) or not (0.0 <= fid_w <= 1.0):
                         raise ValueError(f"❌ CRITICAL: Metrics out of range | coh={coh_w} fid={fid_w}")
                     
-                    state_info = wsm.get('state', 'UNKNOWN')
                     logger.info(
                         f"[LATTICE-W]   cycle=#{cycle} | "
-                        f"state={state_info} | "
                         f"coherence_avg={coh_w:.6f} | "
                         f"fidelity_avg={fid_w:.6f} | "
-                        f"superpositions={wsm.get('superposition_count', 0)} | "
-                        f"validations={wsm.get('transaction_validations', 0)}"
+                        f"superpositions={super_q} | "
+                        f"bell_chsh_s={bell_s:.3f} | "
+                        f"entanglement_depth={depth} | "
+                        f"mi={mi:.4f} | "
+                        f"κ={kappa:.5f} | "
+                        f"validations={validations} {viol_flag}"
                     )
                 except (ValueError, TypeError, KeyError, RuntimeError) as _e:
                     # ENTERPRISE: Log as ERROR not DEBUG - this is visible failure
@@ -1454,6 +1485,8 @@ def _lattice_telemetry_loop() -> None:
                 except Exception as _e:
                     # Unexpected error - EXPOSE it
                     logger.error(f"❌ [LATTICE-W] FATAL UNEXPECTED ERROR: {_e}", exc_info=True)
+            else:
+                logger.debug(f"[LATTICE-W]   cycle=#{cycle} | LATTICE not yet initialized")
 
             # ── NOISE BATH ────────────────────────────────────────────────────
             nb = getattr(_ql, 'NOISE_BATH_ENHANCED', None)
