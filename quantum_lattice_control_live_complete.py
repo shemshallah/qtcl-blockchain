@@ -5649,34 +5649,62 @@ class DynamicNoiseBathEvolution:
         return max(0.0, min(1.0, memory))
     
     def evolve_bath_state(self, current_coherence: float, current_fidelity: float) -> Dict[str, Any]:
-        """Evolve bath state using non-Markovian dynamics"""
+        """
+        Evolve bath state using non-Markovian dynamics with genuine T1/T2 decoherence.
+
+        Physics pipeline (per 30-second telemetry cycle):
+          1. T2 dephasing  — exp(-dt/T2) decay, T2 ≈ 300 s at 1 Hz heartbeat
+          2. T1 amplitude damping — slower energy relaxation, T1 ≈ 600 s
+          3. Stochastic Lindblad kick — shot noise from bath_coupling
+          4. Non-Markovian memory revival — partial recovery proportional to κ·memory
+        This ensures coherence oscillates (decoheres then revives) rather than
+        sitting at a fixed point.
+        """
         try:
+            # ── Phase 1: Natural decoherence (T2 dephasing + T1 relaxation) ─────
+            # dt = 30 s telemetry interval; T2 = 300 s, T1 = 600 s
+            dt = 30.0
+            T2 = 300.0
+            T1 = 600.0
+            t2_decay = float(np.exp(-dt / T2))   # ≈ 0.9048 per cycle
+            t1_decay = float(np.exp(-dt / T1))   # ≈ 0.9512 per cycle
+
+            # Stochastic Lindblad kick — small random perturbation from bath coupling
+            noise_kick = float(np.random.normal(0.0, self.bath_coupling * 0.01))
+
+            coh_after_decay = max(0.01, current_coherence * t2_decay + noise_kick)
+            fid_after_decay = max(0.01, current_fidelity * t1_decay)
+
+            # ── Phase 2: Non-Markovian memory revival ─────────────────────────
             memory = self.compute_memory_effect()
-            
-            # Memory-dependent evolution
-            # Strong memory means past influences present (W-state revival effect)
-            coherence_boost = self.memory_kernel * memory * 0.02
-            fidelity_boost = self.bath_coupling * memory * 0.01
-            
-            new_coherence = min(0.99, current_coherence + coherence_boost)
-            new_fidelity = min(0.99, current_fidelity + fidelity_boost)
-            
+
+            coherence_revival = self.memory_kernel * memory * (1.0 - coh_after_decay) * 0.35
+            fidelity_revival  = self.bath_coupling  * memory * (1.0 - fid_after_decay) * 0.20
+
+            new_coherence = float(np.clip(coh_after_decay + coherence_revival, 0.0, 0.9999))
+            new_fidelity  = float(np.clip(fid_after_decay + fidelity_revival,  0.0, 0.9999))
+
             evolution_data = {
-                'timestamp': time.time(),
-                'memory': float(memory),
+                'timestamp':        time.time(),
+                'memory':           float(memory),
                 'coherence_before': float(current_coherence),
-                'coherence_after': float(new_coherence),
-                'fidelity_before': float(current_fidelity),
-                'fidelity_after': float(new_fidelity),
-                'coherence_boost': float(coherence_boost),
-                'fidelity_boost': float(fidelity_boost)
+                'coherence_after':  new_coherence,
+                'fidelity_before':  float(current_fidelity),
+                'fidelity_after':   new_fidelity,
+                'coherence':        new_coherence,    # scalar alias for telemetry
+                'fidelity':         new_fidelity,     # scalar alias for telemetry
+                'coherence_boost':  float(coherence_revival),
+                'fidelity_boost':   float(fidelity_revival),
+                't2_decay':         t2_decay,
+                'noise_kick':       noise_kick,
             }
-            
+
             with self.lock:
-                self.history.append(evolution_data)
+                self.history.append({'coherence': new_coherence, 'fidelity': new_fidelity,
+                                     'timestamp': evolution_data['timestamp']})
                 self.coherence_evolution.append(new_coherence)
                 self.fidelity_evolution.append(new_fidelity)
-            
+
             return evolution_data
         except Exception as e:
             logger.error(f"Error evolving bath state: {e}")
@@ -5864,7 +5892,6 @@ class QuantumLatticeGlobal:
             with self.lock:
                 self.operations_count += 1
             
-            # Compute scalar coherence / fidelity from evolution history and w_state
             coh_hist = list(self.noise_bath.coherence_evolution)[-10:] if self.noise_bath.coherence_evolution else []
             fid_hist = list(self.noise_bath.fidelity_evolution)[-10:] if self.noise_bath.fidelity_evolution else []
             w_info   = self.get_w_state()
@@ -6235,18 +6262,46 @@ class EnhancedWStateManager:
                 return 0.0
     
     def on_heartbeat(self, pulse_time: float):
-        """Refresh coherence on heartbeat"""
+        """Refresh coherence on heartbeat — applies T2 decay + partial revival each 1 Hz pulse."""
         with self.lock:
-            # Decay all coherences
+            # ── T2 dephasing on active superpositions ─────────────────────────
             for tx_id in list(self.superposition_states.keys()):
                 state = self.superposition_states[tx_id]
                 state['coherence'] *= (1.0 - self.coherence_decay_rate)
                 self.total_coherence_time += 0.001
-            
-            # Update average coherence
+
+            # ── Background lattice coherence tracking (even with no active txs) ─
+            # T2 decay per pulse: ~0.9999 at 1 Hz → full decay over ~10000 pulses
+            dt_pulse   = 1.0     # seconds (heartbeat at 1 Hz)
+            T2_lattice = 1800.0  # 30-minute T2 for lattice qubit ensemble
+            T1_lattice = 3600.0  # 60-minute T1
+
+            coh_decay = float(np.exp(-dt_pulse / T2_lattice))
+            fid_decay = float(np.exp(-dt_pulse / T1_lattice))
+
+            # Add small stochastic Lindblad kick
+            noise = float(np.random.normal(0.0, 0.0005))
+
+            # Non-Markovian partial revival: κ=0.08, push toward 0.92 steady-state
+            kappa  = 0.08
+            target_coh = 0.920
+            target_fid = 0.990
+            revival_coh = kappa * max(0.0, target_coh - self.coherence_avg) * 0.1
+            revival_fid = kappa * max(0.0, target_fid - self.fidelity_avg)  * 0.05
+
+            # Exponential moving avg with decay + revival
+            self.coherence_avg = float(np.clip(
+                self.coherence_avg * coh_decay + noise + revival_coh, 0.0, 0.999
+            ))
+            self.fidelity_avg = float(np.clip(
+                self.fidelity_avg * fid_decay + revival_fid, 0.0, 0.999
+            ))
+
+            # Reflect active superposition coherences into avg if present
             if self.superposition_states:
                 coherences = [s['coherence'] for s in self.superposition_states.values()]
-                self.coherence_avg = 0.9 * self.coherence_avg + 0.1 * np.mean(coherences)
+                active_avg = float(np.mean(coherences))
+                self.coherence_avg = 0.9 * self.coherence_avg + 0.1 * active_avg
     
     def validate_transaction(self, tx_id: str, min_coherence: float = 0.5) -> bool:
         """Validate transaction coherence"""
@@ -6369,6 +6424,28 @@ class EnhancedNoiseBathRefresh:
                 
                 self.fidelity_preservation_rate = avg_fidelity
     
+    def get_metrics(self) -> Dict[str, Any]:
+        """Telemetry alias — scalar coherence/fidelity from evolution history."""
+        with self.lock:
+            coh_hist = list(self.coherence_evolution)
+            fid_hist = list(self.fidelity_evolution)
+            global_coh = float(np.mean(coh_hist[-20:])) if coh_hist else 0.0
+            global_fid = float(np.mean(fid_hist[-20:])) if fid_hist else 0.0
+            return {
+                'kappa':                          self.kappa,
+                'dissipation_rate':               float(self.dissipation_rate),
+                'decoherence_events':             self.decoherence_events,
+                'error_correction_applications':  self.error_correction_applications,
+                'fidelity_preservation_rate':     float(self.fidelity_preservation_rate),
+                'non_markovian_order':            self.non_markovian_order,
+                'coherence_evolution_length':     len(coh_hist),
+                'fidelity_evolution_length':      len(fid_hist),
+                'global_coherence':               global_coh,
+                'global_fidelity':                global_fid,
+                'coherence':                      global_coh,
+                'fidelity':                       global_fid,
+            }
+
     def get_state(self) -> Dict[str, Any]:
         """Get current state"""
         with self.lock:
@@ -6382,9 +6459,6 @@ class EnhancedNoiseBathRefresh:
                 'coherence_evolution_length': len(self.coherence_evolution),
                 'fidelity_evolution_length': len(self.fidelity_evolution)
             }
-
-# ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-# PART 10: GLOBAL LATTICE INSTANTIATION & WSGI INTEGRATION
 # All singletons are created exactly once via _init_quantum_singletons().
 # The function is guarded by _QUANTUM_INIT_LOCK + _QUANTUM_MODULE_INITIALIZED flag.
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
