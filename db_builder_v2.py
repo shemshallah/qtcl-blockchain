@@ -4683,6 +4683,102 @@ class DatabaseBuilder:
             )
             self.pool = None
     
+    # ── Reconnect daemon ──────────────────────────────────────────────────────
+    def start_reconnect_daemon(self) -> None:
+        """
+        Launch a background daemon that retries pool creation with full
+        exponential back-off whenever self.pool is None.
+
+        Back-off schedule (seconds): 5 → 10 → 20 → 40 → 60 (capped)
+        The daemon dies automatically when the main process exits.
+
+        Safe to call multiple times — a guard prevents double-starting.
+        """
+        with self.lock:
+            if getattr(self, '_reconnect_daemon_started', False):
+                return
+            self._reconnect_daemon_started = True
+
+        def _reconnect_loop() -> None:
+            delay = 5.0
+            MAX_DELAY = 60.0
+            attempt = 0
+
+            while True:
+                with self.lock:
+                    pool_alive = self.pool is not None
+
+                if pool_alive:
+                    # Pool exists — verify it's healthy with a lightweight ping
+                    try:
+                        conn = self.pool.getconn()
+                        with conn.cursor() as cur:
+                            cur.execute("SELECT 1")
+                        self.pool.putconn(conn)
+                        delay = 5.0          # Reset back-off on healthy ping
+                        attempt = 0
+                        import time as _t; _t.sleep(delay)
+                        continue
+                    except Exception as _ping_err:
+                        logger.warning(
+                            "[DB-RECONNECT] Pool ping failed (%s) — closing stale pool and retrying",
+                            _ping_err
+                        )
+                        with self.lock:
+                            try:
+                                self.pool.closeall()
+                            except Exception:
+                                pass
+                            self.pool = None
+
+                # Pool is None — attempt to rebuild
+                attempt += 1
+                logger.info(
+                    "[DB-RECONNECT] Attempt #%d — rebuilding pool (host=%s user=%s port=%s db=%s)",
+                    attempt, self.host, self.user, self.port, self.database
+                )
+                try:
+                    new_pool = ThreadedConnectionPool(
+                        DB_POOL_MIN_CONNECTIONS,
+                        self.pool_size,
+                        host=self.host,
+                        user=self.user,
+                        password=self.password,
+                        port=self.port,
+                        database=self.database,
+                        connect_timeout=CONNECTION_TIMEOUT,
+                    )
+                    with self.lock:
+                        self.pool       = new_pool
+                        self.pool_error = None
+                    logger.info(
+                        "[DB-RECONNECT] ✅ Pool rebuilt successfully (attempt #%d, delay=%.0fs)",
+                        attempt, delay
+                    )
+                    delay   = 5.0
+                    attempt = 0
+                except Exception as exc:
+                    with self.lock:
+                        self.pool_error = str(exc)
+                    logger.warning(
+                        "[DB-RECONNECT] ❌ Attempt #%d failed: %s — retrying in %.0fs",
+                        attempt, exc, delay
+                    )
+
+                import time as _t; _t.sleep(delay)
+                delay = min(delay * 2.0, MAX_DELAY)
+
+        t = threading.Thread(
+            target=_reconnect_loop,
+            daemon=True,
+            name="db-reconnect-daemon"
+        )
+        t.start()
+        logger.info(
+            "[DB-RECONNECT] 🔄 Daemon started (back-off: 5→10→20→40→60s, host=%s)",
+            self.host
+        )
+
     def get_connection(self, timeout=CONNECTION_TIMEOUT):
         """
         ENTERPRISE-GRADE connection management with:
@@ -8086,7 +8182,9 @@ try:
         database=POOLER_DB,
         pool_size=DB_POOL_MAX_CONNECTIONS
     )
-    print("✅ [DB] Global db_manager singleton initialized")
+    # Always start reconnect daemon — it self-manages whether pool is healthy or None
+    db_manager.start_reconnect_daemon()
+    print("✅ [DB] Global db_manager singleton initialized + reconnect daemon running")
 except Exception as e:
     print(f"⚠️  [DB] Failed to initialize db_manager: {e}")
     db_manager = None
