@@ -1535,12 +1535,13 @@ def register_oracle_with_heartbeat():
     """Register oracle API with heartbeat system"""
     try:
         hb = get_heartbeat()
-        if hb:
+        # Check if heartbeat is initialized (not a dict placeholder)
+        if hb and not isinstance(hb, dict):
             hb.add_listener(_oracle_heartbeat.on_heartbeat)
             logger.info("[Oracle] ✓ Registered with heartbeat for oracle measurement")
             return True
         else:
-            logger.debug("[Oracle] Heartbeat not available - skipping registration")
+            logger.debug("[Oracle] Heartbeat not available or not initialized - skipping registration")
             return False
     except Exception as e:
         logger.warning(f"[Oracle] Failed to register with heartbeat: {e}")
