@@ -287,23 +287,43 @@ def initialize_globals():
             logger.info("="*80)
 
             # Initialize Quantum Systems — import already-created singletons
-            # Use try/except to gracefully handle import errors
+            #
+            # FIX: The previous implementation used signal.signal(SIGALRM) for a 15-second
+            # timeout.  SIGALRM only works in the main thread of the main interpreter.
+            # initialize_globals() is called from a daemon thread (wsgi_config's
+            # _initialize_globals_deferred), so signal.signal() raised:
+            #
+            #   ValueError: signal only works in main thread of the main interpreter
+            #
+            # The outer except Exception caught that ValueError and logged:
+            #   ⚠️  Quantum systems: signal only works in main thread of the main interpreter
+            #
+            # This meant the quantum_lattice import was NEVER attempted, HEARTBEAT remained
+            # None, get_heartbeat() returned {'status':'not_initialized'}, and every
+            # register_*_with_heartbeat() silently failed with AttributeError on .add_listener().
+            #
+            # Fix: replace SIGALRM with a concurrent.futures thread-based timeout.
+            # This works correctly in ANY thread (daemon, worker, or main).
             try:
+                import concurrent.futures as _cf
                 logger.info("  Loading quantum subsystems (this may take a moment)...")
-                import signal
-                
-                def timeout_handler(signum, frame):
-                    raise TimeoutError("Quantum system initialization took too long (>15s)")
-                
-                # Set 15 second timeout for quantum import
-                old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-                signal.alarm(15)
-                
-                try:
-                    import quantum_lattice_control_live_complete as _qlc
-                    signal.alarm(0)  # Cancel alarm
-                    signal.signal(signal.SIGALRM, old_handler)
-                    
+
+                def _import_quantum():
+                    import quantum_lattice_control_live_complete as _m
+                    return _m
+
+                _qlc = None
+                with _cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix='quantum-import') as _ex:
+                    _fut = _ex.submit(_import_quantum)
+                    try:
+                        _qlc = _fut.result(timeout=60)   # 60 s — generous for first cold import
+                    except _cf.TimeoutError:
+                        logger.warning("⚠️  Quantum systems: import timed out after 60 s — "
+                                       "HEARTBEAT will be unavailable this cycle")
+                    except Exception as _qe:
+                        logger.warning(f"⚠️  Quantum systems import error: {str(_qe)[:120]}")
+
+                if _qlc is not None:
                     _GLOBAL_STATE['heartbeat']              = _qlc.HEARTBEAT
                     _GLOBAL_STATE['lattice']                = _qlc.LATTICE
                     _GLOBAL_STATE['lattice_neural_refresh'] = _qlc.LATTICE_NEURAL_REFRESH
@@ -314,10 +334,6 @@ def initialize_globals():
                                           'w_state_enhanced', 'noise_bath_enhanced', 'quantum_coordinator')
                               if _GLOBAL_STATE[k] is not None]
                     logger.info(f"✅ Quantum subsystems loaded: {', '.join(_alive)}")
-                except (TimeoutError, Exception) as e:
-                    signal.alarm(0)  # Cancel alarm
-                    signal.signal(signal.SIGALRM, old_handler)
-                    logger.warning(f"⚠️  Quantum systems (timeout protection): {str(e)[:120]}")
             except Exception as e:
                 logger.warning(f"⚠️  Quantum systems: {str(e)[:120]}")
 
@@ -504,8 +520,13 @@ def get_globals():
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 def get_heartbeat():
+    # FIX: previously returned {'status': 'not_initialized'} when heartbeat is None.
+    # That non-empty dict is truthy, so every caller doing `if hb: hb.add_listener(...)`
+    # hit AttributeError on a plain dict — silently swallowed, all listeners dead.
+    # Now returns None so callers can guard with `if hb and not isinstance(hb, dict):`
+    # or `if hb and hasattr(hb, 'add_listener'):`.
     state = get_globals()
-    return state['heartbeat'] or {'status': 'not_initialized'}
+    return state['heartbeat']   # None when not yet initialized — callers must null-check
 
 def get_lattice():
     state = get_globals()
@@ -703,13 +724,15 @@ def get_metrics():
     return state['metrics']
 
 def get_system_health() -> dict:
+    # FIX: get_heartbeat() now returns None (not a dict) when uninitialized.
+    _hb = get_heartbeat()
     return {
-        'status': 'healthy',
-        'timestamp': datetime.now(timezone.utc).isoformat(),
-        'components': {
-            'quantum': 'ok' if get_heartbeat() else 'offline',
-            'blockchain': 'ok' if get_blockchain() else 'offline',
-            'database': 'ok' if get_db_manager() else 'offline',
+        "status": "healthy",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "components": {
+            "quantum":    "ok" if (_hb is not None and not isinstance(_hb, dict)) else "offline",
+            "blockchain": "ok" if get_blockchain() else "offline",
+            "database":   "ok" if get_db_manager() else "offline",
         }
     }
 
