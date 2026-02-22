@@ -528,7 +528,7 @@ _DB_STATUS_CACHE: dict  = {
     'timestamp': 0.0,   'error': None,
 }
 _DB_STATUS_LOCK             = threading.Lock()
-_DB_STATUS_UPDATE_INTERVAL  = 10   # seconds — fast enough to catch reconnect within one keepalive cycle
+_DB_STATUS_UPDATE_INTERVAL  = 30   # seconds
 
 
 def _update_db_status_cache() -> None:
@@ -538,29 +538,6 @@ def _update_db_status_cache() -> None:
         try:
             from db_builder_v2 import verify_database_connection
             result = verify_database_connection(verbose=False)
-
-            # If verify_database_connection says not connected, do one more check:
-            # directly inspect db_manager.pool — the reconnect daemon may have
-            # rebuilt it between verify_database_connection's pool check and now.
-            if not result.get('connected', False):
-                try:
-                    import sys as _sys
-                    _dbmod = _sys.modules.get('db_builder_v2')
-                    if _dbmod is not None:
-                        _mgr = getattr(_dbmod, 'db_manager', None)
-                        if _mgr is not None and getattr(_mgr, 'pool', None) is not None:
-                            # Pool is alive — do a lightweight ping to confirm
-                            _conn = _mgr.pool.getconn()
-                            if _conn is not None:
-                                with _conn.cursor() as _cur:
-                                    _cur.execute("SELECT 1")
-                                _mgr.pool.putconn(_conn)
-                                result['connected'] = True
-                                result['healthy']   = True
-                                logger.info("[DB-STATUS-CACHE] Pool ping confirmed connected via db_manager.pool")
-                except Exception as _pe:
-                    logger.debug(f"[DB-STATUS-CACHE] Direct pool ping failed: {_pe}")
-
             with _DB_STATUS_LOCK:
                 _DB_STATUS_CACHE.update({
                     'connected': result.get('connected', False),
@@ -631,28 +608,8 @@ def health():
     with _DB_STATUS_LOCK:
         db = _DB_STATUS_CACHE.copy()
 
-    # ── Priority 1: wsgi_config.DB (set by _initialize_database_deferred) ────
+    # Live pool check: authoritative for cold-start window before cache refreshes
     live_connected = (DB is not None and getattr(DB, 'pool', None) is not None)
-
-    # ── Priority 2: db_builder_v2.db_manager (module-level singleton) ─────────
-    # This catches the case where wsgi_config.DB is None but the module-level
-    # pool was rebuilt by the reconnect daemon — the two are independent objects.
-    if not live_connected:
-        try:
-            import sys as _sys
-            _dbmod = _sys.modules.get('db_builder_v2')
-            if _dbmod is not None:
-                _mgr = getattr(_dbmod, 'db_manager', None)
-                if _mgr is not None and getattr(_mgr, 'pool', None) is not None:
-                    live_connected = True
-                    # Also update wsgi_config.DB so subsequent checks are consistent
-                    global DB, DB_POOL
-                    if DB is None:
-                        DB     = _mgr
-                        DB_POOL = getattr(_dbmod, 'DB_POOL', _mgr)
-        except Exception:
-            pass
-
     connected = live_connected or db.get('connected', False)
 
     # Write live truth back into cache so next caller also benefits
@@ -812,84 +769,6 @@ def db_diagnostics():
     except Exception as exc:
         logger.error(f"[DIAG] {exc}")
         return jsonify({'error': str(exc), 'timestamp': datetime.now(timezone.utc).isoformat()}), 500
-
-
-@app.route('/api/db-reconnect', methods=['POST'])
-def db_reconnect():
-    """
-    Force an immediate DB reconnect attempt — useful when credentials were just
-    added to Koyeb env vars without a full redeploy.
-
-    Does NOT require auth (the credentials themselves are the gate).
-    Returns the connection result so the caller knows if it worked.
-    """
-    global DB, DB_POOL
-    try:
-        import sys as _sys
-        _dbmod = _sys.modules.get('db_builder_v2')
-
-        # Try the module-level db_manager first
-        if _dbmod is not None:
-            _mgr = getattr(_dbmod, 'db_manager', None)
-            if _mgr is not None:
-                # Force the reconnect daemon logic manually (safe: tries once)
-                from db_builder_v2 import (
-                    POOLER_HOST, POOLER_USER, POOLER_PASSWORD, POOLER_PORT,
-                    POOLER_DB, DB_POOL_MAX_CONNECTIONS, DB_POOL_MIN_CONNECTIONS,
-                    CONNECTION_TIMEOUT
-                )
-                from psycopg2.pool import ThreadedConnectionPool
-                try:
-                    new_pool = ThreadedConnectionPool(
-                        DB_POOL_MIN_CONNECTIONS,
-                        DB_POOL_MAX_CONNECTIONS,
-                        host=POOLER_HOST,
-                        user=POOLER_USER,
-                        password=POOLER_PASSWORD,
-                        port=POOLER_PORT,
-                        database=POOLER_DB,
-                        connect_timeout=CONNECTION_TIMEOUT,
-                    )
-                    with _mgr.lock:
-                        if _mgr.pool is not None:
-                            try:
-                                _mgr.pool.closeall()
-                            except Exception:
-                                pass
-                        _mgr.pool       = new_pool
-                        _mgr.pool_error = None
-
-                    DB     = _mgr
-                    DB_POOL = _mgr
-                    with _DB_STATUS_LOCK:
-                        _DB_STATUS_CACHE['connected'] = True
-                        _DB_STATUS_CACHE['healthy']   = True
-                        _DB_STATUS_CACHE['timestamp'] = time.time()
-                        _DB_STATUS_CACHE['error']     = None
-
-                    logger.info("[DB-RECONNECT-API] ✅ Pool rebuilt via /api/db-reconnect")
-                    return jsonify({
-                        'success':   True,
-                        'message':   'DB reconnect successful',
-                        'host':      POOLER_HOST,
-                        'database':  POOLER_DB,
-                        'timestamp': datetime.now(timezone.utc).isoformat(),
-                    }), 200
-
-                except Exception as pool_err:
-                    logger.error(f"[DB-RECONNECT-API] Pool rebuild failed: {pool_err}")
-                    return jsonify({
-                        'success': False,
-                        'error':   str(pool_err),
-                        'hint':    'Check DATABASE_URL / SUPABASE_* / PGHOST env vars on Koyeb',
-                        'host':    POOLER_HOST if 'POOLER_HOST' in dir() else 'unknown',
-                    }), 503
-
-        return jsonify({'success': False, 'error': 'db_builder_v2 module not loaded yet'}), 503
-
-    except Exception as exc:
-        logger.error(f"[DB-RECONNECT-API] {exc}")
-        return jsonify({'success': False, 'error': str(exc)}), 500
 
 
 @app.route('/api/status', methods=['GET'])
