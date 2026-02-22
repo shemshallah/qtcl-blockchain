@@ -1909,7 +1909,7 @@ class KeyVaultManager:
             
             # Otherwise assume it's a psycopg2 pool (has getconn method)
             elif hasattr(pool, 'getconn') and callable(getattr(pool, 'getconn')):
-                conn, pool = self._get_connection()
+                conn = pool.getconn()  # ← FIX: Call the pool's getconn(), not self._get_connection() recursively
                 return conn, pool  # psycopg2 pool has putconn method
             
             else:
