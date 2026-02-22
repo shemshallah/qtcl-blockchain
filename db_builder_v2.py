@@ -4721,8 +4721,20 @@ class DatabaseBuilder:
                             pass
                     raise health_check_error
                 
-                # Connection is healthy
-                conn.set_session(autocommit=True)
+                # Connection is healthy - now ensure we're not in a transaction
+                # (important for pooled connections that may have been reused)
+                try:
+                    # If there's an open transaction, rollback to clean state
+                    if conn.get_transaction_status() != 0:  # 0 = IDLE, >0 = IN_TRANSACTION
+                        conn.rollback()
+                    # Now set autocommit mode
+                    conn.set_session(autocommit=True)
+                except psycopg2.ProgrammingError as pe:
+                    # If set_session fails, just use the connection as-is
+                    # (some pool configurations don't allow session changes)
+                    logger.debug(f"[DB-CONN] set_session skipped (pool config): {pe}")
+                    pass
+                
                 logger.debug(f"[DB-CONN] ✓ Got connection on attempt {attempt + 1}")
                 return conn
                 
