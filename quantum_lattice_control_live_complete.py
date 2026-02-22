@@ -1734,43 +1734,6 @@ class AdaptiveSigmaController:
         }
         return float(sigma_final), cache
     
-    def backward(self, cache: Dict, target_sigma: float, predicted_sigma: float) -> float:
-        """Backpropagation: learn from sigma prediction error."""
-        loss = (predicted_sigma - target_sigma) ** 2
-        
-        output_raw = cache['z3'][0]
-        sigmoid_prime = self.sigmoid(output_raw) * (1.0 - self.sigmoid(output_raw))
-        
-        grad_output = 2 * (predicted_sigma - target_sigma) * sigmoid_prime / 8.0
-        
-        grad_w3 = np.outer(cache['a2'], np.atleast_1d(grad_output))
-        grad_b3 = np.atleast_1d(grad_output)
-        grad_a2 = grad_output * self.w3.flatten()
-        
-        grad_z2 = grad_a2 * self.relu_grad(cache['z2'])
-        grad_w2 = np.outer(cache['a1'], grad_z2)
-        grad_b2 = grad_z2.copy()
-        grad_a1 = np.dot(self.w2, grad_z2)
-        
-        grad_z1 = grad_a1 * self.relu_grad(cache['z1'])
-        grad_w1 = np.outer(cache['x'], grad_z1)
-        grad_b1 = grad_z1.copy()
-        
-        for grad in [grad_w1, grad_w2, grad_w3, grad_b1, grad_b2, grad_b3]:
-            np.clip(grad, -1.0, 1.0, out=grad)
-        
-        with self.lock:
-            self.w1 -= self.lr * grad_w1
-            self.b1 -= self.lr * grad_b1
-            self.w2 -= self.lr * grad_w2
-            self.b2 -= self.lr * grad_b2
-            self.w3 -= self.lr * grad_w3
-            self.b3 -= self.lr * grad_b3
-            
-            self.learning_history.append(float(loss))
-            self.total_updates += 1
-        
-        return float(loss)
     
     # ===== BONUS: QUANTUM LEARNING (Network learns from 5-layer guidance) =====
     def quantum_learning_step(self, cache: Dict, layer_sigma: float, tqft_signature: float) -> Dict:
@@ -5224,41 +5187,40 @@ class TransactionValidatorWState:
             interference_result = self.amplify_interference_with_noise_injection()
             
             # ── Seed or update coherence/fidelity vectors from Aer result ──────
-            if np:
-                with self.lock:
-                    # Seed from W-state probabilities on first run (no magic fallbacks)
-                    if self.coherence_vector is None or self.fidelity_vector is None:
-                        if self.w_state_vector is not None:
-                            probs = np.abs(np.array(self.w_state_vector)) ** 2
-                            w_indices = [2**i for i in range(self.num_validators)]
-                            w_probs = np.array([probs[idx] if idx < len(probs) else 0.0
-                                                for idx in w_indices])
-                            # Coherence ~ fidelity to ideal W-state per validator
-                            self.coherence_vector = np.clip(
-                                w_probs * self.num_validators, 0.70, 0.99
-                            ).astype(float)
-                            self.fidelity_vector = self.coherence_vector * 0.98
-                            logger.info(
-                                f"[W-STATE] Vectors seeded from Aer: "
-                                f"coh={float(np.mean(self.coherence_vector)):.4f} "
-                                f"fid={float(np.mean(self.fidelity_vector)):.4f}"
-                            )
-                        else:
-                            raise RuntimeError(
-                                "coherence_vector/fidelity_vector unavailable: "
-                                "Aer statevector not computed yet"
-                            )
+            with self.lock:
+                # Seed from W-state probabilities on first run (no magic fallbacks)
+                if self.coherence_vector is None or self.fidelity_vector is None:
+                    if self.w_state_vector is not None:
+                        probs = np.abs(np.array(self.w_state_vector)) ** 2
+                        w_indices = [2**i for i in range(self.num_validators)]
+                        w_probs = np.array([probs[idx] if idx < len(probs) else 0.0
+                                            for idx in w_indices])
+                        # Coherence ~ fidelity to ideal W-state per validator
+                        self.coherence_vector = np.clip(
+                            w_probs * self.num_validators, 0.70, 0.99
+                        ).astype(float)
+                        self.fidelity_vector = self.coherence_vector * 0.98
+                        logger.info(
+                            f"[W-STATE] Vectors seeded from Aer: "
+                            f"coh={float(np.mean(self.coherence_vector)):.4f} "
+                            f"fid={float(np.mean(self.fidelity_vector)):.4f}"
+                        )
                     else:
-                        # Lindblad decay toward W-state ideal
-                        self.coherence_vector = np.maximum(
-                            self.coherence_vector - 0.01, 0.70
+                        raise RuntimeError(
+                            "coherence_vector/fidelity_vector unavailable: "
+                            "Aer statevector not computed yet"
                         )
-                        for i in range(self.num_validators):
-                            if interference_result.get('interference_detected', False):
-                                self.coherence_vector[i] = min(0.99, self.coherence_vector[i] + 0.02)
-                        self.fidelity_vector = np.maximum(
-                            self.fidelity_vector - 0.005, 0.68
-                        )
+                else:
+                    # Lindblad decay toward W-state ideal
+                    self.coherence_vector = np.maximum(
+                        self.coherence_vector - 0.01, 0.70
+                    )
+                    for i in range(self.num_validators):
+                        if interference_result.get('interference_detected', False):
+                            self.coherence_vector[i] = min(0.99, self.coherence_vector[i] + 0.02)
+                    self.fidelity_vector = np.maximum(
+                        self.fidelity_vector - 0.005, 0.68
+                    )
 
             if self.coherence_vector is None:
                 raise RuntimeError("coherence_vector still None after refresh — Aer circuit failed")
@@ -5454,14 +5416,13 @@ class NeuralLatticeControlGlobals:
         self.last_update_time = time.time()
         
         # Initialize weights and biases
-        if np:
-            for layer in range(num_layers):
-                in_size = num_neurons if layer > 0 else 5  # 5 validator qubits input
-                out_size = num_neurons
-                w = np.random.randn(in_size, out_size) * 0.01
-                b = np.zeros(out_size)
-                self.weights.append(w)
-                self.biases.append(b)
+        for layer in range(num_layers):
+            in_size = num_neurons if layer > 0 else 5  # 5 validator qubits input
+            out_size = num_neurons
+            w = np.random.randn(in_size, out_size) * 0.01
+            b = np.zeros(out_size)
+            self.weights.append(w)
+            self.biases.append(b)
     
     def forward_pass(self, input_vector: np.ndarray) -> np.ndarray:
         """Forward pass through neural lattice with activation tracking"""
@@ -5500,7 +5461,7 @@ class NeuralLatticeControlGlobals:
         - Recent gradient magnitude (prevent divergence)
         - Convergence status (slow down near convergence)
         """
-        if not np or gradient is None:
+        if gradient is None:
             return
         
         try:
@@ -5564,7 +5525,7 @@ class NeuralLatticeControlGlobals:
         Noise-revival phenomenon: refresh neural network weights based on current noise state.
         This implements the coupling between noise bath and neural control layer.
         """
-        if not np or not noise_bath_state:
+        if not noise_bath_state:
             return
         
         try:
@@ -5745,15 +5706,14 @@ class TransactionQuantumProcessor:
             oracle_result = self.ghz_builder.measure_oracle_finality(circuit)
             
             # Step 4: Update neural lattice with transaction info
-            if np:
-                input_vector = np.array([
-                    amount / 1000.0,
-                    float(user_id % 100) / 100.0,
-                    float(target_id % 100) / 100.0,
-                    float(oracle_result.get('confidence', 0.5)),
-                    float(w_state_result.get('coherence_avg', 0.9))
-                ])
-                neural_output = self.neural_control.forward_pass(input_vector)
+            input_vector = np.array([
+                amount / 1000.0,
+                float(user_id % 100) / 100.0,
+                float(target_id % 100) / 100.0,
+                float(oracle_result.get('confidence', 0.5)),
+                float(w_state_result.get('coherence_avg', 0.9))
+            ])
+            neural_output = self.neural_control.forward_pass(input_vector)
             
             # Compile result
             result = {
@@ -6011,7 +5971,7 @@ class HyperbolicQuantumRouting:
         Compute Poincaré distance between two quantum states in hyperbolic space.
         States are assumed to be normalized vectors in the Poincaré ball.
         """
-        if not np or state1 is None or state2 is None:
+        if state1 is None or state2 is None:
             return float('inf')
         
         try:
@@ -6050,7 +6010,7 @@ class HyperbolicQuantumRouting:
     def adapt_routing_to_coherence(self, coherence_levels: List[float]) -> Dict[str, Any]:
         """Adapt routing based on current coherence levels"""
         try:
-            avg_coherence = np.mean(coherence_levels) if np and coherence_levels else 0.5
+            avg_coherence = np.mean(coherence_levels) if coherence_levels else 0.5
             
             # High coherence: tighter geodesics (lower curvature needed)
             # Low coherence: wider geodesics (higher curvature)
@@ -6096,13 +6056,24 @@ class QuantumLatticeGlobal:
     def get_w_state(self) -> Dict[str, Any]:
         """Get current W-state from manager with safe metric extraction"""
         try:
+            # coherence_vector and fidelity_vector are Optional[np.ndarray]
+            # They are None until first Aer circuit run populates them
+            coherence_val = 0.0
+            fidelity_val = 0.0
+            
+            if self.w_state_manager.coherence_vector is not None and len(self.w_state_manager.coherence_vector) > 0:
+                coherence_val = float(np.mean(self.w_state_manager.coherence_vector))
+            
+            if self.w_state_manager.fidelity_vector is not None and len(self.w_state_manager.fidelity_vector) > 0:
+                fidelity_val = float(np.mean(self.w_state_manager.fidelity_vector))
+            
             return {
                 'refresh_count': self.w_state_manager.refresh_count,
-                'coherence_avg': float(self.w_state_manager.coherence_avg) if self.w_state_manager.coherence_avg is not None else 0.0,
-                'fidelity_avg': float(self.w_state_manager.fidelity_avg) if self.w_state_manager.fidelity_avg is not None else 0.0,
+                'coherence_avg': coherence_val,
+                'fidelity_avg': fidelity_val,
                 'entanglement_strength': float(self.w_state_manager.entanglement_strength)
             }
-        except (AttributeError, TypeError, ValueError) as e:
+        except (AttributeError, TypeError, ValueError, RuntimeError) as e:
             logger.warning(f"W-state metric extraction failed: {e}, returning safe defaults")
             return {
                 'refresh_count': 0,
