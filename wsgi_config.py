@@ -91,7 +91,7 @@ class AdaptiveHyperparameterTuner:
                 else:
                     adjustment = -0.03 * (ref_rate - recovery_rate) / ref_rate
                     self.current_kappa = 0.08 + adjustment
-                self.current_kappa = np.clip(self.current_kappa, 0.06, 0.12)
+                self.current_kappa = np.clip(self.current_kappa, 0.070, 0.120)  # FLOOR 7% — κ below this loses revival utility
             
             # Adaptive W-state strength
             if len(self.coherence_history) >= 2:

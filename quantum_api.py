@@ -4876,3 +4876,177 @@ def get_quantum_blueprint():
                 logger.error(f"[Quantum] Fallback blueprint also failed: {e2}")
                 raise RuntimeError(f"[Quantum] Cannot create any blueprint: {e} / {e2}")
     return _quantum_blueprint_instance
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# v9 MASSIVE ENTANGLEMENT ENGINE — API ENDPOINTS
+# Injected into the existing quantum_api blueprint at module level.
+# These endpoints expose the 106,496-qubit noise-induced entanglement system.
+# ═══════════════════════════════════════════════════════════════════════════════════
+
+def _extend_blueprint_with_v9_endpoints(bp):
+    """
+    Inject v9 Massive Engine endpoints into an existing blueprint.
+    Called after blueprint creation to add the new routes cleanly.
+    """
+    from quantum_lattice_control_live_complete import (
+        get_massive_engine_status,
+        run_massive_entanglement_cycle,
+        run_bell_violation_proof,
+        get_pid_feedback_status,
+        get_adaptive_sigma_status,
+        run_deep_bell_test,
+        run_three_qubit_test,
+        MASSIVE_ENTANGLEMENT_ENGINE,
+        QUANTUM_FEEDBACK_PID,
+        ADAPTIVE_SIGMA_SCHEDULER,
+        THREE_QUBIT_GENERATOR,
+        DEEP_ENTANGLING_CIRCUIT,
+    )
+
+    @bp.route('/v9/engine/status', methods=['GET'])
+    def v9_engine_status():
+        """Full status of the 106,496-qubit noise-induced entanglement engine."""
+        try:
+            status = get_massive_engine_status()
+            return jsonify({'success': True, 'engine': status}), 200
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    @bp.route('/v9/entanglement/cycle', methods=['POST'])
+    def v9_run_entanglement_cycle():
+        """
+        Run one full entanglement cycle on all 52 batches.
+        Returns: batch results, PID feedback, adaptive sigma, global entanglement.
+        Optional JSON body: {"batch_ids": [0,1,...,51]}
+        """
+        try:
+            body     = request.get_json(silent=True) or {}
+            batch_ids = body.get('batch_ids', None)
+            result   = run_massive_entanglement_cycle(batch_ids=batch_ids)
+            return jsonify({'success': True, 'result': result}), 200
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    @bp.route('/v9/bell/test', methods=['POST'])
+    def v9_bell_violation_test():
+        """
+        Execute Bell violation tests on most-entangled Wubit triplets.
+        S_CHSH > 2.0 = quantum. S_CHSH ≥ 2.828 = maximum quantum.
+        Optional JSON: {"n_triplets": 3}
+        """
+        try:
+            body      = request.get_json(silent=True) or {}
+            n         = int(body.get('n_triplets', 3))
+            result    = run_bell_violation_proof(n_triplets=n)
+            return jsonify({'success': True, 'bell_test': result}), 200
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    @bp.route('/v9/pid/status', methods=['GET'])
+    def v9_pid_status():
+        """PID controller state — error, integral, derivative, last adjustments."""
+        try:
+            return jsonify({'success': True, 'pid': get_pid_feedback_status()}), 200
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    @bp.route('/v9/pid/target', methods=['POST'])
+    def v9_pid_set_target():
+        """
+        Update PID coherence target.
+        JSON: {"target": 0.95}
+        """
+        try:
+            body   = request.get_json(silent=True) or {}
+            target = float(body.get('target', 0.94))
+            if QUANTUM_FEEDBACK_PID is not None:
+                QUANTUM_FEEDBACK_PID.set_target(target)
+                return jsonify({'success': True, 'new_target': target}), 200
+            return jsonify({'success': False, 'error': 'PID not initialized'}), 503
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    @bp.route('/v9/sigma/status', methods=['GET'])
+    def v9_sigma_status():
+        """Adaptive σ scheduler status — current regime, sigma value, coherence trend."""
+        try:
+            return jsonify({'success': True, 'sigma': get_adaptive_sigma_status()}), 200
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    @bp.route('/v9/circuit/deep-bell', methods=['POST'])
+    def v9_deep_bell():
+        """
+        Execute a depth-20 deep Bell circuit.
+        Returns concurrence, mutual information, measurement counts.
+        Optional JSON: {"shots": 4096}
+        """
+        try:
+            body  = request.get_json(silent=True) or {}
+            shots = int(body.get('shots', 4096))
+            result = run_deep_bell_test(shots=shots)
+            return jsonify({'success': True, 'deep_bell': result}), 200
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    @bp.route('/v9/circuit/three-qubit', methods=['POST'])
+    def v9_three_qubit():
+        """
+        Execute a 3-qubit W/GHZ/Hybrid entangled circuit.
+        JSON: {"circuit_type": "w"|"ghz"|"hybrid", "shots": 2048}
+        Returns: concurrence, S_CHSH, Bell violation status.
+        """
+        try:
+            body = request.get_json(silent=True) or {}
+            ct   = body.get('circuit_type', 'hybrid')
+            shots = int(body.get('shots', 2048))
+            result = run_three_qubit_test(circuit_type=ct, shots=shots)
+            return jsonify({'success': True, 'three_qubit': result}), 200
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    @bp.route('/v9/wubits/entanglement-map', methods=['GET'])
+    def v9_entanglement_map():
+        """
+        Return the Wubit entanglement map — inter-Wubit phase correlation strengths.
+        Top 20 most-entangled Wubits returned for efficiency.
+        """
+        try:
+            if MASSIVE_ENTANGLEMENT_ENGINE is None:
+                return jsonify({'error': 'Engine not initialized'}), 503
+            emap = MASSIVE_ENTANGLEMENT_ENGINE._entanglement_map
+            top_n = 20
+            top_idx   = [int(i) for i in np.argsort(emap)[-top_n:][::-1]]
+            top_vals  = [round(float(emap[i]), 6) for i in top_idx]
+            return jsonify({
+                'success':            True,
+                'n_wubits':           int(MASSIVE_ENTANGLEMENT_ENGINE.N_WUBITS),
+                'top_entangled_wubits': dict(zip(top_idx, top_vals)),
+                'mean_entanglement':  round(float(np.mean(emap)), 6),
+                'max_entanglement':   round(float(np.max(emap)), 6),
+                'global_entanglement': round(float(MASSIVE_ENTANGLEMENT_ENGINE.global_entanglement), 6),
+            }), 200
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    @bp.route('/v9/qrng/ensemble-status', methods=['GET'])
+    def v9_qrng_ensemble():
+        """Status of the 5-source QRNG ensemble."""
+        try:
+            if MASSIVE_ENTANGLEMENT_ENGINE is None:
+                return jsonify({'error': 'Engine not initialized'}), 503
+            ens = MASSIVE_ENTANGLEMENT_ENGINE.ensemble
+            return jsonify({
+                'success': True,
+                'sources': ens.source_names,
+                'n_sources': len(ens.sources),
+                'metrics': ens.get_metrics() if hasattr(ens, 'get_metrics') else {},
+            }), 200
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    logger.info("✓ v9 API endpoints registered: /v9/engine/status | /v9/entanglement/cycle | "
+                "/v9/bell/test | /v9/pid/* | /v9/sigma/status | /v9/circuit/* | /v9/wubits/* | /v9/qrng/*")
+    return bp
+
