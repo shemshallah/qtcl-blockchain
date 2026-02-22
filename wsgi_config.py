@@ -37,6 +37,8 @@ import time
 import traceback
 import json
 import numpy as np
+from typing import Dict
+from collections import deque
 
 # ── Logging: configure once, never re-configure on re-import ─────────────────
 if not logging.getLogger().hasHandlers():
