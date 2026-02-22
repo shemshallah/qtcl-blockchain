@@ -1420,84 +1420,6 @@ def _lattice_telemetry_loop() -> None:
                 except Exception as _e:
                     logger.debug(f"[LATTICE-TELEM] HEARTBEAT metrics error: {_e}")
 
-            # ── W-STATE + QUANTUM OBSERVABLES (compute fresh from history) ───────────────
-            lattice = getattr(_ql, 'LATTICE', None)
-            
-            if lattice is not None:
-                try:
-                    noise_bath = getattr(lattice, 'noise_bath', None)
-                    
-                    # Current state
-                    coh_w = float(noise_bath.coherence_evolution[-1]) if (noise_bath and hasattr(noise_bath, 'coherence_evolution') and len(noise_bath.coherence_evolution) > 0) else 0.0
-                    fid_w = float(noise_bath.fidelity_evolution[-1]) if (noise_bath and hasattr(noise_bath, 'fidelity_evolution') and len(noise_bath.fidelity_evolution) > 0) else 0.0
-                    
-                    # Get history
-                    coh_hist = list(noise_bath.coherence_evolution)[-100:] if (noise_bath and len(noise_bath.coherence_evolution) > 0) else []
-                    fid_hist = list(noise_bath.fidelity_evolution)[-100:] if (noise_bath and len(noise_bath.fidelity_evolution) > 0) else []
-                    
-                    # COMPUTE Bell test
-                    bell_s = 0.0
-                    validations = 0
-                    bell_flag = ""
-                    bell_tester = getattr(lattice, 'bell_tester', None)
-                    if bell_tester is not None and len(coh_hist) >= 5:
-                        try:
-                            coh_arr = np.array(coh_hist, dtype=np.float64)
-                            fid_arr = np.array(fid_hist, dtype=np.float64)
-                            bell_result = bell_tester.on_measurement(coh_arr, fid_arr)
-                            bell_s = float(bell_result.get('chsh_s', 0.0))
-                            validations = int(bell_result.get('test_count', 0))
-                            if bell_result.get('chsh_violation', False):
-                                bell_flag = "⚡"
-                        except Exception:
-                            pass
-                    
-                    # COMPUTE W-state superposition
-                    super_q = 0
-                    if len(coh_hist) >= 5:
-                        try:
-                            coh_val = float(coh_hist[-1])
-                            ss = 0.87
-                            w_str = max(0.0, (coh_val - ss) / (0.92 - ss))
-                            super_q = int(w_str * 100)
-                        except Exception:
-                            pass
-                    
-                    # COMPUTE Mutual Information
-                    mi = 0.0
-                    if len(coh_hist) >= 20:
-                        try:
-                            coh_arr = np.array(coh_hist, dtype=np.float64)
-                            fid_arr = np.array(fid_hist, dtype=np.float64)
-                            coh_mean = np.mean(coh_arr)
-                            fid_mean = np.mean(fid_arr)
-                            coh_std = np.std(coh_arr)
-                            fid_std = np.std(fid_arr)
-                            if coh_std > 1e-8 and fid_std > 1e-8:
-                                cov = np.mean((coh_arr - coh_mean) * (fid_arr - fid_mean))
-                                corr = cov / (coh_std * fid_std)
-                                if not np.isnan(corr) and not np.isinf(corr):
-                                    mi = float(np.clip(abs(corr), 0.0, 1.0))
-                        except Exception:
-                            pass
-                    
-                    kappa = float(getattr(noise_bath, 'memory_kernel', 0.08)) if noise_bath else 0.08
-                    
-                    logger.info(
-                        f"[LATTICE-W]   cycle=#{cycle} | "
-                        f"coherence_avg={coh_w:.6f} | "
-                        f"fidelity_avg={fid_w:.6f} | "
-                        f"superpositions={super_q} | "
-                        f"bell_chsh_s={bell_s:.3f} {bell_flag} | "
-                        f"mi={mi:.4f} | "
-                        f"κ={kappa:.5f} | "
-                        f"validations={validations}"
-                    )
-                except Exception as _e:
-                    logger.debug(f"[LATTICE-TELEM] W-state error: {_e}")
-            else:
-                logger.debug(f"[LATTICE-W]   cycle=#{cycle} | LATTICE not initialized")
-
             # ── LATTICE SYSTEM METRICS (primary source of truth) ────────────────
             lat = getattr(_ql, 'LATTICE', None)
             lm = None
@@ -1697,6 +1619,29 @@ def _lattice_telemetry_loop() -> None:
                         f"Bell S_CHSH={bell_s:.3f} {('⚡VIOL' if bell_violation else '·')} | "
                         f"MI={mi:.4f} | WState={super_q}% | source=AerSimulator"
                     )
+
+                    # ── W-STATE SUMMARY (from just-computed measurements) ──────────────────
+                    # Now that evolution is done, report the comprehensive quantum observables
+                    try:
+                        if lat is not None:
+                            noise_bath = getattr(lat, 'noise_bath', None)
+                            if noise_bath and hasattr(noise_bath, 'coherence_evolution') and len(noise_bath.coherence_evolution) > 0:
+                                coh_w = float(noise_bath.coherence_evolution[-1])
+                                fid_w = float(noise_bath.fidelity_evolution[-1]) if hasattr(noise_bath, 'fidelity_evolution') and len(noise_bath.fidelity_evolution) > 0 else 0.0
+                                kappa = float(getattr(noise_bath, 'memory_kernel', 0.08))
+                                
+                                logger.info(
+                                    f"[LATTICE-W]   cycle=#{cycle} | "
+                                    f"coherence_avg={coh_w:.6f} | "
+                                    f"fidelity_avg={fid_w:.6f} | "
+                                    f"superpositions={super_q} | "
+                                    f"bell_chsh_s={bell_s:.3f} {('⚡' if bell_violation else '')} | "
+                                    f"mi={mi:.4f} | "
+                                    f"κ={kappa:.5f} | "
+                                    f"validations={validations}"
+                                )
+                    except Exception as _we:
+                        logger.debug(f"[LATTICE-TELEM] W-state summary error: {_we}")
 
                     # ── SECONDARY: BLP monitoring ──────────────────────────────
                     try:
