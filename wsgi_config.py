@@ -443,6 +443,43 @@ def _update_database_status_cache():
     """Background thread: update cached database status without blocking requests"""
     global _DB_STATUS_CACHE
     
+    def _do_cache_update():
+        """Perform a single cache update"""
+        try:
+            from db_builder_v2 import verify_database_connection
+            result = verify_database_connection(verbose=False)
+            now = time.time()
+            
+            with _DB_STATUS_LOCK:
+                _DB_STATUS_CACHE.update({
+                    'connected': result.get('connected', False),
+                    'healthy': result.get('healthy', False),
+                    'host': result.get('host', 'unknown'),
+                    'port': result.get('port', 5432),
+                    'database': result.get('database', 'unknown'),
+                    'timestamp': now,
+                    'error': None
+                })
+        except Exception as e:
+            now = time.time()
+            with _DB_STATUS_LOCK:
+                _DB_STATUS_CACHE.update({
+                    'connected': False,
+                    'healthy': False,
+                    'timestamp': now,
+                    'error': str(e)[:100]
+                })
+    
+    # CRITICAL: Update cache IMMEDIATELY on first run (before 30s delay)
+    # This ensures /health endpoint returns correct status right away
+    try:
+        logger.debug("[DB-STATUS-CACHE] Performing initial cache update...")
+        _do_cache_update()
+        logger.info("[DB-STATUS-CACHE] ✅ Initial cache update complete")
+    except Exception as e:
+        logger.error(f"[DB-STATUS-CACHE] Initial update failed: {e}")
+    
+    # Now enter regular update loop
     while True:
         try:
             time.sleep(_DB_STATUS_UPDATE_INTERVAL)
@@ -452,29 +489,7 @@ def _update_database_status_cache():
             if now - _DB_STATUS_CACHE.get('timestamp', 0) < _DB_STATUS_UPDATE_INTERVAL:
                 continue
             
-            # Try to get fresh database status (with short timeout)
-            try:
-                from db_builder_v2 import verify_database_connection
-                result = verify_database_connection(verbose=False)
-                
-                with _DB_STATUS_LOCK:
-                    _DB_STATUS_CACHE.update({
-                        'connected': result.get('connected', False),
-                        'healthy': result.get('healthy', False),
-                        'host': result.get('host', 'unknown'),
-                        'port': result.get('port', 5432),
-                        'database': result.get('database', 'unknown'),
-                        'timestamp': now,
-                        'error': None
-                    })
-            except Exception as e:
-                with _DB_STATUS_LOCK:
-                    _DB_STATUS_CACHE.update({
-                        'connected': False,
-                        'healthy': False,
-                        'timestamp': now,
-                        'error': str(e)[:100]
-                    })
+            _do_cache_update()
         
         except Exception as e:
             logger.debug(f"[DB-STATUS-CACHE] Background update error: {e}")
