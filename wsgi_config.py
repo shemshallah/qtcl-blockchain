@@ -46,11 +46,73 @@ if not logging.getLogger().hasHandlers():
     )
 logger = logging.getLogger(__name__)
 
-# Suppress Qiskit's verbose transpiler/passmanager logging
+# Suppress Qiskit verbose transpiler/passmanager logging
 logging.getLogger('qiskit.passmanager').setLevel(logging.WARNING)
 logging.getLogger('qiskit.compiler').setLevel(logging.WARNING)
 logging.getLogger('qiskit.transpiler').setLevel(logging.WARNING)
 logging.getLogger('qiskit').setLevel(logging.WARNING)
+
+# ── Adaptive Hyperparameter Tuner ──────────────────────────────────────────────
+class AdaptiveHyperparameterTuner:
+    """Real-time adaptive hyperparameter optimization for lattice control."""
+    
+    def __init__(self):
+        self.coherence_history = deque(maxlen=10)
+        self.fidelity_history = deque(maxlen=10)
+        self.mi_history = deque(maxlen=10)
+        self.gradient_history = deque(maxlen=10)
+        self.current_lr = 1e-3
+        self.current_kappa = 0.08
+        self.w_strength_multiplier = 1.0
+        self.lock = threading.RLock()
+    
+    def update_metrics(self, coherence: float, fidelity: float, mi: float, gradient: float):
+        """Update adaptive parameters based on current metrics."""
+        with self.lock:
+            self.coherence_history.append(coherence)
+            self.fidelity_history.append(fidelity)
+            self.mi_history.append(mi)
+            self.gradient_history.append(gradient)
+            
+            # Adaptive learning rate with oscillation
+            cycle = len(self.gradient_history)
+            oscillation = np.sin(2 * np.pi * cycle / 15)
+            self.current_lr = 1e-3 * (1 + 0.15 * oscillation)
+            
+            # Adaptive memory kernel based on recovery rate
+            if len(self.coherence_history) >= 2:
+                recovery_rate = (self.coherence_history[-1] - self.coherence_history[0]) / len(self.coherence_history)
+                ref_rate = 0.002
+                if recovery_rate > ref_rate:
+                    adjustment = 0.03 * min((recovery_rate - ref_rate) / ref_rate, 1.0)
+                    self.current_kappa = 0.08 + adjustment
+                else:
+                    adjustment = -0.03 * (ref_rate - recovery_rate) / ref_rate
+                    self.current_kappa = 0.08 + adjustment
+                self.current_kappa = np.clip(self.current_kappa, 0.06, 0.12)
+            
+            # Adaptive W-state strength
+            if len(self.coherence_history) >= 2:
+                recovery_rate = (self.coherence_history[-1] - self.coherence_history[0]) / len(self.coherence_history)
+                ref_rate = 0.002
+                if recovery_rate > ref_rate:
+                    multiplier = 1.0 + 0.5 * min((recovery_rate - ref_rate) / ref_rate, 1.0)
+                else:
+                    multiplier = 1.0
+                self.w_strength_multiplier = np.clip(multiplier, 1.0, 1.5)
+    
+    def get_status(self) -> Dict:
+        """Get current tuning status."""
+        with self.lock:
+            return {
+                'learning_rate': float(self.current_lr),
+                'kappa': float(self.current_kappa),
+                'w_strength_multiplier': float(self.w_strength_multiplier),
+                'coherence_gain': float(self.coherence_history[-1] - self.coherence_history[0]) if len(self.coherence_history) >= 2 else 0.0
+            }
+
+HYPERPARAMETER_TUNER = AdaptiveHyperparameterTuner()
+logger.info("✓ Hyperparameter tuner initialized (adaptive LR, κ, W-strength)")
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
@@ -1736,6 +1798,20 @@ def _lattice_telemetry_loop() -> None:
                         f"Bell S_CHSH={bell_s:.3f} {('⚡VIOL' if bell_violation else '·')} | "
                         f"MI={mi:.4f} | WState={super_q}% | source=AerSimulator"
                     )
+                    
+                    # ── HYPERPARAMETER TUNING UPDATE ──────────────────────────────
+                    try:
+                        HYPERPARAMETER_TUNER.update_metrics(coh_after, fid_after, mi, 0.0001)
+                        tuning_status = HYPERPARAMETER_TUNER.get_status()
+                        if cycle % 5 == 0:
+                            logger.info(
+                                f"[TUNING] LR={tuning_status['learning_rate']:.2e} | "
+                                f"κ={tuning_status['kappa']:.4f} | "
+                                f"W_mult={tuning_status['w_strength_multiplier']:.3f} | "
+                                f"coh_gain={tuning_status['coherence_gain']:+.5f}"
+                            )
+                    except Exception as _te:
+                        logger.debug(f"[TUNING] Update error: {_te}")
 
                     # ── W-STATE SUMMARY (from just-computed measurements) ──────────────────
                     # Now that evolution is done, report the comprehensive quantum observables
