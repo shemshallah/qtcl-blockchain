@@ -1565,7 +1565,7 @@ def create_oracle_api_blueprint():
     def get_price(symbol):
         """Get asset price from unified oracle provider."""
         try:
-            price_data = ORACLE_PRICE_PROVIDER.get_price(symbol)
+            price_data = get_oracle_price_provider().get_price(symbol)
             
             if price_data.get('available'):
                 return jsonify(ResponseWrapper.success(data=price_data)), 200
@@ -1583,7 +1583,7 @@ def create_oracle_api_blueprint():
     def get_prices():
         """Get all available prices."""
         try:
-            all_prices = ORACLE_PRICE_PROVIDER.get_all_prices()
+            all_prices = get_oracle_price_provider().get_all_prices()
             return jsonify(ResponseWrapper.success(
                 data={'prices': all_prices, 'count': len(all_prices)}
             )), 200
@@ -1614,7 +1614,7 @@ def create_oracle_api_blueprint():
                     error_code='INVALID_INPUT'
                 )), 400
             
-            ORACLE_PRICE_PROVIDER.update_price(symbol, float(price), source)
+            get_oracle_price_provider().update_price(symbol, float(price), source)
             
             return jsonify(ResponseWrapper.success(
                 data={'symbol': symbol, 'price': float(price), 'source': source}
@@ -1637,7 +1637,7 @@ def create_oracle_api_blueprint():
             oracle = get_oracle_instance()
             base   = oracle.get_status() if hasattr(oracle, 'get_status') else {}
             base.update({
-                'price_provider': ORACLE_PRICE_PROVIDER.get_status(),
+                'price_provider': get_oracle_price_provider().get_status(),
                 'integration':    get_integration_summary(),
                 'heartbeat':      get_oracle_heartbeat_status(),
             })
@@ -1720,11 +1720,16 @@ def create_oracle_api_blueprint():
 
     return blueprint
 
-blueprint = create_oracle_api_blueprint()
+
+_ORACLE_BLUEPRINT = None
 
 def get_oracle_blueprint():
-    """Factory function for WSGI integration — returns the module-level singleton blueprint."""
-    return blueprint
+    """Lazy factory function for WSGI integration — creates blueprint on first call."""
+    global _ORACLE_BLUEPRINT
+    if _ORACLE_BLUEPRINT is None:
+        _ORACLE_BLUEPRINT = create_oracle_api_blueprint()
+    return _ORACLE_BLUEPRINT
+
 
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -2353,16 +2358,28 @@ def get_integration_summary() -> Dict[str, Any]:
             'coordination_count': len(coordinator.coordination_log),
             'decision_count':     len(coordinator.decision_log),
         },
-        'price_provider': ORACLE_PRICE_PROVIDER.get_status(),
+        'price_provider': get_oracle_price_provider().get_status(),
         'timestamp': time.time(),
     }
 
 
 # ── Singletons created at module load ─────────────────────────────────────
 
-ORACLE_PRICE_PROVIDER = UnifiedOraclePriceProvider()
+_ORACLE_PRICE_PROVIDER = None
 
-initialize_integrations()
+def get_oracle_price_provider():
+    """Lazy getter for ORACLE_PRICE_PROVIDER singleton — defers initialization to avoid import loops."""
+    global _ORACLE_PRICE_PROVIDER
+    if _ORACLE_PRICE_PROVIDER is None:
+        _ORACLE_PRICE_PROVIDER = UnifiedOraclePriceProvider()
+    return _ORACLE_PRICE_PROVIDER
+
+# Backwards compatibility alias
+@property
+def ORACLE_PRICE_PROVIDER():
+    """Deprecated: use get_oracle_price_provider() instead."""
+    return get_oracle_price_provider()
+
 
 logger.info("""
 ╔═════════════════════════════════════════════════════════════════════════════════════╗
@@ -2511,14 +2528,14 @@ def _wire_oracle_hooks_into_registry() -> None:
         reg = SystemIntegrationRegistry.get_instance()
 
         def _price_update_hook(symbol: str, price: float, source: str = 'external') -> Dict:
-            ORACLE_PRICE_PROVIDER.update_price(symbol, price, source)
+            get_oracle_price_provider().update_price(symbol, price, source)
             return {'status': 'updated', 'symbol': symbol, 'price': price}
 
         def _get_price_hook(symbol: str) -> Dict:
-            return ORACLE_PRICE_PROVIDER.get_price(symbol)
+            return get_oracle_price_provider().get_price(symbol)
 
         def _get_all_prices_hook() -> Dict:
-            return ORACLE_PRICE_PROVIDER.get_all_prices()
+            return get_oracle_price_provider().get_all_prices()
 
         def _get_integration_summary_hook() -> Dict:
             return get_integration_summary()

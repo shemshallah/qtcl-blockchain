@@ -1382,13 +1382,8 @@ class BlueprintProxy:
     def __repr__(self):
         return repr(get_defi_blueprint())
 
-# Export as proxy - first access triggers creation
-try:
-    blueprint=get_defi_blueprint()
-except Exception as e:
-    logger.warning(f"[DeFi] Could not create blueprint at import time: {e}")
-    logger.info("[DeFi] Blueprint will be created on first access via get_defi_blueprint()")
-    blueprint=BlueprintProxy()
+# Blueprint proxy for backwards compatibility
+blueprint = BlueprintProxy()
 
 
 
