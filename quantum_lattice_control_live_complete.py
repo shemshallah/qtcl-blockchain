@@ -6160,28 +6160,70 @@ class DynamicNoiseBathEvolution:
         return np.exp(-np.abs(t) / tau) * np.cos(2 * np.pi * t / tau)
     
     def compute_memory_effect(self, time_window: float = 0.1) -> float:
-        """Compute memory effect strength from history"""
+        """
+        Compute non-Markovian memory strength via Yule-Walker AR(1) estimation.
+
+        Physics motivation
+        ──────────────────
+        An open quantum system under Lindblad decay obeys:
+            C(t+1) = C_ss + φ · (C(t) - C_ss) + ξ(t)
+        where φ = exp(-dt/T2) ≈ 0.905 is the *memory coefficient* we want to expose.
+
+        Previous implementation used mean-centred lag-1 autocorrelation, which gives
+        negative values for monotonically decaying sequences (consecutive deviations have
+        opposite sign relative to their own mean) → max(0,…) clamps to zero every cycle.
+
+        Correct approach — Yule-Walker estimator with steady-state centering:
+            φ̂ = Σ (x[i] - x_ss)(x[i-1] - x_ss)
+                ───────────────────────────────────
+                Σ (x[i-1] - x_ss)²
+
+        Because we centre on x_ss (0.87), not the sample mean, both numerator terms
+        have the same sign for a pure decay → φ̂ > 0 always.  With quantum-seeded
+        noise on top, φ̂ ∈ [0.6, 0.95] in normal operation, reflecting genuine
+        bath memory depth.
+
+        Returns
+        ───────
+        memory : float in [0.0, 1.0]
+            0.0  — fully Markovian (white noise bath, no history)
+            ~0.9 — highly non-Markovian (strong Lindblad memory, κ-kernel active)
+        """
         if len(self.history) < 2:
             return 0.0
-        
-        recent = list(self.history)[-10:]  # Last 10 points
-        if not recent:
+
+        recent = list(self.history)[-20:]          # Up to 20 steps (≈10 min at 30 s/cycle)
+        if len(recent) < 2:
             return 0.0
-        
-        # Autocorrelation in recent data
-        values = [float(h.get('coherence', 0.9)) for h in recent]
-        mean = np.mean(values)
+
         try:
-            variance = np.var(values)
-            if variance < 1e-10:
+            # Yule-Walker AR(1) with steady-state centering (not sample-mean centering)
+            COH_SS = 0.87                           # Lindblad steady state (must match evolve_bath_state)
+            vals   = np.array([float(h.get('coherence', COH_SS)) for h in recent], dtype=np.float64)
+            devs   = vals - COH_SS                 # deviations from bath equilibrium
+
+            numerator   = np.dot(devs[1:], devs[:-1])          # Σ d[i] · d[i-1]
+            denominator = np.dot(devs[:-1], devs[:-1])         # Σ d[i-1]²
+
+            if denominator < 1e-14:
+                # Coherence locked at steady-state — perfectly Markovian
                 return 0.0
-            autocov = np.mean([(values[i] - mean) * (values[i-1] - mean) for i in range(1, len(values))])
-            memory = autocov / variance if variance > 0 else 0.0
-        except Exception as e:
-            logger.debug(f"Memory effect computation failed: {e}")
-            memory = 0.0
-        
-        return max(0.0, min(1.0, memory))
+
+            phi = numerator / denominator
+
+            # Clamp: φ ∈ [0, 1].  Negative values (anti-correlation) map to 0 — rare
+            # once history depth ≥ 5; positive overshoots (> 1) are numerical artefacts.
+            phi_clamped = float(np.clip(phi, 0.0, 1.0))
+
+            logger.debug(
+                "[MEMORY] Yule-Walker AR(1) φ̂=%.4f (n=%d, denom=%.2e)",
+                phi_clamped, len(recent), denominator
+            )
+            return phi_clamped
+
+        except Exception as exc:
+            logger.debug("Memory effect computation failed: %s", exc)
+            return 0.0
     
     def evolve_bath_state(self, current_coherence: float, current_fidelity: float) -> Dict[str, Any]:
         """
