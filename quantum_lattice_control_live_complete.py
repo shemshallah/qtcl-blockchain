@@ -7813,7 +7813,6 @@ class EnhancedNoiseBathRefresh:
                 'violation_ratio': bell_metrics['violation_ratio'],
                 'bipartite_entanglement_avg': bell_metrics['bipartite_avg'],
             }
-            }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
