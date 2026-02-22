@@ -702,10 +702,54 @@ def get_pqc_state():
     return state['pqc_state']
 
 def get_quantum():
-    state = get_globals()
-    if state['heartbeat'] is None:
-        return {'status': 'offline'}
-    return {'status': 'online', 'heartbeat': state['heartbeat']}
+    """Return comprehensive quantum/lattice metrics including heartbeat, lattice neural refresh, W-state, and noise bath"""
+    try:
+        from quantum_lattice_control_live_complete import HEARTBEAT, LATTICE, LATTICE_NEURAL_REFRESH, W_STATE_ENHANCED, NOISE_BATH_ENHANCED
+        
+        metrics = {'status': 'online'}
+        
+        # Heartbeat metrics
+        if HEARTBEAT is not None:
+            hb_metrics = HEARTBEAT.get_metrics()
+            metrics['heartbeat'] = hb_metrics
+        else:
+            metrics['heartbeat'] = {'status': 'offline'}
+        
+        # Lattice neural refresh metrics
+        if LATTICE_NEURAL_REFRESH is not None:
+            try:
+                lattice_state = LATTICE_NEURAL_REFRESH.get_state()
+                metrics['lattice_neural'] = lattice_state
+            except Exception as e:
+                metrics['lattice_neural'] = {'error': str(e)}
+        
+        # W-state metrics
+        if W_STATE_ENHANCED is not None:
+            try:
+                w_state_metrics = W_STATE_ENHANCED.get_metrics()
+                metrics['w_state'] = w_state_metrics
+            except Exception as e:
+                metrics['w_state'] = {'error': str(e)}
+        
+        # Noise bath metrics
+        if NOISE_BATH_ENHANCED is not None:
+            try:
+                noise_metrics = NOISE_BATH_ENHANCED.get_metrics()
+                metrics['noise_bath'] = noise_metrics
+            except Exception as e:
+                metrics['noise_bath'] = {'error': str(e)}
+        
+        # Quantum lattice metrics
+        if LATTICE is not None:
+            try:
+                lattice_metrics = LATTICE.get_system_metrics()
+                metrics['lattice'] = lattice_metrics
+            except Exception as e:
+                metrics['lattice'] = {'error': str(e)}
+        
+        return metrics
+    except Exception as e:
+        return {'status': 'offline', 'error': str(e)}
 
 def get_genesis_block():
     state = get_globals()
