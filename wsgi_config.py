@@ -1424,10 +1424,14 @@ def _lattice_telemetry_loop() -> None:
             if ws is not None and hasattr(ws, 'get_state'):
                 try:
                     wsm = ws.get_state()
+                    coh_w = wsm.get('coherence_avg')
+                    fid_w = wsm.get('fidelity_avg')
+                    coh_str = f"{coh_w:.6f}" if coh_w is not None else "pending"
+                    fid_str = f"{fid_w:.6f}" if fid_w is not None else "pending"
                     logger.info(
                         f"[LATTICE-W]   cycle=#{cycle} | "
-                        f"coherence_avg={wsm.get('coherence_avg', 0):.6f} | "
-                        f"fidelity_avg={wsm.get('fidelity_avg', 0):.6f} | "
+                        f"coherence_avg={coh_str} | "
+                        f"fidelity_avg={fid_str} | "
                         f"superpositions={wsm.get('superposition_count','?')} | "
                         f"validations={wsm.get('transaction_validations','?')}"
                     )
@@ -1439,12 +1443,18 @@ def _lattice_telemetry_loop() -> None:
             if nb is not None and hasattr(nb, 'get_metrics'):
                 try:
                     nbm = nb.get_metrics()
-                    logger.info(
-                        f"[LATTICE-NB]  cycle=#{cycle} | "
-                        f"coherence={nbm.get('global_coherence', nbm.get('coherence', '?'))} | "
-                        f"fidelity={nbm.get('global_fidelity', nbm.get('fidelity', '?'))} | "
-                        f"kappa={nbm.get('kappa','?')}"
-                    )
+                    # Only log real values — if coherence/fidelity keys missing, log error
+                    nb_coh = nbm.get('global_coherence', nbm.get('coherence'))
+                    nb_fid = nbm.get('global_fidelity',  nbm.get('fidelity'))
+                    if nb_coh is None or nb_fid is None:
+                        logger.warning(f"[LATTICE-NB]  cycle=#{cycle} | coherence=ERROR(not yet evolved) | kappa={nbm.get('kappa','?')}")
+                    else:
+                        logger.info(
+                            f"[LATTICE-NB]  cycle=#{cycle} | "
+                            f"coherence={nb_coh} | "
+                            f"fidelity={nb_fid} | "
+                            f"kappa={nbm.get('kappa','?')}"
+                        )
                 except Exception as _e:
                     logger.debug(f"[LATTICE-TELEM] NOISE_BATH metrics error: {_e}")
 
@@ -1453,8 +1463,9 @@ def _lattice_telemetry_loop() -> None:
             if lat is not None and hasattr(lat, 'get_system_metrics'):
                 try:
                     lm = lat.get_system_metrics()
-                    coh = lm.get('global_coherence', lm.get('w_state', {}).get('coherence_avg', '?'))
-                    fid = lm.get('global_fidelity',  lm.get('w_state', {}).get('fidelity_avg',  '?'))
+                    # get_system_metrics raises RuntimeError on cycle #1 (no history yet)
+                    coh = lm['global_coherence']
+                    fid = lm['global_fidelity']
                     logger.info(
                         f"[LATTICE-SYS] cycle=#{cycle} | "
                         f"coherence={coh:.6f} | fidelity={fid:.6f} | "
@@ -1462,6 +1473,8 @@ def _lattice_telemetry_loop() -> None:
                         f"ops={lm.get('operations_count','?')} | "
                         f"txs={lm.get('transactions_processed','?')}"
                     )
+                except RuntimeError as _re:
+                    logger.info(f"[LATTICE-SYS] cycle=#{cycle} | coherence=ERROR({_re}) | fidelity=ERROR")
                 except Exception as _e:
                     logger.debug(f"[LATTICE-TELEM] LATTICE system metrics error: {_e}")
 
@@ -1520,8 +1533,9 @@ def _lattice_telemetry_loop() -> None:
                     try:
                         # Pull current coherence/fidelity from metrics
                         _lm     = lat.get_system_metrics()
-                        _coh_in = _lm.get('global_coherence', 0.87)
-                        _fid_in = _lm.get('global_fidelity',  0.93)
+                        # Require real values — RuntimeError here means bath not yet evolved
+                        _coh_in = _lm['global_coherence']
+                        _fid_in = _lm['global_fidelity']
 
                         nb_result  = lat.evolve_noise_bath(_coh_in, _fid_in)
                         ws_result  = lat.refresh_interference()

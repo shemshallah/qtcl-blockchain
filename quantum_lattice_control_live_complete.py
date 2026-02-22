@@ -724,9 +724,7 @@ def _init_wsgi():
 class QRNGSource(Enum):
     """Quantum RNG source types"""
     RANDOM_ORG = "random.org"
-    ANU        = "anu_qrng"
-    HOTBITS    = "hotbits_fourmilab"   # Radioactive decay — fourmilab.ch
-    HU_BERLIN  = "hu_berlin_qrng"      # Humboldt University Berlin vacuum fluctuations
+    ANU = "anu_qrng"
 
 @dataclass
 class QRNGMetrics:
@@ -1204,6 +1202,7 @@ class QuantumEntropyEnsemble:
                                    "bytes": self.hu_berlin.metrics.bytes_fetched},
                 }
             }
+
 
 
 class NonMarkovianNoiseBath:
@@ -2031,9 +2030,9 @@ class RealTimeMetricsStreamer:
                     {
                         'batch_id': m.get('batch_id', 0),
                         'tx_id': m.get('tx_id') or f"batch_{m.get('batch_id', 0)}_meas_{secrets.token_hex(8)}",
-                        'ghz': m.get('ghz_fidelity', 0.91),
-                        'w_state': m.get('w_state_fidelity', 0.90),
-                        'coherence': m.get('coherence_quality', 0.90),
+                        'ghz': m['ghz_fidelity'],  # KeyError = measurement dict missing ghz_fidelity
+                        'w_state': m['w_state_fidelity'],  # KeyError = measurement dict missing w_state_fidelity
+                        'coherence': m['coherence_quality'],  # KeyError = measurement dict missing coherence_quality
                         'meta': json.dumps(m.get('measurement_data', {})),
                         'pq_id': m.get('pseudoqubit_id', 1),
                         'metadata': json.dumps(m.get('metadata', {}))
@@ -2073,8 +2072,8 @@ class RealTimeMetricsStreamer:
                     VALUES (%(pre)s, %(post)s, %(etype)s, %(method)s, NOW(), %(meta)s)
                 """, [
                     {
-                        'pre': m.get('pre_fidelity', 0.92),
-                        'post': m.get('post_fidelity', 0.91),
+                        'pre': m['pre_fidelity'],  # KeyError = mitigation dict missing pre_fidelity
+                        'post': m['post_fidelity'],  # KeyError = mitigation dict missing post_fidelity
                         'etype': m.get('error_type', 'unknown'),
                         'method': m.get('mitigation_method', 'adaptive'),
                         'meta': json.dumps(m)
@@ -2113,8 +2112,8 @@ class RealTimeMetricsStreamer:
                     WHERE pseudoqubit_id = %(pseudoqubit_id)s
                 """, [
                     {
-                        'fidelity': u.get('fidelity', 0.93),
-                        'coherence': u.get('coherence', 0.92),
+                        'fidelity': u['fidelity'],  # KeyError = update dict missing fidelity
+                        'coherence': u['coherence'],  # KeyError = update dict missing coherence
                         'pseudoqubit_id': u.get('qubit_id') or u.get('pseudoqubit_id', 0)
                     }
                     for u in updates
@@ -5050,8 +5049,9 @@ class TransactionValidatorWState:
         self.w_state_circuit = None
         self.interference_phase = 0.0
         self.entanglement_strength = 1.0
-        self.coherence_vector = np.ones(num_validators) * 0.95 if np else None
-        self.fidelity_vector = np.ones(num_validators) * 0.92 if np else None
+        # Seeded from first Aer circuit run — never use magic default values
+        self.coherence_vector: "Optional[np.ndarray]" = None
+        self.fidelity_vector:  "Optional[np.ndarray]" = None
         self.lock = threading.RLock()
         self.refresh_count = 0
         self.last_refresh_time = time.time()
@@ -5088,28 +5088,29 @@ class TransactionValidatorWState:
             return None
     
     def compute_w_state_statevector(self) -> Optional[np.ndarray]:
-        """Compute exact statevector for 5-qubit W-state"""
+        """
+        Compute exact statevector for 5-qubit W-state (Qiskit 1.x API).
+        Raises on failure — callers must handle; no silent None returns after init.
+        """
         if not QISKIT_AVAILABLE or np is None:
-            return None
-            
-        try:
-            qc = self.generate_w_state_circuit()
-            if qc is None:
-                return None
-            
-            # Transpile and execute
-            simulator = StatevectorSimulator()
-            job = execute(qc, simulator)
-            result = job.result()
-            statevector = result.get_statevector(qc)
-            
-            with self.lock:
-                self.w_state_vector = statevector
-            
-            return statevector
-        except Exception as e:
-            logger.error(f"Error computing W-state statevector: {e}")
-            return None
+            raise RuntimeError("Qiskit / numpy not available — cannot compute W-state statevector")
+
+        qc = self.generate_w_state_circuit()
+        if qc is None:
+            raise RuntimeError("generate_w_state_circuit() returned None")
+
+        simulator = AerSimulator(method='statevector')
+        qc_t = transpile(qc, simulator)
+        qc_t.save_statevector()
+        result = simulator.run(qc_t).result()
+        if not result.success:
+            raise RuntimeError(f"Aer statevector job failed: {result.status}")
+
+        statevector = result.get_statevector(qc_t)
+        with self.lock:
+            self.w_state_vector = statevector
+
+        return statevector
     
     def detect_interference_pattern(self) -> Dict[str, Any]:
         """Detect W-state interference patterns and entanglement signatures"""
@@ -5179,14 +5180,17 @@ class TransactionValidatorWState:
                 noise_model.add_all_qubit_quantum_error(depol_error, ['u1', 'u2', 'u3'])
                 
                 # Amplitude damping with memory-preserving kernel
-                ampdamp_error = amplitude_damping_error(0.001)
-                noise_model.add_all_qubit_quantum_error(ampdamp_error, ['cx'])
-                
-                # Execute with noise
+                # 2-qubit depolarizing on cx (amplitude_damping is 1-qubit only)
+                depol_2q = depolarizing_error(0.004, 2)
+                noise_model.add_all_qubit_quantum_error(depol_2q, ['cx'])
+
+                # Qiskit 1.x: transpile + backend.run (no execute())
                 simulator = AerSimulator(noise_model=noise_model)
-                job = execute(qc, simulator, shots=2048)
-                result = job.result()
-                counts = result.get_counts(qc)
+                qc_t = transpile(qc, simulator)
+                result = simulator.run(qc_t, shots=2048).result()
+                if not result.success:
+                    raise RuntimeError(f"Interference Aer job failed: {result.status}")
+                counts = result.get_counts(qc_t)
                 
                 # Re-measure with noise to amplify interference detection
                 new_data = self.detect_interference_pattern()
@@ -5219,29 +5223,52 @@ class TransactionValidatorWState:
             # Detect and amplify interference
             interference_result = self.amplify_interference_with_noise_injection()
             
-            # Update coherence and fidelity vectors
+            # ── Seed or update coherence/fidelity vectors from Aer result ──────
             if np:
                 with self.lock:
-                    self.coherence_vector = np.maximum(
-                        self.coherence_vector - 0.01,  # Slight decay
-                        0.85
-                    )
-                    # Boost where interference is strong
-                    for i in range(self.num_validators):
-                        if interference_result.get('interference_detected', False):
-                            self.coherence_vector[i] = min(0.99, self.coherence_vector[i] + 0.02)
-                    
-                    self.fidelity_vector = np.maximum(
-                        self.fidelity_vector - 0.005,  # Minimal decay
-                        0.88
-                    )
-            
+                    # Seed from W-state probabilities on first run (no magic fallbacks)
+                    if self.coherence_vector is None or self.fidelity_vector is None:
+                        if self.w_state_vector is not None:
+                            probs = np.abs(np.array(self.w_state_vector)) ** 2
+                            w_indices = [2**i for i in range(self.num_validators)]
+                            w_probs = np.array([probs[idx] if idx < len(probs) else 0.0
+                                                for idx in w_indices])
+                            # Coherence ~ fidelity to ideal W-state per validator
+                            self.coherence_vector = np.clip(
+                                w_probs * self.num_validators, 0.70, 0.99
+                            ).astype(float)
+                            self.fidelity_vector = self.coherence_vector * 0.98
+                            logger.info(
+                                f"[W-STATE] Vectors seeded from Aer: "
+                                f"coh={float(np.mean(self.coherence_vector)):.4f} "
+                                f"fid={float(np.mean(self.fidelity_vector)):.4f}"
+                            )
+                        else:
+                            raise RuntimeError(
+                                "coherence_vector/fidelity_vector unavailable: "
+                                "Aer statevector not computed yet"
+                            )
+                    else:
+                        # Lindblad decay toward W-state ideal
+                        self.coherence_vector = np.maximum(
+                            self.coherence_vector - 0.01, 0.70
+                        )
+                        for i in range(self.num_validators):
+                            if interference_result.get('interference_detected', False):
+                                self.coherence_vector[i] = min(0.99, self.coherence_vector[i] + 0.02)
+                        self.fidelity_vector = np.maximum(
+                            self.fidelity_vector - 0.005, 0.68
+                        )
+
+            if self.coherence_vector is None:
+                raise RuntimeError("coherence_vector still None after refresh — Aer circuit failed")
+
             return {
                 'refresh_count': self.refresh_count,
                 'timestamp': time.time(),
                 'interference': interference_result,
-                'coherence_avg': float(np.mean(self.coherence_vector)) if np else 0.0,
-                'fidelity_avg': float(np.mean(self.fidelity_vector)) if np else 0.0
+                'coherence_avg': float(np.mean(self.coherence_vector)),
+                'fidelity_avg':  float(np.mean(self.fidelity_vector)),
             }
         except Exception as e:
             logger.error(f"Error refreshing transaction W-state: {e}")
@@ -5348,11 +5375,13 @@ class GHZCircuitBuilder:
             # Measure oracle qubit
             qc.measure(oracle_qubit, oracle_qubit)
             
-            # Execute
+            # Qiskit 1.x: transpile + backend.run
             simulator = AerSimulator()
-            job = execute(qc, simulator, shots=1024)
-            result = job.result()
-            counts = result.get_counts(qc)
+            qc_t = transpile(qc, simulator)
+            result = simulator.run(qc_t, shots=1024).result()
+            if not result.success:
+                raise RuntimeError(f"Oracle finality Aer job failed: {result.status}")
+            counts = result.get_counts(qc_t)
             
             # Extract oracle qubit measurement
             # Most likely outcome determines finality
@@ -5539,8 +5568,8 @@ class NeuralLatticeControlGlobals:
             return
         
         try:
-            coherence = noise_bath_state.get('coherence_avg', 0.95)
-            fidelity = noise_bath_state.get('fidelity_avg', 0.92)
+            coherence = noise_bath_state['coherence_avg']  # KeyError = bath not evolved yet
+            fidelity = noise_bath_state['fidelity_avg']   # KeyError = bath not evolved yet
             entanglement = noise_bath_state.get('entanglement_strength', 1.0)
             
             # Compute noise-based gradient signal
@@ -5963,6 +5992,7 @@ class DynamicNoiseBathEvolution:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
 # PART 8: HYPERBOLIC ROUTING & ADAPTIVE QUANTUM GEOMETRY
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -6048,26 +6078,21 @@ class QuantumLatticeGlobal:
     """
     
     def __init__(self):
-        self.w_state_manager    = TransactionValidatorWState()
-        self.ghz_builder        = GHZCircuitBuilder()
-        self.neural_control     = NeuralLatticeControlGlobals()
-        self.tx_processor       = TransactionQuantumProcessor()
-        self.noise_bath         = DynamicNoiseBathEvolution()   # entropy_ensemble wired below
+        self.w_state_manager = TransactionValidatorWState()
+        self.ghz_builder = GHZCircuitBuilder()
+        self.neural_control = NeuralLatticeControlGlobals()
+        self.tx_processor = TransactionQuantumProcessor()
+        self.noise_bath = DynamicNoiseBathEvolution()
         self.hyperbolic_routing = HyperbolicQuantumRouting()
-        self.lock               = threading.RLock()
-
-        # ── Genuine Quantum Measurement Engine ────────────────────────────
-        self.bell_tester  = CHSHBellTester()         # CHSH S_CHSH violation test
-        self.blp_monitor  = QuantumBLPMonitor()       # Non-Markovianity trace distance
-        self._bell_cycle_counter = 0                  # trigger every BELL_TEST_INTERVAL cycles
-
-        # Thread pool for WSGI threads
-        self.executor    = ThreadPoolExecutor(max_workers=4, thread_name_prefix="LATTICE-WSGI")
+        self.lock = threading.RLock()
+        
+        # Thread pool for 4 WSGI threads
+        self.executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix='LATTICE-WSGI')
         self.active_threads = 0
-
+        
         # Metrics
         self.operations_count = 0
-        self.last_update      = time.time()
+        self.last_update = time.time()
         
     def get_w_state(self) -> Dict[str, Any]:
         """Get current W-state from manager"""
@@ -6090,77 +6115,33 @@ class QuantumLatticeGlobal:
     def refresh_interference(self) -> Dict[str, Any]:
         """Refresh and detect W-state interference"""
         return self.w_state_manager.amplify_interference_with_noise_injection()
-
+    
     def evolve_noise_bath(self, coherence: float, fidelity: float) -> Dict[str, Any]:
-        """
-        Evolve noise bath + W-state revival detection.
-        Every BELL_TEST_INTERVAL cycles also runs CHSH Bell test and BLP monitor.
-        """
+        """Evolve the noise bath with W-state revival detection"""
         result = self.noise_bath.evolve_bath_state(coherence, fidelity)
         revival = self.noise_bath.detect_w_state_revival()
-
-        # ── Periodic genuine quantum measurements ─────────────────────────
-        self._bell_cycle_counter += 1
-        if QISKIT_AVAILABLE and self._bell_cycle_counter >= CHSHBellTester.BELL_TEST_INTERVAL:
-            self._bell_cycle_counter = 0
-            # Get current bath kappa for realistic noise injection
-            try:
-                import quantum_lattice_control_live_complete as _ql
-                _nb_enh = getattr(_ql, "NOISE_BATH_ENHANCED", None)
-                kappa = float(_nb_enh.kappa) if _nb_enh else 0.08
-            except Exception:
-                kappa = 0.08
-
-            # Run in background threads to avoid blocking telemetry cycle
-            def _run_bell():
-                try:
-                    self.bell_tester.run_bell_test(shots=1024, noise_kappa=kappa)
-                except Exception as _e:
-                    logger.debug(f"BELL background error: {_e}")
-
-            def _run_blp():
-                try:
-                    self.blp_monitor.measure(noise_kappa=kappa, shots=512)
-                except Exception as _e:
-                    logger.debug(f"BLP background error: {_e}")
-
-            threading.Thread(target=_run_bell, daemon=True, name="BELL-tester").start()
-            threading.Thread(target=_run_blp,  daemon=True, name="BLP-monitor").start()
-
-        combined = {**result, **revival}
-        return combined
-
+        return {**result, **revival}
+    
     def get_neural_lattice_state(self) -> Dict[str, Any]:
         """Get neural lattice state"""
         return self.neural_control.get_lattice_state()
-
+    
     def get_system_metrics(self) -> Dict[str, Any]:
-        """Get comprehensive system metrics including scalar coherence/fidelity"""
+        """Get comprehensive system metrics"""
         try:
             with self.lock:
                 self.operations_count += 1
-
-            coh_hist = list(self.noise_bath.coherence_evolution)[-10:] if self.noise_bath.coherence_evolution else []
-            fid_hist  = list(self.noise_bath.fidelity_evolution)[-10:]  if self.noise_bath.fidelity_evolution  else []
-            w_info   = self.get_w_state()
-
+            
             return {
-                "timestamp":               time.time(),
-                "operations_count":        self.operations_count,
-                "active_threads":          self.active_threads,
-                "w_state":                 w_info,
-                "neural_lattice":          self.get_neural_lattice_state(),
-                "transactions_processed":  self.tx_processor.transactions_processed,
-                "finalized_transactions":  len(self.tx_processor.finalized_transactions),
-                "coherence_evolution":     coh_hist,
-                "fidelity_evolution":      fid_hist,
-                # Scalar convenience fields for telemetry
-                "global_coherence": float(coh_hist[-1]) if coh_hist else float(w_info.get("coherence_avg", 0.87)),
-                "global_fidelity":  float(fid_hist[-1]) if fid_hist  else float(w_info.get("fidelity_avg",  0.93)),
-                "num_qubits":       106496,
-                # Quantum measurement summaries
-                "bell": self.bell_tester.get_summary(),
-                "blp":  self.blp_monitor.get_summary(),
+                'timestamp': time.time(),
+                'operations_count': self.operations_count,
+                'active_threads': self.active_threads,
+                'w_state': self.get_w_state(),
+                'neural_lattice': self.get_neural_lattice_state(),
+                'transactions_processed': self.tx_processor.transactions_processed,
+                'finalized_transactions': len(self.tx_processor.finalized_transactions),
+                'coherence_evolution': list(self.noise_bath.coherence_evolution)[-10:] if self.noise_bath.coherence_evolution else [],
+                'fidelity_evolution': list(self.noise_bath.fidelity_evolution)[-10:] if self.noise_bath.fidelity_evolution else [],
             }
         except Exception as e:
             logger.error(f"Error getting metrics: {e}")
@@ -6619,14 +6600,15 @@ class EnhancedWStateManager:
         
         # Metrics
         self.superposition_count = 0
-        self.coherence_avg = 0.5
-        self.fidelity_avg = 0.99
+        # None until first heartbeat reads from NOISE_BATH_ENHANCED — no magic values
+        self.coherence_avg: "Optional[float]" = None
+        self.fidelity_avg:  "Optional[float]" = None
         self.entanglement_strength = 0.0
         self.coherence_decay_rate = 0.01
         self.transaction_validations = 0
         self.total_coherence_time = 0.0
-        
-        logger.info("🌀 EnhancedWStateManager initialized")
+
+        logger.info("🌀 EnhancedWStateManager initialized (coherence_avg/fidelity_avg pending first heartbeat)")
     
     def create_superposition(self, tx_id: str) -> bool:
         """Create new superposition state for transaction"""
@@ -6673,7 +6655,10 @@ class EnhancedWStateManager:
             # Update average coherence
             if self.superposition_states:
                 coherences = [s['coherence'] for s in self.superposition_states.values()]
-                self.coherence_avg = 0.9 * self.coherence_avg + 0.1 * np.mean(coherences)
+                if self.coherence_avg is not None:
+                    self.coherence_avg = 0.9 * self.coherence_avg + 0.1 * float(np.mean(coherences))
+                else:
+                    self.coherence_avg = float(np.mean(coherences))
     
     def validate_transaction(self, tx_id: str, min_coherence: float = 0.5) -> bool:
         """Validate transaction coherence"""
@@ -6689,8 +6674,8 @@ class EnhancedWStateManager:
         with self.lock:
             return {
                 'superposition_count': self.superposition_count,
-                'coherence_avg': float(self.coherence_avg),
-                'fidelity_avg': float(self.fidelity_avg),
+                'coherence_avg': float(self.coherence_avg) if self.coherence_avg is not None else None,
+                'fidelity_avg':  float(self.fidelity_avg)  if self.fidelity_avg  is not None else None,
                 'entanglement_strength': float(self.entanglement_strength),
                 'transaction_validations': self.transaction_validations,
                 'total_coherence_time': self.total_coherence_time
@@ -7097,6 +7082,7 @@ class EnhancedNoiseBathRefresh:
             }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
 # PART 10: GLOBAL LATTICE INSTANTIATION & WSGI INTEGRATION
 # All singletons are created exactly once via _init_quantum_singletons().
 # The function is guarded by _QUANTUM_INIT_LOCK + _QUANTUM_MODULE_INITIALIZED flag.
