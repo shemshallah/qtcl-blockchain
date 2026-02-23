@@ -3266,6 +3266,65 @@ SCHEMA_DEFINITIONS = {
         )
     """,
     
+    'quantum_density_matrix_global': """
+        CREATE TABLE IF NOT EXISTS quantum_density_matrix_global (
+            id BIGSERIAL PRIMARY KEY,
+            cycle BIGINT NOT NULL UNIQUE,
+            timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            lattice_size INT DEFAULT 260,
+            density_matrix_data BYTEA NOT NULL,
+            density_matrix_hash VARCHAR(64) NOT NULL,
+            coherence FLOAT NOT NULL,
+            fidelity FLOAT NOT NULL,
+            w_state_strength FLOAT NOT NULL,
+            ghz_phase FLOAT NOT NULL,
+            batch_coherences FLOAT8[] DEFAULT ARRAY[]::FLOAT8[],
+            is_collapsed BOOLEAN DEFAULT FALSE,
+            collapse_timestamp TIMESTAMP WITH TIME ZONE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """,
+    
+    'quantum_shadow_states_global': """
+        CREATE TABLE IF NOT EXISTS quantum_shadow_states_global (
+            id BIGSERIAL PRIMARY KEY,
+            cycle_before_collapse BIGINT NOT NULL,
+            collapse_cycle BIGINT NOT NULL,
+            timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            pre_collapse_density_matrix BYTEA NOT NULL,
+            reduced_density_matrices JSONB NOT NULL,
+            correlation_matrix BYTEA,
+            batch_coherences_pre FLOAT8[],
+            batch_fidelities_pre FLOAT8[],
+            ghz_phase_pre FLOAT NOT NULL,
+            w_state_strength_pre FLOAT NOT NULL,
+            collapse_measurement FLOAT,
+            revival_data JSONB,
+            is_recovered BOOLEAN DEFAULT FALSE,
+            recovery_timestamp TIMESTAMP WITH TIME ZONE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """,
+    
+    'quantum_entanglement_log': """
+        CREATE TABLE IF NOT EXISTS quantum_entanglement_log (
+            id BIGSERIAL PRIMARY KEY,
+            cycle BIGINT NOT NULL,
+            timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            qubit_1 INT NOT NULL,
+            qubit_2 INT NOT NULL,
+            entanglement_strength FLOAT NOT NULL,
+            mutual_information FLOAT,
+            discord FLOAT,
+            bell_parameter FLOAT,
+            is_violated BOOLEAN DEFAULT FALSE,
+            batch_id_1 INT,
+            batch_id_2 INT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """,
+    
     'w_state_validator_states': """
         CREATE TABLE IF NOT EXISTS w_state_validator_states (
             state_id BIGSERIAL PRIMARY KEY,

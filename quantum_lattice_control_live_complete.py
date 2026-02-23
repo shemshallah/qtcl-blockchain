@@ -51,6 +51,99 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 
 # ═════════════════════════════════════════════════════════════════════════════════
+# QUANTUM DENSITY MATRIX DATABASE SYNCHRONIZATION (INTEGRATED)
+# ═════════════════════════════════════════════════════════════════════════════════
+
+class QuantumDensityMatrixSync:
+    """Inline density matrix persistence to PostgreSQL."""
+    
+    def __init__(self, db_pool, lattice_size: int = 260):
+        self.db_pool = db_pool
+        self.lattice_size = lattice_size
+        self.cycle_count = 0
+    
+    def write_cycle_to_db(self, rho: np.ndarray, coherence: float, fidelity: float,
+                          w_state_strength: float, ghz_phase: float,
+                          batch_coherences: np.ndarray, is_collapsed: bool = False) -> bool:
+        """Write lattice density matrix to database."""
+        try:
+            self.cycle_count += 1
+            rho_flat = rho.astype(np.complex128).flatten()
+            rho_bytes = rho_flat.tobytes()
+            rho_hash = hashlib.sha256(rho_bytes).hexdigest()
+            
+            with self.db_pool.getconn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO quantum_density_matrix_global
+                        (cycle, density_matrix_data, density_matrix_hash, coherence,
+                         fidelity, w_state_strength, ghz_phase, batch_coherences,
+                         is_collapsed, timestamp)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    """, (self.cycle_count, psycopg2.Binary(rho_bytes), rho_hash,
+                          float(coherence), float(fidelity), float(w_state_strength),
+                          float(ghz_phase), batch_coherences.tolist(), bool(is_collapsed)))
+                    conn.commit()
+            return True
+        except Exception as e:
+            logging.warning(f"DB sync write failed: {e}")
+            return False
+    
+    def save_shadow_before_collapse(self, cycle_before: int, cycle_collapse: int,
+                                     rho_pre: np.ndarray, batch_coherences_pre: np.ndarray,
+                                     batch_fidelities_pre: np.ndarray, ghz_phase_pre: float,
+                                     w_strength_pre: float) -> bool:
+        """Save state before GHZ collapse."""
+        try:
+            rho_bytes = rho_pre.astype(np.complex128).flatten().tobytes()
+            
+            with self.db_pool.getconn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO quantum_shadow_states_global
+                        (cycle_before_collapse, collapse_cycle, pre_collapse_density_matrix,
+                         batch_coherences_pre, ghz_phase_pre, w_state_strength_pre, timestamp)
+                        VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                    """, (cycle_before, cycle_collapse, psycopg2.Binary(rho_bytes),
+                          batch_coherences_pre.tolist(), float(ghz_phase_pre),
+                          float(w_strength_pre)))
+                    conn.commit()
+            return True
+        except Exception as e:
+            logging.warning(f"Shadow save failed: {e}")
+            return False
+    
+    def recover_shadow(self, collapse_cycle: int) -> dict:
+        """Recover state from shadow for Sigma-8 revival."""
+        try:
+            with self.db_pool.getconn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT pre_collapse_density_matrix, batch_coherences_pre,
+                               ghz_phase_pre, w_state_strength_pre
+                        FROM quantum_shadow_states_global
+                        WHERE collapse_cycle = %s LIMIT 1
+                    """, (collapse_cycle,))
+                    row = cur.fetchone()
+            
+            if not row:
+                return None
+            
+            rho_bytes = bytes(row[0])
+            rho_flat = np.frombuffer(rho_bytes, dtype=np.complex128)
+            rho = rho_flat.reshape((self.lattice_size, self.lattice_size))
+            
+            return {
+                'rho': rho,
+                'batch_coherences': np.array(row[1]),
+                'ghz_phase': row[2],
+                'w_state_strength': row[3],
+            }
+        except Exception as e:
+            logging.warning(f"Shadow recovery failed: {e}")
+            return None
+
+# ═════════════════════════════════════════════════════════════════════════════════
 # PARALLEL BATCH PROCESSING + NOISE-ALONE W-STATE REFRESH (v5.2 ENHANCEMENT)
 # Fully inlined — no external parallel_refresh_implementation.py required.
 # ═════════════════════════════════════════════════════════════════════════════════

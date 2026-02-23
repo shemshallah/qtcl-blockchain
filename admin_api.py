@@ -1700,6 +1700,86 @@ def create_blueprint()->Blueprint:
             logger.error(f"Upgrade vote error: {e}",exc_info=True)
             return jsonify({'error':'Failed to vote on upgrade'}),500
     
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # v5.2 QUANTUM MONITORING ENDPOINTS
+    # ═══════════════════════════════════════════════════════════════════════════════
+    
+    @bp.route('/admin/quantum/coherence', methods=['GET'])
+    @require_auth
+    def admin_quantum_coherence():
+        """Get quantum coherence metrics (admin only)."""
+        try:
+            if not g.is_admin:
+                return jsonify({'error': 'Admin required'}), 403
+            
+            from wsgi_config import QUANTUM_STATE, QUANTUM_COHERENCE_COMMITMENT
+            if not QUANTUM_STATE:
+                return jsonify({'error': 'Quantum system not initialized'}), 503
+            
+            snapshot = QUANTUM_STATE.get_snapshot()
+            
+            return jsonify({
+                'success': True,
+                'coherence': snapshot['lattice_coherence'],
+                'fidelity': snapshot['lattice_fidelity'],
+                'w_state_strength': snapshot['w_state_strength'],
+                'ghz_phase': snapshot['ghz_phase'],
+                'measurements': snapshot['total_measurements'],
+                'decoherence_rate': QUANTUM_COHERENCE_COMMITMENT.get_decoherence_trend() if QUANTUM_COHERENCE_COMMITMENT else None,
+            }), 200
+        except Exception as e:
+            logger.error(f"admin_quantum_coherence failed: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+    
+    @bp.route('/admin/quantum/system-health', methods=['GET'])
+    @require_auth
+    def admin_quantum_system_health():
+        """Get overall quantum system health (admin only)."""
+        try:
+            if not g.is_admin:
+                return jsonify({'error': 'Admin required'}), 403
+            
+            from wsgi_config import ENTANGLEMENT_GRAPH, QUANTUM_WRITER, QUANTUM_STATE
+            
+            health_score = ENTANGLEMENT_GRAPH.get_health_score() if ENTANGLEMENT_GRAPH else None
+            writer_stats = QUANTUM_WRITER.get_stats() if QUANTUM_WRITER else None
+            quantum_snapshot = QUANTUM_STATE.get_snapshot() if QUANTUM_STATE else None
+            
+            return jsonify({
+                'success': True,
+                'entanglement_health': health_score,
+                'writer_stats': writer_stats,
+                'quantum_snapshot': {
+                    'fidelity': quantum_snapshot['lattice_fidelity'],
+                    'coherence': quantum_snapshot['lattice_coherence'],
+                } if quantum_snapshot else None,
+            }), 200
+        except Exception as e:
+            logger.error(f"admin_quantum_system_health failed: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+    
+    @bp.route('/admin/quantum/phase-info', methods=['GET'])
+    @require_auth
+    def admin_quantum_phase_info():
+        """Get current quantum phase and transition info (admin only)."""
+        try:
+            if not g.is_admin:
+                return jsonify({'error': 'Admin required'}), 403
+            
+            from wsgi_config import QUANTUM_TRANSITION
+            if not QUANTUM_TRANSITION:
+                return jsonify({'error': 'Quantum transition system not initialized'}), 503
+            
+            phase_info = QUANTUM_TRANSITION.get_phase_info()
+            
+            return jsonify({
+                'success': True,
+                'phase_info': phase_info,
+            }), 200
+        except Exception as e:
+            logger.error(f"admin_quantum_phase_info failed: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+    
     return bp
 
 

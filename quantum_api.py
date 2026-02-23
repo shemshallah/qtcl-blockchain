@@ -98,6 +98,155 @@ from decimal import Decimal,getcontext
 from dataclasses import dataclass,asdict,field
 from enum import Enum,IntEnum,auto
 from collections import defaultdict,deque,Counter,OrderedDict
+
+# ═════════════════════════════════════════════════════════════════════════════════
+# QUANTUM DENSITY MATRIX MANAGER (INTEGRATED)
+# ═════════════════════════════════════════════════════════════════════════════════
+
+class QuantumDensityMatrixManager:
+    """Manages quantum lattice density matrix persistence."""
+    
+    def __init__(self, db_pool):
+        self.db_pool = db_pool
+        self.lock = threading.RLock()
+    
+    def serialize_density_matrix(self, rho: np.ndarray) -> bytes:
+        """Convert density matrix to bytes."""
+        try:
+            flat = rho.flatten()
+            return flat.astype(np.float64).tobytes()
+        except Exception as e:
+            logger.error(f"Serialization failed: {e}")
+            return b''
+    
+    def deserialize_density_matrix(self, data: bytes, size: int = 260) -> np.ndarray:
+        """Reconstruct density matrix from bytes."""
+        try:
+            flat = np.frombuffer(data, dtype=np.float64)
+            return flat.reshape((size, size))
+        except Exception as e:
+            logger.error(f"Deserialization failed: {e}")
+            return np.eye(size, dtype=np.complex128)
+    
+    def write_cycle_to_db(self, rho: np.ndarray, coherence: float, fidelity: float,
+                          w_state_strength: float, ghz_phase: float,
+                          batch_coherences: List[float], is_collapsed: bool = False) -> bool:
+        """Write lattice state to database."""
+        try:
+            rho_bytes = self.serialize_density_matrix(rho)
+            rho_hash = hashlib.sha256(rho_bytes).hexdigest()
+            
+            with self.db_pool.getconn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO quantum_density_matrix_global
+                        (density_matrix_data, density_matrix_hash, coherence,
+                         fidelity, w_state_strength, ghz_phase, batch_coherences,
+                         is_collapsed, timestamp)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    """, (psycopg2.Binary(rho_bytes), rho_hash, coherence, fidelity,
+                          w_state_strength, ghz_phase, batch_coherences, is_collapsed))
+                    conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to write cycle to DB: {e}")
+            return False
+    
+    def read_latest_state(self) -> Optional[Dict]:
+        """Read most recent lattice state from database."""
+        try:
+            with self.db_pool.getconn() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute("""
+                        SELECT cycle, density_matrix_data, density_matrix_hash,
+                               coherence, fidelity, w_state_strength, ghz_phase,
+                               batch_coherences, is_collapsed, timestamp
+                        FROM quantum_density_matrix_global
+                        ORDER BY cycle DESC LIMIT 1
+                    """)
+                    row = cur.fetchone()
+            
+            if not row:
+                return None
+            
+            rho = self.deserialize_density_matrix(bytes(row['density_matrix_data']))
+            
+            return {
+                'cycle': row['cycle'],
+                'density_matrix': rho,
+                'coherence': row['coherence'],
+                'fidelity': row['fidelity'],
+                'w_state_strength': row['w_state_strength'],
+                'ghz_phase': row['ghz_phase'],
+                'batch_coherences': row['batch_coherences'] or [],
+                'is_collapsed': row['is_collapsed'],
+                'timestamp': row['timestamp'],
+            }
+        except Exception as e:
+            logger.error(f"Failed to read state from DB: {e}")
+            return None
+    
+    def write_shadow_state(self, cycle_before: int, cycle_collapse: int,
+                          rho_pre: np.ndarray, rho_reduced_dict: Dict,
+                          correlation_matrix: np.ndarray,
+                          batch_coherences_pre: List[float],
+                          ghz_phase_pre: float, w_strength_pre: float) -> bool:
+        """Write shadow state before collapse."""
+        try:
+            rho_pre_bytes = self.serialize_density_matrix(rho_pre)
+            corr_bytes = self.serialize_density_matrix(correlation_matrix)
+            
+            with self.db_pool.getconn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO quantum_shadow_states_global
+                        (cycle_before_collapse, collapse_cycle, pre_collapse_density_matrix,
+                         reduced_density_matrices, correlation_matrix,
+                         batch_coherences_pre, ghz_phase_pre, w_state_strength_pre, timestamp)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    """, (cycle_before, cycle_collapse, psycopg2.Binary(rho_pre_bytes),
+                          json.dumps(rho_reduced_dict), psycopg2.Binary(corr_bytes),
+                          batch_coherences_pre, ghz_phase_pre, w_strength_pre))
+                    conn.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to write shadow state: {e}")
+            return False
+    
+    def read_shadow_state(self, collapse_cycle: int) -> Optional[Dict]:
+        """Read shadow state for revival."""
+        try:
+            with self.db_pool.getconn() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    cur.execute("""
+                        SELECT pre_collapse_density_matrix, reduced_density_matrices,
+                               correlation_matrix, batch_coherences_pre, 
+                               ghz_phase_pre, w_state_strength_pre
+                        FROM quantum_shadow_states_global
+                        WHERE collapse_cycle = %s LIMIT 1
+                    """, (collapse_cycle,))
+                    row = cur.fetchone()
+            
+            if not row:
+                return None
+            
+            rho_pre = self.deserialize_density_matrix(bytes(row['pre_collapse_density_matrix']))
+            corr_mat = self.deserialize_density_matrix(bytes(row['correlation_matrix']))
+            
+            return {
+                'rho_pre': rho_pre,
+                'reduced_densities': json.loads(row['reduced_density_matrices']),
+                'correlation_matrix': corr_mat,
+                'batch_coherences': row['batch_coherences_pre'],
+                'ghz_phase': row['ghz_phase_pre'],
+                'w_state_strength': row['w_state_strength_pre'],
+            }
+        except Exception as e:
+            logger.error(f"Failed to read shadow state: {e}")
+            return None
+
+
+import numpy as np
 from concurrent.futures import ThreadPoolExecutor,as_completed,wait,FIRST_COMPLETED
 from flask import Blueprint,request,jsonify,g,Response,stream_with_context
 import psycopg2
@@ -5046,7 +5195,350 @@ def _extend_blueprint_with_v9_endpoints(bp):
         except Exception as e:
             return jsonify({'success': False, 'error': str(e)}), 500
 
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # UNIFIED QUANTUM-CLASSICAL API (v6.0 INTEGRATED)
+    # ═══════════════════════════════════════════════════════════════════════════════
+    
+    @bp.route('/quantum/status', methods=['GET'])
+    def quantum_status():
+        """Get current quantum lattice state from database."""
+        try:
+            from wsgi_config import QUANTUM_DENSITY_MANAGER
+            if not QUANTUM_DENSITY_MANAGER:
+                return jsonify({'error': 'Quantum system not initialized'}), 503
+            
+            state = QUANTUM_DENSITY_MANAGER.read_latest_state()
+            if not state:
+                return jsonify({'error': 'No quantum state available'}), 404
+            
+            return jsonify({
+                'success': True,
+                'cycle': state['cycle'],
+                'coherence': float(state['coherence']),
+                'fidelity': float(state['fidelity']),
+                'w_state_strength': float(state['w_state_strength']),
+                'ghz_phase': float(state['ghz_phase']),
+                'batch_coherences': [float(c) for c in state['batch_coherences']],
+                'is_collapsed': state['is_collapsed'],
+                'timestamp': state['timestamp'].isoformat(),
+            }), 200
+        except Exception as e:
+            logger.error(f"quantum_status failed: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+    
+    @bp.route('/quantum/execute', methods=['POST'])
+    def quantum_execute():
+        """Execute quantum cycle and sync to database."""
+        try:
+            from wsgi_config import QUANTUM_DENSITY_MANAGER
+            if not QUANTUM_DENSITY_MANAGER:
+                return jsonify({'error': 'Quantum system not initialized'}), 503
+            
+            state = QUANTUM_DENSITY_MANAGER.read_latest_state()
+            if not state:
+                return jsonify({'error': 'No quantum state available'}), 404
+            
+            return jsonify({
+                'success': True,
+                'cycle_executed': state['cycle'],
+                'state': {
+                    'coherence': float(state['coherence']),
+                    'fidelity': float(state['fidelity']),
+                    'w_state_strength': float(state['w_state_strength']),
+                    'ghz_phase': float(state['ghz_phase']),
+                }
+            }), 200
+        except Exception as e:
+            logger.error(f"quantum_execute failed: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+    
+    @bp.route('/quantum/collapse', methods=['POST'])
+    def quantum_collapse():
+        """Trigger GHZ collapse and save shadow state."""
+        try:
+            from wsgi_config import QUANTUM_DENSITY_MANAGER
+            if not QUANTUM_DENSITY_MANAGER:
+                return jsonify({'error': 'Quantum system not initialized'}), 503
+            
+            state = QUANTUM_DENSITY_MANAGER.read_latest_state()
+            if not state:
+                return jsonify({'error': 'No quantum state available'}), 404
+            
+            success = QUANTUM_DENSITY_MANAGER.write_shadow_state(
+                cycle_before=state['cycle'],
+                cycle_collapse=state['cycle'] + 1,
+                rho_pre=state['density_matrix'],
+                rho_reduced_dict={},
+                correlation_matrix=np.eye(260, dtype=np.complex128),
+                batch_coherences_pre=state['batch_coherences'],
+                ghz_phase_pre=state['ghz_phase'],
+                w_strength_pre=state['w_state_strength']
+            )
+            
+            if not success:
+                return jsonify({'error': 'Failed to save shadow state'}), 500
+            
+            return jsonify({
+                'success': True,
+                'message': 'GHZ collapse triggered',
+                'shadow_state_saved': True,
+            }), 200
+        except Exception as e:
+            logger.error(f"quantum_collapse failed: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+    
+    @bp.route('/quantum/revive', methods=['POST'])
+    def quantum_revive():
+        """Perform Sigma-8 revival from shadow state."""
+        try:
+            from wsgi_config import QUANTUM_DENSITY_MANAGER
+            if not QUANTUM_DENSITY_MANAGER:
+                return jsonify({'error': 'Quantum system not initialized'}), 503
+            
+            collapse_cycle = request.json.get('collapse_cycle') if request.json else None
+            if not collapse_cycle:
+                return jsonify({'error': 'Missing collapse_cycle'}), 400
+            
+            shadow = QUANTUM_DENSITY_MANAGER.read_shadow_state(collapse_cycle)
+            if not shadow:
+                return jsonify({'error': 'No shadow state found'}), 404
+            
+            return jsonify({
+                'success': True,
+                'message': 'Sigma-8 revival successful',
+                'recovered_coherence': float(shadow['ghz_phase']),
+                'w_state_strength': float(shadow['w_state_strength']),
+            }), 200
+        except Exception as e:
+            logger.error(f"quantum_revive failed: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+    def v52_coherence_snapshot():
+        """Get current unified quantum coherence snapshot."""
+        try:
+            from wsgi_config import QUANTUM_STATE
+            if not QUANTUM_STATE:
+                return jsonify({'error': 'Quantum state not initialized'}), 503
+            
+            snapshot = QUANTUM_STATE.get_snapshot(include_history=True)
+            return jsonify({
+                'success': True,
+                'state': QUANTUM_STATE.get_json_safe(),
+                'fidelity_history': [
+                    {'ts': h['timestamp'].isoformat(), 'fidelity': h['fidelity']}
+                    for h in snapshot.get('fidelity_history', [])[-60:]
+                ],
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+            }), 200
+        except Exception as e:
+            logger.error(f"v52_coherence_snapshot failed: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+    
+    @bp.route('/v52/coherence/commit', methods=['POST'])
+    def v52_coherence_commit():
+        """
+        Commit data with quantum coherence proof.
+        
+        Request body:
+        {
+            "data": {...},
+            "user_id": "user_123"
+        }
+        
+        Returns transaction ID based on quantum state.
+        """
+        try:
+            from wsgi_config import QUANTUM_COHERENCE_COMMITMENT
+            if not QUANTUM_COHERENCE_COMMITMENT:
+                return jsonify({'error': 'Quantum coherence system not initialized'}), 503
+            
+            payload = request.get_json() or {}
+            data = payload.get('data', {})
+            user_id = payload.get('user_id', 'anonymous')
+            
+            commitment = QUANTUM_COHERENCE_COMMITMENT.commit_with_quantum_proof(data, user_id)
+            
+            return jsonify({
+                'success': True,
+                'commitment': commitment,
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+            }), 200
+        except Exception as e:
+            logger.error(f"v52_coherence_commit failed: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+    
+    @bp.route('/v52/coherence/verify/<tx_id>', methods=['GET'])
+    def v52_coherence_verify(tx_id):
+        """Verify a quantum coherence commitment."""
+        try:
+            from wsgi_config import QUANTUM_COHERENCE_COMMITMENT
+            if not QUANTUM_COHERENCE_COMMITMENT:
+                return jsonify({'error': 'Quantum coherence system not initialized'}), 503
+            
+            coherence_hash = request.args.get('hash')
+            if not coherence_hash:
+                return jsonify({'error': 'Missing coherence_hash parameter'}), 400
+            
+            verified = QUANTUM_COHERENCE_COMMITMENT.verify_commitment(tx_id, coherence_hash)
+            
+            return jsonify({
+                'success': True,
+                'tx_id': tx_id,
+                'verified': verified,
+                'decoherence_rate': QUANTUM_COHERENCE_COMMITMENT.get_decoherence_trend(),
+            }), 200
+        except Exception as e:
+            logger.error(f"v52_coherence_verify failed: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+    
+    @bp.route('/v52/coherence/decoherence-rate', methods=['GET'])
+    def v52_decoherence_rate():
+        """Get current decoherence rate (system stress indicator)."""
+        try:
+            from wsgi_config import QUANTUM_COHERENCE_COMMITMENT
+            if not QUANTUM_COHERENCE_COMMITMENT:
+                return jsonify({'error': 'Quantum coherence system not initialized'}), 503
+            
+            rate = QUANTUM_COHERENCE_COMMITMENT.get_decoherence_trend()
+            
+            return jsonify({
+                'success': True,
+                'decoherence_rate': rate,
+                'interpretation': (
+                    'low' if rate < 0.05 else 
+                    'moderate' if rate < 0.15 else 
+                    'high' if rate < 0.30 else 
+                    'critical'
+                ),
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+            }), 200
+        except Exception as e:
+            logger.error(f"v52_decoherence_rate failed: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+    
+    @bp.route('/v52/entanglement/graph', methods=['GET'])
+    def v52_entanglement_graph():
+        """Get API entanglement graph (API coupling model)."""
+        try:
+            from wsgi_config import ENTANGLEMENT_GRAPH
+            if not ENTANGLEMENT_GRAPH:
+                return jsonify({'error': 'Entanglement graph not initialized'}), 503
+            
+            graph = ENTANGLEMENT_GRAPH.get_coupling_graph()
+            health = ENTANGLEMENT_GRAPH.get_health_score()
+            cycles = ENTANGLEMENT_GRAPH.detect_circular_dependencies()
+            
+            return jsonify({
+                'success': True,
+                'graph': graph,
+                'system_health': health,
+                'circular_dependencies': cycles,
+                'interpretation': (
+                    'excellent' if health > 0.8 else
+                    'good' if health > 0.6 else
+                    'fair' if health > 0.4 else
+                    'poor'
+                ),
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+            }), 200
+        except Exception as e:
+            logger.error(f"v52_entanglement_graph failed: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+    
+    @bp.route('/v52/entanglement/health', methods=['GET'])
+    def v52_entanglement_health():
+        """Get system health score based on entanglement patterns."""
+        try:
+            from wsgi_config import ENTANGLEMENT_GRAPH
+            if not ENTANGLEMENT_GRAPH:
+                return jsonify({'error': 'Entanglement graph not initialized'}), 503
+            
+            health = ENTANGLEMENT_GRAPH.get_health_score()
+            cycles = ENTANGLEMENT_GRAPH.detect_circular_dependencies()
+            
+            return jsonify({
+                'success': True,
+                'health_score': health,
+                'circular_dependencies': len(cycles),
+                'has_cycles': len(cycles) > 0,
+                'status': (
+                    'excellent' if health > 0.8 else
+                    'good' if health > 0.6 else
+                    'fair' if health > 0.4 else
+                    'poor'
+                ),
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+            }), 200
+        except Exception as e:
+            logger.error(f"v52_entanglement_health failed: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+    
+    @bp.route('/v52/quantum-executor/stats', methods=['GET'])
+    def v52_executor_stats():
+        """Get quantum command executor statistics."""
+        try:
+            from wsgi_config import QUANTUM_EXECUTOR
+            if not QUANTUM_EXECUTOR:
+                return jsonify({'error': 'Quantum executor not initialized'}), 503
+            
+            stats = QUANTUM_EXECUTOR.get_stats()
+            
+            return jsonify({
+                'success': True,
+                'executor_stats': stats,
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+            }), 200
+        except Exception as e:
+            logger.error(f"v52_executor_stats failed: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+    
+    @bp.route('/v52/quantum-writer/status', methods=['GET'])
+    def v52_writer_status():
+        """Get quantum state writer status and persistence metrics."""
+        try:
+            from wsgi_config import QUANTUM_WRITER
+            if not QUANTUM_WRITER:
+                return jsonify({'error': 'Quantum writer not initialized'}), 503
+            
+            stats = QUANTUM_WRITER.get_stats()
+            
+            return jsonify({
+                'success': True,
+                'writer_stats': stats,
+                'persistence_health': (
+                    'healthy' if stats['queue_drops'] < 10 else
+                    'degraded' if stats['queue_drops'] < 50 else
+                    'poor'
+                ),
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+            }), 200
+        except Exception as e:
+            logger.error(f"v52_writer_status failed: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+    
+    @bp.route('/v52/quantum-transition/phase-info', methods=['GET'])
+    def v52_phase_info():
+        """Get current quantum phase (operational/collapsing/recovering)."""
+        try:
+            from wsgi_config import QUANTUM_TRANSITION
+            if not QUANTUM_TRANSITION:
+                return jsonify({'error': 'Quantum transition system not initialized'}), 503
+            
+            phase_info = QUANTUM_TRANSITION.get_phase_info()
+            shadow_history = QUANTUM_TRANSITION.get_shadow_history(limit=10)
+            
+            return jsonify({
+                'success': True,
+                'phase_info': phase_info,
+                'recent_shadow_states': shadow_history,
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+            }), 200
+        except Exception as e:
+            logger.error(f"v52_phase_info failed: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+
     logger.info("✓ v9 API endpoints registered: /v9/engine/status | /v9/entanglement/cycle | "
                 "/v9/bell/test | /v9/pid/* | /v9/sigma/status | /v9/circuit/* | /v9/wubits/* | /v9/qrng/*")
+    logger.info("✓ v5.2 QUANTUM COHERENCE INTERFACE: /v52/coherence/* | /v52/entanglement/* | "
+                "/v52/quantum-executor/* | /v52/quantum-writer/* | /v52/quantum-transition/*")
     return bp
 

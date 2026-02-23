@@ -7551,10 +7551,7 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
 
 
 def _dispatch_from_globals(raw: str) -> dict:
-    """
-    Standalone dispatch that reads from globals.COMMAND_REGISTRY.
-    Used by parallel execution so each command doesn't need an engine ref.
-    """
+    """Dispatch with quantum state awareness."""
     try:
         from globals import COMMAND_REGISTRY
         name, args, flags = parse_command(raw)
@@ -7563,6 +7560,25 @@ def _dispatch_from_globals(raw: str) -> dict:
             return {'status': 'error', 'error': f"Command '{name}' not found",
                     'suggestions': [n for n in COMMAND_REGISTRY if n.startswith(name[:4])]}
         handler = handler_entry['handler']
+        
+        # Execute with quantum state context
+        try:
+            from wsgi_config import QUANTUM_DENSITY_MANAGER
+            if QUANTUM_DENSITY_MANAGER:
+                state = QUANTUM_DENSITY_MANAGER.read_latest_state()
+                if state:
+                    result = handler(flags, args)
+                    if isinstance(result, dict):
+                        result['quantum_context'] = {
+                            'fidelity': float(state['fidelity']),
+                            'coherence': float(state['coherence']),
+                            'w_state_strength': float(state['w_state_strength']),
+                            'cycle': state['cycle'],
+                        }
+                    return result
+        except Exception as e:
+            logger.debug(f"Quantum context unavailable: {e}")
+        
         return handler(flags, args)
     except Exception as e:
         return {'status': 'error', 'error': str(e)}

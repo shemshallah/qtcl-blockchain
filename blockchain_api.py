@@ -1983,6 +1983,7 @@ class QuantumBlockBuilder:
     
     @staticmethod
     def add_transaction_to_mempool(tx: Dict[str, Any]) -> Tuple[bool, str]:
+        """Add transaction to mempool with quantum finality proof."""
         valid,msg=QuantumBlockBuilder._consensus.validate_transaction_rules(tx)
         if not valid:
             return False,f"TX invalid: {msg}"
@@ -1990,6 +1991,24 @@ class QuantumBlockBuilder:
             key=f"{inp.get('txid')}:{inp.get('vout')}"
             if key in QuantumBlockBuilder._utxo_mgr.spent:
                 return False,f"Double-spend: {key}"
+        
+        # Inject quantum finality proof
+        try:
+            from wsgi_config import QUANTUM_DENSITY_MANAGER
+            if QUANTUM_DENSITY_MANAGER:
+                state = QUANTUM_DENSITY_MANAGER.read_latest_state()
+                if state:
+                    tx['quantum_finality'] = {
+                        'coherence': float(state['coherence']),
+                        'fidelity': float(state['fidelity']),
+                        'w_state_strength': float(state['w_state_strength']),
+                        'ghz_phase': float(state['ghz_phase']),
+                        'cycle': state['cycle'],
+                        'timestamp': state['timestamp'].isoformat() if state['timestamp'] else None,
+                    }
+        except Exception as e:
+            logger.debug(f"Could not add quantum proof: {e}")
+        
         fee=QuantumBlockBuilder.calculate_transaction_fee(tx)
         tx['fee']=fee
         tx['id']=hashlib.sha3_256(json.dumps(tx,sort_keys=True).encode()).hexdigest()
