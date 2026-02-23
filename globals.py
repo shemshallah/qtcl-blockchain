@@ -421,7 +421,7 @@ def initialize_globals():
                     _GLOBAL_STATE['w_state_enhanced']       = _qlc.W_STATE_ENHANCED
                     _GLOBAL_STATE['noise_bath_enhanced']    = _qlc.NOISE_BATH_ENHANCED
                     _GLOBAL_STATE['quantum_coordinator']    = _qlc.QUANTUM_COORDINATOR
-                    # v8 Revival System objects (optional — may not exist in all versions)
+                    # v8 Revival System objects (optional)
                     _GLOBAL_STATE['pseudoqubit_guardian']   = getattr(_qlc, 'PSEUDOQUBIT_GUARDIAN', None)
                     _GLOBAL_STATE['revival_engine']         = getattr(_qlc, 'REVIVAL_ENGINE', None)
                     _GLOBAL_STATE['resonance_coupler']      = getattr(_qlc, 'RESONANCE_COUPLER', None)
@@ -631,46 +631,44 @@ def get_lattice():
     return state['lattice'] or {'status': 'not_initialized'}
 
 def get_lattice_neural_refresh():
-    """Return the ContinuousLatticeNeuralRefresh singleton (57-neuron network)."""
+    """Return the ContinuousLatticeNeuralRefresh singleton. Cache-only."""
     state = get_globals()
     return state.get('lattice_neural_refresh')
 
 def get_w_state_enhanced():
-    """Return the EnhancedWStateManager singleton."""
+    """Return the EnhancedWStateManager singleton. Cache-only."""
     state = get_globals()
     return state.get('w_state_enhanced')
 
 def get_noise_bath_enhanced():
-    """Return the EnhancedNoiseBathRefresh singleton (κ=0.08)."""
+    """Return the EnhancedNoiseBathRefresh singleton. Cache-only."""
     state = get_globals()
     return state.get('noise_bath_enhanced')
 
 # ── v8 Revival System getters ─────────────────────────────────────────────────
-# No lazy imports — all v8 objects are loaded at initialize_globals() and cached.
-# Querying None is acceptable; re-importing is NOT.
 
-def _v8_get(slot: str):
-    """Get v8 object from cache without any re-imports."""
+def _v8_lazy(slot: str, attr: str):
+    """Get v8 component from cache. NO runtime imports."""
     state = get_globals()
     return state.get(slot)
 
 def get_pseudoqubit_guardian():
-    return _v8_get('pseudoqubit_guardian')
+    return _v8_lazy('pseudoqubit_guardian', 'PSEUDOQUBIT_GUARDIAN')
 
 def get_revival_engine():
-    return _v8_get('revival_engine')
+    return _v8_lazy('revival_engine', 'REVIVAL_ENGINE')
 
 def get_resonance_coupler():
-    return _v8_get('resonance_coupler')
+    return _v8_lazy('resonance_coupler', 'RESONANCE_COUPLER')
 
 def get_neural_v2():
-    return _v8_get('neural_v2')
+    return _v8_lazy('neural_v2', 'NEURAL_V2')
 
 def get_perpetual_maintainer():
-    return _v8_get('perpetual_maintainer')
+    return _v8_lazy('perpetual_maintainer', 'PERPETUAL_MAINTAINER')
 
 def get_revival_pipeline():
-    return _v8_get('revival_pipeline')
+    return _v8_lazy('revival_pipeline', 'REVIVAL_PIPELINE')
 
 def get_v8_status() -> dict:
     """Aggregate all v8 revival metrics — used by quantum-v8 and quantum-pseudoqubits commands."""
@@ -703,7 +701,7 @@ def get_v8_status() -> dict:
     }
 
 def get_quantum_coordinator():
-    """Return the QuantumSystemCoordinator singleton from cache."""
+    """Return the QuantumSystemCoordinator singleton. Cache-only."""
     state = get_globals()
     return state.get('quantum_coordinator')
 
@@ -757,63 +755,49 @@ def get_pqc_state():
     return state['pqc_state']
 
 def get_quantum():
-    """Return comprehensive quantum/lattice metrics from cached references (NO RUNTIME IMPORTS).
+    """Return quantum metrics from CACHED references. NO RUNTIME IMPORTS."""
+    state = get_globals()
+    heartbeat = state.get('heartbeat')
+    lattice = state.get('lattice')
+    lattice_neural = state.get('lattice_neural_refresh')
+    w_state = state.get('w_state_enhanced')
+    noise_bath = state.get('noise_bath_enhanced')
     
-    All quantum objects are loaded once during initialize_globals() and cached in _GLOBAL_STATE.
-    This function NEVER re-imports the quantum module — it only reads from the cache.
-    This prevents worker timeout on /api/status endpoint.
-    """
-    try:
-        state = get_globals()
-        metrics = {'status': 'online'}
-        
-        # Read cached references (set during initialize_globals)
-        heartbeat = state.get('heartbeat')
-        lattice = state.get('lattice')
-        lattice_neural = state.get('lattice_neural_refresh')
-        w_state = state.get('w_state_enhanced')
-        noise_bath = state.get('noise_bath_enhanced')
-        
-        # Heartbeat metrics
-        if heartbeat is not None and hasattr(heartbeat, 'get_metrics'):
-            try:
-                metrics['heartbeat'] = heartbeat.get_metrics()
-            except Exception as e:
-                metrics['heartbeat'] = {'error': str(e)[:100]}
-        else:
-            metrics['heartbeat'] = {'status': 'offline'}
-        
-        # Lattice neural refresh metrics
-        if lattice_neural is not None and hasattr(lattice_neural, 'get_state'):
-            try:
-                metrics['lattice_neural'] = lattice_neural.get_state()
-            except Exception as e:
-                metrics['lattice_neural'] = {'error': str(e)[:100]}
-        
-        # W-state metrics
-        if w_state is not None and hasattr(w_state, 'get_metrics'):
-            try:
-                metrics['w_state'] = w_state.get_metrics()
-            except Exception as e:
-                metrics['w_state'] = {'error': str(e)[:100]}
-        
-        # Noise bath metrics
-        if noise_bath is not None and hasattr(noise_bath, 'get_metrics'):
-            try:
-                metrics['noise_bath'] = noise_bath.get_metrics()
-            except Exception as e:
-                metrics['noise_bath'] = {'error': str(e)[:100]}
-        
-        # Quantum lattice metrics
-        if lattice is not None and hasattr(lattice, 'get_system_metrics'):
-            try:
-                metrics['lattice'] = lattice.get_system_metrics()
-            except Exception as e:
-                metrics['lattice'] = {'error': str(e)[:100]}
-        
-        return metrics
-    except Exception as e:
-        return {'status': 'offline', 'error': str(e)[:100]}
+    metrics = {'status': 'online'}
+    
+    if heartbeat and hasattr(heartbeat, 'get_metrics'):
+        try:
+            metrics['heartbeat'] = heartbeat.get_metrics()
+        except Exception as e:
+            metrics['heartbeat'] = {'error': str(e)[:100]}
+    else:
+        metrics['heartbeat'] = {'status': 'offline'}
+    
+    if lattice_neural and hasattr(lattice_neural, 'get_state'):
+        try:
+            metrics['lattice_neural'] = lattice_neural.get_state()
+        except Exception as e:
+            metrics['lattice_neural'] = {'error': str(e)[:100]}
+    
+    if w_state and hasattr(w_state, 'get_metrics'):
+        try:
+            metrics['w_state'] = w_state.get_metrics()
+        except Exception as e:
+            metrics['w_state'] = {'error': str(e)[:100]}
+    
+    if noise_bath and hasattr(noise_bath, 'get_metrics'):
+        try:
+            metrics['noise_bath'] = noise_bath.get_metrics()
+        except Exception as e:
+            metrics['noise_bath'] = {'error': str(e)[:100]}
+    
+    if lattice and hasattr(lattice, 'get_system_metrics'):
+        try:
+            metrics['lattice'] = lattice.get_system_metrics()
+        except Exception as e:
+            metrics['lattice'] = {'error': str(e)[:100]}
+    
+    return metrics
 
 def get_genesis_block():
     state = get_globals()
