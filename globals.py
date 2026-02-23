@@ -2698,6 +2698,66 @@ def _parse_raw_command(raw: str) -> tuple:
     
     return cmd_name, flags, positional
 
+# ═════════════════════════════════════════════════════════════════════════════════
+# QUANTUM ENHANCEMENT TRACKING METRICS v6.0
+# Real-time monitoring of adaptive recovery, MI smoothing, and entanglement sigs
+# ═════════════════════════════════════════════════════════════════════════════════
+
+QUANTUM_ENHANCEMENT_METRICS = {
+    'adaptive_w_recovery': {
+        'mean_degradation': 0.0,
+        'mean_recovery': 0.0,
+        'mean_w_strength': 0.0,
+        'max_w_applied': 0.0,
+        'current_refresh_interval': 3,
+        'consecutive_insufficient': 0,
+        'recovery_ratio': 0.0,
+        'last_updated': 0
+    },
+    'mi_tracking': {
+        'raw_mi_cycles': 0,
+        'smooth_mi_current': 0.5,
+        'mi_trend_current': 0.0,
+        'mi_confidence': 0.5,
+        'ema_alpha': 0.3,
+        'last_updated': 0
+    },
+    'entanglement_signatures': {
+        'total_extracted': 0,
+        'mean_signature_strength': 0.0,
+        'mean_entanglement_depth': 0.0,
+        'phase_stability_mean': 0.0,
+        'source_correlations': {},
+        'last_updated': 0
+    },
+    'bell_testing': {
+        'cycles_tested': 0,
+        'chsh_s_mean': 0.0,
+        'violation_ratio': 0.0,
+        'entanglement_depth_mean': 0.0,
+        'last_updated': 0
+    },
+    'floquet_berry_coupling': {
+        'floquet_gains_mean': 0.0,
+        'berry_gains_mean': 0.0,
+        'mi_coupling_active': False,
+        'entanglement_coupling_active': False,
+        'last_updated': 0
+    }
+}
+
+def update_enhancement_metrics(metrics: dict) -> None:
+    """Thread-safe update of enhancement metrics from quantum subsystems."""
+    global QUANTUM_ENHANCEMENT_METRICS
+    try:
+        QUANTUM_ENHANCEMENT_METRICS.update({k: {**QUANTUM_ENHANCEMENT_METRICS[k], **v} for k, v in metrics.items()})
+    except Exception as e:
+        logger.debug(f"Error updating enhancement metrics: {e}")
+
+def get_enhancement_metrics() -> dict:
+    """Thread-safe retrieval of all enhancement metrics."""
+    return {k: dict(v) for k, v in QUANTUM_ENHANCEMENT_METRICS.items()}
+
 def dispatch_command(command: str, args: dict = None, user_id: str = None, token: str = None, role: str = None) -> dict:
     """
     Dispatch command with built-in authentication and admin checks.

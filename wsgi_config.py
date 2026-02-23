@@ -1689,6 +1689,53 @@ def _lattice_telemetry_loop() -> None:
                 except Exception as _e:
                     logger.debug(f"[LATTICE-TELEM] Neural error: {_e}")
 
+            # ── BELL TESTING & MI SMOOTHING (EVERY CYCLE - ENHANCED v6.0) ───────────
+            # Run Bell test every cycle (not every 5) for stable MI signal to NN
+            try:
+                bell_tester = getattr(_ql, 'LATTICE', None)
+                if bell_tester is not None:
+                    bell_obj = getattr(bell_tester, 'bell_tester', None)
+                    if bell_obj is not None and hasattr(bell_obj, 'run_test'):
+                        bell_result = bell_obj.run_test(coh_current, fid_current)
+                        chsh_s = bell_result.get('S', 0.0)
+                        
+                        # Update MI smoother with raw MI and CHSH for confidence
+                        mi_tracker = getattr(bell_obj, 'mi_tracker', None) if hasattr(bell_obj, 'mi_tracker') else None
+                        if mi_tracker is None:
+                            # Try to get from sigma controller
+                            sigma_ctrl = getattr(_ql.LATTICE, 'sigma_controller', None) if hasattr(_ql, 'LATTICE') else None
+                            mi_tracker = getattr(sigma_ctrl, 'mi_tracker', None) if sigma_ctrl and hasattr(sigma_ctrl, 'mi_tracker') else None
+                        
+                        if mi_tracker is not None and hasattr(mi_tracker, 'update_mi'):
+                            computed_mi = bell_result.get('mutual_information', 0.5)
+                            mi_update = mi_tracker.update_mi(computed_mi, chsh_s)
+                            smooth_mi = mi_update['smooth_mi']
+                            mi_trend = mi_update['mi_trend']
+                            
+                            logger.info(
+                                f"[BELL-MI] cycle=#{cycle} | S_CHSH={chsh_s:.4f} | "
+                                f"raw_MI={computed_mi:.4f} | smooth_MI={smooth_mi:.4f} | "
+                                f"MI_trend={mi_trend:+.6f}"
+                            )
+            except Exception as _e:
+                logger.debug(f"[LATTICE-TELEM] Bell/MI update error: {_e}")
+            
+            # ── ADAPTIVE RECOVERY METRICS ─────────────────────────────────────────
+            try:
+                sigma_ctrl = getattr(_ql.LATTICE, 'sigma_controller', None) if hasattr(_ql, 'LATTICE') else None
+                if sigma_ctrl and hasattr(sigma_ctrl, 'adaptive_w_recovery'):
+                    adap_metrics = sigma_ctrl.adaptive_w_recovery.get_metrics()
+                    logger.info(
+                        f"[ADAPTIVE-W] cycle=#{cycle} | "
+                        f"mean_deg={adap_metrics['mean_deg']:.6f} | "
+                        f"mean_rec={adap_metrics['mean_rec']:.6f} | "
+                        f"mean_w_str={adap_metrics['mean_w_str']:.6f} | "
+                        f"max_w={adap_metrics['max_w_applied']:.6f} | "
+                        f"interval={adap_metrics['refresh_interval']}"
+                    )
+            except Exception as _e:
+                logger.debug(f"[LATTICE-TELEM] Adaptive recovery metrics error: {_e}")
+
             # ── Genuine quantum observables from last Aer statevector run ─────
             # These are the true quantum quantities: purity, S_vN, entanglement entropy,
             # l₁ coherence, W-state fidelity. Sourced from TransactionValidatorWState.
