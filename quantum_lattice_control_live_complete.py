@@ -7431,10 +7431,10 @@ class ContinuousLatticeNeuralRefresh:
     saddle-point convergence — a form of quantum-annealed stochastic optimisation.
     """
 
-    INPUT_DIM  = 8
+    INPUT_DIM  = 10   # expanded from 8: +S_CHSH, +MI (quantum boundary feedback)
     HIDDEN1    = 57    # keep 57 for metric naming continuity
     HIDDEN2    = 32
-    OUTPUT_DIM = 8
+    OUTPUT_DIM = 10   # expanded to match new input dim (autoregressive prediction)
 
     def __init__(self, entropy_ensemble=None):
         self.lock             = threading.RLock()
@@ -7572,8 +7572,13 @@ class ContinuousLatticeNeuralRefresh:
     # ── Heartbeat: train on live quantum state each 1 Hz pulse ───────────
     def on_heartbeat(self, pulse_time: float):
         """
-        Build 8-feature input from live quantum subsystem state.
-        Push into ring buffer, train on (t-1)→(t) pairs.
+        Build 10-feature input from live quantum subsystem state.
+        Features 1-8: coherence/fidelity/phase (as before).
+        Feature 9:  S_CHSH normalised to [-1,+1] relative to classical bound (2.0).
+        Feature 10: Mutual information normalised to [-1,+1].
+        Push into ring buffer, train on (t-1) -> (t) pairs.
+        S_CHSH and MI provide the quantum boundary signal the NN needs to
+        learn to navigate the classical-quantum transition region.
         """
         try:
             import quantum_lattice_control_live_complete as _ql
@@ -7600,27 +7605,56 @@ class ContinuousLatticeNeuralRefresh:
             sin_phase = float(np.sin(pulse_time * omega))
             cos_phase = float(np.cos(pulse_time * omega))
 
-            # Normalise each feature to [-1, 1]
+            # Feature 9: S_CHSH normalised to [-1, +1] centred at classical bound 2.0
+            # S in [0, 2.828]: map 0 -> -1.0, 2.0 (classical) -> 0.0, 2.828 -> +1.0
+            s_chsh_raw = 0.0
+            try:
+                _bt = getattr(_ql, "BELL_TESTER", None)
+                if _bt is not None and hasattr(_bt, "last_s_chsh"):
+                    s_chsh_raw = float(_bt.last_s_chsh)
+            except Exception:
+                pass
+            s_chsh_feat = float(np.clip((s_chsh_raw - 2.0) / 2.0, -1.0, 1.0))
+
+            # Feature 10: Mutual Information normalised to [-1, +1]
+            mi_raw = 0.91
+            try:
+                _mi_val = lm.get("mutual_information", None)
+                if _mi_val is None and _ws:
+                    _mi_val = getattr(_ws, "mutual_information", None)
+                if _mi_val is not None:
+                    mi_raw = float(_mi_val)
+            except Exception:
+                pass
+            mi_feat = float(np.clip(mi_raw * 2.0 - 1.0, -1.0, 1.0))
+
             feat = np.array([
                 nb_coh * 2 - 1, nb_fid  * 2 - 1,
                 w_coh  * 2 - 1, w_fid   * 2 - 1,
                 sys_coh * 2 - 1, sys_fid  * 2 - 1,
                 sin_phase, cos_phase,
+                s_chsh_feat,
+                mi_feat,
             ], dtype=float)
 
-            # ── Online training: predict feat_t from feat_{t-1} ──────────
+            # Online training: predict feat_t from feat_{t-1}
             if len(self._input_buf) > 0:
                 x_prev  = self._input_buf[-1]
+                if len(x_prev) < self.INPUT_DIM:
+                    x_prev = np.pad(x_prev, (0, self.INPUT_DIM - len(x_prev)))
                 out, cache = self.forward_pass(x_prev)
-                loss = self.backward_pass(cache, feat)   # target = current features
+                loss = self.backward_pass(cache, feat)
 
-                # Update convergence status
-                if self.avg_error_gradient > 0.01:
+                # Convergence: re-open if quantum boundary signals are moving
+                s_prev = float(x_prev[8]) if len(x_prev) > 8 else 0.0
+                mi_prev = float(x_prev[9]) if len(x_prev) > 9 else 0.0
+                quantum_active = abs(s_chsh_feat - s_prev) > 0.02 or abs(mi_feat - mi_prev) > 0.01
+                if self.avg_error_gradient > 0.01 or quantum_active:
                     self.convergence_status = "training"
-                elif self.avg_error_gradient > 0.001:
+                elif self.avg_error_gradient > 0.0005:
                     self.convergence_status = "fine-tuning"
                 else:
-                    self.convergence_status = "converged"
+                    self.convergence_status = "boundary-tracking" if quantum_active else "converged"
 
             self._input_buf.append(feat)
 
@@ -7630,19 +7664,43 @@ class ContinuousLatticeNeuralRefresh:
     def get_state(self) -> Dict[str, Any]:
         with self.lock:
             recent_loss = list(self.loss_history)[-20:] if self.loss_history else [0.0]
+            loss_hist_export = [float(x) for x in list(self.loss_history)[-100:]]
+            hidden_acts = []
+            # Compute live hidden activations for telemetry (sample forward pass)
+            try:
+                if len(self._input_buf) > 0:
+                    _x = self._input_buf[-1]
+                    if len(_x) < self.INPUT_DIM:
+                        _x = np.pad(_x, (0, self.INPUT_DIM - len(_x)))
+                    _z1 = _x @ self.W1 + self.b1
+                    _a1 = np.tanh(_z1)
+                    hidden_acts = _a1.tolist()
+            except Exception:
+                pass
             return {
-                "activation_count":    self.activation_count,
-                "learning_iterations": self.learning_iterations,
+                "activation_count":     self.activation_count,
+                "learning_iterations":  self.learning_iterations,
                 "total_weight_updates": self.total_weight_updates,
-                "avg_error_gradient":  float(self.avg_error_gradient),
-                "convergence_status":  self.convergence_status,
+                # wsgi_config reads 'weight_update_count' — expose as alias
+                "weight_update_count":  self.total_weight_updates,
+                "total_parameters":     sum(w.size for w in [self.W1, self.W2, self.W3]) +
+                                        sum(b.size for b in [self.b1, self.b2, self.b3]),
+                "avg_error_gradient":   float(self.avg_error_gradient),
+                "convergence_status":   self.convergence_status,
                 "avg_weight_magnitude": float(np.mean([
                     np.mean(np.abs(self.W1)), np.mean(np.abs(self.W2)), np.mean(np.abs(self.W3))
                 ])),
-                "learning_rate":       self.learning_rate,
-                "loss_ema":            float(np.mean(recent_loss)),
-                "prediction_error":    float(self.prediction_error),
-                "adam_step":           self._t,
+                "learning_rate":        self.learning_rate,
+                "loss_ema":             float(np.mean(recent_loss)),
+                "prediction_error":     float(self.prediction_error),
+                "adam_step":            self._t,
+                # Telemetry fields consumed by wsgi_config [LATTICE-NN] formatter
+                "loss_history":         loss_hist_export,
+                "hidden_acts":          hidden_acts,
+                "input_dim":            self.INPUT_DIM,
+                "feature_names":        ["nb_coh","nb_fid","w_coh","w_fid",
+                                         "sys_coh","sys_fid","sin_phi","cos_phi",
+                                         "S_CHSH","MI"],
             }
 
 
@@ -7882,12 +7940,31 @@ class CHSHBellTester:
     """
 
     BELL_TEST_INTERVAL = 5   # run every N telemetry cycles
-    OPTIMAL_ANGLES = {       # maximally violating angle set
+
+    # ── CORRECTED CHSH optimal angles ────────────────────────────────────────
+    # For |Φ+⟩ prepared via H+CNOT and Ry(2θ) measurement rotation,
+    # the correlator is E(a,b) = cos(2(a-b)).
+    # Previous angles (a=0, a'=π/2, b=π/4, b'=-π/4) give ALL FOUR correlators
+    # equal to cos(±π/2)=0, producing S≡0 regardless of entanglement quality.
+    # Corrected angles satisfy |E(a,b)-E(a,b')+E(a',b)+E(a',b')| = 2√2:
+    #   E(0, π/8)    = cos(−π/4) = +1/√2
+    #   E(0, 3π/8)   = cos(−3π/4)= −1/√2
+    #   E(π/4, π/8)  = cos(+π/4) = +1/√2
+    #   E(π/4, 3π/8) = cos(−π/4) = +1/√2
+    #   S = |1/√2 − (−1/√2) + 1/√2 + 1/√2| = 4/√2 = 2√2 ≈ 2.828 ✓
+    OPTIMAL_ANGLES = {
         "a":  0.0,
-        "a_": np.pi / 2,
-        "b":  np.pi / 4,
-        "b_": -np.pi / 4,
+        "a_": np.pi / 4,          # was π/2 — shifted to π/4
+        "b":  np.pi / 8,          # was π/4 — shifted to π/8
+        "b_": 3 * np.pi / 8,      # was −π/4 — now 3π/8
     }
+
+    # Noise sweep range for classical-quantum boundary mapping.
+    # When BOUNDARY_SWEEP_MODE=True the tester iterates kappa values
+    # and records the S vs kappa curve each BOUNDARY_SWEEP_INTERVAL cycles.
+    BOUNDARY_SWEEP_MODE     = False
+    BOUNDARY_SWEEP_INTERVAL = 20   # cycles between sweep runs
+    BOUNDARY_KAPPA_STEPS    = np.linspace(0.0, 0.5, 11)   # 0.00 → 0.50 in 0.05 steps
 
     def __init__(self, entropy_ensemble=None):
         self.entropy_ensemble = entropy_ensemble
@@ -7898,6 +7975,12 @@ class CHSHBellTester:
         self.max_s_seen       = 0.0
         self.test_count       = 0
         self.violation_count  = 0
+        # Boundary mapping: rolling S vs kappa sweep results
+        self._boundary_sweep_history = deque(maxlen=50)
+        # Paired (S_CHSH, MI) history for correlation analysis
+        self._chsh_mi_pairs          = deque(maxlen=500)
+        # Classical-quantum boundary estimate (kappa where S drops below 2.0)
+        self._boundary_kappa_estimate = None
 
     def _measure_correlator(self, theta_a: float, theta_b: float,
                              shots: int, noise_kappa: float) -> float:
@@ -7965,9 +8048,37 @@ class CHSHBellTester:
         """
         Run full CHSH test: 4 correlators, compute S_CHSH.
         Logs [BELL] line with violation status.
+        Also runs boundary sweep when BOUNDARY_SWEEP_MODE=True, recording
+        S vs kappa to map the classical-quantum transition curve.
         """
         if not QISKIT_AVAILABLE:
             return {"s_chsh": 0.0, "violation": False}
+
+        # ── Boundary sweep: record S at multiple kappa values ─────────────────
+        if self.BOUNDARY_SWEEP_MODE and (self.test_count % self.BOUNDARY_SWEEP_INTERVAL == 0):
+            sweep_curve = {}
+            for kp in self.BOUNDARY_KAPPA_STEPS:
+                try:
+                    ang = self.OPTIMAL_ANGLES
+                    _e1 = self._measure_correlator(ang["a"],  ang["b"],  512, float(kp))
+                    _e2 = self._measure_correlator(ang["a"],  ang["b_"], 512, float(kp))
+                    _e3 = self._measure_correlator(ang["a_"], ang["b"],  512, float(kp))
+                    _e4 = self._measure_correlator(ang["a_"], ang["b_"], 512, float(kp))
+                    sweep_curve[float(round(kp, 3))] = float(abs(_e1 - _e2 + _e3 + _e4))
+                except Exception as _se:
+                    sweep_curve[float(round(kp, 3))] = 0.0
+            with self.lock:
+                self._boundary_sweep_history.append({"timestamp": time.time(), "curve": sweep_curve})
+            # Find crossing point (where S crosses 2.0)
+            crossing_kappa = None
+            for kp_val, s_val in sorted(sweep_curve.items()):
+                if s_val < 2.0:
+                    crossing_kappa = kp_val
+                    break
+            logger.info(
+                f"[BELL-BOUNDARY] sweep complete | kappa_crossing≈{crossing_kappa} | "
+                f"curve={{{', '.join(f'{k:.2f}:{v:.3f}' for k,v in list(sweep_curve.items())[:5])}...}}"
+            )
 
         ang = self.OPTIMAL_ANGLES
         try:
@@ -8017,13 +8128,29 @@ class CHSHBellTester:
 
     def get_summary(self) -> Dict[str, Any]:
         with self.lock:
+            # Compute Pearson correlation between S_CHSH and MI from paired history
+            chsh_mi_corr = None
+            if len(self._chsh_mi_pairs) > 10:
+                try:
+                    s_vals = np.array([p[0] for p in self._chsh_mi_pairs])
+                    mi_vals = np.array([p[1] for p in self._chsh_mi_pairs])
+                    if np.std(s_vals) > 1e-9 and np.std(mi_vals) > 1e-9:
+                        chsh_mi_corr = float(np.corrcoef(s_vals, mi_vals)[0, 1])
+                except Exception:
+                    pass
+            # Most recent boundary sweep curve
+            last_sweep = self._boundary_sweep_history[-1] if self._boundary_sweep_history else None
             return {
-                "last_s_chsh":       self.last_s_chsh,
-                "last_violation":    self.last_violation,
-                "max_s_seen":        self.max_s_seen,
-                "test_count":        self.test_count,
-                "violation_count":   self.violation_count,
-                "violation_rate":    self.violation_count / max(self.test_count, 1),
+                "last_s_chsh":            self.last_s_chsh,
+                "last_violation":         self.last_violation,
+                "max_s_seen":             self.max_s_seen,
+                "test_count":             self.test_count,
+                "violation_count":        self.violation_count,
+                "violation_rate":         self.violation_count / max(self.test_count, 1),
+                "boundary_kappa_estimate": self._boundary_kappa_estimate,
+                "chsh_mi_correlation":    chsh_mi_corr,
+                "last_boundary_sweep":    last_sweep,
+                "optimal_angles_corrected": True,   # signals angles are no longer the zero-S set
             }
 
 

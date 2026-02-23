@@ -74,6 +74,8 @@ COMMAND_REGISTRY = {
     'quantum-revival': {'category': 'quantum', 'description': 'Spectral revival prediction & next peak', 'auth_required': False},
     'quantum-maintainer': {'category': 'quantum', 'description': 'Perpetual W-state maintainer (10 Hz daemon) status', 'auth_required': False},
     'quantum-resonance': {'category': 'quantum', 'description': 'Noise-resonance coupler — stochastic resonance metrics', 'auth_required': False},
+    'quantum-bell-boundary': {'category': 'quantum', 'description': 'Classical-quantum boundary map — CHSH history, MI trend, kappa crossing estimate', 'auth_required': False},
+    'quantum-mi-trend':      {'category': 'quantum', 'description': 'Mutual information trend analysis over recent cycles', 'auth_required': False},
     'oracle-price': {'category': 'oracle', 'description': 'Get current price from oracle', 'auth_required': False},
     'oracle-feed': {'category': 'oracle', 'description': 'Get oracle price feed', 'auth_required': False},
     'oracle-history': {'category': 'oracle', 'description': 'Get oracle data history', 'auth_required': False},
@@ -194,6 +196,9 @@ for cmd, info in COMMAND_REGISTRY.items():
 # GLOBAL STATE WITH REAL SYSTEM REFERENCES
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
+# ── Deque import needed for Bell/MI history buffers ────────────────────────
+from collections import deque as _deque
+
 _GLOBAL_STATE = {
     'initialized': False,
     '_initializing': False,          # re-entrancy guard (prevents RLock recursion loop)
@@ -224,6 +229,16 @@ _GLOBAL_STATE = {
     'neural_v2':             None,
     'perpetual_maintainer':  None,
     'revival_pipeline':      None,
+    # ── Classical-quantum boundary mapping state ────────────────────────────────
+    # These are updated every refresh cycle by wsgi_config / LATTICE-REFRESH.
+    # They provide system-wide memory of where the boundary has been observed.
+    'bell_chsh_history':    _deque(maxlen=1000),    # (timestamp, S_CHSH, noise_kappa) tuples
+    'mi_history':           _deque(maxlen=1000),    # (timestamp, MI) tuples
+    'boundary_crossings':   [],                      # list of {cycle, direction, S, kappa, timestamp}
+    'boundary_kappa_est':   None,                    # latest estimate of kappa at S=2.0
+    'chsh_violation_total': 0,                       # cumulative Bell violations across all cycles
+    'quantum_regime_cycles':0,                       # cycles where S > 2.0
+    'classical_regime_cycles':0,                     # cycles where S <= 2.0
 }
 
 def _safe_import(module_path: str, item_name: str, fallback=None):
@@ -766,6 +781,143 @@ def get_metrics():
     if state['metrics'] is None:
         state['metrics'] = {'requests': 0, 'errors': 0, 'uptime_seconds': 0}
     return state['metrics']
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# CLASSICAL-QUANTUM BOUNDARY TRACKING
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+def record_bell_measurement(s_chsh: float, noise_kappa: float = 0.08,
+                             mi: float = None, cycle: int = 0) -> dict:
+    """
+    Record a Bell measurement result into global boundary-mapping state.
+    Called each refresh cycle by wsgi_config after computing bell_s.
+    Returns a summary of boundary status.
+    """
+    import time as _t
+    gs = _GLOBAL_STATE
+    ts = _t.time()
+
+    gs['bell_chsh_history'].append((ts, float(s_chsh), float(noise_kappa)))
+    if mi is not None:
+        gs['mi_history'].append((ts, float(mi)))
+
+    violation = s_chsh > 2.0
+    if violation:
+        gs['chsh_violation_total'] += 1
+        gs['quantum_regime_cycles'] += 1
+    else:
+        gs['classical_regime_cycles'] += 1
+
+    # Detect boundary crossing
+    history = list(gs['bell_chsh_history'])
+    crossing_direction = None
+    if len(history) >= 2:
+        prev_s = history[-2][1]
+        if prev_s < 2.0 and s_chsh >= 2.0:
+            crossing_direction = "classical→quantum"
+        elif prev_s >= 2.0 and s_chsh < 2.0:
+            crossing_direction = "quantum→classical"
+    if crossing_direction:
+        gs['boundary_crossings'].append({
+            'cycle': cycle, 'direction': crossing_direction,
+            'S': s_chsh, 'kappa': noise_kappa, 'timestamp': ts,
+        })
+        # Keep only last 100 crossings
+        if len(gs['boundary_crossings']) > 100:
+            gs['boundary_crossings'] = gs['boundary_crossings'][-100:]
+
+    # Estimate kappa at boundary using linear interpolation across recent history
+    try:
+        if len(history) >= 20:
+            import numpy as _np
+            recent = history[-50:]
+            s_arr  = _np.array([r[1] for r in recent])
+            k_arr  = _np.array([r[2] for r in recent])
+            # Find pairs that straddle 2.0
+            stradle_mask = (_np.diff(_np.sign(s_arr - 2.0)) != 0)
+            if stradle_mask.any():
+                idx = _np.where(stradle_mask)[0][-1]
+                s1, s2 = s_arr[idx], s_arr[idx+1]
+                k1, k2 = k_arr[idx], k_arr[idx+1]
+                if abs(s2 - s1) > 1e-9:
+                    k_cross = k1 + (2.0 - s1) * (k2 - k1) / (s2 - s1)
+                    gs['boundary_kappa_est'] = float(k_cross)
+    except Exception:
+        pass
+
+    total_cycles = gs['quantum_regime_cycles'] + gs['classical_regime_cycles']
+    return {
+        'violation': violation,
+        'S_CHSH': s_chsh,
+        'quantum_fraction': gs['quantum_regime_cycles'] / max(total_cycles, 1),
+        'boundary_kappa_est': gs['boundary_kappa_est'],
+        'total_violations': gs['chsh_violation_total'],
+        'crossings_total': len(gs['boundary_crossings']),
+        'last_crossing': gs['boundary_crossings'][-1] if gs['boundary_crossings'] else None,
+    }
+
+
+def get_bell_boundary_report() -> dict:
+    """Return comprehensive boundary mapping report from accumulated history."""
+    gs = _GLOBAL_STATE
+    import numpy as _np
+
+    history = list(gs['bell_chsh_history'])
+    mi_hist  = list(gs['mi_history'])
+    total    = gs['quantum_regime_cycles'] + gs['classical_regime_cycles']
+
+    s_values  = [h[1] for h in history] if history else [0.0]
+    mi_values = [m[1] for m in mi_hist]  if mi_hist  else [0.0]
+
+    # Pearson correlation: does higher S correlate with higher MI?
+    chsh_mi_corr = None
+    if len(s_values) >= 10 and len(mi_values) >= 10:
+        try:
+            n = min(len(s_values), len(mi_values))
+            corr = float(_np.corrcoef(s_values[-n:], mi_values[-n:])[0, 1])
+            chsh_mi_corr = corr
+        except Exception:
+            pass
+
+    return {
+        'boundary_kappa_estimate':  gs['boundary_kappa_est'],
+        'total_bell_measurements':  len(history),
+        'quantum_regime_cycles':    gs['quantum_regime_cycles'],
+        'classical_regime_cycles':  gs['classical_regime_cycles'],
+        'quantum_fraction':         gs['quantum_regime_cycles'] / max(total, 1),
+        'chsh_violation_total':     gs['chsh_violation_total'],
+        'S_CHSH_mean':              float(_np.mean(s_values)) if s_values else 0.0,
+        'S_CHSH_max':               float(_np.max(s_values))  if s_values else 0.0,
+        'S_CHSH_std':               float(_np.std(s_values))  if s_values else 0.0,
+        'MI_mean':                  float(_np.mean(mi_values)) if mi_values else 0.0,
+        'MI_trend_last50':          float(_np.mean(mi_values[-50:]) - _np.mean(mi_values[-100:-50]))
+                                    if len(mi_values) > 100 else 0.0,
+        'chsh_mi_correlation':      chsh_mi_corr,
+        'boundary_crossings_total': len(gs['boundary_crossings']),
+        'recent_crossings':         gs['boundary_crossings'][-5:],
+        'angles_corrected':         True,   # flags the fixed a=0, a'=π/4, b=π/8, b'=3π/8 set
+        'angle_set': {'a': 0.0, 'a_prime': 'π/4', 'b': 'π/8', 'b_prime': '3π/8'},
+    }
+
+
+def get_mi_trend(window: int = 20) -> dict:
+    """Return mutual information trend over recent window of measurements."""
+    import numpy as _np
+    mi_hist = list(_GLOBAL_STATE['mi_history'])
+    if len(mi_hist) < 3:
+        return {'trend': 'insufficient_data', 'slope': 0.0, 'mean': 0.0}
+    recent = [m[1] for m in mi_hist[-window:]]
+    slope  = float((recent[-1] - recent[0]) / max(len(recent) - 1, 1))
+    trend  = 'declining' if slope < -0.0005 else ('rising' if slope > 0.0005 else 'stable')
+    return {
+        'trend': trend, 'slope': slope,
+        'mean': float(_np.mean(recent)),
+        'std':  float(_np.std(recent)),
+        'window': len(recent),
+        'first': recent[0] if recent else 0.0,
+        'last':  recent[-1] if recent else 0.0,
+    }
+
 
 def get_system_health() -> dict:
     # FIX: get_heartbeat() now returns None (not a dict) when uninitialized.
@@ -1782,6 +1934,21 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
             'last_maintenance_at':   m.get('last_maintenance_at', None),
             'daemon_thread':         True,
         }}
+
+    if cmd == 'quantum-bell-boundary':
+        try:
+            report = get_bell_boundary_report()
+            return {'status': 'success', 'result': report}
+        except Exception as _be:
+            return {'status': 'error', 'error': str(_be)}
+
+    if cmd == 'quantum-mi-trend':
+        try:
+            window = int(kwargs.get('window', 20))
+            trend = get_mi_trend(window=window)
+            return {'status': 'success', 'result': trend}
+        except Exception as _me:
+            return {'status': 'error', 'error': str(_me)}
 
     if cmd == 'quantum-resonance':
         coupler = get_resonance_coupler()

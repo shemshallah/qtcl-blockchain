@@ -1658,7 +1658,10 @@ def _lattice_telemetry_loop() -> None:
                         except Exception:
                             pass
                     
-                    weight_updates = int(nm.get('weight_update_count', 0))
+                    # FIX: NN get_state() returns 'total_weight_updates' not 'weight_update_count'.
+                    # Both keys now exposed; 'weight_update_count' is the alias wsgi reads.
+                    weight_updates = int(nm.get('weight_update_count',
+                                        nm.get('total_weight_updates', 0)))
                     total_params = int(nm.get('total_parameters', 0))
                     
                     # Loss trend
@@ -1889,6 +1892,36 @@ def _lattice_telemetry_loop() -> None:
                         except Exception:
                             pass
 
+                    # Classical-quantum boundary detection: log when S_CHSH crosses 2.0
+                    _boundary_cross_tag = ""
+                    if hasattr(lat, "_prev_bell_s"):
+                        _prev = getattr(lat, "_prev_bell_s", 0.0)
+                        if _prev < 2.0 and bell_s >= 2.0:
+                            _boundary_cross_tag = " 🔴CROSSED-INTO-QUANTUM"
+                        elif _prev >= 2.0 and bell_s < 2.0:
+                            _boundary_cross_tag = " 🔵FELL-CLASSICAL"
+                    try:
+                        lat._prev_bell_s = bell_s
+                    except Exception:
+                        pass
+
+                    # MI trend over last 5 cycles for boundary drift indication
+                    _mi_trend_tag = ""
+                    if not hasattr(lat, "_mi_history_wsgi"):
+                        try:
+                            lat._mi_history_wsgi = []
+                        except Exception:
+                            pass
+                    try:
+                        lat._mi_history_wsgi.append(mi)
+                        if len(lat._mi_history_wsgi) > 5:
+                            lat._mi_history_wsgi.pop(0)
+                        if len(lat._mi_history_wsgi) >= 3:
+                            _mi_delta = lat._mi_history_wsgi[-1] - lat._mi_history_wsgi[0]
+                            _mi_trend_tag = f" MI_trend={_mi_delta:+.4f}"
+                    except Exception:
+                        pass
+
                     logger.info(
                         f"[LATTICE-REFRESH] Cycle #{cycle:4d} | "
                         f"C: {coh_current:.4f}→{coh_after:.4f} (ss={coh_ss:.3f}) | "
@@ -1897,7 +1930,8 @@ def _lattice_telemetry_loop() -> None:
                         f"{'🌊REVIVAL' if revival else ''} | "
                         f"W-revival={'✓' if revival else '↔'} | "
                         f"Bell S_CHSH={bell_s:.3f} {('⚡VIOL' if bell_violation else '·')} | "
-                        f"MI={mi:.4f} | WState={super_q}% | source=AerSimulator"
+                        f"MI={mi:.4f}{_mi_trend_tag} | WState={super_q}% | source=AerSimulator"
+                        f"{_boundary_cross_tag}"
                     )
                     
                     # ── HYPERPARAMETER TUNING UPDATE ──────────────────────────────
