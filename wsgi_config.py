@@ -515,10 +515,14 @@ def _initialize_quantum_infrastructure_deferred() -> None:
             )
         except (ImportError, ModuleNotFoundError):
             logger.warning("[BOOTSTRAP/QUANTUM] quantum_state_manager not available")
-            # Continue with fallback
+            # Define fallback values
+            QuantumStateWriter = None
+            QuantumStateSnapshot = None
+            QuantumStateValidator = None
         
-        # Create quantum components
-        QUANTUM_WRITER = QuantumStateWriter(db_pool=DB_POOL, batch_size=150, flush_interval=4.0)
+        # Create quantum components - handle None case
+        if QuantumStateWriter is not None:
+            QUANTUM_WRITER = QuantumStateWriter(db_pool=DB_POOL, batch_size=150, flush_interval=4.0)
         QUANTUM_STATE = QuantumStateSnapshot()
         QUANTUM_TRANSITION = AtomicQuantumTransition(max_shadow_history=200)
         QUANTUM_EXECUTOR = QuantumAwareCommandExecutor(QUANTUM_STATE, QUANTUM_TRANSITION)
