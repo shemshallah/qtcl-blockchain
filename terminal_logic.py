@@ -1314,6 +1314,30 @@ class TerminalEngine:
         UI.success("Goodbye!")
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
+# BOOTSTRAP SUPPORT
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+
+def register_all_commands(engine):
+    """
+    Register all terminal commands into the engine.
+    
+    This stub function is called by wsgi_config.py during bootstrap to integrate
+    terminal_logic with the global command registry (globals.py).
+    
+    Current implementation: All commands are already in globals.COMMAND_REGISTRY.
+    Terminal engine here is optional enhancement — main registry is in globals.py.
+    
+    Args:
+        engine: TerminalEngine instance
+        
+    Returns:
+        int: Number of commands registered (0 — all commands in globals.py)
+    """
+    logger.info("[terminal_logic] register_all_commands called — main registry in globals.py")
+    return 0  # All commands managed by globals.COMMAND_REGISTRY
+
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
 # MAIN ENTRY POINT
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 

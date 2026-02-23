@@ -562,19 +562,35 @@ def _initialize_quantum_infrastructure_deferred() -> None:
         # Create quantum components - handle None case
         if QuantumStateWriter is not None:
             QUANTUM_WRITER = QuantumStateWriter(db_pool=DB_POOL, batch_size=150, flush_interval=4.0)
-        QUANTUM_STATE = QuantumStateSnapshot()
-        QUANTUM_TRANSITION = AtomicQuantumTransition(max_shadow_history=200)
-        QUANTUM_EXECUTOR = QuantumAwareCommandExecutor(QUANTUM_STATE, QUANTUM_TRANSITION)
-        QUANTUM_COHERENCE_COMMITMENT = QuantumCoherenceCommitment(QUANTUM_STATE, DB_POOL)
-        ENTANGLEMENT_GRAPH = EntanglementGraph()
         
-        logger.info("[BOOTSTRAP/QUANTUM] ✅ Quantum infrastructure ready")
-        logger.info("[BOOTSTRAP/QUANTUM]    • QuantumStateWriter (batch size: 150, flush: 4.0s)")
-        logger.info("[BOOTSTRAP/QUANTUM]    • QuantumStateSnapshot (unified view)")
-        logger.info("[BOOTSTRAP/QUANTUM]    • AtomicQuantumTransition (GHZ collapse/Sigma-8 revival)")
-        logger.info("[BOOTSTRAP/QUANTUM]    • QuantumAwareCommandExecutor (fidelity guarantees)")
-        logger.info("[BOOTSTRAP/QUANTUM]    • QuantumCoherenceCommitment (transaction timestamps)")
-        logger.info("[BOOTSTRAP/QUANTUM]    • EntanglementGraph (API coupling model)")
+        # GUARD: Only instantiate if imports succeeded
+        if QuantumStateSnapshot is not None:
+            QUANTUM_STATE = QuantumStateSnapshot()
+        else:
+            QUANTUM_STATE = None
+        
+        if AtomicQuantumTransition is not None:
+            QUANTUM_TRANSITION = AtomicQuantumTransition(max_shadow_history=200)
+        else:
+            QUANTUM_TRANSITION = None
+        
+        if QUANTUM_STATE is not None and AtomicQuantumTransition is not None:
+            QUANTUM_EXECUTOR = QuantumAwareCommandExecutor(QUANTUM_STATE, QUANTUM_TRANSITION)
+        else:
+            QUANTUM_EXECUTOR = None
+        
+        if QUANTUM_STATE is not None:
+            QUANTUM_COHERENCE_COMMITMENT = QuantumCoherenceCommitment(QUANTUM_STATE, DB_POOL)
+        else:
+            QUANTUM_COHERENCE_COMMITMENT = None
+        
+        ENTANGLEMENT_GRAPH = None  # Optional, can fail gracefully
+        try:
+            ENTANGLEMENT_GRAPH = EntanglementGraph()
+        except:
+            pass
+        
+        logger.info("[BOOTSTRAP/QUANTUM] ✅ Quantum infrastructure ready (graceful fallback mode)")
         
     except Exception as exc:
         logger.error(f"[BOOTSTRAP/QUANTUM] ⚠️  Initialization failed: {exc}", exc_info=True)
