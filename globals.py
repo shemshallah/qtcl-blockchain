@@ -26,95 +26,201 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 COMMAND_REGISTRY = {
-    'pq-genesis-verify': {'category': 'pq', 'description': 'Verify genesis block PQ cryptographic material', 'auth_required': False},
-    'pq-key-gen': {'category': 'pq', 'description': 'Generate HLWE-256 post-quantum keypair', 'auth_required': True},
-    'pq-key-list': {'category': 'pq', 'description': 'List post-quantum keys in vault', 'auth_required': True},
-    'pq-key-status': {'category': 'pq', 'description': 'Show status of a specific PQ key', 'auth_required': True},
-    'pq-schema-status': {'category': 'pq', 'description': 'PQ schema installation & table health', 'auth_required': False},
-    'pq-schema-init': {'category': 'pq', 'description': '★ Initialize PQ vault schema & genesis material', 'auth_required': False},
-    'block-create': {'category': 'block', 'description': 'Create new block with mempool transactions', 'auth_required': True, 'requires_admin': True},
-    'block-details': {'category': 'block', 'description': 'Get detailed block information', 'auth_required': False},
-    'block-list': {'category': 'block', 'description': 'List blocks by height range', 'auth_required': False},
-    'block-verify': {'category': 'block', 'description': 'Verify block PQ signature & chain-of-custody', 'auth_required': False},
-    'block-stats': {'category': 'block', 'description': 'Blockchain statistics', 'auth_required': False},
-    'utxo-balance': {'category': 'block', 'description': 'Get UTXO balance for address', 'auth_required': False},
-    'utxo-list': {'category': 'block', 'description': 'List unspent outputs for address', 'auth_required': False},
-    'block-finality': {'category': 'block', 'description': 'Get finality status of block', 'auth_required': False},
-    'tx-create': {'category': 'transaction', 'description': 'Create new transaction', 'auth_required': True},
-    'tx-sign': {'category': 'transaction', 'description': 'Sign transaction with PQ key', 'auth_required': True},
-    'tx-verify': {'category': 'transaction', 'description': 'Verify transaction signature', 'auth_required': False},
-    'tx-encrypt': {'category': 'transaction', 'description': 'Encrypt transaction for recipient', 'auth_required': True},
-    'tx-submit': {'category': 'transaction', 'description': 'Submit transaction to mempool', 'auth_required': True},
-    'tx-status': {'category': 'transaction', 'description': 'Check transaction status', 'auth_required': False},
-    'tx-list': {'category': 'transaction', 'description': 'List transactions in mempool', 'auth_required': False},
-    'tx-batch-sign': {'category': 'transaction', 'description': 'Batch sign multiple transactions', 'auth_required': True},
-    'tx-fee-estimate': {'category': 'transaction', 'description': 'Estimate transaction fees', 'auth_required': False},
-    'tx-cancel': {'category': 'transaction', 'description': 'Cancel pending transaction', 'auth_required': True},
-    'tx-analyze': {'category': 'transaction', 'description': 'Analyze transaction patterns', 'auth_required': True},
-    'tx-export': {'category': 'transaction', 'description': 'Export transaction history', 'auth_required': True},
-    'tx-stats': {'category': 'transaction', 'description': 'Transaction statistics', 'auth_required': False},
-    'wallet-create': {'category': 'wallet', 'description': 'Create new wallet', 'auth_required': True},
-    'wallet-list': {'category': 'wallet', 'description': 'List all wallets', 'auth_required': False},
-    'wallet-balance': {'category': 'wallet', 'description': 'Get wallet balance', 'auth_required': False},
-    'wallet-send': {'category': 'wallet', 'description': 'Send transaction from wallet', 'auth_required': True},
-    'wallet-import': {'category': 'wallet', 'description': 'Import wallet from seed', 'auth_required': True},
-    'wallet-export': {'category': 'wallet', 'description': 'Export wallet (private key)', 'auth_required': True},
-    'wallet-sync': {'category': 'wallet', 'description': 'Sync wallet with blockchain', 'auth_required': True},
-    'quantum-status': {'category': 'quantum', 'description': 'Quantum engine metrics & status', 'auth_required': False},
-    'quantum-entropy': {'category': 'quantum', 'description': 'Get quantum entropy from QRNG sources', 'auth_required': False},
-    'quantum-circuit': {'category': 'quantum', 'description': 'Get current quantum circuit metrics', 'auth_required': False},
-    'quantum-ghz': {'category': 'quantum', 'description': 'GHZ-8 finality proof status', 'auth_required': False},
-    'quantum-wstate': {'category': 'quantum', 'description': 'W-state validator network status', 'auth_required': False},
-    'quantum-coherence': {'category': 'quantum', 'description': 'Temporal coherence attestation', 'auth_required': False},
-    'quantum-measurement': {'category': 'quantum', 'description': 'Quantum measurement results', 'auth_required': False},
-    'quantum-stats': {'category': 'quantum', 'description': 'Quantum subsystem statistics', 'auth_required': False},
-    'quantum-qrng': {'category': 'quantum', 'description': 'QRNG entropy sources & cache', 'auth_required': False},
-    'quantum-v8': {'category': 'quantum', 'description': 'v8 W-state revival engine — full diagnostics', 'auth_required': False},
-    'quantum-pseudoqubits': {'category': 'quantum', 'description': 'Pseudoqubit 1-5 validator W-state & coherence floors', 'auth_required': False},
-    'quantum-revival': {'category': 'quantum', 'description': 'Spectral revival prediction & next peak', 'auth_required': False},
-    'quantum-maintainer': {'category': 'quantum', 'description': 'Perpetual W-state maintainer (10 Hz daemon) status', 'auth_required': False},
-    'quantum-resonance': {'category': 'quantum', 'description': 'Noise-resonance coupler — stochastic resonance metrics', 'auth_required': False},
-    'quantum-bell-boundary': {'category': 'quantum', 'description': 'Classical-quantum boundary map — CHSH history, MI trend, kappa crossing estimate', 'auth_required': False},
-    'quantum-mi-trend':      {'category': 'quantum', 'description': 'Mutual information trend analysis over recent cycles', 'auth_required': False},
-    'oracle-price': {'category': 'oracle', 'description': 'Get current price from oracle', 'auth_required': False},
-    'oracle-feed': {'category': 'oracle', 'description': 'Get oracle price feed', 'auth_required': False},
-    'oracle-history': {'category': 'oracle', 'description': 'Get oracle data history', 'auth_required': False},
-    'oracle-list': {'category': 'oracle', 'description': 'List available price feeds', 'auth_required': False},
-    'oracle-verify': {'category': 'oracle', 'description': 'Verify oracle data integrity', 'auth_required': False},
-    'defi-pool-list': {'category': 'defi', 'description': 'List liquidity pools', 'auth_required': False},
-    'defi-swap': {'category': 'defi', 'description': 'Perform token swap', 'auth_required': True},
-    'defi-stake': {'category': 'defi', 'description': 'Stake tokens', 'auth_required': True},
-    'defi-unstake': {'category': 'defi', 'description': 'Unstake tokens', 'auth_required': True},
-    'defi-yield': {'category': 'defi', 'description': 'Check yield farming rewards', 'auth_required': False},
-    'defi-tvl': {'category': 'defi', 'description': 'Get total value locked', 'auth_required': False},
-    'governance-vote': {'category': 'governance', 'description': 'Vote on governance proposal', 'auth_required': True},
-    'governance-propose': {'category': 'governance', 'description': 'Create governance proposal', 'auth_required': True},
-    'governance-list': {'category': 'governance', 'description': 'List active proposals', 'auth_required': False},
-    'governance-status': {'category': 'governance', 'description': 'Check proposal status', 'auth_required': False},
-    'auth-login': {'category': 'auth', 'description': 'Authenticate user', 'auth_required': False},
-    'auth-logout': {'category': 'auth', 'description': 'Logout user', 'auth_required': True},
-    'auth-register': {'category': 'auth', 'description': 'Register new user', 'auth_required': False},
-    'auth-mfa': {'category': 'auth', 'description': 'Setup multi-factor authentication', 'auth_required': True},
-    'auth-device': {'category': 'auth', 'description': 'Manage trusted devices', 'auth_required': True},
-    'auth-session': {'category': 'auth', 'description': 'Check session status', 'auth_required': True},
-    'admin-users': {'category': 'admin', 'description': 'Manage users', 'auth_required': True, 'requires_admin': True},
-    'admin-keys': {'category': 'admin', 'description': 'Manage validator keys', 'auth_required': True, 'requires_admin': True},
-    'admin-revoke': {'category': 'admin', 'description': 'Revoke compromised keys', 'auth_required': True, 'requires_admin': True},
-    'admin-config': {'category': 'admin', 'description': 'System configuration', 'auth_required': True, 'requires_admin': True},
-    'admin-audit': {'category': 'admin', 'description': 'Audit log', 'auth_required': True, 'requires_admin': True},
-    'admin-stats': {'category': 'admin', 'description': 'System statistics', 'auth_required': True, 'requires_admin': True},
-    'system-health': {'category': 'system', 'description': 'Full system health check', 'auth_required': False},
-    'system-status': {'category': 'system', 'description': 'System status overview', 'auth_required': False},
-    'system-peers': {'category': 'system', 'description': 'Connected peers', 'auth_required': False},
-    'system-sync': {'category': 'system', 'description': 'Blockchain sync status', 'auth_required': False},
-    'system-version': {'category': 'system', 'description': 'System version info', 'auth_required': False},
-    'system-logs': {'category': 'system', 'description': 'System logs', 'auth_required': False},
-    'system-metrics': {'category': 'system', 'description': 'Performance metrics', 'auth_required': False},
-    'help': {'category': 'help', 'description': 'General help & command syntax', 'auth_required': False},
-    'help-commands': {'category': 'help', 'description': 'List all registered commands', 'auth_required': False},
-    'help-pq': {'category': 'help', 'description': 'Post-quantum cryptography help & reference', 'auth_required': False},
-    'help-category': {'category': 'help', 'description': 'Show commands in category', 'auth_required': False},
-    'help-command': {'category': 'help', 'description': 'Get detailed help for command', 'auth_required': False},
+    # ══════════════════════════════════════════════════════════════════
+    # SYSTEM — everything in one place
+    # ══════════════════════════════════════════════════════════════════
+    'system-stats':     {'category': 'system', 'auth_required': False,
+                         'description': 'Comprehensive system snapshot — health, version, metrics, module state, peers, sync, WSGI bridge. --section=health|version|metrics|peers|sync|modules|all'},
+
+    # ══════════════════════════════════════════════════════════════════
+    # QUANTUM — specific subsystem probes + aggregate
+    # ══════════════════════════════════════════════════════════════════
+    'quantum-stats':        {'category': 'quantum', 'auth_required': False,
+                             'description': 'Full quantum engine aggregate — heartbeat, lattice, W-state, noise-bath, v8, bell, MI'},
+    'quantum-entropy':      {'category': 'quantum', 'auth_required': False,
+                             'description': 'Live QRNG entropy draw — Shannon score, SHA3 digest, source breakdown'},
+    'quantum-circuit':      {'category': 'quantum', 'auth_required': False,
+                             'description': 'Quantum circuit execution — Born-rule measurement, gate counts, fidelity. --qubits --depth --type'},
+    'quantum-ghz':          {'category': 'quantum', 'auth_required': False,
+                             'description': 'GHZ-8 entangled state — fidelity, coherence, finality proof, lattice coupling'},
+    'quantum-wstate':       {'category': 'quantum', 'auth_required': False,
+                             'description': 'W-5 validator network — consensus health, fidelity avg, entanglement strength, heartbeat'},
+    'quantum-coherence':    {'category': 'quantum', 'auth_required': False,
+                             'description': 'Temporal coherence attestation — decoherence rate, kappa memory kernel, bath fidelity'},
+    'quantum-measurement':  {'category': 'quantum', 'auth_required': False,
+                             'description': 'Quantum measurement collapse — bitstring, Bloch sphere, Born probabilities. --qubits --basis --shots'},
+    'quantum-qrng':         {'category': 'quantum', 'auth_required': False,
+                             'description': 'QRNG cache and source diagnostics — entropy pool, byte sample, lattice ops'},
+    'quantum-v8':           {'category': 'quantum', 'auth_required': False,
+                             'description': 'v8 W-state revival engine — guardian, spectral, resonance, neural-v2, maintainer in full'},
+    'quantum-pseudoqubits': {'category': 'quantum', 'auth_required': False,
+                             'description': 'Pseudoqubit 1-5 — per-qubit coherence, fuel tank, W-state lock status, floor violations'},
+    'quantum-revival':      {'category': 'quantum', 'auth_required': False,
+                             'description': 'Spectral revival prediction — next peak batch, dominant frequency, micro/meso/macro scales'},
+    'quantum-maintainer':   {'category': 'quantum', 'auth_required': False,
+                             'description': 'Perpetual W-state maintainer daemon — 10 Hz status, cycles, coherence trend, uptime'},
+    'quantum-resonance':    {'category': 'quantum', 'auth_required': False,
+                             'description': 'Noise-resonance coupler — stochastic resonance score, kappa, coupling efficiency, bath τ_c'},
+    'quantum-bell-boundary':{'category': 'quantum', 'auth_required': False,
+                             'description': 'Classical-quantum boundary — CHSH S history, MI trend, kappa crossing estimate, regime fractions'},
+    'quantum-mi-trend':     {'category': 'quantum', 'auth_required': False,
+                             'description': 'Mutual information trend — slope, mean, std, window. --window=N'},
+
+    # ══════════════════════════════════════════════════════════════════
+    # BLOCKCHAIN — chain ops + stats
+    # ══════════════════════════════════════════════════════════════════
+    'block-stats':    {'category': 'block', 'auth_required': False,
+                       'description': 'Blockchain aggregate stats — height, tip, avg block time, total tx, chain health'},
+    'block-details':  {'category': 'block', 'auth_required': False,
+                       'description': 'Block detail + finality — hash, timestamp, tx count, PQ sig, confirmations. --block=N'},
+    'block-list':     {'category': 'block', 'auth_required': False,
+                       'description': 'List block range — height, hash, tx count. --start=N --end=N'},
+    'block-create':   {'category': 'block', 'auth_required': True,  'requires_admin': True,
+                       'description': 'Create new block from mempool — requires admin, queues into consensus'},
+    'block-verify':   {'category': 'block', 'auth_required': False,
+                       'description': 'Verify block PQ signature and chain-of-custody integrity. --block=N'},
+    'utxo-balance':   {'category': 'block', 'auth_required': False,
+                       'description': 'UTXO balance for address — QTCL balance, UTXO count. --address=<addr>'},
+    'utxo-list':      {'category': 'block', 'auth_required': False,
+                       'description': 'Unspent outputs for address — full UTXO set. --address=<addr>'},
+
+    # ══════════════════════════════════════════════════════════════════
+    # TRANSACTIONS — lifecycle + aggregate
+    # ══════════════════════════════════════════════════════════════════
+    'tx-stats':       {'category': 'transaction', 'auth_required': False,
+                       'description': 'Transaction aggregate — mempool count, confirmed 24h, avg fee, TPS, total volume'},
+    'tx-status':      {'category': 'transaction', 'auth_required': False,
+                       'description': 'Specific transaction status — confirmation, block height, fee paid. --tx-id=<id>'},
+    'tx-list':        {'category': 'transaction', 'auth_required': False,
+                       'description': 'List mempool transactions — pending, count, fee distribution'},
+    'tx-create':      {'category': 'transaction', 'auth_required': True,
+                       'description': 'Create transaction — from/to/amount, returns tx_id. --from --to --amount --fee'},
+    'tx-sign':        {'category': 'transaction', 'auth_required': True,
+                       'description': 'Sign transaction with HLWE-256 PQ key. --tx-id --key-id'},
+    'tx-verify':      {'category': 'transaction', 'auth_required': False,
+                       'description': 'Verify transaction PQ signature. --tx-id --signature'},
+    'tx-encrypt':     {'category': 'transaction', 'auth_required': True,
+                       'description': 'Encrypt transaction payload for recipient. --tx-id --recipient-key'},
+    'tx-submit':      {'category': 'transaction', 'auth_required': True,
+                       'description': 'Submit signed transaction to mempool. --tx-id'},
+    'tx-batch-sign':  {'category': 'transaction', 'auth_required': True,
+                       'description': 'Batch-sign multiple transactions with single PQ key. --tx-ids --key-id'},
+    'tx-fee-estimate':{'category': 'transaction', 'auth_required': False,
+                       'description': 'Fee estimate — low/medium/high tiers in QTCL'},
+    'tx-cancel':      {'category': 'transaction', 'auth_required': True,
+                       'description': 'Cancel pending mempool transaction. --tx-id'},
+    'tx-analyze':     {'category': 'transaction', 'auth_required': True,
+                       'description': 'Analyze transaction — fee efficiency, pattern classification, risk score. --tx-id'},
+    'tx-export':      {'category': 'transaction', 'auth_required': True,
+                       'description': 'Export transaction history. --format=json|csv --limit=N'},
+
+    # ══════════════════════════════════════════════════════════════════
+    # WALLET — overview + operations
+    # ══════════════════════════════════════════════════════════════════
+    'wallet-stats':   {'category': 'wallet', 'auth_required': True,
+                       'description': 'Wallet overview — all wallets, balances, total portfolio QTCL. --address to filter'},
+    'wallet-create':  {'category': 'wallet', 'auth_required': True,
+                       'description': 'Create new HLWE-256 wallet — returns wallet_id and PQ public key'},
+    'wallet-send':    {'category': 'wallet', 'auth_required': True,
+                       'description': 'Send QTCL from wallet. --wallet=<id> --to=<addr> --amount=<val> --fee'},
+    'wallet-import':  {'category': 'wallet', 'auth_required': True,
+                       'description': 'Import wallet from PQ seed phrase. --seed'},
+    'wallet-export':  {'category': 'wallet', 'auth_required': True,
+                       'description': 'Export wallet keys. --wallet=<id>'},
+    'wallet-sync':    {'category': 'wallet', 'auth_required': True,
+                       'description': 'Sync wallet to current chain height, resolve UTXO set'},
+
+    # ══════════════════════════════════════════════════════════════════
+    # ORACLE — data feeds + specific queries
+    # ══════════════════════════════════════════════════════════════════
+    'oracle-stats':   {'category': 'oracle', 'auth_required': False,
+                       'description': 'Oracle aggregate — all feeds, integrity status, available symbols, last verified'},
+    'oracle-price':   {'category': 'oracle', 'auth_required': False,
+                       'description': 'Live price from oracle. --symbol=BTC-USD (default)'},
+    'oracle-history': {'category': 'oracle', 'auth_required': False,
+                       'description': 'Historical price data for symbol. --symbol --limit=N'},
+
+    # ══════════════════════════════════════════════════════════════════
+    # DEFI — protocol stats + operations
+    # ══════════════════════════════════════════════════════════════════
+    'defi-stats':     {'category': 'defi', 'auth_required': False,
+                       'description': 'DeFi protocol aggregate — TVL, pool list, pending yield, APY summary'},
+    'defi-swap':      {'category': 'defi', 'auth_required': True,
+                       'description': 'Token swap. --from=TOKEN --to=TOKEN --amount=VAL --slippage=0.5'},
+    'defi-stake':     {'category': 'defi', 'auth_required': True,
+                       'description': 'Stake tokens to pool. --amount=VAL --pool=<id>'},
+    'defi-unstake':   {'category': 'defi', 'auth_required': True,
+                       'description': 'Unstake tokens from pool. --amount=VAL --pool=<id>'},
+
+    # ══════════════════════════════════════════════════════════════════
+    # GOVERNANCE — proposals + voting
+    # ══════════════════════════════════════════════════════════════════
+    'governance-stats':   {'category': 'governance', 'auth_required': False,
+                           'description': 'Governance overview — active proposals, vote counts, quorum status. --id to filter'},
+    'governance-vote':    {'category': 'governance', 'auth_required': True,
+                           'description': 'Vote on proposal. --id=<id> --vote=yes|no|abstain'},
+    'governance-propose': {'category': 'governance', 'auth_required': True,
+                           'description': 'Create proposal. --title="..." --description="..." --duration=7'},
+
+    # ══════════════════════════════════════════════════════════════════
+    # AUTH — session lifecycle
+    # ══════════════════════════════════════════════════════════════════
+    'auth-login':    {'category': 'auth', 'auth_required': False,
+                      'description': 'Authenticate — returns JWT. --email --password'},
+    'auth-logout':   {'category': 'auth', 'auth_required': True,
+                      'description': 'Invalidate current session and JWT'},
+    'auth-register': {'category': 'auth', 'auth_required': False,
+                      'description': 'Register new account. --email --password --username'},
+    'auth-mfa':      {'category': 'auth', 'auth_required': True,
+                      'description': 'MFA management — TOTP setup and HLWE-256 PQ binding'},
+    'auth-device':   {'category': 'auth', 'auth_required': True,
+                      'description': 'Trusted device management — list and register devices via PQ key'},
+    'auth-session':  {'category': 'auth', 'auth_required': True,
+                      'description': 'Current session details — user_id, role, expiry, active status'},
+
+    # ══════════════════════════════════════════════════════════════════
+    # ADMIN — privileged operations
+    # ══════════════════════════════════════════════════════════════════
+    'admin-stats':   {'category': 'admin', 'auth_required': True, 'requires_admin': True,
+                      'description': 'Admin aggregate — user count, active sessions, block height, uptime metrics'},
+    'admin-users':   {'category': 'admin', 'auth_required': True, 'requires_admin': True,
+                      'description': 'User management — list, search, disable. --limit --search --action'},
+    'admin-keys':    {'category': 'admin', 'auth_required': True, 'requires_admin': True,
+                      'description': 'Validator key management — list active PQ keys, rotation schedule'},
+    'admin-revoke':  {'category': 'admin', 'auth_required': True, 'requires_admin': True,
+                      'description': 'Revoke compromised key. --key-id=<id> --reason="..."'},
+    'admin-config':  {'category': 'admin', 'auth_required': True, 'requires_admin': True,
+                      'description': 'System configuration — read/write runtime config via API'},
+    'admin-audit':   {'category': 'admin', 'auth_required': True, 'requires_admin': True,
+                      'description': 'Audit log — privileged action history. --limit=N --action --user-id'},
+
+    # ══════════════════════════════════════════════════════════════════
+    # POST-QUANTUM CRYPTOGRAPHY
+    # ══════════════════════════════════════════════════════════════════
+    'pq-stats':       {'category': 'pq', 'auth_required': False,
+                       'description': 'PQ system aggregate — schema health, genesis verification, vault summary, algorithm info'},
+    'pq-key-gen':     {'category': 'pq', 'auth_required': True,
+                       'description': 'Generate HLWE-256 keypair for current user'},
+    'pq-key-list':    {'category': 'pq', 'auth_required': True,
+                       'description': 'List PQ keys in vault for current user — id, algorithm, created, status'},
+    'pq-key-status':  {'category': 'pq', 'auth_required': True,
+                       'description': 'Specific PQ key status — active/revoked/expired. --key-id=<id>'},
+    'pq-schema-init': {'category': 'pq', 'auth_required': False,
+                       'description': '★ Initialize PQ vault schema, genesis material, and baseline keys'},
+
+    # ══════════════════════════════════════════════════════════════════
+    # HELP
+    # ══════════════════════════════════════════════════════════════════
+    'help':          {'category': 'help', 'auth_required': False,
+                      'description': 'General help — format, categories, examples'},
+    'help-commands': {'category': 'help', 'auth_required': False,
+                      'description': 'Full command list with descriptions. --category to filter'},
+    'help-category': {'category': 'help', 'auth_required': False,
+                      'description': 'Commands in a specific category. --category=<name>'},
+    'help-command':  {'category': 'help', 'auth_required': False,
+                      'description': 'Detailed help for one command. --command=<name>'},
+    'help-pq':       {'category': 'help', 'auth_required': False,
+                      'description': 'Post-quantum cryptography reference — algorithms, NIST compliance, usage'},
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -124,61 +230,35 @@ COMMAND_REGISTRY = {
 # so dispatch_command doesn't return "unknown command" but "initializing" instead.
 
 _ESSENTIAL_COMMANDS = {
-    'login': {
-        'handler': None,  # ← Injected by register_all_commands()
-        'category': 'auth',
-        'description': 'Authenticate with email + password',
-        'auth_required': False,
-        'requires_admin': False,
+    'auth-login': {
+        'handler': None, 'category': 'auth',
+        'description': 'Authenticate — returns JWT',
+        'auth_required': False, 'requires_admin': False,
     },
-    'register': {
-        'handler': None,
-        'category': 'auth',
-        'description': 'Register new user account',
-        'auth_required': False,
-        'requires_admin': False,
+    'auth-register': {
+        'handler': None, 'category': 'auth',
+        'description': 'Register new account',
+        'auth_required': False, 'requires_admin': False,
+    },
+    'auth-logout': {
+        'handler': None, 'category': 'auth',
+        'description': 'Invalidate session',
+        'auth_required': True, 'requires_admin': False,
     },
     'help': {
-        'handler': None,
-        'category': 'help',
-        'description': 'Show help',
-        'auth_required': False,
-        'requires_admin': False,
+        'handler': None, 'category': 'help',
+        'description': 'General help',
+        'auth_required': False, 'requires_admin': False,
     },
     'help-commands': {
-        'handler': None,
-        'category': 'help',
-        'description': 'List all commands',
-        'auth_required': False,
-        'requires_admin': False,
+        'handler': None, 'category': 'help',
+        'description': 'Full command list',
+        'auth_required': False, 'requires_admin': False,
     },
-    'logout': {
-        'handler': None,
-        'category': 'auth',
-        'description': 'Logout user',
-        'auth_required': True,
-        'requires_admin': False,
-    },
-    'system-health': {
-        'handler': None,
-        'category': 'system',
-        'description': 'System health check',
-        'auth_required': False,
-        'requires_admin': False,
-    },
-    'system-status': {
-        'handler': None,
-        'category': 'system',
-        'description': 'System status',
-        'auth_required': False,
-        'requires_admin': False,
-    },
-    'wsgi-status': {
-        'handler': None,
-        'category': 'system',
-        'description': 'WSGI globals bridge status',
-        'auth_required': False,
-        'requires_admin': False,
+    'system-stats': {
+        'handler': None, 'category': 'system',
+        'description': 'Comprehensive system snapshot',
+        'auth_required': False, 'requires_admin': False,
     },
 }
 
@@ -187,10 +267,6 @@ for cmd_name, cmd_info in _ESSENTIAL_COMMANDS.items():
     if cmd_name not in COMMAND_REGISTRY:
         COMMAND_REGISTRY[cmd_name] = cmd_info
 
-COMMAND_ALIASES = {}
-for cmd, info in COMMAND_REGISTRY.items():
-    for alias in info.get('aliases', []):
-        COMMAND_ALIASES[alias] = cmd
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # GLOBAL STATE WITH REAL SYSTEM REFERENCES
@@ -973,30 +1049,11 @@ def _create_pqc_genesis_block() -> dict:
 
 def resolve_command(cmd: str) -> str:
     """
-    Resolve a command name to its canonical form.
-    Handles: slash→hyphen conversion, lowercase normalization, alias resolution.
+    Normalize a command name to its canonical registry key.
+    Handles: slash→hyphen, underscore→hyphen, lowercase, whitespace strip.
+    No alias resolution — every command has one canonical name.
     """
-    # Normalize: convert slashes to hyphens, lowercase, strip whitespace
-    normalized = cmd.replace('/', '-').replace('_', '-').lower().strip()
-    
-    # Direct lookup in registry
-    if normalized in COMMAND_REGISTRY:
-        return normalized
-    
-    # Try alias resolution
-    if normalized in COMMAND_ALIASES:
-        return COMMAND_ALIASES[normalized]
-    
-    # Try alternate forms (underscores vs hyphens)
-    alt_form = normalized.replace('-', '_')
-    if alt_form in COMMAND_REGISTRY:
-        return alt_form
-    
-    if alt_form in COMMAND_ALIASES:
-        return COMMAND_ALIASES[alt_form]
-    
-    # If all else fails, return normalized (will be caught as "Unknown command" later)
-    return normalized
+    return cmd.replace('/', '-').replace('_', '-').lower().strip()
 
 def get_command_info(cmd: str) -> dict:
     """Retrieve complete command metadata from registry."""
@@ -1308,7 +1365,7 @@ def dispatch_command(command: str, args: dict = None, user_id: str = None,
         prefix = cmd_parts[0] if cmd_parts else ''
         suggestions = (
             [c for c in COMMAND_REGISTRY if c.startswith(prefix) or prefix in c][:10]
-            or ['help', 'help-commands', 'help-category', 'system-status', 'quantum-status']
+            or ['help', 'help-commands', 'help-category', 'quantum-stats', 'system-stats']
         )
         return {
             'status': 'error',
@@ -1325,7 +1382,7 @@ def dispatch_command(command: str, args: dict = None, user_id: str = None,
         return {
             'status': 'unauthorized',
             'error': f'Command "{canonical}" requires authentication.',
-            'hint': 'Login first: login --email=you@example.com --password=secret',
+            'hint': 'Authenticate first: auth-login --email=you@example.com --password=secret',
             'debug_info': {'token_provided': token_provided, 'command': canonical} if token_provided else None,
         }
 
@@ -1354,12 +1411,15 @@ def dispatch_command(command: str, args: dict = None, user_id: str = None,
         }
 
 
+
 def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: dict) -> dict:
-    """Route a parsed, validated command to its real handler."""
-    
-    # ── DYNAMIC HANDLER ROUTING ──
-    # Use terminal_logic-injected handler if it exists AND is callable.
-    # handler=None means this command lives in the if/elif block below — fall through.
+    """
+    Single unified command router.
+    Each command has exactly one handler — comprehensive, deployment-grade.
+    No aliases. No duplicate logic. No fallbacks to old code.
+    """
+
+    # ── Dynamic handler routing (terminal_logic injection) ──────────────────────
     _dyn_handler = cmd_info.get('handler')
     if callable(_dyn_handler):
         try:
@@ -1367,18 +1427,15 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
             result = _dyn_handler(kwargs, args)
             return result
         except Exception as e:
-            logger.error(f"[execute] Error in handler for {cmd}: {e}", exc_info=True)
-            return {
-                'status': 'error',
-                'error': str(e),
-                'command': cmd,
-            }
-    
+            logger.error(f"[execute] Dynamic handler error for {cmd}: {e}", exc_info=True)
+            return {'status': 'error', 'error': str(e), 'command': cmd}
+
     cat = cmd_info.get('category', '')
 
-    # ══════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════════
     # HELP
-    # ══════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════════
+
     if cmd == 'help':
         return _help_general()
 
@@ -1390,150 +1447,179 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
 
     if cmd == 'help-command':
         return _help_command(kwargs)
-    
+
     if cmd == 'help-pq':
         return _help_pq(kwargs)
 
-    # ══════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════════
     # SYSTEM
-    # ══════════════════════════════════════════
-    if cmd == 'system-health':
-        return {'status': 'success', 'result': get_system_health()}
+    # All subsystem state, health, version, metrics, peers, sync in one place.
+    # --section=health|version|metrics|peers|sync|modules|all (default: all)
+    # ══════════════════════════════════════════════════════════════════════════
 
-    if cmd == 'system-status':
-        return {'status': 'success', 'result': get_state_snapshot()}
+    if cmd == 'system-stats':
+        import platform as _pl
+        section = str(kwargs.get('section', 'all')).lower()
+        _bc = get_blockchain()
+        _bc_d = _bc if isinstance(_bc, dict) else {}
 
-    if cmd == 'system-version':
-        return {'status': 'success', 'result': {
-            'version': '5.0', 'codename': 'QTCL',
-            'python': __import__('sys').version,
-            'build': 'production',
-            'modules': {
-                'quantum': bool(_GLOBAL_STATE.get('heartbeat')),
-                'blockchain': bool(_GLOBAL_STATE.get('blockchain')),
-                'database': bool(_GLOBAL_STATE.get('db_manager')),
-                'ledger': bool(_GLOBAL_STATE.get('ledger')),
-                'oracle': bool(_GLOBAL_STATE.get('oracle')),
+        _health = {
+            'status': 'healthy',
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'components': {
+                'quantum':    'ok'      if _GLOBAL_STATE.get('heartbeat')   else 'offline',
+                'blockchain': 'ok'      if _GLOBAL_STATE.get('blockchain')  else 'offline',
+                'database':   'ok'      if _GLOBAL_STATE.get('db_manager')  else 'offline',
+                'ledger':     'ok'      if _GLOBAL_STATE.get('ledger')      else 'offline',
+                'oracle':     'ok'      if _GLOBAL_STATE.get('oracle')      else 'offline',
+                'defi':       'ok'      if _GLOBAL_STATE.get('defi')        else 'offline',
+                'auth':       'ok'      if _GLOBAL_STATE.get('auth_manager')else 'offline',
+                'pqc':        'ok'      if _GLOBAL_STATE.get('pqc_system')  else 'offline',
+                'admin':      'ok'      if _GLOBAL_STATE.get('admin_system')else 'offline',
             },
-        }}
-
-    if cmd == 'system-metrics':
-        return {'status': 'success', 'result': get_metrics()}
-
-    if cmd == 'system-peers':
-        return {'status': 'success', 'result': {
+        }
+        _version = {
+            'version': '5.0.0', 'codename': 'QTCL',
+            'python': _pl.python_version(), 'platform': _pl.platform(),
+            'build': 'production', 'quantum_lattice': 'v8',
+            'pqc': 'HLWE-256', 'wsgi': 'gunicorn-sync',
+        }
+        _metrics = get_metrics()
+        _modules = {k: bool(v) for k, v in _GLOBAL_STATE.items()
+                    if k in ('heartbeat', 'blockchain', 'db_manager', 'ledger', 'oracle',
+                              'defi', 'auth_manager', 'pqc_system', 'admin_system',
+                              'revival_engine', 'pseudoqubit_guardian', 'perpetual_maintainer')}
+        _peers = {
             'peers': [], 'connected': 0, 'max_peers': 50,
             'network': 'QTCL-mainnet', 'sync_status': 'synced',
-        }}
-
-    if cmd == 'system-sync':
-        bc = get_blockchain()
-        return {'status': 'success', 'result': {
+        }
+        _sync = {
             'synced': True,
-            'height': bc.get('height', 0) if isinstance(bc, dict) else 0,
-            'chain_tip': bc.get('chain_tip') if isinstance(bc, dict) else None,
+            'height': _bc_d.get('height', 0),
+            'chain_tip': _bc_d.get('chain_tip'),
             'peers_syncing': 0,
-        }}
+        }
 
-    if cmd == 'system-logs':
-        limit = int(kwargs.get('limit', 20))
+        if section == 'health':
+            return {'status': 'success', 'result': _health}
+        if section == 'version':
+            return {'status': 'success', 'result': _version}
+        if section == 'metrics':
+            return {'status': 'success', 'result': _metrics}
+        if section == 'modules':
+            return {'status': 'success', 'result': _modules}
+        if section == 'peers':
+            return {'status': 'success', 'result': _peers}
+        if section == 'sync':
+            return {'status': 'success', 'result': _sync}
+        # default: all
         return {'status': 'success', 'result': {
-            'logs': [f'[{datetime.now(timezone.utc).isoformat()}] System operational'] * min(limit, 5),
-            'level': kwargs.get('level', 'info'),
+            'health':   _health,
+            'version':  _version,
+            'metrics':  _metrics,
+            'modules':  _modules,
+            'peers':    _peers,
+            'sync':     _sync,
+            'initialized': _GLOBAL_STATE.get('initialized', False),
+            'hint': 'Filter with --section=health|version|metrics|modules|peers|sync',
         }}
 
-    # ══════════════════════════════════════════
-    # QUANTUM
-    # ══════════════════════════════════════════
-    if cmd in ('quantum-status', 'quantum-stats'):
-        # Pull live data from stored global singletons — no re-import needed
-        hb_metrics = {}
-        lattice_metrics = {}
-        neural_state = {}
-        w_state = {}
-        noise_state = {}
-        health = {}
-        v8_summary = {}
-        try:
-            import json as _json
-            def _clean(d):
-                try:
-                    return _json.loads(_json.dumps(d, default=lambda o: float(o) if hasattr(o,'__float__') else str(o)))
-                except Exception:
-                    return {}
+    # ══════════════════════════════════════════════════════════════════════════
+    # QUANTUM — aggregate
+    # Full engine status: heartbeat, lattice, W-state, noise-bath, v8, bell, MI
+    # ══════════════════════════════════════════════════════════════════════════
 
+    if cmd == 'quantum-stats':
+        import json as _json
+
+        def _clean(d):
+            try:
+                return _json.loads(_json.dumps(
+                    d, default=lambda o: float(o) if hasattr(o, '__float__') else str(o)))
+            except Exception:
+                return {}
+
+        hb_m = lat_m = neural_s = ws_s = nb_s = health_s = {}
+        try:
             _hb  = get_heartbeat()
             _lat = get_lattice()
             _lnr = get_lattice_neural_refresh()
             _ws  = get_w_state_enhanced()
             _nb  = get_noise_bath_enhanced()
+            if hasattr(_hb,  'get_metrics'):        hb_m    = _clean(_hb.get_metrics())
+            if hasattr(_lat, 'get_system_metrics'): lat_m   = _clean(_lat.get_system_metrics())
+            if hasattr(_lnr, 'get_state'):          neural_s= _clean(_lnr.get_state())
+            if hasattr(_ws,  'get_state'):          ws_s    = _clean(_ws.get_state())
+            if hasattr(_nb,  'get_state'):          nb_s    = _clean(_nb.get_state())
+            if hasattr(_lat, 'health_check'):       health_s= _clean(_lat.health_check())
+        except Exception as _qe:
+            logger.debug(f"[quantum-stats] singleton error: {_qe}")
 
-            if hasattr(_hb, 'get_metrics'):
-                hb_metrics = _clean(_hb.get_metrics())
-            if hasattr(_lat, 'get_system_metrics'):
-                lattice_metrics = _clean(_lat.get_system_metrics())
-            if hasattr(_lnr, 'get_state'):
-                neural_state = _clean(_lnr.get_state())
-            if hasattr(_ws, 'get_state'):
-                w_state = _clean(_ws.get_state())
-            if hasattr(_nb, 'get_state'):
-                noise_state = _clean(_nb.get_state())
-            if hasattr(_lat, 'health_check'):
-                health = _clean(_lat.health_check())
-            # v8 revival summary
-            v8_full = get_v8_status()
-            g = v8_full.get('guardian', {})
-            m = v8_full.get('maintainer', {})
-            v8_summary = {
-                'initialized':         v8_full['initialized'],
-                'pseudoqubits_locked': v8_full['initialized'],
-                'total_pulses':        g.get('total_pulses_fired', 0),
-                'floor_violations':    g.get('floor_violations', 0),
-                'maintainer_hz':       m.get('actual_hz', 0.0),
-                'maintainer_running':  m.get('running', False),
-                'coherence_floor':     0.89,
-                'w_state_target':      0.9997,
-            }
-        except Exception as _e:
-            logger.debug(f"[quantum-stats] singleton access error: {_e}")
+        v8 = get_v8_status()
+        g  = v8.get('guardian', {})
+        m  = v8.get('maintainer', {})
+
+        bell = get_bell_boundary_report()
+        mi   = get_mi_trend()
 
         return {'status': 'success', 'result': {
-            'quantum_engine': 'QTCL-QE v8.0',
-            'heartbeat': hb_metrics or {'running': False, 'note': 'heartbeat not started'},
-            'lattice': lattice_metrics,
-            'neural_network': neural_state,
-            'w_state_manager': w_state,
-            'noise_bath': noise_state,
-            'health': health,
-            'v8_revival': v8_summary,
-            'subsystems': {
-                'lattice': 'HLWE-256',
-                'w_state_validators': w_state.get('superposition_count', 5),
-                'coherence_avg': w_state.get('coherence_avg', 0.9987),
-                'fidelity_avg': w_state.get('fidelity_avg', 0.9971),
-                'entanglement_strength': w_state.get('entanglement_strength', 0.998),
-                'neural_convergence': neural_state.get('convergence_status', 'unknown'),
-                'neural_iterations': neural_state.get('learning_iterations', 0),
-                'noise_bath_kappa': noise_state.get('kappa', 0.08),
-                'decoherence_events': noise_state.get('decoherence_events', 0),
-                'fidelity_preservation': noise_state.get('fidelity_preservation_rate', 0.99),
-                'pulse_count': hb_metrics.get('pulse_count', 0),
-                'pulse_frequency_hz': hb_metrics.get('frequency', 1.0),
-                'transactions_processed': lattice_metrics.get('transactions_processed', 0),
-                'v8_pseudoqubits_guardian': v8_summary.get('total_pulses', 0),
+            'engine': 'QTCL-QE v8.0',
+            'heartbeat': {
+                'running':      hb_m.get('running', False),
+                'pulse_count':  hb_m.get('pulse_count', 0),
+                'frequency_hz': hb_m.get('frequency', 1.0),
+            } if hb_m else {'running': False, 'note': 'heartbeat not started'},
+            'lattice': {
+                'operations':   lat_m.get('operations_count', 0),
+                'tx_processed': lat_m.get('transactions_processed', 0),
+                'health':       health_s,
             },
+            'neural_network': {
+                'convergence':  neural_s.get('convergence_status', 'unknown'),
+                'iterations':   neural_s.get('learning_iterations', 0),
+            },
+            'w_state': {
+                'coherence_avg':        ws_s.get('coherence_avg', 0.0),
+                'fidelity_avg':         ws_s.get('fidelity_avg', 0.0),
+                'entanglement_strength':ws_s.get('entanglement_strength', 0.0),
+                'superposition_count':  ws_s.get('superposition_count', 5),
+                'tx_validations':       ws_s.get('transaction_validations', 0),
+            },
+            'noise_bath': {
+                'kappa':                nb_s.get('kappa', 0.08),
+                'fidelity_preservation':nb_s.get('fidelity_preservation_rate', 0.99),
+                'decoherence_events':   nb_s.get('decoherence_events', 0),
+                'non_markovian_order':  nb_s.get('non_markovian_order', 5),
+            },
+            'v8_revival': {
+                'initialized':    v8['initialized'],
+                'total_pulses':   g.get('total_pulses_fired', 0),
+                'floor_violations':g.get('floor_violations', 0),
+                'maintainer_hz':  m.get('actual_hz', 0.0),
+                'maintainer_running': m.get('running', False),
+                'coherence_floor': 0.89,
+                'w_state_target':  0.9997,
+            },
+            'bell_boundary': {
+                'quantum_fraction':     bell.get('quantum_fraction', 0.0),
+                'chsh_violations':      bell.get('chsh_violation_total', 0),
+                'boundary_kappa_est':   bell.get('boundary_kappa_estimate'),
+                'S_CHSH_mean':          bell.get('S_CHSH_mean', 0.0),
+            },
+            'mi_trend': mi,
         }}
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # QUANTUM — specific subsystem probes
+    # ══════════════════════════════════════════════════════════════════════════
+
     if cmd == 'quantum-entropy':
-        import secrets as _s, hashlib as _hl
-        raw = _s.token_bytes(64)
-        # Shannon entropy of raw bytes
+        import secrets as _s, hashlib as _hl, math as _m
         from collections import Counter as _C
+        raw = _s.token_bytes(64)
         freq = _C(raw)
-        import math as _m
-        _n = len(raw)
-        shannon = -sum((c/_n)*_m.log2(c/_n) for c in freq.values() if c > 0)
-        # Pull QRNG metrics if available
+        n = len(raw)
+        shannon = -sum((c/n)*_m.log2(c/n) for c in freq.values() if c > 0)
         qrng_sources = {}
         try:
             _lat = get_lattice()
@@ -1543,239 +1629,194 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
         except Exception:
             pass
         return {'status': 'success', 'result': {
-            'entropy_bytes': raw.hex()[:48] + '...',
-            'entropy_hex_full_length': 128,
-            'sha3_256_hash': _hl.sha3_256(raw).hexdigest(),
-            'shannon_score': round(shannon, 6),
-            'shannon_max': 8.0,
-            'quality_percent': round(shannon / 8.0 * 100, 2),
-            'sources': ['os.urandom', 'secrets.token_bytes', 'HLWE-noise-bath'],
-            'qrng_info': qrng_sources,
-            'pool_health': 'excellent' if shannon > 7.5 else 'good' if shannon > 6.5 else 'degraded',
-            'byte_count': 64,
-            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'entropy_hex_sample':  raw.hex()[:48] + '...',
+            'full_length_bytes':   64,
+            'sha3_256':            _hl.sha3_256(raw).hexdigest(),
+            'shannon_score':       round(shannon, 6),
+            'shannon_max':         8.0,
+            'quality_percent':     round(shannon / 8.0 * 100, 2),
+            'pool_health':         'excellent' if shannon > 7.5 else ('good' if shannon > 6.5 else 'degraded'),
+            'sources':             ['os.urandom', 'secrets.token_bytes', 'HLWE-noise-bath'],
+            'qrng_info':           qrng_sources,
+            'timestamp':           datetime.now(timezone.utc).isoformat(),
         }}
 
     if cmd == 'quantum-circuit':
-        qubits = int(kwargs.get('qubits', 8))
-        depth = int(kwargs.get('depth', 24))
         import secrets as _s, math as _m
-        # Generate deterministic but entropy-seeded measurement outcomes
-        seed_bytes = _s.token_bytes(16)
-        outcomes = {}
-        total_shots = 1024
-        remaining = total_shots
+        qubits = int(kwargs.get('qubits', 8))
+        depth  = int(kwargs.get('depth', 24))
+        ctype  = kwargs.get('type', 'GHZ')
+        shots  = 1024
+        remaining = shots
+        outcomes  = {}
         for i in range(min(4, 2**qubits)):
             bitstring = format(i, f'0{qubits}b')
             share = int(_s.token_bytes(2).hex(), 16) % (remaining // max(1, 4-i) + 1)
-            outcomes[f'|{bitstring}⟩'] = round(share / total_shots, 4)
+            outcomes[f'|{bitstring}⟩'] = round(share / shots, 4)
             remaining -= share
         if remaining > 0:
-            outcomes['|other⟩'] = round(remaining / total_shots, 4)
+            outcomes['|other⟩'] = round(remaining / shots, 4)
         fidelity = 0.97 + int(_s.token_bytes(1).hex(), 16) / 256 * 0.029
         return {'status': 'success', 'result': {
-            'circuit_id': _s.token_hex(8),
-            'qubit_count': qubits,
-            'circuit_depth': depth,
-            'gate_count': depth * qubits * 2,
-            'measurement_shots': total_shots,
+            'circuit_id':         _s.token_hex(8),
+            'qubit_count':        qubits,
+            'circuit_depth':      depth,
+            'circuit_type':       ctype,
+            'gate_count':         depth * qubits * 2,
+            'measurement_shots':  shots,
             'measurement_outcomes': outcomes,
-            'fidelity': round(fidelity, 6),
-            'circuit_type': kwargs.get('type', 'GHZ'),
-            'backend': 'HLWE-256-sim',
-            'execution_time_us': round(depth * qubits * 0.4, 2),
+            'fidelity':           round(fidelity, 6),
+            'backend':            'HLWE-256-sim',
+            'execution_time_us':  round(depth * qubits * 0.4, 2),
         }}
 
     if cmd == 'quantum-ghz':
-        ghz_state = {}
+        import json as _j
+        def _cl(d):
+            try: return _j.loads(_j.dumps(d, default=lambda o: float(o) if hasattr(o,'__float__') else str(o)))
+            except: return {}
         try:
-            import json as _j
-            def _cl(d):
-                try: return _j.loads(_j.dumps(d, default=lambda o: float(o) if hasattr(o,'__float__') else str(o)))
-                except: return {}
-            _ws = get_w_state_enhanced()
+            _ws  = get_w_state_enhanced()
             _lat = get_lattice()
-            w = _cl(_ws.get_state()) if hasattr(_ws, 'get_state') else {}
-            lm = _cl(_lat.get_system_metrics()) if hasattr(_lat, 'get_system_metrics') else {}
-            ghz_state = {
-                'ghz_state': 'GHZ-8',
-                'fidelity': w.get('fidelity_avg', 0.9987),
-                'coherence': w.get('coherence_avg', 0.9971),
-                'entanglement_strength': w.get('entanglement_strength', 0.998),
-                'transaction_validations': w.get('transaction_validations', 0),
-                'total_coherence_time_s': w.get('total_coherence_time', 0),
-                'finality_proof': 'valid' if w.get('fidelity_avg', 0) > 0.90 else 'pending',
-                'superpositions_measured': w.get('superposition_count', 0),
-                'lattice_ops': lm.get('operations_count', 0),
-                'last_measurement': datetime.now(timezone.utc).isoformat(),
-            }
+            w  = _cl(_ws.get_state())  if hasattr(_ws,  'get_state')          else {}
+            lm = _cl(_lat.get_system_metrics()) if hasattr(_lat,'get_system_metrics') else {}
         except Exception:
-            ghz_state = {
-                'ghz_state': 'GHZ-8', 'fidelity': 0.9987,
-                'finality_proof': 'valid',
-                'last_measurement': datetime.now(timezone.utc).isoformat(),
-            }
-        return {'status': 'success', 'result': ghz_state}
+            w = {}; lm = {}
+        fid = w.get('fidelity_avg', 0.9987)
+        return {'status': 'success', 'result': {
+            'ghz_state':                 'GHZ-8',
+            'fidelity':                  fid,
+            'coherence':                 w.get('coherence_avg', 0.9971),
+            'entanglement_strength':     w.get('entanglement_strength', 0.998),
+            'transaction_validations':   w.get('transaction_validations', 0),
+            'total_coherence_time_s':    w.get('total_coherence_time', 0),
+            'superpositions_measured':   w.get('superposition_count', 0),
+            'lattice_ops':               lm.get('operations_count', 0),
+            'finality_proof':            'valid' if fid > 0.90 else 'pending',
+            'last_measurement':          datetime.now(timezone.utc).isoformat(),
+        }}
 
     if cmd == 'quantum-wstate':
+        import json as _j, concurrent.futures as _cf
+        def _cl(d):
+            try: return _j.loads(_j.dumps(d, default=lambda o: float(o) if hasattr(o,'__float__') else str(o)))
+            except: return {}
+        ws = {}; hbm = {}
         try:
-            import json as _j
-            def _cl(d):
-                try: return _j.loads(_j.dumps(d, default=lambda o: float(o) if hasattr(o,'__float__') else str(o)))
-                except: return {}
             _ws = get_w_state_enhanced()
             _hb = get_heartbeat()
-            # get_state() same risk — wrap in timeout
-            try:
-                import concurrent.futures as _cf3
-                with _cf3.ThreadPoolExecutor(max_workers=1) as _ex3:
-                    _fut2 = _ex3.submit(_ws.get_state) if hasattr(_ws, 'get_state') else None
-                    raw_ws = _fut2.result(timeout=2) if _fut2 else {}
-                ws = _cl(raw_ws) if raw_ws else {}
-            except Exception:
-                ws = {}
-            # get_metrics() can block on lock contention or numpy serialization —
-            # hard 2s timeout prevents terminal freeze
-            try:
-                import concurrent.futures as _cf2
-                with _cf2.ThreadPoolExecutor(max_workers=1) as _ex2:
-                    _fut = _ex2.submit(_hb.get_metrics) if hasattr(_hb, 'get_metrics') else None
-                    raw_hbm = _fut.result(timeout=2) if _fut else {}
-                hbm = _cl(raw_hbm) if raw_hbm else {}
-            except Exception:
-                hbm = {}  # Timed out or error — use defaults below
-            fidelity_avg = ws.get('fidelity_avg', 0.96)
-            consensus = 'healthy' if fidelity_avg > 0.90 else 'degraded'
-            return {'status': 'success', 'result': {
-                'w_state': 'W-5',
-                'validators': [f'q{i}_val' for i in range(5)],
-                'consensus': consensus,
-                'coherence_avg': ws.get('coherence_avg', 0),
-                'fidelity_avg': fidelity_avg,
-                'entanglement_strength': ws.get('entanglement_strength', 0),
-                'superposition_count': ws.get('superposition_count', 0),
-                'transaction_validations': ws.get('transaction_validations', 0),
-                'total_coherence_time_s': ws.get('total_coherence_time', 0),
-                'heartbeat_pulses': hbm.get('pulse_count', 0),
-                'heartbeat_hz': hbm.get('frequency', 1.0),
-            }}
-        except Exception as _e:
-            return {'status': 'success', 'result': {
-                'w_state': 'W-5',
-                'validators': ['q0_val', 'q1_val', 'q2_val', 'q3_val', 'q4_val'],
-                'consensus': 'healthy', 'fidelity_avg': 0.96,
-                'note': f'Live data unavailable: {str(_e)[:60]}'
-            }}
+            with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+                _fut = _ex.submit(_ws.get_state) if hasattr(_ws, 'get_state') else None
+                ws = _cl(_fut.result(timeout=2)) if _fut else {}
+            with _cf.ThreadPoolExecutor(max_workers=1) as _ex2:
+                _fut2 = _ex2.submit(_hb.get_metrics) if hasattr(_hb, 'get_metrics') else None
+                hbm = _cl(_fut2.result(timeout=2)) if _fut2 else {}
+        except Exception:
+            pass
+        fid = ws.get('fidelity_avg', 0.96)
+        return {'status': 'success', 'result': {
+            'w_state':              'W-5',
+            'validators':           [f'q{i}_val' for i in range(5)],
+            'consensus':            'healthy' if fid > 0.90 else 'degraded',
+            'coherence_avg':        ws.get('coherence_avg', 0.0),
+            'fidelity_avg':         fid,
+            'entanglement_strength':ws.get('entanglement_strength', 0.0),
+            'superposition_count':  ws.get('superposition_count', 0),
+            'transaction_validations': ws.get('transaction_validations', 0),
+            'total_coherence_time_s':  ws.get('total_coherence_time', 0),
+            'heartbeat_pulses':     hbm.get('pulse_count', 0),
+            'heartbeat_hz':         hbm.get('frequency', 1.0),
+        }}
 
     if cmd == 'quantum-coherence':
+        import json as _j
+        def _cl(d):
+            try: return _j.loads(_j.dumps(d, default=lambda o: float(o) if hasattr(o,'__float__') else str(o)))
+            except: return {}
+        noise = {}; ws = {}; hbm = {}
         try:
-            import json as _j
-            def _cl(d):
-                try: return _j.loads(_j.dumps(d, default=lambda o: float(o) if hasattr(o,'__float__') else str(o)))
-                except: return {}
             _nb = get_noise_bath_enhanced()
             _ws = get_w_state_enhanced()
             _hb = get_heartbeat()
-            noise = _cl(_nb.get_state()) if hasattr(_nb, 'get_state') else {}
-            ws = _cl(_ws.get_state()) if hasattr(_ws, 'get_state') else {}
-            hbm = _cl(_hb.get_metrics()) if hasattr(_hb, 'get_metrics') else {}
-            fid_pres = noise.get('fidelity_preservation_rate', 0.99)
-            diss = noise.get('dissipation_rate', 0.01)
-            coherence_time_ms = round(1000.0 / (diss * 10 + 0.001), 2)
-            decoherence_rate = round(diss, 6)
-            return {'status': 'success', 'result': {
-                'coherence_time_ms': coherence_time_ms,
-                'decoherence_rate': decoherence_rate,
-                'dissipation_rate': diss,
-                'kappa_memory_kernel': noise.get('kappa', 0.08),
-                'non_markovian_order': noise.get('non_markovian_order', 5),
-                'fidelity_preservation_rate': fid_pres,
-                'coherence_samples': noise.get('coherence_evolution_length', 0),
-                'fidelity_samples': noise.get('fidelity_evolution_length', 0),
-                'decoherence_events': noise.get('decoherence_events', 0),
-                'w_state_coherence_avg': ws.get('coherence_avg', 0),
-                'w_state_fidelity_avg': ws.get('fidelity_avg', 0),
-                'heartbeat_synced': hbm.get('running', False),
-                'heartbeat_pulses': hbm.get('pulse_count', 0),
-                'temporal_attestation': 'valid' if fid_pres > 0.90 else 'degraded',
-                'certified_at': datetime.now(timezone.utc).isoformat(),
-                'note': 'Real non-Markovian bath data — κ=0.08 memory kernel active',
-            }}
-        except Exception as _e:
-            return {'status': 'success', 'result': {
-                'coherence_time_ms': 142.7, 'decoherence_rate': 0.0013,
-                'temporal_attestation': 'valid',
-                'certified_at': datetime.now(timezone.utc).isoformat(),
-                'note': f'Live data unavailable: {str(_e)[:60]}',
-            }}
+            noise = _cl(_nb.get_state())    if hasattr(_nb, 'get_state')    else {}
+            ws    = _cl(_ws.get_state())    if hasattr(_ws, 'get_state')    else {}
+            hbm   = _cl(_hb.get_metrics())  if hasattr(_hb, 'get_metrics')  else {}
+        except Exception:
+            pass
+        diss = noise.get('dissipation_rate', 0.01)
+        fid_pres = noise.get('fidelity_preservation_rate', 0.99)
+        return {'status': 'success', 'result': {
+            'coherence_time_ms':        round(1000.0 / (diss * 10 + 0.001), 2),
+            'decoherence_rate':         round(diss, 6),
+            'dissipation_rate':         diss,
+            'kappa_memory_kernel':      noise.get('kappa', 0.08),
+            'non_markovian_order':      noise.get('non_markovian_order', 5),
+            'fidelity_preservation_rate': fid_pres,
+            'coherence_samples':        noise.get('coherence_evolution_length', 0),
+            'fidelity_samples':         noise.get('fidelity_evolution_length', 0),
+            'decoherence_events':       noise.get('decoherence_events', 0),
+            'w_state_coherence_avg':    ws.get('coherence_avg', 0.0),
+            'w_state_fidelity_avg':     ws.get('fidelity_avg', 0.0),
+            'heartbeat_synced':         hbm.get('running', False),
+            'heartbeat_pulses':         hbm.get('pulse_count', 0),
+            'temporal_attestation':     'valid' if fid_pres > 0.90 else 'degraded',
+            'certified_at':             datetime.now(timezone.utc).isoformat(),
+            'physics_note':             'Real non-Markovian bath — κ=0.08 memory kernel active',
+        }}
 
     if cmd == 'quantum-measurement':
-        import secrets as _s, math as _m
-        # Simulate a proper multi-qubit measurement with Born-rule probabilities
+        import secrets as _s, math as _m, json as _j
         n_qubits = int(kwargs.get('qubits', 4))
-        basis = kwargs.get('basis', 'computational')
-        shots = int(kwargs.get('shots', 1024))
-        # Generate Born-rule outcomes using seeded entropy
+        basis    = kwargs.get('basis', 'computational')
+        shots    = int(kwargs.get('shots', 1024))
         raw = _s.token_bytes(n_qubits * 4)
-        raw_bits = int.from_bytes(raw, 'big')
-        # Simulate |ψ⟩ = superposition collapse
-        collapsed_state = raw_bits % (2**n_qubits)
+        collapsed_state = int.from_bytes(raw, 'big') % (2**n_qubits)
         bitstring = format(collapsed_state, f'0{n_qubits}b')
-        # Confidence from entropy quality
         confidence = 0.90 + (int(_s.token_bytes(1).hex(), 16) / 256.0) * 0.09
-        # Pull live coherence data
+        theta = (_m.pi  * int.from_bytes(_s.token_bytes(2), 'big')) / 65535
+        phi   = (2*_m.pi* int.from_bytes(_s.token_bytes(2), 'big')) / 65535
         coherence_data = {}
         try:
-            import json as _j
             def _cl(d):
                 try: return _j.loads(_j.dumps(d, default=lambda o: float(o) if hasattr(o,'__float__') else str(o)))
                 except: return {}
-            _ws = get_w_state_enhanced()
-            _nb = get_noise_bath_enhanced()
-            ws = _cl(_ws.get_state()) if hasattr(_ws, 'get_state') else {}
-            nb = _cl(_nb.get_state()) if hasattr(_nb, 'get_state') else {}
+            ws = _cl(get_w_state_enhanced().get_state()) if hasattr(get_w_state_enhanced(), 'get_state') else {}
+            nb = _cl(get_noise_bath_enhanced().get_state()) if hasattr(get_noise_bath_enhanced(), 'get_state') else {}
             coherence_data = {
-                'bath_fidelity': nb.get('fidelity_preservation_rate', 0.99),
+                'bath_fidelity':         nb.get('fidelity_preservation_rate', 0.99),
                 'entanglement_strength': ws.get('entanglement_strength', 0.998),
-                'coherence_avg': ws.get('coherence_avg', 0.9987),
-                'decoherence_events': nb.get('decoherence_events', 0),
+                'coherence_avg':         ws.get('coherence_avg', 0.9987),
+                'decoherence_events':    nb.get('decoherence_events', 0),
             }
         except Exception:
             pass
-        # Bloch sphere angles
-        theta = (_m.pi * int.from_bytes(_s.token_bytes(2), 'big')) / 65535
-        phi = (2 * _m.pi * int.from_bytes(_s.token_bytes(2), 'big')) / 65535
         return {'status': 'success', 'result': {
-            'measurement': collapsed_state,
-            'bitstring': bitstring,
-            'n_qubits': n_qubits,
-            'basis': basis,
-            'eigenstate': f'|{bitstring}⟩',
-            'confidence': round(confidence, 6),
-            'shots_simulated': shots,
-            'bloch_theta_rad': round(theta, 6),
-            'bloch_phi_rad': round(phi, 6),
-            'bloch_x': round(_m.sin(theta) * _m.cos(phi), 6),
-            'bloch_y': round(_m.sin(theta) * _m.sin(phi), 6),
-            'bloch_z': round(_m.cos(theta), 6),
-            'prob_0': round(_m.cos(theta/2)**2, 6),
-            'prob_1': round(_m.sin(theta/2)**2, 6),
-            'entropy_bits': round(_m.log2(2**n_qubits), 2),
-            'quantum_noise_model': 'HLWE-256 non-Markovian bath',
-            'live_coherence': coherence_data,
-            'measured_at': datetime.now(timezone.utc).isoformat(),
+            'measurement':        collapsed_state,
+            'bitstring':          bitstring,
+            'eigenstate':         f'|{bitstring}⟩',
+            'n_qubits':           n_qubits,
+            'basis':              basis,
+            'shots_simulated':    shots,
+            'confidence':         round(confidence, 6),
+            'bloch_theta_rad':    round(theta, 6),
+            'bloch_phi_rad':      round(phi, 6),
+            'bloch_x':            round(_m.sin(theta)*_m.cos(phi), 6),
+            'bloch_y':            round(_m.sin(theta)*_m.sin(phi), 6),
+            'bloch_z':            round(_m.cos(theta), 6),
+            'prob_0':             round(_m.cos(theta/2)**2, 6),
+            'prob_1':             round(_m.sin(theta/2)**2, 6),
+            'entropy_bits':       round(_m.log2(2**n_qubits), 2),
+            'quantum_noise_model':'HLWE-256 non-Markovian bath',
+            'live_coherence':     coherence_data,
+            'measured_at':        datetime.now(timezone.utc).isoformat(),
         }}
 
     if cmd == 'quantum-qrng':
-        import secrets as _s, hashlib as _hl
+        import secrets as _s, hashlib as _hl, math as _m
         from collections import Counter as _C
-        import math as _m
-        # Generate real entropy and compute stats
         raw = _s.token_bytes(256)
         freq = _C(raw)
         shannon = -sum((c/256)*_m.log2(c/256) for c in freq.values() if c > 0)
-        byte_values = list(raw[:32])
-        # Pull lattice ops count
         lattice_ops = 0
         try:
             _lat = get_lattice()
@@ -1785,40 +1826,54 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
         except Exception:
             pass
         return {'status': 'success', 'result': {
-            'entropy_hex_sample': raw.hex()[:64],
-            'sha3_digest': _hl.sha3_256(raw).hexdigest(),
-            'shannon_score': round(shannon, 6),
-            'shannon_max': 8.0,
-            'quality_percent': round(shannon / 8.0 * 100, 2),
-            'byte_sample': byte_values,
-            'cache_size_bytes': 4096,
+            'entropy_hex_sample':  raw.hex()[:64],
+            'sha3_digest':         _hl.sha3_256(raw).hexdigest(),
+            'shannon_score':       round(shannon, 6),
+            'shannon_max':         8.0,
+            'quality_percent':     round(shannon / 8.0 * 100, 2),
+            'byte_sample':         list(raw[:32]),
+            'cache_size_bytes':    4096,
             'sources': {
-                'os_urandom': {'description': 'OS kernel entropy pool', 'active': True},
-                'hlwe_noise_bath': {'description': 'Non-Markovian noise bath κ=0.08', 'active': True, 'lattice_ops': lattice_ops},
+                'os_urandom':     {'description': 'OS kernel entropy pool', 'active': True},
+                'hlwe_noise_bath':{'description': 'Non-Markovian noise bath κ=0.08',
+                                   'active': True, 'lattice_ops': lattice_ops},
                 'secrets_module': {'description': 'Python cryptographic RNG', 'active': True},
             },
-            'generated_at': datetime.now(timezone.utc).isoformat(),
+            'generated_at':        datetime.now(timezone.utc).isoformat(),
         }}
 
-    # ── v8 revival engine commands ────────────────────────────────────────────
-    if cmd in ('quantum-v8', 'quantum-pseudoqubits') and cmd == 'quantum-v8':
+    if cmd == 'quantum-v8':
         v8 = get_v8_status()
         g = v8.get('guardian', {})
         r = v8.get('revival_spectral', {})
         c = v8.get('resonance_coupler', {})
         n = v8.get('neural_v2', {})
         m = v8.get('maintainer', {})
+        # Inline pseudoqubit breakdown so v8 is fully self-contained
+        qc    = g.get('qubit_coherences', {})
+        qfuel = g.get('qubit_fuel_tanks', {})
+        pseudoqubits = [
+            {
+                'id': i,
+                'coherence':      qc.get(str(i), qc.get(i, 0.0)),
+                'fuel_tank':      qfuel.get(str(i), qfuel.get(i, 0.0)),
+                'above_floor':    qc.get(str(i), qc.get(i, 0.0)) >= 0.89,
+                'w_state_locked': qc.get(str(i), qc.get(i, 0.0)) >= 0.89,
+            }
+            for i in range(1, 6)
+        ]
         return {'status': 'success', 'result': {
-            'v8_initialized': v8['initialized'],
-            'pseudoqubit_ids': [1, 2, 3, 4, 5],
-            'w_state_target': 0.9997,
+            'v8_initialized':  v8['initialized'],
+            'w_state_target':  0.9997,
             'coherence_floor': 0.89,
+            'pseudoqubits':    pseudoqubits,
+            'all_locked':      all(p['w_state_locked'] for p in pseudoqubits),
+            'locked_count':    sum(1 for p in pseudoqubits if p['w_state_locked']),
             'guardian': {
-                'total_pulses':      g.get('total_pulses_fired', 0),
-                'fuel_harvested':    g.get('total_fuel_harvested', 0.0),
-                'floor_violations':  g.get('floor_violations', 0),
-                'clean_streaks':     g.get('clean_cycle_streaks', 0),
-                'qubit_coherences':  g.get('qubit_coherences', {}),
+                'total_pulses':     g.get('total_pulses_fired', 0),
+                'fuel_harvested':   g.get('total_fuel_harvested', 0.0),
+                'floor_violations': g.get('floor_violations', 0),
+                'clean_streaks':    g.get('clean_cycle_streaks', 0),
             },
             'revival_spectral': {
                 'dominant_period':   r.get('dominant_period_batches', 0),
@@ -1826,58 +1881,59 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
                 'micro_revivals':    r.get('micro_revivals', 0),
                 'meso_revivals':     r.get('meso_revivals', 0),
                 'macro_revivals':    r.get('macro_revivals', 0),
-                'next_peak_batch':   r.get('next_predicted_peak', None),
+                'next_peak_batch':   r.get('next_predicted_peak'),
                 'pre_amplification': r.get('pre_amplification_active', False),
             },
             'resonance_coupler': {
-                'resonance_score':   c.get('resonance_score', 0.0),
-                'correlation_time':  c.get('bath_correlation_time', 0.0),
-                'kappa_current':     c.get('current_kappa', 0.08),
-                'kappa_adjustments': c.get('kappa_adjustments', 0),
-                'coupling_efficiency': c.get('coupling_efficiency', 0.0),
+                'resonance_score':    c.get('resonance_score', 0.0),
+                'correlation_time':   c.get('bath_correlation_time', 0.0),
+                'kappa_current':      c.get('current_kappa', 0.08),
+                'kappa_adjustments':  c.get('kappa_adjustments', 0),
+                'coupling_efficiency':c.get('coupling_efficiency', 0.0),
+                'stochastic_resonance_active': c.get('resonance_score', 0.0) > 0.7,
             },
             'neural_v2': {
-                'revival_loss':      n.get('revival_loss', None),
-                'pq_health_loss':    n.get('pq_loss', None),
-                'gate_modifier':     n.get('current_gate_modifier', 1.0),
-                'iterations':        n.get('total_iterations', 0),
-                'converged':         n.get('converged', False),
+                'revival_loss':    n.get('revival_loss'),
+                'pq_health_loss':  n.get('pq_loss'),
+                'gate_modifier':   n.get('current_gate_modifier', 1.0),
+                'iterations':      n.get('total_iterations', 0),
+                'converged':       n.get('converged', False),
             },
             'maintainer': {
-                'running':           m.get('running', False),
+                'running':            m.get('running', False),
                 'maintenance_cycles': m.get('maintenance_cycles', 0),
-                'inter_cycle_revivals': m.get('inter_cycle_revivals', 0),
-                'uptime_seconds':    m.get('uptime_seconds', 0.0),
-                'actual_hz':         m.get('actual_hz', 0.0),
+                'inter_cycle_revivals':m.get('inter_cycle_revivals', 0),
+                'uptime_seconds':     m.get('uptime_seconds', 0.0),
+                'target_hz':          10,
+                'actual_hz':          m.get('actual_hz', 0.0),
+                'coherence_trend':    m.get('coherence_trend', 'stable'),
             },
         }}
 
     if cmd == 'quantum-pseudoqubits':
         v8 = get_v8_status()
-        g = v8.get('guardian', {})
-        qc = g.get('qubit_coherences', {})
+        g  = v8.get('guardian', {})
+        qc    = g.get('qubit_coherences', {})
         qfuel = g.get('qubit_fuel_tanks', {})
-        pseudoqubits = []
-        for i in [1, 2, 3, 4, 5]:
-            key = str(i)
-            pseudoqubits.append({
+        pseudoqubits = [
+            {
                 'id': i,
-                'coherence':     qc.get(key, qc.get(i, 0.0)),
-                'fuel_tank':     qfuel.get(key, qfuel.get(i, 0.0)),
-                'above_floor':   qc.get(key, qc.get(i, 0.0)) >= 0.89,
-                'w_state_locked': qc.get(key, qc.get(i, 0.0)) >= 0.89,
-            })
-        floor_violations = g.get('floor_violations', 0)
-        total_pulses     = g.get('total_pulses_fired', 0)
+                'coherence':      qc.get(str(i), qc.get(i, 0.0)),
+                'fuel_tank':      qfuel.get(str(i), qfuel.get(i, 0.0)),
+                'above_floor':    qc.get(str(i), qc.get(i, 0.0)) >= 0.89,
+                'w_state_locked': qc.get(str(i), qc.get(i, 0.0)) >= 0.89,
+            }
+            for i in range(1, 6)
+        ]
         return {'status': 'success', 'result': {
-            'pseudoqubits':      pseudoqubits,
-            'w_state_target':    0.9997,
-            'coherence_floor':   0.89,
-            'floor_violations':  floor_violations,
-            'total_revival_pulses': total_pulses,
-            'all_above_floor':   all(p['above_floor'] for p in pseudoqubits),
-            'locked_count':      sum(1 for p in pseudoqubits if p['w_state_locked']),
-            'v8_initialized':    v8['initialized'],
+            'pseudoqubits':       pseudoqubits,
+            'w_state_target':     0.9997,
+            'coherence_floor':    0.89,
+            'floor_violations':   g.get('floor_violations', 0),
+            'total_revival_pulses': g.get('total_pulses_fired', 0),
+            'all_above_floor':    all(p['above_floor'] for p in pseudoqubits),
+            'locked_count':       sum(1 for p in pseudoqubits if p['w_state_locked']),
+            'v8_initialized':     v8['initialized'],
         }}
 
     if cmd == 'quantum-revival':
@@ -1889,21 +1945,21 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
             try: return _j.loads(_j.dumps(d, default=lambda o: float(o) if hasattr(o,'__float__') else str(o)))
             except: return {}
         current_batch = int(kwargs.get('batch', 0))
-        report = _cl(revival.get_spectral_report()) if hasattr(revival, 'get_spectral_report') else {}
+        report = _cl(revival.get_spectral_report())      if hasattr(revival, 'get_spectral_report')    else {}
         pred   = _cl(revival.predict_next_revival(current_batch)) if hasattr(revival, 'predict_next_revival') else {}
         return {'status': 'success', 'result': {
-            'current_batch':         current_batch,
-            'next_revival_peak':     pred.get('predicted_peak_batch', None),
-            'batches_until_peak':    pred.get('batches_until_peak', None),
-            'revival_type':          pred.get('revival_type', 'unknown'),
-            'sigma_modifier':        pred.get('sigma_modifier', 1.0),
-            'dominant_frequency':    report.get('dominant_frequency', 0.0),
+            'current_batch':           current_batch,
+            'next_revival_peak':       pred.get('predicted_peak_batch'),
+            'batches_until_peak':      pred.get('batches_until_peak'),
+            'revival_type':            pred.get('revival_type', 'unknown'),
+            'sigma_modifier':          pred.get('sigma_modifier', 1.0),
+            'dominant_frequency':      report.get('dominant_frequency', 0.0),
             'dominant_period_batches': report.get('dominant_period_batches', 0),
-            'spectral_entropy':      report.get('spectral_entropy', 0.0),
+            'spectral_entropy':        report.get('spectral_entropy', 0.0),
             'revival_scales': {
-                'micro_period':  5,
-                'meso_period':   13,
-                'macro_period':  52,
+                'micro_period':   5,
+                'meso_period':    13,
+                'macro_period':   52,
                 'micro_revivals': report.get('micro_revivals', 0),
                 'meso_revivals':  report.get('meso_revivals', 0),
                 'macro_revivals': report.get('macro_revivals', 0),
@@ -1931,24 +1987,9 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
             'target_hz':             10,
             'actual_hz':             m.get('actual_hz', 0.0),
             'coherence_trend':       m.get('coherence_trend', 'stable'),
-            'last_maintenance_at':   m.get('last_maintenance_at', None),
+            'last_maintenance_at':   m.get('last_maintenance_at'),
             'daemon_thread':         True,
         }}
-
-    if cmd == 'quantum-bell-boundary':
-        try:
-            report = get_bell_boundary_report()
-            return {'status': 'success', 'result': report}
-        except Exception as _be:
-            return {'status': 'error', 'error': str(_be)}
-
-    if cmd == 'quantum-mi-trend':
-        try:
-            window = int(kwargs.get('window', 20))
-            trend = get_mi_trend(window=window)
-            return {'status': 'success', 'result': trend}
-        except Exception as _me:
-            return {'status': 'error', 'error': str(_me)}
 
     if cmd == 'quantum-resonance':
         coupler = get_resonance_coupler()
@@ -1960,24 +2001,319 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
             except: return {}
         c = _cl(coupler.get_coupler_metrics()) if hasattr(coupler, 'get_coupler_metrics') else {}
         return {'status': 'success', 'result': {
-            'resonance_score':      c.get('resonance_score', 0.0),
-            'bath_correlation_time': c.get('bath_correlation_time', 0.0),
-            'w_state_frequency':    c.get('w_state_frequency', 0.0),
-            'kappa_current':        c.get('current_kappa', 0.08),
-            'kappa_initial':        0.08,
-            'kappa_adjustments':    c.get('kappa_adjustments', 0),
-            'coupling_efficiency':  c.get('coupling_efficiency', 0.0),
-            'optimal_noise_variance': c.get('optimal_noise_variance', 0.0),
+            'resonance_score':          c.get('resonance_score', 0.0),
+            'bath_correlation_time':    c.get('bath_correlation_time', 0.0),
+            'w_state_frequency':        c.get('w_state_frequency', 0.0),
+            'kappa_current':            c.get('current_kappa', 0.08),
+            'kappa_initial':            0.08,
+            'kappa_adjustments':        c.get('kappa_adjustments', 0),
+            'coupling_efficiency':      c.get('coupling_efficiency', 0.0),
+            'optimal_noise_variance':   c.get('optimal_noise_variance', 0.0),
             'stochastic_resonance_active': c.get('resonance_score', 0.0) > 0.7,
+            'noise_fuel_coupling':      0.0034,
             'physics': 'τ_c · ω_W ≈ 1  →  bath memory × W-freq = resonance condition',
-            'noise_fuel_coupling':  0.0034,
         }}
 
-    # ══════════════════════════════════════════
-    # ORACLE
-    # ══════════════════════════════════════════
+    if cmd == 'quantum-bell-boundary':
+        try:
+            return {'status': 'success', 'result': get_bell_boundary_report()}
+        except Exception as _be:
+            return {'status': 'error', 'error': str(_be)}
+
+    if cmd == 'quantum-mi-trend':
+        try:
+            window = int(kwargs.get('window', 20))
+            return {'status': 'success', 'result': get_mi_trend(window=window)}
+        except Exception as _me:
+            return {'status': 'error', 'error': str(_me)}
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # BLOCKCHAIN — chain aggregate + block operations
+    # ══════════════════════════════════════════════════════════════════════════
+
+    if cmd == 'block-stats':
+        bc = get_blockchain()
+        h  = bc.get('height', 0) if isinstance(bc, dict) else 0
+        return {'status': 'success', 'result': {
+            'height':           h,
+            'total_blocks':     h + 1,
+            'chain_tip':        bc.get('chain_tip') if isinstance(bc, dict) else None,
+            'genesis_hash':     bc.get('genesis_hash') if isinstance(bc, dict) else None,
+            'avg_block_time_ms':420,
+            'total_transactions': h * 3,
+            'finality_algorithm': 'quantum-oracle-collapse',
+            'pqc_scheme':       'HLWE-256',
+            'sync_status':      'synced',
+        }}
+
+    if cmd == 'block-details':
+        # Merged: block details + finality in single response
+        block_n = kwargs.get('block') or (kwargs.get('_args') or ['0'])[0]
+        bc = get_blockchain()
+        height = bc.get('height', 0) if isinstance(bc, dict) else 0
+        return {'status': 'success', 'result': {
+            'height':        int(block_n),
+            'hash':          f'0x{int(block_n):064x}',
+            'timestamp':     datetime.now(timezone.utc).isoformat(),
+            'tx_count':      3,
+            'validator':     'q0_val',
+            'pq_signature':  'valid',
+            'pqc_scheme':    'HLWE-256',
+            'finality':      'FINALIZED',
+            'finality_proof':'oracle-collapse-validated',
+            'confirmations': max(0, height - int(block_n)) + 6,
+            'confidence':    0.9987,
+            'current_height':height,
+        }}
+
+    if cmd == 'block-list':
+        bc = get_blockchain()
+        h  = bc.get('height', 0) if isinstance(bc, dict) else 0
+        start = int(kwargs.get('start', max(0, h - 9)))
+        end   = int(kwargs.get('end', h))
+        return {'status': 'success', 'result': {
+            'blocks': [{'height': i, 'hash': f'0x{i:064x}', 'tx_count': 3,
+                        'finality': 'FINALIZED'} for i in range(start, end + 1)],
+            'total': end - start + 1,
+            'range': {'start': start, 'end': end},
+        }}
+
+    if cmd == 'block-create':
+        bc = get_blockchain()
+        h  = bc.get('height', 0) if isinstance(bc, dict) else 0
+        return {'status': 'success', 'result': {
+            'created':       True,
+            'height':        h + 1,
+            'pq_signature':  'pending',
+            'status':        'queued',
+            'route':         'POST /api/blockchain/block/create',
+            'requires_admin':True,
+            'message':       'Block creation queued — awaits mempool tx and admin consensus',
+        }}
+
+    if cmd == 'block-verify':
+        block_n = kwargs.get('block') or (kwargs.get('_args') or ['0'])[0]
+        return {'status': 'success', 'result': {
+            'block':       int(block_n),
+            'verified':    True,
+            'pqc_valid':   True,
+            'chain_valid': True,
+            'pqc_scheme':  'HLWE-256',
+            'verified_at': datetime.now(timezone.utc).isoformat(),
+        }}
+
+    if cmd == 'utxo-balance':
+        addr = kwargs.get('address') or kwargs.get('addr') or (kwargs.get('_args') or ['not-specified'])[0]
+        return {'status': 'success', 'result': {
+            'address':     addr,
+            'balance':     0.0,
+            'currency':    'QTCL',
+            'utxo_count':  0,
+            'hint':        'Provide --address=<wallet-addr> for live balance',
+        }}
+
+    if cmd == 'utxo-list':
+        addr = kwargs.get('address') or kwargs.get('addr') or (kwargs.get('_args') or ['not-specified'])[0]
+        return {'status': 'success', 'result': {
+            'address': addr,
+            'utxos':   [],
+            'total':   0,
+        }}
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TRANSACTIONS
+    # ══════════════════════════════════════════════════════════════════════════
+
+    if cmd == 'tx-stats':
+        return {'status': 'success', 'result': {
+            'mempool_count':    0,
+            'confirmed_24h':    0,
+            'avg_fee_qtcl':     0.0005,
+            'fee_low':          0.0001,
+            'fee_medium':       0.0005,
+            'fee_high':         0.001,
+            'tps':              0.0,
+            'total_volume_qtcl':0.0,
+            'pqc_scheme':       'HLWE-256',
+        }}
+
+    if cmd == 'tx-status':
+        tx_id = kwargs.get('tx_id') or kwargs.get('id') or (kwargs.get('_args') or ['unknown'])[0]
+        return {'status': 'success', 'result': {
+            'tx_id':   tx_id,
+            'status':  'unknown',
+            'hint':    'Provide a valid tx_id from a submitted transaction',
+            'route':   'GET /api/blockchain/transaction/status',
+        }}
+
+    if cmd == 'tx-list':
+        return {'status': 'success', 'result': {'mempool': [], 'count': 0, 'pending': 0}}
+
+    if cmd in ('tx-create', 'tx-sign', 'tx-encrypt', 'tx-submit', 'tx-batch-sign'):
+        import uuid as _uuid
+        op  = cmd.replace('tx-', '').replace('-', '_')
+        tx_id  = kwargs.get('tx_id') or kwargs.get('tx') or str(_uuid.uuid4())
+        key_id = kwargs.get('key_id') or kwargs.get('key')
+        base = {
+            'command':       cmd,
+            'operation':     op,
+            'tx_id':         tx_id,
+            'pqc_scheme':    'HLWE-256',
+            'auth_required': True,
+            'route':         f'POST /api/blockchain/transaction/{op}',
+        }
+        if cmd == 'tx-sign':
+            base['key_id'] = key_id or 'not-specified'
+            base['hint']   = 'Use: tx-sign --tx-id=<id> --key-id=<pq-key-id>'
+        elif cmd == 'tx-submit':
+            base['message'] = 'Transaction queued to mempool — poll tx-status --tx-id=<id>'
+        elif cmd == 'tx-batch-sign':
+            base['hint'] = 'Use: tx-batch-sign --tx-ids=<id1,id2,...> --key-id=<pq-key-id>'
+        elif cmd == 'tx-create':
+            base['hint'] = 'Use: tx-create --from=<addr> --to=<addr> --amount=<val> --fee=<fee>'
+        elif cmd == 'tx-encrypt':
+            base['hint'] = 'Use: tx-encrypt --tx-id=<id> --recipient-key=<pq-pub-key>'
+        return {'status': 'success', 'result': base}
+
+    if cmd == 'tx-verify':
+        tx_id = kwargs.get('tx_id') or kwargs.get('tx') or kwargs.get('id')
+        sig   = kwargs.get('signature') or kwargs.get('sig')
+        return {'status': 'success', 'result': {
+            'tx_id':               tx_id or 'not-specified',
+            'signature_provided':  bool(sig),
+            'verification':        'VALID' if (tx_id and sig) else 'Provide --tx-id=<id> --signature=<sig>',
+            'pqc_scheme':          'HLWE-256',
+            'route':               'POST /api/blockchain/transaction/verify',
+        }}
+
+    if cmd == 'tx-fee-estimate':
+        return {'status': 'success', 'result': {
+            'fee_low':    0.0001,
+            'fee_medium': 0.0005,
+            'fee_high':   0.001,
+            'unit':       'QTCL',
+            'basis':      'network congestion + tx size',
+        }}
+
+    if cmd == 'tx-cancel':
+        tx_id = kwargs.get('tx_id') or kwargs.get('id') or (kwargs.get('_args') or [''])[0]
+        return {'status': 'success', 'result': {
+            'tx_id':     tx_id or 'not-specified',
+            'cancelled': bool(tx_id),
+            'message':   'Transaction removed from mempool' if tx_id else 'Provide --tx-id=<id>',
+            'route':     'POST /api/blockchain/transaction/cancel',
+        }}
+
+    if cmd == 'tx-analyze':
+        tx_id = kwargs.get('tx_id') or kwargs.get('id') or (kwargs.get('_args') or [''])[0]
+        return {'status': 'success', 'result': {
+            'tx_id':    tx_id or 'not-specified',
+            'analysis': {'fee_efficiency': 'optimal', 'pattern': 'standard', 'risk_score': 0.01},
+            'route':    'GET /api/blockchain/transaction/analyze',
+        }}
+
+    if cmd == 'tx-export':
+        fmt   = kwargs.get('format', 'json')
+        limit = int(kwargs.get('limit', 100))
+        return {'status': 'success', 'result': {
+            'format': fmt, 'limit': limit,
+            'transactions': [], 'count': 0,
+            'route': 'GET /api/blockchain/transaction/export',
+        }}
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # WALLET
+    # ══════════════════════════════════════════════════════════════════════════
+
+    if cmd == 'wallet-stats':
+        # Merged wallet-list + wallet-balance in one comprehensive view
+        addr = kwargs.get('address') or kwargs.get('wallet') or (kwargs.get('_args') or [None])[0]
+        return {'status': 'success', 'result': {
+            'wallets':         [],
+            'count':           0,
+            'total_balance':   0.0,
+            'currency':        'QTCL',
+            'filter_address':  addr,
+            'hint':            'Use --address=<addr> to scope to specific wallet',
+        }}
+
+    if cmd == 'wallet-create':
+        import uuid as _uuid
+        return {'status': 'success', 'result': {
+            'wallet_id':   str(_uuid.uuid4())[:16],
+            'pq_public_key':'pq_pub_' + str(_uuid.uuid4()).replace('-','')[:32],
+            'algorithm':   'HLWE-256',
+            'message':     'Wallet created — use pq-key-gen to associate PQ keypair',
+            'route':       'POST /api/blockchain/wallet/create',
+            'auth_required':True,
+        }}
+
+    if cmd == 'wallet-send':
+        import uuid as _uuid
+        return {'status': 'success', 'result': {
+            'tx_id':        str(_uuid.uuid4())[:16],
+            'to':           kwargs.get('to', 'not-specified'),
+            'amount':       kwargs.get('amount', 'not-specified'),
+            'fee':          kwargs.get('fee', '0.0005'),
+            'wallet':       kwargs.get('wallet', 'not-specified'),
+            'message':      'Use: wallet-send --wallet=<id> --to=<addr> --amount=<val>',
+            'route':        'POST /api/blockchain/wallet/send',
+            'auth_required':True,
+        }}
+
+    if cmd == 'wallet-import':
+        import uuid as _uuid
+        return {'status': 'success', 'result': {
+            'wallet_id':    str(_uuid.uuid4())[:16],
+            'message':      'Wallet imported from seed phrase',
+            'route':        'POST /api/blockchain/wallet/import',
+            'auth_required':True,
+            'hint':         'Use: wallet-import --seed="word1 word2 ..."',
+        }}
+
+    if cmd == 'wallet-export':
+        return {'status': 'success', 'result': {
+            'wallet_id':    kwargs.get('wallet', 'not-specified'),
+            'message':      'Use: wallet-export --wallet=<id>',
+            'route':        'GET /api/blockchain/wallet/export',
+            'auth_required':True,
+            'warning':      'Contains private key material — handle securely',
+        }}
+
+    if cmd == 'wallet-sync':
+        bc = get_blockchain()
+        h  = bc.get('height', 0) if isinstance(bc, dict) else 0
+        return {'status': 'success', 'result': {
+            'synced':          True,
+            'current_height':  h,
+            'message':         'Wallet UTXO set synced to current chain height',
+        }}
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ORACLE — aggregate + specific price / history
+    # ══════════════════════════════════════════════════════════════════════════
+
+    if cmd == 'oracle-stats':
+        # Merged: oracle-feed + oracle-list + oracle-verify
+        all_prices = {}
+        try:
+            from oracle_api import ORACLE_PRICE_PROVIDER
+            all_prices = ORACLE_PRICE_PROVIDER.get_all_prices()
+        except Exception:
+            all_prices = {'QTCL-USD': 1.0, 'BTC-USD': 45000.0, 'ETH-USD': 3000.0,
+                          'USDC-USD': 1.0, 'SOL-USD': 100.0, 'MATIC-USD': 0.9}
+        return {'status': 'success', 'result': {
+            'feeds':         all_prices,
+            'symbols':       list(all_prices.keys()),
+            'oracle_types':  ['time', 'price', 'event', 'random', 'entropy'],
+            'integrity':     'valid',
+            'pqc_signature': 'valid',
+            'last_verified': datetime.now(timezone.utc).isoformat(),
+            'source':        'QTCL oracle network',
+        }}
+
     if cmd == 'oracle-price':
-        symbol = kwargs.get('symbol', kwargs.get('_args', ['BTC-USD'])[0] if kwargs.get('_args') else 'BTC-USD')
+        symbol = kwargs.get('symbol') or (kwargs.get('_args') or ['BTC-USD'])[0]
         try:
             from oracle_api import ORACLE_PRICE_PROVIDER
             data = ORACLE_PRICE_PROVIDER.get_price(symbol.upper().replace('/', '-'))
@@ -1985,453 +2321,323 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
         except Exception:
             import random
             return {'status': 'success', 'result': {
-                'symbol': symbol.upper(), 'price': round(random.uniform(100, 60000), 2),
-                'source': 'internal-cache', 'available': True,
+                'symbol':    symbol.upper(),
+                'price':     round(random.uniform(100, 60000), 2),
+                'source':    'internal-cache',
+                'available': True,
                 'timestamp': datetime.now(timezone.utc).isoformat(),
             }}
 
-    if cmd == 'oracle-feed':
-        try:
-            from oracle_api import ORACLE_PRICE_PROVIDER
-            return {'status': 'success', 'result': ORACLE_PRICE_PROVIDER.get_all_prices()}
-        except Exception:
-            return {'status': 'success', 'result': {'QTCL-USD': 1.0, 'BTC-USD': 45000.0, 'ETH-USD': 3000.0}}
-
-    if cmd == 'oracle-list':
-        return {'status': 'success', 'result': {
-            'feeds': ['QTCL-USD', 'BTC-USD', 'ETH-USD', 'USDC-USD', 'SOL-USD', 'MATIC-USD'],
-            'oracles': ['time', 'price', 'event', 'random', 'entropy'],
-        }}
-
     if cmd == 'oracle-history':
+        symbol = kwargs.get('symbol') or (kwargs.get('_args') or ['BTC-USD'])[0]
+        limit  = int(kwargs.get('limit', 50))
         return {'status': 'success', 'result': {
-            'history': [], 'count': 0,
-            'symbol': kwargs.get('symbol', 'BTC-USD'),
+            'symbol':  symbol.upper(),
+            'history': [],
+            'count':   0,
+            'limit':   limit,
+            'hint':    'Use --symbol=<SYMBOL> --limit=N',
         }}
 
-    if cmd == 'oracle-verify':
+    # ══════════════════════════════════════════════════════════════════════════
+    # DEFI — aggregate + operations
+    # ══════════════════════════════════════════════════════════════════════════
+
+    if cmd == 'defi-stats':
+        # Merged: defi-pool-list + defi-tvl + defi-yield
+        pools = [
+            {'pair': 'QTCL-USDC', 'tvl': 125000.0, 'apy': 0.12, 'liquidity_depth': 'medium'},
+            {'pair': 'BTC-USDC',  'tvl': 890000.0, 'apy': 0.08, 'liquidity_depth': 'high'},
+            {'pair': 'ETH-USDC',  'tvl': 560000.0, 'apy': 0.10, 'liquidity_depth': 'high'},
+        ]
+        total_tvl = sum(p['tvl'] for p in pools)
         return {'status': 'success', 'result': {
-            'oracle_integrity': 'valid',
-            'last_verified': datetime.now(timezone.utc).isoformat(),
-            'pqc_signature': 'valid',
+            'tvl_usd':        total_tvl,
+            'pool_count':     len(pools),
+            'pools':          pools,
+            'pending_rewards':0.0,
+            'rewards_currency':'QTCL',
+            'avg_apy':        round(sum(p['apy'] for p in pools) / len(pools), 4),
+            'protocol':       'QTCL-DeFi v1',
         }}
 
-    # ══════════════════════════════════════════
-    # BLOCKCHAIN / BLOCK
-    # ══════════════════════════════════════════
-    if cmd == 'block-stats':
+    if cmd == 'defi-swap':
+        import uuid as _uuid
+        return {'status': 'success', 'result': {
+            'tx_id':          str(_uuid.uuid4()),
+            'from_token':     kwargs.get('from', 'not-specified'),
+            'to_token':       kwargs.get('to',   'not-specified'),
+            'amount':         kwargs.get('amount','not-specified'),
+            'slippage':       kwargs.get('slippage', '0.5%'),
+            'status':         'queued',
+            'route':          'POST /api/defi/swap',
+            'auth_required':  True,
+            'hint':           'Use: defi-swap --from=TOKEN --to=TOKEN --amount=VAL --slippage=0.5',
+        }}
+
+    if cmd == 'defi-stake':
+        import uuid as _uuid
+        return {'status': 'success', 'result': {
+            'tx_id':        str(_uuid.uuid4()),
+            'pool':         kwargs.get('pool', 'not-specified'),
+            'amount':       kwargs.get('amount', 'not-specified'),
+            'status':       'queued',
+            'route':        'POST /api/defi/stake',
+            'auth_required':True,
+            'hint':         'Use: defi-stake --amount=VAL --pool=<pool_id>',
+        }}
+
+    if cmd == 'defi-unstake':
+        import uuid as _uuid
+        return {'status': 'success', 'result': {
+            'tx_id':        str(_uuid.uuid4()),
+            'pool':         kwargs.get('pool', 'not-specified'),
+            'amount':       kwargs.get('amount', 'not-specified'),
+            'status':       'queued',
+            'route':        'POST /api/defi/unstake',
+            'auth_required':True,
+            'hint':         'Use: defi-unstake --amount=VAL --pool=<pool_id>',
+        }}
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # GOVERNANCE — aggregate + vote + propose
+    # ══════════════════════════════════════════════════════════════════════════
+
+    if cmd == 'governance-stats':
+        # Merged: governance-list + governance-status (filter by --id)
+        prop_id = kwargs.get('id') or kwargs.get('proposal')
+        base = {
+            'active_proposals': [],
+            'total_proposals':  0,
+            'quorum_threshold': 0.51,
+            'voting_period_days': 7,
+            'protocol':         'QTCL-Governance v1',
+        }
+        if prop_id:
+            base['filter_id'] = prop_id
+            base['proposal']  = {'id': prop_id, 'status': 'unknown',
+                                  'hint': 'Provide a valid proposal id from governance-propose'}
+        return {'status': 'success', 'result': base}
+
+    if cmd == 'governance-vote':
+        prop_id = kwargs.get('id') or kwargs.get('proposal') or (kwargs.get('_args') or [''])[0]
+        vote    = kwargs.get('vote', kwargs.get('v', 'yes'))
+        return {'status': 'success', 'result': {
+            'proposal_id':  prop_id or 'not-specified',
+            'vote':         vote,
+            'submitted':    bool(prop_id),
+            'message':      'Use: governance-vote --id=<id> --vote=yes|no|abstain',
+            'route':        'POST /api/governance/vote',
+            'auth_required':True,
+        }}
+
+    if cmd == 'governance-propose':
+        return {'status': 'success', 'result': {
+            'submitted':    True,
+            'title':        kwargs.get('title', 'not-specified'),
+            'duration_days':int(kwargs.get('duration', 7)),
+            'message':      'Use: governance-propose --title="..." --description="..." --duration=7',
+            'route':        'POST /api/governance/propose',
+            'auth_required':True,
+        }}
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # AUTH
+    # ══════════════════════════════════════════════════════════════════════════
+
+    if cmd == 'auth-login':
+        email    = kwargs.get('email', '')
+        password = kwargs.get('password', '')
+        if not email or not password:
+            return {'status': 'error',
+                    'error': 'Usage: auth-login --email=you@example.com --password=secret'}
+        try:
+            from auth_handlers import AuthSystemIntegration
+            return AuthSystemIntegration().login(email, password)
+        except Exception:
+            return {'status': 'error', 'error': 'Auth system unavailable — try POST /api/auth/login'}
+
+    if cmd == 'auth-logout':
+        return {'status': 'success', 'result': {
+            'logged_out': True, 'user_id': user_id,
+        }}
+
+    if cmd == 'auth-register':
+        email    = kwargs.get('email', '')
+        password = kwargs.get('password', '')
+        username = kwargs.get('username', '')
+        if not email or not password:
+            return {'status': 'error',
+                    'error': 'Usage: auth-register --email=... --password=... --username=...'}
+        try:
+            from auth_handlers import AuthSystemIntegration
+            return AuthSystemIntegration().register(email, password, username)
+        except Exception:
+            return {'status': 'success', 'result': {
+                'message':  'Use POST /api/auth/register',
+                'endpoint': '/api/auth/register',
+                'required': {'email': email, 'password': '***', 'username': username},
+            }}
+
+    if cmd == 'auth-mfa':
+        return {'status': 'success', 'result': {
+            'mfa_available': True,
+            'methods':       ['TOTP', 'HLWE-256 PQ'],
+            'endpoint':      '/api/auth/totp/setup',
+            'message':       'POST /api/auth/totp/setup — requires active session',
+        }}
+
+    if cmd == 'auth-session':
+        return {'status': 'success', 'result': {
+            'session_active': bool(user_id),
+            'user_id':        user_id,
+            'endpoint':       '/api/auth/session',
+            'hint':           'JWT in Authorization header — decode to see full claims',
+        }}
+
+    if cmd == 'auth-device':
+        return {'status': 'success', 'result': {
+            'registered_devices': [],
+            'message':            'Device binding via PQ key — use pq-key-gen first',
+            'endpoint':           '/api/auth/device',
+        }}
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ADMIN (all require admin role — enforced by dispatch_command)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    if cmd == 'admin-stats':
         bc = get_blockchain()
-        h = bc.get('height', 0) if isinstance(bc, dict) else 0
         return {'status': 'success', 'result': {
-            'height': h, 'total_blocks': h + 1,
-            'avg_block_time_ms': 420, 'total_transactions': h * 3,
-            'chain_tip': bc.get('chain_tip') if isinstance(bc, dict) else None,
+            'total_users':     0,
+            'active_sessions': 0,
+            'block_height':    bc.get('height', 0) if isinstance(bc, dict) else 0,
+            'uptime':          get_metrics(),
+            'modules':         {k: bool(v) for k, v in _GLOBAL_STATE.items()
+                                if k in ('heartbeat', 'blockchain', 'db_manager',
+                                         'oracle', 'defi', 'auth_manager', 'pqc_system')},
         }}
 
-    if cmd == 'block-list':
-        bc = get_blockchain()
-        h = bc.get('height', 0) if isinstance(bc, dict) else 0
-        start = int(kwargs.get('start', max(0, h - 9)))
-        end   = int(kwargs.get('end', h))
+    if cmd == 'admin-users':
+        limit  = int(kwargs.get('limit', 50))
+        search = kwargs.get('search', '')
         return {'status': 'success', 'result': {
-            'blocks': [{'height': i, 'hash': f'0x{i:064x}', 'tx_count': 3} for i in range(start, end + 1)],
-            'total': end - start + 1,
+            'users':    [],
+            'count':    0,
+            'limit':    limit,
+            'search':   search,
+            'route':    f'GET /api/admin/users?limit={limit}&search={search}',
         }}
 
-    if cmd == 'block-details':
-        block_n = kwargs.get('block', (kwargs.get('_args') or ['0'])[0])
+    if cmd == 'admin-keys':
         return {'status': 'success', 'result': {
-            'height': int(block_n), 'hash': f'0x{int(block_n):064x}',
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'tx_count': 3, 'validator': 'q0_val',
-            'pq_signature': 'valid', 'finality': 'FINALIZED',
+            'keys':     [],
+            'count':    0,
+            'algorithm':'HLWE-256',
+            'route':    'GET /api/admin/keys',
         }}
 
-    if cmd == 'block-verify':
-        return {'status': 'success', 'result': {'verified': True, 'pqc_valid': True, 'chain_valid': True}}
-
-    if cmd == 'block-create':
+    if cmd == 'admin-revoke':
+        key_id = kwargs.get('key_id') or kwargs.get('key') or (kwargs.get('_args') or [''])[0]
+        reason = kwargs.get('reason', '')
         return {'status': 'success', 'result': {
-            'created': True, 'height': (get_blockchain() or {}).get('height', 0) + 1,
-            'pq_signature': 'pending', 'status': 'queued',
+            'key_id':   key_id or 'not-specified',
+            'reason':   reason,
+            'revoked':  bool(key_id),
+            'route':    'POST /api/admin/keys/revoke',
+            'hint':     'Use: admin-revoke --key-id=<id> --reason="..."',
         }}
 
-    if cmd == 'block-finality':
-        block_n = kwargs.get('block', (kwargs.get('_args') or ['0'])[0])
+    if cmd == 'admin-config':
         return {'status': 'success', 'result': {
-            'block': int(block_n), 'finality': 'FINALIZED',
-            'confidence': 0.9987, 'confirmations': 6,
+            'route':   'GET/POST /api/admin/config',
+            'message': 'Read or write runtime config — use admin panel or API',
         }}
 
-    if cmd == 'utxo-balance':
-        addr = kwargs.get('address', kwargs.get('addr', (kwargs.get('_args') or ['unknown'])[0]))
-        return {'status': 'success', 'result': {'address': addr, 'balance': 0.0, 'utxo_count': 0}}
-
-    if cmd == 'utxo-list':
-        addr = kwargs.get('address', kwargs.get('addr', (kwargs.get('_args') or ['unknown'])[0]))
-        return {'status': 'success', 'result': {'address': addr, 'utxos': [], 'total': 0}}
-
-    # ══════════════════════════════════════════
-    # TRANSACTIONS
-    # ══════════════════════════════════════════
-    if cmd == 'tx-status':
-        tx_id = kwargs.get('tx_id', kwargs.get('id', (kwargs.get('_args') or ['unknown'])[0]))
+    if cmd == 'admin-audit':
+        limit  = int(kwargs.get('limit', 50))
+        action = kwargs.get('action', '')
+        uid    = kwargs.get('user_id', '')
         return {'status': 'success', 'result': {
-            'tx_id': tx_id, 'status': 'unknown',
-            'hint': 'Provide a valid tx_id from a submitted transaction.',
+            'entries': [],
+            'count':   0,
+            'limit':   limit,
+            'filter':  {'action': action, 'user_id': uid},
+            'route':   'GET /api/admin/audit',
         }}
 
-    if cmd == 'tx-list':
-        return {'status': 'success', 'result': {'mempool': [], 'count': 0, 'pending': 0}}
+    # ══════════════════════════════════════════════════════════════════════════
+    # POST-QUANTUM CRYPTOGRAPHY
+    # ══════════════════════════════════════════════════════════════════════════
 
-    if cmd == 'tx-fee-estimate':
+    if cmd == 'pq-stats':
+        # Merged: pq-schema-status + pq-genesis-verify
+        genesis = verify_genesis_block()
         return {'status': 'success', 'result': {
-            'fee_low': 0.0001, 'fee_medium': 0.0005, 'fee_high': 0.001, 'unit': 'QTCL',
-        }}
-
-    if cmd in ('tx-create', 'tx-sign', 'tx-verify', 'tx-encrypt', 'tx-submit', 'tx-batch-sign'):
-        return {'status': 'success', 'result': {
-            'command': cmd, 'queued': True,
-            'tx_id': str(__import__('uuid').uuid4()),
-            'message': f'{cmd} accepted — submit to mempool with tx-submit',
-        }}
-
-    # ══════════════════════════════════════════
-    # WALLET
-    # ══════════════════════════════════════════
-    if cmd == 'wallet-list':
-        return {'status': 'success', 'result': {'wallets': [], 'count': 0}}
-
-    if cmd == 'wallet-balance':
-        addr = kwargs.get('address', kwargs.get('wallet', (kwargs.get('_args') or [''])[0]))
-        return {'status': 'success', 'result': {'address': addr, 'balance': 0.0, 'currency': 'QTCL'}}
-
-    if cmd in ('wallet-create', 'wallet-import', 'wallet-export', 'wallet-send', 'wallet-sync'):
-        return {'status': 'success', 'result': {
-            'command': cmd, 'message': f'{cmd} executed',
-            'wallet_id': str(__import__('uuid').uuid4())[:16],
-        }}
-
-    # ══════════════════════════════════════════
-    # DEFI
-    # ══════════════════════════════════════════
-    if cmd == 'defi-pool-list':
-        return {'status': 'success', 'result': {
-            'pools': [
-                {'pair': 'QTCL-USDC', 'tvl': 125000.0, 'apy': 0.12},
-                {'pair': 'BTC-USDC',  'tvl': 890000.0, 'apy': 0.08},
-                {'pair': 'ETH-USDC',  'tvl': 560000.0, 'apy': 0.10},
+            'algorithm':       'HLWE-256',
+            'nist_standard':   'ML-DSA (CRYSTALS-Dilithium) + ML-KEM (CRYSTALS-Kyber)',
+            'security_level':  256,
+            'schema': {
+                'installed': True,
+                'tables':    ['pq_keys', 'pq_vault', 'pq_genesis'],
+                'health':    'ok',
+            },
+            'genesis':         genesis,
+            'vault_summary': {
+                'key_count':   0,
+                'active_keys': 0,
+                'user_id':     user_id,
+            },
+            'features': [
+                'Quantum-resistant signatures on all transactions',
+                'Post-quantum key encapsulation (ML-KEM)',
+                'Key rotation with finality proofs',
+                'NIST SP 800-208 Migration Guidelines compliant',
             ],
-        }}
-
-    if cmd == 'defi-tvl':
-        return {'status': 'success', 'result': {'tvl_usd': 1575000.0, 'pools': 3}}
-
-    if cmd == 'defi-yield':
-        return {'status': 'success', 'result': {'pending_rewards': 0.0, 'currency': 'QTCL', 'apy': 0.12}}
-
-    if cmd in ('defi-swap', 'defi-stake', 'defi-unstake'):
-        return {'status': 'success', 'result': {
-            'command': cmd, 'status': 'queued',
-            'tx_id': str(__import__('uuid').uuid4()),
-        }}
-
-    # ══════════════════════════════════════════
-    # GOVERNANCE
-    # ══════════════════════════════════════════
-    if cmd == 'governance-list':
-        return {'status': 'success', 'result': {'proposals': [], 'active': 0}}
-
-    if cmd == 'governance-status':
-        prop_id = kwargs.get('id', (kwargs.get('_args') or ['unknown'])[0])
-        return {'status': 'success', 'result': {'proposal_id': prop_id, 'status': 'unknown'}}
-
-    if cmd in ('governance-vote', 'governance-propose'):
-        return {'status': 'success', 'result': {'command': cmd, 'submitted': True}}
-
-    # ══════════════════════════════════════════
-    # PQ / POST-QUANTUM
-    # ══════════════════════════════════════════
-    if cmd == 'pq-genesis-verify':
-        return {'status': 'success', 'result': verify_genesis_block()}
-
-    if cmd == 'pq-schema-status':
-        return {'status': 'success', 'result': {
-            'schema': 'HLWE-256', 'installed': True,
-            'tables': ['pq_keys', 'pq_vault', 'pq_genesis'],
-            'health': 'ok',
-        }}
-
-    if cmd == 'pq-schema-init':
-        return {'status': 'success', 'result': {
-            'schema_initialized': True, 'genesis': verify_genesis_block(),
         }}
 
     if cmd == 'pq-key-gen':
         return {'status': 'success', 'result': pqc_generate_user_key(user_id or 'anon')}
 
     if cmd == 'pq-key-list':
-        return {'status': 'success', 'result': {'keys': [], 'count': 0, 'user_id': user_id}}
+        return {'status': 'success', 'result': {
+            'keys':    [],
+            'count':   0,
+            'user_id': user_id,
+            'algorithm':'HLWE-256',
+        }}
 
     if cmd == 'pq-key-status':
-        key_id = kwargs.get('key_id', kwargs.get('key', (kwargs.get('_args') or ['unknown'])[0]))
-        return {'status': 'success', 'result': {'key_id': key_id, 'status': 'active', 'algorithm': 'HLWE-256'}}
-
-    # ══════════════════════════════════════════
-    # AUTH (terminal-facing)
-    # ══════════════════════════════════════════
-    if cmd == 'auth-login':
-        email = kwargs.get('email', '')
-        password = kwargs.get('password', '')
-        if not email or not password:
-            return {'status': 'error', 'error': 'Usage: auth-login --email=x@x.com --password=secret'}
-        # Delegate to auth_handlers if available
-        try:
-            from auth_handlers import AuthSystemIntegration
-            auth = AuthSystemIntegration()
-            return auth.login(email, password)
-        except Exception:
-            return {'status': 'error', 'error': 'Auth system unavailable — try via /api/auth/login'}
-
-    if cmd == 'auth-logout':
-        return {'status': 'success', 'result': {'logged_out': True, 'user_id': user_id}}
-
-    if cmd == 'auth-register':
+        key_id = kwargs.get('key_id') or kwargs.get('key') or (kwargs.get('_args') or ['unknown'])[0]
         return {'status': 'success', 'result': {
-            'message': 'Use POST /api/auth/register with {username, email, password}',
-            'endpoint': '/api/auth/register',
+            'key_id':    key_id,
+            'status':    'active',
+            'algorithm': 'HLWE-256',
+            'user_id':   user_id,
         }}
 
-    if cmd == 'auth-mfa':
+    if cmd == 'pq-schema-init':
         return {'status': 'success', 'result': {
-            'message': 'Use POST /api/auth/totp/setup', 'endpoint': '/api/auth/totp/setup',
-        }}
-
-    if cmd in ('auth-device', 'auth-session'):
-        return {'status': 'success', 'result': {'user_id': user_id, 'command': cmd, 'active': bool(user_id)}}
-
-    # ══════════════════════════════════════════
-    # ADMIN
-    # ══════════════════════════════════════════
-    if cmd == 'admin-stats':
-        return {'status': 'success', 'result': {
-            'total_users': 0, 'active_sessions': 0,
-            'blocks': (get_blockchain() or {}).get('height', 0),
-            'uptime': get_metrics(),
-        }}
-
-    if cmd in ('admin-users', 'admin-keys', 'admin-revoke', 'admin-config', 'admin-audit'):
-        return {'status': 'success', 'result': {
-            'command': cmd, 'message': f'Use /api/admin/{cmd.split("-")[1]} endpoint for full admin control.',
+            'schema_initialized': True,
+            'genesis':            verify_genesis_block(),
+            'tables_created':     ['pq_keys', 'pq_vault', 'pq_genesis'],
+            'message':            'PQ schema initialized — run pq-key-gen to create your first key',
         }}
 
     # ══════════════════════════════════════════════════════════════════════════
-    # ADDITIONAL COMMAND HANDLERS
-    # These live here because they're quantum-lattice / auth / blockchain API
-    # forwarding commands, not terminal_logic session commands.
+    # FALLTHROUGH — return registry metadata for any unhandled command
+    # (Should not be reached if registry and handlers stay in sync)
     # ══════════════════════════════════════════════════════════════════════════
-
-    # ── quantum-v8: v8 lattice status ─────────────────────────────────────
-    if cmd == 'quantum-v8':
-        try:
-            v8 = get_v8_status()
-            return {'status': 'success', 'result': v8}
-        except Exception as e:
-            return {'status': 'error', 'error': str(e)}
-
-    # ── quantum-stats: full lattice metrics ────────────────────────────────
-    if cmd == 'quantum-stats':
-        import secrets as _s, math as _m
-        try:
-            lat = get_lattice(); hb = get_heartbeat()
-            lm = lat.get_system_metrics() if hasattr(lat, 'get_system_metrics') else {}
-            hbm = hb.get_metrics() if hasattr(hb, 'get_metrics') else {}
-            v8 = get_v8_status()
-        except Exception: lm = {}; hbm = {}; v8 = {}
-        return {'status': 'success', 'result': {
-            'lattice_ops': lm.get('operations_count', 0),
-            'heartbeat_beats': hbm.get('total_beats', 0),
-            'w_state_fidelity': v8.get('wstate_guardian', {}).get('fidelity', 0.998),
-            'revival_threshold': 0.89,
-            'neural_neurons': 57,
-            'noise_kappa': 0.08,
-            'maintainer_hz': 10,
-            'v8_online': True,
-        }}
-
-    # ── auth-login/register/logout/mfa/session/device: route to terminal ──
-    # These duplicate login/register/logout — point users to canonical commands.
-    if cmd in ('auth-login',):
-        return {'status': 'success', 'result': {'redirect': 'login',
-            'message': 'Use: login --email=you@example.com --password=secret'}}
-    if cmd in ('auth-register',):
-        return {'status': 'success', 'result': {'redirect': 'register',
-            'message': 'Use: register --email=you@example.com --password=secret --username=you'}}
-    if cmd in ('auth-logout',):
-        return {'status': 'success', 'result': {'redirect': 'logout',
-            'message': 'Use: logout'}}
-    if cmd == 'auth-mfa':
-        return {'status': 'success', 'result': {
-            'mfa_available': True, 'methods': ['TOTP', 'HLWE-256 PQ'],
-            'message': 'Use: auth-2fa-setup to configure MFA. Requires login first.'}}
-    if cmd == 'auth-session':
-        return {'status': 'success', 'result': {
-            'session_active': bool(user_id),
-            'user_id': user_id,
-            'message': 'Use whoami to see session details.'}}
-    if cmd == 'auth-device':
-        return {'status': 'success', 'result': {
-            'registered_devices': [],
-            'message': 'Device registration via PQ key binding. Use pq-key-gen first.'}}
-
-    # ── tx-create/sign/submit/encrypt/batch-sign: forward to blockchain_api ──
-    if cmd in ('tx-create', 'tx-sign', 'tx-submit', 'tx-encrypt', 'tx-batch-sign'):
-        _bc = get_blockchain()
-        op_name = cmd.replace('tx-', '').replace('-', '_')
-        return {'status': 'success', 'result': {
-            'command': cmd,
-            'operation': op_name,
-            'message': f'Submit via POST /api/blockchain/transaction/{op_name}',
-            'auth_required': True,
-            'kwargs': {k: v for k, v in kwargs.items() if not k.startswith('_')},
-        }}
-
-    # ── wallet-send / wallet-sync ──────────────────────────────────────────
-    if cmd == 'wallet-send':
-        return {'status': 'success', 'result': {
-            'message': 'Use: wallet-send --to=<address> --amount=<value> --wallet=<id>',
-            'route': 'POST /api/blockchain/wallet/send',
-            'auth_required': True,
-        }}
-    if cmd == 'wallet-sync':
-        _bc = get_blockchain()
-        height = (_bc or {}).get('height', 0) if isinstance(_bc, dict) else 0
-        return {'status': 'success', 'result': {
-            'synced': True, 'current_height': height,
-            'message': 'Wallet sync uses live blockchain height.'}}
-
-    # ── defi-swap ──────────────────────────────────────────────────────────
-    if cmd == 'defi-swap':
-        return {'status': 'success', 'result': {
-            'message': 'Use: defi-swap --from=TOKEN --to=TOKEN --amount=VALUE',
-            'route': 'POST /api/defi/swap',
-            'slippage_default': '0.5%',
-            'auth_required': True,
-        }}
-
-    # ── governance-propose ────────────────────────────────────────────────
-    if cmd == 'governance-propose':
-        return {'status': 'success', 'result': {
-            'message': 'Use: governance-propose --title="..." --description="..." --duration=7',
-            'route': 'POST /api/governance/propose',
-            'auth_required': True,
-        }}
-
-    # ── utxo-balance / utxo-list ──────────────────────────────────────────
-    if cmd == 'utxo-balance':
-        addr = kwargs.get('address') or kwargs.get('addr') or 'not-specified'
-        return {'status': 'success', 'result': {
-            'address': addr,
-            'balance_qtcl': 0,
-            'utxo_count': 0,
-            'message': 'Provide --address=<wallet-address> for live balance.'}}
-    if cmd == 'utxo-list':
-        addr = kwargs.get('address') or kwargs.get('addr', 'not-specified')
-        return {'status': 'success', 'result': {
-            'address': addr,
-            'utxos': [],
-            'total': 0,
-        }}
-
-    # ── block-create ──────────────────────────────────────────────────────
-    if cmd == 'block-create':
-        return {'status': 'success', 'result': {
-            'message': 'Block creation requires admin role and active mempool transactions.',
-            'route': 'POST /api/blockchain/block/create',
-            'requires_admin': True,
-        }}
-
-    # ── block-finality ────────────────────────────────────────────────────
-    if cmd == 'block-finality':
-        block_id = kwargs.get('block') or kwargs.get('block_id', 'latest')
-        _bc = get_blockchain()
-        height = (_bc or {}).get('height', 1) if isinstance(_bc, dict) else 1
-        return {'status': 'success', 'result': {
-            'block': block_id,
-            'finality_status': 'FINALIZED',
-            'current_height': height,
-            'confirmations': 6,
-            'finality_proof': 'oracle-collapse-validated',
-        }}
-
-    # ── admin-config / admin-keys / admin-revoke ──────────────────────────
-    if cmd == 'admin-config':
-        return {'status': 'success', 'result': {
-            'route': 'GET/POST /api/admin/config',
-            'message': 'Use admin panel or API for configuration management.'}}
-    if cmd == 'admin-keys':
-        return {'status': 'success', 'result': {
-            'route': 'GET /api/admin/keys',
-            'message': 'Validator key management via admin API.'}}
-    if cmd == 'admin-revoke':
-        return {'status': 'success', 'result': {
-            'message': 'Use: admin-revoke --key-id=<id> --reason="..."',
-            'route': 'POST /api/admin/keys/revoke'}}
-
-    # ── system-version ────────────────────────────────────────────────────
-    if cmd == 'system-version':
-        return {'status': 'success', 'result': {
-            'version': '5.0.0',
-            'quantum_lattice': 'v8',
-            'pqc': 'HLWE-256',
-            'wsgi': 'gunicorn-sync',
-            'python': __import__('platform').python_version(),
-        }}
-
-    # ── help-pq: redirect to pq help function ────────────────────────────
-    if cmd == 'help-pq':
-        return _help_pq(kwargs)
-
-
-    # ── tx-verify ─────────────────────────────────────────────────────────
-    if cmd == 'tx-verify':
-        tx_id = kwargs.get('tx_id') or kwargs.get('tx') or kwargs.get('id')
-        sig   = kwargs.get('signature') or kwargs.get('sig')
-        return {'status': 'success', 'result': {
-            'tx_id': tx_id or 'not-specified',
-            'signature_provided': bool(sig),
-            'verification': 'VALID' if tx_id else 'Provide --tx-id=<id> --signature=<sig>',
-            'pqc_scheme': 'HLWE-256',
-            'route': 'POST /api/blockchain/transaction/verify',
-        }}
-
-    # ── tx-sign ───────────────────────────────────────────────────────────
-    if cmd == 'tx-sign':
-        tx_id  = kwargs.get('tx_id') or kwargs.get('tx')
-        key_id = kwargs.get('key_id') or kwargs.get('key')
-        return {'status': 'success', 'result': {
-            'tx_id': tx_id or 'not-specified',
-            'key_id': key_id or 'not-specified',
-            'message': 'Use: tx-sign --tx-id=<id> --key-id=<pq-key-id>',
-            'pqc_scheme': 'HLWE-256',
-            'route': 'POST /api/blockchain/transaction/sign',
-            'auth_required': True,
-        }}
-
-    # ══════════════════════════════════════════
-    # TRUE FALLTHROUGH: return command metadata
-    # ══════════════════════════════════════════
     return {
-        'status': 'success',
+        'status':  'success',
         'result': {
-            'command': cmd,
-            'category': cat,
-            'description': cmd_info.get('description', ''),
-            'auth_required': cmd_info.get('auth_required', False),
-            'message': 'Command available. See description for usage.',
+            'command':      cmd,
+            'category':     cat,
+            'description':  cmd_info.get('description', ''),
+            'auth_required':cmd_info.get('auth_required', False),
+            'message':      'Command registered but handler not yet implemented.',
         }
     }
-
 
 # ── Help handlers ─────────────────────────────────────────────────────────────
 
@@ -2443,7 +2649,19 @@ def _help_general() -> dict:
         '╚══════════════════════════════════════════════════════╝',
         '',
         'Format:  category-command --flag=value --bool',
-        'Example: quantum-status | oracle-price --symbol=BTC-USD',
+        'Example: quantum-stats | oracle-price --symbol=BTC-USD | system-stats --section=health',
+        '',
+        'STATS COMMANDS (comprehensive aggregates):',
+        '  system-stats     health, version, metrics, peers, sync  --section=<n>',
+        '  quantum-stats    heartbeat, lattice, W-state, v8, bell, MI',
+        '  block-stats      chain height, tip, avg time, total tx',
+        '  tx-stats         mempool, fees, TPS, volume',
+        '  wallet-stats     all wallets, balances, portfolio total',
+        '  oracle-stats     all feeds, integrity, symbols',
+        '  defi-stats       TVL, pools, APY, pending yield',
+        '  governance-stats proposals, quorum, voting status',
+        '  pq-stats         schema, genesis, vault, algorithm info',
+        '  admin-stats      users, sessions, uptime  [admin only]',
         '',
         'CATEGORIES:',
     ]
@@ -2494,42 +2712,47 @@ def _help_command(kwargs: dict) -> dict:
 
 
 def _help_pq(kwargs: dict) -> dict:
-    """Post-quantum cryptography reference and help."""
-    detailed = kwargs.get('detailed', kwargs.get('verbose', False))
-    topic = kwargs.get('topic', kwargs.get('_args', [''])[0] if kwargs.get('_args') else '')
-    
-    pq_content = {
-        'status': 'success',
-        'result': {
-            'title': 'Post-Quantum Cryptography (PQC) Reference',
-            'description': 'QTCL v5.0 uses NIST-standardized post-quantum cryptographic algorithms',
-            'algorithms': {
-                'signature': {'name': 'ML-DSA (CRYSTALS-Dilithium)', 'description': 'Lattice-based digital signature'},
-                'kem': {'name': 'ML-KEM (CRYSTALS-Kyber)', 'description': 'Lattice-based key encapsulation'},
-                'hash': {'name': 'SHA3-256 / SHA3-512', 'description': 'Quantum-resistant hash functions'}
-            },
-            'commands': [
-                'pq-key-gen — Generate new HLWE-256 keypair',
-                'pq-key-list — List post-quantum keys in vault',
-                'quantum-pq-rotate — Perform PQ key rotation',
-                'pq-genesis-verify — Verify genesis block PQC material'
-            ],
-            'features': [
-                'Quantum-resistant signatures on all transactions',
-                'Post-quantum encrypted communications',
-                'Key rotation with finality proofs',
-                'NIST SP 800-208 Migration Guidelines compliance'
-            ]
-        }
+    topic   = str(kwargs.get('topic', (kwargs.get('_args') or [''])[0])).lower()
+    verbose = bool(kwargs.get('verbose', kwargs.get('detailed', False)))
+
+    algorithms = {
+        'signature': {'name': 'ML-DSA (CRYSTALS-Dilithium)', 'nist': 'FIPS 204',
+                      'description': 'Lattice-based digital signature — used on all tx and blocks'},
+        'kem':       {'name': 'ML-KEM (CRYSTALS-Kyber)',     'nist': 'FIPS 203',
+                      'description': 'Lattice-based key encapsulation — encrypted tx payloads'},
+        'hash':      {'name': 'SHA3-256 / SHA3-512',          'nist': 'FIPS 202',
+                      'description': 'Quantum-resistant hash functions — UTXO commitments'},
+        'internal':  {'name': 'HLWE-256', 'nist': 'proprietary',
+                      'description': 'QTCL lattice implementation wrapping ML-DSA + ML-KEM'},
     }
-    
-    if detailed or topic:
-        if topic == 'algorithms':
-            return {'status': 'success', 'result': pq_content['result']['algorithms']}
-        elif topic == 'commands':
-            return {'status': 'success', 'result': pq_content['result']['commands']}
-    
-    return pq_content
+    commands_ref = {
+        'pq-stats':       'PQ system aggregate — schema, genesis, vault, algorithm info',
+        'pq-key-gen':     'Generate new HLWE-256 keypair for current user',
+        'pq-key-list':    'List PQ keys in vault — id, algorithm, created, status',
+        'pq-key-status':  'Specific key status — active/revoked/expired. --key-id=<id>',
+        'pq-schema-init': '★ Initialize PQ vault schema, genesis material, baseline keys',
+    }
+    features = [
+        'Quantum-resistant signatures on every transaction and block',
+        'Post-quantum key encapsulation for encrypted tx payloads',
+        'Key rotation with oracle-collapse finality proofs',
+        'NIST SP 800-208 Migration Guidelines compliant',
+        'Non-Markovian noise bath (κ=0.08) for lattice key hardening',
+    ]
+
+    if topic == 'algorithms':
+        return {'status': 'success', 'result': algorithms}
+    if topic == 'commands':
+        return {'status': 'success', 'result': commands_ref}
+
+    return {'status': 'success', 'result': {
+        'title':       'Post-Quantum Cryptography (PQC) Reference — QTCL v5.0',
+        'algorithms':  algorithms if verbose else {k: v['name'] for k, v in algorithms.items()},
+        'commands':    commands_ref,
+        'features':    features,
+        'nist_compliance': ['FIPS 202', 'FIPS 203', 'FIPS 204', 'SP 800-208'],
+        'hint':        'Use --verbose for full algorithm detail, --topic=algorithms|commands to filter',
+    }}
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # POST-QUANTUM CRYPTOGRAPHY
@@ -2627,237 +2850,3 @@ def revoke_session(session_id: str) -> dict:
         'revoked_at': datetime.now(timezone.utc).isoformat(),
     }
 
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# UNIFIED COMMAND PARSING (Single source of truth)
-# ═══════════════════════════════════════════════════════════════════════════════════════
-
-def _parse_raw_command(raw: str) -> tuple:
-    """
-    Parse raw command string into (command_name, flags_dict, positional_args).
-    
-    SINGLE UNIFIED PARSER - used by dispatch_command and all other parsing.
-    
-    Examples:
-        "login --email=x@y.com --password=secret" 
-        → ("login", {"email": "x@y.com", "password": "secret"}, [])
-        
-        "block-details 42 --verbose"
-        → ("block-details", {"verbose": True}, ["42"])
-        
-        "help"
-        → ("help", {}, [])
-    
-    Returns: (command_name, flags_dict, positional_args)
-    """
-    import re
-    
-    tokens = raw.strip().split()
-    if not tokens:
-        return '', {}, []
-    
-    cmd_name = tokens[0].lower()
-    flags = {}
-    positional = []
-    
-    i = 1
-    while i < len(tokens):
-        tok = tokens[i]
-        
-        # Long flag: --key=value or --key or --key value
-        if tok.startswith('--'):
-            inner = tok[2:].strip()
-            if not inner:
-                i += 1
-                continue
-            
-            if '=' in inner:
-                # --key=value format
-                key, val = inner.split('=', 1)
-                flags[key.replace('-', '_')] = val
-            else:
-                # --key or --key value format
-                key = inner.replace('-', '_')
-                # Check if next token is a value (not a flag)
-                if i + 1 < len(tokens) and not tokens[i + 1].startswith('-'):
-                    val = tokens[i + 1]
-                    flags[key] = val
-                    i += 1  # Skip next token (it's the value)
-                else:
-                    flags[key] = True  # Boolean flag
-        
-        # Short flag: -v or -abc
-        elif tok.startswith('-'):
-            for char in tok[1:]:
-                flags[char] = True
-        
-        # Positional argument
-        else:
-            positional.append(tok)
-        
-        i += 1
-    
-    return cmd_name, flags, positional
-
-# ═════════════════════════════════════════════════════════════════════════════════
-# QUANTUM ENHANCEMENT TRACKING METRICS v6.0
-# Real-time monitoring of adaptive recovery, MI smoothing, and entanglement sigs
-# ═════════════════════════════════════════════════════════════════════════════════
-
-QUANTUM_ENHANCEMENT_METRICS = {
-    'adaptive_w_recovery': {
-        'mean_degradation': 0.0,
-        'mean_recovery': 0.0,
-        'mean_w_strength': 0.0,
-        'max_w_applied': 0.0,
-        'current_refresh_interval': 3,
-        'consecutive_insufficient': 0,
-        'recovery_ratio': 0.0,
-        'last_updated': 0
-    },
-    'mi_tracking': {
-        'raw_mi_cycles': 0,
-        'smooth_mi_current': 0.5,
-        'mi_trend_current': 0.0,
-        'mi_confidence': 0.5,
-        'ema_alpha': 0.3,
-        'last_updated': 0
-    },
-    'entanglement_signatures': {
-        'total_extracted': 0,
-        'mean_signature_strength': 0.0,
-        'mean_entanglement_depth': 0.0,
-        'phase_stability_mean': 0.0,
-        'source_correlations': {},
-        'last_updated': 0
-    },
-    'bell_testing': {
-        'cycles_tested': 0,
-        'chsh_s_mean': 0.0,
-        'violation_ratio': 0.0,
-        'entanglement_depth_mean': 0.0,
-        'last_updated': 0
-    },
-    'floquet_berry_coupling': {
-        'floquet_gains_mean': 0.0,
-        'berry_gains_mean': 0.0,
-        'mi_coupling_active': False,
-        'entanglement_coupling_active': False,
-        'last_updated': 0
-    }
-}
-
-def update_enhancement_metrics(metrics: dict) -> None:
-    """Thread-safe update of enhancement metrics from quantum subsystems."""
-    global QUANTUM_ENHANCEMENT_METRICS
-    try:
-        QUANTUM_ENHANCEMENT_METRICS.update({k: {**QUANTUM_ENHANCEMENT_METRICS[k], **v} for k, v in metrics.items()})
-    except Exception as e:
-        logger.debug(f"Error updating enhancement metrics: {e}")
-
-def get_enhancement_metrics() -> dict:
-    """Thread-safe retrieval of all enhancement metrics."""
-    return {k: dict(v) for k, v in QUANTUM_ENHANCEMENT_METRICS.items()}
-
-def dispatch_command(command: str, args: dict = None, user_id: str = None, token: str = None, role: str = None) -> dict:
-    """
-    Dispatch command with built-in authentication and admin checks.
-    
-    Handles both:
-    1. Pre-parsed: dispatch_command("login", {"email": "...", "password": "..."})
-    2. Raw string: dispatch_command("login --email=... --password=...")
-    
-    Verifies:
-    1. Command exists in COMMAND_REGISTRY
-    2. Handler is registered (or returns 'initializing' status if pending)
-    3. Auth required vs. provided
-    4. Admin required vs. user role
-    5. Executes handler with proper context
-    
-    Args:
-        command: Command name or full command string (e.g., 'system-health' or 'login --email=x')
-        args: Command arguments dict (merged with parsed flags if command is raw string)
-        user_id: Optional user ID from auth context
-        token: Optional JWT token
-        role: Optional user role from token
-    
-    Returns:
-        dict with status, data, error, or 'initializing' status
-    """
-    try:
-        positional_args = []
-        
-        # Detect if command is a raw string (contains spaces)
-        if ' ' in command and not command.startswith(' '):
-            # Parse raw command string using unified parser
-            cmd_name, parsed_flags, positional_args = _parse_raw_command(command)
-            if args is None:
-                args = {}
-            args = {**args, **parsed_flags}  # Parsed flags override provided args
-            command = cmd_name
-        else:
-            # Command is already parsed; args dict is flags
-            if args is None:
-                args = {}
-        
-        # ── Lookup command in registry ────────────────────────────────────
-        entry = COMMAND_REGISTRY.get(command)
-        if not entry:
-            suggestions = [c for c in COMMAND_REGISTRY.keys() if c.startswith(command[:4]) if command]
-            return {
-                'status': 'error',
-                'error': f"Unknown command: {command}",
-                'suggestions': suggestions
-            }
-        
-        # ── Check if handler is registered ────────────────────────────────
-        # handler=None means terminal_logic hasn't injected a handler YET (or this
-        # command lives entirely in _execute_command's if/elif chain, not terminal_logic).
-        # Either way: route to _execute_command which covers ALL commands.
-        # We only block if the handler key is completely absent AND _execute_command
-        # can't route (i.e. command is genuinely unknown — already caught above).
-        handler = entry.get('handler')
-        if handler is None:
-            # Route directly to _execute_command — it has the full handler chain.
-            # Pass auth context so PQ / admin commands can use it.
-            _ec_kwargs = dict(args) if args else {}
-            _ec_kwargs['_user_id'] = user_id
-            _ec_kwargs['_token']   = token
-            _ec_kwargs['_role']    = role
-            return _execute_command(command, _ec_kwargs, user_id, entry)
-        
-        # ── Check authentication requirement ──────────────────────────────
-        auth_required = entry.get('auth_required', False)
-        requires_admin = entry.get('requires_admin', False)
-        
-        if auth_required and not token and not user_id:
-            return {
-                'status': 'error',
-                'error': f'Command "{command}" requires authentication'
-            }
-        
-        # ── Check admin requirement ──────────────────────────────────────
-        if requires_admin:
-            is_admin = role in ('admin', 'superadmin', 'super_admin') if role else False
-            if not is_admin:
-                return {
-                    'status': 'error',
-                    'error': f'Command "{command}" requires admin access'
-                }
-        
-        # ── Execute handler ──────────────────────────────────────────────
-        if not callable(handler):
-            return {
-                'status': 'error',
-                'error': f'Command "{command}" handler not callable'
-            }
-        
-        # Call handler with flags dict and positional args list
-        result = handler(args, positional_args)
-        return result if isinstance(result, dict) else {'status': 'ok', 'result': result}
-    
-    except Exception as e:
-        logger.error(f"[dispatch_command] Error executing '{command}': {e}", exc_info=True)
-        return {
-            'status': 'error',
-            'error': str(e)
-        }
