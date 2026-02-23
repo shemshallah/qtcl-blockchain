@@ -1001,6 +1001,10 @@ def _format_response(response: Any) -> dict:
     
     # Default: convert to string representation
     return {'status': 'success', 'result': str(response)}
+
+
+def get_state_snapshot() -> dict:
+    """Get unified system state snapshot."""
     return {
         'initialized': _GLOBAL_STATE['initialized'],
         'quantum': get_quantum(),
