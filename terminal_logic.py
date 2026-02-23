@@ -5457,27 +5457,43 @@ def _pq_genesis_verify(flags: dict, args: list) -> dict:
     try:
         from db_builder_v2 import db_manager
         
-        if not db_manager:
-            return {'status': 'error', 'error': 'Database unavailable'}
+        if not db_manager or not db_manager.pool:
+            return {
+                'status': 'error', 
+                'error': 'Database unavailable',
+                'message': 'Database connection not initialized. Check SUPABASE_* environment variables.'
+            }
         
         try:
+            # Query for genesis block (height 0)
             row = db_manager.execute_fetch("SELECT * FROM blocks WHERE height=0 LIMIT 1")
         except Exception as query_err:
             logger.debug(f"[pq-genesis-verify] Query failed: {query_err}")
-            return {'status': 'error', 'error': f'Genesis block query failed: {query_err}'}
+            return {
+                'status': 'error', 
+                'error': f'Genesis block query failed',
+                'details': str(query_err)
+            }
         
         if not row:
-            return {'status': 'error', 'error': 'Genesis block not found'}
+            return {
+                'status': 'error', 
+                'error': 'Genesis block not found',
+                'message': 'Genesis block not initialized. Run: init-pq-schema',
+                'recommendation': 'Initialize the quantum blockchain with: pq-schema-init'
+            }
         
         g = dict(row)
+        
         # Sanitize timestamps
         for f in list(g.keys()):
             if g[f] and hasattr(g[f], 'isoformat'):
                 g[f] = g[f].isoformat()
         
+        # ── Verification Checks ────────────────────────────────────────────────────
         checks = {
             'pq_signature_present':     bool(g.get('pq_signature')),
-            'pq_key_fingerprint':       g.get('pq_key_fingerprint'),
+            'pq_key_fingerprint':       g.get('pq_key_fingerprint', 'not set'),
             'pq_validation_status':     g.get('pq_validation_status', 'unsigned'),
             'pq_merkle_root_present':   bool(g.get('pq_merkle_root')),
             'vdf_output_present':       bool(g.get('vdf_output')),
@@ -5491,31 +5507,51 @@ def _pq_genesis_verify(flags: dict, args: list) -> dict:
             'field_cipher':             g.get('field_encryption_cipher', 'not set'),
             'entropy_certification':    g.get('entropy_certification_level', 'not set'),
         }
-        all_pass = all([
+        
+        # Determine overall status
+        all_critical_pass = all([
             checks['pq_signature_present'],
             checks['pq_merkle_root_present'],
             checks['vdf_output_present'],
         ])
+        
         pq_summary = {
             'pq_signature':    (g.get('pq_signature') or '')[:40] + '…' if g.get('pq_signature') else None,
             'pq_merkle_root':  (g.get('pq_merkle_root') or '')[:40] + '…' if g.get('pq_merkle_root') else None,
             'vdf_output':      (g.get('vdf_output') or '')[:40] + '…' if g.get('vdf_output') else None,
             'block_hash':      g.get('block_hash'),
             'finalized_at':    g.get('finalized_at'),
+            'created_at':      g.get('created_at'),
         }
+        
         return {
             'status': 'success',
             'result': {
-                'genesis_pq_verified': all_pass,
+                'genesis_pq_verified': all_critical_pass,
                 'checks': checks,
                 'pq_summary': pq_summary,
-                'overall': '✅ GENESIS FULLY PQ-SECURED' if all_pass else '⚠️  GENESIS MISSING PQ MATERIAL — run init-pq-schema',
+                'overall': '✅ GENESIS FULLY PQ-SECURED' if all_critical_pass else '⚠️  GENESIS MISSING PQ MATERIAL — run pq-schema-init',
+                'entropy_sources': {
+                    'anu': checks['qrng_anu_present'],
+                    'random_org': checks['qrng_random_org_present'],
+                    'lfdr': checks['qrng_lfdr_present'],
+                },
+                'critical_material': {
+                    'signature': checks['pq_signature_present'],
+                    'merkle_root': checks['pq_merkle_root_present'],
+                    'vdf_proof': checks['vdf_proof_present'],
+                }
             }
         }
+        
     except Exception as e:
         import traceback
         logger.error(f"[pq-genesis-verify] {traceback.format_exc()}")
-        return {'status': 'error', 'error': f'pq-genesis-verify: {str(e)}'}
+        return {
+            'status': 'error', 
+            'error': f'pq-genesis-verify exception',
+            'details': str(e)
+        }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════════════════
@@ -7044,139 +7080,261 @@ def _build_api_handlers(engine: 'TerminalEngine') -> dict:
     # ── SYSTEM ────────────────────────────────────────────────────────────────
 
     def h_system_status(flags, args):
+        """System status — real data from database + quantum lattice"""
         try:
-            from globals import get_globals
-            gs = get_globals()
+            import os
+            import time
+            from db_builder_v2 import db_manager
             
-            # Safe attribute access with fallbacks
-            bc = gs.blockchain if gs else None
-            auth = gs.auth if gs else None
-            q = gs.quantum if gs else None
-            led = gs.ledger if gs else None
+            status_data = {
+                'initialized': True,
+                'health': 'ok',
+                'chain_height': 0,
+                'total_transactions': 0,
+                'mempool_size': 0,
+                'active_sessions': 0,
+                'ledger_entries': 0,
+                'lattice_ready': False,
+                'heartbeat_running': False,
+                'pqc_ready': False,
+                'quantum_metrics': None,
+                'database_available': False,
+                'timestamp': time.time(),
+            }
             
-            # Extract values safely
-            bc_height = bc.get('chain_height') if isinstance(bc, dict) else getattr(bc, 'chain_height', 0) if bc else 0
-            bc_total_txns = bc.get('total_transactions') if isinstance(bc, dict) else getattr(bc, 'total_transactions', 0) if bc else 0
-            bc_mempool = bc.get('mempool_size') if isinstance(bc, dict) else getattr(bc, 'mempool_size', 0) if bc else 0
+            # ── Database Connectivity ──────────────────────────────────────────────
+            if db_manager and db_manager.pool:
+                status_data['database_available'] = True
+                
+                try:
+                    # Query blockchain stats
+                    blocks_result = db_manager.execute_fetch(
+                        "SELECT COUNT(*) as total, MAX(height) as max_height FROM blocks"
+                    )
+                    if blocks_result:
+                        blocks = dict(blocks_result)
+                        status_data['chain_height'] = int(blocks.get('max_height') or 0)
+                    
+                    # Query ledger entries
+                    ledger_result = db_manager.execute_fetch(
+                        "SELECT COUNT(*) as total FROM ledger_entries"
+                    )
+                    if ledger_result:
+                        ledger = dict(ledger_result)
+                        status_data['ledger_entries'] = int(ledger.get('total') or 0)
+                    
+                    # Query transactions (will be 0 if no users yet)
+                    tx_result = db_manager.execute_fetch(
+                        "SELECT COUNT(*) as total FROM transactions"
+                    )
+                    if tx_result:
+                        txs = dict(tx_result)
+                        status_data['total_transactions'] = int(txs.get('total') or 0)
+                    
+                    # Query active sessions
+                    sessions_result = db_manager.execute_fetch(
+                        "SELECT COUNT(*) as total FROM sessions WHERE active=true"
+                    )
+                    if sessions_result:
+                        sess = dict(sessions_result)
+                        status_data['active_sessions'] = int(sess.get('total') or 0)
+                    
+                    # Check PQC schema initialization
+                    try:
+                        pqc_check = db_manager.execute_fetch(
+                            "SELECT COUNT(*) as total FROM pq_keys LIMIT 1"
+                        )
+                        status_data['pqc_ready'] = pqc_check is not None
+                    except:
+                        status_data['pqc_ready'] = False
+                        
+                except Exception as db_err:
+                    logger.debug(f"[h_system_status] Database query error: {db_err}")
+                    status_data['database_available'] = False
             
-            auth_sessions = auth.get('active_sessions') if isinstance(auth, dict) else getattr(auth, 'active_sessions', 0) if auth else 0
+            # ── Quantum Lattice Status ─────────────────────────────────────────────
+            try:
+                from quantum_lattice_control_live_complete import (
+                    LATTICE_STATE, HEARTBEAT_DAEMON
+                )
+                
+                # Check if lattice is running
+                if LATTICE_STATE:
+                    status_data['lattice_ready'] = True
+                    
+                    # Get quantum metrics
+                    lattice_metrics = {
+                        'coherence': getattr(LATTICE_STATE, 'coherence', None),
+                        'fidelity': getattr(LATTICE_STATE, 'fidelity', None),
+                        'bell_chsh': getattr(LATTICE_STATE, 'bell_chsh_s', None),
+                        'mi': getattr(LATTICE_STATE, 'mi', None),
+                        'qubits': getattr(LATTICE_STATE, 'qubits_count', 0),
+                        'operations': getattr(LATTICE_STATE, 'operations_count', 0),
+                        'w_state_strength': getattr(LATTICE_STATE, 'w_state_strength', None),
+                    }
+                    status_data['quantum_metrics'] = lattice_metrics
+                
+                # Check heartbeat
+                if HEARTBEAT_DAEMON and hasattr(HEARTBEAT_DAEMON, 'running'):
+                    status_data['heartbeat_running'] = HEARTBEAT_DAEMON.running
+                    
+            except ImportError:
+                logger.debug("[h_system_status] Quantum lattice not available (expected during init)")
+            except Exception as quantum_err:
+                logger.debug(f"[h_system_status] Quantum status error: {quantum_err}")
             
-            led_entries = led.get('total_entries') if isinstance(led, dict) else getattr(led, 'total_entries', 0) if led else 0
+            # ── Overall Health ─────────────────────────────────────────────────────
+            if status_data['database_available'] and status_data['lattice_ready']:
+                status_data['health'] = 'healthy'
+            elif status_data['database_available']:
+                status_data['health'] = 'degraded'
+            else:
+                status_data['health'] = 'offline'
             
-            q_lattice = q.get('lattice') if isinstance(q, dict) else getattr(q, 'lattice', None) if q else None
-            q_heartbeat = q.get('heartbeat') if isinstance(q, dict) else getattr(q, 'heartbeat', None) if q else None
-            q_hb_running = q_heartbeat.get('running') if isinstance(q_heartbeat, dict) else getattr(q_heartbeat, 'running', False) if q_heartbeat else False
+            return _ok(status_data)
             
-            return _ok({
-                'initialized':        gs.get('initialized', False) if gs else False,
-                'health':             'ok',
-                'chain_height':       bc_height,
-                'total_transactions': bc_total_txns,
-                'mempool_size':       bc_mempool,
-                'active_sessions':    auth_sessions,
-                'ledger_entries':     led_entries,
-                'lattice_ready':      bool(q_lattice),
-                'heartbeat_running':  q_hb_running,
-                'pqc_ready':          gs.get('pqc_initialized', False) if gs else False,
-            })
         except Exception as e:
+            logger.error(f"[h_system_status] Error: {e}")
             return _err(f'System status error: {e}')
 
     def h_system_health(flags, args):
         """System health check — includes database connectivity and detailed diagnostics."""
         try:
-            from globals import get_globals, get_db_pool
-            gs = get_globals()
-            
-            # Quantum subsystems status (safe access)
-            q  = gs.quantum if gs else None
-            hb = q.get('heartbeat') if q else None if isinstance(q, dict) else getattr(q, 'heartbeat', None) if q else None
-            
-            # Database status check
-            db_pool = get_db_pool()
-            db_status = 'unknown'
-            db_connected = False
-            db_error = None
-            
-            if db_pool is None:
-                db_status = 'not_initialized'
-                db_connected = False
-                db_error = 'Database pool not initialized — check SUPABASE_* environment variables'
-            else:
-                try:
-                    # Try to get a connection to verify database is reachable
-                    conn = db_pool.get_connection()
-                    if conn:
-                        db_pool.return_connection(conn)
-                        db_status = 'connected'
-                        db_connected = True
-                    else:
-                        db_status = 'pool_error'
-                        db_error = 'Pool returned None connection'
-                except Exception as db_conn_err:
-                    db_status = 'connection_failed'
-                    db_connected = False
-                    db_error = str(db_conn_err)
-            
-            # Blockchain stats from globals (safe access)
-            bc = gs.blockchain if gs else None
-            bc_chain_height = bc.get('chain_height') if isinstance(bc, dict) else getattr(bc, 'chain_height', 0) if bc else 0
-            bc_total_blocks = bc.get('total_blocks') if isinstance(bc, dict) else getattr(bc, 'total_blocks', 0) if bc else 0
-            bc_total_txns = bc.get('total_transactions') if isinstance(bc, dict) else getattr(bc, 'total_transactions', 0) if bc else 0
-            bc_mempool = bc.get('mempool_size') if isinstance(bc, dict) else getattr(bc, 'mempool_size', 0) if bc else 0
-            
-            bc_stats = {
-                'chain_height': bc_chain_height,
-                'total_blocks': bc_total_blocks,
-                'total_transactions': bc_total_txns,
-                'mempool_size': bc_mempool,
-            }
-            
-            # Safe access to quantum attributes
-            lattice_ready = False
-            neural_ready = False
-            w_state_ready = False
-            noise_bath_ready = False
-            
-            if q:
-                lattice_ready = bool(q.get('lattice') if isinstance(q, dict) else getattr(q, 'lattice', None))
-                neural_ready = bool(q.get('neural_network') if isinstance(q, dict) else getattr(q, 'neural_network', None))
-                w_state_ready = bool(q.get('w_state_manager') if isinstance(q, dict) else getattr(q, 'w_state_manager', None))
-                noise_bath_ready = bool(q.get('noise_bath') if isinstance(q, dict) else getattr(q, 'noise_bath', None))
-            
-            hb_running = hb.get('running') if isinstance(hb, dict) else getattr(hb, 'running', False) if hb else False
-            hb_pulses = hb.get('pulse_count') if isinstance(hb, dict) else getattr(hb, 'pulse_count', 0) if hb else 0
+            from db_builder_v2 import db_manager
+            import time
             
             health_response = {
                 'status': 'ok',
-                'initialized': gs.get('initialized', False) if gs else False,
+                'timestamp': time.time(),
                 'system_health': {
-                    'overall': 'healthy' if (db_connected and hb_running) else ('degraded' if db_connected else 'offline'),
+                    'overall': 'offline',
                     'database': {
-                        'status': db_status,
-                        'connected': db_connected,
-                        'error': db_error,
+                        'status': 'unknown',
+                        'connected': False,
+                        'error': None,
                     },
                     'heartbeat': {
-                        'running': hb_running,
-                        'pulses': hb_pulses,
+                        'running': False,
+                        'pulses': 0,
                     },
                     'quantum': {
-                        'lattice_ready': lattice_ready,
-                        'neural_ready': neural_ready,
-                        'w_state_ready': w_state_ready,
-                        'noise_bath_ready': noise_bath_ready,
+                        'lattice_ready': False,
+                        'neural_ready': False,
+                        'w_state_ready': False,
+                        'noise_bath_ready': False,
                     },
-                    'blockchain': bc_stats,
-                },
+                    'blockchain': {
+                        'chain_height': 0,
+                        'total_blocks': 0,
+                        'total_transactions': 0,
+                        'mempool_size': 0,
+                    },
+                }
             }
             
-            # If database not connected, add helpful diagnostic message
-            if not db_connected:
+            # ── Database Status ────────────────────────────────────────────────────
+            db_status = health_response['system_health']['database']
+            
+            if db_manager is None or db_manager.pool is None:
+                db_status['status'] = 'not_initialized'
+                db_status['connected'] = False
+                db_status['error'] = 'Database pool not initialized — check SUPABASE_* environment variables'
+            else:
+                try:
+                    # Try to get a connection to verify database is reachable
+                    conn = db_manager.get_connection()
+                    if conn:
+                        db_manager.return_connection(conn)
+                        db_status['status'] = 'connected'
+                        db_status['connected'] = True
+                        
+                        # Query blockchain stats
+                        try:
+                            blocks_result = db_manager.execute_fetch(
+                                "SELECT COUNT(*) as total, MAX(height) as max_height FROM blocks"
+                            )
+                            if blocks_result:
+                                b = dict(blocks_result)
+                                health_response['system_health']['blockchain']['chain_height'] = int(b.get('max_height') or 0)
+                                health_response['system_health']['blockchain']['total_blocks'] = int(b.get('total') or 0)
+                        except:
+                            pass
+                        
+                        # Query transactions
+                        try:
+                            tx_result = db_manager.execute_fetch(
+                                "SELECT COUNT(*) as total FROM transactions"
+                            )
+                            if tx_result:
+                                t = dict(tx_result)
+                                health_response['system_health']['blockchain']['total_transactions'] = int(t.get('total') or 0)
+                        except:
+                            pass
+                            
+                    else:
+                        db_status['status'] = 'pool_error'
+                        db_status['connected'] = False
+                        db_status['error'] = 'Pool returned None connection'
+                except Exception as db_conn_err:
+                    db_status['status'] = 'connection_failed'
+                    db_status['connected'] = False
+                    db_status['error'] = str(db_conn_err)
+            
+            # ── Quantum Lattice Status ─────────────────────────────────────────────
+            try:
+                from quantum_lattice_control_live_complete import (
+                    LATTICE_STATE, HEARTBEAT_DAEMON, NEURAL_NETWORK_MANAGER, 
+                    W_STATE_MANAGER, NOISE_BATH
+                )
+                
+                quantum = health_response['system_health']['quantum']
+                
+                if LATTICE_STATE:
+                    quantum['lattice_ready'] = True
+                
+                if NEURAL_NETWORK_MANAGER:
+                    quantum['neural_ready'] = True
+                
+                if W_STATE_MANAGER:
+                    quantum['w_state_ready'] = True
+                
+                if NOISE_BATH:
+                    quantum['noise_bath_ready'] = True
+                
+                # Heartbeat status
+                if HEARTBEAT_DAEMON:
+                    health_response['system_health']['heartbeat']['running'] = getattr(HEARTBEAT_DAEMON, 'running', False)
+                    health_response['system_health']['heartbeat']['pulses'] = getattr(HEARTBEAT_DAEMON, 'pulse_count', 0)
+                    
+            except ImportError:
+                logger.debug("[h_system_health] Quantum lattice not imported (expected during init)")
+            except Exception as quantum_err:
+                logger.debug(f"[h_system_health] Quantum status error: {quantum_err}")
+            
+            # ── Compute Overall Health ─────────────────────────────────────────────
+            db_ok = health_response['system_health']['database']['connected']
+            hb_ok = health_response['system_health']['heartbeat']['running']
+            
+            if db_ok and hb_ok:
+                health_response['system_health']['overall'] = 'healthy'
+            elif db_ok:
+                health_response['system_health']['overall'] = 'degraded'
+            else:
+                health_response['system_health']['overall'] = 'offline'
+            
+            # Add diagnostic message if needed
+            if not db_ok:
                 health_response['diagnostic_message'] = (
                     'Database connection unavailable. '
                     'Check environment: SUPABASE_HOST, SUPABASE_USER, SUPABASE_PASSWORD, SUPABASE_DB'
                 )
+            
+            return _ok(health_response)
+            
+        except Exception as e:
+            import traceback
+            logger.error(f"[h_system_health] Error: {traceback.format_exc()}")
+            return _err(f'Health check error: {e}')
             
             return _ok(health_response)
             
