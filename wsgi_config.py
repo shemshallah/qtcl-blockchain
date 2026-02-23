@@ -546,51 +546,68 @@ def _initialize_quantum_infrastructure_deferred() -> None:
         
         logger.info("[BOOTSTRAP/QUANTUM] Initializing quantum state infrastructure…")
         
+        # Pre-initialize all to None to prevent UnboundLocalError
+        QuantumStateWriter = None
+        QuantumStateSnapshot = None
+        AtomicQuantumTransition = None
+        QuantumAwareCommandExecutor = None
+        QuantumCoherenceCommitment = None
+        EntanglementGraph = None
+        
         try:
             from quantum_state_manager import (
-            QuantumStateWriter, QuantumStateSnapshot, 
-            AtomicQuantumTransition, QuantumAwareCommandExecutor,
-            QuantumCoherenceCommitment, EntanglementGraph
+                QuantumStateWriter, QuantumStateSnapshot, 
+                AtomicQuantumTransition, QuantumAwareCommandExecutor,
+                QuantumCoherenceCommitment, EntanglementGraph
             )
         except (ImportError, ModuleNotFoundError):
-            logger.warning("[BOOTSTRAP/QUANTUM] quantum_state_manager not available")
-            # Define fallback values
-            QuantumStateWriter = None
-            QuantumStateSnapshot = None
-            QuantumStateValidator = None
+            logger.warning("[BOOTSTRAP/QUANTUM] quantum_state_manager not available — degraded mode")
         
-        # Create quantum components - handle None case
+        # Safely instantiate only if imports succeeded
+        QUANTUM_WRITER = None
+        QUANTUM_STATE = None
+        QUANTUM_TRANSITION = None
+        QUANTUM_EXECUTOR = None
+        QUANTUM_COHERENCE_COMMITMENT = None
+        ENTANGLEMENT_GRAPH = None
+        
         if QuantumStateWriter is not None:
-            QUANTUM_WRITER = QuantumStateWriter(db_pool=DB_POOL, batch_size=150, flush_interval=4.0)
+            try:
+                QUANTUM_WRITER = QuantumStateWriter(db_pool=DB_POOL, batch_size=150, flush_interval=4.0)
+            except Exception as e:
+                logger.warning(f"[BOOTSTRAP/QUANTUM] QuantumStateWriter failed: {e}")
         
-        # GUARD: Only instantiate if imports succeeded
         if QuantumStateSnapshot is not None:
-            QUANTUM_STATE = QuantumStateSnapshot()
-        else:
-            QUANTUM_STATE = None
+            try:
+                QUANTUM_STATE = QuantumStateSnapshot()
+            except Exception as e:
+                logger.warning(f"[BOOTSTRAP/QUANTUM] QuantumStateSnapshot failed: {e}")
         
         if AtomicQuantumTransition is not None:
-            QUANTUM_TRANSITION = AtomicQuantumTransition(max_shadow_history=200)
-        else:
-            QUANTUM_TRANSITION = None
+            try:
+                QUANTUM_TRANSITION = AtomicQuantumTransition(max_shadow_history=200)
+            except Exception as e:
+                logger.warning(f"[BOOTSTRAP/QUANTUM] AtomicQuantumTransition failed: {e}")
         
         if QUANTUM_STATE is not None and AtomicQuantumTransition is not None:
-            QUANTUM_EXECUTOR = QuantumAwareCommandExecutor(QUANTUM_STATE, QUANTUM_TRANSITION)
-        else:
-            QUANTUM_EXECUTOR = None
+            try:
+                QUANTUM_EXECUTOR = QuantumAwareCommandExecutor(QUANTUM_STATE, QUANTUM_TRANSITION)
+            except Exception as e:
+                logger.warning(f"[BOOTSTRAP/QUANTUM] QuantumAwareCommandExecutor failed: {e}")
         
         if QUANTUM_STATE is not None:
-            QUANTUM_COHERENCE_COMMITMENT = QuantumCoherenceCommitment(QUANTUM_STATE, DB_POOL)
-        else:
-            QUANTUM_COHERENCE_COMMITMENT = None
+            try:
+                QUANTUM_COHERENCE_COMMITMENT = QuantumCoherenceCommitment(QUANTUM_STATE, DB_POOL)
+            except Exception as e:
+                logger.warning(f"[BOOTSTRAP/QUANTUM] QuantumCoherenceCommitment failed: {e}")
         
-        ENTANGLEMENT_GRAPH = None  # Optional, can fail gracefully
-        try:
-            ENTANGLEMENT_GRAPH = EntanglementGraph()
-        except:
-            pass
+        if EntanglementGraph is not None:
+            try:
+                ENTANGLEMENT_GRAPH = EntanglementGraph()
+            except Exception as e:
+                logger.warning(f"[BOOTSTRAP/QUANTUM] EntanglementGraph failed: {e}")
         
-        logger.info("[BOOTSTRAP/QUANTUM] ✅ Quantum infrastructure ready (graceful fallback mode)")
+        logger.info("[BOOTSTRAP/QUANTUM] ✅ Quantum infrastructure ready")
         
     except Exception as exc:
         logger.error(f"[BOOTSTRAP/QUANTUM] ⚠️  Initialization failed: {exc}", exc_info=True)
@@ -1017,6 +1034,9 @@ def execute_command():
                 logger.error(f"[auth] Unexpected JWT error: {exc}", exc_info=True)
 
         result = dispatch_command(command, args, user_id, token=raw_token, role=role)
+        # Ensure response is JSON-serializable
+        from globals import _format_response
+        result = _format_response(result)
         return jsonify(result)
 
     except Exception as exc:
@@ -1050,7 +1070,7 @@ def genesis():
 
 @app.route('/api/quantum', methods=['GET'])
 def quantum_summary():
-    """Comprehensive quantum/lattice metrics - uses cached get_quantum() from globals."""
+    """Comprehensive quantum metrics — unified, cache-based."""
     try:
         from globals import get_quantum
         metrics = get_quantum()

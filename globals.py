@@ -965,7 +965,42 @@ def get_system_health() -> dict:
         }
     }
 
-def get_state_snapshot() -> dict:
+def _format_response(response: Any) -> dict:
+    """
+    Ensure all command responses are JSON-safe dictionaries.
+    Converts any response to proper format.
+    """
+    # If already a dict, ensure it's JSON-serializable
+    if isinstance(response, dict):
+        try:
+            # Test JSON serialization
+            json.dumps(response)
+            return response
+        except (TypeError, ValueError):
+            # If not serializable, extract safe values
+            safe_dict = {}
+            for k, v in response.items():
+                try:
+                    json.dumps({k: v})
+                    safe_dict[k] = v
+                except:
+                    safe_dict[k] = str(v) if v is not None else None
+            return safe_dict
+    
+    # If None, return error
+    if response is None:
+        return {'status': 'error', 'error': 'Command returned None'}
+    
+    # If string, wrap in response
+    if isinstance(response, str):
+        return {'status': 'success', 'result': response}
+    
+    # If list, wrap in response
+    if isinstance(response, list):
+        return {'status': 'success', 'result': response}
+    
+    # Default: convert to string representation
+    return {'status': 'success', 'result': str(response)}
     return {
         'initialized': _GLOBAL_STATE['initialized'],
         'quantum': get_quantum(),
@@ -2410,9 +2445,26 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
                     'error': 'Usage: auth-login --email=you@example.com --password=secret'}
         try:
             from auth_handlers import AuthSystemIntegration
-            return AuthSystemIntegration().login(email, password)
-        except Exception:
-            return {'status': 'error', 'error': 'Auth system unavailable — try POST /api/auth/login'}
+            response = AuthSystemIntegration().login(email, password)
+            # Ensure response is a dict
+            if isinstance(response, dict):
+                return response
+            else:
+                # Fallback: convert to string representation
+                return {
+                    'status': 'success',
+                    'result': {
+                        'message': 'Login response received',
+                        'auth_handler_response': str(response),
+                    }
+                }
+        except Exception as e:
+            return {
+                'status': 'error',
+                'error': 'Auth system unavailable',
+                'hint': 'Use POST /api/auth/login with JSON: {"email": "...", "password": "..."}',
+                'debug': str(e)[:100] if str(e) else None,
+            }
 
     if cmd == 'auth-logout':
         return {'status': 'success', 'result': {
@@ -2428,13 +2480,28 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
                     'error': 'Usage: auth-register --email=... --password=... --username=...'}
         try:
             from auth_handlers import AuthSystemIntegration
-            return AuthSystemIntegration().register(email, password, username)
-        except Exception:
-            return {'status': 'success', 'result': {
-                'message':  'Use POST /api/auth/register',
-                'endpoint': '/api/auth/register',
-                'required': {'email': email, 'password': '***', 'username': username},
-            }}
+            response = AuthSystemIntegration().register(email, password, username)
+            # Ensure response is a dict
+            if isinstance(response, dict):
+                return response
+            else:
+                return {
+                    'status': 'success',
+                    'result': {
+                        'message': 'Registration response received',
+                        'auth_handler_response': str(response),
+                    }
+                }
+        except Exception as e:
+            return {
+                'status': 'success',
+                'result': {
+                    'message': 'Use POST /api/auth/register for registration',
+                    'endpoint': '/api/auth/register',
+                    'required': {'email': email, 'password': '***', 'username': username},
+                    'debug': str(e)[:100] if str(e) else None,
+                }
+            }
 
     if cmd == 'auth-mfa':
         return {'status': 'success', 'result': {
