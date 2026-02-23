@@ -315,7 +315,181 @@ _GLOBAL_STATE = {
     'chsh_violation_total': 0,                       # cumulative Bell violations across all cycles
     'quantum_regime_cycles':0,                       # cycles where S > 2.0
     'classical_regime_cycles':0,                     # cycles where S <= 2.0
+    
+    # ── Metrics harvester daemon ───────────────────────────────────────────────────
+    'metrics_harvester': None,                       # QuantumMetricsHarvester instance
+    'metrics_daemon_thread': None,                   # Background harvest thread
+    'metrics_last_harvest': 0.0,                     # Timestamp of last harvest
+    'metrics_harvest_count': 0,                      # Total harvests performed
+    'metrics_last_verbose_log': 0.0,                 # Timestamp of last verbose log
 }
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# LIGHTWEIGHT METRICS HARVESTER FOR 15-SECOND INTERVALS
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+class QuantumMetricsHarvester:
+    """Lightweight harvester that collects metrics every 15 seconds and writes to DB"""
+    
+    def __init__(self, db_connection_getter=None):
+        self.get_db = db_connection_getter
+        self.running = False
+        self.harvest_interval = 15  # Every 15 seconds
+        self.verbose_interval = 30  # Verbose log every 30 seconds
+        self.harvest_count = 0
+        self.write_count = 0
+        self.error_count = 0
+    
+    def harvest(self) -> dict:
+        """Collect current metrics from global state"""
+        try:
+            from datetime import datetime
+            metrics = {
+                'timestamp': datetime.utcnow().isoformat(),
+                'engine': 'QTCL-QE v8.0',
+                'source': 'live_harvest'
+            }
+            
+            # Get heartbeat metrics
+            hb = _GLOBAL_STATE.get('heartbeat')
+            if hb and hasattr(hb, 'get_metrics'):
+                hb_m = hb.get_metrics() or {}
+                metrics['heartbeat_running'] = hb_m.get('running', False)
+                metrics['heartbeat_pulse_count'] = hb_m.get('pulse_count', 0)
+                metrics['heartbeat_frequency_hz'] = hb_m.get('frequency', 1.0)
+            else:
+                metrics['heartbeat_running'] = False
+                metrics['heartbeat_pulse_count'] = 0
+                metrics['heartbeat_frequency_hz'] = 0.0
+            
+            # Get lattice metrics
+            lat = _GLOBAL_STATE.get('lattice')
+            if lat and hasattr(lat, 'get_system_metrics'):
+                lat_m = lat.get_system_metrics() or {}
+                metrics['lattice_operations'] = lat_m.get('operations_count', 0)
+                metrics['lattice_tx_processed'] = lat_m.get('transactions_processed', 0)
+            else:
+                metrics['lattice_operations'] = 0
+                metrics['lattice_tx_processed'] = 0
+            
+            # Get W-state metrics
+            ws = _GLOBAL_STATE.get('w_state_enhanced')
+            if ws and hasattr(ws, 'get_state'):
+                ws_m = ws.get_state() or {}
+                metrics['w_state_coherence_avg'] = float(ws_m.get('coherence_avg', 0.0))
+                metrics['w_state_fidelity_avg'] = float(ws_m.get('fidelity_avg', 0.0))
+                metrics['w_state_entanglement'] = float(ws_m.get('entanglement_strength', 0.0))
+                metrics['w_state_superposition_count'] = ws_m.get('superposition_count', 5)
+                metrics['w_state_tx_validations'] = ws_m.get('transaction_validations', 0)
+            else:
+                metrics['w_state_coherence_avg'] = 0.0
+                metrics['w_state_fidelity_avg'] = 0.0
+                metrics['w_state_entanglement'] = 0.0
+                metrics['w_state_superposition_count'] = 5
+                metrics['w_state_tx_validations'] = 0
+            
+            # Get noise bath metrics
+            nb = _GLOBAL_STATE.get('noise_bath_enhanced')
+            if nb and hasattr(nb, 'get_state'):
+                nb_m = nb.get_state() or {}
+                metrics['noise_kappa'] = float(nb_m.get('kappa', 0.08))
+                metrics['noise_fidelity_preservation'] = float(nb_m.get('fidelity_preservation_rate', 0.99))
+                metrics['noise_decoherence_events'] = nb_m.get('decoherence_events', 0)
+                metrics['noise_non_markovian_order'] = nb_m.get('non_markovian_order', 5)
+            else:
+                metrics['noise_kappa'] = 0.08
+                metrics['noise_fidelity_preservation'] = 0.99
+                metrics['noise_decoherence_events'] = 0
+                metrics['noise_non_markovian_order'] = 5
+            
+            # Get Bell boundary metrics
+            bell_history = _GLOBAL_STATE.get('bell_chsh_history', [])
+            if bell_history:
+                latest = list(bell_history)[-1] if hasattr(bell_history, '__iter__') else None
+                if latest and len(latest) >= 2:
+                    metrics['bell_s_chsh_mean'] = float(latest[1])  # S_CHSH value
+                else:
+                    metrics['bell_s_chsh_mean'] = 0.0
+            else:
+                metrics['bell_s_chsh_mean'] = 0.0
+            
+            metrics['bell_chsh_violations'] = _GLOBAL_STATE.get('chsh_violation_total', 0)
+            metrics['bell_quantum_fraction'] = float(
+                _GLOBAL_STATE.get('quantum_regime_cycles', 0) / max(1, 
+                    _GLOBAL_STATE.get('quantum_regime_cycles', 0) + 
+                    _GLOBAL_STATE.get('classical_regime_cycles', 1))
+            )
+            
+            self.harvest_count += 1
+            return metrics
+            
+        except Exception as e:
+            logger.error(f"Harvest error: {e}")
+            self.error_count += 1
+            return {}
+    
+    def write_to_db(self, metrics: dict) -> bool:
+        """Write metrics to quantum_metrics table"""
+        if not self.get_db or not metrics:
+            return False
+        
+        try:
+            conn = self.get_db()
+            if not conn:
+                return False
+            
+            cursor = conn.cursor()
+            query = """
+            INSERT INTO quantum_metrics (
+                timestamp, engine,
+                heartbeat_running, heartbeat_pulse_count, heartbeat_frequency_hz,
+                lattice_operations, lattice_tx_processed,
+                w_state_coherence_avg, w_state_fidelity_avg, w_state_entanglement,
+                w_state_superposition_count, w_state_tx_validations,
+                noise_kappa, noise_fidelity_preservation, noise_decoherence_events,
+                noise_non_markovian_order, bell_quantum_fraction, bell_chsh_violations, 
+                bell_s_chsh_mean, created_at, updated_at
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
+            """
+            
+            now = datetime.utcnow().isoformat()
+            values = (
+                metrics.get('timestamp'),
+                metrics.get('engine', 'QTCL-QE v8.0'),
+                metrics.get('heartbeat_running', False),
+                metrics.get('heartbeat_pulse_count', 0),
+                metrics.get('heartbeat_frequency_hz', 1.0),
+                metrics.get('lattice_operations', 0),
+                metrics.get('lattice_tx_processed', 0),
+                metrics.get('w_state_coherence_avg', 0.0),
+                metrics.get('w_state_fidelity_avg', 0.0),
+                metrics.get('w_state_entanglement', 0.0),
+                metrics.get('w_state_superposition_count', 5),
+                metrics.get('w_state_tx_validations', 0),
+                metrics.get('noise_kappa', 0.08),
+                metrics.get('noise_fidelity_preservation', 0.99),
+                metrics.get('noise_decoherence_events', 0),
+                metrics.get('noise_non_markovian_order', 5),
+                metrics.get('bell_quantum_fraction', 0.0),
+                metrics.get('bell_chsh_violations', 0),
+                metrics.get('bell_s_chsh_mean', 0.0),
+                now, now
+            )
+            
+            cursor.execute(query, values)
+            conn.commit()
+            cursor.close()
+            conn.close()
+            
+            self.write_count += 1
+            return True
+            
+        except Exception as e:
+            logger.debug(f"DB write error: {e}")
+            self.error_count += 1
+            return False
 
 def _safe_import(module_path: str, item_name: str, fallback=None):
     """Safely import with circuit breaker."""
@@ -523,6 +697,58 @@ def initialize_globals():
                 logger.info("✅ PQC genesis block created and verified")
             except Exception as e:
                 logger.warning(f"⚠️  Genesis block: {str(e)[:60]}")
+
+            # Initialize Metrics Harvester (15-second intervals)
+            try:
+                def _get_db_conn():
+                    """Get database connection from pool"""
+                    db_pool = _GLOBAL_STATE.get('db_pool')
+                    if db_pool and hasattr(db_pool, 'getconn'):
+                        return db_pool.getconn()
+                    return None
+                
+                harvester = QuantumMetricsHarvester(db_connection_getter=_get_db_conn)
+                _GLOBAL_STATE['metrics_harvester'] = harvester
+                
+                # Start background harvest thread
+                def _harvest_loop():
+                    """Background 15-second harvest loop"""
+                    import time
+                    last_verbose = time.time()
+                    while _GLOBAL_STATE['initialized']:
+                        try:
+                            now = time.time()
+                            metrics = harvester.harvest()
+                            if metrics:
+                                harvester.write_to_db(metrics)
+                            
+                            # Verbose log every 30 seconds
+                            if now - last_verbose >= 30:
+                                logger.info(
+                                    f"[metrics] Harvest #{harvester.harvest_count} | "
+                                    f"Writes: {harvester.write_count} | "
+                                    f"Coherence: {metrics.get('w_state_coherence_avg', 0):.4f} | "
+                                    f"Ops: {metrics.get('lattice_operations', 0)}"
+                                )
+                                last_verbose = now
+                            
+                            time.sleep(15)  # Every 15 seconds
+                        except Exception as e:
+                            logger.debug(f"Harvest loop error: {e}")
+                            time.sleep(15)
+                
+                import threading as _threading
+                harvest_thread = _threading.Thread(
+                    target=_harvest_loop,
+                    daemon=True,
+                    name='metrics-harvest'
+                )
+                _GLOBAL_STATE['metrics_daemon_thread'] = harvest_thread
+                harvest_thread.start()
+                logger.info("✅ Metrics harvester daemon started (15-second intervals, verbose every 30s)")
+                
+            except Exception as e:
+                logger.warning(f"⚠️  Metrics harvester: {str(e)[:60]}")
 
             _GLOBAL_STATE['initialized'] = True
             logger.info("="*80)
@@ -1526,204 +1752,93 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
     # ══════════════════════════════════════════════════════════════════════════
 
     if cmd == 'quantum-stats':
-        """Quantum statistics — all values from database."""
         import json as _json
-        from datetime import datetime, timezone
 
         def _clean(d):
-            """JSON-safe dict cleaner."""
             try:
                 return _json.loads(_json.dumps(
                     d, default=lambda o: float(o) if hasattr(o, '__float__') else str(o)))
             except Exception:
                 return {}
 
-        # ─ Try to load from database ──────────────────────────────────────────
-        db_metrics = {}
-        db_written = False
+        hb_m = lat_m = neural_s = ws_s = nb_s = health_s = {}
         try:
-            db_mgr = get_db_manager()
-            if db_mgr and hasattr(db_mgr, 'execute_query'):
-                # Try to fetch latest quantum metrics from DB
-                query = """
-                    SELECT * FROM quantum_metrics 
-                    ORDER BY timestamp DESC LIMIT 1
-                """
-                result = db_mgr.execute_query(query)
-                if result and isinstance(result, (list, tuple)) and len(result) > 0:
-                    row = result[0]
-                    # Convert row (tuple/dict) to dict
-                    if isinstance(row, dict):
-                        db_metrics = row
-                    elif hasattr(row, '_asdict'):
-                        db_metrics = row._asdict()
-                    else:
-                        db_metrics = {}
-        except Exception as _db_err:
-            logger.debug(f"[quantum-stats] DB fetch error: {_db_err}")
+            _hb  = get_heartbeat()
+            _lat = get_lattice()
+            _lnr = get_lattice_neural_refresh()
+            _ws  = get_w_state_enhanced()
+            _nb  = get_noise_bath_enhanced()
+            if hasattr(_hb,  'get_metrics'):        hb_m    = _clean(_hb.get_metrics())
+            if hasattr(_lat, 'get_system_metrics'): lat_m   = _clean(_lat.get_system_metrics())
+            if hasattr(_lnr, 'get_state'):          neural_s= _clean(_lnr.get_state())
+            if hasattr(_ws,  'get_state'):          ws_s    = _clean(_ws.get_state())
+            if hasattr(_nb,  'get_state'):          nb_s    = _clean(_nb.get_state())
+            if hasattr(_lat, 'health_check'):       health_s= _clean(_lat.health_check())
+        except Exception as _qe:
+            logger.debug(f"[quantum-stats] singleton error: {_qe}")
 
-        # ─ Fallback: Build metrics from cached subsystems ──────────────────────
-        if not db_metrics:
-            hb_m = lat_m = neural_s = ws_s = nb_s = health_s = {}
+        v8 = get_v8_status()
+        g  = v8.get('guardian', {})
+        m  = v8.get('maintainer', {})
+
+        bell = get_bell_boundary_report()
+        mi   = get_mi_trend()
+        
+        # Trigger metrics harvest and database write on demand
+        harvester = _GLOBAL_STATE.get('metrics_harvester')
+        if harvester:
             try:
-                _hb  = get_heartbeat()
-                _lat = get_lattice()
-                _lnr = get_lattice_neural_refresh()
-                _ws  = get_w_state_enhanced()
-                _nb  = get_noise_bath_enhanced()
-                if hasattr(_hb,  'get_metrics'):        hb_m    = _clean(_hb.get_metrics())
-                if hasattr(_lat, 'get_system_metrics'): lat_m   = _clean(_lat.get_system_metrics())
-                if hasattr(_lnr, 'get_state'):          neural_s= _clean(_lnr.get_state())
-                if hasattr(_ws,  'get_state'):          ws_s    = _clean(_ws.get_state())
-                if hasattr(_nb,  'get_state'):          nb_s    = _clean(_nb.get_state())
-                if hasattr(_lat, 'health_check'):       health_s= _clean(_lat.health_check())
-            except Exception as _qe:
-                logger.debug(f"[quantum-stats] subsystem error: {_qe}")
+                metrics = harvester.harvest()
+                if metrics:
+                    harvester.write_to_db(metrics)
+            except Exception as _he:
+                logger.debug(f"Harvest trigger error: {_he}")
 
-            v8 = get_v8_status()
-            g  = v8.get('guardian', {})
-            m  = v8.get('maintainer', {})
-            bell = get_bell_boundary_report()
-            mi   = get_mi_trend()
-
-            db_metrics = {
-                'engine': 'QTCL-QE v8.0',
-                'timestamp': datetime.now(timezone.utc).isoformat(),
-                'heartbeat_running': hb_m.get('running', False),
-                'heartbeat_pulse_count': hb_m.get('pulse_count', 0),
-                'heartbeat_frequency_hz': hb_m.get('frequency', 1.0),
-                'lattice_operations': lat_m.get('operations_count', 0),
-                'lattice_tx_processed': lat_m.get('transactions_processed', 0),
-                'neural_convergence': neural_s.get('convergence_status', 'unknown'),
-                'neural_iterations': neural_s.get('learning_iterations', 0),
-                'w_state_coherence_avg': ws_s.get('coherence_avg', 0.0),
-                'w_state_fidelity_avg': ws_s.get('fidelity_avg', 0.0),
-                'w_state_entanglement': ws_s.get('entanglement_strength', 0.0),
-                'w_state_superposition_count': ws_s.get('superposition_count', 5),
-                'w_state_tx_validations': ws_s.get('transaction_validations', 0),
-                'noise_kappa': nb_s.get('kappa', 0.08),
-                'noise_fidelity_preservation': nb_s.get('fidelity_preservation_rate', 0.99),
-                'noise_decoherence_events': nb_s.get('decoherence_events', 0),
-                'noise_non_markovian_order': nb_s.get('non_markovian_order', 5),
-                'v8_initialized': v8.get('initialized', False),
-                'v8_total_pulses': g.get('total_pulses_fired', 0),
-                'v8_floor_violations': g.get('floor_violations', 0),
-                'v8_maintainer_hz': m.get('actual_hz', 0.0),
-                'v8_maintainer_running': m.get('running', False),
-                'v8_coherence_floor': 0.89,
-                'v8_w_state_target': 0.9997,
-                'bell_quantum_fraction': bell.get('quantum_fraction', 0.0),
-                'bell_chsh_violations': bell.get('chsh_violation_total', 0),
-                'bell_boundary_kappa_est': bell.get('boundary_kappa_estimate'),
-                'bell_s_chsh_mean': bell.get('S_CHSH_mean', 0.0),
-                'mi_trend_slope': mi.get('slope', 0.0),
-                'mi_trend_mean': mi.get('mean', 0.0),
-                'mi_trend_status': mi.get('trend', 'insufficient_data'),
-            }
-
-            # ─ Try to write metrics to database ───────────────────────────────
-            try:
-                db_mgr = get_db_manager()
-                if db_mgr and hasattr(db_mgr, 'execute_query'):
-                    insert_query = """
-                        INSERT INTO quantum_metrics (
-                            timestamp, engine,
-                            heartbeat_running, heartbeat_pulse_count, heartbeat_frequency_hz,
-                            lattice_operations, lattice_tx_processed,
-                            neural_convergence, neural_iterations,
-                            w_state_coherence_avg, w_state_fidelity_avg, w_state_entanglement,
-                            w_state_superposition_count, w_state_tx_validations,
-                            noise_kappa, noise_fidelity_preservation, noise_decoherence_events,
-                            noise_non_markovian_order,
-                            v8_initialized, v8_total_pulses, v8_floor_violations,
-                            v8_maintainer_hz, v8_maintainer_running,
-                            v8_coherence_floor, v8_w_state_target,
-                            bell_quantum_fraction, bell_chsh_violations,
-                            bell_boundary_kappa_est, bell_s_chsh_mean,
-                            mi_trend_slope, mi_trend_mean, mi_trend_status
-                        ) VALUES (
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                        )
-                    """
-                    params = (
-                        db_metrics['timestamp'], db_metrics['engine'],
-                        db_metrics['heartbeat_running'], db_metrics['heartbeat_pulse_count'],
-                        db_metrics['heartbeat_frequency_hz'],
-                        db_metrics['lattice_operations'], db_metrics['lattice_tx_processed'],
-                        db_metrics['neural_convergence'], db_metrics['neural_iterations'],
-                        db_metrics['w_state_coherence_avg'], db_metrics['w_state_fidelity_avg'],
-                        db_metrics['w_state_entanglement'],
-                        db_metrics['w_state_superposition_count'], db_metrics['w_state_tx_validations'],
-                        db_metrics['noise_kappa'], db_metrics['noise_fidelity_preservation'],
-                        db_metrics['noise_decoherence_events'],
-                        db_metrics['noise_non_markovian_order'],
-                        db_metrics['v8_initialized'], db_metrics['v8_total_pulses'],
-                        db_metrics['v8_floor_violations'],
-                        db_metrics['v8_maintainer_hz'], db_metrics['v8_maintainer_running'],
-                        db_metrics['v8_coherence_floor'], db_metrics['v8_w_state_target'],
-                        db_metrics['bell_quantum_fraction'], db_metrics['bell_chsh_violations'],
-                        db_metrics['bell_boundary_kappa_est'], db_metrics['bell_s_chsh_mean'],
-                        db_metrics['mi_trend_slope'], db_metrics['mi_trend_mean'],
-                        db_metrics['mi_trend_status'],
-                    )
-                    db_mgr.execute_query(insert_query, params)
-                    db_written = True
-            except Exception as _write_err:
-                logger.debug(f"[quantum-stats] DB write error: {_write_err}")
-
-        # ─ Format response ────────────────────────────────────────────────────
         return {'status': 'success', 'result': {
-            'engine': db_metrics.get('engine', 'QTCL-QE v8.0'),
-            'timestamp': db_metrics.get('timestamp', datetime.now(timezone.utc).isoformat()),
-            'database_sourced': bool(db_metrics),
-            'database_written': db_written,
+            'engine': 'QTCL-QE v8.0',
             'heartbeat': {
-                'running':      db_metrics.get('heartbeat_running', False),
-                'pulse_count':  db_metrics.get('heartbeat_pulse_count', 0),
-                'frequency_hz': db_metrics.get('heartbeat_frequency_hz', 1.0),
-            },
+                'running':      hb_m.get('running', False),
+                'pulse_count':  hb_m.get('pulse_count', 0),
+                'frequency_hz': hb_m.get('frequency', 1.0),
+            } if hb_m else {'running': False, 'note': 'heartbeat not started'},
             'lattice': {
-                'operations':   db_metrics.get('lattice_operations', 0),
-                'tx_processed': db_metrics.get('lattice_tx_processed', 0),
+                'operations':   lat_m.get('operations_count', 0),
+                'tx_processed': lat_m.get('transactions_processed', 0),
+                'health':       health_s,
             },
             'neural_network': {
-                'convergence':  db_metrics.get('neural_convergence', 'unknown'),
-                'iterations':   db_metrics.get('neural_iterations', 0),
+                'convergence':  neural_s.get('convergence_status', 'unknown'),
+                'iterations':   neural_s.get('learning_iterations', 0),
             },
             'w_state': {
-                'coherence_avg':        db_metrics.get('w_state_coherence_avg', 0.0),
-                'fidelity_avg':         db_metrics.get('w_state_fidelity_avg', 0.0),
-                'entanglement_strength': db_metrics.get('w_state_entanglement', 0.0),
-                'superposition_count':  db_metrics.get('w_state_superposition_count', 5),
-                'tx_validations':       db_metrics.get('w_state_tx_validations', 0),
+                'coherence_avg':        ws_s.get('coherence_avg', 0.0),
+                'fidelity_avg':         ws_s.get('fidelity_avg', 0.0),
+                'entanglement_strength':ws_s.get('entanglement_strength', 0.0),
+                'superposition_count':  ws_s.get('superposition_count', 5),
+                'tx_validations':       ws_s.get('transaction_validations', 0),
             },
             'noise_bath': {
-                'kappa':                db_metrics.get('noise_kappa', 0.08),
-                'fidelity_preservation': db_metrics.get('noise_fidelity_preservation', 0.99),
-                'decoherence_events':   db_metrics.get('noise_decoherence_events', 0),
-                'non_markovian_order':  db_metrics.get('noise_non_markovian_order', 5),
+                'kappa':                nb_s.get('kappa', 0.08),
+                'fidelity_preservation':nb_s.get('fidelity_preservation_rate', 0.99),
+                'decoherence_events':   nb_s.get('decoherence_events', 0),
+                'non_markovian_order':  nb_s.get('non_markovian_order', 5),
             },
             'v8_revival': {
-                'initialized':    db_metrics.get('v8_initialized', False),
-                'total_pulses':   db_metrics.get('v8_total_pulses', 0),
-                'floor_violations': db_metrics.get('v8_floor_violations', 0),
-                'maintainer_hz':  db_metrics.get('v8_maintainer_hz', 0.0),
-                'maintainer_running': db_metrics.get('v8_maintainer_running', False),
-                'coherence_floor': db_metrics.get('v8_coherence_floor', 0.89),
-                'w_state_target':  db_metrics.get('v8_w_state_target', 0.9997),
+                'initialized':    v8['initialized'],
+                'total_pulses':   g.get('total_pulses_fired', 0),
+                'floor_violations':g.get('floor_violations', 0),
+                'maintainer_hz':  m.get('actual_hz', 0.0),
+                'maintainer_running': m.get('running', False),
+                'coherence_floor': 0.89,
+                'w_state_target':  0.9997,
             },
             'bell_boundary': {
-                'quantum_fraction':     db_metrics.get('bell_quantum_fraction', 0.0),
-                'chsh_violations':      db_metrics.get('bell_chsh_violations', 0),
-                'boundary_kappa_est':   db_metrics.get('bell_boundary_kappa_est'),
-                'S_CHSH_mean':          db_metrics.get('bell_s_chsh_mean', 0.0),
+                'quantum_fraction':     bell.get('quantum_fraction', 0.0),
+                'chsh_violations':      bell.get('chsh_violation_total', 0),
+                'boundary_kappa_est':   bell.get('boundary_kappa_estimate'),
+                'S_CHSH_mean':          bell.get('S_CHSH_mean', 0.0),
             },
-            'mi_trend': {
-                'slope': db_metrics.get('mi_trend_slope', 0.0),
-                'mean': db_metrics.get('mi_trend_mean', 0.0),
-                'trend': db_metrics.get('mi_trend_status', 'insufficient_data'),
-            },
+            'mi_trend': mi,
         }}
 
     # ══════════════════════════════════════════════════════════════════════════

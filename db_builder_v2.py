@@ -273,7 +273,36 @@ PQ_SCHEMA_DEFINITIONS = {
         assigned_at TIMESTAMP,
         pq_info JSONB DEFAULT '{}'::jsonb,
         status VARCHAR(32) DEFAULT 'available',
-        FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE SET NULL)"""
+        FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE SET NULL)""",
+    'quantum_metrics': """CREATE TABLE IF NOT EXISTS quantum_metrics (
+        id SERIAL PRIMARY KEY,
+        timestamp TIMESTAMP NOT NULL DEFAULT NOW(),
+        engine VARCHAR(50) DEFAULT 'QTCL-QE v8.0',
+        heartbeat_running BOOLEAN DEFAULT FALSE,
+        heartbeat_pulse_count INTEGER DEFAULT 0,
+        heartbeat_frequency_hz FLOAT DEFAULT 1.0,
+        lattice_operations INTEGER DEFAULT 0,
+        lattice_tx_processed INTEGER DEFAULT 0,
+        w_state_coherence_avg FLOAT DEFAULT 0.0,
+        w_state_fidelity_avg FLOAT DEFAULT 0.0,
+        w_state_entanglement FLOAT DEFAULT 0.0,
+        w_state_superposition_count INTEGER DEFAULT 5,
+        w_state_tx_validations INTEGER DEFAULT 0,
+        noise_kappa FLOAT DEFAULT 0.08,
+        noise_fidelity_preservation FLOAT DEFAULT 0.99,
+        noise_decoherence_events INTEGER DEFAULT 0,
+        noise_non_markovian_order INTEGER DEFAULT 5,
+        bell_quantum_fraction FLOAT DEFAULT 0.0,
+        bell_chsh_violations INTEGER DEFAULT 0,
+        bell_s_chsh_mean FLOAT DEFAULT 0.0,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW())"""
+}
+
+# Create indexes for quantum_metrics table
+QUANTUM_METRICS_INDEXES = {
+    'idx_quantum_metrics_timestamp': 'CREATE INDEX IF NOT EXISTS idx_quantum_metrics_timestamp ON quantum_metrics(timestamp DESC)',
+    'idx_quantum_metrics_created': 'CREATE INDEX IF NOT EXISTS idx_quantum_metrics_created ON quantum_metrics(created_at DESC)'
 }
 
 def init_pq_schema(db_mgr=None):
@@ -293,6 +322,15 @@ def init_pq_schema(db_mgr=None):
             except Exception as e:
                 if 'already exists' not in str(e).lower() and 'duplicate' not in str(e).lower():
                     logger.debug(f"[PQ-SCHEMA] {tbl}: {e}")
+        
+        # Create indexes for quantum_metrics table
+        for idx_name, idx_sql in QUANTUM_METRICS_INDEXES.items():
+            try:
+                db_mgr.execute(idx_sql)
+                logger.debug(f"[PQ-SCHEMA] ✓ {idx_name}")
+            except Exception as e:
+                if 'already exists' not in str(e).lower():
+                    logger.debug(f"[PQ-SCHEMA] {idx_name}: {e}")
         
         try:
             manifest = db_mgr.execute_fetch(
