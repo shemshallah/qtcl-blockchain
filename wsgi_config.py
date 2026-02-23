@@ -48,6 +48,36 @@ logging.getLogger('qiskit.compiler').setLevel(logging.WARNING)
 logging.getLogger('qiskit.transpiler').setLevel(logging.WARNING)
 logging.getLogger('qiskit').setLevel(logging.WARNING)
 
+# ════════════════════════════════════════════════════════════════════════════════
+# ENVIRONMENT VARIABLES - Hard-coded from Koyeb Console
+# ════════════════════════════════════════════════════════════════════════════════
+# These MUST be set in Koyeb console environment variables before Flask starts.
+# If missing here, application will not initialize database connection.
+
+logger.info("[BOOTSTRAP] Reading environment variables from os.environ...")
+
+# Check for Supabase credentials (REQUIRED)
+SUPABASE_HOST = os.environ.get('SUPABASE_HOST')
+SUPABASE_USER = os.environ.get('SUPABASE_USER')
+SUPABASE_PASSWORD = os.environ.get('SUPABASE_PASSWORD')
+SUPABASE_PORT = os.environ.get('SUPABASE_PORT', '5432')
+SUPABASE_DB = os.environ.get('SUPABASE_DB', 'postgres')
+
+if SUPABASE_HOST and SUPABASE_USER and SUPABASE_PASSWORD:
+    logger.info(f"[BOOTSTRAP] ✓ SUPABASE credentials loaded from environment")
+    logger.info(f"[BOOTSTRAP]   HOST={SUPABASE_HOST}")
+    logger.info(f"[BOOTSTRAP]   USER={SUPABASE_USER}")
+    logger.info(f"[BOOTSTRAP]   PORT={SUPABASE_PORT}")
+    logger.info(f"[BOOTSTRAP]   DB={SUPABASE_DB}")
+else:
+    logger.error("[BOOTSTRAP] ❌ SUPABASE credentials NOT found in environment!")
+    logger.error("[BOOTSTRAP] Required env vars in Koyeb console:")
+    logger.error("[BOOTSTRAP]   SUPABASE_HOST")
+    logger.error("[BOOTSTRAP]   SUPABASE_USER")
+    logger.error("[BOOTSTRAP]   SUPABASE_PASSWORD")
+    logger.error("[BOOTSTRAP]   SUPABASE_PORT (optional, default 5432)")
+    logger.error("[BOOTSTRAP]   SUPABASE_DB (optional, default postgres)")
+
 # ── Adaptive Hyperparameter Tuner ──────────────────────────────────────────────
 class AdaptiveHyperparameterTuner:
     """Real-time adaptive hyperparameter optimization for lattice control."""
@@ -263,16 +293,25 @@ def _initialize_database_deferred() -> None:
     global DB, DB_POOL
     try:
         logger.info("[BOOTSTRAP/DB] Starting deferred database initialization…")
+        
+        # Check environment variables are loaded (from top of wsgi_config.py)
+        if not SUPABASE_HOST or not SUPABASE_USER or not SUPABASE_PASSWORD:
+            logger.error("[BOOTSTRAP/DB] ❌ SUPABASE credentials not loaded in environment")
+            logger.error(f"[BOOTSTRAP/DB]   SUPABASE_HOST={SUPABASE_HOST}")
+            logger.error(f"[BOOTSTRAP/DB]   SUPABASE_USER={SUPABASE_USER}")
+            logger.error(f"[BOOTSTRAP/DB]   SUPABASE_PASSWORD={'<set>' if SUPABASE_PASSWORD else '<NOT SET>'}")
+            return
+        
+        # Import db_manager which will use the environment variables we've loaded
         from db_builder_v2 import (
             db_manager, DB_POOL as _pool,
-            POOLER_HOST, POOLER_USER, POOLER_PASSWORD, POOLER_PORT, POOLER_DB,
         )
 
         if db_manager is None:
             logger.error("[BOOTSTRAP/DB] ❌ db_manager is None — credential/pool failure")
-            logger.error(f"[BOOTSTRAP/DB]   HOST={POOLER_HOST}  USER={POOLER_USER}  "
-                         f"PASSWORD={'<set>' if POOLER_PASSWORD else '<EMPTY>'}  "
-                         f"PORT={POOLER_PORT}  DB={POOLER_DB}")
+            logger.error(f"[BOOTSTRAP/DB]   HOST={SUPABASE_HOST}  USER={SUPABASE_USER}  "
+                         f"PASSWORD={'<set>' if SUPABASE_PASSWORD else '<EMPTY>'}  "
+                         f"PORT={SUPABASE_PORT}  DB={SUPABASE_DB}")
             return
 
         if db_manager.pool is None:
