@@ -5,17 +5,58 @@ if not logging.getLogger().hasHandlers():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-# GLOBALS INTEGRATION - Unified State Management
-# ═══════════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════════
+# ALL IMPORTS - Before any class definitions using type hints
+# ═════════════════════════════════════════════════════════════════════════════════
+
+import os,sys,json,time,hashlib,uuid,threading,secrets,hmac,base64,re,traceback,copy,struct,random,math,sqlite3
+from datetime import datetime,timedelta,timezone
+from typing import Dict,List,Optional,Any,Tuple,Set,Callable,Union
+from functools import wraps,lru_cache,partial
+from decimal import Decimal,getcontext
+from dataclasses import dataclass,asdict,field
+from enum import Enum,IntEnum,auto
+from collections import defaultdict,deque,Counter,OrderedDict
+
+# Numpy MUST be imported before any class definition using np.ndarray in type hints
+import numpy as np
+from concurrent.futures import ThreadPoolExecutor,as_completed,wait,FIRST_COMPLETED
+
+# Scientific computing
 try:
-    from globals import get_db_pool, get_heartbeat, get_globals, get_auth_manager, get_terminal
-    GLOBALS_AVAILABLE = True
+    from scipy.linalg import eigvalsh,expm
+    from scipy.special import xlogy
+    from scipy.optimize import minimize
+    SCIPY_AVAILABLE=True
 except ImportError:
-    GLOBALS_AVAILABLE = False
-    logger.warning(f"[{os.path.basename(input_path)}] Globals not available - using fallback")
+    SCIPY_AVAILABLE=False
+    logger.warning("SciPy not available")
 
+# Flask and database
+from flask import Blueprint,request,jsonify,g,Response,stream_with_context
+import psycopg2
+from psycopg2.extras import RealDictCursor,execute_batch,execute_values,Json
 
-"""
+# Qiskit quantum computing
+try:
+    from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister, transpile
+    from qiskit_aer import AerSimulator, QasmSimulator, StatevectorSimulator
+    from qiskit_aer.noise import NoiseModel, depolarizing_error, amplitude_damping_error, phase_damping_error, pauli_error
+    from qiskit.quantum_info import Statevector, DensityMatrix, state_fidelity, entropy, partial_trace, purity
+    from qiskit.circuit.library import QFT, GroverOperator, EfficientSU2
+    
+    # Handle execute import - deprecated in qiskit 1.0+
+    try:
+        from qiskit import execute
+    except ImportError:
+        execute = None
+    
+    QISKIT_AVAILABLE = True
+except ImportError as e:
+    QISKIT_AVAILABLE = False
+    logger.warning(f"Qiskit not available: {e}")
+    execute = None
+
 ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════╗
 ║                                                                                                          ║
 ║                    🌌 QUANTUM API ULTIMATE - THE POWERHOUSE 🌌                                           ║
@@ -88,23 +129,47 @@ except ImportError:
 ║  This is where we show off. This is the REVOLUTION.                                                    ║
 ║                                                                                                          ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════╝
-"""
 
-import os,sys,json,time,hashlib,uuid,logging,threading,secrets,hmac,base64,re,traceback,copy,struct,random,math,sqlite3
-from datetime import datetime,timedelta,timezone
-from typing import Dict,List,Optional,Any,Tuple,Set,Callable,Union
-from functools import wraps,lru_cache,partial
-from decimal import Decimal,getcontext
-from dataclasses import dataclass,asdict,field
-from enum import Enum,IntEnum,auto
-from collections import defaultdict,deque,Counter,OrderedDict
+# GLOBALS INTEGRATION - Unified State Management
+# ═══════════════════════════════════════════════════════════════════════════════════════
+try:
+    from globals import get_db_pool, get_heartbeat, get_globals, get_auth_manager, get_terminal
+    GLOBALS_AVAILABLE = True
+except ImportError:
+    GLOBALS_AVAILABLE = False
+    logger.warning("[quantum_api] Globals not available - using fallback")
 
-# ═════════════════════════════════════════════════════════════════════════════════
-# QUANTUM DENSITY MATRIX MANAGER (INTEGRATED)
-# ═════════════════════════════════════════════════════════════════════════════════
 
 class QuantumDensityMatrixManager:
-    """Manages quantum lattice density matrix persistence."""
+    
+
+# ═════════════════════════════════════════════════════════════════════════════════
+# QRNG HELPER FUNCTIONS - Use globals instead of np.random
+# ═════════════════════════════════════════════════════════════════════════════════
+
+def get_random_float(scale=1.0):
+    """Get random float from globals QRNG system."""
+    try:
+        from globals import get_qrng
+        qrng = get_qrng()
+        return qrng.random() * scale if qrng else (np.sin(time.time()) * scale)
+    except:
+        return np.sin(time.time()) * scale
+
+def get_random_array(shape, scale=0.1):
+    """Get random array from globals QRNG system."""
+    try:
+        from globals import get_qrng
+        qrng = get_qrng()
+        if qrng:
+            size = int(np.prod(shape)) if hasattr(shape, '__iter__') else shape
+            return np.array([qrng.random() * scale for _ in range(size)]).reshape(shape)
+        else:
+            return np.sin(np.arange(np.prod(shape if hasattr(shape, '__iter__') else [shape])) * 0.1 * scale).reshape(shape)
+    except:
+        return np.sin(np.arange(np.prod(shape if hasattr(shape, '__iter__') else [shape])) * 0.1 * scale).reshape(shape)
+
+"""Manages quantum lattice density matrix persistence."""
     
     def __init__(self, db_pool):
         self.db_pool = db_pool
@@ -1562,7 +1627,7 @@ class NeuralLatticeControlGlobals:
         self.lock=threading.RLock()
         
         # Neural network weights (shared with lattice control)
-        self.weights=np.random.randn(57)*0.1 if NUMPY_AVAILABLE else None
+        self.weights=np.ones(57) * 0.1*0.1 if NUMPY_AVAILABLE else None
         
         # State tracking
         self.current_coherence=1.0
@@ -1648,7 +1713,7 @@ class NeuralLatticeControlGlobals:
                     return 0.0
                 
                 # Gradient computation (simplified)
-                grad=-loss*np.random.randn(len(self.weights))*0.01
+                grad=-loss*np.ones(len(self.weights) * 0.1)*0.01
                 
                 # Weight update with decay
                 self.weights+=grad
@@ -3131,7 +3196,7 @@ class AdvancedQuantumAlgorithms:
             # Build parameterized circuit
             circuit=QuantumCircuit(3,3,name="VQE")
             
-            params=initial_params if initial_params is not None else np.random.randn(6)*0.1
+            params=initial_params if initial_params is not None else np.ones(6) * 0.1*0.1
             
             # Ansatz
             for i,param in enumerate(params):
