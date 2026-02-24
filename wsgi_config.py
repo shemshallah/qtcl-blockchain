@@ -1392,6 +1392,14 @@ def _register_heartbeat_listeners() -> None:
         f"[HEARTBEAT-LISTENERS] Registration complete — "
         f"{len(registered)} ok / {len(failed)} failed / {listener_count} total listeners on HEARTBEAT"
     )
+    
+    # Register quantum executor heartbeat listener
+    try:
+        from quantum_lattice_control_live_complete import quantum_executor_heartbeat
+        hb.add_listener(quantum_executor_heartbeat)
+        logger.info("[HEARTBEAT-LISTENERS] ✅ Quantum Executor Heartbeat")
+    except Exception as qe:
+        logger.warning(f"[HEARTBEAT-LISTENERS] ⚠️  Quantum Executor: {qe}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
