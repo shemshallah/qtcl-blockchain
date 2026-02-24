@@ -1048,14 +1048,10 @@ def execute_command():
                 'debug': str(format_exc)[:100]
             }
         
-        # Final attempt to jsonify with detailed error logging
+        # Serialize and return — always JSON, always application/json content-type
         try:
             response = jsonify(result)
-            # Verify response is valid JSON by trying to parse it
-            try:
-                response.get_json()
-            except:
-                logger.warning(f"[/api/command] Response get_json() failed, but continuing")
+            response.headers['Content-Type'] = 'application/json; charset=utf-8'
             return response
         except Exception as jsonify_exc:
             logger.critical(f"[/api/command.jsonify] JSON serialization FAILED: {jsonify_exc}", exc_info=True)
@@ -1064,22 +1060,32 @@ def execute_command():
             logger.critical(f"[/api/command.jsonify] Result: {result}")
             # Try one more time with minimal response
             try:
-                return jsonify({
+                resp = jsonify({
                     'status': 'error',
                     'error': 'JSON serialization failed',
                     'command': command,
                     'message': 'See server logs for details'
-                }), 500
-            except:
-                logger.critical("[/api/command] EMERGENCY: Even fallback jsonify failed!")
-                return jsonify({'status': 'error', 'error': 'API critical failure'}), 500
+                })
+                resp.headers['Content-Type'] = 'application/json; charset=utf-8'
+                return resp, 500
+            except Exception:
+                from flask import make_response as _mr
+                _r = _mr('{"status":"error","error":"API critical failure"}', 500)
+                _r.headers['Content-Type'] = 'application/json; charset=utf-8'
+                return _r
 
     except Exception as exc:
         logger.error(f"[/api/command] OUTER EXCEPTION: {exc}", exc_info=True)
         try:
-            return jsonify({'status': 'error', 'error': str(exc)[:100]}), 500
-        except:
-            return "API Error", 500
+            resp = jsonify({'status': 'error', 'error': str(exc)[:200]})
+            resp.headers['Content-Type'] = 'application/json; charset=utf-8'
+            return resp, 500
+        except Exception:
+            # Absolute last resort — hand-craft a JSON string so the client NEVER sees HTML
+            from flask import make_response as _make_resp
+            r = _make_resp('{"status":"error","error":"API critical failure"}', 500)
+            r.headers['Content-Type'] = 'application/json; charset=utf-8'
+            return r
 
 
 @app.route('/api/commands', methods=['GET'])

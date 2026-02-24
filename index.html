@@ -551,14 +551,16 @@ async function execute() {
       body: JSON.stringify({ command: cmdStr, args: [], kwargs: {} })
     });
 
-    const data = await res.json().catch(() => ({ error: 'Invalid JSON response' }));
+    const data = await res.json().catch(() => ({ error: 'Invalid JSON response', status: 'error' }));
 
-    // Capture auth tokens from login responses
-    const tok = data.result?.token || data.result?.access_token || data.token;
+    // Capture auth tokens — AuthHandlers returns access_token at TOP LEVEL (not nested in result)
+    const tok = data.token || data.access_token
+              || data.result?.token || data.result?.access_token;
     if (tok && window.qtclExecutor) window.qtclExecutor.setToken(tok);
 
-    if (res.ok && (data.status === 'success' || data.result !== undefined)) {
-      const result = data.result;
+    if (res.ok && (data.status === 'success' || data.result !== undefined || data.access_token !== undefined)) {
+      // For auth responses the payload IS the top-level dict (access_token, user_id, etc.)
+      const result = data.result ?? (data.access_token ? data : null);
       if (!result) {
         addLine('✓ OK', 'success');
       } else if (typeof result === 'object') {
