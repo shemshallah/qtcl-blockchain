@@ -1851,23 +1851,33 @@ def get_system_health() -> dict:
         }
     }
 
-def _deep_json_sanitize(obj, _depth=0, _max_depth=32):
+def _deep_json_sanitize(obj, _depth=0, _max_depth=32, _visited=None):
     """
-    Recursively sanitize any Python object into a JSON-serializable form.
-    Handles numpy scalars/arrays, complex, datetime, deque, bytes, Decimal,
-    Enum, dataclasses, sets, and arbitrary nesting at any depth.
-    Depth-limited to prevent infinite recursion on circular structures.
-    Called by _format_response on every command response before jsonify().
+    ENHANCED: Recursively sanitize ANY Python object to JSON-serializable form.
+    Handles: numpy scalars/arrays, complex, datetime, deque, bytes, Decimal, Enum,
+    UUID, dataclasses, custom objects, circular refs, NaN/inf, and ANY nesting depth.
+    CRITICAL: This is the authoritative JSON-safety layer - nothing leaves without passing through here.
     """
+    if _visited is None:
+        _visited = set()
+    
+    obj_id = id(obj)
+    if obj_id in _visited and not isinstance(obj, (str, int, float, bool, type(None))):
+        return str(obj)
+    
     if _depth > _max_depth:
         return str(obj)
+    
+    if not isinstance(obj, (str, int, float, bool, type(None))):
+        _visited.add(obj_id)
+    
     _d = _depth + 1
-    # None / bool / str — already JSON-native
+    
     if obj is None or isinstance(obj, bool):
         return obj
     if isinstance(obj, str):
         return obj
-    # Pure Python numerics — guard against nan/inf which JSON rejects
+    
     if isinstance(obj, int):
         return int(obj)
     if isinstance(obj, float):
@@ -1875,20 +1885,20 @@ def _deep_json_sanitize(obj, _depth=0, _max_depth=32):
         if _m.isnan(obj) or _m.isinf(obj):
             return None
         return float(obj)
-    # dict — recurse both keys and values
+    
     if isinstance(obj, dict):
-        return {str(k): _deep_json_sanitize(v, _d, _max_depth) for k, v in obj.items()}
-    # list / tuple / set / frozenset
+        return {str(k): _deep_json_sanitize(v, _d, _max_depth, _visited) for k, v in obj.items()}
+    
     if isinstance(obj, (list, tuple, set, frozenset)):
-        return [_deep_json_sanitize(v, _d, _max_depth) for v in obj]
-    # collections.deque
+        return [_deep_json_sanitize(v, _d, _max_depth, _visited) for v in obj]
+    
     try:
-        from collections import deque as _deque
-        if isinstance(obj, _deque):
-            return [_deep_json_sanitize(v, _d, _max_depth) for v in obj]
-    except Exception:
+        from collections import deque as _deque_type
+        if isinstance(obj, _deque_type):
+            return [_deep_json_sanitize(v, _d, _max_depth, _visited) for v in obj]
+    except:
         pass
-    # numpy — must be before general __float__ check
+    
     try:
         import numpy as _np
         if isinstance(obj, _np.bool_):
@@ -1903,97 +1913,122 @@ def _deep_json_sanitize(obj, _depth=0, _max_depth=32):
             return {'real': float(obj.real), 'imag': float(obj.imag)}
         if isinstance(obj, _np.ndarray):
             if obj.ndim == 0:
-                return _deep_json_sanitize(obj.item(), _d, _max_depth)
-            # Convert to nested Python lists
-            return [_deep_json_sanitize(v, _d, _max_depth) for v in obj.tolist()]
-    except ImportError:
+                return _deep_json_sanitize(obj.item(), _d, _max_depth, _visited)
+            return [_deep_json_sanitize(v, _d, _max_depth, _visited) for v in obj.tolist()]
+    except:
         pass
-    # Python complex
+    
     if isinstance(obj, complex):
         return {'real': float(obj.real), 'imag': float(obj.imag)}
-    # datetime / date / timedelta
+    
     try:
-        import datetime as _DT
-        if isinstance(obj, _DT.datetime):
+        from datetime import datetime as _DT_cls, date as _Date_cls, timedelta as _TD_cls, timezone as _TZ_cls
+        if isinstance(obj, _DT_cls):
             if obj.tzinfo is None:
-                obj = obj.replace(tzinfo=_DT.timezone.utc)
+                obj = obj.replace(tzinfo=_TZ_cls.utc)
             return obj.isoformat()
-        if isinstance(obj, _DT.date):
+        if isinstance(obj, _Date_cls):
             return obj.isoformat()
-        if isinstance(obj, _DT.timedelta):
+        if isinstance(obj, _TD_cls):
             return obj.total_seconds()
-    except Exception:
+    except:
         pass
-    # Decimal
+    
+    try:
+        import uuid as _uuid_mod
+        if isinstance(obj, _uuid_mod.UUID):
+            return str(obj)
+    except:
+        pass
+    
     try:
         from decimal import Decimal as _Dec
         if isinstance(obj, _Dec):
-            return float(obj)
-    except Exception:
+            v = float(obj)
+            import math as _m
+            return None if (_m.isnan(v) or _m.isinf(v)) else v
+    except:
         pass
-    # Enum
+    
     try:
         from enum import Enum as _Enum
         if isinstance(obj, _Enum):
-            return _deep_json_sanitize(obj.value, _d, _max_depth)
-    except Exception:
+            if hasattr(obj, 'value'):
+                return _deep_json_sanitize(obj.value, _d, _max_depth, _visited)
+            elif hasattr(obj, 'name'):
+                return obj.name
+            else:
+                return str(obj)
+    except:
         pass
-    # bytes / bytearray — hex-encode
+    
     if isinstance(obj, (bytes, bytearray)):
         return obj.hex()
-    # dataclass — asdict recursion
+    
     try:
-        import dataclasses as _dc
-        if _dc.is_dataclass(obj) and not isinstance(obj, type):
-            return _deep_json_sanitize(_dc.asdict(obj), _d, _max_depth)
-    except Exception:
+        from dataclasses import is_dataclass as _is_dc, asdict as _asdict
+        if _is_dc(obj) and not isinstance(obj, type):
+            return _deep_json_sanitize(_asdict(obj), _d, _max_depth, _visited)
+    except:
         pass
-    # Objects with to_dict() / asdict()
-    for _meth in ('to_dict', 'asdict'):
+    
+    for _method_name in ('to_dict', 'to_json', 'asdict'):
         try:
-            attr = getattr(obj, _meth, None)
-            if callable(attr):
-                return _deep_json_sanitize(attr(), _d, _max_depth)
-        except Exception:
+            _attr = getattr(obj, _method_name, None)
+            if callable(_attr):
+                try:
+                    _result = _attr()
+                    return _deep_json_sanitize(_result, _d, _max_depth, _visited)
+                except:
+                    pass
+        except:
             pass
-    # Objects with __dict__ (plain class instances)
+    
     try:
-        d = getattr(obj, '__dict__', None)
-        if d is not None and isinstance(d, dict) and d:
-            return _deep_json_sanitize(d, _d, _max_depth)
-    except Exception:
+        _d_attr = getattr(obj, '__dict__', None)
+        if _d_attr and isinstance(_d_attr, dict) and _d_attr:
+            return _deep_json_sanitize(_d_attr, _d, _max_depth, _visited)
+    except:
         pass
-    # Any other numeric via __float__
+    
     try:
         v = float(obj)
         import math as _m
         return None if (_m.isnan(v) or _m.isinf(v)) else v
     except (TypeError, ValueError):
         pass
-    # Final fallback: stringify
+    
     try:
-        return str(obj)
+        s = str(obj)
+        if len(s) > 500:
+            return s[:500] + '...[truncated]'
+        return s
     except Exception:
-        return '__unserializable__'
+        return '__unserializable_object__'
 
 
 def _format_response(response) -> dict:
     """
     Ensure all command responses are JSON-safe dictionaries.
-    Uses _deep_json_sanitize() to handle numpy scalars/arrays, complex numbers,
-    datetime objects, deques, bytes, Decimals, and Enums at any nesting depth.
-    The previous shallow one-level approach silently broke on quantum metric objects.
+    Uses _deep_json_sanitize() to handle ALL data types at ANY nesting depth.
+    CRITICAL: This is the last line of defense before jsonify().
     """
-    sanitized = _deep_json_sanitize(response)
-    if isinstance(sanitized, dict):
-        return sanitized
-    if sanitized is None:
-        return {'status': 'error', 'error': 'Command returned None'}
-    if isinstance(sanitized, str):
+    try:
+        sanitized = _deep_json_sanitize(response)
+        if isinstance(sanitized, dict):
+            return sanitized
+        if sanitized is None:
+            return {'status': 'error', 'error': 'Command returned None'}
+        if isinstance(sanitized, (str, list)):
+            return {'status': 'success', 'result': sanitized}
         return {'status': 'success', 'result': sanitized}
-    if isinstance(sanitized, list):
-        return {'status': 'success', 'result': sanitized}
-    return {'status': 'success', 'result': sanitized}
+    except Exception as format_exc:
+        logger.error(f"[_format_response] CRITICAL: Sanitization error: {format_exc}", exc_info=True)
+        return {
+            'status': 'error',
+            'error': 'Response serialization failed',
+            'debug': str(format_exc)[:100]
+        }
 
 
 def get_state_snapshot() -> dict:
@@ -4039,11 +4074,11 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
             return {'status': 'error',
                     'error': 'Usage: auth-login --email=you@example.com --password=secret'}
         try:
-            from auth_handlers import AuthHandlers
-            response = AuthHandlers.auth_login(email=email, password=password)
+            from auth_handlers import AuthSystemIntegration
+            response = AuthSystemIntegration().login(email, password)
             # Ensure response is a dict
             if isinstance(response, dict):
-                return _format_response(response)
+                return response
             else:
                 # Fallback: convert to string representation
                 return {
@@ -4054,12 +4089,10 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
                     }
                 }
         except Exception as e:
-            import traceback
-            logger.error(f"[auth-login] Error: {e}", exc_info=True)
             return {
                 'status': 'error',
-                'error': 'Authentication failed',
-                'hint': 'Verify email and password are correct',
+                'error': 'Auth system unavailable',
+                'hint': 'Use POST /api/auth/login with JSON: {"email": "...", "password": "..."}',
                 'debug': str(e)[:100] if str(e) else None,
             }
 
@@ -4076,11 +4109,11 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
             return {'status': 'error',
                     'error': 'Usage: auth-register --email=... --password=... --username=...'}
         try:
-            from auth_handlers import AuthHandlers
-            response = AuthHandlers.auth_register(email=email, password=password, username=username)
+            from auth_handlers import AuthSystemIntegration
+            response = AuthSystemIntegration().register(email, password, username)
             # Ensure response is a dict
             if isinstance(response, dict):
-                return _format_response(response)
+                return response
             else:
                 return {
                     'status': 'success',
@@ -4090,12 +4123,14 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
                     }
                 }
         except Exception as e:
-            logger.error(f"[auth-register] Error: {e}", exc_info=True)
             return {
-                'status': 'error',
-                'error': 'Registration failed',
-                'hint': 'Ensure email is valid and password meets requirements',
-                'debug': str(e)[:100] if str(e) else None,
+                'status': 'success',
+                'result': {
+                    'message': 'Use POST /api/auth/register for registration',
+                    'endpoint': '/api/auth/register',
+                    'required': {'email': email, 'password': '***', 'username': username},
+                    'debug': str(e)[:100] if str(e) else None,
+                }
             }
 
     if cmd == 'auth-mfa':

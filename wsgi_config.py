@@ -1036,12 +1036,50 @@ def execute_command():
         result = dispatch_command(command, args, user_id, token=raw_token, role=role)
         # Ensure response is JSON-serializable
         from globals import _format_response
-        result = _format_response(result)
-        return jsonify(result)
+        try:
+            result = _format_response(result)
+            logger.debug(f"[/api/command] Response formatted successfully")
+        except Exception as format_exc:
+            logger.error(f"[/api/command] Format error for {command}: {format_exc}", exc_info=True)
+            result = {
+                'status': 'error',
+                'error': 'Response formatting failed',
+                'command': command,
+                'debug': str(format_exc)[:100]
+            }
+        
+        # Final attempt to jsonify with detailed error logging
+        try:
+            response = jsonify(result)
+            # Verify response is valid JSON by trying to parse it
+            try:
+                response.get_json()
+            except:
+                logger.warning(f"[/api/command] Response get_json() failed, but continuing")
+            return response
+        except Exception as jsonify_exc:
+            logger.critical(f"[/api/command.jsonify] JSON serialization FAILED: {jsonify_exc}", exc_info=True)
+            logger.critical(f"[/api/command.jsonify] Command: {command}")
+            logger.critical(f"[/api/command.jsonify] Result type: {type(result)}")
+            logger.critical(f"[/api/command.jsonify] Result: {result}")
+            # Try one more time with minimal response
+            try:
+                return jsonify({
+                    'status': 'error',
+                    'error': 'JSON serialization failed',
+                    'command': command,
+                    'message': 'See server logs for details'
+                }), 500
+            except:
+                logger.critical("[/api/command] EMERGENCY: Even fallback jsonify failed!")
+                return jsonify({'status': 'error', 'error': 'API critical failure'}), 500
 
     except Exception as exc:
-        logger.error(f"[/api/command] {exc}")
-        return jsonify({'status': 'error', 'error': str(exc)}), 500
+        logger.error(f"[/api/command] OUTER EXCEPTION: {exc}", exc_info=True)
+        try:
+            return jsonify({'status': 'error', 'error': str(exc)[:100]}), 500
+        except:
+            return "API Error", 500
 
 
 @app.route('/api/commands', methods=['GET'])
