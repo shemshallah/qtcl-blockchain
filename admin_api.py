@@ -42,7 +42,7 @@ except ImportError:
 # WSGI INTEGRATION
 # ═══════════════════════════════════════════════════════════════════════════════════════
 try:
-    from wsgi_config import DB, PROFILER, CACHE, ERROR_BUDGET, RequestCorrelation, CIRCUIT_BREAKERS, RATE_LIMITERS
+    from wsgi_config import DB, PROFILER, CACHE, ERROR_BUDGET, RequestCorrelation, CIRCUIT_BREAKERS, RATE_LIMITERS, get_pq_system
     WSGI_AVAILABLE = True
 except ImportError as _adm_ie:
     # Hard error with detail — CIRCUIT_BREAKERS/RATE_LIMITERS must exist in wsgi_config.py
@@ -54,6 +54,8 @@ except ImportError as _adm_ie:
     DB = PROFILER = CACHE = ERROR_BUDGET = RequestCorrelation = None
     CIRCUIT_BREAKERS = {}
     RATE_LIMITERS    = {}
+    def get_pq_system():
+        return None
 
     # ── Stub classes so GlobalAdminCommandHandlers.admin_suspend_user() never NameErrors ──
     class _NullProfiler:
