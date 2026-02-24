@@ -634,7 +634,7 @@ logger.info("[BOOTSTRAP] ✅ Quantum infrastructure initialization started")
 # PHASE 3 — FLASK APP CREATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, g
 from datetime import datetime, timezone
 
 app = Flask(
