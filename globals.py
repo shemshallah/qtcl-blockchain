@@ -1839,15 +1839,45 @@ def get_mi_trend(window: int = 20) -> dict:
 
 
 def get_system_health() -> dict:
-    # FIX: get_heartbeat() now returns None (not a dict) when uninitialized.
+    """Check actual system health by verifying pool works, not just object existence"""
     _hb = get_heartbeat()
+    
+    # Verify database ACTUALLY works with a test connection
+    db_is_ok = False
+    try:
+        db_mgr = get_db_manager()
+        if db_mgr and db_mgr.pool is not None:
+            # Try to get and verify a test connection
+            test_conn = None
+            try:
+                test_conn = db_mgr.pool.getconn()
+                cursor = test_conn.cursor()
+                cursor.execute("SELECT 1")
+                cursor.close()
+                db_is_ok = True
+            except Exception as e:
+                logger.debug(f"[HEALTH] Database health check failed: {e}")
+                db_is_ok = False
+            finally:
+                if test_conn:
+                    try:
+                        db_mgr.pool.putconn(test_conn)
+                    except:
+                        pass
+        else:
+            logger.debug("[HEALTH] Database pool is None")
+            db_is_ok = False
+    except Exception as e:
+        logger.debug(f"[HEALTH] Exception checking database: {e}")
+        db_is_ok = False
+    
     return {
-        "status": "healthy",
+        "status": "healthy" if db_is_ok else "degraded",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "components": {
             "quantum":    "ok" if (_hb is not None and not isinstance(_hb, dict)) else "offline",
             "blockchain": "ok" if get_blockchain() else "offline",
-            "database":   "ok" if get_db_manager() else "offline",
+            "database":   "ok" if db_is_ok else "offline",
         }
     }
 

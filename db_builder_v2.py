@@ -4973,12 +4973,22 @@ class DatabaseBuilder:
         raise Exception(error_detail)
     
     def return_connection(self, conn):
-        """Return connection to pool"""
+        """Return connection to pool with critical error tracking"""
         if conn and self.pool:
             try:
                 self.pool.putconn(conn)
+            except psycopg2.pool.PoolError as e:
+                logger.error(f"[DB-CONN] ❌ CRITICAL: Failed to return connection to pool: {e}")
+                logger.error(f"[DB-CONN] Pool may be exhausted or corrupted — attempting reset...")
+                try:
+                    self.pool.closeall()
+                    self.pool = None
+                except Exception:
+                    pass
+                raise
             except Exception as e:
-                logger.warning(f"[DB-CONN] Error returning connection to pool: {e}")
+                logger.error(f"[DB-CONN] ⚠️  Unexpected error returning connection: {e}")
+                raise
     
     def validate_schema_recursively(self):
         """
@@ -8799,17 +8809,34 @@ class DatabaseHeartbeatIntegration:
                 self.pulse_count += 1
                 self.pool_checks += 1
             
-            # Check connection pool health
+            # REAL pool health check — verify connections work
             try:
-                # This would check pool status
-                pass
+                from globals import get_db_manager
+                db_mgr = get_db_manager()
+                if db_mgr and db_mgr.pool:
+                    # Try to get and return a test connection
+                    test_conn = db_mgr.pool.getconn()
+                    try:
+                        cursor = test_conn.cursor()
+                        cursor.execute("SELECT 1")
+                        cursor.close()
+                        db_mgr.pool.putconn(test_conn)
+                        # Pool is healthy — no action needed
+                    except Exception as health_err:
+                        # Connection failed health check
+                        db_mgr.pool.putconn(test_conn, close=True)
+                        with self.lock:
+                            self.error_count += 1
+                        logger.warning(f"[DB-HB] Pool health check failed: {health_err}")
+                else:
+                    logger.debug("[DB-HB] Database pool not initialized")
             except Exception as e:
-                logger.debug(f"[DB-HB] Pool check: {e}")
+                logger.warning(f"[DB-HB] Pool check exception: {e}")
                 with self.lock:
                     self.error_count += 1
         
         except Exception as e:
-            logger.error(f"[DB-HB] Heartbeat callback error: {e}")
+            logger.error(f"[DB-HB] Heartbeat callback error: {e}", exc_info=True)
             with self.lock:
                 self.error_count += 1
     
