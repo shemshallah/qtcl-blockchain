@@ -1573,14 +1573,7 @@ def get_bell_boundary_report() -> dict:
                 gs['boundary_kappa_est'] = k_cross
 
     # Pearson CHSH-MI correlation
-    chsh_mi_corr = None
-    if len(s_values) >= 10 and len(mi_values) >= 10:
-        try:
-            n = min(len(s_values), len(mi_values))
-            corr = float(_np.corrcoef(s_values[-n:], mi_values[-n:])[0, 1])
-            chsh_mi_corr = None if (_m.isnan(corr) or _m.isinf(corr)) else corr
-        except Exception:
-            pass
+    chsh_mi_corr = _safe_corrcoef(s_values, mi_values) if len(s_values) >= 10 and len(mi_values) >= 10 else None
 
     # Regime analysis
     s_arr_all = _np.array(s_values) if s_values else _np.array([0.0])
@@ -1600,11 +1593,10 @@ def get_bell_boundary_report() -> dict:
         'S_CHSH_tsirelson_bound':   float(2.0 * _np.sqrt(2.0)),
         'S_CHSH_classical_bound':   2.0,
         'measurements_above_tsirelson_50pct': tsirelson_above,
-        'MI_mean':                  float(_np.mean(mi_values)) if mi_values else 0.0,
-        'MI_max':                   float(_np.max(mi_values))  if mi_values else 0.0,
-        'MI_trend_last50':          float(_np.mean(mi_values[-50:]) - _np.mean(mi_values[-100:-50]))
-                                    if len(mi_values) > 100 else 0.0,
-        'chsh_mi_correlation':      chsh_mi_corr,
+        'MI_mean':                  _safe_mean(mi_values, 0.0),
+        'MI_max':                   _safe_max(mi_values, 0.0),
+        'MI_trend_last50':          _safe_float(_safe_mean(mi_values[-50:], 0.0) - _safe_mean(mi_values[-100:-50], 0.0) if len(mi_values) > 100 else 0.0, 0.0),
+        'chsh_mi_correlation':      _safe_corrcoef(s_values, mi_values) if len(s_values) >= 10 and len(mi_values) >= 10 else None,
         'boundary_crossings_total': len(gs['boundary_crossings']),
         'recent_crossings':         gs['boundary_crossings'][-5:],
         'angles_corrected':         True,
@@ -1816,19 +1808,19 @@ def get_mi_trend(window: int = 20) -> dict:
 
     return {
         'trend': trend,
-        'slope': float(slope),
+        'slope': _safe_float(slope, 0.0),
         'slope_units': 'bits_per_measurement',
-        'mean': float(_np.mean(recent)),
-        'std':  float(_np.std(recent)),
-        'min':  float(_np.min(recent)),
-        'max':  float(_np.max(recent)),
+        'mean': _safe_mean(recent, 0.0),
+        'std':  _safe_std(recent, 0.0),
+        'min':  _safe_float(_np.min(recent) if len(recent) > 0 else 0, 0.0),
+        'max':  _safe_max(recent, 0.0),
         'window': w,
         'total_mi_measurements': len(mi_hist),
-        'first': float(recent[0]),
-        'last':  float(recent[-1]),
+        'first': _safe_float(recent[0], 0.0),
+        'last':  _safe_float(recent[-1], 0.0),
         'oscillation_detected': oscillation_detected,
         'non_markovian_kappa': kappa,
-        'decoherence_rate_estimate': float(gamma_eff_est),
+        'decoherence_rate_estimate': _safe_float(gamma_eff_est, 0.0),
         'source': 'db+analytic' if len(mi_hist) > 5 else 'live',
         'physics': {
             'formula': 'I(A:B) = S(ρ_A) + S(ρ_B) - S(ρ_AB)',
@@ -1850,6 +1842,67 @@ def get_system_health() -> dict:
             "database":   "ok" if get_db_manager() else "offline",
         }
     }
+
+def _safe_float(val, default=0.0):
+    """Convert any value to float, returning default if conversion fails or value is NaN/inf."""
+    try:
+        if val is None:
+            return default
+        if isinstance(val, bool):
+            return float(val)
+        if isinstance(val, (int, float)):
+            f = float(val)
+            return default if (math.isnan(f) or math.isinf(f)) else f
+        if isinstance(val, (np.integer, np.floating)):
+            f = float(val)
+            return default if (math.isnan(f) or math.isinf(f)) else f
+        f = float(val)
+        return default if (math.isnan(f) or math.isinf(f)) else f
+    except (TypeError, ValueError, AttributeError):
+        return default
+
+def _safe_mean(values, default=0.0):
+    """Compute mean of list, filtering None/NaN/inf, returning default if empty/all-invalid."""
+    if not values:
+        return default
+    filtered = [_safe_float(v) for v in values]
+    filtered = [v for v in filtered if v is not None and not math.isnan(v) and not math.isinf(v)]
+    return default if not filtered else float(np.mean(filtered))
+
+def _safe_max(values, default=0.0):
+    """Compute max of list, filtering None/NaN/inf, returning default if empty/all-invalid."""
+    if not values:
+        return default
+    filtered = [_safe_float(v) for v in values]
+    filtered = [v for v in filtered if v is not None and not math.isnan(v) and not math.isinf(v)]
+    return default if not filtered else float(np.max(filtered))
+
+def _safe_std(values, default=0.0):
+    """Compute std of list, filtering None/NaN/inf, returning default if empty/all-invalid."""
+    if not values or len(values) < 2:
+        return default
+    filtered = [_safe_float(v) for v in values]
+    filtered = [v for v in filtered if v is not None and not math.isnan(v) and not math.isinf(v)]
+    return default if len(filtered) < 2 else float(np.std(filtered))
+
+def _safe_corrcoef(x_vals, y_vals):
+    """Compute Pearson correlation, returning None if invalid."""
+    if not x_vals or not y_vals or len(x_vals) < 2 or len(y_vals) < 2:
+        return None
+    x_filtered = [_safe_float(v) for v in x_vals]
+    y_filtered = [_safe_float(v) for v in y_vals]
+    x_filtered = [v for v in x_filtered if v is not None and not math.isnan(v) and not math.isinf(v)]
+    y_filtered = [v for v in y_filtered if v is not None and not math.isnan(v) and not math.isinf(v)]
+    if len(x_filtered) < 2 or len(y_filtered) < 2:
+        return None
+    try:
+        n = min(len(x_filtered), len(y_filtered))
+        if n < 2:
+            return None
+        corr = float(np.corrcoef(x_filtered[-n:], y_filtered[-n:])[0, 1])
+        return None if (math.isnan(corr) or math.isinf(corr)) else corr
+    except Exception:
+        return None
 
 def _deep_json_sanitize(obj, _depth=0, _max_depth=32):
     """
