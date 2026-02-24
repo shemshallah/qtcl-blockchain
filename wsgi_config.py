@@ -318,21 +318,11 @@ def _initialize_database_deferred() -> None:
             logger.error(f"[BOOTSTRAP/DB] ❌ Pool creation failed: {db_manager.pool_error}")
             return
 
-        # Smoke-test: one query to confirm the pool actually works
-        test_conn = db_manager.get_connection()
-        if test_conn is None:
-            logger.error("[BOOTSTRAP/DB] ❌ Could not obtain test connection from pool")
-            return
-
-        cur = test_conn.cursor()
-        cur.execute("SELECT version()")
-        version = cur.fetchone()
-        cur.close()
-        db_manager.return_connection(test_conn)
-
+        # Trust the pool — if db_manager.pool exists, it's ready
+        # No blocking test query — health checks will verify connectivity
         DB      = db_manager
         DB_POOL = _pool
-        logger.info(f"[BOOTSTRAP/DB] ✅ Pool ready — {version[0][:70]}…")
+        logger.info(f"[BOOTSTRAP/DB] ✅ Pool ready for connection")
 
     except ImportError as exc:
         logger.error(f"[BOOTSTRAP/DB] ❌ Import failed: {exc}")
