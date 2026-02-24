@@ -635,6 +635,8 @@ app = Flask(
     static_url_path='/static',
 )
 app.config['JSON_SORT_KEYS'] = False
+app.config['PROPAGATE_EXCEPTIONS'] = False   # Never let raw exceptions escape to gunicorn (would return HTML 500)
+app.config['TRAP_HTTP_EXCEPTIONS']  = False   # Same — always use our JSON error handlers
 
 logger.info("[FLASK] ✅ Flask app created")
 

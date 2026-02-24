@@ -212,17 +212,18 @@ class QTCLCommandExecutor {
 
             const duration = Math.round(performance.now() - t0);
 
-            if (resp.ok && (data.status === 'success' || data.result !== undefined)) {
+            if (resp.ok && (data.status === 'success' || data.result !== undefined || data.access_token !== undefined)) {
+                // Auth responses carry access_token at TOP LEVEL (not nested under result)
+                const tok = data.token || data.access_token
+                          || data.result?.token || data.result?.access_token;
+                if (tok) this.setToken(tok);
                 result = {
                     status:   'success',
-                    result:   data.result ?? data.output ?? null,
+                    result:   data.result ?? (data.access_token ? data : data.output ?? null),
                     command:  cmdStr,
                     duration,
                     raw:      data
                 };
-                // Detect auth token in login responses
-                const tok = data.result?.token || data.result?.access_token || data.token;
-                if (tok) this.setToken(tok);
             } else {
                 result = {
                     status:      'error',
