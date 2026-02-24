@@ -374,17 +374,6 @@ _QUANTUM_MANAGER_THREAD.start()
 
 GLOBALS_AVAILABLE = False
 
-
-def _initialize_globals_deferred() -> None:
-    """Call globals.initialize_globals() in a daemon thread; mark GLOBALS_AVAILABLE on success."""
-    global GLOBALS_AVAILABLE
-    try:
-        logger.info("[BOOTSTRAP/GLOBALS] Initializing global state…")
-        from globals import initialize_globals
-        initialize_globals()
-        GLOBALS_AVAILABLE = True
-        logger.info("[BOOTSTRAP/GLOBALS] ✅ Global state initialized")
-        # Wire heartbeat listeners now that globals (and HEARTBEAT singleton) are ready
 def _register_heartbeat_listeners() -> None:
     """
     Wire per-module heartbeat callbacks into the HEARTBEAT singleton.
@@ -489,6 +478,17 @@ def _register_heartbeat_listeners() -> None:
         logger.warning(f"[HEARTBEAT-LISTENERS] ⚠️  Quantum Executor: {qe}")
 
 
+
+def _initialize_globals_deferred() -> None:
+    """Call globals.initialize_globals() in a daemon thread; mark GLOBALS_AVAILABLE on success."""
+    global GLOBALS_AVAILABLE
+    try:
+        logger.info("[BOOTSTRAP/GLOBALS] Initializing global state…")
+        from globals import initialize_globals
+        initialize_globals()
+        GLOBALS_AVAILABLE = True
+        logger.info("[BOOTSTRAP/GLOBALS] ✅ Global state initialized")
+        # Wire heartbeat listeners now that globals (and HEARTBEAT singleton) are ready
         _register_heartbeat_listeners()
     except Exception as exc:
         logger.error(f"[BOOTSTRAP/GLOBALS] ⚠️  Initialization failed: {exc}", exc_info=True)
@@ -1439,7 +1439,6 @@ _start_blueprint_registration_thread()
 # globals.initialize_globals() completes and HEARTBEAT is a real object.  The
 # isinstance guard is applied uniformly here so the individual API modules'
 # register_* functions are irrelevant — we register directly.
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # INSTANCE KEEP-ALIVE DAEMON
