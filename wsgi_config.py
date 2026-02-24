@@ -385,6 +385,110 @@ def _initialize_globals_deferred() -> None:
         GLOBALS_AVAILABLE = True
         logger.info("[BOOTSTRAP/GLOBALS] ✅ Global state initialized")
         # Wire heartbeat listeners now that globals (and HEARTBEAT singleton) are ready
+def _register_heartbeat_listeners() -> None:
+    """
+    Wire per-module heartbeat callbacks into the HEARTBEAT singleton.
+
+    Must be called AFTER globals.initialize_globals() so HEARTBEAT is a
+    UniversalQuantumHeartbeat instance, not None or a dict fallback.
+
+    Each listener is registered in its own try/except so one failing module
+    does not prevent the others from receiving heartbeat pulses.
+    """
+    # BUG-4 FIX: isinstance guard — never call .add_listener() on a plain dict
+    hb = get_heartbeat()
+    if hb is None or isinstance(hb, dict):
+        logger.warning(
+            "[HEARTBEAT-LISTENERS] HEARTBEAT not ready (got %s) — listener "
+            "registration deferred.  Will retry on next globals init.",
+            type(hb).__name__,
+        )
+        return
+
+    if not hasattr(hb, 'add_listener'):
+        logger.error(
+            f"[HEARTBEAT-LISTENERS] HEARTBEAT object ({type(hb)}) has no add_listener — "
+            "check quantum_lattice_control_live_complete.py"
+        )
+        return
+
+    registered = []
+    failed     = []
+
+    _candidates = [
+        ('core_api',        'core_api',        'register_core_with_heartbeat'),
+        ('blockchain_api',  'blockchain_api',  'register_blockchain_with_heartbeat'),
+        ('quantum_api',     'quantum_api',     'register_quantum_with_heartbeat'),
+        ('admin_api',       'admin_api',       'register_admin_with_heartbeat'),
+        ('defi_api',        'defi_api',        'register_defi_with_heartbeat'),
+    ]
+
+    for label, module_name, fn_name in _candidates:
+        try:
+            import importlib
+            mod = importlib.import_module(module_name)
+            register_fn = getattr(mod, fn_name, None)
+            if register_fn is None:
+                failed.append((label, f"{fn_name} not found in {module_name}"))
+                continue
+
+            # Each module's register_* function calls get_heartbeat() internally
+            # and has `if hb: hb.add_listener(...)` — BUG-4 means they silently
+            # fail.  Call them anyway (some may have been patched) and also
+            # register the on_heartbeat method directly here as a backstop.
+            try:
+                register_fn()
+            except Exception:
+                pass   # fallback to direct registration below
+
+            # Direct registration — bypass the buggy isinstance check in the modules
+            hb_integration_attr = f"_{label.replace('_api', '')}_heartbeat"
+            integration = getattr(mod, hb_integration_attr, None) or \
+                          getattr(mod, '_defi_heartbeat', None)     or \
+                          getattr(mod, '_hb_listener', None)
+
+            if integration and hasattr(integration, 'on_heartbeat'):
+                try:
+                    hb.add_listener(integration.on_heartbeat)
+                    registered.append(label)
+                except Exception as exc:
+                    # Listener already registered (some impls check for duplicates)
+                    if 'duplicate' in str(exc).lower() or 'already' in str(exc).lower():
+                        registered.append(f"{label} (already registered)")
+                    else:
+                        failed.append((label, str(exc)))
+            else:
+                # Module registered via its own register_fn (may have worked)
+                registered.append(f"{label} (via register_fn)")
+
+        except Exception as exc:
+            failed.append((label, str(exc)))
+
+    for label in registered:
+        logger.info(f"[HEARTBEAT-LISTENERS] ✅ {label}")
+    for label, err in failed:
+        logger.warning(f"[HEARTBEAT-LISTENERS] ⚠️  {label}: {err}")
+
+    listener_count = len(hb.listeners) if hasattr(hb, 'listeners') else '?'
+    logger.info(
+        f"[HEARTBEAT-LISTENERS] Registration complete — "
+        f"{len(registered)} ok / {len(failed)} failed / {listener_count} total listeners on HEARTBEAT"
+    )
+    
+    # Register quantum executor heartbeat listener
+    try:
+        import quantum_lattice_control_live_complete as qlc_module
+        if hasattr(qlc_module, 'quantum_executor_heartbeat'):
+            hb.add_listener(qlc_module.quantum_executor_heartbeat)
+            logger.info("[HEARTBEAT-LISTENERS] ✅ Quantum Executor Heartbeat")
+        else:
+            logger.warning("[HEARTBEAT-LISTENERS] ⚠️  Quantum Executor: quantum_executor_heartbeat not found in module")
+    except ImportError as ie:
+        logger.warning(f"[HEARTBEAT-LISTENERS] ⚠️  Quantum Executor module import error: {ie}")
+    except Exception as qe:
+        logger.warning(f"[HEARTBEAT-LISTENERS] ⚠️  Quantum Executor: {qe}")
+
+
         _register_heartbeat_listeners()
     except Exception as exc:
         logger.error(f"[BOOTSTRAP/GLOBALS] ⚠️  Initialization failed: {exc}", exc_info=True)
@@ -700,8 +804,7 @@ def _update_db_status_cache() -> None:
     def _do_update() -> None:
         try:
             from db_builder_v2 import verify_database_connection
-            # FIX: Pass DB explicitly — don't rely on globals() lookup in db_builder_v2
-            result = verify_database_connection(db_manager=DB, verbose=False)
+            result = verify_database_connection(verbose=False)
             with _DB_STATUS_LOCK:
                 _DB_STATUS_CACHE.update({
                     'connected': result.get('connected', False),
@@ -1336,109 +1439,6 @@ _start_blueprint_registration_thread()
 # globals.initialize_globals() completes and HEARTBEAT is a real object.  The
 # isinstance guard is applied uniformly here so the individual API modules'
 # register_* functions are irrelevant — we register directly.
-
-def _register_heartbeat_listeners() -> None:
-    """
-    Wire per-module heartbeat callbacks into the HEARTBEAT singleton.
-
-    Must be called AFTER globals.initialize_globals() so HEARTBEAT is a
-    UniversalQuantumHeartbeat instance, not None or a dict fallback.
-
-    Each listener is registered in its own try/except so one failing module
-    does not prevent the others from receiving heartbeat pulses.
-    """
-    # BUG-4 FIX: isinstance guard — never call .add_listener() on a plain dict
-    hb = get_heartbeat()
-    if hb is None or isinstance(hb, dict):
-        logger.warning(
-            "[HEARTBEAT-LISTENERS] HEARTBEAT not ready (got %s) — listener "
-            "registration deferred.  Will retry on next globals init.",
-            type(hb).__name__,
-        )
-        return
-
-    if not hasattr(hb, 'add_listener'):
-        logger.error(
-            f"[HEARTBEAT-LISTENERS] HEARTBEAT object ({type(hb)}) has no add_listener — "
-            "check quantum_lattice_control_live_complete.py"
-        )
-        return
-
-    registered = []
-    failed     = []
-
-    _candidates = [
-        ('core_api',        'core_api',        'register_core_with_heartbeat'),
-        ('blockchain_api',  'blockchain_api',  'register_blockchain_with_heartbeat'),
-        ('quantum_api',     'quantum_api',     'register_quantum_with_heartbeat'),
-        ('admin_api',       'admin_api',       'register_admin_with_heartbeat'),
-        ('defi_api',        'defi_api',        'register_defi_with_heartbeat'),
-    ]
-
-    for label, module_name, fn_name in _candidates:
-        try:
-            import importlib
-            mod = importlib.import_module(module_name)
-            register_fn = getattr(mod, fn_name, None)
-            if register_fn is None:
-                failed.append((label, f"{fn_name} not found in {module_name}"))
-                continue
-
-            # Each module's register_* function calls get_heartbeat() internally
-            # and has `if hb: hb.add_listener(...)` — BUG-4 means they silently
-            # fail.  Call them anyway (some may have been patched) and also
-            # register the on_heartbeat method directly here as a backstop.
-            try:
-                register_fn()
-            except Exception:
-                pass   # fallback to direct registration below
-
-            # Direct registration — bypass the buggy isinstance check in the modules
-            hb_integration_attr = f"_{label.replace('_api', '')}_heartbeat"
-            integration = getattr(mod, hb_integration_attr, None) or \
-                          getattr(mod, '_defi_heartbeat', None)     or \
-                          getattr(mod, '_hb_listener', None)
-
-            if integration and hasattr(integration, 'on_heartbeat'):
-                try:
-                    hb.add_listener(integration.on_heartbeat)
-                    registered.append(label)
-                except Exception as exc:
-                    # Listener already registered (some impls check for duplicates)
-                    if 'duplicate' in str(exc).lower() or 'already' in str(exc).lower():
-                        registered.append(f"{label} (already registered)")
-                    else:
-                        failed.append((label, str(exc)))
-            else:
-                # Module registered via its own register_fn (may have worked)
-                registered.append(f"{label} (via register_fn)")
-
-        except Exception as exc:
-            failed.append((label, str(exc)))
-
-    for label in registered:
-        logger.info(f"[HEARTBEAT-LISTENERS] ✅ {label}")
-    for label, err in failed:
-        logger.warning(f"[HEARTBEAT-LISTENERS] ⚠️  {label}: {err}")
-
-    listener_count = len(hb.listeners) if hasattr(hb, 'listeners') else '?'
-    logger.info(
-        f"[HEARTBEAT-LISTENERS] Registration complete — "
-        f"{len(registered)} ok / {len(failed)} failed / {listener_count} total listeners on HEARTBEAT"
-    )
-    
-    # Register quantum executor heartbeat listener
-    try:
-        import quantum_lattice_control_live_complete as qlc_module
-        if hasattr(qlc_module, 'quantum_executor_heartbeat'):
-            hb.add_listener(qlc_module.quantum_executor_heartbeat)
-            logger.info("[HEARTBEAT-LISTENERS] ✅ Quantum Executor Heartbeat")
-        else:
-            logger.warning("[HEARTBEAT-LISTENERS] ⚠️  Quantum Executor: quantum_executor_heartbeat not found in module")
-    except ImportError as ie:
-        logger.warning(f"[HEARTBEAT-LISTENERS] ⚠️  Quantum Executor module import error: {ie}")
-    except Exception as qe:
-        logger.warning(f"[HEARTBEAT-LISTENERS] ⚠️  Quantum Executor: {qe}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
