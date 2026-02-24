@@ -668,7 +668,7 @@ function showDynamicHelp() {
   addLine('    ✓ quantum-status                quantum engine metrics', 'dim');
   addLine('    ✓ block-details --block=42      block by number', 'dim');
   addLine('    ✓ oracle-price --symbol=BTCUSD  live price feed', 'dim');
-  addLine('    ✓ system-health                 full health check', 'dim');
+  addLine('    ✓ system-stats                 full system stats & health', 'dim');
   addLine('    ✓ login --email=x --password=y  authenticate', 'dim');
   addLine('    ✓ help-commands                 list all commands', 'dim');
   addLine('    ✓ help-category --category=defi show defi commands', 'dim');
@@ -698,7 +698,7 @@ function showDynamicHelp() {
   addLine('', 'dim');
   addLine('💡 QUICK START:', 'info');
   addLine('  1. help-commands           — see everything available', 'dim');
-  addLine('  2. system-health           — check all systems', 'dim');
+  addLine('  2. system-stats            — check all system components & health', 'dim');
   addLine('  3. quantum-status          — quantum engine metrics', 'dim');
   addLine('  4. oracle-price --symbol=BTCUSD  — live price', 'dim');
   addLine('  5. Click INFO tab          — visual system status', 'dim');
@@ -1084,7 +1084,7 @@ async function boot() {
     { t: 60, msg: 'Connecting to PostgreSQL ledger…', cls: 'info' },
     { t: 100, msg: '', cls: 'info' },
     { t: 60, msg: 'Type  help            — list all commands from globals', cls: 'dim' },
-    { t: 40, msg: 'Type  system-health   — full system health check', cls: 'dim' },
+    { t: 40, msg: 'Type  system-stats   — full system stats & health check', cls: 'dim' },
     { t: 40, msg: 'Type  quantum-status  — quantum engine metrics', cls: 'dim' },
     { t: 40, msg: 'Type  help-commands   — all 82+ registered commands', cls: 'dim' },
     { t: 40, msg: 'Click INFO tab        — system details & quick launch', cls: 'dim' },

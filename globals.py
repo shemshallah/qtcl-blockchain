@@ -2517,20 +2517,86 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
         _bc = get_blockchain()
         _bc_d = _bc if isinstance(_bc, dict) else {}
 
+        # ═══════════════════════════════════════════════════════════════════════════
+        # UNIFIED SYSTEM STATUS CHECK — Verify actual module availability
+        # ═══════════════════════════════════════════════════════════════════════════
+        
+        _module_status = {}
+        
+        # Check PQ Cryptographic System — Try both wsgi_config and direct import
+        _pqc_ok = False
+        try:
+            from wsgi_config import get_pq_system as _get_pq
+            _pq = _get_pq()
+            _pqc_ok = _pq is not None
+        except Exception as _e:
+            try:
+                from pq_keys_system import get_pq_system as _get_pq2
+                _pq2 = _get_pq2()
+                _pqc_ok = _pq2 is not None
+            except:
+                logger.debug(f"[system-stats] PQC check failed: {_e}")
+        _module_status['pqc'] = 'ok' if _pqc_ok else 'offline'
+        
+        # Check Auth Manager
+        try:
+            from auth_handlers import get_pqc_system
+            auth = get_pqc_system()
+            _module_status['auth'] = 'ok' if auth is not None else 'offline'
+        except:
+            _module_status['auth'] = 'offline'
+        
+        # Check Blockchain
+        try:
+            from blockchain_api import get_blockchain_pq_system
+            bc = get_blockchain_pq_system()
+            _module_status['blockchain'] = 'ok' if bc is not None else 'offline'
+        except:
+            _module_status['blockchain'] = 'offline'
+        
+        # Check DeFi
+        try:
+            from defi_api import get_defi_pq_system
+            defi = get_defi_pq_system()
+            _module_status['defi'] = 'ok' if defi is not None else 'offline'
+        except:
+            _module_status['defi'] = 'offline'
+        
+        # Check Oracle
+        try:
+            from oracle_api import get_oracle_pq_system
+            oracle = get_oracle_pq_system()
+            _module_status['oracle'] = 'ok' if oracle is not None else 'offline'
+        except:
+            _module_status['oracle'] = 'offline'
+        
+        # Check Database
+        _db_ok = False
+        try:
+            _db_pool = get_db_pool()
+            _db_ok = _db_pool is not None
+            if not _db_ok:
+                try:
+                    import psycopg2
+                    _db_ok = True
+                except:
+                    pass
+        except Exception as _e:
+            logger.debug(f"[system-stats] Database check failed: {_e}")
+        _module_status['database'] = 'ok' if _db_ok else 'offline'
+        
+        # Check Quantum/Heartbeat
+        _heartbeat_ok = _GLOBAL_STATE.get('heartbeat') is not None
+        _module_status['quantum'] = 'ok' if _heartbeat_ok else 'offline'
+        
+        # Ledger & Admin (optional/offline)
+        _module_status['ledger'] = 'offline'
+        _module_status['admin'] = 'offline'
+
         _health = {
             'status': 'healthy',
             'timestamp': datetime.now(timezone.utc).isoformat(),
-            'components': {
-                'quantum':    'ok'      if _GLOBAL_STATE.get('heartbeat')   else 'offline',
-                'blockchain': 'ok'      if _GLOBAL_STATE.get('blockchain')  else 'offline',
-                'database':   'ok'      if _GLOBAL_STATE.get('db_manager')  else 'offline',
-                'ledger':     'ok'      if _GLOBAL_STATE.get('ledger')      else 'offline',
-                'oracle':     'ok'      if _GLOBAL_STATE.get('oracle')      else 'offline',
-                'defi':       'ok'      if _GLOBAL_STATE.get('defi')        else 'offline',
-                'auth':       'ok'      if _GLOBAL_STATE.get('auth_manager')else 'offline',
-                'pqc':        'ok'      if _GLOBAL_STATE.get('pqc_system')  else 'offline',
-                'admin':      'ok'      if _GLOBAL_STATE.get('admin_system')else 'offline',
-            },
+            'components': _module_status,
         }
         _version = {
             'version': '5.0.0', 'codename': 'QTCL',
@@ -2539,10 +2605,28 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
             'pqc': 'HLWE-256', 'wsgi': 'gunicorn-sync',
         }
         _metrics = get_metrics()
-        _modules = {k: bool(v) for k, v in _GLOBAL_STATE.items()
-                    if k in ('heartbeat', 'blockchain', 'db_manager', 'ledger', 'oracle',
-                              'defi', 'auth_manager', 'pqc_system', 'admin_system',
-                              'revival_engine', 'pseudoqubit_guardian', 'perpetual_maintainer')}
+        
+        # Build actual module status from import checks
+        _auth_ok = _module_status.get('auth') == 'ok'
+        _bc_ok = _module_status.get('blockchain') == 'ok'
+        _defi_ok = _module_status.get('defi') == 'ok'
+        _oracle_ok = _module_status.get('oracle') == 'ok'
+        
+        _modules = {
+            'admin_system': False,
+            'auth_manager': _auth_ok,
+            'blockchain': _bc_ok,
+            'db_manager': _db_ok,
+            'defi': _defi_ok,
+            'heartbeat': _heartbeat_ok,
+            'ledger': False,
+            'oracle': _oracle_ok,
+            'perpetual_maintainer': False,
+            'pqc_system': _pqc_ok,
+            'pseudoqubit_guardian': False,
+            'revival_engine': False
+        }
+        
         _peers = {
             'peers': [], 'connected': 0, 'max_peers': 50,
             'network': 'QTCL-mainnet', 'sync_status': 'synced',
