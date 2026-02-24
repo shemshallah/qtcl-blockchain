@@ -63,6 +63,17 @@ SUPABASE_PASSWORD = os.environ.get('SUPABASE_PASSWORD')
 SUPABASE_PORT = os.environ.get('SUPABASE_PORT', '5432')
 SUPABASE_DB = os.environ.get('SUPABASE_DB', 'postgres')
 
+# DEBUG: Verify all credentials loaded
+logger.info(f"[DEBUG/CREDS] SUPABASE_HOST={SUPABASE_HOST}")
+logger.info(f"[DEBUG/CREDS] SUPABASE_USER={SUPABASE_USER}")
+logger.info(f"[DEBUG/CREDS] SUPABASE_PASSWORD loaded={SUPABASE_PASSWORD is not None}")
+if SUPABASE_PASSWORD:
+    logger.info(f"[DEBUG/CREDS] PASSWORD length={len(SUPABASE_PASSWORD)}")
+    logger.info(f"[DEBUG/CREDS] PASSWORD first 5 chars={SUPABASE_PASSWORD[:5]}")
+    logger.info(f"[DEBUG/CREDS] PASSWORD has $={'$' in SUPABASE_PASSWORD}")
+logger.info(f"[DEBUG/CREDS] SUPABASE_PORT={SUPABASE_PORT}")
+logger.info(f"[DEBUG/CREDS] SUPABASE_DB={SUPABASE_DB}")
+
 if SUPABASE_HOST and SUPABASE_USER and SUPABASE_PASSWORD:
     logger.info(f"[BOOTSTRAP] ✓ SUPABASE credentials loaded from environment")
     logger.info(f"[BOOTSTRAP]   HOST={SUPABASE_HOST}")
@@ -762,26 +773,45 @@ def index():
 @app.route('/health', methods=['GET'])
 def health():
     """
-    ENTERPRISE HEALTH CHECK — Production Grade.
-    
-    Direct pool check: No verification functions, no daemon threads, no cache.
-    If DB.pool exists, the database is ready (connections happen on first use).
-    
-    Response time: <1ms
-    Reliability: 100% (no external dependencies)
+    Fast health endpoint — always HTTP 200, DB truth resolved in priority order:
+      1. Module-level DB pool (live, zero-latency) — resolves the 30s cold-start
+         window where _DB_STATUS_CACHE is stale-False despite pool being ready.
+      2. _DB_STATUS_CACHE — updated every 30s by daemon thread.
+    Whichever shows connected=True wins.
     """
-    global DB
-    
-    # Enterprise: Check pool existence only
-    pool_exists = DB is not None and hasattr(DB, 'pool') and DB.pool is not None
-    
+    with _DB_STATUS_LOCK:
+        db = _DB_STATUS_CACHE.copy()
+
+    # Live pool check: authoritative for cold-start window before cache refreshes
+    live_connected = (DB is not None and getattr(DB, 'pool', None) is not None)
+    connected = live_connected or db.get('connected', False)
+
+    # Write live truth back into cache so next caller also benefits
+    if live_connected and not db.get('connected', False):
+        with _DB_STATUS_LOCK:
+            _DB_STATUS_CACHE['connected'] = True
+            _DB_STATUS_CACHE['healthy']   = True
+
+    status = 'healthy' if connected else 'degraded'
+
     return jsonify({
-        'status': 'healthy' if pool_exists else 'degraded',
+        'status':              status,
+        'timestamp':           datetime.now(timezone.utc).isoformat(),
+        'globals_initialized': GLOBALS_AVAILABLE,
         'database': {
-            'connected': pool_exists,
-            'pool_ready': pool_exists,
+            'connected':         connected,
+            'host':              db.get('host'),
+            'port':              db.get('port'),
+            'database':          db.get('database'),
+            'error':             db.get('error'),
+            'cache_age_seconds': int(time.time() - db.get('timestamp', 0)),
+            'live_pool':         live_connected,
         },
-        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'note': (
+            None if connected
+            else 'DB not yet connected — check Koyeb env vars or wait for deferred init. '
+                 'Details: /api/db-diagnostics'
+        ),
     }), 200
 
 
