@@ -4770,6 +4770,13 @@ class DatabaseBuilder:
                 connect_timeout=CONNECTION_TIMEOUT
             )
             logger.info(f"{CLR.G}[OK] DatabaseBuilder initialized with pool size {pool_size}{CLR.E}")
+            
+            # ENTERPRISE: Register instance globally when pool is ready
+            try:
+                from wsgi_config import set_database_instance
+                set_database_instance(self)
+            except (ImportError, RuntimeError):
+                pass  # Standalone mode or wsgi_config not available
         except Exception as e:
             self.pool_error = str(e)
             logger.warning(
@@ -8343,10 +8350,6 @@ def verify_database_connection(db_manager=None, verbose=True) -> Dict[str, Any]:
         'errors': [],
         'warnings': []
     }
-    
-        # ENTERPRISE FIX: db_manager MUST be provided explicitly
-if db_manager is None:
-        db_manager = globals().get('db_manager')
     
     if db_manager is None:
         result['errors'].append("db_manager is None")
