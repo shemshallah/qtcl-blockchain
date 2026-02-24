@@ -883,27 +883,21 @@ def create_blueprint()->Blueprint:
     # ═══════════════════════════════════════════════════════════════════════════════════
     
     def require_auth(f):
-        """Decorator to require JWT authentication"""
+        """Decorator to require JWT authentication — checks g.authenticated set by global before_request."""
         @wraps(f)
         def decorated_function(*args,**kwargs):
-            auth_header=request.headers.get('Authorization','')
-            if not auth_header.startswith('Bearer '):
-                return jsonify({'error':'Missing or invalid authorization header'}),401
-            token=auth_header.split(' ',1)[1]
-            payload=jwt_manager.verify_token(token)
-            if not payload:
-                return jsonify({'error':'Invalid or expired token'}),401
-            g.user_id=payload.get('user_id')
-            g.user_role=payload.get('role')
+            # Global before_request already decoded JWT and set g.authenticated, g.user_id, g.user_role
+            if not g.get('authenticated', False):
+                return jsonify({'error':'Authentication required'}),401
             return f(*args,**kwargs)
         return decorated_function
     
     def require_role(min_role:UserRole):
-        """Decorator to require minimum role level"""
+        """Decorator to require minimum role level — checks g.user_role set by global before_request."""
         def decorator(f):
             @wraps(f)
             def decorated_function(*args,**kwargs):
-                if not hasattr(g,'user_role'):
+                if not g.get('authenticated', False) or not g.get('user_role'):
                     return jsonify({'error':'Authentication required'}),401
                 user_role_value=UserRole[g.user_role].value if isinstance(g.user_role,str) else g.user_role
                 if user_role_value<min_role.value:
@@ -911,6 +905,7 @@ def create_blueprint()->Blueprint:
                 return f(*args,**kwargs)
             return decorated_function
         return decorator
+
     
     def rate_limit(max_requests:int=100,window_seconds:int=60):
         """Simple rate limiting decorator"""

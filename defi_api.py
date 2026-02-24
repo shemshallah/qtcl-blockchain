@@ -654,16 +654,12 @@ def create_blueprint()->Blueprint:
         return decorator
     
     def require_auth(f):
-        """Authentication decorator"""
+        """Authentication decorator — checks g.authenticated set by global before_request hook."""
         @wraps(f)
         def decorated_function(*args,**kwargs):
-            auth_header=request.headers.get('Authorization','')
-            if not auth_header.startswith('Bearer '):
-                g.authenticated=False
-                g.user_id=None
-            else:
-                g.authenticated=True
-                g.user_id=f"user_{secrets.token_hex(8)}"
+            # Global before_request already decoded JWT and set g.authenticated, g.user_id, g.user_role
+            if not g.get('authenticated', False):
+                return jsonify({'error':'Authentication required'}),401
             return f(*args,**kwargs)
         return decorated_function
     

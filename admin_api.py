@@ -520,59 +520,26 @@ def create_blueprint()->Blueprint:
         return decorator
     
     def require_auth(f):
-        """Authentication decorator — validates Bearer token via globals session_store or JWT."""
+        """Authentication decorator — checks g.authenticated set by global before_request hook."""
         @wraps(f)
         def decorated_function(*args,**kwargs):
-            auth_header=request.headers.get('Authorization','')
-            g.authenticated=False; g.user_id=None; g.is_admin=False; g.user_role='user'
-            if not auth_header.startswith('Bearer '):
+            # Global before_request already decoded JWT and set g.authenticated, g.user_id, g.user_role, g.is_admin
+            if not g.get('authenticated', False):
                 return jsonify({'error':'Authentication required'}),401
-            token=auth_header[7:].strip()
-            if not token:
-                return jsonify({'error':'Authentication required'}),401
-
-            # Priority 1: globals session_store
-            try:
-                from globals import get_globals as _gg
-                sess=_gg().auth.session_store.get(token)
-                if sess and sess.get('authenticated'):
-                    g.authenticated=True
-                    g.user_id=sess.get('user_id','')
-                    g.user_role=sess.get('role','user')
-                    g.is_admin=sess.get('is_admin', g.user_role in ('admin','superadmin'))
-                    return f(*args,**kwargs)
-            except Exception:
-                pass
-
-            # Priority 2: JWT stateless verify
-            try:
-                from auth_handlers import TokenManager as _TM
-                payload=_TM.verify_token(token)
-                if payload:
-                    role=payload.get('role','user')
-                    g.authenticated=True; g.user_id=payload.get('user_id','')
-                    g.user_role=role; g.is_admin=payload.get('is_admin', role in ('admin','superadmin'))
-                    return f(*args,**kwargs)
-            except Exception:
-                pass
-
-            # Priority 3: ADMIN_SECRET env bypass
-            secret=os.getenv('ADMIN_SECRET','')
-            if secret and token==secret:
-                g.authenticated=True; g.user_id='admin_bypass'; g.user_role='admin'; g.is_admin=True
-                return f(*args,**kwargs)
-
-            return jsonify({'error':'Invalid or expired token'}),401
+            return f(*args,**kwargs)
         return decorated_function
     
     def require_admin(f):
-        """Admin authorization decorator"""
+        """Admin authorization decorator — checks g.is_admin set by global before_request hook."""
         @wraps(f)
         def decorated_function(*args,**kwargs):
-            if not g.get('is_admin',False):
+            # require_auth should have run first (due to decorator ordering), setting g.is_admin
+            # But now with global before_request, g.is_admin is guaranteed to be set
+            if not g.get('is_admin', False):
                 return jsonify({'error':'Admin access required'}),403
             return f(*args,**kwargs)
         return decorated_function
+
     
     # ═══════════════════════════════════════════════════════════════════════════════════
     # ADMIN SETTINGS ROUTES  (Full CRUD — no stubs)

@@ -656,12 +656,107 @@ logger.info("[FLASK] ✅ Flask app created")
 
 @app.before_request
 def _before():
+    """
+    CRITICAL GLOBAL JWT EXTRACTION — Runs before EVERY request.
+    Extracts and validates JWT once, sets g.user_id, g.user_role, g.is_admin, g.authenticated.
+    
+    This FIXES:
+    • decorator ordering bugs (require_admin before require_auth in execution)
+    • duplicate auth logic across blueprints  
+    • "auth required even when authenticated" false positives
+    
+    All route decorators can now trust g.authenticated, g.user_id, g.user_role to be set.
+    """
+    import jwt as _jwt
+    
+    # Initialize all g attributes to safe defaults
+    g.authenticated = False
+    g.user_id = None
+    g.user_role = 'user'
+    g.is_admin = False
+    g.token_payload = {}
+    
     logger.debug(f"[REQUEST] {request.method} {request.path}")
+    
+    # Extract token from Authorization header, query params, or JSON body
+    raw_token = None
+    auth_header = request.headers.get('Authorization', '')
+    
+    if auth_header.startswith('Bearer '):
+        raw_token = auth_header[7:].strip()
+    
+    if not raw_token:
+        raw_token = request.args.get('access_token') or request.args.get('token')
+    
+    if not raw_token and request.method in ('POST', 'PUT', 'DELETE', 'PATCH'):
+        try:
+            data = request.get_json(silent=True) or {}
+            raw_token = data.get('token') or data.get('access_token')
+        except Exception:
+            pass
+    
+    if raw_token:
+        decode_success = False
+        jwt_payload = {}
+        
+        secrets_to_try = []
+        env_secret = os.getenv('JWT_SECRET', '')
+        if env_secret:
+            secrets_to_try.append(('ENV', env_secret))
+        
+        try:
+            from auth_handlers import JWT_SECRET as _ahs
+            if _ahs:
+                secrets_to_try.append(('AUTH_HANDLERS', _ahs))
+        except Exception:
+            pass
+        
+        try:
+            from globals import _get_jwt_secret as _gs_fn
+            _gs = _gs_fn()
+            if _gs:
+                secrets_to_try.append(('GLOBALS', _gs))
+        except Exception:
+            pass
+        
+        for secret_source, secret in secrets_to_try:
+            try:
+                jwt_payload = _jwt.decode(raw_token, secret, algorithms=['HS512', 'HS256'])
+                decode_success = True
+                logger.debug(f"[AUTH/GLOBAL] JWT decoded via {secret_source}")
+                break
+            except _jwt.InvalidSignatureError:
+                continue
+            except _jwt.ExpiredSignatureError:
+                logger.debug(f"[AUTH/GLOBAL] Token expired")
+                break
+            except Exception:
+                continue
+        
+        if decode_success and jwt_payload:
+            g.authenticated = True
+            g.user_id = jwt_payload.get('user_id')
+            g.user_role = jwt_payload.get('role', 'user')
+            g.is_admin = bool(jwt_payload.get('is_admin', False)) or g.user_role in ('admin', 'superadmin', 'super_admin')
+            g.token_payload = jwt_payload
+            logger.debug(f"[AUTH/GLOBAL] ✓ user={g.user_id} role={g.user_role} admin={g.is_admin}")
 
 
 @app.after_request
 def _after(response):
+    """
+    ENTERPRISE RESPONSE HANDLER — Ensures all JSON responses are properly formatted.
+    • Sets Content-Type for all JSON responses
+    • Prevents "invalid JSON" issues with proxy/clients
+    • Ensures charset is UTF-8
+    """
     logger.debug(f"[RESPONSE] {response.status_code}")
+    
+    # If this is a JSON response, explicitly set Content-Type
+    if response.is_json or 'application/json' in response.content_type:
+        if 'charset' not in response.content_type:
+            response.headers['Content-Type'] = 'application/json; charset=utf-8'
+    
     return response
 
 
