@@ -1,55 +1,76 @@
-# QTCL Blockchain API - Production Dependencies
-# Python 3.9+
+# QTCL v5.2 — Complete Production Requirements
+# Install with: pip install -r requirements.txt
 
-# Web Framework
-Flask==2.3.2
-Flask-CORS==4.0.0
-Flask-SocketIO==5.3.4
-liboqs-python>=0.12.0
-scipy>=1.10.0
-scikit-learn>=1.3.2
-python-socketio>=5.9.0
-gunicorn>=21.2.0
-python-dotenv>=1.0.0
+# ═══════════════════════════════════════════════════════════════════════════════
+# FLASK & WEB FRAMEWORK
+# ═══════════════════════════════════════════════════════════════════════════════
+Flask==2.3.3
+Werkzeug==2.3.7
+click==8.1.7
+itsdangerous==2.1.2
 
-# Database
-psycopg2-binary==2.9.7
+# ═══════════════════════════════════════════════════════════════════════════════
+# AUTHENTICATION & SECURITY
+# ═══════════════════════════════════════════════════════════════════════════════
+PyJWT==2.8.1
+bcrypt==4.1.1
+cryptography==41.0.5
+python-dateutil==2.8.2
 
-# Authentication & Security
-PyJWT==2.8.0
-bcrypt==4.0.1
+# Post-Quantum Cryptography (CRITICAL)
+liboqs-python==0.8.0
 
-# HTTP & Networking
-requests==2.31.0
+# ═══════════════════════════════════════════════════════════════════════════════
+# DATABASE
+# ═══════════════════════════════════════════════════════════════════════════════
+psycopg2-binary==2.9.9
 
-# Quantum & Mathematical Computing
-numpy==1.24.3
+# ═══════════════════════════════════════════════════════════════════════════════
+# DATA HANDLING & VALIDATION
+# ═══════════════════════════════════════════════════════════════════════════════
+pydantic==2.5.0
+pydantic-core==2.14.1
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCIENTIFIC & QUANTUM COMPUTING
+# ═══════════════════════════════════════════════════════════════════════════════
+numpy==1.26.3
+scipy==1.11.4
+scikit-learn==1.3.2
+
+# Quantum Computing Stack
+qiskit==0.44.1
+qiskit-aer==0.13.1
+qiskit-ibmq-provider==0.20.2
+
+# Advanced Math
 mpmath==1.3.0
 
-# Quantum Circuit Execution
-qiskit>=0.43.0
-qiskit-aer>=0.12.0
+# ═══════════════════════════════════════════════════════════════════════════════
+# UTILITIES & LOGGING
+# ═══════════════════════════════════════════════════════════════════════════════
+colorama==0.4.6
+tabulate==0.9.0
 
-# Optional: 2FA Support (pyotp + qrcode for TOTP)
-pyotp==2.9.0
-qrcode[pil]==7.4.2
-Pillow==10.0.0
+# ═══════════════════════════════════════════════════════════════════════════════
+# PRODUCTION DEPLOYMENT
+# ═══════════════════════════════════════════════════════════════════════════════
+gunicorn==21.2.0
+python-dotenv==1.0.0
 
-# Optional: Advanced Cryptography
-cryptography==41.0.3
+# ═══════════════════════════════════════════════════════════════════════════════
+# OPTIONAL: Development/Testing (uncomment for dev)
+# ═══════════════════════════════════════════════════════════════════════════════
+# pytest==7.4.3
+# pytest-cov==4.1.0
+# black==23.12.0
+# flake8==6.1.0
+# mypy==1.7.1
 
-# Optional: Redis Caching
-redis==5.0.0
-
-# Optional: Web3 Integration
-web3==6.10.0
-eth-account==0.9.0
-eth-utils==2.2.0
-
-# Optional: Analytics
-pandas==2.0.3
-matplotlib==3.7.2
-seaborn==0.12.2
-
-# Data Validation
-email-validator==2.0.0
+# ═══════════════════════════════════════════════════════════════════════════════
+# NOTES
+# ═══════════════════════════════════════════════════════════════════════════════
+# - liboqs-python requires system-level dependencies (see INSTALLATION.md)
+# - qiskit requires numpy; installed separately for compatibility
+# - psycopg2-binary avoids compilation on deployment
+# - All versions pinned for production stability
