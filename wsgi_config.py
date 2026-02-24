@@ -1395,9 +1395,14 @@ def _register_heartbeat_listeners() -> None:
     
     # Register quantum executor heartbeat listener
     try:
-        from quantum_lattice_control_live_complete import quantum_executor_heartbeat
-        hb.add_listener(quantum_executor_heartbeat)
-        logger.info("[HEARTBEAT-LISTENERS] ✅ Quantum Executor Heartbeat")
+        import quantum_lattice_control_live_complete as qlc_module
+        if hasattr(qlc_module, 'quantum_executor_heartbeat'):
+            hb.add_listener(qlc_module.quantum_executor_heartbeat)
+            logger.info("[HEARTBEAT-LISTENERS] ✅ Quantum Executor Heartbeat")
+        else:
+            logger.warning("[HEARTBEAT-LISTENERS] ⚠️  Quantum Executor: quantum_executor_heartbeat not found in module")
+    except ImportError as ie:
+        logger.warning(f"[HEARTBEAT-LISTENERS] ⚠️  Quantum Executor module import error: {ie}")
     except Exception as qe:
         logger.warning(f"[HEARTBEAT-LISTENERS] ⚠️  Quantum Executor: {qe}")
 

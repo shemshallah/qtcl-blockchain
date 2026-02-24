@@ -1761,6 +1761,26 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
             except Exception:
                 return {}
 
+        # GET REAL METRICS FROM QUANTUM EXECUTOR
+        executor_metrics = {}
+        executor_coherence = 0.0
+        executor_fidelity = 0.0
+        executor_operations = 0
+        executor_running = False
+        
+        try:
+            import quantum_lattice_control_live_complete as qlc
+            if hasattr(qlc, 'get_quantum_executor'):
+                executor = qlc.get_quantum_executor()
+                if executor:
+                    executor_running = True
+                    executor_metrics = executor.get_metrics()
+                    executor_coherence = float(executor_metrics.get('coherence', 0.0))
+                    executor_fidelity = float(executor_metrics.get('fidelity', 0.0))
+                    executor_operations = executor_metrics.get('total_operations', 0)
+        except Exception as _exe:
+            logger.debug(f"[quantum-stats] executor error: {_exe}")
+
         hb_m = lat_m = neural_s = ws_s = nb_s = health_s = {}
         try:
             _hb  = get_heartbeat()
@@ -1795,15 +1815,23 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
                 logger.debug(f"Harvest trigger error: {_he}")
 
         return {'status': 'success', 'result': {
-            'engine': 'QTCL-QE v8.0',
+            'engine': 'QTCL-QE v8.0 + Enterprise Executor',
             'heartbeat': {
                 'running':      hb_m.get('running', False),
                 'pulse_count':  hb_m.get('pulse_count', 0),
                 'frequency_hz': hb_m.get('frequency', 1.0),
             } if hb_m else {'running': False, 'note': 'heartbeat not started'},
+            'quantum_executor': {
+                'running': executor_running,
+                'cycles': executor_metrics.get('execution_cycles', 0),
+                'coherence': executor_coherence,
+                'fidelity': executor_fidelity,
+                'operations': executor_operations,
+                'pid_feedback': executor_metrics.get('pid_feedback', 0.0),
+            },
             'lattice': {
-                'operations':   lat_m.get('operations_count', 0),
-                'tx_processed': lat_m.get('transactions_processed', 0),
+                'operations':   lat_m.get('operations_count', executor_operations),
+                'tx_processed': lat_m.get('transactions_processed', executor_operations),
                 'health':       health_s,
             },
             'neural_network': {
@@ -1811,11 +1839,11 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
                 'iterations':   neural_s.get('learning_iterations', 0),
             },
             'w_state': {
-                'coherence_avg':        ws_s.get('coherence_avg', 0.0),
-                'fidelity_avg':         ws_s.get('fidelity_avg', 0.0),
+                'coherence_avg':        ws_s.get('coherence_avg', executor_coherence),
+                'fidelity_avg':         ws_s.get('fidelity_avg', executor_fidelity),
                 'entanglement_strength':ws_s.get('entanglement_strength', 0.0),
                 'superposition_count':  ws_s.get('superposition_count', 5),
-                'tx_validations':       ws_s.get('transaction_validations', 0),
+                'tx_validations':       ws_s.get('transaction_validations', executor_operations),
             },
             'noise_bath': {
                 'kappa':                nb_s.get('kappa', 0.08),
@@ -1829,14 +1857,14 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
                 'floor_violations':g.get('floor_violations', 0),
                 'maintainer_hz':  m.get('actual_hz', 0.0),
                 'maintainer_running': m.get('running', False),
-                'coherence_floor': 0.89,
-                'w_state_target':  0.9997,
+                'coherence_floor': executor_coherence,
+                'w_state_target':  0.93,
             },
             'bell_boundary': {
                 'quantum_fraction':     bell.get('quantum_fraction', 0.0),
                 'chsh_violations':      bell.get('chsh_violation_total', 0),
                 'boundary_kappa_est':   bell.get('boundary_kappa_estimate'),
-                'S_CHSH_mean':          bell.get('S_CHSH_mean', 0.0),
+                'S_CHSH_mean':          bell.get('S_CHSH_mean', executor_metrics.get('bell_chsh', 0.0)),
             },
             'mi_trend': mi,
         }}
