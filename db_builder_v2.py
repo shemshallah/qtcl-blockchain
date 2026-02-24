@@ -8797,46 +8797,16 @@ class DatabaseHeartbeatIntegration:
     
     def __init__(self):
         self.pulse_count = 0
-        self.pool_checks = 0
-        self.connection_refreshes = 0
         self.error_count = 0
         self.lock = threading.RLock()
     
     def on_heartbeat(self, timestamp):
-        """Called every heartbeat - manage database connections"""
+        """Called every heartbeat - just track metrics"""
         try:
             with self.lock:
                 self.pulse_count += 1
-                self.pool_checks += 1
-            
-            # REAL pool health check — verify connections work
-            try:
-                from globals import get_db_manager
-                db_mgr = get_db_manager()
-                if db_mgr and db_mgr.pool:
-                    # Try to get and return a test connection
-                    test_conn = db_mgr.pool.getconn()
-                    try:
-                        cursor = test_conn.cursor()
-                        cursor.execute("SELECT 1")
-                        cursor.close()
-                        db_mgr.pool.putconn(test_conn)
-                        # Pool is healthy — no action needed
-                    except Exception as health_err:
-                        # Connection failed health check
-                        db_mgr.pool.putconn(test_conn, close=True)
-                        with self.lock:
-                            self.error_count += 1
-                        logger.warning(f"[DB-HB] Pool health check failed: {health_err}")
-                else:
-                    logger.debug("[DB-HB] Database pool not initialized")
-            except Exception as e:
-                logger.warning(f"[DB-HB] Pool check exception: {e}")
-                with self.lock:
-                    self.error_count += 1
-        
         except Exception as e:
-            logger.error(f"[DB-HB] Heartbeat callback error: {e}", exc_info=True)
+            logger.error(f"[DB-HB] Heartbeat callback error: {e}")
             with self.lock:
                 self.error_count += 1
     
@@ -8845,8 +8815,6 @@ class DatabaseHeartbeatIntegration:
         with self.lock:
             return {
                 'pulse_count': self.pulse_count,
-                'pool_checks': self.pool_checks,
-                'connection_refreshes': self.connection_refreshes,
                 'error_count': self.error_count
             }
 

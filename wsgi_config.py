@@ -287,7 +287,7 @@ DB_POOL = None
 def _initialize_database_deferred() -> None:
     """
     Connect to PostgreSQL in a daemon thread so Flask can start immediately.
-    Verifies credentials, creates a test connection, and runs SELECT version().
+    Verifies credentials and creates connection pool.
     Sets module-level DB / DB_POOL on success.
     """
     global DB, DB_POOL
