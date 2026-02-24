@@ -132,6 +132,25 @@ except ImportError:
     # Qiskit not available - will use fallback quantum simulation
     pass
 
+# ════════════════════════════════════════════════════════════════════════════════
+# UNIFIED POST-QUANTUM CRYPTOGRAPHY (pq_keys_system v1.0)
+# Provides digital signatures, key management, and audit logging for blockchain
+# ════════════════════════════════════════════════════════════════════════════════
+try:
+    from pq_keys_system import get_pq_system
+    PQ_SYSTEM_AVAILABLE = True
+    def get_blockchain_pq_system():
+        """Get PQ system for blockchain transactions"""
+        try:
+            from wsgi_config import get_pq_system as _get_pq
+            return _get_pq()
+        except:
+            return get_pq_system()
+except ImportError:
+    PQ_SYSTEM_AVAILABLE = False
+    def get_blockchain_pq_system():
+        return None
+
 getcontext().prec=28
 logger=logging.getLogger(__name__)
 

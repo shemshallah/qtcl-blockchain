@@ -149,6 +149,27 @@ try:
 except ImportError as _ge:
     logger.warning("[oracle_api] ⚠️  Globals not available - running in standalone mode: %s", _ge)
 
+# ════════════════════════════════════════════════════════════════════════════════════════
+# UNIFIED POST-QUANTUM CRYPTOGRAPHY (pq_keys_system v1.0)
+# Provides cryptographic operations for oracle transactions and measurements
+# ════════════════════════════════════════════════════════════════════════════════════════
+PQ_SYSTEM_AVAILABLE = False
+try:
+    from pq_keys_system import get_pq_system as _get_unified_pq
+    PQ_SYSTEM_AVAILABLE = True
+    def get_oracle_pq_system():
+        """Get unified PQ system for oracle operations"""
+        try:
+            from wsgi_config import get_pq_system as _get_pq
+            return _get_pq()
+        except:
+            return _get_unified_pq()
+    logger.info("[oracle_api] ✅ Unified PQ cryptographic system available")
+except ImportError as _pq_ie:
+    logger.warning("[oracle_api] ⚠️  PQ cryptographic system not available: %s", _pq_ie)
+    def get_oracle_pq_system():
+        return None
+
 # NOTE: wsgi_config (DB/PROFILER/CACHE/etc.) not imported here —
 # those objects don't exist in wsgi_config.py; all DB access goes through globals/db_builder_v2.
 
@@ -1563,11 +1584,28 @@ def create_oracle_api_blueprint():
     
     @blueprint.route('/price/<symbol>', methods=['GET'])
     def get_price(symbol):
-        """Get asset price from unified oracle provider."""
+        """Get price with quantum W-state seal."""
         try:
             price_data = get_oracle_price_provider().get_price(symbol)
             
             if price_data.get('available'):
+                # Inject quantum W-state seal
+                try:
+                    from wsgi_config import QUANTUM_DENSITY_MANAGER
+                    if QUANTUM_DENSITY_MANAGER:
+                        state = QUANTUM_DENSITY_MANAGER.read_latest_state()
+                        if state:
+                            w_seal = hashlib.sha256(
+                                f"{symbol}{price_data.get('price')}{state['w_state_strength']}{state['ghz_phase']}".encode()
+                            ).hexdigest()
+                            
+                            price_data['quantum_w_state_seal'] = w_seal
+                            price_data['quantum_coherence'] = float(state['coherence'])
+                            price_data['quantum_fidelity'] = float(state['fidelity'])
+                            price_data['quantum_timestamp'] = state['timestamp'].isoformat() if state['timestamp'] else None
+                except Exception as e:
+                    logger.warning(f"[oracle_api] Could not seal price: {e}")
+                
                 return jsonify(ResponseWrapper.success(data=price_data)), 200
             else:
                 return jsonify(ResponseWrapper.error(

@@ -49,6 +49,29 @@ logging.getLogger('qiskit.transpiler').setLevel(logging.WARNING)
 logging.getLogger('qiskit').setLevel(logging.WARNING)
 
 # ════════════════════════════════════════════════════════════════════════════════
+# UNIFIED POST-QUANTUM CRYPTOGRAPHY SYSTEM (PARADIGM SHIFT — v1.0)
+# Singular point of integration for all cryptographic operations across system
+# ════════════════════════════════════════════════════════════════════════════════
+
+_PQ_CRYPTO_SYSTEM = None
+_PQ_CRYPTO_LOCK = threading.RLock()
+
+def get_pq_system():
+    """Get or create global unified PQ cryptographic system singleton"""
+    global _PQ_CRYPTO_SYSTEM
+    if _PQ_CRYPTO_SYSTEM is None:
+        with _PQ_CRYPTO_LOCK:
+            if _PQ_CRYPTO_SYSTEM is None:
+                try:
+                    from pq_keys_system import get_pq_system as _get_unified_pq
+                    _PQ_CRYPTO_SYSTEM = _get_unified_pq()
+                    logger.info("[BOOTSTRAP/PQ] ✓ Unified PQ cryptographic system initialized")
+                except Exception as e:
+                    logger.error(f"[BOOTSTRAP/PQ] ✗ Failed to initialize PQ system: {e}", exc_info=True)
+                    _PQ_CRYPTO_SYSTEM = None
+    return _PQ_CRYPTO_SYSTEM
+
+# ════════════════════════════════════════════════════════════════════════════════
 # ENVIRONMENT VARIABLES - Hard-coded from Koyeb Console
 # ════════════════════════════════════════════════════════════════════════════════
 # These MUST be set in Koyeb console environment variables before Flask starts.
@@ -285,13 +308,14 @@ PROFILER            = SimpleProfiler()
 CACHE               = SimpleCache(max_size=2000)
 RequestCorrelation  = RequestTracer()
 ERROR_BUDGET        = ErrorBudgetManager(max_errors=100, window_sec=60)
+PQ_SYSTEM           = None  # Lazily initialized via get_pq_system() on first use
 
 # ── Exported stubs — blockchain_api / defi_api / admin_api import these ──────
 # Each module implements its own circuit-breaking; these are coordination stubs.
 CIRCUIT_BREAKERS: dict = {}
 RATE_LIMITERS:    dict = {}
 
-logger.info("[BOOTSTRAP] ✅ Utility singletons ready (PROFILER, CACHE, RequestCorrelation, ERROR_BUDGET)")
+logger.info("[BOOTSTRAP] ✅ Utility singletons ready (PROFILER, CACHE, RequestCorrelation, ERROR_BUDGET, PQ_SYSTEM)")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

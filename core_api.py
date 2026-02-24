@@ -70,11 +70,31 @@ logger=logging.getLogger(__name__)
 # GLOBAL WSGI INTEGRATION - Quantum Revolution
 # ═══════════════════════════════════════════════════════════════════════════════════════
 try:
-    from wsgi_config import DB, PROFILER, CACHE, ERROR_BUDGET, RequestCorrelation, CIRCUIT_BREAKERS, RATE_LIMITERS
+    from wsgi_config import DB, PROFILER, CACHE, ERROR_BUDGET, RequestCorrelation, CIRCUIT_BREAKERS, RATE_LIMITERS, get_pq_system
     WSGI_AVAILABLE = True
 except ImportError:
     WSGI_AVAILABLE = False
     logger.warning("[INTEGRATION] WSGI globals not available - running in standalone mode")
+    def get_pq_system():
+        return None
+
+# ════════════════════════════════════════════════════════════════════════════════════════
+# UNIFIED POST-QUANTUM CRYPTOGRAPHY (pq_keys_system v1.0)
+# Provides key management, signatures, and cryptographic operations for core API
+# ════════════════════════════════════════════════════════════════════════════════════════
+try:
+    from pq_keys_system import get_pq_system as _get_local_pq
+    PQ_SYSTEM_AVAILABLE = True
+    def get_core_pq_system():
+        """Get unified PQ system for core operations"""
+        try:
+            return get_pq_system()  # From wsgi_config import above
+        except:
+            return _get_local_pq()
+except ImportError:
+    PQ_SYSTEM_AVAILABLE = False
+    def get_core_pq_system():
+        return None
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION & ENUMS

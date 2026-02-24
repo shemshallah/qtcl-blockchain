@@ -127,6 +127,256 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
+# UNIFIED POST-QUANTUM CRYPTOGRAPHIC SYSTEM INTEGRATION
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+
+def get_pq_system_status() -> Dict[str, Any]:
+    """Get unified PQ cryptographic system status"""
+    try:
+        from wsgi_config import get_pq_system
+        pq = get_pq_system()
+        
+        if not pq:
+            return {
+                'status': 'offline',
+                'reason': 'Failed to initialize unified PQ system',
+                'ready': False
+            }
+        
+        status = pq.get_system_status()
+        return {
+            'status': 'ok',
+            'ready': True,
+            'system': status.get('system', 'Unknown'),
+            'version': status.get('version', 'Unknown'),
+            'security_level': status.get('security_level', 'Unknown'),
+            'qrng_sources': status.get('qrng_ensemble', {}).get('active_sources', 0),
+            'vault_mode': status.get('vault_mode', 'Memory'),
+            'precision_bits': status.get('precision_bits', 150),
+            'tessellation': status.get('tessellation', 'Unknown'),
+            'pseudoqubits': status.get('pseudoqubits', 106496)
+        }
+    except Exception as e:
+        logger.error(f"[PQ-STATUS] Error: {e}", exc_info=True)
+        return {'status': 'offline', 'reason': str(e), 'ready': False}
+
+
+def get_module_health() -> Dict[str, bool]:
+    """Get health status of all system modules"""
+    module_health = {
+        'pqc_system': False,
+        'auth_manager': False,
+        'blockchain': False,
+        'database': False,
+        'defi': False,
+        'oracle': False
+    }
+    
+    try:
+        from wsgi_config import get_pq_system
+        pq = get_pq_system()
+        module_health['pqc_system'] = pq is not None
+    except:
+        pass
+    
+    try:
+        from auth_handlers import get_pqc_system
+        auth = get_pqc_system()
+        module_health['auth_manager'] = auth is not None
+    except:
+        pass
+    
+    try:
+        from blockchain_api import get_blockchain_pq_system
+        bc = get_blockchain_pq_system()
+        module_health['blockchain'] = bc is not None
+    except:
+        pass
+    
+    try:
+        import psycopg2
+        module_health['database'] = True
+    except:
+        pass
+    
+    try:
+        from defi_api import get_defi_pq_system
+        defi = get_defi_pq_system()
+        module_health['defi'] = defi is not None
+    except:
+        pass
+    
+    try:
+        from oracle_api import get_oracle_pq_system
+        oracle = get_oracle_pq_system()
+        module_health['oracle'] = oracle is not None
+    except:
+        pass
+    
+    return module_health
+
+
+def get_chain_height() -> int:
+    """
+    Get current blockchain height from EXISTING database.
+    Queries the blocks table to find maximum height.
+    Integrates with db_builder_v2 schema.
+    """
+    try:
+        from globals import get_db_pool
+        
+        db_pool = get_db_pool()
+        if not db_pool:
+            logger.warning("[CHAIN-HEIGHT] Database pool unavailable")
+            return 0
+        
+        conn = db_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                # Query maximum block height from existing blocks table
+                cur.execute("SELECT MAX(height) as max_height FROM blocks")
+                result = cur.fetchone()
+                
+                if result and result[0] is not None:
+                    height = int(result[0])
+                    logger.debug(f"[CHAIN-HEIGHT] Current chain height: {height}")
+                    return height
+                else:
+                    # No blocks exist yet - genesis hasn't been created
+                    logger.info("[CHAIN-HEIGHT] No blocks in database - genesis not yet created")
+                    return 0
+        finally:
+            db_pool.putconn(conn)
+    
+    except Exception as e:
+        logger.error(f"[CHAIN-HEIGHT] Error querying database: {e}", exc_info=True)
+        return 0
+
+
+def check_genesis_block() -> Dict[str, Any]:
+    """
+    Check if genesis block exists in EXISTING database.
+    Queries blocks table for height=0.
+    Genesis block is required for blockchain to function.
+    """
+    try:
+        from globals import get_db_pool
+        
+        db_pool = get_db_pool()
+        if not db_pool:
+            return {
+                'initialized': False,
+                'genesis_exists': False,
+                'reason': 'Database pool unavailable'
+            }
+        
+        conn = db_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                # Check if genesis block (height=0) exists
+                cur.execute("""
+                    SELECT height, block_hash, timestamp 
+                    FROM blocks 
+                    WHERE height = 0
+                """)
+                genesis = cur.fetchone()
+                
+                if genesis:
+                    logger.info(f"[GENESIS] Genesis block exists: {genesis[1][:16]}...")
+                    return {
+                        'initialized': True,
+                        'genesis_exists': True,
+                        'genesis_height': genesis[0],
+                        'genesis_hash': genesis[1],
+                        'genesis_timestamp': str(genesis[2])
+                    }
+                else:
+                    # Check total block count
+                    cur.execute("SELECT COUNT(*) as count FROM blocks")
+                    count = cur.fetchone()[0]
+                    
+                    logger.warning(f"[GENESIS] Genesis block missing (total blocks: {count})")
+                    return {
+                        'initialized': True,
+                        'genesis_exists': False,
+                        'total_blocks': count,
+                        'message': 'Genesis block not found - blockchain not properly initialized'
+                    }
+        finally:
+            db_pool.putconn(conn)
+    
+    except Exception as e:
+        logger.error(f"[GENESIS] Error checking genesis block: {e}", exc_info=True)
+        return {
+            'initialized': False,
+            'error': str(e)
+        }
+
+
+def get_blockchain_stats() -> Dict[str, Any]:
+    """
+    Get comprehensive blockchain statistics from EXISTING database.
+    Queries blocks, transactions, validators from db_builder_v2 schema.
+    """
+    try:
+        from globals import get_db_pool
+        
+        db_pool = get_db_pool()
+        if not db_pool:
+            return {'available': False, 'reason': 'Database pool unavailable'}
+        
+        conn = db_pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                stats = {}
+                
+                # Total blocks
+                cur.execute("SELECT COUNT(*) FROM blocks")
+                stats['total_blocks'] = cur.fetchone()[0]
+                
+                # Chain height
+                cur.execute("SELECT MAX(height) FROM blocks")
+                max_height = cur.fetchone()[0]
+                stats['chain_height'] = int(max_height) if max_height else 0
+                
+                # Total transactions
+                cur.execute("SELECT SUM(transactions) FROM blocks WHERE transactions IS NOT NULL")
+                total_tx = cur.fetchone()[0]
+                stats['total_transactions'] = int(total_tx) if total_tx else 0
+                
+                # Unique validators
+                cur.execute("SELECT COUNT(DISTINCT validator) FROM blocks WHERE validator IS NOT NULL")
+                stats['unique_validators'] = cur.fetchone()[0]
+                
+                # Latest block timestamp
+                cur.execute("""
+                    SELECT timestamp FROM blocks 
+                    ORDER BY height DESC 
+                    LIMIT 1
+                """)
+                latest = cur.fetchone()
+                if latest:
+                    stats['latest_block_timestamp'] = latest[0]
+                
+                # Average block time
+                cur.execute("""
+                    SELECT AVG(b2.timestamp - b1.timestamp) 
+                    FROM blocks b1 
+                    JOIN blocks b2 ON b2.height = b1.height + 1
+                    WHERE b1.timestamp IS NOT NULL AND b2.timestamp IS NOT NULL
+                """)
+                avg_block_time = cur.fetchone()[0]
+                stats['avg_block_time_ms'] = float(avg_block_time) if avg_block_time else 0
+                
+                return stats
+        finally:
+            db_pool.putconn(conn)
+    
+    except Exception as e:
+        logger.error(f"[BLOCKCHAIN-STATS] Error querying blockchain: {e}", exc_info=True)
+        return {'available': False, 'error': str(e)}
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
 # UNIFIED RESPONSE SCHEMA
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -713,14 +963,16 @@ class TerminalEngine:
     # ═══════════════════════════════════════════════════════════════════════════════════════════
     
     def cmd_system(self):
-        """System operations"""
+        """System operations with unified PQ cryptography monitoring"""
         while self.running:
             option = UI.menu("SYSTEM", [
-                "Status", "Health", "Config", "Backup", "Restore", "Back"
+                "Status", "Health", "Blockchain", "PQ Cryptography", "Config", "Backup", "Restore", "Back"
             ])
             
             if option == "Status":
                 success, result = self.client.request('GET', '/system/status', {})
+                pq_status = get_pq_system_status()
+                
                 if success:
                     UI.table(
                         ['Component', 'Status'],
@@ -728,12 +980,65 @@ class TerminalEngine:
                             ['API', result.get('api', 'unknown')],
                             ['Database', result.get('database', 'unknown')],
                             ['Quantum Engine', result.get('quantum', 'unknown')],
+                            ['PQ Cryptography', pq_status.get('status', 'unknown')],
                             ['Cache', result.get('cache', 'unknown')],
                         ],
                         "System Status"
                     )
                 else:
                     UI.error("System offline")
+            
+            elif option == "Health":
+                modules = get_module_health()
+                pq_status = get_pq_system_status()
+                
+                rows = [
+                    ['PQ Cryptography System', '✓' if pq_status.get('ready') else '✗'],
+                    ['Auth Manager', '✓' if modules.get('auth_manager') else '✗'],
+                    ['Blockchain', '✓' if modules.get('blockchain') else '✗'],
+                    ['Database', '✓' if modules.get('database') else '✗'],
+                    ['DeFi', '✓' if modules.get('defi') else '✗'],
+                    ['Oracle', '✓' if modules.get('oracle') else '✗'],
+                ]
+                
+                UI.table(['Module', 'Status'], rows, "Module Health")
+            
+            elif option == "Blockchain":
+                # Get blockchain stats from EXISTING database
+                genesis = check_genesis_block()
+                stats = get_blockchain_stats()
+                chain_height = get_chain_height()
+                
+                if genesis.get('genesis_exists'):
+                    UI.success(f"✓ Genesis Block Exists")
+                    UI.info(f"  Hash: {genesis['genesis_hash'][:32]}...")
+                    UI.info(f"  Timestamp: {genesis.get('genesis_timestamp')}")
+                else:
+                    UI.warning(f"⚠ Genesis Block: {genesis.get('message', 'Missing')}")
+                
+                if stats.get('available') is not False:
+                    UI.info(f"\nBlockchain Statistics:")
+                    UI.info(f"  Chain Height: {chain_height}")
+                    UI.info(f"  Total Blocks: {stats.get('total_blocks', 0)}")
+                    UI.info(f"  Total Transactions: {stats.get('total_transactions', 0)}")
+                    UI.info(f"  Unique Validators: {stats.get('unique_validators', 0)}")
+                    UI.info(f"  Avg Block Time: {stats.get('avg_block_time_ms', 0):.2f}ms")
+                else:
+                    UI.error(f"Blockchain query failed: {stats.get('error')}")
+            
+            elif option == "PQ Cryptography":
+                pq_status = get_pq_system_status()
+                
+                if pq_status.get('ready'):
+                    UI.success(f"✓ PQ System: {pq_status.get('system', 'Unknown')}")
+                    UI.info(f"  Security Level: {pq_status.get('security_level')}")
+                    UI.info(f"  Vault Mode: {pq_status.get('vault_mode')}")
+                    UI.info(f"  Entropy Sources: {pq_status.get('qrng_sources')}")
+                    UI.info(f"  Tessellation: {pq_status.get('tessellation')}")
+                    UI.info(f"  Pseudoqubits: {pq_status.get('pseudoqubits'):,}")
+                else:
+                    UI.warning(f"⚠ PQ System: {pq_status.get('status')}")
+                    UI.error(f"  Reason: {pq_status.get('reason')}")
             
             elif option == "Back":
                 break
@@ -743,24 +1048,78 @@ class TerminalEngine:
     # ═══════════════════════════════════════════════════════════════════════════════════════════
     
     def cmd_quantum(self):
-        """Quantum operations"""
-        correlation_id = str(uuid.uuid4())[:12]
-        option = UI.menu("QUANTUM", ["Status", "Entropy", "Validators", "Finality", "Back"])
-        
-        if option == "Status":
-            success, result = self.client.request('GET', '/quantum/status', {}, correlation_id=correlation_id)
-            if success:
+        """Quantum operations with PQ system integration"""
+        while self.running:
+            correlation_id = str(uuid.uuid4())[:12]
+            option = UI.menu("QUANTUM", ["Status", "PQ Stats", "Blockchain", "Entropy", "Validators", "Finality", "Back"])
+            
+            if option == "Status":
+                success, result = self.client.request('GET', '/quantum/status', {}, correlation_id=correlation_id)
+                if success:
+                    response = StatResponse(
+                        command='quantum status',
+                        status='success',
+                        correlation_id=correlation_id,
+                        stats={'entropy': result.get('entropy'), 'coherence': result.get('coherence')},
+                        quantum=result,
+                        metrics={}
+                    )
+                    UI.print_response(response)
+                else:
+                    UI.error(f"Failed: {result.get('error')}")
+            
+            elif option == "PQ Stats":
+                # Show unified PQ cryptographic system status
+                pq_status = get_pq_system_status()
+                modules = get_module_health()
+                
                 response = StatResponse(
-                    command='quantum status',
-                    status='success',
+                    command='quantum pq-stats',
+                    status='success' if pq_status.get('ready') else 'degraded',
                     correlation_id=correlation_id,
-                    stats={'entropy': result.get('entropy'), 'coherence': result.get('coherence')},
-                    quantum=result,
-                    metrics={}
+                    details={
+                        'pq_system': pq_status,
+                        'modules': modules
+                    },
+                    quantum={
+                        'system': pq_status.get('system'),
+                        'security_level': pq_status.get('security_level'),
+                        'ready': pq_status.get('ready'),
+                        'vault_mode': pq_status.get('vault_mode'),
+                        'entropy_sources': pq_status.get('qrng_sources'),
+                        'tessellation': pq_status.get('tessellation'),
+                        'pseudoqubits': pq_status.get('pseudoqubits')
+                    },
+                    metrics={'active_modules': sum(1 for v in modules.values() if v)}
                 )
                 UI.print_response(response)
-            else:
-                UI.error(f"Failed: {result.get('error')}")
+            
+            elif option == "Blockchain":
+                # Show blockchain statistics from existing database
+                genesis = check_genesis_block()
+                stats = get_blockchain_stats()
+                chain_height = get_chain_height()
+                
+                if genesis.get('genesis_exists'):
+                    UI.success(f"✓ Genesis Block: {genesis['genesis_hash'][:16]}...")
+                    UI.info(f"  Timestamp: {genesis.get('genesis_timestamp')}")
+                else:
+                    UI.warning("⚠ Genesis Block: Not found in database")
+                
+                if stats.get('available') is not False:
+                    rows = [
+                        ['Chain Height', str(chain_height)],
+                        ['Total Blocks', str(stats.get('total_blocks', 0))],
+                        ['Total Transactions', str(stats.get('total_transactions', 0))],
+                        ['Unique Validators', str(stats.get('unique_validators', 0))],
+                        ['Avg Block Time (ms)', f"{stats.get('avg_block_time_ms', 0):.2f}"],
+                    ]
+                    UI.table(['Metric', 'Value'], rows, "Blockchain Statistics")
+                else:
+                    UI.error(f"Blockchain unavailable: {stats.get('error')}")
+            
+            elif option == "Back":
+                break
     
     def cmd_defi(self):
         """Unified DeFi operations"""
@@ -1313,28 +1672,19 @@ class TerminalEngine:
         self.running = False
         UI.success("Goodbye!")
 
+
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 # BOOTSTRAP SUPPORT
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 
 def register_all_commands(engine):
     """
-    Register all terminal commands into the engine.
-    
-    This stub function is called by wsgi_config.py during bootstrap to integrate
-    terminal_logic with the global command registry (globals.py).
-    
-    Current implementation: All commands are already in globals.COMMAND_REGISTRY.
-    Terminal engine here is optional enhancement — main registry is in globals.py.
-    
-    Args:
-        engine: TerminalEngine instance
-        
-    Returns:
-        int: Number of commands registered (0 — all commands in globals.py)
+    Register all commands with the engine.
+    Called from wsgi_config bootstrap to integrate terminal_logic.
+    Returns: number of commands registered
     """
-    logger.info("[terminal_logic] register_all_commands called — main registry in globals.py")
-    return 0  # All commands managed by globals.COMMAND_REGISTRY
+    logger.debug("[terminal_logic] register_all_commands called")
+    return 0  # All commands in globals.COMMAND_REGISTRY
 
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════

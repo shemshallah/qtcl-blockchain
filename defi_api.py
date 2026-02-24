@@ -37,11 +37,30 @@ except ImportError:
 # GLOBAL WSGI INTEGRATION - Quantum Revolution
 # ═══════════════════════════════════════════════════════════════════════════════════════
 try:
-    from wsgi_config import DB, PROFILER, CACHE, ERROR_BUDGET, RequestCorrelation, CIRCUIT_BREAKERS, RATE_LIMITERS
+    from wsgi_config import DB, PROFILER, CACHE, ERROR_BUDGET, RequestCorrelation, CIRCUIT_BREAKERS, RATE_LIMITERS, get_pq_system
     WSGI_AVAILABLE = True
 except ImportError:
     WSGI_AVAILABLE = False
     logger.warning("[INTEGRATION] WSGI globals not available - running in standalone mode")
+
+# ════════════════════════════════════════════════════════════════════════════════════════
+# UNIFIED POST-QUANTUM CRYPTOGRAPHY (pq_keys_system v1.0)
+# Provides cryptographic security for DeFi transactions, contract signing, bridge operations
+# ════════════════════════════════════════════════════════════════════════════════════════
+try:
+    from pq_keys_system import get_pq_system as _get_unified_pq
+    PQ_SYSTEM_AVAILABLE = True
+    def get_defi_pq_system():
+        """Get unified PQ system for DeFi operations"""
+        try:
+            return get_pq_system()  # From wsgi_config import above
+        except:
+            return _get_unified_pq()  # Fallback to local import
+except ImportError:
+    PQ_SYSTEM_AVAILABLE = False
+    def get_defi_pq_system():
+        return None
+    logger.warning("[PQ-SYSTEM] Unified PQ cryptography not available - DeFi signatures disabled")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION & ENUMS
