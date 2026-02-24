@@ -18,7 +18,7 @@ cryptography==41.0.5
 python-dateutil==2.8.2
 
 # Post-Quantum Cryptography (CRITICAL)
-liboqs-python==0.8.0
+liboqs-python==0.14.1
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # DATABASE
