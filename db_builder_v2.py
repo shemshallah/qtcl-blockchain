@@ -4759,10 +4759,6 @@ class DatabaseBuilder:
         
         # Try to create pool, but don't fail if credentials are bad
         try:
-            logger.info(f"[POOL-DEBUG] host={host}, user={user}, port={port}, db={database}")
-            logger.info(f"[POOL-DEBUG] password loaded={password is not None}, len={len(password) if password else 0}")
-            if password:
-                logger.info(f"[POOL-DEBUG] password first 5: {password[:5]}, has $: {'$' in password}")
             self.pool = ThreadedConnectionPool(
                 DB_POOL_MIN_CONNECTIONS, 
                 pool_size,
@@ -8348,7 +8344,8 @@ def verify_database_connection(db_manager=None, verbose=True) -> Dict[str, Any]:
         'warnings': []
     }
     
-    if db_manager is None:
+        # ENTERPRISE FIX: db_manager MUST be provided explicitly
+if db_manager is None:
         db_manager = globals().get('db_manager')
     
     if db_manager is None:
