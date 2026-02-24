@@ -695,12 +695,18 @@ _DB_STATUS_UPDATE_INTERVAL  = 30   # seconds
 
 
 def _update_db_status_cache() -> None:
-    """Daemon thread: refresh cached DB status without ever blocking a request handler."""
+    """
+    Daemon thread: refresh cached DB status without blocking request handlers.
+    
+    🔥 CRITICAL FIX 🔥: Pass DB instance explicitly to verify_database_connection()
+    instead of relying on globals() lookup, which was failing due to scope issues.
+    """
 
     def _do_update() -> None:
         try:
             from db_builder_v2 import verify_database_connection
-            result = verify_database_connection(verbose=False)
+            # FIX: Pass DB explicitly — don't rely on globals() in db_builder_v2
+            result = verify_database_connection(db_manager=DB, verbose=False, fail_fast=False)
             with _DB_STATUS_LOCK:
                 _DB_STATUS_CACHE.update({
                     'connected': result.get('connected', False),
@@ -709,7 +715,7 @@ def _update_db_status_cache() -> None:
                     'port':      result.get('port',      5432),
                     'database':  result.get('database',  'unknown'),
                     'timestamp': time.time(),
-                    'error':     None,
+                    'error':     None if result.get('connected') else result.get('errors', ['unknown'])[0],
                 })
         except Exception as exc:
             with _DB_STATUS_LOCK:
@@ -719,13 +725,14 @@ def _update_db_status_cache() -> None:
                     'error':     str(exc)[:120],
                 })
 
-    # Immediate update so /health is accurate from the first request
+    # Immediate update on startup so /health is accurate from first request
     try:
         _do_update()
         logger.info("[DB-STATUS-CACHE] ✅ Initial cache populated")
     except Exception as exc:
         logger.warning(f"[DB-STATUS-CACHE] Initial update error: {exc}")
 
+    # Periodic refresh every 30s (or 5s if error)
     while True:
         try:
             time.sleep(_DB_STATUS_UPDATE_INTERVAL)
@@ -762,24 +769,34 @@ def index():
 @app.route('/health', methods=['GET'])
 def health():
     """
-    Fast health endpoint — always HTTP 200, DB truth resolved in priority order:
-      1. Module-level DB pool (live, zero-latency) — resolves the 30s cold-start
-         window where _DB_STATUS_CACHE is stale-False despite pool being ready.
-      2. _DB_STATUS_CACHE — updated every 30s by daemon thread.
-    Whichever shows connected=True wins.
+    ═══════════════════════════════════════════════════════════════════════════════
+    FAST HEALTH CHECK — ZERO COLD-START WINDOW
+    ═══════════════════════════════════════════════════════════════════════════════
+    
+    PRIORITY ORDER (first True wins):
+      1. LIVE POOL CHECK: Is DB.pool not None right now? (zero-latency)
+      2. STATUS CACHE: Did periodic daemon report connected=True?
+    
+    This eliminates the 30-second window where /health returned 'degraded' despite
+    pool being ready, because the periodic cache daemon hadn't run yet.
+    
+    Now: DB.pool is checked immediately, and cache is updated every 30s in background.
     """
     with _DB_STATUS_LOCK:
         db = _DB_STATUS_CACHE.copy()
 
-    # Live pool check: authoritative for cold-start window before cache refreshes
-    live_connected = (DB is not None and getattr(DB, 'pool', None) is not None)
-    connected = live_connected or db.get('connected', False)
+    # LIVE CHECK: Is the pool alive right now?
+    # This is ZERO-LATENCY and authoritative for cold-start window
+    live_pool_exists = (DB is not None and getattr(DB, 'pool', None) is not None)
+    
+    # First check: Live pool. Second check: Cached status (updated every 30s)
+    connected = live_pool_exists or db.get('connected', False)
 
-    # Write live truth back into cache so next caller also benefits
-    if live_connected and not db.get('connected', False):
+    # Write truth back to cache so next caller benefits without waiting for daemon
+    if live_pool_exists and not db.get('connected', False):
         with _DB_STATUS_LOCK:
             _DB_STATUS_CACHE['connected'] = True
-            _DB_STATUS_CACHE['healthy']   = True
+            _DB_STATUS_CACHE['healthy'] = True
 
     status = 'healthy' if connected else 'degraded'
 
@@ -794,12 +811,12 @@ def health():
             'database':          db.get('database'),
             'error':             db.get('error'),
             'cache_age_seconds': int(time.time() - db.get('timestamp', 0)),
-            'live_pool':         live_connected,
+            'live_pool':         live_pool_exists,
         },
         'note': (
             None if connected
-            else 'DB not yet connected — check Koyeb env vars or wait for deferred init. '
-                 'Details: /api/db-diagnostics'
+            else 'DB pool not ready — check Supabase credentials & network. '
+                 'See: /api/db-diagnostics'
         ),
     }), 200
 
@@ -813,7 +830,46 @@ def health():
 # Neither route existed before → every keepalive attempt returned 404 which
 # Koyeb's proxy surfaced to callers as 503.
 
-@app.route('/api/heartbeat', methods=['GET', 'POST'])
+@app.route('/api/db-diagnostics', methods=['GET'])
+def db_diagnostics():
+    """
+    Comprehensive database diagnostics endpoint — performs actual connection test.
+    
+    Unlike /health (fast, trusts pool existence), this endpoint:
+    • Attempts an actual connection from the pool
+    • Tests the connection with SELECT version()
+    • Returns detailed diagnostic info
+    • Useful for debugging connection issues
+    
+    Performance impact: ~100-500ms if connection succeeds, slower on timeout
+    So this is NOT called by fast health checks — only on-demand.
+    """
+    try:
+        from db_builder_v2 import verify_database_connection
+        
+        # Full diagnostic test (fail_fast=False means do real connection test)
+        result = verify_database_connection(
+            db_manager=DB,
+            verbose=True,  # Log detailed output
+            fail_fast=False  # Full test, not just pool check
+        )
+        
+        return jsonify({
+            'status': 'ok' if result.get('healthy') else 'error',
+            'diagnostics': result,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }), (200 if result.get('healthy') else 503)
+        
+    except Exception as e:
+        logger.error(f"[DB-DIAGNOSTICS] Unexpected error: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e),
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }), 500
+
+
+
 def api_heartbeat_receiver():
     """
     Keepalive / metrics sink for LightweightHeartbeat (quantum_lattice module).

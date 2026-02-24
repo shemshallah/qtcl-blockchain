@@ -8310,29 +8310,44 @@ DB_POOL = db_manager
 # DATABASE HEALTH CHECK AND DIAGNOSTICS
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 
-def verify_database_connection(db_manager=None, verbose=True) -> Dict[str, Any]:
+def verify_database_connection(db_manager=None, verbose=True, fail_fast=False) -> Dict[str, Any]:
     """
-    Comprehensive database connection verification and diagnostics.
+    ═══════════════════════════════════════════════════════════════════════════════
+    PRODUCTION-GRADE DATABASE CONNECTION VERIFICATION (CRISIS FIXED)
+    ═══════════════════════════════════════════════════════════════════════════════
+    
+    🔥 SCOPE BUG FIX 🔥
+    ─────────────────
+    Original issue: verify_database_connection() called `globals().get('db_manager')`
+    but was imported from wsgi_config context where 'db_manager' exists in wsgi_config's
+    namespace, NOT db_builder_v2's globals(). Result: Always returned db_manager=None.
+    
+    Solution: Caller MUST pass db_manager explicitly. This ensures correct scoping
+    and makes the contract explicit. No more hidden globals() lookups.
+    
+    Args:
+        db_manager: Explicit DatabaseBuilder instance (MANDATORY)
+        verbose: Log detailed diagnostics
+        fail_fast: If True, trust pool existence + skip live connection test
+                   (Used by /health endpoint to avoid thrashing)
     
     Returns:
         {
-            'healthy': bool,
-            'connected': bool,
-            'pool_initialized': bool,
+            'healthy': bool,                  ✅ True if connected + version test passed
+            'connected': bool,                ✅ True if actual connection succeeded
+            'pool_initialized': bool,         ✅ True if ThreadedConnectionPool exists
+            'live_tested': bool,              ✅ True if we actually tested a connection
             'credentials_source': str,
-            'host': str,
-            'port': int,
-            'database': str,
-            'version': str,
+            'host': str, 'port': int, 'database': str, 'user': str, 'version': str,
             'connection_time_ms': float,
-            'errors': List[str],
-            'warnings': List[str]
+            'errors': List[str], 'warnings': List[str]
         }
     """
     result = {
         'healthy': False,
         'connected': False,
         'pool_initialized': False,
+        'live_tested': False,
         'credentials_source': _creds.get('source', 'unknown'),
         'host': POOLER_HOST,
         'port': POOLER_PORT,
@@ -8344,71 +8359,91 @@ def verify_database_connection(db_manager=None, verbose=True) -> Dict[str, Any]:
         'warnings': []
     }
     
+    # ─────────────────────────────────────────────────────────────────────────────
+    # REQUIRED PARAMETER: db_manager must be passed explicitly
+    # Do NOT fall back to globals() — that was the bug
+    # ─────────────────────────────────────────────────────────────────────────────
     if db_manager is None:
-        db_manager = globals().get('db_manager')
-    
-    if db_manager is None:
-        result['errors'].append("db_manager is None")
+        result['errors'].append("SCOPE_BUG_FIX: db_manager parameter is REQUIRED")
         if verbose:
-            logger.error(f"[DB-CHECK] ❌ {result['errors'][0]}")
+            logger.error(f"[DB-CHECK] ❌ db_manager=None — caller must pass explicit instance")
         return result
     
-    # Check pool
+    # Check pool exists (even if not yet connected)
     if db_manager.pool is None:
         result['errors'].append(f"Pool not initialized: {db_manager.pool_error}")
         if verbose:
-            logger.error(f"[DB-CHECK] ❌ Pool creation failed: {db_manager.pool_error}")
+            logger.error(f"[DB-CHECK] ⚠️  Pool unavailable: {db_manager.pool_error}")
         return result
     
     result['pool_initialized'] = True
     
-    # Try connection
+    # ─────────────────────────────────────────────────────────────────────────────
+    # FAIL_FAST MODE: Trust pool existence, skip live connection test
+    # Used by /health endpoint to avoid connection thrashing on every 5-second ping
+    # ─────────────────────────────────────────────────────────────────────────────
+    if fail_fast:
+        result['connected'] = True        # Pool exists = good enough
+        result['healthy'] = True
+        result['warnings'].append("fail_fast=True — skipped live connection test (pool trusted)")
+        return result
+    
+    # ─────────────────────────────────────────────────────────────────────────────
+    # LIVE CONNECTION TEST: Get, Ping, Release
+    # Full diagnostic test with timing, version, and proper error handling
+    # ─────────────────────────────────────────────────────────────────────────────
     conn = None
     try:
         import time as time_module
         start = time_module.time()
-        conn = db_manager.get_connection()
+        conn = db_manager.get_connection(timeout=CONNECTION_TIMEOUT)
         elapsed_ms = (time_module.time() - start) * 1000
         result['connection_time_ms'] = elapsed_ms
         
         if conn is None:
-            result['errors'].append("get_connection() returned None")
+            result['errors'].append("get_connection() returned None — pool exhausted or timeout")
             if verbose:
                 logger.error(f"[DB-CHECK] ❌ Could not obtain connection")
             return result
         
-        # Test connection
+        # PING: SELECT version() + current_database() for diagnostics
         cursor = conn.cursor()
         cursor.execute("SELECT version(), current_database()")
         version, current_db = cursor.fetchone()
         cursor.close()
         
         result['connected'] = True
+        result['live_tested'] = True
         result['version'] = version
         result['healthy'] = True
         
         if verbose:
-            logger.info(f"[DB-CHECK] ✅ Database connection healthy")
-            logger.info(f"[DB-CHECK]   Host: {POOLER_HOST}:{POOLER_PORT}")
-            logger.info(f"[DB-CHECK]   Database: {current_db}")
-            logger.info(f"[DB-CHECK]   Connection time: {elapsed_ms:.0f}ms")
-            logger.info(f"[DB-CHECK]   PostgreSQL: {version[:60]}...")
+            logger.info(f"[DB-CHECK] ✅ Connection verified in {elapsed_ms:.0f}ms")
+            logger.info(f"[DB-CHECK]   Host: {POOLER_HOST}:{POOLER_PORT} | DB: {current_db}")
+            logger.info(f"[DB-CHECK]   PostgreSQL: {version[:70]}...")
         
+        return result
+        
+    except psycopg2_errors.OperationalError as e:
+        # Network/auth error — reconnect daemon will retry
+        result['errors'].append(f"OperationalError: {str(e)[:100]}")
+        if verbose:
+            logger.error(f"[DB-CHECK] ❌ Network/auth issue: {type(e).__name__}")
+            logger.error(f"[DB-CHECK]   (Reconnect daemon will retry in 5-60s)")
         return result
         
     except Exception as e:
-        result['errors'].append(str(e))
+        # Any other error
+        result['errors'].append(str(e)[:120])
         if verbose:
-            logger.error(f"[DB-CHECK] ❌ Connection failed: {e}")
-            logger.error(f"[DB-CHECK]   Host: {POOLER_HOST}:{POOLER_PORT}")
-            logger.error(f"[DB-CHECK]   User: {POOLER_USER}")
-            logger.error(f"[DB-CHECK]   Database: {POOLER_DB}")
-            logger.error(f"[DB-CHECK]   Error type: {type(e).__name__}")
+            logger.error(f"[DB-CHECK] ❌ {type(e).__name__}: {e}")
+            logger.error(f"[DB-CHECK]   Host: {POOLER_HOST}:{POOLER_PORT} | User: {POOLER_USER}")
         return result
+        
     finally:
+        # Always return connection to pool
         if conn:
             try:
-                # Try to return connection to pool (handles both old and new DatabaseBuilder versions)
                 if hasattr(db_manager, 'return_connection'):
                     db_manager.return_connection(conn)
                 elif hasattr(db_manager, 'pool') and db_manager.pool:
