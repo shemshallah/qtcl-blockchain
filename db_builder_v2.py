@@ -8310,7 +8310,7 @@ DB_POOL = db_manager
 # DATABASE HEALTH CHECK AND DIAGNOSTICS
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 
-def verify_database_connection(db_manager=None, verbose=True) -> Dict[str, Any]:
+def verify_database_connection(db_manager: 'DatabaseBuilder', verbose: bool = True) -> Dict[str, Any]:
     """
     Comprehensive database connection verification and diagnostics.
     
@@ -8345,17 +8345,12 @@ def verify_database_connection(db_manager=None, verbose=True) -> Dict[str, Any]:
     }
     
     if db_manager is None:
-        # FIX: Import from wsgi_config instead of relying on globals()
-        # globals().get('db_manager') fails because db_manager lives in wsgi_config's namespace
-        try:
-            from wsgi_config import DB as db_manager
-        except (ImportError, RuntimeError):
-            db_manager = None
+        db_manager = globals().get('db_manager')
     
     if db_manager is None:
-        result['errors'].append("db_manager not available (check wsgi_config initialization)")
+        result['errors'].append("db_manager is None")
         if verbose:
-            logger.error(f"[DB-CHECK] ❌ db_manager not provided or importable from wsgi_config")
+            logger.error(f"[DB-CHECK] ❌ {result['errors'][0]}")
         return result
     
     # Check pool
