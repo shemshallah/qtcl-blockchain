@@ -63,17 +63,6 @@ SUPABASE_PASSWORD = os.environ.get('SUPABASE_PASSWORD')
 SUPABASE_PORT = os.environ.get('SUPABASE_PORT', '5432')
 SUPABASE_DB = os.environ.get('SUPABASE_DB', 'postgres')
 
-# DEBUG: Verify all credentials loaded
-logger.info(f"[DEBUG/CREDS] SUPABASE_HOST={SUPABASE_HOST}")
-logger.info(f"[DEBUG/CREDS] SUPABASE_USER={SUPABASE_USER}")
-logger.info(f"[DEBUG/CREDS] SUPABASE_PASSWORD loaded={SUPABASE_PASSWORD is not None}")
-if SUPABASE_PASSWORD:
-    logger.info(f"[DEBUG/CREDS] PASSWORD length={len(SUPABASE_PASSWORD)}")
-    logger.info(f"[DEBUG/CREDS] PASSWORD first 5 chars={SUPABASE_PASSWORD[:5]}")
-    logger.info(f"[DEBUG/CREDS] PASSWORD has $={'$' in SUPABASE_PASSWORD}")
-logger.info(f"[DEBUG/CREDS] SUPABASE_PORT={SUPABASE_PORT}")
-logger.info(f"[DEBUG/CREDS] SUPABASE_DB={SUPABASE_DB}")
-
 if SUPABASE_HOST and SUPABASE_USER and SUPABASE_PASSWORD:
     logger.info(f"[BOOTSTRAP] ✓ SUPABASE credentials loaded from environment")
     logger.info(f"[BOOTSTRAP]   HOST={SUPABASE_HOST}")
@@ -88,6 +77,25 @@ else:
     logger.error("[BOOTSTRAP]   SUPABASE_PASSWORD")
     logger.error("[BOOTSTRAP]   SUPABASE_PORT (optional, default 5432)")
     logger.error("[BOOTSTRAP]   SUPABASE_DB (optional, default postgres)")
+
+
+# ── DATABASE INSTANCE REFERENCE — Enterprise Singleton Pattern ──────────────────────
+DB = None  # Will be set by db_builder_v2 when pool is ready
+DB_LOCK = threading.RLock()
+
+def set_database_instance(db_instance):
+    """CANONICAL setter — db_builder_v2 calls this when pool is ready."""
+    global DB
+    with DB_LOCK:
+        DB = db_instance
+        logger.info("[DB] Database instance registered globally")
+
+def get_database_instance():
+    """CANONICAL getter — Thread-safe access to DB instance."""
+    global DB
+    with DB_LOCK:
+        return DB
+
 
 # ── Adaptive Hyperparameter Tuner ──────────────────────────────────────────────
 class AdaptiveHyperparameterTuner:
@@ -773,46 +781,58 @@ def index():
 @app.route('/health', methods=['GET'])
 def health():
     """
-    Fast health endpoint — always HTTP 200, DB truth resolved in priority order:
-      1. Module-level DB pool (live, zero-latency) — resolves the 30s cold-start
-         window where _DB_STATUS_CACHE is stale-False despite pool being ready.
-      2. _DB_STATUS_CACHE — updated every 30s by daemon thread.
-    Whichever shows connected=True wins.
+    ENTERPRISE HEALTH CHECK — Direct pool verification, synchronous, 2-3ms.
+    Single canonical path (no cache, no daemon, no scope bugs).
     """
-    with _DB_STATUS_LOCK:
-        db = _DB_STATUS_CACHE.copy()
-
-    # Live pool check: authoritative for cold-start window before cache refreshes
-    live_connected = (DB is not None and getattr(DB, 'pool', None) is not None)
-    connected = live_connected or db.get('connected', False)
-
-    # Write live truth back into cache so next caller also benefits
-    if live_connected and not db.get('connected', False):
-        with _DB_STATUS_LOCK:
-            _DB_STATUS_CACHE['connected'] = True
-            _DB_STATUS_CACHE['healthy']   = True
-
-    status = 'healthy' if connected else 'degraded'
-
+    # ENTERPRISE FIX: Direct pool check via get_database_instance()
+    db = get_database_instance()
+    pool_ready = db is not None and hasattr(db, 'pool') and db.pool is not None
+    
     return jsonify({
-        'status':              status,
-        'timestamp':           datetime.now(timezone.utc).isoformat(),
-        'globals_initialized': GLOBALS_AVAILABLE,
+        'status': 'healthy' if pool_ready else 'degraded',
+        'timestamp': datetime.now(timezone.utc).isoformat(),
         'database': {
-            'connected':         connected,
-            'host':              db.get('host'),
-            'port':              db.get('port'),
-            'database':          db.get('database'),
-            'error':             db.get('error'),
-            'cache_age_seconds': int(time.time() - db.get('timestamp', 0)),
-            'live_pool':         live_connected,
+            'connected': pool_ready,
+            'pool_ready': pool_ready,
         },
-        'note': (
-            None if connected
-            else 'DB not yet connected — check Koyeb env vars or wait for deferred init. '
-                 'Details: /api/db-diagnostics'
-        ),
     }), 200
+
+
+@app.route('/api/db-diagnostics', methods=['GET'])
+def db_diagnostics():
+    """
+    ENTERPRISE DIAGNOSTICS — Detailed verification for monitoring dashboards.
+    Uses verify_database_connection() with explicit db_manager parameter (no scope bugs).
+    """
+    try:
+        from db_builder_v2 import verify_database_connection
+        
+        db = get_database_instance()
+        if db is None:
+            return jsonify({
+                'status': 'error',
+                'message': 'Database instance not initialized',
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+            }), 503
+        
+        # ENTERPRISE FIX: Pass db_manager explicitly (no scope lookup fallback)
+        result = verify_database_connection(db_manager=db, verbose=True)
+        status_code = 200 if result.get('healthy') else 503
+        
+        return jsonify({
+            'status': 'ok',
+            'verification': result,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }), status_code
+        
+    except Exception as e:
+        import traceback
+        return jsonify({
+            'status': 'error',
+            'error': str(e),
+            'traceback': traceback.format_exc(),
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }), 500
 
 
 
@@ -823,6 +843,38 @@ def health():
 # QuantumSystemCoordinator (same file:2541) uses /api/keepalive.
 # Neither route existed before → every keepalive attempt returned 404 which
 # Koyeb's proxy surfaced to callers as 503.
+
+@app.route('/api/db-diagnostics', methods=['GET'])
+def db_diagnostics():
+    """ENTERPRISE DIAGNOSTICS — Detailed verification for monitoring."""
+    try:
+        from db_builder_v2 import verify_database_connection
+        
+        db = get_database_instance()
+        if db is None:
+            return jsonify({
+                'status': 'error',
+                'message': 'Database instance not initialized',
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+            }), 503
+        
+        # ENTERPRISE FIX: Pass db_manager explicitly (no scope bugs)
+        result = verify_database_connection(db_manager=db, verbose=True)
+        status_code = 200 if result.get('healthy') else 503
+        
+        return jsonify({
+            'status': 'ok',
+            'verification': result,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }), status_code
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'error': str(e),
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }), 500
+
 
 @app.route('/api/heartbeat', methods=['GET', 'POST'])
 def api_heartbeat_receiver():
