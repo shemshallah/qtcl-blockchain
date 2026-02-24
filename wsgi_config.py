@@ -1757,6 +1757,7 @@ def _lattice_telemetry_loop() -> None:
     bath attached, producing [LATTICE-REFRESH] log lines organically.
     """
     import time as _time
+    import sys
 
     # Wait for quantum module to initialize before first measurement
     _time.sleep(45)
@@ -1767,6 +1768,8 @@ def _lattice_telemetry_loop() -> None:
     )
 
     cycle = 0
+    import_failed_logged = False
+    
     while True:
         try:
             _time.sleep(LATTICE_TELEMETRY_INTERVAL)
@@ -1775,8 +1778,15 @@ def _lattice_telemetry_loop() -> None:
             # ── Import live singletons ────────────────────────────────────────
             try:
                 import quantum_lattice_control_live_complete as _ql
-            except ImportError:
-                logger.warning("[LATTICE-TELEM] quantum_lattice module not importable yet")
+                import_failed_logged = False  # Reset flag on successful import
+            except ImportError as _ie:
+                # Log only once to avoid spam
+                if not import_failed_logged:
+                    logger.debug(f"[LATTICE-TELEM] quantum_lattice module not importable: {_ie}")
+                    import_failed_logged = True
+                continue
+            except Exception as _e:
+                logger.debug(f"[LATTICE-TELEM] Unexpected error importing quantum_lattice: {_e}")
                 continue
 
             # ── HEARTBEAT status ──────────────────────────────────────────────
