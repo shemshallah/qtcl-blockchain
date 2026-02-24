@@ -4068,7 +4068,7 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
     # ══════════════════════════════════════════════════════════════════════════
 
     if cmd == 'auth-login':
-        email    = kwargs.get('email', '').strip()
+        email    = kwargs.get('email', '')
         password = kwargs.get('password', '')
         if not email or not password:
             return {'status': 'error',
@@ -4083,8 +4083,7 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
             )
             if not isinstance(result, dict):
                 result = {'status': 'error', 'error': 'Unexpected auth response type'}
-            # Normalise: surface token at top-level so the JS executor can capture it
-            # AuthHandlers returns access_token at top level — mirror it as 'token' too
+            # Mirror access_token -> token so JS executor captures it regardless of which key it reads
             if result.get('status') == 'success' and result.get('access_token'):
                 result.setdefault('token', result['access_token'])
             return result
@@ -4102,9 +4101,9 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
         }}
 
     if cmd == 'auth-register':
-        email    = kwargs.get('email', '').strip()
+        email    = kwargs.get('email', '')
         password = kwargs.get('password', '')
-        username = kwargs.get('username', '').strip() or (email.split('@')[0] if email else '')
+        username = kwargs.get('username', '')
         if not email or not password:
             return {'status': 'error',
                     'error': 'Usage: auth-register --email=... --password=... --username=...'}
@@ -4113,17 +4112,17 @@ def _execute_command(cmd: str, kwargs: dict, user_id: Optional[str], cmd_info: d
             result = AuthHandlers.auth_register(
                 email=email,
                 password=password,
-                username=username,
+                username=username or email.split('@')[0],
             )
             if not isinstance(result, dict):
-                result = {'status': 'error', 'error': 'Unexpected registration response type'}
+                result = {'status': 'error', 'error': 'Unexpected register response type'}
             return result
         except Exception as e:
             logger.error(f"[auth-register] Exception: {e}", exc_info=True)
             return {
                 'status': 'error',
                 'error': f'Registration failed: {str(e)[:120]}',
-                'hint': 'Ensure email/username are unique and password meets requirements (12+ chars, upper+lower+digit+symbol).',
+                'hint': 'Check inputs and try again.',
             }
 
     if cmd == 'auth-mfa':
