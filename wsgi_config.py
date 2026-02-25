@@ -30,6 +30,13 @@ import threading
 import time
 import traceback
 import json
+
+# NEW-BUG-3 FIX: Suppress oqs auto-install countdown + git-clone BEFORE any module
+# can import oqs.  The oqs Python package checks os.environ at module load time.
+# Without these, startup blocks for 3-5s per import attempt and logs noise.
+# These are no-ops when liboqs.so IS available (auto-install only runs when it's not).
+os.environ.setdefault('OQS_SKIP_SETUP', '1')
+os.environ.setdefault('OQS_BUILD', '0')
 import numpy as np
 import concurrent.futures
 from typing import Dict

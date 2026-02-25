@@ -93,11 +93,16 @@ except ImportError:
 
 try:
     # BUG-3 FIX: liboqs-python installs as module "oqs" (not "liboqs.oqs").
-    # Install: pip install liboqs-python  (requires liboqs C library).
-    # Koyeb/Ubuntu: apt-get install -y liboqs-dev && pip install liboqs-python
+    # NEW-BUG-1/3 FIX: oqs raises RuntimeError (not ImportError) when the C shared library
+    # (liboqs.so) is absent.  It also triggers a 3-5 second git-clone countdown that blocks
+    # startup.  OQS_SKIP_SETUP=1 / OQS_BUILD=0 suppress the auto-install attempt entirely.
+    # Must be set BEFORE the import — oqs checks os.environ at module load time.
+    import os as _os_pq
+    _os_pq.environ.setdefault('OQS_SKIP_SETUP', '1')   # skip git clone countdown
+    _os_pq.environ.setdefault('OQS_BUILD', '0')         # alternate variable name
     from oqs import KeyEncapsulation, Signature
     LIBOQS_AVAILABLE = True
-except ImportError:
+except (ImportError, RuntimeError, OSError, Exception):  # RuntimeError = no liboqs.so
     LIBOQS_AVAILABLE = False
     KeyEncapsulation = None
     Signature = None

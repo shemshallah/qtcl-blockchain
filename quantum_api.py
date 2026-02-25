@@ -1064,6 +1064,11 @@ class QuantumCircuitBuilders:
         
         Used for validator consensus - one validator qubit in excited state
         Special property: symmetric, robust to errors, maintains entanglement
+
+        NEW-BUG-2 FIX: circuit.measure() was never called even though the circuit was
+        created with 5 classical bits.  Aer requires at least one measurement instruction
+        to populate the counts dict; without it result.get_counts() raises
+        'No counts for experiment "0"'.  Added measure_all() before returning.
         """
         if len(qubits)<5:
             return circuit
@@ -1094,6 +1099,9 @@ class QuantumCircuitBuilders:
                 circuit.cx(qubits[i],qubits[i+1])
             for i in range(5):
                 circuit.h(qubits[i])
+            
+            # NEW-BUG-2 FIX: measure all qubits so Aer populates get_counts()
+            circuit.measure(list(range(5)), list(range(5)))
             
             return circuit
         except:
@@ -1329,7 +1337,14 @@ class QuantumExecutionEngine:
                 return None
             
             # Extract results
-            counts=result.get_counts() if hasattr(result,'get_counts') else {}
+            # NEW-BUG-2 FIX: get_counts() raises "No counts for experiment 0" when the
+            # circuit has no measurement instructions.  Catch and return empty dict.
+            counts = {}
+            if hasattr(result, 'get_counts'):
+                try:
+                    counts = result.get_counts()
+                except Exception:
+                    counts = {}
             
             # Try to get statevector
             statevector=None

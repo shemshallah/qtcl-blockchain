@@ -40,9 +40,14 @@ from psycopg2.extras import RealDictCursor,execute_values
 
 try:
     # BUG-4 FIX: correct module name is "oqs" not "liboqs.oqs"
+    # NEW-BUG-1/3 FIX: oqs raises RuntimeError when liboqs.so is missing.
+    # Suppress the 5-second auto-install countdown before importing.
+    import os as _os_ah
+    _os_ah.environ.setdefault('OQS_SKIP_SETUP', '1')
+    _os_ah.environ.setdefault('OQS_BUILD', '0')
     from oqs import KeyEncapsulation, Signature
     PQ_AVAILABLE = True
-except ImportError:
+except (ImportError, RuntimeError, OSError, Exception):  # RuntimeError = no liboqs.so
     PQ_AVAILABLE = False
     KeyEncapsulation = None
     Signature = None
@@ -1603,9 +1608,9 @@ class AuthHandlers:
 
             # Fallback: generate a simulated-but-cryptographically-sound PQ keypair
             # using our PQCryptoEngine (SHA3/Dilithium-style simulation).
-            # This ensures EVERY user has a key — even if pq_keys_system is unavailable.
+            # This ensures EVERY user has a key — even if pq_key_system is unavailable.
             if not pq_bundle:
-                logger.warning(f"[Auth/Register] pq_keys_system unavailable — issuing simulated PQ keypair")
+                logger.warning(f"[Auth/Register] pq_key_system unavailable — issuing simulated PQ keypair")
                 _pq_pub, _pq_sec = PQCryptoEngine.generate_keypair()
                 _msg = f"{user.user_id}{user.pseudoqubit_id}{email}"
                 _sig = PQCryptoEngine.sign_message(_msg, _pq_sec)
