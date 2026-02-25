@@ -1237,6 +1237,7 @@ def execute_command():
             'status': 'error',
             'error': str(exc)[:200],
             'command': cmd_name,
+        }), 500
 
 
 @app.route('/api/commands', methods=['GET'])
