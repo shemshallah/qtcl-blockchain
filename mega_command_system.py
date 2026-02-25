@@ -31,16 +31,17 @@ from typing import Any, Dict, List, Optional, Callable, Tuple, Union
 from datetime import datetime, timezone
 from collections import defaultdict
 
-try:
-    from pydantic import BaseModel, Field, ValidationError
-except ImportError:
-    print("FATAL: Pydantic required. Install: pip install pydantic")
-    sys.exit(1)
-
 logger = logging.getLogger(__name__)
 
+try:
+    from pydantic import BaseModel, Field, ValidationError
+    HAS_PYDANTIC = True
+except ImportError:
+    HAS_PYDANTIC = False
+    logger.warning("[SYSTEM] Pydantic not available - using plain dicts")
+
 # ════════════════════════════════════════════════════════════════════════════════════════
-# CORE MODELS
+# CORE ENUMS & MODELS
 # ════════════════════════════════════════════════════════════════════════════════════════
 
 class CommandStatus(str, Enum):
@@ -68,30 +69,54 @@ class CommandCategory(str, Enum):
     PQ = "pq"
     HELP = "help"
 
-class CommandResponse(BaseModel):
-    status: str
-    result: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
-    suggestions: List[str] = Field(default_factory=list)
-    hint: Optional[str] = None
-    execution_time_ms: float = 0.0
-    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    trace_id: Optional[str] = None
-    command: Optional[str] = None
+if HAS_PYDANTIC:
+    class CommandResponse(BaseModel):
+        status: str
+        result: Optional[Dict[str, Any]] = None
+        error: Optional[str] = None
+        suggestions: List[str] = Field(default_factory=list)
+        hint: Optional[str] = None
+        execution_time_ms: float = 0.0
+        timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+        trace_id: Optional[str] = None
+        command: Optional[str] = None
+        
+        def to_dict(self) -> Dict[str, Any]:
+            return {k: v for k, v in self.__dict__.items() if v is not None}
     
-    def to_dict(self) -> Dict[str, Any]:
-        return {k: v for k, v in self.__dict__.items() if v is not None}
+    class CommandRequest(BaseModel):
+        command: str
+        args: Dict[str, Any] = Field(default_factory=dict)
+        user_id: Optional[str] = None
+        token: Optional[str] = None
+        role: Optional[str] = None
+        trace_id: Optional[str] = None
+else:
+    # Plain dict fallback when pydantic not available
+    class CommandResponse:
+        def __init__(self, status, result=None, error=None, suggestions=None, hint=None, 
+                     execution_time_ms=0.0, timestamp=None, trace_id=None, command=None):
+            self.status = status
+            self.result = result
+            self.error = error
+            self.suggestions = suggestions or []
+            self.hint = hint
+            self.execution_time_ms = execution_time_ms
+            self.timestamp = timestamp or datetime.now(timezone.utc).isoformat()
+            self.trace_id = trace_id
+            self.command = command
+        
+        def to_dict(self) -> Dict[str, Any]:
+            return {k: v for k, v in self.__dict__.items() if v is not None}
     
-    def to_json_str(self) -> str:
-        return json.dumps(self.to_dict(), default=str, ensure_ascii=False)
-
-class CommandRequest(BaseModel):
-    command: str
-    args: Dict[str, Any] = Field(default_factory=dict)
-    user_id: Optional[str] = None
-    token: Optional[str] = None
-    role: Optional[str] = None
-    trace_id: Optional[str] = None
+    class CommandRequest:
+        def __init__(self, command, args=None, user_id=None, token=None, role=None, trace_id=None):
+            self.command = command
+            self.args = args or {}
+            self.user_id = user_id
+            self.token = token
+            self.role = role
+            self.trace_id = trace_id
 
 # ════════════════════════════════════════════════════════════════════════════════════════
 # RATE LIMITER & METRICS

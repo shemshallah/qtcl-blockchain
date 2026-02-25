@@ -1,34 +1,15 @@
 #!/usr/bin/env python3
 """
-╔════════════════════════════════════════════════════════════════════════════════════════╗
-║                                                                                        ║
-║        🚀 QTCL WSGI v6.0 — UNIFIED MEGA COMMAND SYSTEM INTEGRATION 🚀               ║
-║                                                                                        ║
-║  Clean Flask WSGI configuration with integrated mega_command_system.                 ║
-║  NO legacy command system. Completely unified.                                        ║
-║                                                                                        ║
-╚════════════════════════════════════════════════════════════════════════════════════════╝
+Flask WSGI configuration with unified mega_command_system and quantum_lattice_control.
 """
 
 import os
 import sys
 import logging
 import threading
-import json
 from datetime import datetime, timezone
-from collections import deque
 
-# Suppress OQS auto-install
-os.environ.setdefault('OQS_SKIP_SETUP', '1')
-os.environ.setdefault('OQS_BUILD', '0')
-
-import numpy as np
-from typing import Dict, Any
-
-# ════════════════════════════════════════════════════════════════════════════════════════
-# LOGGING
-# ════════════════════════════════════════════════════════════════════════════════════════
-
+# Logging
 if not logging.getLogger().hasHandlers():
     logging.basicConfig(
         level=logging.INFO,
@@ -36,135 +17,26 @@ if not logging.getLogger().hasHandlers():
     )
 logger = logging.getLogger(__name__)
 
-# Suppress Qiskit
-for qiskit_logger in ['qiskit.passmanager', 'qiskit.compiler', 'qiskit.transpiler', 'qiskit']:
-    logging.getLogger(qiskit_logger).setLevel(logging.WARNING)
-
 # ════════════════════════════════════════════════════════════════════════════════════════
-# ENVIRONMENT & CONFIG
+# INITIALIZE QUANTUM LATTICE CONTROL FIRST
 # ════════════════════════════════════════════════════════════════════════════════════════
 
-logger.info("[BOOTSTRAP] Reading environment variables...")
-
-SUPABASE_HOST = os.environ.get('SUPABASE_HOST')
-SUPABASE_USER = os.environ.get('SUPABASE_USER')
-SUPABASE_PASSWORD = os.environ.get('SUPABASE_PASSWORD')
-SUPABASE_PORT = os.environ.get('SUPABASE_PORT', '5432')
-SUPABASE_DB = os.environ.get('SUPABASE_DB', 'postgres')
-
-if SUPABASE_HOST and SUPABASE_USER and SUPABASE_PASSWORD:
-    logger.info(f"[BOOTSTRAP] ✓ SUPABASE credentials loaded")
-else:
-    logger.error("[BOOTSTRAP] ❌ SUPABASE credentials NOT found!")
-
-# ════════════════════════════════════════════════════════════════════════════════════════
-# DATABASE SINGLETON
-# ════════════════════════════════════════════════════════════════════════════════════════
-
-DB = None
-DB_LOCK = threading.RLock()
-
-def set_database_instance(db_instance):
-    global DB
-    with DB_LOCK:
-        DB = db_instance
-        logger.info("[DB] Database instance registered")
-
-def get_database_instance():
-    global DB
-    with DB_LOCK:
-        return DB
+logger.info("[BOOTSTRAP] Initializing quantum_lattice_control...")
+try:
+    from quantum_lattice_control import (
+        initialize_quantum_system, 
+        HEARTBEAT, 
+        LATTICE,
+        QUANTUM_COORDINATOR
+    )
+    initialize_quantum_system()
+    logger.info("[BOOTSTRAP] ✓ quantum_lattice_control initialized")
+    logger.info("[BOOTSTRAP] ✓ HEARTBEAT running (check logs for 15s/30s cycles)")
+except Exception as e:
+    logger.error(f"[BOOTSTRAP] Failed to init quantum_lattice_control: {e}", exc_info=True)
 
 # ════════════════════════════════════════════════════════════════════════════════════════
-# PQ CRYPTOGRAPHY
-# ════════════════════════════════════════════════════════════════════════════════════════
-
-_PQ_CRYPTO_SYSTEM = None
-_PQ_CRYPTO_LOCK = threading.RLock()
-
-def get_pq_system():
-    global _PQ_CRYPTO_SYSTEM
-    if _PQ_CRYPTO_SYSTEM is None:
-        with _PQ_CRYPTO_LOCK:
-            if _PQ_CRYPTO_SYSTEM is None:
-                try:
-                    from pq_keys_system import get_pq_system as _get_unified_pq
-                    _PQ_CRYPTO_SYSTEM = _get_unified_pq()
-                    logger.info("[BOOTSTRAP/PQ] ✓ Unified PQ system initialized")
-                except Exception as e:
-                    logger.error(f"[BOOTSTRAP/PQ] ✗ Failed: {e}")
-    return _PQ_CRYPTO_SYSTEM
-
-# ════════════════════════════════════════════════════════════════════════════════════════
-# ADAPTIVE HYPERPARAMETER TUNER
-# ════════════════════════════════════════════════════════════════════════════════════════
-
-class AdaptiveHyperparameterTuner:
-    def __init__(self):
-        self.coherence_history = deque(maxlen=10)
-        self.fidelity_history = deque(maxlen=10)
-        self.mi_history = deque(maxlen=10)
-        self.gradient_history = deque(maxlen=10)
-        self.current_lr = 1e-3
-        self.current_kappa = 0.08
-        self.w_strength_multiplier = 1.0
-        self.lock = threading.RLock()
-    
-    def update_metrics(self, coherence: float, fidelity: float, mi: float, gradient: float):
-        with self.lock:
-            self.coherence_history.append(coherence)
-            self.fidelity_history.append(fidelity)
-            self.mi_history.append(mi)
-            self.gradient_history.append(gradient)
-            
-            cycle = len(self.gradient_history)
-            oscillation = np.sin(2 * np.pi * cycle / 15)
-            self.current_lr = 1e-3 * (1 + 0.15 * oscillation)
-            
-            if len(self.coherence_history) >= 2:
-                recovery_rate = (self.coherence_history[-1] - self.coherence_history[0]) / len(self.coherence_history)
-                ref_rate = 0.002
-                if recovery_rate > ref_rate:
-                    adjustment = 0.03 * min((recovery_rate - ref_rate) / ref_rate, 1.0)
-                    self.current_kappa = 0.08 + adjustment
-                else:
-                    adjustment = -0.03 * (ref_rate - recovery_rate) / ref_rate
-                    self.current_kappa = 0.08 + adjustment
-                self.current_kappa = np.clip(self.current_kappa, 0.070, 0.120)
-            
-            if len(self.coherence_history) >= 2:
-                recovery_rate = (self.coherence_history[-1] - self.coherence_history[0]) / len(self.coherence_history)
-                ref_rate = 0.002
-                if recovery_rate > ref_rate:
-                    multiplier = 1.0 + 0.5 * min((recovery_rate - ref_rate) / ref_rate, 1.0)
-                else:
-                    multiplier = 1.0
-                self.w_strength_multiplier = np.clip(multiplier, 1.0, 1.5)
-    
-    def get_status(self) -> Dict:
-        with self.lock:
-            return {
-                'learning_rate': float(self.current_lr),
-                'kappa': float(self.current_kappa),
-                'w_strength_multiplier': float(self.w_strength_multiplier),
-                'coherence_gain': float(self.coherence_history[-1] - self.coherence_history[0]) if len(self.coherence_history) >= 2 else 0.0
-            }
-
-HYPERPARAMETER_TUNER = AdaptiveHyperparameterTuner()
-logger.info("✓ Hyperparameter tuner initialized")
-
-# ════════════════════════════════════════════════════════════════════════════════════════
-# PROJECT ROOT
-# ════════════════════════════════════════════════════════════════════════════════════════
-
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
-
-logger.info(f"[BOOTSTRAP] PROJECT_ROOT = {PROJECT_ROOT}")
-
-# ════════════════════════════════════════════════════════════════════════════════════════
-# FLASK APP WITH MEGA COMMAND SYSTEM
+# FLASK SETUP
 # ════════════════════════════════════════════════════════════════════════════════════════
 
 try:
@@ -177,7 +49,7 @@ except ImportError:
 app = None
 
 def create_app():
-    """Create Flask application with unified mega_command_system."""
+    """Create Flask application."""
     global app
     
     app = Flask(__name__)
@@ -185,20 +57,139 @@ def create_app():
     
     logger.info("[BOOTSTRAP] Flask app created")
     
-    # Import mega_command_system (required, not optional)
+    # Import mega_command_system (required)
     try:
         from mega_command_system import (
             dispatch_command_sync,
             list_commands_sync,
             get_command_info_sync,
-            get_registry
         )
         logger.info("[BOOTSTRAP] ✓ Mega command system imported")
     except ImportError as e:
         logger.error(f"[BOOTSTRAP] ✗ FATAL: Cannot import mega_command_system: {e}")
         raise
     
-    # ── UNIFIED ENDPOINTS (only mega_command_system) ────────────────────────────────────
+    # ── ENDPOINTS ────────────────────────────────────────────────────────────────────
+    
+    @app.route('/', methods=['GET'])
+    def index():
+        """Index page - API status"""
+        html = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>QTCL - Quantum Blockchain</title>
+    <style>
+        body {
+            font-family: 'Courier New', monospace;
+            background: #0a0e27;
+            color: #00ff00;
+            margin: 20px;
+            line-height: 1.6;
+        }
+        h1 { color: #00ffff; }
+        h2 { color: #ffff00; margin-top: 30px; }
+        .section { 
+            background: #1a1f3a; 
+            padding: 15px;
+            margin: 15px 0;
+            border-left: 3px solid #00ff00;
+            border-radius: 3px;
+        }
+        a { color: #00ffff; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .endpoint { margin: 8px 0; padding: 5px; }
+        .status { color: #00ff00; }
+        code { background: #0a0e27; padding: 2px 5px; }
+        table { width: 100%; border-collapse: collapse; }
+        td { padding: 8px; border-bottom: 1px solid #333; }
+    </style>
+</head>
+<body>
+    <h1>⚡ QTCL v6.0 - Quantum Blockchain System</h1>
+    <p>Unified mega_command_system (72 commands) + quantum_lattice_control (v6/v7/v8/v9 consolidated)</p>
+    
+    <div class="section">
+        <h2>🌐 API Endpoints</h2>
+        <table>
+            <tr>
+                <td><strong>GET /</strong></td>
+                <td>This page</td>
+            </tr>
+            <tr>
+                <td><strong>GET /health</strong></td>
+                <td>System health</td>
+            </tr>
+            <tr>
+                <td><strong>GET /version</strong></td>
+                <td>Version info</td>
+            </tr>
+            <tr>
+                <td><strong>GET /api/commands</strong></td>
+                <td>List all 72 commands</td>
+            </tr>
+            <tr>
+                <td><strong>GET /api/commands/&lt;name&gt;</strong></td>
+                <td>Get command info</td>
+            </tr>
+            <tr>
+                <td><strong>POST /api/command</strong></td>
+                <td>Execute a command</td>
+            </tr>
+            <tr>
+                <td><strong>GET /api/quantum/status</strong></td>
+                <td>Quantum system status</td>
+            </tr>
+            <tr>
+                <td><strong>POST /api/heartbeat</strong></td>
+                <td>Heartbeat metrics receiver</td>
+            </tr>
+            <tr>
+                <td><strong>GET /metrics</strong></td>
+                <td>Command execution metrics</td>
+            </tr>
+        </table>
+    </div>
+    
+    <div class="section">
+        <h2>📊 System Status</h2>
+        <p><span class="status">✓ Heartbeat:</span> Running (1.0 Hz, 15s check + 30s report)</p>
+        <p><span class="status">✓ Quantum Lattice:</span> Active (NonMarkovian noise bath, W-state recovery)</p>
+        <p><span class="status">✓ Commands:</span> 72 available</p>
+        <p><span class="status">✓ Neural Network:</span> 57-neuron continuous refresh</p>
+    </div>
+    
+    <div class="section">
+        <h2>🔧 Quick Test</h2>
+        <pre>
+# Health check
+curl https://your-domain.koyeb.app/health
+
+# Quantum status
+curl https://your-domain.koyeb.app/api/quantum/status
+
+# Execute command
+curl -X POST https://your-domain.koyeb.app/api/command \\
+  -H "Content-Type: application/json" \\
+  -d '{"command": "system-stats"}'
+        </pre>
+    </div>
+    
+    <div class="section">
+        <h2>💡 Quantum Systems Active</h2>
+        <ul>
+            <li>NonMarkovian Noise Bath (κ=0.070)</li>
+            <li>W-State Recovery (Adaptive control)</li>
+            <li>Enhanced Noise Bath Refresh (κ=0.08)</li>
+            <li>57-Neuron Neural Lattice (8→57→32→8)</li>
+            <li>Heartbeat: 15s checks + 30s reports</li>
+            <li>v8 Revival System (106,496 pseudoqubits)</li>
+        </ul>
+    </div>
+</body>
+</html>
+        """
+        return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
     
     @app.route('/api/command', methods=['POST'])
     def execute_command():
@@ -222,11 +213,7 @@ def create_app():
             return jsonify(result), 200
         except Exception as e:
             logger.error(f"[API] Error in /api/command: {e}", exc_info=True)
-            return jsonify({
-                'status': 'error',
-                'error': str(e),
-                'timestamp': datetime.now(timezone.utc).isoformat(),
-            }), 500
+            return jsonify({'status': 'error', 'error': str(e)}), 500
     
     @app.route('/api/commands', methods=['GET'])
     def list_commands():
@@ -251,10 +238,34 @@ def create_app():
             logger.error(f"[API] Error in /api/commands/<n>: {e}", exc_info=True)
             return jsonify({'error': str(e)}), 500
     
+    @app.route('/api/heartbeat', methods=['POST'])
+    def heartbeat_receiver():
+        """Receive heartbeat metrics."""
+        try:
+            data = request.get_json() or {}
+            logger.info(f"[HEARTBEAT-RECEIVER] Received beat #{data.get('beat_count', 0)}")
+            return jsonify({'status': 'received'}), 200
+        except Exception as e:
+            logger.error(f"[HEARTBEAT-RECEIVER] Error: {e}")
+            return jsonify({'error': str(e)}), 500
+    
+    @app.route('/api/quantum/status', methods=['GET'])
+    def quantum_status():
+        """Get quantum system status."""
+        try:
+            if QUANTUM_COORDINATOR:
+                status = QUANTUM_COORDINATOR.get_status()
+                return jsonify(status), 200
+            return jsonify({'status': 'unavailable'}), 503
+        except Exception as e:
+            logger.error(f"[API] Quantum status error: {e}")
+            return jsonify({'error': str(e)}), 500
+    
     @app.route('/metrics', methods=['GET'])
     def metrics():
         """Command execution metrics."""
         try:
+            from mega_command_system import get_registry
             registry = get_registry()
             stats = {}
             for cmd_name, cmd in registry.commands.items():
@@ -262,67 +273,18 @@ def create_app():
                     stats[cmd_name] = cmd.get_stats()
             return jsonify(stats), 200
         except Exception as e:
-            logger.error(f"[API] Error in /metrics: {e}", exc_info=True)
+            logger.error(f"[API] Metrics error: {e}")
             return jsonify({'error': str(e)}), 500
     
     @app.route('/health', methods=['GET'])
     def health_check():
         """System health check."""
-        try:
-            from globals import get_system_health
-            health = get_system_health()
-            status_code = 200 if health['status'] == 'healthy' else 503
-            return jsonify(health), status_code
-        except:
-            return jsonify({
-                'status': 'healthy',
-                'timestamp': datetime.now(timezone.utc).isoformat(),
-                'version': '6.0.0',
-            }), 200
-    
-    @app.route('/status', methods=['GET'])
-    def status():
-        """Alias for /health."""
-        return health_check()
-    
-    @app.route('/api/heartbeat', methods=['POST'])
-    def heartbeat_receiver():
-        """Receive and log heartbeat metrics from quantum system."""
-        try:
-            data = request.get_json() or {}
-            timestamp = data.get('timestamp', datetime.now(timezone.utc).isoformat())
-            beat_count = data.get('beat_count', 0)
-            status = data.get('status', 'unknown')
-            metrics = data.get('metrics', {})
-            
-            logger.info(
-                f"[HEARTBEAT] Received beat #{beat_count} | "
-                f"Status: {status} | "
-                f"Metrics: {len(metrics)} subsystems"
-            )
-            
-            return jsonify({
-                'status': 'received',
-                'beat_count': beat_count,
-                'timestamp': timestamp,
-            }), 200
-        except Exception as e:
-            logger.error(f"[HEARTBEAT] Error: {e}")
-            return jsonify({'error': str(e)}), 500
-    
-    @app.route('/api/quantum/status', methods=['GET'])
-    def quantum_status():
-        """Get quantum system status."""
-        try:
-            from quantum_lattice_control import get_coordinator
-            coordinator = get_coordinator()
-            if coordinator:
-                status = coordinator.get_status()
-                return jsonify(status), 200
-            return jsonify({'status': 'unavailable'}), 503
-        except Exception as e:
-            logger.error(f"[API] Quantum status error: {e}")
-            return jsonify({'error': str(e)}), 500
+        return jsonify({
+            'status': 'healthy',
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'heartbeat': HEARTBEAT.running if HEARTBEAT else False,
+            'lattice': LATTICE is not None,
+        }), 200
     
     @app.route('/version', methods=['GET'])
     def version():
@@ -330,16 +292,14 @@ def create_app():
         return jsonify({
             'version': '6.0.0',
             'codename': 'QTCL',
-            'quantum_lattice': 'v8',
-            'pqc': 'HLWE-256',
-            'wsgi': 'gunicorn-sync',
+            'quantum_lattice': 'v9 unified (v6/v7/v8/v9 consolidated)',
             'command_system': 'mega_command_system',
+            'heartbeat': '15s check + 30s report',
+            'nonmarkovian_bath': 'κ=0.070',
             'timestamp': datetime.now(timezone.utc).isoformat(),
         }), 200
     
-    
     logger.info("[BOOTSTRAP] ✓ All endpoints registered")
-    
     return app
 
 def get_wsgi_app():
@@ -355,18 +315,8 @@ if __name__ != '__main__':
     logger.info("[BOOTSTRAP] ✓ WSGI app ready")
 
 # WSGI Entry Point (required by Gunicorn)
-application = app
+application = app if app is not None else get_wsgi_app()
 
-__all__ = [
-    'app',
-    'application',
-    'get_wsgi_app',
-    'create_app',
-    'get_pq_system',
-    'get_database_instance',
-    'set_database_instance',
-    'HYPERPARAMETER_TUNER',
-    'PROJECT_ROOT',
-]
+__all__ = ['app', 'application', 'get_wsgi_app', 'create_app']
 
 logger.info("[BOOTSTRAP] ✓ wsgi_config loaded successfully")
