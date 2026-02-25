@@ -197,9 +197,20 @@ class PostQuantumCrypto:
         """Hash data using lattice-based compression."""
         with self.lock:
             classical_hash = hashlib.sha256(data).hexdigest()
-            lattice_vector = np.frombuffer(hashlib.sha512(data).digest(), dtype=np.uint8)[:self.dimension]
+            # Create lattice vector with proper dimension (256)
+            lattice_vector = np.frombuffer(hashlib.sha512(data).digest(), dtype=np.uint8)
+            # Ensure exactly self.dimension elements
+            if len(lattice_vector) < self.dimension:
+                # Pad with additional hash if needed (SHA512=64 bytes, need 256)
+                extra_hash = hashlib.sha256(data + b'_lattice_pad').digest()
+                extra_bytes = np.frombuffer(extra_hash, dtype=np.uint8)
+                lattice_vector = np.concatenate([lattice_vector, extra_bytes])[:self.dimension]
+            else:
+                lattice_vector = lattice_vector[:self.dimension]
+            # Convert to float for matrix operations
+            lattice_vector = lattice_vector.astype(np.float64)
             lattice_compression = (self.secret_key @ lattice_vector) % self.modulus
-            lattice_hash = hashlib.sha256(lattice_compression.tobytes()).hexdigest()
+            lattice_hash = hashlib.sha256(lattice_compression.astype(np.uint8).tobytes()).hexdigest()
             
             combined = hashlib.sha256(
                 (classical_hash + lattice_hash).encode()
