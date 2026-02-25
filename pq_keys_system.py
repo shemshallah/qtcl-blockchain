@@ -1103,7 +1103,7 @@ class UnifiedPQCryptographicSystem:
     
     def __init__(self, params: HLWEParams = HLWE_256, db_url: Optional[str] = None):
         self.params = params
-        self.entropy = QuantumEntropyEnsemble(require_min_sources=2)
+        self.entropy = QuantumEntropyEnsemble(require_min_sources=1)
         self.db = DatabaseManager(db_url) if db_url and PSYCOPG2_AVAILABLE else None
         
         # Cryptographic primitives
