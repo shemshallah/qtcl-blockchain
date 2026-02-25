@@ -2380,3 +2380,73 @@ class SessionSecurityManager:
                 return True
             return False
 
+
+# ════════════════════════════════════════════════════════════════════════════════════════
+# MEGA COMMAND SYSTEM INTEGRATION (Minimal - for auth checks only)
+# ════════════════════════════════════════════════════════════════════════════════════════
+
+def validate_token_for_command(token: str) -> tuple:
+    """
+    Validate JWT token for command dispatch.
+    Returns: (is_valid, user_payload_dict_or_none)
+    """
+    if not token:
+        return False, None
+    
+    try:
+        if jwt is None:
+            return False, None
+        
+        JWT_SECRET = _derive_stable_jwt_secret()
+        JWT_ALGORITHM = 'HS512'
+        
+        payload = jwt.decode(
+            token,
+            JWT_SECRET,
+            algorithms=[JWT_ALGORITHM],
+            options={'verify_signature': True}
+        )
+        return True, payload
+    except:
+        return False, None
+
+
+def extract_user_from_command_context(user_id=None, token=None, role=None):
+    """
+    Extract user context from command dispatch request.
+    Returns: {'user_id': ..., 'is_authenticated': ..., 'is_admin': ..., 'role': ...}
+    """
+    context = {
+        'user_id': user_id,
+        'token': token,
+        'role': role or 'user',
+        'is_authenticated': False,
+        'is_admin': False,
+    }
+    
+    if token:
+        is_valid, payload = validate_token_for_command(token)
+        if is_valid and payload:
+            context['user_id'] = payload.get('user_id', user_id)
+            context['is_authenticated'] = True
+            context['role'] = payload.get('role', role or 'user')
+    
+    context['is_authenticated'] = bool(context['user_id'] and context['token'])
+    context['is_admin'] = (context['role'] == 'admin')
+    
+    return context
+
+
+def check_command_auth(command_name, user_context, requires_auth=False, requires_admin=False):
+    """
+    Check if user has permission to run command.
+    Returns: (allowed, error_message_or_none)
+    """
+    if requires_auth and not user_context.get('is_authenticated'):
+        return False, f"Command '{command_name}' requires authentication"
+    
+    if requires_admin and not user_context.get('is_admin'):
+        return False, f"Command '{command_name}' requires admin privileges"
+    
+    return True, None
+
