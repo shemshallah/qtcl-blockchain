@@ -2215,6 +2215,28 @@ def _deep_json_sanitize(obj, _depth=0, _max_depth=32, _visited=None):
             pass
     
     # ─────────────────────────────────────────────────────────────────────────
+    # FLASK/WERKZEUG RESPONSE OBJECTS — Never let these into JSON output.
+    # A Flask Response accidentally embedded in a result dict would produce
+    # a 500-character stringified object that is NOT valid JSON content.
+    # Convert to a structured dict summarising the response instead.
+    # ─────────────────────────────────────────────────────────────────────────
+    try:
+        _wz_resp_base = None
+        import sys as _sys
+        if 'werkzeug' in _sys.modules:
+            import werkzeug.wrappers as _wz
+            _wz_resp_base = getattr(_wz, 'Response', None)
+        if _wz_resp_base and isinstance(obj, _wz_resp_base):
+            return {
+                '__type': 'FlaskResponse',
+                'status': obj.status,
+                'content_type': obj.content_type,
+                'data_preview': obj.get_data(as_text=True)[:200] if obj.content_length and obj.content_length < 10000 else '<large>',
+            }
+    except Exception:
+        pass
+
+    # ─────────────────────────────────────────────────────────────────────────
     # FALLBACK: Use __dict__ or string representation
     # ─────────────────────────────────────────────────────────────────────────
     
@@ -2245,35 +2267,72 @@ def _deep_json_sanitize(obj, _depth=0, _max_depth=32, _visited=None):
 
 def _format_response(response) -> dict:
     """
-    MUSEUM-QUALITY: Ensure ALL command responses are JSON-safe dictionaries.
-    
-    ✓ CRITICAL RESPONSIBILITY: Last safety check before wsgi_config's /api/command sends response
-    ✓ Single entry point: All dispatch_command() handlers flow through this
-    ✓ Guaranteed output: Always returns a dict (never None, bytes, or other types)
-    ✓ Chain of custody: dispatch_command() → handler → result → this function → _safe_jsonify()
-    
-    This function is NON-OPTIONAL. Every command response MUST pass through it.
-    The sanitization ensures 100% JSON serializability before the response leaves the server.
-    
-    Args:
-        response: Any Python object from a command handler (dict, list, string, custom obj, etc)
-    
-    Returns:
-        dict: Guaranteed JSON-safe response dict with 'status' and 'result'/'error' keys
+    ABSOLUTE GUARANTEE: Returns a JSON-safe dict on every code path.
+
+    Enhancement 2026:
+    • Detects Flask Response objects accidentally returned from handlers
+      and converts them to structured dicts rather than letting json.dumps
+      stringify a repr() that breaks the JSON body.
+    • Verifies the final dict is json.dumps-able before returning; if not,
+      falls back to an emergency safe dict.  This catches any edge case
+      _deep_json_sanitize might miss (e.g. new numpy types, custom classes).
+    • Never returns None, bytes, tuples, or non-dict types.
+
+    Chain of custody:
+        dispatch_command() → handler → result → _format_response()
+            → _deep_json_sanitize() → verified json.dumps() → _safe_jsonify()
     """
+    import json as _j
     try:
-        # Sanitize recursively — handles ALL data types at ANY nesting depth
+        # ── Detect Flask Response objects at the top level ───────────────
+        try:
+            import sys as _sys2
+            _wz = _sys2.modules.get('werkzeug')
+            if _wz:
+                _RespClass = getattr(getattr(_wz, 'wrappers', None), 'Response', None)
+                if _RespClass and isinstance(response, _RespClass):
+                    logger.warning(
+                        "[_format_response] Handler returned a Flask Response object! "
+                        "Handlers must return dicts. Converting to error dict."
+                    )
+                    response = {
+                        'status': 'error',
+                        'error': 'Handler returned a Flask Response object instead of a dict.',
+                        'http_status': response.status,
+                        'content_type': response.content_type,
+                    }
+        except Exception:
+            pass
+
+        # ── Deep-sanitise ─────────────────────────────────────────────────
         sanitized = _deep_json_sanitize(response)
-        
-        # Ensure we return a dict
+
+        # ── Normalise to dict ─────────────────────────────────────────────
         if isinstance(sanitized, dict):
-            return sanitized
-        if sanitized is None:
-            return {'status': 'error', 'error': 'Command returned None'}
-        if isinstance(sanitized, (str, list)):
-            return {'status': 'success', 'result': sanitized}
-        # Wrap any other type
-        return {'status': 'success', 'result': sanitized}
+            result = sanitized
+        elif sanitized is None:
+            result = {'status': 'error', 'error': 'Command returned None'}
+        elif isinstance(sanitized, (str, list)):
+            result = {'status': 'success', 'result': sanitized}
+        else:
+            result = {'status': 'success', 'result': sanitized}
+
+        # ── VERIFY: attempt a trial json.dumps to catch anything missed ───
+        # This is cheap (the dict is already sanitised) and catches edge cases
+        # that would only surface inside _safe_jsonify with no context.
+        try:
+            _j.dumps(result)   # trial serialisation — discard output
+        except Exception as _verify_exc:
+            logger.error(
+                f"[_format_response] Trial json.dumps FAILED after sanitisation: {_verify_exc}. "
+                "Falling back to string-keys-only safe dict.",
+                exc_info=False
+            )
+            # Nuclear option: convert every value to string
+            result = {str(k): str(v)[:200] for k, v in result.items()}
+
+        return result
+
     except Exception as format_exc:
         logger.error(f"[_format_response] CRITICAL: Sanitization error: {format_exc}", exc_info=True)
         # Emergency fallback

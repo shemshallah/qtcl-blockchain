@@ -545,15 +545,82 @@ async function execute() {
     const headers = { 'Content-Type': 'application/json' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
-    const res = await fetch('/api/command', {
-      method:  'POST',
-      headers,
-      body: JSON.stringify({ command: cmdStr, args: [], kwargs: {} })
-    });
+    // ── CRITICAL FIX (2026): AbortController timeout ──────────────────────────
+    // Previously: raw fetch() with NO timeout → Gunicorn killed the worker after
+    // 30 s → broken HTTP body → res.json() threw → 'Invalid JSON response'.
+    // Fix: abort the fetch after 35 s and return a clean JSON error object.
+    // The server-side timeout is 25 s, so 35 s on the client ensures the server
+    // always responds first (with a proper JSON timeout message) in normal cases.
+    // The extra 10 s is a safety margin for slow quantum module initialization.
+    const _abort = new AbortController();
+    const _abortTimer = setTimeout(() => _abort.abort(), 35000);
 
-    const data = await res.json().catch(() => ({ error: 'Invalid JSON response' }));
+    let res, data;
+    try {
+      res = await fetch('/api/command', {
+        method:  'POST',
+        headers,
+        body:    JSON.stringify({ command: cmdStr, args: [], kwargs: {} }),
+        signal:  _abort.signal
+      });
+      clearTimeout(_abortTimer);
 
-    // Capture auth tokens — AuthHandlers returns access_token at TOP LEVEL (not nested in result)
+      // ── Robust JSON parsing ────────────────────────────────────────────────
+      // res.json() CAN fail even with a 200 OK if:
+      //   • The server returned an HTML error page (Content-Type mismatch)
+      //   • The response body is empty or truncated (worker restart)
+      //   • The body starts with a BOM or whitespace
+      // Strategy:
+      //   1. Try res.json() natively
+      //   2. Fall back to parsing res.text() manually
+      //   3. Last resort: return structured error so the UI shows useful info
+      let rawText = '';
+      try {
+        data = await res.json();
+      } catch (_jsonErr) {
+        try {
+          rawText = await res.text().catch(() => '');
+          rawText = rawText.trim();
+          // Strip BOM and leading whitespace/logging lines before the JSON
+          const jsonStart = rawText.search(/[{[]/);
+          if (jsonStart > 0) {
+            console.warn('[Terminal] Response had leading non-JSON content, stripping:',
+                         rawText.slice(0, Math.min(jsonStart, 200)));
+            rawText = rawText.slice(jsonStart);
+          }
+          data = JSON.parse(rawText);
+        } catch (_parseErr) {
+          console.error('[Terminal] JSON parse failed:', _parseErr, '| raw:', rawText.slice(0, 500));
+          // Detect common server error patterns in the raw body
+          const isHtml   = rawText.includes('<!DOCTYPE') || rawText.includes('<html');
+          const isGunicornTimeout = rawText.includes('Worker timeout') || rawText === '';
+          data = {
+            status: 'error',
+            error: isGunicornTimeout
+              ? 'Server worker timed out — quantum initialization may still be in progress. Please retry in a few seconds.'
+              : isHtml
+              ? 'Server returned an HTML error page instead of JSON. Check server logs.'
+              : `Response could not be parsed as JSON. Raw snippet: ${rawText.slice(0, 120)}`,
+            _parse_error: _parseErr.message,
+            _http_status: res.status,
+          };
+        }
+      }
+    } catch (_fetchErr) {
+      clearTimeout(_abortTimer);
+      const isAbort = _fetchErr.name === 'AbortError';
+      data = {
+        status: 'error',
+        error: isAbort
+          ? 'Command timed out after 35 s. The server may be initializing quantum components — please retry in a few seconds.'
+          : `Network error: ${_fetchErr.message}`,
+        _aborted: isAbort,
+      };
+      res = { ok: false, status: 0 };
+    }
+
+    // ── Token capture ──────────────────────────────────────────────────────
+    // AuthHandlers returns access_token at TOP LEVEL (not nested in result)
     const tok = data.token || data.access_token
               || data.result?.token || data.result?.access_token;
     if (tok && window.qtclExecutor) window.qtclExecutor.setToken(tok);
@@ -580,14 +647,15 @@ async function execute() {
         String(result).split('\n').forEach(l => { if (l.trim()) addLine(l, 'success'); });
       }
     } else {
-      const errMsg = data.error || `HTTP ${res.status}`;
+      const errMsg = data.error || `HTTP ${res.status || 'unknown'}`;
       addLine('✗ ' + errMsg, 'error');
+      if (data.hint) addLine('  ↳ ' + data.hint, 'warning');
       if (data.suggestions && data.suggestions.length) {
         addLine('Similar: ' + data.suggestions.join(', '), 'warning');
       }
     }
   } catch (err) {
-    addLine('Network error: ' + err.message, 'error');
+    addLine('Error: ' + err.message, 'error');
   } finally {
     state.isLoading = false;
     state.cmdInput.disabled = false;

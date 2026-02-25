@@ -777,19 +777,91 @@ def _before():
 @app.after_request
 def _after(response):
     """
-    ENTERPRISE RESPONSE HANDLER — Ensures all JSON responses are properly formatted.
-    • Sets Content-Type for all JSON responses
-    • Prevents "invalid JSON" issues with proxy/clients
-    • Ensures charset is UTF-8
+    ENTERPRISE RESPONSE HARDENER — Ensures every /api/* response is valid JSON.
+
+    FIX 2026: The original guard (is_json OR 'application/json' in content_type)
+    only ran when the Content-Type was ALREADY set to JSON.  If a code path
+    produced a Response without setting Content-Type (e.g. make_response(str))
+    the header was missing entirely → client's res.json() would fail.
+
+    New logic:
+      • /api/* paths: FORCE Content-Type to application/json; charset=utf-8
+        unless the response is already a known binary/stream type.
+        This is safe because every /api/* route in this codebase returns JSON.
+      • Non-api paths: keep the original conservative logic.
+      • CORS: ensure Access-Control-Allow-Origin is set for browser clients.
     """
-    logger.debug(f"[RESPONSE] {response.status_code}")
-    
-    # If this is a JSON response, explicitly set Content-Type
-    if response.is_json or 'application/json' in response.content_type:
-        if 'charset' not in response.content_type:
+    logger.debug(f"[RESPONSE] {response.status_code} {request.path}")
+
+    # Force JSON content-type on all /api/ endpoints (they only return JSON)
+    if request.path.startswith('/api/'):
+        ct = response.content_type or ''
+        # Skip if explicitly binary/stream/html (shouldn't happen on /api/ but be safe)
+        if not any(t in ct for t in ('text/html', 'application/octet-stream', 'image/', 'audio/', 'video/')):
             response.headers['Content-Type'] = 'application/json; charset=utf-8'
-    
+    else:
+        # For non-api paths: set charset if JSON content-type is already present
+        if response.is_json or 'application/json' in (response.content_type or ''):
+            if 'charset' not in (response.content_type or ''):
+                response.headers['Content-Type'] = 'application/json; charset=utf-8'
+
+    # Prevent caching of API responses (avoids stale JSON in browser)
+    if request.path.startswith('/api/'):
+        response.headers.setdefault('Cache-Control', 'no-store, no-cache, must-revalidate')
+        response.headers.setdefault('Pragma', 'no-cache')
+
     return response
+
+
+@app.errorhandler(400)
+def _err_400(e):
+    """Return JSON for bad request errors (not Flask's default HTML 400 page)."""
+    return _safe_jsonify({'status': 'error', 'error': str(e), 'code': 400}, status_code=400)
+
+
+@app.errorhandler(404)
+def _err_404(e):
+    """Return JSON for missing routes (not Flask's default HTML 404 page)."""
+    return _safe_jsonify({
+        'status': 'error', 'error': f'Endpoint not found: {request.path}', 'code': 404
+    }, status_code=404)
+
+
+@app.errorhandler(405)
+def _err_405(e):
+    """Return JSON for method-not-allowed."""
+    return _safe_jsonify({'status': 'error', 'error': str(e), 'code': 405}, status_code=405)
+
+
+@app.errorhandler(500)
+def _err_500(e):
+    """Return JSON for unhandled internal errors (not Flask's default HTML 500 page).
+    This is the LAST LINE OF DEFENCE against HTML error pages reaching the client."""
+    logger.error(f"[Flask/500] Unhandled error: {e}", exc_info=True)
+    return _safe_jsonify({
+        'status': 'error',
+        'error': f'Internal server error: {str(e)[:200]}',
+        'code': 500,
+        'hint': 'Check server logs for details.',
+    }, status_code=500)
+
+
+@app.errorhandler(Exception)
+def _err_uncaught(e):
+    """Catch-all for ANY uncaught exception in a view — returns JSON, never HTML."""
+    logger.error(f"[Flask/Exception] Uncaught: {type(e).__name__}: {e}", exc_info=True)
+    try:
+        return _safe_jsonify({
+            'status': 'error',
+            'error': str(e)[:200],
+            'type': type(e).__name__,
+        }, status_code=500)
+    except Exception:
+        # Absolute last resort — raw string response
+        from flask import make_response as _mkr_last
+        r = _mkr_last('{"status":"error","error":"catastrophic serialization failure"}', 500)
+        r.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return r
 
 
 # ── Safe service accessors ────────────────────────────────────────────────────
@@ -1098,177 +1170,238 @@ def status():
 
 def _safe_jsonify(data: dict, status_code: int = 200):
     """
-    UNIVERSAL: Guaranteed to return (Response, int) tuple on ALL code paths.
+    ABSOLUTE GUARANTEE: Returns a proper Flask Response object (NOT a tuple) with
+    Content-Type: application/json; charset=utf-8 set on every code path.
 
-    BUG-2 FIX: All three code paths (primary, fallback, emergency) now return
-    (Response, status_code) consistently.  Previously the fallback and emergency
-    paths returned bare Response objects, causing callers that appended ", status"
-    to create a double-tuple that Flask could not parse.
+    BUG-3 FIX (2026): Returns a bare Response (not a tuple) so callers can do:
+        return _safe_jsonify(data)            # ← clean, Flask handles directly
+        return _safe_jsonify(data, 500)       # ← with status code
 
-    - Sanitizes data via _deep_json_sanitize (handles numpy, datetime, circular refs)
-    - Falls back to json.dumps with default=str if jsonify fails
-    - Emergency path always returns a parseable JSON body
-    - Never returns non-JSON or a bare Response (always a 2-tuple)
+    Flask view functions handle bare Response objects AND (Response, int) tuples,
+    but returning a bare Response is simpler, unambiguous, and avoids Flask's
+    tuple-unwrapping logic which can interact unpredictably with after_request hooks.
+
+    Pipeline:
+        data → _deep_json_sanitize → jsonify (or json.dumps fallback) → Response
+              ↳ Content-Type ALWAYS set
+              ↳ status_code ALWAYS applied
+              ↳ charset ALWAYS utf-8
     """
-    from globals import _deep_json_sanitize
+    import json as _json_mod
+    from flask import make_response as _mkr
 
+    # ── Attempt to import sanitizer; fall back to identity if globals unavailable ──
     try:
-        safe_data = _deep_json_sanitize(data)
+        from globals import _deep_json_sanitize as _sanitize
+    except Exception:
+        def _sanitize(x, **_):
+            return x
+
+    # ── PRIMARY: jsonify (most reliable, handles flask app context) ─────────────
+    try:
+        safe_data = _sanitize(data)
         if not isinstance(safe_data, dict):
             safe_data = {'status': 'success', 'result': safe_data}
-        response = jsonify(safe_data)
-        response.headers['Content-Type'] = 'application/json; charset=utf-8'
-        return response, status_code                         # PRIMARY PATH — tuple ✓
-    except Exception as jsonify_exc:
-        logger.error(f"[_safe_jsonify] jsonify failed, trying json.dumps fallback: {jsonify_exc}")
-        try:
-            import json as _json_mod
-            safe_data2 = _deep_json_sanitize(data)
-            json_str   = _json_mod.dumps(safe_data2, default=str)
-            from flask import make_response as _mkr
-            resp = _mkr(json_str, status_code)
-            resp.headers['Content-Type'] = 'application/json; charset=utf-8'
-            return resp, status_code                         # FALLBACK PATH — tuple ✓
-        except Exception as fallback_exc:
-            logger.critical(f"[_safe_jsonify] Both paths failed: primary={jsonify_exc} fallback={fallback_exc}")
-            from flask import make_response as _mkr2
-            body = '{"status":"error","error":"JSON serialization critical failure"}'
-            emergency = _mkr2(body, 500)
-            emergency.headers['Content-Type'] = 'application/json; charset=utf-8'
-            return emergency, 500                            # EMERGENCY PATH — tuple ✓
+        resp = _mkr(jsonify(safe_data).get_data(), status_code)
+        resp.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return resp                                          # PRIMARY PATH ✓
+    except Exception as primary_exc:
+        logger.error(f"[_safe_jsonify] PRIMARY failed: {primary_exc}")
+
+    # ── FALLBACK: manual json.dumps (bypasses jsonify entirely) ─────────────────
+    try:
+        safe_data2 = _sanitize(data)
+        json_str = _json_mod.dumps(safe_data2, default=str, ensure_ascii=False)
+        resp2 = _mkr(json_str, status_code)
+        resp2.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return resp2                                         # FALLBACK PATH ✓
+    except Exception as fallback_exc:
+        logger.critical(f"[_safe_jsonify] FALLBACK also failed: primary={primary_exc} fallback={fallback_exc}")
+
+    # ── EMERGENCY: hardcoded minimal JSON ───────────────────────────────────────
+    try:
+        err_body = _json_mod.dumps({
+            'status': 'error',
+            'error': 'JSON serialization failed — server-side critical failure',
+            'primary_exc': str(primary_exc)[:120],
+            'fallback_exc': str(fallback_exc)[:120]
+        })
+    except Exception:
+        err_body = '{"status":"error","error":"JSON serialization critical failure"}'
+
+    emergency = _mkr(err_body, 500)
+    emergency.headers['Content-Type'] = 'application/json; charset=utf-8'
+    return emergency                                          # EMERGENCY PATH ✓
 
 
 @app.route('/api/command', methods=['POST'])
 def execute_command():
     """
-    BULLETPROOF: Handles timeout properly, logs everything, returns valid JSON
-    - 15s timeout per command (half of Gunicorn's 30s, leaves 5s buffer)
-    - Aggressive logging to find hanging handlers
-    - No blocking on thread shutdown
-    - Always returns valid JSON response
+    BULLETPROOF v2 — JSON-safe on every code path, full timeout coverage.
+
+    KEY FIXES (2026):
+    BUG-A  _initialize_terminal_engine() ran OUTSIDE the executor timeout,
+           so a blocking quantum module import (106k-qubit init) would hang
+           the Gunicorn worker -> worker killed -> broken HTTP body ->
+           res.json() throws -> 'Invalid JSON response' on the client.
+           FIX: _init + dispatch run together in ONE timeout-protected thread.
+
+    BUG-B  _safe_jsonify returned (Response, int) tuple; this view returned
+           it directly via `return resp`, which double-wrapped the status.
+           FIX: _safe_jsonify now returns a bare Response; callers return it
+           directly without further wrapping.
+
+    BUG-C  request.get_json() without force/silent silently returned None
+           when Content-Type was slightly wrong.
+           FIX: force=True + silent=True.
+
+    BUG-D  Timeout was 15s but quantum module init alone can take 20s+,
+           exceeding the budget before dispatch even began.
+           FIX: Unified 25s budget covers init + dispatch together.
     """
-    import signal as _signal
-    
-    cmd_name = 'unknown'
+    cmd_name   = 'unknown'
     start_time = time.time()
-    
+
     try:
-        _initialize_terminal_engine()
-        
-        data = request.get_json() or {}
-        command = data.get('command', 'help')
+        # force=True: parse body regardless of Content-Type header
+        # silent=True: return {} on any parse error (never raises)
+        data     = request.get_json(force=True, silent=True) or {}
+        command  = str(data.get('command') or 'help').strip()
         cmd_name = command
-        args = data.get('args') or {}
-        user_id = data.get('user_id')
+        args     = data.get('args') or {}
+        user_id  = data.get('user_id')
         raw_token = None
-        role = None
+        role      = None
 
-        # Log command start IMMEDIATELY
-        logger.info(f"[/api/command] START: cmd={command} user={user_id}")
+        logger.info(f"[/api/command] START: cmd={command!r} user={user_id}")
 
-        # Extract token
+        # ── Token extraction ─────────────────────────────────────────────────
         auth_header = request.headers.get('Authorization', '')
         if auth_header.startswith('Bearer '):
             raw_token = auth_header[7:].strip()
         if not raw_token:
             raw_token = data.get('token') or data.get('access_token')
 
-        # Decode JWT
+        # ── JWT decode (CPU-only, no I/O — safe synchronously) ───────────────
         if raw_token:
             try:
                 import jwt as _jwt
-                secrets = []
-                env_sec = os.getenv('JWT_SECRET', '')
-                if env_sec:
-                    secrets.append(env_sec)
+                _secrets = []
+                _env = os.getenv('JWT_SECRET', '')
+                if _env: _secrets.append(_env)
                 try:
-                    from auth_handlers import JWT_SECRET
-                    if JWT_SECRET:
-                        secrets.append(JWT_SECRET)
-                except:
-                    pass
+                    from auth_handlers import JWT_SECRET as _ah_sec
+                    if _ah_sec: _secrets.append(_ah_sec)
+                except Exception: pass
                 try:
-                    from globals import _get_jwt_secret
-                    gs = _get_jwt_secret()
-                    if gs:
-                        secrets.append(gs)
-                except:
-                    pass
-                
-                for secret in secrets:
-                    try:
-                        payload = _jwt.decode(raw_token, secret, algorithms=['HS512', 'HS256'])
-                        if not user_id:
-                            user_id = payload.get('user_id')
-                        role = payload.get('role', 'user')
-                        break
-                    except:
-                        continue
-            except Exception as e:
-                logger.warning(f"[/api/command] JWT error: {e}")
+                    from globals import _get_jwt_secret as _gs_fn
+                    _gs = _gs_fn()
+                    if _gs: _secrets.append(_gs)
+                except Exception: pass
 
-        # CRITICAL: Timeout-safe dispatch with NO thread waiting
-        result = None
+                for _sec in _secrets:
+                    try:
+                        _pl = _jwt.decode(raw_token, _sec, algorithms=['HS512', 'HS256'])
+                        if not user_id: user_id = _pl.get('user_id')
+                        role = _pl.get('role', 'user')
+                        break
+                    except Exception: continue
+            except Exception as jwt_e:
+                logger.warning(f"[/api/command] JWT error: {jwt_e}")
+
+        # ── ALL blocking work inside executor (timeout covers EVERYTHING) ─────
+        # Budget: 25 s — Gunicorn default 30 s, leaves 5 s for serialisation.
+        # The thread runs: _initialize_terminal_engine() THEN dispatch_command()
+        # so even first-call quantum module imports are fully time-bounded.
+        result   = None
         executor = None
-        timeout_seconds = 15.0  # 15s timeout (Gunicorn default is 30s)
-        
+        _timeout = 25.0
+
+        def _init_and_dispatch():
+            """Thread body: idempotent init then command dispatch."""
+            _initialize_terminal_engine()   # no-op after first successful call
+            return dispatch_command(command, args, user_id, token=raw_token, role=role)
+
         try:
-            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            future = executor.submit(dispatch_command, command, args, user_id, token=raw_token, role=role)
-            
+            executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix='qtcl_cmd'
+            )
+            future = executor.submit(_init_and_dispatch)
             try:
-                logger.debug(f"[/api/command] EXEC: Waiting for result (timeout={timeout_seconds}s)")
-                result = future.result(timeout=timeout_seconds)
+                result  = future.result(timeout=_timeout)
                 elapsed = time.time() - start_time
-                logger.info(f"[/api/command] SUCCESS: cmd={command} elapsed={elapsed:.2f}s")
+                logger.info(f"[/api/command] SUCCESS: cmd={command!r} elapsed={elapsed:.2f}s")
             except concurrent.futures.TimeoutError:
                 elapsed = time.time() - start_time
-                logger.error(f"[/api/command] TIMEOUT: cmd={command} elapsed={elapsed:.2f}s (limit={timeout_seconds}s)")
+                logger.error(
+                    f"[/api/command] TIMEOUT: cmd={command!r} "
+                    f"elapsed={elapsed:.2f}s (limit={_timeout}s)"
+                )
                 result = {
-                    'status': 'error',
-                    'error': f'Command "{command}" exceeded {timeout_seconds}s timeout',
-                    'command': command,
-                    'elapsed_ms': int(elapsed * 1000)
+                    'status':     'error',
+                    'error': (
+                        f'Command "{command}" timed out after {_timeout:.0f}s. '
+                        'The server may still be initializing quantum components — '
+                        'please wait a moment and retry.'
+                    ),
+                    'command':    command,
+                    'elapsed_ms': int(elapsed * 1000),
+                    'hint': (
+                        'First-time quantum module initialization can take 20-30 s. '
+                        'Subsequent commands will be fast. Retry in a few seconds.'
+                    ),
                 }
-                # Don't try to cancel - just leave it
                 future.cancel()
-                
-        except Exception as e:
+
+        except Exception as dispatch_e:
             elapsed = time.time() - start_time
-            logger.error(f"[/api/command] DISPATCH ERROR: {e} (elapsed={elapsed:.2f}s)", exc_info=True)
-            result = {'status': 'error', 'error': str(e)[:200], 'command': command}
+            logger.error(
+                f"[/api/command] DISPATCH ERROR: {dispatch_e} (elapsed={elapsed:.2f}s)",
+                exc_info=True
+            )
+            result = {'status': 'error', 'error': str(dispatch_e)[:200], 'command': command}
         finally:
-            # Shutdown WITHOUT waiting (no blocking)
             if executor:
                 try:
-                    executor.shutdown(wait=False)
-                except:
-                    pass
+                    executor.shutdown(wait=False)   # never block the Gunicorn worker
+                except Exception: pass
 
-        # Ensure result is dict
+        # ── Normalise to dict ────────────────────────────────────────────────
         if not isinstance(result, dict):
             result = {'status': 'success', 'result': result}
 
-        # Sanitize
+        # ── Deep-sanitise (numpy, datetime, Decimal, circular refs, …) ───────
         try:
-            logger.debug(f"[/api/command] FORMAT: Sanitizing response")
             from globals import _format_response
             result = _format_response(result)
-            logger.debug(f"[/api/command] FORMAT: Success")
-        except Exception as e:
-            logger.error(f"[/api/command] FORMAT ERROR: {e}")
-            result = {'status': 'error', 'error': 'Response formatting failed', 'command': command}
+        except Exception as fmt_e:
+            logger.error(f"[/api/command] FORMAT ERROR: {fmt_e}")
+            result = {
+                'status':  'error',
+                'error':   'Response serialisation failed',
+                'command': command,
+                'debug':   str(fmt_e)[:100],
+            }
 
-        # Return safe JSON
-        resp = _safe_jsonify(result)
-        elapsed = time.time() - start_time
-        logger.info(f"[/api/command] RETURN: cmd={command} total_time={elapsed:.2f}s")
-        return resp
+        # ── Serialise & return (bare Response — no tuple wrapping needed) ─────
+        response = _safe_jsonify(result)
+        elapsed  = time.time() - start_time
+        logger.info(
+            f"[/api/command] RETURN: cmd={command!r} "
+            f"total={elapsed:.2f}s status={response.status_code}"
+        )
+        return response
 
     except Exception as exc:
         elapsed = time.time() - start_time
-        logger.error(f"[/api/command] EXCEPTION: {exc} (elapsed={elapsed:.2f}s)", exc_info=True)
-        return _safe_jsonify({'status': 'error', 'error': str(exc)[:200], 'command': cmd_name}, status_code=500)
+        logger.error(
+            f"[/api/command] UNHANDLED EXCEPTION: {exc} (elapsed={elapsed:.2f}s)",
+            exc_info=True
+        )
+        return _safe_jsonify(
+            {'status': 'error', 'error': str(exc)[:200], 'command': cmd_name},
+            status_code=500
+        )
 
 
 @app.route('/api/commands', methods=['GET'])

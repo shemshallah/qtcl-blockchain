@@ -119,11 +119,25 @@ except ImportError:
         return "\n".join(str(row) for row in data)
 
 import logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] %(levelname)s — %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
+# ── CRITICAL: Only configure stdout logging when running standalone (CLI mode).
+# When imported by the WSGI/Flask server, DO NOT add a StreamHandler to stdout.
+# Stdout is the HTTP response pipe in WSGI environments; writing log messages
+# to it would corrupt the JSON response body → 'Invalid JSON' on the client.
+# The WSGI server (Gunicorn) configures its own logging — we just inherit it.
+if __name__ == '__main__':
+    # CLI / standalone mode: stdout logging is fine
+    if not logging.getLogger().hasHandlers():
+        logging.basicConfig(
+            level=logging.INFO,
+            format='[%(asctime)s] %(levelname)s — %(message)s',
+            handlers=[logging.StreamHandler(sys.stdout)]
+        )
+else:
+    # Server context: use existing root logger (Gunicorn owns it)
+    # Only add a NullHandler if the root logger has NO handlers yet
+    # (prevents "No handlers could be found" warnings without adding stdout)
+    if not logging.getLogger().hasHandlers():
+        logging.getLogger().addHandler(logging.NullHandler())
 logger = logging.getLogger(__name__)
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
