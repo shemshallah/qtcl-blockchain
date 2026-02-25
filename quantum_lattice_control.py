@@ -1185,6 +1185,57 @@ logger.info("╚═════════════════════�
 
 _QUANTUM_LATTICE = get_quantum_lattice()
 
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════
+# DEPLOYMENT COMPATIBILITY LAYER (for wsgi_config.py)
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+class QuantumCoordinator:
+    """Coordinator for quantum system state across deployment."""
+    
+    def __init__(self):
+        self.lattice = get_quantum_lattice()
+        self.running = False
+    
+    def start(self):
+        """Start quantum system."""
+        self.running = True
+        logger.info("[COORDINATOR] Quantum system started")
+    
+    def stop(self):
+        """Stop quantum system."""
+        self.running = False
+        logger.info("[COORDINATOR] Quantum system stopped")
+    
+    def get_metrics(self):
+        """Get current metrics."""
+        return self.lattice.get_system_metrics().dict()
+
+def initialize_quantum_system():
+    """Initialize quantum lattice for deployment."""
+    global LATTICE, HEARTBEAT, QUANTUM_COORDINATOR
+    
+    logger.info("[INIT] Initializing quantum lattice system...")
+    
+    # Get lattice instance
+    LATTICE = get_quantum_lattice()
+    
+    # Initialize heartbeat
+    HEARTBEAT = QuantumHeartbeat(interval=5.0)  # 5 second heartbeat
+    HEARTBEAT.start()
+    
+    # Initialize coordinator
+    QUANTUM_COORDINATOR = QuantumCoordinator()
+    QUANTUM_COORDINATOR.start()
+    
+    logger.info("[INIT] ✓ Quantum system initialized")
+    logger.info("[INIT] ✓ HEARTBEAT running (5s interval)")
+    logger.info("[INIT] ✓ QUANTUM_COORDINATOR active")
+
+# Global exports for wsgi_config
+LATTICE = get_quantum_lattice()
+HEARTBEAT = QuantumHeartbeat(interval=5.0)
+QUANTUM_COORDINATOR = None
+
 if __name__ == '__main__':
     print("\n=== QUANTUM LATTICE DEMO (AER-ENABLED) ===\n")
     lattice = get_quantum_lattice()
