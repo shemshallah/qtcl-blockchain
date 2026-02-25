@@ -1220,7 +1220,7 @@ def initialize_quantum_system():
     LATTICE = get_quantum_lattice()
     
     # Initialize heartbeat
-    HEARTBEAT = QuantumHeartbeat(interval=5.0)  # 5 second heartbeat
+    HEARTBEAT = QuantumHeartbeat(interval_seconds=5.0)  # 5 second heartbeat
     HEARTBEAT.start()
     
     # Initialize coordinator
@@ -1233,7 +1233,7 @@ def initialize_quantum_system():
 
 # Global exports for wsgi_config
 LATTICE = get_quantum_lattice()
-HEARTBEAT = QuantumHeartbeat(interval=5.0)
+HEARTBEAT = QuantumHeartbeat(interval_seconds=5.0)
 QUANTUM_COORDINATOR = None
 
 if __name__ == '__main__':
