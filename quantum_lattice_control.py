@@ -197,20 +197,9 @@ class PostQuantumCrypto:
         """Hash data using lattice-based compression."""
         with self.lock:
             classical_hash = hashlib.sha256(data).hexdigest()
-            # Create lattice vector with proper dimension
-            lattice_vector = np.frombuffer(hashlib.sha512(data).digest(), dtype=np.uint8)
-            # Pad or truncate to exact dimension
-            if len(lattice_vector) < self.dimension:
-                # Pad with additional hashing if needed
-                extra_hash = hashlib.sha256(data + b'_pad').digest()
-                extra_bytes = np.frombuffer(extra_hash, dtype=np.uint8)
-                lattice_vector = np.concatenate([lattice_vector, extra_bytes])[:self.dimension]
-            else:
-                lattice_vector = lattice_vector[:self.dimension]
-            # Ensure it's exactly self.dimension elements
-            lattice_vector = lattice_vector.astype(np.float64)
+            lattice_vector = np.frombuffer(hashlib.sha512(data).digest(), dtype=np.uint8)[:self.dimension]
             lattice_compression = (self.secret_key @ lattice_vector) % self.modulus
-            lattice_hash = hashlib.sha256(lattice_compression.astype(np.uint8).tobytes()).hexdigest()
+            lattice_hash = hashlib.sha256(lattice_compression.tobytes()).hexdigest()
             
             combined = hashlib.sha256(
                 (classical_hash + lattice_hash).encode()
@@ -1231,7 +1220,7 @@ def initialize_quantum_system():
     LATTICE = get_quantum_lattice()
     
     # Initialize heartbeat
-    HEARTBEAT = QuantumHeartbeat(interval=5.0)  # 5 second heartbeat
+    HEARTBEAT = QuantumHeartbeat(interval_seconds=5.0)  # 5 second heartbeat
     HEARTBEAT.start()
     
     # Initialize coordinator
@@ -1244,7 +1233,7 @@ def initialize_quantum_system():
 
 # Global exports for wsgi_config
 LATTICE = get_quantum_lattice()
-HEARTBEAT = QuantumHeartbeat(interval=5.0)
+HEARTBEAT = QuantumHeartbeat(interval_seconds=5.0)
 QUANTUM_COORDINATOR = None
 
 if __name__ == '__main__':
