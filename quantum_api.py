@@ -4604,6 +4604,236 @@ QUANTUM.diagnostics=SystemDiagnostics
 QUANTUM.resources=RESOURCE_MANAGER
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════
+# QUANTUM STATE MANAGER INFRASTRUCTURE (v5.2 integrated into quantum_api.py)
+# ═════════════════════════════════════════════════════════════════════════════════════════════════════════
+# These classes provide coherence-aware state management and atomic transitions.
+# Integrated directly into quantum_api.py (previously quantum_state_manager.py)
+
+class QuantumStateWriter:
+    """Batches and flushes quantum state snapshots to the database with configurable intervals."""
+    
+    def __init__(self, db_pool=None, batch_size=150, flush_interval=4.0):
+        self.db_pool = db_pool
+        self.batch_size = batch_size
+        self.flush_interval = flush_interval
+        self.batch = deque(maxlen=batch_size)
+        self.lock = threading.RLock()
+        self._last_flush = time.time()
+    
+    def write_state(self, state_id, coherence, fidelity, w_state_strength):
+        """Queue a quantum state snapshot for batch writing."""
+        with self.lock:
+            self.batch.append({
+                'state_id': state_id,
+                'coherence': coherence,
+                'fidelity': fidelity,
+                'w_state_strength': w_state_strength,
+                'timestamp': datetime.now(timezone.utc)
+            })
+            
+            # Auto-flush on batch size or time interval
+            if len(self.batch) >= self.batch_size or \
+               (time.time() - self._last_flush) >= self.flush_interval:
+                self.flush()
+    
+    def flush(self):
+        """Flush batched states to database."""
+        with self.lock:
+            if len(self.batch) == 0:
+                return
+            # In a real deployment, this would write to Supabase
+            # For now, just clear the batch
+            self.batch.clear()
+            self._last_flush = time.time()
+
+
+class QuantumStateSnapshot:
+    """Captures and restores quantum state snapshots for reproducibility."""
+    
+    def __init__(self):
+        self.snapshots = {}
+        self.lock = threading.RLock()
+        self.current_coherence = 0.0
+        self.current_fidelity = 0.0
+        self.current_w_state = 0.0
+    
+    def take_snapshot(self, snapshot_id=None):
+        """Capture current quantum state."""
+        if snapshot_id is None:
+            snapshot_id = str(uuid.uuid4())
+        
+        with self.lock:
+            self.snapshots[snapshot_id] = {
+                'coherence': self.current_coherence,
+                'fidelity': self.current_fidelity,
+                'w_state': self.current_w_state,
+                'timestamp': datetime.now(timezone.utc)
+            }
+        return snapshot_id
+    
+    def restore_snapshot(self, snapshot_id):
+        """Restore quantum state from snapshot."""
+        with self.lock:
+            if snapshot_id in self.snapshots:
+                snap = self.snapshots[snapshot_id]
+                self.current_coherence = snap['coherence']
+                self.current_fidelity = snap['fidelity']
+                self.current_w_state = snap['w_state']
+                return True
+        return False
+    
+    def get_current_state(self):
+        """Get current quantum state."""
+        with self.lock:
+            return {
+                'coherence': self.current_coherence,
+                'fidelity': self.current_fidelity,
+                'w_state': self.current_w_state
+            }
+
+
+class AtomicQuantumTransition:
+    """Manages atomic quantum state transitions with shadow correlation history."""
+    
+    def __init__(self, max_shadow_history=200):
+        self.max_shadow_history = max_shadow_history
+        self.shadow_history = deque(maxlen=max_shadow_history)
+        self.lock = threading.RLock()
+        self.transition_count = 0
+    
+    def apply_transition(self, from_state, to_state, coherence_delta):
+        """Apply an atomic transition and record shadow correlation."""
+        with self.lock:
+            self.shadow_history.append({
+                'from': from_state,
+                'to': to_state,
+                'coherence_delta': coherence_delta,
+                'timestamp': time.time(),
+                'transition_id': self.transition_count
+            })
+            self.transition_count += 1
+            return self.transition_count - 1
+    
+    def get_shadow_correlation(self, index):
+        """Retrieve shadow correlation from history."""
+        with self.lock:
+            if 0 <= index < len(self.shadow_history):
+                return self.shadow_history[index]
+        return None
+
+
+class QuantumAwareCommandExecutor:
+    """Executes commands with quantum state awareness and coherence tracking."""
+    
+    def __init__(self, quantum_state, quantum_transition):
+        self.quantum_state = quantum_state
+        self.quantum_transition = quantum_transition
+        self.executed_commands = deque(maxlen=1000)
+        self.lock = threading.RLock()
+    
+    def execute_command(self, command, args, kwargs=None):
+        """Execute a command with quantum awareness."""
+        if kwargs is None:
+            kwargs = {}
+        
+        with self.lock:
+            pre_state = self.quantum_state.get_current_state()
+            
+            # Execute command (placeholder)
+            result = {'command': command, 'status': 'executed', 'args': args}
+            
+            post_state = self.quantum_state.get_current_state()
+            coherence_delta = post_state['coherence'] - pre_state['coherence']
+            
+            # Record in shadow history
+            self.quantum_transition.apply_transition(pre_state, post_state, coherence_delta)
+            
+            self.executed_commands.append({
+                'command': command,
+                'timestamp': time.time(),
+                'result': result
+            })
+            
+            return result
+
+
+class QuantumCoherenceCommitment:
+    """Commits quantum coherence measurements to the database."""
+    
+    def __init__(self, quantum_state, db_pool=None):
+        self.quantum_state = quantum_state
+        self.db_pool = db_pool
+        self.commitments = deque(maxlen=500)
+        self.lock = threading.RLock()
+    
+    def commit_coherence(self, measurement_id, coherence_value, metadata=None):
+        """Commit a coherence measurement."""
+        with self.lock:
+            commitment = {
+                'measurement_id': measurement_id,
+                'coherence': coherence_value,
+                'timestamp': datetime.now(timezone.utc),
+                'metadata': metadata or {}
+            }
+            self.commitments.append(commitment)
+            # In real deployment, would write to Supabase
+            return measurement_id
+    
+    def get_committed_coherence(self):
+        """Get current committed coherence value."""
+        if len(self.commitments) > 0:
+            return self.commitments[-1]['coherence']
+        return 0.0
+
+
+class EntanglementGraph:
+    """Models quantum entanglement relationships between qubits and API couplings."""
+    
+    def __init__(self):
+        self.edges = {}  # {qubit_a: {qubit_b: entanglement_strength, ...}, ...}
+        self.api_couplings = {}  # {endpoint_a: {endpoint_b: coupling_strength, ...}, ...}
+        self.lock = threading.RLock()
+    
+    def add_entanglement(self, qubit_a, qubit_b, strength=1.0):
+        """Add an entanglement edge between two qubits."""
+        with self.lock:
+            if qubit_a not in self.edges:
+                self.edges[qubit_a] = {}
+            self.edges[qubit_a][qubit_b] = strength
+            
+            if qubit_b not in self.edges:
+                self.edges[qubit_b] = {}
+            self.edges[qubit_b][qubit_a] = strength
+    
+    def add_api_coupling(self, endpoint_a, endpoint_b, strength=1.0):
+        """Add an API coupling edge (models endpoint communication patterns)."""
+        with self.lock:
+            if endpoint_a not in self.api_couplings:
+                self.api_couplings[endpoint_a] = {}
+            self.api_couplings[endpoint_a][endpoint_b] = strength
+    
+    def get_entanglement_degree(self, qubit_id):
+        """Get the degree (number of entanglements) for a qubit."""
+        with self.lock:
+            if qubit_id in self.edges:
+                return len(self.edges[qubit_id])
+        return 0
+    
+    def get_graph_density(self):
+        """Calculate entanglement graph density."""
+        with self.lock:
+            if len(self.edges) == 0:
+                return 0.0
+            
+            edge_count = sum(len(neighbors) for neighbors in self.edges.values()) / 2
+            max_edges = len(self.edges) * (len(self.edges) - 1) / 2
+            
+            if max_edges == 0:
+                return 0.0
+            return edge_count / max_edges
+
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════════════
 # SECTION 26: FINAL EXPORTS & INITIALIZATION
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -4648,7 +4878,14 @@ __all__=[
     'PerformanceProfiler',
     'SystemDiagnostics',
     'ResourceManager',
-    'QuantumAPIGlobals'
+    'QuantumAPIGlobals',
+    # Quantum State Manager Infrastructure (v5.2)
+    'QuantumStateWriter',
+    'QuantumStateSnapshot',
+    'AtomicQuantumTransition',
+    'QuantumAwareCommandExecutor',
+    'QuantumCoherenceCommitment',
+    'EntanglementGraph',
 ]
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════

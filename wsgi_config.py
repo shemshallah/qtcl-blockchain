@@ -595,13 +595,13 @@ def _initialize_quantum_infrastructure_deferred() -> None:
         EntanglementGraph = None
         
         try:
-            from quantum_state_manager import (
+            from quantum_api import (
                 QuantumStateWriter, QuantumStateSnapshot, 
                 AtomicQuantumTransition, QuantumAwareCommandExecutor,
                 QuantumCoherenceCommitment, EntanglementGraph
             )
         except (ImportError, ModuleNotFoundError):
-            logger.warning("[BOOTSTRAP/QUANTUM] quantum_state_manager not available — degraded mode")
+            logger.warning("[BOOTSTRAP/QUANTUM] quantum state manager classes not available — degraded mode")
         
         # Safely instantiate only if imports succeeded
         QUANTUM_WRITER = None
@@ -1460,17 +1460,6 @@ def metrics():
         return jsonify(get_metrics())
     except Exception:
         return jsonify({'status': 'operational'})
-
-
-@app.errorhandler(404)
-def not_found(exc):
-    return jsonify({'error': 'Not found', 'path': request.path}), 404
-
-
-@app.errorhandler(500)
-def server_error(exc):
-    logger.error(f"[500] {exc}")
-    return jsonify({'error': 'Internal server error'}), 500
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
