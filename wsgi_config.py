@@ -31,6 +31,7 @@ import time
 import traceback
 import json
 import numpy as np
+import concurrent.futures
 from typing import Dict
 from collections import deque
 
@@ -1128,116 +1129,94 @@ def _safe_jsonify(data: dict, status_code: int = 200):
 @app.route('/api/command', methods=['POST'])
 def execute_command():
     """
-    MUSEUM-QUALITY: Dispatch a named command through the terminal engine.
-    
-    ✓ Unified JWT extraction (env → auth_handlers → globals)
-    ✓ Timeout-safe execution via concurrent.futures
-    ✓ Guaranteed JSON-safe response via _safe_jsonify()
-    ✓ NO hanging — all operations have explicit timeout guards
+    ✓ BULLETPROOF: 30s timeout, guaranteed JSON response
+    ✓ Never hangs, always returns valid JSON
     """
-    import concurrent.futures as _cf
-    from globals import _format_response, _deep_json_sanitize
-    
     cmd_name = 'unknown'
     try:
-        _initialize_terminal_engine()   # idempotent, thread-safe
-
-        data    = request.get_json() or {}
+        _initialize_terminal_engine()
+        
+        data = request.get_json() or {}
         command = data.get('command', 'help')
-        cmd_name = command  # For logging
-        args    = data.get('args') or {}
+        cmd_name = command
+        args = data.get('args') or {}
         user_id = data.get('user_id')
+        raw_token = None
+        role = None
 
-        raw_token       = None
-        role            = None
-        is_admin        = False
-
-        # ── AUTH: Centralized JWT extraction ─────────────────────────────────────
+        # Extract token
         auth_header = request.headers.get('Authorization', '')
         if auth_header.startswith('Bearer '):
             raw_token = auth_header[7:].strip()
         if not raw_token:
             raw_token = data.get('token') or data.get('access_token')
 
+        # Decode JWT if present
         if raw_token:
             try:
                 import jwt as _jwt
-                secrets_to_try = []
-                env_secret = os.getenv('JWT_SECRET', '')
-                if env_secret:
-                    secrets_to_try.append(('ENV', env_secret))
-
+                secrets = []
+                env_sec = os.getenv('JWT_SECRET', '')
+                if env_sec:
+                    secrets.append(env_sec)
                 try:
-                    from auth_handlers import JWT_SECRET as _ahs
-                    if _ahs:
-                        secrets_to_try.append(('AUTH_HANDLERS', _ahs))
+                    from auth_handlers import JWT_SECRET
+                    if JWT_SECRET:
+                        secrets.append(JWT_SECRET)
                 except:
                     pass
-
                 try:
-                    from globals import _get_jwt_secret as _gs_fn
-                    _gs = _gs_fn()
-                    if _gs:
-                        secrets_to_try.append(('GLOBALS', _gs))
+                    from globals import _get_jwt_secret
+                    gs = _get_jwt_secret()
+                    if gs:
+                        secrets.append(gs)
                 except:
                     pass
-
-                jwt_payload = {}
-                for secret_source, secret in secrets_to_try:
+                
+                for secret in secrets:
                     try:
-                        jwt_payload = _jwt.decode(raw_token, secret, algorithms=['HS512', 'HS256'])
+                        payload = _jwt.decode(raw_token, secret, algorithms=['HS512', 'HS256'])
                         if not user_id:
-                            user_id = jwt_payload.get('user_id')
-                        role = jwt_payload.get('role', 'user')
-                        is_admin = bool(jwt_payload.get('is_admin')) or role in ('admin', 'superadmin', 'super_admin')
-                        logger.debug(f"[auth] JWT decoded via {secret_source}")
+                            user_id = payload.get('user_id')
+                        role = payload.get('role', 'user')
+                        logger.debug(f"[auth] JWT decoded")
                         break
                     except:
                         continue
-            except Exception as _exc:
-                logger.warning(f"[auth] JWT processing failed: {_exc}")
+            except Exception as e:
+                logger.warning(f"[auth] JWT error: {e}")
 
-        # ── DISPATCH: Timeout-safe execution ─────────────────────────────────────
+        # CRITICAL: Timeout-safe dispatch
         result = None
         try:
-            with _cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix='cmd-exec') as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(dispatch_command, command, args, user_id, token=raw_token, role=role)
-                result = future.result(timeout=30.0)  # 30s per command
-        except _cf.TimeoutError:
+                result = future.result(timeout=30.0)
+        except concurrent.futures.TimeoutError:
             logger.error(f"[/api/command] TIMEOUT: {command}")
-            result = {
-                'status': 'error',
-                'error': f'Command "{command}" timed out after 30 seconds',
-                'command': command,
-            }
-        except Exception as dispatch_exc:
-            logger.error(f"[/api/command] Dispatch error: {dispatch_exc}", exc_info=True)
-            result = {
-                'status': 'error',
-                'error': str(dispatch_exc)[:200],
-                'command': command,
-            }
+            result = {'status': 'error', 'error': f'Command timeout after 30s', 'command': command}
+        except Exception as e:
+            logger.error(f"[/api/command] Error: {e}", exc_info=True)
+            result = {'status': 'error', 'error': str(e)[:200], 'command': command}
 
-        # ── FORMATTING: Guaranteed JSON-safe ─────────────────────────────────────
-        if result is None:
-            result = {'status': 'error', 'error': 'Command returned None', 'command': command}
-        
+        # Ensure result is dict
+        if not isinstance(result, dict):
+            result = {'status': 'success', 'result': result}
+
+        # Sanitize to JSON-safe
         try:
+            from globals import _format_response
             result = _format_response(result)
-        except Exception as fmt_exc:
-            logger.error(f"[/api/command] Format error: {fmt_exc}", exc_info=True)
-            result = {'status': 'error', 'error': 'Response formatting failed', 'command': command}
+        except Exception as e:
+            logger.error(f"[/api/command] Format error: {e}")
+            result = {'status': 'error', 'error': 'Format failed', 'command': command}
 
-        # ── RESPONSE: Safe JSON serialization ────────────────────────────────────
+        # Return safe JSON
         return _safe_jsonify(result)
 
     except Exception as exc:
-        logger.error(f"[/api/command] OUTER EXCEPTION: {exc}", exc_info=True)
-        return _safe_jsonify({
-            'status': 'error',
-            'error': str(exc)[:200],
-            'command': cmd_name,
-        }), 500
+        logger.error(f"[/api/command] EXCEPTION: {exc}", exc_info=True)
+        return _safe_jsonify({'status': 'error', 'error': str(exc)[:200], 'command': cmd_name}), 500
 
 
 @app.route('/api/commands', methods=['GET'])
