@@ -572,18 +572,12 @@ ENTANGLEMENT_GRAPH = None
 
 
 def _initialize_quantum_infrastructure_deferred() -> None:
-    """Initialize quantum state manager in background thread."""
+    """Initialize quantum state manager in background thread - NON-BLOCKING."""
     global QUANTUM_WRITER, QUANTUM_STATE, QUANTUM_TRANSITION, QUANTUM_EXECUTOR
     global QUANTUM_COHERENCE_COMMITMENT, ENTANGLEMENT_GRAPH
     
     try:
-        # Wait for DB to be ready
-        max_wait = 30.0
-        waited = 0.0
-        while DB_POOL is None and waited < max_wait:
-            time.sleep(0.5)
-            waited += 0.5
-        
+        # DO NOT WAIT FOR DB_POOL — Initialize immediately with None, it's optional
         logger.info("[BOOTSTRAP/QUANTUM] Initializing quantum state infrastructure…")
         
         # Pre-initialize all to None to prevent UnboundLocalError
@@ -613,7 +607,7 @@ def _initialize_quantum_infrastructure_deferred() -> None:
         
         if QuantumStateWriter is not None:
             try:
-                QUANTUM_WRITER = QuantumStateWriter(db_pool=DB_POOL, batch_size=150, flush_interval=4.0)
+                QUANTUM_WRITER = QuantumStateWriter(db_pool=None, batch_size=150, flush_interval=4.0)
             except Exception as e:
                 logger.warning(f"[BOOTSTRAP/QUANTUM] QuantumStateWriter failed: {e}")
         
@@ -637,7 +631,7 @@ def _initialize_quantum_infrastructure_deferred() -> None:
         
         if QUANTUM_STATE is not None:
             try:
-                QUANTUM_COHERENCE_COMMITMENT = QuantumCoherenceCommitment(QUANTUM_STATE, DB_POOL)
+                QUANTUM_COHERENCE_COMMITMENT = QuantumCoherenceCommitment(QUANTUM_STATE, None)
             except Exception as e:
                 logger.warning(f"[BOOTSTRAP/QUANTUM] QuantumCoherenceCommitment failed: {e}")
         
@@ -647,7 +641,7 @@ def _initialize_quantum_infrastructure_deferred() -> None:
             except Exception as e:
                 logger.warning(f"[BOOTSTRAP/QUANTUM] EntanglementGraph failed: {e}")
         
-        logger.info("[BOOTSTRAP/QUANTUM] ✅ Quantum infrastructure ready")
+        logger.info("[BOOTSTRAP/QUANTUM] ✅ Quantum infrastructure ready (non-blocking)")
         
     except Exception as exc:
         logger.error(f"[BOOTSTRAP/QUANTUM] ⚠️  Initialization failed: {exc}", exc_info=True)
