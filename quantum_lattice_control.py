@@ -90,6 +90,11 @@ class QuantumState(BaseModel):
     interference_visibility: float = 0.5
     chsh_s: float = 2.1
     bell_violation: bool = False
+    # Bell measurements: E(a,b), E(a,b'), E(a',b), E(a',b')
+    bell_E_ab: float = 0.0
+    bell_E_ab_prime: float = 0.0
+    bell_E_a_prime_b: float = 0.0
+    bell_E_a_prime_b_prime: float = 0.0
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 class QRNGMetrics(BaseModel):
@@ -196,22 +201,16 @@ class PostQuantumCrypto:
     def hash_with_lattice(self, data: bytes) -> str:
         """Hash data using lattice-based compression."""
         with self.lock:
-            try:
-                classical_hash = hashlib.sha256(data).hexdigest()
-                lattice_vector = np.frombuffer(hashlib.sha512(data).digest(), dtype=np.uint8)
-                # Pad to exactly 256 dimensions
-                while len(lattice_vector) < self.dimension:
-                    pad_data = data + f'_p{len(lattice_vector)}'.encode()
-                    pad_bytes = np.frombuffer(hashlib.sha256(pad_data).digest(), dtype=np.uint8)
-                    lattice_vector = np.concatenate([lattice_vector, pad_bytes])
-                lattice_vector = lattice_vector[:self.dimension].astype(np.float64)
-                lattice_compression = (self.secret_key @ lattice_vector) % self.modulus
-                lattice_hash = hashlib.sha256(lattice_compression.astype(np.uint8).tobytes()).hexdigest()
-                combined = hashlib.sha256((classical_hash + lattice_hash).encode()).hexdigest()
-                return combined
-            except Exception as e:
-                logger.error(f"[PQC] hash error: {e}")
-                return hashlib.sha256(data).hexdigest()
+            classical_hash = hashlib.sha256(data).hexdigest()
+            lattice_vector = np.frombuffer(hashlib.sha512(data).digest(), dtype=np.uint8)[:self.dimension]
+            lattice_compression = (self.secret_key @ lattice_vector) % self.modulus
+            lattice_hash = hashlib.sha256(lattice_compression.tobytes()).hexdigest()
+            
+            combined = hashlib.sha256(
+                (classical_hash + lattice_hash).encode()
+            ).hexdigest()
+            
+            return combined
     
     def verify_quantum_resistance(self) -> Dict[str, Any]:
         """Verify post-quantum crypto properties."""
@@ -797,8 +796,16 @@ class CHSHBellTester:
                     
                     s_value = float(np.clip(s_value, 1.0, 2.828))
             else:
-                # Theoretical CHSH
-                s_value = 2.4
+                # Theoretical CHSH: compute 4 correlations
+                # Random realistic measurements
+                e_ab = np.random.uniform(-1.0, 1.0)  # E(a,b)
+                e_ab_prime = np.random.uniform(-0.8, 1.0)  # E(a,b')
+                e_a_prime_b = np.random.uniform(-1.0, 0.9)  # E(a',b)
+                e_a_prime_b_prime = np.random.uniform(-0.9, 0.8)  # E(a',b')
+                
+                # CHSH: S = |E(a,b) - E(a,b') + E(a',b) + E(a',b')|
+                s_value = abs(e_ab - e_ab_prime + e_a_prime_b + e_a_prime_b_prime)
+                s_value = float(np.clip(s_value, 0.0, 2.828))
             
             self.s_values.append(s_value)
             
@@ -814,6 +821,10 @@ class CHSHBellTester:
                 'is_bell_violated': is_violated,
                 'violation_margin': margin,
                 'tsirelson_ratio': float(s_value / 2.828),
+                'E_ab': float(e_ab),
+                'E_ab_prime': float(e_ab_prime),
+                'E_a_prime_b': float(e_a_prime_b),
+                'E_a_prime_b_prime': float(e_a_prime_b_prime),
             }
     
     def get_statistics(self) -> Dict[str, Any]:
@@ -833,135 +844,88 @@ class CHSHBellTester:
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 class PseudoqubitCoherenceManager:
-    """
-    MUSEUM GRADE: Real-time quantum coherence measurement via T1/T2 decoherence with Non-Markovian memory.
-    Physics-accurate quantum state evolution under realistic noise.
-    """
+    """MUSEUM GRADE: Real T1/T2 quantum decoherence with Non-Markovian memory."""
     
     TOTAL_PSEUDOQUBITS = 106496
     NUM_BATCHES = 52
-    QUBITS_PER_BATCH = TOTAL_PSEUDOQUBITS // NUM_BATCHES
-    
-    # Realistic quantum decoherence timescales
-    T1 = 100.0  # Amplitude damping (energy relaxation) in ms
-    T2 = 50.0   # Phase damping (dephasing) in ms
-    CYCLE_TIME = 10.0  # Each cycle = 10ms realistic gate time
+    T1 = 100.0  # ms
+    T2 = 50.0   # ms
+    CYCLE_TIME = 10.0  # ms
     
     def __init__(self):
-        # Initialize with realistic quantum coherence
         self.batch_coherences = np.ones(self.NUM_BATCHES) * 0.95
         self.batch_fidelities = np.ones(self.NUM_BATCHES) * 0.97
-        self.batch_entropies = np.ones(self.NUM_BATCHES) * 1.0
-        
-        # Track history for analysis
+        self.batch_entropies = np.ones(self.NUM_BATCHES) * 0.5
         self.coherence_history = deque(maxlen=200)
         self.fidelity_history = deque(maxlen=200)
         self.entropy_history = deque(maxlen=200)
-        self.noise_memory = deque(maxlen=50)  # Non-Markovian memory buffer
-        
+        self.noise_memory = deque(maxlen=30)
         self.lock = threading.RLock()
         self.cycle_count = 0
         self.coherence_trend = 0.0
-        
-        logger.info(f"[PSEUDOQUBITS] Museum-Grade: T1={self.T1}ms, T2={self.T2}ms, κ=0.07 Non-Markovian")
+        logger.info(f"[PSEUDOQUBITS] T1={self.T1}ms, T2={self.T2}ms, κ=0.07 Non-Markovian")
     
     def apply_noise_decoherence(self, noise_info: Dict[str, float]):
-        """
-        REAL quantum decoherence model:
-        C(t) = C₀ * exp(-t/T₂) + κ * ∫₀ᵗ C(τ)dτ
-        
-        T2 decay dominates coherence loss (phase damping)
-        T1 decay affects fidelity (energy loss)
-        Non-Markovian memory (κ=0.07) creates persistent correlation
-        """
+        """REAL decoherence: noise dominates recovery."""
         with self.lock:
-            kappa = 0.07  # Non-Markovian memory kernel
-            
+            kappa = 0.07
             for i in range(self.NUM_BATCHES):
-                # T2 exponential decay (phase damping)
-                t2_decay_factor = np.exp(-self.CYCLE_TIME / self.T2)
+                # Strong T2 decay (phase damping dominates)
+                t2_decay = np.exp(-self.CYCLE_TIME / self.T2)
+                t1_decay = np.exp(-self.CYCLE_TIME / self.T1)
+                t2_loss = (1.0 - t2_decay) * 0.30  # 30% loss per cycle
+                t1_loss = (1.0 - t1_decay) * 0.10  # 10% from amplitude damping
                 
-                # T1 exponential decay (amplitude damping)
-                t1_decay_factor = np.exp(-self.CYCLE_TIME / self.T1)
+                spontaneous_loss = t2_loss + t1_loss
                 
-                # Spontaneous decoherence from noise bath
-                spontaneous_loss = (1.0 - t2_decay_factor * t1_decay_factor) * 0.15
-                
-                # Non-Markovian memory effect: past noise influences current state
+                # Non-Markovian memory
                 memory_effect = 0.0
-                if len(self.noise_memory) > 5:
-                    # κ * mean(past 5 noise cycles)
-                    memory_effect = kappa * np.mean(list(self.noise_memory)[-5:])
+                if len(self.noise_memory) > 3:
+                    memory_effect = kappa * 0.3 * np.mean(list(self.noise_memory)[-3:])
                 
-                # Total decoherence impact
                 total_loss = spontaneous_loss + memory_effect
                 
-                # Update coherence: realistic exponential decay
+                # Apply decoherence
                 old_coh = self.batch_coherences[i]
                 new_coh = old_coh * (1.0 - total_loss)
-                
-                # Clip to realistic bounds (never 1.0, minimum 0.70)
                 self.batch_coherences[i] = np.clip(new_coh, 0.70, 0.99)
                 
-                # Fidelity degrades with T1 (energy loss)
-                fidelity_loss = 1.0 - t1_decay_factor
-                self.batch_fidelities[i] = np.clip(
-                    self.batch_fidelities[i] * (1.0 - fidelity_loss),
-                    0.75, 0.99
-                )
+                # Fidelity tracks coherence (gate fidelity ∝ state purity)
+                target_fid = np.clip(self.batch_coherences[i] + 0.03, 0.75, 0.99)
+                self.batch_fidelities[i] = self.batch_fidelities[i] * 0.95 + target_fid * 0.05
             
-            # Store noise magnitude in memory buffer
             noise_mag = abs(noise_info.get('total_noise', 0.0))
             self.noise_memory.append(noise_mag)
     
     def apply_w_state_amplification(self, w_strength: float, amplification: float = 1.0):
-        """
-        W-state entanglement recovery: PARTIAL and realistic.
-        Recovery is bounded by quantum mechanics (max ~4% per cycle).
-        Effectiveness decreases if state is already highly coherent.
-        """
+        """Partial recovery - max 2% per cycle."""
         with self.lock:
-            # Recovery efficiency based on W-state strength
-            recovery_efficiency = 0.35 * w_strength * amplification
-            max_recovery_per_cycle = 0.04
-            
-            actual_recovery = min(recovery_efficiency, max_recovery_per_cycle)
+            mean_noise = np.mean(list(self.noise_memory)) if self.noise_memory else 0.0
+            noise_suppression = np.exp(-mean_noise * 3.0)
+            recovery = 0.12 * w_strength * amplification * noise_suppression
+            max_recovery = 0.020  # 2% hard limit
+            actual = min(recovery, max_recovery)
             
             for i in range(self.NUM_BATCHES):
-                self.batch_coherences[i] = np.clip(
-                    self.batch_coherences[i] + actual_recovery,
-                    0.70, 0.99
-                )
-                self.batch_fidelities[i] = np.clip(
-                    self.batch_fidelities[i] + actual_recovery * 0.6,
-                    0.75, 0.99
-                )
+                self.batch_coherences[i] = np.clip(self.batch_coherences[i] + actual, 0.70, 0.99)
+                self.batch_fidelities[i] = np.clip(self.batch_fidelities[i] + actual * 0.5, 0.75, 0.99)
     
     def apply_neural_recovery(self, recovery_boost: float):
-        """
-        Neural network learns WHEN recovery is most effective.
-        Optimal recovery at mid-range coherence (~0.85).
-        Less effective at extremes (0.70 or 0.99).
-        """
+        """Neural net learns from coherence trend."""
         with self.lock:
-            mean_coherence = np.mean(self.batch_coherences)
+            mean_coh = np.mean(self.batch_coherences)
+            # Peak effectiveness at 0.85
+            effectiveness = 1.0 - ((mean_coh - 0.85) ** 2 / 0.02)
+            effectiveness = np.clip(effectiveness, 0.2, 1.0)
             
-            # Bell curve effectiveness: peak at 0.85 coherence
-            effectiveness = 1.0 - ((mean_coherence - 0.85) ** 2 / 0.01)
-            effectiveness = np.clip(effectiveness, 0.3, 1.0)
-            
-            # Adaptive recovery boost
-            nn_recovery = recovery_boost * 0.06 * effectiveness
+            # Respond to trend
+            recovery_urgency = max(0.0, -self.coherence_trend * 3.0)
+            adjusted = effectiveness * (1.0 + recovery_urgency)
+            nn_recovery = recovery_boost * 0.025 * np.clip(adjusted, 0.3, 1.2)
             
             for i in range(self.NUM_BATCHES):
-                self.batch_coherences[i] = np.clip(
-                    self.batch_coherences[i] + nn_recovery,
-                    0.70, 0.99
-                )
-                self.batch_fidelities[i] = np.clip(
-                    self.batch_fidelities[i] + nn_recovery * 0.7,
-                    0.75, 0.99
-                )
+                self.batch_coherences[i] = np.clip(self.batch_coherences[i] + nn_recovery, 0.70, 0.99)
+                self.batch_fidelities[i] = np.clip(self.batch_fidelities[i] + nn_recovery * 0.6, 0.75, 0.99)
     
     def get_global_coherence(self) -> float:
         with self.lock:
@@ -972,20 +936,19 @@ class PseudoqubitCoherenceManager:
             return float(np.mean(self.batch_fidelities))
     
     def update_cycle(self) -> Dict[str, float]:
-        """Track coherence evolution and compute von Neumann entropy."""
+        """Track state evolution."""
         with self.lock:
             self.cycle_count += 1
             coh = self.get_global_coherence()
             fid = self.get_global_fidelity()
             
-            # Von Neumann entropy: S = -Tr(ρ log ρ)
-            # For pure state approximation: S ≈ -p*log(p) - (1-p)*log(1-p)
-            if 0 < coh < 1:
-                entropy = -(coh * np.log2(coh + 1e-10) + (1-coh) * np.log2(1-coh + 1e-10))
+            # Von Neumann entropy: S = 0 (pure) to 1 (maximally mixed)
+            # For coherence metric: entropy ≈ 0 near 0 or 1, max near 0.5
+            if 0.01 < coh < 0.99:
+                entropy = -(coh * np.log2(coh) + (1.0-coh) * np.log2(1.0-coh))
             else:
                 entropy = 0.0
             
-            # Track coherence trend (improving or degrading?)
             if len(self.coherence_history) > 0:
                 self.coherence_trend = coh - self.coherence_history[-1]
             
@@ -993,29 +956,31 @@ class PseudoqubitCoherenceManager:
             self.fidelity_history.append(fid)
             self.entropy_history.append(entropy)
             
-            return {
-                'global_coherence': coh,
-                'global_fidelity': fid,
-                'von_neumann_entropy': entropy,
-            }
+            return {'global_coherence': coh, 'global_fidelity': fid, 'von_neumann_entropy': entropy}
     
     def get_statistics(self) -> Dict[str, Any]:
         with self.lock:
             cohs = list(self.coherence_history)
             fids = list(self.fidelity_history)
             ents = list(self.entropy_history)
-            
             return {
                 'mean_coherence': float(np.mean(cohs)) if cohs else 0.95,
                 'coherence_trend': float(self.coherence_trend),
                 'min_coherence': float(np.min(cohs)) if cohs else 0.95,
                 'max_coherence': float(np.max(cohs)) if cohs else 0.95,
                 'mean_fidelity': float(np.mean(fids)) if fids else 0.97,
-                'von_neumann_entropy': float(np.mean(ents)) if ents else 1.0,
+                'von_neumann_entropy': float(np.mean(ents)) if ents else 0.5,
                 'cycle_count': self.cycle_count,
                 'total_pseudoqubits': self.TOTAL_PSEUDOQUBITS,
                 'non_markovian_memory_depth': len(self.noise_memory),
+                'update_count': self.cycle_count,
             }
+
+
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════
+# QUANTUM LATTICE CONTROLLER (Master Orchestrator with Aer)
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 class QuantumLatticeController:
     """
@@ -1103,7 +1068,7 @@ class QuantumLatticeController:
             coherence_final = self.coherence_manager.get_global_coherence()
             qubit_update = self.coherence_manager.update_cycle()
             
-            # Build result state
+            # Build result state with all Bell measurements
             self.current_state = QuantumState(
                 coherence=coherence_final,
                 fidelity=self.coherence_manager.get_global_fidelity(),
@@ -1112,7 +1077,11 @@ class QuantumLatticeController:
                 w_strength=w_strength,
                 interference_visibility=w_info.get('w_strength', 0.5),
                 chsh_s=chsh_info['s_value'],
-                bell_violation=chsh_info['is_bell_violated']
+                bell_violation=chsh_info['is_bell_violated'],
+                bell_E_ab=chsh_info.get('E_ab', 0.0),
+                bell_E_ab_prime=chsh_info.get('E_ab_prime', 0.0),
+                bell_E_a_prime_b=chsh_info.get('E_a_prime_b', 0.0),
+                bell_E_a_prime_b_prime=chsh_info.get('E_a_prime_b_prime', 0.0),
             )
             
             # Post-quantum crypto hash
@@ -1247,16 +1216,16 @@ class QuantumHeartbeat:
                 
                 with self.lock:
                     self.cycle_count += 1
-                    # Get neural network stats
-                    nn_stats = lattice.neural_network.get_statistics()
+                    # Log Bell measurements
+                    e_ab = result.state.bell_E_ab
+                    e_ab_p = result.state.bell_E_ab_prime
+                    e_ap_b = result.state.bell_E_a_prime_b
+                    e_ap_bp = result.state.bell_E_a_prime_b_prime
+                    chsh_s = result.state.chsh_s
+                    computed_s = abs(e_ab - e_ab_p + e_ap_b + e_ap_bp)
                     
-                    # MUSEUM GRADE: Real quantum metrics
                     coh = result.state.coherence
-                    fid = result.state.fidelity
-                    entropy = result.state.entanglement_entropy
                     trend = nn_stats.get('coherence_trend', 0.0)
-                    
-                    # Trend indicators
                     if coh > 0.92:
                         status = "📈 RECOVERING"
                     elif coh > 0.85:
@@ -1264,13 +1233,14 @@ class QuantumHeartbeat:
                     else:
                         status = "📉 DEGRADING"
                     
-                    # Log comprehensive quantum state
                     logger.info(
                         f"[HEARTBEAT] Cycle {self.cycle_count:03d} | "
                         f"Coherence: {coh:.4f} {status} | "
-                        f"Fidelity: {fid:.4f} | "
-                        f"Von Neumann Entropy: {entropy:.4f} | "
-                        f"Bell: {result.state.bell_violation} | "
+                        f"Fidelity: {result.state.fidelity:.4f} | "
+                        f"Von Neumann: {result.state.entanglement_entropy:.4f} | "
+                        f"CHSH S: {chsh_s:.4f} (Computed: {computed_s:.4f}) | "
+                        f"E(a,b):{e_ab:+.3f}, E(a,b'):{e_ab_p:+.3f}, E(a',b):{e_ap_b:+.3f}, E(a',b'):{e_ap_bp:+.3f} | "
+                        f"Bell Violation: {result.state.bell_violation} | "
                         f"NN Updates: {nn_stats.get('update_count', 0)} | "
                         f"Trend: {trend:+.4f}"
                     )
@@ -1350,7 +1320,7 @@ def initialize_quantum_system():
     LATTICE = get_quantum_lattice()
     
     # Initialize heartbeat
-    HEARTBEAT = QuantumHeartbeat(interval_seconds=5.0)  # 5 second heartbeat
+    HEARTBEAT = QuantumHeartbeat(interval_seconds=10.0)  # 10 second heartbeat
     HEARTBEAT.start()
     
     # Initialize coordinator
@@ -1358,12 +1328,12 @@ def initialize_quantum_system():
     QUANTUM_COORDINATOR.start()
     
     logger.info("[INIT] ✓ Quantum system initialized")
-    logger.info("[INIT] ✓ HEARTBEAT running (5s interval)")
+    logger.info("[INIT] ✓ HEARTBEAT running (10s interval)")
     logger.info("[INIT] ✓ QUANTUM_COORDINATOR active")
 
 # Global exports for wsgi_config
 LATTICE = get_quantum_lattice()
-HEARTBEAT = QuantumHeartbeat(interval_seconds=5.0)
+HEARTBEAT = QuantumHeartbeat(interval_seconds=10.0)
 QUANTUM_COORDINATOR = None
 
 if __name__ == '__main__':
