@@ -1129,8 +1129,8 @@ def _safe_jsonify(data: dict, status_code: int = 200):
 @app.route('/api/command', methods=['POST'])
 def execute_command():
     """
-    ✓ BULLETPROOF: 30s timeout, guaranteed JSON response
-    ✓ Never hangs, always returns valid JSON
+    ✓ BULLETPROOF: 30s timeout, works with Gunicorn
+    ✓ Never hangs, never kills worker, always returns valid JSON
     """
     cmd_name = 'unknown'
     try:
@@ -1186,18 +1186,28 @@ def execute_command():
             except Exception as e:
                 logger.warning(f"[auth] JWT error: {e}")
 
-        # CRITICAL: Timeout-safe dispatch
+        # CRITICAL: Timeout-safe dispatch (NOT using context manager to avoid Gunicorn shutdown issues)
         result = None
+        executor = None
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(dispatch_command, command, args, user_id, token=raw_token, role=role)
-                result = future.result(timeout=30.0)
-        except concurrent.futures.TimeoutError:
-            logger.error(f"[/api/command] TIMEOUT: {command}")
-            result = {'status': 'error', 'error': f'Command timeout after 30s', 'command': command}
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            future = executor.submit(dispatch_command, command, args, user_id, token=raw_token, role=role)
+            try:
+                result = future.result(timeout=28.0)  # 28s (leave 2s for cleanup before Gunicorn's 30s)
+            except concurrent.futures.TimeoutError:
+                logger.error(f"[/api/command] TIMEOUT: {command}")
+                result = {'status': 'error', 'error': f'Command timeout after 28s', 'command': command}
+                future.cancel()  # Try to cancel the hanging task
         except Exception as e:
             logger.error(f"[/api/command] Error: {e}", exc_info=True)
             result = {'status': 'error', 'error': str(e)[:200], 'command': command}
+        finally:
+            # Clean shutdown without blocking
+            if executor:
+                try:
+                    executor.shutdown(wait=False)  # Don't wait for threads (avoid Gunicorn kill)
+                except:
+                    pass
 
         # Ensure result is dict
         if not isinstance(result, dict):
