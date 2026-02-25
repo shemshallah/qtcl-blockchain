@@ -196,33 +196,38 @@ class PostQuantumCrypto:
     def hash_with_lattice(self, data: bytes) -> str:
         """Hash data using lattice-based compression."""
         with self.lock:
-            classical_hash = hashlib.sha256(data).hexdigest()
-            
-            # Build lattice vector to exactly self.dimension (256) elements
-            lattice_vector = np.frombuffer(hashlib.sha512(data).digest(), dtype=np.uint8)
-            
-            # Keep padding until we have exactly 256 elements
-            pad_counter = 0
-            while len(lattice_vector) < self.dimension:
-                pad_data = data + f'_pad_{pad_counter}'.encode()
-                pad_hash = hashlib.sha256(pad_data).digest()
-                pad_bytes = np.frombuffer(pad_hash, dtype=np.uint8)
-                lattice_vector = np.concatenate([lattice_vector, pad_bytes])
-                pad_counter += 1
-            
-            # Trim to exact dimension if overshoot
-            lattice_vector = lattice_vector[:self.dimension]
-            
-            # Convert to float for matrix operations
-            lattice_vector = lattice_vector.astype(np.float64)
-            lattice_compression = (self.secret_key @ lattice_vector) % self.modulus
-            lattice_hash = hashlib.sha256(lattice_compression.astype(np.uint8).tobytes()).hexdigest()
-            
-            combined = hashlib.sha256(
-                (classical_hash + lattice_hash).encode()
-            ).hexdigest()
-            
-            return combined
+            try:
+                classical_hash = hashlib.sha256(data).hexdigest()
+                
+                # Build lattice vector to exactly self.dimension (256) elements
+                lattice_vector = np.frombuffer(hashlib.sha512(data).digest(), dtype=np.uint8)
+                
+                # Keep padding until we have exactly 256 elements
+                pad_counter = 0
+                while len(lattice_vector) < self.dimension:
+                    pad_data = data + f'_pad_{pad_counter}'.encode()
+                    pad_hash = hashlib.sha256(pad_data).digest()
+                    pad_bytes = np.frombuffer(pad_hash, dtype=np.uint8)
+                    lattice_vector = np.concatenate([lattice_vector, pad_bytes])
+                    pad_counter += 1
+                
+                # Trim to exact dimension if overshoot
+                lattice_vector = lattice_vector[:self.dimension]
+                
+                # Convert to float for matrix operations
+                lattice_vector = lattice_vector.astype(np.float64)
+                lattice_compression = (self.secret_key @ lattice_vector) % self.modulus
+                lattice_hash = hashlib.sha256(lattice_compression.astype(np.uint8).tobytes()).hexdigest()
+                
+                combined = hashlib.sha256(
+                    (classical_hash + lattice_hash).encode()
+                ).hexdigest()
+                
+                return combined
+            except Exception as e:
+                logger.error(f"[PQC] hash_with_lattice error: {e}", exc_info=True)
+                # Fallback: just use classical hash
+                return hashlib.sha256(data).hexdigest()
     
     def verify_quantum_resistance(self) -> Dict[str, Any]:
         """Verify post-quantum crypto properties."""
@@ -1156,12 +1161,14 @@ class QuantumHeartbeat:
     def _run(self):
         """Heartbeat loop."""
         lattice = get_quantum_lattice()
+        logger.info("[HEARTBEAT] Loop starting...")
         while self.running:
             try:
                 result = lattice.evolve_one_cycle()
                 
                 with self.lock:
                     self.cycle_count += 1
+                    logger.info(f"[HEARTBEAT] Cycle {self.cycle_count} completed (coherence={result.state.coherence:.4f})")
                     for listener in self.listeners:
                         try:
                             listener(result)
@@ -1170,7 +1177,7 @@ class QuantumHeartbeat:
                 
                 time.sleep(self.interval)
             except Exception as e:
-                logger.error(f"Heartbeat error: {e}")
+                logger.error(f"[HEARTBEAT] Cycle error: {type(e).__name__}: {e}", exc_info=True)
                 time.sleep(self.interval)
     
     def start(self):
