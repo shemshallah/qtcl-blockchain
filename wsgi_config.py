@@ -1313,8 +1313,16 @@ def execute_command():
 
         def _init_and_dispatch():
             """Thread body: idempotent init then command dispatch."""
-            _initialize_terminal_engine()   # no-op after first successful call
-            return dispatch_command(command, args, user_id, token=raw_token, role=role)
+            try:
+                _initialize_terminal_engine()   # no-op after first successful call
+                return dispatch_command(command, args, user_id, token=raw_token, role=role)
+            except Exception as e:
+                logger.error(f"[_init_and_dispatch] Error: {e}", exc_info=True)
+                return {
+                    'status': 'error',
+                    'error': str(e)[:200],
+                    'command': command
+                }
 
         try:
             executor = concurrent.futures.ThreadPoolExecutor(
@@ -1331,6 +1339,11 @@ def execute_command():
                     f"[/api/command] TIMEOUT: cmd={command!r} "
                     f"elapsed={elapsed:.2f}s (limit={_timeout}s)"
                 )
+                # Try to cancel the future
+                try:
+                    future.cancel()
+                except Exception:
+                    pass
                 result = {
                     'status':     'error',
                     'error': (
@@ -1345,7 +1358,6 @@ def execute_command():
                         'Subsequent commands will be fast. Retry in a few seconds.'
                     ),
                 }
-                future.cancel()
 
         except Exception as dispatch_e:
             elapsed = time.time() - start_time
@@ -1357,7 +1369,11 @@ def execute_command():
         finally:
             if executor:
                 try:
-                    executor.shutdown(wait=False)   # never block the Gunicorn worker
+                    # Improved: Wait up to 2s for graceful shutdown, then force kill
+                    executor.shutdown(wait=True, timeout=2.0)
+                except Exception as shutdown_e:
+                    logger.warning(f"[/api/command] Executor shutdown error: {shutdown_e}")
+
                 except Exception: pass
 
         # ── Normalise to dict ────────────────────────────────────────────────

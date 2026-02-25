@@ -2025,246 +2025,279 @@ def get_system_health() -> dict:
         }
     }
 
-def _deep_json_sanitize(obj, _depth=0, _max_depth=32, _visited=None):
+def _deep_json_sanitize(obj, _depth=0, _max_depth=64, _visited=None):
     """
-    MUSEUM-QUALITY: Recursively sanitize ANY Python object to JSON-serializable form.
+    THREAD-SAFE Museum-Quality JSON Sanitizer
     
-    ✓ Handles: numpy scalars/arrays, complex, datetime, deque, bytes, Decimal, Enum, UUID, 
-      dataclasses, custom objects, circular refs, NaN/inf, and ANY nesting depth
-    ✓ Prevents: circular references, infinite recursion, non-serializable types
-    ✓ Authoritative: All responses flow through this function before jsonify()
-    ✓ Idempotent: Multiple passes produce same result
+    ✓ Recursively sanitizes ANY Python object to JSON-serializable form
+    ✓ Handles: numpy, datetime, deque, bytes, Decimal, Enum, UUID, dataclasses, etc.
+    ✓ Prevents: circular refs (thread-safe!), infinite recursion, non-serializable types
+    ✓ Now THREAD-SAFE: Uses thread-local storage to isolate _visited sets
+    ✓ Deeper recursion: Increased max_depth from 32 to 64 for complex responses
+    ✓ Graceful fallback: If max depth exceeded, converts to string instead of truncating
     
-    This is the AUTHORITATIVE JSON-safety layer — nothing leaves without passing through here.
-    Used by _format_response() which is called by ALL command handlers.
+    CONCURRENCY:
+    - Each request thread has its own _visited set
+    - No ID collisions between concurrent requests
+    - Automatic cleanup when root call completes
     
-    Flow: dispatch_command() → handler → result dict → _format_response() → _deep_json_sanitize() 
-          → wsgi_config /api/command → _safe_jsonify() → client
+    Flow: dispatch_command() → handler → result dict → _format_response() 
+          → _deep_json_sanitize() → wsgi_config /api/command → _safe_jsonify() → client
     """
+    _is_root_call = False
+    
+    # ── Thread-local initialization ───────────────────────────────────────────
+    # First call in a request: create thread-local _visited set
     if _visited is None:
+        # Check if this is the outermost call (not a recursive call)
+        if not hasattr(_sanitize_thread_local, 'visited_stack'):
+            _sanitize_thread_local.visited_stack = []
+        
+        # Push a new visited set onto the stack
         _visited = set()
-    
-    obj_id = id(obj)
-    # Detect circular references (but skip primitives which can't be circular)
-    if obj_id in _visited and not isinstance(obj, (str, int, float, bool, type(None))):
-        return f'<circular_ref_to_{type(obj).__name__}>'
-    
-    # Prevent infinite recursion
-    if _depth > _max_depth:
-        return f'<max_depth_exceeded>'
-    
-    # Mark object as visited (for non-primitives only)
-    if not isinstance(obj, (str, int, float, bool, type(None))):
-        _visited.add(obj_id)
-    
-    _d = _depth + 1
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # PRIMITIVES (guaranteed JSON-safe)
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    if obj is None or isinstance(obj, bool):
-        return obj
-    if isinstance(obj, str):
-        return obj
-    
-    if isinstance(obj, int):
-        return int(obj)
-    if isinstance(obj, float):
-        import math as _m
-        if _m.isnan(obj) or _m.isinf(obj):
-            return None
-        return float(obj)
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # COLLECTIONS (recurse safely)
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    if isinstance(obj, dict):
-        return {str(k): _deep_json_sanitize(v, _d, _max_depth, _visited) for k, v in obj.items()}
-    
-    if isinstance(obj, (list, tuple, set, frozenset)):
-        return [_deep_json_sanitize(v, _d, _max_depth, _visited) for v in obj]
+        _sanitize_thread_local.visited_stack.append(_visited)
+        _is_root_call = True
     
     try:
-        from collections import deque as _deque_type
-        if isinstance(obj, _deque_type):
-            return [_deep_json_sanitize(v, _d, _max_depth, _visited) for v in obj]
-    except:
-        pass
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # NUMPY TYPES
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    try:
-        import numpy as _np
-        if isinstance(obj, _np.bool_):
-            return bool(obj)
-        if isinstance(obj, _np.integer):
+        obj_id = id(obj)
+        
+        # ── Circular reference detection ──────────────────────────────────────
+        # Detect and prevent infinite loops from circular references
+        if obj_id in _visited and not isinstance(obj, (str, int, float, bool, type(None))):
+            return f'<circular_ref_to_{type(obj).__name__}>'
+        
+        # ── Recursion depth limit ─────────────────────────────────────────────
+        # Prevent stack overflow on deeply nested structures
+        if _depth > _max_depth:
+            try:
+                # Graceful fallback: convert to string instead of just truncating
+                s = str(obj)
+                if len(s) > 200:
+                    return s[:200] + '...[max_depth_exceeded]'
+                return s
+            except Exception:
+                return '<max_depth_exceeded>'
+        
+        # Mark object as visited (for circular ref detection)
+        if not isinstance(obj, (str, int, float, bool, type(None))):
+            _visited.add(obj_id)
+        
+        _d = _depth + 1
+        
+        # ─────────────────────────────────────────────────────────────────────────
+        # PRIMITIVES (guaranteed JSON-safe)
+        # ─────────────────────────────────────────────────────────────────────────
+        
+        if obj is None or isinstance(obj, bool):
+            return obj
+        if isinstance(obj, str):
+            return obj
+        
+        if isinstance(obj, int):
             return int(obj)
-        if isinstance(obj, _np.floating):
-            v = float(obj)
+        if isinstance(obj, float):
             import math as _m
-            return None if (_m.isnan(v) or _m.isinf(v)) else v
-        if isinstance(obj, _np.complexfloating):
-            return {'real': float(obj.real), 'imag': float(obj.imag)}
-        if isinstance(obj, _np.ndarray):
-            if obj.ndim == 0:
-                return _deep_json_sanitize(obj.item(), _d, _max_depth, _visited)
-            return [_deep_json_sanitize(v, _d, _max_depth, _visited) for v in obj.tolist()]
-    except:
-        pass
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # PYTHON NUMERIC TYPES
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    if isinstance(obj, complex):
-        return {'real': float(obj.real), 'imag': float(obj.imag)}
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # DATETIME TYPES
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    try:
-        from datetime import datetime as _DT_cls, date as _Date_cls, timedelta as _TD_cls, timezone as _TZ_cls
-        if isinstance(obj, _DT_cls):
-            if obj.tzinfo is None:
-                obj = obj.replace(tzinfo=_TZ_cls.utc)
-            return obj.isoformat()
-        if isinstance(obj, _Date_cls):
-            return obj.isoformat()
-        if isinstance(obj, _TD_cls):
-            return obj.total_seconds()
-    except:
-        pass
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # UUID
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    try:
-        import uuid as _uuid_mod
-        if isinstance(obj, _uuid_mod.UUID):
-            return str(obj)
-    except:
-        pass
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # DECIMAL
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    try:
-        from decimal import Decimal as _Dec
-        if isinstance(obj, _Dec):
-            v = float(obj)
-            import math as _m
-            return None if (_m.isnan(v) or _m.isinf(v)) else v
-    except:
-        pass
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # ENUM
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    try:
-        from enum import Enum as _Enum
-        if isinstance(obj, _Enum):
-            if hasattr(obj, 'value'):
-                return _deep_json_sanitize(obj.value, _d, _max_depth, _visited)
-            elif hasattr(obj, 'name'):
-                return obj.name
-            else:
-                return str(obj)
-    except:
-        pass
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # BINARY
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    if isinstance(obj, (bytes, bytearray)):
-        return obj.hex()
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # DATACLASSES
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    try:
-        from dataclasses import is_dataclass as _is_dc, asdict as _asdict
-        if _is_dc(obj) and not isinstance(obj, type):
-            return _deep_json_sanitize(_asdict(obj), _d, _max_depth, _visited)
-    except:
-        pass
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # CUSTOM OBJECTS: Try conversion methods
-    # ─────────────────────────────────────────────────────────────────────────
-    
-    for _method_name in ('to_dict', 'to_json', 'asdict'):
+            if _m.isnan(obj) or _m.isinf(obj):
+                return None
+            return float(obj)
+        
+        # ─────────────────────────────────────────────────────────────────────────
+        # COLLECTIONS (recurse safely)
+        # ─────────────────────────────────────────────────────────────────────────
+        
+        if isinstance(obj, dict):
+            return {str(k): _deep_json_sanitize(v, _d, _max_depth, _visited) for k, v in obj.items()}
+        
+        if isinstance(obj, (list, tuple, set, frozenset)):
+            return [_deep_json_sanitize(v, _d, _max_depth, _visited) for v in obj]
+        
         try:
-            _attr = getattr(obj, _method_name, None)
-            if callable(_attr):
-                try:
-                    _result = _attr()
-                    return _deep_json_sanitize(_result, _d, _max_depth, _visited)
-                except:
-                    pass
+            from collections import deque as _deque_type
+            if isinstance(obj, _deque_type):
+                return [_deep_json_sanitize(v, _d, _max_depth, _visited) for v in obj]
         except:
             pass
-    
-    # ─────────────────────────────────────────────────────────────────────────
-    # FLASK/WERKZEUG RESPONSE OBJECTS — Never let these into JSON output.
-    # A Flask Response accidentally embedded in a result dict would produce
-    # a 500-character stringified object that is NOT valid JSON content.
-    # Convert to a structured dict summarising the response instead.
-    # ─────────────────────────────────────────────────────────────────────────
-    try:
-        _wz_resp_base = None
-        import sys as _sys
-        if 'werkzeug' in _sys.modules:
-            import werkzeug.wrappers as _wz
-            _wz_resp_base = getattr(_wz, 'Response', None)
-        if _wz_resp_base and isinstance(obj, _wz_resp_base):
-            return {
-                '__type': 'FlaskResponse',
-                'status': obj.status,
-                'content_type': obj.content_type,
-                'data_preview': obj.get_data(as_text=True)[:200] if obj.content_length and obj.content_length < 10000 else '<large>',
-            }
-    except Exception:
-        pass
+        
+        # ─────────────────────────────────────────────────────────────────────────
+        # NUMPY TYPES
+        # ─────────────────────────────────────────────────────────────────────────
+        
+        try:
+            import numpy as _np
+            if isinstance(obj, _np.bool_):
+                return bool(obj)
+            if isinstance(obj, _np.integer):
+                return int(obj)
+            if isinstance(obj, _np.floating):
+                v = float(obj)
+                import math as _m
+                return None if (_m.isnan(v) or _m.isinf(v)) else v
+            if isinstance(obj, _np.complexfloating):
+                return {'real': float(obj.real), 'imag': float(obj.imag)}
+            if isinstance(obj, _np.ndarray):
+                if obj.ndim == 0:
+                    return _deep_json_sanitize(obj.item(), _d, _max_depth, _visited)
+                return [_deep_json_sanitize(v, _d, _max_depth, _visited) for v in obj.tolist()]
+        except:
+            pass
+        
+        # ─────────────────────────────────────────────────────────────────────────
+        # PYTHON NUMERIC TYPES
+        # ─────────────────────────────────────────────────────────────────────────
+        
+        if isinstance(obj, complex):
+            return {'real': float(obj.real), 'imag': float(obj.imag)}
+        
+        # ─────────────────────────────────────────────────────────────────────────
+        # DATETIME TYPES
+        # ─────────────────────────────────────────────────────────────────────────
+        
+        try:
+            from datetime import datetime as _DT_cls, date as _Date_cls, timedelta as _TD_cls, timezone as _TZ_cls
+            if isinstance(obj, _DT_cls):
+                if obj.tzinfo is None:
+                    obj = obj.replace(tzinfo=_TZ_cls.utc)
+                return obj.isoformat()
+            if isinstance(obj, _Date_cls):
+                return obj.isoformat()
+            if isinstance(obj, _TD_cls):
+                return obj.total_seconds()
+        except:
+            pass
+        
+        # ─────────────────────────────────────────────────────────────────────────
+        # UUID
+        # ─────────────────────────────────────────────────────────────────────────
+        
+        try:
+            import uuid as _uuid_mod
+            if isinstance(obj, _uuid_mod.UUID):
+                return str(obj)
+        except:
+            pass
+        
+        # ─────────────────────────────────────────────────────────────────────────
+        # DECIMAL
+        # ─────────────────────────────────────────────────────────────────────────
+        
+        try:
+            from decimal import Decimal as _Dec
+            if isinstance(obj, _Dec):
+                v = float(obj)
+                import math as _m
+                return None if (_m.isnan(v) or _m.isinf(v)) else v
+        except:
+            pass
+        
+        # ─────────────────────────────────────────────────────────────────────────
+        # ENUM
+        # ─────────────────────────────────────────────────────────────────────────
+        
+        try:
+            from enum import Enum as _Enum
+            if isinstance(obj, _Enum):
+                if hasattr(obj, 'value'):
+                    return _deep_json_sanitize(obj.value, _d, _max_depth, _visited)
+                elif hasattr(obj, 'name'):
+                    return obj.name
+                else:
+                    return str(obj)
+        except:
+            pass
+        
+        # ─────────────────────────────────────────────────────────────────────────
+        # BINARY
+        # ─────────────────────────────────────────────────────────────────────────
+        
+        if isinstance(obj, (bytes, bytearray)):
+            return obj.hex()
+        
+        # ─────────────────────────────────────────────────────────────────────────
+        # DATACLASSES
+        # ─────────────────────────────────────────────────────────────────────────
+        
+        try:
+            from dataclasses import is_dataclass as _is_dc, asdict as _asdict
+            if _is_dc(obj) and not isinstance(obj, type):
+                return _deep_json_sanitize(_asdict(obj), _d, _max_depth, _visited)
+        except:
+            pass
+        
+        # ─────────────────────────────────────────────────────────────────────────
+        # CUSTOM OBJECTS: Try conversion methods
+        # ─────────────────────────────────────────────────────────────────────────
+        
+        for _method_name in ('to_dict', 'to_json', 'asdict'):
+            try:
+                _attr = getattr(obj, _method_name, None)
+                if callable(_attr):
+                    try:
+                        _result = _attr()
+                        return _deep_json_sanitize(_result, _d, _max_depth, _visited)
+                    except:
+                        pass
+            except:
+                pass
+        
+        # ─────────────────────────────────────────────────────────────────────────
+        # FLASK/WERKZEUG RESPONSE OBJECTS
+        # ─────────────────────────────────────────────────────────────────────────
+        
+        try:
+            _wz_resp_base = None
+            import sys as _sys
+            if 'werkzeug' in _sys.modules:
+                import werkzeug.wrappers as _wz
+                _wz_resp_base = getattr(_wz, 'Response', None)
+            if _wz_resp_base and isinstance(obj, _wz_resp_base):
+                return {
+                    '__type': 'FlaskResponse',
+                    'status': obj.status,
+                    'content_type': obj.content_type,
+                    'data_preview': obj.get_data(as_text=True)[:200] if obj.content_length and obj.content_length < 10000 else '<large>',
+                }
+        except Exception:
+            pass
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # FALLBACK: Use __dict__ or string representation
-    # ─────────────────────────────────────────────────────────────────────────
+        # ─────────────────────────────────────────────────────────────────────────
+        # FALLBACK: Use __dict__ or string representation
+        # ─────────────────────────────────────────────────────────────────────────
+        
+        try:
+            _d_attr = getattr(obj, '__dict__', None)
+            if _d_attr and isinstance(_d_attr, dict) and _d_attr:
+                return _deep_json_sanitize(_d_attr, _d, _max_depth, _visited)
+        except:
+            pass
+        
+        # Try coercion to float
+        try:
+            v = float(obj)
+            import math as _m
+            return None if (_m.isnan(v) or _m.isinf(v)) else v
+        except (TypeError, ValueError):
+            pass
+        
+        # Last resort: string representation (truncated)
+        try:
+            s = str(obj)
+            if len(s) > 500:
+                return s[:500] + '...[truncated]'
+            return s
+        except Exception:
+            return '__unserializable_object__'
     
-    try:
-        _d_attr = getattr(obj, '__dict__', None)
-        if _d_attr and isinstance(_d_attr, dict) and _d_attr:
-            return _deep_json_sanitize(_d_attr, _d, _max_depth, _visited)
-    except:
-        pass
-    
-    # Try coercion to float
-    try:
-        v = float(obj)
-        import math as _m
-        return None if (_m.isnan(v) or _m.isinf(v)) else v
-    except (TypeError, ValueError):
-        pass
-    
-    # Last resort: string representation (truncated to prevent huge responses)
-    try:
-        s = str(obj)
-        if len(s) > 500:
-            return s[:500] + '...[truncated]'
-        return s
-    except Exception:
-        return '__unserializable_object__'
-
-
+    finally:
+        # ── Cleanup: Pop visited set when root call completes ──────────────────
+        if _is_root_call:
+            try:
+                if hasattr(_sanitize_thread_local, 'visited_stack') and _sanitize_thread_local.visited_stack:
+                    _sanitize_thread_local.visited_stack.pop()
+                    # If stack is now empty, clean it up
+                    if not _sanitize_thread_local.visited_stack:
+                        delattr(_sanitize_thread_local, 'visited_stack')
+            except Exception:
+                pass
 def _format_response(response) -> dict:
     """
     ABSOLUTE GUARANTEE: Returns a JSON-safe dict on every code path.
