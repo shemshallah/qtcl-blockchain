@@ -1129,10 +1129,17 @@ def _safe_jsonify(data: dict, status_code: int = 200):
 @app.route('/api/command', methods=['POST'])
 def execute_command():
     """
-    ✓ BULLETPROOF: 30s timeout, works with Gunicorn
-    ✓ Never hangs, never kills worker, always returns valid JSON
+    BULLETPROOF: Handles timeout properly, logs everything, returns valid JSON
+    - 15s timeout per command (half of Gunicorn's 30s, leaves 5s buffer)
+    - Aggressive logging to find hanging handlers
+    - No blocking on thread shutdown
+    - Always returns valid JSON response
     """
+    import signal as _signal
+    
     cmd_name = 'unknown'
+    start_time = time.time()
+    
     try:
         _initialize_terminal_engine()
         
@@ -1144,6 +1151,9 @@ def execute_command():
         raw_token = None
         role = None
 
+        # Log command start IMMEDIATELY
+        logger.info(f"[/api/command] START: cmd={command} user={user_id}")
+
         # Extract token
         auth_header = request.headers.get('Authorization', '')
         if auth_header.startswith('Bearer '):
@@ -1151,7 +1161,7 @@ def execute_command():
         if not raw_token:
             raw_token = data.get('token') or data.get('access_token')
 
-        # Decode JWT if present
+        # Decode JWT
         if raw_token:
             try:
                 import jwt as _jwt
@@ -1179,33 +1189,47 @@ def execute_command():
                         if not user_id:
                             user_id = payload.get('user_id')
                         role = payload.get('role', 'user')
-                        logger.debug(f"[auth] JWT decoded")
                         break
                     except:
                         continue
             except Exception as e:
-                logger.warning(f"[auth] JWT error: {e}")
+                logger.warning(f"[/api/command] JWT error: {e}")
 
-        # CRITICAL: Timeout-safe dispatch (NOT using context manager to avoid Gunicorn shutdown issues)
+        # CRITICAL: Timeout-safe dispatch with NO thread waiting
         result = None
         executor = None
+        timeout_seconds = 15.0  # 15s timeout (Gunicorn default is 30s)
+        
         try:
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             future = executor.submit(dispatch_command, command, args, user_id, token=raw_token, role=role)
+            
             try:
-                result = future.result(timeout=28.0)  # 28s (leave 2s for cleanup before Gunicorn's 30s)
+                logger.debug(f"[/api/command] EXEC: Waiting for result (timeout={timeout_seconds}s)")
+                result = future.result(timeout=timeout_seconds)
+                elapsed = time.time() - start_time
+                logger.info(f"[/api/command] SUCCESS: cmd={command} elapsed={elapsed:.2f}s")
             except concurrent.futures.TimeoutError:
-                logger.error(f"[/api/command] TIMEOUT: {command}")
-                result = {'status': 'error', 'error': f'Command timeout after 28s', 'command': command}
-                future.cancel()  # Try to cancel the hanging task
+                elapsed = time.time() - start_time
+                logger.error(f"[/api/command] TIMEOUT: cmd={command} elapsed={elapsed:.2f}s (limit={timeout_seconds}s)")
+                result = {
+                    'status': 'error',
+                    'error': f'Command "{command}" exceeded {timeout_seconds}s timeout',
+                    'command': command,
+                    'elapsed_ms': int(elapsed * 1000)
+                }
+                # Don't try to cancel - just leave it
+                future.cancel()
+                
         except Exception as e:
-            logger.error(f"[/api/command] Error: {e}", exc_info=True)
+            elapsed = time.time() - start_time
+            logger.error(f"[/api/command] DISPATCH ERROR: {e} (elapsed={elapsed:.2f}s)", exc_info=True)
             result = {'status': 'error', 'error': str(e)[:200], 'command': command}
         finally:
-            # Clean shutdown without blocking
+            # Shutdown WITHOUT waiting (no blocking)
             if executor:
                 try:
-                    executor.shutdown(wait=False)  # Don't wait for threads (avoid Gunicorn kill)
+                    executor.shutdown(wait=False)
                 except:
                     pass
 
@@ -1213,19 +1237,25 @@ def execute_command():
         if not isinstance(result, dict):
             result = {'status': 'success', 'result': result}
 
-        # Sanitize to JSON-safe
+        # Sanitize
         try:
+            logger.debug(f"[/api/command] FORMAT: Sanitizing response")
             from globals import _format_response
             result = _format_response(result)
+            logger.debug(f"[/api/command] FORMAT: Success")
         except Exception as e:
-            logger.error(f"[/api/command] Format error: {e}")
-            result = {'status': 'error', 'error': 'Format failed', 'command': command}
+            logger.error(f"[/api/command] FORMAT ERROR: {e}")
+            result = {'status': 'error', 'error': 'Response formatting failed', 'command': command}
 
         # Return safe JSON
-        return _safe_jsonify(result)
+        resp = _safe_jsonify(result)
+        elapsed = time.time() - start_time
+        logger.info(f"[/api/command] RETURN: cmd={command} total_time={elapsed:.2f}s")
+        return resp
 
     except Exception as exc:
-        logger.error(f"[/api/command] EXCEPTION: {exc}", exc_info=True)
+        elapsed = time.time() - start_time
+        logger.error(f"[/api/command] EXCEPTION: {exc} (elapsed={elapsed:.2f}s)", exc_info=True)
         return _safe_jsonify({'status': 'error', 'error': str(exc)[:200], 'command': cmd_name}), 500
 
 
