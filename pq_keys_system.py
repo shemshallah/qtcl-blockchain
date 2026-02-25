@@ -187,9 +187,10 @@ class ZigguratGaussianSampler:
     ]
     
     def __init__(self):
-        self._kn = [int(self._X[i] / self._Y[i] * (1 << 32)) for i in range(len(self._X))]
-        self._wn = self._Y
-        self._fn = self._X
+        min_len = min(len(self._X), len(self._Y))
+        self._kn = [int(self._X[i] / self._Y[i] * (1 << 32)) for i in range(min_len)]
+        self._wn = self._Y[:min_len]
+        self._fn = self._X[:min_len]
     
     def sample(self, rng_bytes: bytes) -> float:
         """Generate N(0,1) sample from 8 bytes"""

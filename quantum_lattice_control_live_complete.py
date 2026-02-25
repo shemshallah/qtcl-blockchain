@@ -2445,13 +2445,14 @@ class NonMarkovianNoiseBath:
     def _generate_initial_fidelity_measurement(self) -> float:
         """Generate genuine initial fidelity from quantum measurement"""
         try:
-            entropy_bytes = self.entropy.fetch_quantum_bytes(16)
+            entropy_bytes = self.entropy.get_random_bytes(16)
             noise1 = int.from_bytes(entropy_bytes[:8], 'big') % 1000 / 10000.0
             noise2 = int.from_bytes(entropy_bytes[8:], 'big') % 1000 / 10000.0
             lindblad_decay = 0.8 * (1.0 - np.exp(-0.05))
             quantum_measurement = 0.82 + noise1 + noise2
             return np.clip(quantum_measurement, 0.70, 0.94)
-        except:
+        except Exception as e:
+            logger.warning(f"[Fidelity Init] Error: {e}, using fallback")
             return 0.82 + np.random.random() * 0.10
 
 
