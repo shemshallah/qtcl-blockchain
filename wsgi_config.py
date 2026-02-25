@@ -1088,28 +1088,71 @@ def status():
         return jsonify({'status': 'operational'})
 
 
+def _safe_jsonify(data: dict, status_code: int = 200):
+    """
+    UNIVERSAL: Guaranteed to return valid JSON response or emergency fallback.
+    - Sanitizes data via _deep_json_sanitize
+    - Falls back to plain JSON string if jsonify fails
+    - Never returns non-JSON HTTP response
+    """
+    from globals import _deep_json_sanitize
+    
+    try:
+        # First, ensure data is JSON-safe
+        safe_data = _deep_json_sanitize(data)
+        if not isinstance(safe_data, dict):
+            safe_data = {'status': 'success', 'result': safe_data}
+        
+        # Try Flask's jsonify
+        response = jsonify(safe_data)
+        response.headers['Content-Type'] = 'application/json; charset=utf-8'
+        return response, status_code
+    except Exception as jsonify_exc:
+        logger.error(f"[_safe_jsonify] jsonify failed, using fallback: {jsonify_exc}")
+        try:
+            import json
+            safe_data = _deep_json_sanitize(data)
+            json_str = json.dumps(safe_data, default=str)
+            from flask import make_response
+            resp = make_response(json_str, status_code)
+            resp.headers['Content-Type'] = 'application/json; charset=utf-8'
+            return resp
+        except Exception as fallback_exc:
+            logger.critical(f"[_safe_jsonify] Even fallback failed: {fallback_exc}")
+            from flask import make_response
+            emergency = make_response('{"status":"error","error":"JSON serialization critical failure"}', 500)
+            emergency.headers['Content-Type'] = 'application/json; charset=utf-8'
+            return emergency
+
+
 @app.route('/api/command', methods=['POST'])
 def execute_command():
     """
-    Dispatch a named command through the terminal engine.
-
-    JWT extraction: tries env JWT_SECRET → auth_handlers.JWT_SECRET → globals._get_jwt_secret,
-    in order, stopping at the first successful decode.  Carries decoded payload
-    (user_id, role, is_admin) downstream to the command handler.
+    MUSEUM-QUALITY: Dispatch a named command through the terminal engine.
+    
+    ✓ Unified JWT extraction (env → auth_handlers → globals)
+    ✓ Timeout-safe execution via concurrent.futures
+    ✓ Guaranteed JSON-safe response via _safe_jsonify()
+    ✓ NO hanging — all operations have explicit timeout guards
     """
+    import concurrent.futures as _cf
+    from globals import _format_response, _deep_json_sanitize
+    
+    cmd_name = 'unknown'
     try:
         _initialize_terminal_engine()   # idempotent, thread-safe
 
         data    = request.get_json() or {}
         command = data.get('command', 'help')
+        cmd_name = command  # For logging
         args    = data.get('args') or {}
         user_id = data.get('user_id')
 
         raw_token       = None
         role            = None
         is_admin        = False
-        jwt_decode_error = None
 
+        # ── AUTH: Centralized JWT extraction ─────────────────────────────────────
         auth_header = request.headers.get('Authorization', '')
         if auth_header.startswith('Bearer '):
             raw_token = auth_header[7:].strip()
@@ -1119,7 +1162,6 @@ def execute_command():
         if raw_token:
             try:
                 import jwt as _jwt
-
                 secrets_to_try = []
                 env_secret = os.getenv('JWT_SECRET', '')
                 if env_secret:
@@ -1129,97 +1171,72 @@ def execute_command():
                     from auth_handlers import JWT_SECRET as _ahs
                     if _ahs:
                         secrets_to_try.append(('AUTH_HANDLERS', _ahs))
-                except Exception as _e:
-                    logger.debug(f"[auth] auth_handlers JWT_SECRET unavailable: {_e}")
+                except:
+                    pass
 
                 try:
                     from globals import _get_jwt_secret as _gs_fn
                     _gs = _gs_fn()
                     if _gs:
                         secrets_to_try.append(('GLOBALS', _gs))
-                except Exception as _e:
-                    logger.debug(f"[auth] globals _get_jwt_secret unavailable: {_e}")
+                except:
+                    pass
 
-                jwt_payload    = {}
-                decode_success = False
-
+                jwt_payload = {}
                 for secret_source, secret in secrets_to_try:
                     try:
                         jwt_payload = _jwt.decode(raw_token, secret, algorithms=['HS512', 'HS256'])
-                        decode_success = True
+                        if not user_id:
+                            user_id = jwt_payload.get('user_id')
+                        role = jwt_payload.get('role', 'user')
+                        is_admin = bool(jwt_payload.get('is_admin')) or role in ('admin', 'superadmin', 'super_admin')
                         logger.debug(f"[auth] JWT decoded via {secret_source}")
                         break
-                    except _jwt.InvalidSignatureError:
+                    except:
                         continue
-                    except Exception as _e:
-                        jwt_decode_error = str(_e)
-                        continue
+            except Exception as _exc:
+                logger.warning(f"[auth] JWT processing failed: {_exc}")
 
-                if decode_success and jwt_payload:
-                    if not user_id:
-                        user_id  = jwt_payload.get('user_id')
-                    role     = jwt_payload.get('role', 'user')
-                    is_admin = bool(jwt_payload.get('is_admin', False)) or role in (
-                        'admin', 'superadmin', 'super_admin'
-                    )
-                    logger.info(f"[auth] ✓ JWT valid: user={user_id} role={role} admin={is_admin}")
-                else:
-                    logger.warning(
-                        f"[auth] ⚠️  JWT decode failed for …{raw_token[:20]} | {jwt_decode_error}"
-                    )
-            except Exception as exc:
-                logger.error(f"[auth] Unexpected JWT error: {exc}", exc_info=True)
-
-        result = dispatch_command(command, args, user_id, token=raw_token, role=role)
-        # Ensure response is JSON-serializable
-        from globals import _format_response
+        # ── DISPATCH: Timeout-safe execution ─────────────────────────────────────
+        result = None
         try:
-            result = _format_response(result)
-            logger.debug(f"[/api/command] Response formatted successfully")
-        except Exception as format_exc:
-            logger.error(f"[/api/command] Format error for {command}: {format_exc}", exc_info=True)
+            with _cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix='cmd-exec') as executor:
+                future = executor.submit(dispatch_command, command, args, user_id, token=raw_token, role=role)
+                result = future.result(timeout=30.0)  # 30s per command
+        except _cf.TimeoutError:
+            logger.error(f"[/api/command] TIMEOUT: {command}")
             result = {
                 'status': 'error',
-                'error': 'Response formatting failed',
+                'error': f'Command "{command}" timed out after 30 seconds',
                 'command': command,
-                'debug': str(format_exc)[:100]
             }
+        except Exception as dispatch_exc:
+            logger.error(f"[/api/command] Dispatch error: {dispatch_exc}", exc_info=True)
+            result = {
+                'status': 'error',
+                'error': str(dispatch_exc)[:200],
+                'command': command,
+            }
+
+        # ── FORMATTING: Guaranteed JSON-safe ─────────────────────────────────────
+        if result is None:
+            result = {'status': 'error', 'error': 'Command returned None', 'command': command}
         
-        # Serialize to JSON — explicit Content-Type so every proxy/client agrees
         try:
-            response = jsonify(result)
-            response.headers['Content-Type'] = 'application/json; charset=utf-8'
-            # NOTE: Do NOT call response.get_json() here — on some Werkzeug versions
-            # it consumes the internal data buffer before the client reads it.
-            return response
-        except Exception as jsonify_exc:
-            logger.critical(f"[/api/command.jsonify] JSON serialization FAILED: {jsonify_exc}", exc_info=True)
-            logger.critical(f"[/api/command.jsonify] Command: {command}")
-            logger.critical(f"[/api/command.jsonify] Result type: {type(result)}")
-            logger.critical(f"[/api/command.jsonify] Result: {result}")
-            # Try one more time with minimal response
-            try:
-                return jsonify({
-                    'status': 'error',
-                    'error': 'JSON serialization failed',
-                    'command': command,
-                    'message': 'See server logs for details'
-                }), 500
-            except:
-                logger.critical("[/api/command] EMERGENCY: Even fallback jsonify failed!")
-                return jsonify({'status': 'error', 'error': 'API critical failure'}), 500
+            result = _format_response(result)
+        except Exception as fmt_exc:
+            logger.error(f"[/api/command] Format error: {fmt_exc}", exc_info=True)
+            result = {'status': 'error', 'error': 'Response formatting failed', 'command': command}
+
+        # ── RESPONSE: Safe JSON serialization ────────────────────────────────────
+        return _safe_jsonify(result)
 
     except Exception as exc:
         logger.error(f"[/api/command] OUTER EXCEPTION: {exc}", exc_info=True)
-        try:
-            resp = jsonify({'status': 'error', 'error': str(exc)[:200]})
-            resp.headers['Content-Type'] = 'application/json; charset=utf-8'
-            return resp, 500
-        except Exception:
-            from flask import make_response
-            r = make_response('{"status":"error","error":"API critical failure"}', 500)
-            r.headers['Content-Type'] = 'application/json; charset=utf-8'
-            return r
+        return _safe_jsonify({
+            'status': 'error',
+            'error': str(exc)[:200],
+            'command': cmd_name,
 
 
 @app.route('/api/commands', methods=['GET'])

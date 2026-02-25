@@ -194,7 +194,13 @@ class QTCLCommandExecutor {
         if (token) headers['Authorization'] = `Bearer ${token}`;
 
         let result;
+        let abortController = new AbortController();
+        let timeoutId = null;
+
         try {
+            // 40 second timeout for fetch operations
+            timeoutId = setTimeout(() => abortController.abort(), 40000);
+
             const resp = await fetch(`${this.baseUrl}/api/command`, {
                 method:  'POST',
                 headers,
@@ -202,13 +208,40 @@ class QTCLCommandExecutor {
                     command: cmdStr,
                     args:    [],     // args are embedded in cmdStr above
                     kwargs:  {}      // kwargs are embedded in cmdStr above
-                })
+                }),
+                signal: abortController.signal
             });
 
-            const data = await resp.json().catch(() => ({
-                status: 'error',
-                error: 'Invalid JSON from server'
-            }));
+            clearTimeout(timeoutId);
+
+            // Check for non-OK status BEFORE attempting to parse JSON
+            if (!resp.ok) {
+                console.warn(`[Executor] HTTP ${resp.status} for command "${cmdStr}"`);
+            }
+
+            // Attempt to parse response as JSON
+            let data;
+            const contentType = resp.headers.get('content-type') || '';
+            
+            if (!contentType.includes('application/json')) {
+                console.error(`[Executor] Invalid Content-Type: ${contentType}, expected application/json`);
+                data = {
+                    status: 'error',
+                    error: 'Server returned non-JSON response',
+                    hint: `Content-Type was: ${contentType}`
+                };
+            } else {
+                try {
+                    data = await resp.json();
+                } catch (parseErr) {
+                    console.error(`[Executor] JSON parse failed: ${parseErr.message}`);
+                    data = {
+                        status: 'error',
+                        error: 'Invalid JSON response from server',
+                        debug: parseErr.message
+                    };
+                }
+            }
 
             const duration = Math.round(performance.now() - t0);
 
@@ -236,15 +269,28 @@ class QTCLCommandExecutor {
                 };
             }
         } catch (err) {
+            clearTimeout(timeoutId);
             const duration = Math.round(performance.now() - t0);
-            console.error('[Executor] Network error:', err);
-            result = {
-                status:   'error',
-                error:    `Network error: ${err.message}`,
-                command:  cmdStr,
-                duration,
-                raw:      null
-            };
+            
+            if (err.name === 'AbortError') {
+                console.error('[Executor] Command timeout (>40s)');
+                result = {
+                    status:   'error',
+                    error:    'Command timed out — server may be unresponsive',
+                    command:  cmdStr,
+                    duration,
+                    raw:      null
+                };
+            } else {
+                console.error('[Executor] Network error:', err);
+                result = {
+                    status:   'error',
+                    error:    `Network error: ${err.message}`,
+                    command:  cmdStr,
+                    duration,
+                    raw:      null
+                };
+            }
         }
 
         // Record history

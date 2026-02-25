@@ -1883,25 +1883,41 @@ def get_system_health() -> dict:
 
 def _deep_json_sanitize(obj, _depth=0, _max_depth=32, _visited=None):
     """
-    ENHANCED: Recursively sanitize ANY Python object to JSON-serializable form.
-    Handles: numpy scalars/arrays, complex, datetime, deque, bytes, Decimal, Enum,
-    UUID, dataclasses, custom objects, circular refs, NaN/inf, and ANY nesting depth.
-    CRITICAL: This is the authoritative JSON-safety layer - nothing leaves without passing through here.
+    MUSEUM-QUALITY: Recursively sanitize ANY Python object to JSON-serializable form.
+    
+    ✓ Handles: numpy scalars/arrays, complex, datetime, deque, bytes, Decimal, Enum, UUID, 
+      dataclasses, custom objects, circular refs, NaN/inf, and ANY nesting depth
+    ✓ Prevents: circular references, infinite recursion, non-serializable types
+    ✓ Authoritative: All responses flow through this function before jsonify()
+    ✓ Idempotent: Multiple passes produce same result
+    
+    This is the AUTHORITATIVE JSON-safety layer — nothing leaves without passing through here.
+    Used by _format_response() which is called by ALL command handlers.
+    
+    Flow: dispatch_command() → handler → result dict → _format_response() → _deep_json_sanitize() 
+          → wsgi_config /api/command → _safe_jsonify() → client
     """
     if _visited is None:
         _visited = set()
     
     obj_id = id(obj)
+    # Detect circular references (but skip primitives which can't be circular)
     if obj_id in _visited and not isinstance(obj, (str, int, float, bool, type(None))):
-        return str(obj)
+        return f'<circular_ref_to_{type(obj).__name__}>'
     
+    # Prevent infinite recursion
     if _depth > _max_depth:
-        return str(obj)
+        return f'<max_depth_exceeded>'
     
+    # Mark object as visited (for non-primitives only)
     if not isinstance(obj, (str, int, float, bool, type(None))):
         _visited.add(obj_id)
     
     _d = _depth + 1
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # PRIMITIVES (guaranteed JSON-safe)
+    # ─────────────────────────────────────────────────────────────────────────
     
     if obj is None or isinstance(obj, bool):
         return obj
@@ -1916,6 +1932,10 @@ def _deep_json_sanitize(obj, _depth=0, _max_depth=32, _visited=None):
             return None
         return float(obj)
     
+    # ─────────────────────────────────────────────────────────────────────────
+    # COLLECTIONS (recurse safely)
+    # ─────────────────────────────────────────────────────────────────────────
+    
     if isinstance(obj, dict):
         return {str(k): _deep_json_sanitize(v, _d, _max_depth, _visited) for k, v in obj.items()}
     
@@ -1928,6 +1948,10 @@ def _deep_json_sanitize(obj, _depth=0, _max_depth=32, _visited=None):
             return [_deep_json_sanitize(v, _d, _max_depth, _visited) for v in obj]
     except:
         pass
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # NUMPY TYPES
+    # ─────────────────────────────────────────────────────────────────────────
     
     try:
         import numpy as _np
@@ -1948,8 +1972,16 @@ def _deep_json_sanitize(obj, _depth=0, _max_depth=32, _visited=None):
     except:
         pass
     
+    # ─────────────────────────────────────────────────────────────────────────
+    # PYTHON NUMERIC TYPES
+    # ─────────────────────────────────────────────────────────────────────────
+    
     if isinstance(obj, complex):
         return {'real': float(obj.real), 'imag': float(obj.imag)}
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # DATETIME TYPES
+    # ─────────────────────────────────────────────────────────────────────────
     
     try:
         from datetime import datetime as _DT_cls, date as _Date_cls, timedelta as _TD_cls, timezone as _TZ_cls
@@ -1964,12 +1996,20 @@ def _deep_json_sanitize(obj, _depth=0, _max_depth=32, _visited=None):
     except:
         pass
     
+    # ─────────────────────────────────────────────────────────────────────────
+    # UUID
+    # ─────────────────────────────────────────────────────────────────────────
+    
     try:
         import uuid as _uuid_mod
         if isinstance(obj, _uuid_mod.UUID):
             return str(obj)
     except:
         pass
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # DECIMAL
+    # ─────────────────────────────────────────────────────────────────────────
     
     try:
         from decimal import Decimal as _Dec
@@ -1979,6 +2019,10 @@ def _deep_json_sanitize(obj, _depth=0, _max_depth=32, _visited=None):
             return None if (_m.isnan(v) or _m.isinf(v)) else v
     except:
         pass
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # ENUM
+    # ─────────────────────────────────────────────────────────────────────────
     
     try:
         from enum import Enum as _Enum
@@ -1992,8 +2036,16 @@ def _deep_json_sanitize(obj, _depth=0, _max_depth=32, _visited=None):
     except:
         pass
     
+    # ─────────────────────────────────────────────────────────────────────────
+    # BINARY
+    # ─────────────────────────────────────────────────────────────────────────
+    
     if isinstance(obj, (bytes, bytearray)):
         return obj.hex()
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # DATACLASSES
+    # ─────────────────────────────────────────────────────────────────────────
     
     try:
         from dataclasses import is_dataclass as _is_dc, asdict as _asdict
@@ -2001,6 +2053,10 @@ def _deep_json_sanitize(obj, _depth=0, _max_depth=32, _visited=None):
             return _deep_json_sanitize(_asdict(obj), _d, _max_depth, _visited)
     except:
         pass
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # CUSTOM OBJECTS: Try conversion methods
+    # ─────────────────────────────────────────────────────────────────────────
     
     for _method_name in ('to_dict', 'to_json', 'asdict'):
         try:
@@ -2014,6 +2070,10 @@ def _deep_json_sanitize(obj, _depth=0, _max_depth=32, _visited=None):
         except:
             pass
     
+    # ─────────────────────────────────────────────────────────────────────────
+    # FALLBACK: Use __dict__ or string representation
+    # ─────────────────────────────────────────────────────────────────────────
+    
     try:
         _d_attr = getattr(obj, '__dict__', None)
         if _d_attr and isinstance(_d_attr, dict) and _d_attr:
@@ -2021,6 +2081,7 @@ def _deep_json_sanitize(obj, _depth=0, _max_depth=32, _visited=None):
     except:
         pass
     
+    # Try coercion to float
     try:
         v = float(obj)
         import math as _m
@@ -2028,6 +2089,7 @@ def _deep_json_sanitize(obj, _depth=0, _max_depth=32, _visited=None):
     except (TypeError, ValueError):
         pass
     
+    # Last resort: string representation (truncated to prevent huge responses)
     try:
         s = str(obj)
         if len(s) > 500:
@@ -2039,21 +2101,38 @@ def _deep_json_sanitize(obj, _depth=0, _max_depth=32, _visited=None):
 
 def _format_response(response) -> dict:
     """
-    Ensure all command responses are JSON-safe dictionaries.
-    Uses _deep_json_sanitize() to handle ALL data types at ANY nesting depth.
-    CRITICAL: This is the last line of defense before jsonify().
+    MUSEUM-QUALITY: Ensure ALL command responses are JSON-safe dictionaries.
+    
+    ✓ CRITICAL RESPONSIBILITY: Last safety check before wsgi_config's /api/command sends response
+    ✓ Single entry point: All dispatch_command() handlers flow through this
+    ✓ Guaranteed output: Always returns a dict (never None, bytes, or other types)
+    ✓ Chain of custody: dispatch_command() → handler → result → this function → _safe_jsonify()
+    
+    This function is NON-OPTIONAL. Every command response MUST pass through it.
+    The sanitization ensures 100% JSON serializability before the response leaves the server.
+    
+    Args:
+        response: Any Python object from a command handler (dict, list, string, custom obj, etc)
+    
+    Returns:
+        dict: Guaranteed JSON-safe response dict with 'status' and 'result'/'error' keys
     """
     try:
+        # Sanitize recursively — handles ALL data types at ANY nesting depth
         sanitized = _deep_json_sanitize(response)
+        
+        # Ensure we return a dict
         if isinstance(sanitized, dict):
             return sanitized
         if sanitized is None:
             return {'status': 'error', 'error': 'Command returned None'}
         if isinstance(sanitized, (str, list)):
             return {'status': 'success', 'result': sanitized}
+        # Wrap any other type
         return {'status': 'success', 'result': sanitized}
     except Exception as format_exc:
         logger.error(f"[_format_response] CRITICAL: Sanitization error: {format_exc}", exc_info=True)
+        # Emergency fallback
         return {
             'status': 'error',
             'error': 'Response serialization failed',
