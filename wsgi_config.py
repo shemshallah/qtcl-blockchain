@@ -285,6 +285,45 @@ def create_app():
         """Alias for /health."""
         return health_check()
     
+    @app.route('/api/heartbeat', methods=['POST'])
+    def heartbeat_receiver():
+        """Receive and log heartbeat metrics from quantum system."""
+        try:
+            data = request.get_json() or {}
+            timestamp = data.get('timestamp', datetime.now(timezone.utc).isoformat())
+            beat_count = data.get('beat_count', 0)
+            status = data.get('status', 'unknown')
+            metrics = data.get('metrics', {})
+            
+            logger.info(
+                f"[HEARTBEAT] Received beat #{beat_count} | "
+                f"Status: {status} | "
+                f"Metrics: {len(metrics)} subsystems"
+            )
+            
+            return jsonify({
+                'status': 'received',
+                'beat_count': beat_count,
+                'timestamp': timestamp,
+            }), 200
+        except Exception as e:
+            logger.error(f"[HEARTBEAT] Error: {e}")
+            return jsonify({'error': str(e)}), 500
+    
+    @app.route('/api/quantum/status', methods=['GET'])
+    def quantum_status():
+        """Get quantum system status."""
+        try:
+            from quantum_lattice_control import get_coordinator
+            coordinator = get_coordinator()
+            if coordinator:
+                status = coordinator.get_status()
+                return jsonify(status), 200
+            return jsonify({'status': 'unavailable'}), 503
+        except Exception as e:
+            logger.error(f"[API] Quantum status error: {e}")
+            return jsonify({'error': str(e)}), 500
+    
     @app.route('/version', methods=['GET'])
     def version():
         """Return system version information."""
@@ -297,6 +336,7 @@ def create_app():
             'command_system': 'mega_command_system',
             'timestamp': datetime.now(timezone.utc).isoformat(),
         }), 200
+    
     
     logger.info("[BOOTSTRAP] ✓ All endpoints registered")
     
