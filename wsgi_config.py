@@ -314,8 +314,12 @@ if __name__ != '__main__':
     app = get_wsgi_app()
     logger.info("[BOOTSTRAP] ✓ WSGI app ready")
 
+# WSGI Entry Point (required by Gunicorn)
+application = app
+
 __all__ = [
     'app',
+    'application',
     'get_wsgi_app',
     'create_app',
     'get_pq_system',
