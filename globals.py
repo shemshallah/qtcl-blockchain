@@ -665,10 +665,11 @@ def initialize_globals():
                 logger.warning(f"⚠️  Auth: {str(e)[:60]}")
 
             # Initialize PQC
+            # BUG-5 FIX: module is 'pq_keys_system' (with s); function is 'get_pq_system'
             try:
-                get_pqc_system = _safe_import('pq_key_system', 'get_pqc_system')
-                if get_pqc_system:
-                    _GLOBAL_STATE['pqc_system'] = get_pqc_system()
+                _get_pq_sys_fn = _safe_import('pq_keys_system', 'get_pq_system')
+                if _get_pq_sys_fn:
+                    _GLOBAL_STATE['pqc_system'] = _get_pq_sys_fn()
                     logger.info("✅ Post-quantum cryptography system initialized")
             except Exception as e:
                 logger.warning(f"⚠️  PQC: {str(e)[:60]}")

@@ -1091,39 +1091,44 @@ def status():
 
 def _safe_jsonify(data: dict, status_code: int = 200):
     """
-    UNIVERSAL: Guaranteed to return valid JSON response or emergency fallback.
-    - Sanitizes data via _deep_json_sanitize
-    - Falls back to plain JSON string if jsonify fails
-    - Never returns non-JSON HTTP response
+    UNIVERSAL: Guaranteed to return (Response, int) tuple on ALL code paths.
+
+    BUG-2 FIX: All three code paths (primary, fallback, emergency) now return
+    (Response, status_code) consistently.  Previously the fallback and emergency
+    paths returned bare Response objects, causing callers that appended ", status"
+    to create a double-tuple that Flask could not parse.
+
+    - Sanitizes data via _deep_json_sanitize (handles numpy, datetime, circular refs)
+    - Falls back to json.dumps with default=str if jsonify fails
+    - Emergency path always returns a parseable JSON body
+    - Never returns non-JSON or a bare Response (always a 2-tuple)
     """
     from globals import _deep_json_sanitize
-    
+
     try:
-        # First, ensure data is JSON-safe
         safe_data = _deep_json_sanitize(data)
         if not isinstance(safe_data, dict):
             safe_data = {'status': 'success', 'result': safe_data}
-        
-        # Try Flask's jsonify
         response = jsonify(safe_data)
         response.headers['Content-Type'] = 'application/json; charset=utf-8'
-        return response, status_code
+        return response, status_code                         # PRIMARY PATH — tuple ✓
     except Exception as jsonify_exc:
-        logger.error(f"[_safe_jsonify] jsonify failed, using fallback: {jsonify_exc}")
+        logger.error(f"[_safe_jsonify] jsonify failed, trying json.dumps fallback: {jsonify_exc}")
         try:
-            import json
-            safe_data = _deep_json_sanitize(data)
-            json_str = json.dumps(safe_data, default=str)
-            from flask import make_response
-            resp = make_response(json_str, status_code)
+            import json as _json_mod
+            safe_data2 = _deep_json_sanitize(data)
+            json_str   = _json_mod.dumps(safe_data2, default=str)
+            from flask import make_response as _mkr
+            resp = _mkr(json_str, status_code)
             resp.headers['Content-Type'] = 'application/json; charset=utf-8'
-            return resp
+            return resp, status_code                         # FALLBACK PATH — tuple ✓
         except Exception as fallback_exc:
-            logger.critical(f"[_safe_jsonify] Even fallback failed: {fallback_exc}")
-            from flask import make_response
-            emergency = make_response('{"status":"error","error":"JSON serialization critical failure"}', 500)
+            logger.critical(f"[_safe_jsonify] Both paths failed: primary={jsonify_exc} fallback={fallback_exc}")
+            from flask import make_response as _mkr2
+            body = '{"status":"error","error":"JSON serialization critical failure"}'
+            emergency = _mkr2(body, 500)
             emergency.headers['Content-Type'] = 'application/json; charset=utf-8'
-            return emergency
+            return emergency, 500                            # EMERGENCY PATH — tuple ✓
 
 
 @app.route('/api/command', methods=['POST'])
@@ -1256,7 +1261,7 @@ def execute_command():
     except Exception as exc:
         elapsed = time.time() - start_time
         logger.error(f"[/api/command] EXCEPTION: {exc} (elapsed={elapsed:.2f}s)", exc_info=True)
-        return _safe_jsonify({'status': 'error', 'error': str(exc)[:200], 'command': cmd_name}), 500
+        return _safe_jsonify({'status': 'error', 'error': str(exc)[:200], 'command': cmd_name}, status_code=500)
 
 
 @app.route('/api/commands', methods=['GET'])
@@ -1453,44 +1458,37 @@ def _register_blueprints() -> None:
         logger.info(f"[BLUEPRINT] ✅ All {len(ok)} blueprints registered successfully")
 
 
-# ── DEFERRED BLUEPRINT REGISTRATION — avoid circular import on gunicorn fork ──
-# Do NOT call _register_blueprints() at module load time. Gunicorn's forking model
-# loads wsgi_config in the parent process, then forks workers. If db_builder_v2 is
-# mid-initialization during fork, workers inherit a half-constructed module.
-# Solution: register blueprints lazily on the first HTTP request.
+# ── SYNCHRONOUS BLUEPRINT REGISTRATION ──────────────────────────────────────────────
+# BUG-7 FIX: Register blueprints synchronously at module load time, not in a
+# background thread.  The original background-thread approach had two fatal flaws:
+#   1. Flask url_map is NOT thread-safe for concurrent add_url_rule() calls
+#   2. HTTP requests arriving before thread completion get 404 on all blueprint routes
 #
-# Flask's before_request hook ensures registration happens once per worker
-# after the worker has fully initialized and any deferred imports have completed.
+# Gunicorn pre-fork model: wsgi_config is imported in the PARENT process before any
+# worker fork.  Synchronous blueprint registration here ensures all routes are in the
+# url_map before gunicorn forks workers — each worker inherits the complete route table.
+#
+# db_builder_v2 is imported lazily inside each blueprint handler function (not at
+# blueprint registration time), so there is no circular import risk.
 
 _BLUEPRINTS_REGISTERED = False
-_BLUEPRINT_THREAD = None
-
-def _register_blueprints_background():
-    """Register blueprints in background thread (non-blocking to HTTP requests)"""
-    global _BLUEPRINTS_REGISTERED
-    try:
-        logger.info("[BLUEPRINT/BG] Starting background blueprint registration...")
-        _register_blueprints()
-        _BLUEPRINTS_REGISTERED = True
-        logger.info("[BLUEPRINT/BG] ✅ Background blueprint registration complete")
-    except Exception as exc:
-        logger.error(f"[BLUEPRINT/BG] Failed during background registration: {exc}", exc_info=True)
-        _BLUEPRINTS_REGISTERED = True  # Mark as attempted even if failed
 
 def _start_blueprint_registration_thread():
-    """Start background thread for blueprint registration (called immediately after app creation)"""
-    global _BLUEPRINT_THREAD
-    if _BLUEPRINT_THREAD is None or not _BLUEPRINT_THREAD.is_alive():
-        _BLUEPRINT_THREAD = threading.Thread(
-            target=_register_blueprints_background,
-            daemon=True,
-            name="BlueprintRegistration"
-        )
-        _BLUEPRINT_THREAD.start()
-        logger.info("[BLUEPRINT/BG] 🔄 Background blueprint registration thread started (non-blocking)")
+    """BUG-7 FIX: Now registers synchronously. Name kept for backward compatibility."""
+    global _BLUEPRINTS_REGISTERED
+    if _BLUEPRINTS_REGISTERED:
+        return
+    try:
+        logger.info("[BLUEPRINT] Starting synchronous blueprint registration...")
+        _register_blueprints()
+        _BLUEPRINTS_REGISTERED = True
+        logger.info("[BLUEPRINT] ✅ Synchronous blueprint registration complete")
+    except Exception as exc:
+        logger.error(f"[BLUEPRINT] Failed: {exc}", exc_info=True)
+        _BLUEPRINTS_REGISTERED = True  # mark attempted
 
 
-# ── Start blueprint registration immediately (runs in background) ────────────────────
+# ── Register blueprints synchronously at import time ──────────────────────────────
 _start_blueprint_registration_thread()
 
 

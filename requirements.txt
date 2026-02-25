@@ -35,6 +35,11 @@ qiskit-machine-learning>=0.5.0        # Quantum ML algorithms
 # ════════════════════════════════════════════════════════════════════════════════
 # CRYPTOGRAPHY & SECURITY
 # ════════════════════════════════════════════════════════════════════════════════
+# BUG-8 FIX: liboqs-python missing from requirements (caused LIBOQS_AVAILABLE=False)
+# INSTALL NOTE: Requires liboqs C library. On Koyeb/Ubuntu:
+#   apt-get install -y cmake liboqs-dev && pip install liboqs-python
+# The package installs as Python module "oqs" (not "liboqs" or "liboqs.oqs")
+liboqs-python>=0.8.0                  # Post-quantum cryptography (CRYSTALS-Kyber, Dilithium)
 bcrypt>=4.0.0                         # Password hashing (bcrypt algorithm)
 cryptography>=38.0.0                  # SSL/TLS + encryption (Fernet, RSA, AES)
 pycryptodome>=3.15.0                  # Comprehensive crypto library (AES, DES, RSA, ECC)

@@ -92,10 +92,15 @@ except ImportError:
     CRYPTOGRAPHY_AVAILABLE = False
 
 try:
-    from liboqs.oqs import KeyEncapsulation, Signature
+    # BUG-3 FIX: liboqs-python installs as module "oqs" (not "liboqs.oqs").
+    # Install: pip install liboqs-python  (requires liboqs C library).
+    # Koyeb/Ubuntu: apt-get install -y liboqs-dev && pip install liboqs-python
+    from oqs import KeyEncapsulation, Signature
     LIBOQS_AVAILABLE = True
 except ImportError:
     LIBOQS_AVAILABLE = False
+    KeyEncapsulation = None
+    Signature = None
 
 try:
     import psycopg2

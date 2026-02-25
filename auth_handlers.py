@@ -39,10 +39,13 @@ import smtplib,ssl,bcrypt,jwt,psycopg2
 from psycopg2.extras import RealDictCursor,execute_values
 
 try:
-    from liboqs.oqs import KeyEncapsulation,Signature
-    PQ_AVAILABLE=True
+    # BUG-4 FIX: correct module name is "oqs" not "liboqs.oqs"
+    from oqs import KeyEncapsulation, Signature
+    PQ_AVAILABLE = True
 except ImportError:
-    PQ_AVAILABLE=False
+    PQ_AVAILABLE = False
+    KeyEncapsulation = None
+    Signature = None
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # UNIFIED POST-QUANTUM CRYPTOGRAPHY (pq_keys_system v1.0 — PARADIGM SHIFT)
@@ -1568,7 +1571,8 @@ class AuthHandlers:
 
             for _attempt in range(3):
                 try:
-                    from pq_key_system import get_pqc_system
+                    # BUG-6 FIX: correct module + function names
+                    from pq_keys_system import get_pq_system as get_pqc_system
                     _pqc = get_pqc_system()
                     _pq_int = int(user.pseudoqubit_id) if isinstance(user.pseudoqubit_id, (int, float)) else 0
                     pq_bundle = _pqc.generate_user_key(
@@ -1599,9 +1603,9 @@ class AuthHandlers:
 
             # Fallback: generate a simulated-but-cryptographically-sound PQ keypair
             # using our PQCryptoEngine (SHA3/Dilithium-style simulation).
-            # This ensures EVERY user has a key — even if pq_key_system is unavailable.
+            # This ensures EVERY user has a key — even if pq_keys_system is unavailable.
             if not pq_bundle:
-                logger.warning(f"[Auth/Register] pq_key_system unavailable — issuing simulated PQ keypair")
+                logger.warning(f"[Auth/Register] pq_keys_system unavailable — issuing simulated PQ keypair")
                 _pq_pub, _pq_sec = PQCryptoEngine.generate_keypair()
                 _msg = f"{user.user_id}{user.pseudoqubit_id}{email}"
                 _sig = PQCryptoEngine.sign_message(_msg, _pq_sec)
