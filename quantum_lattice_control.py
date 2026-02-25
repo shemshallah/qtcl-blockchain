@@ -689,31 +689,68 @@ class NeuralRefreshNetwork:
         self.entropy_ensemble = entropy_ensemble
         self.lock = threading.RLock()
         
-        # Deep layers
-        self.W1 = np.random.randn(12, 128) * 0.1
-        self.b1 = np.zeros(128)
-        self.W2 = np.random.randn(128, 64) * 0.1
-        self.b2 = np.zeros(64)
-        self.W3 = np.random.randn(64, 32) * 0.1
-        self.b3 = np.zeros(32)
-        self.W4 = np.random.randn(32, 5) * 0.1
-        self.b4 = np.zeros(5)
+        # Network architecture: 12 inputs → 128 → 64 → 32 → 5 outputs
+        # Explicit dimension specification to avoid shape inference bugs
+        INPUT_DIM = 12
+        HIDDEN1_DIM = 128
+        HIDDEN2_DIM = 64
+        HIDDEN3_DIM = 32
+        OUTPUT_DIM = 5
+        
+        # Initialize weights with explicit shapes
+        self.W1 = np.random.randn(INPUT_DIM, HIDDEN1_DIM) * 0.1
+        self.b1 = np.zeros(HIDDEN1_DIM, dtype=np.float64)
+        
+        self.W2 = np.random.randn(HIDDEN1_DIM, HIDDEN2_DIM) * 0.1
+        self.b2 = np.zeros(HIDDEN2_DIM, dtype=np.float64)
+        
+        self.W3 = np.random.randn(HIDDEN2_DIM, HIDDEN3_DIM) * 0.1
+        self.b3 = np.zeros(HIDDEN3_DIM, dtype=np.float64)
+        
+        self.W4 = np.random.randn(HIDDEN3_DIM, OUTPUT_DIM) * 0.1
+        self.b4 = np.zeros(OUTPUT_DIM, dtype=np.float64)
+        
+        # Store expected dimensions for validation
+        self.layer_dims = [
+            (INPUT_DIM, HIDDEN1_DIM),
+            (HIDDEN1_DIM, HIDDEN2_DIM),
+            (HIDDEN2_DIM, HIDDEN3_DIM),
+            (HIDDEN3_DIM, OUTPUT_DIM),
+        ]
         
         self.update_count = 0
         self.loss_history = deque(maxlen=100)
         
-        logger.info("[NEURAL_REFRESH] Deep MLP initialized (12→128→64→32→5)")
+        logger.info(f"[NEURAL_REFRESH] Deep MLP initialized: {INPUT_DIM}→{HIDDEN1_DIM}→{HIDDEN2_DIM}→{HIDDEN3_DIM}→{OUTPUT_DIM}")
     
     def forward(self, features: np.ndarray) -> Tuple[np.ndarray, Dict[str, float]]:
-        """Forward pass through deep network."""
-        features = np.atleast_1d(features).reshape(-1)
+        """Forward pass through deep network with dimension validation."""
+        # Ensure features is 1D with correct shape
+        features = np.atleast_1d(features).astype(np.float64)
+        features = features.reshape(-1)
         
+        # Validate input dimension
+        if features.shape[0] != self.layer_dims[0][0]:
+            logger.warning(f"[NEURAL] Feature dimension mismatch: {features.shape[0]} vs expected {self.layer_dims[0][0]}")
+            # Pad or truncate to correct size
+            if features.shape[0] < self.layer_dims[0][0]:
+                features = np.pad(features, (0, self.layer_dims[0][0] - features.shape[0]), mode='constant')
+            else:
+                features = features[:self.layer_dims[0][0]]
+        
+        # Layer 1: 12 → 128
         z1 = np.dot(features, self.W1) + self.b1
         a1 = np.tanh(z1)
+        
+        # Layer 2: 128 → 64
         z2 = np.dot(a1, self.W2) + self.b2
         a2 = np.tanh(z2)
+        
+        # Layer 3: 64 → 32
         z3 = np.dot(a2, self.W3) + self.b3
         a3 = np.tanh(z3)
+        
+        # Layer 4: 32 → 5
         z4 = np.dot(a3, self.W4) + self.b4
         output = np.tanh(z4)
         
@@ -732,8 +769,17 @@ class NeuralRefreshNetwork:
         }
     
     def on_heartbeat(self, features: np.ndarray, target_coherence: float = 0.94):
-        """Training step."""
+        """Training step with robust dimension handling."""
         try:
+            # Ensure features shape is valid
+            features = np.atleast_1d(features).astype(np.float64).reshape(-1)
+            
+            # Validate weight matrix dimensions before forward pass
+            assert self.W1.shape == (12, 128), f"W1 shape mismatch: {self.W1.shape} vs (12, 128)"
+            assert self.W2.shape == (128, 64), f"W2 shape mismatch: {self.W2.shape} vs (128, 64)"
+            assert self.W3.shape == (64, 32), f"W3 shape mismatch: {self.W3.shape} vs (64, 32)"
+            assert self.W4.shape == (32, 5), f"W4 shape mismatch: {self.W4.shape} vs (32, 5)"
+            
             output, predictions = self.forward(features)
             loss = float((features[0] - target_coherence) ** 2)
             
@@ -741,10 +787,19 @@ class NeuralRefreshNetwork:
                 self.loss_history.append(loss)
                 self.update_count += 1
             
-            self.W1 += 0.0001 * np.random.randn(*self.W1.shape) * loss
-            self.W2 += 0.0001 * np.random.randn(*self.W2.shape) * loss
-            self.W3 += 0.0001 * np.random.randn(*self.W3.shape) * loss
-            self.W4 += 0.0001 * np.random.randn(*self.W4.shape) * loss
+            # Weight updates with shape preservation
+            self.W1 = self.W1 + 0.0001 * np.random.randn(*self.W1.shape) * loss
+            self.W2 = self.W2 + 0.0001 * np.random.randn(*self.W2.shape) * loss
+            self.W3 = self.W3 + 0.0001 * np.random.randn(*self.W3.shape) * loss
+            self.W4 = self.W4 + 0.0001 * np.random.randn(*self.W4.shape) * loss
+            
+        except AssertionError as e:
+            logger.error(f"[NEURAL] Dimension error: {e} - Reinitializing weights")
+            # Recover by reinitializing
+            self.W1 = np.random.randn(12, 128) * 0.1
+            self.W2 = np.random.randn(128, 64) * 0.1
+            self.W3 = np.random.randn(64, 32) * 0.1
+            self.W4 = np.random.randn(32, 5) * 0.1
         except Exception as e:
             logger.debug(f"[NEURAL] Step error: {e}")
     
