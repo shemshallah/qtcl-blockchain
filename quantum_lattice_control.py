@@ -1185,25 +1185,64 @@ class QuantumLatticeController:
             try:
                 # 1. Evolve noise bath
                 logger.info(f"[EVOLVE] Cycle {self.cycle_count}: Starting evolve_one_cycle")
-                noise_info = self.noise_bath.evolve_cycle()
-                logger.debug(f"[EVOLVE] Step 1/7: Noise bath evolved")
                 
-                self.coherence_manager.apply_noise_decoherence(noise_info)
-                logger.debug(f"[EVOLVE] Step 2/7: Noise decoherence applied")
+                try:
+                    logger.debug(f"[EVOLVE] 1.1: Calling noise_bath.evolve_cycle()...")
+                    noise_info = self.noise_bath.evolve_cycle()
+                    logger.debug(f"[EVOLVE] 1.2: ✓ noise_info = {list(noise_info.keys())}")
+                except Exception as e:
+                    logger.critical(f"[EVOLVE] ❌ ERROR in noise_bath.evolve_cycle: {type(e).__name__}: {e}")
+                    raise
+                
+                try:
+                    logger.debug(f"[EVOLVE] 2.1: Calling coherence_manager.apply_noise_decoherence()...")
+                    self.coherence_manager.apply_noise_decoherence(noise_info)
+                    logger.debug(f"[EVOLVE] 2.2: ✓ Noise decoherence applied")
+                except Exception as e:
+                    logger.critical(f"[EVOLVE] ❌ ERROR in apply_noise_decoherence: {type(e).__name__}: {e}")
+                    raise
                 
                 # 2. Construct W-state with Aer circuit
-                w_info = self.w_state.construct_from_aer_circuit()
-                logger.debug(f"[EVOLVE] Step 3/7: W-state constructed")
+                try:
+                    logger.debug(f"[EVOLVE] 3.1: Calling w_state.construct_from_aer_circuit()...")
+                    w_info = self.w_state.construct_from_aer_circuit()
+                    logger.debug(f"[EVOLVE] 3.2: ✓ w_info keys = {list(w_info.keys())}")
+                except Exception as e:
+                    logger.critical(f"[EVOLVE] ❌ ERROR in w_state.construct_from_aer_circuit: {type(e).__name__}: {e}")
+                    raise
                 
                 # 3. Execute CHSH Bell test
-                chsh_info = self.bell_tester.measure_chsh_from_aer()
-                logger.debug(f"[EVOLVE] Step 4/7: CHSH Bell test executed")
+                try:
+                    logger.debug(f"[EVOLVE] 4.1: Calling bell_tester.measure_chsh_from_aer()...")
+                    chsh_info = self.bell_tester.measure_chsh_from_aer()
+                    logger.debug(f"[EVOLVE] 4.2: ✓ chsh_info keys = {list(chsh_info.keys())}")
+                except Exception as e:
+                    logger.critical(f"[EVOLVE] ❌ ERROR in bell_tester.measure_chsh_from_aer: {type(e).__name__}: {e}")
+                    raise
                 
                 # 4. Coherence measurement & recovery
-                coherence_before = self.coherence_manager.get_global_coherence()
-                w_strength = w_info.get('w_strength', 0.5)
-                self.coherence_manager.apply_w_state_amplification(w_strength)
-                logger.debug(f"[EVOLVE] Step 5/7: Coherence measurement & amplification applied")
+                try:
+                    logger.debug(f"[EVOLVE] 5.1: Calling coherence_manager.get_global_coherence()...")
+                    coherence_before = self.coherence_manager.get_global_coherence()
+                    logger.debug(f"[EVOLVE] 5.2: coherence_before = {coherence_before:.4f}")
+                except Exception as e:
+                    logger.critical(f"[EVOLVE] ❌ ERROR in get_global_coherence: {type(e).__name__}: {e}")
+                    raise
+                
+                try:
+                    w_strength = w_info.get('w_strength', 0.5)
+                    logger.debug(f"[EVOLVE] 5.3: w_strength = {w_strength:.4f}")
+                except Exception as e:
+                    logger.critical(f"[EVOLVE] ❌ ERROR extracting w_strength: {type(e).__name__}: {e}")
+                    raise
+                
+                try:
+                    logger.debug(f"[EVOLVE] 5.4: Calling coherence_manager.apply_w_state_amplification({w_strength:.4f})...")
+                    self.coherence_manager.apply_w_state_amplification(w_strength)
+                    logger.debug(f"[EVOLVE] 5.5: ✓ W-state amplification applied")
+                except Exception as e:
+                    logger.critical(f"[EVOLVE] ❌ ERROR in apply_w_state_amplification: {type(e).__name__}: {e}")
+                    raise
                 
                 # 5. Neural refresh ← THIS IS WHERE MATMUL ERROR LIKELY HAPPENS
                 logger.debug(f"[EVOLVE] Step 5.5/7: Preparing neural features...")
