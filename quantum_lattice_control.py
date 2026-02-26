@@ -29,6 +29,13 @@ from enum import Enum
 from dataclasses import dataclass, field
 from pydantic import BaseModel, Field, ValidationError
 
+# NumPy 2.0 renamed trapz → trapezoid; resolve once at import time so no
+# AttributeError can occur at runtime regardless of installed NumPy version.
+if hasattr(np, 'trapezoid'):
+    _np_trapz = np.trapezoid   # NumPy >= 2.0
+else:
+    _np_trapz = np.trapz       # NumPy < 2.0
+
 # ─────────────────────────────────────────────────────────────────────────────
 # QISKIT AER — HARD DEPENDENCY (Qiskit 1.x / qiskit-aer 0.14+)
 # Aer was removed from qiskit core in Qiskit 1.0.0; it lives in qiskit-aer.
@@ -140,8 +147,7 @@ class MemoryKernelState:
         if len(self.kernel_values) > 1:
             vals = list(self.kernel_values)
             dts  = list(self.time_steps)
-            _trapz   = getattr(np, 'trapezoid', np.trapz)
-            integral = float(_trapz(vals, dts)) * rho_s_value
+            integral = float(_np_trapz(vals, dts)) * rho_s_value
             self.cumulative_integral = integral
             return integral
         return 0.0
@@ -737,8 +743,7 @@ class NonMarkovianNoiseBath:
         k_vals    = (BATH_ETA * wc**2 * np.exp(-wc * tau_vals) *
                      (np.cos(Om * tau_vals) + (gamma_r / Om) * np.sin(Om * tau_vals)))
 
-        _trapz   = getattr(np, 'trapezoid', np.trapz)  # NumPy 2.0 renamed trapz → trapezoid
-        integral = float(_trapz(k_vals * rho_hist, tau_vals)) * self.kappa
+        integral = float(_np_trapz(k_vals * rho_hist, tau_vals)) * self.kappa
         self.nz_state.cumulative_integral = integral
         return integral
 
