@@ -801,13 +801,13 @@ class NeuralRefreshNetwork:
             logger.error(f"[NEURAL] CRITICAL: {e}")
             # EMERGENCY RECOVERY: Reinitialize all weights
             self._emergency_reinit()
-            # Return safe defaults
-            output = np.tanh(np.random.randn(5) * 0.01)
+            # Return safe defaults (256-d to match new architecture)
+            output = np.tanh(np.random.randn(256) * 0.01)  # ← FIXED: 256-d not 5-d
         
         except Exception as e:
             logger.error(f"[NEURAL] Forward pass CRITICAL ERROR: {e}")
             self._emergency_reinit()
-            output = np.tanh(np.random.randn(5) * 0.01)
+            output = np.tanh(np.random.randn(256) * 0.01)  # ← FIXED: 256-d not 5-d
         
         try:
             # Extract control parameters from first 5 dimensions of 256-d output (PATH 1)
@@ -827,6 +827,17 @@ class NeuralRefreshNetwork:
             learning_rate = 0.001
             entanglement_target = 1.0
             lattice_update_vector = np.zeros(256)
+        
+        # ════════════════════════════════════════════════════════════════════
+        # CRITICAL: Ensure output is ALWAYS 256-dimensional
+        # ════════════════════════════════════════════════════════════════════
+        if output.shape != (256,):
+            logger.critical(f"[NEURAL_SAFETY_CHECK] ❌ Output shape is {output.shape}, not (256,)!")
+            logger.critical(f"[NEURAL_SAFETY_CHECK] Correcting to 256-d...")
+            if len(output) < 256:
+                output = np.pad(output, (0, 256 - len(output)), mode='constant')
+            else:
+                output = output[:256]
         
         return output, {
             'optimal_sigma': optimal_sigma,
