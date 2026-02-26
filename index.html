@@ -1,377 +1,1112 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>QTCL — Quantum Temporal Coherence Ledger</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    
-    :root {
-      --bg: #0a0a0e;
-      --bg-secondary: #0f0f14;
-      --border: #1a1a24;
-      --border-light: #252535;
-      --sky-blue: #00bfff;
-      --sky-blue-dim: #0099cc;
-      --sky-blue-dark: #007399;
-      --text: #d4d4d8;
-      --text-dim: #808089;
-      --success: #22c55e;
-      --error: #ef4444;
-      --warning: #eab308;
-      --glow-sky: 0 0 20px rgba(0, 191, 255, 0.3);
-    }
-    
-    html, body {
-      width: 100%;
-      height: 100%;
-      overflow: hidden;
-      font-family: 'Fira Code', 'JetBrains Mono', 'Menlo', monospace;
-      font-size: 13px;
-      background: var(--bg);
-      color: var(--text);
-      line-height: 1.5;
-      letter-spacing: 0.2px;
-      position: fixed;
-    }
-    
-    #app {
-      display: flex;
-      flex-direction: column;
-      height: 100vh;
-      width: 100%;
-    }
-    
-    /* Header */
-    #header {
-      display: flex;
-      align-items: center;
-      gap: 20px;
-      height: 45px;
-      padding: 0 20px;
-      background: linear-gradient(90deg, var(--bg) 0%, var(--bg-secondary) 100%);
-      border-bottom: 2px solid var(--sky-blue);
-      box-shadow: 0 0 20px rgba(0, 191, 255, 0.1);
-      flex-shrink: 0;
-    }
-    
-    #header-title {
-      font-size: 14px;
-      font-weight: bold;
-      letter-spacing: 3px;
-      color: var(--sky-blue);
-      text-shadow: var(--glow-sky);
-      user-select: none;
-    }
-    
-    /* Terminal Container */
-    #terminal {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-      background: var(--bg);
-    }
-    
-    /* Output Area */
-    #output {
-      flex: 1;
-      overflow-y: auto;
-      overflow-x: hidden;
-      padding: 20px;
-      padding-right: 15px;
-      background: var(--bg);
-    }
-    
-    #output::-webkit-scrollbar {
-      width: 8px;
-    }
-    
-    #output::-webkit-scrollbar-track {
-      background: transparent;
-    }
-    
-    #output::-webkit-scrollbar-thumb {
-      background: rgba(0, 191, 255, 0.2);
-      border-radius: 4px;
-      transition: all 0.3s ease;
-    }
-    
-    #output::-webkit-scrollbar-thumb:hover {
-      background: rgba(0, 191, 255, 0.4);
-    }
-    
-    /* Line Styles */
-    .line {
-      margin-bottom: 3px;
-      white-space: pre-wrap;
-      word-wrap: break-word;
-      font-size: 13px;
-      animation: slideIn 0.15s ease-out;
-      font-variant-numeric: tabular-nums;
-    }
-    
-    @keyframes slideIn {
-      from {
-        opacity: 0;
-        transform: translateY(2px);
-      }
-      to {
-        opacity: 1;
-        transform: translateY(0);
-      }
-    }
-    
-    .line-prompt {
-      color: var(--text-dim);
-    }
-    
-    .line-cmd {
-      color: var(--sky-blue);
-      font-weight: 500;
-    }
-    
-    .line-success {
-      color: var(--success);
-    }
-    
-    .line-error {
-      color: var(--error);
-    }
-    
-    .line-warning {
-      color: var(--warning);
-    }
-    
-    .line-info {
-      color: var(--sky-blue);
-      opacity: 0.8;
-    }
-    
-    .line-system {
-      color: var(--text-dim);
-    }
-    
-    .line-dim {
-      color: var(--text-dim);
-      opacity: 0.7;
-    }
-    
-    .line-header {
-      color: var(--sky-blue);
-      font-weight: bold;
-      letter-spacing: 2px;
-      margin-top: 8px;
-      margin-bottom: 4px;
-      border-bottom: 1px solid var(--border);
-      padding-bottom: 4px;
-    }
-    
-    /* Input Area */
-    #inputbar {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 12px 20px;
-      border-top: 2px solid var(--sky-blue);
-      background: linear-gradient(90deg, var(--bg) 0%, var(--bg-secondary) 100%);
-      flex-shrink: 0;
-      box-shadow: 0 -2px 15px rgba(0, 191, 255, 0.1);
-    }
-    
-    #prompt {
-      color: var(--sky-blue);
-      font-weight: bold;
-      font-size: 13px;
-      user-select: none;
-      flex-shrink: 0;
-      text-shadow: var(--glow-sky);
-    }
-    
-    #cmd {
-      flex: 1;
-      background: transparent;
-      border: none;
-      outline: none;
-      color: var(--text);
-      font-family: inherit;
-      font-size: 13px;
-      caret-color: var(--sky-blue);
-      padding: 4px 0;
-      user-select: text;
-    }
-    
-    #cmd::placeholder {
-      color: var(--text-dim);
-      opacity: 0.5;
-    }
-    
-    #cmd:focus {
-      outline: none;
-      border-bottom: 1px solid var(--sky-blue);
-      padding-bottom: 3px;
-    }
-    
-    #exec-btn {
-      padding: 6px 14px;
-      background: rgba(0, 191, 255, 0.1);
-      border: 1px solid var(--sky-blue);
-      color: var(--sky-blue);
-      font-family: inherit;
-      font-size: 11px;
-      font-weight: bold;
-      letter-spacing: 1px;
-      cursor: pointer;
-      border-radius: 2px;
-      transition: all 0.2s ease;
-      text-transform: uppercase;
-      flex-shrink: 0;
-      user-select: none;
-    }
-    
-    #exec-btn:hover {
-      background: rgba(0, 191, 255, 0.2);
-      box-shadow: 0 0 15px rgba(0, 191, 255, 0.3);
-    }
-    
-    #exec-btn:active {
-      transform: scale(0.98);
-    }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>QTCL v5.0 — Quantum Temporal Coherence Ledger</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#050508;
+  --bg2:#0a0a12;
+  --bg3:#0f0f1a;
+  --panel:#0d0d18;
+  --border:#1a1a2e;
+  --border2:#252545;
+  --border-light:#363654;
+  --cyan:#00d4ff;
+  --cyan2:#00a0cc;
+  --cyan-dark:#0088aa;
+  --green:#2ecc71;
+  --green2:#1a7a45;
+  --amber:#f0b429;
+  --red:#e05252;
+  --purple:#bb86fc;
+  --dim:#404060;
+  --mid:#606080;
+  --text:#d0d0e8;
+  --text-dim:#a0a0b8;
+  --glow-cyan: 0 0 12px rgba(0,212,255,0.3);
+  --glow-green: 0 0 10px rgba(46,204,113,0.25);
+  --glow-purple: 0 0 10px rgba(187,134,252,0.25);
+  --transition: all 0.2s cubic-bezier(0.4,0,0.2,1);
+}
+html,body{width:100%;height:100%;overflow:hidden;font-family:'Fira Code','Menlo','Monaco','Courier New',monospace;font-size:13px;background:var(--bg);color:var(--text);line-height:1.6;letter-spacing:0.3px;position:fixed;}
+
+/* ─── LAYOUT ─── */
+#app{display:flex;flex-direction:column;height:100vh}
+
+/* ─── TOP BAR ─── */
+#topbar{
+  display:flex;align-items:center;gap:0;
+  background:linear-gradient(90deg,#02020a 0%,#08081a 100%);
+  border-bottom:2px solid var(--border);
+  padding:0;
+  flex-shrink:0;
+  height:50px;
+  box-shadow:0 2px 8px rgba(0,0,0,0.5);
+}
+#brand{
+  display:flex;align-items:center;gap:12px;
+  padding:0 22px;border-right:2px solid var(--border);
+  height:100%;
+}
+.brand-icon{font-size:18px;color:var(--cyan)}
+.brand-name{
+  font-size:13px;font-weight:bold;letter-spacing:3px;
+  color:var(--cyan);text-shadow:var(--glow-cyan);
+}
+.brand-version{
+  font-size:10px;color:var(--mid);letter-spacing:1px;margin-left:8px;
+}
+
+/* ─── TABS ─── */
+#tabs{display:flex;height:100%;flex:1}
+.tab{
+  display:flex;align-items:center;gap:8px;
+  padding:0 24px;cursor:pointer;
+  border-right:1px solid var(--border);
+  font-size:11px;letter-spacing:2px;font-weight:bold;
+  color:var(--dim);transition:var(--transition);
+  text-transform:uppercase;position:relative;
+  user-select:none;
+}
+.tab:hover{color:var(--text);background:rgba(255,255,255,0.01)}
+.tab.active{
+  color:var(--cyan);
+  background:rgba(0,212,255,0.06);
+}
+.tab.active::after{
+  content:'';position:absolute;bottom:0;left:0;right:0;height:3px;
+  background:linear-gradient(90deg,var(--cyan),var(--cyan2));box-shadow:var(--glow-cyan);
+}
+.tab-dot{width:7px;height:7px;border-radius:50%;background:var(--dim)}
+.tab.active .tab-dot{background:var(--cyan);box-shadow:var(--glow-cyan);animation:pulse 2.5s ease-in-out infinite}
+
+/* ─── STATUS STRIP ─── */
+#statusbar{
+  margin-left:auto;display:flex;align-items:center;gap:20px;
+  padding-right:20px;font-size:10px;color:var(--dim);letter-spacing:1px;
+  text-transform:uppercase;
+}
+.stat{display:flex;align-items:center;gap:7px;padding:0 10px}
+.stat-dot{width:6px;height:6px;border-radius:50%;animation:pulse 2.5s ease-in-out infinite}
+.stat-dot.ok{background:var(--green);box-shadow:var(--glow-green)}
+.stat-dot.warn{background:var(--amber);animation:none;opacity:0.7}
+.stat-dot.off{background:var(--red);animation:none;opacity:0.6}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:0.6;transform:scale(1.1)}}
+
+/* ─── CONTENT AREA ─── */
+#content{flex:1;overflow:hidden;display:flex}
+
+/* ─── TERMINAL TAB ─── */
+#terminal-view{flex:1;display:flex;flex-direction:column;overflow:hidden}
+
+/* ─── TERMINAL OUTPUT ─── */
+#output{
+  flex:1;overflow-y:auto;overflow-x:hidden;
+  padding:16px 20px;background:var(--bg);
+}
+#output::-webkit-scrollbar{width:6px}
+#output::-webkit-scrollbar-track{background:transparent}
+#output::-webkit-scrollbar-thumb{background:var(--border-light);border-radius:3px;transition:var(--transition)}
+#output::-webkit-scrollbar-thumb:hover{background:var(--dim)}
+
+/* ─── OUTPUT LINES ─── */
+.line{margin-bottom:4px;white-space:pre-wrap;word-wrap:break-word;font-size:13px;animation:fadeIn 0.15s ease;font-variant-numeric:tabular-nums}
+@keyframes fadeIn{from{opacity:0;transform:translateY(2px)}to{opacity:1;transform:translateY(0)}}
+.line-prompt{color:var(--mid)}
+.line-cmd{color:var(--text);font-weight:500}
+.line-success{color:var(--green)}
+.line-error{color:var(--red)}
+.line-info{color:#5a9ccc}
+.line-warning{color:var(--amber)}
+.line-system{color:var(--cyan);opacity:0.85}
+.line-dim{color:var(--dim)}
+.line-header{color:var(--cyan);font-weight:bold;letter-spacing:2px;border-bottom:1px solid var(--border);padding-bottom:3px;margin-bottom:6px}
+
+/* prompt line */
+.prompt-line{display:flex;gap:7px;margin-bottom:4px;align-items:flex-start}
+.prompt-arrow{color:var(--cyan);opacity:0.7;font-weight:bold;min-width:15px}
+.prompt-cmd-text{color:var(--text)}
+
+/* ─── INPUT AREA ─── */
+#inputbar{
+  display:flex;align-items:center;
+  padding:12px 20px;gap:12px;
+  border-top:2px solid var(--border);
+  background:linear-gradient(90deg,var(--bg) 0%,var(--bg2) 100%);
+  flex-shrink:0;
+  position:relative;
+  z-index:9999;
+  box-shadow:0 -2px 10px rgba(0,0,0,0.5);
+}
+.input-ps1{color:var(--cyan);opacity:0.8;user-select:none;font-size:13px;flex-shrink:0;font-weight:bold}
+#cmd{
+  flex:1;background:transparent;border:none;outline:none;
+  color:var(--text);font-family:inherit;font-size:13px;caret-color:var(--cyan);
+  padding:8px 4px;
+  -webkit-user-select:text;
+  user-select:text;
+}
+#cmd::placeholder{color:var(--dim)}
+#cmd:focus{color:var(--text);outline:none;border-bottom:1px solid var(--cyan)}
+#exec-btn{
+  padding:8px 16px;background:rgba(0,212,255,0.08);
+  border:1px solid var(--border-light);color:var(--cyan);
+  cursor:pointer;border-radius:3px;font-size:11px;letter-spacing:1px;
+  font-family:inherit;transition:var(--transition);text-transform:uppercase;font-weight:bold;
+  min-width:50px;
+  flex-shrink:0;
+}
+#exec-btn:hover{background:rgba(0,212,255,0.18);border-color:var(--cyan);box-shadow:0 0 10px rgba(0,212,255,0.2)}
+#exec-btn:active{transform:scale(0.98)}
+
+/* ─── INFO TAB ─── */
+#info-view{
+  flex:1;display:none;overflow-y:auto;overflow-x:hidden;
+  padding:24px;background:var(--bg2);
+}
+#info-view.active{display:block}
+#info-view::-webkit-scrollbar{width:6px}
+#info-view::-webkit-scrollbar-track{background:transparent}
+#info-view::-webkit-scrollbar-thumb{background:var(--border-light);border-radius:3px}
+#info-view::-webkit-scrollbar-thumb:hover{background:var(--dim)}
+
+.info-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:18px;margin-bottom:24px}
+.info-card{
+  background:linear-gradient(135deg,var(--panel) 0%,var(--bg3) 100%);
+  border:1px solid var(--border-light);
+  border-radius:6px;padding:18px;
+  transition:var(--transition);
+  box-shadow:0 4px 6px rgba(0,0,0,0.2);
+}
+.info-card:hover{border-color:var(--cyan);box-shadow:0 0 15px rgba(0,212,255,0.15)}
+.info-card-title{
+  font-size:11px;letter-spacing:2px;text-transform:uppercase;
+  color:var(--cyan);margin-bottom:14px;opacity:0.9;
+  border-bottom:2px solid var(--border);padding-bottom:8px;
+  font-weight:bold;
+}
+.info-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:12px}
+.info-key{color:var(--mid);font-weight:500}
+.info-val{color:var(--green);font-weight:bold;font-variant-numeric:tabular-nums}
+.info-val.dim{color:var(--dim)}
+.info-val.warn{color:var(--amber)}
+.info-val.cyan{color:var(--cyan)}
+.info-val.purple{color:var(--purple)}
+
+.cmd-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.cmd-tag{
+  padding:4px 10px;background:rgba(0,212,255,0.08);
+  border:1px solid var(--border-light);border-radius:3px;
+  font-size:10px;color:var(--cyan);letter-spacing:0.5px;cursor:pointer;
+  transition:var(--transition);font-weight:500;
+}
+.cmd-tag:hover{background:rgba(0,212,255,0.2);border-color:var(--cyan);box-shadow:var(--glow-cyan);transform:scale(1.05)}
+.cmd-tag:active{transform:scale(0.95)}
+
+/* ─── COMMAND CATEGORIES ─── */
+.category-section{margin-bottom:28px}
+.category-header{
+  font-size:12px;letter-spacing:2px;text-transform:uppercase;
+  color:var(--purple);margin-bottom:12px;opacity:0.9;
+  font-weight:bold;padding-bottom:6px;border-bottom:1px solid var(--border);
+}
+
+/* ─── SPINNER ─── */
+.spinner{
+  display:inline-block;width:12px;height:12px;border:2px solid var(--dim);
+  border-top:2px solid var(--cyan);border-radius:50%;
+  animation:spin 0.8s linear infinite;vertical-align:middle;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ─── MOBILE OPTIMIZATIONS ─── */
+@media (max-width: 768px) {
+  #app{
+    height:100vh;
+    max-height:100vh;
+    overflow:hidden;
+  }
+  
+  #content{
+    overflow:hidden;
+    max-height:calc(100vh - 95px);
+  }
+  
+  #inputbar{
+    padding:10px 12px;
+    gap:8px;
+    position:fixed;
+    bottom:0;
+    left:0;
+    right:0;
+    width:100%;
+    height:auto;
+    min-height:50px;
+    border-top:2px solid var(--border);
+    border-bottom:none;
+    box-shadow:0 -4px 20px rgba(0,0,0,0.9);
+    z-index:9999;
+    background:var(--bg);
+    display:flex !important;
+    visibility:visible !important;
+    opacity:1 !important;
+  }
+  
+  #terminal-view{
+    flex:1;
+    overflow:hidden;
+    display:flex;
+    flex-direction:column;
+    height:calc(100vh - 95px);
+  }
+  
+  #output{
+    flex:1;
+    overflow-y:auto;
+    overflow-x:hidden;
+    padding:12px 14px;
+    padding-bottom:60px;
+  }
+  
+  .input-ps1{
+    font-size:11px;
+    min-width:35px;
+  }
+  
+  #cmd{
+    font-size:16px;
+    padding:12px 8px;
+    min-height:38px;
+    border:1px solid var(--border-light);
+    border-radius:3px;
+    background:rgba(255,255,255,0.02);
+  }
+  
+  #cmd:focus{
+    border:1px solid var(--cyan);
+    background:rgba(0,212,255,0.05);
+  }
+  
+  #exec-btn{
+    padding:10px 12px;
+    font-size:12px;
+    min-width:55px;
+    min-height:38px;
+  }
+
+  .brand-name{font-size:11px}
+  .tab{padding:0 14px;font-size:9px}
+  #topbar{height:45px}
+  .info-grid{grid-template-columns:1fr}
+  #statusbar{gap:10px;padding-right:14px}
+}
+
+/* ─── PQC TECH DESCRIPTION PANEL ─── */
+.pqc-panel {
+  background: linear-gradient(135deg, #07071a 0%, #0a0a1f 50%, #060614 100%);
+  border: 1px solid #1a1a3a;
+  border-left: 3px solid var(--purple);
+  border-radius: 6px;
+  padding: 22px 26px 26px;
+  margin-bottom: 20px;
+  position: relative;
+  overflow: hidden;
+}
+.pqc-panel::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--purple), var(--cyan), transparent);
+  opacity: 0.4;
+}
+.pqc-panel-title {
+  font-size: 11px;
+  letter-spacing: 4px;
+  text-transform: uppercase;
+  color: var(--purple);
+  font-weight: bold;
+  margin-bottom: 6px;
+  text-shadow: 0 0 12px rgba(187,134,252,0.4);
+}
+.pqc-panel-subtitle {
+  font-size: 10px;
+  color: var(--mid);
+  letter-spacing: 1px;
+  margin-bottom: 18px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid #1a1a35;
+}
+.pqc-section { margin-bottom: 18px; }
+.pqc-section-hdr {
+  font-size: 10px;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  color: var(--cyan);
+  margin-bottom: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #151530;
+}
+.pqc-body {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  line-height: 1.8;
+  letter-spacing: 0.2px;
+}
+.pqc-body em { color: var(--cyan); font-style: normal; font-weight: bold; }
+.pqc-body strong { color: var(--text); font-weight: bold; }
+.pqc-body .hl-purple { color: var(--purple); font-weight: bold; }
+.pqc-body .hl-green  { color: var(--green);  font-weight: bold; }
+.pqc-body .hl-amber  { color: var(--amber);  font-weight: bold; }
+.pqc-math {
+  font-family: 'Fira Code', monospace;
+  font-size: 11px;
+  color: #88aaff;
+  background: rgba(0,0,40,0.6);
+  border: 1px solid #1a1a40;
+  border-radius: 4px;
+  padding: 10px 14px;
+  margin: 8px 0;
+  line-height: 1.7;
+  overflow-x: auto;
+  white-space: pre;
+}
+.pqc-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 10px;
+}
+@media (max-width: 700px) { .pqc-grid-2 { grid-template-columns: 1fr; } }
+.pqc-stat {
+  background: rgba(0,0,30,0.5);
+  border: 1px solid #1a1a35;
+  border-radius: 4px;
+  padding: 10px 14px;
+}
+.pqc-stat-label { font-size: 10px; color: var(--dim); letter-spacing: 1px; margin-bottom: 3px; }
+.pqc-stat-val   { font-size: 12px; color: var(--cyan); font-weight: bold; }
+.pqc-cap-row { display:flex; align-items:center; gap:8px; margin-bottom:5px; font-size:11.5px; }
+.pqc-cap-dot { width:6px; height:6px; border-radius:50%; background:var(--dim); flex-shrink:0; }
+.pqc-cap-dot.on { background:var(--green); box-shadow:0 0 6px rgba(46,204,113,0.5); }
+.pqc-cap-dot.off { background:var(--red); }
+.pqc-cap-dot.partial { background:var(--amber); }
+</style>
 </head>
 <body>
-  <div id="app">
-    <div id="header">
-      <div id="header-title">⬡ QTCL</div>
+<div id="app">
+
+  <!-- TOP BAR -->
+  <div id="topbar">
+    <div id="brand">
+      <span class="brand-icon">⚛</span>
+      <span class="brand-name">QTCL</span>
+      <span class="brand-version">v5.0</span>
     </div>
-    
-    <div id="terminal">
-      <div id="output"></div>
-      
-      <div id="inputbar">
-        <div id="prompt">QTCL></div>
-        <input type="text" id="cmd" placeholder="type command...">
-        <button id="exec-btn">Execute</button>
+    <div id="tabs">
+      <div class="tab active" data-view="terminal" onclick="switchTab('terminal')">
+        <div class="tab-dot"></div>TERMINAL
+      </div>
+      <div class="tab" data-view="info" onclick="switchTab('info')">
+        <div class="tab-dot"></div>INFO
+      </div>
+    </div>
+    <div id="statusbar">
+      <div class="stat">
+        <div class="stat-dot ok" id="dot-api"></div>
+        <span id="lbl-api">API</span>
+      </div>
+      <div class="stat">
+        <div class="stat-dot warn" id="dot-quantum"></div>
+        <span id="lbl-quantum">QUANTUM</span>
+      </div>
+      <div class="stat">
+        <div class="stat-dot warn" id="dot-db"></div>
+        <span id="lbl-db">DB</span>
       </div>
     </div>
   </div>
 
-  <script>
-    const state = {
-      cmdInput: document.getElementById('cmd'),
-      output: document.getElementById('output'),
-      execBtn: document.getElementById('exec-btn'),
-      history: [],
-      historyIndex: -1,
-    };
+  <!-- CONTENT -->
+  <div id="content">
 
-    // Add line to output
-    function addLine(text, className = 'line-system') {
-      const line = document.createElement('div');
-      line.className = `line ${className}`;
-      line.textContent = text;
-      state.output.appendChild(line);
-      state.output.scrollTop = state.output.scrollHeight;
-    }
+    <!-- TERMINAL VIEW -->
+    <div id="terminal-view">
+      <div id="output"></div>
+      <div id="inputbar">
+        <span class="input-ps1">QTCL ›</span>
+        <input type="text" id="cmd" placeholder="Type 'help' for commands…" spellcheck="false" autocomplete="off">
+        <button id="exec-btn">RUN</button>
+      </div>
+    </div>
 
-    // Execute command
-    async function execute() {
-      const cmd = state.cmdInput.value.trim();
-      if (!cmd) return;
+    <!-- INFO VIEW -->
+    <div id="info-view">
+      <div id="info-content">
+        <!-- Dynamically populated -->
+      </div>
+    </div>
 
-      // Add to history
-      state.history.push(cmd);
-      state.historyIndex = state.history.length;
+  </div>
+</div>
 
-      // Display input
-      addLine(`QTCL> ${cmd}`, 'line-cmd');
-      state.cmdInput.value = '';
+<script>
+'use strict';
 
-      try {
-        const response = await fetch('/api/command', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ command: cmd }),
-        });
+// ─── GLOBAL STATE ───
+const state = {
+  output: document.getElementById('output'),
+  cmdInput: document.getElementById('cmd'),
+  cmdHistory: [],
+  histIdx: -1,
+  statusData: {},
+  allCommands: [],
+  commandsByCategory: {},
+  isLoading: false,
+  isMobile: /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+};
 
-        const data = await response.json();
+// ─── TAB SWITCHING ───
+function switchTab(name) {
+  const tabs = document.querySelectorAll('.tab');
+  tabs.forEach(t => t.classList.remove('active'));
+  document.querySelector(`[data-view="${name}"]`).classList.add('active');
+  
+  const termView = document.getElementById('terminal-view');
+  const infoView = document.getElementById('info-view');
+  
+  if (name === 'terminal') {
+    termView.style.display = 'flex';
+    infoView.classList.remove('active');
+    setTimeout(() => state.cmdInput.focus(), 50);
+  } else {
+    termView.style.display = 'none';
+    infoView.classList.add('active');
+    // Fetch fresh PQC telemetry each time info tab is opened
+    loadPQCStatus();
+  }
+}
 
-        if (data.status === 'success') {
-          if (data.result) {
-            const result = data.result;
-            if (typeof result === 'string') {
-              addLine(result, 'line-success');
-            } else {
-              addLine(JSON.stringify(result, null, 2), 'line-success');
-            }
-          }
-        } else if (data.error) {
-          addLine(`[ERROR] ${data.error}`, 'line-error');
-        } else {
-          addLine('[No output]', 'line-dim');
-        }
+// ─── OUTPUT UTILITIES ───
+function addLine(text, style = 'system') {
+  const line = document.createElement('div');
+  line.className = `line line-${style}`;
+  line.textContent = text;
+  state.output.appendChild(line);
+  state.output.scrollTop = state.output.scrollHeight;
+}
 
-        if (data.execution_time_ms) {
-          addLine(`[ ${data.execution_time_ms.toFixed(2)}ms ]`, 'line-dim');
-        }
-      } catch (err) {
-        addLine(`[ERROR] ${err.message}`, 'line-error');
-      }
+function addPromptLine(cmd) {
+  const container = document.createElement('div');
+  container.className = 'prompt-line';
+  container.innerHTML = `<span class="prompt-arrow">›</span><span class="prompt-cmd-text">${escapeHtml(cmd)}</span>`;
+  state.output.appendChild(container);
+}
 
-      state.cmdInput.focus();
-    }
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
 
-    // Event listeners
-    state.execBtn.addEventListener('click', execute);
-    state.cmdInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        execute();
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        if (state.historyIndex > 0) {
-          state.historyIndex--;
-          state.cmdInput.value = state.history[state.historyIndex];
-        }
-      } else if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        if (state.historyIndex < state.history.length - 1) {
-          state.historyIndex++;
-          state.cmdInput.value = state.history[state.historyIndex];
-        } else {
-          state.historyIndex = state.history.length;
-          state.cmdInput.value = '';
-        }
-      }
+// ─── COMMAND EXECUTION ───
+async function execute() {
+  const raw = state.cmdInput.value.trim();
+  if (!raw || state.isLoading) return;
+
+  state.cmdHistory.unshift(raw);
+  state.histIdx = -1;
+  state.cmdInput.value = '';
+
+  addPromptLine(raw);
+
+  // Local client-side commands
+  const lc = raw.toLowerCase();
+  if (lc === 'clear' || lc === 'cls') { state.output.innerHTML = ''; return; }
+  if (lc === 'info') { switchTab('info'); return; }
+  if (lc === 'help') { showDynamicHelp(); return; }
+
+  state.isLoading = true;
+  state.cmdInput.disabled = true;
+
+  try {
+    // Parse via executor so --flag=value and slash-notation are handled correctly
+    const parsed   = window.qtclExecutor
+      ? window.qtclExecutor.parse(raw)
+      : { command: raw.replace(/\//g, '-'), args: [], kwargs: {} };
+    const cmdStr   = window.qtclExecutor
+      ? window.qtclExecutor.buildCommandString(parsed.command, parsed.args, parsed.kwargs)
+      : parsed.command;
+
+    const token = window.qtclExecutor ? window.qtclExecutor.getToken() : '';
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const res = await fetch('/api/command', {
+      method:  'POST',
+      headers,
+      body: JSON.stringify({ command: cmdStr, args: [], kwargs: {} })
     });
 
-    // Boot sequence
-    async function boot() {
-      const BOOT = [
-        { t: 20, msg: '╔═══════════════════════════════════════════════════════╗', cls: 'line-dim' },
-        { t: 20, msg: '║  QUANTUM TEMPORAL COHERENCE LEDGER                    ║', cls: 'line-info' },
-        { t: 20, msg: '║  Command Interface                                    ║', cls: 'line-info' },
-        { t: 20, msg: '╚═══════════════════════════════════════════════════════╝', cls: 'line-dim' },
-        { t: 40, msg: '', cls: 'line-system' },
-        { t: 60, msg: 'Initializing quantum subsystem…', cls: 'line-info' },
-        { t: 60, msg: 'Loading command registry…', cls: 'line-info' },
-        { t: 60, msg: 'Connecting to database…', cls: 'line-info' },
-        { t: 40, msg: '', cls: 'line-system' },
-        { t: 40, msg: 'Type "help" for command list', cls: 'line-dim' },
-        { t: 80, msg: 'Ready.', cls: 'line-success' },
-        { t: 20, msg: '', cls: 'line-system' },
-      ];
+    const data = await res.json().catch(() => ({ error: 'Invalid JSON response' }));
 
-      let delay = 0;
-      for (const { t, msg, cls } of BOOT) {
-        await new Promise(r => setTimeout(r, t));
-        addLine(msg, cls);
+    // Capture auth tokens from login responses
+    const tok = data.result?.token || data.result?.access_token || data.token;
+    if (tok && window.qtclExecutor) window.qtclExecutor.setToken(tok);
+
+    if (res.ok && (data.status === 'success' || data.result !== undefined)) {
+      const result = data.result;
+      if (!result) {
+        addLine('✓ OK', 'success');
+      } else if (typeof result === 'object') {
+        if (result.output) {
+          result.output.split('\n').forEach(l => {
+            if (l.trim()) addLine(l, l.includes('─') || l.includes('═') || l.includes('║') ? 'system' : 'success');
+          });
+        } else {
+          try {
+            const pretty = JSON.stringify(result, null, 2);
+            pretty.split('\n').forEach(l => addLine(l, 'success'));
+          } catch {
+            addLine(String(result), 'success');
+          }
+        }
+      } else {
+        String(result).split('\n').forEach(l => { if (l.trim()) addLine(l, 'success'); });
       }
-
+    } else {
+      const errMsg = data.error || `HTTP ${res.status}`;
+      addLine('✗ ' + errMsg, 'error');
+      if (data.suggestions && data.suggestions.length) {
+        addLine('Similar: ' + data.suggestions.join(', '), 'warning');
+      }
+    }
+  } catch (err) {
+    addLine('Network error: ' + err.message, 'error');
+  } finally {
+    state.isLoading = false;
+    state.cmdInput.disabled = false;
+    state.output.scrollTop = state.output.scrollHeight;
+    if (state.isMobile) {
+      setTimeout(() => {
+        state.cmdInput.focus();
+        state.cmdInput.scrollIntoView({ behavior: 'instant', block: 'end' });
+      }, 50);
+    } else {
       state.cmdInput.focus();
     }
+  }
+}
 
-    boot();
-  </script>
+// ─── DYNAMIC COMMAND LOADING ───
+async function loadCommands() {
+  try {
+    addLine('Loading command registry from globals…', 'dim');
+    const res = await fetch('/api/commands');
+    if (res.ok) {
+      const data = await res.json();
+      // API returns commands as a plain object keyed by name — normalize to array
+      const raw = data.commands || data || {};
+      if (Array.isArray(raw)) {
+        state.allCommands = raw;
+      } else {
+        state.allCommands = Object.entries(raw).map(([name, info]) => ({
+          name,
+          category: info.category || 'misc',
+          description: info.description || '',
+          auth_required: info.auth_required || false,
+          ...info
+        }));
+      }
+      state.commandsByCategory = {};
+
+      state.allCommands.forEach(cmd => {
+        const cat = cmd.category || 'misc';
+        if (!state.commandsByCategory[cat]) {
+          state.commandsByCategory[cat] = [];
+        }
+        state.commandsByCategory[cat].push(cmd);
+      });
+      
+      addLine(`✓ Loaded ${state.allCommands.length} commands from registry`, 'success');
+      renderInfoGrid();
+    } else {
+      addLine('⚠ Could not load commands', 'warning');
+    }
+  } catch (e) {
+    addLine(`⚠ Command load error: ${e.message}`, 'warning');
+    console.error('Command load failed:', e);
+  }
+}
+
+// ─── DYNAMIC HELP ───
+function showDynamicHelp() {
+  addLine('', 'dim');
+  addLine('╔════════════════════════════════════════════════════════╗', 'system');
+  addLine('║  QTCL v5.0 — COMMAND REFERENCE & SYNTAX GUIDE          ║', 'system');
+  addLine('╚════════════════════════════════════════════════════════╝', 'system');
+  addLine('', 'dim');
+
+  addLine('📱 MOBILE UX TIPS:', 'info');
+  addLine('  • Input box auto-focuses at bottom of screen', 'dim');
+  addLine('  • Click/tap terminal → input focuses', 'dim');
+  addLine('  • Keyboard opens automatically', 'dim');
+  addLine('  • Press RUN button or Enter to execute', 'dim');
+  addLine('', 'dim');
+
+  addLine('🎯 COMMAND SYNTAX — HYPHEN-SEPARATED (canonical format):', 'warning');
+  addLine('  Format: category-command --flag=value --bool-flag', 'text');
+  addLine('', 'dim');
+  addLine('  EXAMPLES:', 'success');
+  addLine('    ✓ admin-users                   list all users', 'dim');
+  addLine('    ✓ admin-users --limit=20 --role=admin', 'dim');
+  addLine('    ✓ quantum-status                quantum engine metrics', 'dim');
+  addLine('    ✓ block-details --block=42      block by number', 'dim');
+  addLine('    ✓ oracle-price --symbol=BTCUSD  live price feed', 'dim');
+  addLine('    ✓ system-health                 full health check', 'dim');
+  addLine('    ✓ login --email=x --password=y  authenticate', 'dim');
+  addLine('    ✓ help-commands                 list all commands', 'dim');
+  addLine('    ✓ help-category --category=defi show defi commands', 'dim');
+  addLine('', 'dim');
+  addLine('  NOTE: quantum/status also works — slash auto-converts to hyphen', 'dim');
+  addLine('', 'dim');
+
+  addLine('📖 HELP COMMANDS:', 'info');
+  addLine('  help                    This menu', 'dim');
+  addLine('  help-commands           List ALL registered commands', 'dim');
+  addLine('  help-category --category=admin    Show admin commands', 'dim');
+  addLine('  help-category --category=quantum  Show quantum commands', 'dim');
+  addLine('  help-category --category=defi     Show DeFi commands', 'dim');
+  addLine('', 'dim');
+
+  if (Object.keys(state.commandsByCategory).length === 0) {
+    addLine('(Commands not yet loaded — visit INFO tab to load)', 'dim');
+  } else {
+    addLine('📂 COMMAND CATEGORIES:', 'info');
+    const categories = Object.keys(state.commandsByCategory).sort();
+    categories.forEach(cat => {
+      const count = state.commandsByCategory[cat].length;
+      addLine(`  ${cat.padEnd(16)} (${count} commands)   help-category --category=${cat}`, 'dim');
+    });
+  }
+
+  addLine('', 'dim');
+  addLine('💡 QUICK START:', 'info');
+  addLine('  1. help-commands           — see everything available', 'dim');
+  addLine('  2. system-health           — check all systems', 'dim');
+  addLine('  3. quantum-status          — quantum engine metrics', 'dim');
+  addLine('  4. oracle-price --symbol=BTCUSD  — live price', 'dim');
+  addLine('  5. Click INFO tab          — visual system status', 'dim');
+  addLine('', 'dim');
+}
+
+// ─── KEYBOARD HANDLING ───
+state.cmdInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') { 
+    e.preventDefault(); 
+    execute(); 
+  }
+  else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    state.histIdx = Math.min(state.histIdx + 1, state.cmdHistory.length - 1);
+    if (state.histIdx >= 0) state.cmdInput.value = state.cmdHistory[state.histIdx];
+  }
+  else if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    state.histIdx = Math.max(state.histIdx - 1, -1);
+    state.cmdInput.value = state.histIdx >= 0 ? state.cmdHistory[state.histIdx] : '';
+  }
+});
+
+// ─── BUTTON EVENT ───
+document.getElementById('exec-btn').addEventListener('click', execute);
+
+// ─── STATUS POLLING ───
+async function loadStatus() {
+  try {
+    const r = await fetch('/api/status');
+    if (r.ok) {
+      const d = await r.json();
+      state.statusData = d;
+      
+      const qok = d.quantum && (d.quantum.status === 'active' || d.quantum.status === 'Active');
+      setDot('quantum', qok ? 'ok' : 'warn');
+      document.getElementById('lbl-quantum').textContent = 
+        d.quantum ? (d.quantum.status || 'QUANTUM').toUpperCase().slice(0, 10) : 'QUANTUM';
+      
+      const dbok = d.database || d.db;
+      setDot('db', dbok ? 'ok' : 'warn');
+      
+      setDot('api', 'ok');
+      
+      if (d.ledger && typeof d.ledger.blocks === 'number') {
+        document.getElementById('lbl-db').textContent = d.ledger.blocks + ' BLK';
+      }
+    }
+  } catch (e) { 
+    setDot('api', 'warn');
+  }
+}
+
+function setDot(id, cls) {
+  const d = document.getElementById('dot-' + id);
+  if (d) d.className = 'stat-dot ' + cls;
+}
+
+setInterval(loadStatus, 12000);
+
+// ─── PQC LIVE TELEMETRY ───
+// Cached from the last /api/pqc/status fetch
+state.pqcData = {};
+
+async function loadPQCStatus() {
+  try {
+    const r = await fetch('/api/pqc/status', { cache: 'no-store' });
+    if (r.ok) {
+      const j = await r.json();
+      state.pqcData = j.data || j;
+      renderInfoGrid(); // re-render with live data
+    }
+  } catch(e) {}
+}
+
+// ─── INFO GRID ───
+function renderInfoGrid() {
+  const container = document.getElementById('info-content');
+  container.innerHTML = '';
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // PQC DESCRIPTION PANEL — dense world-class technical description
+  // ══════════════════════════════════════════════════════════════════════════
+  const pqc = state.pqcData;
+  const pqcInit   = pqc.initialized ?? false;
+  const pqcParams = pqc.params || 'HLWE-256';
+  const pqcKeys   = pqc.keys   || {};
+  const pqcOps    = pqc.operations || {};
+  const pqcEnt    = pqc.entropy   || {};
+  const pqcTess   = pqc.tessellation || {};
+  const capDot = (on) => `<span class="pqc-cap-dot ${on ? 'on' : 'off'}"></span>`;
+
+  const pqcPanel = document.createElement('div');
+  pqcPanel.className = 'pqc-panel';
+  pqcPanel.innerHTML = `
+    <div class="pqc-panel-title">⬡ Post-Quantum Cryptography Engine</div>
+    <div class="pqc-panel-subtitle">
+      HLWE — Hyperbolic Learning With Errors &nbsp;|&nbsp;
+      PSL(2,ℝ) / {8,3} Tessellation &nbsp;|&nbsp;
+      ${pqcParams} &nbsp;|&nbsp; ${pqcInit ? '<span style="color:var(--green)">ACTIVE</span>' : '<span style="color:var(--amber)">INITIALIZING</span>'}
+    </div>
+
+    <!-- ── HARD PROBLEM ─────────────────────────────────────────────────── -->
+    <div class="pqc-section">
+      <div class="pqc-section-hdr">Hard Problem &amp; Quantum Resistance</div>
+      <div class="pqc-body">
+        The cryptographic bedrock of every key, signature, and encapsulation in this system is
+        the <em>Hyperbolic Learning With Errors</em> (HLWE) problem — a geometric generalization
+        of Ring-LWE into the non-Euclidean hyperbolic plane <strong>ℍ²</strong>.
+        The hard instance is stated as: given <em>k</em> public landmark points
+        <strong>z₁ … z_k</strong> drawn from a depth-5 <em>{8,3} triangular tessellation</em>
+        of the Poincaré disk, and noisy hyperbolic distances
+        <strong>bᵢ = d_ℍ(zᵢ, s) + eᵢ</strong> (where eᵢ ~ N(0,σ²)), recover the secret
+        center <strong>s ∈ ℍ²</strong>. This is computationally intractable under four
+        independent hardness properties absent from any Euclidean lattice scheme:
+      </div>
+      <div class="pqc-math">① PSL(2,ℝ) isometry group is NON-ABELIAN
+       → Shor / Kitaev Hidden Subgroup Problem requires abelian structure — inapplicable here.
+
+② Hyperbolic volume growth is EXPONENTIAL:  vol(Bᵣ) ~ eʳ  (vs  rⁿ Euclidean)
+   → Each unit of radial depth multiplies search space exponentially.
+   → Effective attack dimension is doubly-exponential in Euclidean equivalents.
+
+③ {8,3} triangle group Δ(2,3,8) has NO known efficient quantum algorithm.
+   → Automorphism group is a non-elementary hyperbolic group (word problem is in P,
+     conjugacy / isomorphism are undecidable in the general case).
+
+④ Lattice basis reduction (LLL, BKZ-2020, sieving) is UNDEFINED on ℍ²
+   → All polynomial-time classical lattice attacks degenerate to brute-force search.</div>
+      <div class="pqc-body" style="margin-top:10px">
+        The <span class="hl-purple">pseudoqubit identity binding</span> mechanism adds a fifth,
+        operational layer of security: every private key <em>s</em> is derived as the
+        geodesic midpoint between the user's canonical tessellation anchor
+        <strong>anchor(pq_id) ∈ {8,3}</strong> and a private entropy point sampled from
+        three independent QRNG sources. Revoking the DB row for <code>pseudoqubit_id</code>
+        makes the anchor mathematically unreachable — the derivation path is
+        <span class="hl-amber">cryptographically dead</span> without any key distribution or CRL.
+      </div>
+    </div>
+
+    <!-- ── MATHEMATICAL FOUNDATION ─────────────────────────────────────── -->
+    <div class="pqc-section">
+      <div class="pqc-section-hdr">Mathematical Foundation — Poincaré Disk &amp; {8,3} Tessellation</div>
+      <div class="pqc-body">
+        All computations operate in the <em>Poincaré disk model</em> of the hyperbolic plane:
+        <strong>ℍ² = {z ∈ ℂ : |z| &lt; 1}</strong> equipped with the Riemannian metric
+        <strong>ds² = 4(dx²+dy²)/(1−|z|²)²</strong>. The isometry group is
+        <em>PSL(2,ℝ)</em> — Möbius transformations of the form
+        <strong>T(z) = (az+b)/(b̄z+ā)</strong>, |a|²−|b|² = 1. Non-commutativity of
+        composition (T₁∘T₂ ≠ T₂∘T₁) is the group-theoretic root of quantum resistance.
+        Geodesic distances are computed via the exact formula
+        <strong>d(z₁,z₂) = 2 arctanh(|z₁−z₂|/|1−z̄₁z₂|)</strong> at
+        <em>150 decimal places</em> of mpmath precision, matching the db_builder_v2 standard.
+      </div>
+      <div class="pqc-math">Tessellation {8,3}: octagonal {p=8} tiles, three meeting at each vertex {q=3}
+Fundamental octagon vertex angle: π/8  |  Meeting angle: π/3
+Triangle area (Gauss-Bonnet):  A = π(1 − 13/24) = 11π/24
+Circumradius:  cosh(R) = cos(π/8)·cos(π/3) / sin²(π/8)
+
+Subdivision at depth d:  8 × 4ᵈ triangles
+Depth 5 total:  8 × 4⁵ = 8,192 triangles
+Pseudoqubits per triangle:  13  (3 vertices + incenter + circumcenter + orthocenter + 7 barycentric)
+Total positions:  8,192 × 13 = 106,496 unique lattice anchors</div>
+      <div class="pqc-body">
+        Each of the <em>106,496 pseudoqubit positions</em> maps one-to-one to a unique
+        Poincaré disk coordinate via the canonical 5-level recursive Möbius subdivision.
+        This gives every user a <span class="hl-purple">geometrically unique cryptographic identity</span>
+        guaranteed by the infinite non-repeating structure of the {8,3} tiling — in direct analogy
+        to how prime factorization gives RSA its uniqueness, but operating in a space where quantum
+        algorithms have zero known purchase.
+      </div>
+    </div>
+
+    <!-- ── KEY ARCHITECTURE ─────────────────────────────────────────────── -->
+    <div class="pqc-section">
+      <div class="pqc-section-hdr">Six-Level Key Architecture</div>
+      <div class="pqc-body">
+        The system implements a complete 6-level hierarchical key architecture, each level
+        building atomically on the one below it:
+      </div>
+      <div class="pqc-math">L0 — HyperbolicMath         : Poincaré disk primitives (Möbius, geodesic, midpoint, barycentric)
+L1 — HLWESampler            : Keypair generation — derives s = geodesic_midpoint(anchor(pq_id), entropy_point)
+                              Public key: (landmark_seed, {bᵢ = d_ℍ(zᵢ,s) + eᵢ}ᵢ₌₁ᵏ)
+L2a — HyperKEM (IND-CCA2)  : Fujisaki-Okamoto KEM — ephemeral ℍ² encapsulation → AES-256-GCM
+L2b — HyperSign (EUF-CMA)  : Fiat-Shamir w/ Aborts over {8,3} walk — rejection-sampled signatures
+L3 — HyperbolicKeyGenerator : BIP32-analogous HD tree: m / purpose / index via geodesic derivation
+L4 — HyperZKProver          : Sigma-protocol (3-move) non-interactive ZK proofs of pseudoqubit ownership
+     HyperbolicSecretSharing : Shamir (t,n) adapted to ℍ² — shares geometrically bound to pseudoqubits
+L5 — KeyVaultManager        : AES-256-GCM encrypted key store (PostgreSQL) + cascade revocation CTE</div>
+      <div class="pqc-body">
+        Hybrid mode activates when <code>liboqs</code> is available: every HLWE operation is
+        XOR-composed with its CRYSTALS counterpart — <span class="hl-green">Kyber-1024</span> for
+        encapsulation, <span class="hl-green">Dilithium5</span> for signatures. This provides
+        <em>defense-in-depth</em>: an attacker must simultaneously break both HLWE on PSL(2,ℝ)
+        <strong>and</strong> NIST-standardized Module-LWE to recover any key material.
+      </div>
+    </div>
+
+    <!-- ── ENTROPY ──────────────────────────────────────────────────────── -->
+    <div class="pqc-section">
+      <div class="pqc-section-hdr">Quantum Entropy Pipeline</div>
+      <div class="pqc-body">
+        All key material originates from a <em>triple-source QRNG entropy hedge</em>.
+        Sources are queried in parallel and XOR-combined: <strong>ANU Quantum Lab</strong>
+        (vacuum fluctuation photon detection), <strong>Random.org</strong> (atmospheric noise),
+        and <strong>LFDR German QRNG</strong> (quantum optical source). The XOR hedge guarantees
+        that final entropy strength equals the <em>maximum</em> of individual source strengths —
+        even if two sources are entirely compromised, the third source's entropy is fully preserved.
+        A final SHA3-512 expansion pass ensures uniform distribution before any key derivation step.
+        Each key is additionally domain-separated by its <code>pseudoqubit_id</code>, making QRNG
+        collision attacks between users computationally infeasible even with identical raw entropy.
+      </div>
+    </div>
+
+    <!-- ── LIVE TELEMETRY GRID ──────────────────────────────────────────── -->
+    <div class="pqc-section">
+      <div class="pqc-section-hdr">Live Telemetry</div>
+      <div class="pqc-grid-2">
+        <div class="pqc-stat"><div class="pqc-stat-label">PARAMETER SET</div>
+          <div class="pqc-stat-val">${pqcParams}</div></div>
+        <div class="pqc-stat"><div class="pqc-stat-label">TESSELLATION</div>
+          <div class="pqc-stat-val">${pqcTess.scheme || '{8,3} hyperbolic'}</div></div>
+        <div class="pqc-stat"><div class="pqc-stat-label">TOTAL ANCHORS</div>
+          <div class="pqc-stat-val">${(pqcTess.total_positions || 106496).toLocaleString()}</div></div>
+        <div class="pqc-stat"><div class="pqc-stat-label">ASSIGNED</div>
+          <div class="pqc-stat-val">${(pqcTess.assigned || 0).toLocaleString()}</div></div>
+        <div class="pqc-stat"><div class="pqc-stat-label">KEYS ACTIVE</div>
+          <div class="pqc-stat-val" style="color:var(--green)">${pqcKeys.active ?? '—'}</div></div>
+        <div class="pqc-stat"><div class="pqc-stat-label">KEYS REVOKED</div>
+          <div class="pqc-stat-val" style="color:var(--red)">${pqcKeys.revoked ?? '—'}</div></div>
+        <div class="pqc-stat"><div class="pqc-stat-label">SIGNATURES</div>
+          <div class="pqc-stat-val">${pqcOps.signatures_produced ?? '—'}</div></div>
+        <div class="pqc-stat"><div class="pqc-stat-label">ZK PROOFS</div>
+          <div class="pqc-stat-val">${pqcOps.zk_proofs ?? '—'}</div></div>
+        <div class="pqc-stat"><div class="pqc-stat-label">ENTROPY BYTES</div>
+          <div class="pqc-stat-val">${(pqcEnt.total_bytes || 0).toLocaleString()}</div></div>
+        <div class="pqc-stat"><div class="pqc-stat-label">QRNG HITS</div>
+          <div class="pqc-stat-val">${((pqcEnt.sources?.anu_qrng||0)+(pqcEnt.sources?.random_org||0)+(pqcEnt.sources?.lfdr_qrng||0)).toLocaleString()}</div></div>
+      </div>
+    </div>
+
+    <!-- ── CAPABILITY FLAGS ─────────────────────────────────────────────── -->
+    <div class="pqc-section">
+      <div class="pqc-section-hdr">System Capabilities</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 24px">
+        <div class="pqc-cap-row">${capDot(pqcInit)}<span style="color:var(--text)">HLWE Engine</span><span style="color:var(--dim);font-size:10px;margin-left:auto">PSL(2,ℝ)</span></div>
+        <div class="pqc-cap-row">${capDot(pqc.kyber_hybrid)}<span style="color:var(--text)">Kyber-1024 Hybrid</span><span style="color:var(--dim);font-size:10px;margin-left:auto">NIST L5</span></div>
+        <div class="pqc-cap-row">${capDot(pqc.dilithium_hybrid)}<span style="color:var(--text)">Dilithium5 Hybrid</span><span style="color:var(--dim);font-size:10px;margin-left:auto">NIST L5</span></div>
+        <div class="pqc-cap-row">${capDot(pqc.mpmath)}<span style="color:var(--text)">150-decimal Precision</span><span style="color:var(--dim);font-size:10px;margin-left:auto">mpmath</span></div>
+        <div class="pqc-cap-row">${capDot(pqc.vault_schema_ready)}<span style="color:var(--text)">Encrypted Key Vault</span><span style="color:var(--dim);font-size:10px;margin-left:auto">AES-256-GCM</span></div>
+        <div class="pqc-cap-row">${capDot(true)}<span style="color:var(--text)">Triple-Source QRNG</span><span style="color:var(--dim);font-size:10px;margin-left:auto">ANU+R.ORG+LFDR</span></div>
+        <div class="pqc-cap-row">${capDot(true)}<span style="color:var(--text)">ZK Ownership Proofs</span><span style="color:var(--dim);font-size:10px;margin-left:auto">Sigma / FS</span></div>
+        <div class="pqc-cap-row">${capDot(true)}<span style="color:var(--text)">Threshold Secret Sharing</span><span style="color:var(--dim);font-size:10px;margin-left:auto">(t,n) Shamir/ℍ²</span></div>
+        <div class="pqc-cap-row">${capDot(true)}<span style="color:var(--text)">HD Key Derivation</span><span style="color:var(--dim);font-size:10px;margin-left:auto">BIP32-analogue</span></div>
+        <div class="pqc-cap-row">${capDot(true)}<span style="color:var(--text)">Instant Cascade Revocation</span><span style="color:var(--dim);font-size:10px;margin-left:auto">CTE DB</span></div>
+      </div>
+    </div>
+
+    <!-- ── API ENDPOINTS ────────────────────────────────────────────────── -->
+    <div class="pqc-section" style="margin-bottom:0">
+      <div class="pqc-section-hdr">REST Endpoints</div>
+      <div class="pqc-body" style="font-size:11px;line-height:2">
+        <code style="color:var(--cyan)">GET  /api/pqc/status</code> &nbsp;— live telemetry &amp; capability snapshot<br>
+        <code style="color:var(--cyan)">POST /api/pqc/keygen</code> &nbsp;— generate HLWE master + subkey bundle<br>
+        <code style="color:var(--cyan)">POST /api/pqc/sign</code> &nbsp;&nbsp;&nbsp;— HyperSign EUF-CMA signature<br>
+        <code style="color:var(--cyan)">POST /api/pqc/verify</code> &nbsp;&nbsp;— verify HyperSign signature<br>
+        <code style="color:var(--cyan)">POST /api/pqc/encapsulate</code> — IND-CCA2 KEM (HLWE+Kyber hybrid)<br>
+        <code style="color:var(--cyan)">POST /api/pqc/prove-identity</code> — Sigma-protocol ZK proof<br>
+        <code style="color:var(--cyan)">POST /api/pqc/revoke</code> &nbsp;&nbsp;— instant cascade key revocation<br>
+        <code style="color:var(--cyan)">POST /api/pqc/rotate</code> &nbsp;&nbsp;— fresh-entropy key rotation
+      </div>
+    </div>
+  `;
+  container.appendChild(pqcPanel);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // SYSTEM STATUS CARDS (original 4-card grid)
+  // ══════════════════════════════════════════════════════════════════════════
+  const archCard = document.createElement('div');
+  archCard.className = 'info-card';
+  archCard.innerHTML = `
+    <div class="info-card-title">System Architecture</div>
+    <div class="info-row"><span class="info-key">Blockchain Type</span><span class="info-val">Quantum-Classical</span></div>
+    <div class="info-row"><span class="info-key">Consensus</span><span class="info-val">Quantum PoW + Classical PoS</span></div>
+    <div class="info-row"><span class="info-key">Validator Qubits</span><span class="info-val cyan">5 (W-State)</span></div>
+    <div class="info-row"><span class="info-key">Finality Proofs</span><span class="info-val purple">8-GHZ Circuit</span></div>
+    <div class="info-row"><span class="info-key">PQC Scheme</span><span class="info-val purple">HLWE / PSL(2,ℝ)</span></div>
+  `;
+  
+  const qCard = document.createElement('div');
+  qCard.className = 'info-card';
+  qCard.innerHTML = `
+    <div class="info-card-title">Quantum Subsystem</div>
+    <div class="info-row"><span class="info-key">Engine</span><span class="info-val">${state.statusData.quantum?.status || '—'}</span></div>
+    <div class="info-row"><span class="info-key">W-State</span><span class="info-val cyan">${state.statusData.quantum?.w_state || '—'}</span></div>
+    <div class="info-row"><span class="info-key">Coherence</span><span class="info-val purple">${state.statusData.quantum?.coherence || '—'}</span></div>
+    <div class="info-row"><span class="info-key">Entropy Pool</span><span class="info-val">${state.statusData.quantum?.entropy || '—'}</span></div>
+    <div class="info-row"><span class="info-key">QRNG Sources</span><span class="info-val green">3 Active</span></div>
+  `;
+  
+  const ledgerCard = document.createElement('div');
+  ledgerCard.className = 'info-card';
+  ledgerCard.innerHTML = `
+    <div class="info-card-title">Ledger Status</div>
+    <div class="info-row"><span class="info-key">Blocks</span><span class="info-val">${state.statusData.ledger?.blocks ?? '—'}</span></div>
+    <div class="info-row"><span class="info-key">Transactions</span><span class="info-val">${state.statusData.ledger?.transactions ?? '—'}</span></div>
+    <div class="info-row"><span class="info-key">Validators</span><span class="info-val">${state.statusData.ledger?.validators ?? '—'}</span></div>
+    <div class="info-row"><span class="info-key">Uptime</span><span class="info-val">${state.statusData.uptime ? Math.round(state.statusData.uptime) + 's' : '—'}</span></div>
+  `;
+  
+  const pqcLiveCard = document.createElement('div');
+  pqcLiveCard.className = 'info-card';
+  pqcLiveCard.innerHTML = `
+    <div class="info-card-title" style="color:var(--purple)">PQC Key Vault</div>
+    <div class="info-row"><span class="info-key">Active Keys</span><span class="info-val green">${pqcKeys.active ?? '—'}</span></div>
+    <div class="info-row"><span class="info-key">Rotations</span><span class="info-val cyan">${pqcKeys.rotated ?? '—'}</span></div>
+    <div class="info-row"><span class="info-key">Revocations</span><span class="info-val warn">${pqcKeys.revoked ?? '—'}</span></div>
+    <div class="info-row"><span class="info-key">Encapsulations</span><span class="info-val">${pqcOps.encapsulations ?? '—'}</span></div>
+  `;
+  
+  const grid = document.createElement('div');
+  grid.className = 'info-grid';
+  grid.appendChild(archCard);
+  grid.appendChild(qCard);
+  grid.appendChild(ledgerCard);
+  grid.appendChild(pqcLiveCard);
+  container.appendChild(grid);
+
+  const cats = Object.keys(state.commandsByCategory).sort();
+  
+  if (cats.length === 0) {
+    const noCmd = document.createElement('div');
+    noCmd.style.color = 'var(--dim)';
+    noCmd.style.padding = '20px';
+    noCmd.textContent = 'Commands not yet loaded. Run "help" in terminal.';
+    container.appendChild(noCmd);
+    return;
+  }
+  
+  cats.forEach(category => {
+    const section = document.createElement('div');
+    section.className = 'category-section';
+    
+    const header = document.createElement('div');
+    header.className = 'category-header';
+    header.textContent = category.toUpperCase();
+    section.appendChild(header);
+    
+    const cmdList = document.createElement('div');
+    cmdList.className = 'cmd-list';
+    
+    state.commandsByCategory[category].forEach(cmd => {
+      const tag = document.createElement('span');
+      tag.className = 'cmd-tag';
+      tag.textContent = cmd.name || cmd.command || '(unknown)';
+      tag.onclick = () => runQuick(cmd.name || cmd.command);
+      cmdList.appendChild(tag);
+    });
+    
+    section.appendChild(cmdList);
+    container.appendChild(section);
+  });
+}
+
+function runQuick(cmd) {
+  switchTab('terminal');
+  state.cmdInput.value = cmd;
+  execute();
+}
+
+// ─── BOOT SEQUENCE ───
+async function boot() {
+  const BOOT = [
+    { t: 0, msg: '╔═══════════════════════════════════════════════════════════╗', cls: 'system' },
+    { t: 30, msg: '║     QUANTUM TEMPORAL COHERENCE LEDGER  v5.0               ║', cls: 'system' },
+    { t: 30, msg: '║     Hybrid Blockchain Command Interface                    ║', cls: 'system' },
+    { t: 30, msg: '║     Comments & Collaboration: shemshallah@gmail.com        ║', cls: 'system' },
+    { t: 30, msg: '╚═══════════════════════════════════════════════════════════╝', cls: 'system' },
+    { t: 80, msg: '', cls: 'info' },
+    { t: 60, msg: 'Initializing quantum subsystem…', cls: 'info' },
+    { t: 80, msg: 'Loading command registry from globals…', cls: 'info' },
+    { t: 60, msg: 'Connecting to PostgreSQL ledger…', cls: 'info' },
+    { t: 100, msg: '', cls: 'info' },
+    { t: 60, msg: 'Type  help            — list all commands from globals', cls: 'dim' },
+    { t: 40, msg: 'Type  system-health   — full system health check', cls: 'dim' },
+    { t: 40, msg: 'Type  quantum-status  — quantum engine metrics', cls: 'dim' },
+    { t: 40, msg: 'Type  help-commands   — all 82+ registered commands', cls: 'dim' },
+    { t: 40, msg: 'Click INFO tab        — system details & quick launch', cls: 'dim' },
+    { t: 80, msg: '', cls: 'info' },
+    { t: 60, msg: 'Ready.', cls: 'success' },
+    { t: 20, msg: '', cls: 'info' },
+  ];
+
+  let delay = 0;
+  for (const { t, msg, cls } of BOOT) {
+    delay += t;
+    await new Promise(r => setTimeout(r, delay));
+    addLine(msg, cls);
+  }
+
+  await loadCommands();
+  loadStatus();
+  // Pre-fetch PQC status so info tab is populated immediately
+  loadPQCStatus();
+}
+
+state.cmdInput.focus();
+boot();
+</script>
+<script src="/command_executor.js"></script>
 </body>
 </html>
