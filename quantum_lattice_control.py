@@ -54,17 +54,45 @@ from qiskit_aer.noise import (
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(name)s — %(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
-# ── Qiskit noise suppression ──────────────────────────────────────────────────
-# Every AerSimulator.run() call triggers ~40 INFO lines from the transpiler
-# pass-manager pipeline (UnrollCustomDefinitions → BasisTranslator →
-# CommutativeCancellation → ConsolidateBlocks → …) plus a "Total Transpile
-# Time" summary from qiskit.compiler.transpiler.  Set these two hierarchies to
-# WARNING so only genuine qiskit errors/warnings surface.  This block must live
-# *after* basicConfig and *before* the first qiskit import so no handler race
-# can restore the noisy level.
-for _ql in ("qiskit.passmanager", "qiskit.passmanager.base_tasks",
-            "qiskit.compiler.transpiler", "qiskit.transpiler"):
-    logging.getLogger(_ql).setLevel(logging.WARNING)
+# ── Qiskit noise suppression — ROOT-HANDLER FILTER (bulletproof) ──────────────
+# Problem: qiskit.passmanager.base_tasks emits ~40 INFO lines per circuit (one
+# per transpiler micro-pass) and qiskit.compiler.transpiler emits a "Total
+# Transpile Time" line. setLevel() on the loggers is insufficient — qiskit's
+# internal logging config can reset effective levels after import.
+#
+# Solution: attach a Filter directly to every root handler.  Filters fire at
+# the *handler* level, downstream of the logger hierarchy entirely, so no
+# internal qiskit logger reconfiguration can bypass them.  We also call
+# setLevel() as belt-and-suspenders, but the filter is the actual guarantee.
+_QISKIT_NOISE_PREFIXES = (
+    "qiskit.passmanager",        # base_tasks, flow_controllers, …
+    "qiskit.compiler.transpiler", # "Total Transpile Time" lines
+    "qiskit.transpiler",          # older Qiskit builds
+)
+
+class _QiskitPassFilter(logging.Filter):
+    """Drop sub-INFO records from qiskit transpiler internals at the handler sink."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING:
+            return True  # always let warnings and errors through
+        return not any(record.name.startswith(p) for p in _QISKIT_NOISE_PREFIXES)
+
+_qiskit_filter = _QiskitPassFilter()
+# Attach to every handler currently on the root logger (covers StreamHandler,
+# FileHandler, gunicorn's handler, etc.) and also set logger levels as backup.
+for _h in logging.root.handlers:
+    _h.addFilter(_qiskit_filter)
+for _ql in _QISKIT_NOISE_PREFIXES:
+    _lg = logging.getLogger(_ql)
+    _lg.setLevel(logging.WARNING)
+    # If qiskit ever resets the level, the root-handler filter still catches it.
+
+# Guard: if basicConfig was called before us and root has no handlers yet,
+# install a handler now so the filter has somewhere to live.
+if not logging.root.handlers:
+    _fallback = logging.StreamHandler()
+    _fallback.addFilter(_qiskit_filter)
+    logging.root.addHandler(_fallback)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ════════════════════════════════════════════════════════════════════════════════

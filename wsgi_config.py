@@ -17,21 +17,32 @@ if not logging.getLogger().hasHandlers():
     )
 logger = logging.getLogger(__name__)
 
-# ── Qiskit noise suppression ──────────────────────────────────────────────────
-# qiskit.passmanager.base_tasks floods logs with every transpiler micro-pass
-# (UnrollCustomDefinitions, BasisTranslator, CommutativeCancellation, …) at
-# INFO level on every AerSimulator.run() call.  qiskit.compiler.transpiler
-# emits a "Total Transpile Time" line per circuit.  Neither is useful outside
-# of circuit-debugging sessions — silence both to WARNING so our own INFO
-# messages remain readable.  All other qiskit sub-loggers (qiskit_aer,
-# qiskit.circuit, etc.) stay at INFO so real errors surface immediately.
-for _noisy_logger in (
-    "qiskit.passmanager.base_tasks",
+# ── Qiskit noise suppression — ROOT-HANDLER FILTER (bulletproof) ──────────────
+# quantum_lattice_control installs this filter too, but wsgi_config must also
+# install it here because gunicorn worker processes may reach this module via a
+# different import path, or wsgi_config's basicConfig may fire after QLC's.
+# Attaching a Filter to root handlers is idempotent and safe to call twice.
+_QISKIT_NOISE_PREFIXES = (
+    "qiskit.passmanager",
     "qiskit.compiler.transpiler",
-    "qiskit.passmanager",          # parent catches any future sub-loggers
-    "qiskit.transpiler",           # alternate hierarchy in older Qiskit builds
-):
-    logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
+    "qiskit.transpiler",
+)
+
+class _QiskitPassFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING:
+            return True
+        return not any(record.name.startswith(p) for p in _QISKIT_NOISE_PREFIXES)
+
+_qf = _QiskitPassFilter()
+for _h in logging.root.handlers:
+    _h.addFilter(_qf)
+for _ql in _QISKIT_NOISE_PREFIXES:
+    logging.getLogger(_ql).setLevel(logging.WARNING)
+if not logging.root.handlers:
+    _fb = logging.StreamHandler()
+    _fb.addFilter(_qf)
+    logging.root.addHandler(_fb)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ════════════════════════════════════════════════════════════════════════════════════════
