@@ -694,8 +694,8 @@ class NeuralRefreshNetwork:
         INPUT_DIM = 12
         HIDDEN1_DIM = 128
         HIDDEN2_DIM = 64
-        HIDDEN3_DIM = 32
-        OUTPUT_DIM = 5
+        HIDDEN3_DIM = 256  # PATH 1: Expanded from 32 → 256 (matches HLWE lattice)
+        OUTPUT_DIM = 256   # PATH 1: Expanded from 5 → 256 (full pseudoqubit dimension)
         
         # Initialize weights with explicit shapes
         self.W1 = np.random.randn(INPUT_DIM, HIDDEN1_DIM) * 0.1
@@ -729,8 +729,8 @@ class NeuralRefreshNetwork:
             # CRITICAL: Validate ALL weight dimensions BEFORE any matmul
             assert self.W1.shape == (12, 128), f"CRITICAL: W1 shape corrupted! {self.W1.shape} vs (12, 128)"
             assert self.W2.shape == (128, 64), f"CRITICAL: W2 shape corrupted! {self.W2.shape} vs (128, 64)"
-            assert self.W3.shape == (64, 32), f"CRITICAL: W3 shape corrupted! {self.W3.shape} vs (64, 32)"
-            assert self.W4.shape == (32, 5), f"CRITICAL: W4 shape corrupted! {self.W4.shape} vs (32, 5)"
+            assert self.W3.shape == (64, 256), f"CRITICAL: W3 shape corrupted! {self.W3.shape} vs (64, 256)"
+            assert self.W4.shape == (256, 256), f"CRITICAL: W4 shape corrupted! {self.W4.shape} vs (256, 256)"
             
             # Ensure features is 1D with correct shape
             features = np.atleast_1d(features).astype(np.float64)
@@ -755,18 +755,18 @@ class NeuralRefreshNetwork:
             assert z2.shape == (64,), f"z2 shape wrong: {z2.shape}"
             a2 = np.tanh(z2)
             
-            # Layer 3: 64 → 32
+            # Layer 3: 64 → 256
             z3 = np.dot(a2, self.W3) + self.b3
-            assert z3.shape == (32,), f"z3 shape wrong: {z3.shape}"
+            assert z3.shape == (256,), f"z3 shape wrong: {z3.shape}"
             a3 = np.tanh(z3)
             
-            # Layer 4: 32 → 5
+            # Layer 4: 256 → 256
             z4 = np.dot(a3, self.W4) + self.b4
-            assert z4.shape == (5,), f"z4 shape wrong: {z4.shape}"
+            assert z4.shape == (256,), f"z4 shape wrong: {z4.shape}"
             output = np.tanh(z4)
             
             # Final output validation
-            assert output.shape == (5,), f"Output shape wrong: {output.shape}"
+            assert output.shape == (256,), f"Output shape wrong: {output.shape}"
             
         except AssertionError as e:
             logger.error(f"[NEURAL] CRITICAL: {e}")
@@ -781,11 +781,15 @@ class NeuralRefreshNetwork:
             output = np.tanh(np.random.randn(5) * 0.01)
         
         try:
+            # Extract control parameters from first 5 dimensions of 256-d output (PATH 1)
             optimal_sigma = float(0.08 + output[0] * 0.04)
             amplification = float(1.0 + output[1] * 0.5)
             recovery_boost = float(np.clip(output[2], 0.0, 1.0))
             learning_rate = float(0.001 + np.clip(output[3], 0.0, 0.01))
             entanglement_target = float(1.0 + output[4])
+            
+            # Store full 256-d output for lattice state update
+            lattice_update_vector = output.copy()
         except Exception as e:
             logger.error(f"[NEURAL] Output extraction error: {e}")
             optimal_sigma = 0.08
@@ -793,6 +797,7 @@ class NeuralRefreshNetwork:
             recovery_boost = 0.5
             learning_rate = 0.001
             entanglement_target = 1.0
+            lattice_update_vector = np.zeros(256)
         
         return output, {
             'optimal_sigma': optimal_sigma,
@@ -800,6 +805,7 @@ class NeuralRefreshNetwork:
             'recovery_boost': recovery_boost,
             'learning_rate': learning_rate,
             'entanglement_target': entanglement_target,
+            'lattice_update_vector': lattice_update_vector,  # PATH 1: Full 256-d lattice state update
         }
     
     def _emergency_reinit(self):
@@ -808,12 +814,12 @@ class NeuralRefreshNetwork:
         try:
             self.W1 = np.random.randn(12, 128) * 0.1
             self.W2 = np.random.randn(128, 64) * 0.1
-            self.W3 = np.random.randn(64, 32) * 0.1
-            self.W4 = np.random.randn(32, 5) * 0.1
+            self.W3 = np.random.randn(64, 256) * 0.1  # PATH 1: 64→256
+            self.W4 = np.random.randn(256, 256) * 0.1  # PATH 1: 256→256
             self.b1 = np.zeros(128, dtype=np.float64)
             self.b2 = np.zeros(64, dtype=np.float64)
-            self.b3 = np.zeros(32, dtype=np.float64)
-            self.b4 = np.zeros(5, dtype=np.float64)
+            self.b3 = np.zeros(256, dtype=np.float64)  # PATH 1: 256-dim bias
+            self.b4 = np.zeros(256, dtype=np.float64)  # PATH 1: 256-dim bias
             logger.info("[NEURAL] ✓ Emergency reinit complete - all weights restored")
         except Exception as e:
             logger.critical(f"[NEURAL] Emergency reinit FAILED: {e}")
@@ -827,8 +833,8 @@ class NeuralRefreshNetwork:
             # Validate weight matrix dimensions before forward pass
             assert self.W1.shape == (12, 128), f"W1 shape mismatch: {self.W1.shape} vs (12, 128)"
             assert self.W2.shape == (128, 64), f"W2 shape mismatch: {self.W2.shape} vs (128, 64)"
-            assert self.W3.shape == (64, 32), f"W3 shape mismatch: {self.W3.shape} vs (64, 32)"
-            assert self.W4.shape == (32, 5), f"W4 shape mismatch: {self.W4.shape} vs (32, 5)"
+            assert self.W3.shape == (64, 256), f"W3 shape mismatch: {self.W3.shape} vs (64, 256)"
+            assert self.W4.shape == (256, 256), f"W4 shape mismatch: {self.W4.shape} vs (256, 256)"
             
             output, predictions = self.forward(features)
             loss = float((features[0] - target_coherence) ** 2)
@@ -848,8 +854,8 @@ class NeuralRefreshNetwork:
             # Recover by reinitializing
             self.W1 = np.random.randn(12, 128) * 0.1
             self.W2 = np.random.randn(128, 64) * 0.1
-            self.W3 = np.random.randn(64, 32) * 0.1
-            self.W4 = np.random.randn(32, 5) * 0.1
+            self.W3 = np.random.randn(64, 256) * 0.1  # PATH 1: 64→256
+            self.W4 = np.random.randn(256, 256) * 0.1  # PATH 1: 256→256
         except Exception as e:
             logger.debug(f"[NEURAL] Step error: {e}")
     
@@ -1478,7 +1484,9 @@ class QuantumHeartbeat:
                     computed_s = abs(e_ab - e_ab_p + e_ap_b + e_ap_bp)
                     
                     coh = result.state.coherence
-                    trend = nn_stats.get('coherence_trend', 0.0)
+                    # PATH 3 FIX: Calculate nn_stats locally instead of undefined reference
+                    nn_stats = self.lattice.neural_network.get_statistics() if hasattr(self.lattice, 'neural_network') else {}
+                    trend = nn_stats.get('mean_loss', 0.0)
                     if coh > 0.92:
                         status = "📈 RECOVERING"
                     elif coh > 0.85:
