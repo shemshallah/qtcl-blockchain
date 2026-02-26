@@ -202,10 +202,11 @@ class PostQuantumCrypto:
         """Hash data using lattice-based compression."""
         with self.lock:
             classical_hash = hashlib.sha256(data).hexdigest()
-            # SHA512 produces 64 bytes, but we need 256-dimensional vector
-            lattice_vector_raw = np.frombuffer(hashlib.sha512(data).digest(), dtype=np.uint8)  # (64,)
-            # Pad to 256 dimensions to match secret_key (256, 256)
-            lattice_vector = np.pad(lattice_vector_raw, (0, self.dimension - len(lattice_vector_raw)), mode='constant')
+            # Use SHAKE-256 XOF to expand to exactly self.dimension bytes with full entropy.
+            # Zero-padding (the previous approach) left 192/256 dims as zeros, reducing
+            # effective LWE security from dim-256 to dim-64 — cryptographically broken.
+            shake = hashlib.shake_256(data)
+            lattice_vector = np.frombuffer(shake.digest(self.dimension), dtype=np.uint8)  # (256,) full entropy
             assert lattice_vector.shape == (self.dimension,), f"lattice_vector wrong shape: {lattice_vector.shape}"
             lattice_compression = (self.secret_key @ lattice_vector) % self.modulus
             lattice_hash = hashlib.sha256(lattice_compression.tobytes()).hexdigest()
@@ -1594,6 +1595,7 @@ class QuantumHeartbeat:
     def _run(self):
         """Heartbeat loop with API posting."""
         lattice = get_quantum_lattice()
+        self.lattice = lattice  # Fix: expose for nn_stats access on line referencing self.lattice
         while self.running:
             try:
                 result = lattice.evolve_one_cycle()
