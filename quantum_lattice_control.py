@@ -710,6 +710,24 @@ class NeuralRefreshNetwork:
         self.W4 = np.random.randn(HIDDEN3_DIM, OUTPUT_DIM) * 0.1
         self.b4 = np.zeros(OUTPUT_DIM, dtype=np.float64)
         
+        # ════════════════════════════════════════════════════════════════════════
+        # CRITICAL DIAGNOSTIC: Show which code version is running
+        # ════════════════════════════════════════════════════════════════════════
+        logger.critical(f"[NEURAL_INIT_DIAGNOSTIC] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        logger.critical(f"[NEURAL_INIT_DIAGNOSTIC] W1: {self.W1.shape} | Expected: (12, 128) {'✓' if self.W1.shape == (12, 128) else '❌'}")
+        logger.critical(f"[NEURAL_INIT_DIAGNOSTIC] W2: {self.W2.shape} | Expected: (128, 64) {'✓' if self.W2.shape == (128, 64) else '❌'}")
+        logger.critical(f"[NEURAL_INIT_DIAGNOSTIC] W3: {self.W3.shape} | Expected: (64, 256) {'✓ FIXED' if self.W3.shape == (64, 256) else '❌ OLD CODE (64, 32)'}")
+        logger.critical(f"[NEURAL_INIT_DIAGNOSTIC] W4: {self.W4.shape} | Expected: (256, 256) {'✓ FIXED' if self.W4.shape == (256, 256) else '❌ OLD CODE (32, 5)'}")
+        logger.critical(f"[NEURAL_INIT_DIAGNOSTIC] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        
+        if self.W3.shape != (64, 256) or self.W4.shape != (256, 256):
+            logger.critical(f"[NEURAL_INIT_DIAGNOSTIC] ⚠️  ALERT: Using OLD code version!")
+            logger.critical(f"[NEURAL_INIT_DIAGNOSTIC] Heartbeat will CRASH with matmul dimension error")
+            logger.critical(f"[NEURAL_INIT_DIAGNOSTIC] SOLUTION: Redeploy /mnt/user-data/outputs/quantum_lattice_control.py")
+        else:
+            logger.critical(f"[NEURAL_INIT_DIAGNOSTIC] ✓ CONFIRMED: Using NEW fixed code (PATH 1 & 3)")
+        # ════════════════════════════════════════════════════════════════════════
+        
         # Store expected dimensions for validation
         self.layer_dims = [
             (INPUT_DIM, HIDDEN1_DIM),
@@ -756,7 +774,18 @@ class NeuralRefreshNetwork:
             a2 = np.tanh(z2)
             
             # Layer 3: 64 → 256
-            z3 = np.dot(a2, self.W3) + self.b3
+            # ⚠️ THIS IS WHERE THE ERROR HAPPENS IF W3 IS WRONG
+            try:
+                z3 = np.dot(a2, self.W3) + self.b3
+            except ValueError as matmul_error:
+                logger.critical(f"[NEURAL_MATMUL_DIAGNOSTIC] ❌ MATMUL FAILED at Layer 3!")
+                logger.critical(f"[NEURAL_MATMUL_DIAGNOSTIC] a2 shape: {a2.shape} (expected (64,))")
+                logger.critical(f"[NEURAL_MATMUL_DIAGNOSTIC] W3 shape: {self.W3.shape} (expected (64, 256))")
+                logger.critical(f"[NEURAL_MATMUL_DIAGNOSTIC] Error: {matmul_error}")
+                logger.critical(f"[NEURAL_MATMUL_DIAGNOSTIC] This means OLD CODE is still running!")
+                logger.critical(f"[NEURAL_MATMUL_DIAGNOSTIC] W3 should be (64, 256) but is {self.W3.shape}")
+                raise
+            
             assert z3.shape == (256,), f"z3 shape wrong: {z3.shape}"
             a3 = np.tanh(z3)
             
