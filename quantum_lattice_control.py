@@ -49,7 +49,20 @@ from qiskit_aer.noise import (
     NoiseModel, depolarizing_error,
     amplitude_damping_error, phase_damping_error,
 )
+# ────────────────────────────────────────────────────────────────────────────
+# DATABASE INTEGRATION (NEW — Non-Invasive, Optional)
+# ────────────────────────────────────────────────────────────────────────────
 
+try:
+    import psycopg2
+    from psycopg2 import sql, errors as psycopg2_errors
+    from psycopg2.pool import ThreadedConnectionPool
+    from psycopg2.extras import RealDictCursor
+    DB_AVAILABLE = True
+except ImportError:
+    DB_AVAILABLE = False
+
+import queue
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(name)s — %(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -94,6 +107,163 @@ if not logging.root.handlers:
     _fallback.addFilter(_qiskit_filter)
     logging.root.addHandler(_fallback)
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# DATABASE CONFIGURATION & CONNECTOR (NEW)
+# ════════════════════════════════════════════════════════════════════════════════
+
+class DatabaseConfig:
+    """Database connection configuration."""
+    HOST = os.getenv('DB_HOST', 'localhost')
+    USER = os.getenv('DB_USER', 'postgres')
+    PASSWORD = os.getenv('DB_PASSWORD', 'password')
+    DATABASE = os.getenv('DB_NAME', 'quantum_lattice')
+    PORT = int(os.getenv('DB_PORT', '5432'))
+    POOL_SIZE = 5
+    TIMEOUT = 10
+
+
+class QuantumDatabaseConnector:
+    """Quantum metrics streaming to PostgreSQL/Supabase (async, non-blocking)."""
+    
+    def __init__(self, config: DatabaseConfig = None):
+        self.config = config or DatabaseConfig()
+        self.pool = None
+        self.log_queue = queue.Queue(maxsize=10000)
+        self.logger_thread = None
+        self.running = False
+        self.lock = threading.RLock()
+        self.stats = {'inserts_succeeded': 0, 'inserts_failed': 0, 'queue_depth': 0}
+        if DB_AVAILABLE:
+            self._initialize_pool()
+    
+    def _initialize_pool(self):
+        try:
+            self.pool = ThreadedConnectionPool(
+                minconn=1, maxconn=self.config.POOL_SIZE,
+                host=self.config.HOST, user=self.config.USER,
+                password=self.config.PASSWORD, database=self.config.DATABASE,
+                port=self.config.PORT, connect_timeout=self.config.TIMEOUT,
+            )
+            logger.info(f"[DB] Pool initialized")
+        except Exception as e:
+            logger.warning(f"[DB] Pool init failed: {e}")
+            self.pool = None
+    
+    def execute(self, query: str, params: Tuple = None) -> bool:
+        if not self.pool:
+            return False
+        conn = None
+        try:
+            conn = self.pool.getconn()
+            cursor = conn.cursor()
+            cursor.execute(query, params or ())
+            conn.commit()
+            cursor.close()
+            return True
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            return False
+        finally:
+            if conn:
+                self.pool.putconn(conn)
+    
+    def execute_fetch_all(self, query: str, params: Tuple = None) -> List[Dict]:
+        if not self.pool:
+            return []
+        conn = None
+        try:
+            conn = self.pool.getconn()
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute(query, params or ())
+            results = cursor.fetchall()
+            cursor.close()
+            return [dict(r) for r in results]
+        except Exception:
+            return []
+        finally:
+            if conn:
+                self.pool.putconn(conn)
+    
+    def queue_metric(self, metric: Dict[str, Any]) -> bool:
+        try:
+            self.log_queue.put_nowait(metric)
+            return True
+        except queue.Full:
+            return False
+    
+    def _logger_worker(self):
+        batch = []
+        last_flush = time.time()
+        while self.running:
+            try:
+                try:
+                    metric = self.log_queue.get(timeout=0.1)
+                    batch.append(metric)
+                except queue.Empty:
+                    pass
+                if len(batch) >= 50 or (time.time() - last_flush) > 1.0:
+                    if batch:
+                        self._batch_insert_metrics(batch)
+                        batch = []
+                        last_flush = time.time()
+                self.stats['queue_depth'] = self.log_queue.qsize()
+            except Exception:
+                time.sleep(0.5)
+        if batch:
+            self._batch_insert_metrics(batch)
+    
+    def _batch_insert_metrics(self, metrics: List[Dict[str, Any]]):
+        if not metrics or not self.pool:
+            return
+        conn = None
+        try:
+            conn = self.pool.getconn()
+            cursor = conn.cursor()
+            columns = list(metrics[0].keys())
+            placeholders = ','.join(['%s'] * len(columns))
+            insert_sql = f"INSERT INTO quantum_metrics ({','.join(columns)}) VALUES ({placeholders})"
+            values = [[m.get(col) for col in columns] for m in metrics]
+            cursor.executemany(insert_sql, values)
+            conn.commit()
+            self.stats['inserts_succeeded'] += len(metrics)
+            cursor.close()
+        except Exception:
+            if conn:
+                conn.rollback()
+            self.stats['inserts_failed'] += len(metrics)
+        finally:
+            if conn:
+                self.pool.putconn(conn)
+    
+    def start_logger(self):
+        with self.lock:
+            if not self.running and self.pool:
+                self.running = True
+                self.logger_thread = threading.Thread(
+                    target=self._logger_worker, daemon=True, name='QuantumDatabaseLogger'
+                )
+                self.logger_thread.start()
+    
+    def stop_logger(self):
+        with self.lock:
+            self.running = False
+        if self.logger_thread:
+            self.logger_thread.join(timeout=5)
+    
+    def get_stats(self) -> Dict[str, Any]:
+        return dict(self.stats)
+    
+    def close(self):
+        self.stop_logger()
+        if self.pool:
+            self.pool.closeall()
+
+
+# Global database instance
+db = None
 
 # ════════════════════════════════════════════════════════════════════════════════
 # CONSTANTS — CLAY MATHEMATICS / PHYSICS PARAMETERS
@@ -2035,6 +2205,9 @@ class QuantumLatticeController:
         self.channel_type = NoiseChannelType.UNKNOWN
         self.channel_confidence = 0.0
 
+        # Database integration (optional, graceful degradation if unavailable)
+        self.db = db
+        
         # History
         self.cycle_history:     deque = deque(maxlen=500)
         self.coherence_history: deque = deque(maxlen=500)
@@ -2395,6 +2568,25 @@ class QuantumLatticeController:
             except Exception as le:
                 logger.debug(f"[LATTICE] Listener error: {le}")
 
+        # ── DATABASE: Queue metrics for async insertion
+        if self.db:
+            try:
+                metric_record = {
+                    'cycle_num': cn, 'coherence': coherence_final, 'purity': purity,
+                    'fidelity': fidelity_final, 'entanglement_entropy': vn_entropy,
+                    'chsh_s': chsh_s, 'bell_violation': bell_violated,
+                    'revival_coherence': revival_coh, 'revival_state': revival_state_str,
+                    'nz_integral': float(noise_info.get('nz_integral', 0.0)),
+                    'noise_amplitude': float(noise_info.get('total_noise', 0.0)),
+                    'memory_effect': float(noise_info.get('memory_effect', 0.0)),
+                    'mutual_info': mutual_info, 'info_leakage_rate': info_leakage_rate,
+                    'tsirelson_ratio': tsirelson_ratio, 'execution_time_ms': exec_time_ms,
+                    'timestamp': datetime.now(timezone.utc),
+                }
+                self.db.queue_metric(metric_record)
+            except Exception:
+                pass
+
         return result
 
     def get_system_metrics(self) -> SystemMetrics:
@@ -2413,6 +2605,27 @@ class QuantumLatticeController:
                 revival_events_total = self.revival_events_total,
                 nz_memory_depth   = MEMORY_DEPTH,
             )
+
+    def query_metrics(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Query recent metrics from database."""
+        if not self.db or not self.db.pool:
+            return []
+        query = "SELECT cycle_num, coherence, purity, fidelity, bell_violation, revival_state, timestamp FROM quantum_metrics ORDER BY cycle_num DESC LIMIT %s"
+        return self.db.execute_fetch_all(query, (limit,))
+    
+    def get_revival_history(self) -> List[Dict[str, Any]]:
+        """Query revival events from database."""
+        if not self.db or not self.db.pool:
+            return []
+        query = "SELECT cycle_num, revival_coherence, revival_state, timestamp FROM quantum_metrics WHERE revival_state = 'seeded' ORDER BY cycle_num DESC LIMIT 100"
+        return self.db.execute_fetch_all(query)
+    
+    def get_coherence_trend(self, limit: int = 1000) -> List[Dict[str, Any]]:
+        """Get coherence trend from database."""
+        if not self.db or not self.db.pool:
+            return []
+        query = "SELECT cycle_num, coherence, purity, timestamp FROM quantum_metrics ORDER BY cycle_num DESC LIMIT %s"
+        return self.db.execute_fetch_all(query, (limit,))
 
     def get_full_status(self) -> Dict[str, Any]:
         return {
