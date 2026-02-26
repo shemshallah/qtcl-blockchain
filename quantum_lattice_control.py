@@ -1296,24 +1296,145 @@ def get_quantum_status() -> Dict[str, Any]:
 # HEARTBEAT DAEMON
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════
+# HEARTBEAT DAEMON WITH HTTP HEALTH REPORTING
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+# Global database manager reference (set by wsgi_config or main initialization)
+_db_manager = None
+
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+    import urllib.request
+    import json as json_module
+
 class QuantumHeartbeat:
-    """Periodic quantum lattice evolution daemon."""
+    """Periodic quantum lattice evolution daemon with HTTP API & database integration."""
     
-    def __init__(self, interval_seconds: float = 1.0):
+    def __init__(self, interval_seconds: float = 10.0, api_url: str = None):
+        # Use API_URL environment variable, fallback to parameter, then default
+        self.api_url = api_url or os.getenv('API_URL', 'http://localhost:8000/api/heartbeat')
         self.interval = interval_seconds
         self.running = False
         self.thread = None
         self.cycle_count = 0
         self.lock = threading.RLock()
         self.listeners = []
+        self.last_post_time = 0
+        self.post_failures = 0
+        self.post_successes = 0
+        self.health_status = "initializing"
+        
+        logger.info(f"[HEARTBEAT] Initialized with {interval_seconds}s interval, API_URL: {self.api_url}")
     
     def add_listener(self, callback: Callable):
         """Register callback for each heartbeat."""
         with self.lock:
             self.listeners.append(callback)
     
+    def post_to_api(self, beat_data: Dict[str, Any]) -> bool:
+        """POST heartbeat data to API endpoint."""
+        try:
+            if HAS_REQUESTS:
+                # Use requests library
+                response = requests.post(
+                    self.api_url,
+                    json=beat_data,
+                    timeout=5,
+                    headers={'Content-Type': 'application/json'}
+                )
+                success = response.status_code in [200, 201, 202]
+                if success:
+                    with self.lock:
+                        self.post_successes += 1
+                        self.health_status = "healthy"
+                    logger.debug(f"[HEARTBEAT-POST] ✓ Cycle {beat_data.get('beat_count')}: Posted successfully")
+                else:
+                    with self.lock:
+                        self.post_failures += 1
+                    logger.warning(f"[HEARTBEAT-POST] ⚠ Cycle {beat_data.get('beat_count')}: HTTP {response.status_code}")
+                return success
+            else:
+                # Fallback: Use urllib
+                req = urllib.request.Request(
+                    self.api_url,
+                    data=json_module.dumps(beat_data).encode('utf-8'),
+                    headers={'Content-Type': 'application/json'}
+                )
+                try:
+                    response = urllib.request.urlopen(req, timeout=5)
+                    success = response.status in [200, 201, 202]
+                    if success:
+                        with self.lock:
+                            self.post_successes += 1
+                            self.health_status = "healthy"
+                        logger.debug(f"[HEARTBEAT-POST] ✓ Cycle {beat_data.get('beat_count')}: Posted successfully")
+                    return success
+                except Exception as e:
+                    with self.lock:
+                        self.post_failures += 1
+                    logger.warning(f"[HEARTBEAT-POST] ⚠ Cycle {beat_data.get('beat_count')}: {e}")
+                    return False
+        except Exception as e:
+            with self.lock:
+                self.post_failures += 1
+                self.health_status = "api_error"
+            logger.error(f"[HEARTBEAT-POST] ✗ Failed to post: {e}")
+            return False
+    
+    def write_metrics_to_db(self, beat_data: Dict[str, Any]) -> bool:
+        """Write heartbeat metrics to database via db_builder_v2 global."""
+        global _db_manager
+        try:
+            if not _db_manager:
+                logger.debug("[HEARTBEAT-DB] Database manager not available")
+                return False
+            
+            # Get connection from pool
+            conn = _db_manager.get_connection()
+            if not conn:
+                logger.debug("[HEARTBEAT-DB] No database connection available")
+                return False
+            
+            try:
+                with conn.cursor() as cur:
+                    # Insert or update heartbeat metrics
+                    cur.execute("""
+                        INSERT INTO quantum_heartbeat_metrics 
+                        (beat_count, timestamp, state, metrics, stats_data) 
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (beat_count) DO UPDATE SET
+                            timestamp = EXCLUDED.timestamp,
+                            state = EXCLUDED.state,
+                            metrics = EXCLUDED.metrics,
+                            stats_data = EXCLUDED.stats_data
+                    """, (
+                        beat_data.get('beat_count'),
+                        beat_data.get('timestamp'),
+                        beat_data.get('state', {}),
+                        beat_data.get('metrics', {}),
+                        beat_data.get('stats', {}),
+                    ))
+                    conn.commit()
+                    logger.debug(f"[HEARTBEAT-DB] ✓ Cycle {beat_data.get('beat_count')}: Metrics stored to database")
+                    return True
+            except Exception as e:
+                logger.warning(f"[HEARTBEAT-DB] Error storing metrics: {e}")
+                if conn:
+                    conn.rollback()
+                return False
+            finally:
+                if hasattr(_db_manager, 'return_connection') and conn:
+                    _db_manager.return_connection(conn)
+        except Exception as e:
+            logger.debug(f"[HEARTBEAT-DB] Database write failed: {e}")
+            return False
+    
     def _run(self):
-        """Heartbeat loop."""
+        """Heartbeat loop with API posting."""
         lattice = get_quantum_lattice()
         while self.running:
             try:
@@ -1321,7 +1442,34 @@ class QuantumHeartbeat:
                 
                 with self.lock:
                     self.cycle_count += 1
-                    # Log Bell measurements
+                    
+                    # Prepare heartbeat data
+                    beat_data = {
+                        'beat_count': self.cycle_count,
+                        'timestamp': datetime.now(timezone.utc).isoformat(),
+                        'state': {
+                            'coherence': float(result.state.coherence),
+                            'fidelity': float(result.state.fidelity),
+                            'purity': float(result.state.purity),
+                            'entanglement_entropy': float(result.state.entanglement_entropy),
+                            'chsh_s': float(result.state.chsh_s),
+                            'bell_violation': bool(result.state.bell_violation),
+                        },
+                        'metrics': {
+                            'noise_amplitude': float(result.noise_amplitude),
+                            'memory_effect': float(result.memory_effect),
+                            'recovery_applied': float(result.recovery_applied),
+                            'quantum_entropy_used': float(result.quantum_entropy_used),
+                            'execution_time_ms': float(result.execution_time_ms),
+                        },
+                        'stats': {
+                            'post_successes': self.post_successes,
+                            'post_failures': self.post_failures,
+                            'health_status': self.health_status,
+                        }
+                    }
+                    
+                    # Log heartbeat
                     e_ab = result.state.bell_E_ab
                     e_ab_p = result.state.bell_E_ab_prime
                     e_ap_b = result.state.bell_E_a_prime_b
@@ -1346,19 +1494,27 @@ class QuantumHeartbeat:
                         f"CHSH S: {chsh_s:.4f} (Computed: {computed_s:.4f}) | "
                         f"E(a,b):{e_ab:+.3f}, E(a,b'):{e_ab_p:+.3f}, E(a',b):{e_ap_b:+.3f}, E(a',b'):{e_ap_bp:+.3f} | "
                         f"Bell Violation: {result.state.bell_violation} | "
-                        f"NN Updates: {nn_stats.get('update_count', 0)} | "
-                        f"Trend: {trend:+.4f}"
+                        f"API: {'✓' if self.health_status == 'healthy' else '⚠'}"
                     )
                     
+                    # Notify listeners
                     for listener in self.listeners:
                         try:
                             listener(result)
                         except Exception as e:
                             logger.debug(f"Listener error: {e}")
                 
+                # Write to database (non-blocking, real-time metrics)
+                self.write_metrics_to_db(beat_data)
+                
+                # POST to API (non-blocking)
+                self.post_to_api(beat_data)
+                
                 time.sleep(self.interval)
             except Exception as e:
                 logger.error(f"Heartbeat error: {e}")
+                with self.lock:
+                    self.health_status = "error"
                 time.sleep(self.interval)
     
     def start(self):
@@ -1366,16 +1522,35 @@ class QuantumHeartbeat:
         with self.lock:
             if not self.running:
                 self.running = True
+                self.health_status = "running"
                 self.thread = threading.Thread(target=self._run, daemon=True)
                 self.thread.start()
-                logger.info(f"✓ Quantum heartbeat started ({self.interval}s interval)")
+                logger.info(f"✓ Quantum heartbeat started ({self.interval}s interval, API: {self.api_url})")
     
     def stop(self):
         """Stop heartbeat daemon."""
         with self.lock:
             self.running = False
+            self.health_status = "stopped"
         if self.thread:
             self.thread.join(timeout=5)
+    
+    def get_health_status(self) -> Dict[str, Any]:
+        """Get heartbeat health status."""
+        global _db_manager
+        with self.lock:
+            return {
+                'running': self.running,
+                'cycle_count': self.cycle_count,
+                'health_status': self.health_status,
+                'post_successes': self.post_successes,
+                'post_failures': self.post_failures,
+                'api_url': self.api_url,
+                'database': {
+                    'connected': _db_manager is not None,
+                    'pool_available': _db_manager.pool is not None if _db_manager else False,
+                }
+            }
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════
 # INITIALIZATION
@@ -1414,6 +1589,25 @@ class QuantumCoordinator:
     def get_metrics(self):
         """Get current metrics."""
         return self.lattice.get_system_metrics().dict()
+    
+    def get_status(self) -> Dict[str, Any]:
+        """Get system health status."""
+        try:
+            metrics = self.get_metrics()
+            return {
+                'status': 'healthy' if self.running else 'stopped',
+                'running': self.running,
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'system': metrics,
+            }
+        except Exception as e:
+            logger.error(f"[COORDINATOR] get_status error: {e}")
+            return {
+                'status': 'error',
+                'running': self.running,
+                'error': str(e),
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+            }
 
 def initialize_quantum_system():
     """Initialize quantum lattice for deployment."""
@@ -1424,8 +1618,9 @@ def initialize_quantum_system():
     # Get lattice instance
     LATTICE = get_quantum_lattice()
     
-    # Initialize heartbeat
-    HEARTBEAT = QuantumHeartbeat(interval_seconds=10.0)  # 10 second heartbeat
+    # Initialize heartbeat with API_URL from environment
+    api_url = os.getenv('API_URL', 'http://localhost:8000/api/heartbeat')
+    HEARTBEAT = QuantumHeartbeat(interval_seconds=10.0, api_url=api_url)
     HEARTBEAT.start()
     
     # Initialize coordinator
@@ -1433,13 +1628,24 @@ def initialize_quantum_system():
     QUANTUM_COORDINATOR.start()
     
     logger.info("[INIT] ✓ Quantum system initialized")
-    logger.info("[INIT] ✓ HEARTBEAT running (10s interval)")
+    logger.info(f"[INIT] ✓ HEARTBEAT running (10s interval, API_URL={api_url})")
     logger.info("[INIT] ✓ QUANTUM_COORDINATOR active")
 
 # Global exports for wsgi_config
 LATTICE = get_quantum_lattice()
-HEARTBEAT = QuantumHeartbeat(interval_seconds=10.0)
+
+# Use API_URL environment variable (falls back to localhost default)
+_api_url = os.getenv('API_URL', 'http://localhost:8000/api/heartbeat')
+HEARTBEAT = QuantumHeartbeat(interval_seconds=10.0, api_url=_api_url)
 QUANTUM_COORDINATOR = None
+
+# Function to register database for metrics storage
+def set_heartbeat_database(db_manager):
+    """Set the database manager for heartbeat metrics storage."""
+    global _db_manager
+    _db_manager = db_manager
+    if _db_manager:
+        logger.info("[HEARTBEAT] ✓ Database manager registered for metrics storage")
 
 if __name__ == '__main__':
     print("\n=== QUANTUM LATTICE DEMO (AER-ENABLED) ===\n")
