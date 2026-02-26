@@ -205,60 +205,48 @@ class EntanglementRevivalEvent:
 
     def decay(self) -> float:
         """
-        Exponential decay of revival coherence using WALL-CLOCK TIME.
-        ε(t+1) = ε(t) × exp(-Γ_revival × Δt)
+        Exponential decay of revival coherence using WALL-CLOCK TIME (in-place).
+        ε(t) = ε(0) × exp(-Γ_revival × Δt)
         
         ══════════════════════════════════════════════════════════════════════════════
-        MUSEUM-GRADE FIX v13: Wall-Clock Time Physics
+        MUSEUM-GRADE FIX v13.1: In-Place Decay with Wall-Clock Time
         ══════════════════════════════════════════════════════════════════════════════
         
-        PREVIOUS BUG (v12):
-          dt = CYCLE_TIME_MS / 1000.0 = 10 ms / 1000 = 0.01 seconds (WRONG!)
-          decay_factor = exp(-0.15 × 0.01) = 0.9985 per cycle
-          Revival barely decays: takes 72 cycles to leave PEAK state
-          In real deployment: cycles are 10+ seconds apart!
-          Result: Revival stuck at 0.9985(peak) forever
-        
-        FIX:
-          Use actual elapsed time between cycles (wall-clock)
-          Measure time.time() at start of revival
-          dt = current_time - started_at (real seconds!)
-          decay_factor = exp(-Γ_revival × dt)
+        CRITICAL BUG FIX:
+          v13 recalculated from peak_coherence (which is uninitialized = 0.0)
+          Result: current = 0.0 × decay_factor = 0.0 (instant dormancy)
           
-          With real dt ≈ 10 seconds per cycle:
-          decay_factor = exp(-0.15 × 10) = exp(-1.5) ≈ 0.223
-          Revival decays 77.7% per cycle (physical!)
-          
-          Reaches dormant (<0.01) after 5-6 cycles as intended
+        SOLUTION: Decay current IN PLACE
+          current(t+dt) = current(t) × exp(-Γ_revival × dt)
+          Preserves seeded amplitude, applies real time scaling
         
-        This aligns the code clock with the execution clock.
+        Physics: Revival amplitude decays exponentially from its starting value.
+        Time: Use wall-clock seconds, not hardcoded simulation time.
         """
         # Use wall-clock time (seconds since revival start)
         now = time.time()
         dt = now - self.started_at  # Real elapsed time in seconds
         
-        # Handle initialization: first call shouldn't have decayed yet
+        # Handle initialization: first call should preserve seeded amplitude
         if dt < 0.001:  # < 1 ms means just started
-            dt = 0.0
+            # Don't decay yet, but track the peak for state machine
+            self.peak_coherence = self.current_coherence
+            return self.current_coherence
         
-        # Exponential decay: Γ_revival is decay rate [1/seconds]
+        # Exponential decay: decay CURRENT in place, not recalculate from peak
+        # ε(t) = ε(0) × exp(-Γ_revival × Δt)
         decay_factor = math.exp(-REVIVAL_DECAY_RATE * dt)
-        self.current_coherence = self.peak_coherence * decay_factor
+        self.current_coherence *= decay_factor  # ← In-place multiplication, not assignment
         self.cycles_active += 1
         
         # Track state transitions with physical thresholds
-        # Revival intensity diminishes exponentially
         if self.current_coherence < 0.01:
-            # Coherence dropped below 1% of peak → no recovery power
             self.state = EntanglementRevivalState.DORMANT
         elif self.current_coherence > 0.9 * self.peak_coherence:
-            # Still within 90% of peak → growing phase
             self.state = EntanglementRevivalState.PEAK
         elif self.current_coherence > 0.3 * self.peak_coherence:
-            # Between 30% and 90% of peak → active decay phase
             self.state = EntanglementRevivalState.DECAYING
         else:
-            # Below 30% of peak → tail end, dormant soon
             self.state = EntanglementRevivalState.DORMANT
         
         logger.debug(f"[REVIVAL-DECAY-WALL] elapsed={dt:.2f}s decay_factor={decay_factor:.6f} "
