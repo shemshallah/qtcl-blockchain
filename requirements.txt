@@ -24,8 +24,8 @@ asyncpg>=0.29.0              # Async PostgreSQL (for future scaling)
 # ================================================================================
 # QUANTUM COMPUTING (Required for quantum_api, blockchain_api, oracle_api)
 # ================================================================================
-qiskit>=0.43.0               # Quantum circuits (GHZ-8, W-state, measurements)
-qiskit-aer>=0.13.0           # Aer simulator with noise models
+qiskit>=1.0           # Quantum circuits (GHZ-8, W-state, measurements)
+qiskit-aer>=0.14.0           # Aer simulator with noise models
 qiskit-ibm-runtime>=0.16.0   # IBM Quantum runtime
 numpy>=1.24.0                 # Numerical computing (quantum state vectors)
 scipy>=1.10.0                 # Scientific computing (matrix operations)
