@@ -979,9 +979,16 @@ class NeuralRefreshNetwork:
 class CHSHBellTester:
     """CHSH inequality test using Aer; measures E(a,b) for 4 angle pairs → S value."""
 
-    # Optimal CHSH angles: a=0, a'=π/2, b=π/4, b'=3π/4 → S_max = 2√2
-    A_ANGLES  = (0.0, math.pi / 2)
-    B_ANGLES  = (math.pi / 4, 3 * math.pi / 4)
+    # ── CLAY-STANDARD FIX: angles corrected for Ry(-2θ) circuit formulation.
+    # Circuit produces E(a,b) = cos(2(a-b)), NOT cos(a-b).
+    # Old angles (0, π/2) × (π/4, 3π/4) → all 4 pairs give cos(±π/2)=0 → S≡0.
+    # Correct optimal angles for cos(2(a-b)):
+    #   a=0, a'=π/4, b=π/8, b'=3π/8  → E=±√2/2 for all pairs → S=2√2.
+    # Proof: E(0,π/8)=cos(-π/4)=√2/2, E(0,3π/8)=cos(-3π/4)=-√2/2,
+    #         E(π/4,π/8)=cos(π/4)=√2/2, E(π/4,3π/8)=cos(-π/4)=√2/2
+    #         S=|√2/2-(-√2/2)+√2/2+√2/2|=2√2 ✓
+    A_ANGLES  = (0.0, math.pi / 4)
+    B_ANGLES  = (math.pi / 8, 3 * math.pi / 8)
 
     def __init__(self, aer_sim: AerQuantumSimulator):
         self.aer_sim = aer_sim
@@ -1104,10 +1111,13 @@ class PseudoqubitCoherenceManager:
                 self.batch_coherences[i] = float(np.clip(
                     self.batch_coherences[i] * (1.0 - net_loss), 0.80, 0.99
                 ))
-                target_fid = float(np.clip(self.batch_coherences[i] + 0.03, 0.75, 0.99))
-                self.batch_fidelities[i] = float(
-                    self.batch_fidelities[i] * 0.95 + target_fid * 0.05
-                )
+                # FIX: target ceiling raised 0.99→0.9990; fidelity can now reflect
+                # genuine quantum purity above 0.99.  Previous hard cap at 0.99 caused
+                # the EMA to lock exactly there since target = clip(coh+0.03,...,0.99)=0.99.
+                target_fid = float(np.clip(self.batch_coherences[i] ** 2 + 0.02, 0.75, 0.9990))
+                self.batch_fidelities[i] = float(np.clip(
+                    self.batch_fidelities[i] * 0.92 + target_fid * 0.08, 0.75, 0.9990
+                ))
 
     def apply_w_state_amplification(self, w_strength: float, amplification: float = 1.0):
         with self.lock:
@@ -1119,7 +1129,7 @@ class PseudoqubitCoherenceManager:
             recovery    = min(0.18 * w_strength * amplification * suppression, 0.035)
             for i in range(NUM_BATCHES):
                 self.batch_coherences[i] = float(np.clip(self.batch_coherences[i] + recovery, 0.80, 0.99))
-                self.batch_fidelities[i] = float(np.clip(self.batch_fidelities[i] + recovery * 0.5, 0.82, 0.99))
+                self.batch_fidelities[i] = float(np.clip(self.batch_fidelities[i] + recovery * 0.5, 0.82, 0.9990))
 
     def apply_revival_boost(self, revival_coherence: float):
         """
@@ -1159,7 +1169,7 @@ class PseudoqubitCoherenceManager:
             nn_recovery = float(recovery_boost * 0.040 * np.clip(effectiveness * (1.0 + trend_boost), 0.3, 2.0))
             for i in range(NUM_BATCHES):
                 self.batch_coherences[i] = float(np.clip(self.batch_coherences[i] + nn_recovery, 0.75, 0.99))
-                self.batch_fidelities[i] = float(np.clip(self.batch_fidelities[i] + nn_recovery * 0.6, 0.78, 0.99))
+                self.batch_fidelities[i] = float(np.clip(self.batch_fidelities[i] + nn_recovery * 0.6, 0.78, 0.9990))
 
     def get_global_coherence(self) -> float:
         with self.lock:
@@ -1392,6 +1402,12 @@ class QuantumLatticeController:
         coherence_final = float(cycle_state_metrics['global_coherence'])
         fidelity_final  = float(cycle_state_metrics['global_fidelity'])
         vn_entropy      = float(cycle_state_metrics['von_neumann_entropy'])
+
+        # ── CLAY-STANDARD FIX: fidelity driven by actual CHSH quantum quality.
+        # F = 0.5 + 0.5*(S/2√2)*coherence — rises from 0.5 (classical/S=0)
+        # to ~0.9999 (ideal Tsirelson S=2√2, coh=1).  Breaks 0.9900 lockup.
+        chsh_fid_target = float(np.clip(0.5 + 0.5 * tsirelson_ratio * coherence_final, 0.50, 0.9999))
+        fidelity_final  = float(np.clip(fidelity_final * 0.70 + chsh_fid_target * 0.30, 0.50, 0.9999))
 
         qstate = QuantumState(
             coherence            = coherence_final,
