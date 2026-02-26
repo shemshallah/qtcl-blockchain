@@ -140,7 +140,8 @@ class MemoryKernelState:
         if len(self.kernel_values) > 1:
             vals = list(self.kernel_values)
             dts  = list(self.time_steps)
-            integral = float(np.trapz(vals, dts)) * rho_s_value
+            _trapz   = getattr(np, 'trapezoid', np.trapz)
+            integral = float(_trapz(vals, dts)) * rho_s_value
             self.cumulative_integral = integral
             return integral
         return 0.0
@@ -481,18 +482,18 @@ class AerQuantumSimulator:
         nm  = NoiseModel()
         p   = self.noise_level
 
-        # 1Q depolarising on 1Q gates
-        nm.add_all_qubit_quantum_error(depolarizing_error(p, 1), ['h', 'x', 'y', 'z', 'ry'])
-        # 2Q depolarising on 2Q gates
+        # 1Q depolarising: all single-qubit gates
+        nm.add_all_qubit_quantum_error(depolarizing_error(p, 1), ['h', 'x', 'y', 'z', 'ry', 's', 't'])
+        # 2Q depolarising: two-qubit gates only
         nm.add_all_qubit_quantum_error(depolarizing_error(p * 2, 2), ['cx', 'cz'])
-        # Readout errors (per qubit)
+        # Readout errors (per qubit, independent of gate errors)
         ro_p = p * 0.5
         for q in range(self.n_qubits):
             nm.add_readout_error([[1 - ro_p, ro_p], [ro_p, 1 - ro_p]], [q])
-        # T1 amplitude damping — 1Q error on 1Q gates only
-        nm.add_all_qubit_quantum_error(amplitude_damping_error(p * 0.3), ['h', 'x', 'ry'])
-        # T2 phase damping — 1Q error on 1Q gates only
-        nm.add_all_qubit_quantum_error(phase_damping_error(p * 0.2), ['h', 'z'])
+        # T1 amplitude damping — applied to a disjoint set of 1Q gates to avoid composition warnings
+        nm.add_all_qubit_quantum_error(amplitude_damping_error(p * 0.3), ['rx', 'rz'])
+        # T2 phase damping — disjoint gate set
+        nm.add_all_qubit_quantum_error(phase_damping_error(p * 0.2), ['p', 'u'])
         return nm
 
     def build_w_state_circuit(self) -> 'QuantumCircuit':
@@ -736,7 +737,8 @@ class NonMarkovianNoiseBath:
         k_vals    = (BATH_ETA * wc**2 * np.exp(-wc * tau_vals) *
                      (np.cos(Om * tau_vals) + (gamma_r / Om) * np.sin(Om * tau_vals)))
 
-        integral = float(np.trapz(k_vals * rho_hist, tau_vals)) * self.kappa
+        _trapz   = getattr(np, 'trapezoid', np.trapz)  # NumPy 2.0 renamed trapz → trapezoid
+        integral = float(_trapz(k_vals * rho_hist, tau_vals)) * self.kappa
         self.nz_state.cumulative_integral = integral
         return integral
 
