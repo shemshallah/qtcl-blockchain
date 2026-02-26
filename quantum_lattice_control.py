@@ -54,6 +54,19 @@ from qiskit_aer.noise import (
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(name)s — %(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
+# ── Qiskit noise suppression ──────────────────────────────────────────────────
+# Every AerSimulator.run() call triggers ~40 INFO lines from the transpiler
+# pass-manager pipeline (UnrollCustomDefinitions → BasisTranslator →
+# CommutativeCancellation → ConsolidateBlocks → …) plus a "Total Transpile
+# Time" summary from qiskit.compiler.transpiler.  Set these two hierarchies to
+# WARNING so only genuine qiskit errors/warnings surface.  This block must live
+# *after* basicConfig and *before* the first qiskit import so no handler race
+# can restore the noisy level.
+for _ql in ("qiskit.passmanager", "qiskit.passmanager.base_tasks",
+            "qiskit.compiler.transpiler", "qiskit.transpiler"):
+    logging.getLogger(_ql).setLevel(logging.WARNING)
+# ─────────────────────────────────────────────────────────────────────────────
+
 # ════════════════════════════════════════════════════════════════════════════════
 # CONSTANTS — CLAY MATHEMATICS / PHYSICS PARAMETERS
 # ════════════════════════════════════════════════════════════════════════════════

@@ -17,6 +17,23 @@ if not logging.getLogger().hasHandlers():
     )
 logger = logging.getLogger(__name__)
 
+# ── Qiskit noise suppression ──────────────────────────────────────────────────
+# qiskit.passmanager.base_tasks floods logs with every transpiler micro-pass
+# (UnrollCustomDefinitions, BasisTranslator, CommutativeCancellation, …) at
+# INFO level on every AerSimulator.run() call.  qiskit.compiler.transpiler
+# emits a "Total Transpile Time" line per circuit.  Neither is useful outside
+# of circuit-debugging sessions — silence both to WARNING so our own INFO
+# messages remain readable.  All other qiskit sub-loggers (qiskit_aer,
+# qiskit.circuit, etc.) stay at INFO so real errors surface immediately.
+for _noisy_logger in (
+    "qiskit.passmanager.base_tasks",
+    "qiskit.compiler.transpiler",
+    "qiskit.passmanager",          # parent catches any future sub-loggers
+    "qiskit.transpiler",           # alternate hierarchy in older Qiskit builds
+):
+    logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
+# ─────────────────────────────────────────────────────────────────────────────
+
 # ════════════════════════════════════════════════════════════════════════════════════════
 # INITIALIZE QUANTUM LATTICE CONTROL FIRST
 # ════════════════════════════════════════════════════════════════════════════════════════
