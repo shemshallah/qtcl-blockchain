@@ -1280,8 +1280,8 @@ class PseudoqubitCoherenceManager:
         
         target_coherence = 0.94
         with self.lock:
-            # Compute mean coherence across all batches
-            mean_coh = float(np.mean(self.batch_coherences)) if self.batch_coherences else 0.70
+            # Compute mean coherence across all batches (use len check, not bare array)
+            mean_coh = float(np.mean(self.batch_coherences)) if len(self.batch_coherences) > 0 else 0.70
             
             # Deficit: how far below target are we?
             deficit = float(max(0.0, target_coherence - mean_coh))
