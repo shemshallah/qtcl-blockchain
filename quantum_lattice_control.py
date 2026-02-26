@@ -1352,7 +1352,7 @@ class NeuralRefreshNetwork:
     HIDDEN1_DIM = 128
     HIDDEN2_DIM = 64
     HIDDEN3_DIM = 256
-    OUTPUT_DIM  = 256
+    OUTPUT_DIM  = 320  # v14.1 expansion: channel discrimination indices 266-272 now in bounds
 
     def __init__(self, entropy_ensemble: Optional[QuantumEntropySourceEnsemble] = None):
         self.entropy_ensemble = entropy_ensemble
@@ -1377,9 +1377,9 @@ class NeuralRefreshNetwork:
         MUSEUM-GRADE NEURAL CONTROL v14: SIGMA-AWARE TIMING + ADAPTIVE COUPLING
         ══════════════════════════════════════════════════════════════════════════════
         
-        NOW using ALL 256 outputs for complete quantum control:
+        NOW using ALL 320 outputs for complete quantum control + channel discrimination:
         
-        Output allocation (256 total):
+        Output allocation (320 total):
           [0-19]:    Sigma-aware timing parameters (10 new for v14!)
             [0-3]:   Per-quadrant (σ mod 4) revival trigger gates
             [4-7]:   Per-quadrant anti-resonance avoidance
@@ -1391,7 +1391,12 @@ class NeuralRefreshNetwork:
           [82-133]:  Per-batch memory scaling (52)
           [134-185]: Per-batch W-state scaling (52)
           [186-237]: Per-batch urgency scaling (52)
-          [238-255]: Reserved expansion (18)
+          [238-265]: Reserved expansion (28)
+          [266-272]: v14.1 Noise channel discrimination (7, NEW!)
+            [266-268]: Channel type probabilities (depol, dephase, AD)
+            [269-271]: Per-channel coupling modulation
+            [272]:     Channel confidence
+          [273-319]: Future expansion headroom (47)
         """
         try:
             feats = np.atleast_1d(features).astype(np.float64).reshape(-1)
@@ -1403,7 +1408,7 @@ class NeuralRefreshNetwork:
             a1 = np.tanh(self.W1.T @ feats + self.b1)   # (128,)
             a2 = np.tanh(self.W2.T @ a1    + self.b2)   # (64,)
             a3 = np.tanh(self.W3.T @ a2    + self.b3)   # (256,)
-            out= np.tanh(self.W4.T @ a3    + self.b4)   # (256,) ∈ [-1, 1]
+            out= np.tanh(self.W4.T @ a3    + self.b4)   # (320,) ∈ [-1, 1] with expanded channel discrimination
         except Exception as e:
             logger.error(f"[NEURAL] Forward error: {e}; emergency reinit")
             self._emergency_reinit()
@@ -1863,7 +1868,7 @@ class PseudoqubitCoherenceManager:
             if revival_coherence > 0.3 and self.cycle_count % 50 == 0:
                 logger.debug(
                     f"[REVIVAL-BOOST] mean={mean_coh:.4f} deficit={deficit:.4f} "
-                    f"urgency={urgency:.4f} gain_factor={gain_factor:.4f} "
+                    f"urgency={total_urgency:.4f} gain_factor={gain_factor:.4f} "
                     f"revival_coh={revival_coherence:.4f} → boost={effective_gain:.6f}"
                 )
 
