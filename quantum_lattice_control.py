@@ -51,10 +51,10 @@ logger = logging.getLogger(__name__)
 # CONSTANTS — CLAY MATHEMATICS / PHYSICS PARAMETERS
 # ════════════════════════════════════════════════════════════════════════════════
 
-HBAR      = 1.054571817e-34        # J·s  (reduced Planck)
-KB        = 1.380649e-23           # J/K  (Boltzmann)
-TEMP_K    = 300.0                  # K    (room temperature bath)
-BETA      = 1.0 / (KB * TEMP_K)   # 1/J  (inverse temperature)
+HBAR      = 1.0          # natural units ℏ = 1
+KB        = 1.0          # natural units kB = 1
+TEMP_K    = 5.0          # dimensionless temperature T/ωc (T ≫ ℏωc → classical bath limit)
+BETA      = 1.0 / TEMP_K # β = 1/T in natural units
 
 # Drude-Lorentz bath parameters
 BATH_ETA      = 0.12      # dimensionless coupling (Kondo parameter)
@@ -481,17 +481,18 @@ class AerQuantumSimulator:
         nm  = NoiseModel()
         p   = self.noise_level
 
-        # 1Q gate errors
+        # 1Q depolarising on 1Q gates
         nm.add_all_qubit_quantum_error(depolarizing_error(p, 1), ['h', 'x', 'y', 'z', 'ry'])
-        # 2Q gate errors
+        # 2Q depolarising on 2Q gates
         nm.add_all_qubit_quantum_error(depolarizing_error(p * 2, 2), ['cx', 'cz'])
-        # Readout errors
+        # Readout errors (per qubit)
         ro_p = p * 0.5
         for q in range(self.n_qubits):
             nm.add_readout_error([[1 - ro_p, ro_p], [ro_p, 1 - ro_p]], [q])
-        # T1 / T2
-        nm.add_all_qubit_quantum_error(amplitude_damping_error(p * 0.3), ['h', 'cx'])
-        nm.add_all_qubit_quantum_error(phase_damping_error(p * 0.2),     ['h', 'z'])
+        # T1 amplitude damping — 1Q error on 1Q gates only
+        nm.add_all_qubit_quantum_error(amplitude_damping_error(p * 0.3), ['h', 'x', 'ry'])
+        # T2 phase damping — 1Q error on 1Q gates only
+        nm.add_all_qubit_quantum_error(phase_damping_error(p * 0.2), ['h', 'z'])
         return nm
 
     def build_w_state_circuit(self) -> 'QuantumCircuit':
