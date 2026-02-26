@@ -724,49 +724,99 @@ class NeuralRefreshNetwork:
         logger.info(f"[NEURAL_REFRESH] Deep MLP initialized: {INPUT_DIM}→{HIDDEN1_DIM}→{HIDDEN2_DIM}→{HIDDEN3_DIM}→{OUTPUT_DIM}")
     
     def forward(self, features: np.ndarray) -> Tuple[np.ndarray, Dict[str, float]]:
-        """Forward pass through deep network with dimension validation."""
-        # Ensure features is 1D with correct shape
-        features = np.atleast_1d(features).astype(np.float64)
-        features = features.reshape(-1)
+        """Forward pass through deep network with dimension validation and assertion protection."""
+        try:
+            # CRITICAL: Validate ALL weight dimensions BEFORE any matmul
+            assert self.W1.shape == (12, 128), f"CRITICAL: W1 shape corrupted! {self.W1.shape} vs (12, 128)"
+            assert self.W2.shape == (128, 64), f"CRITICAL: W2 shape corrupted! {self.W2.shape} vs (128, 64)"
+            assert self.W3.shape == (64, 32), f"CRITICAL: W3 shape corrupted! {self.W3.shape} vs (64, 32)"
+            assert self.W4.shape == (32, 5), f"CRITICAL: W4 shape corrupted! {self.W4.shape} vs (32, 5)"
+            
+            # Ensure features is 1D with correct shape
+            features = np.atleast_1d(features).astype(np.float64)
+            features = features.reshape(-1)
+            
+            # Validate input dimension with AUTO-CORRECTION
+            if features.shape[0] != self.layer_dims[0][0]:
+                logger.warning(f"[NEURAL] Feature dimension mismatch: {features.shape[0]} vs expected {self.layer_dims[0][0]}")
+                # Auto-correct dimensions
+                if features.shape[0] < self.layer_dims[0][0]:
+                    features = np.pad(features, (0, self.layer_dims[0][0] - features.shape[0]), mode='constant')
+                else:
+                    features = features[:self.layer_dims[0][0]]
+            
+            # Layer 1: 12 → 128
+            z1 = np.dot(features, self.W1) + self.b1
+            assert z1.shape == (128,), f"z1 shape wrong: {z1.shape}"
+            a1 = np.tanh(z1)
+            
+            # Layer 2: 128 → 64
+            z2 = np.dot(a1, self.W2) + self.b2
+            assert z2.shape == (64,), f"z2 shape wrong: {z2.shape}"
+            a2 = np.tanh(z2)
+            
+            # Layer 3: 64 → 32
+            z3 = np.dot(a2, self.W3) + self.b3
+            assert z3.shape == (32,), f"z3 shape wrong: {z3.shape}"
+            a3 = np.tanh(z3)
+            
+            # Layer 4: 32 → 5
+            z4 = np.dot(a3, self.W4) + self.b4
+            assert z4.shape == (5,), f"z4 shape wrong: {z4.shape}"
+            output = np.tanh(z4)
+            
+            # Final output validation
+            assert output.shape == (5,), f"Output shape wrong: {output.shape}"
+            
+        except AssertionError as e:
+            logger.error(f"[NEURAL] CRITICAL: {e}")
+            # EMERGENCY RECOVERY: Reinitialize all weights
+            self._emergency_reinit()
+            # Return safe defaults
+            output = np.tanh(np.random.randn(5) * 0.01)
         
-        # Validate input dimension
-        if features.shape[0] != self.layer_dims[0][0]:
-            logger.warning(f"[NEURAL] Feature dimension mismatch: {features.shape[0]} vs expected {self.layer_dims[0][0]}")
-            # Pad or truncate to correct size
-            if features.shape[0] < self.layer_dims[0][0]:
-                features = np.pad(features, (0, self.layer_dims[0][0] - features.shape[0]), mode='constant')
-            else:
-                features = features[:self.layer_dims[0][0]]
+        except Exception as e:
+            logger.error(f"[NEURAL] Forward pass CRITICAL ERROR: {e}")
+            self._emergency_reinit()
+            output = np.tanh(np.random.randn(5) * 0.01)
         
-        # Layer 1: 12 → 128
-        z1 = np.dot(features, self.W1) + self.b1
-        a1 = np.tanh(z1)
-        
-        # Layer 2: 128 → 64
-        z2 = np.dot(a1, self.W2) + self.b2
-        a2 = np.tanh(z2)
-        
-        # Layer 3: 64 → 32
-        z3 = np.dot(a2, self.W3) + self.b3
-        a3 = np.tanh(z3)
-        
-        # Layer 4: 32 → 5
-        z4 = np.dot(a3, self.W4) + self.b4
-        output = np.tanh(z4)
-        
-        optimal_sigma = 0.08 + output[0] * 0.04
-        amplification = 1.0 + output[1] * 0.5
-        recovery_boost = np.clip(output[2], 0.0, 1.0)
-        learning_rate = 0.001 + np.clip(output[3], 0.0, 0.01)
-        entanglement_target = 1.0 + output[4]
+        try:
+            optimal_sigma = float(0.08 + output[0] * 0.04)
+            amplification = float(1.0 + output[1] * 0.5)
+            recovery_boost = float(np.clip(output[2], 0.0, 1.0))
+            learning_rate = float(0.001 + np.clip(output[3], 0.0, 0.01))
+            entanglement_target = float(1.0 + output[4])
+        except Exception as e:
+            logger.error(f"[NEURAL] Output extraction error: {e}")
+            optimal_sigma = 0.08
+            amplification = 1.0
+            recovery_boost = 0.5
+            learning_rate = 0.001
+            entanglement_target = 1.0
         
         return output, {
-            'optimal_sigma': float(optimal_sigma),
-            'amplification_factor': float(amplification),
-            'recovery_boost': float(recovery_boost),
-            'learning_rate': float(learning_rate),
-            'entanglement_target': float(entanglement_target),
+            'optimal_sigma': optimal_sigma,
+            'amplification_factor': amplification,
+            'recovery_boost': recovery_boost,
+            'learning_rate': learning_rate,
+            'entanglement_target': entanglement_target,
         }
+    
+    def _emergency_reinit(self):
+        """Emergency reinitialization if weights become corrupted."""
+        logger.critical("[NEURAL] EMERGENCY REINIT: Resetting all weights to safe state")
+        try:
+            self.W1 = np.random.randn(12, 128) * 0.1
+            self.W2 = np.random.randn(128, 64) * 0.1
+            self.W3 = np.random.randn(64, 32) * 0.1
+            self.W4 = np.random.randn(32, 5) * 0.1
+            self.b1 = np.zeros(128, dtype=np.float64)
+            self.b2 = np.zeros(64, dtype=np.float64)
+            self.b3 = np.zeros(32, dtype=np.float64)
+            self.b4 = np.zeros(5, dtype=np.float64)
+            logger.info("[NEURAL] ✓ Emergency reinit complete - all weights restored")
+        except Exception as e:
+            logger.critical(f"[NEURAL] Emergency reinit FAILED: {e}")
     
     def on_heartbeat(self, features: np.ndarray, target_coherence: float = 0.94):
         """Training step with robust dimension handling."""
