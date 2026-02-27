@@ -46,7 +46,56 @@ if not logging.root.handlers:
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ════════════════════════════════════════════════════════════════════════════════════════
-# INITIALIZE QUANTUM LATTICE CONTROL FIRST
+# PHASE 0: INITIALIZE GLOBAL STATE (MUST BE FIRST)
+# ════════════════════════════════════════════════════════════════════════════════════════
+
+logger.info("[BOOTSTRAP] Initializing global state infrastructure...")
+try:
+    from globals import initialize_globals, set_global_state, get_global_state
+    
+    if initialize_globals():
+        logger.info("[BOOTSTRAP] ✓ Global state infrastructure ready")
+    else:
+        logger.warning("[BOOTSTRAP] ⚠️ Global state initialization had issues")
+except Exception as e:
+    logger.error(f"[BOOTSTRAP] Failed to initialize globals: {e}", exc_info=True)
+
+# ════════════════════════════════════════════════════════════════════════════════════════
+# PHASE 1: INITIALIZE DATABASE MANAGER (BEFORE EVERYTHING ELSE)
+# ════════════════════════════════════════════════════════════════════════════════════════
+
+logger.info("[BOOTSTRAP] Initializing database manager...")
+try:
+    from db_builder_v2 import DatabaseBuilder
+    
+    # Create database manager with connection pool
+    # This reads credentials from environment: POOLER_HOST, POOLER_USER, etc.
+    db_manager = DatabaseBuilder()
+    
+    # Register in global state for all modules to access
+    set_global_state('db_manager', db_manager)
+    
+    if db_manager.pool is not None:
+        logger.info(f"[BOOTSTRAP] ✓ Database manager initialized with active connection pool")
+        logger.info(f"[BOOTSTRAP]   Host: {db_manager.host}")
+        logger.info(f"[BOOTSTRAP]   DB: {db_manager.database}")
+        logger.info(f"[BOOTSTRAP]   Pool size: {db_manager.pool_size}")
+        
+        # Start reconnection daemon for resilience
+        db_manager.start_reconnect_daemon()
+        logger.info("[BOOTSTRAP] ✓ Reconnection daemon started (auto-recovery on pool failure)")
+    else:
+        logger.warning(f"[BOOTSTRAP] ⚠️ Database pool creation failed")
+        logger.warning(f"[BOOTSTRAP]   Error: {db_manager.pool_error}")
+        logger.warning("[BOOTSTRAP] Database operations will be unavailable")
+        logger.warning("[BOOTSTRAP] Verify POOLER_HOST, POOLER_USER, POOLER_PASSWORD env vars")
+except ImportError as e:
+    logger.error(f"[BOOTSTRAP] Cannot import DatabaseBuilder: {e}")
+except Exception as e:
+    logger.error(f"[BOOTSTRAP] Failed to initialize database manager: {e}", exc_info=True)
+
+# ════════════════════════════════════════════════════════════════════════════════════════
+# PHASE 2: INITIALIZE QUANTUM LATTICE CONTROL
 # ════════════════════════════════════════════════════════════════════════════════════════
 
 logger.info("[BOOTSTRAP] Initializing quantum_lattice_control...")
@@ -62,34 +111,6 @@ try:
     logger.info("[BOOTSTRAP] ✓ HEARTBEAT running (check logs for 15s/30s cycles)")
 except Exception as e:
     logger.error(f"[BOOTSTRAP] Failed to init quantum_lattice_control: {e}", exc_info=True)
-
-# ════════════════════════════════════════════════════════════════════════════════════════
-# INITIALIZE DATABASE MANAGER (v3.0 — Museum Grade)
-# ════════════════════════════════════════════════════════════════════════════════════════
-
-logger.info("[BOOTSTRAP] Initializing database manager...")
-try:
-    from db_builder_v2 import DatabaseBuilder
-    from globals import set_global_state
-    
-    # Create database manager with connection pool
-    db_manager = DatabaseBuilder()
-    
-    # Register in global state for all modules to access
-    set_global_state('db_manager', db_manager)
-    
-    if db_manager.pool is not None:
-        logger.info("[BOOTSTRAP] ✓ Database manager initialized with active connection pool")
-        # Start reconnection daemon for resilience
-        db_manager.start_reconnect_daemon()
-        logger.info("[BOOTSTRAP] ✓ Reconnection daemon started")
-    else:
-        logger.warning(f"[BOOTSTRAP] ⚠️ Database pool failed: {db_manager.pool_error}")
-        logger.warning("[BOOTSTRAP] Database operations will be unavailable until credentials are fixed")
-except ImportError as e:
-    logger.error(f"[BOOTSTRAP] Cannot import DatabaseBuilder: {e}")
-except Exception as e:
-    logger.error(f"[BOOTSTRAP] Failed to initialize database manager: {e}", exc_info=True)
 
 # ════════════════════════════════════════════════════════════════════════════════════════
 # FLASK SETUP
