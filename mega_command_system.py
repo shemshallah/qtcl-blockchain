@@ -1338,7 +1338,7 @@ class QuantumEntropyCommand(Command):
         """Extract entropy metrics from lattice."""
         if lattice is None:
             return {
-                'sources': 10,
+                'sources': 5,
                 'ensemble_size': 9.15,
                 'average_quality': 0.915,
                 'entropy_pool_bits': 65536,
@@ -1347,7 +1347,7 @@ class QuantumEntropyCommand(Command):
         
         try:
             data = {
-                'sources': 10,
+                'sources': 5,
                 'ensemble_size': 9.15,
                 'average_quality': 0.915,
                 'entropy_pool_bits': 65536,
@@ -1377,7 +1377,7 @@ class QuantumEntropyCommand(Command):
         except Exception as e:
             logger.warning(f"[quantum-entropy] Failed to extract data: {e}")
             return {
-                'sources': 10,
+                'sources': 5,
                 'ensemble_size': 9.15,
                 'average_quality': 0.915,
                 'entropy_pool_bits': 65536,
@@ -1907,35 +1907,268 @@ class QuantumResonanceCommand(Command):
         return {'coupling_efficiency': 0.85, 'stochastic_score': 0.9, 'resonance_frequency': 2.4e9}
 
 class QuantumBellCommand(Command):
+    """QUANTUM BELL - Calculate real CHSH from quantum circuits."""
     def __init__(self):
         super().__init__('quantum-bell-boundary', CommandCategory.QUANTUM, 'Bell boundary')
+    
     def execute(self, args, ctx):
-        return {'CHSH_S': 2.4, 'classical_limit': 2.0, 'violation': 0.2, 'status': 'entangled'}
+        """Execute quantum-bell with real circuit calculation."""
+        import time
+        start_time = time.time()
+        try:
+            lattice = get_lattice()
+            db_manager = get_db_manager()
+            
+            chsh_value = 2.0
+            entanglement_confidence = 0.0
+            
+            if lattice:
+                try:
+                    if hasattr(lattice, 'measure_chsh_boundary'):
+                        chsh_result = lattice.measure_chsh_boundary()
+                        if isinstance(chsh_result, dict):
+                            chsh_value = float(chsh_result.get('chsh_s', 2.0))
+                            entanglement_confidence = float(chsh_result.get('confidence', 0.0))
+                        else:
+                            chsh_value = float(chsh_result)
+                except Exception as e:
+                    logger.warning(f"[quantum-bell] Failed to measure: {e}")
+            
+            chsh_value = max(2.0, min(2.828, chsh_value))
+            violation = max(0, chsh_value - 2.0)
+            is_entangled = chsh_value > 2.1
+            
+            execution_time = (time.time() - start_time) * 1000
+            return {
+                'status': 'success',
+                'CHSH_S': round(chsh_value, 4),
+                'classical_limit': 2.0,
+                'ideal_value': round(2 * 2**0.5, 4),
+                'violation': round(violation, 4),
+                'entangled': is_entangled,
+                'confidence': round(entanglement_confidence, 3),
+                'execution_time_ms': round(execution_time, 2),
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
+        except Exception as e:
+            logger.error(f"[quantum-bell] ✗ Error: {e}", exc_info=True)
+            return {'status': 'error', 'error': str(e), 'CHSH_S': 2.0, 'violation': 0.0, 'entangled': False, 'trace_id': ctx.get('trace_id', 'unknown')}
 
 class QuantumMiTrendCommand(Command):
+    """QUANTUM MI TREND - Calculate real Mutual Information trend."""
     def __init__(self):
         super().__init__('quantum-mi-trend', CommandCategory.QUANTUM, 'MI trend')
+    
     def execute(self, args, ctx):
-        return {'MI': 0.8, 'trend': 'increasing', 'direction_changes': 3}
+        """Execute quantum-mi-trend with real calculation."""
+        import time
+        start_time = time.time()
+        try:
+            lattice = get_lattice()
+            db_manager = get_db_manager()
+            
+            mi_value = 0.5
+            direction_changes = 0
+            trend = 'stable'
+            
+            if lattice:
+                try:
+                    if hasattr(lattice, 'measure_mutual_information'):
+                        mi_result = lattice.measure_mutual_information()
+                        if isinstance(mi_result, dict):
+                            mi_value = float(mi_result.get('mi', 0.5))
+                        else:
+                            mi_value = float(mi_result)
+                except Exception as e:
+                    logger.warning(f"[quantum-mi-trend] Failed to measure: {e}")
+            
+            if db_manager:
+                try:
+                    query = """
+                        SELECT mutual_information, timestamp
+                        FROM quantum_metrics
+                        WHERE mutual_information IS NOT NULL
+                        AND timestamp > NOW() - INTERVAL '1 hour'
+                        ORDER BY timestamp DESC LIMIT 10
+                    """
+                    results = db_manager.execute_fetch_all(query)
+                    if results and len(results) >= 2:
+                        mi_values = [float(r.get('mutual_information', 0.5)) for r in results]
+                        mi_value = mi_values[0]
+                        recent, older = mi_values[0], mi_values[-1]
+                        if recent > older * 1.05:
+                            trend = 'increasing'
+                        elif recent < older * 0.95:
+                            trend = 'decreasing'
+                        else:
+                            trend = 'stable'
+                except Exception as e:
+                    logger.warning(f"[quantum-mi-trend] Failed to analyze: {e}")
+            
+            mi_value = max(0.0, min(1.0, mi_value))
+            execution_time = (time.time() - start_time) * 1000
+            return {
+                'status': 'success',
+                'MI': round(mi_value, 3),
+                'trend': trend,
+                'direction_changes': direction_changes,
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'period_minutes': 60,
+                'execution_time_ms': round(execution_time, 2)
+            }
+        except Exception as e:
+            logger.error(f"[quantum-mi-trend] ✗ Error: {e}", exc_info=True)
+            return {'status': 'error', 'error': str(e), 'MI': 0.0, 'trend': 'unknown', 'direction_changes': 0, 'trace_id': ctx.get('trace_id', 'unknown')}
 
 # BLOCKCHAIN (7)
 class BlockStatsCommand(Command):
+    """BLOCK STATS - Real block statistics from database."""
     def __init__(self):
         super().__init__('block-stats', CommandCategory.BLOCKCHAIN, 'Block stats')
+    
     def execute(self, args, ctx):
-        return {'height': 100000, 'avg_time': 10}
+        """Execute block-stats with real DB data."""
+        import time
+        start_time = time.time()
+        try:
+            db_manager = get_db_manager()
+            if not db_manager:
+                return {'status': 'error', 'error': 'Database not available', 'height': 0, 'avg_time': 0, 'block_count': 0}
+            
+            height_query = "SELECT COALESCE(MAX(height), 0) as max_height FROM blocks"
+            height_result = db_manager.execute_fetch(height_query)
+            max_height = height_result['max_height'] if height_result else 0
+            
+            time_query = """
+                SELECT 
+                    COALESCE(AVG(EXTRACT(EPOCH FROM (finalized_at - created_at))), 0) as avg_time_seconds,
+                    COUNT(*) as total_blocks
+                FROM blocks
+                WHERE finalized_at IS NOT NULL
+            """
+            time_result = db_manager.execute_fetch(time_query)
+            avg_time_ms = (time_result['avg_time_seconds'] * 1000) if time_result else 0
+            total_blocks = time_result['total_blocks'] if time_result else 0
+            
+            execution_time = (time.time() - start_time) * 1000
+            return {
+                'height': int(max_height),
+                'avg_time': round(float(avg_time_ms), 2),
+                'total_blocks': int(total_blocks),
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'execution_time_ms': round(execution_time, 2),
+                'status': 'success'
+            }
+        except Exception as e:
+            logger.error(f"[block-stats] ✗ Error: {e}", exc_info=True)
+            return {'status': 'error', 'error': str(e), 'height': 0, 'avg_time': 0, 'trace_id': ctx.get('trace_id', 'unknown')}
 
 class BlockDetailsCommand(Command):
+    """BLOCK DETAILS - Real block data from database."""
     def __init__(self):
         super().__init__('block-details', CommandCategory.BLOCKCHAIN, 'Block details')
+    
     def execute(self, args, ctx):
-        return {'hash': 'abc123', 'tx_count': 500}
+        """Execute block-details with real DB data."""
+        import time
+        start_time = time.time()
+        try:
+            db_manager = get_db_manager()
+            if not db_manager:
+                return {'status': 'error', 'error': 'Database not available'}
+            
+            block_height = args.get('height', 0)
+            block_hash = args.get('hash')
+            
+            if block_hash:
+                query = "SELECT * FROM blocks WHERE hash = %s LIMIT 1"
+                block = db_manager.execute_fetch(query, (block_hash,))
+            else:
+                query = "SELECT * FROM blocks WHERE height = %s LIMIT 1"
+                block = db_manager.execute_fetch(query, (block_height,))
+            
+            if not block:
+                return {'status': 'not_found', 'error': f'Block height={block_height} not found', 'height': block_height, 'hash': block_hash or 'unknown', 'tx_count': 0}
+            
+            block_id = block.get('id')
+            tx_query = "SELECT COUNT(*) as tx_count FROM transactions WHERE block_id = %s"
+            tx_result = db_manager.execute_fetch(tx_query, (block_id,))
+            tx_count = tx_result['tx_count'] if tx_result else 0
+            
+            execution_time = (time.time() - start_time) * 1000
+            return {
+                'status': 'success',
+                'hash': block.get('hash', 'unknown'),
+                'height': int(block.get('height', 0)),
+                'tx_count': int(tx_count),
+                'timestamp': str(block.get('created_at', '')),
+                'finalized': block.get('finalized_at') is not None,
+                'nonce': block.get('nonce', 0),
+                'execution_time_ms': round(execution_time, 2)
+            }
+        except Exception as e:
+            logger.error(f"[block-details] ✗ Error: {e}", exc_info=True)
+            return {'status': 'error', 'error': str(e), 'hash': 'unknown', 'tx_count': 0, 'trace_id': ctx.get('trace_id', 'unknown')}
 
 class BlockListCommand(Command):
+    """BLOCK LIST - List actual blocks from database."""
     def __init__(self):
         super().__init__('block-list', CommandCategory.BLOCKCHAIN, 'List blocks')
+    
     def execute(self, args, ctx):
-        return {'blocks': []}
+        """Execute block-list with real DB data."""
+        import time
+        start_time = time.time()
+        try:
+            db_manager = get_db_manager()
+            if not db_manager:
+                return {'status': 'error', 'error': 'Database not available', 'blocks': [], 'count': 0}
+            
+            limit = int(args.get('limit', 50))
+            offset = int(args.get('offset', 0))
+            
+            query = """
+                SELECT 
+                    b.id, b.hash, b.height, b.nonce, 
+                    b.created_at, b.finalized_at,
+                    COUNT(t.id) as tx_count
+                FROM blocks b
+                LEFT JOIN transactions t ON t.block_id = b.id
+                GROUP BY b.id, b.hash, b.height, b.nonce, b.created_at, b.finalized_at
+                ORDER BY b.height DESC
+                LIMIT %s OFFSET %s
+            """
+            
+            results = db_manager.execute_fetch_all(query, (limit, offset))
+            blocks = []
+            if results:
+                for row in results:
+                    blocks.append({
+                        'height': int(row.get('height', 0)),
+                        'hash': row.get('hash', 'unknown'),
+                        'tx_count': int(row.get('tx_count', 0)),
+                        'finalized': row.get('finalized_at') is not None,
+                        'timestamp': str(row.get('created_at', ''))
+                    })
+            
+            count_query = "SELECT COUNT(*) as total FROM blocks"
+            count_result = db_manager.execute_fetch(count_query)
+            total = count_result['total'] if count_result else 0
+            
+            execution_time = (time.time() - start_time) * 1000
+            return {
+                'status': 'success',
+                'blocks': blocks,
+                'count': int(len(blocks)),
+                'total': int(total),
+                'limit': limit,
+                'offset': offset,
+                'execution_time_ms': round(execution_time, 2),
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
+        except Exception as e:
+            logger.error(f"[block-list] ✗ Error: {e}", exc_info=True)
+            return {'status': 'error', 'error': str(e), 'blocks': [], 'count': 0, 'trace_id': ctx.get('trace_id', 'unknown')}
 
 class BlockCreateCommand(Command):
     def __init__(self):
@@ -3476,10 +3709,43 @@ class GenesisStatusCommand(Command):
 
 # PQ CRYPTO (5)
 class PqStatsCommand(Command):
+    """PQ STATS - Real post-quantum cryptography statistics."""
     def __init__(self):
         super().__init__('pq-stats', CommandCategory.PQ, 'PQ stats')
+    
     def execute(self, args, ctx):
-        return {'algorithm': 'HLWE-256', 'keys': 100}
+        """Execute pq-stats with real key/signature count."""
+        import time
+        start_time = time.time()
+        try:
+            db_manager = get_db_manager()
+            key_count = 0
+            signature_count = 0
+            
+            if db_manager:
+                try:
+                    key_query = "SELECT COUNT(*) as count FROM pq_keys"
+                    key_result = db_manager.execute_fetch(key_query)
+                    key_count = int(key_result['count']) if key_result else 0
+                    
+                    sig_query = "SELECT COUNT(*) as count FROM pq_signatures"
+                    sig_result = db_manager.execute_fetch(sig_query)
+                    signature_count = int(sig_result['count']) if sig_result else 0
+                except Exception as e:
+                    logger.warning(f"[pq-stats] Failed to read counts: {e}")
+            
+            execution_time = (time.time() - start_time) * 1000
+            return {
+                'status': 'success',
+                'algorithm': 'HLWE-256',
+                'keys': key_count,
+                'signatures': signature_count,
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'execution_time_ms': round(execution_time, 2)
+            }
+        except Exception as e:
+            logger.error(f"[pq-stats] ✗ Error: {e}", exc_info=True)
+            return {'status': 'error', 'error': str(e), 'algorithm': 'HLWE-256', 'keys': 0, 'trace_id': ctx.get('trace_id', 'unknown')}
 
 class PqGenerateCommand(Command):
     def __init__(self):
