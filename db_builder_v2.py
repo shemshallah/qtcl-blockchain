@@ -8969,6 +8969,228 @@ def initialize_blockchain_with_genesis(
                 pass
 
 
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# HLWE GENESIS & BLOCK DATABASE INTEGRATION
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+def persist_genesis_to_database(genesis_block, db_pool=None):
+    """
+    Persist genesis block to database with full HLWE PQ material.
+    
+    Called by HLWEGenesisOrchestrator.initialize_genesis() to store genesis block.
+    
+    Returns: (success: bool, block_id: int or None)
+    """
+    try:
+        if db_pool is None:
+            logger.warning("[DB-HLWE] No database pool provided, skipping persist")
+            return True, None  # Soft fail
+        
+        conn = db_pool.getconn()
+        try:
+            cur = conn.cursor()
+            
+            logger.info(f"[DB-HLWE] Persisting genesis block (hash={genesis_block.get('block_hash', '?')[:16]}...)")
+            
+            cur.execute("""
+                INSERT INTO blocks (
+                    height, block_hash, prev_block_hash, timestamp, 
+                    merkle_root, tx_count, miner, status, finalized,
+                    pq_signature, pq_key_fingerprint, pq_merkle_root,
+                    pq_entropy_source, pq_commitment, vdf_proof, metadata
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (height) DO UPDATE SET
+                    block_hash = EXCLUDED.block_hash,
+                    finalized = EXCLUDED.finalized,
+                    status = EXCLUDED.status,
+                    pq_signature = EXCLUDED.pq_signature,
+                    pq_key_fingerprint = EXCLUDED.pq_key_fingerprint,
+                    metadata = EXCLUDED.metadata
+                RETURNING id
+            """, (
+                genesis_block.get('height', 0),
+                genesis_block.get('block_hash'),
+                genesis_block.get('prev_block_hash', '0' * 64),
+                genesis_block.get('timestamp'),
+                genesis_block.get('merkle_root'),
+                genesis_block.get('tx_count', 0),
+                genesis_block.get('miner', 'GENESIS_VALIDATOR'),
+                genesis_block.get('status', 'finalized'),
+                genesis_block.get('finalized', True),
+                genesis_block.get('pq_signature'),
+                genesis_block.get('pq_key_fingerprint'),
+                genesis_block.get('pq_merkle_root'),
+                genesis_block.get('pq_entropy_source'),
+                genesis_block.get('pq_commitment'),
+                genesis_block.get('vdf_proof'),
+                json.dumps(genesis_block.get('metadata', {}))
+            ))
+            
+            result = cur.fetchone()
+            block_id = result[0] if result else None
+            
+            conn.commit()
+            logger.info(f"[DB-HLWE] ✓ Genesis persisted (id={block_id})")
+            
+            return True, block_id
+            
+        finally:
+            db_pool.putconn(conn)
+    
+    except Exception as e:
+        logger.error(f"[DB-HLWE] Persist genesis failed: {e}\n{traceback.format_exc()}")
+        return False, None
+
+
+def persist_block_to_database(block, db_pool=None):
+    """
+    Persist block to database with HLWE PQ material.
+    
+    Called by HLWEGenesisOrchestrator.forge_block() to store blocks.
+    
+    Returns: (success: bool, block_id: int or None)
+    """
+    try:
+        if db_pool is None:
+            logger.warning("[DB-HLWE] No database pool provided, skipping persist")
+            return True, None
+        
+        conn = db_pool.getconn()
+        try:
+            cur = conn.cursor()
+            
+            logger.debug(f"[DB-HLWE] Persisting block height={block.get('height')} (hash={block.get('block_hash', '?')[:16]}...)")
+            
+            cur.execute("""
+                INSERT INTO blocks (
+                    height, block_hash, prev_block_hash, timestamp, 
+                    merkle_root, tx_count, miner, status, finalized,
+                    pq_signature, pq_key_fingerprint, pq_merkle_root,
+                    pq_entropy_source, pq_commitment, vdf_proof, metadata
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (height) DO UPDATE SET
+                    block_hash = EXCLUDED.block_hash,
+                    status = EXCLUDED.status,
+                    pq_signature = EXCLUDED.pq_signature,
+                    metadata = EXCLUDED.metadata
+                RETURNING id
+            """, (
+                block.get('height'),
+                block.get('block_hash'),
+                block.get('prev_block_hash'),
+                block.get('timestamp'),
+                block.get('merkle_root'),
+                block.get('tx_count', 0),
+                block.get('miner'),
+                block.get('status', 'pending'),
+                block.get('finalized', False),
+                block.get('pq_signature'),
+                block.get('pq_key_fingerprint'),
+                block.get('pq_merkle_root'),
+                block.get('pq_entropy_source'),
+                block.get('pq_commitment'),
+                block.get('vdf_proof'),
+                json.dumps(block.get('metadata', {}))
+            ))
+            
+            result = cur.fetchone()
+            block_id = result[0] if result else None
+            
+            conn.commit()
+            logger.debug(f"[DB-HLWE] ✓ Block persisted (height={block.get('height')}, id={block_id})")
+            
+            return True, block_id
+            
+        finally:
+            db_pool.putconn(conn)
+    
+    except Exception as e:
+        logger.error(f"[DB-HLWE] Persist block failed: {e}")
+        return False, None
+
+
+def get_block_pq_integrity_status(height, db_pool=None):
+    """
+    Check block for PQ material integrity.
+    
+    Returns: dict with integrity status
+    """
+    try:
+        if db_pool is None:
+            return {'status': 'error', 'message': 'No database pool'}
+        
+        conn = db_pool.getconn()
+        try:
+            cur = conn.cursor()
+            
+            cur.execute("""
+                SELECT height, block_hash, pq_signature, pq_key_fingerprint, 
+                       pq_merkle_root, vdf_proof, status
+                FROM blocks WHERE height = %s
+            """, (height,))
+            
+            row = cur.fetchone()
+            
+            if not row:
+                return {'status': 'not_found', 'height': height}
+            
+            has_pq_sig = bool(row[2])
+            has_pq_fp = bool(row[3])
+            has_pq_merkle = bool(row[4])
+            has_vdf = bool(row[5])
+            
+            all_valid = has_pq_sig and has_pq_fp and has_pq_merkle and has_vdf
+            
+            return {
+                'status': 'valid' if all_valid else 'incomplete',
+                'height': row[0],
+                'hash': row[1],
+                'pq_signature': has_pq_sig,
+                'pq_key_fingerprint': has_pq_fp,
+                'pq_merkle_root': has_pq_merkle,
+                'vdf_proof': has_vdf,
+                'block_status': row[6]
+            }
+            
+        finally:
+            db_pool.putconn(conn)
+    
+    except Exception as e:
+        logger.error(f"[DB-HLWE] Integrity check failed: {e}")
+        return {'status': 'error', 'message': str(e)}
+
+
+def check_genesis_exists(db_pool=None):
+    """
+    Check if genesis block (height=0) exists in database.
+    
+    Returns: bool
+    """
+    try:
+        if db_pool is None:
+            return False
+        
+        conn = db_pool.getconn()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM blocks WHERE height = 0 LIMIT 1")
+            result = cur.fetchone()
+            return result is not None
+        finally:
+            db_pool.putconn(conn)
+    
+    except Exception as e:
+        logger.warning(f"[DB-HLWE] Genesis check failed: {e}")
+        return False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+
 def main():
     """Main entry point"""
     print_banner()

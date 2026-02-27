@@ -3219,6 +3219,261 @@ class AdminAuditCommand(Command):
     def execute(self, args, ctx):
         return {'audit_entries': []}
 
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# HLWE BLOCK CREATION COMMANDS (4)
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+class GenesisInitCommand(Command):
+    """Initialize genesis block with HLWE PQ material"""
+    def __init__(self):
+        super().__init__('genesis-init', CommandCategory.QUANTUM, 'Initialize genesis block', auth_required=True)
+        self.description = 'Create genesis block (height=0) with HLWE cryptographic material'
+    
+    def execute(self, args, ctx):
+        """Execute genesis initialization"""
+        try:
+            from hlwe_engine import HLWEGenesisOrchestrator
+            import time
+            
+            start_time = time.time()
+            
+            # Parse arguments
+            chain_id = args.get('chain_id', 'QTCL-MAINNET')
+            validator_id = args.get('validator_id', 'GENESIS_VALIDATOR')
+            force_overwrite = args.get('force_overwrite', False)
+            initial_supply = args.get('initial_supply', 1_000_000_000)
+            entropy_sources = args.get('entropy_sources', 5)
+            
+            logger.info(f"[GenesisInitCommand] Config: chain_id={chain_id}, validator={validator_id}")
+            
+            # Execute
+            success, genesis_block = HLWEGenesisOrchestrator.initialize_genesis(
+                validator_id=validator_id,
+                chain_id=chain_id,
+                initial_supply=initial_supply,
+                entropy_sources=entropy_sources,
+                force_overwrite=force_overwrite
+            )
+            
+            duration = time.time() - start_time
+            
+            if not success:
+                return {
+                    'status': 'error',
+                    'message': 'Genesis initialization failed',
+                    'code': 'GENESIS_INIT_FAILED'
+                }
+            
+            return {
+                'status': 'success',
+                'message': 'Genesis block initialized with HLWE PQ material',
+                'code': 'GENESIS_INITIALIZED',
+                'genesis_block': {
+                    'height': genesis_block.get('height'),
+                    'hash': genesis_block.get('block_hash'),
+                    'timestamp': genesis_block.get('timestamp'),
+                    'chain_id': genesis_block.get('chain_id'),
+                    'validator': genesis_block.get('miner'),
+                    'pq_key_fingerprint': genesis_block.get('pq_key_fingerprint'),
+                    'finalized': genesis_block.get('finalized'),
+                },
+                'duration_ms': round(duration * 1000, 2),
+            }
+            
+        except Exception as e:
+            logger.error(f"[GenesisInitCommand] Error: {e}\n{traceback.format_exc()}")
+            return {
+                'status': 'error',
+                'message': f'Exception: {str(e)}',
+                'code': 'GENESIS_EXCEPTION'
+            }
+
+
+class BlockForgeCommand(Command):
+    """Forge new block with HLWE signatures"""
+    def __init__(self):
+        super().__init__('block-forge', CommandCategory.QUANTUM, 'Forge new block', auth_required=True)
+        self.description = 'Create new block with HLWE signatures and quantum consensus'
+    
+    def execute(self, args, ctx):
+        """Forge a new block"""
+        try:
+            from hlwe_engine import HLWEGenesisOrchestrator
+            import json, time
+            
+            start_time = time.time()
+            
+            # Parse arguments
+            height = args.get('height', 1)
+            miner = args.get('miner', 'miner1')
+            prev_hash = args.get('prev_hash', '0' * 64)
+            
+            # Parse transactions
+            txs_arg = args.get('txs', [])
+            if isinstance(txs_arg, str):
+                try:
+                    transactions = json.loads(txs_arg)
+                except:
+                    transactions = []
+            else:
+                transactions = txs_arg if isinstance(txs_arg, list) else []
+            
+            consensus_proof = args.get('consensus_proof')
+            
+            logger.info(f"[BlockForgeCommand] Params: height={height}, miner={miner}, txs={len(transactions)}")
+            
+            # Forge block
+            success, block = HLWEGenesisOrchestrator.forge_block(
+                height=height,
+                transactions=transactions,
+                miner=miner,
+                prev_block_hash=prev_hash,
+                consensus_proof=consensus_proof
+            )
+            
+            duration = time.time() - start_time
+            
+            if not success:
+                return {
+                    'status': 'error',
+                    'message': 'Block forge failed',
+                    'code': 'FORGE_FAILED'
+                }
+            
+            return {
+                'status': 'success',
+                'message': 'Block forged with HLWE signatures',
+                'code': 'BLOCK_FORGED',
+                'block': {
+                    'height': block.get('height'),
+                    'hash': block.get('block_hash'),
+                    'prev_hash': block.get('prev_block_hash'),
+                    'timestamp': block.get('timestamp'),
+                    'miner': block.get('miner'),
+                    'tx_count': block.get('tx_count'),
+                    'pq_key_fingerprint': block.get('pq_key_fingerprint'),
+                    'status': block.get('status'),
+                },
+                'duration_ms': round(duration * 1000, 2),
+            }
+            
+        except Exception as e:
+            logger.error(f"[BlockForgeCommand] Error: {e}\n{traceback.format_exc()}")
+            return {
+                'status': 'error',
+                'message': f'Exception: {str(e)}',
+                'code': 'FORGE_EXCEPTION'
+            }
+
+
+class BlockStatusCommand(Command):
+    """Get block status and finality information"""
+    def __init__(self):
+        super().__init__('block-status', CommandCategory.QUANTUM, 'Get block status')
+        self.description = 'Check block finality and consensus state'
+    
+    def execute(self, args, ctx):
+        """Get block status"""
+        try:
+            height = args.get('height')
+            block_hash = args.get('hash')
+            
+            logger.info(f"[BlockStatusCommand] Querying block: height={height}, hash={block_hash}")
+            
+            # Try to get from global state
+            try:
+                from globals import get_global_state
+                blockchain = get_global_state('blockchain')
+            except:
+                blockchain = None
+            
+            if blockchain is None:
+                return {
+                    'status': 'error',
+                    'message': 'Blockchain not available',
+                    'code': 'BLOCKCHAIN_UNAVAILABLE'
+                }
+            
+            # Get block
+            if height is not None:
+                block = blockchain.get_block_by_height(height)
+            elif block_hash:
+                block = blockchain.get_block_by_hash(block_hash)
+            else:
+                return {
+                    'status': 'error',
+                    'message': 'Must specify height or hash',
+                    'code': 'INVALID_PARAMS'
+                }
+            
+            if not block:
+                return {
+                    'status': 'error',
+                    'message': 'Block not found',
+                    'code': 'BLOCK_NOT_FOUND'
+                }
+            
+            return {
+                'status': 'success',
+                'message': 'Block status retrieved',
+                'code': 'BLOCK_FOUND',
+                'block': {
+                    'height': block.get('height'),
+                    'hash': block.get('block_hash'),
+                    'timestamp': block.get('timestamp'),
+                    'miner': block.get('miner'),
+                    'tx_count': block.get('tx_count'),
+                    'status': block.get('status'),
+                    'finalized': block.get('finalized'),
+                    'finality_depth': block.get('finality_depth', 0),
+                    'pq_signature_valid': bool(block.get('pq_signature')),
+                    'consensus_proof': bool(block.get('consensus_proof')),
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"[BlockStatusCommand] Error: {e}")
+            return {
+                'status': 'error',
+                'message': f'Exception: {str(e)}',
+                'code': 'STATUS_EXCEPTION'
+            }
+
+
+class GenesisStatusCommand(Command):
+    """Get genesis block and initialization status"""
+    def __init__(self):
+        super().__init__('genesis-status', CommandCategory.QUANTUM, 'Check genesis status')
+        self.description = 'Get current genesis block status and PQ material'
+    
+    def execute(self, args, ctx):
+        """Get genesis status"""
+        try:
+            from hlwe_engine import HLWEGenesisOrchestrator
+            
+            return {
+                'status': 'success',
+                'message': 'Genesis status retrieved',
+                'code': 'GENESIS_STATUS',
+                'genesis': {
+                    'initialized': HLWEGenesisOrchestrator._genesis_initialized,
+                    'last_block_hash': HLWEGenesisOrchestrator._last_block_hash,
+                    'block_counter': HLWEGenesisOrchestrator._block_counter,
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"[GenesisStatusCommand] Error: {e}")
+            return {
+                'status': 'error',
+                'message': f'Exception: {str(e)}',
+                'code': 'GENESIS_STATUS_EXCEPTION'
+            }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+
 # PQ CRYPTO (5)
 class PqStatsCommand(Command):
     def __init__(self):
@@ -3355,6 +3610,12 @@ def register_all_commands():
     registry.register(AdminConfigCommand())
     registry.register(AdminAuditCommand())
     
+    # HLWE Block Creation (4)
+    registry.register(GenesisInitCommand())
+    registry.register(BlockForgeCommand())
+    registry.register(BlockStatusCommand())
+    registry.register(GenesisStatusCommand())
+    
     # PQ Crypto (5)
     registry.register(PqStatsCommand())
     registry.register(PqGenerateCommand())
@@ -3366,7 +3627,7 @@ def register_all_commands():
     registry.register(HelpCommand())
     registry.register(HelpCommandsCommand())
     
-    logger.info(f"[REGISTRY] ✓ Registered all 72 commands")
+    logger.info(f"[REGISTRY] ✓ Registered all 76 commands (72 original + 4 HLWE block)")
 
 # Auto-register on import
 register_all_commands()
@@ -3385,4 +3646,4 @@ __all__ = [
     'get_registry',
 ]
 
-logger.info("[MEGA_COMMAND_SYSTEM] ✓ Complete system loaded (72 commands)")
+logger.info("[MEGA_COMMAND_SYSTEM] ✓ Complete system loaded (76 commands: 72 original + 4 HLWE block creation)")

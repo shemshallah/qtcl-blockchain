@@ -6,50 +6,6 @@ Flask WSGI configuration with unified mega_command_system and quantum_lattice_co
 import os
 import sys
 
-# ── OQS / liboqs shim — inject before any `import oqs` fires ────────────────
-# Root cause: liboqs-python 0.14.1 is the only PyPI version. It calls cmake to
-# build liboqs.so from source at runtime, but Koyeb has no cmake. The clone now
-# works (tag 0.11.0) but cmake: not found → RuntimeError → gunicorn dies.
-#
-# The system already has full HLWE-256 native PQC with LIBOQS_AVAILABLE=False
-# fallback in pq_keys_system.py. We just need the RuntimeError to not escape.
-#
-# Fix: pre-load a lightweight stub 'oqs' module into sys.modules so every
-# subsequent 'import oqs' / 'from oqs import ...' gets the stub (no .so needed).
-# pq_keys_system catches ImportError/RuntimeError already; the stub ensures
-# KeyEncapsulation and Signature resolve to None gracefully.
-import types as _types
-
-def _make_oqs_stub():
-    stub = _types.ModuleType('oqs')
-    stub.KeyEncapsulation = None
-    stub.Signature = None
-    stub.rand = None
-    stub.__version__ = '0.0.0-stub'
-    # Expose get_enabled_kem_mechanisms / get_enabled_sig_mechanisms as empty lists
-    stub.get_enabled_kem_mechanisms = lambda: []
-    stub.get_enabled_sig_mechanisms = lambda: []
-    return stub
-
-# Only inject stub if liboqs .so is genuinely absent; try real import first
-try:
-    import importlib.metadata as _im
-    import importlib.util as _iu
-    # Suppress the auto-installer by pre-setting env vars
-    os.environ['OQS_SKIP_SETUP'] = '1'
-    os.environ['OQS_BUILD'] = '0'
-    # Attempt real import — if it works, great; if RuntimeError, use stub
-    import oqs as _oqs_real
-    print('[OQS] ✓ liboqs loaded natively', flush=True)
-except (ImportError, RuntimeError, OSError, Exception) as _oqs_err:
-    _oqs_stub = _make_oqs_stub()
-    import sys as _sys_oqs
-    _sys_oqs.modules['oqs'] = _oqs_stub
-    _sys_oqs.modules['oqs.oqs'] = _oqs_stub
-    print(f'[OQS] liboqs unavailable ({type(_oqs_err).__name__}: {_oqs_err})', flush=True)
-    print('[OQS] ✓ Stub injected — system runs on native HLWE-256 PQC', flush=True)
-# ─────────────────────────────────────────────────────────────────────────────
-
 import logging
 import threading
 from datetime import datetime, timezone
@@ -239,6 +195,55 @@ try:
     logger.info("[BOOTSTRAP] ✓ HEARTBEAT running (check logs for 15s/30s cycles)")
 except Exception as e:
     logger.error(f"[BOOTSTRAP] Failed to init quantum_lattice_control: {e}", exc_info=True)
+
+# ════════════════════════════════════════════════════════════════════════════════════════
+# PHASE 2.5: INITIALIZE HLWE GENESIS ORCHESTRATOR
+# ════════════════════════════════════════════════════════════════════════════════════════
+
+logger.info("[BOOTSTRAP] Initializing HLWE Genesis Orchestrator...")
+try:
+    from hlwe_engine import HLWEGenesisOrchestrator
+    from globals import get_global_state, set_global_state, get_db_pool
+    import os as _os
+    
+    # Store orchestrator reference in global state
+    set_global_state('genesis_orchestrator', HLWEGenesisOrchestrator)
+    logger.info("[BOOTSTRAP] ✓ HLWE Genesis Orchestrator ready")
+    
+    # Optional: Auto-initialize genesis if environment variable set
+    auto_init = _os.environ.get('GENESIS_AUTO_INIT', 'false').lower() in ('true', '1', 'yes')
+    if auto_init:
+        logger.info("[BOOTSTRAP] GENESIS_AUTO_INIT=true, checking genesis block...")
+        try:
+            from db_builder_v2 import check_genesis_exists
+            
+            db_pool = get_db_pool()
+            genesis_exists = check_genesis_exists(db_pool)
+            
+            if not genesis_exists:
+                logger.info("[BOOTSTRAP] Genesis block not found, initializing...")
+                config_chain_id = _os.environ.get('CHAIN_ID', 'QTCL-MAINNET')
+                config_validator = _os.environ.get('GENESIS_VALIDATOR', 'GENESIS_VALIDATOR')
+                
+                success, genesis_block = HLWEGenesisOrchestrator.initialize_genesis(
+                    validator_id=config_validator,
+                    chain_id=config_chain_id,
+                    entropy_sources=int(_os.environ.get('GENESIS_ENTROPY_SOURCES', '5')),
+                    force_overwrite=_os.environ.get('GENESIS_FORCE_OVERWRITE', 'false').lower() in ('true', '1')
+                )
+                if success:
+                    logger.info(f"[BOOTSTRAP] ✓ Genesis initialized: {genesis_block.get('block_hash', '?')[:16]}...")
+                else:
+                    logger.warning(f"[BOOTSTRAP] Genesis initialization failed (non-fatal)")
+            else:
+                logger.info("[BOOTSTRAP] ✓ Genesis block already exists")
+        except Exception as e:
+            logger.warning(f"[BOOTSTRAP] Auto-genesis initialization failed: {e}")
+    
+except ImportError as e:
+    logger.warning(f"[BOOTSTRAP] HLWE Genesis Orchestrator not available: {e}")
+except Exception as e:
+    logger.error(f"[BOOTSTRAP] HLWE Genesis initialization error: {e}", exc_info=True)
 
 # ════════════════════════════════════════════════════════════════════════════════════════
 # FLASK SETUP

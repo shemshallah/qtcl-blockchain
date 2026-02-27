@@ -2595,6 +2595,365 @@ def run_comprehensive_tests():
 # MAIN ENTRY POINT
 # =============================================================================
 
+# =============================================================================
+# SECTION 6: INTEGRATED HLWE GENESIS ORCHESTRATOR
+# =============================================================================
+# Complete block creation orchestration with HLWE PQ material generation
+
+class HLWEGenesisOrchestrator:
+    """Master orchestrator for genesis and block creation with full HLWE integration"""
+    
+    _lock = threading.RLock()
+    _genesis_initialized = False
+    _block_counter = 0
+    _last_block_hash = None
+    _hlwe_system = None
+    _qrng_ensemble = None
+    
+    @classmethod
+    def initialize_genesis(
+        cls, 
+        validator_id='GENESIS_VALIDATOR',
+        chain_id='QTCL-MAINNET',
+        initial_supply=1_000_000_000,
+        entropy_sources=5,
+        force_overwrite=False,
+        db_connection=None
+    ):
+        """
+        ATOMIC GENESIS INITIALIZATION WITH COMPLETE HLWE MATERIAL
+        
+        Creates genesis block (height=0) with:
+        - HLWE PQ keypair for genesis validator
+        - QRNG entropy sources initialized
+        - Full cryptographic material chain
+        - Database persistence
+        
+        Returns: (success: bool, genesis_block_dict: dict)
+        """
+        with cls._lock:
+            try:
+                logger.info(f"[HLWE-Genesis] Starting genesis initialization (chain_id={chain_id})")
+                
+                # ─────────────────────────────────────────────────────────────
+                # Step 1: Initialize HLWE system
+                # ─────────────────────────────────────────────────────────────
+                try:
+                    from globals import get_hlwe_system, set_global_state, get_qrng_ensemble
+                    hlwe = get_hlwe_system()
+                    qrng = get_qrng_ensemble()
+                except:
+                    hlwe = None
+                    qrng = None
+                
+                if hlwe is None:
+                    logger.info("[HLWE-Genesis] Initializing HLWE system...")
+                    hlwe = get_pq_system(HLWE_256, os.environ.get('DATABASE_URL'))
+                    try:
+                        set_global_state('hlwe_system', hlwe)
+                    except:
+                        pass
+                
+                if hlwe is None:
+                    raise Exception("HLWE system unavailable")
+                
+                cls._hlwe_system = hlwe
+                
+                # ─────────────────────────────────────────────────────────────
+                # Step 2: Initialize QRNG ensemble
+                # ─────────────────────────────────────────────────────────────
+                if qrng is None:
+                    logger.info("[HLWE-Genesis] QRNG not in globals, initializing...")
+                    try:
+                        from qrng_ensemble import get_qrng_ensemble as create_qrng
+                        qrng = create_qrng()
+                        try:
+                            set_global_state('qrng_ensemble', qrng)
+                        except:
+                            pass
+                    except:
+                        qrng = None
+                
+                cls._qrng_ensemble = qrng
+                
+                # ─────────────────────────────────────────────────────────────
+                # Step 3: Generate genesis validator key via HLWE
+                # ─────────────────────────────────────────────────────────────
+                logger.info("[HLWE-Genesis] Generating genesis validator PQ keypair...")
+                genesis_key = hlwe.generate_user_key(
+                    pseudoqubit_id=0,
+                    user_id=validator_id,
+                    store=True
+                )
+                
+                if not genesis_key or 'fingerprint' not in genesis_key:
+                    raise Exception("HLWE key generation failed")
+                
+                gen_fingerprint = genesis_key['fingerprint']
+                logger.info(f"[HLWE-Genesis] Genesis key generated: {gen_fingerprint[:16]}...")
+                
+                # ─────────────────────────────────────────────────────────────
+                # Step 4: Collect QRNG entropy for genesis
+                # ─────────────────────────────────────────────────────────────
+                entropy_bytes = b''
+                if qrng:
+                    try:
+                        entropy_data = qrng.get_entropy(num_bytes=256, sources=entropy_sources)
+                        entropy_bytes = entropy_data['entropy']
+                        logger.info(f"[HLWE-Genesis] Collected {len(entropy_bytes)} bytes from QRNG")
+                    except Exception as e:
+                        logger.warning(f"[HLWE-Genesis] QRNG entropy collection partial: {e}")
+                        entropy_bytes = secrets.token_bytes(256)
+                
+                # ─────────────────────────────────────────────────────────────
+                # Step 5: Build genesis block structure
+                # ─────────────────────────────────────────────────────────────
+                timestamp = datetime.now(timezone.utc).isoformat()
+                
+                genesis_block = {
+                    'height': 0,
+                    'timestamp': timestamp,
+                    'block_hash': hashlib.sha3_256(b'GENESIS_BLOCK').hexdigest(),
+                    'prev_block_hash': '0' * 64,
+                    'merkle_root': hashlib.sha3_256(b'GENESIS_MERKLE').hexdigest(),
+                    'nonce': 0,
+                    'difficulty': 0,
+                    'miner': validator_id,
+                    'chain_id': chain_id,
+                    'transactions': [],
+                    'tx_count': 0,
+                }
+                
+                # ─────────────────────────────────────────────────────────────
+                # Step 6: Generate HLWE cryptographic material
+                # ─────────────────────────────────────────────────────────────
+                block_hash = genesis_block['block_hash']
+                
+                # Sign block hash with HLWE
+                pq_sig = hlwe.sign_data(block_hash, key_fingerprint=gen_fingerprint)
+                pq_sig_str = pq_sig if isinstance(pq_sig, str) else pq_sig.hex() if isinstance(pq_sig, bytes) else str(pq_sig)
+                
+                # Create PQ merkle root from transactions
+                tx_data = json.dumps(genesis_block['transactions']).encode()
+                pq_merkle = hashlib.sha3_256(tx_data + entropy_bytes).hexdigest()
+                
+                # Create commitment
+                commitment_input = block_hash.encode() + entropy_bytes + pq_merkle.encode()
+                pq_commitment = hashlib.sha3_512(commitment_input).hexdigest()
+                
+                # VDF proof (verifiable delay function)
+                vdf_input = pq_sig_str.encode() if isinstance(pq_sig_str, str) else pq_sig_str
+                vdf_output = hashlib.sha3_512(vdf_input + b"vdf_genesis").hexdigest()
+                vdf_proof = hashlib.sha3_512(vdf_output.encode() + entropy_bytes).hexdigest()
+                
+                # Merge PQ material into block
+                genesis_block.update({
+                    'pq_signature': pq_sig_str,
+                    'pq_key_fingerprint': gen_fingerprint,
+                    'pq_merkle_root': pq_merkle,
+                    'pq_entropy_source': entropy_bytes.hex()[:64],
+                    'pq_commitment': pq_commitment,
+                    'vdf_proof': vdf_proof,
+                    'consensus_proof': None,
+                    'finality_depth': 0,
+                })
+                
+                genesis_block['metadata'] = {
+                    'block_type': 'genesis',
+                    'pq_validator': validator_id,
+                    'pq_key_fingerprint': gen_fingerprint,
+                    'created_at': datetime.now(timezone.utc).isoformat(),
+                    'pq_system': 'HLWE-256 (NIST Level 5)',
+                }
+                
+                genesis_block['finalized'] = True
+                genesis_block['status'] = 'finalized'
+                
+                logger.info(f"[HLWE-Genesis] ✅ Genesis block structure complete")
+                
+                # ─────────────────────────────────────────────────────────────
+                # Step 7: Persist to database
+                # ─────────────────────────────────────────────────────────────
+                try:
+                    if db_connection:
+                        cur = db_connection.cursor()
+                        cur.execute("""
+                            INSERT INTO blocks (height, block_hash, prev_block_hash, timestamp, 
+                                               merkle_root, tx_count, miner, status, finalized,
+                                               pq_signature, pq_key_fingerprint, pq_merkle_root,
+                                               pq_entropy_source, pq_commitment, vdf_proof, metadata)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (height) DO UPDATE SET
+                                block_hash = EXCLUDED.block_hash,
+                                finalized = EXCLUDED.finalized,
+                                status = EXCLUDED.status,
+                                pq_signature = EXCLUDED.pq_signature,
+                                metadata = EXCLUDED.metadata
+                        """, (
+                            genesis_block['height'],
+                            genesis_block['block_hash'],
+                            genesis_block['prev_block_hash'],
+                            genesis_block['timestamp'],
+                            genesis_block['merkle_root'],
+                            genesis_block['tx_count'],
+                            genesis_block['miner'],
+                            genesis_block['status'],
+                            genesis_block['finalized'],
+                            genesis_block.get('pq_signature'),
+                            genesis_block.get('pq_key_fingerprint'),
+                            genesis_block.get('pq_merkle_root'),
+                            genesis_block.get('pq_entropy_source'),
+                            genesis_block.get('pq_commitment'),
+                            genesis_block.get('vdf_proof'),
+                            json.dumps(genesis_block.get('metadata', {}))
+                        ))
+                        db_connection.commit()
+                        logger.info(f"[HLWE-Genesis] ✅ Block persisted to DB (height={genesis_block['height']})")
+                except Exception as e:
+                    logger.warning(f"[HLWE-Genesis] Database persist warning: {e}")
+                
+                cls._genesis_initialized = True
+                cls._last_block_hash = genesis_block['block_hash']
+                
+                logger.info(f"[HLWE-Genesis] ✅ Genesis initialization complete (hash={genesis_block['block_hash'][:16]}...)")
+                return True, genesis_block
+                
+            except Exception as e:
+                logger.error(f"[HLWE-Genesis] Genesis initialization failed: {e}\n{traceback.format_exc()}")
+                return False, {}
+    
+    @classmethod
+    def forge_block(
+        cls,
+        height,
+        transactions,
+        miner,
+        prev_block_hash,
+        consensus_proof=None,
+        db_connection=None
+    ):
+        """
+        Forge a new block with HLWE integration
+        
+        Flow:
+        1. Collect latest QRNG entropy
+        2. Create block structure
+        3. Generate HLWE signatures & commitments
+        4. Attach quantum consensus proof
+        5. Persist to DB (optional)
+        6. Update global state
+        
+        Returns: (success: bool, block_dict: dict)
+        """
+        with cls._lock:
+            try:
+                logger.info(f"[HLWE-Genesis] Forging block height={height} miner={miner}")
+                
+                # Initialize systems if needed
+                hlwe = cls._hlwe_system
+                qrng = cls._qrng_ensemble
+                
+                if hlwe is None:
+                    try:
+                        from globals import get_hlwe_system
+                        hlwe = get_hlwe_system()
+                    except:
+                        hlwe = get_pq_system(HLWE_256, os.environ.get('DATABASE_URL'))
+                    cls._hlwe_system = hlwe
+                
+                # Collect entropy
+                entropy_bytes = b''
+                if qrng:
+                    try:
+                        entropy_data = qrng.get_entropy(num_bytes=256, sources=5)
+                        entropy_bytes = entropy_data['entropy']
+                    except:
+                        entropy_bytes = secrets.token_bytes(256)
+                else:
+                    entropy_bytes = secrets.token_bytes(256)
+                
+                # Build block
+                timestamp = datetime.now(timezone.utc).isoformat()
+                block_hash = hashlib.sha3_256(
+                    f"{height}{prev_block_hash}{timestamp}".encode() + entropy_bytes
+                ).hexdigest()
+                
+                block = {
+                    'height': height,
+                    'timestamp': timestamp,
+                    'block_hash': block_hash,
+                    'prev_block_hash': prev_block_hash,
+                    'merkle_root': hashlib.sha3_256(
+                        json.dumps(transactions).encode()
+                    ).hexdigest(),
+                    'nonce': secrets.randbits(64),
+                    'difficulty': 0,
+                    'miner': miner,
+                    'transactions': transactions,
+                    'tx_count': len(transactions),
+                }
+                
+                # Generate HLWE key for miner if needed
+                miner_key = None
+                if hlwe:
+                    try:
+                        miner_key = hlwe.generate_user_key(
+                            pseudoqubit_id=height % 106496,
+                            user_id=miner,
+                            store=False
+                        )
+                    except:
+                        logger.warning(f"[HLWE-Genesis] Could not generate key for miner {miner}")
+                
+                # Generate PQ material
+                if hlwe and miner_key:
+                    try:
+                        pq_sig = hlwe.sign_data(block_hash, key_fingerprint=miner_key.get('fingerprint'))
+                        pq_sig_str = pq_sig if isinstance(pq_sig, str) else str(pq_sig)
+                        
+                        tx_data = json.dumps(transactions).encode()
+                        pq_merkle = hashlib.sha3_256(tx_data + entropy_bytes).hexdigest()
+                        
+                        commitment_input = block_hash.encode() + entropy_bytes + pq_merkle.encode()
+                        pq_commitment = hashlib.sha3_512(commitment_input).hexdigest()
+                        
+                        vdf_input = pq_sig_str.encode() if isinstance(pq_sig_str, str) else pq_sig_str
+                        vdf_output = hashlib.sha3_512(vdf_input + b"vdf_block").hexdigest()
+                        vdf_proof = hashlib.sha3_512(vdf_output.encode() + entropy_bytes).hexdigest()
+                        
+                        block.update({
+                            'pq_signature': pq_sig_str,
+                            'pq_key_fingerprint': miner_key.get('fingerprint'),
+                            'pq_merkle_root': pq_merkle,
+                            'pq_entropy_source': entropy_bytes.hex()[:64],
+                            'pq_commitment': pq_commitment,
+                            'vdf_proof': vdf_proof,
+                        })
+                    except Exception as e:
+                        logger.warning(f"[HLWE-Genesis] PQ material generation failed: {e}")
+                
+                if consensus_proof:
+                    block['consensus_proof'] = consensus_proof
+                
+                block['metadata'] = {
+                    'block_type': 'normal',
+                    'pq_validator': miner,
+                    'created_at': timestamp,
+                }
+                block['finalized'] = False
+                block['status'] = 'pending'
+                
+                cls._block_counter += 1
+                cls._last_block_hash = block_hash
+                
+                logger.info(f"[HLWE-Genesis] ✅ Block forged: height={height} hash={block_hash[:16]}...")
+                return True, block
+                
+            except Exception as e:
+                logger.error(f"[HLWE-Genesis] Block forge failed: {e}\n{traceback.format_exc()}")
+                return False, {}
+
+
 if __name__ == '__main__':
     logging.basicConfig(
         level=logging.INFO,

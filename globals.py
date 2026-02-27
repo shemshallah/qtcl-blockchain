@@ -25,6 +25,7 @@ _GLOBAL_STATE={
     'initialized':False,'_initializing':False,'lock':threading.Lock(),
     'qrng_ensemble':None,'qrng_stats':None,'qrng_last_refresh':0.0,'qrng_circuit_breakers':{},'qrng_pool_size':0,'qrng_active_sources':0,'qrng_entropy_estimate':0.0,
     'hlwe_system':None,'hlwe_params':None,'pqc_system':None,'pqc_state':None,
+}
 
 _STATE_LOCK=threading.RLock()
 
