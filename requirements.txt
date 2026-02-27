@@ -41,9 +41,20 @@ pycryptodome>=3.17.0          # Additional crypto algorithms
 
 
 # ================================================================================
-# POST-QUANTUM CRYPTOGRAPHY (Required for pq_keys_system, admin_api PQC endpoints)
+# POST-QUANTUM CRYPTOGRAPHY — PINNED to known-good version.
+#
+# CRITICAL: liboqs-python must be pinned.  This package bundles the Python
+# wrapper but NOT the C shared library (liboqs.so); that is built from source
+# by entrypoint.py at startup using the matching git tag.
+#
+# Pin rule: installed version == git tag that exists in
+#   https://github.com/open-quantum-safe/liboqs
+# Known good tags: 0.10.0, 0.10.1, 0.11.0, 0.12.0
+# DO NOT use >=  — that lets pip install a version (e.g. 0.14.x) whose
+# corresponding liboqs C tag does not yet exist, causing the auto-installer
+# to crash with "Remote branch X not found in upstream origin".
 # ================================================================================
-liboqs-python>=0.10.0        # Open Quantum Safe (CRYSTALS-Kyber, Dilithium)
+liboqs-python==0.10.1        # Open Quantum Safe (CRYSTALS-Kyber, Dilithium) — PINNED
 
 
 # ================================================================================
