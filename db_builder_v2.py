@@ -1684,9 +1684,11 @@ class HybridQuantumEntropyEngine:
         theta = self.get_random_angle()
         return cos(theta), sin(theta)
     
-    def get_random_poincare_point(self, max_radius: 'mpf' = mpf('0.95')) -> Tuple['mpf', 'mpf']:
+    def get_random_poincare_point(self, max_radius: 'mpf' = None) -> Tuple['mpf', 'mpf']:
         """Get random point in Poincaré disk with 150 decimal precision"""
         # Use rejection sampling for uniform distribution
+        if max_radius is None:
+            max_radius = mpf('0.95')
         while True:
             x = (self.get_random_mpf() * mpf(2) - mpf(1)) * max_radius
             y = (self.get_random_mpf() * mpf(2) - mpf(1)) * max_radius
@@ -2669,7 +2671,7 @@ class RoutingTopologyBuilder:
         logger.info(f"{CLR.BOLD}{CLR.C}Initializing RoutingTopologyBuilder{CLR.E}")
         logger.info(f"{CLR.C}  Input qubits: {len(pseudoqubits):,}{CLR.E}")
     
-    def build_routing(self, max_neighbors: int = 10, distance_threshold: 'mpf' = mpf('0.5')):
+    def build_routing(self, max_neighbors: int = 10, distance_threshold: 'mpf' = None):
         """
         Build routing topology using nearest-neighbor graph
         
@@ -2677,6 +2679,8 @@ class RoutingTopologyBuilder:
             max_neighbors: Maximum neighbors per qubit
             distance_threshold: Maximum hyperbolic distance for edge
         """
+        if distance_threshold is None:
+            distance_threshold = mpf('0.5')
         start_time = time.time()
         
         logger.info(f"\n{CLR.BOLD}{CLR.C}BUILDING ROUTING TOPOLOGY{CLR.E}")
