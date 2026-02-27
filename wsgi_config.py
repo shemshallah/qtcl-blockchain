@@ -6,22 +6,48 @@ Flask WSGI configuration with unified mega_command_system and quantum_lattice_co
 import os
 import sys
 
-# ── OQS / liboqs branch fix — MUST run before any `import oqs` ──────────────
-# oqs-python 0.14.1 calls importlib.metadata.version('liboqs-python') at runtime
-# to get the branch string for git clone.  The C repo has no tag 0.14.1 (latest
-# real tag: 0.11.0) so the clone fails.  '0.14.1' is never a literal in oqs.py —
-# it is always resolved dynamically — so file patches do nothing.
+# ── OQS / liboqs shim — inject before any `import oqs` fires ────────────────
+# Root cause: liboqs-python 0.14.1 is the only PyPI version. It calls cmake to
+# build liboqs.so from source at runtime, but Koyeb has no cmake. The clone now
+# works (tag 0.11.0) but cmake: not found → RuntimeError → gunicorn dies.
 #
-# Fix: monkey-patch importlib.metadata.version() to return '0.11.0' for the
-# liboqs-python package BEFORE oqs is imported anywhere in this process.
-import importlib.metadata as _im_meta
-_im_real_version = _im_meta.version
-def _im_patched_version(package_name: str) -> str:
-    if package_name in ('liboqs-python', 'liboqs_python', 'oqs'):
-        return '0.11.0'
-    return _im_real_version(package_name)
-_im_meta.version = _im_patched_version
-print('[OQS-PATCH] ✓ importlib.metadata.version patched: liboqs-python → 0.11.0', flush=True)
+# The system already has full HLWE-256 native PQC with LIBOQS_AVAILABLE=False
+# fallback in pq_keys_system.py. We just need the RuntimeError to not escape.
+#
+# Fix: pre-load a lightweight stub 'oqs' module into sys.modules so every
+# subsequent 'import oqs' / 'from oqs import ...' gets the stub (no .so needed).
+# pq_keys_system catches ImportError/RuntimeError already; the stub ensures
+# KeyEncapsulation and Signature resolve to None gracefully.
+import types as _types
+
+def _make_oqs_stub():
+    stub = _types.ModuleType('oqs')
+    stub.KeyEncapsulation = None
+    stub.Signature = None
+    stub.rand = None
+    stub.__version__ = '0.0.0-stub'
+    # Expose get_enabled_kem_mechanisms / get_enabled_sig_mechanisms as empty lists
+    stub.get_enabled_kem_mechanisms = lambda: []
+    stub.get_enabled_sig_mechanisms = lambda: []
+    return stub
+
+# Only inject stub if liboqs .so is genuinely absent; try real import first
+try:
+    import importlib.metadata as _im
+    import importlib.util as _iu
+    # Suppress the auto-installer by pre-setting env vars
+    os.environ['OQS_SKIP_SETUP'] = '1'
+    os.environ['OQS_BUILD'] = '0'
+    # Attempt real import — if it works, great; if RuntimeError, use stub
+    import oqs as _oqs_real
+    print('[OQS] ✓ liboqs loaded natively', flush=True)
+except (ImportError, RuntimeError, OSError, Exception) as _oqs_err:
+    _oqs_stub = _make_oqs_stub()
+    import sys as _sys_oqs
+    _sys_oqs.modules['oqs'] = _oqs_stub
+    _sys_oqs.modules['oqs.oqs'] = _oqs_stub
+    print(f'[OQS] liboqs unavailable ({type(_oqs_err).__name__}: {_oqs_err})', flush=True)
+    print('[OQS] ✓ Stub injected — system runs on native HLWE-256 PQC', flush=True)
 # ─────────────────────────────────────────────────────────────────────────────
 
 import logging
