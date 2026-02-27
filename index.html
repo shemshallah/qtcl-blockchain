@@ -1,735 +1,377 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>QTCL - Quantum Blockchain</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        :root {
-            --primary: #a78bfa;
-            --primary-light: #c4b5fd;
-            --primary-dark: #7c3aed;
-            --secondary: #64748b;
-            --accent: #e2e8f0;
-            --bg-black: #0f0f1e;
-            --bg-dark: #1a1a2e;
-            --bg-darker: #0a0a14;
-            --border: #2a2a3e;
-            --text-primary: #f0f0f0;
-            --text-secondary: #94a3b8;
-        }
-
-        html, body {
-            width: 100%;
-            height: 100%;
-            background: linear-gradient(135deg, #0a0a14 0%, #0f0f1e 100%);
-            color: var(--text-primary);
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Courier New', monospace;
-            overflow: hidden;
-        }
-
-        body {
-            display: flex;
-            flex-direction: column;
-        }
-
-        .header {
-            background: linear-gradient(135deg, #1a1a2e 0%, #0f0f1e 100%);
-            border-bottom: 1px solid var(--border);
-            padding: 24px;
-            backdrop-filter: blur(10px);
-        }
-
-        .header-top {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .header-title {
-            font-size: 28px;
-            font-weight: 900;
-            color: var(--primary);
-            letter-spacing: -1px;
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-
-        .header-title .symbol {
-            font-size: 32px;
-            animation: float 3s ease-in-out infinite;
-        }
-
-        @keyframes float {
-            0%, 100% { transform: translateY(0); }
-            50% { transform: translateY(-4px); }
-        }
-
-        .header-subtitle {
-            color: var(--text-secondary);
-            font-size: 13px;
-            font-weight: 500;
-            letter-spacing: 0.5px;
-            text-transform: uppercase;
-            margin-top: 8px;
-        }
-
-        .status-bar {
-            display: flex;
-            gap: 12px;
-        }
-
-        .status-item {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 8px 14px;
-            background: rgba(167, 139, 250, 0.05);
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            font-size: 12px;
-            color: var(--text-secondary);
-        }
-
-        .status-dot {
-            width: 6px;
-            height: 6px;
-            border-radius: 50%;
-            background: var(--primary);
-            animation: pulse-dot 2s infinite;
-        }
-
-        @keyframes pulse-dot {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
-
-        .container {
-            display: flex;
-            flex: 1;
-            overflow: hidden;
-            padding: 16px;
-        }
-
-        .terminal-wrapper {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            background: var(--bg-dark);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            overflow: hidden;
-        }
-
-        .terminal {
-            flex: 1;
-            background: var(--bg-darker);
-            padding: 24px;
-            overflow-y: auto;
-            font-size: 13px;
-            line-height: 1.7;
-            font-family: 'Courier New', monospace;
-            letter-spacing: 0.3px;
-        }
-
-        .terminal::-webkit-scrollbar {
-            width: 8px;
-        }
-
-        .terminal::-webkit-scrollbar-track {
-            background: var(--bg-darker);
-        }
-
-        .terminal::-webkit-scrollbar-thumb {
-            background: var(--border);
-            border-radius: 4px;
-        }
-
-        .terminal::-webkit-scrollbar-thumb:hover {
-            background: var(--secondary);
-        }
-
-        .output-line {
-            margin-bottom: 6px;
-            opacity: 0;
-            animation: slide-in 0.3s ease forwards;
-        }
-
-        @keyframes slide-in {
-            from {
-                opacity: 0;
-                transform: translateX(-10px);
-            }
-            to {
-                opacity: 1;
-                transform: translateX(0);
-            }
-        }
-
-        .output-prompt {
-            color: var(--primary);
-            font-weight: 600;
-        }
-
-        .output-text {
-            color: var(--text-primary);
-        }
-
-        .output-success {
-            color: #86efac;
-        }
-
-        .output-error {
-            color: #f87171;
-        }
-
-        .output-warning {
-            color: var(--primary-light);
-        }
-
-        .output-info {
-            color: var(--text-secondary);
-        }
-
-        .input-area {
-            background: var(--bg-dark);
-            border-top: 1px solid var(--border);
-            padding: 16px 24px;
-            display: flex;
-            gap: 12px;
-            align-items: center;
-        }
-
-        .input-prompt {
-            color: var(--primary);
-            font-weight: 600;
-            font-family: 'Courier New', monospace;
-        }
-
-        .input-field {
-            flex: 1;
-            background: var(--bg-darker);
-            border: 1px solid var(--border);
-            color: var(--text-primary);
-            padding: 12px 14px;
-            font-family: 'Courier New', monospace;
-            font-size: 13px;
-            border-radius: 6px;
-            outline: none;
-            transition: all 0.2s;
-        }
-
-        .input-field:focus {
-            border-color: var(--primary);
-            background: rgba(167, 139, 250, 0.02);
-        }
-
-        .input-field::placeholder {
-            color: var(--text-secondary);
-        }
-
-        .input-field.password {
-            font-size: 20px;
-            letter-spacing: 4px;
-        }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QTCL — Quantum Temporal Coherence Ledger</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    
+    :root {
+      --bg: #0a0a0e;
+      --bg-secondary: #0f0f14;
+      --border: #1a1a24;
+      --border-light: #252535;
+      --sky-blue: #00bfff;
+      --sky-blue-dim: #0099cc;
+      --sky-blue-dark: #007399;
+      --text: #d4d4d8;
+      --text-dim: #808089;
+      --success: #22c55e;
+      --error: #ef4444;
+      --warning: #eab308;
+      --glow-sky: 0 0 20px rgba(0, 191, 255, 0.3);
+    }
+    
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      font-family: 'Fira Code', 'JetBrains Mono', 'Menlo', monospace;
+      font-size: 13px;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      letter-spacing: 0.2px;
+      position: fixed;
+    }
+    
+    #app {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      width: 100%;
+    }
+    
+    /* Header */
+    #header {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      height: 45px;
+      padding: 0 20px;
+      background: linear-gradient(90deg, var(--bg) 0%, var(--bg-secondary) 100%);
+      border-bottom: 2px solid var(--sky-blue);
+      box-shadow: 0 0 20px rgba(0, 191, 255, 0.1);
+      flex-shrink: 0;
+    }
+    
+    #header-title {
+      font-size: 14px;
+      font-weight: bold;
+      letter-spacing: 3px;
+      color: var(--sky-blue);
+      text-shadow: var(--glow-sky);
+      user-select: none;
+    }
+    
+    /* Terminal Container */
+    #terminal {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: var(--bg);
+    }
+    
+    /* Output Area */
+    #output {
+      flex: 1;
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding: 20px;
+      padding-right: 15px;
+      background: var(--bg);
+    }
+    
+    #output::-webkit-scrollbar {
+      width: 8px;
+    }
+    
+    #output::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    
+    #output::-webkit-scrollbar-thumb {
+      background: rgba(0, 191, 255, 0.2);
+      border-radius: 4px;
+      transition: all 0.3s ease;
+    }
+    
+    #output::-webkit-scrollbar-thumb:hover {
+      background: rgba(0, 191, 255, 0.4);
+    }
+    
+    /* Line Styles */
+    .line {
+      margin-bottom: 3px;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      font-size: 13px;
+      animation: slideIn 0.15s ease-out;
+      font-variant-numeric: tabular-nums;
+    }
+    
+    @keyframes slideIn {
+      from {
+        opacity: 0;
+        transform: translateY(2px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+    
+    .line-prompt {
+      color: var(--text-dim);
+    }
+    
+    .line-cmd {
+      color: var(--sky-blue);
+      font-weight: 500;
+    }
+    
+    .line-success {
+      color: var(--success);
+    }
+    
+    .line-error {
+      color: var(--error);
+    }
+    
+    .line-warning {
+      color: var(--warning);
+    }
+    
+    .line-info {
+      color: var(--sky-blue);
+      opacity: 0.8;
+    }
+    
+    .line-system {
+      color: var(--text-dim);
+    }
+    
+    .line-dim {
+      color: var(--text-dim);
+      opacity: 0.7;
+    }
+    
+    .line-header {
+      color: var(--sky-blue);
+      font-weight: bold;
+      letter-spacing: 2px;
+      margin-top: 8px;
+      margin-bottom: 4px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 4px;
+    }
+    
+    /* Input Area */
+    #inputbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 20px;
+      border-top: 2px solid var(--sky-blue);
+      background: linear-gradient(90deg, var(--bg) 0%, var(--bg-secondary) 100%);
+      flex-shrink: 0;
+      box-shadow: 0 -2px 15px rgba(0, 191, 255, 0.1);
+    }
+    
+    #prompt {
+      color: var(--sky-blue);
+      font-weight: bold;
+      font-size: 13px;
+      user-select: none;
+      flex-shrink: 0;
+      text-shadow: var(--glow-sky);
+    }
+    
+    #cmd {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: var(--text);
+      font-family: inherit;
+      font-size: 13px;
+      caret-color: var(--sky-blue);
+      padding: 4px 0;
+      user-select: text;
+    }
+    
+    #cmd::placeholder {
+      color: var(--text-dim);
+      opacity: 0.5;
+    }
+    
+    #cmd:focus {
+      outline: none;
+      border-bottom: 1px solid var(--sky-blue);
+      padding-bottom: 3px;
+    }
+    
+    #exec-btn {
+      padding: 6px 14px;
+      background: rgba(0, 191, 255, 0.1);
+      border: 1px solid var(--sky-blue);
+      color: var(--sky-blue);
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: bold;
+      letter-spacing: 1px;
+      cursor: pointer;
+      border-radius: 2px;
+      transition: all 0.2s ease;
+      text-transform: uppercase;
+      flex-shrink: 0;
+      user-select: none;
+    }
+    
+    #exec-btn:hover {
+      background: rgba(0, 191, 255, 0.2);
+      box-shadow: 0 0 15px rgba(0, 191, 255, 0.3);
+    }
+    
+    #exec-btn:active {
+      transform: scale(0.98);
+    }
+  </style>
 </head>
 <body>
-    <div class="header">
-        <div class="header-top">
-            <div>
-                <div class="header-title">
-                    <span class="symbol">⚛️</span>
-                    <span>QTCL</span>
-                </div>
-                <div class="header-subtitle">Quantum Blockchain Infrastructure</div>
-            </div>
-            <div class="status-bar">
-                <div class="status-item">
-                    <div class="status-dot"></div>
-                    Quantum: Online
-                </div>
-                <div class="status-item">
-                    <div class="status-dot"></div>
-                    Ledger: Synced
-                </div>
-                <div class="status-item" id="auth-status">
-                    Not authenticated
-                </div>
-            </div>
-        </div>
+  <div id="app">
+    <div id="header">
+      <div id="header-title">⬡ QTCL</div>
     </div>
-
-    <div class="container">
-        <div class="terminal-wrapper">
-            <div class="terminal" id="terminal">
-                <div class="output-line">
-                    <span class="output-prompt">$</span>
-                    <span class="output-text"> QTCL Terminal v1.0</span>
-                </div>
-                <div class="output-line">
-                    <span class="output-success">✓</span>
-                    <span class="output-text"> Quantum systems online</span>
-                </div>
-                <div class="output-line">
-                    <span class="output-success">✓</span>
-                    <span class="output-text"> Ready for setup</span>
-                </div>
-            </div>
-
-            <div class="input-area">
-                <span class="input-prompt">$</span>
-                <input 
-                    type="text" 
-                    class="input-field" 
-                    id="commandInput" 
-                    placeholder="Enter command..."
-                    autocomplete="off"
-                >
-            </div>
-        </div>
+    
+    <div id="terminal">
+      <div id="output"></div>
+      
+      <div id="inputbar">
+        <div id="prompt">QTCL></div>
+        <input type="text" id="cmd" placeholder="type command...">
+        <button id="exec-btn">Execute</button>
+      </div>
     </div>
+  </div>
 
-    <script>
-        const API_URL = '/api';
-        const PROMPT_STATES = {
-            NONE: 'none',
-            LOGIN_USERNAME: 'login_username',
-            LOGIN_PASSWORD: 'login_password',
-            REGISTER_EMAIL: 'register_email',
-            REGISTER_PASSWORD: 'register_password',
-            REGISTER_NAME: 'register_name',
-            TRANSACT_RECIPIENT: 'transact_recipient',
-            TRANSACT_AMOUNT: 'transact_amount'
-        };
+  <script>
+    const state = {
+      cmdInput: document.getElementById('cmd'),
+      output: document.getElementById('output'),
+      execBtn: document.getElementById('exec-btn'),
+      history: [],
+      historyIndex: -1,
+    };
 
-        class QTCLTerminal {
-            constructor() {
-                this.authToken = null;
-                this.currentUser = null;
-                this.isAuthenticated = false;
-                this.commandHistory = [];
-                this.historyIndex = -1;
-                this.promptState = PROMPT_STATES.NONE;
-                this.tempData = {};
+    // Add line to output
+    function addLine(text, className = 'line-system') {
+      const line = document.createElement('div');
+      line.className = `line ${className}`;
+      line.textContent = text;
+      state.output.appendChild(line);
+      state.output.scrollTop = state.output.scrollHeight;
+    }
 
-                this.init();
+    // Execute command
+    async function execute() {
+      const cmd = state.cmdInput.value.trim();
+      if (!cmd) return;
+
+      // Add to history
+      state.history.push(cmd);
+      state.historyIndex = state.history.length;
+
+      // Display input
+      addLine(`QTCL> ${cmd}`, 'line-cmd');
+      state.cmdInput.value = '';
+
+      try {
+        const response = await fetch('/api/command', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: cmd }),
+        });
+
+        const data = await response.json();
+
+        if (data.status === 'success') {
+          if (data.result) {
+            const result = data.result;
+            if (typeof result === 'string') {
+              addLine(result, 'line-success');
+            } else {
+              addLine(JSON.stringify(result, null, 2), 'line-success');
             }
-
-            init() {
-                const input = document.getElementById('commandInput');
-                input.addEventListener('keydown', (e) => this.handleInput(e));
-                input.focus();
-            }
-
-            handleInput(e) {
-                if (e.key === 'Enter') {
-                    const input = document.getElementById('commandInput');
-                    const value = input.value.trim();
-                    
-                    if (value || this.promptState !== PROMPT_STATES.NONE) {
-                        if (this.promptState === PROMPT_STATES.NONE) {
-                            this.printLine(`$ ${value}`, 'prompt');
-                            this.commandHistory.push(value);
-                            this.historyIndex = -1;
-                            this.executeCommand(value);
-                        } else {
-                            this.handlePromptInput(value);
-                        }
-                    }
-                    input.value = '';
-                } else if (e.key === 'ArrowUp') {
-                    e.preventDefault();
-                    this.navigateHistory(-1);
-                } else if (e.key === 'ArrowDown') {
-                    e.preventDefault();
-                    this.navigateHistory(1);
-                }
-            }
-
-            navigateHistory(dir) {
-                const input = document.getElementById('commandInput');
-                this.historyIndex += dir;
-                
-                if (this.historyIndex < -1) this.historyIndex = -1;
-                if (this.historyIndex >= this.commandHistory.length) this.historyIndex = this.commandHistory.length - 1;
-                
-                input.value = this.historyIndex >= 0 ? this.commandHistory[this.historyIndex] : '';
-            }
-
-            handlePromptInput(value) {
-                switch(this.promptState) {
-                    case PROMPT_STATES.LOGIN_USERNAME:
-                        this.tempData.username = value;
-                        this.printLine(value, 'text');
-                        this.promptState = PROMPT_STATES.LOGIN_PASSWORD;
-                        this.printLine('', 'info');
-                        this.printLine('Password:', 'warning');
-                        break;
-
-                    case PROMPT_STATES.LOGIN_PASSWORD:
-                        this.tempData.password = value;
-                        this.printLine('••••••••', 'text');
-                        this.performLogin(this.tempData.username, this.tempData.password);
-                        this.promptState = PROMPT_STATES.NONE;
-                        this.tempData = {};
-                        break;
-
-                    case PROMPT_STATES.REGISTER_EMAIL:
-                        this.tempData.email = value;
-                        this.printLine(value, 'text');
-                        this.promptState = PROMPT_STATES.REGISTER_PASSWORD;
-                        this.printLine('', 'info');
-                        this.printLine('Password:', 'warning');
-                        break;
-
-                    case PROMPT_STATES.REGISTER_PASSWORD:
-                        this.tempData.password = value;
-                        this.printLine('••••••••', 'text');
-                        this.promptState = PROMPT_STATES.REGISTER_NAME;
-                        this.printLine('', 'info');
-                        this.printLine('Full Name:', 'warning');
-                        break;
-
-                    case PROMPT_STATES.REGISTER_NAME:
-                        this.tempData.name = value;
-                        this.printLine(value, 'text');
-                        this.performRegister(this.tempData.email, this.tempData.password, this.tempData.name);
-                        this.promptState = PROMPT_STATES.NONE;
-                        this.tempData = {};
-                        break;
-
-                    case PROMPT_STATES.TRANSACT_RECIPIENT:
-                        this.tempData.recipient = value;
-                        this.printLine(value, 'text');
-                        this.validateRecipient(value);
-                        break;
-
-                    case PROMPT_STATES.TRANSACT_AMOUNT:
-                        this.tempData.amount = value;
-                        this.printLine(value, 'text');
-                        this.executeTransaction(this.tempData.recipient, this.tempData.amount);
-                        this.promptState = PROMPT_STATES.NONE;
-                        this.tempData = {};
-                        break;
-                }
-            }
-
-            async performLogin(username, password) {
-                this.printLine('', 'info');
-                this.printLine('Authenticating...', 'warning');
-
-                try {
-                    const response = await fetch(`${API_URL}/auth/login`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ email: username, password })
-                    });
-
-                    const data = await response.json();
-
-                    if (response.ok && data.token) {
-                        this.authToken = data.token;
-                        this.currentUser = username;
-                        this.isAuthenticated = true;
-
-                        this.printLine('✓ Authentication successful', 'success');
-                        this.printLine(`✓ User: ${username}`, 'success');
-                        this.printLine(`✓ Token issued`, 'success');
-
-                        document.getElementById('auth-status').innerHTML = `<span style="color: #86efac;">✓ Authenticated (${username})</span>`;
-
-                        this.printLine('', 'info');
-                        this.showHelp();
-                    } else {
-                        this.printLine(`✗ Authentication failed: ${data.message || 'Invalid credentials'}`, 'error');
-                        this.promptState = PROMPT_STATES.NONE;
-                        this.tempData = {};
-                    }
-                } catch (e) {
-                    this.printLine(`✗ Error: ${e.message}`, 'error');
-                    this.promptState = PROMPT_STATES.NONE;
-                    this.tempData = {};
-                }
-            }
-
-            async performRegister(email, password, name) {
-                this.printLine('', 'info');
-                this.printLine('Creating account...', 'warning');
-
-                try {
-                    const response = await fetch(`${API_URL}/auth/register`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ email, password, name })
-                    });
-
-                    const data = await response.json();
-
-                    if (response.ok) {
-                        this.printLine('✓ Account created successfully', 'success');
-                        this.printLine(`✓ User ID: ${data.user_id || 'Generated'}`, 'success');
-                        this.printLine('Type "login" to authenticate', 'info');
-                    } else {
-                        this.printLine(`✗ Registration failed: ${data.message || 'Unknown error'}`, 'error');
-                    }
-                } catch (e) {
-                    this.printLine(`✗ Error: ${e.message}`, 'error');
-                }
-            }
-
-            async validateRecipient(recipient) {
-                try {
-                    const response = await fetch(`${API_URL}/users/${recipient}`, {
-                        headers: { 'Authorization': `Bearer ${this.authToken}` }
-                    });
-
-                    if (response.ok) {
-                        const data = await response.json();
-                        this.printLine(`✓ Recipient valid: ${data.name || data.email}`, 'success');
-                        this.printLine('', 'info');
-                        this.printLine('Amount (QTCL):', 'warning');
-                        this.promptState = PROMPT_STATES.TRANSACT_AMOUNT;
-                    } else {
-                        this.printLine(`✗ Recipient not found`, 'error');
-                        this.promptState = PROMPT_STATES.NONE;
-                        this.tempData = {};
-                    }
-                } catch (e) {
-                    this.printLine(`✗ Error: ${e.message}`, 'error');
-                    this.promptState = PROMPT_STATES.NONE;
-                    this.tempData = {};
-                }
-            }
-
-            async executeTransaction(recipient, amount) {
-                this.printLine('', 'info');
-                this.printLine('Processing transaction...', 'warning');
-
-                try {
-                    const response = await fetch(`${API_URL}/transactions`, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${this.authToken}`
-                        },
-                        body: JSON.stringify({ recipient, amount: parseFloat(amount) })
-                    });
-
-                    const data = await response.json();
-
-                    if (response.ok) {
-                        this.printLine(`✓ Transaction created`, 'success');
-                        this.printLine(`✓ TX ID: ${data.tx_id || data.id}`, 'success');
-                        this.printLine(`✓ Amount: ${amount} QTCL to ${recipient}`, 'success');
-                        this.printLine('Status: Quantum verification in progress...', 'info');
-                        this.printLine('', 'info');
-                    } else {
-                        this.printLine(`✗ Transaction failed: ${data.message || 'Unknown error'}`, 'error');
-                    }
-                } catch (e) {
-                    this.printLine(`✗ Error: ${e.message}`, 'error');
-                }
-            }
-
-            executeCommand(cmd) {
-                const parts = cmd.split(' ');
-                const command = parts[0].toLowerCase();
-
-                switch(command) {
-                    case 'login':
-                        if (this.isAuthenticated) {
-                            this.printLine('✗ Already authenticated', 'error');
-                            break;
-                        }
-                        this.printLine('', 'info');
-                        this.printLine('Username/Email:', 'warning');
-                        this.promptState = PROMPT_STATES.LOGIN_USERNAME;
-                        break;
-
-                    case 'register':
-                        if (this.isAuthenticated) {
-                            this.printLine('✗ Already authenticated', 'error');
-                            break;
-                        }
-                        this.printLine('', 'info');
-                        this.printLine('Email:', 'warning');
-                        this.promptState = PROMPT_STATES.REGISTER_EMAIL;
-                        break;
-
-                    case 'logout':
-                        this.logout();
-                        break;
-
-                    case 'help':
-                        this.showHelp();
-                        break;
-
-                    case 'profile':
-                        this.showProfile();
-                        break;
-
-                    case 'balance':
-                        this.showBalance();
-                        break;
-
-                    case 'transact':
-                        this.startTransact();
-                        break;
-
-                    case 'quantum-status':
-                        this.quantumStatus();
-                        break;
-
-                    case 'tx-history':
-                        this.txHistory();
-                        break;
-
-                    case 'oracle-price':
-                        this.oraclePrice();
-                        break;
-
-                    case 'clear':
-                        document.getElementById('terminal').innerHTML = '';
-                        break;
-
-                    default:
-                        this.printLine(`✗ Unknown command: ${command}`, 'error');
-                        this.printLine(`Type 'help' for commands`, 'info');
-                }
-            }
-
-            startTransact() {
-                if (!this.isAuthenticated) {
-                    this.printLine('✗ Authentication required', 'error');
-                    return;
-                }
-                this.printLine('', 'info');
-                this.printLine('Recipient (Qubit ID, Email, or UID):', 'warning');
-                this.promptState = PROMPT_STATES.TRANSACT_RECIPIENT;
-            }
-
-            logout() {
-                this.authToken = null;
-                this.currentUser = null;
-                this.isAuthenticated = false;
-                document.getElementById('auth-status').innerHTML = '<span>Not authenticated</span>';
-                this.printLine('✓ Logged out', 'success');
-            }
-
-            showHelp() {
-                this.printLine('', 'info');
-                this.printLine('🚀 QTCL TERMINAL v5.0 - 81+ COMMANDS', 'warning');
-                this.printLine('', 'info');
-                this.printLine('AUTH (6): login, logout, register, whoami, auth/2fa/setup, auth/token/refresh', 'text');
-                this.printLine('USER (4): user/profile, user/settings, user/list, user/details', 'text');
-                this.printLine('TRANSACTION (7): transaction/create, track, list, cancel, analyze, export, stats', 'text');
-                this.printLine('WALLET (8): wallet/create, list, balance, import, export, multisig/create, sign', 'text');
-                this.printLine('BLOCK (4): block/list, details, explorer, stats', 'text');
-                this.printLine('QUANTUM (5): quantum/status, circuit, entropy, validator, finality', 'text');
-                this.printLine('ORACLE (5): oracle/time, price, random, event, feed', 'text');
-                this.printLine('DEFI (6): defi/stake, unstake, borrow, repay, yield, pool', 'text');
-                this.printLine('GOVERNANCE (4): governance/vote, proposal, delegate, stats', 'text');
-                this.printLine('NFT (5): nft/mint, transfer, burn, metadata, collection', 'text');
-                this.printLine('CONTRACT (4): contract/deploy, execute, compile, state', 'text');
-                this.printLine('BRIDGE (4): bridge/initiate, status, history, wrapped', 'text');
-                this.printLine('👑 ADMIN (6): admin/users, approval, monitoring, settings, audit, emergency', 'text');
-                this.printLine('SYSTEM (5): system/status, health, config, backup, restore', 'text');
-                this.printLine('PARALLEL (3): parallel/execute, batch, monitor', 'text');
-                this.printLine('HELP (5): help, help/admin, help/search, help/commands, help/examples', 'text');
-                this.printLine('', 'info');
-            }
-
-            showProfile() {
-                if (!this.isAuthenticated) {
-                    this.printLine('✗ Authentication required', 'error');
-                    return;
-                }
-                this.printLine('', 'info');
-                this.printLine('USER PROFILE', 'warning');
-                this.printLine('', 'info');
-                this.printLine(`User: ${this.currentUser}`, 'text');
-                this.printLine(`Balance: Loading...`, 'text');
-                this.printLine(`Status: Active`, 'success');
-                this.printLine('', 'info');
-            }
-
-            showBalance() {
-                if (!this.isAuthenticated) {
-                    this.printLine('✗ Authentication required', 'error');
-                    return;
-                }
-                this.printLine('', 'info');
-                this.printLine('ACCOUNT BALANCE', 'warning');
-                this.printLine('', 'info');
-                this.printLine(`Loading balance...`, 'info');
-                this.printLine('', 'info');
-            }
-
-            quantumStatus() {
-                this.printLine('', 'info');
-                this.printLine('QUANTUM SYSTEM', 'warning');
-                this.printLine('', 'info');
-                this.printLine('Status: Operational', 'success');
-                this.printLine('Circuits: 12 active', 'text');
-                this.printLine('Entanglement: 256 pairs', 'text');
-                this.printLine('Coherence: 45.3μs', 'text');
-                this.printLine('Lattice: Synchronized', 'success');
-                this.printLine('', 'info');
-            }
-
-            txHistory() {
-                if (!this.isAuthenticated) {
-                    this.printLine('✗ Authentication required', 'error');
-                    return;
-                }
-                this.printLine('', 'info');
-                this.printLine('TRANSACTION HISTORY', 'warning');
-                this.printLine('', 'info');
-                this.printLine('Loading transactions...', 'info');
-                this.printLine('', 'info');
-            }
-
-            oraclePrice() {
-                this.printLine('', 'info');
-                this.printLine('PRICE ORACLE', 'warning');
-                this.printLine('', 'info');
-                this.printLine('ETH: $3,500.50', 'text');
-                this.printLine('BTC: $95,000.25', 'text');
-                this.printLine('QTCL: $12.75', 'success');
-                this.printLine('', 'info');
-            }
-
-            printLine(text, type = 'text') {
-                const terminal = document.getElementById('terminal');
-                const line = document.createElement('div');
-                line.className = 'output-line';
-                
-                let className = `output-${type}`;
-                if (type === 'prompt') className = 'output-prompt';
-                
-                line.innerHTML = `<span class="${className}">${this.escapeHtml(text)}</span>`;
-                terminal.appendChild(line);
-                terminal.scrollTop = terminal.scrollHeight;
-            }
-
-            escapeHtml(text) {
-                const div = document.createElement('div');
-                div.textContent = text;
-                return div.innerHTML;
-            }
+          }
+        } else if (data.error) {
+          addLine(`[ERROR] ${data.error}`, 'line-error');
+        } else {
+          addLine('[No output]', 'line-dim');
         }
 
-        window.addEventListener('DOMContentLoaded', () => {
-            new QTCLTerminal();
-        });
-    </script>
+        if (data.execution_time_ms) {
+          addLine(`[ ${data.execution_time_ms.toFixed(2)}ms ]`, 'line-dim');
+        }
+      } catch (err) {
+        addLine(`[ERROR] ${err.message}`, 'line-error');
+      }
+
+      state.cmdInput.focus();
+    }
+
+    // Event listeners
+    state.execBtn.addEventListener('click', execute);
+    state.cmdInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        execute();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (state.historyIndex > 0) {
+          state.historyIndex--;
+          state.cmdInput.value = state.history[state.historyIndex];
+        }
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (state.historyIndex < state.history.length - 1) {
+          state.historyIndex++;
+          state.cmdInput.value = state.history[state.historyIndex];
+        } else {
+          state.historyIndex = state.history.length;
+          state.cmdInput.value = '';
+        }
+      }
+    });
+
+    // Boot sequence
+    async function boot() {
+      const BOOT = [
+        { t: 20, msg: '╔═══════════════════════════════════════════════════════╗', cls: 'line-dim' },
+        { t: 20, msg: '║  QUANTUM TEMPORAL COHERENCE LEDGER                    ║', cls: 'line-info' },
+        { t: 20, msg: '║  Command Interface                                    ║', cls: 'line-info' },
+        { t: 20, msg: '╚═══════════════════════════════════════════════════════╝', cls: 'line-dim' },
+        { t: 40, msg: '', cls: 'line-system' },
+        { t: 60, msg: 'Initializing quantum subsystem…', cls: 'line-info' },
+        { t: 60, msg: 'Loading command registry…', cls: 'line-info' },
+        { t: 60, msg: 'Connecting to database…', cls: 'line-info' },
+        { t: 40, msg: '', cls: 'line-system' },
+        { t: 40, msg: 'Type "help" for command list', cls: 'line-dim' },
+        { t: 80, msg: 'Ready.', cls: 'line-success' },
+        { t: 20, msg: '', cls: 'line-system' },
+      ];
+
+      let delay = 0;
+      for (const { t, msg, cls } of BOOT) {
+        await new Promise(r => setTimeout(r, t));
+        addLine(msg, cls);
+      }
+
+      state.cmdInput.focus();
+    }
+
+    boot();
+  </script>
 </body>
 </html>

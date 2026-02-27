@@ -68,7 +68,7 @@ except Exception as e:
 # ════════════════════════════════════════════════════════════════════════════════════════
 
 try:
-    from flask import Flask, request, g, jsonify
+    from flask import Flask, request, g, jsonify, send_file
     logger.info("[BOOTSTRAP] Flask imported successfully")
 except ImportError:
     logger.error("[BOOTSTRAP] Flask not available")
@@ -99,9 +99,41 @@ def create_app():
     
     # ── ENDPOINTS ────────────────────────────────────────────────────────────────────
     
+    @app.route('/index.html', methods=['GET'])
+    def serve_index():
+        """Serve index.html with no-cache headers."""
+        try:
+            index_path = os.path.join(os.path.dirname(__file__), 'index.html')
+            if os.path.exists(index_path):
+                with open(index_path, 'r') as f:
+                    return f.read(), 200, {
+                        'Content-Type': 'text/html; charset=utf-8',
+                        'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
+                        'Pragma': 'no-cache',
+                        'Expires': '0',
+                    }
+            return "index.html not found", 404
+        except Exception as e:
+            logger.error(f"[API] Error serving index.html: {e}")
+            return str(e), 500
+    
     @app.route('/', methods=['GET'])
     def index():
-        """Index page - API status"""
+        """Redirect to index.html or serve dashboard."""
+        try:
+            index_path = os.path.join(os.path.dirname(__file__), 'index.html')
+            if os.path.exists(index_path):
+                with open(index_path, 'r') as f:
+                    return f.read(), 200, {
+                        'Content-Type': 'text/html; charset=utf-8',
+                        'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
+                        'Pragma': 'no-cache',
+                        'Expires': '0',
+                    }
+        except Exception as e:
+            logger.warning(f"[API] Could not load index.html: {e}")
+        
+        # Fallback API status page
         html = """
 <!DOCTYPE html>
 <html>
@@ -134,8 +166,8 @@ def create_app():
     </style>
 </head>
 <body>
-    <h1>⚡ QTCL v6.0 - Quantum Blockchain System</h1>
-    <p>Unified mega_command_system (72 commands) + quantum_lattice_control (v6/v7/v8/v9 consolidated)</p>
+    <h1>⚡ QTCL - Quantum Blockchain System</h1>
+    <p>Unified mega_command_system (72 commands) + quantum_lattice_control</p>
     
     <div class="section">
         <h2>🌐 API Endpoints</h2>
@@ -184,7 +216,6 @@ def create_app():
         <p><span class="status">✓ Heartbeat:</span> Running (1.0 Hz, 15s check + 30s report)</p>
         <p><span class="status">✓ Quantum Lattice:</span> Active (NonMarkovian noise bath, W-state recovery)</p>
         <p><span class="status">✓ Commands:</span> 72 available</p>
-        <p><span class="status">✓ Neural Network:</span> 57-neuron continuous refresh</p>
     </div>
     
     <div class="section">
@@ -202,22 +233,15 @@ curl -X POST https://your-domain.koyeb.app/api/command \\
   -d '{"command": "system-stats"}'
         </pre>
     </div>
-    
-    <div class="section">
-        <h2>💡 Quantum Systems Active</h2>
-        <ul>
-            <li>NonMarkovian Noise Bath (κ=0.070)</li>
-            <li>W-State Recovery (Adaptive control)</li>
-            <li>Enhanced Noise Bath Refresh (κ=0.08)</li>
-            <li>57-Neuron Neural Lattice (8→57→32→8)</li>
-            <li>Heartbeat: 15s checks + 30s reports</li>
-            <li>v8 Revival System (106,496 pseudoqubits)</li>
-        </ul>
-    </div>
 </body>
 </html>
         """
-        return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
+        return html, 200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
+            'Pragma': 'no-cache',
+            'Expires': '0',
+        }
     
     @app.route('/api/command', methods=['POST'])
     def execute_command():
@@ -328,6 +352,18 @@ curl -X POST https://your-domain.koyeb.app/api/command \\
         }), 200
     
     logger.info("[BOOTSTRAP] ✓ All endpoints registered")
+    
+    # ── NO-CACHE HEADERS ─────────────────────────────────────────────────────────
+    @app.after_request
+    def set_no_cache(response):
+        """Force no-cache on ALL responses."""
+        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate, max-age=0'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        logger.debug(f"[NO-CACHE] Applied to {request.path}")
+        return response
+    
     return app
 
 def get_wsgi_app():
