@@ -322,6 +322,20 @@ curl -X POST https://your-domain.koyeb.app/api/command \\
             logger.error(f"[API] Quantum status error: {e}")
             return jsonify({'error': str(e)}), 500
     
+    @app.route('/api/health/stabilizer', methods=['GET'])
+    def get_stabilizer_health():
+        """Return comprehensive enterprise stabilizer health report."""
+        try:
+            from quantum_lattice_control import STABILIZER
+            if not STABILIZER:
+                return jsonify({'status': 'unavailable', 'message': 'Stabilizer not initialized'}), 503
+            
+            report = STABILIZER.get_health_report()
+            return jsonify(report), 200
+        except Exception as e:
+            logger.error(f"[API] Stabilizer health error: {e}", exc_info=True)
+            return jsonify({'error': str(e)}), 500
+    
     @app.route('/metrics', methods=['GET'])
     def metrics():
         """Command execution metrics."""

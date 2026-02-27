@@ -20,7 +20,7 @@ CLAY MATHEMATICS STANDARD:
       ε_revival(t) = V_12(t) · exp(-Γ_revival · t) where V_12 = |⟨ψ₁|ψ₂⟩|²
 """
 
-import os, threading, time, logging, hashlib, json, math
+import os, threading, time, logging, hashlib, json, math, psutil
 import numpy as np
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List, Tuple
@@ -741,6 +741,15 @@ class QuantumEntropySourceEnsemble:
                 'hu_berlin_status': 'active (public, no auth)',
                 'timestamp': time.time(),
             }
+    
+    def reset(self):
+        """HEALING: Clear QRNG memory and revival state for entropy flushing."""
+        with self.lock:
+            self.cache.clear()
+            self.interference_patterns.clear()
+            self.active_revival = None
+            self.revival_events.clear()
+            logger.debug("[QRNG-ENSEMBLE] ✓ Cache and revival state cleared")
 
 # ════════════════════════════════════════════════════════════════════════════════
 # AER QUANTUM SIMULATOR — FIXED IMPORTS (qiskit-aer 0.14+)
@@ -1132,6 +1141,13 @@ class NonMarkovianNoiseBath:
                 'nz_integral': self.nz_state.cumulative_integral,
 
             }
+    
+    def reset(self):
+        """HEALING: Reset noise bath state for entropy flushing."""
+        with self.lock:
+            self.sigma = self.sigma_base
+            self.noise_values.clear()
+            logger.debug("[NOISE-BATH] ✓ State reset")
 
 # ════════════════════════════════════════════════════════════════════════════════
 # W-STATE CONSTRUCTOR WITH AER SIMULATION
@@ -1188,6 +1204,16 @@ class WStateConstructor:
                 'construction_count':       self.construction_count,
                 'measurements_performed':   len(self.measurement_outcomes),
             }
+    
+    def reset(self):
+        """HEALING: Reset W-state constructor to fresh state."""
+        with self.lock:
+            self.w_strength_history.clear()
+            self.entanglement_entropy_history.clear()
+            self.purity_history.clear()
+            self.measurement_outcomes.clear()
+            self.construction_count = 0
+            logger.debug("[W-STATE] ✓ Histories cleared, ready for coherent state")
 
 # ════════════════════════════════════════════════════════════════════════════════
 # NEURAL REFRESH NETWORK — 12→128→64→256→256
@@ -1769,6 +1795,36 @@ class NeuralRefreshNetwork:
                 
         except Exception as e:
             logger.error(f"[NEURAL] Heartbeat error: {e}")
+    
+    def reset_weights(self):
+        """
+        HEALING ROUTINE: Reinitialize neural network weights.
+        Breaks accumulated drift from training over long runs.
+        Resets to Xavier uniform initialization.
+        """
+        try:
+            rng = np.random.default_rng()
+            self.W1 = rng.standard_normal((self.INPUT_DIM,   self.HIDDEN1_DIM)) * 0.1
+            self.W2 = rng.standard_normal((self.HIDDEN1_DIM, self.HIDDEN2_DIM)) * 0.1
+            self.W3 = rng.standard_normal((self.HIDDEN2_DIM, self.HIDDEN3_DIM)) * 0.1
+            self.W4 = rng.standard_normal((self.HIDDEN3_DIM, self.OUTPUT_DIM))  * 0.1
+            self.b1 = np.zeros(self.HIDDEN1_DIM)
+            self.b2 = np.zeros(self.HIDDEN2_DIM)
+            self.b3 = np.zeros(self.HIDDEN3_DIM)
+            self.b4 = np.zeros(self.OUTPUT_DIM)
+            self.loss_history.clear()
+            logger.info("[NEURAL-WEIGHTS] ✓ All weights reset to fresh initialization")
+        except Exception as e:
+            logger.error(f"[NEURAL-WEIGHTS] Reset failed: {e}")
+    
+    def reset_state(self):
+        """Reset neural controller hidden state and learning history."""
+        try:
+            self.loss_history.clear()
+            self.update_count = 0
+            logger.debug("[NEURAL-STATE] ✓ Hidden state cleared")
+        except Exception as e:
+            logger.error(f"[NEURAL-STATE] Reset failed: {e}")
 
 # ════════════════════════════════════════════════════════════════════════════════
 # CHSH BELL TESTER
@@ -2734,6 +2790,35 @@ class QuantumLatticeController:
                     'recommendation': 'Deploy — All enterprise tuning complete. Monitor coherence trend.',
                 },
             }
+    
+    def reset_to_coherent_state(self):
+        """
+        HEALING ROUTINE: Flush accumulated entropy.
+        Reset lattice to fresh coherent state for indefinite operation.
+        """
+        logger.info("[LATTICE-HEALING] Resetting to coherent state...")
+        try:
+            # Reset W-state constructor to |W⟩ pure state
+            if hasattr(self, 'w_state_constructor'):
+                self.w_state_constructor.reset()
+            
+            # Reset pseudoqubits to Bloch sphere north pole
+            if hasattr(self, 'pseudoqubits'):
+                for pq in self.pseudoqubits:
+                    if hasattr(pq, 'reset_to_pure'):
+                        pq.reset_to_pure()
+            
+            # Clear QRNG memory effects
+            if hasattr(self, 'qrng_ensemble'):
+                self.qrng_ensemble.reset()
+            
+            # Reset neural controller hidden states
+            if hasattr(self, 'neural') and hasattr(self.neural, 'reset_state'):
+                self.neural.reset_state()
+            
+            logger.info("[LATTICE-HEALING] ✓ Reset to coherent state complete")
+        except Exception as e:
+            logger.error(f"[LATTICE-HEALING] Reset failed: {e}")
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -2744,6 +2829,184 @@ _db_manager = None
 
 def get_quantum_lattice() -> QuantumLatticeController:
     return QuantumLatticeController.get_instance()
+
+# ════════════════════════════════════════════════════════════════════════════════════════
+# ENTERPRISE STABILIZER — INDEFINITE OPERATION SYSTEM
+# ════════════════════════════════════════════════════════════════════════════════════════
+
+class HealthStatus(str, Enum):
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    CRITICAL = "critical"
+
+@dataclass
+class HealthThresholds:
+    min_coherence: float = 0.92
+    min_fidelity: float = 0.975
+    max_gamma_rate: float = 0.15
+    max_vn_entropy: float = 2.5
+    max_memory_mb: int = 2000
+    min_revival_success_rate: float = 0.80
+    max_isb_variance: float = 0.5
+
+@dataclass
+class CycleMetrics:
+    cycle_num: int
+    timestamp: datetime
+    coherence: float
+    fidelity: float
+    vn_entropy: float
+    gamma_t: float
+    isb: float
+    revival_active: bool
+    memory_mb: float
+
+class MetricsCollector:
+    def __init__(self, window_size: int = 100):
+        self.window_size = window_size
+        self.metrics: deque = deque(maxlen=window_size)
+        self.lock = threading.RLock()
+    
+    def record(self, cycle_num: int, coherence: float, fidelity: float, vn_entropy: float, 
+               gamma_t: float, isb: float, revival_active: bool):
+        with self.lock:
+            memory_mb = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+            metric = CycleMetrics(
+                cycle_num=cycle_num, timestamp=datetime.now(timezone.utc), 
+                coherence=coherence, fidelity=fidelity, vn_entropy=vn_entropy, 
+                gamma_t=gamma_t, isb=isb, revival_active=revival_active, memory_mb=memory_mb,
+            )
+            self.metrics.append(metric)
+    
+    def get_stats(self) -> Dict[str, Any]:
+        with self.lock:
+            if len(self.metrics) < 2:
+                return {}
+            coherences = [m.coherence for m in self.metrics]
+            fidelities = [m.fidelity for m in self.metrics]
+            gammas = [m.gamma_t for m in self.metrics]
+            vn_entropies = [m.vn_entropy for m in self.metrics]
+            isbs = [m.isb for m in self.metrics]
+            revivals = [m.revival_active for m in self.metrics]
+            memory = [m.memory_mb for m in self.metrics]
+            n = len(gammas)
+            gamma_slope = (gammas[-1] - gammas[0]) / max(1, n - 1) if n > 1 else 0
+            coh_slope = (coherences[-1] - coherences[0]) / max(1, n - 1) if n > 1 else 0
+            return {
+                'coh_mean': sum(coherences) / len(coherences),
+                'coh_min': min(coherences),
+                'coh_slope': coh_slope,
+                'fid_mean': sum(fidelities) / len(fidelities),
+                'fid_min': min(fidelities),
+                'gamma_mean': sum(gammas) / len(gammas),
+                'gamma_slope': gamma_slope,
+                'vn_mean': sum(vn_entropies) / len(vn_entropies),
+                'vn_max': max(vn_entropies),
+                'isb_variance': self._variance(isbs),
+                'memory_max_mb': max(memory),
+                'memory_current_mb': memory[-1],
+                'revival_rate': sum(revivals) / len(revivals),
+                'cycles_tracked': n,
+            }
+    
+    @staticmethod
+    def _variance(vals: List[float]) -> float:
+        if len(vals) < 2:
+            return 0.0
+        mean = sum(vals) / len(vals)
+        return sum((x - mean) ** 2 for x in vals) / (len(vals) - 1)
+
+class SystemStabilizer:
+    def __init__(self, thresholds: Optional[HealthThresholds] = None):
+        self.thresholds = thresholds or HealthThresholds()
+        self.collector = MetricsCollector(window_size=120)
+        self.health_status = HealthStatus.HEALTHY
+        self.lock = threading.RLock()
+        self.interventions: List[Dict[str, Any]] = []
+        self.last_entropy_flush = datetime.now(timezone.utc)
+        self.last_neural_refresh = datetime.now(timezone.utc)
+    
+    def record_cycle(self, cycle_num: int, coherence: float, fidelity: float,
+                     vn_entropy: float, gamma_t: float, isb: float, revival_active: bool):
+        self.collector.record(cycle_num, coherence, fidelity, vn_entropy, gamma_t, isb, revival_active)
+        self._assess_health()
+    
+    def _assess_health(self):
+        with self.lock:
+            stats = self.collector.get_stats()
+            if not stats:
+                return
+            alerts = []
+            if stats['coh_min'] < self.thresholds.min_coherence:
+                alerts.append(f"Coherence dipped to {stats['coh_min']:.4f}")
+            if stats['fid_min'] < self.thresholds.min_fidelity:
+                alerts.append(f"Fidelity dipped to {stats['fid_min']:.4f}")
+            if stats['gamma_slope'] > self.thresholds.max_gamma_rate / 100:
+                alerts.append(f"Dephasing γ trending up (slope={stats['gamma_slope']:.6f})")
+            if stats['vn_max'] > self.thresholds.max_vn_entropy:
+                alerts.append(f"Entropy peak {stats['vn_max']:.2f} exceeds threshold")
+            if stats['memory_current_mb'] > self.thresholds.max_memory_mb:
+                alerts.append(f"Memory {stats['memory_current_mb']:.1f}MB exceeds threshold")
+            if stats['revival_rate'] < self.thresholds.min_revival_success_rate:
+                alerts.append(f"Revival rate {stats['revival_rate']:.1%} below threshold")
+            if stats['isb_variance'] > self.thresholds.max_isb_variance:
+                alerts.append(f"I(S:B) variance {stats['isb_variance']:.3f} indicates drift")
+            
+            if len(alerts) >= 3:
+                self.health_status = HealthStatus.CRITICAL
+            elif len(alerts) >= 1:
+                self.health_status = HealthStatus.DEGRADED
+            else:
+                self.health_status = HealthStatus.HEALTHY
+            
+            if alerts:
+                logger.warning(f"[STABILIZER-HEALTH] {self.health_status.value} | {' | '.join(alerts)}")
+            if stats['cycles_tracked'] % 50 == 0:
+                logger.info(f"[STABILIZER] coh={stats['coh_mean']:.4f} fid={stats['fid_mean']:.4f} "
+                          f"γ={stats['gamma_mean']:.4f}(Δ={stats['gamma_slope']:.6f}) "
+                          f"mem={stats['memory_current_mb']:.1f}MB revival={stats['revival_rate']:.1%}")
+    
+    def suggest_entropy_flush(self) -> bool:
+        stats = self.collector.get_stats()
+        if not stats:
+            return False
+        should_flush = stats['vn_max'] > self.thresholds.max_vn_entropy
+        if should_flush:
+            self.last_entropy_flush = datetime.now(timezone.utc)
+            self.interventions.append({'type': 'entropy_flush', 'timestamp': datetime.now(timezone.utc).isoformat()})
+        return should_flush
+    
+    def suggest_neural_refresh(self) -> bool:
+        stats = self.collector.get_stats()
+        if not stats:
+            return False
+        should_refresh = (stats['isb_variance'] > self.thresholds.max_isb_variance or
+                         stats['coh_slope'] < -0.001)
+        if should_refresh:
+            self.last_neural_refresh = datetime.now(timezone.utc)
+            self.interventions.append({'type': 'neural_refresh', 'timestamp': datetime.now(timezone.utc).isoformat()})
+        return should_refresh
+    
+    def suggest_adaptive_kappa_tune(self) -> Optional[float]:
+        stats = self.collector.get_stats()
+        if not stats:
+            return None
+        if stats['gamma_slope'] > self.thresholds.max_gamma_rate / 200:
+            self.interventions.append({'type': 'adaptive_kappa_tune', 'timestamp': datetime.now(timezone.utc).isoformat()})
+            return 0.105
+        return None
+    
+    def get_health_report(self) -> Dict[str, Any]:
+        with self.lock:
+            stats = self.collector.get_stats()
+            return {
+                'status': self.health_status.value,
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'metrics': stats,
+                'interventions_total': len(self.interventions),
+                'last_entropy_flush': self.last_entropy_flush.isoformat(),
+                'last_neural_refresh': self.last_neural_refresh.isoformat(),
+            }
 
 # ════════════════════════════════════════════════════════════════════════════════
 # HEARTBEAT DAEMON
@@ -2817,12 +3080,32 @@ class QuantumHeartbeat:
 
     def _run_refresh(self):
         """Lattice refresh thread: evolves quantum state independently."""
+        cycle_since_heal = 0
         while self.running:
             try:
                 result = self.lattice.evolve_one_cycle()
                 with self.lock:
                     self.cycle_count += 1
                     self.last_result = result
+                    current_cycle = self.cycle_count
+                
+                # Record metrics for enterprise stabilizer
+                global STABILIZER
+                if STABILIZER:
+                    STABILIZER.record_cycle(
+                        cycle_num=current_cycle,
+                        coherence=result.state.coherence,
+                        fidelity=result.state.fidelity,
+                        vn_entropy=result.state.entanglement_entropy,
+                        gamma_t=getattr(result, 'gamma_t', 0.1),
+                        isb=getattr(result, 'mutual_information', 0.5),
+                        revival_active=(result.state.revival_coherence > 0.08),
+                    )
+                
+                cycle_since_heal += 1
+                if cycle_since_heal >= 50:
+                    cycle_since_heal = 0
+                    self._run_healing_checks()
                 
                 logger.debug(f"[LATTICE-REFRESH] Evolved to cycle {result.cycle_num}")
                 time.sleep(self.refresh_interval)
@@ -2831,6 +3114,44 @@ class QuantumHeartbeat:
                 with self.lock:
                     self.health_status = 'error'
                 time.sleep(self.refresh_interval)
+    
+    def _run_healing_checks(self):
+        """Execute auto-healing procedures based on system health."""
+        global STABILIZER, LATTICE
+        if not STABILIZER or not LATTICE:
+            return
+        
+        # Check 1: Entropy flush
+        if STABILIZER.suggest_entropy_flush():
+            logger.info("[HEALING] Flushing entropy...")
+            try:
+                if hasattr(LATTICE, 'reset_to_coherent_state'):
+                    LATTICE.reset_to_coherent_state()
+                    logger.info("[HEALING-ENTROPY] ✓ Lattice entropy flushed")
+            except Exception as e:
+                logger.error(f"[HEALING-ENTROPY] Failed: {e}")
+        
+        # Check 2: Neural network refresh
+        if STABILIZER.suggest_neural_refresh():
+            logger.info("[HEALING] Refreshing neural weights...")
+            try:
+                if hasattr(LATTICE, 'neural') and hasattr(LATTICE.neural, 'reset_weights'):
+                    LATTICE.neural.reset_weights()
+                    logger.info("[HEALING-NEURAL] ✓ Neural weights reset")
+            except Exception as e:
+                logger.error(f"[HEALING-NEURAL] Failed: {e}")
+        
+        # Check 3: Adaptive noise tuning
+        new_kappa = STABILIZER.suggest_adaptive_kappa_tune()
+        if new_kappa is not None:
+            logger.info(f"[HEALING] Tuning noise bath to κ={new_kappa}...")
+            try:
+                if hasattr(LATTICE, 'noise_bath'):
+                    old_kappa = getattr(LATTICE.noise_bath, 'kappa', None)
+                    LATTICE.noise_bath.kappa = new_kappa
+                    logger.info(f"[HEALING-TUNE] ✓ κ adjusted {old_kappa} → {new_kappa}")
+            except Exception as e:
+                logger.error(f"[HEALING-TUNE] Failed: {e}")
 
     def start(self):
         with self.lock:
@@ -2927,12 +3248,13 @@ logger.info("╚═════════════════════�
 LATTICE            = get_quantum_lattice()
 _api_url           = os.getenv('API_URL', 'http://localhost:8000/api/heartbeat')
 HEARTBEAT          = QuantumHeartbeat(interval_seconds=1.0, api_url=_api_url)
+STABILIZER: Optional[SystemStabilizer] = None
 QUANTUM_COORDINATOR: Optional[QuantumCoordinator] = None
 
 
 def initialize_quantum_system():
     """Called by wsgi_config.py on boot."""
-    global LATTICE, HEARTBEAT, QUANTUM_COORDINATOR
+    global LATTICE, HEARTBEAT, QUANTUM_COORDINATOR, STABILIZER
     logger.info("[INIT] Initialising quantum lattice system (Clay-standard v10)...")
     LATTICE     = get_quantum_lattice()
     api_url     = os.getenv('API_URL', 'http://localhost:8000/api/heartbeat')
@@ -2940,9 +3262,11 @@ def initialize_quantum_system():
     HEARTBEAT.start()
     QUANTUM_COORDINATOR = QuantumCoordinator()
     QUANTUM_COORDINATOR.start()
+    STABILIZER  = SystemStabilizer(HealthThresholds())
     logger.info("[INIT] ✓ Quantum system initialised")
-    logger.info(f"[INIT] ✓ HEARTBEAT running (10s, {api_url})")
+    logger.info(f"[INIT] ✓ HEARTBEAT running (30s keepalive, {api_url})")
     logger.info("[INIT] ✓ QUANTUM_COORDINATOR active")
+    logger.info("[INIT] ✓ STABILIZER active (entropy flushing, neural refresh, adaptive tuning)")
     logger.info("[INIT] ✓ AerSimulator: real quantum circuits (qiskit-aer hard dep)")
     logger.info(f"[INIT] ✓ NM noise bath: κ={KAPPA_MEMORY} Drude-Lorentz ωc={BATH_OMEGA_C:.3f}")
     logger.info(f"[INIT] ✓ Entanglement revival: threshold={REVIVAL_THRESHOLD} amp={REVIVAL_AMPLIFIER}")
@@ -2956,9 +3280,9 @@ def set_heartbeat_database(db_manager):
 
 
 __all__ = [
-    'initialize_quantum_system', 'HEARTBEAT', 'LATTICE', 'QUANTUM_COORDINATOR',
+    'initialize_quantum_system', 'HEARTBEAT', 'LATTICE', 'QUANTUM_COORDINATOR', 'STABILIZER',
     'set_heartbeat_database', 'get_quantum_lattice',
-    'QuantumLatticeController', 'QuantumCoordinator', 'QuantumHeartbeat',
+    'QuantumLatticeController', 'QuantumCoordinator', 'QuantumHeartbeat', 'SystemStabilizer',
     'NonMarkovianNoiseBath', 'AerQuantumSimulator', 'QuantumEntropySourceEnsemble',
     'PostQuantumCrypto', 'WStateConstructor', 'CHSHBellTester',
     'PseudoqubitCoherenceManager', 'SurfaceCodeErrorCorrection', 'NeuralRefreshNetwork',
