@@ -130,18 +130,6 @@ except ImportError:
     CRYPTOGRAPHY_AVAILABLE = False
 
 try:
-    # OQS integration (optional - for CRYSTALS compatibility)
-    import os as _os_pq
-    _os_pq.environ.setdefault('OQS_SKIP_SETUP', '1')
-    _os_pq.environ.setdefault('OQS_BUILD', '0')
-    from oqs import KeyEncapsulation, Signature
-    LIBOQS_AVAILABLE = True
-except (ImportError, RuntimeError, OSError, Exception):
-    LIBOQS_AVAILABLE = False
-    KeyEncapsulation = None
-    Signature = None
-
-try:
     import psycopg2
     from psycopg2.extras import RealDictCursor, execute_values
     from psycopg2 import sql, errors as psycopg2_errors
