@@ -2753,7 +2753,7 @@ class QuantumHeartbeat:
     """Dual-thread: keepalive posts frequently; lattice evolves independently."""
 
     def __init__(self, interval_seconds: float = 1.0, api_url: str = 'http://localhost:8000/api/heartbeat'):
-        self.keepalive_interval = 0.1  # Post keepalive every 100ms
+        self.keepalive_interval = 30.0  # Post keepalive every 30s
         self.refresh_interval   = interval_seconds  # Evolve lattice at this interval
         self.api_url            = api_url
         self.lattice            = get_quantum_lattice()
@@ -2850,7 +2850,7 @@ class QuantumHeartbeat:
                 )
                 self.refresh_thread.start()
                 
-                logger.info(f"[HEARTBEAT] ✓ Started dual-thread (keepalive=100ms, refresh={self.refresh_interval}s → {self.api_url})")
+                logger.info(f"[HEARTBEAT] ✓ Started dual-thread (keepalive=30s, refresh={self.refresh_interval}s → {self.api_url})")
 
     def stop(self):
         with self.lock:
