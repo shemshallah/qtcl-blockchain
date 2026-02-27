@@ -83,7 +83,7 @@ except ImportError:
 # Provides key management, signatures, and cryptographic operations for core API
 # ════════════════════════════════════════════════════════════════════════════════════════
 try:
-    from pq_keys_system import get_pq_system as _get_local_pq
+    from hlwe_engine import get_pq_system as _get_local_pq
     PQ_SYSTEM_AVAILABLE = True
     def get_core_pq_system():
         """Get unified PQ system for core operations"""

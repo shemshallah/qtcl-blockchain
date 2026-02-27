@@ -57,10 +57,10 @@ except ImportError as e:
 # ════════════════════════════════════════════════════════════════════════════════════════
 
 try:
-    from pq_keys_system import HLWE_256, HLWE_128, HLWE_192, HLWESampler, HLWEParams
+    from hlwe_engine import HLWE_256, HLWE_128, HLWE_192, HLWESampler, HLWEParams
     PQ_AVAILABLE = True
 except ImportError as e:
-    raise RuntimeError(f"[FATAL] pq_keys_system is REQUIRED with HLWE_256. Error: {e}")
+    raise RuntimeError(f"[FATAL] hlwe_engine is REQUIRED with HLWE_256. Error: {e}")
 
 logger = logging.getLogger(__name__)
 

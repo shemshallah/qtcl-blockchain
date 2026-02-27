@@ -18,13 +18,13 @@ if not logging.getLogger().hasHandlers():
     )
 logger = logging.getLogger(__name__)
 
-# Post-quantum keys system (optional, graceful fallback)
+# Post-quantum keys system (optional, graceful fallback) — uses hlwe_engine
 try:
-    import pq_keys_system
+    import hlwe_engine
     PQ_SYSTEM_AVAILABLE = True
 except ImportError:
-    logger.warning("[BOOTSTRAP] pq_keys_system module not found — running in simulation mode")
-    pq_keys_system = None
+    logger.warning("[BOOTSTRAP] hlwe_engine module not found — running in simulation mode")
+    hlwe_engine = None
     PQ_SYSTEM_AVAILABLE = False
 
 # ── Qiskit noise suppression — ROOT-HANDLER FILTER (bulletproof) ──────────────

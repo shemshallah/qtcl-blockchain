@@ -48,7 +48,7 @@ except ImportError:
 # Provides cryptographic security for DeFi transactions, contract signing, bridge operations
 # ════════════════════════════════════════════════════════════════════════════════════════
 try:
-    from pq_keys_system import get_pq_system as _get_unified_pq
+    from hlwe_engine import get_pq_system as _get_unified_pq
     PQ_SYSTEM_AVAILABLE = True
     def get_defi_pq_system():
         """Get unified PQ system for DeFi operations"""

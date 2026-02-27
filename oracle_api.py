@@ -155,7 +155,7 @@ except ImportError as _ge:
 # ════════════════════════════════════════════════════════════════════════════════════════
 PQ_SYSTEM_AVAILABLE = False
 try:
-    from pq_keys_system import get_pq_system as _get_unified_pq
+    from hlwe_engine import get_pq_system as _get_unified_pq
     PQ_SYSTEM_AVAILABLE = True
     def get_oracle_pq_system():
         """Get unified PQ system for oracle operations"""
