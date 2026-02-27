@@ -64,6 +64,34 @@ except Exception as e:
     logger.error(f"[BOOTSTRAP] Failed to init quantum_lattice_control: {e}", exc_info=True)
 
 # ════════════════════════════════════════════════════════════════════════════════════════
+# INITIALIZE DATABASE MANAGER (v3.0 — Museum Grade)
+# ════════════════════════════════════════════════════════════════════════════════════════
+
+logger.info("[BOOTSTRAP] Initializing database manager...")
+try:
+    from db_builder_v2 import DatabaseBuilder
+    from globals import set_global_state
+    
+    # Create database manager with connection pool
+    db_manager = DatabaseBuilder()
+    
+    # Register in global state for all modules to access
+    set_global_state('db_manager', db_manager)
+    
+    if db_manager.pool is not None:
+        logger.info("[BOOTSTRAP] ✓ Database manager initialized with active connection pool")
+        # Start reconnection daemon for resilience
+        db_manager.start_reconnect_daemon()
+        logger.info("[BOOTSTRAP] ✓ Reconnection daemon started")
+    else:
+        logger.warning(f"[BOOTSTRAP] ⚠️ Database pool failed: {db_manager.pool_error}")
+        logger.warning("[BOOTSTRAP] Database operations will be unavailable until credentials are fixed")
+except ImportError as e:
+    logger.error(f"[BOOTSTRAP] Cannot import DatabaseBuilder: {e}")
+except Exception as e:
+    logger.error(f"[BOOTSTRAP] Failed to initialize database manager: {e}", exc_info=True)
+
+# ════════════════════════════════════════════════════════════════════════════════════════
 # FLASK SETUP
 # ════════════════════════════════════════════════════════════════════════════════════════
 
