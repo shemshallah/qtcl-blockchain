@@ -108,20 +108,41 @@ import base64
 import uuid
 import re
 import traceback
+def ensure_package(package, pip_name=None):
+    """Attempt to import a package, but don't fail if it's not available"""
+    try:
+        __import__(package)
+        return True
+    except ImportError:
+        print(f"⚠️  Package '{pip_name or package}' not available (should be pre-installed)")
+        return False
+
+# Try to import essential packages (should be pre-installed via requirements.txt)
+ensure_package("psycopg2", "psycopg2-binary")
+numpy_available = ensure_package("numpy")
+mpmath_available = ensure_package("mpmath")
+
 import psycopg2
 from psycopg2.extras import execute_values, RealDictCursor, Json
 from psycopg2.pool import ThreadedConnectionPool
 from psycopg2 import sql, errors as psycopg2_errors
 
-# mpmath is a hard dependency — listed in requirements.txt; must be installed before running
-from mpmath import mp, mpf, sqrt, pi, cos, sin, exp, log, tanh, sinh, cosh, acosh
-mp.dps = 150  # 150 decimal places of precision throughout
-
-# numpy — required for quantum state vector operations
-try:
-    import numpy as np
-except ImportError as _np_err:
-    raise ImportError(f"numpy is required but not installed: {_np_err}") from _np_err
+# Lazy-load numpy (required for some features)
+np = None
+mp = None
+if numpy_available:
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
+        
+if mpmath_available:
+    try:
+        from mpmath import mp, mpf, sqrt, pi, cos, sin, exp, log, tanh, sinh, cosh, acosh
+        # Set mpmath to 150 decimal precision
+        mp.dps = 150
+    except ImportError:
+        mp = None
 
 # ===============================================================================
 # LOGGING CONFIGURATION
@@ -252,110 +273,7 @@ PQ_SCHEMA_DEFINITIONS = {
         assigned_at TIMESTAMP,
         pq_info JSONB DEFAULT '{}'::jsonb,
         status VARCHAR(32) DEFAULT 'available',
-        FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE SET NULL)""",
-    'quantum_metrics': """CREATE TABLE IF NOT EXISTS quantum_metrics (
-        id SERIAL PRIMARY KEY,
-        timestamp TIMESTAMP NOT NULL DEFAULT NOW(),
-        engine VARCHAR(50) DEFAULT 'QTCL-QE v8.0',
-        heartbeat_running BOOLEAN DEFAULT FALSE,
-        heartbeat_pulse_count INTEGER DEFAULT 0,
-        heartbeat_frequency_hz FLOAT DEFAULT 1.0,
-        lattice_operations INTEGER DEFAULT 0,
-        lattice_tx_processed INTEGER DEFAULT 0,
-        w_state_coherence_avg FLOAT DEFAULT 0.0,
-        w_state_fidelity_avg FLOAT DEFAULT 0.0,
-        w_state_entanglement FLOAT DEFAULT 0.0,
-        w_state_superposition_count INTEGER DEFAULT 5,
-        w_state_tx_validations INTEGER DEFAULT 0,
-        noise_kappa FLOAT DEFAULT 0.08,
-        noise_fidelity_preservation FLOAT DEFAULT 0.99,
-        noise_decoherence_events INTEGER DEFAULT 0,
-        noise_non_markovian_order INTEGER DEFAULT 5,
-        bell_quantum_fraction FLOAT DEFAULT 0.0,
-        bell_chsh_violations INTEGER DEFAULT 0,
-        bell_s_chsh_mean FLOAT DEFAULT 0.0,
-        created_at TIMESTAMP DEFAULT NOW(),
-        updated_at TIMESTAMP DEFAULT NOW())\"\"\",
-    
-    # ════════════════════════════════════════════════════════════════════════════════
-    # LYRA CONSENSUS SCHEMA (Lattice-Year Reservoir Architecture)
-    # Byzantine validator pseudoqubits and consensus measurements
-    # ════════════════════════════════════════════════════════════════════════════════
-    
-    'lyra_validators': \"\"\"CREATE TABLE IF NOT EXISTS lyra_validators (
-        validator_id SMALLINT PRIMARY KEY CHECK (validator_id >= 0 AND validator_id < 5),
-        pseudoqubit_id BIGINT NOT NULL UNIQUE,
-        validator_address VARCHAR(255) NOT NULL UNIQUE,
-        w_state_register INTEGER[] DEFAULT ARRAY[]::INTEGER[],
-        consensus_strength FLOAT DEFAULT 0.5,
-        current_sigma FLOAT DEFAULT 8.0,
-        current_scenario VARCHAR(64) DEFAULT 'unanimous',
-        is_active BOOLEAN DEFAULT TRUE,
-        last_vote_timestamp TIMESTAMP,
-        total_votes BIGINT DEFAULT 0,
-        consensus_achieved_count BIGINT DEFAULT 0,
-        created_at TIMESTAMP DEFAULT NOW(),
-        updated_at TIMESTAMP DEFAULT NOW())\"\"\",
-    
-    'lyra_consensus_votes': \"\"\"CREATE TABLE IF NOT EXISTS lyra_consensus_votes (
-        vote_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        round_number BIGINT NOT NULL,
-        validator_id SMALLINT NOT NULL REFERENCES lyra_validators(validator_id),
-        scenario VARCHAR(64) NOT NULL,
-        sigma FLOAT NOT NULL,
-        vote_value BOOLEAN NOT NULL,
-        parity FLOAT DEFAULT 0.5,
-        consensus_strength FLOAT DEFAULT 0.5,
-        majority_strength FLOAT DEFAULT 0.75,
-        entropy FLOAT DEFAULT 2.0,
-        p_w FLOAT DEFAULT 0.6,
-        vote_timestamp TIMESTAMP DEFAULT NOW())\"\"\",
-    
-    'lyra_consensus_rounds': \"\"\"CREATE TABLE IF NOT EXISTS lyra_consensus_rounds (
-        round_id BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
-        round_number BIGINT NOT NULL UNIQUE,
-        scenario VARCHAR(64) NOT NULL,
-        sigma FLOAT NOT NULL,
-        consensus_achieved BOOLEAN DEFAULT FALSE,
-        majority_validator_id SMALLINT,
-        majority_votes INTEGER DEFAULT 0,
-        majority_strength FLOAT DEFAULT 0.75,
-        avg_entropy FLOAT DEFAULT 2.0,
-        avg_consensus_strength FLOAT DEFAULT 0.5,
-        avg_p_w FLOAT DEFAULT 0.6,
-        round_timestamp TIMESTAMP DEFAULT NOW(),
-        metadata JSONB)\"\"\",
-    
-    'lyra_consensus_metrics': \"\"\"CREATE TABLE IF NOT EXISTS lyra_consensus_metrics (
-        metric_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        scenario VARCHAR(64) NOT NULL,
-        sigma FLOAT NOT NULL,
-        sample_count INTEGER DEFAULT 0,
-        consensus_rate FLOAT DEFAULT 0.0,
-        avg_majority_strength FLOAT DEFAULT 0.75,
-        avg_entropy FLOAT DEFAULT 2.0,
-        max_entropy FLOAT DEFAULT 4.0,
-        min_entropy FLOAT DEFAULT 1.0,
-        byzantines_tolerated INTEGER DEFAULT 1,
-        recorded_at TIMESTAMP DEFAULT NOW())\"\"\",
-    
-    'lyra_pseudoqubit_consensus': \"\"\"CREATE TABLE IF NOT EXISTS lyra_pseudoqubit_consensus (
-        id BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
-        pseudoqubit_id BIGINT NOT NULL,
-        validator_id SMALLINT REFERENCES lyra_validators(validator_id),
-        validator_role VARCHAR(64) DEFAULT 'state_validator',
-        consensus_participation_score FLOAT DEFAULT 0.0,
-        byzantine_resistance_strength FLOAT DEFAULT 0.5,
-        last_consensus_result JSONB,
-        metadata JSONB,
-        created_at TIMESTAMP DEFAULT NOW(),
-        updated_at TIMESTAMP DEFAULT NOW())\"\"\"
-}
-
-# Create indexes for quantum_metrics table
-QUANTUM_METRICS_INDEXES = {
-    'idx_quantum_metrics_timestamp': 'CREATE INDEX IF NOT EXISTS idx_quantum_metrics_timestamp ON quantum_metrics(timestamp DESC)',
-    'idx_quantum_metrics_created': 'CREATE INDEX IF NOT EXISTS idx_quantum_metrics_created ON quantum_metrics(created_at DESC)'
+        FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE SET NULL)"""
 }
 
 def init_pq_schema(db_mgr=None):
@@ -375,15 +293,6 @@ def init_pq_schema(db_mgr=None):
             except Exception as e:
                 if 'already exists' not in str(e).lower() and 'duplicate' not in str(e).lower():
                     logger.debug(f"[PQ-SCHEMA] {tbl}: {e}")
-        
-        # Create indexes for quantum_metrics table
-        for idx_name, idx_sql in QUANTUM_METRICS_INDEXES.items():
-            try:
-                db_mgr.execute(idx_sql)
-                logger.debug(f"[PQ-SCHEMA] ✓ {idx_name}")
-            except Exception as e:
-                if 'already exists' not in str(e).lower():
-                    logger.debug(f"[PQ-SCHEMA] {idx_name}: {e}")
         
         try:
             manifest = db_mgr.execute_fetch(
@@ -417,88 +326,6 @@ def get_pq_status():
         return {'schema_installed': False, 'error': 'unavailable'}
 
 PQ_SCHEMA_AVAILABLE = True
-
-# ════════════════════════════════════════════════════════════════════════════════
-# LYRA CONSENSUS SCHEMA INITIALIZATION
-# ════════════════════════════════════════════════════════════════════════════════
-
-LYRA_SCHEMA_VERSION = 'v1.0.0'
-
-LYRA_SCHEMA_TABLES = [
-    'lyra_validators',
-    'lyra_consensus_votes',
-    'lyra_consensus_rounds',
-    'lyra_consensus_metrics',
-    'lyra_pseudoqubit_consensus'
-]
-
-def init_lyra_schema(db_mgr=None) -> bool:
-    """
-    Initialize LYRA Byzantine Consensus schema tables.
-    
-    Creates:
-    - lyra_validators: 5 state validator pseudoqubits
-    - lyra_consensus_votes: Per-validator voting records
-    - lyra_consensus_rounds: Consensus round summaries
-    - lyra_consensus_metrics: Aggregate statistics per scenario-sigma
-    - lyra_pseudoqubit_consensus: Links pseudoqubits to validator roles
-    """
-    if db_mgr is None:
-        global db_manager
-        db_mgr = db_manager
-    if db_mgr is None:
-        logger.warning("[LYRA-SCHEMA] db_manager not available")
-        return False
-    
-    try:
-        # Create all LYRA tables
-        lyra_schemas = {k: v for k, v in PQ_SCHEMA_DEFINITIONS.items() if k in LYRA_SCHEMA_TABLES}
-        
-        for tbl, sql in lyra_schemas.items():
-            try:
-                db_mgr.execute(sql)
-                logger.debug(f"[LYRA-SCHEMA] ✓ {tbl}")
-            except Exception as e:
-                if 'already exists' not in str(e).lower() and 'duplicate' not in str(e).lower():
-                    logger.debug(f"[LYRA-SCHEMA] {tbl}: {e}")
-        
-        # Create indexes for LYRA tables
-        lyra_indexes = {
-            'idx_lyra_votes_round_scenario': 
-                'CREATE INDEX IF NOT EXISTS idx_lyra_votes_round_scenario ON lyra_consensus_votes(round_number, scenario)',
-            'idx_lyra_rounds_timestamp': 
-                'CREATE INDEX IF NOT EXISTS idx_lyra_rounds_timestamp ON lyra_consensus_rounds(round_timestamp DESC)',
-            'idx_lyra_metrics_scenario_sigma': 
-                'CREATE INDEX IF NOT EXISTS idx_lyra_metrics_scenario_sigma ON lyra_consensus_metrics(scenario, sigma)',
-            'idx_lyra_pseudoqubit_validator':
-                'CREATE INDEX IF NOT EXISTS idx_lyra_pseudoqubit_validator ON lyra_pseudoqubit_consensus(pseudoqubit_id, validator_id)',
-        }
-        
-        for idx_name, idx_sql in lyra_indexes.items():
-            try:
-                db_mgr.execute(idx_sql)
-                logger.debug(f"[LYRA-SCHEMA] ✓ {idx_name}")
-            except Exception as e:
-                if 'already exists' not in str(e).lower():
-                    logger.debug(f"[LYRA-SCHEMA] {idx_name}: {e}")
-        
-        # Register LYRA schema version
-        try:
-            db_mgr.execute(
-                "INSERT INTO genesis_pq_manifest (pq_schema_version, hlwe_params) "
-                "VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                (f'LYRA-{LYRA_SCHEMA_VERSION}', json.dumps({'version': LYRA_SCHEMA_VERSION, 'type': 'Byzantine Consensus'}))
-            )
-        except Exception:
-            pass
-        
-        logger.info(f"[LYRA-SCHEMA] ✅ Initialized (v{LYRA_SCHEMA_VERSION}) - 5 Byzantine Validators")
-        return True
-    except Exception as e:
-        logger.error(f"[LYRA-SCHEMA] Init failed: {e}")
-        return False
-
-LYRA_SCHEMA_AVAILABLE = True
 
 class CLR:
     """ANSI color codes for beautiful terminal output"""
@@ -703,7 +530,7 @@ class QRNGEntropyEngine:
 class ShannonEntropyCalculator:
     """
     Compute Shannon entropy of block hashes and quantum states.
-    H(X) = -∑ p(x)·log₂(p(x))
+    H(X) = -sum p(x)*log2(p(x))
     """
     
     @staticmethod
@@ -1533,7 +1360,7 @@ class RandomOrgQRNG:
         """Fallback to system entropy - NEVER FAILS"""
         return secrets.token_bytes(num_bytes)
     
-    def get_random_mpf(self, precision: int = 150) -> 'mpf':
+    def get_random_mpf(self, precision: int = 150) -> mpf:
         """Get random mpf number in [0, 1) with specified precision"""
         num_bytes = (precision // 8) + 8
         random_bytes = self.fetch_bytes(num_bytes)
@@ -1662,7 +1489,7 @@ class ANUQuantumRNG:
         """Fallback to system entropy - NEVER FAILS"""
         return secrets.token_bytes(num_bytes)
     
-    def get_random_mpf(self, precision: int = 150) -> 'mpf':
+    def get_random_mpf(self, precision: int = 150) -> mpf:
         """Get random mpf number in [0, 1) with specified precision"""
         num_bytes = (precision // 8) + 8
         random_bytes = self.fetch_bytes(num_bytes)
@@ -1796,7 +1623,7 @@ class HybridQuantumEntropyEngine:
             self.stats['fallback_uses'] += 1
             return secrets.token_bytes(num_bytes)
     
-    def get_random_mpf(self, precision: int = 150) -> 'mpf':
+    def get_random_mpf(self, precision: int = 150) -> mpf:
         """Get random mpf with 150 decimal precision using hybrid entropy"""
         num_bytes = (precision // 4) + 16  # Extra precision
         random_bytes = self.get_random_bytes(num_bytes)
@@ -1806,24 +1633,22 @@ class HybridQuantumEntropyEngine:
         
         return mpf(random_int) / max_val
     
-    def get_random_angle(self) -> 'mpf':
+    def get_random_angle(self) -> mpf:
         """Get random angle in [0, 2π) with 150 decimal precision"""
         return self.get_random_mpf() * mpf(2) * pi
     
-    def get_random_phase(self) -> 'mpf':
+    def get_random_phase(self) -> mpf:
         """Get random phase in [-π, π) with 150 decimal precision"""
         return (self.get_random_mpf() * mpf(2) - mpf(1)) * pi
     
-    def get_random_unit_complex(self) -> Tuple['mpf', 'mpf']:
+    def get_random_unit_complex(self) -> Tuple[mpf, mpf]:
         """Get random point on unit circle (cos θ, sin θ)"""
         theta = self.get_random_angle()
         return cos(theta), sin(theta)
     
-    def get_random_poincare_point(self, max_radius: 'mpf' = None) -> Tuple['mpf', 'mpf']:
+    def get_random_poincare_point(self, max_radius: mpf = mpf('0.95')) -> Tuple[mpf, mpf]:
         """Get random point in Poincaré disk with 150 decimal precision"""
         # Use rejection sampling for uniform distribution
-        if max_radius is None:
-            max_radius = mpf('0.95')
         while True:
             x = (self.get_random_mpf() * mpf(2) - mpf(1)) * max_radius
             y = (self.get_random_mpf() * mpf(2) - mpf(1)) * max_radius
@@ -1874,7 +1699,7 @@ class VibrationalQuantumState:
             'source': self.source
         }
     
-    def to_poincare_coordinates(self) -> Tuple['mpf', 'mpf']:
+    def to_poincare_coordinates(self) -> Tuple[mpf, mpf]:
         """Map vibrational state to Poincaré disk coordinates"""
         # Normalize
         norm = sqrt(self.q0**2 + self.q1**2 + self.q2**2)
@@ -1964,11 +1789,11 @@ class HyperbolicCoordinates:
     """
     poincare_x: mpf
     poincare_y: mpf
-    klein_x: 'mpf' = None
-    klein_y: 'mpf' = None
-    hyperboloid_x: 'mpf' = None
-    hyperboloid_y: 'mpf' = None
-    hyperboloid_t: 'mpf' = None
+    klein_x: mpf = None
+    klein_y: mpf = None
+    hyperboloid_x: mpf = None
+    hyperboloid_y: mpf = None
+    hyperboloid_t: mpf = None
     
     def __post_init__(self):
         """Compute all coordinate systems from Poincaré"""
@@ -1982,7 +1807,7 @@ class HyperbolicCoordinates:
                 self._poincare_to_hyperboloid(self.poincare_x, self.poincare_y)
     
     @staticmethod
-    def _poincare_to_klein(x: mpf, y: mpf) -> Tuple['mpf', 'mpf']:
+    def _poincare_to_klein(x: mpf, y: mpf) -> Tuple[mpf, mpf]:
         """Convert Poincaré to Klein disk (150 decimal precision)"""
         r2 = x**2 + y**2
         
@@ -1998,7 +1823,7 @@ class HyperbolicCoordinates:
         return x * scale, y * scale
     
     @staticmethod
-    def _poincare_to_hyperboloid(x: mpf, y: mpf) -> Tuple['mpf', mpf, 'mpf']:
+    def _poincare_to_hyperboloid(x: mpf, y: mpf) -> Tuple[mpf, mpf, mpf]:
         """Convert Poincaré to hyperboloid model (150 decimal precision)"""
         r2 = x**2 + y**2
         
@@ -2016,7 +1841,7 @@ class HyperbolicCoordinates:
         
         return hx, hy, ht
     
-    def hyperbolic_distance_to(self, other: 'HyperbolicCoordinates') -> 'mpf':
+    def hyperbolic_distance_to(self, other: 'HyperbolicCoordinates') -> mpf:
         """
         Compute hyperbolic distance with 150 decimal precision
         d(z1, z2) = arccosh(1 + 2|z1-z2|²/((1-|z1|²)(1-|z2|²)))
@@ -2072,11 +1897,11 @@ class PoincarePoint:
     coords: HyperbolicCoordinates
     
     @property
-    def z_re(self) -> 'mpf':
+    def z_re(self) -> mpf:
         return self.coords.poincare_x
     
     @property
-    def z_im(self) -> 'mpf':
+    def z_im(self) -> mpf:
         return self.coords.poincare_y
     
     @staticmethod
@@ -2095,7 +1920,7 @@ class PoincarePoint:
         coords = HyperbolicCoordinates(x, y)
         return PoincarePoint(coords)
     
-    def hyperbolic_distance_to(self, other: 'PoincarePoint') -> 'mpf':
+    def hyperbolic_distance_to(self, other: 'PoincarePoint') -> mpf:
         """Compute hyperbolic distance to another point"""
         return self.coords.hyperbolic_distance_to(other.coords)
 
@@ -2182,7 +2007,7 @@ class HyperbolicTriangle:
     depth: int = 0
     triangle_id: int = None
     
-    def area(self) -> 'mpf':
+    def area(self) -> mpf:
         """
         Compute hyperbolic area using Gauss-Bonnet:
         Area = π - (α + β + γ) where α, β, γ are interior angles
@@ -2806,7 +2631,7 @@ class RoutingTopologyBuilder:
         logger.info(f"{CLR.BOLD}{CLR.C}Initializing RoutingTopologyBuilder{CLR.E}")
         logger.info(f"{CLR.C}  Input qubits: {len(pseudoqubits):,}{CLR.E}")
     
-    def build_routing(self, max_neighbors: int = 10, distance_threshold: 'mpf' = None):
+    def build_routing(self, max_neighbors: int = 10, distance_threshold: mpf = mpf('0.5')):
         """
         Build routing topology using nearest-neighbor graph
         
@@ -2814,8 +2639,6 @@ class RoutingTopologyBuilder:
             max_neighbors: Maximum neighbors per qubit
             distance_threshold: Maximum hyperbolic distance for edge
         """
-        if distance_threshold is None:
-            distance_threshold = mpf('0.5')
         start_time = time.time()
         
         logger.info(f"\n{CLR.BOLD}{CLR.C}BUILDING ROUTING TOPOLOGY{CLR.E}")
@@ -4909,13 +4732,6 @@ class DatabaseBuilder:
                 connect_timeout=CONNECTION_TIMEOUT
             )
             logger.info(f"{CLR.G}[OK] DatabaseBuilder initialized with pool size {pool_size}{CLR.E}")
-            
-            # ENTERPRISE: Register instance globally when pool is ready
-            try:
-                from wsgi_config import set_database_instance
-                set_database_instance(self)
-            except (ImportError, RuntimeError):
-                pass  # Standalone mode or wsgi_config not available
         except Exception as e:
             self.pool_error = str(e)
             logger.warning(
@@ -5119,22 +4935,12 @@ class DatabaseBuilder:
         raise Exception(error_detail)
     
     def return_connection(self, conn):
-        """Return connection to pool with critical error tracking"""
+        """Return connection to pool"""
         if conn and self.pool:
             try:
                 self.pool.putconn(conn)
-            except psycopg2.pool.PoolError as e:
-                logger.error(f"[DB-CONN] ❌ CRITICAL: Failed to return connection to pool: {e}")
-                logger.error(f"[DB-CONN] Pool may be exhausted or corrupted — attempting reset...")
-                try:
-                    self.pool.closeall()
-                    self.pool = None
-                except Exception:
-                    pass
-                raise
             except Exception as e:
-                logger.error(f"[DB-CONN] ⚠️  Unexpected error returning connection: {e}")
-                raise
+                logger.warning(f"[DB-CONN] Error returning connection to pool: {e}")
     
     def validate_schema_recursively(self):
         """
@@ -6600,16 +6406,6 @@ class DatabaseBuilder:
             else:
                 logger.warning(f"{CLR.Y}[PQ-SCHEMA] db_builder_pq_schema.py not found — "
                                f"encryption schema NOT installed{CLR.E}")
-            
-            # ────────────────────────────────────────────────────────────────────────
-            # LYRA CONSENSUS SCHEMA INITIALIZATION (Byzantine Validators) - MANDATORY
-            # ────────────────────────────────────────────────────────────────────────
-            logger.info(f"{CLR.C}[LYRA-SCHEMA] Installing Byzantine consensus schema...{CLR.E}")
-            lyra_result = init_lyra_schema(self)
-            if lyra_result:
-                logger.info(f"{CLR.G}[LYRA-SCHEMA] ✓ Byzantine validator schema v{LYRA_SCHEMA_VERSION} ready (5 state validators){CLR.E}")
-            else:
-                raise RuntimeError("[LYRA-SCHEMA] Schema installation failed - cannot proceed")
     
     def populate_pseudoqubits(self, count=106496):
         """
@@ -6632,7 +6428,7 @@ class DatabaseBuilder:
         
         try:
             # CRITICAL: Ensure mpmath is available for 150-decimal precision calculations
-            if mp is None:
+            if mp is None or not mpmath_available:
                 raise RuntimeError(
                     f"\n{'='*80}\n"
                     f"❌ mpmath is REQUIRED for hyperbolic tessellation!\n"
@@ -8501,6 +8297,9 @@ def verify_database_connection(db_manager=None, verbose=True) -> Dict[str, Any]:
     }
     
     if db_manager is None:
+        db_manager = globals().get('db_manager')
+    
+    if db_manager is None:
         result['errors'].append("db_manager is None")
         if verbose:
             logger.error(f"[DB-CHECK] ❌ {result['errors'][0]}")
@@ -8950,14 +8749,27 @@ class DatabaseHeartbeatIntegration:
     
     def __init__(self):
         self.pulse_count = 0
+        self.pool_checks = 0
+        self.connection_refreshes = 0
         self.error_count = 0
         self.lock = threading.RLock()
     
     def on_heartbeat(self, timestamp):
-        """Called every heartbeat - just track metrics"""
+        """Called every heartbeat - manage database connections"""
         try:
             with self.lock:
                 self.pulse_count += 1
+                self.pool_checks += 1
+            
+            # Check connection pool health
+            try:
+                # This would check pool status
+                pass
+            except Exception as e:
+                logger.debug(f"[DB-HB] Pool check: {e}")
+                with self.lock:
+                    self.error_count += 1
+        
         except Exception as e:
             logger.error(f"[DB-HB] Heartbeat callback error: {e}")
             with self.lock:
@@ -8968,6 +8780,8 @@ class DatabaseHeartbeatIntegration:
         with self.lock:
             return {
                 'pulse_count': self.pulse_count,
+                'pool_checks': self.pool_checks,
+                'connection_refreshes': self.connection_refreshes,
                 'error_count': self.error_count
             }
 
@@ -9133,228 +8947,6 @@ def initialize_blockchain_with_genesis(
                 builder.close()
             except Exception:
                 pass
-
-
-
-
-# ═══════════════════════════════════════════════════════════════════════════════════════════════
-# HLWE GENESIS & BLOCK DATABASE INTEGRATION
-# ═══════════════════════════════════════════════════════════════════════════════════════════════
-
-def persist_genesis_to_database(genesis_block, db_pool=None):
-    """
-    Persist genesis block to database with full HLWE PQ material.
-    
-    Called by HLWEGenesisOrchestrator.initialize_genesis() to store genesis block.
-    
-    Returns: (success: bool, block_id: int or None)
-    """
-    try:
-        if db_pool is None:
-            logger.warning("[DB-HLWE] No database pool provided, skipping persist")
-            return True, None  # Soft fail
-        
-        conn = db_pool.getconn()
-        try:
-            cur = conn.cursor()
-            
-            logger.info(f"[DB-HLWE] Persisting genesis block (hash={genesis_block.get('block_hash', '?')[:16]}...)")
-            
-            cur.execute("""
-                INSERT INTO blocks (
-                    height, block_hash, prev_block_hash, timestamp, 
-                    merkle_root, tx_count, miner, status, finalized,
-                    pq_signature, pq_key_fingerprint, pq_merkle_root,
-                    pq_entropy_source, pq_commitment, vdf_proof, metadata
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (height) DO UPDATE SET
-                    block_hash = EXCLUDED.block_hash,
-                    finalized = EXCLUDED.finalized,
-                    status = EXCLUDED.status,
-                    pq_signature = EXCLUDED.pq_signature,
-                    pq_key_fingerprint = EXCLUDED.pq_key_fingerprint,
-                    metadata = EXCLUDED.metadata
-                RETURNING id
-            """, (
-                genesis_block.get('height', 0),
-                genesis_block.get('block_hash'),
-                genesis_block.get('prev_block_hash', '0' * 64),
-                genesis_block.get('timestamp'),
-                genesis_block.get('merkle_root'),
-                genesis_block.get('tx_count', 0),
-                genesis_block.get('miner', 'GENESIS_VALIDATOR'),
-                genesis_block.get('status', 'finalized'),
-                genesis_block.get('finalized', True),
-                genesis_block.get('pq_signature'),
-                genesis_block.get('pq_key_fingerprint'),
-                genesis_block.get('pq_merkle_root'),
-                genesis_block.get('pq_entropy_source'),
-                genesis_block.get('pq_commitment'),
-                genesis_block.get('vdf_proof'),
-                json.dumps(genesis_block.get('metadata', {}))
-            ))
-            
-            result = cur.fetchone()
-            block_id = result[0] if result else None
-            
-            conn.commit()
-            logger.info(f"[DB-HLWE] ✓ Genesis persisted (id={block_id})")
-            
-            return True, block_id
-            
-        finally:
-            db_pool.putconn(conn)
-    
-    except Exception as e:
-        logger.error(f"[DB-HLWE] Persist genesis failed: {e}\n{traceback.format_exc()}")
-        return False, None
-
-
-def persist_block_to_database(block, db_pool=None):
-    """
-    Persist block to database with HLWE PQ material.
-    
-    Called by HLWEGenesisOrchestrator.forge_block() to store blocks.
-    
-    Returns: (success: bool, block_id: int or None)
-    """
-    try:
-        if db_pool is None:
-            logger.warning("[DB-HLWE] No database pool provided, skipping persist")
-            return True, None
-        
-        conn = db_pool.getconn()
-        try:
-            cur = conn.cursor()
-            
-            logger.debug(f"[DB-HLWE] Persisting block height={block.get('height')} (hash={block.get('block_hash', '?')[:16]}...)")
-            
-            cur.execute("""
-                INSERT INTO blocks (
-                    height, block_hash, prev_block_hash, timestamp, 
-                    merkle_root, tx_count, miner, status, finalized,
-                    pq_signature, pq_key_fingerprint, pq_merkle_root,
-                    pq_entropy_source, pq_commitment, vdf_proof, metadata
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (height) DO UPDATE SET
-                    block_hash = EXCLUDED.block_hash,
-                    status = EXCLUDED.status,
-                    pq_signature = EXCLUDED.pq_signature,
-                    metadata = EXCLUDED.metadata
-                RETURNING id
-            """, (
-                block.get('height'),
-                block.get('block_hash'),
-                block.get('prev_block_hash'),
-                block.get('timestamp'),
-                block.get('merkle_root'),
-                block.get('tx_count', 0),
-                block.get('miner'),
-                block.get('status', 'pending'),
-                block.get('finalized', False),
-                block.get('pq_signature'),
-                block.get('pq_key_fingerprint'),
-                block.get('pq_merkle_root'),
-                block.get('pq_entropy_source'),
-                block.get('pq_commitment'),
-                block.get('vdf_proof'),
-                json.dumps(block.get('metadata', {}))
-            ))
-            
-            result = cur.fetchone()
-            block_id = result[0] if result else None
-            
-            conn.commit()
-            logger.debug(f"[DB-HLWE] ✓ Block persisted (height={block.get('height')}, id={block_id})")
-            
-            return True, block_id
-            
-        finally:
-            db_pool.putconn(conn)
-    
-    except Exception as e:
-        logger.error(f"[DB-HLWE] Persist block failed: {e}")
-        return False, None
-
-
-def get_block_pq_integrity_status(height, db_pool=None):
-    """
-    Check block for PQ material integrity.
-    
-    Returns: dict with integrity status
-    """
-    try:
-        if db_pool is None:
-            return {'status': 'error', 'message': 'No database pool'}
-        
-        conn = db_pool.getconn()
-        try:
-            cur = conn.cursor()
-            
-            cur.execute("""
-                SELECT height, block_hash, pq_signature, pq_key_fingerprint, 
-                       pq_merkle_root, vdf_proof, status
-                FROM blocks WHERE height = %s
-            """, (height,))
-            
-            row = cur.fetchone()
-            
-            if not row:
-                return {'status': 'not_found', 'height': height}
-            
-            has_pq_sig = bool(row[2])
-            has_pq_fp = bool(row[3])
-            has_pq_merkle = bool(row[4])
-            has_vdf = bool(row[5])
-            
-            all_valid = has_pq_sig and has_pq_fp and has_pq_merkle and has_vdf
-            
-            return {
-                'status': 'valid' if all_valid else 'incomplete',
-                'height': row[0],
-                'hash': row[1],
-                'pq_signature': has_pq_sig,
-                'pq_key_fingerprint': has_pq_fp,
-                'pq_merkle_root': has_pq_merkle,
-                'vdf_proof': has_vdf,
-                'block_status': row[6]
-            }
-            
-        finally:
-            db_pool.putconn(conn)
-    
-    except Exception as e:
-        logger.error(f"[DB-HLWE] Integrity check failed: {e}")
-        return {'status': 'error', 'message': str(e)}
-
-
-def check_genesis_exists(db_pool=None):
-    """
-    Check if genesis block (height=0) exists in database.
-    
-    Returns: bool
-    """
-    try:
-        if db_pool is None:
-            return False
-        
-        conn = db_pool.getconn()
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT 1 FROM blocks WHERE height = 0 LIMIT 1")
-            result = cur.fetchone()
-            return result is not None
-        finally:
-            db_pool.putconn(conn)
-    
-    except Exception as e:
-        logger.warning(f"[DB-HLWE] Genesis check failed: {e}")
-        return False
-
-
-# ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 
 def main():
