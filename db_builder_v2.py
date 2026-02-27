@@ -1398,7 +1398,7 @@ class RandomOrgQRNG:
         """Fallback to system entropy - NEVER FAILS"""
         return secrets.token_bytes(num_bytes)
     
-    def get_random_mpf(self, precision: int = 150) -> mpf:
+    def get_random_mpf(self, precision: int = 150) -> 'mpf':
         """Get random mpf number in [0, 1) with specified precision"""
         num_bytes = (precision // 8) + 8
         random_bytes = self.fetch_bytes(num_bytes)
@@ -1527,7 +1527,7 @@ class ANUQuantumRNG:
         """Fallback to system entropy - NEVER FAILS"""
         return secrets.token_bytes(num_bytes)
     
-    def get_random_mpf(self, precision: int = 150) -> mpf:
+    def get_random_mpf(self, precision: int = 150) -> 'mpf':
         """Get random mpf number in [0, 1) with specified precision"""
         num_bytes = (precision // 8) + 8
         random_bytes = self.fetch_bytes(num_bytes)
@@ -1661,7 +1661,7 @@ class HybridQuantumEntropyEngine:
             self.stats['fallback_uses'] += 1
             return secrets.token_bytes(num_bytes)
     
-    def get_random_mpf(self, precision: int = 150) -> mpf:
+    def get_random_mpf(self, precision: int = 150) -> 'mpf':
         """Get random mpf with 150 decimal precision using hybrid entropy"""
         num_bytes = (precision // 4) + 16  # Extra precision
         random_bytes = self.get_random_bytes(num_bytes)
@@ -1671,20 +1671,20 @@ class HybridQuantumEntropyEngine:
         
         return mpf(random_int) / max_val
     
-    def get_random_angle(self) -> mpf:
+    def get_random_angle(self) -> 'mpf':
         """Get random angle in [0, 2π) with 150 decimal precision"""
         return self.get_random_mpf() * mpf(2) * pi
     
-    def get_random_phase(self) -> mpf:
+    def get_random_phase(self) -> 'mpf':
         """Get random phase in [-π, π) with 150 decimal precision"""
         return (self.get_random_mpf() * mpf(2) - mpf(1)) * pi
     
-    def get_random_unit_complex(self) -> Tuple[mpf, mpf]:
+    def get_random_unit_complex(self) -> Tuple['mpf', 'mpf']:
         """Get random point on unit circle (cos θ, sin θ)"""
         theta = self.get_random_angle()
         return cos(theta), sin(theta)
     
-    def get_random_poincare_point(self, max_radius: mpf = mpf('0.95')) -> Tuple[mpf, mpf]:
+    def get_random_poincare_point(self, max_radius: 'mpf' = mpf('0.95')) -> Tuple['mpf', 'mpf']:
         """Get random point in Poincaré disk with 150 decimal precision"""
         # Use rejection sampling for uniform distribution
         while True:
@@ -1737,7 +1737,7 @@ class VibrationalQuantumState:
             'source': self.source
         }
     
-    def to_poincare_coordinates(self) -> Tuple[mpf, mpf]:
+    def to_poincare_coordinates(self) -> Tuple['mpf', 'mpf']:
         """Map vibrational state to Poincaré disk coordinates"""
         # Normalize
         norm = sqrt(self.q0**2 + self.q1**2 + self.q2**2)
@@ -1827,11 +1827,11 @@ class HyperbolicCoordinates:
     """
     poincare_x: mpf
     poincare_y: mpf
-    klein_x: mpf = None
-    klein_y: mpf = None
-    hyperboloid_x: mpf = None
-    hyperboloid_y: mpf = None
-    hyperboloid_t: mpf = None
+    klein_x: 'mpf' = None
+    klein_y: 'mpf' = None
+    hyperboloid_x: 'mpf' = None
+    hyperboloid_y: 'mpf' = None
+    hyperboloid_t: 'mpf' = None
     
     def __post_init__(self):
         """Compute all coordinate systems from Poincaré"""
@@ -1845,7 +1845,7 @@ class HyperbolicCoordinates:
                 self._poincare_to_hyperboloid(self.poincare_x, self.poincare_y)
     
     @staticmethod
-    def _poincare_to_klein(x: mpf, y: mpf) -> Tuple[mpf, mpf]:
+    def _poincare_to_klein(x: mpf, y: mpf) -> Tuple['mpf', 'mpf']:
         """Convert Poincaré to Klein disk (150 decimal precision)"""
         r2 = x**2 + y**2
         
@@ -1861,7 +1861,7 @@ class HyperbolicCoordinates:
         return x * scale, y * scale
     
     @staticmethod
-    def _poincare_to_hyperboloid(x: mpf, y: mpf) -> Tuple[mpf, mpf, mpf]:
+    def _poincare_to_hyperboloid(x: mpf, y: mpf) -> Tuple['mpf', mpf, 'mpf']:
         """Convert Poincaré to hyperboloid model (150 decimal precision)"""
         r2 = x**2 + y**2
         
@@ -1879,7 +1879,7 @@ class HyperbolicCoordinates:
         
         return hx, hy, ht
     
-    def hyperbolic_distance_to(self, other: 'HyperbolicCoordinates') -> mpf:
+    def hyperbolic_distance_to(self, other: 'HyperbolicCoordinates') -> 'mpf':
         """
         Compute hyperbolic distance with 150 decimal precision
         d(z1, z2) = arccosh(1 + 2|z1-z2|²/((1-|z1|²)(1-|z2|²)))
@@ -1935,11 +1935,11 @@ class PoincarePoint:
     coords: HyperbolicCoordinates
     
     @property
-    def z_re(self) -> mpf:
+    def z_re(self) -> 'mpf':
         return self.coords.poincare_x
     
     @property
-    def z_im(self) -> mpf:
+    def z_im(self) -> 'mpf':
         return self.coords.poincare_y
     
     @staticmethod
@@ -1958,7 +1958,7 @@ class PoincarePoint:
         coords = HyperbolicCoordinates(x, y)
         return PoincarePoint(coords)
     
-    def hyperbolic_distance_to(self, other: 'PoincarePoint') -> mpf:
+    def hyperbolic_distance_to(self, other: 'PoincarePoint') -> 'mpf':
         """Compute hyperbolic distance to another point"""
         return self.coords.hyperbolic_distance_to(other.coords)
 
@@ -2045,7 +2045,7 @@ class HyperbolicTriangle:
     depth: int = 0
     triangle_id: int = None
     
-    def area(self) -> mpf:
+    def area(self) -> 'mpf':
         """
         Compute hyperbolic area using Gauss-Bonnet:
         Area = π - (α + β + γ) where α, β, γ are interior angles
@@ -2669,7 +2669,7 @@ class RoutingTopologyBuilder:
         logger.info(f"{CLR.BOLD}{CLR.C}Initializing RoutingTopologyBuilder{CLR.E}")
         logger.info(f"{CLR.C}  Input qubits: {len(pseudoqubits):,}{CLR.E}")
     
-    def build_routing(self, max_neighbors: int = 10, distance_threshold: mpf = mpf('0.5')):
+    def build_routing(self, max_neighbors: int = 10, distance_threshold: 'mpf' = mpf('0.5')):
         """
         Build routing topology using nearest-neighbor graph
         
