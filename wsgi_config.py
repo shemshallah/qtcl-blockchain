@@ -6,17 +6,42 @@ Flask WSGI configuration with unified mega_command_system and quantum_lattice_co
 import os
 import sys
 
-# ── OQS / liboqs guard — MUST be set before any module that does `import oqs` ──
-# oqs.oqs._load_liboqs() runs at import time and tries to git-clone liboqs from
-# source if the shared library (.so) is absent.  On Koyeb there is no cmake/gcc
-# toolchain and the target git branch (0.14.1) no longer exists, so the clone
-# fails with "Remote branch 0.14.1 not found" → RuntimeError → process exits.
+# ── OQS / liboqs patch — runs BEFORE any `import oqs` anywhere in the process ──
+# liboqs-python 0.14.1 (only version on PyPI) hardcodes its own version "0.14.1"
+# as the git branch to clone when building the C library.  That branch does not
+# exist in the liboqs C repo (latest real tag: 0.11.0), so the clone always
+# fails on Koyeb.  OQS_SKIP_SETUP / OQS_BUILD env vars are ignored by this version.
 #
-# OQS_SKIP_SETUP=1 tells oqs to skip the auto-install countdown entirely.
-# OQS_BUILD=0      is the alternate env var checked by some oqs builds.
-# Both must be set before the first `import oqs` anywhere in the process.
-os.environ.setdefault('OQS_SKIP_SETUP', '1')
-os.environ.setdefault('OQS_BUILD', '0')
+# Fix: find oqs.py on disk and replace the bad branch string in-place, right now,
+# before any module triggers `import oqs`.  Safe to run on every startup — if the
+# string is already correct (or absent) the file is left unchanged.
+def _patch_oqs_git_branch():
+    import pathlib, site
+    bad  = 'branch 0.14.1'
+    good = 'branch 0.11.0'
+    search_dirs = []
+    try: search_dirs += site.getsitepackages()
+    except Exception: pass
+    try: search_dirs.append(site.getusersitepackages())
+    except Exception: pass
+    # also hardcode the exact path seen in Koyeb logs
+    search_dirs.append('/workspace/.heroku/python/lib/python3.11/site-packages')
+    for d in search_dirs:
+        p = pathlib.Path(d) / 'oqs' / 'oqs.py'
+        if p.exists():
+            try:
+                src = p.read_text()
+                if bad in src:
+                    p.write_text(src.replace(bad, good))
+                    print(f'[OQS-PATCH] Fixed git branch in {p}', flush=True)
+                else:
+                    print(f'[OQS-PATCH] {p} already correct', flush=True)
+            except Exception as e:
+                print(f'[OQS-PATCH] Could not patch {p}: {e}', flush=True)
+            return
+    print('[OQS-PATCH] oqs.py not found in site-packages', flush=True)
+
+_patch_oqs_git_branch()
 # ─────────────────────────────────────────────────────────────────────────────
 
 import logging
