@@ -18,6 +18,15 @@ if not logging.getLogger().hasHandlers():
     )
 logger = logging.getLogger(__name__)
 
+# Post-quantum keys system (optional, graceful fallback)
+try:
+    import pq_keys_system
+    PQ_SYSTEM_AVAILABLE = True
+except ImportError:
+    logger.warning("[BOOTSTRAP] pq_keys_system module not found — running in simulation mode")
+    pq_keys_system = None
+    PQ_SYSTEM_AVAILABLE = False
+
 # ── Qiskit noise suppression — ROOT-HANDLER FILTER (bulletproof) ──────────────
 # quantum_lattice_control installs this filter too, but wsgi_config must also
 # install it here because gunicorn worker processes may reach this module via a
@@ -217,8 +226,8 @@ try:
         try:
             from db_builder_v2 import check_genesis_exists
             
-            db_pool = get_db_pool()
-            genesis_exists = check_genesis_exists(db_pool)
+            genesis_ok, genesis_info = check_genesis_exists()
+            genesis_exists = genesis_ok
             
             if not genesis_exists:
                 logger.info("[BOOTSTRAP] Genesis block not found, initializing...")
@@ -242,8 +251,10 @@ try:
     
 except ImportError as e:
     logger.warning(f"[BOOTSTRAP] HLWE Genesis Orchestrator not available: {e}")
+    HLWEGenesisOrchestrator = None
 except Exception as e:
-    logger.error(f"[BOOTSTRAP] HLWE Genesis initialization error: {e}", exc_info=True)
+    logger.warning(f"[BOOTSTRAP] HLWE Genesis initialization error: {e}")
+    HLWEGenesisOrchestrator = None
 
 # ════════════════════════════════════════════════════════════════════════════════════════
 # FLASK SETUP

@@ -530,7 +530,7 @@ class QRNGEntropyEngine:
 class ShannonEntropyCalculator:
     """
     Compute Shannon entropy of block hashes and quantum states.
-    H(X) = -sum p(x)*log2(p(x))
+    H(X) = -∑ p(x)·log₂(p(x))
     """
     
     @staticmethod
@@ -8811,6 +8811,52 @@ def get_database_heartbeat_status():
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 # TOP-LEVEL CONVENIENCE FUNCTION — callable from any module, mirrors the standalone script API
 # ════════════════════════════════════════════════════════════════════════════════════════════════
+
+
+def check_genesis_exists(db_url: Optional[str] = None) -> Tuple[bool, Dict[str, Any]]:
+    """
+    Check if genesis block exists in the database.
+    
+    Returns: (exists: bool, genesis_info: dict)
+    """
+    try:
+        builder = DatabaseBuilder() if db_url is None else DatabaseBuilder(db_url=db_url)
+        
+        if builder.pool is None:
+            return False, {'error': 'Database connection failed', 'pool_available': False}
+        
+        conn = builder.get_connection()
+        cur = conn.cursor()
+        
+        # Check if genesis block exists (height = 0)
+        cur.execute("""
+            SELECT block_number, height, block_hash, timestamp, pq_signature
+            FROM blocks
+            WHERE height = 0
+            LIMIT 1
+        """)
+        
+        genesis = cur.fetchone()
+        cur.close()
+        conn.close()
+        
+        if genesis:
+            return True, {
+                'exists': True,
+                'block_number': genesis[0],
+                'height': genesis[1],
+                'block_hash': str(genesis[2])[:64],
+                'timestamp': str(genesis[3]),
+                'pq_signature_present': genesis[4] is not None
+            }
+        else:
+            return False, {'exists': False, 'error': 'Genesis block not found', 'height': 0}
+    
+    except Exception as e:
+        logger.error(f"[GENESIS] ✗ Check failed: {e}")
+        return False, {'exists': False, 'error': str(e)}
+
+
 
 def initialize_blockchain_with_genesis(
     db_url: Optional[str] = None,
