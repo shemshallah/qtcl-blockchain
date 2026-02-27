@@ -1,1 +1,1 @@
-web: python entrypoint.py
+web: pip install -r requirements.txt && python -c "import site, pathlib; [p.write_text(p.read_text().replace(\"branch 0.14.1\", \"branch 0.11.0\")) for p in [pathlib.Path(s) / 'oqs/oqs.py' for s in site.getsitepackages()] if p.exists()]" && gunicorn -w 4 -b 0.0.0.0:8000 wsgi_config:application

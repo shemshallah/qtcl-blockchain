@@ -57,7 +57,7 @@ pycryptodome>=3.17.0          # Additional crypto algorithms
 # triggering its broken auto-installer (which wrongly tries to clone C tag
 # "0.14.1" — a tag that does not exist in the C repository).
 # ================================================================================
-liboqs-python==0.14.1        # Open Quantum Safe (CRYSTALS-Kyber, Dilithium) — ONLY PyPI version
+liboqs-python==0.14.1        # Open Quantum Safe — ONLY version on PyPI; C lib built by oqs auto-installer (patched to tag 0.11.0 in Procfile)
 
 
 # ================================================================================
