@@ -108,41 +108,20 @@ import base64
 import uuid
 import re
 import traceback
-def ensure_package(package, pip_name=None):
-    """Attempt to import a package, but don't fail if it's not available"""
-    try:
-        __import__(package)
-        return True
-    except ImportError:
-        print(f"⚠️  Package '{pip_name or package}' not available (should be pre-installed)")
-        return False
-
-# Try to import essential packages (should be pre-installed via requirements.txt)
-ensure_package("psycopg2", "psycopg2-binary")
-numpy_available = ensure_package("numpy")
-mpmath_available = ensure_package("mpmath")
-
 import psycopg2
 from psycopg2.extras import execute_values, RealDictCursor, Json
 from psycopg2.pool import ThreadedConnectionPool
 from psycopg2 import sql, errors as psycopg2_errors
 
-# Lazy-load numpy (required for some features)
-np = None
-mp = None
-if numpy_available:
-    try:
-        import numpy as np
-    except ImportError:
-        np = None
-        
-if mpmath_available:
-    try:
-        from mpmath import mp, mpf, sqrt, pi, cos, sin, exp, log, tanh, sinh, cosh, acosh
-        # Set mpmath to 150 decimal precision
-        mp.dps = 150
-    except ImportError:
-        mp = None
+# mpmath is a hard dependency — listed in requirements.txt; must be installed before running
+from mpmath import mp, mpf, sqrt, pi, cos, sin, exp, log, tanh, sinh, cosh, acosh
+mp.dps = 150  # 150 decimal places of precision throughout
+
+# numpy — required for quantum state vector operations
+try:
+    import numpy as np
+except ImportError as _np_err:
+    raise ImportError(f"numpy is required but not installed: {_np_err}") from _np_err
 
 # ===============================================================================
 # LOGGING CONFIGURATION
@@ -6487,7 +6466,7 @@ class DatabaseBuilder:
         
         try:
             # CRITICAL: Ensure mpmath is available for 150-decimal precision calculations
-            if mp is None or not mpmath_available:
+            if mp is None:
                 raise RuntimeError(
                     f"\n{'='*80}\n"
                     f"❌ mpmath is REQUIRED for hyperbolic tessellation!\n"
