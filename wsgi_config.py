@@ -7,39 +7,42 @@ import os
 import sys
 
 # ── OQS / liboqs patch — runs BEFORE any `import oqs` anywhere in the process ──
-# liboqs-python 0.14.1 (only version on PyPI) hardcodes its own version "0.14.1"
-# as the git branch to clone when building the C library.  That branch does not
-# exist in the liboqs C repo (latest real tag: 0.11.0), so the clone always
-# fails on Koyeb.  OQS_SKIP_SETUP / OQS_BUILD env vars are ignored by this version.
-#
-# Fix: find oqs.py on disk and replace the bad branch string in-place, right now,
-# before any module triggers `import oqs`.  Safe to run on every startup — if the
-# string is already correct (or absent) the file is left unchanged.
+# liboqs-python 0.14.1 stores its version in a variable (e.g. _liboqs_version = "0.14.1")
+# and passes it as the git --branch arg.  Our previous patch searched for the
+# literal "branch 0.14.1" which doesn't exist — the string is built at runtime.
+# Fix: replace every occurrence of the string "0.14.1" in oqs.py with "0.11.0"
+# (the latest real liboqs C tag), which rewrites both the version var and any
+# other hardcoded references in one pass.
 def _patch_oqs_git_branch():
-    import pathlib, site
-    bad  = 'branch 0.14.1'
-    good = 'branch 0.11.0'
+    import pathlib, site, re
+    target_ver = '0.14.1'
+    good_ver   = '0.11.0'
     search_dirs = []
     try: search_dirs += site.getsitepackages()
     except Exception: pass
     try: search_dirs.append(site.getusersitepackages())
     except Exception: pass
-    # also hardcode the exact path seen in Koyeb logs
     search_dirs.append('/workspace/.heroku/python/lib/python3.11/site-packages')
     for d in search_dirs:
         p = pathlib.Path(d) / 'oqs' / 'oqs.py'
         if p.exists():
             try:
                 src = p.read_text()
-                if bad in src:
-                    p.write_text(src.replace(bad, good))
-                    print(f'[OQS-PATCH] Fixed git branch in {p}', flush=True)
+                if target_ver in src:
+                    patched = src.replace(target_ver, good_ver)
+                    p.write_text(patched)
+                    count = src.count(target_ver)
+                    print(f'[OQS-PATCH] ✓ Replaced {count}x "{target_ver}" → "{good_ver}" in {p}', flush=True)
                 else:
-                    print(f'[OQS-PATCH] {p} already correct', flush=True)
+                    print(f'[OQS-PATCH] "{target_ver}" not found in {p} — already patched or different version', flush=True)
+                    # dump first 50 lines to help diagnose
+                    for i, line in enumerate(src.splitlines()[:50]):
+                        if '0.' in line and ('version' in line.lower() or 'branch' in line.lower() or 'clone' in line.lower()):
+                            print(f'[OQS-PATCH]   line {i+1}: {line.strip()}', flush=True)
             except Exception as e:
-                print(f'[OQS-PATCH] Could not patch {p}: {e}', flush=True)
+                print(f'[OQS-PATCH] ✗ Could not patch {p}: {e}', flush=True)
             return
-    print('[OQS-PATCH] oqs.py not found in site-packages', flush=True)
+    print('[OQS-PATCH] ✗ oqs.py not found in any site-packages dir', flush=True)
 
 _patch_oqs_git_branch()
 # ─────────────────────────────────────────────────────────────────────────────
