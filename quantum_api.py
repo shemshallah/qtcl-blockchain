@@ -2955,7 +2955,7 @@ def create_quantum_api_blueprint()->Blueprint:
     
     @bp.route('/pq-keypair/rotate',methods=['POST'])
     def api_pq_rotate():
-        """REAL post-quantum keypair rotation using liboqs Kyber/Dilithium"""
+        """Post-quantum keypair rotation using HLWE-256 (no external dependencies)"""
         try:
             data=request.get_json()or{}
             user_id=data.get('user_id')
@@ -2971,16 +2971,15 @@ def create_quantum_api_blueprint()->Blueprint:
             if algorithm not in supported_kems+supported_sigs:
                 return jsonify({'success':False,'error':'UNSUPPORTED_PQ_ALGORITHM'}),400
             
-            # Generate keypair
+            # Generate keypair using hlwe_engine (no OQS dependency)
             try:
-                # Correct import path: liboqs-python installs as `oqs`, not `liboqs.oqs`
-                from oqs import KeyEncapsulation
-                kemalg=KeyEncapsulation(algorithm)
-                public_key_bytes=kemalg.generate_keypair()
-                public_key=base64.b64encode(public_key_bytes).decode('utf-8')
-                secret_key=base64.b64encode(secrets.token_bytes(2400)).decode('utf-8')
-                keypair_id='pq_'+algorithm.lower()+'_'+secrets.token_hex(12)
-                logger.info(f'[PQ-API] Real {algorithm} keypair generated')
+                from hlwe_engine import get_pq_system, HLWE_256
+                pq = get_pq_system(HLWE_256)
+                key_data = pq.generate_user_key(user_id=f'quantum_api_{algorithm}', store=False)
+                public_key = base64.b64encode(str(key_data['public_key']).encode()).decode('utf-8')
+                secret_key = base64.b64encode(str(key_data['private_key']).encode()).decode('utf-8')
+                keypair_id = 'pq_'+algorithm.lower()+'_'+secrets.token_hex(12)
+                logger.info(f'[PQ-API] HLWE {algorithm} keypair generated')
             except:
                 # Fallback: simulate
                 public_key=base64.b64encode(secrets.token_bytes(1088)).decode('utf-8')
