@@ -25,6 +25,7 @@ _GLOBAL_STATE={
     'initialized':False,'_initializing':False,'lock':threading.Lock(),
     'qrng_ensemble':None,'qrng_stats':None,'qrng_last_refresh':0.0,'qrng_circuit_breakers':{},'qrng_pool_size':0,'qrng_active_sources':0,'qrng_entropy_estimate':0.0,
     'hlwe_system':None,'hlwe_params':None,'pqc_system':None,'pqc_state':None,
+    'lyra_loader':None,'lyra_validator_pool':None,'lyra_validator_addresses':[f'validator_{i}' for i in range(5)],
 }
 
 _STATE_LOCK=threading.RLock()
@@ -99,8 +100,41 @@ def initialize_hlwe_engine(db_url:Optional[str]=None,params=None)->bool:
         logger.warning(f"[GLOBAL] HLWE Engine initialization failed: {e}")
         return False
 
+def get_lyra_loader():
+    """Get LYRA consensus loader singleton"""
+    return get_global_state('lyra_loader')
+
+def get_lyra_validator_pool():
+    """Get LYRA Byzantine validator pool singleton"""
+    return get_global_state('lyra_validator_pool')
+
+def initialize_lyra_consensus(validator_addresses:Optional[List[str]]=None)->bool:
+    """
+    Initialize LYRA Byzantine consensus system - MANDATORY for block validation.
+    
+    ENTERPRISE GRADE: No fallbacks. If initialization fails, raises exception.
+    """
+    # Import LYRA components (hardcoded, no loading)
+    from quantum_lattice_control import get_lyra_validator_pool, LYRA_CONSENSUS_DATA
+    
+    if not LYRA_CONSENSUS_DATA:
+        raise RuntimeError("[LYRA] Hardcoded consensus data not available - invalid deployment")
+    
+    # Initialize LYRA validator pool
+    validator_addrs = validator_addresses or get_global_state('lyra_validator_addresses')
+    lyra_pool = get_lyra_validator_pool(validator_addrs)
+    
+    if not lyra_pool or not lyra_pool.validators:
+        raise RuntimeError("[LYRA] Failed to initialize Byzantine validator pool")
+    
+    set_global_state('lyra_validator_pool', lyra_pool)
+    
+    logger.info("[GLOBAL] ✓ LYRA Byzantine Consensus initialized (5 state validators, hardcoded data, MANDATORY)")
+    return True
+
 def get_heartbeat()->Optional[Any]:
     return get_global_state('heartbeat')
+
 
 def get_lattice()->Optional[Any]:
     return get_global_state('lattice')

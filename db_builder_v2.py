@@ -275,7 +275,81 @@ PQ_SCHEMA_DEFINITIONS = {
         bell_chsh_violations INTEGER DEFAULT 0,
         bell_s_chsh_mean FLOAT DEFAULT 0.0,
         created_at TIMESTAMP DEFAULT NOW(),
-        updated_at TIMESTAMP DEFAULT NOW())"""
+        updated_at TIMESTAMP DEFAULT NOW())\"\"\",
+    
+    # ════════════════════════════════════════════════════════════════════════════════
+    # LYRA CONSENSUS SCHEMA (Lattice-Year Reservoir Architecture)
+    # Byzantine validator pseudoqubits and consensus measurements
+    # ════════════════════════════════════════════════════════════════════════════════
+    
+    'lyra_validators': \"\"\"CREATE TABLE IF NOT EXISTS lyra_validators (
+        validator_id SMALLINT PRIMARY KEY CHECK (validator_id >= 0 AND validator_id < 5),
+        pseudoqubit_id BIGINT NOT NULL UNIQUE,
+        validator_address VARCHAR(255) NOT NULL UNIQUE,
+        w_state_register INTEGER[] DEFAULT ARRAY[]::INTEGER[],
+        consensus_strength FLOAT DEFAULT 0.5,
+        current_sigma FLOAT DEFAULT 8.0,
+        current_scenario VARCHAR(64) DEFAULT 'unanimous',
+        is_active BOOLEAN DEFAULT TRUE,
+        last_vote_timestamp TIMESTAMP,
+        total_votes BIGINT DEFAULT 0,
+        consensus_achieved_count BIGINT DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW())\"\"\",
+    
+    'lyra_consensus_votes': \"\"\"CREATE TABLE IF NOT EXISTS lyra_consensus_votes (
+        vote_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        round_number BIGINT NOT NULL,
+        validator_id SMALLINT NOT NULL REFERENCES lyra_validators(validator_id),
+        scenario VARCHAR(64) NOT NULL,
+        sigma FLOAT NOT NULL,
+        vote_value BOOLEAN NOT NULL,
+        parity FLOAT DEFAULT 0.5,
+        consensus_strength FLOAT DEFAULT 0.5,
+        majority_strength FLOAT DEFAULT 0.75,
+        entropy FLOAT DEFAULT 2.0,
+        p_w FLOAT DEFAULT 0.6,
+        vote_timestamp TIMESTAMP DEFAULT NOW())\"\"\",
+    
+    'lyra_consensus_rounds': \"\"\"CREATE TABLE IF NOT EXISTS lyra_consensus_rounds (
+        round_id BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+        round_number BIGINT NOT NULL UNIQUE,
+        scenario VARCHAR(64) NOT NULL,
+        sigma FLOAT NOT NULL,
+        consensus_achieved BOOLEAN DEFAULT FALSE,
+        majority_validator_id SMALLINT,
+        majority_votes INTEGER DEFAULT 0,
+        majority_strength FLOAT DEFAULT 0.75,
+        avg_entropy FLOAT DEFAULT 2.0,
+        avg_consensus_strength FLOAT DEFAULT 0.5,
+        avg_p_w FLOAT DEFAULT 0.6,
+        round_timestamp TIMESTAMP DEFAULT NOW(),
+        metadata JSONB)\"\"\",
+    
+    'lyra_consensus_metrics': \"\"\"CREATE TABLE IF NOT EXISTS lyra_consensus_metrics (
+        metric_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        scenario VARCHAR(64) NOT NULL,
+        sigma FLOAT NOT NULL,
+        sample_count INTEGER DEFAULT 0,
+        consensus_rate FLOAT DEFAULT 0.0,
+        avg_majority_strength FLOAT DEFAULT 0.75,
+        avg_entropy FLOAT DEFAULT 2.0,
+        max_entropy FLOAT DEFAULT 4.0,
+        min_entropy FLOAT DEFAULT 1.0,
+        byzantines_tolerated INTEGER DEFAULT 1,
+        recorded_at TIMESTAMP DEFAULT NOW())\"\"\",
+    
+    'lyra_pseudoqubit_consensus': \"\"\"CREATE TABLE IF NOT EXISTS lyra_pseudoqubit_consensus (
+        id BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+        pseudoqubit_id BIGINT NOT NULL,
+        validator_id SMALLINT REFERENCES lyra_validators(validator_id),
+        validator_role VARCHAR(64) DEFAULT 'state_validator',
+        consensus_participation_score FLOAT DEFAULT 0.0,
+        byzantine_resistance_strength FLOAT DEFAULT 0.5,
+        last_consensus_result JSONB,
+        metadata JSONB,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW())\"\"\"
 }
 
 # Create indexes for quantum_metrics table
@@ -343,6 +417,88 @@ def get_pq_status():
         return {'schema_installed': False, 'error': 'unavailable'}
 
 PQ_SCHEMA_AVAILABLE = True
+
+# ════════════════════════════════════════════════════════════════════════════════
+# LYRA CONSENSUS SCHEMA INITIALIZATION
+# ════════════════════════════════════════════════════════════════════════════════
+
+LYRA_SCHEMA_VERSION = 'v1.0.0'
+
+LYRA_SCHEMA_TABLES = [
+    'lyra_validators',
+    'lyra_consensus_votes',
+    'lyra_consensus_rounds',
+    'lyra_consensus_metrics',
+    'lyra_pseudoqubit_consensus'
+]
+
+def init_lyra_schema(db_mgr=None) -> bool:
+    """
+    Initialize LYRA Byzantine Consensus schema tables.
+    
+    Creates:
+    - lyra_validators: 5 state validator pseudoqubits
+    - lyra_consensus_votes: Per-validator voting records
+    - lyra_consensus_rounds: Consensus round summaries
+    - lyra_consensus_metrics: Aggregate statistics per scenario-sigma
+    - lyra_pseudoqubit_consensus: Links pseudoqubits to validator roles
+    """
+    if db_mgr is None:
+        global db_manager
+        db_mgr = db_manager
+    if db_mgr is None:
+        logger.warning("[LYRA-SCHEMA] db_manager not available")
+        return False
+    
+    try:
+        # Create all LYRA tables
+        lyra_schemas = {k: v for k, v in PQ_SCHEMA_DEFINITIONS.items() if k in LYRA_SCHEMA_TABLES}
+        
+        for tbl, sql in lyra_schemas.items():
+            try:
+                db_mgr.execute(sql)
+                logger.debug(f"[LYRA-SCHEMA] ✓ {tbl}")
+            except Exception as e:
+                if 'already exists' not in str(e).lower() and 'duplicate' not in str(e).lower():
+                    logger.debug(f"[LYRA-SCHEMA] {tbl}: {e}")
+        
+        # Create indexes for LYRA tables
+        lyra_indexes = {
+            'idx_lyra_votes_round_scenario': 
+                'CREATE INDEX IF NOT EXISTS idx_lyra_votes_round_scenario ON lyra_consensus_votes(round_number, scenario)',
+            'idx_lyra_rounds_timestamp': 
+                'CREATE INDEX IF NOT EXISTS idx_lyra_rounds_timestamp ON lyra_consensus_rounds(round_timestamp DESC)',
+            'idx_lyra_metrics_scenario_sigma': 
+                'CREATE INDEX IF NOT EXISTS idx_lyra_metrics_scenario_sigma ON lyra_consensus_metrics(scenario, sigma)',
+            'idx_lyra_pseudoqubit_validator':
+                'CREATE INDEX IF NOT EXISTS idx_lyra_pseudoqubit_validator ON lyra_pseudoqubit_consensus(pseudoqubit_id, validator_id)',
+        }
+        
+        for idx_name, idx_sql in lyra_indexes.items():
+            try:
+                db_mgr.execute(idx_sql)
+                logger.debug(f"[LYRA-SCHEMA] ✓ {idx_name}")
+            except Exception as e:
+                if 'already exists' not in str(e).lower():
+                    logger.debug(f"[LYRA-SCHEMA] {idx_name}: {e}")
+        
+        # Register LYRA schema version
+        try:
+            db_mgr.execute(
+                "INSERT INTO genesis_pq_manifest (pq_schema_version, hlwe_params) "
+                "VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (f'LYRA-{LYRA_SCHEMA_VERSION}', json.dumps({'version': LYRA_SCHEMA_VERSION, 'type': 'Byzantine Consensus'}))
+            )
+        except Exception:
+            pass
+        
+        logger.info(f"[LYRA-SCHEMA] ✅ Initialized (v{LYRA_SCHEMA_VERSION}) - 5 Byzantine Validators")
+        return True
+    except Exception as e:
+        logger.error(f"[LYRA-SCHEMA] Init failed: {e}")
+        return False
+
+LYRA_SCHEMA_AVAILABLE = True
 
 class CLR:
     """ANSI color codes for beautiful terminal output"""
@@ -6444,6 +6600,16 @@ class DatabaseBuilder:
             else:
                 logger.warning(f"{CLR.Y}[PQ-SCHEMA] db_builder_pq_schema.py not found — "
                                f"encryption schema NOT installed{CLR.E}")
+            
+            # ────────────────────────────────────────────────────────────────────────
+            # LYRA CONSENSUS SCHEMA INITIALIZATION (Byzantine Validators) - MANDATORY
+            # ────────────────────────────────────────────────────────────────────────
+            logger.info(f"{CLR.C}[LYRA-SCHEMA] Installing Byzantine consensus schema...{CLR.E}")
+            lyra_result = init_lyra_schema(self)
+            if lyra_result:
+                logger.info(f"{CLR.G}[LYRA-SCHEMA] ✓ Byzantine validator schema v{LYRA_SCHEMA_VERSION} ready (5 state validators){CLR.E}")
+            else:
+                raise RuntimeError("[LYRA-SCHEMA] Schema installation failed - cannot proceed")
     
     def populate_pseudoqubits(self, count=106496):
         """

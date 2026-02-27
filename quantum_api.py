@@ -3042,24 +3042,26 @@ def create_quantum_api_blueprint()->Blueprint:
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 def initialize_quantum_api():
-    """Initialize the quantum API on startup"""
-    try:
-        logger.info("🚀 Initializing Quantum API...")
-        
-        # Initialize simulators
-        logger.info("  ✓ Qiskit AER simulators initialized")
-        
-        # Generate initial W-state
-        QUANTUM.generate_w_state()
-        logger.info("  ✓ Initial W-state generated")
-        
-        # Initialize neural lattice
-        logger.info("  ✓ Neural lattice control initialized")
-        
-        logger.info("✅ QUANTUM API READY - 4000+ LINES OF QUANTUM POWER")
-        
-    except Exception as e:
-        logger.error(f"❌ Quantum API initialization failed: {e}")
+    """Initialize the quantum API on startup - LYRA MANDATORY"""
+    logger.info("🚀 Initializing Quantum API...")
+    
+    # Initialize simulators
+    logger.info("  ✓ Qiskit AER simulators initialized")
+    
+    # Generate initial W-state
+    QUANTUM.generate_w_state()
+    logger.info("  ✓ Initial W-state generated")
+    
+    # Initialize neural lattice
+    logger.info("  ✓ Neural lattice control initialized")
+    
+    # Initialize LYRA Byzantine consensus system - MANDATORY
+    from globals import initialize_lyra_consensus, get_lyra_validator_pool
+    initialize_lyra_consensus()  # Raises exception if fails
+    pool = get_lyra_validator_pool()
+    logger.info(f"  ✓ LYRA Byzantine consensus initialized ({len(pool.validators)} state validators, hardcoded)")
+    
+    logger.info("✅ QUANTUM API READY - LYRA CONSENSUS MANDATORY")
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════
 # SECTION 13: ADVANCED QUANTUM ERROR CORRECTION & TOPOLOGICAL CODES

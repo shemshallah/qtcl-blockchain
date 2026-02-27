@@ -1115,14 +1115,60 @@ class BlockCreator:
 # ═══════════════════════════════════════════════════════════════════════════════════════════════════
 
 class BlockValidator:
-    """Comprehensive block validation with HLWE verification"""
+    """Comprehensive block validation with HLWE verification and LYRA Byzantine consensus"""
     
     def __init__(self, db=None):
         self.db = db or _get_global_db()
         self._lock = threading.RLock()
         self.blocks_validated = 0
         self.blocks_rejected = 0
-        logger.info('[BlockValidator] Initialized')
+        self.lyra_consensus_round = 0
+        
+        # LYRA Byzantine consensus integration
+        try:
+            from globals import get_lyra_validator_pool
+            self.lyra_pool = get_lyra_validator_pool()
+        except:
+            self.lyra_pool = None
+        
+        logger.info('[BlockValidator] Initialized (LYRA Byzantine Consensus ready)' if self.lyra_pool else '[BlockValidator] Initialized')
+    
+    def _validate_block_with_lyra_consensus(self, block: Block) -> Tuple[bool, str]:
+        """
+        MANDATORY Byzantine consensus validation - no fallbacks.
+        
+        If LYRA consensus fails, block is rejected.
+        If LYRA pool unavailable, exception is raised (non-operational state).
+        """
+        if not self.lyra_pool:
+            raise RuntimeError("[LYRA] Byzantine validator pool not initialized - cannot validate block")
+        
+        # Scenario determination
+        if len(block.transactions) == 0:
+            scenario = 'unanimous'
+        elif len(block.transactions) < 50:
+            scenario = 'contested'
+        else:
+            scenario = 'scalability'
+        
+        # Noise strength tuning
+        sigma = 12.0 if len(block.transactions) > 100 else 10.0
+        
+        # Execute mandatory consensus round
+        result = self.lyra_pool.measure_consensus_round(scenario, sigma)
+        
+        # Log consensus result
+        logger.debug(
+            f"[LYRA-Consensus] Round {self.lyra_consensus_round} | Scenario={scenario} | Sigma={sigma:.1f} | "
+            f"Consensus={'✓' if result['consensus_achieved'] else '✗'} | "
+            f"Majority={result['majority_votes']}/5 | Strength={result['majority_strength']:.3f}"
+        )
+        
+        # Byzantine fault tolerance: require 3-of-5 majority
+        if result['consensus_achieved'] and result['majority_votes'] >= 3:
+            return True, f"LYRA consensus approved (round {self.lyra_consensus_round}, {result['majority_votes']}/5 votes)"
+        else:
+            return False, f"LYRA consensus rejected (round {self.lyra_consensus_round}, {result['majority_votes']}/5 votes)"
     
     def validate_block(self, block: Block) -> Tuple[bool, str]:
         """Comprehensive block validation"""
@@ -1160,11 +1206,18 @@ class BlockValidator:
             if not is_valid:
                 logger.warning(f"[BlockValidator] HLWE seal check failed (non-blocking): {msg}")
             
+            # LYRA Byzantine consensus validation
+            lyra_valid, lyra_msg = self._validate_block_with_lyra_consensus(block)
+            if not lyra_valid:
+                with self._lock:
+                    self.blocks_rejected += 1
+                return False, f"LYRA consensus failed: {lyra_msg}"
+            
             with self._lock:
                 self.blocks_validated += 1
             
-            logger.info(f"[BlockValidator] Block {block.block_number} validated")
-            return True, "Block valid"
+            logger.info(f"[BlockValidator] Block {block.block_number} validated with LYRA consensus")
+            return True, "Block valid (LYRA consensus approved)"
         
         except Exception as e:
             logger.error(f"[BlockValidator] Validation error: {e}", exc_info=True)
