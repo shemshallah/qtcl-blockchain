@@ -2750,19 +2750,22 @@ def get_quantum_lattice() -> QuantumLatticeController:
 # ════════════════════════════════════════════════════════════════════════════════
 
 class QuantumHeartbeat:
-    """Perpetual heartbeat: evolves lattice each interval, posts metrics to API."""
+    """Dual-thread: keepalive posts frequently; lattice evolves independently."""
 
-    def __init__(self, interval_seconds: float = 10.0, api_url: str = 'http://localhost:8000/api/heartbeat'):
-        self.interval    = interval_seconds
-        self.api_url     = api_url
-        self.lattice     = get_quantum_lattice()
-        self.lock        = threading.RLock()
-        self.running     = False
-        self.thread: Optional[threading.Thread] = None
-        self.cycle_count = 0
-        self.post_successes = 0
-        self.post_failures  = 0
-        self.health_status  = 'initialized'
+    def __init__(self, interval_seconds: float = 1.0, api_url: str = 'http://localhost:8000/api/heartbeat'):
+        self.keepalive_interval = 0.1  # Post keepalive every 100ms
+        self.refresh_interval   = interval_seconds  # Evolve lattice at this interval
+        self.api_url            = api_url
+        self.lattice            = get_quantum_lattice()
+        self.lock               = threading.RLock()
+        self.running            = False
+        self.keepalive_thread: Optional[threading.Thread] = None
+        self.refresh_thread: Optional[threading.Thread] = None
+        self.cycle_count        = 0
+        self.post_successes     = 0
+        self.post_failures      = 0
+        self.health_status      = 'initialized'
+        self.last_result        = None  # Cache last evolution result
 
     def write_metrics_to_db(self, data: Dict[str, Any]):
         global _db_manager
@@ -2788,52 +2791,75 @@ class QuantumHeartbeat:
         except Exception:
             self.post_failures += 1
 
-    def _run(self):
+    def _run_keepalive(self):
+        """Keepalive thread: posts current state every 100ms (doesn't evolve)."""
+        while self.running:
+            try:
+                with self.lock:
+                    result = self.last_result
+                    beat_count = self.cycle_count
+                
+                if result:
+                    keepalive_data = {
+                        'beat_count': beat_count,
+                        'cycle': result.cycle_num,
+                        'coherence': result.state.coherence,
+                        'fidelity': result.state.fidelity,
+                        'revival_coherence': result.state.revival_coherence,
+                        'timestamp': datetime.now(timezone.utc).isoformat(),
+                    }
+                    self.post_to_api(keepalive_data)
+                
+                time.sleep(self.keepalive_interval)
+            except Exception as e:
+                logger.debug(f"[HEARTBEAT-KEEPALIVE] Error: {e}")
+                time.sleep(self.keepalive_interval)
+
+    def _run_refresh(self):
+        """Lattice refresh thread: evolves quantum state independently."""
         while self.running:
             try:
                 result = self.lattice.evolve_one_cycle()
                 with self.lock:
                     self.cycle_count += 1
-                beat_data = {
-                    'beat_count': self.cycle_count,
-                    'cycle': result.cycle_num,
-                    'coherence': result.state.coherence,
-                    'fidelity': result.state.fidelity,
-                    'entanglement_entropy': result.state.entanglement_entropy,
-                    'chsh_s': result.state.chsh_s,
-                    'bell_violation': result.state.bell_violation,
-                    'revival_coherence': result.state.revival_coherence,
-                    'revival_state': result.state.revival_state,
-                    'nz_integral': result.state.nz_integral,
-                    'noise_amplitude': result.noise_amplitude,
-                    'memory_effect': result.memory_effect,
-    
-                    'timestamp': datetime.now(timezone.utc).isoformat(),
-                }
-                self.write_metrics_to_db(beat_data)
-                self.post_to_api(beat_data)
-                time.sleep(self.interval)
+                    self.last_result = result
+                
+                logger.debug(f"[LATTICE-REFRESH] Evolved to cycle {result.cycle_num}")
+                time.sleep(self.refresh_interval)
             except Exception as e:
-                logger.error(f"[HEARTBEAT] Error: {e}")
+                logger.error(f"[LATTICE-REFRESH] Error: {e}")
                 with self.lock:
                     self.health_status = 'error'
-                time.sleep(self.interval)
+                time.sleep(self.refresh_interval)
 
     def start(self):
         with self.lock:
             if not self.running:
                 self.running = True
                 self.health_status = 'running'
-                self.thread = threading.Thread(target=self._run, daemon=True, name='QuantumHeartbeat')
-                self.thread.start()
-                logger.info(f"[HEARTBEAT] ✓ Started ({self.interval}s interval → {self.api_url})")
+                
+                # Start keepalive thread (fast, non-blocking)
+                self.keepalive_thread = threading.Thread(
+                    target=self._run_keepalive, daemon=True, name='QuantumHeartbeat-Keepalive'
+                )
+                self.keepalive_thread.start()
+                
+                # Start lattice refresh thread (evolves independently)
+                self.refresh_thread = threading.Thread(
+                    target=self._run_refresh, daemon=True, name='QuantumHeartbeat-Refresh'
+                )
+                self.refresh_thread.start()
+                
+                logger.info(f"[HEARTBEAT] ✓ Started dual-thread (keepalive=100ms, refresh={self.refresh_interval}s → {self.api_url})")
 
     def stop(self):
         with self.lock:
             self.running = False
             self.health_status = 'stopped'
-        if self.thread:
-            self.thread.join(timeout=5)
+        if self.keepalive_thread:
+            self.keepalive_thread.join(timeout=5)
+        if self.refresh_thread:
+            self.refresh_thread.join(timeout=5)
 
     def get_health_status(self) -> Dict[str, Any]:
         global _db_manager
@@ -2900,7 +2926,7 @@ logger.info("╚═════════════════════�
 
 LATTICE            = get_quantum_lattice()
 _api_url           = os.getenv('API_URL', 'http://localhost:8000/api/heartbeat')
-HEARTBEAT          = QuantumHeartbeat(interval_seconds=10.0, api_url=_api_url)
+HEARTBEAT          = QuantumHeartbeat(interval_seconds=1.0, api_url=_api_url)
 QUANTUM_COORDINATOR: Optional[QuantumCoordinator] = None
 
 
@@ -2910,7 +2936,7 @@ def initialize_quantum_system():
     logger.info("[INIT] Initialising quantum lattice system (Clay-standard v10)...")
     LATTICE     = get_quantum_lattice()
     api_url     = os.getenv('API_URL', 'http://localhost:8000/api/heartbeat')
-    HEARTBEAT   = QuantumHeartbeat(interval_seconds=10.0, api_url=api_url)
+    HEARTBEAT   = QuantumHeartbeat(interval_seconds=1.0, api_url=api_url)
     HEARTBEAT.start()
     QUANTUM_COORDINATOR = QuantumCoordinator()
     QUANTUM_COORDINATOR.start()
