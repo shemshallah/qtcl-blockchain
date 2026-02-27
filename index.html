@@ -300,7 +300,23 @@
         if (data.status === 'success') {
           if (data.result) {
             const result = data.result;
-            if (typeof result === 'string') {
+            
+            // Special formatting for help/command list
+            if (cmd.toLowerCase() === 'help' && Array.isArray(result)) {
+              addLine('Available Commands:', 'line-header');
+              const categories = {};
+              result.forEach(cmd => {
+                const cat = cmd.category || 'uncategorized';
+                if (!categories[cat]) categories[cat] = [];
+                categories[cat].push(cmd.name || cmd.command || '(unknown)');
+              });
+              Object.keys(categories).sort().forEach(cat => {
+                addLine(`  [${cat.toUpperCase()}]`, 'line-info');
+                categories[cat].forEach(c => {
+                  addLine(`    • ${c}`, 'line-dim');
+                });
+              });
+            } else if (typeof result === 'string') {
               addLine(result, 'line-success');
             } else {
               addLine(JSON.stringify(result, null, 2), 'line-success');

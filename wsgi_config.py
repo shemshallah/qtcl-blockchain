@@ -248,11 +248,20 @@ curl -X POST https://your-domain.koyeb.app/api/command \\
         """Execute a command."""
         try:
             data = request.get_json() or {}
-            command = data.get('command', '')
+            command = data.get('command', '').strip().lower()
             args = data.get('args', {})
             user_id = getattr(g, 'user_id', None)
             token = request.headers.get('Authorization', '').replace('Bearer ', '')
             role = getattr(g, 'user_role', 'user')
+            
+            # Special handling for help command
+            if command == 'help':
+                result = list_commands_sync()
+                return jsonify({
+                    'status': 'success',
+                    'result': result,
+                    'execution_time_ms': 0.0,
+                }), 200
             
             result = dispatch_command_sync(
                 command=command,
