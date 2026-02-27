@@ -571,7 +571,7 @@ class SystemStatsCommand(Command):
             self.metrics.last_error_timestamp = datetime.now(timezone.utc)
             
             logger.error(f"[system-stats] ✗ Error: {e}", exc_info=True)
-            return {'status': 'error', 'error': str(e), 'trace_id': ctx.trace_id}
+            return {'status': 'error', 'error': str(e), 'trace_id': ctx['trace_id']}
     
     def _read_command_metrics(self, db_manager) -> Dict[str, Any]:
         """Read aggregated command execution statistics from database."""
@@ -627,7 +627,7 @@ class SystemStatsCommand(Command):
                 INSERT INTO command_logs (command, status, user_id, trace_id, executed_at)
                 VALUES (%s, %s, %s, %s, NOW())
             """
-            db_manager.execute(query, (command, status, ctx.user_id, ctx.trace_id))
+            db_manager.execute(query, (command, status, ctx['user_id'], ctx['trace_id']))
         except Exception as e:
             logger.warning(f"[system-stats] Failed to log command: {e}")
 
@@ -697,7 +697,7 @@ class QuantumStatsCommand(Command):
             self.metrics.record(execution_time, success=False, error=str(e))
             
             logger.error(f"[quantum-stats] ✗ Error: {e}", exc_info=True)
-            return {'status': 'error', 'error': str(e), 'trace_id': ctx.trace_id}
+            return {'status': 'error', 'error': str(e), 'trace_id': ctx['trace_id']}
     
     def _get_quantum_data(self, lattice) -> Dict[str, Any]:
         """Extract quantum metrics from lattice object."""
@@ -812,7 +812,7 @@ class QuantumStatsCommand(Command):
                 INSERT INTO command_logs (command, status, user_id, trace_id, executed_at)
                 VALUES (%s, %s, %s, %s, NOW())
             """
-            db_manager.execute(query, (command, status, ctx.user_id, ctx.trace_id))
+            db_manager.execute(query, (command, status, ctx['user_id'], ctx['trace_id']))
         except Exception as e:
             logger.warning(f"[quantum-stats] Failed to log command: {e}")
 
@@ -878,7 +878,7 @@ class QuantumEntropyCommand(Command):
             self.metrics.record(execution_time, success=False, error=str(e))
             
             logger.error(f"[quantum-entropy] ✗ Error: {e}", exc_info=True)
-            return {'status': 'error', 'error': str(e), 'trace_id': ctx.trace_id}
+            return {'status': 'error', 'error': str(e), 'trace_id': ctx['trace_id']}
     
     def _get_entropy_data(self, lattice) -> Dict[str, Any]:
         """Extract entropy metrics from lattice."""
@@ -985,7 +985,7 @@ class QuantumEntropyCommand(Command):
                 INSERT INTO command_logs (command, status, user_id, trace_id, executed_at)
                 VALUES (%s, %s, %s, %s, NOW())
             """
-            db_manager.execute(query, (command, status, ctx.user_id, ctx.trace_id))
+            db_manager.execute(query, (command, status, ctx['user_id'], ctx['trace_id']))
         except Exception as e:
             logger.warning(f"[quantum-entropy] Failed to log command: {e}")
 
@@ -1063,7 +1063,7 @@ class QuantumCircuitCommand(Command):
             self.metrics.record(execution_time, success=False, error=str(e))
             
             logger.error(f"[quantum-circuit] ✗ Error: {e}", exc_info=True)
-            return {'status': 'error', 'error': str(e), 'trace_id': ctx.trace_id}
+            return {'status': 'error', 'error': str(e), 'trace_id': ctx['trace_id']}
     
     def _compile_circuit(self, qubits: int, depth: int, circuit_type: str) -> Dict[str, Any]:
         """Compile quantum circuit."""
@@ -1133,7 +1133,7 @@ class QuantumCircuitCommand(Command):
             db_manager.execute(
                 query,
                 (
-                    ctx.user_id,
+                    ctx['user_id'],
                     'circuit_' + str(circuit_data['qubits']) + 'q',
                     circuit_data['estimated_fidelity'],
                     json.dumps(circuit_data),
@@ -1154,7 +1154,7 @@ class QuantumCircuitCommand(Command):
                 INSERT INTO command_logs (command, status, user_id, trace_id, executed_at)
                 VALUES (%s, %s, %s, %s, NOW())
             """
-            db_manager.execute(query, (command, status, ctx.user_id, ctx.trace_id))
+            db_manager.execute(query, (command, status, ctx['user_id'], ctx['trace_id']))
         except Exception as e:
             logger.warning(f"[quantum-circuit] Failed to log command: {e}")
 
@@ -1233,7 +1233,7 @@ class QuantumGhzCommand(Command):
             self.metrics.record(execution_time, success=False, error=str(e))
             
             logger.error(f"[quantum-ghz] ✗ Error: {e}", exc_info=True)
-            return {'status': 'error', 'error': str(e), 'trace_id': ctx.trace_id}
+            return {'status': 'error', 'error': str(e), 'trace_id': ctx['trace_id']}
     
     def _compute_ghz_state(self, qubits: int, lattice) -> Dict[str, Any]:
         """Compute GHZ state metrics."""
@@ -1335,7 +1335,7 @@ class QuantumGhzCommand(Command):
             db_manager.execute(
                 query,
                 (
-                    ctx.user_id,
+                    ctx['user_id'],
                     f"ghz_{ghz_data['qubits']}q",
                     ghz_data['fidelity'],
                     json.dumps(ghz_data),
@@ -1354,7 +1354,7 @@ class QuantumGhzCommand(Command):
                 INSERT INTO command_logs (command, status, user_id, trace_id, executed_at)
                 VALUES (%s, %s, %s, %s, NOW())
             """
-            db_manager.execute(query, (command, status, ctx.user_id, ctx.trace_id))
+            db_manager.execute(query, (command, status, ctx['user_id'], ctx['trace_id']))
         except Exception as e:
             logger.warning(f"[quantum-ghz] Failed to log command: {e}")
 
@@ -1781,7 +1781,7 @@ class AuthLoginCommand(Command):
             self.metrics.record(execution_time, success=False, error=str(e))
             
             logger.error(f"[auth-login] ✗ Error: {e}", exc_info=True)
-            return {'status': 'error', 'error': str(e), 'trace_id': ctx.trace_id}
+            return {'status': 'error', 'error': str(e), 'trace_id': ctx['trace_id']}
     
     def _read_user(self, db_manager, username: str) -> Optional[Dict[str, Any]]:
         """Read user from database."""
@@ -1863,7 +1863,7 @@ class AuthLoginCommand(Command):
                 INSERT INTO command_logs (command, status, user_id, trace_id, executed_at)
                 VALUES (%s, %s, %s, %s, NOW())
             """
-            db_manager.execute(query, (command, status, ctx.user_id, ctx.trace_id))
+            db_manager.execute(query, (command, status, ctx['user_id'], ctx['trace_id']))
         except Exception as e:
             logger.warning(f"[auth-login] Failed to log command: {e}")
 
@@ -1892,26 +1892,26 @@ class AuthLogoutCommand(Command):
         
         try:
             # ▸ VALIDATE: Context
-            if not ctx.user_id:
+            if not ctx['user_id']:
                 raise ValueError("user_id required for logout")
             
             token = args.get('token')
             db_manager = get_db_manager()
             
             # ▸ DB READ: Validate session exists
-            session = self._read_session(db_manager, ctx.user_id, token) if token else None
+            session = self._read_session(db_manager, ctx['user_id'], token) if token else None
             
             # ▸ DB WRITE: Invalidate session
-            self._invalidate_session(db_manager, ctx.user_id, token)
+            self._invalidate_session(db_manager, ctx['user_id'], token)
             
             # ▸ DB WRITE: Log logout
-            self._log_auth_event(db_manager, ctx.user_id, 'logout_success', 'user_initiated')
+            self._log_auth_event(db_manager, ctx['user_id'], 'logout_success', 'user_initiated')
             
             # ▸ AGGREGATE: Result
             result = {
                 'status': 'success',
                 'logged_out': True,
-                'user_id': ctx.user_id,
+                'user_id': ctx['user_id'],
                 'timestamp': datetime.now(timezone.utc).isoformat(),
                 'message': 'Successfully logged out',
             }
@@ -1923,7 +1923,7 @@ class AuthLogoutCommand(Command):
             execution_time = (time.time() - start_time) * 1000
             self.metrics.record(execution_time, success=True)
             
-            logger.info(f"[auth-logout] ✓ User {ctx.user_id} logged out")
+            logger.info(f"[auth-logout] ✓ User {ctx['user_id']} logged out")
             return result
             
         except Exception as e:
@@ -1931,7 +1931,7 @@ class AuthLogoutCommand(Command):
             self.metrics.record(execution_time, success=False, error=str(e))
             
             logger.error(f"[auth-logout] ✗ Error: {e}", exc_info=True)
-            return {'status': 'error', 'error': str(e), 'trace_id': ctx.trace_id}
+            return {'status': 'error', 'error': str(e), 'trace_id': ctx['trace_id']}
     
     def _read_session(self, db_manager, user_id: str, token: str) -> Optional[Dict[str, Any]]:
         """Read session from database."""
@@ -1988,7 +1988,7 @@ class AuthLogoutCommand(Command):
                 INSERT INTO command_logs (command, status, user_id, trace_id, executed_at)
                 VALUES (%s, %s, %s, %s, NOW())
             """
-            db_manager.execute(query, (command, status, ctx.user_id, ctx.trace_id))
+            db_manager.execute(query, (command, status, ctx['user_id'], ctx['trace_id']))
         except Exception as e:
             logger.warning(f"[auth-logout] Failed to log command: {e}")
 
@@ -2073,7 +2073,7 @@ class AuthRegisterCommand(Command):
             self.metrics.record(execution_time, success=False, error=str(e))
             
             logger.error(f"[auth-register] ✗ Error: {e}", exc_info=True)
-            return {'status': 'error', 'error': str(e), 'trace_id': ctx.trace_id}
+            return {'status': 'error', 'error': str(e), 'trace_id': ctx['trace_id']}
     
     def _check_user_exists(self, db_manager, username: str, email: str) -> Optional[str]:
         """Check if user already exists."""
@@ -2152,7 +2152,7 @@ class AuthRegisterCommand(Command):
                 INSERT INTO command_logs (command, status, user_id, trace_id, executed_at)
                 VALUES (%s, %s, %s, %s, NOW())
             """
-            db_manager.execute(query, (command, status, ctx.user_id, ctx.trace_id))
+            db_manager.execute(query, (command, status, ctx['user_id'], ctx['trace_id']))
         except Exception as e:
             logger.warning(f"[auth-register] Failed to log command: {e}")
 
@@ -2180,7 +2180,7 @@ class AuthMfaCommand(Command):
         start_time = time.time()
         
         try:
-            if not ctx.user_id:
+            if not ctx['user_id']:
                 raise ValueError("user_id required")
             
             action = args.get('action', 'status')  # enable, disable, status
@@ -2189,13 +2189,13 @@ class AuthMfaCommand(Command):
             db_manager = get_db_manager()
             
             # ▸ DB READ: Get current MFA status
-            current_status = self._read_mfa_status(db_manager, ctx.user_id)
+            current_status = self._read_mfa_status(db_manager, ctx['user_id'])
             
             # ▸ PROCESS: Handle action
             if action == 'enable':
                 secret = self._generate_mfa_secret()
-                self._update_mfa(db_manager, ctx.user_id, True, mfa_method, secret)
-                self._log_auth_event(db_manager, ctx.user_id, 'mfa_enabled', mfa_method)
+                self._update_mfa(db_manager, ctx['user_id'], True, mfa_method, secret)
+                self._log_auth_event(db_manager, ctx['user_id'], 'mfa_enabled', mfa_method)
                 result = {
                     'status': 'success',
                     'action': 'enable',
@@ -2205,8 +2205,8 @@ class AuthMfaCommand(Command):
                     'message': 'MFA enabled',
                 }
             elif action == 'disable':
-                self._update_mfa(db_manager, ctx.user_id, False, None, None)
-                self._log_auth_event(db_manager, ctx.user_id, 'mfa_disabled', 'user_request')
+                self._update_mfa(db_manager, ctx['user_id'], False, None, None)
+                self._log_auth_event(db_manager, ctx['user_id'], 'mfa_disabled', 'user_request')
                 result = {
                     'status': 'success',
                     'action': 'disable',
@@ -2222,7 +2222,7 @@ class AuthMfaCommand(Command):
                 }
             
             result['timestamp'] = datetime.now(timezone.utc).isoformat()
-            result['user_id'] = ctx.user_id
+            result['user_id'] = ctx['user_id']
             
             # ▸ DB WRITE: Audit log
             self._log_command(db_manager, ctx, 'auth-mfa', 'success')
@@ -2231,7 +2231,7 @@ class AuthMfaCommand(Command):
             execution_time = (time.time() - start_time) * 1000
             self.metrics.record(execution_time, success=True)
             
-            logger.info(f"[auth-mfa] ✓ MFA {action} for user {ctx.user_id}")
+            logger.info(f"[auth-mfa] ✓ MFA {action} for user {ctx['user_id']}")
             return result
             
         except Exception as e:
@@ -2239,7 +2239,7 @@ class AuthMfaCommand(Command):
             self.metrics.record(execution_time, success=False, error=str(e))
             
             logger.error(f"[auth-mfa] ✗ Error: {e}", exc_info=True)
-            return {'status': 'error', 'error': str(e), 'trace_id': ctx.trace_id}
+            return {'status': 'error', 'error': str(e), 'trace_id': ctx['trace_id']}
     
     def _read_mfa_status(self, db_manager, user_id: str) -> Dict[str, Any]:
         """Read MFA status from database."""
@@ -2301,7 +2301,7 @@ class AuthMfaCommand(Command):
                 INSERT INTO command_logs (command, status, user_id, trace_id, executed_at)
                 VALUES (%s, %s, %s, %s, NOW())
             """
-            db_manager.execute(query, (command, status, ctx.user_id, ctx.trace_id))
+            db_manager.execute(query, (command, status, ctx['user_id'], ctx['trace_id']))
         except Exception as e:
             logger.warning(f"[auth-mfa] Failed to log command: {e}")
 
@@ -2329,7 +2329,7 @@ class AuthDeviceCommand(Command):
         start_time = time.time()
         
         try:
-            if not ctx.user_id:
+            if not ctx['user_id']:
                 raise ValueError("user_id required")
             
             action = args.get('action', 'list')
@@ -2339,7 +2339,7 @@ class AuthDeviceCommand(Command):
             db_manager = get_db_manager()
             
             if action == 'list':
-                devices = self._list_devices(db_manager, ctx.user_id)
+                devices = self._list_devices(db_manager, ctx['user_id'])
                 result = {
                     'status': 'success',
                     'action': 'list',
@@ -2349,8 +2349,8 @@ class AuthDeviceCommand(Command):
             elif action == 'trust':
                 if not device_id:
                     raise ValueError("device_id required for trust action")
-                self._trust_device(db_manager, ctx.user_id, device_id, device_name)
-                self._log_auth_event(db_manager, ctx.user_id, 'device_trusted', device_id)
+                self._trust_device(db_manager, ctx['user_id'], device_id, device_name)
+                self._log_auth_event(db_manager, ctx['user_id'], 'device_trusted', device_id)
                 result = {
                     'status': 'success',
                     'action': 'trust',
@@ -2360,8 +2360,8 @@ class AuthDeviceCommand(Command):
             elif action == 'revoke':
                 if not device_id:
                     raise ValueError("device_id required for revoke action")
-                self._revoke_device(db_manager, ctx.user_id, device_id)
-                self._log_auth_event(db_manager, ctx.user_id, 'device_revoked', device_id)
+                self._revoke_device(db_manager, ctx['user_id'], device_id)
+                self._log_auth_event(db_manager, ctx['user_id'], 'device_revoked', device_id)
                 result = {
                     'status': 'success',
                     'action': 'revoke',
@@ -2372,7 +2372,7 @@ class AuthDeviceCommand(Command):
                 raise ValueError(f"Unknown action: {action}")
             
             result['timestamp'] = datetime.now(timezone.utc).isoformat()
-            result['user_id'] = ctx.user_id
+            result['user_id'] = ctx['user_id']
             
             # ▸ DB WRITE: Audit log
             self._log_command(db_manager, ctx, 'auth-device', 'success')
@@ -2381,7 +2381,7 @@ class AuthDeviceCommand(Command):
             execution_time = (time.time() - start_time) * 1000
             self.metrics.record(execution_time, success=True)
             
-            logger.info(f"[auth-device] ✓ Device {action} for user {ctx.user_id}")
+            logger.info(f"[auth-device] ✓ Device {action} for user {ctx['user_id']}")
             return result
             
         except Exception as e:
@@ -2389,7 +2389,7 @@ class AuthDeviceCommand(Command):
             self.metrics.record(execution_time, success=False, error=str(e))
             
             logger.error(f"[auth-device] ✗ Error: {e}", exc_info=True)
-            return {'status': 'error', 'error': str(e), 'trace_id': ctx.trace_id}
+            return {'status': 'error', 'error': str(e), 'trace_id': ctx['trace_id']}
     
     def _list_devices(self, db_manager, user_id: str) -> List[Dict[str, Any]]:
         """List active devices for user."""
@@ -2459,7 +2459,7 @@ class AuthDeviceCommand(Command):
                 INSERT INTO command_logs (command, status, user_id, trace_id, executed_at)
                 VALUES (%s, %s, %s, %s, NOW())
             """
-            db_manager.execute(query, (command, status, ctx.user_id, ctx.trace_id))
+            db_manager.execute(query, (command, status, ctx['user_id'], ctx['trace_id']))
         except Exception as e:
             logger.warning(f"[auth-device] Failed to log command: {e}")
 
@@ -2487,30 +2487,30 @@ class AuthSessionCommand(Command):
         start_time = time.time()
         
         try:
-            if not ctx.user_id:
+            if not ctx['user_id']:
                 raise ValueError("user_id required")
             
             db_manager = get_db_manager()
             token = args.get('token')
             
             # ▸ DB READ: Get user info
-            user = self._read_user(db_manager, ctx.user_id)
+            user = self._read_user(db_manager, ctx['user_id'])
             if not user:
                 raise ValueError("User not found")
             
             # ▸ DB READ: Validate session
-            session = self._read_session(db_manager, ctx.user_id, token) if token else None
+            session = self._read_session(db_manager, ctx['user_id'], token) if token else None
             
             # ▸ DB READ: Get preferences
-            prefs = self._read_preferences(db_manager, ctx.user_id)
+            prefs = self._read_preferences(db_manager, ctx['user_id'])
             
             # ▸ AGGREGATE: Session info
             result = {
                 'status': 'success',
-                'user_id': ctx.user_id,
+                'user_id': ctx['user_id'],
                 'username': user.get('username'),
                 'email': user.get('email'),
-                'role': ctx.role or 'user',
+                'role': ctx['role'] or 'user',
                 'mfa_enabled': prefs.get('mfa_enabled', False),
                 'session_valid': session is not None,
                 'session_expires_at': session.get('expires_at') if session else None,
@@ -2525,7 +2525,7 @@ class AuthSessionCommand(Command):
             execution_time = (time.time() - start_time) * 1000
             self.metrics.record(execution_time, success=True)
             
-            logger.info(f"[auth-session] ✓ Session info retrieved for user {ctx.user_id}")
+            logger.info(f"[auth-session] ✓ Session info retrieved for user {ctx['user_id']}")
             return result
             
         except Exception as e:
@@ -2533,7 +2533,7 @@ class AuthSessionCommand(Command):
             self.metrics.record(execution_time, success=False, error=str(e))
             
             logger.error(f"[auth-session] ✗ Error: {e}", exc_info=True)
-            return {'status': 'error', 'error': str(e), 'trace_id': ctx.trace_id}
+            return {'status': 'error', 'error': str(e), 'trace_id': ctx['trace_id']}
     
     def _read_user(self, db_manager, user_id: str) -> Optional[Dict[str, Any]]:
         """Read user from database."""
@@ -2588,7 +2588,7 @@ class AuthSessionCommand(Command):
                 INSERT INTO command_logs (command, status, user_id, trace_id, executed_at)
                 VALUES (%s, %s, %s, %s, NOW())
             """
-            db_manager.execute(query, (command, status, ctx.user_id, ctx.trace_id))
+            db_manager.execute(query, (command, status, ctx['user_id'], ctx['trace_id']))
         except Exception as e:
             logger.warning(f"[auth-session] Failed to log command: {e}")
 
