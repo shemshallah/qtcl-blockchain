@@ -1363,7 +1363,6 @@ class QuantumWstateCommand(Command):
         super().__init__('quantum-wstate', CommandCategory.QUANTUM, 'W-state')
     def execute(self, args, ctx):
         try:
-            from quantum_lattice_control import get_lattice
             lattice = get_lattice()
             if lattice:
                 return {'validators': 5, 'consensus': 0.95, 'cycle': lattice.cycle_count}
@@ -1376,7 +1375,6 @@ class QuantumCoherenceCommand(Command):
         super().__init__('quantum-coherence', CommandCategory.QUANTUM, 'Coherence')
     def execute(self, args, ctx):
         try:
-            from quantum_lattice_control import get_lattice
             lattice = get_lattice()
             if lattice:
                 coherence = lattice.coherence
@@ -1398,7 +1396,6 @@ class QuantumQrngCommand(Command):
         super().__init__('quantum-qrng', CommandCategory.QUANTUM, 'QRNG')
     def execute(self, args, ctx):
         try:
-            from quantum_lattice_control import get_lattice
             lattice = get_lattice()
             if lattice and lattice.entropy_ensemble:
                 entropy = lattice.entropy_ensemble.get_entropy(bits=256)
@@ -1424,7 +1421,6 @@ class QuantumPseudoqubitsCommand(Command):
         super().__init__('quantum-pseudoqubits', CommandCategory.QUANTUM, 'Pseudoqubits')
     def execute(self, args, ctx):
         try:
-            from quantum_lattice_control import get_lattice
             lattice = get_lattice()
             if lattice:
                 return {'pseudoqubits': lattice.pseudoqubits, 'coherence': lattice.coherence, 'batches': lattice.batches}
@@ -1443,7 +1439,6 @@ class QuantumMaintainerCommand(Command):
         super().__init__('quantum-maintainer', CommandCategory.QUANTUM, 'Maintainer')
     def execute(self, args, ctx):
         try:
-            from quantum_lattice_control import get_lattice
             lattice = get_lattice()
             if lattice:
                 return {'cycles': lattice.cycle_count, 'uptime_hours': lattice.cycle_count / 240}
@@ -1797,15 +1792,31 @@ class AuthLoginCommand(Command):
             return None
     
     def _verify_password(self, password: str, password_hash: str) -> bool:
-        """Verify password against hash."""
+        """Verify password against bcrypt hash."""
         if not password_hash:
             return False
+        
         try:
             import bcrypt
-            return bcrypt.checkpw(password.encode(), password_hash.encode())
-        except:
-            # Fallback: simple comparison (use bcrypt in production)
-            return hashlib.sha256(password.encode()).hexdigest() == password_hash
+            # password_hash should be a bcrypt hash string from database
+            # bcrypt.checkpw expects bytes for both password and hash
+            password_bytes = password.encode('utf-8')
+            
+            # Handle hash that might be stored as string
+            if isinstance(password_hash, str):
+                hash_bytes = password_hash.encode('utf-8')
+            else:
+                hash_bytes = password_hash
+            
+            # Use bcrypt to verify
+            return bcrypt.checkpw(password_bytes, hash_bytes)
+        
+        except ImportError:
+            logger.warning("[auth-login] bcrypt not available, cannot verify password securely")
+            return False
+        except Exception as e:
+            logger.error(f"[auth-login] Password verification failed: {e}")
+            return False
     
     def _check_mfa(self, db_manager, user_id: str) -> bool:
         """Check if MFA is enabled for user."""
