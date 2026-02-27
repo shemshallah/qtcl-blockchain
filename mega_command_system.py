@@ -1873,21 +1873,51 @@ class AuthLoginCommand(Command):
             password = args.get('password')
             device_id = args.get('device_id', 'unknown')
             
+            logger.info(f"[auth-login] Attempting login for: {username}")
+            
             if not username or not password:
                 raise ValueError("username and password required")
             
             db_manager = get_db_manager()
             
+            if not db_manager:
+                logger.warning("[auth-login] ⚠️ Database manager not available (get_db_manager() returned None)")
+                logger.info("[auth-login] User may not exist in database or DB not initialized")
+                raise ValueError("Invalid credentials")
+            
             # ▸ DB READ: Fetch user credentials
+            logger.info(f"[auth-login] Looking up user: {username}")
             user = self._read_user(db_manager, username)
+            
             if not user:
+                logger.warning(f"[auth-login] ⚠️ User not found: {username}")
+                logger.info("[auth-login] → Check: Does user exist in 'users' table?")
+                logger.info("[auth-login] → Check: Is database connection working?")
                 self._log_auth_event(db_manager, None, 'login_failed', 'user_not_found')
                 raise ValueError("Invalid credentials")
             
-            # ▸ VERIFY: Password (simplified - in production use bcrypt)
-            if not self._verify_password(password, user.get('password_hash')):
+            logger.info(f"[auth-login] ✓ User found: {user.get('id')}")
+            
+            # ▸ VERIFY: Password
+            password_hash = user.get('password_hash')
+            if not password_hash:
+                logger.warning(f"[auth-login] ⚠️ No password hash stored for user: {username}")
+                logger.info("[auth-login] → Check: Is password_hash column populated in database?")
+                self._log_auth_event(db_manager, user['id'], 'login_failed', 'no_password_hash')
+                raise ValueError("Invalid credentials")
+            
+            logger.debug(f"[auth-login] Password hash (first 20 chars): {password_hash[:20]}...")
+            
+            if not self._verify_password(password, password_hash):
+                logger.warning(f"[auth-login] ⚠️ Password verification failed for user: {username}")
+                logger.info("[auth-login] → Possible issues:")
+                logger.info("[auth-login]    1. Password is incorrect")
+                logger.info("[auth-login]    2. Password hash format is not bcrypt ($2a$, $2b$, $2y$)")
+                logger.info("[auth-login]    3. bcrypt package not installed: pip install bcrypt")
                 self._log_auth_event(db_manager, user['id'], 'login_failed', 'invalid_password')
                 raise ValueError("Invalid credentials")
+            
+            logger.info(f"[auth-login] ✓ Password verified")
             
             # ▸ CHECK: MFA requirement
             user_id = user['id']
@@ -1931,7 +1961,54 @@ class AuthLoginCommand(Command):
             self.metrics.record(execution_time, success=False, error=str(e))
             
             logger.error(f"[auth-login] ✗ Error: {e}", exc_info=True)
-            return {'status': 'error', 'error': str(e), 'trace_id': ctx['trace_id']}
+            
+            # Build diagnostic info
+            username = args.get('username', 'unknown')
+            db_manager = get_db_manager()
+            
+            debug_info = {
+                'database_connected': db_manager is not None,
+                'username_provided': bool(username),
+                'password_provided': bool(args.get('password')),
+            }
+            
+            # Try to check user existence
+            try:
+                if db_manager:
+                    test_user = self._read_user(db_manager, username)
+                    debug_info['user_found_in_db'] = test_user is not None
+                    if test_user:
+                        debug_info['user_has_password_hash'] = bool(test_user.get('password_hash'))
+                        if test_user.get('password_hash'):
+                            ph = test_user.get('password_hash', '')
+                            debug_info['password_hash_format'] = ph[:10] if len(ph) > 10 else ph
+                            debug_info['password_hash_length'] = len(ph)
+                else:
+                    debug_info['user_found_in_db'] = False
+            except Exception as debug_e:
+                debug_info['debug_error'] = str(debug_e)
+            
+            # Check bcrypt
+            try:
+                import bcrypt
+                debug_info['bcrypt_installed'] = True
+                debug_info['bcrypt_version'] = str(bcrypt.__version__)
+            except ImportError:
+                debug_info['bcrypt_installed'] = False
+            
+            # Return error with actual debugging information
+            return {
+                'status': 'error', 
+                'error': str(e),
+                'trace_id': ctx['trace_id'],
+                'debug': debug_info,
+                'help': {
+                    'if_database_not_connected': 'Run db_builder_v2.py to initialize database',
+                    'if_user_not_found': f"INSERT INTO users (username, email, password_hash) VALUES ('shemshallah', '{username}', 'bcrypt_hash_here');",
+                    'if_bcrypt_not_installed': 'pip install bcrypt',
+                    'if_password_wrong': 'Verify password matches the bcrypt hash in database',
+                }
+            }
     
     def _read_user(self, db_manager, username: str) -> Optional[Dict[str, Any]]:
         """Read user from database."""
