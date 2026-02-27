@@ -6,45 +6,22 @@ Flask WSGI configuration with unified mega_command_system and quantum_lattice_co
 import os
 import sys
 
-# ── OQS / liboqs patch — runs BEFORE any `import oqs` anywhere in the process ──
-# liboqs-python 0.14.1 stores its version in a variable (e.g. _liboqs_version = "0.14.1")
-# and passes it as the git --branch arg.  Our previous patch searched for the
-# literal "branch 0.14.1" which doesn't exist — the string is built at runtime.
-# Fix: replace every occurrence of the string "0.14.1" in oqs.py with "0.11.0"
-# (the latest real liboqs C tag), which rewrites both the version var and any
-# other hardcoded references in one pass.
-def _patch_oqs_git_branch():
-    import pathlib, site, re
-    target_ver = '0.14.1'
-    good_ver   = '0.11.0'
-    search_dirs = []
-    try: search_dirs += site.getsitepackages()
-    except Exception: pass
-    try: search_dirs.append(site.getusersitepackages())
-    except Exception: pass
-    search_dirs.append('/workspace/.heroku/python/lib/python3.11/site-packages')
-    for d in search_dirs:
-        p = pathlib.Path(d) / 'oqs' / 'oqs.py'
-        if p.exists():
-            try:
-                src = p.read_text()
-                if target_ver in src:
-                    patched = src.replace(target_ver, good_ver)
-                    p.write_text(patched)
-                    count = src.count(target_ver)
-                    print(f'[OQS-PATCH] ✓ Replaced {count}x "{target_ver}" → "{good_ver}" in {p}', flush=True)
-                else:
-                    print(f'[OQS-PATCH] "{target_ver}" not found in {p} — already patched or different version', flush=True)
-                    # dump first 50 lines to help diagnose
-                    for i, line in enumerate(src.splitlines()[:50]):
-                        if '0.' in line and ('version' in line.lower() or 'branch' in line.lower() or 'clone' in line.lower()):
-                            print(f'[OQS-PATCH]   line {i+1}: {line.strip()}', flush=True)
-            except Exception as e:
-                print(f'[OQS-PATCH] ✗ Could not patch {p}: {e}', flush=True)
-            return
-    print('[OQS-PATCH] ✗ oqs.py not found in any site-packages dir', flush=True)
-
-_patch_oqs_git_branch()
+# ── OQS / liboqs branch fix — MUST run before any `import oqs` ──────────────
+# oqs-python 0.14.1 calls importlib.metadata.version('liboqs-python') at runtime
+# to get the branch string for git clone.  The C repo has no tag 0.14.1 (latest
+# real tag: 0.11.0) so the clone fails.  '0.14.1' is never a literal in oqs.py —
+# it is always resolved dynamically — so file patches do nothing.
+#
+# Fix: monkey-patch importlib.metadata.version() to return '0.11.0' for the
+# liboqs-python package BEFORE oqs is imported anywhere in this process.
+import importlib.metadata as _im_meta
+_im_real_version = _im_meta.version
+def _im_patched_version(package_name: str) -> str:
+    if package_name in ('liboqs-python', 'liboqs_python', 'oqs'):
+        return '0.11.0'
+    return _im_real_version(package_name)
+_im_meta.version = _im_patched_version
+print('[OQS-PATCH] ✓ importlib.metadata.version patched: liboqs-python → 0.11.0', flush=True)
 # ─────────────────────────────────────────────────────────────────────────────
 
 import logging
