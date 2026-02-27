@@ -46,53 +46,136 @@ if not logging.root.handlers:
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ════════════════════════════════════════════════════════════════════════════════════════
-# PHASE 0: INITIALIZE GLOBAL STATE (MUST BE FIRST)
+# CRITICAL: PHASE 0 — INITIALIZE GLOBAL STATE (ABSOLUTELY FIRST)
 # ════════════════════════════════════════════════════════════════════════════════════════
 
-logger.info("[BOOTSTRAP] Initializing global state infrastructure...")
+logger.info("[BOOTSTRAP] PHASE 0: Initializing global state infrastructure...")
 try:
     from globals import initialize_globals, set_global_state, get_global_state
     
-    if initialize_globals():
-        logger.info("[BOOTSTRAP] ✓ Global state infrastructure ready")
-    else:
-        logger.warning("[BOOTSTRAP] ⚠️ Global state initialization had issues")
+    if not initialize_globals():
+        logger.warning("[BOOTSTRAP] Global state had initialization issues, continuing anyway")
+    logger.info("[BOOTSTRAP] ✓ PHASE 0 complete: Global state ready")
 except Exception as e:
-    logger.error(f"[BOOTSTRAP] Failed to initialize globals: {e}", exc_info=True)
+    logger.error(f"[BOOTSTRAP] CRITICAL: Global state init failed: {e}", exc_info=True)
+    raise
 
 # ════════════════════════════════════════════════════════════════════════════════════════
-# PHASE 1: INITIALIZE DATABASE MANAGER (BEFORE EVERYTHING ELSE)
+# CRITICAL: Validate Database Credentials Before Attempting Connection
 # ════════════════════════════════════════════════════════════════════════════════════════
 
-logger.info("[BOOTSTRAP] Initializing database manager...")
+logger.info("[BOOTSTRAP] Validating database credentials...")
+
+_required_env_vars = {
+    'POOLER_HOST': 'PostgreSQL hostname (e.g., localhost or cloud.example.com)',
+    'POOLER_USER': 'PostgreSQL username',
+    'POOLER_PASSWORD': 'PostgreSQL password',
+    'POOLER_PORT': 'PostgreSQL port (default: 5432)',
+    'POOLER_DB': 'Database name',
+}
+
+_missing_vars = []
+for var, description in _required_env_vars.items():
+    value = os.environ.get(var)
+    if not value:
+        _missing_vars.append(f"  • {var}: {description}")
+        logger.error(f"[BOOTSTRAP] Missing env var: {var}")
+    else:
+        if 'PASSWORD' in var:
+            display = '*' * 5
+        else:
+            display = value
+        logger.info(f"[BOOTSTRAP] Found {var} = {display}")
+
+if _missing_vars:
+    logger.error("[BOOTSTRAP] ❌ CRITICAL: Missing environment variables:")
+    for var_msg in _missing_vars:
+        logger.error(var_msg)
+    logger.error("[BOOTSTRAP] Set these before starting the app:")
+    logger.error("[BOOTSTRAP]   export POOLER_HOST=your-host")
+    logger.error("[BOOTSTRAP]   export POOLER_USER=postgres")
+    logger.error("[BOOTSTRAP]   export POOLER_PASSWORD=your-password")
+    logger.error("[BOOTSTRAP]   export POOLER_PORT=5432")
+    logger.error("[BOOTSTRAP]   export POOLER_DB=qtcl_db")
+    raise RuntimeError("Missing required database credentials")
+
+logger.info("[BOOTSTRAP] ✓ All database credentials found")
+
+# ════════════════════════════════════════════════════════════════════════════════════════
+# CRITICAL: PHASE 1 — INITIALIZE DATABASE MANAGER (BEFORE EVERYTHING ELSE)
+# ════════════════════════════════════════════════════════════════════════════════════════
+
+logger.info("[BOOTSTRAP] PHASE 1: Initializing database manager...")
+DB_MANAGER = None  # Module-level, so it persists
+
 try:
     from db_builder_v2 import DatabaseBuilder
     
     # Create database manager with connection pool
-    # This reads credentials from environment: POOLER_HOST, POOLER_USER, etc.
-    db_manager = DatabaseBuilder()
+    # Reads from environment: POOLER_HOST, POOLER_USER, POOLER_PASSWORD, POOLER_PORT, POOLER_DB
+    logger.info("[BOOTSTRAP]   Creating DatabaseBuilder...")
+    DB_MANAGER = DatabaseBuilder()
     
-    # Register in global state for all modules to access
-    set_global_state('db_manager', db_manager)
+    # CRITICAL: Register in global state so get_db_manager() works
+    logger.info("[BOOTSTRAP]   Storing db_manager in global state...")
+    set_global_state('db_manager', DB_MANAGER)
     
-    if db_manager.pool is not None:
-        logger.info(f"[BOOTSTRAP] ✓ Database manager initialized with active connection pool")
-        logger.info(f"[BOOTSTRAP]   Host: {db_manager.host}")
-        logger.info(f"[BOOTSTRAP]   DB: {db_manager.database}")
-        logger.info(f"[BOOTSTRAP]   Pool size: {db_manager.pool_size}")
+    if DB_MANAGER.pool is not None:
+        logger.info(f"[BOOTSTRAP] ✓ PHASE 1 complete: Database CONNECTED")
+        logger.info(f"[BOOTSTRAP]   Pool Status: ACTIVE")
+        logger.info(f"[BOOTSTRAP]   Host: {DB_MANAGER.host}:{DB_MANAGER.port}")
+        logger.info(f"[BOOTSTRAP]   Database: {DB_MANAGER.database}")
+        logger.info(f"[BOOTSTRAP]   Pool Size: {DB_MANAGER.pool_size}")
+        logger.info(f"[BOOTSTRAP]   Min Connections: 1")
+        
+        # Verify pool is actually working with a test query
+        try:
+            conn = DB_MANAGER.pool.getconn()
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            DB_MANAGER.pool.putconn(conn)
+            logger.info("[BOOTSTRAP]   Pool Test: ✓ SUCCESS (SELECT 1 executed)")
+        except Exception as pool_test_err:
+            logger.warning(f"[BOOTSTRAP]   Pool Test: ⚠️ FAILED — {pool_test_err}")
         
         # Start reconnection daemon for resilience
-        db_manager.start_reconnect_daemon()
-        logger.info("[BOOTSTRAP] ✓ Reconnection daemon started (auto-recovery on pool failure)")
+        try:
+            DB_MANAGER.start_reconnect_daemon()
+            logger.info("[BOOTSTRAP] ✓ Reconnection daemon started (auto-recovery enabled)")
+        except Exception as daemon_err:
+            logger.warning(f"[BOOTSTRAP]   Reconnection daemon failed: {daemon_err}")
     else:
-        logger.warning(f"[BOOTSTRAP] ⚠️ Database pool creation failed")
-        logger.warning(f"[BOOTSTRAP]   Error: {db_manager.pool_error}")
-        logger.warning("[BOOTSTRAP] Database operations will be unavailable")
-        logger.warning("[BOOTSTRAP] Verify POOLER_HOST, POOLER_USER, POOLER_PASSWORD env vars")
+        # Pool failed to create
+        logger.error(f"[BOOTSTRAP] ✗ PHASE 1 FAILED: Database pool NOT initialized")
+        logger.error(f"[BOOTSTRAP]   Error: {DB_MANAGER.pool_error}")
+        logger.error(f"[BOOTSTRAP]   Credentials to verify:")
+        logger.error(f"[BOOTSTRAP]     POOLER_HOST = {os.environ.get('POOLER_HOST')}")
+        logger.error(f"[BOOTSTRAP]     POOLER_USER = {os.environ.get('POOLER_USER')}")
+        logger.error(f"[BOOTSTRAP]     POOLER_PASSWORD = {'*' * len(os.environ.get('POOLER_PASSWORD', ''))}")
+        logger.error(f"[BOOTSTRAP]     POOLER_PORT = {os.environ.get('POOLER_PORT')}")
+        logger.error(f"[BOOTSTRAP]     POOLER_DB = {os.environ.get('POOLER_DB')}")
+        logger.error(f"[BOOTSTRAP]   FIX: Verify PostgreSQL is running and credentials are correct")
+        raise RuntimeError(f"Database pool initialization failed: {DB_MANAGER.pool_error}")
+        
 except ImportError as e:
-    logger.error(f"[BOOTSTRAP] Cannot import DatabaseBuilder: {e}")
+    logger.error(f"[BOOTSTRAP] CRITICAL: Cannot import DatabaseBuilder: {e}", exc_info=True)
+    raise
 except Exception as e:
-    logger.error(f"[BOOTSTRAP] Failed to initialize database manager: {e}", exc_info=True)
+    logger.error(f"[BOOTSTRAP] CRITICAL: Database initialization failed: {e}", exc_info=True)
+    raise
+
+# Verify DB_MANAGER is in global state
+_check_db = get_global_state('db_manager')
+if _check_db is None:
+    logger.error("[BOOTSTRAP] CRITICAL: db_manager is None in global state!")
+    logger.error("[BOOTSTRAP] Something went wrong storing db_manager")
+    raise RuntimeError("Failed to store db_manager in global state")
+elif _check_db.pool is None:
+    logger.error("[BOOTSTRAP] CRITICAL: db_manager.pool is None!")
+    logger.error("[BOOTSTRAP] Database connection failed")
+    raise RuntimeError("Database pool is None")
+else:
+    logger.info("[BOOTSTRAP] ✓ Verified: db_manager is in global state and pool is active")
 
 # ════════════════════════════════════════════════════════════════════════════════════════
 # PHASE 2: INITIALIZE QUANTUM LATTICE CONTROL
