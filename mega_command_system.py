@@ -363,7 +363,18 @@ def dispatch_command_sync(
     start_time = time.time()
     
     try:
-        command = command.strip().lower()
+        command = command.strip()
+        
+        # AUTO-DETECT CLI FORMAT: if command has spaces and = signs, parse it
+        # This allows: dispatch_command_sync("auth-login username=X password=Y")
+        if ' ' in command and '=' in command:
+            # Parse as CLI format
+            parsed_cmd, parsed_args = parse_cli_command(command)
+            command = parsed_cmd
+            # Merge parsed args with provided args (provided args take precedence)
+            args = {**parsed_args, **args}
+        
+        command = command.lower()
         registry = get_registry()
         cmd_obj = registry.get(command)
         
