@@ -2973,7 +2973,8 @@ def create_quantum_api_blueprint()->Blueprint:
             
             # Generate keypair
             try:
-                from liboqs.oqs import KeyEncapsulation
+                # Correct import path: liboqs-python installs as `oqs`, not `liboqs.oqs`
+                from oqs import KeyEncapsulation
                 kemalg=KeyEncapsulation(algorithm)
                 public_key_bytes=kemalg.generate_keypair()
                 public_key=base64.b64encode(public_key_bytes).decode('utf-8')

@@ -5,6 +5,20 @@ Flask WSGI configuration with unified mega_command_system and quantum_lattice_co
 
 import os
 import sys
+
+# ── OQS / liboqs guard — MUST be set before any module that does `import oqs` ──
+# oqs.oqs._load_liboqs() runs at import time and tries to git-clone liboqs from
+# source if the shared library (.so) is absent.  On Koyeb there is no cmake/gcc
+# toolchain and the target git branch (0.14.1) no longer exists, so the clone
+# fails with "Remote branch 0.14.1 not found" → RuntimeError → process exits.
+#
+# OQS_SKIP_SETUP=1 tells oqs to skip the auto-install countdown entirely.
+# OQS_BUILD=0      is the alternate env var checked by some oqs builds.
+# Both must be set before the first `import oqs` anywhere in the process.
+os.environ.setdefault('OQS_SKIP_SETUP', '1')
+os.environ.setdefault('OQS_BUILD', '0')
+# ─────────────────────────────────────────────────────────────────────────────
+
 import logging
 import threading
 from datetime import datetime, timezone
