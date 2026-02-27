@@ -1897,6 +1897,11 @@ class AuthLogoutCommand(Command):
                         'Session termination and cleanup',
                         auth_required=True, timeout_seconds=5)
     
+    def validate_args(self, args: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        """Validate auth-logout arguments."""
+        # Token is optional but helpful
+        return True, None
+    
     def execute(self, args: Dict[str, Any], ctx: CommandContext) -> Dict[str, Any]:
         """Execute auth-logout with full DB integration."""
         start_time = time.time()
@@ -2022,6 +2027,26 @@ class AuthRegisterCommand(Command):
         super().__init__('auth-register', CommandCategory.AUTH, 
                         'User registration and account creation',
                         auth_required=False, timeout_seconds=10)
+    
+    def validate_args(self, args: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        """Validate auth-register arguments."""
+        missing = []
+        if 'username' not in args or not args['username']:
+            missing.append('username')
+        if 'email' not in args or not args['email']:
+            missing.append('email')
+        if 'password' not in args or not args['password']:
+            missing.append('password')
+        
+        if missing:
+            return False, f"❌ Missing: {', '.join(missing)}\n   Usage: auth-register username=<name> email=<email> password=<password>\n   Example: auth-register username=alice email=alice@example.com password=secure123"
+        
+        # Check password length
+        password = args.get('password', '')
+        if len(password) < 8:
+            return False, "❌ Password must be at least 8 characters\n   Usage: auth-register username=<name> email=<email> password=<8+ chars>"
+        
+        return True, None
     
     def execute(self, args: Dict[str, Any], ctx: CommandContext) -> Dict[str, Any]:
         """Execute auth-register with full DB integration."""
@@ -2186,6 +2211,13 @@ class AuthMfaCommand(Command):
                         'Multi-factor authentication setup and management',
                         auth_required=True, timeout_seconds=5)
     
+    def validate_args(self, args: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        """Validate auth-mfa arguments."""
+        action = args.get('action', 'status')
+        if action not in ['enable', 'disable', 'status']:
+            return False, f"❌ Invalid action: {action}\n   Valid: enable, disable, status\n   Usage: auth-mfa action=enable|disable|status mfa_method=totp|sms|email"
+        return True, None
+    
     def execute(self, args: Dict[str, Any], ctx: CommandContext) -> Dict[str, Any]:
         """Execute auth-mfa with full DB integration."""
         start_time = time.time()
@@ -2334,6 +2366,17 @@ class AuthDeviceCommand(Command):
         super().__init__('auth-device', CommandCategory.AUTH, 
                         'Device management and trusted device tracking',
                         auth_required=True, timeout_seconds=5)
+    
+    def validate_args(self, args: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        """Validate auth-device arguments."""
+        action = args.get('action', 'list')
+        if action not in ['list', 'trust', 'revoke', 'status']:
+            return False, f"❌ Invalid action: {action}\n   Valid: list, trust, revoke, status\n   Usage: auth-device action=list|trust|revoke|status device_id=<id> device_name=<name>"
+        
+        if action in ['trust', 'revoke'] and not args.get('device_id'):
+            return False, f"❌ Missing device_id for action '{action}'\n   Usage: auth-device action={action} device_id=<id> device_name=<optional>"
+        
+        return True, None
     
     def execute(self, args: Dict[str, Any], ctx: CommandContext) -> Dict[str, Any]:
         """Execute auth-device with full DB integration."""
@@ -2492,6 +2535,11 @@ class AuthSessionCommand(Command):
         super().__init__('auth-session', CommandCategory.AUTH, 
                         'Current session information and validation',
                         auth_required=True, timeout_seconds=5)
+    
+    def validate_args(self, args: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        """Validate auth-session arguments."""
+        # Token is optional for getting current session info
+        return True, None
     
     def execute(self, args: Dict[str, Any], ctx: CommandContext) -> Dict[str, Any]:
         """Execute auth-session with full DB integration."""
