@@ -318,8 +318,15 @@ class Command(ABC):
         self.admin_required = admin_required
         self.timeout_seconds = timeout_seconds
         self.rate_limit_per_minute = rate_limit_per_minute
-        # Initialize local metrics object for each command
-        self.metrics = CommandMetrics(name=name)
+        # Lazy-initialize metrics (don't create immediately to avoid blocking heartbeat)
+        self._metrics = None
+    
+    @property
+    def metrics(self) -> CommandMetrics:
+        """Lazy-initialize metrics on first access."""
+        if self._metrics is None:
+            self._metrics = CommandMetrics(name=self.name)
+        return self._metrics
     
     @abstractmethod
     def execute(self, args: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
