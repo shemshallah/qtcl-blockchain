@@ -31,13 +31,20 @@ STAMP_FILE           = INSTALL_DIR / '.build_stamp'
 BUILD_TIMEOUT_S      = 600   # 10 min hard cap
 
 # Tag priority list — newest → oldest; entrypoint tries each in order until
-# one clones and builds successfully.  All of these exist in the liboqs repo.
-# Pin whichever version matches `oqs-python` installed on the system.
+# one clones and builds successfully.
+#
+# IMPORTANT: liboqs-python (Python wrapper, PyPI) and liboqs (C library, GitHub)
+# have INDEPENDENT version numbers.  As of early 2026:
+#   • liboqs-python on PyPI: only 0.14.1 exists  (wrapper, install from pip)
+#   • liboqs C library tags: latest is 0.11.0     (build from source)
+# The 0.14.1 Python wrapper is ABI-compatible with the 0.11.x C library.
+# oqs-python's auto-installer wrongly tries to clone branch "0.14.1" which
+# does NOT exist in the C repo — that is the bug this entrypoint fixes by
+# pre-building from a real tag and setting OQS_INSTALL_DIR before any import.
 CANDIDATE_TAGS: List[str] = [
-    '0.12.0',   # latest as of late 2025
-    '0.11.0',   # stable Dec 2024
+    '0.11.0',   # latest stable C library (Dec 2024) — compatible with oqs-python 0.14.x
     '0.10.1',   # stable Oct 2024
-    '0.10.0',   # stable Aug 2024
+    '0.10.0',   # stable May 2024
     '0.9.2',    # stable
     '0.9.0',    # fallback
     '0.8.0',    # last-resort
@@ -148,29 +155,15 @@ def _installed_oqs_version() -> Optional[str]:
 
 def _resolve_build_tag(oqs_ver: Optional[str]) -> List[str]:
     """
-    Return ordered list of tags to attempt, putting the oqs Python version
-    first if it exists in our candidate list, then falling back to the full list.
-    Also adds the raw major.minor from the version string as a candidate.
+    Return CANDIDATE_TAGS unchanged.
+    NOTE: liboqs-python (PyPI wrapper) and liboqs (C lib) have independent
+    version numbers — do NOT try to match them.  oqs-python 0.14.1 is
+    ABI-compatible with liboqs C 0.11.0; trying to clone C tag "0.14.1"
+    is exactly the bug we are fixing.  Always build from CANDIDATE_TAGS order.
     """
-    candidates = list(CANDIDATE_TAGS)
-    if not oqs_ver:
-        return candidates
-    # normalize version: strip leading 'v', trailing suffixes
-    clean = re.sub(r'[^0-9.]', '', oqs_ver.lstrip('v')).strip('.')
-    if clean and clean not in candidates:
-        candidates.insert(0, clean)
-    elif clean in candidates:
-        # move to front
-        candidates.remove(clean)
-        candidates.insert(0, clean)
-    # also try major.minor.0 form if not already present
-    parts = clean.split('.')
-    if len(parts) >= 2:
-        mm0 = f"{parts[0]}.{parts[1]}.0"
-        if mm0 not in candidates:
-            candidates.insert(1, mm0)
-    log.info(f"[OQS-VER] Tag resolution order: {candidates[:5]}...")
-    return candidates
+    if oqs_ver:
+        log.info(f"[OQS-VER] liboqs-python wrapper={oqs_ver} → using fixed C tag list (versions are independent)")
+    return list(CANDIDATE_TAGS)
 
 
 def _lib_already_valid() -> bool:
