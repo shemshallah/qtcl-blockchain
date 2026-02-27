@@ -318,6 +318,8 @@ class Command(ABC):
         self.admin_required = admin_required
         self.timeout_seconds = timeout_seconds
         self.rate_limit_per_minute = rate_limit_per_minute
+        # Initialize local metrics object for each command
+        self.metrics = CommandMetrics(name=name)
     
     @abstractmethod
     def execute(self, args: Dict[str, Any], ctx: Dict[str, Any]) -> Dict[str, Any]:
@@ -551,20 +553,14 @@ class SystemStatsCommand(Command):
             
             # ▸ METRICS UPDATE
             execution_time = (time.time() - start_time) * 1000
-            self.metrics.execution_count += 1
-            self.metrics.success_count += 1
-            self.metrics.total_execution_time += execution_time
-            self.metrics.min_execution_time = min(self.metrics.min_execution_time, execution_time)
-            self.metrics.max_execution_time = max(self.metrics.max_execution_time, execution_time)
+            self.metrics.record(execution_time, success=True)
             
             logger.info(f"[system-stats] ✓ Executed in {execution_time:.2f}ms")
             return result
             
         except Exception as e:
             execution_time = (time.time() - start_time) * 1000
-            self.metrics.execution_count += 1
-            self.metrics.error_count += 1
-            self.metrics.last_error = str(e)
+            self.metrics.record(execution_time, success=False, error=str(e))
             self.metrics.last_error_timestamp = datetime.now(timezone.utc)
             
             logger.error(f"[system-stats] ✗ Error: {e}", exc_info=True)
@@ -684,20 +680,14 @@ class QuantumStatsCommand(Command):
             
             # ▸ METRICS UPDATE
             execution_time = (time.time() - start_time) * 1000
-            self.metrics.execution_count += 1
-            self.metrics.success_count += 1
-            self.metrics.total_execution_time += execution_time
-            self.metrics.min_execution_time = min(self.metrics.min_execution_time, execution_time)
-            self.metrics.max_execution_time = max(self.metrics.max_execution_time, execution_time)
+            self.metrics.record(execution_time, success=True)
             
             logger.info(f"[quantum-stats] ✓ Coherence={quantum_data['coherence']:.4f}, Fidelity={quantum_data['fidelity']:.4f}")
             return result
             
         except Exception as e:
             execution_time = (time.time() - start_time) * 1000
-            self.metrics.execution_count += 1
-            self.metrics.error_count += 1
-            self.metrics.last_error = str(e)
+            self.metrics.record(execution_time, success=False, error=str(e))
             
             logger.error(f"[quantum-stats] ✗ Error: {e}", exc_info=True)
             return {'status': 'error', 'error': str(e), 'trace_id': ctx.trace_id}
@@ -871,20 +861,14 @@ class QuantumEntropyCommand(Command):
             
             # ▸ METRICS UPDATE
             execution_time = (time.time() - start_time) * 1000
-            self.metrics.execution_count += 1
-            self.metrics.success_count += 1
-            self.metrics.total_execution_time += execution_time
-            self.metrics.min_execution_time = min(self.metrics.min_execution_time, execution_time)
-            self.metrics.max_execution_time = max(self.metrics.max_execution_time, execution_time)
+            self.metrics.record(execution_time, success=True)
             
             logger.info(f"[quantum-entropy] ✓ Sources={entropy_data['sources']}, Quality={entropy_data['average_quality']:.3f}")
             return result
             
         except Exception as e:
             execution_time = (time.time() - start_time) * 1000
-            self.metrics.execution_count += 1
-            self.metrics.error_count += 1
-            self.metrics.last_error = str(e)
+            self.metrics.record(execution_time, success=False, error=str(e))
             
             logger.error(f"[quantum-entropy] ✗ Error: {e}", exc_info=True)
             return {'status': 'error', 'error': str(e), 'trace_id': ctx.trace_id}
@@ -1062,20 +1046,14 @@ class QuantumCircuitCommand(Command):
             
             # ▸ METRICS UPDATE
             execution_time = (time.time() - start_time) * 1000
-            self.metrics.execution_count += 1
-            self.metrics.success_count += 1
-            self.metrics.total_execution_time += execution_time
-            self.metrics.min_execution_time = min(self.metrics.min_execution_time, execution_time)
-            self.metrics.max_execution_time = max(self.metrics.max_execution_time, execution_time)
+            self.metrics.record(execution_time, success=True)
             
             logger.info(f"[quantum-circuit] ✓ Circuit {circuit_id[:8]}: {qubits}q depth={depth}")
             return result
             
         except Exception as e:
             execution_time = (time.time() - start_time) * 1000
-            self.metrics.execution_count += 1
-            self.metrics.error_count += 1
-            self.metrics.last_error = str(e)
+            self.metrics.record(execution_time, success=False, error=str(e))
             
             logger.error(f"[quantum-circuit] ✗ Error: {e}", exc_info=True)
             return {'status': 'error', 'error': str(e), 'trace_id': ctx.trace_id}
@@ -1238,20 +1216,14 @@ class QuantumGhzCommand(Command):
             
             # ▸ METRICS UPDATE
             execution_time = (time.time() - start_time) * 1000
-            self.metrics.execution_count += 1
-            self.metrics.success_count += 1
-            self.metrics.total_execution_time += execution_time
-            self.metrics.min_execution_time = min(self.metrics.min_execution_time, execution_time)
-            self.metrics.max_execution_time = max(self.metrics.max_execution_time, execution_time)
+            self.metrics.record(execution_time, success=True)
             
             logger.info(f"[quantum-ghz] ✓ {qubits}-qubit GHZ, Fidelity={ghz_data['fidelity']:.4f}")
             return result
             
         except Exception as e:
             execution_time = (time.time() - start_time) * 1000
-            self.metrics.execution_count += 1
-            self.metrics.error_count += 1
-            self.metrics.last_error = str(e)
+            self.metrics.record(execution_time, success=False, error=str(e))
             
             logger.error(f"[quantum-ghz] ✗ Error: {e}", exc_info=True)
             return {'status': 'error', 'error': str(e), 'trace_id': ctx.trace_id}
@@ -1792,20 +1764,14 @@ class AuthLoginCommand(Command):
             
             # ▸ METRICS UPDATE
             execution_time = (time.time() - start_time) * 1000
-            self.metrics.execution_count += 1
-            self.metrics.success_count += 1
-            self.metrics.total_execution_time += execution_time
-            self.metrics.min_execution_time = min(self.metrics.min_execution_time, execution_time)
-            self.metrics.max_execution_time = max(self.metrics.max_execution_time, execution_time)
+            self.metrics.record(execution_time, success=True)
             
             logger.info(f"[auth-login] ✓ User {user_id} authenticated successfully")
             return result
             
         except Exception as e:
             execution_time = (time.time() - start_time) * 1000
-            self.metrics.execution_count += 1
-            self.metrics.error_count += 1
-            self.metrics.last_error = str(e)
+            self.metrics.record(execution_time, success=False, error=str(e))
             
             logger.error(f"[auth-login] ✗ Error: {e}", exc_info=True)
             return {'status': 'error', 'error': str(e), 'trace_id': ctx.trace_id}
@@ -1948,20 +1914,14 @@ class AuthLogoutCommand(Command):
             
             # ▸ METRICS UPDATE
             execution_time = (time.time() - start_time) * 1000
-            self.metrics.execution_count += 1
-            self.metrics.success_count += 1
-            self.metrics.total_execution_time += execution_time
-            self.metrics.min_execution_time = min(self.metrics.min_execution_time, execution_time)
-            self.metrics.max_execution_time = max(self.metrics.max_execution_time, execution_time)
+            self.metrics.record(execution_time, success=True)
             
             logger.info(f"[auth-logout] ✓ User {ctx.user_id} logged out")
             return result
             
         except Exception as e:
             execution_time = (time.time() - start_time) * 1000
-            self.metrics.execution_count += 1
-            self.metrics.error_count += 1
-            self.metrics.last_error = str(e)
+            self.metrics.record(execution_time, success=False, error=str(e))
             
             logger.error(f"[auth-logout] ✗ Error: {e}", exc_info=True)
             return {'status': 'error', 'error': str(e), 'trace_id': ctx.trace_id}
@@ -2096,20 +2056,14 @@ class AuthRegisterCommand(Command):
             
             # ▸ METRICS UPDATE
             execution_time = (time.time() - start_time) * 1000
-            self.metrics.execution_count += 1
-            self.metrics.success_count += 1
-            self.metrics.total_execution_time += execution_time
-            self.metrics.min_execution_time = min(self.metrics.min_execution_time, execution_time)
-            self.metrics.max_execution_time = max(self.metrics.max_execution_time, execution_time)
+            self.metrics.record(execution_time, success=True)
             
             logger.info(f"[auth-register] ✓ User {user_id} registered")
             return result
             
         except Exception as e:
             execution_time = (time.time() - start_time) * 1000
-            self.metrics.execution_count += 1
-            self.metrics.error_count += 1
-            self.metrics.last_error = str(e)
+            self.metrics.record(execution_time, success=False, error=str(e))
             
             logger.error(f"[auth-register] ✗ Error: {e}", exc_info=True)
             return {'status': 'error', 'error': str(e), 'trace_id': ctx.trace_id}
@@ -2268,20 +2222,14 @@ class AuthMfaCommand(Command):
             
             # ▸ METRICS UPDATE
             execution_time = (time.time() - start_time) * 1000
-            self.metrics.execution_count += 1
-            self.metrics.success_count += 1
-            self.metrics.total_execution_time += execution_time
-            self.metrics.min_execution_time = min(self.metrics.min_execution_time, execution_time)
-            self.metrics.max_execution_time = max(self.metrics.max_execution_time, execution_time)
+            self.metrics.record(execution_time, success=True)
             
             logger.info(f"[auth-mfa] ✓ MFA {action} for user {ctx.user_id}")
             return result
             
         except Exception as e:
             execution_time = (time.time() - start_time) * 1000
-            self.metrics.execution_count += 1
-            self.metrics.error_count += 1
-            self.metrics.last_error = str(e)
+            self.metrics.record(execution_time, success=False, error=str(e))
             
             logger.error(f"[auth-mfa] ✗ Error: {e}", exc_info=True)
             return {'status': 'error', 'error': str(e), 'trace_id': ctx.trace_id}
@@ -2424,20 +2372,14 @@ class AuthDeviceCommand(Command):
             
             # ▸ METRICS UPDATE
             execution_time = (time.time() - start_time) * 1000
-            self.metrics.execution_count += 1
-            self.metrics.success_count += 1
-            self.metrics.total_execution_time += execution_time
-            self.metrics.min_execution_time = min(self.metrics.min_execution_time, execution_time)
-            self.metrics.max_execution_time = max(self.metrics.max_execution_time, execution_time)
+            self.metrics.record(execution_time, success=True)
             
             logger.info(f"[auth-device] ✓ Device {action} for user {ctx.user_id}")
             return result
             
         except Exception as e:
             execution_time = (time.time() - start_time) * 1000
-            self.metrics.execution_count += 1
-            self.metrics.error_count += 1
-            self.metrics.last_error = str(e)
+            self.metrics.record(execution_time, success=False, error=str(e))
             
             logger.error(f"[auth-device] ✗ Error: {e}", exc_info=True)
             return {'status': 'error', 'error': str(e), 'trace_id': ctx.trace_id}
@@ -2574,20 +2516,14 @@ class AuthSessionCommand(Command):
             
             # ▸ METRICS UPDATE
             execution_time = (time.time() - start_time) * 1000
-            self.metrics.execution_count += 1
-            self.metrics.success_count += 1
-            self.metrics.total_execution_time += execution_time
-            self.metrics.min_execution_time = min(self.metrics.min_execution_time, execution_time)
-            self.metrics.max_execution_time = max(self.metrics.max_execution_time, execution_time)
+            self.metrics.record(execution_time, success=True)
             
             logger.info(f"[auth-session] ✓ Session info retrieved for user {ctx.user_id}")
             return result
             
         except Exception as e:
             execution_time = (time.time() - start_time) * 1000
-            self.metrics.execution_count += 1
-            self.metrics.error_count += 1
-            self.metrics.last_error = str(e)
+            self.metrics.record(execution_time, success=False, error=str(e))
             
             logger.error(f"[auth-session] ✗ Error: {e}", exc_info=True)
             return {'status': 'error', 'error': str(e), 'trace_id': ctx.trace_id}
