@@ -599,12 +599,13 @@ class AuthDatabase:
         except Exception:
             pass
         # ── Priority 3: Direct env-var psycopg2 connection ───────────────────
+        # FIXED: Check POOLER_* (wsgi_config standard) FIRST → SUPABASE_* → DB_*
         conn=psycopg2.connect(
-            host=os.getenv('SUPABASE_HOST') or os.getenv('DB_HOST','localhost'),
-            user=os.getenv('SUPABASE_USER') or os.getenv('DB_USER','postgres'),
-            password=os.getenv('SUPABASE_PASSWORD') or os.getenv('DB_PASSWORD'),
-            database=os.getenv('SUPABASE_DB') or os.getenv('DB_NAME','postgres'),
-            port=int(os.getenv('SUPABASE_PORT') or os.getenv('DB_PORT',5432)),
+            host=os.getenv('POOLER_HOST') or os.getenv('SUPABASE_HOST') or os.getenv('DB_HOST','localhost'),
+            user=os.getenv('POOLER_USER') or os.getenv('SUPABASE_USER') or os.getenv('DB_USER','postgres'),
+            password=os.getenv('POOLER_PASSWORD') or os.getenv('SUPABASE_PASSWORD') or os.getenv('DB_PASSWORD'),
+            database=os.getenv('POOLER_DB') or os.getenv('SUPABASE_DB') or os.getenv('DB_NAME','postgres'),
+            port=int(os.getenv('POOLER_PORT') or os.getenv('SUPABASE_PORT') or os.getenv('DB_PORT',5432)),
             connect_timeout=5
         )
         return conn
