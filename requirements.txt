@@ -29,7 +29,7 @@ qiskit-aer>=0.14.0           # Aer simulator with noise models
 qiskit-ibm-runtime>=0.16.0   # IBM Quantum runtime
 numpy>=1.24.0                 # Numerical computing (quantum state vectors)
 scipy>=1.10.0                 # Scientific computing (matrix operations)
-
+mpmath>=0.0.0
 
 # ================================================================================
 # CRYPTOGRAPHY & SECURITY (Required for auth, keys, signatures)
