@@ -284,6 +284,7 @@ def create_app():
             dispatch_command_sync,
             list_commands_sync,
             get_command_info_sync,
+            parse_cli_command,
         )
         logger.info("[BOOTSTRAP] ✓ Mega command system imported")
     except ImportError as e:
@@ -438,14 +439,30 @@ curl -X POST https://your-domain.koyeb.app/api/command \\
     
     @app.route('/api/command', methods=['POST'])
     def execute_command():
-        """Execute a command."""
+        """Execute a command - supports JSON and CLI text format."""
         try:
-            data = request.get_json() or {}
-            command = data.get('command', '').strip().lower()
-            args = data.get('args', {})
             user_id = getattr(g, 'user_id', None)
             token = request.headers.get('Authorization', '').replace('Bearer ', '')
             role = getattr(g, 'user_role', 'user')
+            
+            # Try JSON first
+            data = request.get_json(silent=True)
+            command = None
+            args = {}
+            
+            if data and isinstance(data, dict):
+                command = data.get('command', '').strip().lower()
+                args = data.get('args', {})
+            else:
+                # Try CLI text format: "auth-login username=X password=Y"
+                raw_input = request.get_data(as_text=True).strip()
+                if raw_input:
+                    parsed_cmd, parsed_args = parse_cli_command(raw_input)
+                    command = parsed_cmd.lower()
+                    args = parsed_args
+            
+            if not command:
+                return jsonify({'status': 'error', 'error': 'No command specified'}), 400
             
             # Special handling for help command
             if command == 'help':
