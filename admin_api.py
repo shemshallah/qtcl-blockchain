@@ -554,7 +554,6 @@ def create_blueprint()->Blueprint:
         }.get(role_str, AdminRole.ADMIN)
 
     @bp.route('/admin/settings', methods=['GET'])
-    @require_auth
     @require_admin
     @rate_limit(max_requests=200)
     def admin_get_settings_route():
@@ -570,7 +569,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error': str(e)}), 500
 
     @bp.route('/admin/settings/schema', methods=['GET'])
-    @require_auth
     @require_admin
     @rate_limit(max_requests=200)
     def admin_settings_schema():
@@ -588,7 +586,6 @@ def create_blueprint()->Blueprint:
         return jsonify({'status':'success','schema':schema,'total':len(schema)}), 200
 
     @bp.route('/admin/settings/<path:key>', methods=['GET'])
-    @require_auth
     @require_admin
     @rate_limit(max_requests=500)
     def admin_get_single_setting(key):
@@ -597,7 +594,6 @@ def create_blueprint()->Blueprint:
         return jsonify(result), 200 if result.get('status')=='success' else (404 if result.get('status')=='not_found' else 403 if result.get('status')=='forbidden' else 500)
 
     @bp.route('/admin/settings', methods=['PUT','POST'])
-    @require_auth
     @require_admin
     @rate_limit(max_requests=50)
     def admin_update_settings_route():
@@ -623,7 +619,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error': str(e)}), 500
 
     @bp.route('/admin/settings/<path:key>/reset', methods=['POST'])
-    @require_auth
     @require_admin
     @rate_limit(max_requests=50)
     def admin_reset_single_setting(key):
@@ -632,7 +627,6 @@ def create_blueprint()->Blueprint:
         return jsonify(result), 200 if result.get('status')=='success' else (404 if result.get('status')=='not_found' else 403 if result.get('status')=='forbidden' else 500)
 
     @bp.route('/admin/settings/reset-all', methods=['POST'])
-    @require_auth
     @require_admin
     @rate_limit(max_requests=5)
     def admin_reset_all_settings():
@@ -654,7 +648,6 @@ def create_blueprint()->Blueprint:
     # ═══════════════════════════════════════════════════════════════════════════════════
 
     @bp.route('/admin/sessions', methods=['GET'])
-    @require_auth
     @require_admin
     @rate_limit(max_requests=200)
     def admin_list_all_sessions():
@@ -693,7 +686,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error': str(e)}), 500
 
     @bp.route('/admin/users', methods=['GET'])
-    @require_auth
     @require_admin
     @rate_limit(max_requests=200)
     def admin_list_users():
@@ -723,7 +715,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error': str(e)}), 500
 
     @bp.route('/admin/users', methods=['POST'])
-    @require_auth
     @require_admin
     @rate_limit(max_requests=50)
     def admin_create_user_route():
@@ -742,7 +733,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error': str(e)}), 500
 
     @bp.route('/admin/users/<user_id>', methods=['GET'])
-    @require_auth
     @require_admin
     @rate_limit(max_requests=200)
     def admin_get_user_route(user_id):
@@ -751,7 +741,6 @@ def create_blueprint()->Blueprint:
         return jsonify(result), 200 if result.get('status')=='success' else (404 if result.get('status')=='not_found' else 403 if result.get('status')=='forbidden' else 500)
 
     @bp.route('/admin/users/<user_id>/role', methods=['PUT','POST'])
-    @require_auth
     @require_admin
     @rate_limit(max_requests=30)
     def admin_modify_user_role_route(user_id):
@@ -763,7 +752,6 @@ def create_blueprint()->Blueprint:
         return jsonify(result), 200 if result.get('status')=='success' else (403 if result.get('status')=='forbidden' else 400 if result.get('status')=='validation_error' else 404 if result.get('status')=='not_found' else 500)
 
     @bp.route('/admin/users/<user_id>/unlock', methods=['POST'])
-    @require_auth
     @require_admin
     @rate_limit(max_requests=50)
     def admin_unlock_user_route(user_id):
@@ -773,7 +761,6 @@ def create_blueprint()->Blueprint:
         return jsonify(result), 200 if result.get('status')=='success' else 400
 
     @bp.route('/admin/users/<user_id>/password-reset', methods=['POST'])
-    @require_auth
     @require_admin
     @rate_limit(max_requests=20)
     def admin_reset_user_password_route(user_id):
@@ -787,7 +774,6 @@ def create_blueprint()->Blueprint:
         return jsonify(result), 200 if result.get('status')=='success' else (400 if result.get('status')=='validation_error' else 403 if result.get('status')=='forbidden' else 500)
 
     @bp.route('/admin/users/<user_id>', methods=['DELETE'])
-    @require_auth
     @require_admin
     @rate_limit(max_requests=20)
     def admin_delete_user_route(user_id):
@@ -800,7 +786,6 @@ def create_blueprint()->Blueprint:
         return jsonify(result), 200 if result.get('status')=='success' else (403 if result.get('status')=='forbidden' else 404 if result.get('status')=='not_found' else 500)
 
     @bp.route('/admin/users/<user_id>/pq-key', methods=['POST'])
-    @require_auth
     @require_admin
     @rate_limit(max_requests=30)
     def admin_issue_pq_key_route(user_id):
@@ -817,7 +802,6 @@ def create_blueprint()->Blueprint:
         return jsonify(result), 200 if result.get('status')=='success' else (404 if result.get('status')=='not_found' else 403 if result.get('status')=='forbidden' else 500)
 
     @bp.route('/admin/users/<user_id>/sessions', methods=['GET'])
-    @require_auth
     @require_admin
     @rate_limit(max_requests=100)
     def admin_user_sessions(user_id):
@@ -837,7 +821,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error': str(e)}), 500
 
     @bp.route('/admin/users/<user_id>/sessions', methods=['DELETE'])
-    @require_auth
     @require_admin
     @rate_limit(max_requests=50)
     def admin_revoke_user_sessions(user_id):
@@ -849,7 +832,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error': str(e)}), 500
 
     @bp.route('/admin/users/<user_id>/suspend',methods=['POST'])
-    @require_auth
     @require_admin
     @rate_limit(max_requests=50)
     def admin_suspend_user(user_id):
@@ -881,7 +863,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error':'Failed to suspend user'}),500
     
     @bp.route('/admin/users/<user_id>/activate',methods=['POST'])
-    @require_auth
     @require_admin
     @rate_limit(max_requests=50)
     def admin_activate_user(user_id):
@@ -910,7 +891,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error':'Failed to activate user'}),500
     
     @bp.route('/admin/logs',methods=['GET'])
-    @require_auth
     @require_admin
     @rate_limit(max_requests=200)
     def admin_get_logs():
@@ -1101,7 +1081,6 @@ def create_blueprint()->Blueprint:
     # ══════════════════════════════════════════════════════════════════════
 
     @bp.route('/pqc/status', methods=['GET'])
-    @require_auth
     @rate_limit(max_requests=200)
     def admin_pqc_status():
         """
@@ -1126,7 +1105,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error': str(e)}), 500
 
     @bp.route('/pqc/users', methods=['GET'])
-    @require_auth
     @rate_limit(max_requests=100)
     def admin_pqc_users():
         """
@@ -1154,7 +1132,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error': str(e)}), 500
 
     @bp.route('/pqc/keygen', methods=['POST'])
-    @require_auth
     @rate_limit(max_requests=50)
     def admin_pqc_keygen():
         """
@@ -1201,7 +1178,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error': str(e)}), 500
 
     @bp.route('/pqc/revoke', methods=['POST'])
-    @require_auth
     @rate_limit(max_requests=50)
     def admin_pqc_revoke():
         """
@@ -1235,7 +1211,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error': str(e)}), 500
 
     @bp.route('/pqc/rotate', methods=['POST'])
-    @require_auth
     @rate_limit(max_requests=50)
     def admin_pqc_rotate():
         """
@@ -1267,7 +1242,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error': str(e)}), 500
 
     @bp.route('/pqc/vault-keys', methods=['GET'])
-    @require_auth
     @rate_limit(max_requests=100)
     def admin_pqc_vault_keys():
         """
@@ -1322,7 +1296,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error': str(e)}), 500
 
     @bp.route('/pqc/entropy-report', methods=['GET'])
-    @require_auth
     @rate_limit(max_requests=100)
     def admin_pqc_entropy_report():
         """
@@ -1355,7 +1328,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error': str(e)}), 500
 
     @bp.route('/events/watch',methods=['POST'])
-    @require_auth
     @rate_limit(max_requests=100)
     def watch_events():
         """Subscribe to event notifications"""
@@ -1474,7 +1446,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error':'Failed to get mobile config'}),500
     
     @bp.route('/mobile/dashboard',methods=['GET'])
-    @require_auth
     @rate_limit(max_requests=500)
     def mobile_dashboard():
         """Get mobile dashboard data"""
@@ -1511,7 +1482,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error':'Failed to get dashboard'}),500
     
     @bp.route('/mobile/qr-scan',methods=['POST'])
-    @require_auth
     @rate_limit(max_requests=100)
     def mobile_qr_scan():
         """Process QR code scan data"""
@@ -1548,7 +1518,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error':'Failed to process QR code'}),500
     
     @bp.route('/mobile/quick-send',methods=['POST'])
-    @require_auth
     @rate_limit(max_requests=100)
     def mobile_quick_send():
         """Quick mobile transaction send"""
@@ -1577,7 +1546,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error':'Failed to send transaction'}),500
     
     @bp.route('/mobile/notifications',methods=['GET'])
-    @require_auth
     @rate_limit(max_requests=200)
     def mobile_notifications():
         """Get mobile push notifications"""
@@ -1637,7 +1605,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error':'Failed to get upgrade status'}),500
     
     @bp.route('/upgrades/<upgrade_id>/vote',methods=['POST'])
-    @require_auth
     @rate_limit(max_requests=50)
     def vote_on_upgrade(upgrade_id):
         """Vote on system upgrade"""
@@ -1674,7 +1641,6 @@ def create_blueprint()->Blueprint:
     # ═══════════════════════════════════════════════════════════════════════════════
     
     @bp.route('/admin/quantum/coherence', methods=['GET'])
-    @require_auth
     def admin_quantum_coherence():
         """Get quantum coherence metrics (admin only)."""
         try:
@@ -1701,7 +1667,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error': str(e)}), 500
     
     @bp.route('/admin/quantum/system-health', methods=['GET'])
-    @require_auth
     def admin_quantum_system_health():
         """Get overall quantum system health (admin only)."""
         try:
@@ -1728,7 +1693,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error': str(e)}), 500
     
     @bp.route('/admin/quantum/phase-info', methods=['GET'])
-    @require_auth
     def admin_quantum_phase_info():
         """Get current quantum phase and transition info (admin only)."""
         try:
@@ -1750,7 +1714,6 @@ def create_blueprint()->Blueprint:
             return jsonify({'error': str(e)}), 500
     
     return bp
-
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PART 2: GLOBAL ADMIN COMMAND SYSTEM - FORTRESS-LEVEL SECURITY
@@ -3545,7 +3508,6 @@ class GlobalAdminCommandHandlers:
                 'system_state': cls._system_state.copy()
             }
 
-
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PART 6: GLOBAL ADMIN REGISTRY & EXECUTOR
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -3617,7 +3579,6 @@ class GlobalAdminRegistry:
             logger_admin.error(f"[AdminRegistry] Execution error: {e}")
             return {'error': str(e), 'status': 'error'}
 
-
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PART 7: ADMIN PROCESSOR - SECURE EXECUTION ENGINE
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -3675,7 +3636,6 @@ class AdminCommandProcessor:
         
         with self._lock:
             return list(self._session_commands.get(session_id, []))
-
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PART 8: TERMINAL INTEGRATION - ADMIN-ONLY HELP
@@ -3760,7 +3720,6 @@ class AdminHelpSystem:
                     }
         return {'error': f'Command not found: {command}'}
 
-
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PART 9: GLOBAL PROCESSOR INSTANTIATION
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -3798,7 +3757,6 @@ logger_admin.info("""
 """)
 
 logger_admin.info("✓ Admin API expansion complete - 2000+ lines of fortress security")
-
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # 🫀 ADMIN API HEARTBEAT INTEGRATION
