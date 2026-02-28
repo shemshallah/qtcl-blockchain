@@ -289,47 +289,73 @@
       state.cmdInput.value = '';
 
       try {
+        // Attach auth token if present
+        const token = (() => { try { return localStorage.getItem('qtcl_auth_token') || ''; } catch { return ''; } })();
+        const headers = { 'Content-Type': 'application/json' };
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+
         const response = await fetch('/api/command', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({ command: cmd }),
         });
 
+        // Guard: server must return JSON — never blindly call .json()
+        const ct = response.headers.get('content-type') || '';
+        if (!ct.includes('application/json')) {
+          const body = await response.text();
+          addLine(`[ERROR] Server returned HTTP ${response.status} with non-JSON response.`, 'line-error');
+          addLine(`        Content-Type: ${ct || '(none)'}`, 'line-dim');
+          addLine(`        Check server logs. First 200 chars: ${body.slice(0, 200).replace(/\n/g, ' ')}`, 'line-dim');
+          state.cmdInput.focus();
+          return;
+        }
+
         const data = await response.json();
 
+        // Persist auth token if login succeeded
+        const tok = data.token || data.access_token || data.result?.token || data.result?.access_token;
+        if (tok) {
+          try { localStorage.setItem('qtcl_auth_token', tok); } catch {}
+          addLine('[AUTH] Token stored', 'line-dim');
+        }
+
         if (data.status === 'success') {
-          if (data.result) {
+          if (data.result !== undefined && data.result !== null) {
             const result = data.result;
-            
-            // Special formatting for help/command list
+            // Help command — grouped display
             if (cmd.toLowerCase() === 'help' && Array.isArray(result)) {
               addLine('Available Commands:', 'line-header');
               const categories = {};
-              result.forEach(cmd => {
-                const cat = cmd.category || 'uncategorized';
+              result.forEach(entry => {
+                const cat = entry.category || 'uncategorized';
                 if (!categories[cat]) categories[cat] = [];
-                categories[cat].push(cmd.name || cmd.command || '(unknown)');
+                categories[cat].push(entry.name || entry.command || '(unknown)');
               });
               Object.keys(categories).sort().forEach(cat => {
                 addLine(`  [${cat.toUpperCase()}]`, 'line-info');
-                categories[cat].forEach(c => {
-                  addLine(`    • ${c}`, 'line-dim');
-                });
+                categories[cat].forEach(c => addLine(`    • ${c}`, 'line-dim'));
               });
             } else if (typeof result === 'string') {
               addLine(result, 'line-success');
             } else {
               addLine(JSON.stringify(result, null, 2), 'line-success');
             }
+          } else {
+            addLine('[OK]', 'line-success');
           }
+        } else if (data.status === 'auth_required') {
+          addLine('[AUTH REQUIRED] Login first: auth-login username=<u> password=<p>', 'line-error');
         } else if (data.error) {
           addLine(`[ERROR] ${data.error}`, 'line-error');
+          if (data.hint)        addLine(`  Hint: ${data.hint}`, 'line-dim');
+          if (data.suggestions) data.suggestions.forEach(s => addLine(`  → ${s}`, 'line-dim'));
         } else {
           addLine('[No output]', 'line-dim');
         }
 
-        if (data.execution_time_ms) {
-          addLine(`[ ${data.execution_time_ms.toFixed(2)}ms ]`, 'line-dim');
+        if (data.execution_time_ms != null) {
+          addLine(`[ ${Number(data.execution_time_ms).toFixed(2)}ms ]`, 'line-dim');
         }
       } catch (err) {
         addLine(`[ERROR] ${err.message}`, 'line-error');
