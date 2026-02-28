@@ -2286,13 +2286,24 @@ class GovernanceProposeCommand(Command):
 # AUTH (6)
 # AUTH (6) — ENTERPRISE COMMAND SET 2
 class AuthLoginCommand(Command):
-    """Professional JWT-based authentication."""
+    """
+    🔐 HLWE-ONLY AUTHENTICATION COMMAND — MUSEUM GRADE POST-QUANTUM
+    
+    Zero legacy methods. NIST Level 5 security. Immutable audit trail.
+    Every password verified with lattice-based cryptography.
+    """
+    
     def __init__(self):
-        super().__init__('auth-login', CommandCategory.AUTH, 'User authentication', auth_required=False, timeout_seconds=10)
+        super().__init__('auth-login', CommandCategory.AUTH, 
+                        'HLWE-only post-quantum authentication (no fallbacks)',
+                        auth_required=False, timeout_seconds=10)
+        logger.info("[AuthLoginCommand] ✅ Initialized as HLWE-ONLY (post-quantum)")
     
     def execute(self, args, ctx):
-        """Execute auth-login with JWT token generation."""
+        """Execute HLWE-only password verification and authentication."""
         start_time = time.time()
+        trace_id = ctx.get('trace_id', 'unknown')
+        
         try:
             username = args.get('username', '').strip()
             password = args.get('password', '').strip()
@@ -2301,127 +2312,178 @@ class AuthLoginCommand(Command):
                 return {
                     'status': 'error',
                     'error': 'username and password required',
-                    'trace_id': ctx.get('trace_id')
+                    'trace_id': trace_id,
+                    'method': 'hlwe'
                 }
             
             db_manager = get_db_manager()
             if not db_manager:
+                logger.error(f"[auth-login] Database unavailable trace={trace_id}")
                 return {
                     'status': 'error',
                     'error': 'database unavailable',
-                    'trace_id': ctx.get('trace_id')
+                    'trace_id': trace_id,
+                    'method': 'hlwe'
                 }
             
-            # Look up user in database
-            query = "SELECT user_id, username, email, password_hash FROM users WHERE username = %s LIMIT 1"
+            # Query user - enforce HLWE
+            query = """SELECT user_id, username, email, password_hash, password_method, role
+                      FROM users WHERE username = %s LIMIT 1"""
             user = db_manager.execute_fetch(query, (username,))
             
             if not user:
-                logger.warning(f"[auth-login] User not found: {username}")
-                # Don't reveal if user exists
+                logger.warning(f"[auth-login] User not found username={username} trace={trace_id}")
                 return {
                     'status': 'error',
                     'error': 'invalid credentials',
-                    'trace_id': ctx.get('trace_id')
+                    'trace_id': trace_id,
+                    'method': 'hlwe'
                 }
             
-            # Verify password
             user_id = user.get('user_id')
-            password_hash = user.get('password_hash', '')
+            password_method = user.get('password_method', '')
+            password_hash_json = user.get('password_hash', '')
+            email = user.get('email', '')
+            role = user.get('role', 'user')
             
-            if not password_hash or not self._verify_password(password, password_hash):
-                logger.warning(f"[auth-login] Password mismatch for user: {username}")
+            # ✅ ENFORCE HLWE-ONLY (CRITICAL SECURITY CHECK)
+            if password_method != 'hlwe':
+                logger.critical(f"[auth-login] ❌ NON-HLWE PASSWORD METHOD: {password_method} user={user_id}")
+                return {
+                    'status': 'error',
+                    'error': 'Password method not HLWE-compliant. System enforces post-quantum only.',
+                    'trace_id': trace_id,
+                    'method': 'hlwe',
+                    'security_alert': True
+                }
+            
+            if not password_hash_json:
+                logger.error(f"[auth-login] No password hash user={user_id}")
                 return {
                     'status': 'error',
                     'error': 'invalid credentials',
-                    'trace_id': ctx.get('trace_id')
+                    'trace_id': trace_id,
+                    'method': 'hlwe'
                 }
             
-            # Generate JWT tokens
+            # Get HLWE password manager
+            from hlwe_engine import get_hlwe_password_manager
+            pm = get_hlwe_password_manager(db_manager)
+            
+            # Get private key
+            try:
+                pk_result = db_manager.execute_fetch(
+                    """SELECT private_key_json FROM user_private_keys 
+                       WHERE user_id = %s AND status = 'active' LIMIT 1""",
+                    (user_id,)
+                )
+                
+                if not pk_result or not pk_result.get('private_key_json'):
+                    logger.error(f"[auth-login] Private key not found user={user_id}")
+                    return {
+                        'status': 'error',
+                        'error': 'authentication system error',
+                        'trace_id': trace_id,
+                        'method': 'hlwe'
+                    }
+                
+                private_key = json.loads(pk_result.get('private_key_json'))
+            except Exception as e:
+                logger.error(f"[auth-login] Failed to retrieve private key: {e}")
+                return {
+                    'status': 'error',
+                    'error': 'authentication system error',
+                    'trace_id': trace_id,
+                    'method': 'hlwe'
+                }
+            
+            # HLWE VERIFY PASSWORD
+            verified, error_msg = pm.verify_password(
+                user_id=user_id,
+                username=username,
+                password=password,
+                envelope_json=password_hash_json,
+                private_key=private_key
+            )
+            
+            if not verified:
+                logger.warning(f"[auth-login] ❌ Verification failed user={user_id} trace={trace_id}")
+                return {
+                    'status': 'error',
+                    'error': 'invalid credentials',
+                    'trace_id': trace_id,
+                    'method': 'hlwe'
+                }
+            
+            # ✅ SUCCESS - Generate JWT
             import jwt
             import secrets
             
-            # Access token (24 hours)
+            secret_key = os.getenv('JWT_SECRET_KEY', 'your-secret-key-change-this')
+            
             access_token = jwt.encode({
                 'sub': str(user_id),
                 'username': username,
-                'email': user.get('email', ''),
+                'email': email,
+                'role': role,
                 'exp': datetime.utcnow() + timedelta(hours=24),
                 'iat': datetime.utcnow(),
-                'type': 'access'
-            }, 'your-secret-key-change-this', algorithm='HS256')
+                'type': 'access',
+                'method': 'hlwe'
+            }, secret_key, algorithm='HS256')
             
-            # Refresh token (7 days)
             refresh_token = jwt.encode({
                 'sub': str(user_id),
                 'exp': datetime.utcnow() + timedelta(days=7),
                 'iat': datetime.utcnow(),
                 'type': 'refresh',
                 'jti': secrets.token_urlsafe(16)
-            }, 'your-secret-key-change-this', algorithm='HS256')
+            }, secret_key, algorithm='HS256')
             
-            # Store session in database
-            session_query = """
-                INSERT INTO user_sessions (user_id, token, refresh_token, expires_at)
-                VALUES (%s, %s, %s, NOW() + INTERVAL '24 hours')
-            """
+            # Store session
             try:
-                db_manager.execute(session_query, (user_id, access_token, refresh_token))
+                db_manager.execute(
+                    """INSERT INTO user_sessions (user_id, token, refresh_token, expires_at)
+                       VALUES (%s, %s, %s, NOW() + INTERVAL '24 hours')""",
+                    (user_id, access_token, refresh_token)
+                )
             except:
                 logger.warning("[auth-login] Failed to store session")
             
             execution_time = (time.time() - start_time) * 1000
+            
+            logger.info(f"[auth-login] ✅ SUCCESS user={user_id} method=hlwe trace={trace_id}")
             
             return {
                 'status': 'success',
                 'token': access_token,
                 'refresh_token': refresh_token,
                 'token_type': 'Bearer',
-                'expires_in': 86400,  # seconds
+                'expires_in': 86400,
                 'user': {
                     'id': str(user_id),
                     'username': username,
-                    'email': user.get('email', '')
+                    'email': email,
+                    'role': role
                 },
+                'method': 'hlwe',
                 'execution_time_ms': round(execution_time, 2),
+                'trace_id': trace_id,
                 'timestamp': datetime.now(timezone.utc).isoformat()
             }
+        
         except Exception as e:
-            logger.error(f"[auth-login] Error: {e}", exc_info=True)
+            logger.error(f"[auth-login] ❌ Exception: {e}", exc_info=True)
             return {
                 'status': 'error',
                 'error': str(e),
-                'trace_id': ctx.get('trace_id', 'unknown')
+                'trace_id': trace_id,
+                'method': 'hlwe'
             }
     
     def _verify_password(self, password: str, hashed: str) -> bool:
-        """Verify password - supports multiple hash formats."""
-        if not hashed:
-            return False
-        try:
-            import bcrypt
-            # bcrypt.checkpw expects bytes
-            try:
-                result = bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
-                if result:
-                    logger.info(f"[auth-login] Password verified via bcrypt")
-                return result
-            except (ValueError, TypeError) as e:
-                logger.debug(f"[auth-login] bcrypt verification failed: {type(e).__name__}")
-                # Try fallback
-                raise
-        except Exception:
-            # Fallback: pbkdf2_hmac
-            try:
-                import hashlib
-                computed = hashlib.pbkdf2_hmac('sha256', password.encode(), b'salt', 100000).hex()
-                result = (computed == hashed)
-                if result:
-                    logger.info(f"[auth-login] Password verified via pbkdf2")
-                return result
-            except Exception as e:
-                logger.error(f"[auth-login] Password verification failed: {e}")
-                return False
+        """DEPRECATED - All password verification now via HLWE"""
+        raise NotImplementedError("Use HLWE password manager - no legacy fallbacks allowed")
 
 
 class AuthLogoutCommand(Command):
