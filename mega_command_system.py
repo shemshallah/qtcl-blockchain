@@ -2313,7 +2313,7 @@ class AuthLoginCommand(Command):
                 }
             
             # Look up user in database
-            query = "SELECT id, username, email, password_hash FROM users WHERE username = %s LIMIT 1"
+            query = "SELECT user_id, username, email, password_hash FROM users WHERE username = %s LIMIT 1"
             user = db_manager.execute_fetch(query, (username,))
             
             if not user:
@@ -2326,7 +2326,7 @@ class AuthLoginCommand(Command):
                 }
             
             # Verify password
-            user_id = user.get('id')
+            user_id = user.get('user_id')
             password_hash = user.get('password_hash', '')
             
             if not password_hash or not self._verify_password(password, password_hash):
@@ -2400,10 +2400,28 @@ class AuthLoginCommand(Command):
             return False
         try:
             import bcrypt
-            return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
-        except:
-            import hashlib
-            return hashlib.pbkdf2_hmac('sha256', password.encode(), b'salt', 100000).hex() == hashed
+            # bcrypt.checkpw expects bytes
+            try:
+                result = bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+                if result:
+                    logger.info(f"[auth-login] Password verified via bcrypt")
+                return result
+            except (ValueError, TypeError) as e:
+                logger.debug(f"[auth-login] bcrypt verification failed: {type(e).__name__}")
+                # Try fallback
+                raise
+        except Exception:
+            # Fallback: pbkdf2_hmac
+            try:
+                import hashlib
+                computed = hashlib.pbkdf2_hmac('sha256', password.encode(), b'salt', 100000).hex()
+                result = (computed == hashed)
+                if result:
+                    logger.info(f"[auth-login] Password verified via pbkdf2")
+                return result
+            except Exception as e:
+                logger.error(f"[auth-login] Password verification failed: {e}")
+                return False
 
 
 class AuthLogoutCommand(Command):
