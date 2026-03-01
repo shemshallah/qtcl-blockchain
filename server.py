@@ -64,12 +64,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Database Configuration
-# Priority: POOLER_URL (Supabase/PgBouncer) > DATABASE_URL > fallback
+# REQUIRED: Supabase POOLER_URL (PgBouncer connection pooling)
+# Get from: Supabase Dashboard → Settings → Database → Connection Pooling
 POOLER_URL = os.getenv('POOLER_URL')
-DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://postgres:password@localhost/qtcl_db')
-DB_URL = POOLER_URL or DATABASE_URL
 
-logger.info(f"[DB] Using connection: {'POOLER_URL (Supabase)' if POOLER_URL else 'DATABASE_URL'}")
+if not POOLER_URL:
+    logger.error("[DB] ❌ CRITICAL: POOLER_URL environment variable not set!")
+    logger.error("[DB] Get POOLER_URL from Supabase Dashboard:")
+    logger.error("[DB]   → Settings → Database → Connection Pooling")
+    logger.error("[DB]   → Copy the 'postgresql://...' URL (contains 'pooler.supabase.com')")
+    raise ValueError("POOLER_URL environment variable is required for Supabase connection")
+
+DB_URL = POOLER_URL
+logger.info(f"[DB] ✨ Using Supabase Pooler: {POOLER_URL.split('@')[1] if '@' in POOLER_URL else 'configured'}")
 
 # P2P Network
 P2P_PORT = int(os.getenv('P2P_PORT', 8333))
@@ -262,32 +269,39 @@ class DatabasePool:
                 return
             
             try:
-                # Try to import pool module
+                # Try to import pool module (for app-level pooling on top of Supabase pooler)
                 from psycopg2 import pool as psycopg2_pool
                 
-                # Connection pool configuration (optimized for serverless)
+                # Connection pool configuration (app-level pooling)
                 min_connections = int(os.getenv('DB_POOL_MIN', '2'))
                 max_connections = int(os.getenv('DB_POOL_MAX', '10'))
                 
-                logger.info(f"[DB] Initializing connection pool: min={min_connections}, max={max_connections}")
+                logger.info(f"[DB] Initializing app-level connection pool: min={min_connections}, max={max_connections}")
+                logger.info(f"[DB] Using Supabase pooler at: {DB_URL.split('@')[1] if '@' in DB_URL else 'configured'}")
                 
                 self.pool = psycopg2_pool.SimpleConnectionPool(
                     min_connections,
                     max_connections,
-                    DB_URL,
+                    DB_URL,  # Uses Supabase pooler URL
                     connect_timeout=10
                 )
                 self._initialized = True
                 self.use_pooling = True
-                logger.info("[DB] ✨ Connection pool initialized successfully")
+                logger.info("[DB] ✨ App-level pooling initialized (on top of Supabase pooler)")
             
             except (ImportError, AttributeError) as e:
-                # psycopg2.pool not available - use direct connections
-                logger.warning(f"[DB] Connection pooling not available: {e}")
-                logger.warning("[DB] Using direct connections (no pooling)")
+                # psycopg2.pool not available - use direct connections via pooler
+                logger.info(f"[DB] App-level pooling not available: {e}")
+                logger.info("[DB] Using direct connections via Supabase pooler (still fast)")
                 self._initialized = True
                 self.use_pooling = False
                 self.pool = None
+            
+            except psycopg2.OperationalError as e:
+                logger.error(f"[DB] ❌ Cannot connect to Supabase pooler at startup: {e}")
+                logger.error("[DB] Retrying on first request...")
+                self._initialized = False  # Retry on next request
+                self.use_pooling = False
             
             except Exception as e:
                 logger.error(f"[DB] Error initializing pool: {e}")
@@ -296,7 +310,7 @@ class DatabasePool:
                 self.pool = None
     
     def get_connection(self):
-        """Get a connection (from pool if available, otherwise direct)"""
+        """Get a connection (from pool if available, otherwise direct via pooler)"""
         if not self._initialized:
             self._initialize_pool()
         
@@ -304,14 +318,18 @@ class DatabasePool:
             if self.use_pooling and self.pool:
                 conn = self.pool.getconn()
                 if conn is None:
-                    logger.debug("[DB] Pool exhausted, creating direct connection")
+                    logger.debug("[DB] Pool exhausted, creating direct connection via pooler")
                     conn = psycopg2.connect(DB_URL, connect_timeout=10)
                 return conn
             else:
-                # No pooling available, create direct connection
+                # Direct connection via Supabase pooler (no app-level pooling)
                 return psycopg2.connect(DB_URL, connect_timeout=10)
+        except psycopg2.OperationalError as e:
+            logger.error(f"[DB] ❌ Cannot connect to Supabase pooler: {e}")
+            logger.error(f"[DB] Check POOLER_URL: {DB_URL[:50]}...")
+            raise
         except Exception as e:
-            logger.error(f"[DB] Failed to get connection: {e}")
+            logger.error(f"[DB] Connection error: {e}")
             raise
     
     def put_connection(self, conn):
