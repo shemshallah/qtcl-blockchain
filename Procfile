@@ -1,1 +1,1 @@
-web: gunicorn -w1 -b0.0.0.0:$PORT wsgi_config:app
+web: gunicorn -w 1 -b 0.0.0.0:$PORT --timeout 120 --access-logfile - --error-logfile - server:app
