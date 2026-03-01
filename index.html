@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>QTCL — Quantum Temporal Coherence Ledger</title>
+  <title>QTCL Server — Quantum Lattice Dashboard</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     
@@ -11,29 +11,25 @@
       --bg: #0a0a0e;
       --bg-secondary: #0f0f14;
       --border: #1a1a24;
-      --border-light: #252535;
       --sky-blue: #00bfff;
       --sky-blue-dim: #0099cc;
-      --sky-blue-dark: #007399;
       --text: #d4d4d8;
       --text-dim: #808089;
       --success: #22c55e;
-      --error: #ef4444;
       --warning: #eab308;
-      --glow-sky: 0 0 20px rgba(0, 191, 255, 0.3);
+      --error: #ef4444;
+      --glow: 0 0 20px rgba(0, 191, 255, 0.3);
     }
     
     html, body {
       width: 100%;
       height: 100%;
       overflow: hidden;
-      font-family: 'Fira Code', 'JetBrains Mono', 'Menlo', monospace;
-      font-size: 13px;
+      font-family: 'Fira Code', 'JetBrains Mono', monospace;
+      font-size: 12px;
       background: var(--bg);
       color: var(--text);
-      line-height: 1.5;
-      letter-spacing: 0.2px;
-      position: fixed;
+      line-height: 1.4;
     }
     
     #app {
@@ -47,8 +43,8 @@
     #header {
       display: flex;
       align-items: center;
-      gap: 20px;
-      height: 45px;
+      justify-content: space-between;
+      height: 40px;
       padding: 0 20px;
       background: linear-gradient(90deg, var(--bg) 0%, var(--bg-secondary) 100%);
       border-bottom: 2px solid var(--sky-blue);
@@ -56,364 +52,406 @@
       flex-shrink: 0;
     }
     
-    #header-title {
-      font-size: 14px;
+    #title {
+      font-size: 13px;
       font-weight: bold;
-      letter-spacing: 3px;
+      letter-spacing: 2px;
       color: var(--sky-blue);
-      text-shadow: var(--glow-sky);
-      user-select: none;
+      text-shadow: var(--glow);
     }
     
-    /* Terminal Container */
-    #terminal {
+    #status-indicator {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--success);
+      animation: pulse 2s infinite;
+      box-shadow: 0 0 10px var(--success);
+    }
+    
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    
+    /* Main container */
+    #content {
       flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      grid-template-rows: 1fr 1fr;
+      gap: 10px;
+      padding: 10px;
+      overflow: auto;
+    }
+    
+    .panel {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 15px;
       display: flex;
       flex-direction: column;
-      overflow: hidden;
-      background: var(--bg);
+      box-shadow: 0 0 10px rgba(0, 0, 0, 0.3);
     }
     
-    /* Output Area */
-    #output {
-      flex: 1;
-      overflow-y: auto;
-      overflow-x: hidden;
-      padding: 20px;
-      padding-right: 15px;
-      background: var(--bg);
-    }
-    
-    #output::-webkit-scrollbar {
-      width: 8px;
-    }
-    
-    #output::-webkit-scrollbar-track {
-      background: transparent;
-    }
-    
-    #output::-webkit-scrollbar-thumb {
-      background: rgba(0, 191, 255, 0.2);
-      border-radius: 4px;
-      transition: all 0.3s ease;
-    }
-    
-    #output::-webkit-scrollbar-thumb:hover {
-      background: rgba(0, 191, 255, 0.4);
-    }
-    
-    /* Line Styles */
-    .line {
-      margin-bottom: 3px;
-      white-space: pre-wrap;
-      word-wrap: break-word;
-      font-size: 13px;
-      animation: slideIn 0.15s ease-out;
-      font-variant-numeric: tabular-nums;
-    }
-    
-    @keyframes slideIn {
-      from {
-        opacity: 0;
-        transform: translateY(2px);
-      }
-      to {
-        opacity: 1;
-        transform: translateY(0);
-      }
-    }
-    
-    .line-prompt {
-      color: var(--text-dim);
-    }
-    
-    .line-cmd {
+    .panel-title {
+      font-size: 11px;
+      font-weight: bold;
       color: var(--sky-blue);
-      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 10px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 8px;
     }
     
-    .line-success {
+    .metric-item {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 8px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    
+    .metric-item:last-child {
+      border-bottom: none;
+      margin-bottom: 0;
+      padding-bottom: 0;
+    }
+    
+    .metric-label {
+      color: var(--text-dim);
+      font-size: 11px;
+    }
+    
+    .metric-value {
+      color: var(--sky-blue);
+      font-weight: bold;
+      font-size: 12px;
+      text-align: right;
+    }
+    
+    .metric-value.good {
       color: var(--success);
     }
     
-    .line-error {
-      color: var(--error);
-    }
-    
-    .line-warning {
+    .metric-value.warning {
       color: var(--warning);
     }
     
-    .line-info {
-      color: var(--sky-blue);
-      opacity: 0.8;
+    .metric-value.error {
+      color: var(--error);
     }
     
-    .line-system {
-      color: var(--text-dim);
+    .bar {
+      background: var(--border);
+      height: 20px;
+      border-radius: 2px;
+      overflow: hidden;
+      margin-top: 5px;
+      position: relative;
     }
     
-    .line-dim {
-      color: var(--text-dim);
-      opacity: 0.7;
-    }
-    
-    .line-header {
-      color: var(--sky-blue);
-      font-weight: bold;
-      letter-spacing: 2px;
-      margin-top: 8px;
-      margin-bottom: 4px;
-      border-bottom: 1px solid var(--border);
-      padding-bottom: 4px;
-    }
-    
-    /* Input Area */
-    #inputbar {
+    .bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--sky-blue), var(--sky-blue-dim));
+      transition: width 0.2s ease;
       display: flex;
       align-items: center;
-      gap: 12px;
-      padding: 12px 20px;
-      border-top: 2px solid var(--sky-blue);
-      background: linear-gradient(90deg, var(--bg) 0%, var(--bg-secondary) 100%);
-      flex-shrink: 0;
-      box-shadow: 0 -2px 15px rgba(0, 191, 255, 0.1);
-    }
-    
-    #prompt {
-      color: var(--sky-blue);
+      justify-content: center;
+      font-size: 10px;
+      color: var(--bg);
       font-weight: bold;
-      font-size: 13px;
-      user-select: none;
-      flex-shrink: 0;
-      text-shadow: var(--glow-sky);
     }
     
-    #cmd {
-      flex: 1;
-      background: transparent;
-      border: none;
-      outline: none;
-      color: var(--text);
-      font-family: inherit;
-      font-size: 13px;
-      caret-color: var(--sky-blue);
-      padding: 4px 0;
-      user-select: text;
+    /* Panels placement */
+    #quantum-metrics {
+      grid-column: 1;
+      grid-row: 1;
     }
     
-    #cmd::placeholder {
+    #block-state {
+      grid-column: 2;
+      grid-row: 1;
+    }
+    
+    #system-status {
+      grid-column: 3;
+      grid-row: 1;
+    }
+    
+    #database-info {
+      grid-column: 1 / 3;
+      grid-row: 2;
+    }
+    
+    #lattice-info {
+      grid-column: 3;
+      grid-row: 2;
+    }
+    
+    /* Footer */
+    #footer {
+      height: 30px;
+      padding: 0 20px;
+      background: var(--bg-secondary);
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 10px;
       color: var(--text-dim);
-      opacity: 0.5;
-    }
-    
-    #cmd:focus {
-      outline: none;
-      border-bottom: 1px solid var(--sky-blue);
-      padding-bottom: 3px;
-    }
-    
-    #exec-btn {
-      padding: 6px 14px;
-      background: rgba(0, 191, 255, 0.1);
-      border: 1px solid var(--sky-blue);
-      color: var(--sky-blue);
-      font-family: inherit;
-      font-size: 11px;
-      font-weight: bold;
-      letter-spacing: 1px;
-      cursor: pointer;
-      border-radius: 2px;
-      transition: all 0.2s ease;
-      text-transform: uppercase;
       flex-shrink: 0;
-      user-select: none;
     }
     
-    #exec-btn:hover {
-      background: rgba(0, 191, 255, 0.2);
-      box-shadow: 0 0 15px rgba(0, 191, 255, 0.3);
-    }
-    
-    #exec-btn:active {
-      transform: scale(0.98);
+    .update-ts {
+      font-size: 10px;
+      color: var(--text-dim);
     }
   </style>
 </head>
 <body>
   <div id="app">
     <div id="header">
-      <div id="header-title">⬡ QTCL</div>
+      <div id="title">◆ QTCL SERVER — QUANTUM LATTICE DASHBOARD ◆</div>
+      <div id="status-indicator"></div>
     </div>
     
-    <div id="terminal">
-      <div id="output"></div>
-      
-      <div id="inputbar">
-        <div id="prompt">QTCL></div>
-        <input type="text" id="cmd" placeholder="type command...">
-        <button id="exec-btn">Execute</button>
+    <div id="content">
+      <!-- QUANTUM METRICS -->
+      <div id="quantum-metrics" class="panel">
+        <div class="panel-title">Quantum Metrics</div>
+        
+        <div class="metric-item">
+          <span class="metric-label">Coherence</span>
+          <span class="metric-value good" id="metric-coherence">0.99</span>
+        </div>
+        <div class="bar">
+          <div class="bar-fill" id="bar-coherence" style="width: 99%"></div>
+        </div>
+        
+        <div class="metric-item" style="margin-top: 12px;">
+          <span class="metric-label">Entanglement</span>
+          <span class="metric-value good" id="metric-entanglement">0.95</span>
+        </div>
+        <div class="bar">
+          <div class="bar-fill" id="bar-entanglement" style="width: 95%"></div>
+        </div>
+        
+        <div class="metric-item" style="margin-top: 12px;">
+          <span class="metric-label">W-State Fidelity</span>
+          <span class="metric-value good" id="metric-fidelity">0.98</span>
+        </div>
+        <div class="bar">
+          <div class="bar-fill" id="bar-fidelity" style="width: 98%"></div>
+        </div>
+        
+        <div class="metric-item" style="margin-top: 12px;">
+          <span class="metric-label">Phase Drift (rad)</span>
+          <span class="metric-value warning" id="metric-drift">0.012</span>
+        </div>
       </div>
+      
+      <!-- BLOCK STATE -->
+      <div id="block-state" class="panel">
+        <div class="panel-title">Block State</div>
+        
+        <div class="metric-item">
+          <span class="metric-label">Current Height</span>
+          <span class="metric-value" id="block-height">0</span>
+        </div>
+        
+        <div class="metric-item">
+          <span class="metric-label">PQ Current (Max)</span>
+          <span class="metric-value" id="pq-current">0</span>
+        </div>
+        
+        <div class="metric-item">
+          <span class="metric-label">PQ Last (Min)</span>
+          <span class="metric-value" id="pq-last">0</span>
+        </div>
+        
+        <div class="metric-item">
+          <span class="metric-label">Block Hash</span>
+          <span class="metric-value" id="block-hash" style="font-size: 9px; word-break: break-all;">—</span>
+        </div>
+        
+        <div class="metric-item">
+          <span class="metric-label">Timestamp</span>
+          <span class="metric-value" id="block-timestamp" style="font-size: 10px;">—</span>
+        </div>
+      </div>
+      
+      <!-- SYSTEM STATUS -->
+      <div id="system-status" class="panel">
+        <div class="panel-title">System Status</div>
+        
+        <div class="metric-item">
+          <span class="metric-label">Status</span>
+          <span class="metric-value good" id="system-status">Online</span>
+        </div>
+        
+        <div class="metric-item">
+          <span class="metric-label">Lattice</span>
+          <span class="metric-value good" id="lattice-status">Loaded</span>
+        </div>
+        
+        <div class="metric-item">
+          <span class="metric-label">Database</span>
+          <span class="metric-value good" id="database-status">Connected</span>
+        </div>
+        
+        <div class="metric-item">
+          <span class="metric-label">Uptime</span>
+          <span class="metric-value" id="uptime">—</span>
+        </div>
+        
+        <div class="metric-item">
+          <span class="metric-label">Last Update</span>
+          <span class="metric-value update-ts" id="last-update">—</span>
+        </div>
+      </div>
+      
+      <!-- DATABASE INFO -->
+      <div id="database-info" class="panel">
+        <div class="panel-title">Database Schema (62 Tables)</div>
+        
+        <div style="font-size: 10px; color: var(--text-dim); line-height: 1.6;">
+          <div>Core Tables:</div>
+          <div style="margin-left: 10px;">
+            ✓ hyperbolic_triangles (~8K)<br>
+            ✓ pseudoqubits (~100K)<br>
+            ✓ pq_sequential (v5 routing)<br>
+            ✓ quantum_lattice_metadata<br>
+            ✓ blocks, transactions, wallet_addresses
+          </div>
+          <div style="margin-top: 8px;">Quantum Tables:</div>
+          <div style="margin-left: 10px;">
+            ✓ oracle_w_state_snapshots<br>
+            ✓ oracle_density_matrix_stream<br>
+            ✓ oracle_entropy_feeds<br>
+            ✓ quantum_measurements, quantum_phase_evolution<br>
+            ✓ + 47 more (validators, peers, state, metrics)
+          </div>
+        </div>
+      </div>
+      
+      <!-- LATTICE INFO -->
+      <div id="lattice-info" class="panel">
+        <div class="panel-title">Lattice Controller</div>
+        
+        <div class="metric-item">
+          <span class="metric-label">Model</span>
+          <span class="metric-value">Hyperbolic {8,3}</span>
+        </div>
+        
+        <div class="metric-item">
+          <span class="metric-label">Tessellation</span>
+          <span class="metric-value">Depth 5</span>
+        </div>
+        
+        <div class="metric-item">
+          <span class="metric-label">Triangles</span>
+          <span class="metric-value">~8,192</span>
+        </div>
+        
+        <div class="metric-item">
+          <span class="metric-label">Qubits</span>
+          <span class="metric-value">~100K+</span>
+        </div>
+        
+        <div class="metric-item">
+          <span class="metric-label">Routing</span>
+          <span class="metric-value">v5 Sequential</span>
+        </div>
+      </div>
+    </div>
+    
+    <div id="footer">
+      <span id="footer-time">—</span>
+      <span id="footer-status">Loading...</span>
     </div>
   </div>
 
   <script>
-    const state = {
-      cmdInput: document.getElementById('cmd'),
-      output: document.getElementById('output'),
-      execBtn: document.getElementById('exec-btn'),
-      history: [],
-      historyIndex: -1,
-    };
-
-    // Add line to output
-    function addLine(text, className = 'line-system') {
-      const line = document.createElement('div');
-      line.className = `line ${className}`;
-      line.textContent = text;
-      state.output.appendChild(line);
-      state.output.scrollTop = state.output.scrollHeight;
-    }
-
-    // Execute command
-    async function execute() {
-      const cmd = state.cmdInput.value.trim();
-      if (!cmd) return;
-
-      // Add to history
-      state.history.push(cmd);
-      state.historyIndex = state.history.length;
-
-      // Display input
-      addLine(`QTCL> ${cmd}`, 'line-cmd');
-      state.cmdInput.value = '';
-
+    // Configuration
+    const API_BASE = '/api';
+    const REFRESH_INTERVAL = 2000; // 2 seconds
+    
+    // Fetch and update metrics
+    async function refreshMetrics() {
       try {
-        // Attach auth token if present
-        const token = (() => { try { return localStorage.getItem('qtcl_auth_token') || ''; } catch { return ''; } })();
-        const headers = { 'Content-Type': 'application/json' };
-        if (token) headers['Authorization'] = `Bearer ${token}`;
-
-        const response = await fetch('/api/command', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({ command: cmd }),
-        });
-
-        // Guard: server must return JSON — never blindly call .json()
-        const ct = response.headers.get('content-type') || '';
-        if (!ct.includes('application/json')) {
-          const body = await response.text();
-          addLine(`[ERROR] Server returned HTTP ${response.status} with non-JSON response.`, 'line-error');
-          addLine(`        Content-Type: ${ct || '(none)'}`, 'line-dim');
-          addLine(`        Check server logs. First 200 chars: ${body.slice(0, 200).replace(/\n/g, ' ')}`, 'line-dim');
-          state.cmdInput.focus();
-          return;
+        // Fetch health/metrics
+        const resp = await fetch(`${API_BASE}/health`);
+        const data = await resp.json();
+        
+        if (data.quantum_metrics) {
+          const m = data.quantum_metrics;
+          
+          // Update quantum metrics
+          document.getElementById('metric-coherence').textContent = m.coherence?.toFixed(3) || '—';
+          document.getElementById('bar-coherence').style.width = (m.coherence * 100) + '%';
+          
+          document.getElementById('metric-entanglement').textContent = m.entanglement?.toFixed(3) || '—';
+          document.getElementById('bar-entanglement').style.width = (m.entanglement * 100) + '%';
+          
+          document.getElementById('metric-fidelity').textContent = m.w_state_fidelity?.toFixed(3) || '—';
+          document.getElementById('bar-fidelity').style.width = (m.w_state_fidelity * 100) + '%';
+          
+          document.getElementById('metric-drift').textContent = m.phase_drift?.toFixed(4) || '—';
         }
-
-        const data = await response.json();
-
-        // Persist auth token if login succeeded
-        const tok = data.token || data.access_token || data.result?.token || data.result?.access_token;
-        if (tok) {
-          try { localStorage.setItem('qtcl_auth_token', tok); } catch {}
-          addLine('[AUTH] Token stored', 'line-dim');
-        }
-
-        if (data.status === 'success') {
-          if (data.result !== undefined && data.result !== null) {
-            const result = data.result;
-            // Help command — grouped display
-            if (cmd.toLowerCase() === 'help' && Array.isArray(result)) {
-              addLine('Available Commands:', 'line-header');
-              const categories = {};
-              result.forEach(entry => {
-                const cat = entry.category || 'uncategorized';
-                if (!categories[cat]) categories[cat] = [];
-                categories[cat].push(entry.name || entry.command || '(unknown)');
-              });
-              Object.keys(categories).sort().forEach(cat => {
-                addLine(`  [${cat.toUpperCase()}]`, 'line-info');
-                categories[cat].forEach(c => addLine(`    • ${c}`, 'line-dim'));
-              });
-            } else if (typeof result === 'string') {
-              addLine(result, 'line-success');
-            } else {
-              addLine(JSON.stringify(result, null, 2), 'line-success');
-            }
-          } else {
-            addLine('[OK]', 'line-success');
-          }
-        } else if (data.status === 'auth_required') {
-          addLine('[AUTH REQUIRED] Login first: auth-login username=<u> password=<p>', 'line-error');
-        } else if (data.error) {
-          addLine(`[ERROR] ${data.error}`, 'line-error');
-          if (data.hint)        addLine(`  Hint: ${data.hint}`, 'line-dim');
-          if (data.suggestions) data.suggestions.forEach(s => addLine(`  → ${s}`, 'line-dim'));
-        } else {
-          addLine('[No output]', 'line-dim');
-        }
-
-        if (data.execution_time_ms != null) {
-          addLine(`[ ${Number(data.execution_time_ms).toFixed(2)}ms ]`, 'line-dim');
-        }
-      } catch (err) {
-        addLine(`[ERROR] ${err.message}`, 'line-error');
+        
+        // Update system status
+        document.getElementById('system-status').textContent = data.status === 'ok' ? 'Online' : 'Degraded';
+        document.getElementById('system-status').className = 'metric-value ' + 
+          (data.status === 'ok' ? 'good' : 'warning');
+        
+        document.getElementById('lattice-status').textContent = data.lattice_loaded ? 'Loaded' : 'Offline';
+        document.getElementById('lattice-status').className = 'metric-value ' + 
+          (data.lattice_loaded ? 'good' : 'error');
+      } catch (e) {
+        console.error('Error fetching health:', e);
+        document.getElementById('system-status').textContent = 'Error';
+        document.getElementById('system-status').className = 'metric-value error';
       }
-
-      state.cmdInput.focus();
+      
+      try {
+        // Fetch block state
+        const resp = await fetch(`${API_BASE}/blocks`);
+        const data = await resp.json();
+        
+        document.getElementById('block-height').textContent = data.current_height || '0';
+        document.getElementById('pq-current').textContent = data.pq_current || '0';
+        document.getElementById('pq-last').textContent = data.pq_last || '0';
+        document.getElementById('block-hash').textContent = (data.current_hash || '—').substring(0, 16) + '…';
+        document.getElementById('block-timestamp').textContent = data.timestamp ? 
+          new Date(data.timestamp * 1000).toLocaleTimeString() : '—';
+      } catch (e) {
+        console.error('Error fetching blocks:', e);
+      }
+      
+      // Update timestamps
+      const now = new Date();
+      document.getElementById('last-update').textContent = now.toLocaleTimeString();
+      document.getElementById('footer-time').textContent = now.toLocaleString();
+      document.getElementById('footer-status').textContent = 'QTCL Server Connected';
     }
-
-    // Event listeners
-    state.execBtn.addEventListener('click', execute);
-    state.cmdInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        execute();
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        if (state.historyIndex > 0) {
-          state.historyIndex--;
-          state.cmdInput.value = state.history[state.historyIndex];
-        }
-      } else if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        if (state.historyIndex < state.history.length - 1) {
-          state.historyIndex++;
-          state.cmdInput.value = state.history[state.historyIndex];
-        } else {
-          state.historyIndex = state.history.length;
-          state.cmdInput.value = '';
-        }
+    
+    // Initial refresh
+    refreshMetrics();
+    
+    // Auto-refresh
+    setInterval(refreshMetrics, REFRESH_INTERVAL);
+    
+    // Heartbeat POST (keep server alive)
+    setInterval(async () => {
+      try {
+        await fetch(`${API_BASE}/heartbeat`, { method: 'POST' });
+      } catch (e) {
+        console.error('Heartbeat error:', e);
       }
-    });
-
-    // Boot sequence
-    async function boot() {
-      const BOOT = [
-        { t: 20, msg: '╔═══════════════════════════════════════════════════════╗', cls: 'line-dim' },
-        { t: 20, msg: '║  QUANTUM TEMPORAL COHERENCE LEDGER                    ║', cls: 'line-info' },
-        { t: 20, msg: '║  Command Interface                                    ║', cls: 'line-info' },
-        { t: 20, msg: '╚═══════════════════════════════════════════════════════╝', cls: 'line-dim' },
-        { t: 40, msg: '', cls: 'line-system' },
-        { t: 60, msg: 'Initializing quantum subsystem…', cls: 'line-info' },
-        { t: 60, msg: 'Loading command registry…', cls: 'line-info' },
-        { t: 60, msg: 'Connecting to database…', cls: 'line-info' },
-        { t: 40, msg: '', cls: 'line-system' },
-        { t: 40, msg: 'Type "help" for command list', cls: 'line-dim' },
-        { t: 80, msg: 'Ready.', cls: 'line-success' },
-        { t: 20, msg: '', cls: 'line-system' },
-      ];
-
-      let delay = 0;
-      for (const { t, msg, cls } of BOOT) {
-        await new Promise(r => setTimeout(r, t));
-        addLine(msg, cls);
-      }
-
-      state.cmdInput.focus();
-    }
-
-    boot();
+    }, 30000); // 30 seconds
   </script>
 </body>
 </html>
