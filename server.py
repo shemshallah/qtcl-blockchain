@@ -237,7 +237,7 @@ class TransactionInfo:
 # ═════════════════════════════════════════════════════════════════════════════════
 
 class DatabasePool:
-    """Thread-safe connection pool for efficient database access"""
+    """Thread-safe connection pool for efficient database access (lazy initialization)"""
     
     _instance = None
     _lock = threading.Lock()
@@ -248,62 +248,94 @@ class DatabasePool:
                 if cls._instance is None:
                     cls._instance = super().__new__(cls)
                     cls._instance._initialized = False
+                    cls._instance.pool = None
+                    cls._instance.use_pooling = True
         return cls._instance
     
-    def __init__(self):
+    def _initialize_pool(self):
+        """Initialize connection pool (lazy - only when first used)"""
         if self._initialized:
             return
         
-        try:
-            # Connection pool configuration (optimized for serverless)
-            min_connections = int(os.getenv('DB_POOL_MIN', '2'))
-            max_connections = int(os.getenv('DB_POOL_MAX', '10'))
+        with self._lock:
+            if self._initialized:
+                return
             
-            logger.info(f"[DB] Initializing connection pool: min={min_connections}, max={max_connections}")
+            try:
+                # Try to import pool module
+                from psycopg2 import pool as psycopg2_pool
+                
+                # Connection pool configuration (optimized for serverless)
+                min_connections = int(os.getenv('DB_POOL_MIN', '2'))
+                max_connections = int(os.getenv('DB_POOL_MAX', '10'))
+                
+                logger.info(f"[DB] Initializing connection pool: min={min_connections}, max={max_connections}")
+                
+                self.pool = psycopg2_pool.SimpleConnectionPool(
+                    min_connections,
+                    max_connections,
+                    DB_URL,
+                    connect_timeout=10
+                )
+                self._initialized = True
+                self.use_pooling = True
+                logger.info("[DB] ✨ Connection pool initialized successfully")
             
-            self.pool = psycopg2.pool.SimpleConnectionPool(
-                min_connections,
-                max_connections,
-                DB_URL,
-                connect_timeout=10
-            )
-            self._initialized = True
-            logger.info("[DB] ✨ Connection pool initialized successfully")
-        except Exception as e:
-            logger.error(f"[DB] CRITICAL: Failed to initialize connection pool: {e}")
-            raise
+            except (ImportError, AttributeError) as e:
+                # psycopg2.pool not available - use direct connections
+                logger.warning(f"[DB] Connection pooling not available: {e}")
+                logger.warning("[DB] Using direct connections (no pooling)")
+                self._initialized = True
+                self.use_pooling = False
+                self.pool = None
+            
+            except Exception as e:
+                logger.error(f"[DB] Error initializing pool: {e}")
+                self._initialized = True
+                self.use_pooling = False
+                self.pool = None
     
     def get_connection(self):
-        """Get a connection from the pool with fallback"""
+        """Get a connection (from pool if available, otherwise direct)"""
+        if not self._initialized:
+            self._initialize_pool()
+        
         try:
-            conn = self.pool.getconn()
-            if conn is None:
-                logger.warning("[DB] Pool exhausted, creating temporary connection")
-                conn = psycopg2.connect(DB_URL, connect_timeout=10)
-            return conn
+            if self.use_pooling and self.pool:
+                conn = self.pool.getconn()
+                if conn is None:
+                    logger.debug("[DB] Pool exhausted, creating direct connection")
+                    conn = psycopg2.connect(DB_URL, connect_timeout=10)
+                return conn
+            else:
+                # No pooling available, create direct connection
+                return psycopg2.connect(DB_URL, connect_timeout=10)
         except Exception as e:
             logger.error(f"[DB] Failed to get connection: {e}")
             raise
     
     def put_connection(self, conn):
-        """Return a connection to the pool"""
+        """Return a connection to the pool (or close if no pooling)"""
         try:
-            if conn:
+            if self.use_pooling and self.pool and conn:
                 self.pool.putconn(conn)
+            elif conn:
+                # No pooling, just close
+                conn.close()
         except Exception as e:
-            logger.error(f"[DB] Error returning connection: {e}")
+            logger.debug(f"[DB] Error handling connection return: {e}")
     
     def close_all(self):
         """Close all connections in the pool"""
         try:
-            if hasattr(self, 'pool') and self.pool:
+            if self.use_pooling and self.pool:
                 self.pool.closeall()
                 logger.info("[DB] Connection pool closed")
         except Exception as e:
-            logger.error(f"[DB] Error closing pool: {e}")
+            logger.debug(f"[DB] Error closing pool: {e}")
 
 
-# Global pool instance (singleton)
+# Global pool instance (singleton, lazy-initialized)
 db_pool = DatabasePool()
 
 
