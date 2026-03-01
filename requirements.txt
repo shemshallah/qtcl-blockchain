@@ -1,5 +1,27 @@
+# Web Framework
 Flask==2.3.3
 Werkzeug==2.3.7
-psycopg2-binary==2.9.7
 gunicorn==21.2.0
+
+# Database
+psycopg2-binary==2.9.7
+
+# Configuration
 python-dotenv==1.0.0
+
+# HTTP Requests (for QRNG)
+requests>=2.31.0
+
+# Quantum Computing
+qiskit>=0.43.0
+qiskit-aer>=0.13.0
+numpy>=1.24.0
+
+# Cryptography
+cryptography>=41.0.0
+
+# Data Structures
+dataclasses-json>=0.5.0
+
+# Utilities
+typing-extensions>=4.7.0
