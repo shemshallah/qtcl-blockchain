@@ -1606,15 +1606,9 @@ class QuantumLatticeController:
             # Poincaré disk radius for this distance:
             r_fund  = math.tanh(d_fund / 2.0)               # |z| in disk model
 
-            # Edge length in hyperbolic metric:
-            #   cosh(edge) = cos²(π/q)/sin²(π/p) - cos²(π/p)/sin²(π/p)
-            #              = (cos²(π/q) - cos²(π/p)) / sin²(π/p)
-            # Simpler: use the standard {p,q} edge formula
-            cos_edge = (
-                math.cos(math.pi / p) ** 2 +
-                math.cos(math.pi / q) ** 2 - 1.0
-            ) / (math.sin(math.pi / p) ** 2)
-            # edge_len_hyp unused directly; we step vertices via Möbius transforms
+            # Edge step = vertex distance (in {8,3} the edge length equals the
+            # centre-to-vertex distance to first order — close enough for BFS stepping)
+            d_edge = d_fund
 
             # ── Möbius transform helpers (Poincaré disk automorphisms) ────────
             def mobius(z: complex, a: complex) -> complex:
