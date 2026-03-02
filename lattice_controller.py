@@ -58,6 +58,17 @@ else:
     _np_trapz = np.trapz
 
 # ─────────────────────────────────────────────────────────────────────────────
+# LOGGING — must come BEFORE any import block that calls logger.*
+# ─────────────────────────────────────────────────────────────────────────────
+if not logging.getLogger().hasHandlers():
+    logging.basicConfig(
+        level=logging.INFO,
+        format='[%(asctime)s] %(name)s [%(levelname)s]: %(message)s'
+    )
+
+logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────────────────────────────────────
 # QISKIT + QISKIT-AER — GRANULAR IMPORTS WITH DIAGNOSTICS
 #
 # Each import block is independent so a missing sub-package doesn't silently
@@ -149,16 +160,6 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────────────────────
 NUMPY_AVAILABLE = True
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LOGGING
-# ─────────────────────────────────────────────────────────────────────────────
-if not logging.getLogger().hasHandlers():
-    logging.basicConfig(
-        level=logging.INFO,
-        format='[%(asctime)s] %(name)s [%(levelname)s]: %(message)s'
-    )
-
-logger = logging.getLogger(__name__)
 
 # ════════════════════════════════════════════════════════════════════════════════
 # CONSTANTS — CLAY MATHEMATICS / PHYSICS PARAMETERS
