@@ -412,21 +412,27 @@ def get_db_cursor():
 
 
 def query_latest_block() -> Optional[Dict[str, Any]]:
-    """Get latest block from database"""
+    """Get latest block from database - with NULL-safety"""
     try:
         with get_db_cursor() as cur:
             cur.execute("""
-                SELECT height, block_hash, timestamp, oracle_w_state_hash
+                SELECT height, block_hash, 
+                       COALESCE(timestamp, EXTRACT(EPOCH FROM NOW())::bigint) as timestamp,
+                       oracle_w_state_hash
                 FROM blocks
                 ORDER BY height DESC
                 LIMIT 1
             """)
             row = cur.fetchone()
             if row:
+                timestamp = row[2]
+                if timestamp is None:
+                    timestamp = int(time.time())
+                
                 return {
                     'height': row[0],
                     'hash': row[1],
-                    'timestamp': row[2],
+                    'timestamp': timestamp,
                     'w_state_hash': row[3],
                 }
     except Exception as e:
@@ -623,10 +629,14 @@ class SystemState:
         }
         self.block_state = {
             'current_height': 0,
-            'current_hash': None,
+            'current_hash': '0' * 64,
             'pq_current': 0,
             'pq_last': 0,
-            'timestamp': None,
+            'timestamp': int(time.time()),
+            'difficulty': 12,
+            'nonce': 0,
+            'merkle_root': '0' * 64,
+            'parent_hash': '0' * 64,
         }
         self.wallet_state = {
             'balance': 0,
@@ -2241,9 +2251,10 @@ def blocks():
 
 @app.route('/api/blocks/tip', methods=['GET'])
 def blocks_tip():
-    """Get the latest (tip) block - compatible with BlockHeader.from_dict"""
+    """Get the latest (tip) block - BlockHeader compatible format"""
     try:
         if state is None:
+            logger.warning("[BLOCKS_TIP] State not initialized, returning genesis block")
             return jsonify({
                 'block_height': 0,
                 'block_hash': '0' * 64,
@@ -2259,26 +2270,84 @@ def blocks_tip():
         
         snapshot = state.get_state()
         block = snapshot.get('block_state', {})
+        quantum_metrics = snapshot.get('quantum_metrics', {})
         
-        return jsonify({
-            'block_height': block.get('current_height', 0),
-            'block_hash': block.get('current_hash', '0' * 64),
-            'parent_hash': block.get('parent_hash', '0' * 64),
-            'merkle_root': block.get('merkle_root', '0' * 64),
-            'timestamp_s': int(block.get('timestamp', time.time())),
-            'difficulty_bits': block.get('difficulty', 12),
-            'nonce': block.get('nonce', 0),
-            'miner_address': block.get('miner_address', 'genesis'),
-            'w_state_fidelity': snapshot.get('quantum_metrics', {}).get('fidelity', 0.9),
-            'w_entropy_hash': block.get('pq_current', 'genesis'),
-        }), 200
+        def safe_timestamp(ts_value, fallback=None):
+            """Safely extract timestamp, handling None and type mismatches"""
+            if fallback is None:
+                fallback = int(time.time())
+            
+            if ts_value is None:
+                return fallback
+            
+            if isinstance(ts_value, int):
+                return ts_value
+            
+            try:
+                if isinstance(ts_value, float):
+                    return int(ts_value)
+                return int(float(ts_value))
+            except (ValueError, TypeError):
+                logger.warning(f"[BLOCKS_TIP] Invalid timestamp {ts_value!r}, using fallback: {fallback}")
+                return fallback
+        
+        timestamp_s = safe_timestamp(block.get('timestamp'))
+        
+        block_height = block.get('current_height')
+        if block_height is None:
+            block_height = 0
+        else:
+            try:
+                block_height = int(block_height)
+            except (ValueError, TypeError):
+                block_height = 0
+        
+        block_hash = block.get('current_hash') or ('0' * 64)
+        parent_hash = block.get('parent_hash') or ('0' * 64)
+        merkle_root = block.get('merkle_root') or ('0' * 64)
+        miner_address = block.get('miner_address') or 'genesis'
+        w_entropy_hash = block.get('pq_current') or 'genesis'
+        
+        difficulty = block.get('difficulty', 12)
+        try:
+            difficulty = int(difficulty) if difficulty is not None else 12
+        except (ValueError, TypeError):
+            difficulty = 12
+        
+        nonce = block.get('nonce', 0)
+        try:
+            nonce = int(nonce) if nonce is not None else 0
+        except (ValueError, TypeError):
+            nonce = 0
+        
+        fidelity = quantum_metrics.get('fidelity', 0.9)
+        try:
+            fidelity = float(fidelity) if fidelity is not None else 0.9
+        except (ValueError, TypeError):
+            fidelity = 0.9
+        
+        response = {
+            'block_height': block_height,
+            'block_hash': block_hash,
+            'parent_hash': parent_hash,
+            'merkle_root': merkle_root,
+            'timestamp_s': timestamp_s,
+            'difficulty_bits': difficulty,
+            'nonce': nonce,
+            'miner_address': miner_address,
+            'w_state_fidelity': fidelity,
+            'w_entropy_hash': w_entropy_hash,
+        }
+        
+        return jsonify(response), 200
+        
     except Exception as e:
-        logger.error(f"[BLOCKS_TIP] Error: {e}")
+        logger.error(f"[BLOCKS_TIP] Unhandled exception: {e}")
+        logger.error(f"[BLOCKS_TIP] Traceback:\n{traceback.format_exc()}")
         return jsonify({
-            'block_height': 0,
-            'block_hash': 'genesis',
-            'error': str(e)
-        }), 200
+            'error': 'Internal server error',
+            'message': str(e),
+        }), 500
 
 
 @app.route('/api/wallet', methods=['GET'])
