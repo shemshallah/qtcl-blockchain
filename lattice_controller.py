@@ -2176,7 +2176,8 @@ class BlockManager:
         self.sealed_blocks: Deque[QuantumBlock] = deque(maxlen=1000)
         self.block_by_height: Dict[int, QuantumBlock] = {}
         self.last_block_time = time.time()
-        self.block_timeout_s = 12  # 12 second timeout
+        # No timeout — in seal_on_every_tx mode the monitor is still running
+        # as a safety net for seal_requested but won't fire on timeout
         self.block_seal_times: List[float] = []
         self.lock = threading.RLock()
         self.seal_monitor_thread = None
@@ -2184,7 +2185,9 @@ class BlockManager:
         self.seal_requested = False
         self.total_txs_processed = 0
         self.blocks_sealed = 0
-        logger.info("✅ BlockManager initialized")
+        # Testing mode: seal immediately on every single TX (no timeout)
+        self.seal_on_every_tx = True
+        logger.info("✅ BlockManager initialized (seal_on_every_tx=True)")
     
     def start(self):
         """Start block manager"""
@@ -2318,13 +2321,19 @@ class BlockManager:
                     logger.warning(f"[GENESIS] DB persist failed ({persist_err}); genesis lives in-memory only")
     
     def receive_transaction(self, tx: QuantumTransaction) -> bool:
-        """Receive transaction into mempool"""
+        """
+        Receive transaction into mempool.
+
+        In seal_on_every_tx mode (testing): each TX immediately triggers
+        a block seal — 1 TX = 1 block, exactly like the spec.
+        """
         try:
             with self.lock:
                 if tx.tx_id in self.mempool or len(self.mempool) >= 100_000:
                     return False
                 is_valid, error = self.validator.validate_transaction(tx)
                 if not is_valid:
+                    logger.warning(f"[BLOCK] TX rejected: {error}")
                     return False
                 if not tx.spatial_position or tx.spatial_position == (0.0, 0.0, 0.0):
                     idx = len(self.mempool)
@@ -2336,7 +2345,15 @@ class BlockManager:
                 self.mempool[tx.tx_id] = tx
                 self.pending_block.transactions.append(tx)
                 self.total_txs_processed += 1
-                logger.debug(f"📥 TX {tx.tx_id[:16]}... → mempool")
+                logger.debug(f"📥 TX {tx.tx_id[:16]}… → mempool")
+
+                # 1 TX = 1 block in testing mode — seal immediately
+                if self.seal_on_every_tx:
+                    self._seal_current_block()
+                    return True
+
+                # Normal mode: signal monitor to seal
+                self.seal_requested = True
                 return True
         except Exception as e:
             logger.error(f"❌ TX reception failed: {e}")
@@ -2368,8 +2385,9 @@ class BlockManager:
                 with self.lock:
                     if not self.monitor_running:
                         break
-                    # IF/THEN LOGIC: timeout reached OR explicit request
-                    if (time_since_last >= self.block_timeout_s or self.seal_requested) and \
+                    # In seal_on_every_tx mode: only seal on explicit request
+                    # (receive_transaction() handles immediate sealing directly)
+                    if self.seal_requested and \
                        self.pending_block and len(self.pending_block.transactions) > 0:
                         logger.info(f"🔐 SEALING BLOCK #{self.pending_block.block_height}")
                         self._seal_current_block()
@@ -2408,14 +2426,28 @@ class BlockManager:
                 block.coherence_snapshot = 0.95
                 block.fidelity_snapshot  = 0.992
 
-            # ── HLWE post-quantum witness ─────────────────────────────────────
-            witness_data      = json.dumps({
-                'block_height': block.block_height,
-                'merkle_root':  block.merkle_root,
-                'tx_count':     block.tx_count,
-                'w_state_hash': block.w_state_hash,
-            }, sort_keys=True)
-            block.hlwe_witness = hashlib.sha3_256(witness_data.encode()).hexdigest()
+            # ── Oracle signatures ─────────────────────────────────────────────
+            # Sign the block with the oracle master key (pq0)
+            try:
+                from oracle import ORACLE
+                block_sig = ORACLE.sign_block(block.block_hash, block.block_height)
+                if block_sig:
+                    block.hlwe_witness = json.dumps(block_sig.to_dict())
+                    logger.debug(f"[SEAL] Block oracle-signed | path={block_sig.derivation_path}")
+            except ImportError:
+                logger.debug("[SEAL] oracle.py not available — block unsigned")
+            except Exception as oracle_err:
+                logger.warning(f"[SEAL] Oracle signing failed: {oracle_err}")
+
+            # Fallback: hash-based witness if oracle signing not available
+            if not block.hlwe_witness:
+                witness_data = json.dumps({
+                    'block_height': block.block_height,
+                    'merkle_root':  block.merkle_root,
+                    'tx_count':     block.tx_count,
+                    'w_state_hash': block.w_state_hash,
+                }, sort_keys=True)
+                block.hlwe_witness = hashlib.sha3_256(witness_data.encode()).hexdigest()
 
             # ── Block hash (covers everything) ────────────────────────────────
             block.block_hash  = self.validator._compute_block_hash(block)
@@ -2474,6 +2506,14 @@ class BlockManager:
                 f"{block.tx_count} TXs | {seal_time:.2f}s | "
                 f"hash={block.block_hash[:18]}…"
             )
+
+            # ── Notify registered callback (→ P2P broadcast) ─────────────────
+            cb = getattr(self, 'on_block_sealed', None)
+            if cb is not None:
+                try:
+                    cb(block)
+                except Exception as cb_err:
+                    logger.error(f"[SEAL] on_block_sealed callback error: {cb_err}")
         except Exception as e:
             logger.error(f"❌ Sealing failed: {e}")
             logger.error(traceback.format_exc())
@@ -2568,36 +2608,26 @@ if __name__ == '__main__':
     lattice = initialize_lattice(miner_address="alice_" + "0"*60)
     
     try:
-        # Simulate transaction arrivals
+        # Simulate transaction arrivals — in 1-TX mode each seals immediately
         for i in range(5):
-            tx_dict = {
-                'tx_id': f"tx_{i:06d}",
-                'sender_addr': "alice_" + "0"*60,
-                'receiver_addr': "bob___" + "0"*60,
-                'amount': Decimal("100.0"),
-                'nonce': i,
-                'fee': 1 + i,
-                'timestamp_ns': int(time.time_ns()),
-            }
-            
-            tx = QuantumTransaction(**tx_dict)
+            tx = QuantumTransaction(
+                tx_id         = f"tx_{i:06d}",
+                sender_addr   = "alice_" + "0"*60,
+                receiver_addr = "bob___" + "0"*60,
+                amount        = Decimal("100.0"),
+                nonce         = i,
+                fee           = 1 + i,
+                timestamp_ns  = int(time.time_ns()),
+            )
             success = block_manager.receive_transaction(tx)
-            print(f"TX {i} accepted: {success}")
-            time.sleep(0.5)
-        
-        # Check status
-        print(f"\n📊 Chain stats: {block_manager.get_chain_stats()}")
-        
-        # Wait for block seal
-        print(f"\n⏳ Waiting {block_manager.block_timeout_s}s for block seal...")
-        time.sleep(block_manager.block_timeout_s + 2)
-        
-        # Check again
+            print(f"TX {i} accepted: {success} — block seals immediately")
+            time.sleep(0.1)
+
         stats = block_manager.get_chain_stats()
-        print(f"\n📊 After seal: {stats}")
-        print(f"   Blocks sealed: {stats['blocks_sealed']}")
-        print(f"   Latest hash: {stats['latest_block_hash'][:16]}...")
-        
+        print(f"\nChain stats: {stats}")
+        print(f"  Blocks sealed: {stats['blocks_sealed']}")
+        print(f"  Latest hash:   {stats['latest_block_hash'][:18]}...")
+
     except KeyboardInterrupt:
         pass
     finally:

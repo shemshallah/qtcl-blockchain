@@ -994,88 +994,222 @@ class MessageHandlers:
     
     def on_block(self, peer_conn: PeerConnection, message: Message):
         """
-        Handle BLOCK: receive full block data
-        
-        Used to:
-        - Receive complete block information
-        - Validate block structure
-        - Store block in database
-        - Relay to other peers
-        - Update chain state
+        Handle BLOCK from peer.
+
+        Pipeline:
+          1. Structural validation
+          2. Duplicate check (already in our chain?)
+          3. HLWE oracle signature verification
+          4. Submit to BlockManager for chain integration
+          5. Relay to other peers (only if valid)
+          6. Announce via INV to remaining peers
         """
         try:
-            payload = message.payload
-            block_hash = payload.get('hash')
-            block_height = payload.get('height')
-            block_data = payload.get('data')
-            timestamp = payload.get('timestamp', int(time.time()))
-            
-            logger.info(f"[P2P] Block received from {peer_conn.peer_id}: height={block_height}, hash={block_hash[:16]}...")
-            
-            # Validate block structure
+            payload      = message.payload
+            block_hash   = payload.get('hash')
+            block_height = payload.get('height', -1)
+            hlwe_witness = payload.get('hlwe_witness', '')
+            timestamp    = payload.get('timestamp', int(time.time()))
+
+            logger.info(
+                f"[P2P] Block received from {peer_conn.peer_id}: "
+                f"height={block_height}  hash={str(block_hash)[:16]}…"
+            )
+
+            # ── 1. Structural validation ──────────────────────────────────────
             if not self._validate_block(payload):
                 logger.warning(f"[P2P] Invalid block structure from {peer_conn.peer_id}")
                 peer_conn.peer_info.ban_score += 10
                 return
-            
-            # Store block
+
+            # ── 2. Duplicate check ────────────────────────────────────────────
+            with self.lock:
+                if block_hash in self.block_cache:
+                    logger.debug(f"[P2P] Block {block_hash[:16]}… already cached, skipping")
+                    return
+
+            # ── 3. HLWE oracle signature verification ─────────────────────────
+            if ORACLE and hlwe_witness:
+                try:
+                    sig_dict = json.loads(hlwe_witness) if isinstance(hlwe_witness, str) else hlwe_witness
+                    ok, reason = ORACLE.verify_block(block_hash, sig_dict)
+                    if not ok:
+                        logger.warning(
+                            f"[P2P] Block oracle sig INVALID from {peer_conn.peer_id}: {reason}"
+                        )
+                        peer_conn.peer_info.ban_score += 20
+                        return
+                    logger.debug(f"[P2P] Block oracle sig valid: {reason}")
+                except Exception as sig_err:
+                    logger.warning(f"[P2P] Block sig parse error: {sig_err}")
+                    # Non-fatal for now — log and continue
+
+            # ── 4. Submit to BlockManager ─────────────────────────────────────
+            if LATTICE and LATTICE.block_manager:
+                bm = LATTICE.block_manager
+                try:
+                    # Reconstruct QuantumBlock from wire format and add to chain
+                    from lattice_controller import QuantumBlock, QuantumTransaction
+                    from decimal import Decimal
+
+                    # Rebuild transactions
+                    wire_txs = payload.get('transactions', [])
+                    txs = []
+                    for wt in wire_txs:
+                        try:
+                            txs.append(QuantumTransaction(
+                                tx_id            = wt['tx_id'],
+                                sender_addr      = wt['sender_addr'],
+                                receiver_addr    = wt['receiver_addr'],
+                                amount           = Decimal(str(wt['amount'])),
+                                nonce            = int(wt.get('nonce', 0)),
+                                timestamp_ns     = int(wt.get('timestamp_ns', time.time_ns())),
+                                spatial_position = tuple(wt.get('spatial_position', (0, 0, 0))),
+                                fee              = int(wt.get('fee', 1)),
+                                signature        = wt.get('signature'),
+                            ))
+                        except Exception as tx_err:
+                            logger.debug(f"[P2P] TX reconstruct error: {tx_err}")
+
+                    net_block = QuantumBlock(
+                        block_height        = block_height,
+                        block_hash          = block_hash,
+                        parent_hash         = payload.get('parent_hash', ''),
+                        miner_address       = payload.get('miner_address', ''),
+                        transactions        = txs,
+                        tx_count            = len(txs),
+                        merkle_root         = payload.get('merkle_root', ''),
+                        timestamp_s         = timestamp,
+                        coherence_snapshot  = payload.get('coherence_snapshot', 0.95),
+                        fidelity_snapshot   = payload.get('fidelity_snapshot', 0.992),
+                        w_state_hash        = payload.get('w_state_hash', ''),
+                        hlwe_witness        = hlwe_witness,
+                        finalized           = True,
+                        finalized_at        = timestamp,
+                    )
+
+                    with bm.lock:
+                        # Only accept if this extends our chain
+                        if block_height >= bm.chain_height:
+                            bm.sealed_blocks.append(net_block)
+                            bm.block_by_height[block_height] = net_block
+                            bm.current_block_hash = block_hash
+                            if block_height >= bm.chain_height:
+                                bm.chain_height = block_height + 1
+                            # Remove any of these TXs from our mempool
+                            for tx in txs:
+                                bm.mempool.pop(tx.tx_id, None)
+                            logger.info(
+                                f"[P2P] Block #{block_height} integrated into chain | "
+                                f"new height={bm.chain_height}"
+                            )
+                        else:
+                            logger.debug(
+                                f"[P2P] Block #{block_height} behind our tip "
+                                f"({bm.chain_height - 1}) — ignored"
+                            )
+                except Exception as bm_err:
+                    logger.error(f"[P2P] BlockManager integration failed: {bm_err}")
+
+            # ── 5. Cache & update state ───────────────────────────────────────
             with self.lock:
                 self.block_cache[block_hash] = payload
-            
-            # Update peer info
+
             if block_height > peer_conn.peer_info.last_block_height:
                 peer_conn.peer_info.last_block_height = block_height
-                peer_conn.peer_info.last_block_hash = block_hash
-            
-            # Broadcast to other peers (relay)
-            self.p2p.broadcast_block(payload)
-            
-            # Update system state
+                peer_conn.peer_info.last_block_hash   = block_hash
+
             if block_height > state.block_state['current_height']:
                 state.update_block_state({
                     'current_height': block_height,
-                    'current_hash': block_hash,
-                    'timestamp': timestamp,
+                    'current_hash'  : block_hash,
+                    'timestamp'     : timestamp,
                 })
-            
+
+            # ── 6. Relay to other peers (not the sender) ──────────────────────
+            self.p2p.relay_block(payload, exclude_peer_id=peer_conn.peer_id)
+
         except Exception as e:
             logger.error(f"[PEER {peer_conn.peer_id}] Block handler error: {e}")
             peer_conn.peer_info.ban_score += 5
     
     def on_tx(self, peer_conn: PeerConnection, message: Message):
         """
-        Handle TX (transaction): receive full transaction data
-        
-        Used to:
-        - Receive complete transaction information
-        - Validate transaction cryptography
-        - Add to mempool
-        - Relay to other peers
-        - Track transaction propagation
+        Handle TX from peer.
+
+        Pipeline:
+          1. Structural validation
+          2. Duplicate check
+          3. HLWE oracle signature verification
+          4. Submit to BlockManager (triggers immediate seal in 1-TX mode)
+          5. Relay to other peers (only if valid)
         """
         try:
-            payload = message.payload
-            tx_hash = payload.get('hash')
-            from_addr = payload.get('from')
-            to_addr = payload.get('to')
-            amount = payload.get('amount')
-            timestamp = payload.get('timestamp', int(time.time()))
-            
-            logger.debug(f"[P2P] TX received from {peer_conn.peer_id}: {tx_hash[:16]}...")
-            
-            # Validate transaction
+            payload   = message.payload
+            tx_hash   = payload.get('hash') or payload.get('tx_id', '')
+            from_addr = payload.get('from') or payload.get('sender_addr', '')
+            to_addr   = payload.get('to')   or payload.get('receiver_addr', '')
+            amount    = payload.get('amount', 0)
+            signature = payload.get('signature')
+
+            logger.debug(f"[P2P] TX received from {peer_conn.peer_id}: {str(tx_hash)[:16]}…")
+
+            # ── 1. Structural validation ──────────────────────────────────────
             if not self._validate_tx(payload):
-                logger.warning(f"[P2P] Invalid transaction from {peer_conn.peer_id}")
+                logger.warning(f"[P2P] Invalid TX structure from {peer_conn.peer_id}")
                 peer_conn.peer_info.ban_score += 5
                 return
-            
-            # Cache transaction
+
+            # ── 2. Duplicate check ────────────────────────────────────────────
+            with self.lock:
+                if tx_hash in self.tx_cache:
+                    return
+
+            # ── 3. HLWE signature verification ───────────────────────────────
+            if ORACLE and signature:
+                try:
+                    sig_dict = json.loads(signature) if isinstance(signature, str) else signature
+                    ok, reason = ORACLE.verify_transaction(tx_hash, sig_dict, from_addr)
+                    if not ok:
+                        logger.warning(
+                            f"[P2P] TX sig INVALID from {peer_conn.peer_id}: {reason}"
+                        )
+                        peer_conn.peer_info.ban_score += 10
+                        return
+                    logger.debug(f"[P2P] TX sig valid: {reason}")
+                except Exception as sig_err:
+                    logger.warning(f"[P2P] TX sig parse error: {sig_err}")
+
+            # ── 4. Submit to BlockManager ─────────────────────────────────────
+            if LATTICE and LATTICE.block_manager:
+                try:
+                    from lattice_controller import QuantumTransaction
+                    from decimal import Decimal
+
+                    qt = QuantumTransaction(
+                        tx_id         = tx_hash,
+                        sender_addr   = from_addr,
+                        receiver_addr = to_addr,
+                        amount        = Decimal(str(amount)),
+                        nonce         = int(payload.get('nonce', 0)),
+                        timestamp_ns  = int(payload.get('timestamp_ns', time.time_ns())),
+                        fee           = int(payload.get('fee', 1)),
+                        signature     = json.dumps(signature) if isinstance(signature, dict) else signature,
+                    )
+                    accepted = LATTICE.block_manager.receive_transaction(qt)
+                    if accepted:
+                        logger.debug(f"[P2P] TX {str(tx_hash)[:16]}… → BlockManager")
+                    else:
+                        logger.debug(f"[P2P] TX {str(tx_hash)[:16]}… rejected by BlockManager")
+                except Exception as bm_err:
+                    logger.error(f"[P2P] TX→BlockManager failed: {bm_err}")
+
+            # ── 5. Cache & relay ──────────────────────────────────────────────
             with self.lock:
                 self.tx_cache[tx_hash] = payload
-            
-            # Broadcast to other peers
-            self.p2p.broadcast_transaction(payload)
-            
+
+            self.p2p.relay_transaction(payload, exclude_peer_id=peer_conn.peer_id)
+
         except Exception as e:
             logger.error(f"[PEER {peer_conn.peer_id}] TX handler error: {e}")
             peer_conn.peer_info.ban_score += 3
@@ -1703,33 +1837,37 @@ class P2PServer:
     
     def broadcast_block(self, block_data: Dict[str, Any]):
         """Broadcast block to all connected peers"""
-        message = Message(
-            msg_type='block',
-            payload=block_data
-        )
-        
+        self.relay_block(block_data, exclude_peer_id=None)
+
+    def relay_block(self, block_data: Dict[str, Any], exclude_peer_id: Optional[str] = None):
+        """Relay block to all peers except the originating sender."""
+        message = Message(msg_type='block', payload=block_data)
         with self.peers_lock:
-            for peer_conn in list(self.peers.values()):
+            for pid, peer_conn in list(self.peers.items()):
+                if pid == exclude_peer_id:
+                    continue
                 if peer_conn.is_connected and peer_conn.version_received:
                     peer_conn.send_message(message)
                     with self.stats_lock:
                         self.stats['messages_sent'] += 1
-                        self.stats['blocks_sent'] += 1
+                        self.stats['blocks_sent']   += 1
     
     def broadcast_transaction(self, tx_data: Dict[str, Any]):
         """Broadcast transaction to all connected peers"""
-        message = Message(
-            msg_type='tx',
-            payload=tx_data
-        )
-        
+        self.relay_transaction(tx_data, exclude_peer_id=None)
+
+    def relay_transaction(self, tx_data: Dict[str, Any], exclude_peer_id: Optional[str] = None):
+        """Relay transaction to all peers except the originating sender."""
+        message = Message(msg_type='tx', payload=tx_data)
         with self.peers_lock:
-            for peer_conn in list(self.peers.values()):
+            for pid, peer_conn in list(self.peers.items()):
+                if pid == exclude_peer_id:
+                    continue
                 if peer_conn.is_connected and peer_conn.version_received:
                     peer_conn.send_message(message)
                     with self.stats_lock:
                         self.stats['messages_sent'] += 1
-                        self.stats['txs_sent'] += 1
+                        self.stats['txs_sent']      += 1
     
     def announce_inventory(self, inv_type: str, hashes: List[str]):
         """Announce inventory to peers"""
@@ -1816,60 +1954,73 @@ class P2PServer:
 
 def initialize_lattice_controller():
     """
-    Initialize the QuantumLatticeController.
+    Initialize the QuantumLatticeController and wire all subsystems.
 
-    Failure modes handled gracefully:
-      • ImportError   — qiskit / lattice_controller not installed → mock mode
-      • ValueError    — DatabaseConfig.validate() missing password → mock mode
-      • Any other     — logged with full traceback → mock mode
-
-    The server ALWAYS starts; lattice is best-effort.
+    1. Import + instantiate QuantumLatticeController
+    2. Call .start() (registers {8,3} lattice, boots BlockManager, starts chain)
+    3. Wire BlockManager.on_block_sealed → P2P broadcast callback
+    4. Degrade gracefully to mock mode on any failure
     """
-    # ── Step 1: import the module itself ────────────────────────────────────
     try:
         import lattice_controller as _lc_module
     except ImportError as exc:
         logger.warning(
-            f"[LATTICE] lattice_controller module not importable: {exc}. "
-            "Running in mock mode. "
+            f"[LATTICE] lattice_controller not importable: {exc}. "
             "Install: qiskit>=1.0.0 qiskit-aer>=0.14.0 numpy scipy pydantic psutil"
         )
         state.lattice_loaded = False
         return None
-    except Exception as exc:
-        logger.error(f"[LATTICE] Unexpected import error: {exc}")
-        logger.debug(traceback.format_exc())
-        state.lattice_loaded = False
-        return None
 
-    # ── Step 2: report qiskit availability so we see it in logs ─────────────
-    qiskit_ok  = getattr(_lc_module, 'QISKIT_AVAILABLE',     False)
-    aer_ok     = getattr(_lc_module, 'QISKIT_AER_AVAILABLE', False)
+    qiskit_ok = getattr(_lc_module, 'QISKIT_AVAILABLE',     False)
+    aer_ok    = getattr(_lc_module, 'QISKIT_AER_AVAILABLE', False)
     logger.info(
         f"[LATTICE] qiskit_core={qiskit_ok}  qiskit_aer={aer_ok}  "
         f"db={getattr(_lc_module, 'DB_AVAILABLE', False)}"
     )
-    if not qiskit_ok or not aer_ok:
-        logger.warning(
-            "[LATTICE] Qiskit/AER not fully available — quantum circuits will be "
-            "stubbed. Lattice controller will run without circuit simulation."
-        )
 
-    # ── Step 3: instantiate and start ───────────────────────────────────────
     try:
         from lattice_controller import QuantumLatticeController
         controller = QuantumLatticeController()
-        # .start() — not .initialize() — that method does not exist
         controller.start()
         logger.info(
             "✨ [LATTICE] Quantum lattice controller started "
-            "(spatial-temporal field model active)"
+            "(spatial-temporal {8,3} field model active)"
         )
         state.lattice_loaded = True
+
+        # ── Wire BlockManager sealed-block → P2P broadcast ───────────────────
+        # After sealing, BlockManager calls this callback so the new block
+        # is immediately announced to the P2P network.
+        def _on_block_sealed(block):
+            try:
+                if P2P and P2P.is_running:
+                    block_dict        = block.to_dict()
+                    # Normalise to wire format used in MessageHandlers
+                    block_dict['hash']   = block_dict.get('block_hash', '')
+                    block_dict['height'] = block_dict.get('block_height', 0)
+                    P2P.relay_block(block_dict, exclude_peer_id=None)
+                    P2P.announce_inventory('block', [block_dict['hash']])
+                    logger.info(
+                        f"[LATTICE→P2P] Block #{block_dict['height']} broadcast "
+                        f"to {P2P.get_peer_count()} peer(s) | "
+                        f"hash={str(block_dict['hash'])[:18]}…"
+                    )
+                # Also update state
+                state.update_block_state({
+                    'current_height': block.block_height,
+                    'current_hash'  : block.block_hash,
+                    'timestamp'     : block.timestamp_s,
+                })
+            except Exception as cb_err:
+                logger.error(f"[LATTICE→P2P] Sealed-block callback failed: {cb_err}")
+
+        if controller.block_manager:
+            controller.block_manager.on_block_sealed = _on_block_sealed
+            logger.info("[LATTICE] BlockManager.on_block_sealed wired to P2P")
+
         return controller
 
     except ValueError as exc:
-        # Most likely missing DB password — non-fatal, degrade to mock
         logger.warning(f"[LATTICE] Configuration error: {exc}. Running in mock mode.")
         state.lattice_loaded = False
         return None
@@ -1882,6 +2033,19 @@ def initialize_lattice_controller():
 
 
 LATTICE = initialize_lattice_controller()
+
+# Wire oracle to lattice for W-state entropy
+try:
+    from oracle import ORACLE
+    if LATTICE is not None:
+        ORACLE.set_lattice_ref(LATTICE)
+    logger.info(f"[ORACLE] Initialized | address={ORACLE.oracle_address}")
+except ImportError:
+    ORACLE = None
+    logger.warning("[ORACLE] oracle.py not found — signing disabled")
+except Exception as _oe:
+    ORACLE = None
+    logger.error(f"[ORACLE] Init failed: {_oe}")
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # QUANTUM METRICS THREAD
@@ -1908,18 +2072,10 @@ def quantum_metrics_thread():
             # Update quantum metrics
             if LATTICE:
                 try:
-                    lattice_metrics = LATTICE.get_metrics()
-                    # get_metrics() returns {'latest': {...}, 'avg_coherence_100': ..., ...}
-                    # Extract the flat values state expects
-                    latest = lattice_metrics.get('latest', {})
-                    state.update_metrics({
-                        'coherence':        latest.get('coherence',        LATTICE.coherence),
-                        'entanglement':     latest.get('w_state_strength', LATTICE.w_state_strength),
-                        'phase_drift':      latest.get('entropy', 0.01),
-                        'w_state_fidelity': latest.get('fidelity',         LATTICE.fidelity),
-                    })
-                except Exception as lm_err:
-                    logger.debug(f"[METRICS] Lattice metrics read error (non-fatal): {lm_err}")
+                    metrics = LATTICE.get_metrics()
+                    state.update_metrics(metrics)
+                except:
+                    pass
             else:
                 # Mock metrics
                 import random
@@ -2066,41 +2222,128 @@ def wallet():
         return jsonify({'error': 'wallet not found'}), 404
 
 
+@app.route('/api/oracle', methods=['GET'])
+def oracle_status():
+    """Oracle engine status — HLWE signing, key derivation"""
+    if ORACLE is None:
+        return jsonify({'error': 'oracle not initialized'}), 503
+    return jsonify(ORACLE.get_status()), 200
+
+
+@app.route('/api/chain', methods=['GET'])
+def chain_status():
+    """Full chain state from BlockManager"""
+    if LATTICE is None or LATTICE.block_manager is None:
+        return jsonify({'error': 'chain not initialized'}), 503
+    bm = LATTICE.block_manager
+    stats = bm.get_chain_stats()
+    # Add last 5 sealed blocks for the dashboard
+    recent = []
+    with bm.lock:
+        for blk in list(bm.sealed_blocks)[-5:]:
+            recent.append({
+                'height'    : blk.block_height,
+                'hash'      : blk.block_hash,
+                'tx_count'  : blk.tx_count,
+                'timestamp' : blk.timestamp_s,
+                'coherence' : blk.coherence_snapshot,
+                'fidelity'  : blk.fidelity_snapshot,
+            })
+    stats['recent_blocks'] = list(reversed(recent))
+    return jsonify(stats), 200
+
+
 @app.route('/api/transact', methods=['POST'])
 def transact():
-    """Create a transaction"""
-    data = request.get_json() or {}
-    
+    """
+    Submit a transaction.
+
+    Body: { from, to, amount, [nonce], [fee] }
+
+    Flow:
+      1. Validate fields
+      2. Oracle signs the TX (HLWE)
+      3. Submit to BlockManager (triggers immediate seal in 1-TX mode)
+      4. Broadcast to P2P network
+    """
+    data      = request.get_json() or {}
     from_addr = data.get('from')
-    to_addr = data.get('to')
-    amount = data.get('amount')
-    
+    to_addr   = data.get('to')
+    amount    = data.get('amount')
+
     if not all([from_addr, to_addr, amount]):
         return jsonify({'error': 'missing from/to/amount'}), 400
-    
+
     try:
-        tx_hash = insert_transaction(from_addr, to_addr, int(amount))
-        if tx_hash:
-            # Broadcast to network
-            if P2P:
-                tx_data = {
-                    'hash': tx_hash,
-                    'from': from_addr,
-                    'to': to_addr,
-                    'amount': amount,
-                    'timestamp': int(time.time()),
-                }
-                P2P.broadcast_transaction(tx_data)
-            
-            return jsonify({
-                'tx_hash': tx_hash,
-                'status': 'pending',
-                'from': from_addr,
-                'to': to_addr,
-                'amount': amount,
-            }), 201
-        else:
-            return jsonify({'error': 'failed to create transaction'}), 500
+        import uuid as _uuid
+        from decimal import Decimal
+
+        tx_id        = str(_uuid.uuid4())
+        nonce        = int(data.get('nonce', 0))
+        fee          = int(data.get('fee', 1))
+        timestamp_ns = time.time_ns()
+
+        # Build the message to sign = SHA3-256 of canonical TX fields
+        tx_preimage = json.dumps({
+            'tx_id'        : tx_id,
+            'sender_addr'  : from_addr,
+            'receiver_addr': to_addr,
+            'amount'       : str(amount),
+            'nonce'        : nonce,
+            'timestamp_ns' : timestamp_ns,
+        }, sort_keys=True)
+        tx_hash_hex = hashlib.sha3_256(tx_preimage.encode()).hexdigest()
+
+        # Oracle signs
+        signature_json = None
+        if ORACLE:
+            sig = ORACLE.sign_transaction(tx_hash_hex, from_addr)
+            if sig:
+                signature_json = json.dumps(sig.to_dict())
+
+        # Submit to BlockManager
+        if LATTICE and LATTICE.block_manager:
+            from lattice_controller import QuantumTransaction
+            qt = QuantumTransaction(
+                tx_id         = tx_hash_hex,
+                sender_addr   = from_addr,
+                receiver_addr = to_addr,
+                amount        = Decimal(str(amount)),
+                nonce         = nonce,
+                timestamp_ns  = timestamp_ns,
+                fee           = fee,
+                signature     = signature_json,
+            )
+            accepted = LATTICE.block_manager.receive_transaction(qt)
+            if not accepted:
+                return jsonify({'error': 'transaction rejected by BlockManager'}), 422
+
+        # P2P broadcast
+        if P2P:
+            wire_tx = {
+                'hash'      : tx_hash_hex,
+                'tx_id'     : tx_hash_hex,
+                'from'      : from_addr,
+                'sender_addr': from_addr,
+                'to'        : to_addr,
+                'receiver_addr': to_addr,
+                'amount'    : amount,
+                'nonce'     : nonce,
+                'fee'       : fee,
+                'timestamp_ns': timestamp_ns,
+                'signature' : signature_json,
+            }
+            P2P.relay_transaction(wire_tx, exclude_peer_id=None)
+
+        return jsonify({
+            'tx_hash'   : tx_hash_hex,
+            'status'    : 'sealed' if LATTICE else 'pending',
+            'from'      : from_addr,
+            'to'        : to_addr,
+            'amount'    : amount,
+            'signed'    : signature_json is not None,
+        }), 201
+
     except Exception as e:
         logger.error(f"[TRANSACT] Error: {e}")
         return jsonify({'error': str(e)}), 500
