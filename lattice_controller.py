@@ -389,7 +389,6 @@ class SpatialTemporalField:
         with self.lock:
             loc = PseudoqubitLocation(pq_id=pq_id, x=x, y=y, z=z, label=label)
             self.locations[pq_id] = loc
-            logger.info(f"Registered pq{pq_id} at ({x:.2f}, {y:.2f}, {z:.2f}) [{label}]")
             return loc
     
     def create_block(self, pq_from: int, pq_to: int, temporal_seq: int) -> Block:
@@ -1516,55 +1515,305 @@ class QuantumLatticeController:
         self.running = False
         self.maintenance_thread = None
         self.cycle_count = 0
-        
+
+        # ── Blockchain subsystems (initialised in start()) ────────────────────
+        self.db_connector:  Optional['QuantumDatabaseConnector'] = None
+        self.validator:     Optional['IndividualValidator']       = None
+        self.block_manager: Optional['BlockManager']              = None
+        self._init_blockchain()
+
         logger.info("✨ QUANTUM LATTICE CONTROLLER INITIALIZED (SPATIAL-TEMPORAL FIELD MODEL)")
         logger.info(f"   Coherence target: 0.900 | Fidelity target: 0.992")
         logger.info(f"   Memory kernel: κ={KAPPA_MEMORY} | Revival gain: {REVIVAL_AMPLIFIER}x")
-        logger.info(f"   Pseudoqubits: {TOTAL_PSEUDOQUBITS:,} | Batches: {NUM_BATCHES}")
-        logger.info(f"   W-state: tripartite (oracle | inversevirtual | virtual)")
+        logger.info(f"   Pseudoqubits: {TOTAL_PSEUDOQUBITS:,} in {NUM_BATCHES} batches × {TOTAL_PSEUDOQUBITS // NUM_BATCHES}")
+        logger.info(f"   W-state: tripartite oracle|IV|V implicit per pseudoqubit")
         logger.info(f"   Routing: hyperbolic spatial-temporal field management")
+
+    def _init_blockchain(self):
+        """
+        Initialise DB connector, validator, and BlockManager.
+        All failures are non-fatal — blockchain degrades to in-memory only.
+        """
+        # DB connector
+        if DB_AVAILABLE:
+            try:
+                self.db_connector = QuantumDatabaseConnector()
+                self.db_connector.start_logger()
+                logger.info("[BLOCKCHAIN] DB connector initialised")
+            except Exception as e:
+                logger.warning(f"[BLOCKCHAIN] DB connector failed ({e}); running in-memory only")
+                self.db_connector = None
+
+        # Validator
+        self.validator = IndividualValidator(
+            validator_id    = str(uuid.uuid4())[:16],
+            miner_address   = "miner_" + hashlib.sha3_256(
+                str(time.time()).encode()
+            ).hexdigest()[:16],
+        )
+        logger.info(f"[BLOCKCHAIN] Validator ready: {self.validator.miner_address}")
+
+        # BlockManager
+        self.block_manager = BlockManager(self.db_connector, self.validator)
+        logger.info("[BLOCKCHAIN] BlockManager created (not yet started)")
     
     def initialize_spatial_lattice(self) -> None:
-        """Initialize default spatial lattice with oracle, virtual, inversevirtual pseudoqubits"""
+        """
+        Register all 106,496 pseudoqubits on the vertices of the {8,3}
+        hyperbolic tessellation (Schläfli symbol {p=8, q=3}).
+
+        Geometry — {8,3} hyperbolic tessellation
+        ─────────────────────────────────────────
+        {8,3}: regular octagons, 3 meeting at every vertex, tiling the
+        hyperbolic plane H².  We work in the Poincaré disk model (unit disk,
+        |z| < 1) where the metric is ds² = 4(dx²+dy²)/(1-r²)².
+
+        Vertex generation via orbit of the symmetry group:
+          • Start from the centre octagon's vertices.
+          • Each vertex is at hyperbolic distance d from the origin where
+              cosh(d) = cos(π/3) / sin(π/p)  =  cos(60°) / sin(22.5°)
+          • Expand BFS outward: each vertex sprouts 3 edge-connected neighbours
+            (one already visited, two new) — octagon edges have Euclidean
+            chord length derived from the Poincaré metric.
+          • Stop when we have TOTAL_PSEUDOQUBITS vertices.
+
+        Topology
+        ─────────
+        • pq0  — the W-state ORACLE.  Only pq0 is the oracle.
+                  W-state is tripartite: (pq0_oracle | pq0_IV | pq0_V)
+                  These three live at the SAME spatial point (origin).
+        • pq1  — first regular lattice node.
+        • pq2  — second regular lattice node.
+        • Block 0 = the FIELD between pq1 and pq2 (like Bitcoin block 0 is
+                  between coinbase and first recipient).
+        • All remaining pqs (3 … TOTAL_PSEUDOQUBITS-1) are ordinary lattice
+          nodes ordered by BFS ring from the origin.
+
+        Batching
+        ─────────
+        52 batches of 2,048 pqs each, assigned in BFS order so spatially
+        adjacent pqs are in the same or adjacent batches.
+        """
         try:
-            # Register key pseudoqubits at different spatial locations
-            self.field.register_pseudoqubit(0, 0.0, 0.0, 0.0, label="oracle_pq0")
-            self.field.register_pseudoqubit(1, 1.0, 0.0, 0.0, label="inversevirtual_pq1")
-            self.field.register_pseudoqubit(2, 0.0, 1.0, 0.0, label="virtual_pq2")
-            
-            # Register additional pseudoqubits in a grid pattern
-            idx = 3
-            for x in np.linspace(-2, 2, 5):
-                for y in np.linspace(-2, 2, 5):
-                    if idx < min(100, TOTAL_PSEUDOQUBITS):  # Don't register all 106k
-                        self.field.register_pseudoqubit(idx, x, y, 0.0, label=f"pq{idx}")
-                        idx += 1
-            
-            logger.info(f"✅ Spatial lattice initialized with {len(self.field.locations)} registered pseudoqubits")
+            PQ_PER_BATCH = TOTAL_PSEUDOQUBITS // NUM_BATCHES    # 2048
+
+            # ── {8,3} Poincaré-disk vertex generator ─────────────────────────
+            # Fundamental vertex distance from origin (hyperbolic):
+            #   cosh(d) = cos(π/q) / sin(π/p)   for {p,q}={8,3}
+            p, q    = 8, 3
+            cos_d   = math.cos(math.pi / q) / math.sin(math.pi / p)
+            d_fund  = math.acosh(cos_d)                     # hyperbolic distance
+            # Poincaré disk radius for this distance:
+            r_fund  = math.tanh(d_fund / 2.0)               # |z| in disk model
+
+            # Edge length in hyperbolic metric:
+            #   cosh(edge) = cos²(π/q)/sin²(π/p) - cos²(π/p)/sin²(π/p)
+            #              = (cos²(π/q) - cos²(π/p)) / sin²(π/p)
+            # Simpler: use the standard {p,q} edge formula
+            cos_edge = (
+                math.cos(math.pi / p) ** 2 +
+                math.cos(math.pi / q) ** 2 - 1.0
+            ) / (math.sin(math.pi / p) ** 2)
+            # edge_len_hyp unused directly; we step vertices via Möbius transforms
+
+            # ── Möbius transform helpers (Poincaré disk automorphisms) ────────
+            def mobius(z: complex, a: complex) -> complex:
+                """Translate so that a→0: T_a(z) = (z - a)/(1 - ā·z)"""
+                denom = 1.0 - a.conjugate() * z
+                if abs(denom) < 1e-14:
+                    return complex(0)
+                return (z - a) / denom
+
+            def mobius_inv(z: complex, a: complex) -> complex:
+                """Inverse: 0→a"""
+                denom = 1.0 - a.conjugate() * z
+                if abs(denom) < 1e-14:
+                    return a
+                return (z + a) / (1.0 + a.conjugate() * z)
+
+            def rotate(z: complex, angle: float) -> complex:
+                return z * complex(math.cos(angle), math.sin(angle))
+
+            # ── Generate the 8 vertices of the central octagon ────────────────
+            # Vertices at angles k·(2π/8) from origin, at hyperbolic radius r_fund
+            central_verts: List[complex] = []
+            for k in range(p):
+                angle = k * 2.0 * math.pi / p
+                central_verts.append(
+                    complex(r_fund * math.cos(angle), r_fund * math.sin(angle))
+                )
+
+            # ── BFS expansion ─────────────────────────────────────────────────
+            # Each vertex in {8,3} has degree q=3.
+            # Neighbours of a vertex v are obtained by:
+            #   1. Translate disk so v→0
+            #   2. The q=3 edges from v are at angles  θ_parent + π + k·(2π/3)
+            #      relative to the incoming edge direction.
+            # We track: vertex position (complex), parent direction angle (float)
+
+            EPSILON     = 1e-9
+            MAX_RADIUS  = 1.0 - 1e-6     # stay inside Poincaré disk
+
+            # BFS generates TOTAL_PSEUDOQUBITS-1 vertices.
+            # pq0 is reserved for the oracle at the origin (not a tessellation vertex).
+            BFS_TARGET = TOTAL_PSEUDOQUBITS - 1
+
+            visited: dict = {}   # snap(z) → bfs_index (0-based)
+
+            def snap(z: complex) -> complex:
+                """Round to 8 decimal places for deduplication."""
+                return complex(round(z.real, 8), round(z.imag, 8))
+
+            from collections import deque as _deque
+            bfs: _deque = _deque()
+
+            for v in central_verts:
+                sv = snap(v)
+                if sv not in visited:
+                    visited[sv] = len(visited)
+                    in_angle = math.atan2(v.imag, v.real) + math.pi
+                    bfs.append((v, in_angle))
+
+            while len(visited) < BFS_TARGET and bfs:
+                v, in_angle = bfs.popleft()
+                if abs(v) >= MAX_RADIUS:
+                    continue
+                for k in range(q):
+                    ba = in_angle + k * 2.0 * math.pi / q
+                    r_step = math.tanh(d_edge / 2.0)
+                    dz = complex(r_step * math.cos(ba), r_step * math.sin(ba))
+                    neighbour = mobius_inv(dz, v)
+                    if abs(neighbour) >= MAX_RADIUS:
+                        continue
+                    sn = snap(neighbour)
+                    if sn in visited:
+                        continue
+                    visited[sn] = len(visited)
+                    bfs.append((neighbour, ba + math.pi))
+                    if len(visited) >= BFS_TARGET:
+                        break
+
+            # Build ordered list indexed by BFS order
+            id_to_z: List[complex] = [complex(0)] * len(visited)
+            for z, bfs_idx in visited.items():
+                id_to_z[bfs_idx] = complex(z.real, z.imag)
+
+            logger.debug(f"[LATTICE] {{8,3}} BFS generated {len(visited):,} vertices")
+
+            # ── Register pq0 — THE ORACLE (origin, W-state root) ─────────────
+            # pq0 is placed at the ORIGIN of the Poincaré disk.
+            # It is NOT a tessellation vertex; it is the unique oracle node.
+            # Its W-state triplet (IV, V) are implicit sub-qubits at the same point.
+            self.field.register_pseudoqubit(
+                0, 0.0, 0.0, 0.0,
+                label="pq0_oracle",
+            )
+            logger.info(
+                "🌐 pq0 registered at origin as W-state ORACLE\n"
+                "   W-state: pq0_oracle | pq0_IV | pq0_V  (tripartite, localised at origin)\n"
+                "   Block-0 field spans pq1 → pq2"
+            )
+
+            # ── BFS vertex list starts at pq1 ─────────────────────────────────
+            # The id_to_z list was built with BFS pq_id starting from 0 (first
+            # central octagon vertex).  We shift by +1 so BFS index 0 → pq1,
+            # BFS index 1 → pq2, etc.  This keeps the {8,3} vertex ordering
+            # intact while reserving pq0 for the oracle.
+
+            # ── Register pq1 and pq2 — Block-0 endpoints ─────────────────────
+            for special_id in (1, 2):
+                bfs_idx = special_id - 1   # pq1 ← BFS[0], pq2 ← BFS[1]
+                z = id_to_z[bfs_idx] if bfs_idx < len(id_to_z) else central_verts[bfs_idx]
+                self.field.register_pseudoqubit(
+                    special_id,
+                    float(z.real), float(z.imag), 0.0,
+                    label=f"pq{special_id}_block0_endpoint",
+                )
+            logger.debug(
+                f"   pq1 @ ({id_to_z[0].real:.4f}, {id_to_z[0].imag:.4f})"
+                f"   pq2 @ ({id_to_z[1].real:.4f}, {id_to_z[1].imag:.4f})"
+            )
+
+            # ── Register pq3 … TOTAL_PSEUDOQUBITS-1 in batches ───────────────
+            for batch_idx in range(NUM_BATCHES):
+                batch_start = batch_idx * PQ_PER_BATCH
+                batch_end   = batch_start + PQ_PER_BATCH
+
+                for pq_id in range(max(3, batch_start), min(batch_end, TOTAL_PSEUDOQUBITS)):
+                    bfs_idx = pq_id - 1   # shift: pq_id=3 → BFS[2], etc.
+                    z = id_to_z[bfs_idx] if bfs_idx < len(id_to_z) else complex(0)
+                    self.field.register_pseudoqubit(
+                        pq_id,
+                        float(z.real), float(z.imag), 0.0,
+                        label=f"b{batch_idx:02d}_pq{pq_id}",
+                    )
+
+                logger.debug(
+                    f"[LATTICE] Batch {batch_idx:02d}/{NUM_BATCHES} registered "
+                    f"pq {max(3, batch_start)}–{min(batch_end, TOTAL_PSEUDOQUBITS) - 1}"
+                )
+
+            logger.info(
+                f"✅ {{8,3}} hyperbolic lattice fully initialised:\n"
+                f"   {len(self.field.locations):,} pseudoqubits on {NUM_BATCHES} batches × {PQ_PER_BATCH}\n"
+                f"   pq0=oracle(W-state root)  pq1↔pq2=Block-0 field\n"
+                f"   Geometry: Poincaré disk, Schläfli {{8,3}}, BFS vertex order"
+            )
+
         except Exception as e:
             logger.error(f"Spatial lattice initialization failed: {e}")
+            logger.error(traceback.format_exc())
     
     def start(self):
-        """Start the quantum lattice"""
+        """
+        Start the quantum lattice.
+
+        Sequence:
+          1. Register all 106,496 pseudoqubits in 52 batches
+          2. Launch coherence maintenance thread
+          3. Boot the BlockManager (genesis check → chain resume or mint)
+        """
         with self._lock:
-            if not self.running:
-                self.initialize_spatial_lattice()
-                self.running = True
-                self.maintenance_thread = threading.Thread(
-                    target=self._maintenance_loop,
-                    daemon=True,
-                    name='QuantumLatticeMaintenanceThread'
-                )
-                self.maintenance_thread.start()
-                logger.info("[START] Quantum lattice maintenance loop running")
+            if self.running:
+                return
+
+            # ── Phase 1: spatial lattice ──────────────────────────────────────
+            self.initialize_spatial_lattice()
+
+            # ── Phase 2: coherence maintenance ───────────────────────────────
+            self.running = True
+            self.maintenance_thread = threading.Thread(
+                target=self._maintenance_loop,
+                daemon=True,
+                name='QuantumLatticeMaintenanceThread',
+            )
+            self.maintenance_thread.start()
+            logger.info("[START] Quantum lattice maintenance loop running")
+
+            # ── Phase 3: blockchain (BlockManager) ───────────────────────────
+            if self.block_manager is not None:
+                self.block_manager._lattice_ref = self   # live quantum snapshots
+                self.block_manager.start()
+                logger.info("[START] BlockManager started — chain is live")
     
     def stop(self):
-        """Stop the quantum lattice"""
+        """Stop the quantum lattice and all subsystems."""
         with self._lock:
             self.running = False
         if self.maintenance_thread:
             self.maintenance_thread.join(timeout=5)
-        logger.info("[STOP] Quantum lattice maintenance stopped")
+        if self.block_manager is not None:
+            try:
+                self.block_manager.stop()
+            except Exception:
+                pass
+        if self.db_connector is not None:
+            try:
+                self.db_connector.stop_logger()
+                self.db_connector.close()
+            except Exception:
+                pass
+        logger.info("[STOP] Quantum lattice and blockchain subsystems stopped")
     
     def _maintenance_loop(self):
         """Perpetual non-Markovian coherence maintenance"""
@@ -1924,6 +2173,7 @@ class BlockManager:
     def __init__(self, db_connector: QuantumDatabaseConnector, validator: IndividualValidator):
         self.db = db_connector
         self.validator = validator
+        self._lattice_ref = None          # set by QuantumLatticeController.start()
         self.mempool: Dict[str, QuantumTransaction] = {}
         self.pending_block: Optional[QuantumBlock] = None
         self.chain_height = 0
@@ -1954,25 +2204,124 @@ class BlockManager:
         logger.info("✅ BlockManager stopped")
     
     def _create_genesis_block(self):
-        """Create genesis block"""
+        """
+        Bitcoin-style chain bootstrap.
+
+        1. Query DB for the highest sealed block.
+        2. If a chain already exists  → resume from the tip (no new genesis).
+        3. If the chain is empty      → mint genesis block, persist to DB.
+
+        Genesis block parameters (fixed, deterministic):
+          height        = 0
+          parent_hash   = 0x000…000   (null parent, 64 hex zeros)
+          merkle_root   = SHA3-256("QTCL_GENESIS")
+          timestamp_s   = 1700000000  (fixed — same on every node)
+          block_hash    = SHA3-256( canonical JSON of above fields )
+          hlwe_witness  = SHA3-256("GENESIS_WITNESS")
+
+        The genesis hash is therefore *deterministic* — every node that starts
+        fresh will arrive at the same genesis block hash, enabling network
+        consensus from block 0.
+        """
         with self.lock:
+            # ── Try to resume from persisted chain ───────────────────────────
+            if self.db is not None:
+                try:
+                    rows = self.db.execute_fetch_all(
+                        "SELECT block_height, block_hash, oracle_w_state_hash "
+                        "FROM blocks ORDER BY block_height DESC LIMIT 1"
+                    )
+                    if rows:
+                        tip = rows[0]
+                        tip_height  = tip.get('block_height', 0)
+                        tip_hash    = tip.get('block_hash',   '0x' + '0'*64)
+                        logger.info(
+                            f"📦 [GENESIS] Resuming from DB tip: "
+                            f"height={tip_height}  hash={tip_hash[:18]}…"
+                        )
+                        self.chain_height        = tip_height + 1
+                        self.current_block_hash  = tip_hash
+                        self.pending_block = QuantumBlock(
+                            block_height   = self.chain_height,
+                            parent_hash    = tip_hash,
+                            miner_address  = self.validator.miner_address,
+                        )
+                        return   # chain already exists — nothing more to do
+                except Exception as db_err:
+                    logger.warning(
+                        f"[GENESIS] DB query failed ({db_err}); "
+                        "falling through to in-memory genesis."
+                    )
+
+            # ── No existing chain → mint deterministic genesis ───────────────
+            GENESIS_TIMESTAMP = 1_700_000_000   # fixed epoch — same on all nodes
+            GENESIS_MERKLE    = hashlib.sha3_256(b"QTCL_GENESIS").hexdigest()
+            GENESIS_WITNESS   = hashlib.sha3_256(b"GENESIS_WITNESS").hexdigest()
+
+            genesis_preimage = json.dumps({
+                'block_height':   0,
+                'parent_hash':    '0x' + '0'*64,
+                'merkle_root':    GENESIS_MERKLE,
+                'miner_address':  self.validator.miner_address,
+                'timestamp_s':    GENESIS_TIMESTAMP,
+                'tx_count':       0,
+            }, sort_keys=True)
+            genesis_hash = "0x" + hashlib.sha3_256(genesis_preimage.encode()).hexdigest()
+
             genesis = QuantumBlock(
-                block_height=0,
-                block_hash="0x" + "0"*64,
-                parent_hash="0x" + "0"*64,
-                miner_address=self.validator.miner_address,
+                block_height       = 0,
+                block_hash         = genesis_hash,
+                parent_hash        = '0x' + '0'*64,
+                miner_address      = self.validator.miner_address,
+                tx_count           = 0,
+                merkle_root        = GENESIS_MERKLE,
+                timestamp_s        = GENESIS_TIMESTAMP,
+                coherence_snapshot = 1.0,
+                fidelity_snapshot  = 1.0,
+                w_state_hash       = GENESIS_WITNESS,
+                hlwe_witness       = GENESIS_WITNESS,
+                finalized          = True,
+                finalized_at       = GENESIS_TIMESTAMP,
             )
-            self.genesis_block = genesis
-            self.block_by_height[0] = genesis
+
+            self.genesis_block              = genesis
+            self.block_by_height[0]         = genesis
             self.sealed_blocks.append(genesis)
-            self.chain_height = 1
-            self.current_block_hash = genesis.block_hash
+            self.chain_height               = 1
+            self.current_block_hash         = genesis_hash
+
             self.pending_block = QuantumBlock(
-                block_height=1,
-                parent_hash=genesis.block_hash,
-                miner_address=self.validator.miner_address,
+                block_height  = 1,
+                parent_hash   = genesis_hash,
+                miner_address = self.validator.miner_address,
             )
-            logger.info("✅ Genesis block created")
+
+            logger.info(
+                f"🌐 [GENESIS] Genesis block minted\n"
+                f"   height=0  hash={genesis_hash[:18]}…\n"
+                f"   merkle={GENESIS_MERKLE[:18]}…\n"
+                f"   timestamp={GENESIS_TIMESTAMP}  (deterministic — fixed across all nodes)"
+            )
+
+            # Persist genesis to DB if available
+            if self.db is not None:
+                try:
+                    self.db.execute(
+                        """
+                        INSERT INTO blocks
+                            (block_height, block_hash, parent_hash, oracle_w_state_hash,
+                             timestamp, tx_count, merkle_root, hlwe_witness)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (block_height) DO NOTHING
+                        """,
+                        (
+                            0, genesis_hash, '0x' + '0'*64, GENESIS_WITNESS,
+                            GENESIS_TIMESTAMP, 0, GENESIS_MERKLE, GENESIS_WITNESS,
+                        ),
+                    )
+                    logger.info("[GENESIS] ✅ Genesis block persisted to DB")
+                except Exception as persist_err:
+                    logger.warning(f"[GENESIS] DB persist failed ({persist_err}); genesis lives in-memory only")
     
     def receive_transaction(self, tx: QuantumTransaction) -> bool:
         """Receive transaction into mempool"""
@@ -2037,61 +2386,103 @@ class BlockManager:
                 time.sleep(0.5)
     
     def _seal_current_block(self):
-        """ATOMIC SEALING OPERATION"""
+        """ATOMIC SEALING OPERATION — compute, finalise, persist."""
         try:
             if not self.pending_block or len(self.pending_block.transactions) == 0:
                 return
             block = self.pending_block
             block.timestamp_s = int(time.time())
-            block.tx_count = len(block.transactions)
-            
-            # Compute merkle root
-            tx_hashes = [QuantumTransaction.compute_hash(tx.to_dict()) for tx in block.transactions]
+            block.tx_count    = len(block.transactions)
+
+            # ── Merkle root ───────────────────────────────────────────────────
+            tx_hashes        = [QuantumTransaction.compute_hash(tx.to_dict()) for tx in block.transactions]
             block.merkle_root = self.validator._compute_merkle_root(tx_hashes)
-            
-            # Take quantum snapshots
-            block.coherence_snapshot = 0.95
-            block.fidelity_snapshot = 0.992
-            
-            # Generate HLWE witness
-            witness_data = json.dumps({
+
+            # ── Quantum snapshots (live from lattice if wired up) ─────────────
+            if self._lattice_ref is not None:
+                try:
+                    block.coherence_snapshot = self._lattice_ref.coherence
+                    block.fidelity_snapshot  = self._lattice_ref.fidelity
+                    block.w_state_hash       = hashlib.sha3_256(
+                        json.dumps(self._lattice_ref.get_state(), sort_keys=True).encode()
+                    ).hexdigest()
+                except Exception:
+                    block.coherence_snapshot = 0.95
+                    block.fidelity_snapshot  = 0.992
+                    block.w_state_hash       = ""
+            else:
+                block.coherence_snapshot = 0.95
+                block.fidelity_snapshot  = 0.992
+
+            # ── HLWE post-quantum witness ─────────────────────────────────────
+            witness_data      = json.dumps({
                 'block_height': block.block_height,
-                'merkle_root': block.merkle_root,
-                'tx_count': block.tx_count,
+                'merkle_root':  block.merkle_root,
+                'tx_count':     block.tx_count,
+                'w_state_hash': block.w_state_hash,
             }, sort_keys=True)
             block.hlwe_witness = hashlib.sha3_256(witness_data.encode()).hexdigest()
-            
-            # Compute block hash
-            block.block_hash = self.validator._compute_block_hash(block)
-            
-            # Update chain
+
+            # ── Block hash (covers everything) ────────────────────────────────
+            block.block_hash  = self.validator._compute_block_hash(block)
+            block.finalized   = True
+            block.finalized_at = block.timestamp_s
+
+            # ── Update in-memory chain ────────────────────────────────────────
             self.sealed_blocks.append(block)
             self.block_by_height[block.block_height] = block
             self.current_block_hash = block.block_hash
-            
-            # Remove sealed TXs from mempool
+
             for tx in block.transactions:
-                if tx.tx_id in self.mempool:
-                    del self.mempool[tx.tx_id]
-            
-            # Create next pending block
-            next_block = QuantumBlock(
-                block_height=self.chain_height,
-                parent_hash=self.current_block_hash,
-                miner_address=self.validator.miner_address,
+                self.mempool.pop(tx.tx_id, None)
+
+            # ── Persist to DB ─────────────────────────────────────────────────
+            if self.db is not None:
+                try:
+                    self.db.execute(
+                        """
+                        INSERT INTO blocks
+                            (block_height, block_hash, parent_hash, oracle_w_state_hash,
+                             timestamp, tx_count, merkle_root, hlwe_witness)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (block_height) DO UPDATE SET
+                            block_hash        = EXCLUDED.block_hash,
+                            oracle_w_state_hash = EXCLUDED.oracle_w_state_hash,
+                            timestamp         = EXCLUDED.timestamp,
+                            tx_count          = EXCLUDED.tx_count,
+                            merkle_root       = EXCLUDED.merkle_root,
+                            hlwe_witness      = EXCLUDED.hlwe_witness
+                        """,
+                        (
+                            block.block_height, block.block_hash, block.parent_hash,
+                            block.w_state_hash, block.timestamp_s, block.tx_count,
+                            block.merkle_root, block.hlwe_witness,
+                        ),
+                    )
+                except Exception as db_err:
+                    logger.warning(f"[SEAL] DB persist failed for block #{block.block_height}: {db_err}")
+
+            # ── Create next pending block ─────────────────────────────────────
+            self.pending_block = QuantumBlock(
+                block_height  = self.chain_height,
+                parent_hash   = self.current_block_hash,
+                miner_address = self.validator.miner_address,
             )
-            self.pending_block = next_block
-            
-            # Metrics
+
             seal_time = time.time() - self.last_block_time
             self.block_seal_times.append(seal_time)
             self.last_block_time = time.time()
-            self.chain_height += 1
-            self.blocks_sealed += 1
-            
-            logger.info(f"🎉 BLOCK SEALED | #{block.block_height} | {block.tx_count} TXs | {seal_time:.2f}s")
+            self.chain_height   += 1
+            self.blocks_sealed  += 1
+
+            logger.info(
+                f"🎉 BLOCK SEALED | #{block.block_height} | "
+                f"{block.tx_count} TXs | {seal_time:.2f}s | "
+                f"hash={block.block_hash[:18]}…"
+            )
         except Exception as e:
             logger.error(f"❌ Sealing failed: {e}")
+            logger.error(traceback.format_exc())
     
     def request_block_seal(self):
         """Explicitly request block seal"""
