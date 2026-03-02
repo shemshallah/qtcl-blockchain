@@ -52,6 +52,20 @@ if not logging.getLogger().hasHandlers():
 logger = logging.getLogger(__name__)
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# ENTROPY POOL INTEGRATION
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+try:
+    from globals import get_block_field_entropy
+    ENTROPY_AVAILABLE = True
+except ImportError:
+    ENTROPY_AVAILABLE = False
+    def get_block_field_entropy():
+        """Fallback: use random entropy if block field not available"""
+        import os
+        return os.urandom(32)
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # CONSTANTS & ENUMS
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -158,6 +172,9 @@ class Mempool:
         # TX count per sender (rate limiting)
         self._sender_tx_count: Dict[str, int] = {}
         
+        # Entropy-based nonce counters per sender
+        self._nonce_counters: Dict[str, int] = {}
+        
         # Metrics
         self._metrics = {
             'total_received': 0,
@@ -174,6 +191,82 @@ class Mempool:
         
         logger.info("[MEMPOOL] Mempool initialized (max_size={}, max_per_sender={})".format(
             MAX_MEMPOOL_SIZE, MAX_PENDING_PER_SENDER))
+    
+    def generate_nonce_for_address(self, address: str) -> int:
+        """
+        Generate entropy-based nonce for address.
+        
+        Nonce structure:
+          - Timestamp component (32 bits)
+          - Entropy component (32 bits) from block field
+          - Counter component (8 bits) per address
+          - Total: 64-bit strictly increasing nonce
+        
+        Args:
+            address: Sender address
+        
+        Returns:
+            64-bit nonce (strictly increasing per address)
+        """
+        with self._lock:
+            try:
+                # Get entropy from block field
+                entropy = get_block_field_entropy()
+                
+                # Initialize counter for this address if needed
+                if address not in self._nonce_counters:
+                    self._nonce_counters[address] = 0
+                
+                # Build entropy input
+                entropy_input = (
+                    entropy +
+                    address.encode('utf-8') +
+                    self._nonce_counters[address].to_bytes(4, 'big')
+                )
+                
+                # Hash entropy input to get entropy component
+                entropy_hash = hashlib.sha256(entropy_input).digest()
+                entropy_component = int.from_bytes(entropy_hash[:4], 'big')
+                
+                # Get timestamp component
+                timestamp_ms = int(time.time() * 1000)
+                timestamp_component = (timestamp_ms & 0xFFFFFFFF)
+                
+                # Build nonce
+                nonce = (timestamp_component << 32) | entropy_component
+                
+                # Ensure strictly increasing
+                last_nonce = self._nonces.get(address, 0)
+                if nonce <= last_nonce:
+                    nonce = last_nonce + 1
+                
+                # Update counter and stored nonce
+                self._nonce_counters[address] += 1
+                self._nonces[address] = nonce
+                
+                logger.debug(f"[MEMPOOL] Generated nonce {nonce} for {address[:16]}... (counter={self._nonce_counters[address]})")
+                return nonce
+            
+            except Exception as e:
+                logger.error(f"[MEMPOOL] Nonce generation failed for {address}: {e}")
+                # Fallback: use simple counter-based nonce
+                last_nonce = self._nonces.get(address, 0)
+                nonce = last_nonce + 1
+                self._nonces[address] = nonce
+                return nonce
+    
+    def get_next_nonce_for_address(self, address: str) -> int:
+        """
+        Get next expected nonce for address (for validation).
+        
+        Args:
+            address: Sender address
+        
+        Returns:
+            Next nonce (last_nonce + 1)
+        """
+        with self._lock:
+            return self._nonces.get(address, 0) + 1
     
     # ────────────────────────────────────────────────────────────────────────────────────────
     # PUBLIC API

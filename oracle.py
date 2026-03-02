@@ -48,6 +48,19 @@ getcontext().prec = 150
 logger = logging.getLogger(__name__)
 
 # ═════════════════════════════════════════════════════════════════════════════════
+# BLOCK FIELD ENTROPY INTEGRATION
+# ═════════════════════════════════════════════════════════════════════════════════
+
+try:
+    from globals import get_block_field_entropy
+    ENTROPY_AVAILABLE = True
+except ImportError:
+    ENTROPY_AVAILABLE = False
+    def get_block_field_entropy():
+        """Fallback: use random entropy if block field not available"""
+        return secrets.token_bytes(32)
+
+# ═════════════════════════════════════════════════════════════════════════════════
 # QUANTUM IMPORTS (Graceful Degradation)
 # ═════════════════════════════════════════════════════════════════════════════════
 
@@ -462,10 +475,20 @@ class HLWESigner:
     def __init__(self, keyring: HDKeyring):
         self._keyring = keyring
 
-    def sign_message(self, message_hash: str, keypair: OracleKeyPair, w_entropy: bytes) -> HLWESignature:
+    def sign_message(self, message_hash: str, keypair: OracleKeyPair, w_entropy: Optional[bytes] = None) -> HLWESignature:
         """
         Sign a message (arbitrary hash) with a keypair + W-state entropy.
+        
+        If w_entropy not provided, sources from block field entropy pool (nonmarkovian noise bath).
         """
+        # Get entropy from block field if not provided
+        if w_entropy is None:
+            try:
+                w_entropy = get_block_field_entropy()
+            except Exception as e:
+                logger.warning(f"[ORACLE] Failed to get block field entropy, using random: {e}")
+                w_entropy = secrets.token_bytes(32)
+        
         # 1. Commitment = SHA3-256(private || w_entropy || message_hash)
         commitment_input = keypair.private_key + w_entropy + bytes.fromhex(message_hash)
         commitment = hashlib.sha3_256(commitment_input).digest()
@@ -492,11 +515,13 @@ class HLWESigner:
         )
 
     def sign_transaction(
-        self, tx_hash: str, sender_address: str, account: int, change: int, index: int, w_entropy: bytes
+        self, tx_hash: str, sender_address: str, account: int, change: int, index: int, w_entropy: Optional[bytes] = None
     ) -> HLWESignature:
         """
         Sign a transaction with HLWE + W-state.
         Derives the address-specific key for this sender.
+        
+        If w_entropy not provided, sources from block field entropy pool.
         """
         keypair = self._keyring.derive_address_key(account, change, index)
         return self.sign_message(tx_hash, keypair, w_entropy)

@@ -41,6 +41,23 @@ if not logging.getLogger().hasHandlers():
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
+# BLOCK FIELD ENTROPY POOL INTEGRATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+try:
+    from globals import get_block_field_entropy
+    ENTROPY_AVAILABLE = True
+except ImportError:
+    ENTROPY_AVAILABLE = False
+    def get_block_field_entropy():
+        """Fallback: use random entropy"""
+        import os
+        return os.urandom(32)
+
+logger.info("[HLWE] Block field entropy available: {}".format(
+    "✅" if ENTROPY_AVAILABLE else "⚠️ (fallback)"))
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS & ENUMS
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -103,21 +120,44 @@ class HLWECryptoSystem:
 
     def generate_keypair(self) -> Tuple[str, str]:
         """
-        Generate HLWE-256 keypair
+        Generate HLWE-256 keypair using block field entropy.
+        
+        Key material is derived from:
+          1. Block field entropy (primary - nonmarkovian noise bath)
+          2. System entropy (secondary - for additional randomness)
+        
         Returns: (public_key, private_key)
         """
         try:
-            # Public key: 32 bytes hex
-            public_key = secrets.token_hex(32)
+            # Get entropy from block field (nonmarkovian noise)
+            block_entropy = get_block_field_entropy()
             
-            # Private key: 64 bytes hex (double size for redundancy)
-            private_key = secrets.token_hex(64)
+            # Get additional system entropy for redundancy
+            system_entropy = secrets.token_bytes(32)
             
-            logger.debug(f"[HLWE] Generated keypair")
+            # Combine entropies
+            combined_entropy = hashlib.sha512(block_entropy + system_entropy).digest()
+            
+            # Public key: 32 bytes from first half of combined entropy
+            public_key = combined_entropy[:32].hex()
+            
+            # Private key: 64 bytes from combined entropy + additional material
+            additional_entropy = secrets.token_bytes(32)
+            private_key_material = combined_entropy + additional_entropy
+            private_key = hashlib.sha512(private_key_material).hexdigest()[:128]
+            
+            logger.debug(f"[HLWE] Generated keypair from block field entropy")
             return public_key, private_key
         except Exception as e:
             logger.error(f"[HLWE] Key generation failed: {e}")
-            raise
+            # Fallback to random
+            try:
+                public_key = secrets.token_hex(32)
+                private_key = secrets.token_hex(64)
+                logger.warning(f"[HLWE] Using fallback random key generation")
+                return public_key, private_key
+            except:
+                raise
 
     def generate_address(self, public_key: str) -> str:
         """

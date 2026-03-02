@@ -53,6 +53,22 @@ from flask import Flask, jsonify, request, render_template_string, send_file
 from io import BytesIO
 
 # ═════════════════════════════════════════════════════════════════════════════════
+# ENTROPY POOL INTEGRATION
+# ═════════════════════════════════════════════════════════════════════════════════
+
+try:
+    from globals import (
+        initialize_block_field_entropy,
+        set_current_block_field,
+        get_block_field_entropy,
+        initialize_system as init_entropy_system
+    )
+    ENTROPY_AVAILABLE = True
+except ImportError:
+    ENTROPY_AVAILABLE = False
+    logger.warning("[ENTROPY] Block field entropy not available - will use fallback")
+
+# ═════════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION & CONSTANTS
 # ═════════════════════════════════════════════════════════════════════════════════
 
@@ -2409,8 +2425,26 @@ def server_error(e):
 
 @app.before_request
 def before_request():
-    """Before each request"""
-    pass
+    """Before each request - initialize entropy pool on first request"""
+    if ENTROPY_AVAILABLE and not hasattr(before_request, '_entropy_initialized'):
+        try:
+            logger.info("[ENTROPY] Initializing block field entropy on first request...")
+            initialize_block_field_entropy()
+            
+            # Set initial block field
+            initial_block = {
+                'height': 0,
+                'hash': '0x' + '0' * 64,
+                'timestamp': int(time.time() * 1000),
+                'genesis': True,
+            }
+            set_current_block_field(initial_block)
+            
+            before_request._entropy_initialized = True
+            logger.info("[ENTROPY] ✓ Block field entropy initialized")
+        except Exception as e:
+            logger.error(f"[ENTROPY] Initialization failed: {e}")
+            before_request._entropy_initialized = False
 
 
 @app.teardown_appcontext
@@ -2447,7 +2481,31 @@ if __name__ == '__main__':
     import atexit
     atexit.register(shutdown_handler)
     
+    # Initialize Entropy Pool (CRITICAL - must be first)
+    logger.info("[STARTUP] Phase 1/3: Initializing block field entropy pool...")
+    if ENTROPY_AVAILABLE:
+        try:
+            initialize_block_field_entropy()
+            
+            # Set initial block field
+            initial_block = {
+                'height': 0,
+                'hash': '0x' + '0' * 64,
+                'timestamp': int(time.time() * 1000),
+                'genesis': True,
+                'entropy_source': 'block_field',
+            }
+            set_current_block_field(initial_block)
+            
+            logger.info("[STARTUP] ✓ Block field entropy pool initialized")
+        except Exception as e:
+            logger.error(f"[STARTUP] Entropy initialization failed: {e}")
+            logger.error("[STARTUP] Continuing without entropy pool (degraded mode)")
+    else:
+        logger.warning("[STARTUP] Entropy pool not available - continuing in degraded mode")
+    
     # Initialize P2P server
+    logger.info("[STARTUP] Phase 2/3: Initializing P2P server...")
     if not initialize_p2p():
         logger.warning("[STARTUP] Failed to initialize P2P server (may retry)")
     

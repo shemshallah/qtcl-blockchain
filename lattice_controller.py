@@ -69,6 +69,26 @@ if not logging.getLogger().hasHandlers():
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
+# BLOCK FIELD ENTROPY POOL INTEGRATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+try:
+    from globals import get_block_field_entropy, get_entropy_pool_manager
+    ENTROPY_AVAILABLE = True
+except ImportError:
+    ENTROPY_AVAILABLE = False
+    def get_block_field_entropy():
+        """Fallback: use random entropy"""
+        import os
+        return os.urandom(32)
+    def get_entropy_pool_manager():
+        """Stub for compatibility"""
+        return None
+
+logger.info("[LATTICE] Block field entropy pool integration: {}".format(
+    "✅ Available" if ENTROPY_AVAILABLE else "⚠️  Fallback mode"))
+
+# ─────────────────────────────────────────────────────────────────────────────
 # QISKIT + QISKIT-AER — GRANULAR IMPORTS WITH DIAGNOSTICS
 #
 # Each import block is independent so a missing sub-package doesn't silently
