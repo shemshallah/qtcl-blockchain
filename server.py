@@ -53,6 +53,16 @@ from flask import Flask, jsonify, request, render_template_string, send_file
 from io import BytesIO
 
 # ═════════════════════════════════════════════════════════════════════════════════
+# LOGGING SETUP (MUST BE FIRST - all subsequent code depends on logger)
+# ═════════════════════════════════════════════════════════════════════════════════
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s [%(name)s]: %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# ═════════════════════════════════════════════════════════════════════════════════
 # ENTROPY POOL INTEGRATION
 # ═════════════════════════════════════════════════════════════════════════════════
 
@@ -71,13 +81,6 @@ except ImportError:
 # ═════════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION & CONSTANTS
 # ═════════════════════════════════════════════════════════════════════════════════
-
-# Logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] %(levelname)s [%(name)s]: %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 # Database Configuration
 # Supabase provides individual pooler connection variables OR a full URL
