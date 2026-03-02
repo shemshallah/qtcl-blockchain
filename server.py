@@ -2249,6 +2249,70 @@ def oracle_status():
     return jsonify(ORACLE.get_status()), 200
 
 
+@app.route('/api/oracle/register', methods=['POST'])
+def oracle_register():
+    """Register miner with oracle for W-state entanglement"""
+    try:
+        data = request.json or {}
+        miner_id = data.get('miner_id')
+        address = data.get('address')
+        public_key = data.get('public_key')
+        
+        if not all([miner_id, address, public_key]):
+            return jsonify({'error': 'miner_id, address, public_key required'}), 400
+        
+        # Store miner registration (in-memory for now)
+        if not hasattr(oracle_register, 'miners'):
+            oracle_register.miners = {}
+        
+        oracle_register.miners[miner_id] = {
+            'address': address,
+            'public_key': public_key,
+            'timestamp': time.time()
+        }
+        
+        return jsonify({
+            'status': 'registered',
+            'miner_id': miner_id,
+            'token': hashlib.sha256(f"{miner_id}{address}".encode()).hexdigest()[:16]
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/oracle/w-state', methods=['GET'])
+def oracle_w_state():
+    """Get latest W-state snapshot for mining"""
+    try:
+        snapshot = state.get_state()
+        return jsonify({
+            'timestamp_ns': int(time.time() * 1e9),
+            'pq_current': snapshot['block_state']['pq_current'],
+            'pq_last': snapshot['block_state']['pq_last'],
+            'block_height': snapshot['block_state']['current_height'],
+            'fidelity': snapshot['quantum_metrics'].get('fidelity', 0.9),
+            'coherence': snapshot['quantum_metrics'].get('coherence', 0.85)
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/mempool', methods=['GET'])
+def get_mempool():
+    """Get pending transactions from mempool"""
+    try:
+        if LATTICE is None or LATTICE.mempool is None:
+            return jsonify({'transactions': []}), 200
+        
+        mempool_txs = LATTICE.mempool.get_pending_transactions(max_count=100)
+        return jsonify({
+            'size': len(mempool_txs),
+            'transactions': mempool_txs[:50]  # Return top 50 by fee
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/chain', methods=['GET'])
 def chain_status():
     """Full chain state from BlockManager"""
