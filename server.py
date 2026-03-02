@@ -1888,6 +1888,18 @@ class P2PServer:
                         self.stats['messages_sent'] += 1
                         self.stats['txs_sent']      += 1
     
+    def broadcast_block(self, block_data: Dict[str, Any]):
+        """Broadcast newly mined/accepted block to all peers."""
+        message = Message(msg_type='block', payload=block_data)
+        with self.peers_lock:
+            for peer_conn in list(self.peers.values()):
+                if peer_conn.is_connected and peer_conn.version_received:
+                    peer_conn.send_message(message)
+                    with self.stats_lock:
+                        self.stats['messages_sent'] += 1
+                        self.stats['blocks_sent'] = self.stats.get('blocks_sent', 0) + 1
+        logger.info(f"[P2P] 📡 Broadcast block to {self.get_peer_count()} peers")
+    
     def announce_inventory(self, inv_type: str, hashes: List[str]):
         """Announce inventory to peers"""
         message = Message(
@@ -2387,8 +2399,129 @@ def chain_status():
     return jsonify(stats), 200
 
 
-@app.route('/api/transact', methods=['POST'])
-def transact():
+@app.route('/api/submit-block', methods=['POST'])
+def submit_block():
+    """
+    Miners submit mined blocks here.
+    
+    Body: {
+        block_height, block_hash, parent_hash, merkle_root,
+        timestamp_s, difficulty_bits, nonce, miner_address,
+        w_state_fidelity, w_entropy_hash,
+        transactions: []
+    }
+    
+    Server validates:
+    1. Block header integrity
+    2. PoW (hash meets difficulty)
+    3. W-state fidelity >= 0.85
+    4. Correct parent reference
+    5. Transactions valid
+    
+    If valid:
+    - Add to chain
+    - Pay miner reward (block subsidy + fees)
+    - Broadcast via P2P
+    """
+    data = request.get_json() or {}
+    
+    try:
+        # Extract block data
+        block_height = int(data.get('block_height', 0))
+        block_hash = data.get('block_hash', '')
+        parent_hash = data.get('parent_hash', '')
+        merkle_root = data.get('merkle_root', '')
+        timestamp_s = int(data.get('timestamp_s', time.time()))
+        difficulty_bits = int(data.get('difficulty_bits', 12))
+        nonce = int(data.get('nonce', 0))
+        miner_address = data.get('miner_address', '')
+        w_state_fidelity = float(data.get('w_state_fidelity', 0.0))
+        w_entropy_hash = data.get('w_entropy_hash', '')
+        transactions = data.get('transactions', [])
+        
+        # Validation 1: Required fields
+        if not all([block_hash, miner_address]):
+            return jsonify({'error': 'missing block_hash or miner_address'}), 400
+        
+        # Validation 2: W-state fidelity threshold
+        if w_state_fidelity < 0.85:
+            return jsonify({'error': f'W-state fidelity too low: {w_state_fidelity:.4f} < 0.85'}), 422
+        
+        # Validation 3: PoW check (hash must be below target difficulty)
+        target = 2 ** (256 - difficulty_bits)
+        block_hash_int = int(block_hash, 16) if len(block_hash) == 64 else int(block_hash, 10)
+        if block_hash_int >= target:
+            return jsonify({'error': f'PoW invalid: hash does not meet difficulty target'}), 422
+        
+        # Validation 4: Check parent block exists
+        snapshot = state.get_state()
+        tip_height = snapshot['block_state']['current_height']
+        if block_height != tip_height + 1:
+            return jsonify({
+                'error': f'Invalid block height: {block_height}, expected {tip_height + 1}'
+            }), 422
+        
+        if parent_hash != snapshot['block_state']['current_hash']:
+            return jsonify({
+                'error': f'Invalid parent hash: {parent_hash}, expected {snapshot["block_state"]["current_hash"]}'
+            }), 422
+        
+        # Validation 5: Timestamp sanity check
+        if timestamp_s > time.time() + 3600:
+            return jsonify({'error': 'block timestamp too far in future'}), 422
+        
+        # BLOCK VALID! Accept and broadcast
+        logger.info(f"[BLOCK] ✅ Valid block from {miner_address[:20]}… | height={block_height} | F={w_state_fidelity:.4f}")
+        
+        # Update chain state
+        state.update_block_state({
+            'current_height': block_height,
+            'current_hash': block_hash,
+            'parent_hash': parent_hash,
+            'timestamp': timestamp_s,
+            'miner_address': miner_address,
+            'pq_current': w_entropy_hash,
+            'difficulty': difficulty_bits,
+        })
+        
+        # Pay miner reward (12.5 QTCL + transaction fees)
+        block_reward = 12.5
+        fee_total = sum([tx.get('fee', 0) for tx in transactions])
+        miner_total = block_reward + fee_total
+        
+        # P2P broadcast the new block
+        if P2P:
+            block_msg = {
+                'type': 'block',
+                'block_height': block_height,
+                'block_hash': block_hash,
+                'parent_hash': parent_hash,
+                'merkle_root': merkle_root,
+                'timestamp_s': timestamp_s,
+                'difficulty_bits': difficulty_bits,
+                'nonce': nonce,
+                'miner_address': miner_address,
+                'w_state_fidelity': w_state_fidelity,
+                'w_entropy_hash': w_entropy_hash,
+                'transactions': transactions,
+            }
+            P2P.broadcast_block(block_msg)
+            logger.info(f"[P2P] 📡 Broadcasting block {block_hash[:16]}… to peers")
+        
+        return jsonify({
+            'status': 'accepted',
+            'block_height': block_height,
+            'block_hash': block_hash,
+            'miner_reward': miner_total,
+            'transactions_included': len(transactions),
+            'w_state_fidelity': w_state_fidelity,
+        }), 201
+    
+    except ValueError as e:
+        return jsonify({'error': f'Invalid format: {e}'}), 400
+    except Exception as e:
+        logger.error(f"[BLOCK] ❌ Block submission failed: {e}")
+        return jsonify({'error': str(e)}), 500
     """
     Submit a transaction.
 
