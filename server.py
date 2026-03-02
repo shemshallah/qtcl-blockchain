@@ -64,19 +64,31 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Database Configuration
-# REQUIRED: Supabase POOLER_URL (PgBouncer connection pooling)
-# Get from: Supabase Dashboard → Settings → Database → Connection Pooling
+# Supabase provides individual pooler connection variables OR a full URL
+# Try full URL first, then build from components
+
 POOLER_URL = os.getenv('POOLER_URL')
 
 if not POOLER_URL:
-    logger.error("[DB] ❌ CRITICAL: POOLER_URL environment variable not set!")
-    logger.error("[DB] Get POOLER_URL from Supabase Dashboard:")
-    logger.error("[DB]   → Settings → Database → Connection Pooling")
-    logger.error("[DB]   → Copy the 'postgresql://...' URL (contains 'pooler.supabase.com')")
-    raise ValueError("POOLER_URL environment variable is required for Supabase connection")
+    # Build from individual Supabase environment variables
+    POOLER_HOST = os.getenv('POOLER_HOST')
+    POOLER_USER = os.getenv('POOLER_USER')
+    POOLER_PASSWORD = os.getenv('POOLER_PASSWORD')
+    POOLER_DB = os.getenv('POOLER_DB', 'postgres')
+    POOLER_PORT = os.getenv('POOLER_PORT', '6543')
+    
+    if POOLER_HOST and POOLER_USER and POOLER_PASSWORD:
+        POOLER_URL = f"postgresql://{POOLER_USER}:{POOLER_PASSWORD}@{POOLER_HOST}:{POOLER_PORT}/{POOLER_DB}"
+        logger.info("[DB] Built POOLER_URL from POOLER_* environment variables")
+    else:
+        logger.error("[DB] ❌ CRITICAL: Supabase connection not configured!")
+        logger.error("[DB] Set one of:")
+        logger.error("[DB]   1. POOLER_URL=postgresql://...")
+        logger.error("[DB]   2. POOLER_HOST, POOLER_USER, POOLER_PASSWORD, POOLER_DB, POOLER_PORT")
+        raise ValueError("Supabase pooler connection variables not set")
 
 DB_URL = POOLER_URL
-logger.info(f"[DB] ✨ Using Supabase Pooler: {POOLER_URL.split('@')[1] if '@' in POOLER_URL else 'configured'}")
+logger.info(f"[DB] ✨ Using Supabase Pooler: {POOLER_HOST or 'configured'}")
 
 # P2P Network
 P2P_PORT = int(os.getenv('P2P_PORT', 8333))
@@ -276,31 +288,32 @@ class DatabasePool:
                 min_connections = int(os.getenv('DB_POOL_MIN', '2'))
                 max_connections = int(os.getenv('DB_POOL_MAX', '10'))
                 
-                logger.info(f"[DB] Initializing app-level connection pool: min={min_connections}, max={max_connections}")
-                logger.info(f"[DB] Using Supabase pooler at: {DB_URL.split('@')[1] if '@' in DB_URL else 'configured'}")
+                logger.info(f"[DB] Initializing app-level pooling: min={min_connections}, max={max_connections}")
+                logger.info(f"[DB] Connecting to Supabase pooler (aws-0-us-west-2.pooler.supabase.com)")
                 
                 self.pool = psycopg2_pool.SimpleConnectionPool(
                     min_connections,
                     max_connections,
-                    DB_URL,  # Uses Supabase pooler URL
+                    DB_URL,
                     connect_timeout=10
                 )
                 self._initialized = True
                 self.use_pooling = True
-                logger.info("[DB] ✨ App-level pooling initialized (on top of Supabase pooler)")
+                logger.info("[DB] ✨ Connected to Supabase pooler successfully")
             
             except (ImportError, AttributeError) as e:
                 # psycopg2.pool not available - use direct connections via pooler
-                logger.info(f"[DB] App-level pooling not available: {e}")
-                logger.info("[DB] Using direct connections via Supabase pooler (still fast)")
+                logger.info(f"[DB] App-level pooling unavailable, using direct connections")
+                logger.info("[DB] ✨ Connected to Supabase pooler (direct mode)")
                 self._initialized = True
                 self.use_pooling = False
                 self.pool = None
             
             except psycopg2.OperationalError as e:
-                logger.error(f"[DB] ❌ Cannot connect to Supabase pooler at startup: {e}")
+                logger.error(f"[DB] ❌ Cannot connect to Supabase pooler: {e}")
+                logger.error("[DB] Check POOLER_* environment variables are set correctly")
                 logger.error("[DB] Retrying on first request...")
-                self._initialized = False  # Retry on next request
+                self._initialized = False
                 self.use_pooling = False
             
             except Exception as e:
