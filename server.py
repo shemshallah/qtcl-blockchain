@@ -1815,21 +1815,69 @@ class P2PServer:
 # ═════════════════════════════════════════════════════════════════════════════════
 
 def initialize_lattice_controller():
-    """Initialize lattice controller at startup"""
+    """
+    Initialize the QuantumLatticeController.
+
+    Failure modes handled gracefully:
+      • ImportError   — qiskit / lattice_controller not installed → mock mode
+      • ValueError    — DatabaseConfig.validate() missing password → mock mode
+      • Any other     — logged with full traceback → mock mode
+
+    The server ALWAYS starts; lattice is best-effort.
+    """
+    # ── Step 1: import the module itself ────────────────────────────────────
     try:
-        try:
-            from lattice_controller import QuantumLatticeController
-            controller = QuantumLatticeController()
-            controller.initialize()
-            logger.info("✨ [LATTICE] Quantum lattice controller initialized")
-            state.lattice_loaded = True
-            return controller
-        except ImportError:
-            logger.warning("[LATTICE] lattice_controller not available, running in mock mode")
-            state.lattice_loaded = False
-            return None
-    except Exception as e:
-        logger.error(f"[LATTICE] Initialization failed: {e}")
+        import lattice_controller as _lc_module
+    except ImportError as exc:
+        logger.warning(
+            f"[LATTICE] lattice_controller module not importable: {exc}. "
+            "Running in mock mode. "
+            "Install: qiskit>=1.0.0 qiskit-aer>=0.14.0 numpy scipy pydantic psutil"
+        )
+        state.lattice_loaded = False
+        return None
+    except Exception as exc:
+        logger.error(f"[LATTICE] Unexpected import error: {exc}")
+        logger.debug(traceback.format_exc())
+        state.lattice_loaded = False
+        return None
+
+    # ── Step 2: report qiskit availability so we see it in logs ─────────────
+    qiskit_ok  = getattr(_lc_module, 'QISKIT_AVAILABLE',     False)
+    aer_ok     = getattr(_lc_module, 'QISKIT_AER_AVAILABLE', False)
+    logger.info(
+        f"[LATTICE] qiskit_core={qiskit_ok}  qiskit_aer={aer_ok}  "
+        f"db={getattr(_lc_module, 'DB_AVAILABLE', False)}"
+    )
+    if not qiskit_ok or not aer_ok:
+        logger.warning(
+            "[LATTICE] Qiskit/AER not fully available — quantum circuits will be "
+            "stubbed. Lattice controller will run without circuit simulation."
+        )
+
+    # ── Step 3: instantiate and start ───────────────────────────────────────
+    try:
+        from lattice_controller import QuantumLatticeController
+        controller = QuantumLatticeController()
+        # .start() — not .initialize() — that method does not exist
+        controller.start()
+        logger.info(
+            "✨ [LATTICE] Quantum lattice controller started "
+            "(spatial-temporal field model active)"
+        )
+        state.lattice_loaded = True
+        return controller
+
+    except ValueError as exc:
+        # Most likely missing DB password — non-fatal, degrade to mock
+        logger.warning(f"[LATTICE] Configuration error: {exc}. Running in mock mode.")
+        state.lattice_loaded = False
+        return None
+
+    except Exception as exc:
+        logger.error(f"[LATTICE] Initialization failed: {exc}")
+        logger.error(traceback.format_exc())
+        state.lattice_loaded = False
         return None
 
 
@@ -1860,10 +1908,18 @@ def quantum_metrics_thread():
             # Update quantum metrics
             if LATTICE:
                 try:
-                    metrics = LATTICE.get_metrics()
-                    state.update_metrics(metrics)
-                except:
-                    pass
+                    lattice_metrics = LATTICE.get_metrics()
+                    # get_metrics() returns {'latest': {...}, 'avg_coherence_100': ..., ...}
+                    # Extract the flat values state expects
+                    latest = lattice_metrics.get('latest', {})
+                    state.update_metrics({
+                        'coherence':        latest.get('coherence',        LATTICE.coherence),
+                        'entanglement':     latest.get('w_state_strength', LATTICE.w_state_strength),
+                        'phase_drift':      latest.get('entropy', 0.01),
+                        'w_state_fidelity': latest.get('fidelity',         LATTICE.fidelity),
+                    })
+                except Exception as lm_err:
+                    logger.debug(f"[METRICS] Lattice metrics read error (non-fatal): {lm_err}")
             else:
                 # Mock metrics
                 import random
@@ -2131,9 +2187,9 @@ def shutdown_handler():
     
     if LATTICE:
         try:
-            LATTICE.shutdown()
-        except:
-            pass
+            LATTICE.stop()
+        except Exception as e:
+            logger.debug(f"[SERVER] Lattice stop error (non-fatal): {e}")
     
     # Close database connection pool
     try:

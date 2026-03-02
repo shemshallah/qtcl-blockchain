@@ -58,17 +58,79 @@ else:
     _np_trapz = np.trapz
 
 # ─────────────────────────────────────────────────────────────────────────────
-# QISKIT AER — HARD DEPENDENCY
+# QISKIT + QISKIT-AER — GRANULAR IMPORTS WITH DIAGNOSTICS
+#
+# Each import block is independent so a missing sub-package doesn't silently
+# kill the whole quantum subsystem.  We log *exactly* what failed so the
+# operator knows what to install.
+#
+# Qiskit 1.x API notes:
+#   • qiskit.primitives.Sampler was removed in 1.0 — use StatevectorSampler
+#     or just drop it; we don't actually call Sampler anywhere in this file.
+#   • AerSimulator lives in qiskit_aer (separate pip package).
 # ─────────────────────────────────────────────────────────────────────────────
+
+QISKIT_AVAILABLE   = False
+QISKIT_AER_AVAILABLE = False
+
+# ── Core Qiskit ──────────────────────────────────────────────────────────────
 try:
     from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister, transpile
     from qiskit.quantum_info import Statevector, DensityMatrix
-    from qiskit_aer import AerSimulator
-    from qiskit_aer.noise import NoiseModel, depolarizing_error, amplitude_damping_error, phase_damping_error
-    from qiskit.primitives import Sampler
     QISKIT_AVAILABLE = True
-except ImportError:
-    QISKIT_AVAILABLE = False
+    logger.info("✅ qiskit core imported successfully")
+except ImportError as _qiskit_err:
+    logger.warning(
+        f"⚠️  qiskit core not available ({_qiskit_err}). "
+        "Install: pip install qiskit>=1.0.0"
+    )
+    # Minimal stubs so module-level class definitions don't NameError
+    class QuantumCircuit:  # noqa: F811
+        def __init__(self, *a, name=None, **kw): self.name = name or "stub"
+        def h(self, *a): pass
+        def cx(self, *a): pass
+        def ry(self, *a): pass
+        def rz(self, *a): pass
+        def ch(self, *a): pass
+        def measure(self, *a): pass
+    class QuantumRegister:  # noqa: F811
+        def __init__(self, *a, **kw): pass
+    class ClassicalRegister:  # noqa: F811
+        def __init__(self, *a, **kw): pass
+    def transpile(circuit, **kw): return circuit
+    class Statevector:  # noqa: F811
+        pass
+    class DensityMatrix:  # noqa: F811
+        pass
+
+# ── Qiskit AER simulator ──────────────────────────────────────────────────────
+try:
+    from qiskit_aer import AerSimulator
+    from qiskit_aer.noise import (
+        NoiseModel,
+        depolarizing_error,
+        amplitude_damping_error,
+        phase_damping_error,
+    )
+    QISKIT_AER_AVAILABLE = True
+    logger.info("✅ qiskit-aer imported successfully")
+except ImportError as _aer_err:
+    logger.warning(
+        f"⚠️  qiskit-aer not available ({_aer_err}). "
+        "Install: pip install qiskit-aer>=0.14.0"
+    )
+    # Provide no-op stubs so the rest of the module doesn't NameError
+    class AerSimulator:  # noqa: F811
+        def __init__(self, **kwargs): pass
+        def run(self, *a, **kw): return None
+    class NoiseModel:  # noqa: F811
+        def add_quantum_error(self, *a, **kw): pass
+    def depolarizing_error(*a, **kw): return None
+    def amplitude_damping_error(*a, **kw): return None
+    def phase_damping_error(*a, **kw): return None
+
+# Overall flag used in guards throughout the file
+QISKIT_AVAILABLE = QISKIT_AVAILABLE and QISKIT_AER_AVAILABLE
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DATABASE INTEGRATION
@@ -178,27 +240,67 @@ class NoiseChannelType(Enum):
 # ════════════════════════════════════════════════════════════════════════════════
 
 class DatabaseConfig:
-    """PostgreSQL/Supabase configuration from environment variables (SECURE!)"""
-    
-    # Use environment variables (NEVER hardcode credentials!)
-    HOST = os.getenv('DB_HOST', 'localhost')
-    PORT = int(os.getenv('DB_PORT', '5432'))
-    USER = os.getenv('DB_USER', 'postgres')
-    PASSWORD = os.getenv('DB_PASSWORD', '')  # MUST be set via environment!
-    DATABASE = os.getenv('DB_NAME', 'postgres')
-    POOL_SIZE = int(os.getenv('DB_POOL_SIZE', '5'))
-    TIMEOUT = int(os.getenv('DB_TIMEOUT', '10'))
+    """
+    PostgreSQL/Supabase configuration resolved from environment variables.
+
+    Variable priority (first wins):
+      1. POOLER_* — Supabase session-pooler variables (set by Koyeb/Supabase integrations)
+      2. DB_*     — Generic fallback variables for other platforms / local dev
+
+    This means you only need ONE set of env vars in your deployment; whichever
+    the platform injects will be picked up automatically.
+    """
+
+    # ── Host ──────────────────────────────────────────────────────────────────
+    HOST     = (os.getenv('POOLER_HOST')     or os.getenv('DB_HOST',     'localhost'))
+    # ── Port ──────────────────────────────────────────────────────────────────
+    # Supabase session-pooler default is 6543; direct Postgres is 5432.
+    PORT     = int(os.getenv('POOLER_PORT')  or os.getenv('DB_PORT',     '6543'))
+    # ── Credentials ───────────────────────────────────────────────────────────
+    USER     = (os.getenv('POOLER_USER')     or os.getenv('DB_USER',     'postgres'))
+    PASSWORD = (os.getenv('POOLER_PASSWORD') or os.getenv('DB_PASSWORD', ''))
+    DATABASE = (os.getenv('POOLER_DB')       or os.getenv('DB_NAME',     'postgres'))
+    # ── Pool & misc ───────────────────────────────────────────────────────────
+    POOL_SIZE    = int(os.getenv('DB_POOL_SIZE', '5'))
+    TIMEOUT      = int(os.getenv('DB_TIMEOUT',   '10'))
     USE_POSTGRES = os.getenv('DB_USE_POSTGRES', 'true').lower() == 'true'
-    
+
+    # Convenience: build a full DSN string the way server.py does (shared path)
     @classmethod
-    def validate(cls):
-        """Validate that credentials are set properly"""
-        if cls.USE_POSTGRES:
-            if not cls.PASSWORD:
-                logger.error("❌ DB_PASSWORD environment variable not set!")
-                logger.error("   Set it with: export DB_PASSWORD='your_password'")
-                raise ValueError("DB_PASSWORD not configured")
-            logger.info(f"✅ PostgreSQL configured: {cls.USER}@{cls.HOST}:{cls.PORT}/{cls.DATABASE}")
+    def dsn(cls) -> str:
+        """Return a libpq-compatible connection string."""
+        return (
+            f"postgresql://{cls.USER}:{cls.PASSWORD}"
+            f"@{cls.HOST}:{cls.PORT}/{cls.DATABASE}"
+        )
+
+    @classmethod
+    def validate(cls) -> bool:
+        """
+        Validate that the minimum required credentials are present.
+
+        Raises ValueError on missing password so the caller can decide whether
+        to abort or degrade gracefully (server.py catches and falls back to
+        mock mode; standalone lattice_controller raises to the CLI caller).
+        """
+        if not cls.USE_POSTGRES:
+            logger.info("[DB] USE_POSTGRES=false — skipping database validation")
+            return True
+
+        if not cls.PASSWORD:
+            logger.error("❌ No database password found in environment.")
+            logger.error("   Tried: POOLER_PASSWORD → DB_PASSWORD")
+            logger.error("   Set one of those variables and restart.")
+            raise ValueError(
+                "Database password not configured. "
+                "Set POOLER_PASSWORD (Supabase/Koyeb) or DB_PASSWORD."
+            )
+
+        logger.info(
+            f"✅ DatabaseConfig resolved → "
+            f"{cls.USER}@{cls.HOST}:{cls.PORT}/{cls.DATABASE} "
+            f"(pool={cls.POOL_SIZE}, timeout={cls.TIMEOUT}s)"
+        )
         return True
 
 # ════════════════════════════════════════════════════════════════════════════════
