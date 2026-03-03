@@ -445,7 +445,8 @@ def query_block_by_hash(block_hash: str) -> Optional[Dict[str, Any]]:
     try:
         with get_db_cursor() as cur:
             cur.execute("""
-                SELECT height, block_hash, timestamp, oracle_w_state_hash, data
+                SELECT height, block_hash, timestamp, oracle_w_state_hash,
+                       previous_hash, validator_public_key, nonce, difficulty, entropy_score
                 FROM blocks
                 WHERE block_hash = %s
                 LIMIT 1
@@ -457,7 +458,11 @@ def query_block_by_hash(block_hash: str) -> Optional[Dict[str, Any]]:
                     'hash': row[1],
                     'timestamp': row[2],
                     'w_state_hash': row[3],
-                    'data': row[4],
+                    'previous_hash': row[4],
+                    'miner_address': row[5],
+                    'nonce': row[6],
+                    'difficulty': row[7],
+                    'w_state_fidelity': float(row[8]) if row[8] is not None else 0.0,
                 }
     except Exception as e:
         logger.error(f"[DB] Failed to query block: {e}")
@@ -2472,6 +2477,92 @@ def get_mempool():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/blocks/height/<int:height>', methods=['GET'])
+def block_by_height(height: int):
+    """Get a specific block by height — used by miners for sync and genesis bootstrap.
+    
+    Returns BlockHeader-compatible JSON (block_height, block_hash, parent_hash, …)
+    so the miner's BlockHeader.from_dict() can parse it directly.
+    """
+    try:
+        # Special case: height 0 is genesis — return canonical genesis block
+        if height == 0:
+            snapshot = state.get_state() if state else {}
+            genesis_hash = '0' * 64
+            return jsonify({
+                'header': {
+                    'block_height': 0,
+                    'height': 0,
+                    'block_hash': genesis_hash,
+                    'parent_hash': genesis_hash,
+                    'merkle_root': genesis_hash,
+                    'timestamp_s': 1700000000,
+                    'difficulty_bits': 12,
+                    'nonce': 0,
+                    'miner_address': 'genesis',
+                    'w_state_fidelity': 1.0,
+                    'w_entropy_hash': 'genesis',
+                },
+                'transactions': [],
+            }), 200
+        
+        # Query DB for requested height
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT height, block_hash, timestamp, oracle_w_state_hash,
+                       previous_hash, validator_public_key, nonce, difficulty, entropy_score,
+                       transactions_root
+                FROM blocks
+                WHERE height = %s
+                LIMIT 1
+            """, (height,))
+            row = cur.fetchone()
+        
+        if not row:
+            # Not in DB — check in-memory state
+            snapshot = state.get_state() if state else {}
+            bs = snapshot.get('block_state', {})
+            if int(bs.get('current_height', -1)) == height:
+                return jsonify({
+                    'header': {
+                        'block_height': height,
+                        'height': height,
+                        'block_hash': bs.get('current_hash', ''),
+                        'parent_hash': bs.get('parent_hash', '0' * 64),
+                        'merkle_root': bs.get('merkle_root', '0' * 64),
+                        'timestamp_s': bs.get('timestamp', int(time.time())),
+                        'difficulty_bits': int(bs.get('difficulty', 12)),
+                        'nonce': int(bs.get('nonce', 0)),
+                        'miner_address': bs.get('miner_address', ''),
+                        'w_state_fidelity': float(bs.get('w_state_fidelity', 0.9)),
+                        'w_entropy_hash': bs.get('pq_current', ''),
+                    },
+                    'transactions': [],
+                }), 200
+            return jsonify({'error': f'Block at height {height} not found'}), 404
+        
+        return jsonify({
+            'header': {
+                'block_height': row[0],
+                'height': row[0],
+                'block_hash': row[1],
+                'parent_hash': row[4] or ('0' * 64),
+                'merkle_root': row[9] or ('0' * 64),
+                'timestamp_s': int(row[2]) if row[2] else int(time.time()),
+                'difficulty_bits': int(float(row[7])) if row[7] else 12,
+                'nonce': int(row[6]) if row[6] else 0,
+                'miner_address': row[5] or '',
+                'w_state_fidelity': float(row[8]) if row[8] is not None else 0.9,
+                'w_entropy_hash': row[3] or '',
+            },
+            'transactions': [],
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"[BLOCK_BY_HEIGHT] Error at height={height}: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/chain', methods=['GET'])
 def chain_status():
     """Full chain state from BlockManager"""
@@ -2565,16 +2656,20 @@ def submit_block():
         logger.info(f"[BLOCK] ✅ Valid block #{block_height} from {miner_address[:20]}… | F={w_state_fidelity:.4f}")
         
         with get_db_cursor() as cur:
-            # 1️⃣ INSERT BLOCK INTO DATABASE
+            # 1️⃣ INSERT BLOCK INTO DATABASE — schema: previous_hash, block_number, validator_public_key
             cur.execute("""
-                INSERT INTO blocks (height, block_hash, parent_hash, merkle_root, 
-                                   timestamp, difficulty_bits, nonce, miner_address, 
-                                   w_state_fidelity, oracle_w_state_hash)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO blocks (
+                    height, block_number, block_hash, previous_hash,
+                    transactions_root, timestamp, difficulty, nonce,
+                    validator_public_key, oracle_w_state_hash,
+                    entropy_score, status, finalized
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (height) DO NOTHING
             """, (
-                block_height, block_hash, parent_hash, merkle_root,
-                timestamp_s, difficulty_bits, nonce, miner_address,
-                w_state_fidelity, w_entropy_hash
+                block_height, block_height, block_hash, parent_hash,
+                merkle_root, timestamp_s, float(difficulty_bits), str(nonce),
+                miner_address, w_entropy_hash,
+                round(w_state_fidelity, 4), 'confirmed', True
             ))
             logger.info(f"[DB] 📝 Block #{block_height} inserted | hash={block_hash[:16]}…")
             
