@@ -2098,29 +2098,56 @@ except Exception as _oe:
 # ═════════════════════════════════════════════════════════════════════════════════
 
 def quantum_metrics_thread():
-    """Background thread for metrics and state updates"""
+    """Background thread for metrics and state updates.
+    
+    CRITICAL: block state update is independent of pseudoqubit query.
+    A missing/empty pseudoqubits table must never prevent current_height advancing.
+    """
     logger.info("[METRICS] Quantum metrics thread started")
+    
+    # ── Rehydrate in-memory state from DB on startup ──
+    # Handles Koyeb restarts where in-memory state is always fresh.
+    try:
+        boot_block = query_latest_block()
+        if boot_block:
+            state.update_block_state({
+                'current_height': boot_block['height'],
+                'current_hash':   boot_block['hash'],
+                'timestamp':      boot_block['timestamp'],
+            })
+            logger.info(f"[METRICS] 🚀 State rehydrated from DB | height={boot_block['height']} | hash={boot_block['hash'][:16]}…")
+    except Exception as e:
+        logger.warning(f"[METRICS] ⚠️  Boot rehydration failed: {e}")
     
     while state.is_alive:
         try:
-            # Query latest block
+            # 1. Update block height from DB — ALWAYS, independently of anything else
             block = query_latest_block()
             if block:
-                pq_min, pq_max = query_pseudoqubit_range()
                 state.update_block_state({
                     'current_height': block['height'],
-                    'current_hash': block['hash'],
-                    'pq_current': pq_max,
-                    'pq_last': pq_min,
-                    'timestamp': block['timestamp'],
+                    'current_hash':   block['hash'],
+                    'timestamp':      block['timestamp'],
                 })
             
-            # Update quantum metrics
+            # 2. Update pq_current/pq_last from pseudoqubits table — best-effort only
+            # If table is empty or missing, skip silently (does NOT affect block height)
+            try:
+                pq_min, pq_max = query_pseudoqubit_range()
+                if pq_max:
+                    state.update_block_state({
+                        'pq_current': pq_max,
+                        'pq_last':    pq_min,
+                    })
+            except Exception:
+                pass  # pseudoqubits table may not be populated yet — non-fatal
+            
+            # 3. Update quantum metrics
             if LATTICE:
                 try:
                     metrics = LATTICE.get_metrics()
                     state.update_metrics(metrics)
-                except:
+                except Exception:
                     pass
             else:
                 # Mock metrics
@@ -2256,117 +2283,139 @@ def blocks():
 
 @app.route('/api/blocks/tip', methods=['GET'])
 def blocks_tip():
-    """Get the latest (tip) block - BlockHeader compatible format"""
+    """Get the latest (tip) block — BlockHeader compatible format.
+    
+    CRITICAL: Reads from DB first (source of truth), falls back to in-memory state.
+    This handles multi-worker deployments (Koyeb/gunicorn) where each worker has
+    independent in-memory state but all share the same DB.
+    """
     try:
-        if state is None:
-            logger.warning("[BLOCKS_TIP] State not initialized, returning genesis block")
+        # ── Primary: query DB directly ──
+        db_block = query_latest_block()
+        
+        if db_block and db_block.get('height', 0) > 0:
+            # Get full block details for the tip height
+            tip_height = db_block['height']
+            try:
+                with get_db_cursor() as cur:
+                    cur.execute("""
+                        SELECT height, block_hash, timestamp, oracle_w_state_hash,
+                               previous_hash, validator_public_key, nonce, difficulty, entropy_score,
+                               transactions_root
+                        FROM blocks WHERE height = %s LIMIT 1
+                    """, (tip_height,))
+                    row = cur.fetchone()
+                if row:
+                    return jsonify({
+                        'block_height': row[0],
+                        'block_hash':   row[1],
+                        'parent_hash':  row[4] or ('0' * 64),
+                        'merkle_root':  row[9] or ('0' * 64),
+                        'timestamp_s':  int(row[2]) if row[2] else int(time.time()),
+                        'difficulty_bits': int(float(row[7])) if row[7] else 12,
+                        'nonce':        int(row[6]) if row[6] else 0,
+                        'miner_address': row[5] or '',
+                        'w_state_fidelity': float(row[8]) if row[8] is not None else 0.9,
+                        'w_entropy_hash': row[3] or '',
+                    }), 200
+            except Exception as db_err:
+                logger.warning(f"[BLOCKS_TIP] DB detail query failed: {db_err}")
+            
+            # DB row fetch failed but we have height/hash — return minimal valid response
             return jsonify({
-                'block_height': 0,
-                'block_hash': '0' * 64,
-                'parent_hash': '0' * 64,
-                'merkle_root': '0' * 64,
-                'timestamp_s': int(time.time()),
+                'block_height':   db_block['height'],
+                'block_hash':     db_block['hash'],
+                'parent_hash':    '0' * 64,
+                'merkle_root':    '0' * 64,
+                'timestamp_s':    int(db_block.get('timestamp', time.time())),
                 'difficulty_bits': 12,
-                'nonce': 0,
-                'miner_address': 'genesis',
+                'nonce':          0,
+                'miner_address':  '',
                 'w_state_fidelity': 0.9,
-                'w_entropy_hash': 'genesis',
+                'w_entropy_hash': db_block.get('w_state_hash', ''),
+            }), 200
+        
+        # ── Fallback: in-memory state (single-worker or before first block) ──
+        if state is None:
+            return jsonify({
+                'block_height': 0, 'block_hash': '0' * 64,
+                'parent_hash': '0' * 64, 'merkle_root': '0' * 64,
+                'timestamp_s': int(time.time()), 'difficulty_bits': 12,
+                'nonce': 0, 'miner_address': 'genesis',
+                'w_state_fidelity': 1.0, 'w_entropy_hash': 'genesis',
             }), 200
         
         snapshot = state.get_state()
-        block = snapshot.get('block_state', {})
-        quantum_metrics = snapshot.get('quantum_metrics', {})
+        block    = snapshot.get('block_state', {})
+        qm       = snapshot.get('quantum_metrics', {})
         
-        def safe_timestamp(ts_value, fallback=None):
-            """Safely extract timestamp, handling None and type mismatches"""
-            if fallback is None:
-                fallback = int(time.time())
-            
-            if ts_value is None:
-                return fallback
-            
-            if isinstance(ts_value, int):
-                return ts_value
-            
-            try:
-                if isinstance(ts_value, float):
-                    return int(ts_value)
-                return int(float(ts_value))
-            except (ValueError, TypeError):
-                logger.warning(f"[BLOCKS_TIP] Invalid timestamp {ts_value!r}, using fallback: {fallback}")
-                return fallback
+        block_height = int(block.get('current_height') or 0)
+        block_hash   = block.get('current_hash') or ('0' * 64)
+        parent_hash  = block.get('parent_hash')  or ('0' * 64)
         
-        timestamp_s = safe_timestamp(block.get('timestamp'))
-        
-        block_height = block.get('current_height')
-        if block_height is None:
-            block_height = 0
-        else:
-            try:
-                block_height = int(block_height)
-            except (ValueError, TypeError):
-                block_height = 0
-        
-        block_hash = block.get('current_hash') or ('0' * 64)
-        parent_hash = block.get('parent_hash') or ('0' * 64)
-        merkle_root = block.get('merkle_root') or ('0' * 64)
-        miner_address = block.get('miner_address') or 'genesis'
-        w_entropy_hash = block.get('pq_current') or 'genesis'
-        
-        difficulty = block.get('difficulty', 12)
         try:
-            difficulty = int(difficulty) if difficulty is not None else 12
+            difficulty = int(block.get('difficulty', 12))
         except (ValueError, TypeError):
             difficulty = 12
-        
-        nonce = block.get('nonce', 0)
         try:
-            nonce = int(nonce) if nonce is not None else 0
+            nonce = int(block.get('nonce', 0))
         except (ValueError, TypeError):
             nonce = 0
-        
-        fidelity = quantum_metrics.get('fidelity', 0.9)
         try:
-            fidelity = float(fidelity) if fidelity is not None else 0.9
+            fidelity = float(qm.get('w_state_fidelity', 0.9))
         except (ValueError, TypeError):
             fidelity = 0.9
+        try:
+            ts = int(float(block.get('timestamp', time.time())))
+        except (ValueError, TypeError):
+            ts = int(time.time())
         
-        response = {
-            'block_height': block_height,
-            'block_hash': block_hash,
-            'parent_hash': parent_hash,
-            'merkle_root': merkle_root,
-            'timestamp_s': timestamp_s,
-            'difficulty_bits': difficulty,
-            'nonce': nonce,
-            'miner_address': miner_address,
-            'w_state_fidelity': fidelity,
-            'w_entropy_hash': w_entropy_hash,
-        }
-        
-        return jsonify(response), 200
-        
-    except Exception as e:
-        logger.error(f"[BLOCKS_TIP] Unhandled exception: {e}")
-        logger.error(f"[BLOCKS_TIP] Traceback:\n{traceback.format_exc()}")
         return jsonify({
-            'error': 'Internal server error',
-            'message': str(e),
-        }), 500
+            'block_height':    block_height,
+            'block_hash':      block_hash,
+            'parent_hash':     parent_hash,
+            'merkle_root':     block.get('merkle_root') or ('0' * 64),
+            'timestamp_s':     ts,
+            'difficulty_bits': difficulty,
+            'nonce':           nonce,
+            'miner_address':   block.get('miner_address') or 'genesis',
+            'w_state_fidelity': fidelity,
+            'w_entropy_hash':  block.get('pq_current') or '',
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"[BLOCKS_TIP] Unhandled exception: {e}\n{traceback.format_exc()}")
+        return jsonify({'error': 'Internal server error', 'message': str(e)}), 500
 
 
 @app.route('/api/wallet', methods=['GET'])
 def wallet():
-    """Get wallet information"""
+    """Get wallet information — returns balance in QTCL (base units / 100)"""
     address = request.args.get('address')
     if not address:
         return jsonify({'error': 'address parameter required'}), 400
     
     wallet_info = query_wallet_info(address)
     if wallet_info:
-        return jsonify(wallet_info), 200
+        # Convert base units (NUMERIC(30,0) integer) to QTCL float
+        raw_balance = int(wallet_info.get('balance') or 0)
+        qtcl_balance = raw_balance / 100.0
+        return jsonify({
+            'address': address,
+            'balance': qtcl_balance,
+            'balance_base_units': raw_balance,
+            'transaction_count': wallet_info.get('tx_count', 0),
+            'currency': 'QTCL',
+        }), 200
     else:
-        return jsonify({'error': 'wallet not found'}), 404
+        # Wallet not yet in DB (never mined or received) — return 0 balance, not 404
+        return jsonify({
+            'address': address,
+            'balance': 0.0,
+            'balance_base_units': 0,
+            'transaction_count': 0,
+            'currency': 'QTCL',
+        }), 200
 
 
 @app.route('/api/oracle', methods=['GET'])
@@ -2633,10 +2682,16 @@ def submit_block():
         if block_hash_int >= target:
             return jsonify({'error': f'PoW invalid: hash does not meet difficulty'}), 422
         
-        # ✅ VALIDATION 4: Parent and height check
-        snapshot = state.get_state()
-        tip_height = snapshot['block_state']['current_height']
-        tip_hash = snapshot['block_state']['current_hash']
+        # ✅ VALIDATION 4: Parent and height check — read from DB (authoritative source)
+        # In-memory state may be stale on multi-worker deployments (Koyeb/gunicorn).
+        db_tip = query_latest_block()
+        if db_tip and db_tip.get('height', 0) > 0:
+            tip_height = db_tip['height']
+            tip_hash   = db_tip['hash']
+        else:
+            # No blocks in DB yet — genesis state
+            tip_height = 0
+            tip_hash   = '0' * 64
         
         if block_height != tip_height + 1:
             return jsonify({
@@ -2654,6 +2709,11 @@ def submit_block():
         
         # ✅✅✅ BLOCK ACCEPTED - NOW PERSIST TO DATABASE ✅✅✅
         logger.info(f"[BLOCK] ✅ Valid block #{block_height} from {miner_address[:20]}… | F={w_state_fidelity:.4f}")
+        
+        # Block reward in base units (NUMERIC(30,0) schema stores integers)
+        # 1250 base units = 12.50 QTCL  (like Bitcoin's satoshis)
+        BLOCK_REWARD_BASE = 1250
+        BLOCK_REWARD_QTCL = 12.5
         
         with get_db_cursor() as cur:
             # 1️⃣ INSERT BLOCK INTO DATABASE — schema: previous_hash, block_number, validator_public_key
@@ -2674,31 +2734,41 @@ def submit_block():
             logger.info(f"[DB] 📝 Block #{block_height} inserted | hash={block_hash[:16]}…")
             
             # 2️⃣ CREDIT MINER WITH BLOCK REWARD
-            block_reward = 12.5  # 12.5 QTCL per block
-            fee_total = 0.0
+            block_reward = BLOCK_REWARD_BASE   # integer base units
+            fee_total = 0
             
-            # Process transaction fees
             for tx in transactions:
-                fee_total += float(tx.get('fee', 0))
+                # fees stored as float QTCL — convert to base units, round to int
+                fee_total += int(round(float(tx.get('fee', 0)) * 100))
             
             miner_total_reward = block_reward + fee_total
             
-            # Ensure miner wallet exists
+            # Derive deterministic wallet_fingerprint and public_key from miner address
+            # (fingerprint = first 64 hex chars of SHA256(address), public_key = SHA3-256)
+            import hashlib as _hl
+            miner_fingerprint = _hl.sha256(miner_address.encode()).hexdigest()[:64]
+            miner_pubkey      = _hl.sha3_256(miner_address.encode()).hexdigest()
+            
+            # Ensure miner wallet exists — supply all NOT NULL columns
             cur.execute("""
-                INSERT INTO wallet_addresses (address, balance, transaction_count)
-                VALUES (%s, %s, %s)
+                INSERT INTO wallet_addresses (
+                    address, wallet_fingerprint, public_key,
+                    balance, transaction_count, address_type
+                ) VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (address) DO NOTHING
-            """, (miner_address, 0, 0))
+            """, (miner_address, miner_fingerprint, miner_pubkey, 0, 0, 'mining'))
             
             # Credit miner
             cur.execute("""
                 UPDATE wallet_addresses 
                 SET balance = balance + %s,
-                    transaction_count = transaction_count + 1
+                    transaction_count = transaction_count + 1,
+                    last_used_at = NOW(),
+                    balance_updated_at = NOW()
                 WHERE address = %s
             """, (miner_total_reward, miner_address))
             
-            logger.info(f"[WALLET] 💰 Credited {miner_address[:20]}… with {miner_total_reward:.2f} QTCL")
+            logger.info(f"[WALLET] 💰 Credited {miner_address[:20]}… with {miner_total_reward} base units ({miner_total_reward/100:.2f} QTCL)")
             
             # 3️⃣ PROCESS TRANSACTIONS
             for tx in transactions:
@@ -2731,14 +2801,20 @@ def submit_block():
                     WHERE address = %s
                 """, (amount + fee, from_addr))
                 
-                # UPDATE RECIPIENT BALANCE
+                # UPDATE RECIPIENT BALANCE — supply NOT NULL fields on first insert
+                to_fingerprint = _hl.sha256(to_addr.encode()).hexdigest()[:64]
+                to_pubkey      = _hl.sha3_256(to_addr.encode()).hexdigest()
                 cur.execute("""
-                    INSERT INTO wallet_addresses (address, balance, transaction_count)
-                    VALUES (%s, %s, %s)
+                    INSERT INTO wallet_addresses (
+                        address, wallet_fingerprint, public_key,
+                        balance, transaction_count, address_type
+                    ) VALUES (%s, %s, %s, %s, %s, %s)
                     ON CONFLICT (address) DO UPDATE 
                     SET balance = wallet_addresses.balance + %s,
-                        transaction_count = wallet_addresses.transaction_count + 1
-                """, (to_addr, amount, 1, amount))
+                        transaction_count = wallet_addresses.transaction_count + 1,
+                        last_used_at = NOW(),
+                        balance_updated_at = NOW()
+                """, (to_addr, to_fingerprint, to_pubkey, amount, 1, 'receiving', amount))
                 
                 logger.info(f"[TX] ✅ Processed: {from_addr[:16]}… → {to_addr[:16]}… : {amount} QTCL (fee: {fee})")
         
@@ -2773,7 +2849,7 @@ def submit_block():
             'message': 'Block accepted and added to blockchain',
             'block_height': block_height,
             'block_hash': block_hash,
-            'miner_reward': f"{miner_total_reward:.2f} QTCL",
+            'miner_reward': f"{miner_total_reward/100:.2f} QTCL",
             'transactions_included': len(transactions),
             'w_state_fidelity': f"{w_state_fidelity:.4f}",
             'tip': block_height,
