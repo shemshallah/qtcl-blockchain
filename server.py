@@ -47,8 +47,7 @@ from typing import Dict, Any, Optional, Tuple, List, Set, Callable
 from contextlib import contextmanager
 from collections import deque, OrderedDict
 from dataclasses import dataclass, field, asdict
-from enum import Enum
-from decimal import Decimal
+from enum import Enumfrom decimal import Decimal
 import random
 import secrets
 from concurrent.futures import ThreadPoolExecutor  # H2: Thread pooling for DoS prevention
@@ -97,8 +96,7 @@ class M2_DelayedStartSync:
         self.is_started = False
     
     def schedule_delayed_start(self):
-        """Schedule background startup delay."""
-        def delayed_init():
+        """Schedule background startup delay."""        def delayed_init():
             logger.info(
                 f"[M2-DELAYED] Peer sync starting in {self.startup_delay}s "
                 f"(waiting for schema patches)..."
@@ -147,8 +145,7 @@ class M4_AtomicHeartbeatFlag:
     
     def is_set(self) -> bool:
         """Atomically read flag."""
-        with self.lock:
-            return self.flag
+        with self.lock:            return self.flag
     
     def test_and_set(self, expected: bool, new_value: bool) -> bool:
         """Atomic CAS: set new_value only if current == expected."""
@@ -197,8 +194,7 @@ class M5_GossipDeduplicator:
                 ts = self.timestamp_map.get(msg_hash, now)
                 if now - ts < self.window:
                     return True
-                else:
-                    self.seen_hashes.discard(msg_hash)
+                else:                    self.seen_hashes.discard(msg_hash)
                     self.timestamp_map.pop(msg_hash, None)
                     return False
             
@@ -247,8 +243,7 @@ class L2_HLWEWalletCryptography:
     def __init__(self, password: str, salt: bytes = None, hlwe_engine=None):
         self.password = password
         self.salt = salt or secrets.token_bytes(32)
-        self.hlwe_engine = hlwe_engine
-        self._key = self._derive_key()
+        self.hlwe_engine = hlwe_engine        self._key = self._derive_key()
     
     def _derive_key(self) -> bytes:
         """Derive encryption key using PBKDF with HLWE enhancement."""
@@ -270,7 +265,7 @@ class L2_HLWEWalletCryptography:
         
         return key
     
-    def encrypt_wallet(self, wallet_data: Dict[str, Any]) -> Dict[str, Any]:
+    def encrypt_wallet(self, wallet_ Dict[str, Any]) -> Dict[str, Any]:
         """Encrypt wallet data (address, keys, etc.)."""
         plaintext = json.dumps(wallet_data, sort_keys=True).encode('utf-8')
         
@@ -297,8 +292,7 @@ class L2_HLWEWalletCryptography:
             computed_hmac = hashlib.sha256(self._key + ciphertext).hexdigest()
             
             if computed_hmac != stored_hmac:
-                logger.error("[L2-WALLET] HMAC mismatch - wrong password or corrupted wallet")
-                return None
+                logger.error("[L2-WALLET] HMAC mismatch - wrong password or corrupted wallet")                return None
             
             plaintext = bytes(
                 ciphertext[i] ^ self._key[i % len(self._key)]
@@ -347,8 +341,7 @@ class L3_PeerRegistryPersistence:
             import sqlite3
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("""
-                    CREATE TABLE IF NOT EXISTS peer_registry (
-                        peer_id TEXT PRIMARY KEY,
+                    CREATE TABLE IF NOT EXISTS peer_registry (                        peer_id TEXT PRIMARY KEY,
                         address TEXT NOT NULL,
                         port INTEGER NOT NULL,
                         last_seen_at REAL NOT NULL,
@@ -397,8 +390,7 @@ class L3_PeerRegistryPersistence:
         """Get best peers from registry (for bootstrap)."""
         try:
             import sqlite3
-            cutoff = time.time() - max_age_seconds
-            
+            cutoff = time.time() - max_age_seconds            
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.execute("""
                     SELECT address, port FROM peer_registry
@@ -447,8 +439,7 @@ except ImportError as e:
 # ═════════════════════════════════════════════════════════════════════════════════
 
 # Database Configuration
-# Supabase provides individual pooler connection variables OR a full URL
-# Try full URL first, then build from components
+# Supabase provides individual pooler connection variables OR a full URL# Try full URL first, then build from components
 
 POOLER_URL = os.getenv('POOLER_URL')
 
@@ -497,8 +488,7 @@ PEER_DISCOVERY_INTERVAL = 60
 PEER_CLEANUP_INTERVAL = 15
 
 # Message Types
-MESSAGE_TYPES = {
-    'version': 0,
+MESSAGE_TYPES = {    'version': 0,
     'verack': 1,
     'ping': 2,
     'pong': 3,
@@ -547,8 +537,7 @@ class BlockchainEvent(Enum):
     CONSENSUS_ACHIEVED = "consensus_achieved"
 
 
-@dataclass
-class PeerInfo:
+@dataclassclass PeerInfo:
     """Peer connection metadata"""
     peer_id: str
     address: str
@@ -597,8 +586,7 @@ class Message:
     msg_type: str
     payload: Dict[str, Any]
     timestamp: float = field(default_factory=time.time)
-    sender_id: Optional[str] = None
-    message_id: str = field(default_factory=lambda: hashlib.sha256(str(time.time()).encode()).hexdigest()[:16])
+    sender_id: Optional[str] = None    message_id: str = field(default_factory=lambda: hashlib.sha256(str(time.time()).encode()).hexdigest()[:16])
     
     def to_bytes(self) -> bytes:
         """Serialize message to bytes"""
@@ -648,7 +636,6 @@ class TransactionInfo:
 # ═════════════════════════════════════════════════════════════════════════════════
 # DATABASE LAYER WITH CONNECTION POOLING
 # ═════════════════════════════════════════════════════════════════════════════════
-
 class DatabasePool:
     """Thread-safe connection pool for efficient database access (lazy initialization)"""
     
@@ -697,8 +684,7 @@ class DatabasePool:
             
             except (ImportError, AttributeError) as e:
                 # psycopg2.pool not available - use direct connections via pooler
-                logger.info(f"[DB] App-level pooling unavailable, using direct connections")
-                logger.info("[DB] ✨ Connected to Supabase pooler (direct mode)")
+                logger.info(f"[DB] App-level pooling unavailable, using direct connections")                logger.info("[DB] ✨ Connected to Supabase pooler (direct mode)")
                 self._initialized = True
                 self.use_pooling = False
                 self.pool = None
@@ -747,8 +733,7 @@ class DatabasePool:
             elif conn:
                 # No pooling, just close
                 conn.close()
-        except Exception as e:
-            logger.debug(f"[DB] Error handling connection return: {e}")
+        except Exception as e:            logger.debug(f"[DB] Error handling connection return: {e}")
     
     def close_all(self):
         """Close all connections in the pool"""
@@ -797,8 +782,7 @@ def query_latest_block() -> Optional[Dict[str, Any]]:
                 FROM blocks
                 ORDER BY height DESC
                 LIMIT 1
-            """)
-            row = cur.fetchone()
+            """)            row = cur.fetchone()
             if row:
                 timestamp = row[2]
                 if timestamp is None:
@@ -847,8 +831,7 @@ def query_block_by_hash(block_hash: str) -> Optional[Dict[str, Any]]:
 def query_blocks_range(from_height: int, to_height: int) -> List[Dict[str, Any]]:
     """Get blocks in height range"""
     try:
-        with get_db_cursor() as cur:
-            cur.execute("""
+        with get_db_cursor() as cur:            cur.execute("""
                 SELECT height, block_hash, timestamp, oracle_w_state_hash
                 FROM blocks
                 WHERE height BETWEEN %s AND %s
@@ -897,8 +880,7 @@ def query_wallet_info(address: str) -> Optional[Dict[str, Any]]:
                     'address': address,
                     'balance': row[0],
                     'tx_count': row[1],
-                }
-    except Exception as e:
+                }    except Exception as e:
         logger.error(f"[DB] Failed to query wallet: {e}")
     return None
 
@@ -947,8 +929,7 @@ def insert_transaction(from_addr: str, to_addr: str, amount: int) -> Optional[st
 def store_peer_info(peer_info: PeerInfo):
     """Store peer information in database for persistence"""
     try:
-        with get_db_cursor() as cur:
-            cur.execute("""
+        with get_db_cursor() as cur:            cur.execute("""
                 INSERT INTO peer_registry (peer_id, address, port, last_seen, block_height, user_agent)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT(peer_id) DO UPDATE SET
@@ -997,8 +978,7 @@ class BinarySerializer:
             return msgpack.packb({})
         
         payload = {
-            'ts': snapshot.get('timestamp_ns', 0),
-            'addr': snapshot.get('oracle_address', ''),
+            'ts': snapshot.get('timestamp_ns', 0),            'addr': snapshot.get('oracle_address', ''),
             'hash': snapshot.get('w_entropy_hash', ''),
             'pur': round(snapshot.get('purity', 0.95), 4),
             'fid': round(snapshot.get('w_state_fidelity', 0.94), 4),
@@ -1047,8 +1027,7 @@ class BinarySerializer:
                 'coherence': payload.get('coh', 0.5),
                 'entanglement': payload.get('ent', 0.5),
                 'density_matrix_hex': dm_hex,
-                'hlwe_signature': payload.get('sig', {}),
-                'signature_valid': payload.get('sig_valid', True),
+                'hlwe_signature': payload.get('sig', {}),                'signature_valid': payload.get('sig_valid', True),
             }
         except Exception as e:
             logger.error(f"[SERIALIZE] Deserialization error: {e}")
@@ -1060,7 +1039,7 @@ class BinarySerializer:
         return msgpack.packb(metrics, use_bin_type=True, default=str)
 
     @staticmethod
-    def deserialize_metrics(data: bytes) -> Dict[str, Any]:
+    def deserialize_metrics( bytes) -> Dict[str, Any]:
         """Decode metrics from msgpack binary."""
         try:
             return msgpack.unpackb(data, raw=False)
@@ -1097,8 +1076,7 @@ socketio = SocketIO(
 # Separate Flask app for P2P Socket.IO on port 8333
 p2p_app = Flask(__name__)
 p2p_app.config['SECRET_KEY'] = secrets.token_hex(32)
-p2p_socketio = SocketIO(
-    p2p_app,
+p2p_socketio = SocketIO(    p2p_app,
     cors_allowed_origins="*",
     async_mode='threading',
     transports=['polling'],  # ← FORCE HTTP LONG-POLLING (no WebSocket on Koyeb)
@@ -1147,8 +1125,7 @@ def _get_active_miners_for_gossip():
     Enables miners to know peer heights for P2P sync decisions.
     """
     with _miners_lock:
-        now = int(time.time() * 1000)
-        # Consider miners active if heartbeat within last 2 minutes
+        now = int(time.time() * 1000)        # Consider miners active if heartbeat within last 2 minutes
         active_miners = [
             {
                 'miner_id': miner_id,
@@ -1197,8 +1174,7 @@ def _broadcast_snapshot_to_gossip_network(snapshot):
             'coherence': snapshot.get('coherence', 0.5),
             'entanglement': snapshot.get('entanglement', 0.5),
             'density_matrix_hex': snapshot.get('density_matrix_hex', ''),
-            'hlwe_signature': snapshot.get('hlwe_signature', {}),
-            'signature_valid': snapshot.get('signature_valid', True)
+            'hlwe_signature': snapshot.get('hlwe_signature', {}),            'signature_valid': snapshot.get('signature_valid', True)
         }, broadcast=True)
         
         with _metrics_lock:
@@ -1247,8 +1223,7 @@ def handle_miner_register(data):
         with _miners_lock:
             _registered_miners[miner_id] = {
                 'sid': request.sid,
-                'address': address,
-                'public_key': public_key,
+                'address': address,                'public_key': public_key,
                 'registered_at': int(time.time() * 1000),
                 'last_heartbeat': int(time.time() * 1000),
                 'snapshot_ts': data.get('snapshot_ts', 0),
@@ -1297,8 +1272,7 @@ def handle_miner_heartbeat(data):
                 _registered_miners[miner_id]['known_peers_count'] = known_peers
                 
                 active_miners_list = [m for m in _registered_miners.values() 
-                                     if int(time.time() * 1000) - m.get('last_heartbeat', 0) < 120000]
-                max_peer_height = max([m.get('block_height', 0) for m in active_miners_list], default=0)
+                                     if int(time.time() * 1000) - m.get('last_heartbeat', 0) < 120000]                max_peer_height = max([m.get('block_height', 0) for m in active_miners_list], default=0)
                 
                 p2p_socketio.emit('miner_heartbeat_ack', {
                     'status': 'ok',
@@ -1347,8 +1321,7 @@ def handle_miner_snapshot_request(data):
 @p2p_socketio.on('gossip_peer_list_request')
 def handle_gossip_peer_list_request(data):
     """Handle miner requesting peer list for gossip discovery with height awareness.
-    
-    Returns active peers AND server's current block height for P2P sync decisions.
+        Returns active peers AND server's current block height for P2P sync decisions.
     """
     try:
         miner_id = data.get('miner_id', '')
@@ -1397,8 +1370,7 @@ def handle_miner_disconnect(data):
                 
                 # Broadcast updated peer list to remaining miners
                 if _registered_miners:
-                    known_peers = _get_active_miners_for_gossip()
-                    p2p_socketio.emit('gossip_peer_list', {
+                    known_peers = _get_active_miners_for_gossip()                    p2p_socketio.emit('gossip_peer_list', {
                         'timestamp': int(time.time()),
                         'peers': known_peers,
                         'total_active': len(known_peers),
@@ -1447,8 +1419,7 @@ def _snapshot_streaming_daemon():
             
             try:
                 snapshot = None
-                
-                # Try to get snapshot from oracle W-state manager
+                                # Try to get snapshot from oracle W-state manager
                 if ORACLE_AVAILABLE and ORACLE_W_STATE_MANAGER is not None:
                     try:
                         dm = ORACLE_W_STATE_MANAGER.get_latest_density_matrix()
@@ -1497,8 +1468,7 @@ def _snapshot_streaming_daemon():
                 # Broadcast to all miners
                 if snapshot:
                     _broadcast_snapshot_to_gossip_network(snapshot)
-                    broadcast_count += 1
-                    
+                    broadcast_count += 1                    
                     # Log every 100 broadcasts (once per second at 100/sec rate)
                     if broadcast_count % 100 == 0:
                         with _miners_lock:
@@ -1547,8 +1517,7 @@ class MetricsCollector:
     def __init__(self):
         self.running = False
         self.thread = None
-    
-    def start(self):
+        def start(self):
         """Start metrics collector thread"""
         if not self.running:
             self.running = True
@@ -1578,214 +1547,210 @@ class MetricsCollector:
     blocks:       height, block_hash, validator_public_key, timestamp, difficulty, etc.
     transactions: tx_hash, from_address, to_address, amount, height, status
     """
-    try:
-        with get_db_cursor() as cur:
-            # ── BLOCK COUNT & HEIGHT ──────────────────────────────────────────
-            cur.execute("SELECT COUNT(*), MAX(height) FROM blocks")
-            brow = cur.fetchone()
-            blocks_sealed = brow[0] if brow else 0
-            chain_height  = brow[1] if brow and brow[1] is not None else 0
+        try:
+            with get_db_cursor() as cur:
+                # ── BLOCK COUNT & HEIGHT ──────────────────────────────────────────
+                cur.execute("SELECT COUNT(*), MAX(height) FROM blocks")
+                brow = cur.fetchone()
+                blocks_sealed = brow[0] if brow else 0
+                chain_height  = brow[1] if brow and brow[1] is not None else 0
 
-            # ── TRANSACTION COUNT ─────────────────────────────────────────────
-            cur.execute("SELECT COUNT(*) FROM transactions")
-            total_txs = (cur.fetchone() or [0])[0]
+                # ── TRANSACTION COUNT ─────────────────────────────────────────────
+                cur.execute("SELECT COUNT(*) FROM transactions")
+                total_txs = (cur.fetchone() or [0])[0]
 
-            # ── LATEST BLOCK VALIDATION FIELDS ────────────────────────────────
-            cur.execute("""
-                SELECT quantum_validation_status,
-                       pq_validation_status,
-                       oracle_consensus_reached,
-                       temporal_coherence,
-                       difficulty,
-                       timestamp
-                FROM blocks
-                ORDER BY height DESC LIMIT 1
-            """)
-            val_row = cur.fetchone()
-            quantum_status    = val_row[0] if val_row else 'unvalidated'
-            pq_status         = val_row[1] if val_row else 'unsigned'
-            oracle_consensus  = bool(val_row[2]) if val_row else False
-            temporal_coh      = float(val_row[3]) if val_row and val_row[3] is not None else 0.0
-            difficulty        = float(val_row[4]) if val_row and val_row[4] is not None else 20.0
-            last_block_ts     = float(val_row[5]) if val_row and val_row[5] is not None else time.time()
+                # ── LATEST BLOCK VALIDATION FIELDS ────────────────────────────────
+                cur.execute("""
+                    SELECT quantum_validation_status,
+                           pq_validation_status,
+                           oracle_consensus_reached,
+                           temporal_coherence,
+                           difficulty,
+                           timestamp                    FROM blocks
+                    ORDER BY height DESC LIMIT 1
+                """)
+                val_row = cur.fetchone()
+                quantum_status    = val_row[0] if val_row else 'unvalidated'
+                pq_status         = val_row[1] if val_row else 'unsigned'
+                oracle_consensus  = bool(val_row[2]) if val_row else False
+                temporal_coh      = float(val_row[3]) if val_row and val_row[3] is not None else 0.0
+                difficulty        = float(val_row[4]) if val_row and val_row[4] is not None else 20.0
+                last_block_ts     = float(val_row[5]) if val_row and val_row[5] is not None else time.time()
 
-            # ── PENDING TRANSACTIONS (MEMPOOL SIZE) ────────────────────────────
-            cur.execute("SELECT COUNT(*) FROM transactions WHERE status = 'pending'")
-            mempool_size = (cur.fetchone() or [0])[0]
+                # ── PENDING TRANSACTIONS (MEMPOOL SIZE) ────────────────────────────
+                cur.execute("SELECT COUNT(*) FROM transactions WHERE status = 'pending'")
+                mempool_size = (cur.fetchone() or [0])[0]
 
-            # ── AVERAGE BLOCK TIME ─────────────────────────────────────────────
-            cur.execute("""
-                SELECT AVG(dt) FROM (
-                    SELECT (timestamp - LAG(timestamp) OVER (ORDER BY height))::float AS dt
-                    FROM blocks WHERE timestamp IS NOT NULL
-                ) sub WHERE dt IS NOT NULL AND dt > 0 AND dt < 86400
-            """)
-            avg_row = cur.fetchone()
-            avg_block_time = float(avg_row[0]) if avg_row and avg_row[0] is not None else 60.0
+                # ── AVERAGE BLOCK TIME ─────────────────────────────────────────────
+                cur.execute("""
+                    SELECT AVG(dt) FROM (
+                        SELECT (timestamp - LAG(timestamp) OVER (ORDER BY height))::float AS dt
+                        FROM blocks WHERE timestamp IS NOT NULL
+                    ) sub WHERE dt IS NOT NULL AND dt > 0 AND dt < 86400
+                """)
+                avg_row = cur.fetchone()
+                avg_block_time = float(avg_row[0]) if avg_row and avg_row[0] is not None else 60.0
 
-            # ── LAST BLOCK TIME AGO ────────────────────────────────────────────
-            last_block_time_ago = max(0.0, time.time() - last_block_ts)
+                # ── LAST BLOCK TIME AGO ────────────────────────────────────────────
+                last_block_time_ago = max(0.0, time.time() - last_block_ts)
 
-            # ── QUANTUM METRICS (in-memory, updated by metrics thread) ─────────
-            snap = state.get_state()
-            qm   = snap.get('quantum_metrics', {})
-            w_state_fidelity = float(qm.get('w_state_fidelity', 0.0))
+                # ── QUANTUM METRICS (in-memory, updated by metrics thread) ─────────
+                snap = state.get_state()
+                qm   = snap.get('quantum_metrics', {})
+                w_state_fidelity = float(qm.get('w_state_fidelity', 0.0))
 
-            # ── ORACLE STATUS ──────────────────────────────────────────────────
-            oracle_address    = None
-            addresses_issued  = 0
-            if ORACLE:
+                # ── ORACLE STATUS ──────────────────────────────────────────────────
+                oracle_address    = None
+                addresses_issued  = 0
+                if ORACLE:
+                    try:
+                        od = ORACLE.get_status()
+                        oracle_address   = od.get('oracle_address')
+                        addresses_issued = od.get('addresses_issued', 0)
+                    except Exception:
+                        pass
+
+                # ── PEER COUNT ─────────────────────────────────────────────────────
+                peer_count = 0
+                if P2P and hasattr(P2P, 'get_peer_count'):
+                    try:
+                        peer_count = P2P.get_peer_count()
+                    except Exception:                        pass
+
+                # ── NETWORK HASH RATE ─────────────────────────────────────────────
+                # Estimate: 2^difficulty / avg_block_time  (simplified PoW model)
                 try:
-                    od = ORACLE.get_status()
-                    oracle_address   = od.get('oracle_address')
-                    addresses_issued = od.get('addresses_issued', 0)
+                    network_hash_rate = max(100.0, (2.0 ** difficulty) / max(avg_block_time, 1.0))
                 except Exception:
-                    pass
+                    network_hash_rate = 1000.0
 
-            # ── PEER COUNT ─────────────────────────────────────────────────────
-            peer_count = 0
-            if P2P and hasattr(P2P, 'get_peer_count'):
-                try:
-                    peer_count = P2P.get_peer_count()
-                except Exception:
-                    pass
+                # ── RECENT BLOCKS (correct column names: block_hash, validator_public_key) ──
+                cur.execute("""
+                    SELECT b.height,
+                           b.block_hash,
+                           b.validator_public_key,
+                           b.timestamp,
+                           COALESCE(
+                               (SELECT COUNT(*) FROM transactions t WHERE t.height = b.height),
+                               0
+                           ) AS tx_count
+                    FROM blocks b
+                    ORDER BY b.height DESC
+                    LIMIT 10
+                """)
+                recent_blocks = []
+                for row in cur.fetchall():
+                    recent_blocks.append({
+                        'height'   : int(row[0]) if row[0] is not None else 0,
+                        'hash'     : str(row[1] or '0' * 64),
+                        'miner'    : str(row[2] or 'unknown'),
+                        'timestamp': int(float(row[3])) if row[3] is not None else int(time.time()),
+                        'tx_count' : int(row[4]) if row[4] is not None else 0,
+                    })
 
-            # ── NETWORK HASH RATE ─────────────────────────────────────────────
-            # Estimate: 2^difficulty / avg_block_time  (simplified PoW model)
-            try:
-                network_hash_rate = max(100.0, (2.0 ** difficulty) / max(avg_block_time, 1.0))
-            except Exception:
-                network_hash_rate = 1000.0
+                # ── MEMPOOL TRANSACTIONS (correct columns: tx_hash, from_address, to_address) ─
+                cur.execute("""
+                    SELECT tx_hash, from_address, to_address, amount
+                    FROM transactions
+                    WHERE status = 'pending'
+                    ORDER BY created_at DESC
+                    LIMIT 10
+                """)
+                mempool_txs = []
+                for row in cur.fetchall():
+                    raw_amt = int(row[3]) if row[3] is not None else 0
+                    mempool_txs.append({
+                        'hash'  : str(row[0] or ''),
+                        'from'  : str(row[1] or ''),
+                        'to'    : str(row[2] or ''),
+                        'amount': round(raw_amt / 100, 4),   # base units → QTCL
+                        'fee'   : 0,                    })
 
-            # ── RECENT BLOCKS (correct column names: block_hash, validator_public_key) ──
-            cur.execute("""
-                SELECT b.height,
-                       b.block_hash,
-                       b.validator_public_key,
-                       b.timestamp,
-                       COALESCE(
-                           (SELECT COUNT(*) FROM transactions t WHERE t.height = b.height),
-                           0
-                       ) AS tx_count
-                FROM blocks b
-                ORDER BY b.height DESC
-                LIMIT 10
-            """)
-            recent_blocks = []
-            for row in cur.fetchall():
-                recent_blocks.append({
-                    'height'   : int(row[0]) if row[0] is not None else 0,
-                    'hash'     : str(row[1] or '0' * 64),
-                    'miner'    : str(row[2] or 'unknown'),
-                    'timestamp': int(float(row[3])) if row[3] is not None else int(time.time()),
-                    'tx_count' : int(row[4]) if row[4] is not None else 0,
-                })
+                # ── MINER LEADERBOARD (aggregated from transactions) ───────────────
+                cur.execute("""
+                    SELECT b.validator_public_key,
+                           COUNT(*)                           AS blocks_mined,
+                           MAX(b.timestamp)                   AS last_block_ts
+                    FROM blocks b
+                    WHERE b.validator_public_key IS NOT NULL
+                      AND b.validator_public_key != ''
+                    GROUP BY b.validator_public_key
+                    ORDER BY blocks_mined DESC
+                    LIMIT 10
+                """)
+                miners_dict = {}
+                for row in cur.fetchall():
+                    mid = str(row[0] or 'unknown')
+                    miners_dict[mid] = {
+                        'miner_id'       : mid,
+                        'blocks_mined'   : int(row[1] or 0),
+                        'hash_rate'      : round(network_hash_rate, 2),
+                        'last_block_time': int(float(row[2])) if row[2] else int(time.time()),
+                        'wallet_address' : mid,
+                    }
 
-            # ── MEMPOOL TRANSACTIONS (correct columns: tx_hash, from_address, to_address) ─
-            cur.execute("""
-                SELECT tx_hash, from_address, to_address, amount
-                FROM transactions
-                WHERE status = 'pending'
-                ORDER BY created_at DESC
-                LIMIT 10
-            """)
-            mempool_txs = []
-            for row in cur.fetchall():
-                raw_amt = int(row[3]) if row[3] is not None else 0
-                mempool_txs.append({
-                    'hash'  : str(row[0] or ''),
-                    'from'  : str(row[1] or ''),
-                    'to'    : str(row[2] or ''),
-                    'amount': round(raw_amt / 100, 4),   # base units → QTCL
-                    'fee'   : 0,
-                })
+                # ── ASSEMBLE FULL PAYLOAD (nested + flat for frontend compatibility) ─
+                return {
+                    # FLAT FORMAT — consumed directly by explorer JS
+                    'block_height'       : chain_height,
+                    'difficulty'         : difficulty,
+                    'network_hash_rate'  : network_hash_rate,
+                    'w_state_fidelity'   : w_state_fidelity,
+                    'peer_count'         : peer_count,
+                    'mempool_size'       : mempool_size,
+                    'last_block_time_ago': round(last_block_time_ago, 1),
+                    'recent_blocks'      : recent_blocks,
+                    'mempool_txs'        : mempool_txs,
+                    'miners'             : miners_dict,
 
-            # ── MINER LEADERBOARD (aggregated from transactions) ───────────────
-            cur.execute("""
-                SELECT b.validator_public_key,
-                       COUNT(*)                           AS blocks_mined,
-                       MAX(b.timestamp)                   AS last_block_ts
-                FROM blocks b
-                WHERE b.validator_public_key IS NOT NULL
-                  AND b.validator_public_key != ''
-                GROUP BY b.validator_public_key
-                ORDER BY blocks_mined DESC
-                LIMIT 10
-            """)
-            miners_dict = {}
-            for row in cur.fetchall():
-                mid = str(row[0] or 'unknown')
-                miners_dict[mid] = {
-                    'miner_id'       : mid,
-                    'blocks_mined'   : int(row[1] or 0),
-                    'hash_rate'      : round(network_hash_rate, 2),
-                    'last_block_time': int(float(row[2])) if row[2] else int(time.time()),
-                    'wallet_address' : mid,
+                    # NESTED FORMAT — for server-internal compatibility
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'blockchain': {
+                        'chain_height'        : chain_height,
+                        'blocks_sealed'       : blocks_sealed,
+                        'total_transactions'  : total_txs,
+                        'pending_transactions': mempool_size,
+                        'avg_block_time_s'    : round(avg_block_time, 3),
+                    },
+                    'validation': {
+                        'quantum_validation_status': quantum_status,                        'pq_validation_status'     : pq_status,
+                        'oracle_consensus_reached' : oracle_consensus,
+                        'temporal_coherence'       : round(temporal_coh, 4),
+                    },
+                    'quantum': {
+                        'coherence'    : round(float(qm.get('coherence', 0)), 4),
+                        'fidelity'     : round(w_state_fidelity, 4),
+                        'entanglement' : round(float(qm.get('entanglement', 0)), 4),
+                    },
+                    'oracle': {
+                        'address'          : oracle_address,
+                        'addresses_issued' : addresses_issued,
+                    },
+                    'network': {
+                        'peers'          : peer_count,
+                        'lattice_loaded' : state.lattice_loaded,
+                    },
                 }
 
-            # ── ASSEMBLE FULL PAYLOAD (nested + flat for frontend compatibility) ─
+        except Exception as e:
+            logger.error(f"[METRICS] Gather error: {type(e).__name__}: {e}")
+            # Return live in-memory state as fallback so frontend never gets stale zeros
+            snap = state.get_state()
+            bs   = snap.get('block_state', {})
+            qm   = snap.get('quantum_metrics', {})
             return {
-                # FLAT FORMAT — consumed directly by explorer JS
-                'block_height'       : chain_height,
-                'difficulty'         : difficulty,
-                'network_hash_rate'  : network_hash_rate,
-                'w_state_fidelity'   : w_state_fidelity,
-                'peer_count'         : peer_count,
-                'mempool_size'       : mempool_size,
-                'last_block_time_ago': round(last_block_time_ago, 1),
-                'recent_blocks'      : recent_blocks,
-                'mempool_txs'        : mempool_txs,
-                'miners'             : miners_dict,
-
-                # NESTED FORMAT — for server-internal compatibility
-                'timestamp': datetime.now(timezone.utc).isoformat(),
-                'blockchain': {
-                    'chain_height'        : chain_height,
-                    'blocks_sealed'       : blocks_sealed,
-                    'total_transactions'  : total_txs,
-                    'pending_transactions': mempool_size,
-                    'avg_block_time_s'    : round(avg_block_time, 3),
-                },
-                'validation': {
-                    'quantum_validation_status': quantum_status,
-                    'pq_validation_status'     : pq_status,
-                    'oracle_consensus_reached' : oracle_consensus,
-                    'temporal_coherence'       : round(temporal_coh, 4),
-                },
-                'quantum': {
-                    'coherence'    : round(float(qm.get('coherence', 0)), 4),
-                    'fidelity'     : round(w_state_fidelity, 4),
-                    'entanglement' : round(float(qm.get('entanglement', 0)), 4),
-                },
-                'oracle': {
-                    'address'          : oracle_address,
-                    'addresses_issued' : addresses_issued,
-                },
-                'network': {
-                    'peers'          : peer_count,
-                    'lattice_loaded' : state.lattice_loaded,
-                },
+                'error'              : str(e),
+                'block_height'       : int(bs.get('current_height', 0)),
+                'difficulty'         : float(bs.get('difficulty', 20)),
+                'network_hash_rate'  : 0.0,
+                'w_state_fidelity'   : float(qm.get('w_state_fidelity', 0.0)),
+                'peer_count'         : P2P.get_peer_count() if P2P else 0,
+                'mempool_size'       : 0,
+                'last_block_time_ago': 0.0,
+                'recent_blocks'      : [],
+                'mempool_txs'        : [],
+                'miners'             : {},
             }
-
-    except Exception as e:
-        logger.error(f"[METRICS] Gather error: {type(e).__name__}: {e}")
-        # Return live in-memory state as fallback so frontend never gets stale zeros
-        snap = state.get_state()
-        bs   = snap.get('block_state', {})
-        qm   = snap.get('quantum_metrics', {})
-        return {
-            'error'              : str(e),
-            'block_height'       : int(bs.get('current_height', 0)),
-            'difficulty'         : float(bs.get('difficulty', 20)),
-            'network_hash_rate'  : 0.0,
-            'w_state_fidelity'   : float(qm.get('w_state_fidelity', 0.0)),
-            'peer_count'         : P2P.get_peer_count() if P2P else 0,
-            'mempool_size'       : 0,
-            'last_block_time_ago': 0.0,
-            'recent_blocks'      : [],
-            'mempool_txs'        : [],
-            'miners'             : {},
-        }
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # WEBSOCKET HANDLERS
@@ -1797,8 +1762,7 @@ def handle_connect():
     logger.info(f"[WEBSOCKET] Client connected")
     # Send initial metrics immediately
     try:
-        metrics = _metrics_collector._gather_metrics()
-        emit('metrics_update', metrics)
+        metrics = _metrics_collector._gather_metrics()        emit('metrics_update', metrics)
     except Exception as e:
         logger.error(f"[WEBSOCKET] Initial metrics error: {e}")
 
@@ -1847,8 +1811,7 @@ def rest_stats():
         snap = state.get_state()
         bs   = snap.get('block_state', {})
         return jsonify({
-            'block_height': int(bs.get('current_height', 0)),
-            'block_hash'  : bs.get('current_hash', '0' * 64),
+            'block_height': int(bs.get('current_height', 0)),            'block_hash'  : bs.get('current_hash', '0' * 64),
             'timestamp'   : datetime.now(timezone.utc).isoformat(),
         }), 200
     except Exception as e:
@@ -1897,8 +1860,7 @@ class SystemState:
     
     def update_block_state(self, state: Dict[str, Any]):
         with self.lock:
-            self.block_state.update(state)
-    
+            self.block_state.update(state)    
     def get_state(self) -> Dict[str, Any]:
         with self.lock:
             return {
@@ -1947,8 +1909,7 @@ class PeerConnection:
             with self.lock:
                 data = message.to_bytes()
                 
-                # Frame: 4-byte length + message
-                length = len(data)
+                # Frame: 4-byte length + message                length = len(data)
                 if length > MESSAGE_MAX_SIZE:
                     logger.error(f"[PEER {self.peer_id}] Message too large: {length}")
                     return False
@@ -1974,7 +1935,7 @@ class PeerConnection:
                 
                 # Read 4-byte length
                 length_data = self.sock.recv(4)
-                if not length_data:
+                if not length_
                     return None
                 
                 length = int.from_bytes(length_data, 'big')
@@ -1997,8 +1958,7 @@ class PeerConnection:
                 self.peer_info.bytes_received += length + 4
                 self.peer_info.last_message_at = time.time()
                 
-                return message
-        except socket.timeout:
+                return message        except socket.timeout:
             return None
         except Exception as e:
             logger.error(f"[PEER {self.peer_id}] Receive error: {e}")
@@ -2047,8 +2007,7 @@ class PeerDiscoveryEngine:
         
         # Strategy 2: Query DNS seeds
         for seed in DNS_SEEDS:
-            try:
-                dns_peers = self._query_dns_seed(seed)
+            try:                dns_peers = self._query_dns_seed(seed)
                 candidates.update(dns_peers)
                 logger.info(f"[DISCOVERY] Found {len(dns_peers)} peers from DNS seed {seed}")
             except Exception as e:
@@ -2097,8 +2056,7 @@ class PeerDiscoveryEngine:
             info = self.tested_peers.get(key, {})
             info['last_failure'] = time.time()
             info['failures'] = info.get('failures', 0) + 1
-            info['attempts'] = info.get('attempts', 0) + 1
-            self.tested_peers[key] = info
+            info['attempts'] = info.get('attempts', 0) + 1            self.tested_peers[key] = info
     
     def get_connect_candidates(self, exclude: Set[str], needed: int = 5) -> List[Tuple[str, int]]:
         """Get list of peers to try connecting to"""
@@ -2147,8 +2105,7 @@ class MessageHandlers:
         self.lock = threading.RLock()
     
     def on_version(self, peer_conn: PeerConnection, message: Message):
-        """
-        Handle VERSION message: peer capabilities and metadata
+        """        Handle VERSION message: peer capabilities and metadata
         
         Used to:
         - Exchange protocol versions
@@ -2197,8 +2154,7 @@ class MessageHandlers:
         """
         Handle PING: keepalive mechanism
         
-        Used to:
-        - Detect dead connections
+        Used to:        - Detect dead connections
         - Measure latency
         - Keep connections alive
         """
@@ -2247,8 +2203,7 @@ class MessageHandlers:
                     
                     peer_conn.peer_info.blocks_announced += len(new_blocks)
                     
-                    # Request blocks we don't have
-                    if new_blocks:
+                    # Request blocks we don't have                    if new_blocks:
                         self._request_blocks(peer_conn, new_blocks)
                 
                 elif inv_type == 'tx':
@@ -2297,8 +2252,7 @@ class MessageHandlers:
             # ── 2. Duplicate check ────────────────────────────────────────────
             with self.lock:
                 if block_hash in self.block_cache:
-                    logger.debug(f"[P2P] Block {block_hash[:16]}… already cached, skipping")
-                    return
+                    logger.debug(f"[P2P] Block {block_hash[:16]}… already cached, skipping")                    return
 
             # ── 3. HLWE oracle signature verification ─────────────────────────
             if ORACLE and hlwe_witness:
@@ -2347,8 +2301,7 @@ class MessageHandlers:
                         block_height        = block_height,
                         block_hash          = block_hash,
                         parent_hash         = payload.get('parent_hash', ''),
-                        miner_address       = payload.get('miner_address', ''),
-                        transactions        = txs,
+                        miner_address       = payload.get('miner_address', ''),                        transactions        = txs,
                         tx_count            = len(txs),
                         merkle_root         = payload.get('merkle_root', ''),
                         timestamp_s         = timestamp,
@@ -2397,7 +2350,6 @@ class MessageHandlers:
                     'current_hash'  : block_hash,
                     'timestamp'     : timestamp,
                 })
-
             # ── 6. Relay to other peers (not the sender) ──────────────────────
             self.p2p.relay_block(payload, exclude_peer_id=peer_conn.peer_id)
 
@@ -2447,8 +2399,7 @@ class MessageHandlers:
                             f"[P2P] TX sig INVALID from {peer_conn.peer_id}: {reason}"
                         )
                         peer_conn.peer_info.ban_score += 10
-                        return
-                    logger.debug(f"[P2P] TX sig valid: {reason}")
+                        return                    logger.debug(f"[P2P] TX sig valid: {reason}")
                 except Exception as sig_err:
                     logger.warning(f"[P2P] TX sig parse error: {sig_err}")
 
@@ -2497,8 +2448,7 @@ class MessageHandlers:
         - Implement selective data transfer
         """
         try:
-            payload = message.payload
-            data_type = payload.get('type')  # 'block' or 'tx'
+            payload = message.payload            data_type = payload.get('type')  # 'block' or 'tx'
             hashes = payload.get('hashes', [])
             
             logger.debug(f"[PEER {peer_conn.peer_id}] GETDATA: {len(hashes)} {data_type}s")
@@ -2528,7 +2478,7 @@ class MessageHandlers:
                         else:
                             tx_data = query_transaction(tx_hash)
                     
-                    if tx_data:
+                    if tx_
                         response = Message(
                             msg_type='tx',
                             payload=tx_data
@@ -2547,8 +2497,7 @@ class MessageHandlers:
         - Enable peers to catch up
         - Implement efficient block sync
         """
-        try:
-            payload = message.payload
+        try:            payload = message.payload
             since_height = payload.get('since_height', 0)
             limit = min(payload.get('limit', 100), 500)  # Max 500 blocks
             
@@ -2597,8 +2546,7 @@ class MessageHandlers:
             logger.error(f"[PEER {peer_conn.peer_id}] Headers handler error: {e}")
     
     def on_addr(self, peer_conn: PeerConnection, message: Message):
-        """
-        Handle ADDR: receive peer address announcements
+        """        Handle ADDR: receive peer address announcements
         
         Used to:
         - Populate peer list
@@ -2647,8 +2595,7 @@ class MessageHandlers:
                     msg_type='peers_sync',
                     payload={
                         'action': 'response',
-                        'peers': [
-                            {'address': p[0], 'port': p[1]}
+                        'peers': [                            {'address': p[0], 'port': p[1]}
                             for p in peers
                         ]
                     }
@@ -2697,8 +2644,7 @@ class MessageHandlers:
             logger.error(f"[PEER {peer_conn.peer_id}] MEMPOOL handler error: {e}")
     
     def on_consensus(self, peer_conn: PeerConnection, message: Message):
-        """
-        Handle CONSENSUS: consensus-related messages
+        """        Handle CONSENSUS: consensus-related messages
         
         Used to:
         - Exchange consensus state
@@ -2745,15 +2691,14 @@ class MessageHandlers:
         )
         peer_conn.send_message(request)
     
-    def _validate_block(self, block_data: Dict[str, Any]) -> bool:
+    def _validate_block(self, block_ Dict[str, Any]) -> bool:
         """Validate block structure and data"""
-        try:
-            required_fields = ['hash', 'height', 'data']
+        try:            required_fields = ['hash', 'height', 'data']
             return all(field in block_data for field in required_fields)
         except:
             return False
     
-    def _validate_tx(self, tx_data: Dict[str, Any]) -> bool:
+    def _validate_tx(self, tx_ Dict[str, Any]) -> bool:
         """Validate transaction structure and data"""
         try:
             required_fields = ['hash', 'from', 'to', 'amount']
@@ -2797,8 +2742,7 @@ class P2PServer:
         self.message_handlers = MessageHandlers(self)
         
         # Metrics
-        self.stats = {
-            'total_peers_connected': 0,
+        self.stats = {            'total_peers_connected': 0,
             'blocks_received': 0,
             'blocks_sent': 0,
             'txs_received': 0,
@@ -2812,12 +2756,14 @@ class P2PServer:
         }
         self.stats_lock = threading.RLock()
         
-        logger.info(f"[P2P] Server initialized on {self.host}:{self.initial_port} (testnet={testnet})"
+        logger.info(f"[P2P] Server initialized on {self.host}:{self.initial_port} (testnet={testnet})")
+    
     def _generate_peer_id(self) -> str:
-         """Generate cryptographically unique peer ID"""
-    return hashlib.sha256(
-        f"{time.time_ns()}{secrets.token_bytes(16).hex()}".encode()
-    ).hexdigest()[:16]
+        """Generate cryptographically unique peer ID"""
+        return hashlib.sha256(
+            f"{time.time_ns()}{secrets.token_bytes(16).hex()}".encode()
+        ).hexdigest()[:16]
+    
     def start(self) -> bool:
         """
         Start P2P server with intelligent port binding (H1) and thread pooling (H2).
@@ -2845,8 +2791,7 @@ class P2PServer:
         bound_port = None
         probe_range = range(self.initial_port, self.initial_port + 11)
         
-        for attempt_port in probe_range:
-            try:
+        for attempt_port in probe_range:            try:
                 with self.stats_lock:
                     self.stats['port_probe_attempts'] += 1
                 
@@ -2895,8 +2840,7 @@ class P2PServer:
         
         logger.info("[P2P] All background threads started")
         return True
-    
-    def _start_accept_thread(self):
+        def _start_accept_thread(self):
         """
         Thread that accepts incoming peer connections.
         
@@ -2945,8 +2889,7 @@ class P2PServer:
                         self._disconnect_peer(peer_conn)
                 
                 except Exception as e:
-                    if self.is_running:
-                        logger.error(f"[P2P] Accept error: {e}")
+                    if self.is_running:                        logger.error(f"[P2P] Accept error: {e}")
         
         thread = threading.Thread(target=accept_loop, daemon=True)
         self.threads.append(thread)
@@ -2995,8 +2938,7 @@ class P2PServer:
                 'consensus': self.message_handlers.on_consensus,
             }
             
-            handler = handler_map.get(message.msg_type)
-            if handler:
+            handler = handler_map.get(message.msg_type)            if handler:
                 handler(peer_conn, message)
             else:
                 logger.warning(f"[P2P] Unknown message type: {message.msg_type}")
@@ -3045,8 +2987,7 @@ class P2PServer:
                         dead_peers = [
                             peer_id for peer_id, peer in self.peers.items()
                             if not peer.peer_info.is_alive or peer.peer_info.ban_score >= 100
-                        ]
-                        
+                        ]                        
                         for peer_id in dead_peers:
                             if peer_id in self.peers:
                                 peer = self.peers[peer_id]
@@ -3095,8 +3036,7 @@ class P2PServer:
         thread = threading.Thread(target=discovery_loop, daemon=True)
         self.threads.append(thread)
         thread.start()
-    
-    def _connect_to_peer(self, address: str, port: int):
+        def _connect_to_peer(self, address: str, port: int):
         """Initiate outbound connection to peer"""
         try:
             logger.debug(f"[P2P] Connecting to {address}:{port}")
@@ -3145,8 +3085,7 @@ class P2PServer:
         def broadcast_loop():
             logger.info("[P2P] Broadcast thread started")
             while self.is_running:
-                try:
-                    with self.peers_lock:
+                try:                    with self.peers_lock:
                         peers = list(self.peers.values())
                     
                     for peer_conn in peers:
@@ -3177,7 +3116,7 @@ class P2PServer:
         self.threads.append(thread)
         thread.start()
     
-    def broadcast_block(self, block_data: Dict[str, Any]):
+    def broadcast_block(self, block_ Dict[str, Any]):
         """Broadcast block to all connected peers"""
         self.relay_block(block_data, exclude_peer_id=None)
 
@@ -3195,10 +3134,9 @@ class P2PServer:
                         self.stats['blocks_sent']   += 1
     
     def broadcast_transaction(self, tx_data: Dict[str, Any]):
-        """Broadcast transaction to all connected peers"""
-        self.relay_transaction(tx_data, exclude_peer_id=None)
+        """Broadcast transaction to all connected peers"""        self.relay_transaction(tx_data, exclude_peer_id=None)
 
-    def relay_transaction(self, tx_data: Dict[str, Any], exclude_peer_id: Optional[str] = None):
+    def relay_transaction(self, tx_ Dict[str, Any], exclude_peer_id: Optional[str] = None):
         """Relay transaction to all peers except the originating sender."""
         message = Message(msg_type='tx', payload=tx_data)
         with self.peers_lock:
@@ -3211,7 +3149,7 @@ class P2PServer:
                         self.stats['messages_sent'] += 1
                         self.stats['txs_sent']      += 1
     
-    def broadcast_block(self, block_data: Dict[str, Any]):
+    def broadcast_block(self, block_ Dict[str, Any]):
         """Broadcast newly mined/accepted block to all peers."""
         message = Message(msg_type='block', payload=block_data)
         with self.peers_lock:
@@ -3245,8 +3183,7 @@ class P2PServer:
     
     def get_peer_info(self) -> List[Dict[str, Any]]:
         """Get information about all connected peers"""
-        with self.peers_lock:
-            return [
+        with self.peers_lock:            return [
                 {
                     'peer_id': peer.peer_info.peer_id,
                     'address': peer.peer_info.address,
@@ -3295,8 +3232,7 @@ class P2PServer:
         
         # Disconnect all peers
         with self.peers_lock:
-            for peer in list(self.peers.values()):
-                self._disconnect_peer(peer)
+            for peer in list(self.peers.values()):                self._disconnect_peer(peer)
         
         # Close server socket
         if self.server_socket:
@@ -3345,8 +3281,7 @@ class H4_SchemaPatches:
                 # Define patches (add more as needed)
                 patches = [
                     # Patch 1: Ensure peer_registry table
-                    """
-                    CREATE TABLE IF NOT EXISTS peer_registry (
+                    """                    CREATE TABLE IF NOT EXISTS peer_registry (
                         peer_id TEXT PRIMARY KEY,
                         address TEXT NOT NULL,
                         port INTEGER NOT NULL,
@@ -3395,8 +3330,7 @@ class H5_ValidationEngine:
     
     Usage:
         validator = H5_ValidationEngine()
-        synced_blocks = peer_client.get_blocks(start, end)
-        for block in synced_blocks:
+        synced_blocks = peer_client.get_blocks(start, end)        for block in synced_blocks:
             if not validator.verify_pow(block):
                 logger.warning(f"Block {block['hash']} failed PoW check, rejecting")
                 continue
@@ -3446,7 +3380,6 @@ class H5_ValidationEngine:
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # IMP#1: WEBSOCKET-ONLY P2P ARCHITECTURE (PATTERN & READINESS)
 # ═══════════════════════════════════════════════════════════════════════════════════════
-
 class IMP1_WebSocketP2PHubPattern:
     """
     IMP#1 FIX: Replace raw TCP P2P with WebSocket-only P2P hub.
@@ -3495,8 +3428,7 @@ class IMP36_AdaptiveSnapshotPolling:
     IMP#3.6 FIX: Adaptive snapshot poll rate (100ms-500ms).
     
     Problem: Fixed 10ms poll = 100 calls/sec to oracle (rate limited, CPU waste).
-    Solution: Adaptive sleep based on fidelity delta & sync lag.
-    
+    Solution: Adaptive sleep based on fidelity delta & sync lag.    
     Results:
     • Aggressive (state changing): 100ms poll
     • Quiescent (no change): extends to 500ms
@@ -3545,8 +3477,7 @@ class IMP36_AdaptiveSnapshotPolling:
             logger.debug(
                 f"[IMP#3.6-ADAPTIVE] Quiescent (delta={self.fidelity_delta:.6f}, lag={self.sync_lag_ms}ms), "
                 f"poll every {self.current_sleep*1000:.0f}ms"
-            )
-        
+            )        
         return self.current_sleep
 
 
@@ -3595,8 +3526,7 @@ class IMP8_DifficultyConsensus:
             # Check cache validity
             if self.cached_difficulty and (now - self.cached_at) < self.cache_ttl:
                 return self.cached_difficulty
-            
-            # Try oracle
+                        # Try oracle
             try:
                 import requests
                 resp = requests.get(f"{self.oracle_url}/api/difficulty", timeout=5)
@@ -3636,17 +3566,16 @@ class IMP8_DifficultyConsensus:
         ).hexdigest()[:16]
 
 
-# ═════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════
 # LATTICE INITIALIZATION
-# ═════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════
 
 def initialize_lattice_controller():
     """
     Initialize the QuantumLatticeController and wire all subsystems.
 
     1. Import + instantiate QuantumLatticeController
-    2. Call .start() (registers {8,3} lattice, boots BlockManager, starts chain)
-    3. Wire BlockManager.on_block_sealed → P2P broadcast callback
+    2. Call .start() (registers {8,3} lattice, boots BlockManager, starts chain)    3. Wire BlockManager.on_block_sealed → P2P broadcast callback
     4. Degrade gracefully to mock mode on any failure
     """
     try:
@@ -3695,8 +3624,7 @@ def initialize_lattice_controller():
                     )
                 # Also update state
                 state.update_block_state({
-                    'current_height': block.block_height,
-                    'current_hash'  : block.block_hash,
+                    'current_height': block.block_height,                    'current_hash'  : block.block_hash,
                     'timestamp'     : block.timestamp_s,
                 })
             except Exception as cb_err:
@@ -3730,9 +3658,9 @@ if ORACLE_AVAILABLE and ORACLE is not None:
 else:
     logger.warning("[ORACLE] ⚠️  Oracle not available — signing disabled")
 
-# ═════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════
 # QUANTUM METRICS THREAD
-# ═════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════
 
 def quantum_metrics_thread():
     """Background thread for metrics and state updates.
@@ -3745,8 +3673,7 @@ def quantum_metrics_thread():
     # ── Rehydrate in-memory state from DB on startup ──
     # Handles Koyeb restarts where in-memory state is always fresh.
     try:
-        boot_block = query_latest_block()
-        if boot_block:
+        boot_block = query_latest_block()        if boot_block:
             state.update_block_state({
                 'current_height': boot_block['height'],
                 'current_hash':   boot_block['hash'],
@@ -3795,8 +3722,7 @@ def quantum_metrics_thread():
                     'phase_drift': 0.01 + random.random() * 0.02,
                     'w_state_fidelity': 0.98 - random.random() * 0.03,
                 })
-            
-            time.sleep(2)
+                        time.sleep(2)
         except Exception as e:
             logger.error(f"[METRICS] Error: {e}")
             time.sleep(2)
@@ -3805,9 +3731,9 @@ def quantum_metrics_thread():
 metrics_thread = threading.Thread(target=quantum_metrics_thread, daemon=True)
 metrics_thread.start()
 
-# ═════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════
 # P2P SERVER INSTANCE
-# ═════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════
 
 P2P = None
 
@@ -3835,9 +3761,9 @@ def initialize_p2p():
         return False
 
 
-# ═════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════
 # FLASK REST API ENDPOINTS
-# ═════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════
 
 @app.route('/')
 def dashboard():
@@ -3845,8 +3771,7 @@ def dashboard():
     try:
         with open('index.html', 'r') as f:
             html_content = f.read()
-        return render_template_string(html_content)
-    except FileNotFoundError:
+        return render_template_string(html_content)    except FileNotFoundError:
         return """
         <html>
             <head>
@@ -3895,8 +3820,7 @@ def health():
         'status': 'ok' if state.is_alive else 'degraded',
         'lattice_loaded': state.lattice_loaded,
         'p2p_enabled': P2P is not None and P2P.is_running,
-        'p2p_peers': P2P.get_peer_count() if P2P else 0,
-        'quantum_metrics': snapshot['quantum_metrics'],
+        'p2p_peers': P2P.get_peer_count() if P2P else 0,        'quantum_metrics': snapshot['quantum_metrics'],
         'block_height': snapshot['block_state']['current_height'],
         'timestamp': datetime.now(timezone.utc).isoformat(),
     }), 200
@@ -3945,8 +3869,7 @@ def blocks_tip():
                 if row:
                     return jsonify({
                         'block_height': row[0],
-                        'block_hash':   row[1],
-                        'parent_hash':  row[4] or ('0' * 64),
+                        'block_hash':   row[1],                        'parent_hash':  row[4] or ('0' * 64),
                         'merkle_root':  row[9] or ('0' * 64),
                         'timestamp_s':  int(row[2]) if row[2] else int(time.time()),
                         'difficulty_bits': int(float(row[7])) if row[7] else 12,
@@ -3995,8 +3918,7 @@ def blocks_tip():
         except (ValueError, TypeError):
             difficulty = 12
         try:
-            nonce = int(block.get('nonce', 0))
-        except (ValueError, TypeError):
+            nonce = int(block.get('nonce', 0))        except (ValueError, TypeError):
             nonce = 0
         try:
             fidelity = float(qm.get('w_state_fidelity', 0.9))
@@ -4045,8 +3967,7 @@ def wallet():
             'currency': 'QTCL',
         }), 200
     else:
-        # Wallet not yet in DB (never mined or received) — return 0 balance, not 404
-        return jsonify({
+        # Wallet not yet in DB (never mined or received) — return 0 balance, not 404        return jsonify({
             'address': address,
             'balance': 0.0,
             'balance_base_units': 0,
@@ -4095,8 +4016,7 @@ def oracle_register():
 
 
 @app.route('/api/oracle/w-state', methods=['GET'])
-def oracle_w_state():
-    """Get latest W-state snapshot for mining - with real quantum entropy"""
+def oracle_w_state():    """Get latest W-state snapshot for mining - with real quantum entropy"""
     try:
         import hashlib
         
@@ -4146,7 +4066,6 @@ def oracle_w_state():
             'error': 'fallback mode'
         }), 200
 
-
 @app.route('/api/mempool', methods=['GET'])
 def get_mempool():
     """Get pending TRANSFER transactions — coinbase txs are never returned here.
@@ -4195,8 +4114,7 @@ def block_by_height(height: int):
                     'merkle_root': genesis_hash,
                     'timestamp_s': 1700000000,
                     'difficulty_bits': 12,
-                    'nonce': 0,
-                    'miner_address': 'genesis',
+                    'nonce': 0,                    'miner_address': 'genesis',
                     'w_state_fidelity': 1.0,
                     'w_entropy_hash': 'genesis',
                 },
@@ -4245,8 +4163,7 @@ def block_by_height(height: int):
                 'block_hash': row[1],
                 'parent_hash': row[4] or ('0' * 64),
                 'merkle_root': row[9] or ('0' * 64),
-                'timestamp_s': int(row[2]) if row[2] else int(time.time()),
-                'difficulty_bits': int(float(row[7])) if row[7] else 12,
+                'timestamp_s': int(row[2]) if row[2] else int(time.time()),                'difficulty_bits': int(float(row[7])) if row[7] else 12,
                 'nonce': int(row[6]) if row[6] else 0,
                 'miner_address': row[5] or '',
                 'w_state_fidelity': float(row[8]) if row[8] is not None else 0.9,
@@ -4295,8 +4212,7 @@ def chain_status():
             temporal_coherence = float(val_row[3]) if val_row and val_row[3] else 0.0
             
             # Get recent blocks
-            cur.execute("""
-                SELECT height, block_hash, timestamp, transactions,
+            cur.execute("""                SELECT height, block_hash, timestamp, transactions,
                        temporal_coherence, temporal_coherence
                 FROM blocks
                 ORDER BY height DESC
@@ -4345,8 +4261,7 @@ def chain_status():
                 'mempool_size': pending_txs,
                 'pending_txs': pending_txs,
                 'latest_block_hash': latest_hash,
-                'quantum_validation_status': quantum_status,
-                'pq_validation_status': pq_status,
+                'quantum_validation_status': quantum_status,                'pq_validation_status': pq_status,
                 'oracle_consensus_reached': oracle_consensus,
                 'temporal_coherence': temporal_coherence,
                 'recent_blocks': recent,
@@ -4395,8 +4310,7 @@ def submit_block():
         
         # ✅ VALIDATION 2b: Block transaction count cap
         # Count user txs only — coinbase at index 0 is excluded from the cap.
-        user_tx_count = sum(
-            1 for tx in transactions
+        user_tx_count = sum(            1 for tx in transactions
             if str(tx.get('tx_type', 'transfer')).lower() != 'coinbase'
         )
         if user_tx_count > MAX_BLOCK_TX_SERVER:
@@ -4445,8 +4359,7 @@ def submit_block():
         def _server_merkle(tx_list: list) -> str:
             """SHA3-256 merkle tree — matches Block.compute_merkle() in miner."""
             import hashlib as _hm
-            if not tx_list:
-                return _hm.sha3_256(b'').hexdigest()
+            if not tx_list:                return _hm.sha3_256(b'').hexdigest()
             
             def _tx_hash(tx: dict) -> str:
                 """Reproduce miner's CoinbaseTx.compute_hash() / Transaction.compute_hash()."""
@@ -4495,8 +4408,7 @@ def submit_block():
         # ✅✅✅ BLOCK ACCEPTED - NOW PERSIST TO DATABASE ✅✅✅
         logger.info(f"[BLOCK] ✅ Valid block #{block_height} from {miner_address[:20]}… | F={w_state_fidelity:.4f}")
         
-        # Block reward in base units (NUMERIC(30,0) schema stores integers)
-        # 1250 base units = 12.50 QTCL  (like Bitcoin's satoshis)
+        # Block reward in base units (NUMERIC(30,0) schema stores integers)        # 1250 base units = 12.50 QTCL  (like Bitcoin's satoshis)
         BLOCK_REWARD_BASE = 1250
         BLOCK_REWARD_QTCL = 12.5
         
@@ -4545,8 +4457,7 @@ def submit_block():
             # The coinbase is ALWAYS transactions[0].
             # • from_address = COINBASE_ADDRESS (64 zeros) — null/unspendable input
             # • to_address   = miner_address
-            # • amount       = block subsidy + fees (in base units, NUMERIC(30,0))
-            # • tx_type      = 'coinbase'
+            # • amount       = block subsidy + fees (in base units, NUMERIC(30,0))            # • tx_type      = 'coinbase'
             # • The reward ONLY flows through the coinbase tx INSERT — never via a
             #   bare SQL UPDATE that bypasses the transaction ledger.
             # ══════════════════════════════════════════════════════════════════════
@@ -4595,8 +4506,7 @@ def submit_block():
                     }), 422
                 
                 # Verify deterministic tx_id
-                expected_cb_id = _hl.sha3_256(
-                    f"coinbase:{block_height}:{miner_address}:{w_entropy_hash}".encode()
+                expected_cb_id = _hl.sha3_256(                    f"coinbase:{block_height}:{miner_address}:{w_entropy_hash}".encode()
                 ).hexdigest()
                 if cb_id != expected_cb_id:
                     # Accept but warn — miner may have used different entropy hash
@@ -4645,8 +4555,7 @@ def submit_block():
                 0,                  # ALWAYS index 0 — Bitcoin convention
                 'coinbase',
                 'confirmed',
-                w_proof,            # W-state entropy witness
-                block_hash,         # commitment = block hash
+                w_proof,            # W-state entropy witness                block_hash,         # commitment = block hash
                 json.dumps({
                     'block_reward_base':  BLOCK_REWARD_BASE,
                     'fee_total_base':     fee_total_base,
@@ -4695,8 +4604,7 @@ def submit_block():
                     amount_base = int(raw_amount)
                 fee_base = int(round(float(tx.get('fee', 0)) * 100))
                 
-                if not all([tx_id, from_addr, to_addr, amount_base > 0]):
-                    logger.warning(f"[TX] ⚠️  Skipping invalid tx[{tx_idx}]: {tx_id}")
+                if not all([tx_id, from_addr, to_addr, amount_base > 0]):                    logger.warning(f"[TX] ⚠️  Skipping invalid tx[{tx_idx}]: {tx_id}")
                     continue
                 
                 _ensure_wallet(cur, from_addr, 'sending')
@@ -4745,8 +4653,7 @@ def submit_block():
             'current_hash':   block_hash,
             'parent_hash':    parent_hash,
             'timestamp':      timestamp_s,
-            'miner_address':  miner_address,
-            'pq_current':     w_entropy_hash,
+            'miner_address':  miner_address,            'pq_current':     w_entropy_hash,
             'difficulty':     difficulty_bits,
             'w_state_fidelity': w_state_fidelity,
         })
@@ -4794,7 +4701,6 @@ def submit_block():
             'error_type': type(e).__name__,
             'error_details': str(e)[:200]
         }), 500
-
 
 @app.route('/api/submit_transaction', methods=['POST'])
 def submit_transaction():
@@ -4845,8 +4751,7 @@ def submit_transaction():
                 signature_json = json.dumps(sig.to_dict())
 
         # Submit to BlockManager
-        if LATTICE and LATTICE.block_manager:
-            from lattice_controller import QuantumTransaction
+        if LATTICE and LATTICE.block_manager:            from lattice_controller import QuantumTransaction
             qt = QuantumTransaction(
                 tx_id         = tx_hash_hex,
                 sender_addr   = from_addr,
@@ -4895,8 +4800,7 @@ def submit_transaction():
 @app.route('/api/transactions/<string:tx_hash>', methods=['GET'])
 def get_transaction(tx_hash: str):
     """
-    Get a transaction by hash — works for coinbase and regular transfers.
-    Returns full on-chain record including tx_type, block context, and metadata.
+    Get a transaction by hash — works for coinbase and regular transfers.    Returns full on-chain record including tx_type, block context, and metadata.
     """
     try:
         with get_db_cursor() as cur:
@@ -4945,8 +4849,7 @@ def get_transaction(tx_hash: str):
 
 
 @app.route('/api/blocks/height/<int:height>/transactions', methods=['GET'])
-def block_transactions(height: int):
-    """
+def block_transactions(height: int):    """
     Get all transactions in a block by height.
     tx[0] is always the coinbase. Includes full coinbase metadata.
     """
@@ -4995,8 +4898,7 @@ def block_transactions(height: int):
             'coinbase':     coinbase,
             'transactions': txs,
         }), 200
-    
-    except Exception as e:
+        except Exception as e:
         logger.error(f"[BLOCK_TXS] Error: {e}")
         return jsonify({'error': str(e)}), 500
 
@@ -5045,8 +4947,7 @@ def p2p_discovery():
 
 
 @app.errorhandler(404)
-def not_found(e):
-    return jsonify({'error': 'not found'}), 404
+def not_found(e):    return jsonify({'error': 'not found'}), 404
 
 
 @app.errorhandler(500)
@@ -5055,9 +4956,9 @@ def server_error(e):
     return jsonify({'error': 'internal server error'}), 500
 
 
-# ═════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════
 # STARTUP & SHUTDOWN
-# ═════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════
 
 @app.before_request
 def before_request():
@@ -5095,8 +4996,7 @@ def shutdown_handler():
     logger.info("[SERVER] Shutting down...")
     state.is_alive = False
     
-    if P2P:
-        P2P.shutdown()
+    if P2P:        P2P.shutdown()
     
     if LATTICE:
         try:
@@ -5145,8 +5045,7 @@ if __name__ == '__main__':
     if not initialize_p2p():
         logger.warning("[STARTUP] Failed to initialize P2P server (may retry)")
     
-    # Port configuration — unified port 8000 for all services (Koyeb standard)
-    # FLASK_PORT: HTTP/WebSocket server (REST API + P2P on same port via Socket.IO)
+    # Port configuration — unified port 8000 for all services (Koyeb standard)    # FLASK_PORT: HTTP/WebSocket server (REST API + P2P on same port via Socket.IO)
     port = int(os.getenv('FLASK_PORT', 8000))
     debug = os.getenv('FLASK_ENV') == 'development'
     
