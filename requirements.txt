@@ -6,6 +6,9 @@
 Flask==2.3.3
 Werkzeug==2.3.7
 gunicorn==21.2.0
+flask-socketio==5.3.4
+python-socketio==5.9.0
+python-engineio==4.7.1
 
 # ── Database ──────────────────────────────────────────────────────────────────
 psycopg2-binary==2.9.7
