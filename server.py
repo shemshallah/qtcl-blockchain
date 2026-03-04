@@ -668,13 +668,16 @@ class MetricsCollector:
             with get_db_cursor() as cur:
                 # ── BLOCKCHAIN METRICS ──
                 cur.execute("SELECT COUNT(*) FROM blocks")
-                blocks_sealed = cur.fetchone()[0] or 0
+                blocks_row = cur.fetchone()
+                blocks_sealed = blocks_row[0] if blocks_row else 0
                 
                 cur.execute("SELECT MAX(height) FROM blocks")
-                chain_height = cur.fetchone()[0] if cur.fetchone() and cur.fetchone()[0] else 0
+                height_row = cur.fetchone()
+                chain_height = height_row[0] if height_row and height_row[0] is not None else 0
                 
                 cur.execute("SELECT COUNT(*) FROM transactions")
-                total_txs = cur.fetchone()[0] or 0
+                txs_row = cur.fetchone()
+                total_txs = txs_row[0] if txs_row else 0
                 
                 # ── VALIDATION STATUS ──
                 cur.execute("""
@@ -697,7 +700,8 @@ class MetricsCollector:
                     SELECT COUNT(*) FROM transactions 
                     WHERE status = 'pending'
                 """)
-                pending_txs = cur.fetchone()[0] or 0
+                pending_row = cur.fetchone()
+                pending_txs = pending_row[0] if pending_row else 0
                 
                 # ── AVERAGE BLOCK TIME ──
                 cur.execute("""
@@ -705,7 +709,7 @@ class MetricsCollector:
                     FROM blocks WHERE timestamp IS NOT NULL
                 """)
                 avg_block_time_row = cur.fetchone()
-                avg_block_time = float(avg_block_time_row[0]) if avg_block_time_row and avg_block_time_row[0] else 0.0
+                avg_block_time = float(avg_block_time_row[0]) if avg_block_time_row and avg_block_time_row[0] is not None else 0.0
                 
                 # ── QUANTUM METRICS (from system state) ──
                 snapshot = state.get_state()
