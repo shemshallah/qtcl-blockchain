@@ -759,10 +759,10 @@ class MetricsCollector:
                         'lattice_loaded': state.lattice_loaded,
                     }
                 }
-            
-            except Exception as e:
-                logger.error(f"[METRICS] Gather error: {e}")
-                return {'error': str(e)}
+        
+        except Exception as e:
+            logger.error(f"[METRICS] Gather error: {e}")
+            return {'error': str(e)}
 
 _metrics_collector = MetricsCollector()
 
