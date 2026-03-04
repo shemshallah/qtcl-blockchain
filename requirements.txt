@@ -1,32 +1,16 @@
-# ═══════════════════════════════════════════════════════════════════════════════
-# QTCL Quantum Lattice Blockchain — Python Dependencies
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# ── Web framework & WSGI ──────────────────────────────────────────────────────
+# Core dependencies
 Flask==2.3.3
 Werkzeug==2.3.7
-gunicorn==21.2.0
-flask-socketio==5.3.4
-python-socketio==5.9.0
-python-engineio==4.7.1
-
-# ── Database ──────────────────────────────────────────────────────────────────
 psycopg2-binary==2.9.7
+gunicorn==21.2.0
+flask-socketio>=0.0.1
+msgpack>=1.0.0,<2.0.0
 
-# ── Quantum computing (lattice_controller) ────────────────────────────────────
-# qiskit-aer pulls in qiskit-terra transitively; pin both for reproducibility.
+# For production deployments
+python-dotenv==1.0.0
+numpy>=1.24.3
 qiskit>=1.0.0
 qiskit-aer>=0.14.0
-
-# ── Numerical / scientific ────────────────────────────────────────────────────
-numpy>=1.24.3
-scipy>=1.11.2
-
-# ── Data validation (used by lattice_controller Pydantic models) ──────────────
 pydantic>=2.0.0
-
-# ── System metrics (psutil used in lattice_controller) ────────────────────────
 psutil>=5.9.0
-
-# ── Environment & config ──────────────────────────────────────────────────────
-python-dotenv==1.0.0
+scipy>=1.11.2
