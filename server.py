@@ -1078,11 +1078,12 @@ app.config['JSON_SORT_KEYS'] = False
 application = app  # WSGI entry point
 
 # Initialize SocketIO for real-time metrics streaming (port 5000, HTTP)
+# AFTER:
 socketio = SocketIO(
     app,
     cors_allowed_origins="*",
     async_mode='threading',
-    transports=['polling'],  # ← FORCE HTTP LONG-POLLING (no WebSocket on Koyeb)
+    transports=['websocket', 'polling'],  # websocket preferred, polling fallback
     engineio_logger=False,
     socketio_logger=False,
     ping_timeout=60,
@@ -1572,190 +1573,219 @@ class MetricsCollector:
                 time.sleep(2)
     
     def _gather_metrics(self) -> Dict[str, Any]:
-        """Gather all blockchain metrics from database (both nested and flat formats)"""
-        try:
-            with get_db_cursor() as cur:
-                # ── BLOCKCHAIN METRICS ──
-                cur.execute("SELECT COUNT(*) FROM blocks")
-                blocks_row = cur.fetchone()
-                blocks_sealed = blocks_row[0] if blocks_row else 0
-                
-                cur.execute("SELECT MAX(height) FROM blocks")
-                height_row = cur.fetchone()
-                chain_height = height_row[0] if height_row and height_row[0] is not None else 0
-                
-                cur.execute("SELECT COUNT(*) FROM transactions")
-                txs_row = cur.fetchone()
-                total_txs = txs_row[0] if txs_row else 0
-                
-                # ── VALIDATION STATUS ──
-                cur.execute("""
-                    SELECT 
-                      quantum_validation_status,
-                      pq_validation_status,
-                      oracle_consensus_reached,
-                      temporal_coherence,
-                      difficulty,
-                      timestamp
-                    FROM blocks
-                    ORDER BY height DESC LIMIT 1
-                """)
-                val_row = cur.fetchone()
-                quantum_status = val_row[0] if val_row else 'unvalidated'
-                pq_status = val_row[1] if val_row else 'unsigned'
-                oracle_consensus = val_row[2] if val_row else False
-                temporal_coherence = float(val_row[3]) if val_row and val_row[3] else 0.0
-                difficulty = val_row[4] if val_row else 20
-                last_block_timestamp = val_row[5] if val_row else time.time()
-                
-                # ── PENDING TRANSACTIONS ──
-                cur.execute("""
-                    SELECT COUNT(*) FROM transactions 
-                    WHERE status = 'pending'
-                """)
-                pending_row = cur.fetchone()
-                pending_txs = pending_row[0] if pending_row else 0
-                mempool_size = pending_txs
-                
-                # ── AVERAGE BLOCK TIME ──
-                cur.execute("""
-                    SELECT AVG(block_time) FROM (
-                        SELECT (timestamp - LAG(timestamp) OVER (ORDER BY height))::float
-                        FROM blocks WHERE timestamp IS NOT NULL
-                    ) AS t(block_time)
-                """)
-                avg_row = cur.fetchone()
-                avg_block_time = float(avg_row[0]) if avg_row and avg_row[0] is not None else 60.0
-                
-                # ── LAST BLOCK TIME AGO (seconds) ──
-                last_block_time_ago = time.time() - last_block_timestamp
-                
-                # ── QUANTUM METRICS (from system state) ──
-                snapshot = state.get_state()
-                qm = snapshot.get('quantum_metrics', {})
-                w_state_fidelity = qm.get('w_state_fidelity', 0.0)
-                
-                # ── ORACLE STATUS ──
-                oracle_address = None
-                addresses_issued = 0
-                if ORACLE:
-                    try:
-                        oracle_data = ORACLE.get_status()
-                        oracle_address = oracle_data.get('oracle_address')
-                        addresses_issued = oracle_data.get('addresses_issued', 0)
-                    except:
-                        pass
-                
-                # ── NETWORK STATUS ──
-                peer_count = 0
-                if P2P and hasattr(P2P, 'get_peer_count'):
-                    try:
-                        peer_count = P2P.get_peer_count()
-                    except:
-                        pass
-                
-                # ── NETWORK HASH RATE (estimated from difficulty and block time) ──
-                # Hash rate ≈ 2^difficulty / avg_block_time (simplified)
-                network_hash_rate = max(100, (2 ** difficulty) / max(avg_block_time, 60.0)) if difficulty > 0 else 1000
-                
-                # ── RECENT BLOCKS (for explorer) ──
-                cur.execute("""
-                    SELECT height, hash, miner_id, timestamp, (SELECT COUNT(*) FROM transactions WHERE block_height = blocks.height) as tx_count
-                    FROM blocks
-                    ORDER BY height DESC
-                    LIMIT 10
-                """)
-                recent_blocks = []
-                for row in cur.fetchall():
-                    recent_blocks.append({
-                        'height': row[0] or 0,
-                        'hash': row[1] or '0' * 64,
-                        'miner': row[2] or 'unknown',
-                        'timestamp': row[3] or int(time.time()),
-                        'tx_count': row[4] or 0,
-                    })
-                
-                # ── MEMPOOL (recent transactions) ──
-                cur.execute("""
-                    SELECT hash, sender, receiver, amount, fee
-                    FROM transactions
-                    WHERE status = 'pending'
-                    ORDER BY created_at DESC
-                    LIMIT 10
-                """)
-                mempool = []
-                for row in cur.fetchall():
-                    mempool.append({
-                        'hash': row[0] or '0' * 64,
-                        'from': row[1] or 'unknown',
-                        'to': row[2] or 'unknown',
-                        'amount': float(row[3] or 0),
-                        'fee': float(row[4] or 0),
-                    })
-                
-                # Return BOTH nested (for server) and flat (for explorer) formats
-                metrics = {
-                    # ── NESTED FORMAT (for server compatibility) ──
-                    'timestamp': datetime.now(timezone.utc).isoformat(),
-                    'blockchain': {
-                        'chain_height': chain_height,
-                        'blocks_sealed': blocks_sealed,
-                        'total_transactions': total_txs,
-                        'pending_transactions': pending_txs,
-                        'avg_block_time_s': round(avg_block_time, 3),
-                    },
-                    'validation': {
-                        'quantum_validation_status': quantum_status,
-                        'pq_validation_status': pq_status,
-                        'oracle_consensus_reached': oracle_consensus,
-                        'temporal_coherence': round(temporal_coherence, 4),
-                    },
-                    'quantum': {
-                        'coherence': round(qm.get('coherence', 0), 4),
-                        'fidelity': round(w_state_fidelity, 4),
-                        'entanglement': round(qm.get('entanglement', 0), 4),
-                    },
-                    'oracle': {
-                        'address': oracle_address,
-                        'addresses_issued': addresses_issued,
-                    },
-                    'network': {
-                        'peers': peer_count,
-                        'lattice_loaded': state.lattice_loaded,
-                    },
-                    
-                    # ── FLAT FORMAT (for explorer) ──
-                    'block_height': chain_height,
-                    'difficulty': difficulty,
-                    'network_hash_rate': network_hash_rate,
-                    'w_state_fidelity': w_state_fidelity,
-                    'peer_count': peer_count,
-                    'mempool_size': mempool_size,
-                    'last_block_time_ago': last_block_time_ago,
-                    'blocks': recent_blocks,
-                    'mempool': mempool,
-                    'miners': {},  # Will be populated by miner heartbeats
+    """
+    Gather all blockchain metrics — SQL uses verified column names from submit_block schema.
+    blocks:       height, block_hash, validator_public_key, timestamp, difficulty, etc.
+    transactions: tx_hash, from_address, to_address, amount, height, status
+    """
+    try:
+        with get_db_cursor() as cur:
+            # ── BLOCK COUNT & HEIGHT ──────────────────────────────────────────
+            cur.execute("SELECT COUNT(*), MAX(height) FROM blocks")
+            brow = cur.fetchone()
+            blocks_sealed = brow[0] if brow else 0
+            chain_height  = brow[1] if brow and brow[1] is not None else 0
+
+            # ── TRANSACTION COUNT ─────────────────────────────────────────────
+            cur.execute("SELECT COUNT(*) FROM transactions")
+            total_txs = (cur.fetchone() or [0])[0]
+
+            # ── LATEST BLOCK VALIDATION FIELDS ────────────────────────────────
+            cur.execute("""
+                SELECT quantum_validation_status,
+                       pq_validation_status,
+                       oracle_consensus_reached,
+                       temporal_coherence,
+                       difficulty,
+                       timestamp
+                FROM blocks
+                ORDER BY height DESC LIMIT 1
+            """)
+            val_row = cur.fetchone()
+            quantum_status    = val_row[0] if val_row else 'unvalidated'
+            pq_status         = val_row[1] if val_row else 'unsigned'
+            oracle_consensus  = bool(val_row[2]) if val_row else False
+            temporal_coh      = float(val_row[3]) if val_row and val_row[3] is not None else 0.0
+            difficulty        = float(val_row[4]) if val_row and val_row[4] is not None else 20.0
+            last_block_ts     = float(val_row[5]) if val_row and val_row[5] is not None else time.time()
+
+            # ── PENDING TRANSACTIONS (MEMPOOL SIZE) ────────────────────────────
+            cur.execute("SELECT COUNT(*) FROM transactions WHERE status = 'pending'")
+            mempool_size = (cur.fetchone() or [0])[0]
+
+            # ── AVERAGE BLOCK TIME ─────────────────────────────────────────────
+            cur.execute("""
+                SELECT AVG(dt) FROM (
+                    SELECT (timestamp - LAG(timestamp) OVER (ORDER BY height))::float AS dt
+                    FROM blocks WHERE timestamp IS NOT NULL
+                ) sub WHERE dt IS NOT NULL AND dt > 0 AND dt < 86400
+            """)
+            avg_row = cur.fetchone()
+            avg_block_time = float(avg_row[0]) if avg_row and avg_row[0] is not None else 60.0
+
+            # ── LAST BLOCK TIME AGO ────────────────────────────────────────────
+            last_block_time_ago = max(0.0, time.time() - last_block_ts)
+
+            # ── QUANTUM METRICS (in-memory, updated by metrics thread) ─────────
+            snap = state.get_state()
+            qm   = snap.get('quantum_metrics', {})
+            w_state_fidelity = float(qm.get('w_state_fidelity', 0.0))
+
+            # ── ORACLE STATUS ──────────────────────────────────────────────────
+            oracle_address    = None
+            addresses_issued  = 0
+            if ORACLE:
+                try:
+                    od = ORACLE.get_status()
+                    oracle_address   = od.get('oracle_address')
+                    addresses_issued = od.get('addresses_issued', 0)
+                except Exception:
+                    pass
+
+            # ── PEER COUNT ─────────────────────────────────────────────────────
+            peer_count = 0
+            if P2P and hasattr(P2P, 'get_peer_count'):
+                try:
+                    peer_count = P2P.get_peer_count()
+                except Exception:
+                    pass
+
+            # ── NETWORK HASH RATE ─────────────────────────────────────────────
+            # Estimate: 2^difficulty / avg_block_time  (simplified PoW model)
+            try:
+                network_hash_rate = max(100.0, (2.0 ** difficulty) / max(avg_block_time, 1.0))
+            except Exception:
+                network_hash_rate = 1000.0
+
+            # ── RECENT BLOCKS (correct column names: block_hash, validator_public_key) ──
+            cur.execute("""
+                SELECT b.height,
+                       b.block_hash,
+                       b.validator_public_key,
+                       b.timestamp,
+                       COALESCE(
+                           (SELECT COUNT(*) FROM transactions t WHERE t.height = b.height),
+                           0
+                       ) AS tx_count
+                FROM blocks b
+                ORDER BY b.height DESC
+                LIMIT 10
+            """)
+            recent_blocks = []
+            for row in cur.fetchall():
+                recent_blocks.append({
+                    'height'   : int(row[0]) if row[0] is not None else 0,
+                    'hash'     : str(row[1] or '0' * 64),
+                    'miner'    : str(row[2] or 'unknown'),
+                    'timestamp': int(float(row[3])) if row[3] is not None else int(time.time()),
+                    'tx_count' : int(row[4]) if row[4] is not None else 0,
+                })
+
+            # ── MEMPOOL TRANSACTIONS (correct columns: tx_hash, from_address, to_address) ─
+            cur.execute("""
+                SELECT tx_hash, from_address, to_address, amount
+                FROM transactions
+                WHERE status = 'pending'
+                ORDER BY created_at DESC
+                LIMIT 10
+            """)
+            mempool_txs = []
+            for row in cur.fetchall():
+                raw_amt = int(row[3]) if row[3] is not None else 0
+                mempool_txs.append({
+                    'hash'  : str(row[0] or ''),
+                    'from'  : str(row[1] or ''),
+                    'to'    : str(row[2] or ''),
+                    'amount': round(raw_amt / 100, 4),   # base units → QTCL
+                    'fee'   : 0,
+                })
+
+            # ── MINER LEADERBOARD (aggregated from transactions) ───────────────
+            cur.execute("""
+                SELECT b.validator_public_key,
+                       COUNT(*)                           AS blocks_mined,
+                       MAX(b.timestamp)                   AS last_block_ts
+                FROM blocks b
+                WHERE b.validator_public_key IS NOT NULL
+                  AND b.validator_public_key != ''
+                GROUP BY b.validator_public_key
+                ORDER BY blocks_mined DESC
+                LIMIT 10
+            """)
+            miners_dict = {}
+            for row in cur.fetchall():
+                mid = str(row[0] or 'unknown')
+                miners_dict[mid] = {
+                    'miner_id'       : mid,
+                    'blocks_mined'   : int(row[1] or 0),
+                    'hash_rate'      : round(network_hash_rate, 2),
+                    'last_block_time': int(float(row[2])) if row[2] else int(time.time()),
+                    'wallet_address' : mid,
                 }
-                
-                return metrics
-        
-        except Exception as e:
-            logger.error(f"[METRICS] Gather error: {e}")
+
+            # ── ASSEMBLE FULL PAYLOAD (nested + flat for frontend compatibility) ─
             return {
-                'error': str(e),
-                'block_height': 0,
-                'difficulty': 20,
-                'network_hash_rate': 0,
-                'w_state_fidelity': 0.0,
-                'peer_count': 0,
-                'mempool_size': 0,
-                'last_block_time_ago': 0,
-                'blocks': [],
-                'mempool': [],
-                'miners': {},
+                # FLAT FORMAT — consumed directly by explorer JS
+                'block_height'       : chain_height,
+                'difficulty'         : difficulty,
+                'network_hash_rate'  : network_hash_rate,
+                'w_state_fidelity'   : w_state_fidelity,
+                'peer_count'         : peer_count,
+                'mempool_size'       : mempool_size,
+                'last_block_time_ago': round(last_block_time_ago, 1),
+                'recent_blocks'      : recent_blocks,
+                'mempool_txs'        : mempool_txs,
+                'miners'             : miners_dict,
+
+                # NESTED FORMAT — for server-internal compatibility
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'blockchain': {
+                    'chain_height'        : chain_height,
+                    'blocks_sealed'       : blocks_sealed,
+                    'total_transactions'  : total_txs,
+                    'pending_transactions': mempool_size,
+                    'avg_block_time_s'    : round(avg_block_time, 3),
+                },
+                'validation': {
+                    'quantum_validation_status': quantum_status,
+                    'pq_validation_status'     : pq_status,
+                    'oracle_consensus_reached' : oracle_consensus,
+                    'temporal_coherence'       : round(temporal_coh, 4),
+                },
+                'quantum': {
+                    'coherence'    : round(float(qm.get('coherence', 0)), 4),
+                    'fidelity'     : round(w_state_fidelity, 4),
+                    'entanglement' : round(float(qm.get('entanglement', 0)), 4),
+                },
+                'oracle': {
+                    'address'          : oracle_address,
+                    'addresses_issued' : addresses_issued,
+                },
+                'network': {
+                    'peers'          : peer_count,
+                    'lattice_loaded' : state.lattice_loaded,
+                },
             }
 
-_metrics_collector = MetricsCollector()
+    except Exception as e:
+        logger.error(f"[METRICS] Gather error: {type(e).__name__}: {e}")
+        # Return live in-memory state as fallback so frontend never gets stale zeros
+        snap = state.get_state()
+        bs   = snap.get('block_state', {})
+        qm   = snap.get('quantum_metrics', {})
+        return {
+            'error'              : str(e),
+            'block_height'       : int(bs.get('current_height', 0)),
+            'difficulty'         : float(bs.get('difficulty', 20)),
+            'network_hash_rate'  : 0.0,
+            'w_state_fidelity'   : float(qm.get('w_state_fidelity', 0.0)),
+            'peer_count'         : P2P.get_peer_count() if P2P else 0,
+            'mempool_size'       : 0,
+            'last_block_time_ago': 0.0,
+            'recent_blocks'      : [],
+            'mempool_txs'        : [],
+            'miners'             : {},
+        }
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # WEBSOCKET HANDLERS
@@ -1787,6 +1817,42 @@ def handle_request_metrics():
         logger.error(f"[WEBSOCKET] On-demand metrics error: {e}")
         emit('error', {'message': str(e)})
 
+# ── Alias events (miners/clients may emit either name) ────────────────────────
+@socketio.on('get_metrics')
+def handle_get_metrics():
+    """Alias for request_metrics"""
+    handle_request_metrics()
+
+@socketio.on('ping')
+def handle_ws_ping():
+    """WebSocket ping keepalive"""
+    emit('pong', {'ts': time.time()})
+
+# ── REST endpoints for HTTP fallback polling ──────────────────────────────────
+@app.route('/metrics', methods=['GET'])
+@app.route('/api/metrics', methods=['GET'])
+def rest_metrics():
+    """REST endpoint for metrics — consumed by explorer HTTP fallback"""
+    try:
+        data = _metrics_collector._gather_metrics()
+        return jsonify(data), 200
+    except Exception as e:
+        return jsonify({'error': str(e), 'block_height': 0}), 500
+
+@app.route('/stats', methods=['GET'])
+@app.route('/api/stats', methods=['GET'])
+def rest_stats():
+    """Chain stats REST endpoint"""
+    try:
+        snap = state.get_state()
+        bs   = snap.get('block_state', {})
+        return jsonify({
+            'block_height': int(bs.get('current_height', 0)),
+            'block_hash'  : bs.get('current_hash', '0' * 64),
+            'timestamp'   : datetime.now(timezone.utc).isoformat(),
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # SYSTEM STATE & GLOBAL MANAGEMENT
@@ -2746,8 +2812,12 @@ class P2PServer:
         }
         self.stats_lock = threading.RLock()
         
-        logger.info(f"[P2P] Server initialized on {self.host}:{self.initial_port} (testnet={testnet})")
-    
+        logger.info(f"[P2P] Server initialized on {self.host}:{self.initial_port} (testnet={testnet})"
+    def _generate_peer_id(self) -> str:
+         """Generate cryptographically unique peer ID"""
+    return hashlib.sha256(
+        f"{time.time_ns()}{secrets.token_bytes(16).hex()}".encode()
+    ).hexdigest()[:16]
     def start(self) -> bool:
         """
         Start P2P server with intelligent port binding (H1) and thread pooling (H2).
