@@ -770,6 +770,9 @@ _miners_lock = threading.RLock()  # Thread-safe access to _registered_miners
 # Latest snapshot for gossip distribution
 _latest_snapshot = None
 _latest_snapshot_ts = 0
+_last_snapshot_log_time = 0  # ← NEW: Track last log (not broadcast) for throttling
+_snapshot_log_interval = 10.0  # ← NEW: Log only every 10 seconds (broadcasts still every second)
+_verbose_p2p_logging = os.getenv('VERBOSE_P2P_LOGGING', 'false').lower() == 'true'  # ← NEW: Flag for full verbosity
 _snapshot_lock = threading.RLock()
 
 # Snapshot buffer (ring buffer - max 100 snapshots)
@@ -820,11 +823,14 @@ def _get_active_miners_for_gossip():
 def _broadcast_snapshot_to_gossip_network(snapshot):
     """Broadcast latest snapshot to all connected miners via gossip (HTTP long-polling).
     
+    ⚡ BROADCASTS: Every second (real-time P2P metrics)
+    🔇 LOGGING: Every 10 seconds (no spam) unless VERBOSE_P2P_LOGGING=true
+    
     Distributes snapshots to all miners with proper buffering and metrics.
     NOTE: Using Socket.IO HTTP long-polling (transports=['polling']) avoids WebSocket timeouts on Koyeb.
     Binary msgpack serialization available via BinarySerializer for future optimization.
     """
-    global _latest_snapshot, _latest_snapshot_ts
+    global _latest_snapshot, _latest_snapshot_ts, _last_snapshot_log_time
     
     with _snapshot_lock:
         _snapshot_buffer.append(snapshot)
@@ -836,6 +842,7 @@ def _broadcast_snapshot_to_gossip_network(snapshot):
             active_count = len(_registered_miners)
         
         # Send to all connected clients via broadcast (Socket.IO handles HTTP long-polling transport)
+        # ✅ ALWAYS broadcast every second (real-time metrics needed)
         p2p_socketio.emit('w_state_snapshot', {
             'timestamp_ns': snapshot.get('timestamp_ns', 0),
             'oracle_address': snapshot.get('oracle_address', 'qtcl1oracle'),
@@ -854,8 +861,16 @@ def _broadcast_snapshot_to_gossip_network(snapshot):
             snapshot_json = json.dumps(snapshot)
             _p2p_metrics['bytes_sent'] += len(snapshot_json)
         
-        if active_count == 0:
-            logger.debug(f"[P2P-LONGPOLL] 📡 Snapshot broadcast (no miners connected yet) | ts={snapshot.get('timestamp_ns', 0)}")
+        # 🔇 THROTTLE LOGGING ONLY (not broadcasts)
+        now = time.time()
+        should_log = _verbose_p2p_logging or (now - _last_snapshot_log_time >= _snapshot_log_interval)
+        
+        if should_log:
+            if active_count == 0:
+                logger.debug(f"[P2P-LONGPOLL] 📡 Snapshot broadcast (no miners connected yet) | ts={snapshot.get('timestamp_ns', 0)}")
+            else:
+                logger.info(f"[P2P-LONGPOLL] 📡 Snapshot broadcast | ts={snapshot.get('timestamp_ns', 0)} | miners={active_count}")
+            _last_snapshot_log_time = now
         
     except Exception as e:
         logger.error(f"[P2P-LONGPOLL] Snapshot broadcast error: {e}")
