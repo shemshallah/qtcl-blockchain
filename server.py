@@ -1572,7 +1572,7 @@ class MetricsCollector:
                 time.sleep(2)
     
     def _gather_metrics(self) -> Dict[str, Any]:
-        """Gather all blockchain metrics from database"""
+        """Gather all blockchain metrics from database (both nested and flat formats)"""
         try:
             with get_db_cursor() as cur:
                 # ── BLOCKCHAIN METRICS ──
@@ -1594,7 +1594,9 @@ class MetricsCollector:
                       quantum_validation_status,
                       pq_validation_status,
                       oracle_consensus_reached,
-                      temporal_coherence
+                      temporal_coherence,
+                      difficulty,
+                      timestamp
                     FROM blocks
                     ORDER BY height DESC LIMIT 1
                 """)
@@ -1603,6 +1605,8 @@ class MetricsCollector:
                 pq_status = val_row[1] if val_row else 'unsigned'
                 oracle_consensus = val_row[2] if val_row else False
                 temporal_coherence = float(val_row[3]) if val_row and val_row[3] else 0.0
+                difficulty = val_row[4] if val_row else 20
+                last_block_timestamp = val_row[5] if val_row else time.time()
                 
                 # ── PENDING TRANSACTIONS ──
                 cur.execute("""
@@ -1611,6 +1615,7 @@ class MetricsCollector:
                 """)
                 pending_row = cur.fetchone()
                 pending_txs = pending_row[0] if pending_row else 0
+                mempool_size = pending_txs
                 
                 # ── AVERAGE BLOCK TIME ──
                 cur.execute("""
@@ -1620,11 +1625,15 @@ class MetricsCollector:
                     ) AS t(block_time)
                 """)
                 avg_row = cur.fetchone()
-                avg_block_time = float(avg_row[0]) if avg_row and avg_row[0] is not None else 0.0
+                avg_block_time = float(avg_row[0]) if avg_row and avg_row[0] is not None else 60.0
+                
+                # ── LAST BLOCK TIME AGO (seconds) ──
+                last_block_time_ago = time.time() - last_block_timestamp
                 
                 # ── QUANTUM METRICS (from system state) ──
                 snapshot = state.get_state()
                 qm = snapshot.get('quantum_metrics', {})
+                w_state_fidelity = qm.get('w_state_fidelity', 0.0)
                 
                 # ── ORACLE STATUS ──
                 oracle_address = None
@@ -1638,14 +1647,55 @@ class MetricsCollector:
                         pass
                 
                 # ── NETWORK STATUS ──
-                peers = 0
+                peer_count = 0
                 if P2P and hasattr(P2P, 'get_peer_count'):
                     try:
-                        peers = P2P.get_peer_count()
+                        peer_count = P2P.get_peer_count()
                     except:
                         pass
                 
-                return {
+                # ── NETWORK HASH RATE (estimated from difficulty and block time) ──
+                # Hash rate ≈ 2^difficulty / avg_block_time (simplified)
+                network_hash_rate = max(100, (2 ** difficulty) / max(avg_block_time, 60.0)) if difficulty > 0 else 1000
+                
+                # ── RECENT BLOCKS (for explorer) ──
+                cur.execute("""
+                    SELECT height, hash, miner_id, timestamp, (SELECT COUNT(*) FROM transactions WHERE block_height = blocks.height) as tx_count
+                    FROM blocks
+                    ORDER BY height DESC
+                    LIMIT 10
+                """)
+                recent_blocks = []
+                for row in cur.fetchall():
+                    recent_blocks.append({
+                        'height': row[0] or 0,
+                        'hash': row[1] or '0' * 64,
+                        'miner': row[2] or 'unknown',
+                        'timestamp': row[3] or int(time.time()),
+                        'tx_count': row[4] or 0,
+                    })
+                
+                # ── MEMPOOL (recent transactions) ──
+                cur.execute("""
+                    SELECT hash, sender, receiver, amount, fee
+                    FROM transactions
+                    WHERE status = 'pending'
+                    ORDER BY created_at DESC
+                    LIMIT 10
+                """)
+                mempool = []
+                for row in cur.fetchall():
+                    mempool.append({
+                        'hash': row[0] or '0' * 64,
+                        'from': row[1] or 'unknown',
+                        'to': row[2] or 'unknown',
+                        'amount': float(row[3] or 0),
+                        'fee': float(row[4] or 0),
+                    })
+                
+                # Return BOTH nested (for server) and flat (for explorer) formats
+                metrics = {
+                    # ── NESTED FORMAT (for server compatibility) ──
                     'timestamp': datetime.now(timezone.utc).isoformat(),
                     'blockchain': {
                         'chain_height': chain_height,
@@ -1662,7 +1712,7 @@ class MetricsCollector:
                     },
                     'quantum': {
                         'coherence': round(qm.get('coherence', 0), 4),
-                        'fidelity': round(qm.get('w_state_fidelity', 0), 4),
+                        'fidelity': round(w_state_fidelity, 4),
                         'entanglement': round(qm.get('entanglement', 0), 4),
                     },
                     'oracle': {
@@ -1670,14 +1720,40 @@ class MetricsCollector:
                         'addresses_issued': addresses_issued,
                     },
                     'network': {
-                        'peers': peers,
+                        'peers': peer_count,
                         'lattice_loaded': state.lattice_loaded,
-                    }
+                    },
+                    
+                    # ── FLAT FORMAT (for explorer) ──
+                    'block_height': chain_height,
+                    'difficulty': difficulty,
+                    'network_hash_rate': network_hash_rate,
+                    'w_state_fidelity': w_state_fidelity,
+                    'peer_count': peer_count,
+                    'mempool_size': mempool_size,
+                    'last_block_time_ago': last_block_time_ago,
+                    'blocks': recent_blocks,
+                    'mempool': mempool,
+                    'miners': {},  # Will be populated by miner heartbeats
                 }
+                
+                return metrics
         
         except Exception as e:
             logger.error(f"[METRICS] Gather error: {e}")
-            return {'error': str(e)}
+            return {
+                'error': str(e),
+                'block_height': 0,
+                'difficulty': 20,
+                'network_hash_rate': 0,
+                'w_state_fidelity': 0.0,
+                'peer_count': 0,
+                'mempool_size': 0,
+                'last_block_time_ago': 0,
+                'blocks': [],
+                'mempool': [],
+                'miners': {},
+            }
 
 _metrics_collector = MetricsCollector()
 

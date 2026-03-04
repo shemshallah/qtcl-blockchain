@@ -395,7 +395,15 @@
     </div>
 
     <script>
-        const socket = io();
+        // Force WSS (secure WebSocket) on port 443
+        const socket = io({
+            secure: true,
+            rejectUnauthorized: false,
+            reconnection: true,
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 5000,
+            reconnectionAttempts: 10
+        });
 
         // Data storage
         let metrics = {};
@@ -411,18 +419,26 @@
 
         // Socket.IO connection
         socket.on('connect', () => {
-            console.log('✅ Connected to blockchain explorer');
+            console.log('✅ Connected to blockchain explorer via WSS');
             document.querySelector('.status-indicator').classList.add('live');
+            document.querySelector('.status-indicator').textContent = '✓ LIVE';
             socket.emit('request_metrics');
         });
 
         socket.on('disconnect', () => {
             console.log('❌ Disconnected from explorer');
             document.querySelector('.status-indicator').classList.remove('live');
+            document.querySelector('.status-indicator').textContent = '✗ OFFLINE';
+        });
+
+        socket.on('connect_error', (error) => {
+            console.error('❌ Connection error:', error);
+            document.querySelector('.status-indicator').classList.remove('live');
         });
 
         // Main metrics update (real-time streaming)
         socket.on('metrics_update', (data) => {
+            console.log('📊 Metrics received:', data);
             metrics = data;
             updateMetricsDisplay();
             updateCharts();
@@ -430,6 +446,7 @@
 
         // Block announcements
         socket.on('new_block', (blockData) => {
+            console.log('📦 New block:', blockData);
             blocks.unshift(blockData);
             if (blocks.length > 10) blocks.pop();
             updateBlocksDisplay();
@@ -437,20 +454,22 @@
 
         // Mempool updates
         socket.on('mempool_update', (txData) => {
+            console.log('💸 Mempool update:', txData);
             mempool = txData;
             updateMempoolDisplay();
         });
 
         // Miner updates
         socket.on('miner_heartbeat', (minerData) => {
+            console.log('⛏️ Miner heartbeat:', minerData);
             miners[minerData.miner_id] = minerData;
             updateMinersDisplay();
         });
 
         // Update metrics display
         function updateMetricsDisplay() {
-            document.getElementById('height').textContent = metrics.block_height || '—';
-            document.getElementById('difficulty').textContent = metrics.difficulty || '—';
+            document.getElementById('height').textContent = (metrics.block_height || 0).toString();
+            document.getElementById('difficulty').textContent = (metrics.difficulty || 0).toString();
             
             const hashRate = metrics.network_hash_rate || 0;
             document.getElementById('hashRate').textContent = formatHashRate(hashRate);
@@ -458,13 +477,13 @@
             const fidelity = metrics.w_state_fidelity || 0;
             document.getElementById('fidelity').textContent = (fidelity * 100).toFixed(2) + '%';
             
-            document.getElementById('peers').textContent = metrics.peer_count || '—';
-            document.getElementById('mempool').textContent = metrics.mempool_size || '—';
+            document.getElementById('peers').textContent = (metrics.peer_count || 0).toString();
+            document.getElementById('mempool').textContent = (metrics.mempool_size || 0).toString();
             
             const lastBlockTime = metrics.last_block_time_ago || 0;
             document.getElementById('lastBlockTime').textContent = lastBlockTime.toFixed(0);
             
-            document.getElementById('activeMiners').textContent = Object.keys(miners).length;
+            document.getElementById('activeMiners').textContent = Object.keys(miners).length.toString();
 
             // Add to history for charts
             if (hashRate > 0) {
@@ -490,7 +509,7 @@
 
             container.innerHTML = blocks.map(block => `
                 <div class="block-item">
-                    <div class="block-height">Block #${block.height}</div>
+                    <div class="block-height">Block #${block.height || 0}</div>
                     <div class="block-field">
                         Hash: <span class="block-field-value">${(block.hash || '').substring(0, 16)}...</span>
                     </div>
@@ -554,13 +573,13 @@
 
         // Update charts
         function updateCharts() {
-            if (hashRateChart) {
+            if (hashRateChart && hashRateHistory.length > 0) {
                 hashRateChart.data.labels = hashRateHistory.map(d => d.t.toLocaleTimeString());
                 hashRateChart.data.datasets[0].data = hashRateHistory.map(d => d.v);
                 hashRateChart.update('none');
             }
 
-            if (difficultyChart) {
+            if (difficultyChart && difficultyHistory.length > 0) {
                 difficultyChart.data.labels = difficultyHistory.map(d => d.t.toLocaleTimeString());
                 difficultyChart.data.datasets[0].data = difficultyHistory.map(d => d.v);
                 difficultyChart.update('none');
@@ -654,7 +673,7 @@
             }
         });
 
-        // Request initial metrics
+        // Request metrics every 5 seconds
         setInterval(() => {
             socket.emit('request_metrics');
         }, 5000);
