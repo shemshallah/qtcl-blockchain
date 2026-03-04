@@ -47,7 +47,8 @@ from typing import Dict, Any, Optional, Tuple, List, Set, Callable
 from contextlib import contextmanager
 from collections import deque, OrderedDict
 from dataclasses import dataclass, field, asdict
-from enum import Enumfrom decimal import Decimal
+from enum import Enum
+from decimal import Decimal
 import random
 import secrets
 from concurrent.futures import ThreadPoolExecutor  # H2: Thread pooling for DoS prevention
