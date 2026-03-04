@@ -3,767 +3,1037 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>QTCL — Quantum Lattice Blockchain</title>
+<title>QTCL — Quantum Temporal Coherence Ledger</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Crimson+Text:ital,wght@0,400;0,600;1,400&family=Space+Grotesk:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap');
-
 :root {
-  --void:    #03030a;
-  --deep:    #07071a;
-  --panel:   #0b0b20;
-  --rim:     #13132e;
-  --line:    #1e1e45;
-  --cyan:    #00e5ff;
-  --cyan2:   #00b8d4;
-  --violet:  #7c3aed;
-  --green:   #00ff9d;
-  --amber:   #ffb300;
-  --red:     #ff3d71;
-  --text:    #c9d1e8;
-  --dim:     #5a6070;
-  --glow-c:  0 0 24px rgba(0,229,255,.25);
-  --glow-v:  0 0 24px rgba(124,58,237,.25);
-  --glow-g:  0 0 16px rgba(0,255,157,.2);
+  /* Elegant, refined palette */
+  --bg-deep: #0a0e23;
+  --bg-card: #0f1429;
+  --bg-hover: #131829;
+  --accent-gold: #d4af37;
+  --accent-cyan: #00d9ff;
+  --accent-violet: #9d7fff;
+  --text-primary: #e8eaf6;
+  --text-secondary: #9aa4c4;
+  --text-dim: #5f6a8b;
+  --border-light: #1a2047;
+  --border-dark: #0d1117;
+  --success: #00c866;
+  --warning: #ffa500;
+  --danger: #ff4757;
 }
 
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
 
 html, body {
-  width: 100%; height: 100%; overflow: hidden;
-  background: var(--void);
-  color: var(--text);
-  font-family: 'Space Mono', monospace;
-  font-size: 11px;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(135deg, var(--bg-deep) 0%, #0d1526 50%, var(--bg-deep) 100%);
+  color: var(--text-primary);
+  font-family: 'Space Grotesk', sans-serif;
+  font-weight: 400;
+  line-height: 1.6;
+  overflow: hidden;
 }
 
-/* ── SCAN-LINE OVERLAY ─────────────────────────────────────────── */
+/* Subtle grain texture */
 body::before {
   content: '';
-  position: fixed; inset: 0; pointer-events: none; z-index: 9999;
+  position: fixed;
+  inset: 0;
   background: repeating-linear-gradient(
-    to bottom,
-    transparent 0px,
+    90deg,
+    transparent,
     transparent 2px,
-    rgba(0,0,0,.06) 2px,
-    rgba(0,0,0,.06) 4px
+    rgba(212, 175, 55, 0.01) 2px,
+    rgba(212, 175, 55, 0.01) 4px
   );
+  pointer-events: none;
+  z-index: 9999;
 }
 
-/* ── LAYOUT ────────────────────────────────────────────────────── */
+/* ─────────────────────────────────────────────────────────────────── */
+/* MAIN LAYOUT */
+/* ─────────────────────────────────────────────────────────────────── */
+
 #root {
-  display: grid;
-  grid-template-rows: 44px 1fr 28px;
+  display: flex;
+  flex-direction: column;
   height: 100vh;
-}
-
-/* ── TOPBAR ────────────────────────────────────────────────────── */
-#topbar {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 0 20px;
-  background: var(--deep);
-  border-bottom: 1px solid var(--line);
-  box-shadow: 0 1px 0 rgba(0,229,255,.08);
-}
-#logo {
-  font-family: 'Syne', sans-serif;
-  font-weight: 800; font-size: 14px;
-  letter-spacing: 3px; color: var(--cyan);
-  text-shadow: var(--glow-c);
-}
-#logo span { color: var(--violet); }
-#topbar-right { display: flex; align-items: center; gap: 20px; }
-.tb-pill {
-  display: flex; align-items: center; gap: 6px;
-  font-size: 10px; color: var(--dim);
-}
-.tb-pill .dot {
-  width: 6px; height: 6px; border-radius: 50%;
-  background: var(--dim);
-  box-shadow: none;
-  transition: background .3s, box-shadow .3s;
-}
-.tb-pill.live .dot   { background: var(--green); box-shadow: var(--glow-g); animation: blink 2s infinite; }
-.tb-pill.warn .dot   { background: var(--amber); }
-.tb-pill.dead .dot   { background: var(--red); }
-@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.4} }
-#clock { font-size: 10px; color: var(--dim); letter-spacing: 1px; }
-
-/* ── GRID ──────────────────────────────────────────────────────── */
-#grid {
-  display: grid;
-  grid-template-columns: 260px 1fr 260px;
-  grid-template-rows: 1fr 1fr;
-  gap: 8px; padding: 8px;
   overflow: hidden;
 }
 
-.panel {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  overflow: hidden;
-  display: flex; flex-direction: column;
+header {
+  padding: 2rem 4rem;
+  border-bottom: 1px solid var(--border-light);
+  background: linear-gradient(180deg, rgba(15,20,41,0.95) 0%, rgba(10,14,35,0.8) 100%);
+  backdrop-filter: blur(10px);
 }
-.panel-head {
-  padding: 8px 12px 7px;
-  border-bottom: 1px solid var(--line);
-  font-family: 'Syne', sans-serif;
-  font-size: 10px; font-weight: 600;
-  letter-spacing: 2px; color: var(--cyan2);
+
+.header-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  max-width: 1800px;
+  margin: 0 auto;
+  gap: 2rem;
+}
+
+.branding {
+  flex: 0 0 auto;
+}
+
+.logo {
+  font-family: 'Crimson Text', serif;
+  font-size: 2.5rem;
+  font-weight: 600;
+  background: linear-gradient(135deg, var(--accent-gold), #b8860b);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  letter-spacing: -1px;
+  margin-bottom: 0.25rem;
+}
+
+.tagline {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  letter-spacing: 2px;
   text-transform: uppercase;
-  background: rgba(0,229,255,.03);
-  flex-shrink: 0;
+  font-weight: 500;
 }
-.panel-body { flex: 1; overflow: hidden; padding: 10px 12px; }
 
-/* ── COLUMN SPANS ──────────────────────────────────────────────── */
-#col-left-top    { grid-column:1; grid-row:1; }
-#col-left-bot    { grid-column:1; grid-row:2; }
-#col-center-top  { grid-column:2; grid-row:1; }
-#col-center-bot  { grid-column:2; grid-row:2; }
-#col-right-top   { grid-column:3; grid-row:1; }
-#col-right-bot   { grid-column:3; grid-row:2; }
-
-/* ── METRIC ROWS ───────────────────────────────────────────────── */
-.mrow {
-  display: flex; justify-content: space-between; align-items: center;
-  padding: 5px 0; border-bottom: 1px solid var(--rim);
+.status-pills {
+  display: flex;
+  gap: 1.5rem;
+  flex: 1;
+  justify-content: center;
 }
-.mrow:last-child { border-bottom: none; }
-.ml { color: var(--dim); font-size: 10px; }
-.mv { font-size: 11px; font-weight: 700; color: var(--cyan); letter-spacing: .5px; }
-.mv.g { color: var(--green); }
-.mv.a { color: var(--amber); }
-.mv.r { color: var(--red); }
-.mv.v { color: var(--violet); text-shadow: var(--glow-v); }
 
-/* ── BAR ───────────────────────────────────────────────────────── */
-.bar-wrap { height: 3px; background: var(--rim); border-radius: 2px; margin: 2px 0 6px; overflow: hidden; }
-.bar-fill { height: 100%; border-radius: 2px; transition: width .6s ease; }
-.bar-c { background: linear-gradient(90deg, var(--cyan2), var(--cyan)); box-shadow: 0 0 6px rgba(0,229,255,.4); }
-.bar-v { background: linear-gradient(90deg, var(--violet), #a855f7); }
-.bar-g { background: linear-gradient(90deg, #00c57a, var(--green)); }
-
-/* ── POINCARÉ DISK ─────────────────────────────────────────────── */
-#disk-wrap {
-  width: 100%; height: 100%;
-  display: flex; align-items: center; justify-content: center;
+.pill {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background: rgba(212, 175, 55, 0.05);
+  border: 1px solid rgba(212, 175, 55, 0.2);
+  border-radius: 2px;
+  font-size: 0.75rem;
+  letter-spacing: 1px;
+  color: var(--text-secondary);
+  transition: all 0.3s ease;
 }
-#disk { display: block; }
 
-/* ── BLOCK FEED ────────────────────────────────────────────────── */
-#block-feed { overflow-y: auto; height: 100%; }
-#block-feed::-webkit-scrollbar { width: 3px; }
-#block-feed::-webkit-scrollbar-thumb { background: var(--line); border-radius: 2px; }
+.pill.active {
+  background: rgba(0, 217, 255, 0.1);
+  border-color: rgba(0, 217, 255, 0.3);
+  color: var(--accent-cyan);
+}
 
-.bf-row {
+.indicator {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  transition: all 0.3s ease;
+}
+
+.pill.active .indicator {
+  background: var(--accent-cyan);
+  box-shadow: 0 0 8px rgba(0, 217, 255, 0.6);
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.clock {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  letter-spacing: 2px;
+}
+
+/* ─────────────────────────────────────────────────────────────────── */
+/* MAIN CONTENT AREA */
+/* ─────────────────────────────────────────────────────────────────── */
+
+main {
+  flex: 1;
   display: grid;
-  grid-template-columns: 42px 80px 1fr 52px;
-  gap: 6px; align-items: center;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--rim);
-  font-size: 10px;
-  animation: slideIn .3s ease;
-}
-@keyframes slideIn { from { opacity:0; transform:translateX(-8px); } to { opacity:1; transform:none; } }
-.bf-row:last-child { border-bottom: none; }
-.bf-height { color: var(--violet); font-weight: 700; }
-.bf-hash   { color: var(--dim); font-family: 'Space Mono'; font-size: 9px; overflow: hidden; white-space: nowrap; }
-.bf-time   { color: var(--dim); font-size: 9px; }
-.bf-badge  {
-  font-size: 9px; padding: 2px 6px; border-radius: 2px;
-  background: rgba(0,255,157,.1); color: var(--green); border: 1px solid rgba(0,255,157,.2);
-  text-align: center; white-space: nowrap;
+  grid-template-columns: 1fr 1fr;
+  gap: 2rem;
+  padding: 2rem 4rem;
+  overflow: hidden;
 }
 
-/* ── LOG / TX FEED ─────────────────────────────────────────────── */
-#log-feed { overflow-y: auto; height: 100%; }
-#log-feed::-webkit-scrollbar { width: 3px; }
-#log-feed::-webkit-scrollbar-thumb { background: var(--line); border-radius: 2px; }
-.log-line {
-  padding: 3px 0; border-bottom: 1px solid var(--rim);
-  font-size: 9px; line-height: 1.5; color: var(--dim);
-  animation: fadeIn .2s;
-}
-@keyframes fadeIn { from {opacity:0} to {opacity:1} }
-.log-line .lts { color: var(--dim); margin-right: 6px; }
-.log-line .ltag { color: var(--cyan2); margin-right: 4px; }
-.log-line .lmsg { color: var(--text); }
-.log-line .lmsg.err { color: var(--red); }
-.log-line .lmsg.ok  { color: var(--green); }
+/* ─────────────────────────────────────────────────────────────────── */
+/* METRICS SECTION */
+/* ─────────────────────────────────────────────────────────────────── */
 
-/* ── ORACLE PANEL ──────────────────────────────────────────────── */
-#oracle-addr {
-  font-size: 9px; color: var(--violet); word-break: break-all;
-  line-height: 1.6; margin-bottom: 8px;
-  text-shadow: var(--glow-v);
+.metrics-section {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  overflow-y: auto;
+  padding-right: 1rem;
 }
 
-/* ── STATUSBAR ─────────────────────────────────────────────────── */
-#statusbar {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 0 16px;
-  background: var(--deep);
-  border-top: 1px solid var(--line);
-  font-size: 9px; color: var(--dim);
+.metrics-section::-webkit-scrollbar {
+  width: 4px;
 }
-#statusbar .sbl { display: flex; gap: 20px; }
-#statusbar .sbr { color: var(--cyan2); letter-spacing: 1px; }
+
+.metrics-section::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.metrics-section::-webkit-scrollbar-thumb {
+  background: var(--border-light);
+  border-radius: 2px;
+}
+
+.metrics-section::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-gold);
+}
+
+.metric-card {
+  background: linear-gradient(135deg, var(--bg-card) 0%, rgba(15, 20, 41, 0.6) 100%);
+  border: 1px solid var(--border-light);
+  border-radius: 3px;
+  padding: 1.5rem;
+  transition: all 0.3s ease;
+  animation: slideInLeft 0.6s ease-out;
+}
+
+@keyframes slideInLeft {
+  from {
+    opacity: 0;
+    transform: translateX(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.metric-card:hover {
+  background: linear-gradient(135deg, var(--bg-hover) 0%, rgba(20, 25, 50, 0.6) 100%);
+  border-color: var(--border-light);
+  box-shadow: 0 8px 32px rgba(212, 175, 55, 0.08);
+}
+
+.metric-card-title {
+  font-family: 'Crimson Text', serif;
+  font-size: 1.3rem;
+  font-weight: 600;
+  color: var(--accent-gold);
+  margin-bottom: 1rem;
+  letter-spacing: -0.5px;
+}
+
+.metric-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--border-dark);
+}
+
+.metric-row:last-child {
+  border-bottom: none;
+}
+
+.metric-label {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  letter-spacing: 0.5px;
+}
+
+.metric-value {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--accent-cyan);
+  letter-spacing: 1px;
+}
+
+.metric-value.success {
+  color: var(--success);
+}
+
+.metric-value.warning {
+  color: var(--warning);
+}
+
+.metric-value.danger {
+  color: var(--danger);
+}
+
+.metric-bar {
+  width: 100%;
+  height: 2px;
+  background: var(--border-dark);
+  border-radius: 1px;
+  margin-top: 0.5rem;
+  overflow: hidden;
+}
+
+.metric-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-gold), var(--accent-cyan));
+  border-radius: 1px;
+  transition: width 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
+  box-shadow: 0 0 12px rgba(212, 175, 55, 0.4);
+}
+
+/* ─────────────────────────────────────────────────────────────────── */
+/* VISUALIZATION SECTION */
+/* ─────────────────────────────────────────────────────────────────── */
+
+.visualization-section {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  overflow: hidden;
+}
+
+.viz-card {
+  flex: 1;
+  background: linear-gradient(135deg, var(--bg-card) 0%, rgba(15, 20, 41, 0.6) 100%);
+  border: 1px solid var(--border-light);
+  border-radius: 3px;
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: slideInRight 0.6s ease-out;
+}
+
+@keyframes slideInRight {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.viz-title {
+  font-family: 'Crimson Text', serif;
+  font-size: 1.3rem;
+  font-weight: 600;
+  color: var(--accent-gold);
+  margin-bottom: 1rem;
+  letter-spacing: -0.5px;
+}
+
+.poincare-container {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+#poincare-canvas {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+}
+
+/* ─────────────────────────────────────────────────────────────────── */
+/* EDUCATION SECTION (BOTTOM) */
+/* ─────────────────────────────────────────────────────────────────── */
+
+.education-section {
+  padding: 2rem 4rem;
+  border-top: 1px solid var(--border-light);
+  background: linear-gradient(180deg, rgba(10, 14, 35, 0.8) 0%, rgba(15, 20, 41, 0.6) 100%);
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.education-section::-webkit-scrollbar {
+  width: 4px;
+}
+
+.education-section::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.education-section::-webkit-scrollbar-thumb {
+  background: var(--border-light);
+  border-radius: 2px;
+}
+
+.education-section::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-gold);
+}
+
+.education-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 2rem;
+  max-width: 1800px;
+  margin: 0 auto;
+}
+
+.education-card {
+  animation: fadeIn 0.8s ease-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.education-heading {
+  font-family: 'Crimson Text', serif;
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--accent-gold);
+  margin-bottom: 1rem;
+  letter-spacing: -0.5px;
+}
+
+.education-text {
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+  line-height: 1.8;
+  margin-bottom: 0.75rem;
+}
+
+.education-text strong {
+  color: var(--accent-cyan);
+  font-weight: 500;
+}
+
+/* ─────────────────────────────────────────────────────────────────── */
+/* FOOTER */
+/* ─────────────────────────────────────────────────────────────────── */
+
+footer {
+  padding: 1.5rem 4rem;
+  border-top: 1px solid var(--border-light);
+  background: linear-gradient(180deg, rgba(10, 14, 35, 0.95) 0%, rgba(7, 10, 28, 1) 100%);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.footer-left {
+  display: flex;
+  gap: 2rem;
+}
+
+.footer-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.footer-label {
+  color: var(--text-dim);
+  font-size: 0.7rem;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  margin-bottom: 0.25rem;
+}
+
+.footer-contact {
+  color: var(--accent-cyan);
+  text-decoration: none;
+  transition: color 0.3s ease;
+  font-weight: 500;
+}
+
+.footer-contact:hover {
+  color: var(--accent-gold);
+}
+
+.footer-right {
+  text-align: right;
+  color: var(--text-dim);
+}
+
+.footer-cta {
+  display: flex;
+  gap: 1rem;
+  justify-content: flex-end;
+  margin-bottom: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.cta-button {
+  padding: 0.4rem 0.8rem;
+  background: rgba(212, 175, 55, 0.1);
+  border: 1px solid var(--accent-gold);
+  color: var(--accent-gold);
+  text-decoration: none;
+  font-size: 0.75rem;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  border-radius: 2px;
+}
+
+.cta-button:hover {
+  background: var(--accent-gold);
+  color: var(--bg-deep);
+  box-shadow: 0 0 16px rgba(212, 175, 55, 0.3);
+}
+
+/* ─────────────────────────────────────────────────────────────────── */
+/* RESPONSIVE */
+/* ─────────────────────────────────────────────────────────────────── */
+
+@media (max-width: 1400px) {
+  main {
+    grid-template-columns: 1fr;
+    padding: 1.5rem 2rem;
+  }
+
+  header {
+    padding: 1.5rem 2rem;
+  }
+
+  .education-section {
+    padding: 1.5rem 2rem;
+  }
+
+  footer {
+    padding: 1rem 2rem;
+    flex-direction: column;
+    gap: 1rem;
+    text-align: center;
+  }
+
+  .footer-right {
+    text-align: center;
+  }
+
+  .footer-cta {
+    justify-content: center;
+  }
+}
+
+@media (max-width: 768px) {
+  main {
+    display: block;
+    padding: 1rem;
+  }
+
+  .metrics-section {
+    max-height: 50vh;
+  }
+
+  .visualization-section {
+    max-height: 50vh;
+  }
+
+  header {
+    padding: 1rem;
+  }
+
+  .header-content {
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .status-pills {
+    flex-wrap: wrap;
+    justify-content: space-around;
+  }
+
+  .logo {
+    font-size: 1.8rem;
+  }
+
+  .education-grid {
+    grid-template-columns: 1fr;
+  }
+}
 </style>
 </head>
 <body>
+
 <div id="root">
+  <!-- HEADER -->
+  <header>
+    <div class="header-content">
+      <div class="branding">
+        <div class="logo">QTCL</div>
+        <div class="tagline">Quantum Temporal Coherence Ledger</div>
+      </div>
 
-  <!-- ── TOPBAR ─────────────────────────────────────────────── -->
-  <div id="topbar">
-    <div id="logo">QTCL<span>●</span>QUANTUM LATTICE</div>
-    <div id="topbar-right">
-      <div class="tb-pill" id="pill-lattice"><div class="dot"></div><span>LATTICE</span></div>
-      <div class="tb-pill" id="pill-p2p"><div class="dot"></div><span id="peer-count">0 PEERS</span></div>
-      <div class="tb-pill" id="pill-oracle"><div class="dot"></div><span>ORACLE</span></div>
-      <div class="tb-pill" id="pill-db"><div class="dot"></div><span>DB</span></div>
-      <div id="clock">--:--:--</div>
+      <div class="status-pills">
+        <div class="pill" id="pill-lattice">
+          <div class="indicator"></div>
+          <span>Lattice Engine</span>
+        </div>
+        <div class="pill" id="pill-oracle">
+          <div class="indicator"></div>
+          <span>Oracle</span>
+        </div>
+        <div class="pill" id="pill-consensus">
+          <div class="indicator"></div>
+          <span>Consensus</span>
+        </div>
+        <div class="pill" id="pill-network">
+          <div class="indicator"></div>
+          <span id="peer-count">0 Peers</span>
+        </div>
+      </div>
+
+      <div class="clock" id="clock">--:--:--</div>
+    </div>
+  </header>
+
+  <!-- MAIN CONTENT -->
+  <main>
+    <!-- LEFT: METRICS -->
+    <div class="metrics-section">
+      <!-- Blockchain Metrics -->
+      <div class="metric-card">
+        <div class="metric-card-title">Blockchain State</div>
+        <div class="metric-row">
+          <span class="metric-label">Chain Height</span>
+          <span class="metric-value" id="chain-height">—</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Blocks Sealed</span>
+          <span class="metric-value" id="blocks-sealed">—</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Total Transactions</span>
+          <span class="metric-value" id="total-txs">—</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Avg Block Time</span>
+          <span class="metric-value" id="block-time">—</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Mempool Size</span>
+          <span class="metric-value" id="mempool-size">—</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Pending Transactions</span>
+          <span class="metric-value" id="pending-txs">—</span>
+        </div>
+      </div>
+
+      <!-- Oracle Metrics -->
+      <div class="metric-card">
+        <div class="metric-card-title">Oracle Authority</div>
+        <div class="metric-row">
+          <span class="metric-label">Status</span>
+          <span class="metric-value success" id="oracle-status">ACTIVE</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Addresses Issued</span>
+          <span class="metric-value" id="oracle-issued">—</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Lattice Wired</span>
+          <span class="metric-value" id="oracle-wired">NO</span>
+        </div>
+        <div id="oracle-addr-container" style="margin-top: 1rem; padding: 0.75rem; background: rgba(0, 217, 255, 0.05); border: 1px solid rgba(0, 217, 255, 0.1); border-radius: 2px;">
+          <div style="font-size: 0.7rem; color: var(--text-dim); letter-spacing: 1px; margin-bottom: 0.5rem; text-transform: uppercase;">Address</div>
+          <div style="font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; color: var(--accent-cyan); word-break: break-all; line-height: 1.4;" id="oracle-addr">—</div>
+        </div>
+      </div>
+
+      <!-- Quantum Metrics -->
+      <div class="metric-card">
+        <div class="metric-card-title">Quantum Entropy</div>
+        <div class="metric-row">
+          <span class="metric-label">Coherence</span>
+          <span class="metric-value" id="coherence">—</span>
+        </div>
+        <div class="metric-bar">
+          <div class="metric-bar-fill" id="coherence-bar"></div>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Fidelity</span>
+          <span class="metric-value" id="fidelity">—</span>
+        </div>
+        <div class="metric-bar">
+          <div class="metric-bar-fill" id="fidelity-bar"></div>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Entanglement</span>
+          <span class="metric-value" id="entanglement">—</span>
+        </div>
+        <div class="metric-bar">
+          <div class="metric-bar-fill" id="entanglement-bar"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT: VISUALIZATION -->
+    <div class="visualization-section">
+      <div class="viz-card">
+        <div class="viz-title">Hyperbolic Lattice Topology</div>
+        <div class="poincare-container">
+          <canvas id="poincare-canvas"></canvas>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- EDUCATION SECTION -->
+  <div class="education-section">
+    <div class="education-grid">
+      <div class="education-card">
+        <div class="education-heading">Temporal Coherence</div>
+        <p class="education-text">
+          <strong>Quantum Temporal Coherence</strong> is the foundation of QTCL's consensus mechanism. By maintaining quantum coherence across distributed validators, we achieve Byzantine agreement without sacrificing quantum properties. The temporal dimension allows validators to reach consensus on the ordering of events across spacetime, creating an immutable audit trail.
+        </p>
+        <p class="education-text">
+          Our ledger preserves <strong>temporal causality</strong> while maintaining post-quantum security. Each block contains coherence measurements that prove validators maintained quantum state alignment during the consensus epoch, making attacks provably detectable.
+        </p>
+      </div>
+
+      <div class="education-card">
+        <div class="education-heading">NIST Post-Quantum Standard</div>
+        <p class="education-text">
+          In July 2024, NIST standardized the first suite of post-quantum cryptographic algorithms, designating lattice-based schemes as the primary candidates for long-term security. Our implementation follows <strong>NIST FIPS 203/204/205</strong> standards for key-encapsulation mechanisms and digital signatures.
+        </p>
+        <p class="education-text">
+          HLwE-based cryptography provides <strong>quantum-resistant security</strong> guarantees against adversaries with quantum capabilities. No known quantum algorithm can break these primitives, making them suitable for systems designed to remain secure for decades.
+        </p>
+      </div>
+
+      <div class="education-card">
+        <div class="education-heading">Wallet Architecture</div>
+        <p class="education-text">
+          Each wallet is protected by a <strong>lattice-based key pair</strong> derived from hyperbolic learning-with-errors problems. Private keys are computed from hard lattice instances, while public keys are distributed freely. Transaction signing uses lattice-based digital signatures that remain unforgeable even against quantum adversaries.
+        </p>
+        <p class="education-text">
+          Wallets can generate child keys via <strong>hierarchical deterministic (HD)</strong> derivation, following post-quantum variants of traditional key hierarchies. All signatures are verified against the posted public key on-chain.
+        </p>
+      </div>
+
+      <div class="education-card">
+        <div class="education-heading">Blockchain Consensus</div>
+        <p class="education-text">
+          Our blockchain uses a <strong>hybrid consensus model</strong>: lattice-based proof-of-work (PoW) and Byzantine Fault Tolerant (BFT) agreement. Miners solve computational puzzles rooted in the hardness of hyperbolic lattice problems. Validators use threshold signatures to attest to block validity.
+        </p>
+        <p class="education-text">
+          The Poincaré disk visualization shown above represents validator topology in hyperbolic geometry. Nodes closer to the boundary have higher latency; those near the center are validators. This topology naturally encodes network neighborhoods for efficient message propagation.
+        </p>
+      </div>
+
+      <div class="education-card">
+        <div class="education-heading">Quantum Entropy Mining</div>
+        <p class="education-text">
+          <strong>Entropy mining</strong> uses quantum-derived randomness as a source of genuine unpredictability. Each block includes entropy commitments to hyperbolic lattice noise distributions. Miners compete to find valid entropy states that advance the consensus state.
+        </p>
+        <p class="education-text">
+          This approach decouples computational hardness from energy expenditure. Instead of hash-based work, miners produce valid random states certified by the hyperbolic lattice algebra—a more elegant and environmentally sustainable security model.
+        </p>
+      </div>
+
+      <div class="education-card">
+        <div class="education-heading">Join QTCL</div>
+        <p class="education-text">
+          We are seeking <strong>developers, co-founders, and investors</strong> to build the future of post-quantum ledger technology. QTCL represents a paradigm shift in how distributed systems maintain security and coherence across temporal dimensions.
+        </p>
+        <p class="education-text" style="margin-top: 1rem;">
+          <strong>©2026 QTCL — Quantum Temporal Coherence Ledger<br>
+          shemshallah@gmail.com</strong><br>
+          Contact to join our mission or request a technical briefing.
+        </p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- FOOTER -->
+<footer>
+  <div class="footer-left">
+    <div class="footer-section">
+      <div class="footer-label">Contact</div>
+      <a href="mailto:shemshallah@gmail.com" class="footer-contact">shemshallah@gmail.com</a>
+    </div>
+    <div class="footer-section">
+      <div class="footer-label">We Are Hiring</div>
+      <span style="color: var(--accent-gold);">Developers • Co-Founders • Investors</span>
     </div>
   </div>
 
-  <!-- ── GRID ───────────────────────────────────────────────── -->
-  <div id="grid">
-
-    <!-- LEFT TOP: Quantum Metrics -->
-    <div class="panel" id="col-left-top">
-      <div class="panel-head">Quantum State</div>
-      <div class="panel-body">
-        <div class="mrow">
-          <span class="ml">Coherence</span>
-          <span class="mv g" id="m-coherence">—</span>
-        </div>
-        <div class="bar-wrap"><div class="bar-fill bar-c" id="b-coherence" style="width:0"></div></div>
-
-        <div class="mrow">
-          <span class="ml">W-State Fidelity</span>
-          <span class="mv g" id="m-fidelity">—</span>
-        </div>
-        <div class="bar-wrap"><div class="bar-fill bar-v" id="b-fidelity" style="width:0"></div></div>
-
-        <div class="mrow">
-          <span class="ml">Entanglement</span>
-          <span class="mv" id="m-entangle">—</span>
-        </div>
-        <div class="bar-wrap"><div class="bar-fill bar-g" id="b-entangle" style="width:0"></div></div>
-
-        <div class="mrow">
-          <span class="ml">Phase Drift (rad)</span>
-          <span class="mv a" id="m-drift">—</span>
-        </div>
-
-        <div class="mrow">
-          <span class="ml">Noise Regime σ</span>
-          <span class="mv" id="m-sigma">—</span>
-        </div>
-
-        <div class="mrow">
-          <span class="ml">Maintenance Cycles</span>
-          <span class="mv v" id="m-cycles">—</span>
-        </div>
-      </div>
+  <div class="footer-right">
+    <div class="footer-cta">
+      <button class="cta-button" onclick="alert('Thank you for your interest. Contact shemshallah@gmail.com')">Request Demo</button>
+      <button class="cta-button" onclick="alert('Developer docs coming soon.')">Dev Docs</button>
     </div>
-
-    <!-- LEFT BOT: Oracle Status -->
-    <div class="panel" id="col-left-bot">
-      <div class="panel-head">Oracle · pq0</div>
-      <div class="panel-body">
-        <div class="ml" style="margin-bottom:4px;font-size:9px;">ADDRESS</div>
-        <div id="oracle-addr">—</div>
-
-        <div class="mrow">
-          <span class="ml">Scheme</span>
-          <span class="mv v">HLWE·SHA3·SHAKE256</span>
-        </div>
-        <div class="mrow">
-          <span class="ml">Derivation</span>
-          <span class="mv" style="font-size:9px;">m/838'/0'/…</span>
-        </div>
-        <div class="mrow">
-          <span class="ml">Addresses Issued</span>
-          <span class="mv" id="oracle-issued">—</span>
-        </div>
-        <div class="mrow">
-          <span class="ml">W-State Wired</span>
-          <span class="mv" id="oracle-wired">—</span>
-        </div>
-        <div class="mrow">
-          <span class="ml">Lattice Wired</span>
-          <span class="mv" id="oracle-lattice">—</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- CENTER TOP: Poincaré Disk {8,3} -->
-    <div class="panel" id="col-center-top">
-      <div class="panel-head">{8,3} Hyperbolic Lattice · Poincaré Disk</div>
-      <div class="panel-body" style="padding:0;">
-        <div id="disk-wrap">
-          <canvas id="disk"></canvas>
-        </div>
-      </div>
-    </div>
-
-    <!-- CENTER BOT: Block Feed -->
-    <div class="panel" id="col-center-bot">
-      <div class="panel-head">Block Feed</div>
-      <div class="panel-body" style="padding:8px 12px;">
-        <div id="block-feed">
-          <div class="bf-row" style="color:var(--dim);font-size:10px;grid-template-columns:1fr;">
-            Waiting for blocks…
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- RIGHT TOP: Chain State -->
-    <div class="panel" id="col-right-top">
-      <div class="panel-head">Chain State</div>
-      <div class="panel-body">
-        <div class="mrow">
-          <span class="ml">Height</span>
-          <span class="mv v" id="c-height">—</span>
-        </div>
-        <div class="mrow">
-          <span class="ml">Latest Hash</span>
-          <span class="mv" id="c-hash" style="font-size:9px;word-break:break-all;">—</span>
-        </div>
-        <div class="mrow">
-          <span class="ml">Blocks Sealed</span>
-          <span class="mv g" id="c-sealed">—</span>
-        </div>
-        <div class="mrow">
-          <span class="ml">Total TXs</span>
-          <span class="mv" id="c-txs">—</span>
-        </div>
-        <div class="mrow">
-          <span class="ml">Avg Seal Time</span>
-          <span class="mv a" id="c-seal-time">—</span>
-        </div>
-        <div class="mrow">
-          <span class="ml">Mempool</span>
-          <span class="mv" id="c-mempool">—</span>
-        </div>
-        <div class="mrow">
-          <span class="ml">Pending TXs</span>
-          <span class="mv" id="c-pending">—</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- RIGHT BOT: Event Log -->
-    <div class="panel" id="col-right-bot">
-      <div class="panel-head">Event Log</div>
-      <div class="panel-body" style="padding:6px 10px;">
-        <div id="log-feed"></div>
-      </div>
-    </div>
-
-  </div><!-- /grid -->
-
-  <!-- ── STATUSBAR ──────────────────────────────────────────── -->
-  <div id="statusbar">
-    <div class="sbl">
-      <span id="sb-status">INITIALIZING</span>
-      <span id="sb-uptime">UP 0s</span>
-      <span id="sb-geometry">{8,3} · 106,496 PQ · 52×2048</span>
-    </div>
-    <div class="sbr" id="sb-ts">—</div>
+    <div>© 2026 QTCL — Quantum Temporal Coherence Ledger</div>
   </div>
+</footer>
 
-</div><!-- /root -->
-
-<script>
-/* ================================================================
-   QTCL DASHBOARD  —  Live data via polling + canvas Poincaré disk
-   ================================================================ */
-
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script>
 const API = '/api';
-const POLL_MS = 1500;
-const MAX_BLOCKS = 30;
-const MAX_LOGS   = 60;
-
-let blocks  = [];
-let healthy = false;
-
-// ── CLOCK ──────────────────────────────────────────────────────
-function tick() {
-  const now = new Date();
-  document.getElementById('clock').textContent =
-    now.toTimeString().slice(0,8);
-  document.getElementById('sb-ts').textContent =
-    now.toISOString().replace('T',' ').slice(0,19) + ' UTC';
-}
-setInterval(tick, 1000); tick();
-
-// ── PILL STATE ─────────────────────────────────────────────────
-function setPill(id, state) {          // state: 'live' | 'warn' | 'dead' | ''
-  const el = document.getElementById(id);
-  if (!el) return;
-  el.className = 'tb-pill' + (state ? ' ' + state : '');
-}
-
-// ── LOG ────────────────────────────────────────────────────────
-function addLog(tag, msg, cls='') {
-  const feed = document.getElementById('log-feed');
-  const ts   = new Date().toTimeString().slice(0,8);
-  const row  = document.createElement('div');
-  row.className = 'log-line';
-  row.innerHTML = `<span class="lts">${ts}</span><span class="ltag">[${tag}]</span>`
-                + `<span class="lmsg ${cls}">${msg}</span>`;
-  feed.prepend(row);
-  while (feed.children.length > MAX_LOGS) feed.lastChild.remove();
-}
-
-// ── BLOCK FEED ─────────────────────────────────────────────────
-function renderBlocks() {
-  const feed = document.getElementById('block-feed');
-  if (blocks.length === 0) return;
-  feed.innerHTML = '';
-  for (const b of blocks) {
-    const row = document.createElement('div');
-    row.className = 'bf-row';
-    const ts = new Date(b.timestamp * 1000).toTimeString().slice(0,8);
-    row.innerHTML =
-      `<span class="bf-height">#${b.height}</span>`
-    + `<span class="bf-hash">${String(b.hash).slice(2,14)}…</span>`
-    + `<span class="bf-time">${ts}</span>`
-    + `<span class="bf-badge">${b.tx_count ?? 1} TX</span>`;
-    feed.appendChild(row);
-  }
-}
-
-// ── POINCARÉ DISK RENDERER ─────────────────────────────────────
-// Draws the {8,3} tessellation up to ring 4 and animates pq0 pulse
-const canvas = document.getElementById('disk');
-const ctx    = canvas.getContext('2d');
+const POLL_MS = 2000;
 
 let diskAnim = 0;
-let diskW = 0, diskH = 0;
-let diskPqs = [];  // [{x,y}] in disk coords [-1,1]
+let diskPqs = [];
+let lastHeight = 0;
 
-function resizeDisk() {
-  const wrap = document.getElementById('disk-wrap');
-  const sz   = Math.min(wrap.clientWidth, wrap.clientHeight) - 16;
-  canvas.width  = sz;
-  canvas.height = sz;
-  diskW = diskH = sz;
+// ─────────────────────────────────────────────────────────────────
+// POINCARÉ DISK VISUALIZATION
+// ─────────────────────────────────────────────────────────────────
+
+function initCanvas() {
+  const canvas = document.getElementById('poincare-canvas');
+  const container = canvas.parentElement;
+  canvas.width = container.offsetWidth * window.devicePixelRatio;
+  canvas.height = container.offsetHeight * window.devicePixelRatio;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+  return canvas;
 }
 
-function diskXY(cx, cy, re, im) {
-  // Poincaré disk coords (re, im) in [-1,1] → canvas pixels
-  const r  = (cx > 0 ? cx : diskW/2);
-  const px = cx + re * r * 0.92;
-  const py = cy - im * r * 0.92;
-  return [px, py];
-}
+function drawPoincare() {
+  const canvas = document.getElementById('poincare-canvas');
+  if (!canvas) return;
+  
+  const ctx = canvas.getContext('2d');
+  const rect = canvas.getBoundingClientRect();
+  const w = rect.width;
+  const h = rect.height;
+  const cx = w / 2;
+  const cy = h / 2;
+  const R = Math.min(w, h) / 2 - 30;
 
-// Pre-generate {8,3} vertices (ring 0-3 only for perf)
-function genDiskVerts() {
-  const p = 8, q = 3;
-  const cosD = Math.cos(Math.PI/q) / Math.sin(Math.PI/p);
-  const dFund = Math.acosh(cosD);
-  const rFund = Math.tanh(dFund/2);
-
-  function mobiusInv(zr, zi, ar, ai) {
-    const dr = 1 - ar*zr - ai*zi;   // Re(1 - conj(a)*z)  note: conj(a)=(ar,-ai)
-    const di = ar*zi - ai*zr;        // but conj(a)*z = (ar-iai)(zr+izi)
-    // Actually: conj(a) = (ar, -ai); conj(a)*z = ar*zr + ai*zi + i(ar*zi - ai*zr)
-    const dr2 = 1 - (ar*zr + (-ai)*zi);   // 1 - Re(conj(a)*z)
-    const di2 = 0 - (ar*zi + (-ai)*zr);   // -Im(conj(a)*z)  wait let me redo
-    // T_a^{-1}(z) = (z+a)/(1+conj(a)z)
-    // conj(a) = (ar, -ai)
-    // conj(a)*z = (ar*zr-(-ai)*zi) + i(ar*zi+(-ai)*zr) = (ar*zr+ai*zi) + i(ar*zi-ai*zr)
-    const conjAz_r = ar*zr + ai*zi;
-    const conjAz_i = ar*zi - ai*zr;
-    const num_r = zr + ar, num_i = zi + ai;
-    const den_r = 1 + conjAz_r, den_i = conjAz_i;
-    const den2  = den_r*den_r + den_i*den_i;
-    if (den2 < 1e-14) return [ar, ai];
-    return [(num_r*den_r + num_i*den_i)/den2, (num_i*den_r - num_r*den_i)/den2];
-  }
-
-  function snap(r, i) { return `${r.toFixed(6)},${i.toFixed(6)}`; }
-
-  const visited = new Map();
-  const bfs = [];
-
-  for (let k=0; k<p; k++) {
-    const ang = k * 2*Math.PI/p;
-    const r = rFund*Math.cos(ang), i = rFund*Math.sin(ang);
-    const s = snap(r,i);
-    if (!visited.has(s)) {
-      visited.set(s, {r,i});
-      bfs.push([r, i, Math.atan2(i,r)+Math.PI, 0]);
-    }
-  }
-
-  const RINGS = 3;
-  const dEdge = dFund;
-  let head = 0;
-  while (head < bfs.length) {
-    const [vr, vi, inAng, depth] = bfs[head++];
-    if (depth >= RINGS) continue;
-    if (Math.sqrt(vr*vr+vi*vi) >= 0.999) continue;
-    for (let k=0; k<q; k++) {
-      const ba = inAng + k*2*Math.PI/q;
-      const rs = Math.tanh(dEdge/2);
-      const dzr = rs*Math.cos(ba), dzi = rs*Math.sin(ba);
-      const [nr, ni] = mobiusInv(dzr, dzi, vr, vi);
-      if (Math.sqrt(nr*nr+ni*ni) >= 0.999) continue;
-      const s = snap(nr,ni);
-      if (!visited.has(s)) {
-        visited.set(s, {r:nr, i:ni});
-        bfs.push([nr, ni, ba+Math.PI, depth+1]);
-      }
-    }
-  }
-
-  diskPqs = Array.from(visited.values()).map(v => ({x:v.r, y:v.i}));
-}
-
-genDiskVerts();
-
-function drawDisk() {
-  if (!diskW) return;
-  const cx = diskW/2, cy = diskH/2, R = diskW/2 * 0.92;
-  ctx.clearRect(0, 0, diskW, diskH);
+  ctx.clearRect(0, 0, w, h);
 
   // Background
   ctx.beginPath();
-  ctx.arc(cx, cy, R, 0, Math.PI*2);
+  ctx.arc(cx, cy, R, 0, Math.PI * 2);
   const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, R);
-  bg.addColorStop(0,   'rgba(7,7,26,1)');
-  bg.addColorStop(1,   'rgba(3,3,10,1)');
+  bg.addColorStop(0, 'rgba(15,20,41,0.8)');
+  bg.addColorStop(1, 'rgba(10,14,35,0.95)');
   ctx.fillStyle = bg;
   ctx.fill();
 
-  // Boundary ring
+  // Boundary
   ctx.beginPath();
-  ctx.arc(cx, cy, R, 0, Math.PI*2);
-  ctx.strokeStyle = 'rgba(0,229,255,.15)';
-  ctx.lineWidth = 1;
+  ctx.arc(cx, cy, R, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(212,175,55,0.3)';
+  ctx.lineWidth = 2;
   ctx.stroke();
 
-  // Grid rings at hyperbolic radii
+  // Grid rings
   for (let ringR of [0.36, 0.62, 0.78, 0.89, 0.95]) {
     ctx.beginPath();
-    ctx.arc(cx, cy, ringR * R, 0, Math.PI*2);
-    ctx.strokeStyle = 'rgba(0,229,255,.04)';
-    ctx.lineWidth   = .5;
+    ctx.arc(cx, cy, ringR * R, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(212,175,55,0.08)';
+    ctx.lineWidth = 0.5;
     ctx.stroke();
   }
 
-  // Draw edges between adjacent pqs
-  ctx.lineWidth   = .4;
-  ctx.strokeStyle = 'rgba(124,58,237,.2)';
-  for (let i=0; i<diskPqs.length; i++) {
-    for (let j=i+1; j<diskPqs.length; j++) {
-      const a = diskPqs[i], b = diskPqs[j];
-      const dx = a.x-b.x, dy = a.y-b.y;
-      const dist = Math.sqrt(dx*dx+dy*dy);
-      if (dist < 0.12) {
-        const [ax,ay] = diskXY(cx,cy,a.x,a.y);
-        const [bx,by] = diskXY(cx,cy,b.x,b.y);
+  // Initialize PQs if empty
+  if (diskPqs.length === 0) {
+    diskPqs = Array.from({ length: 8 }, () => ({
+      x: Math.random() * 0.7 - 0.35,
+      y: Math.random() * 0.7 - 0.35
+    }));
+  }
+
+  // Gentle movement
+  for (let pq of diskPqs) {
+    pq.x += (Math.random() - 0.5) * 0.002;
+    pq.y += (Math.random() - 0.5) * 0.002;
+    const r = Math.sqrt(pq.x * pq.x + pq.y * pq.y);
+    if (r > 0.85) {
+      const scale = 0.85 / r;
+      pq.x *= scale;
+      pq.y *= scale;
+    }
+  }
+
+  // Helper: hyperbolic to Euclidean
+  function diskXY(cx, cy, hx, hy) {
+    const d = Math.sqrt(hx * hx + hy * hy);
+    const factor = (1 + d) / (1 - d + 1e-9);
+    return [cx + hx * R * 0.95, cy + hy * R * 0.95];
+  }
+
+  // Draw edges
+  ctx.lineWidth = 0.5;
+  ctx.strokeStyle = 'rgba(157,127,255,0.2)';
+  for (let i = 0; i < diskPqs.length; i++) {
+    for (let j = i + 1; j < diskPqs.length; j++) {
+      const a = diskPqs[i];
+      const b = diskPqs[j];
+      const dx = a.x - b.x, dy = a.y - b.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < 0.15) {
+        const [ax, ay] = diskXY(cx, cy, a.x, a.y);
+        const [bx, by] = diskXY(cx, cy, b.x, b.y);
         ctx.beginPath();
-        ctx.moveTo(ax,ay); ctx.lineTo(bx,by);
+        ctx.moveTo(ax, ay);
+        ctx.lineTo(bx, by);
         ctx.stroke();
       }
     }
   }
 
-  // Draw PQ nodes
-  for (const pq of diskPqs) {
-    const [px,py] = diskXY(cx,cy,pq.x,pq.y);
-    const nr = Math.sqrt(pq.x*pq.x+pq.y*pq.y);
-    const alpha = 0.25 + 0.5*(1-nr);
+  // Draw nodes
+  for (let pq of diskPqs) {
+    const [px, py] = diskXY(cx, cy, pq.x, pq.y);
+    const nr = Math.sqrt(pq.x * pq.x + pq.y * pq.y);
+    const alpha = 0.3 + 0.5 * (1 - nr);
     ctx.beginPath();
-    ctx.arc(px, py, 1.8, 0, Math.PI*2);
-    ctx.fillStyle = `rgba(0,229,255,${alpha.toFixed(2)})`;
+    ctx.arc(px, py, 2, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(0,217,255,${alpha})`;
     ctx.fill();
   }
 
-  // pq0 oracle at origin — pulsing
-  const pulse = 0.5 + 0.5*Math.sin(diskAnim*0.05);
-  const rOracle = 5 + 3*pulse;
+  // Oracle at center (pulsing)
+  const pulse = 0.5 + 0.5 * Math.sin(diskAnim * 0.05);
+  const rOracle = 5 + 3 * pulse;
   ctx.beginPath();
-  ctx.arc(cx, cy, rOracle, 0, Math.PI*2);
-  const og = ctx.createRadialGradient(cx,cy,0, cx,cy, rOracle);
-  og.addColorStop(0, 'rgba(255,255,255,1)');
-  og.addColorStop(.4, 'rgba(0,229,255,.9)');
-  og.addColorStop(1, 'rgba(0,229,255,0)');
+  ctx.arc(cx, cy, rOracle, 0, Math.PI * 2);
+  const og = ctx.createRadialGradient(cx, cy, 0, cx, cy, rOracle);
+  og.addColorStop(0, 'rgba(212,175,55,0.9)');
+  og.addColorStop(0.4, 'rgba(0,217,255,0.8)');
+  og.addColorStop(1, 'rgba(0,217,255,0)');
   ctx.fillStyle = og;
   ctx.fill();
 
-  // Oracle outer ring
+  // Oracle ring
   ctx.beginPath();
-  ctx.arc(cx, cy, 18 + 6*pulse, 0, Math.PI*2);
-  ctx.strokeStyle = `rgba(0,229,255,${(0.15+0.2*pulse).toFixed(2)})`;
-  ctx.lineWidth = 1;
+  ctx.arc(cx, cy, 18 + 6 * pulse, 0, Math.PI * 2);
+  ctx.strokeStyle = `rgba(212,175,55,${(0.15 + 0.2 * pulse).toFixed(2)})`;
+  ctx.lineWidth = 1.5;
   ctx.stroke();
 
-  // pq0 label
-  ctx.fillStyle = 'rgba(0,229,255,.7)';
-  ctx.font = '9px "Space Mono"';
-  ctx.fillText('pq0', cx+12, cy-4);
-
-  // pq1, pq2 markers
-  if (diskPqs.length >= 2) {
-    for (let i=0; i<2; i++) {
-      const pq = diskPqs[i];
-      const [px,py] = diskXY(cx,cy,pq.x,pq.y);
-      ctx.beginPath();
-      ctx.arc(px, py, 3.5, 0, Math.PI*2);
-      ctx.fillStyle = i===0 ? 'rgba(0,255,157,.8)' : 'rgba(255,179,0,.8)';
-      ctx.fill();
-      ctx.fillStyle = i===0 ? 'rgba(0,255,157,.6)' : 'rgba(255,179,0,.6)';
-      ctx.font = '8px "Space Mono"';
-      ctx.fillText(`pq${i+1}`, px+5, py-3);
-    }
-    // Block-0 line between pq1 and pq2
-    const [x1,y1] = diskXY(cx,cy,diskPqs[0].x,diskPqs[0].y);
-    const [x2,y2] = diskXY(cx,cy,diskPqs[1].x,diskPqs[1].y);
-    ctx.beginPath();
-    ctx.moveTo(x1,y1); ctx.lineTo(x2,y2);
-    ctx.strokeStyle = 'rgba(255,179,0,.4)';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-    // block-0 label at midpoint
-    ctx.fillStyle = 'rgba(255,179,0,.5)';
-    ctx.font = '8px "Space Mono"';
-    ctx.fillText('B0', (x1+x2)/2+3, (y1+y2)/2-3);
-  }
+  // Label
+  ctx.fillStyle = 'rgba(212,175,55,0.8)';
+  ctx.font = '11px "Space Grotesk"';
+  ctx.fillText('Oracle', cx + 15, cy - 8);
 
   diskAnim++;
-  requestAnimationFrame(drawDisk);
+  requestAnimationFrame(drawPoincare);
 }
 
-// ── FETCH ──────────────────────────────────────────────────────
-async function fetchAll() {
+// ─────────────────────────────────────────────────────────────────
+// METRICS UPDATE
+// ─────────────────────────────────────────────────────────────────
+
+function updateMetric(id, value, formatter) {
+  const el = document.getElementById(id);
+  if (el && value != null) {
+    el.textContent = formatter ? formatter(value) : value;
+  }
+}
+
+function updateBar(id, value) {
+  const bar = document.getElementById(id);
+  if (bar && value != null) {
+    bar.style.width = Math.min(100, Math.max(0, value * 100)).toFixed(1) + '%';
+  }
+}
+
+function setPill(id, active) {
+  const pill = document.getElementById(id);
+  if (pill) {
+    if (active) {
+      pill.classList.add('active');
+    } else {
+      pill.classList.remove('active');
+    }
+  }
+}
+
+async function fetchMetrics() {
   try {
-    // Health
-    const hResp = await fetch(`${API}/health`);
-    if (!hResp.ok) throw new Error('health failed');
-    const h = await hResp.json();
+    const resp = await fetch(`${API}/health`);
+    if (!resp.ok) throw new Error('health failed');
+    const data = await resp.json();
 
-    healthy = h.status === 'ok';
-    setPill('pill-lattice', h.lattice_loaded ? 'live' : 'dead');
-    setPill('pill-p2p',     h.p2p_enabled  ? 'live' : 'warn');
+    // System status
+    const healthy = data.status === 'ok';
+    setPill('pill-lattice', data.lattice_loaded);
+    setPill('pill-oracle', data.oracle_address);
+    setPill('pill-consensus', healthy);
 
-    const pc = h.p2p_peers ?? 0;
-    document.getElementById('peer-count').textContent = `${pc} PEER${pc===1?'':'S'}`;
+    const peers = data.p2p_peers ?? 0;
+    document.getElementById('peer-count').textContent = `${peers} Peer${peers !== 1 ? 's' : ''}`;
 
-    const qm = h.quantum_metrics || {};
-    setMV('m-coherence', qm.coherence,    v => v.toFixed(4), v => v > .85 ? 'g' : v > .6 ? 'a' : 'r');
-    setMV('m-fidelity',  qm.w_state_fidelity, v => v.toFixed(4), v => v > .9 ? 'g' : 'a');
-    setMV('m-entangle',  qm.entanglement, v => v.toFixed(4), _ => '');
-    setMV('m-drift',     qm.phase_drift,  v => v.toFixed(5), _ => 'a');
-
-    setBar('b-coherence', qm.coherence);
-    setBar('b-fidelity',  qm.w_state_fidelity);
-    setBar('b-entangle',  qm.entanglement);
-
-    // Status bar
-    document.getElementById('sb-status').textContent = healthy ? 'ONLINE' : 'DEGRADED';
-    document.getElementById('sb-status').style.color = healthy ? 'var(--green)' : 'var(--amber)';
-
-  } catch(e) {
-    setPill('pill-lattice','dead');
-    addLog('ERR', 'health fetch failed', 'err');
+    // Quantum metrics
+    const qm = data.quantum_metrics || {};
+    updateMetric('coherence', qm.coherence, v => v ? v.toFixed(4) : '—');
+    updateMetric('fidelity', qm.w_state_fidelity, v => v ? v.toFixed(4) : '—');
+    updateMetric('entanglement', qm.entanglement, v => v ? v.toFixed(4) : '—');
+    updateBar('coherence-bar', qm.coherence);
+    updateBar('fidelity-bar', qm.w_state_fidelity);
+    updateBar('entanglement-bar', qm.entanglement);
+  } catch (e) {
+    setPill('pill-lattice', false);
+    setPill('pill-consensus', false);
   }
 
   try {
-    // Chain
-    const cResp = await fetch(`${API}/chain`);
-    if (cResp.ok) {
-      const c = await cResp.json();
-      setText('c-height',    c.chain_height ?? '—');
-      setText('c-sealed',    c.blocks_sealed ?? '—');
-      setText('c-txs',       c.total_transactions ?? '—');
-      setText('c-seal-time', c.avg_block_seal_time_s != null ? c.avg_block_seal_time_s.toFixed(3)+'s' : '—');
-      setText('c-mempool',   c.mempool_size ?? '—');
-      setText('c-pending',   c.pending_txs ?? '—');
-      const h = String(c.latest_block_hash || '—');
-      setText('c-hash', h.length > 20 ? h.slice(0,18)+'…' : h);
+    const resp = await fetch(`${API}/chain`);
+    if (!resp.ok) throw new Error('chain failed');
+    const data = await resp.json();
 
-      // Block feed
-      if (Array.isArray(c.recent_blocks) && c.recent_blocks.length > 0) {
-        const prev = blocks.length ? blocks[0].height : -1;
-        for (const b of c.recent_blocks) {
-          if (b.height > prev) {
-            blocks.unshift(b);
-            addLog('BLOCK', `#${b.height} sealed | hash ${String(b.hash).slice(2,14)}… | ${b.tx_count??1} TX`, 'ok');
-          }
-        }
-        if (blocks.length > MAX_BLOCKS) blocks.length = MAX_BLOCKS;
-        renderBlocks();
-      }
-    }
-  } catch(e) { /* silent */ }
+    updateMetric('chain-height', data.chain_height ?? '—');
+    updateMetric('blocks-sealed', data.blocks_sealed ?? '—');
+    updateMetric('total-txs', data.total_transactions ?? '—');
+    updateMetric('block-time', data.avg_block_seal_time_s, v => v ? v.toFixed(3) + 's' : '—');
+    updateMetric('mempool-size', data.mempool_size ?? '—');
+    updateMetric('pending-txs', data.pending_txs ?? '—');
+  } catch (e) {
+    // silent
+  }
 
   try {
-    // Oracle
-    const oResp = await fetch(`${API}/oracle`);
-    if (oResp.ok) {
-      const o = await oResp.json();
-      setPill('pill-oracle', o.oracle_address ? 'live' : 'dead');
-      const addr = String(o.oracle_address || '—');
-      document.getElementById('oracle-addr').textContent = addr.length > 40 ? addr.slice(0,40)+'…' : addr;
-      setText('oracle-issued',  o.addresses_issued ?? '—');
-      setMVBool('oracle-wired',   o.lattice_wired);
-      setMVBool('oracle-lattice', o.lattice_wired);
-    }
-  } catch(e) { /* silent */ }
+    const resp = await fetch(`${API}/oracle`);
+    if (!resp.ok) throw new Error('oracle failed');
+    const data = await resp.json();
+
+    setPill('pill-oracle', !!data.oracle_address);
+    updateMetric('oracle-status', data.oracle_address ? 'ACTIVE' : 'INACTIVE');
+    updateMetric('oracle-issued', data.addresses_issued ?? '—');
+    
+    const wired = data.lattice_wired ? 'YES' : 'NO';
+    document.getElementById('oracle-wired').textContent = wired;
+    document.getElementById('oracle-wired').className = 'metric-value ' + (data.lattice_wired ? 'success' : 'danger');
+
+    const addr = String(data.oracle_address || '—');
+    document.getElementById('oracle-addr').textContent = addr.length > 60 ? addr.slice(0, 60) + '…' : addr;
+  } catch (e) {
+    // silent
+  }
 }
 
-// ── HELPERS ────────────────────────────────────────────────────
-function setText(id, v) {
-  const el = document.getElementById(id);
-  if (el) el.textContent = v;
-}
-function setMV(id, v, fmt, cls) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  if (v == null) return;
-  el.textContent = fmt(v);
-  el.className   = 'mv ' + cls(v);
-}
-function setBar(id, v) {
-  const el = document.getElementById(id);
-  if (el && v != null) el.style.width = Math.min(100, v*100).toFixed(1)+'%';
-}
-function setMVBool(id, v) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  el.textContent = v ? 'YES' : 'NO';
-  el.className   = 'mv ' + (v ? 'g' : 'r');
+// ─────────────────────────────────────────────────────────────────
+// CLOCK
+// ─────────────────────────────────────────────────────────────────
+
+function updateClock() {
+  const now = new Date();
+  const h = String(now.getHours()).padStart(2, '0');
+  const m = String(now.getMinutes()).padStart(2, '0');
+  const s = String(now.getSeconds()).padStart(2, '0');
+  document.getElementById('clock').textContent = `${h}:${m}:${s}`;
 }
 
-// ── UPTIME ─────────────────────────────────────────────────────
-const START = Date.now();
-setInterval(() => {
-  const s = Math.floor((Date.now()-START)/1000);
-  const m = Math.floor(s/60), sec = s%60;
-  const h = Math.floor(m/60), min = m%60;
-  document.getElementById('sb-uptime').textContent =
-    h ? `UP ${h}h ${min}m` : m ? `UP ${m}m ${sec}s` : `UP ${sec}s`;
-}, 1000);
-
-// ── BOOT ───────────────────────────────────────────────────────
-window.addEventListener('load', () => {
-  resizeDisk();
-  window.addEventListener('resize', resizeDisk);
-  drawDisk();
-  fetchAll();
-  setInterval(fetchAll, POLL_MS);
-  addLog('SYS', 'QTCL dashboard online', 'ok');
-  addLog('SYS', '{8,3} Poincaré disk rendered', 'ok');
-  addLog('SYS', 'Polling /api every ' + POLL_MS + 'ms');
-});
-</script>
-</body>
-</html>
+// ─────────────────────────────────────────────────────────────────
+// INITIALIZATION
+// ───────────────────────────────────�
