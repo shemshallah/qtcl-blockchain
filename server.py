@@ -706,7 +706,7 @@ class MetricsCollector:
                 # ── AVERAGE BLOCK TIME ──
                 cur.execute("""
                     SELECT AVG(block_time) FROM (
-                        SELECT EXTRACT(EPOCH FROM (timestamp - LAG(timestamp) OVER (ORDER BY height)))
+                        SELECT (timestamp - LAG(timestamp) OVER (ORDER BY height))::float
                         FROM blocks WHERE timestamp IS NOT NULL
                     ) AS t(block_time)
                 """)
@@ -2866,13 +2866,13 @@ def chain_status():
             # Calculate average block time
             cur.execute("""
                 SELECT AVG(block_time) FROM (
-                    SELECT EXTRACT(EPOCH FROM (timestamp - LAG(timestamp) OVER (ORDER BY height)))
+                    SELECT (timestamp - LAG(timestamp) OVER (ORDER BY height))::float
                     FROM blocks
                     WHERE timestamp IS NOT NULL
                 ) AS t(block_time)
             """)
             avg_time_row = cur.fetchone()
-            avg_block_time = float(avg_time_row[0]) if avg_time_row[0] is not None else 0.0
+            avg_block_time = float(avg_time_row[0]) if avg_time_row and avg_time_row[0] is not None else 0.0
             
             # Get mempool size (pending transactions not yet in blocks)
             cur.execute("""
