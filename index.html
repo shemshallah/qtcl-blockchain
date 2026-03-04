@@ -753,7 +753,7 @@ footer {
         </p>
         <p class="education-text" style="margin-top: 1rem;">
           <strong>©2026 QTCL — Quantum Temporal Coherence Ledger<br>
-          shemshallah@gmail.com</strong><br>
+          <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="97e4fff2fae4fff6fbfbf6ffd7f0faf6fefbb9f4f8fa">[email&#160;protected]</a></strong><br>
           Contact to join our mission or request a technical briefing.
         </p>
       </div>
@@ -766,7 +766,7 @@ footer {
   <div class="footer-left">
     <div class="footer-section">
       <div class="footer-label">Contact</div>
-      <a href="mailto:shemshallah@gmail.com" class="footer-contact">shemshallah@gmail.com</a>
+      <a href="/cdn-cgi/l/email-protection#91e2f9f4fce2f9f0fdfdf0f9d1f6fcf0f8fdbff2fefc" class="footer-contact"><span class="__cf_email__" data-cfemail="96e5fef3fbe5fef7fafaf7fed6f1fbf7fffab8f5f9fb">[email&#160;protected]</span></a>
     </div>
     <div class="footer-section">
       <div class="footer-label">We Are Hiring</div>
@@ -783,7 +783,7 @@ footer {
   </div>
 </footer>
 
-<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script>
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script>
 const API = '/api';
 const POLL_MS = 2000;
 
@@ -936,8 +936,12 @@ function drawPoincare() {
 
 function updateMetric(id, value, formatter) {
   const el = document.getElementById(id);
-  if (el && value != null) {
-    el.textContent = formatter ? formatter(value) : value;
+  if (el) {
+    if (value === null || value === undefined) {
+      el.textContent = '—';
+    } else {
+      el.textContent = formatter ? formatter(value) : value;
+    }
   }
 }
 
@@ -962,19 +966,21 @@ function setPill(id, active) {
 async function fetchMetrics() {
   try {
     const resp = await fetch(`${API}/health`);
-    if (!resp.ok) throw new Error('health failed');
+    if (!resp.ok) {
+      console.error(`❌ Health failed: ${resp.status}`);
+      throw new Error(`HTTP ${resp.status}`);
+    }
     const data = await resp.json();
 
     // System status
     const healthy = data.status === 'ok';
     setPill('pill-lattice', data.lattice_loaded);
-    setPill('pill-oracle', data.oracle_address);
     setPill('pill-consensus', healthy);
 
     const peers = data.p2p_peers ?? 0;
     document.getElementById('peer-count').textContent = `${peers} Peer${peers !== 1 ? 's' : ''}`;
 
-    // Quantum metrics
+    // Quantum metrics from actual system
     const qm = data.quantum_metrics || {};
     updateMetric('coherence', qm.coherence, v => v ? v.toFixed(4) : '—');
     updateMetric('fidelity', qm.w_state_fidelity, v => v ? v.toFixed(4) : '—');
@@ -982,34 +988,56 @@ async function fetchMetrics() {
     updateBar('coherence-bar', qm.coherence);
     updateBar('fidelity-bar', qm.w_state_fidelity);
     updateBar('entanglement-bar', qm.entanglement);
+    
+    console.log('✅ Health metrics from database:', data);
   } catch (e) {
+    console.error('❌ Health fetch failed:', e.message);
     setPill('pill-lattice', false);
     setPill('pill-consensus', false);
+    // Clear metrics - don't show fallback data
+    updateMetric('coherence', null, () => '—');
+    updateMetric('fidelity', null, () => '—');
+    updateMetric('entanglement', null, () => '—');
   }
 
   try {
     const resp = await fetch(`${API}/chain`);
-    if (!resp.ok) throw new Error('chain failed');
+    if (!resp.ok) {
+      console.error(`❌ Chain failed: ${resp.status}`);
+      throw new Error(`HTTP ${resp.status}`);
+    }
     const data = await resp.json();
 
-    updateMetric('chain-height', data.chain_height ?? '—');
-    updateMetric('blocks-sealed', data.blocks_sealed ?? '—');
-    updateMetric('total-txs', data.total_transactions ?? '—');
+    updateMetric('chain-height', data.chain_height ?? null, v => v !== null ? v : '—');
+    updateMetric('blocks-sealed', data.blocks_sealed ?? null, v => v !== null ? v : '—');
+    updateMetric('total-txs', data.total_transactions ?? null, v => v !== null ? v.toLocaleString() : '—');
     updateMetric('block-time', data.avg_block_seal_time_s, v => v ? v.toFixed(3) + 's' : '—');
-    updateMetric('mempool-size', data.mempool_size ?? '—');
-    updateMetric('pending-txs', data.pending_txs ?? '—');
+    updateMetric('mempool-size', data.mempool_size ?? null, v => v !== null ? v : '—');
+    updateMetric('pending-txs', data.pending_txs ?? null, v => v !== null ? v : '—');
+    
+    console.log('✅ Chain metrics from database:', data);
   } catch (e) {
-    // silent
+    console.error('❌ Chain fetch failed:', e.message);
+    // Clear chain metrics - don't show fallback
+    updateMetric('chain-height', null, () => '—');
+    updateMetric('blocks-sealed', null, () => '—');
+    updateMetric('total-txs', null, () => '—');
+    updateMetric('block-time', null, () => '—');
+    updateMetric('mempool-size', null, () => '—');
+    updateMetric('pending-txs', null, () => '—');
   }
 
   try {
     const resp = await fetch(`${API}/oracle`);
-    if (!resp.ok) throw new Error('oracle failed');
+    if (!resp.ok) {
+      console.error(`❌ Oracle failed: ${resp.status}`);
+      throw new Error(`HTTP ${resp.status}`);
+    }
     const data = await resp.json();
 
     setPill('pill-oracle', !!data.oracle_address);
-    updateMetric('oracle-status', data.oracle_address ? 'ACTIVE' : 'INACTIVE');
-    updateMetric('oracle-issued', data.addresses_issued ?? '—');
+    updateMetric('oracle-status', data.oracle_address ? 'ACTIVE' : 'OFFLINE', v => v);
+    updateMetric('oracle-issued', data.addresses_issued ?? null, v => v !== null ? v : '—');
     
     const wired = data.lattice_wired ? 'YES' : 'NO';
     document.getElementById('oracle-wired').textContent = wired;
@@ -1017,8 +1045,17 @@ async function fetchMetrics() {
 
     const addr = String(data.oracle_address || '—');
     document.getElementById('oracle-addr').textContent = addr.length > 60 ? addr.slice(0, 60) + '…' : addr;
+    
+    console.log('✅ Oracle metrics from database:', data);
   } catch (e) {
-    // silent
+    console.error('❌ Oracle fetch failed:', e.message);
+    setPill('pill-oracle', false);
+    // Clear oracle metrics
+    updateMetric('oracle-status', 'OFFLINE', v => v);
+    updateMetric('oracle-issued', null, () => '—');
+    document.getElementById('oracle-wired').textContent = 'NO';
+    document.getElementById('oracle-wired').className = 'metric-value danger';
+    document.getElementById('oracle-addr').textContent = '—';
   }
 }
 
@@ -1031,9 +1068,4 @@ function updateClock() {
   const h = String(now.getHours()).padStart(2, '0');
   const m = String(now.getMinutes()).padStart(2, '0');
   const s = String(now.getSeconds()).padStart(2, '0');
-  document.getElementById('clock').textContent = `${h}:${m}:${s}`;
-}
-
-// ─────────────────────────────────────────────────────────────────
-// INITIALIZATION
-// ───────────────────────────────────�
+  document.getElementById(

@@ -2259,17 +2259,21 @@ def health_check():
 
 @app.route('/api/health', methods=['GET'])
 def health():
-    """Detailed health check endpoint"""
-    snapshot = state.get_state()
-    return jsonify({
-        'status': 'ok' if state.is_alive else 'degraded',
-        'lattice_loaded': state.lattice_loaded,
-        'p2p_enabled': P2P is not None and P2P.is_running,
-        'p2p_peers': P2P.get_peer_count() if P2P else 0,
-        'quantum_metrics': snapshot['quantum_metrics'],
-        'block_height': snapshot['block_state']['current_height'],
-        'timestamp': datetime.now(timezone.utc).isoformat(),
-    }), 200
+    """Detailed health check from actual database"""
+    try:
+        snapshot = state.get_state()
+        return jsonify({
+            'status': 'ok' if state.is_alive else 'degraded',
+            'lattice_loaded': state.lattice_loaded,
+            'p2p_enabled': P2P is not None and hasattr(P2P, 'is_running') and P2P.is_running,
+            'p2p_peers': P2P.get_peer_count() if P2P and hasattr(P2P, 'get_peer_count') else 0,
+            'quantum_metrics': snapshot['quantum_metrics'],
+            'block_height': snapshot['block_state']['current_height'],
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }), 200
+    except Exception as e:
+        logger.error(f"[HEALTH] Error: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/blocks', methods=['GET'])
@@ -2427,10 +2431,33 @@ def wallet():
 
 @app.route('/api/oracle', methods=['GET'])
 def oracle_status():
-    """Oracle engine status — HLWE signing, key derivation"""
-    if ORACLE is None:
-        return jsonify({'error': 'oracle not initialized'}), 503
-    return jsonify(ORACLE.get_status()), 200
+    """Oracle status from actual oracle object and database"""
+    try:
+        oracle_data = {
+            'oracle_address': None,
+            'addresses_issued': 0,
+            'lattice_wired': False,
+            'status': 'offline',
+        }
+        
+        # Get actual oracle data if available
+        if ORACLE is not None:
+            oracle_status_data = ORACLE.get_status()
+            oracle_data.update(oracle_status_data)
+        
+        # Get wallet count from database
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM wallets")
+                wallet_count = cur.fetchone()[0] or 0
+                oracle_data['addresses_issued'] = wallet_count
+        except:
+            pass
+        
+        return jsonify(oracle_data), 200
+    except Exception as e:
+        logger.error(f"[ORACLE] Error: {e}")
+        return jsonify({'error': str(e), 'message': 'Failed to fetch oracle data'}), 500
 
 
 @app.route('/api/oracle/register', methods=['POST'])
@@ -2632,25 +2659,78 @@ def block_by_height(height: int):
 
 @app.route('/api/chain', methods=['GET'])
 def chain_status():
-    """Full chain state from BlockManager"""
-    if LATTICE is None or LATTICE.block_manager is None:
-        return jsonify({'error': 'chain not initialized'}), 503
-    bm = LATTICE.block_manager
-    stats = bm.get_chain_stats()
-    # Add last 5 sealed blocks for the dashboard
-    recent = []
-    with bm.lock:
-        for blk in list(bm.sealed_blocks)[-5:]:
-            recent.append({
-                'height'    : blk.block_height,
-                'hash'      : blk.block_hash,
-                'tx_count'  : blk.tx_count,
-                'timestamp' : blk.timestamp_s,
-                'coherence' : blk.coherence_snapshot,
-                'fidelity'  : blk.fidelity_snapshot,
-            })
-    stats['recent_blocks'] = list(reversed(recent))
-    return jsonify(stats), 200
+    """Full chain state from database only"""
+    try:
+        with get_db_cursor() as cur:
+            # Get chain height
+            cur.execute("SELECT COUNT(*) FROM blocks")
+            total_blocks = cur.fetchone()[0] or 0
+            
+            # Get max height (most recent block)
+            cur.execute("SELECT MAX(height) FROM blocks")
+            max_height_row = cur.fetchone()
+            chain_height = max_height_row[0] if max_height_row[0] is not None else 0
+            
+            # Get transaction count
+            cur.execute("SELECT COUNT(*) FROM transactions")
+            total_txs = cur.fetchone()[0] or 0
+            
+            # Get recent blocks
+            cur.execute("""
+                SELECT height, block_hash, timestamp, 
+                       (SELECT COUNT(*) FROM transactions WHERE block_id = blocks.id) as tx_count,
+                       COALESCE(coherence_snapshot, 0) as coherence,
+                       COALESCE(fidelity_snapshot, 0) as fidelity
+                FROM blocks
+                ORDER BY height DESC
+                LIMIT 5
+            """)
+            recent = []
+            for row in cur.fetchall():
+                recent.append({
+                    'height': row[0],
+                    'hash': row[1],
+                    'timestamp': row[2],
+                    'tx_count': row[3] or 0,
+                    'coherence': float(row[4]) if row[4] else 0.0,
+                    'fidelity': float(row[5]) if row[5] else 0.0,
+                })
+            recent = list(reversed(recent))
+            
+            # Calculate average block time
+            cur.execute("""
+                SELECT AVG(timestamp - LAG(timestamp) OVER (ORDER BY height))
+                FROM blocks
+                WHERE timestamp IS NOT NULL
+            """)
+            avg_time_row = cur.fetchone()
+            avg_block_time = float(avg_time_row[0]) if avg_time_row[0] is not None else 0.0
+            
+            # Get mempool size (pending transactions not yet in blocks)
+            cur.execute("""
+                SELECT COUNT(*) FROM transactions 
+                WHERE block_id IS NULL AND confirmed = false
+            """)
+            pending_txs = cur.fetchone()[0] or 0
+            
+            # Get latest block hash
+            cur.execute("SELECT block_hash FROM blocks ORDER BY height DESC LIMIT 1")
+            hash_row = cur.fetchone()
+            latest_hash = hash_row[0] if hash_row else '0' * 64
+            
+            return jsonify({
+                'chain_height': chain_height,
+                'blocks_sealed': total_blocks,
+                'total_transactions': total_txs,
+                'avg_block_seal_time_s': avg_block_time,
+                'mempool_size': pending_txs,
+                'pending_txs': pending_txs,
+                'latest_block_hash': latest_hash,
+                'recent_blocks': recent,
+            }), 200
+    except Exception as e:
+        logger.error(f"[CHAIN] Database error: {e}")
+        return jsonify({'error': str(e), 'message': 'Failed to fetch chain data from database'}), 500
 
 
 @app.route('/api/submit_block', methods=['POST'])
