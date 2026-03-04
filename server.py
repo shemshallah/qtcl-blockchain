@@ -647,13 +647,75 @@ p2p_app = Flask(__name__)
 p2p_app.config['SECRET_KEY'] = secrets.token_hex(32)
 p2p_socketio = SocketIO(p2p_app, cors_allowed_origins="*", async_mode='threading')
 
-# Registered miners tracking
-_registered_miners = {}  # {miner_id: {'sid': session_id, 'address': addr, 'registered_at': ts, ...}}
+# Registered miners tracking with gossip support
+_registered_miners = {}  # {miner_id: {'sid': session_id, 'address': addr, 'registered_at': ts, 'last_heartbeat': ts, 'snapshot_ts': ns, 'supports_gossip': bool, ...}}
+_miners_lock = threading.RLock()  # Thread-safe access to _registered_miners
+
+# Latest snapshot for gossip distribution
+_latest_snapshot = None
+_latest_snapshot_ts = 0
+_snapshot_lock = threading.RLock()
 
 @p2p_socketio.on('connect')
 def handle_p2p_connect():
     """Client connected to P2P WebSocket (port 8333)"""
     logger.info(f"[P2P-WEBSOCKET] Client connected on port 8333")
+
+# ═════════════════════════════════════════════════════════════════════════════════
+# GOSSIP PROTOCOL HELPERS
+# ═════════════════════════════════════════════════════════════════════════════════
+
+def _get_active_miners_for_gossip():
+    """Get list of active miners for gossip peer discovery.
+    
+    ENHANCED: Returns peer info including URL, WebSocket URL, and snapshot timestamp.
+    """
+    with _miners_lock:
+        now = int(time.time() * 1000)
+        # Consider miners active if heartbeat within last 2 minutes
+        active_miners = [
+            {
+                'miner_id': miner_id,
+                'address': info.get('address', ''),
+                'url': f"https://qtcl-blockchain.koyeb.app",  # Oracle URL
+                'ws_url': os.getenv('P2P_WEBSOCKET_URL', 'wss://qtcl-blockchain.koyeb.app'),
+                'snapshot_ts': info.get('snapshot_ts', 0),
+                'last_seen': info.get('last_heartbeat', 0),
+                'supports_gossip': info.get('supports_gossip', False)
+            }
+            for miner_id, info in _registered_miners.items()
+            if now - info.get('last_heartbeat', 0) < 120000  # 2 minutes
+        ]
+        return active_miners
+
+def _broadcast_snapshot_to_gossip_network(snapshot):
+    """Broadcast latest snapshot to all connected miners via gossip.
+    
+    ENHANCED: Distributes snapshots to all miners for peer-to-peer sharing.
+    """
+    global _latest_snapshot, _latest_snapshot_ts
+    
+    with _snapshot_lock:
+        _latest_snapshot = snapshot
+        _latest_snapshot_ts = snapshot.get('timestamp_ns', 0)
+    
+    try:
+        # Send to all connected clients via broadcast
+        p2p_socketio.emit('gossip_snapshot', {
+            'from_peer': 'oracle',
+            'timestamp_ns': snapshot.get('timestamp_ns', 0),
+            'oracle_address': snapshot.get('oracle_address', 'qtcl1oracle'),
+            'fidelity': snapshot.get('fidelity', 0.95),
+            'w_entropy_hash': snapshot.get('w_entropy_hash', ''),
+            'density_matrix_hex': snapshot.get('density_matrix_hex', ''),
+            'hlwe_signature': snapshot.get('hlwe_signature', {}),
+            'signature_valid': snapshot.get('signature_valid', True)
+        }, broadcast=True)
+        
+        logger.info(f"[GOSSIP] 📡 Broadcast snapshot to all miners | ts={snapshot.get('timestamp_ns', 0)}")
+    except Exception as e:
+        logger.warning(f"[GOSSIP] Failed to broadcast snapshot: {e}")
+
 
 @p2p_socketio.on('disconnect')
 def handle_p2p_disconnect():
@@ -662,48 +724,75 @@ def handle_p2p_disconnect():
 
 @p2p_socketio.on('miner_register')
 def handle_miner_register(data):
-    """Handle miner registration via P2P WebSocket"""
+    """Handle miner registration via P2P WebSocket.
+    
+    ENHANCED: Track gossip support, snapshot timestamps, and send peer list.
+    """
     try:
         miner_id = data.get('miner_id', '')
         address = data.get('address', '')
         public_key = data.get('public_key', '')
+        supports_gossip = data.get('supports_gossip', False)
         
         if not miner_id or not address:
             p2p_socketio.emit('miner_register_ack', {'status': 'error', 'message': 'Missing miner_id or address'})
             return
         
-        # Register miner
-        _registered_miners[miner_id] = {
-            'sid': request.sid,
-            'address': address,
-            'public_key': public_key,
-            'registered_at': int(time.time() * 1000),
-            'last_heartbeat': int(time.time() * 1000)
-        }
+        # Register miner with gossip support tracking
+        with _miners_lock:
+            _registered_miners[miner_id] = {
+                'sid': request.sid,
+                'address': address,
+                'public_key': public_key,
+                'registered_at': int(time.time() * 1000),
+                'last_heartbeat': int(time.time() * 1000),
+                'snapshot_ts': data.get('snapshot_ts', 0),
+                'supports_gossip': supports_gossip
+            }
         
-        logger.info(f"[P2P-WEBSOCKET] ✅ Miner registered | miner_id={miner_id[:30]}… | address={address[:30]}…")
+        logger.info(f"[P2P-WEBSOCKET] ✅ Miner registered | miner_id={miner_id[:30]}… | gossip={'enabled' if supports_gossip else 'disabled'}")
         
-        # Send confirmation
+        # Get current peer list for gossip discovery
+        known_peers = _get_active_miners_for_gossip()
+        
+        # Send confirmation with peer list
         p2p_socketio.emit('miner_register_ack', {
             'status': 'registered',
             'miner_id': miner_id,
-            'message': 'Registration successful'
+            'message': 'Registration successful with gossip support',
+            'known_peers': known_peers,  # ← NEW: Send active peers
+            'latest_snapshot_ts': _latest_snapshot_ts
         })
+        
+        logger.debug(f"[GOSSIP] 👥 Sent {len(known_peers)} known peers to miner {miner_id[:20]}…")
+        
     except Exception as e:
         logger.error(f"[P2P-WEBSOCKET] Registration error: {e}")
         p2p_socketio.emit('miner_register_ack', {'status': 'error', 'message': str(e)})
 
 @p2p_socketio.on('miner_heartbeat')
 def handle_miner_heartbeat(data):
-    """Handle miner heartbeat (keep-alive)"""
+    """Handle miner heartbeat (keep-alive).
+    
+    ENHANCED: Track snapshot timestamps for gossip network awareness.
+    """
     try:
         miner_id = data.get('miner_id', '')
+        snapshot_ts = data.get('snapshot_ts', 0)
+        known_peers = data.get('known_peers', 0)
         
-        if miner_id in _registered_miners:
-            _registered_miners[miner_id]['last_heartbeat'] = int(time.time() * 1000)
-            p2p_socketio.emit('miner_heartbeat_ack', {'status': 'ok'})
-        else:
-            p2p_socketio.emit('miner_heartbeat_ack', {'status': 'error', 'message': 'Miner not registered'})
+        with _miners_lock:
+            if miner_id in _registered_miners:
+                _registered_miners[miner_id]['last_heartbeat'] = int(time.time() * 1000)
+                _registered_miners[miner_id]['snapshot_ts'] = snapshot_ts  # ← NEW: Track snapshot version
+                p2p_socketio.emit('miner_heartbeat_ack', {
+                    'status': 'ok',
+                    'miner_id': miner_id,
+                    'active_miners': len([m for m in _registered_miners.values() 
+                                         if int(time.time() * 1000) - m.get('last_heartbeat', 0) < 120000])
+                })
+            else:
+                p2p_socketio.emit('miner_heartbeat_ack', {'status': 'error', 'message': 'Miner not registered'})
     except Exception as e:
         logger.error(f"[P2P-WEBSOCKET] Heartbeat error: {e}")
 
@@ -712,6 +801,7 @@ def handle_miner_snapshot_request(data):
     """Handle miner requesting W-state snapshot"""
     try:
         miner_id = data.get('miner_id', '')
+        known_snapshot_ts = data.get('known_snapshot_ts', 0)
         
         # Send latest W-state snapshot
         snapshot = {
@@ -737,16 +827,92 @@ def handle_miner_snapshot_request(data):
         logger.error(f"[P2P-WEBSOCKET] Snapshot request error: {e}")
         p2p_socketio.emit('miner_snapshot_error', {'message': str(e)})
 
-@p2p_socketio.on('miner_disconnect')
-def handle_miner_disconnect(data):
-    """Handle explicit miner disconnect"""
+@p2p_socketio.on('gossip_peer_list_request')
+def handle_gossip_peer_list_request(data):
+    """Handle miner requesting peer list for gossip discovery.
+    
+    NEW: Returns list of active peers for decentralized snapshot sharing.
+    """
     try:
         miner_id = data.get('miner_id', '')
-        if miner_id in _registered_miners:
-            del _registered_miners[miner_id]
-            logger.info(f"[P2P-WEBSOCKET] Miner disconnected | miner_id={miner_id[:30]}…")
+        
+        # Get active miners list
+        known_peers = _get_active_miners_for_gossip()
+        
+        # Emit peer list
+        p2p_socketio.emit('gossip_peer_list', {
+            'timestamp': int(time.time()),
+            'peers': known_peers,
+            'total_active': len(known_peers),
+            'latest_snapshot_ts': _latest_snapshot_ts
+        })
+        
+        logger.debug(f"[GOSSIP] 👥 Peer list sent to {miner_id[:20]}… | {len(known_peers)} active peers")
+    except Exception as e:
+        logger.error(f"[GOSSIP] Peer list request error: {e}")
+        p2p_socketio.emit('gossip_peer_list_error', {'message': str(e)})
+
+@p2p_socketio.on('miner_disconnect')
+def handle_miner_disconnect(data):
+    """Handle explicit miner disconnect.
+    
+    ENHANCED: Clean up miner records and update gossip network.
+    """
+    try:
+        miner_id = data.get('miner_id', '')
+        
+        with _miners_lock:
+            if miner_id in _registered_miners:
+                del _registered_miners[miner_id]
+                logger.info(f"[P2P-WEBSOCKET] Miner disconnected | miner_id={miner_id[:30]}… | remaining={len(_registered_miners)}")
+                
+                # Broadcast updated peer list to remaining miners
+                if _registered_miners:
+                    known_peers = _get_active_miners_for_gossip()
+                    p2p_socketio.emit('gossip_peer_list', {
+                        'timestamp': int(time.time()),
+                        'peers': known_peers,
+                        'total_active': len(known_peers),
+                        'latest_snapshot_ts': _latest_snapshot_ts
+                    }, broadcast=True)
+                    logger.debug(f"[GOSSIP] 📡 Updated peer list broadcast to {len(_registered_miners)} miners")
     except Exception as e:
         logger.error(f"[P2P-WEBSOCKET] Disconnect error: {e}")
+
+def _cleanup_stale_miners():
+    """Periodically remove stale miner connections (no heartbeat for 5+ minutes).
+    
+    NEW: Keeps peer list clean and memory usage low.
+    """
+    while True:
+        try:
+            time.sleep(60)  # Check every minute
+            
+            with _miners_lock:
+                now = int(time.time() * 1000)
+                stale_miners = [
+                    miner_id for miner_id, info in _registered_miners.items()
+                    if now - info.get('last_heartbeat', 0) > 300000  # 5 minutes
+                ]
+                
+                for miner_id in stale_miners:
+                    del _registered_miners[miner_id]
+                
+                if stale_miners:
+                    logger.info(f"[GOSSIP] 🧹 Cleaned up {len(stale_miners)} stale miners | remaining={len(_registered_miners)}")
+                
+        except Exception as e:
+            logger.debug(f"[GOSSIP] Stale miner cleanup error: {e}")
+
+# Start cleanup thread on server startup
+_cleanup_thread = None
+def _start_cleanup_thread():
+    """Start background stale miner cleanup thread."""
+    global _cleanup_thread
+    if _cleanup_thread is None or not _cleanup_thread.is_alive():
+        _cleanup_thread = threading.Thread(target=_cleanup_stale_miners, daemon=True, name="MinerCleanup")
+        _cleanup_thread.start()
+        logger.info("[GOSSIP] Started stale miner cleanup thread")
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # REAL-TIME METRICS COLLECTOR (Background Thread)
@@ -3829,6 +3995,9 @@ if __name__ == '__main__':
     def run_p2p_websocket():
         logger.info("[P2P-WEBSOCKET] Starting P2P WebSocket server on port 8333...")
         p2p_socketio.run(p2p_app, host='0.0.0.0', port=8333, debug=debug, allow_unsafe_werkzeug=True, log_output=False)
+    
+    # Start gossip protocol cleanup thread
+    _start_cleanup_thread()
     
     p2p_thread = threading.Thread(target=run_p2p_websocket, daemon=True)
     p2p_thread.start()
