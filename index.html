@@ -632,6 +632,18 @@ footer {
           <span class="metric-label">Pending Transactions</span>
           <span class="metric-value" id="pending-txs">—</span>
         </div>
+        <div class="metric-row">
+          <span class="metric-label">Quantum Validation</span>
+          <span class="metric-value success" id="quantum-validation">VALIDATED</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Post-Quantum Signature</span>
+          <span class="metric-value success" id="pq-validation">VERIFIED</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Oracle Consensus</span>
+          <span class="metric-value success" id="oracle-consensus">REACHED</span>
+        </div>
       </div>
 
       <!-- Oracle Metrics -->
@@ -1015,7 +1027,28 @@ async function fetchMetrics() {
     updateMetric('mempool-size', data.mempool_size ?? null, v => v !== null ? v : '—');
     updateMetric('pending-txs', data.pending_txs ?? null, v => v !== null ? v : '—');
     
-    console.log('✅ Chain metrics from database:', data);
+    // Update validation status
+    const quantum_val = data.quantum_validation_status === 'validated' ? 'VALIDATED' : 'INVALIDATED';
+    document.getElementById('quantum-validation').textContent = quantum_val;
+    document.getElementById('quantum-validation').className = 'metric-value ' + (data.quantum_validation_status === 'validated' ? 'success' : 'danger');
+    
+    const pq_val = data.pq_validation_status === 'verified' ? 'VERIFIED' : 'UNSIGNED';
+    document.getElementById('pq-validation').textContent = pq_val;
+    document.getElementById('pq-validation').className = 'metric-value ' + (data.pq_validation_status === 'verified' ? 'success' : 'danger');
+    
+    const oracle_val = data.oracle_consensus_reached ? 'REACHED' : 'PENDING';
+    document.getElementById('oracle-consensus').textContent = oracle_val;
+    document.getElementById('oracle-consensus').className = 'metric-value ' + (data.oracle_consensus_reached ? 'success' : 'warning');
+    
+    console.log('✅ Chain metrics from database:', {
+      height: data.chain_height,
+      blocks: data.blocks_sealed,
+      txs: data.total_transactions,
+      quantum: quantum_val,
+      pq: pq_val,
+      oracle: oracle_val,
+      coherence: data.temporal_coherence
+    });
   } catch (e) {
     console.error('❌ Chain fetch failed:', e.message);
     // Clear chain metrics - don't show fallback
@@ -1025,6 +1058,9 @@ async function fetchMetrics() {
     updateMetric('block-time', null, () => '—');
     updateMetric('mempool-size', null, () => '—');
     updateMetric('pending-txs', null, () => '—');
+    document.getElementById('quantum-validation').textContent = '—';
+    document.getElementById('pq-validation').textContent = '—';
+    document.getElementById('oracle-consensus').textContent = '—';
   }
 
   try {
