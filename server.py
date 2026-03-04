@@ -793,9 +793,10 @@ def handle_p2p_connect():
 # ═════════════════════════════════════════════════════════════════════════════════
 
 def _get_active_miners_for_gossip():
-    """Get list of active miners for gossip peer discovery.
+    """Get list of active miners for gossip peer discovery with block height awareness.
     
-    ENHANCED: Returns peer info including URL, WebSocket URL, and snapshot timestamp.
+    ENHANCED: Returns peer info including URL, WebSocket URL, snapshot timestamp, AND block heights.
+    Enables miners to know peer heights for P2P sync decisions.
     """
     with _miners_lock:
         now = int(time.time() * 1000)
@@ -808,6 +809,7 @@ def _get_active_miners_for_gossip():
                 'ws_url': os.getenv('P2P_WEBSOCKET_URL', 'wss://qtcl-blockchain.koyeb.app'),
                 'snapshot_ts': info.get('snapshot_ts', 0),
                 'last_seen': info.get('last_heartbeat', 0),
+                'block_height': info.get('block_height', 0),  # ← NEW: Include peer's current block height
                 'supports_gossip': info.get('supports_gossip', False)
             }
             for miner_id, info in _registered_miners.items()
@@ -915,24 +917,36 @@ def handle_miner_register(data):
 
 @p2p_socketio.on('miner_heartbeat')
 def handle_miner_heartbeat(data):
-    """Handle miner heartbeat (keep-alive).
+    """Handle miner heartbeat (keep-alive) with block height tracking.
     
-    ENHANCED: Track snapshot timestamps for gossip network awareness.
+    ENHANCED: Track snapshot timestamps, block heights for gossip network awareness.
+    Enables P2P sync to know peer heights and avoid "No peer height information" warnings.
     """
     try:
         miner_id = data.get('miner_id', '')
         snapshot_ts = data.get('snapshot_ts', 0)
         known_peers = data.get('known_peers', 0)
+        block_height = data.get('block_height', 0)  # ← NEW: Accept miner's current block height
+        timestamp_ms = data.get('timestamp', int(time.time() * 1000))
         
         with _miners_lock:
             if miner_id in _registered_miners:
-                _registered_miners[miner_id]['last_heartbeat'] = int(time.time() * 1000)
-                _registered_miners[miner_id]['snapshot_ts'] = snapshot_ts  # ← NEW: Track snapshot version
+                _registered_miners[miner_id]['last_heartbeat'] = timestamp_ms
+                _registered_miners[miner_id]['snapshot_ts'] = snapshot_ts
+                _registered_miners[miner_id]['block_height'] = block_height  # ← STORE: Miner's block height
+                _registered_miners[miner_id]['known_peers_count'] = known_peers
+                
+                active_miners_list = [m for m in _registered_miners.values() 
+                                     if int(time.time() * 1000) - m.get('last_heartbeat', 0) < 120000]
+                max_peer_height = max([m.get('block_height', 0) for m in active_miners_list], default=0)
+                
                 p2p_socketio.emit('miner_heartbeat_ack', {
                     'status': 'ok',
                     'miner_id': miner_id,
-                    'active_miners': len([m for m in _registered_miners.values() 
-                                         if int(time.time() * 1000) - m.get('last_heartbeat', 0) < 120000])
+                    'active_miners': len(active_miners_list),
+                    'max_peer_height': max_peer_height,  # ← NEW: Tell miner the highest peer height
+                    'your_height': block_height,
+                    'snapshot_ts_received': snapshot_ts,
                 })
             else:
                 p2p_socketio.emit('miner_heartbeat_ack', {'status': 'error', 'message': 'Miner not registered'})
@@ -972,9 +986,9 @@ def handle_miner_snapshot_request(data):
 
 @p2p_socketio.on('gossip_peer_list_request')
 def handle_gossip_peer_list_request(data):
-    """Handle miner requesting peer list for gossip discovery.
+    """Handle miner requesting peer list for gossip discovery with height awareness.
     
-    NEW: Returns list of active peers for decentralized snapshot sharing.
+    Returns active peers AND server's current block height for P2P sync decisions.
     """
     try:
         miner_id = data.get('miner_id', '')
@@ -982,15 +996,27 @@ def handle_gossip_peer_list_request(data):
         # Get active miners list
         known_peers = _get_active_miners_for_gossip()
         
-        # Emit peer list
+        # Get server's current block height
+        server_height = 0
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("SELECT MAX(height) FROM blocks")
+                row = cur.fetchone()
+                server_height = row[0] if row and row[0] is not None else 0
+        except:
+            server_height = 0
+        
+        # Emit peer list with height info
         p2p_socketio.emit('gossip_peer_list', {
             'timestamp': int(time.time()),
             'peers': known_peers,
             'total_active': len(known_peers),
-            'latest_snapshot_ts': _latest_snapshot_ts
+            'latest_snapshot_ts': _latest_snapshot_ts,
+            'server_block_height': server_height,  # ← NEW: Miners now know server's height
+            'max_peer_height': max([p.get('block_height', 0) for p in known_peers], default=0)  # ← NEW: Highest peer
         })
         
-        logger.debug(f"[GOSSIP] 👥 Peer list sent to {miner_id[:20]}… | {len(known_peers)} active peers")
+        logger.debug(f"[GOSSIP] 👥 Peer list sent to {miner_id[:20]}… | {len(known_peers)} active peers | server_height={server_height}")
     except Exception as e:
         logger.error(f"[GOSSIP] Peer list request error: {e}")
         p2p_socketio.emit('gossip_peer_list_error', {'message': str(e)})
