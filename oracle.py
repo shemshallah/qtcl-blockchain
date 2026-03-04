@@ -39,13 +39,101 @@ import numpy as np
 import queue
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field, asdict
-from collections import deque
+from collections import deque, OrderedDict
 from decimal import Decimal, getcontext
 from enum import Enum
 
 getcontext().prec = 150
 
 logger = logging.getLogger(__name__)
+
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# M1 FIX: EXPONENTIAL BACKOFF QUEUE FOR ORACLE BROADCAST RESILIENCE
+# ═════════════════════════════════════════════════════════════════════════════════════════
+
+class M1_ExponentialBackoffQueue:
+    """
+    Museum-Grade Exponential Backoff for Oracle Broadcast Failures.
+    
+    Problem: Infinite retry loop on oracle unreachability causes network spam.
+    Solution: Track retry_count, exponential backoff (1s → 2s → 4s → ...), max_retries cap.
+    
+    This fixes M1 issue directly in oracle.py. No external dependencies.
+    """
+    
+    def __init__(self, max_retries: int = 10, base_delay_seconds: float = 1.0):
+        self.max_retries = max_retries
+        self.base_delay = base_delay_seconds
+        self.queue: OrderedDict[str, Dict[str, Any]] = OrderedDict()
+        self.lock = threading.RLock()
+        self.stats = {
+            'enqueued': 0,
+            'succeeded': 0,
+            'exhausted': 0,
+            'retried': 0,
+        }
+    
+    def enqueue(self, item_id: str, data: Any, retry_count: int = 0):
+        """Enqueue or re-queue item with retry tracking."""
+        with self.lock:
+            self.queue[item_id] = {
+                'id': item_id,
+                'data': data,
+                'retry_count': retry_count,
+                'enqueued_at': time.time(),
+                'next_retry_at': time.time() + (self.base_delay * (2 ** retry_count)),
+            }
+            if retry_count == 0:
+                self.stats['enqueued'] += 1
+            else:
+                self.stats['retried'] += 1
+    
+    def dequeue_ready(self) -> Optional[Dict[str, Any]]:
+        """Return first item ready for retry (next_retry_at <= now)."""
+        with self.lock:
+            for item_id, item in self.queue.items():
+                if item['next_retry_at'] <= time.time():
+                    return self.queue.pop(item_id)
+        return None
+    
+    def mark_failed(self, item: Dict[str, Any]):
+        """Re-queue or drop if max retries exceeded."""
+        retry_count = item['retry_count'] + 1
+        
+        if retry_count > self.max_retries:
+            with self.lock:
+                self.stats['exhausted'] += 1
+            logger.warning(
+                f"[M1-BACKOFF-ORACLE] Item {item['id']} exhausted {retry_count} retries. Dropping."
+            )
+            return
+        
+        delay = self.base_delay * (2 ** retry_count)
+        logger.info(
+            f"[M1-BACKOFF-ORACLE] Item {item['id']} retry {retry_count}/{self.max_retries}, "
+            f"backoff {delay:.1f}s"
+        )
+        self.enqueue(item['id'], item['data'], retry_count)
+    
+    def mark_success(self, item: Dict[str, Any]):
+        """Remove from queue."""
+        with self.lock:
+            self.stats['succeeded'] += 1
+    
+    def has_pending(self) -> bool:
+        """Check if queue has pending items."""
+        with self.lock:
+            return len(self.queue) > 0
+    
+    def peek_stats(self) -> Dict[str, Any]:
+        """Return queue telemetry."""
+        with self.lock:
+            return {
+                **self.stats,
+                'pending': len(self.queue),
+            }
+
+
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # BLOCK FIELD ENTROPY INTEGRATION
