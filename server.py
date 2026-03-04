@@ -645,7 +645,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 # Separate Flask app for P2P WebSocket on port 8333
 p2p_app = Flask(__name__)
 p2p_app.config['SECRET_KEY'] = secrets.token_hex(32)
-p2p_socketio = SocketIO(p2p_app, cors_allowed_origins="*", async_mode='threading')
+p2p_socketio = SocketIO(p2p_app, cors_allowed_origins="*", async_mode='threading', ping_timeout=30, ping_interval=15)
 
 # Registered miners tracking with gossip support
 _registered_miners = {}  # {miner_id: {'sid': session_id, 'address': addr, 'registered_at': ts, 'last_heartbeat': ts, 'snapshot_ts': ns, 'supports_gossip': bool, ...}}
@@ -656,10 +656,21 @@ _latest_snapshot = None
 _latest_snapshot_ts = 0
 _snapshot_lock = threading.RLock()
 
+# Snapshot buffer (ring buffer - max 100 snapshots)
+_snapshot_buffer = deque(maxlen=100)
+
+# Metrics tracking
+_p2p_metrics = {
+    'snapshots_sent': 0,
+    'bytes_sent': 0,
+    'startup_time': datetime.now(timezone.utc).isoformat(),
+}
+_metrics_lock = threading.RLock()
+
 @p2p_socketio.on('connect')
 def handle_p2p_connect():
     """Client connected to P2P WebSocket (port 8333)"""
-    logger.info(f"[P2P-WEBSOCKET] Client connected on port 8333")
+    logger.info(f"[P2P-WEBSOCKET] ✅ Client connected | sid={request.sid[:16]}")
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # GOSSIP PROTOCOL HELPERS
@@ -691,30 +702,40 @@ def _get_active_miners_for_gossip():
 def _broadcast_snapshot_to_gossip_network(snapshot):
     """Broadcast latest snapshot to all connected miners via gossip.
     
-    ENHANCED: Distributes snapshots to all miners for peer-to-peer sharing.
+    Distributes snapshots to all miners with proper buffering and metrics.
     """
     global _latest_snapshot, _latest_snapshot_ts
     
     with _snapshot_lock:
+        _snapshot_buffer.append(snapshot)
         _latest_snapshot = snapshot
         _latest_snapshot_ts = snapshot.get('timestamp_ns', 0)
     
     try:
         # Send to all connected clients via broadcast
-        p2p_socketio.emit('gossip_snapshot', {
-            'from_peer': 'oracle',
+        p2p_socketio.emit('w_state_snapshot', {
             'timestamp_ns': snapshot.get('timestamp_ns', 0),
             'oracle_address': snapshot.get('oracle_address', 'qtcl1oracle'),
-            'fidelity': snapshot.get('fidelity', 0.95),
             'w_entropy_hash': snapshot.get('w_entropy_hash', ''),
+            'purity': snapshot.get('purity', 0.95),
+            'w_state_fidelity': snapshot.get('w_state_fidelity', 0.94),
             'density_matrix_hex': snapshot.get('density_matrix_hex', ''),
             'hlwe_signature': snapshot.get('hlwe_signature', {}),
             'signature_valid': snapshot.get('signature_valid', True)
         }, broadcast=True)
         
-        logger.info(f"[GOSSIP] 📡 Broadcast snapshot to all miners | ts={snapshot.get('timestamp_ns', 0)}")
+        with _metrics_lock:
+            _p2p_metrics['snapshots_sent'] += 1
+            snapshot_json = json.dumps(snapshot)
+            _p2p_metrics['bytes_sent'] += len(snapshot_json)
+        
+        with _miners_lock:
+            active = len(_registered_miners)
+        
+        if active > 0:
+            logger.debug(f"[P2P-WEBSOCKET] 📡 Snapshot broadcast to {active} miners | ts={snapshot.get('timestamp_ns', 0)}")
     except Exception as e:
-        logger.warning(f"[GOSSIP] Failed to broadcast snapshot: {e}")
+        logger.debug(f"[P2P-WEBSOCKET] Snapshot broadcast error: {e}")
 
 
 @p2p_socketio.on('disconnect')
@@ -882,7 +903,7 @@ def handle_miner_disconnect(data):
 def _cleanup_stale_miners():
     """Periodically remove stale miner connections (no heartbeat for 5+ minutes).
     
-    NEW: Keeps peer list clean and memory usage low.
+    Keeps peer list clean and memory usage low.
     """
     while True:
         try:
@@ -899,20 +920,68 @@ def _cleanup_stale_miners():
                     del _registered_miners[miner_id]
                 
                 if stale_miners:
-                    logger.info(f"[GOSSIP] 🧹 Cleaned up {len(stale_miners)} stale miners | remaining={len(_registered_miners)}")
+                    logger.info(f"[P2P-WEBSOCKET] 🔄 Cleaned up {len(stale_miners)} stale miners | remaining={len(_registered_miners)}")
                 
         except Exception as e:
-            logger.debug(f"[GOSSIP] Stale miner cleanup error: {e}")
+            logger.debug(f"[P2P-WEBSOCKET] Stale miner cleanup error: {e}")
 
-# Start cleanup thread on server startup
+def _snapshot_streaming_daemon():
+    """Background daemon: Stream W-state snapshots every 10ms to all connected miners."""
+    logger.info("[P2P-WEBSOCKET] 🔄 Snapshot streaming daemon started")
+    
+    last_snapshot_ts = 0
+    
+    while True:
+        try:
+            time.sleep(0.01)  # 10ms interval
+            
+            try:
+                # Get latest W-state snapshot from oracle W-state manager
+                if ORACLE_W_STATE_MANAGER is not None:
+                    dm = ORACLE_W_STATE_MANAGER.get_latest_density_matrix()
+                    if dm and hasattr(dm, 'timestamp_ns'):
+                        if dm.timestamp_ns > last_snapshot_ts:
+                            # Prepare snapshot
+                            snapshot = {
+                                'timestamp_ns': dm.timestamp_ns,
+                                'oracle_address': ORACLE.oracle_address if hasattr(ORACLE, 'oracle_address') else 'qtcl1oracle',
+                                'density_matrix_hex': dm.density_matrix_hex,
+                                'w_entropy_hash': dm.w_entropy_hash if hasattr(dm, 'w_entropy_hash') else '',
+                                'purity': dm.purity,
+                                'w_state_fidelity': dm.w_state_fidelity,
+                                'hlwe_signature': dm.hlwe_signature.to_dict() if dm.hlwe_signature else {},
+                                'signature_valid': dm.signature_valid
+                            }
+                            
+                            # Broadcast to all miners
+                            _broadcast_snapshot_to_gossip_network(snapshot)
+                            last_snapshot_ts = dm.timestamp_ns
+            except Exception as e:
+                logger.debug(f"[P2P-WEBSOCKET] Snapshot generation error: {e}")
+                
+        except Exception as e:
+            logger.error(f"[P2P-WEBSOCKET] Streaming daemon error: {e}")
+            time.sleep(1)
+
+# Start daemon threads on server startup
+_streaming_thread = None
 _cleanup_thread = None
-def _start_cleanup_thread():
-    """Start background stale miner cleanup thread."""
-    global _cleanup_thread
+
+def _start_p2p_daemons():
+    """Start background P2P daemon threads (streaming, cleanup)."""
+    global _streaming_thread, _cleanup_thread
+    
+    # Streaming daemon
+    if _streaming_thread is None or not _streaming_thread.is_alive():
+        _streaming_thread = threading.Thread(target=_snapshot_streaming_daemon, daemon=True, name="SnapshotStreaming")
+        _streaming_thread.start()
+        logger.info("[P2P-WEBSOCKET] ✅ Snapshot streaming daemon started")
+    
+    # Cleanup daemon
     if _cleanup_thread is None or not _cleanup_thread.is_alive():
         _cleanup_thread = threading.Thread(target=_cleanup_stale_miners, daemon=True, name="MinerCleanup")
         _cleanup_thread.start()
-        logger.info("[GOSSIP] Started stale miner cleanup thread")
+        logger.info("[P2P-WEBSOCKET] ✅ Miner cleanup daemon started")
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # REAL-TIME METRICS COLLECTOR (Background Thread)
@@ -3996,8 +4065,8 @@ if __name__ == '__main__':
         logger.info("[P2P-WEBSOCKET] Starting P2P WebSocket server on port 8333...")
         p2p_socketio.run(p2p_app, host='0.0.0.0', port=8333, debug=debug, allow_unsafe_werkzeug=True, log_output=False)
     
-    # Start gossip protocol cleanup thread
-    _start_cleanup_thread()
+    # Start P2P daemons (streaming + cleanup)
+    _start_p2p_daemons()
     
     p2p_thread = threading.Thread(target=run_p2p_websocket, daemon=True)
     p2p_thread.start()

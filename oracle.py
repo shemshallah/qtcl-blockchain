@@ -195,6 +195,7 @@ class DensityMatrixSnapshot:
     entanglement_witness: float
     trace_purity: float
     # HLWE SIGNATURE (v14 FINAL)
+    w_entropy_hash: str = ""
     hlwe_signature: Optional[Dict[str, Any]] = None
     oracle_address: Optional[str] = None
     signature_valid: bool = False
@@ -786,8 +787,8 @@ class OracleWStateManager:
                 "aer_noise_state": s.aer_noise_state, "lattice_refresh_counter": s.lattice_refresh_counter,
                 "w_state_strength": s.w_state_strength, "phase_coherence": s.phase_coherence,
                 "entanglement_witness": s.entanglement_witness, "trace_purity": s.trace_purity,
-                "hlwe_signature": s.hlwe_signature, "oracle_address": s.oracle_address,
-                "signature_valid": s.signature_valid,
+                "w_entropy_hash": s.w_entropy_hash, "hlwe_signature": s.hlwe_signature,
+                "oracle_address": s.oracle_address, "signature_valid": s.signature_valid,
             }
 
     def get_density_matrix_stream(self, limit: int = 100) -> List[Dict[str, Any]]:
