@@ -2213,7 +2213,7 @@ def initialize_p2p():
 def dashboard():
     """Serve dashboard"""
     try:
-        with open('index.html', 'r') as f:
+        with open('index.html', 'r', encoding='utf-8', errors='ignore') as f:
             html_content = f.read()
         return render_template_string(html_content)
     except FileNotFoundError:
