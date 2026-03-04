@@ -18,7 +18,7 @@
 ║    gunicorn -w1 -b0.0.0.0:8000 wsgi_config:app                                                ║
 ║    gunicorn -w1 -b0.0.0.0:8000 --timeout 120 wsgi_config:app  (production, Koyeb)           ║
 ║                                                                                                ║
-║  Procfile (Heroku/Koyeb/Railway) — Unified port 8000:                                        ║
+║  Procfile (Heroku/Koyeb/Railway) — Port 8000 internal, 443 external:                         ║
 ║    web: gunicorn -w1 -b0.0.0.0:8000 --timeout 120 wsgi_config:app                           ║
 ║                                                                                                ║
 ║  All subsystem initialization (lattice, P2P, database, oracle) happens in server.py           ║

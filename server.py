@@ -4,12 +4,12 @@
 ║                                                                                ║
 ║  QTCL SERVER v6 — Integrated P2P Blockchain with HLWE & Quantum Metrics       ║
 ║                                                                                ║
-║  Museum-Grade Implementation — Unified Port 8000 (Koyeb-Optimized)            ║
+║  Museum-Grade Implementation — Unified Port 8000 (Internal) / 443 (External)  ║
 ║  ─────────────────────────────────────────────────────────────────────────    ║
 ║                                                                                ║
-║  Single Unified Server (All on Port 8000):                                    ║
-║    • REST API Layer (port 8000) — client-facing interface                    ║
-║    • P2P WebSocket Layer (port 8000) — peer-to-peer consensus               ║
+║  Single Unified Server (All on Port 8000 Internal, 443 External via Koyeb):   ║
+║    • REST API Layer (port 8000 internal → 443 HTTPS external)                 ║
+║    • P2P WebSocket Layer (port 8000 internal → 443 HTTPS external)            ║
 ║    • Database Layer (internal) — persistent state (PostgreSQL)              ║
 ║    • Lattice Controller — quantum entropy mining                             ║
 ║    • Mempool Manager — transaction pool with validation                      ║
@@ -22,9 +22,10 @@
 ║                                                                                ║
 ║  Environment Variables:                                                        ║
 ║    DATABASE_URL — PostgreSQL connection                                       ║
-║    FLASK_PORT — HTTP listen port (default: 8000, Koyeb standard)            ║
+║    FLASK_PORT — HTTP listen port (default: 8000, internal only)             ║
 ║    FLASK_HOST — HTTP bind address (default: 0.0.0.0)                         ║
-║    ORACLE_WS_URL — WebSocket oracle endpoint (e.g., wss://host.com:8000)    ║
+║    ORACLE_WS_URL — WebSocket oracle endpoint (e.g., wss://host/socket.io)   ║
+║                    Koyeb automatically uses HTTPS 443 (no port needed)        ║
 ║    MAX_PEERS — Max peer connections (default: 32)                            ║
 ║    BOOTSTRAP_NODES — Comma-separated peer addresses                          ║
 ║                                                                                ║
