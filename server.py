@@ -3884,9 +3884,26 @@ def submit_block():
         }), 201
     
     except Exception as e:
-        logger.error(f"[BLOCK] ❌ Block submission failed: {e}")
-        logger.error(f"[BLOCK] Traceback: {traceback.format_exc()}")
-        return jsonify({'error': f'Server error: {str(e)}'}), 500
+        logger.error(f"[BLOCK] ❌ Block submission error")
+        logger.error(f"[BLOCK]    Type: {type(e).__name__}")
+        logger.error(f"[BLOCK]    Message: {str(e)}")
+        logger.error(f"[BLOCK]    Traceback: {traceback.format_exc()}")
+        
+        # Extract block info from request if possible
+        try:
+            data = request.get_json() or {}
+            header = data.get('header', {})
+            logger.error(f"[BLOCK]    Block height: {header.get('height', 'unknown')}")
+            logger.error(f"[BLOCK]    Block hash: {str(header.get('block_hash', 'unknown'))[:32]}…")
+            logger.error(f"[BLOCK]    Difficulty: {header.get('difficulty_bits', 'unknown')}")
+        except:
+            pass
+        
+        return jsonify({
+            'error': f'Server error: {str(e)}',
+            'error_type': type(e).__name__,
+            'error_details': str(e)[:200]
+        }), 500
 
 
 @app.route('/api/submit_transaction', methods=['POST'])
