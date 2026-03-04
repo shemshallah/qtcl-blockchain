@@ -21,6 +21,8 @@
 ╚════════════════════════════════════════════════════════════════════════════════════════════════╝
 """
 
+from __future__ import annotations
+
 import threading, logging, json, sys, hashlib
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
