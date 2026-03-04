@@ -1573,7 +1573,7 @@ class MetricsCollector:
                 time.sleep(2)
     
     def _gather_metrics(self) -> Dict[str, Any]:
-    """
+        """
     Gather all blockchain metrics — SQL uses verified column names from submit_block schema.
     blocks:       height, block_hash, validator_public_key, timestamp, difficulty, etc.
     transactions: tx_hash, from_address, to_address, amount, height, status
