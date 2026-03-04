@@ -97,7 +97,8 @@ class M2_DelayedStartSync:
         self.is_started = False
     
     def schedule_delayed_start(self):
-        """Schedule background startup delay."""        def delayed_init():
+        """Schedule background startup delay."""
+        def delayed_init():
             logger.info(
                 f"[M2-DELAYED] Peer sync starting in {self.startup_delay}s "
                 f"(waiting for schema patches)..."
@@ -146,7 +147,8 @@ class M4_AtomicHeartbeatFlag:
     
     def is_set(self) -> bool:
         """Atomically read flag."""
-        with self.lock:            return self.flag
+        with self.lock:
+            return self.flag
     
     def test_and_set(self, expected: bool, new_value: bool) -> bool:
         """Atomic CAS: set new_value only if current == expected."""
@@ -195,7 +197,8 @@ class M5_GossipDeduplicator:
                 ts = self.timestamp_map.get(msg_hash, now)
                 if now - ts < self.window:
                     return True
-                else:                    self.seen_hashes.discard(msg_hash)
+                else:
+                    self.seen_hashes.discard(msg_hash)
                     self.timestamp_map.pop(msg_hash, None)
                     return False
             
@@ -244,7 +247,8 @@ class L2_HLWEWalletCryptography:
     def __init__(self, password: str, salt: bytes = None, hlwe_engine=None):
         self.password = password
         self.salt = salt or secrets.token_bytes(32)
-        self.hlwe_engine = hlwe_engine        self._key = self._derive_key()
+        self.hlwe_engine = hlwe_engine
+        self._key = self._derive_key()
     
     def _derive_key(self) -> bytes:
         """Derive encryption key using PBKDF with HLWE enhancement."""
@@ -266,7 +270,7 @@ class L2_HLWEWalletCryptography:
         
         return key
     
-    def encrypt_wallet(self, wallet_ Dict[str, Any]) -> Dict[str, Any]:
+    def encrypt_wallet(self, wallet_data: Dict[str, Any]) -> Dict[str, Any]:
         """Encrypt wallet data (address, keys, etc.)."""
         plaintext = json.dumps(wallet_data, sort_keys=True).encode('utf-8')
         
@@ -293,7 +297,8 @@ class L2_HLWEWalletCryptography:
             computed_hmac = hashlib.sha256(self._key + ciphertext).hexdigest()
             
             if computed_hmac != stored_hmac:
-                logger.error("[L2-WALLET] HMAC mismatch - wrong password or corrupted wallet")                return None
+                logger.error("[L2-WALLET] HMAC mismatch - wrong password or corrupted wallet")
+                return None
             
             plaintext = bytes(
                 ciphertext[i] ^ self._key[i % len(self._key)]
@@ -538,7 +543,8 @@ class BlockchainEvent(Enum):
     CONSENSUS_ACHIEVED = "consensus_achieved"
 
 
-@dataclassclass PeerInfo:
+@dataclass
+class PeerInfo:
     """Peer connection metadata"""
     peer_id: str
     address: str
@@ -587,7 +593,8 @@ class Message:
     msg_type: str
     payload: Dict[str, Any]
     timestamp: float = field(default_factory=time.time)
-    sender_id: Optional[str] = None    message_id: str = field(default_factory=lambda: hashlib.sha256(str(time.time()).encode()).hexdigest()[:16])
+    sender_id: Optional[str] = None
+    message_id: str = field(default_factory=lambda: hashlib.sha256(str(time.time()).encode()).hexdigest()[:16])
     
     def to_bytes(self) -> bytes:
         """Serialize message to bytes"""
@@ -685,7 +692,8 @@ class DatabasePool:
             
             except (ImportError, AttributeError) as e:
                 # psycopg2.pool not available - use direct connections via pooler
-                logger.info(f"[DB] App-level pooling unavailable, using direct connections")                logger.info("[DB] ✨ Connected to Supabase pooler (direct mode)")
+                logger.info(f"[DB] App-level pooling unavailable, using direct connections")
+                logger.info("[DB] ✨ Connected to Supabase pooler (direct mode)")
                 self._initialized = True
                 self.use_pooling = False
                 self.pool = None
@@ -734,7 +742,8 @@ class DatabasePool:
             elif conn:
                 # No pooling, just close
                 conn.close()
-        except Exception as e:            logger.debug(f"[DB] Error handling connection return: {e}")
+        except Exception as e:
+            logger.debug(f"[DB] Error handling connection return: {e}")
     
     def close_all(self):
         """Close all connections in the pool"""
@@ -783,7 +792,8 @@ def query_latest_block() -> Optional[Dict[str, Any]]:
                 FROM blocks
                 ORDER BY height DESC
                 LIMIT 1
-            """)            row = cur.fetchone()
+            """)
+            row = cur.fetchone()
             if row:
                 timestamp = row[2]
                 if timestamp is None:
@@ -832,7 +842,8 @@ def query_block_by_hash(block_hash: str) -> Optional[Dict[str, Any]]:
 def query_blocks_range(from_height: int, to_height: int) -> List[Dict[str, Any]]:
     """Get blocks in height range"""
     try:
-        with get_db_cursor() as cur:            cur.execute("""
+        with get_db_cursor() as cur:
+            cur.execute("""
                 SELECT height, block_hash, timestamp, oracle_w_state_hash
                 FROM blocks
                 WHERE height BETWEEN %s AND %s
@@ -881,7 +892,8 @@ def query_wallet_info(address: str) -> Optional[Dict[str, Any]]:
                     'address': address,
                     'balance': row[0],
                     'tx_count': row[1],
-                }    except Exception as e:
+                }
+    except Exception as e:
         logger.error(f"[DB] Failed to query wallet: {e}")
     return None
 
@@ -930,7 +942,8 @@ def insert_transaction(from_addr: str, to_addr: str, amount: int) -> Optional[st
 def store_peer_info(peer_info: PeerInfo):
     """Store peer information in database for persistence"""
     try:
-        with get_db_cursor() as cur:            cur.execute("""
+        with get_db_cursor() as cur:
+            cur.execute("""
                 INSERT INTO peer_registry (peer_id, address, port, last_seen, block_height, user_agent)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT(peer_id) DO UPDATE SET
@@ -1273,7 +1286,8 @@ def handle_miner_heartbeat(data):
                 _registered_miners[miner_id]['known_peers_count'] = known_peers
                 
                 active_miners_list = [m for m in _registered_miners.values() 
-                                     if int(time.time() * 1000) - m.get('last_heartbeat', 0) < 120000]                max_peer_height = max([m.get('block_height', 0) for m in active_miners_list], default=0)
+                                     if int(time.time() * 1000) - m.get('last_heartbeat', 0) < 120000]
+                max_peer_height = max([m.get('block_height', 0) for m in active_miners_list], default=0)
                 
                 p2p_socketio.emit('miner_heartbeat_ack', {
                     'status': 'ok',
@@ -1371,7 +1385,8 @@ def handle_miner_disconnect(data):
                 
                 # Broadcast updated peer list to remaining miners
                 if _registered_miners:
-                    known_peers = _get_active_miners_for_gossip()                    p2p_socketio.emit('gossip_peer_list', {
+                    known_peers = _get_active_miners_for_gossip()
+                    p2p_socketio.emit('gossip_peer_list', {
                         'timestamp': int(time.time()),
                         'peers': known_peers,
                         'total_active': len(known_peers),
@@ -1518,7 +1533,8 @@ class MetricsCollector:
     def __init__(self):
         self.running = False
         self.thread = None
-        def start(self):
+    
+    def start(self):
         """Start metrics collector thread"""
         if not self.running:
             self.running = True
@@ -1616,7 +1632,8 @@ class MetricsCollector:
                 if P2P and hasattr(P2P, 'get_peer_count'):
                     try:
                         peer_count = P2P.get_peer_count()
-                    except Exception:                        pass
+                    except Exception:
+                        pass
 
                 # ── NETWORK HASH RATE ─────────────────────────────────────────────
                 # Estimate: 2^difficulty / avg_block_time  (simplified PoW model)
@@ -1763,7 +1780,8 @@ def handle_connect():
     logger.info(f"[WEBSOCKET] Client connected")
     # Send initial metrics immediately
     try:
-        metrics = _metrics_collector._gather_metrics()        emit('metrics_update', metrics)
+        metrics = _metrics_collector._gather_metrics()
+        emit('metrics_update', metrics)
     except Exception as e:
         logger.error(f"[WEBSOCKET] Initial metrics error: {e}")
 
@@ -1936,7 +1954,7 @@ class PeerConnection:
                 
                 # Read 4-byte length
                 length_data = self.sock.recv(4)
-                if not length_
+                if not length_data:
                     return None
                 
                 length = int.from_bytes(length_data, 'big')
@@ -1959,7 +1977,8 @@ class PeerConnection:
                 self.peer_info.bytes_received += length + 4
                 self.peer_info.last_message_at = time.time()
                 
-                return message        except socket.timeout:
+                return message
+        except socket.timeout:
             return None
         except Exception as e:
             logger.error(f"[PEER {self.peer_id}] Receive error: {e}")
@@ -2008,7 +2027,8 @@ class PeerDiscoveryEngine:
         
         # Strategy 2: Query DNS seeds
         for seed in DNS_SEEDS:
-            try:                dns_peers = self._query_dns_seed(seed)
+            try:
+                dns_peers = self._query_dns_seed(seed)
                 candidates.update(dns_peers)
                 logger.info(f"[DISCOVERY] Found {len(dns_peers)} peers from DNS seed {seed}")
             except Exception as e:
@@ -2057,7 +2077,8 @@ class PeerDiscoveryEngine:
             info = self.tested_peers.get(key, {})
             info['last_failure'] = time.time()
             info['failures'] = info.get('failures', 0) + 1
-            info['attempts'] = info.get('attempts', 0) + 1            self.tested_peers[key] = info
+            info['attempts'] = info.get('attempts', 0) + 1
+            self.tested_peers[key] = info
     
     def get_connect_candidates(self, exclude: Set[str], needed: int = 5) -> List[Tuple[str, int]]:
         """Get list of peers to try connecting to"""
@@ -2204,7 +2225,8 @@ class MessageHandlers:
                     
                     peer_conn.peer_info.blocks_announced += len(new_blocks)
                     
-                    # Request blocks we don't have                    if new_blocks:
+                    # Request blocks we don't have
+                    if new_blocks:
                         self._request_blocks(peer_conn, new_blocks)
                 
                 elif inv_type == 'tx':
@@ -2253,7 +2275,8 @@ class MessageHandlers:
             # ── 2. Duplicate check ────────────────────────────────────────────
             with self.lock:
                 if block_hash in self.block_cache:
-                    logger.debug(f"[P2P] Block {block_hash[:16]}… already cached, skipping")                    return
+                    logger.debug(f"[P2P] Block {block_hash[:16]}… already cached, skipping")
+                    return
 
             # ── 3. HLWE oracle signature verification ─────────────────────────
             if ORACLE and hlwe_witness:
@@ -2449,7 +2472,8 @@ class MessageHandlers:
         - Implement selective data transfer
         """
         try:
-            payload = message.payload            data_type = payload.get('type')  # 'block' or 'tx'
+            payload = message.payload
+            data_type = payload.get('type')  # 'block' or 'tx'
             hashes = payload.get('hashes', [])
             
             logger.debug(f"[PEER {peer_conn.peer_id}] GETDATA: {len(hashes)} {data_type}s")
@@ -2479,7 +2503,7 @@ class MessageHandlers:
                         else:
                             tx_data = query_transaction(tx_hash)
                     
-                    if tx_
+                    if tx_data:
                         response = Message(
                             msg_type='tx',
                             payload=tx_data
@@ -2498,7 +2522,8 @@ class MessageHandlers:
         - Enable peers to catch up
         - Implement efficient block sync
         """
-        try:            payload = message.payload
+        try:
+            payload = message.payload
             since_height = payload.get('since_height', 0)
             limit = min(payload.get('limit', 100), 500)  # Max 500 blocks
             
@@ -2692,14 +2717,15 @@ class MessageHandlers:
         )
         peer_conn.send_message(request)
     
-    def _validate_block(self, block_ Dict[str, Any]) -> bool:
+    def _validate_block(self, block_data: Dict[str, Any]) -> bool:
         """Validate block structure and data"""
-        try:            required_fields = ['hash', 'height', 'data']
+        try:
+            required_fields = ['hash', 'height', 'data']
             return all(field in block_data for field in required_fields)
         except:
             return False
     
-    def _validate_tx(self, tx_ Dict[str, Any]) -> bool:
+    def _validate_tx(self, tx_data: Dict[str, Any]) -> bool:
         """Validate transaction structure and data"""
         try:
             required_fields = ['hash', 'from', 'to', 'amount']
@@ -2792,7 +2818,8 @@ class P2PServer:
         bound_port = None
         probe_range = range(self.initial_port, self.initial_port + 11)
         
-        for attempt_port in probe_range:            try:
+        for attempt_port in probe_range:
+            try:
                 with self.stats_lock:
                     self.stats['port_probe_attempts'] += 1
                 
@@ -2841,7 +2868,8 @@ class P2PServer:
         
         logger.info("[P2P] All background threads started")
         return True
-        def _start_accept_thread(self):
+    
+    def _start_accept_thread(self):
         """
         Thread that accepts incoming peer connections.
         
@@ -2890,7 +2918,8 @@ class P2PServer:
                         self._disconnect_peer(peer_conn)
                 
                 except Exception as e:
-                    if self.is_running:                        logger.error(f"[P2P] Accept error: {e}")
+                    if self.is_running:
+                        logger.error(f"[P2P] Accept error: {e}")
         
         thread = threading.Thread(target=accept_loop, daemon=True)
         self.threads.append(thread)
@@ -2939,7 +2968,8 @@ class P2PServer:
                 'consensus': self.message_handlers.on_consensus,
             }
             
-            handler = handler_map.get(message.msg_type)            if handler:
+            handler = handler_map.get(message.msg_type)
+            if handler:
                 handler(peer_conn, message)
             else:
                 logger.warning(f"[P2P] Unknown message type: {message.msg_type}")
@@ -3037,7 +3067,8 @@ class P2PServer:
         thread = threading.Thread(target=discovery_loop, daemon=True)
         self.threads.append(thread)
         thread.start()
-        def _connect_to_peer(self, address: str, port: int):
+    
+    def _connect_to_peer(self, address: str, port: int):
         """Initiate outbound connection to peer"""
         try:
             logger.debug(f"[P2P] Connecting to {address}:{port}")
@@ -3086,7 +3117,8 @@ class P2PServer:
         def broadcast_loop():
             logger.info("[P2P] Broadcast thread started")
             while self.is_running:
-                try:                    with self.peers_lock:
+                try:
+                    with self.peers_lock:
                         peers = list(self.peers.values())
                     
                     for peer_conn in peers:
@@ -3117,7 +3149,7 @@ class P2PServer:
         self.threads.append(thread)
         thread.start()
     
-    def broadcast_block(self, block_ Dict[str, Any]):
+    def broadcast_block(self, block_data: Dict[str, Any]):
         """Broadcast block to all connected peers"""
         self.relay_block(block_data, exclude_peer_id=None)
 
@@ -3135,9 +3167,10 @@ class P2PServer:
                         self.stats['blocks_sent']   += 1
     
     def broadcast_transaction(self, tx_data: Dict[str, Any]):
-        """Broadcast transaction to all connected peers"""        self.relay_transaction(tx_data, exclude_peer_id=None)
+        """Broadcast transaction to all connected peers"""
+        self.relay_transaction(tx_data, exclude_peer_id=None)
 
-    def relay_transaction(self, tx_ Dict[str, Any], exclude_peer_id: Optional[str] = None):
+    def relay_transaction(self, tx_data: Dict[str, Any], exclude_peer_id: Optional[str] = None):
         """Relay transaction to all peers except the originating sender."""
         message = Message(msg_type='tx', payload=tx_data)
         with self.peers_lock:
@@ -3150,7 +3183,7 @@ class P2PServer:
                         self.stats['messages_sent'] += 1
                         self.stats['txs_sent']      += 1
     
-    def broadcast_block(self, block_ Dict[str, Any]):
+    def broadcast_block(self, block_data: Dict[str, Any]):
         """Broadcast newly mined/accepted block to all peers."""
         message = Message(msg_type='block', payload=block_data)
         with self.peers_lock:
@@ -3233,7 +3266,8 @@ class P2PServer:
         
         # Disconnect all peers
         with self.peers_lock:
-            for peer in list(self.peers.values()):                self._disconnect_peer(peer)
+            for peer in list(self.peers.values()):
+                self._disconnect_peer(peer)
         
         # Close server socket
         if self.server_socket:
@@ -3331,7 +3365,8 @@ class H5_ValidationEngine:
     
     Usage:
         validator = H5_ValidationEngine()
-        synced_blocks = peer_client.get_blocks(start, end)        for block in synced_blocks:
+        synced_blocks = peer_client.get_blocks(start, end)
+        for block in synced_blocks:
             if not validator.verify_pow(block):
                 logger.warning(f"Block {block['hash']} failed PoW check, rejecting")
                 continue
@@ -3674,7 +3709,8 @@ def quantum_metrics_thread():
     # ── Rehydrate in-memory state from DB on startup ──
     # Handles Koyeb restarts where in-memory state is always fresh.
     try:
-        boot_block = query_latest_block()        if boot_block:
+        boot_block = query_latest_block()
+        if boot_block:
             state.update_block_state({
                 'current_height': boot_block['height'],
                 'current_hash':   boot_block['hash'],
@@ -3723,7 +3759,8 @@ def quantum_metrics_thread():
                     'phase_drift': 0.01 + random.random() * 0.02,
                     'w_state_fidelity': 0.98 - random.random() * 0.03,
                 })
-                        time.sleep(2)
+            
+            time.sleep(2)
         except Exception as e:
             logger.error(f"[METRICS] Error: {e}")
             time.sleep(2)
@@ -3772,7 +3809,8 @@ def dashboard():
     try:
         with open('index.html', 'r') as f:
             html_content = f.read()
-        return render_template_string(html_content)    except FileNotFoundError:
+        return render_template_string(html_content)
+    except FileNotFoundError:
         return """
         <html>
             <head>
@@ -3919,7 +3957,8 @@ def blocks_tip():
         except (ValueError, TypeError):
             difficulty = 12
         try:
-            nonce = int(block.get('nonce', 0))        except (ValueError, TypeError):
+            nonce = int(block.get('nonce', 0))
+        except (ValueError, TypeError):
             nonce = 0
         try:
             fidelity = float(qm.get('w_state_fidelity', 0.9))
@@ -3968,7 +4007,8 @@ def wallet():
             'currency': 'QTCL',
         }), 200
     else:
-        # Wallet not yet in DB (never mined or received) — return 0 balance, not 404        return jsonify({
+        # Wallet not yet in DB (never mined or received) — return 0 balance, not 404
+        return jsonify({
             'address': address,
             'balance': 0.0,
             'balance_base_units': 0,
@@ -4017,7 +4057,8 @@ def oracle_register():
 
 
 @app.route('/api/oracle/w-state', methods=['GET'])
-def oracle_w_state():    """Get latest W-state snapshot for mining - with real quantum entropy"""
+def oracle_w_state():
+    """Get latest W-state snapshot for mining - with real quantum entropy"""
     try:
         import hashlib
         
@@ -4605,7 +4646,8 @@ def submit_block():
                     amount_base = int(raw_amount)
                 fee_base = int(round(float(tx.get('fee', 0)) * 100))
                 
-                if not all([tx_id, from_addr, to_addr, amount_base > 0]):                    logger.warning(f"[TX] ⚠️  Skipping invalid tx[{tx_idx}]: {tx_id}")
+                if not all([tx_id, from_addr, to_addr, amount_base > 0]):
+                    logger.warning(f"[TX] ⚠️  Skipping invalid tx[{tx_idx}]: {tx_id}")
                     continue
                 
                 _ensure_wallet(cur, from_addr, 'sending')
@@ -4752,7 +4794,8 @@ def submit_transaction():
                 signature_json = json.dumps(sig.to_dict())
 
         # Submit to BlockManager
-        if LATTICE and LATTICE.block_manager:            from lattice_controller import QuantumTransaction
+        if LATTICE and LATTICE.block_manager:
+            from lattice_controller import QuantumTransaction
             qt = QuantumTransaction(
                 tx_id         = tx_hash_hex,
                 sender_addr   = from_addr,
@@ -4850,7 +4893,8 @@ def get_transaction(tx_hash: str):
 
 
 @app.route('/api/blocks/height/<int:height>/transactions', methods=['GET'])
-def block_transactions(height: int):    """
+def block_transactions(height: int):
+    """
     Get all transactions in a block by height.
     tx[0] is always the coinbase. Includes full coinbase metadata.
     """
@@ -4899,7 +4943,7 @@ def block_transactions(height: int):    """
             'coinbase':     coinbase,
             'transactions': txs,
         }), 200
-        except Exception as e:
+    except Exception as e:
         logger.error(f"[BLOCK_TXS] Error: {e}")
         return jsonify({'error': str(e)}), 500
 
@@ -4948,7 +4992,8 @@ def p2p_discovery():
 
 
 @app.errorhandler(404)
-def not_found(e):    return jsonify({'error': 'not found'}), 404
+def not_found(e):
+    return jsonify({'error': 'not found'}), 404
 
 
 @app.errorhandler(500)
@@ -4997,7 +5042,8 @@ def shutdown_handler():
     logger.info("[SERVER] Shutting down...")
     state.is_alive = False
     
-    if P2P:        P2P.shutdown()
+    if P2P:
+        P2P.shutdown()
     
     if LATTICE:
         try:
