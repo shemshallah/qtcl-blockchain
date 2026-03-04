@@ -4,13 +4,13 @@
 ║                                                                                ║
 ║  QTCL SERVER v6 — Integrated P2P Blockchain with HLWE & Quantum Metrics       ║
 ║                                                                                ║
-║  Museum-Grade Implementation                                                   ║
+║  Museum-Grade Implementation — Unified Port 8000 (Koyeb-Optimized)            ║
 ║  ─────────────────────────────────────────────────────────────────────────    ║
 ║                                                                                ║
-║  Single Unified Server:                                                        ║
-║    • P2P Networking Layer (port 8333) — peer-to-peer consensus               ║
-║    • REST API Layer (port 5000) — client-facing interface                    ║
-║    • Database Layer (port 5432) — persistent state (internal only)           ║
+║  Single Unified Server (All on Port 8000):                                    ║
+║    • REST API Layer (port 8000) — client-facing interface                    ║
+║    • P2P WebSocket Layer (port 8000) — peer-to-peer consensus               ║
+║    • Database Layer (internal) — persistent state (PostgreSQL)              ║
 ║    • Lattice Controller — quantum entropy mining                             ║
 ║    • Mempool Manager — transaction pool with validation                      ║
 ║    • Peer Discovery — DNS seeds, bootstrap nodes, peer exchange              ║
@@ -18,14 +18,13 @@
 ║                                                                                ║
 ║  Entry:                                                                        ║
 ║    python server.py                                                            ║
-║    or: gunicorn -w1 -b0.0.0.0:5000 server:app                                ║
+║    or: gunicorn -w1 -b0.0.0.0:8000 server:app                                ║
 ║                                                                                ║
 ║  Environment Variables:                                                        ║
 ║    DATABASE_URL — PostgreSQL connection                                       ║
-║    P2P_PORT — P2P listen port (default: 8333)                                ║
-║    P2P_HOST — P2P bind address (default: 0.0.0.0)                            ║
-║    P2P_WEBSOCKET_URL — WebSocket P2P endpoint (e.g., wss://host.com)         ║
-║                        Set for cloud deployments where port 8333 unavailable  ║
+║    FLASK_PORT — HTTP listen port (default: 8000, Koyeb standard)            ║
+║    FLASK_HOST — HTTP bind address (default: 0.0.0.0)                         ║
+║    ORACLE_WS_URL — WebSocket oracle endpoint (e.g., wss://host.com:8000)    ║
 ║    MAX_PEERS — Max peer connections (default: 32)                            ║
 ║    BOOTSTRAP_NODES — Comma-separated peer addresses                          ║
 ║                                                                                ║
@@ -127,8 +126,8 @@ if not POOLER_URL:
 DB_URL = POOLER_URL
 logger.info(f"[DB] ✨ Using Supabase Pooler: {POOLER_HOST or 'configured'}")
 
-# P2P Network
-P2P_PORT = int(os.getenv('P2P_PORT', 8333))
+# P2P Network — All on port 8000 (unified with REST API via Flask-SocketIO)
+P2P_PORT = int(os.getenv('P2P_PORT', 8000))
 P2P_HOST = os.getenv('P2P_HOST', '0.0.0.0')
 P2P_TESTNET_PORT = 18333
 MAX_PEERS = int(os.getenv('MAX_PEERS', 32))
@@ -137,13 +136,9 @@ MESSAGE_MAX_SIZE = 1_000_000
 PEER_HANDSHAKE_TIMEOUT = 5
 PEER_KEEPALIVE_INTERVAL = 30
 
-# P2P WebSocket Configuration (for cloud/Koyeb deployments)
-# Override this if port 8333 is not exposed (e.g., Koyeb uses :443 or :80)
-# Examples:
-#   - Local: P2P_WEBSOCKET_URL=http://localhost:8333
-#   - Koyeb/Cloud: P2P_WEBSOCKET_URL=wss://qtcl-blockchain.koyeb.app
-#   - Self-hosted: P2P_WEBSOCKET_URL=wss://your-domain.com
-P2P_WEBSOCKET_URL = os.getenv('P2P_WEBSOCKET_URL', None)
+# P2P and WebSocket unified on port 8000
+# No separate P2P endpoint needed — all communication via Flask-SocketIO on 8000
+P2P_WEBSOCKET_URL = os.getenv('P2P_WEBSOCKET_URL', None)  # Deprecated, for backward compatibility only
 
 # ── Block policy ──────────────────────────────────────────────────────────────
 # Max USER transactions per block (coinbase not counted).
@@ -4091,13 +4086,14 @@ if __name__ == '__main__':
     if not initialize_p2p():
         logger.warning("[STARTUP] Failed to initialize P2P server (may retry)")
     
-    # Port configuration (Koyeb uses $PORT environment variable)
-    port = int(os.getenv('PORT', 5000))
+    # Port configuration — unified port 8000 for all services (Koyeb standard)
+    # FLASK_PORT: HTTP/WebSocket server (REST API + P2P on same port via Socket.IO)
+    port = int(os.getenv('FLASK_PORT', 8000))
     debug = os.getenv('FLASK_ENV') == 'development'
     
     logger.info("╔" + "═" * 78 + "╗")
     logger.info("║ QTCL SERVER v6 STARTING (WITH INTEGRATED P2P & CONNECTION POOLING)")
-    logger.info("║ REST API: %d | P2P: %d | Debug: %s | Pooled: Yes" % (port, P2P_PORT, debug))
+    logger.info("║ Unified Port: %d (REST API + P2P WebSocket) | Debug: %s" % (port, debug))
     logger.info("║ Lattice: %s | P2P: %s" % (state.lattice_loaded, P2P is not None))
     logger.info("╚" + "═" * 78 + "╝")
     
@@ -4107,28 +4103,27 @@ if __name__ == '__main__':
     logger.info("[STARTUP] ✓ Metrics collector started (updates every 2 seconds)")
     
     logger.info("╔" + "═" * 78 + "╗")
-    logger.info("║ QTCL SERVER v6 READY — REAL-TIME METRICS STREAMING VIA WEBSOCKET")
-    logger.info("║ REST API: %d | P2P WebSocket: 8333 | Metrics: LIVE" % port)
+    logger.info("║ QTCL SERVER v6 READY — UNIFIED PORT 8000 (REST + P2P + WEBSOCKET)")
+    logger.info("║ Port: %d | Transport: HTTP/WebSocket | Metrics: LIVE | Koyeb: ✅" % port)
     logger.info("║ Lattice: %s | P2P: %s" % (state.lattice_loaded, P2P is not None))
     logger.info("╚" + "═" * 78 + "╝")
     
     # For Koyeb/production: use Gunicorn with SocketIO
     # For local development: use SocketIO development server
     if os.getenv('ENVIRONMENT') == 'production' or not debug:
-        logger.warning("[STARTUP] Running in production mode. Use 'gunicorn --worker-class geventwebsocket.gunicorn.workers.GeventWebSocketWorker -w 1 server:app' for deployment.")
+        logger.info("[STARTUP] Running in production mode (Koyeb-optimized).")
+        logger.info("[STARTUP] Command: gunicorn -w1 -b0.0.0.0:8000 --timeout 120 server:app")
     
-    # Start P2P WebSocket server on port 8333 in background thread
-    def run_p2p_websocket():
-        logger.info("[P2P-WEBSOCKET] Starting P2P WebSocket server on port 8333...")
-        p2p_socketio.run(p2p_app, host='0.0.0.0', port=8333, debug=debug, allow_unsafe_werkzeug=True, log_output=False)
+    # P2P communication integrated into main Flask-SocketIO app on port 8000
+    # All clients (miners, peers) connect via WebSocket to same port as REST API
+    # No separate port 8333 needed — everything unified on 8000
+    logger.info("[P2P-SOCKETIO] P2P communication enabled on main port %d (unified)" % port)
+    logger.info("[P2P-SOCKETIO] Miners and peers connect via: wss://your-domain:8000/socket.io")
     
     # Start P2P daemons (streaming + cleanup)
     _start_p2p_daemons()
+    logger.info("[P2P-SOCKETIO] ✅ P2P daemons started (heartbeat, snapshot broadcast)")
     
-    p2p_thread = threading.Thread(target=run_p2p_websocket, daemon=True)
-    p2p_thread.start()
-    logger.info("[P2P-WEBSOCKET] ✅ P2P WebSocket server started on port 8333")
-    
-    # Use SocketIO to run Flask HTTP server on main port (5000)
-    logger.info(f"[HTTP] Starting HTTP REST server on port {port}...")
+    # Use SocketIO to run unified Flask HTTP+WebSocket server on port 8000
+    logger.info(f"[HTTP] Starting unified HTTP REST + P2P WebSocket server on port {port}...")
     socketio.run(app, host='0.0.0.0', port=port, debug=debug, allow_unsafe_werkzeug=True)
