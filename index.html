@@ -347,7 +347,8 @@
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
       reconnectionAttempts: Infinity,
-      transports: ['websocket', 'polling']
+      transports: ['polling', 'websocket'],  // ← PREFER POLLING (HTTP long-polling first, avoids WebSocket timeouts)
+      path: '/socket.io/'
     });
     
     // Track connection status
