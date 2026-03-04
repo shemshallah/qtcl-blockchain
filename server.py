@@ -50,6 +50,7 @@ from decimal import Decimal
 import random
 
 from flask import Flask, jsonify, request, render_template_string, send_file
+from flask_socketio import SocketIO, emit, join_room, leave_room
 from io import BytesIO
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -623,7 +624,167 @@ app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
 application = app  # WSGI entry point
 
+# Initialize SocketIO for real-time metrics streaming
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+
 # ═════════════════════════════════════════════════════════════════════════════════
+# REAL-TIME METRICS COLLECTOR (Background Thread)
+# ═════════════════════════════════════════════════════════════════════════════════
+
+class MetricsCollector:
+    """Continuously collects and broadcasts blockchain metrics via WebSocket"""
+    
+    def __init__(self):
+        self.running = False
+        self.thread = None
+    
+    def start(self):
+        """Start metrics collector thread"""
+        if not self.running:
+            self.running = True
+            self.thread = threading.Thread(target=self._collect_loop, daemon=True)
+            self.thread.start()
+            logger.info("[METRICS] Real-time collector started")
+    
+    def stop(self):
+        """Stop metrics collector"""
+        self.running = False
+    
+    def _collect_loop(self):
+        """Main collection loop - runs every 2 seconds"""
+        while self.running:
+            try:
+                metrics = self._gather_metrics()
+                # Broadcast to all connected clients
+                socketio.emit('metrics_update', metrics, broadcast=True)
+                time.sleep(2)  # Update every 2 seconds
+            except Exception as e:
+                logger.error(f"[METRICS] Collection error: {e}")
+                time.sleep(2)
+    
+    def _gather_metrics(self) -> Dict[str, Any]:
+        """Gather all blockchain metrics from database"""
+        try:
+            with get_db_cursor() as cur:
+                # ── BLOCKCHAIN METRICS ──
+                cur.execute("SELECT COUNT(*) FROM blocks")
+                blocks_sealed = cur.fetchone()[0] or 0
+                
+                cur.execute("SELECT MAX(height) FROM blocks")
+                chain_height = cur.fetchone()[0] if cur.fetchone() and cur.fetchone()[0] else 0
+                
+                cur.execute("SELECT COUNT(*) FROM transactions")
+                total_txs = cur.fetchone()[0] or 0
+                
+                # ── VALIDATION STATUS ──
+                cur.execute("""
+                    SELECT 
+                      quantum_validation_status,
+                      pq_validation_status,
+                      oracle_consensus_reached,
+                      temporal_coherence
+                    FROM blocks
+                    ORDER BY height DESC LIMIT 1
+                """)
+                val_row = cur.fetchone()
+                quantum_status = val_row[0] if val_row else 'unvalidated'
+                pq_status = val_row[1] if val_row else 'unsigned'
+                oracle_consensus = val_row[2] if val_row else False
+                temporal_coherence = float(val_row[3]) if val_row and val_row[3] else 0.0
+                
+                # ── PENDING TRANSACTIONS ──
+                cur.execute("""
+                    SELECT COUNT(*) FROM transactions 
+                    WHERE status = 'pending'
+                """)
+                pending_txs = cur.fetchone()[0] or 0
+                
+                # ── AVERAGE BLOCK TIME ──
+                cur.execute("""
+                    SELECT AVG(timestamp - LAG(timestamp) OVER (ORDER BY height))
+                    FROM blocks WHERE timestamp IS NOT NULL
+                """)
+                avg_block_time_row = cur.fetchone()
+                avg_block_time = float(avg_block_time_row[0]) if avg_block_time_row and avg_block_time_row[0] else 0.0
+                
+                # ── QUANTUM METRICS (from system state) ──
+                snapshot = state.get_state()
+                qm = snapshot.get('quantum_metrics', {})
+                
+                # ── ORACLE STATUS ──
+                oracle_address = None
+                addresses_issued = 0
+                if ORACLE:
+                    try:
+                        oracle_data = ORACLE.get_status()
+                        oracle_address = oracle_data.get('oracle_address')
+                        addresses_issued = oracle_data.get('addresses_issued', 0)
+                    except:
+                        pass
+                
+                # ── NETWORK STATUS ──
+                peers = 0
+                if P2P and hasattr(P2P, 'get_peer_count'):
+                    try:
+                        peers = P2P.get_peer_count()
+                    except:
+                        pass
+                
+                return {
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'blockchain': {
+                        'chain_height': chain_height,
+                        'blocks_sealed': blocks_sealed,
+                        'total_transactions': total_txs,
+                        'pending_transactions': pending_txs,
+                        'avg_block_time_s': round(avg_block_time, 3),
+                    },
+                    'validation': {
+                        'quantum_validation_status': quantum_status,
+                        'pq_validation_status': pq_status,
+                        'oracle_consensus_reached': oracle_consensus,
+                        'temporal_coherence': round(temporal_coherence, 4),
+                    },
+                    'quantum': {
+                        'coherence': round(qm.get('coherence', 0), 4),
+                        'fidelity': round(qm.get('w_state_fidelity', 0), 4),
+                        'entanglement': round(qm.get('entanglement', 0), 4),
+                    },
+                    'oracle': {
+                        'address': oracle_address,
+                        'addresses_issued': addresses_issued,
+                    },
+                    'network': {
+                        'peers': peers,
+                        'lattice_loaded': state.lattice_loaded,
+                    }
+                }
+            
+            except Exception as e:
+                logger.error(f"[METRICS] Gather error: {e}")
+                return {'error': str(e)}
+
+_metrics_collector = MetricsCollector()
+
+# ═════════════════════════════════════════════════════════════════════════════════
+# WEBSOCKET HANDLERS
+# ═════════════════════════════════════════════════════════════════════════════════
+
+@socketio.on('connect')
+def handle_connect():
+    """Client connected to WebSocket"""
+    logger.info(f"[WEBSOCKET] Client connected")
+    # Send initial metrics immediately
+    try:
+        metrics = _metrics_collector._gather_metrics()
+        emit('metrics_update', metrics)
+    except Exception as e:
+        logger.error(f"[WEBSOCKET] Initial metrics error: {e}")
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    """Client disconnected from WebSocket"""
+    logger.info(f"[WEBSOCKET] Client disconnected")
 # SYSTEM STATE & GLOBAL MANAGEMENT
 # ═════════════════════════════════════════════════════════════════════════════════
 
@@ -3506,9 +3667,21 @@ if __name__ == '__main__':
     logger.info("║ Lattice: %s | P2P: %s" % (state.lattice_loaded, P2P is not None))
     logger.info("╚" + "═" * 78 + "╝")
     
-    # For Koyeb/production: use Gunicorn
-    # For local development: use Flask development server
-    if os.getenv('ENVIRONMENT') == 'production' or not debug:
-        logger.warning("[STARTUP] Running in production mode. Use 'gunicorn -w 1 server:app' for deployment.")
+    # Start real-time metrics collector
+    logger.info("[STARTUP] Phase 3/3: Starting real-time metrics collector...")
+    _metrics_collector.start()
+    logger.info("[STARTUP] ✓ Metrics collector started (updates every 2 seconds)")
     
-    app.run(host='0.0.0.0', port=port, debug=debug, threaded=True)
+    logger.info("╔" + "═" * 78 + "╗")
+    logger.info("║ QTCL SERVER v6 READY — REAL-TIME METRICS STREAMING VIA WEBSOCKET")
+    logger.info("║ REST API: %d | P2P: %d | WebSocket: Enabled | Debug: %s" % (port, P2P_PORT, debug))
+    logger.info("║ Lattice: %s | P2P: %s | Metrics: LIVE" % (state.lattice_loaded, P2P is not None))
+    logger.info("╚" + "═" * 78 + "╝")
+    
+    # For Koyeb/production: use Gunicorn with SocketIO
+    # For local development: use SocketIO development server
+    if os.getenv('ENVIRONMENT') == 'production' or not debug:
+        logger.warning("[STARTUP] Running in production mode. Use 'gunicorn --worker-class geventwebsocket.gunicorn.workers.GeventWebSocketWorker -w 1 server:app' for deployment.")
+    
+    # Use SocketIO to run Flask with WebSocket support
+    socketio.run(app, host='0.0.0.0', port=port, debug=debug, allow_unsafe_werkzeug=True)

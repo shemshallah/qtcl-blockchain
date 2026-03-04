@@ -1,611 +1,336 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>QTCL — Quantum Temporal Coherence Ledger</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Crimson+Text:ital,wght@0,400;0,600;1,400&family=Space+Grotesk:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-<style>
-:root {
-  /* Elegant, refined palette */
-  --bg-deep: #0a0e23;
-  --bg-card: #0f1429;
-  --bg-hover: #131829;
-  --accent-gold: #d4af37;
-  --accent-cyan: #00d9ff;
-  --accent-violet: #9d7fff;
-  --text-primary: #e8eaf6;
-  --text-secondary: #9aa4c4;
-  --text-dim: #5f6a8b;
-  --border-light: #1a2047;
-  --border-dark: #0d1117;
-  --success: #00c866;
-  --warning: #ffa500;
-  --danger: #ff4757;
-}
-
-* { box-sizing: border-box; margin: 0; padding: 0; }
-
-html, body {
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(135deg, var(--bg-deep) 0%, #0d1526 50%, var(--bg-deep) 100%);
-  color: var(--text-primary);
-  font-family: 'Space Grotesk', sans-serif;
-  font-weight: 400;
-  line-height: 1.6;
-  overflow: hidden;
-}
-
-/* Subtle grain texture */
-body::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  background: repeating-linear-gradient(
-    90deg,
-    transparent,
-    transparent 2px,
-    rgba(212, 175, 55, 0.01) 2px,
-    rgba(212, 175, 55, 0.01) 4px
-  );
-  pointer-events: none;
-  z-index: 9999;
-}
-
-/* ─────────────────────────────────────────────────────────────────── */
-/* MAIN LAYOUT */
-/* ─────────────────────────────────────────────────────────────────── */
-
-#root {
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
-  overflow: hidden;
-}
-
-header {
-  padding: 2rem 4rem;
-  border-bottom: 1px solid var(--border-light);
-  background: linear-gradient(180deg, rgba(15,20,41,0.95) 0%, rgba(10,14,35,0.8) 100%);
-  backdrop-filter: blur(10px);
-}
-
-.header-content {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  max-width: 1800px;
-  margin: 0 auto;
-  gap: 2rem;
-}
-
-.branding {
-  flex: 0 0 auto;
-}
-
-.logo {
-  font-family: 'Crimson Text', serif;
-  font-size: 2.5rem;
-  font-weight: 600;
-  background: linear-gradient(135deg, var(--accent-gold), #b8860b);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  letter-spacing: -1px;
-  margin-bottom: 0.25rem;
-}
-
-.tagline {
-  font-family: 'Space Grotesk', sans-serif;
-  font-size: 0.75rem;
-  color: var(--text-secondary);
-  letter-spacing: 2px;
-  text-transform: uppercase;
-  font-weight: 500;
-}
-
-.status-pills {
-  display: flex;
-  gap: 1.5rem;
-  flex: 1;
-  justify-content: center;
-}
-
-.pill {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem 1rem;
-  background: rgba(212, 175, 55, 0.05);
-  border: 1px solid rgba(212, 175, 55, 0.2);
-  border-radius: 2px;
-  font-size: 0.75rem;
-  letter-spacing: 1px;
-  color: var(--text-secondary);
-  transition: all 0.3s ease;
-}
-
-.pill.active {
-  background: rgba(0, 217, 255, 0.1);
-  border-color: rgba(0, 217, 255, 0.3);
-  color: var(--accent-cyan);
-}
-
-.indicator {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--text-dim);
-  transition: all 0.3s ease;
-}
-
-.pill.active .indicator {
-  background: var(--accent-cyan);
-  box-shadow: 0 0 8px rgba(0, 217, 255, 0.6);
-  animation: pulse 2s infinite;
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
-}
-
-.clock {
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.85rem;
-  color: var(--text-dim);
-  letter-spacing: 2px;
-}
-
-/* ─────────────────────────────────────────────────────────────────── */
-/* MAIN CONTENT AREA */
-/* ─────────────────────────────────────────────────────────────────── */
-
-main {
-  flex: 1;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 2rem;
-  padding: 2rem 4rem;
-  overflow: hidden;
-}
-
-/* ─────────────────────────────────────────────────────────────────── */
-/* METRICS SECTION */
-/* ─────────────────────────────────────────────────────────────────── */
-
-.metrics-section {
-  display: flex;
-  flex-direction: column;
-  gap: 1.5rem;
-  overflow-y: auto;
-  padding-right: 1rem;
-}
-
-.metrics-section::-webkit-scrollbar {
-  width: 4px;
-}
-
-.metrics-section::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.metrics-section::-webkit-scrollbar-thumb {
-  background: var(--border-light);
-  border-radius: 2px;
-}
-
-.metrics-section::-webkit-scrollbar-thumb:hover {
-  background: var(--accent-gold);
-}
-
-.metric-card {
-  background: linear-gradient(135deg, var(--bg-card) 0%, rgba(15, 20, 41, 0.6) 100%);
-  border: 1px solid var(--border-light);
-  border-radius: 3px;
-  padding: 1.5rem;
-  transition: all 0.3s ease;
-  animation: slideInLeft 0.6s ease-out;
-}
-
-@keyframes slideInLeft {
-  from {
-    opacity: 0;
-    transform: translateX(-20px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
-}
-
-.metric-card:hover {
-  background: linear-gradient(135deg, var(--bg-hover) 0%, rgba(20, 25, 50, 0.6) 100%);
-  border-color: var(--border-light);
-  box-shadow: 0 8px 32px rgba(212, 175, 55, 0.08);
-}
-
-.metric-card-title {
-  font-family: 'Crimson Text', serif;
-  font-size: 1.3rem;
-  font-weight: 600;
-  color: var(--accent-gold);
-  margin-bottom: 1rem;
-  letter-spacing: -0.5px;
-}
-
-.metric-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 0.75rem 0;
-  border-bottom: 1px solid var(--border-dark);
-}
-
-.metric-row:last-child {
-  border-bottom: none;
-}
-
-.metric-label {
-  font-size: 0.85rem;
-  color: var(--text-secondary);
-  letter-spacing: 0.5px;
-}
-
-.metric-value {
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 1rem;
-  font-weight: 500;
-  color: var(--accent-cyan);
-  letter-spacing: 1px;
-}
-
-.metric-value.success {
-  color: var(--success);
-}
-
-.metric-value.warning {
-  color: var(--warning);
-}
-
-.metric-value.danger {
-  color: var(--danger);
-}
-
-.metric-bar {
-  width: 100%;
-  height: 2px;
-  background: var(--border-dark);
-  border-radius: 1px;
-  margin-top: 0.5rem;
-  overflow: hidden;
-}
-
-.metric-bar-fill {
-  height: 100%;
-  background: linear-gradient(90deg, var(--accent-gold), var(--accent-cyan));
-  border-radius: 1px;
-  transition: width 0.6s cubic-bezier(0.34, 1.56, 0.64, 1);
-  box-shadow: 0 0 12px rgba(212, 175, 55, 0.4);
-}
-
-/* ─────────────────────────────────────────────────────────────────── */
-/* VISUALIZATION SECTION */
-/* ─────────────────────────────────────────────────────────────────── */
-
-.visualization-section {
-  display: flex;
-  flex-direction: column;
-  gap: 1.5rem;
-  overflow: hidden;
-}
-
-.viz-card {
-  flex: 1;
-  background: linear-gradient(135deg, var(--bg-card) 0%, rgba(15, 20, 41, 0.6) 100%);
-  border: 1px solid var(--border-light);
-  border-radius: 3px;
-  padding: 1.5rem;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  animation: slideInRight 0.6s ease-out;
-}
-
-@keyframes slideInRight {
-  from {
-    opacity: 0;
-    transform: translateX(20px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
-}
-
-.viz-title {
-  font-family: 'Crimson Text', serif;
-  font-size: 1.3rem;
-  font-weight: 600;
-  color: var(--accent-gold);
-  margin-bottom: 1rem;
-  letter-spacing: -0.5px;
-}
-
-.poincare-container {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  position: relative;
-}
-
-#poincare-canvas {
-  max-width: 100%;
-  max-height: 100%;
-  width: auto;
-  height: auto;
-}
-
-/* ─────────────────────────────────────────────────────────────────── */
-/* EDUCATION SECTION (BOTTOM) */
-/* ─────────────────────────────────────────────────────────────────── */
-
-.education-section {
-  padding: 2rem 4rem;
-  border-top: 1px solid var(--border-light);
-  background: linear-gradient(180deg, rgba(10, 14, 35, 0.8) 0%, rgba(15, 20, 41, 0.6) 100%);
-  max-height: 40vh;
-  overflow-y: auto;
-}
-
-.education-section::-webkit-scrollbar {
-  width: 4px;
-}
-
-.education-section::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.education-section::-webkit-scrollbar-thumb {
-  background: var(--border-light);
-  border-radius: 2px;
-}
-
-.education-section::-webkit-scrollbar-thumb:hover {
-  background: var(--accent-gold);
-}
-
-.education-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 2rem;
-  max-width: 1800px;
-  margin: 0 auto;
-}
-
-.education-card {
-  animation: fadeIn 0.8s ease-out;
-}
-
-@keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
-.education-heading {
-  font-family: 'Crimson Text', serif;
-  font-size: 1.5rem;
-  font-weight: 600;
-  color: var(--accent-gold);
-  margin-bottom: 1rem;
-  letter-spacing: -0.5px;
-}
-
-.education-text {
-  color: var(--text-secondary);
-  font-size: 0.95rem;
-  line-height: 1.8;
-  margin-bottom: 0.75rem;
-}
-
-.education-text strong {
-  color: var(--accent-cyan);
-  font-weight: 500;
-}
-
-/* ─────────────────────────────────────────────────────────────────── */
-/* FOOTER */
-/* ─────────────────────────────────────────────────────────────────── */
-
-footer {
-  padding: 1.5rem 4rem;
-  border-top: 1px solid var(--border-light);
-  background: linear-gradient(180deg, rgba(10, 14, 35, 0.95) 0%, rgba(7, 10, 28, 1) 100%);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 0.8rem;
-  color: var(--text-secondary);
-}
-
-.footer-left {
-  display: flex;
-  gap: 2rem;
-}
-
-.footer-section {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-}
-
-.footer-label {
-  color: var(--text-dim);
-  font-size: 0.7rem;
-  letter-spacing: 1px;
-  text-transform: uppercase;
-  margin-bottom: 0.25rem;
-}
-
-.footer-contact {
-  color: var(--accent-cyan);
-  text-decoration: none;
-  transition: color 0.3s ease;
-  font-weight: 500;
-}
-
-.footer-contact:hover {
-  color: var(--accent-gold);
-}
-
-.footer-right {
-  text-align: right;
-  color: var(--text-dim);
-}
-
-.footer-cta {
-  display: flex;
-  gap: 1rem;
-  justify-content: flex-end;
-  margin-bottom: 0.5rem;
-  flex-wrap: wrap;
-}
-
-.cta-button {
-  padding: 0.4rem 0.8rem;
-  background: rgba(212, 175, 55, 0.1);
-  border: 1px solid var(--accent-gold);
-  color: var(--accent-gold);
-  text-decoration: none;
-  font-size: 0.75rem;
-  letter-spacing: 1px;
-  text-transform: uppercase;
-  cursor: pointer;
-  transition: all 0.3s ease;
-  border-radius: 2px;
-}
-
-.cta-button:hover {
-  background: var(--accent-gold);
-  color: var(--bg-deep);
-  box-shadow: 0 0 16px rgba(212, 175, 55, 0.3);
-}
-
-/* ─────────────────────────────────────────────────────────────────── */
-/* RESPONSIVE */
-/* ─────────────────────────────────────────────────────────────────── */
-
-@media (max-width: 1400px) {
-  main {
-    grid-template-columns: 1fr;
-    padding: 1.5rem 2rem;
-  }
-
-  header {
-    padding: 1.5rem 2rem;
-  }
-
-  .education-section {
-    padding: 1.5rem 2rem;
-  }
-
-  footer {
-    padding: 1rem 2rem;
-    flex-direction: column;
-    gap: 1rem;
-    text-align: center;
-  }
-
-  .footer-right {
-    text-align: center;
-  }
-
-  .footer-cta {
-    justify-content: center;
-  }
-}
-
-@media (max-width: 768px) {
-  main {
-    display: block;
-    padding: 1rem;
-  }
-
-  .metrics-section {
-    max-height: 50vh;
-  }
-
-  .visualization-section {
-    max-height: 50vh;
-  }
-
-  header {
-    padding: 1rem;
-  }
-
-  .header-content {
-    flex-direction: column;
-    gap: 1rem;
-  }
-
-  .status-pills {
-    flex-wrap: wrap;
-    justify-content: space-around;
-  }
-
-  .logo {
-    font-size: 1.8rem;
-  }
-
-  .education-grid {
-    grid-template-columns: 1fr;
-  }
-}
-</style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QTCL — Quantum Temporal Coherence Ledger</title>
+  <link href="https://fonts.googleapis.com/css2?family=Crimson+Text:wght@400;600&family=Space+Grotesk:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+  
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    
+    body {
+      font-family: 'Space Grotesk', sans-serif;
+      background: linear-gradient(135deg, #0a0e27 0%, #1a1a3a 50%, #0f1629 100%);
+      color: #b0b8d0;
+      min-height: 100vh;
+      padding: 20px;
+      overflow-x: hidden;
+    }
+    
+    .container {
+      max-width: 1800px;
+      margin: 0 auto;
+    }
+    
+    /* ═══════════════════════════════════════════════════════════════ */
+    /* HEADER */
+    /* ═══════════════════════════════════════════════════════════════ */
+    
+    .header {
+      text-align: center;
+      margin-bottom: 40px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid rgba(212, 175, 55, 0.2);
+    }
+    
+    .title {
+      font-family: 'Crimson Text', serif;
+      font-size: 48px;
+      color: #d4af37;
+      margin-bottom: 5px;
+      font-weight: 600;
+    }
+    
+    .subtitle {
+      font-size: 13px;
+      color: #7a8db8;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+    
+    /* ═══════════════════════════════════════════════════════════════ */
+    /* STATUS PILLS */
+    /* ═══════════════════════════════════════════════════════════════ */
+    
+    .status-pills {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 15px;
+      margin-bottom: 40px;
+    }
+    
+    .pill {
+      background: rgba(20, 24, 50, 0.8);
+      border: 1px solid rgba(212, 175, 55, 0.2);
+      border-radius: 8px;
+      padding: 15px 20px;
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+    }
+    
+    .pill::before {
+      content: '';
+      position: absolute;
+      width: 8px;
+      height: 8px;
+      background: #666;
+      border-radius: 50%;
+      left: 15px;
+      top: 50%;
+      transform: translateY(-50%);
+      transition: all 0.3s ease;
+    }
+    
+    .pill.active::before {
+      background: #00d9ff;
+      box-shadow: 0 0 10px #00d9ff;
+    }
+    
+    .pill-label {
+      font-size: 11px;
+      color: #7a8db8;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      margin-left: 20px;
+      margin-bottom: 5px;
+    }
+    
+    .pill-value {
+      font-size: 13px;
+      color: #d4af37;
+      font-weight: 600;
+      margin-left: 20px;
+    }
+    
+    /* ═══════════════════════════════════════════════════════════════ */
+    /* METRICS GRID */
+    /* ═══════════════════════════════════════════════════════════════ */
+    
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 20px;
+      margin-bottom: 40px;
+    }
+    
+    .metric-card {
+      background: rgba(20, 24, 50, 0.6);
+      border: 1px solid rgba(212, 175, 55, 0.15);
+      border-radius: 10px;
+      padding: 25px;
+      backdrop-filter: blur(10px);
+    }
+    
+    .metric-card-title {
+      font-family: 'Crimson Text', serif;
+      font-size: 20px;
+      color: #d4af37;
+      margin-bottom: 20px;
+      font-weight: 600;
+      border-bottom: 1px solid rgba(212, 175, 55, 0.1);
+      padding-bottom: 12px;
+    }
+    
+    .metric-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 0;
+      border-bottom: 1px solid rgba(100, 110, 140, 0.1);
+    }
+    
+    .metric-row:last-child {
+      border-bottom: none;
+    }
+    
+    .metric-label {
+      font-size: 12px;
+      color: #7a8db8;
+      letter-spacing: 0.5px;
+    }
+    
+    .metric-value {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 14px;
+      color: #00d9ff;
+      font-weight: 500;
+    }
+    
+    .metric-value.success {
+      color: #4ade80;
+    }
+    
+    .metric-value.danger {
+      color: #ef4444;
+    }
+    
+    .metric-value.warning {
+      color: #f59e0b;
+    }
+    
+    /* ═══════════════════════════════════════════════════════════════ */
+    /* QUANTUM ENTROPY BARS */
+    /* ═══════════════════════════════════════════════════════════════ */
+    
+    .entropy-bar {
+      width: 100%;
+      height: 4px;
+      background: rgba(100, 110, 140, 0.2);
+      border-radius: 2px;
+      overflow: hidden;
+      margin-top: 8px;
+    }
+    
+    .entropy-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #00d9ff, #d4af37);
+      transition: width 0.3s ease;
+      border-radius: 2px;
+    }
+    
+    /* ═══════════════════════════════════════════════════════════════ */
+    /* POINCARÉ DISK */
+    /* ═══════════════════════════════════════════════════════════════ */
+    
+    .poincare-section {
+      margin-bottom: 40px;
+    }
+    
+    .poincare-title {
+      font-family: 'Crimson Text', serif;
+      font-size: 24px;
+      color: #d4af37;
+      margin-bottom: 20px;
+      font-weight: 600;
+    }
+    
+    .poincare-canvas {
+      width: 100%;
+      height: 400px;
+      background: rgba(10, 14, 39, 0.8);
+      border: 1px solid rgba(212, 175, 55, 0.2);
+      border-radius: 10px;
+    }
+    
+    /* ═══════════════════════════════════════════════════════════════ */
+    /* CONNECTION STATUS */
+    /* ═══════════════════════════════════════════════════════════════ */
+    
+    .connection-status {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 15px;
+      background: rgba(20, 24, 50, 0.9);
+      border: 1px solid rgba(0, 217, 255, 0.3);
+      border-radius: 6px;
+      font-size: 12px;
+      color: #7a8db8;
+    }
+    
+    .connection-indicator {
+      width: 8px;
+      height: 8px;
+      background: #666;
+      border-radius: 50%;
+      animation: pulse 2s infinite;
+    }
+    
+    .connection-indicator.connected {
+      background: #00d9ff;
+      animation: pulse-connected 1s infinite;
+    }
+    
+    @keyframes pulse {
+      0%, 100% { opacity: 0.5; }
+      50% { opacity: 1; }
+    }
+    
+    @keyframes pulse-connected {
+      0%, 100% { box-shadow: none; }
+      50% { box-shadow: 0 0 8px #00d9ff; }
+    }
+    
+    /* ═══════════════════════════════════════════════════════════════ */
+    /* EDUCATIONAL SECTION */
+    /* ═══════════════════════════════════════════════════════════════ */
+    
+    .education-section {
+      margin-top: 60px;
+      padding-top: 40px;
+      border-top: 1px solid rgba(212, 175, 55, 0.2);
+    }
+    
+    .education-cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 20px;
+    }
+    
+    .education-card {
+      background: rgba(20, 24, 50, 0.6);
+      border: 1px solid rgba(212, 175, 55, 0.15);
+      border-radius: 10px;
+      padding: 25px;
+      backdrop-filter: blur(10px);
+    }
+    
+    .education-card-title {
+      font-family: 'Crimson Text', serif;
+      font-size: 18px;
+      color: #d4af37;
+      margin-bottom: 15px;
+      font-weight: 600;
+    }
+    
+    .education-card-text {
+      font-size: 13px;
+      line-height: 1.6;
+      color: #9aa5b8;
+    }
+    
+    .highlight {
+      color: #00d9ff;
+    }
+  </style>
 </head>
 <body>
-
-<div id="root">
-  <!-- HEADER -->
-  <header>
-    <div class="header-content">
-      <div class="branding">
-        <div class="logo">QTCL</div>
-        <div class="tagline">Quantum Temporal Coherence Ledger</div>
-      </div>
-
-      <div class="status-pills">
-        <div class="pill" id="pill-lattice">
-          <div class="indicator"></div>
-          <span>Lattice Engine</span>
-        </div>
-        <div class="pill" id="pill-oracle">
-          <div class="indicator"></div>
-          <span>Oracle</span>
-        </div>
-        <div class="pill" id="pill-consensus">
-          <div class="indicator"></div>
-          <span>Consensus</span>
-        </div>
-        <div class="pill" id="pill-network">
-          <div class="indicator"></div>
-          <span id="peer-count">0 Peers</span>
-        </div>
-      </div>
-
-      <div class="clock" id="clock">--:--:--</div>
+  <div class="container">
+    <!-- Header -->
+    <div class="header">
+      <div class="title">QTCL</div>
+      <div class="subtitle">Quantum Temporal Coherence Ledger</div>
     </div>
-  </header>
-
-  <!-- MAIN CONTENT -->
-  <main>
-    <!-- LEFT: METRICS -->
-    <div class="metrics-section">
-      <!-- Blockchain Metrics -->
+    
+    <!-- Status Pills -->
+    <div class="status-pills">
+      <div class="pill" id="pill-lattice">
+        <div class="pill-label">Lattice Engine</div>
+        <div class="pill-value" id="lattice-status">OFFLINE</div>
+      </div>
+      <div class="pill" id="pill-oracle">
+        <div class="pill-label">Oracle</div>
+        <div class="pill-value" id="oracle-status">OFFLINE</div>
+      </div>
+      <div class="pill" id="pill-consensus">
+        <div class="pill-label">Consensus</div>
+        <div class="pill-value" id="consensus-status">OFFLINE</div>
+      </div>
+      <div class="pill" id="pill-peers">
+        <div class="pill-label">Network Peers</div>
+        <div class="pill-value" id="peer-count">0 Peers</div>
+      </div>
+    </div>
+    
+    <!-- Metrics Grid -->
+    <div class="metrics-grid">
+      <!-- Blockchain State -->
       <div class="metric-card">
         <div class="metric-card-title">Blockchain State</div>
         <div class="metric-row">
@@ -634,24 +359,52 @@ footer {
         </div>
         <div class="metric-row">
           <span class="metric-label">Quantum Validation</span>
-          <span class="metric-value success" id="quantum-validation">VALIDATED</span>
+          <span class="metric-value success" id="quantum-validation">—</span>
         </div>
         <div class="metric-row">
           <span class="metric-label">Post-Quantum Signature</span>
-          <span class="metric-value success" id="pq-validation">VERIFIED</span>
+          <span class="metric-value success" id="pq-validation">—</span>
         </div>
         <div class="metric-row">
           <span class="metric-label">Oracle Consensus</span>
-          <span class="metric-value success" id="oracle-consensus">REACHED</span>
+          <span class="metric-value success" id="oracle-consensus">—</span>
         </div>
       </div>
-
-      <!-- Oracle Metrics -->
+      
+      <!-- Quantum Entropy -->
+      <div class="metric-card">
+        <div class="metric-card-title">Quantum Entropy</div>
+        <div class="metric-row">
+          <span class="metric-label">Coherence</span>
+          <span class="metric-value" id="coherence">—</span>
+        </div>
+        <div class="entropy-bar">
+          <div class="entropy-fill" id="coherence-bar" style="width: 0%"></div>
+        </div>
+        
+        <div class="metric-row" style="margin-top: 20px;">
+          <span class="metric-label">Fidelity</span>
+          <span class="metric-value" id="fidelity">—</span>
+        </div>
+        <div class="entropy-bar">
+          <div class="entropy-fill" id="fidelity-bar" style="width: 0%"></div>
+        </div>
+        
+        <div class="metric-row" style="margin-top: 20px;">
+          <span class="metric-label">Entanglement</span>
+          <span class="metric-value" id="entanglement">—</span>
+        </div>
+        <div class="entropy-bar">
+          <div class="entropy-fill" id="entanglement-bar" style="width: 0%"></div>
+        </div>
+      </div>
+      
+      <!-- Oracle Authority -->
       <div class="metric-card">
         <div class="metric-card-title">Oracle Authority</div>
         <div class="metric-row">
           <span class="metric-label">Status</span>
-          <span class="metric-value success" id="oracle-status">ACTIVE</span>
+          <span class="metric-value" id="oracle-auth-status">OFFLINE</span>
         </div>
         <div class="metric-row">
           <span class="metric-label">Addresses Issued</span>
@@ -661,447 +414,285 @@ footer {
           <span class="metric-label">Lattice Wired</span>
           <span class="metric-value" id="oracle-wired">NO</span>
         </div>
-        <div id="oracle-addr-container" style="margin-top: 1rem; padding: 0.75rem; background: rgba(0, 217, 255, 0.05); border: 1px solid rgba(0, 217, 255, 0.1); border-radius: 2px;">
-          <div style="font-size: 0.7rem; color: var(--text-dim); letter-spacing: 1px; margin-bottom: 0.5rem; text-transform: uppercase;">Address</div>
-          <div style="font-family: 'IBM Plex Mono', monospace; font-size: 0.75rem; color: var(--accent-cyan); word-break: break-all; line-height: 1.4;" id="oracle-addr">—</div>
-        </div>
-      </div>
-
-      <!-- Quantum Metrics -->
-      <div class="metric-card">
-        <div class="metric-card-title">Quantum Entropy</div>
         <div class="metric-row">
-          <span class="metric-label">Coherence</span>
-          <span class="metric-value" id="coherence">—</span>
-        </div>
-        <div class="metric-bar">
-          <div class="metric-bar-fill" id="coherence-bar"></div>
-        </div>
-        <div class="metric-row">
-          <span class="metric-label">Fidelity</span>
-          <span class="metric-value" id="fidelity">—</span>
-        </div>
-        <div class="metric-bar">
-          <div class="metric-bar-fill" id="fidelity-bar"></div>
-        </div>
-        <div class="metric-row">
-          <span class="metric-label">Entanglement</span>
-          <span class="metric-value" id="entanglement">—</span>
-        </div>
-        <div class="metric-bar">
-          <div class="metric-bar-fill" id="entanglement-bar"></div>
+          <span class="metric-label">Oracle Address</span>
+          <span class="metric-value" id="oracle-addr" style="font-size: 11px;">—</span>
         </div>
       </div>
     </div>
-
-    <!-- RIGHT: VISUALIZATION -->
-    <div class="visualization-section">
-      <div class="viz-card">
-        <div class="viz-title">Hyperbolic Lattice Topology</div>
-        <div class="poincare-container">
-          <canvas id="poincare-canvas"></canvas>
-        </div>
-      </div>
+    
+    <!-- Poincaré Disk -->
+    <div class="poincare-section">
+      <div class="poincare-title">Hyperbolic Lattice Topology</div>
+      <canvas id="poincare-canvas" class="poincare-canvas"></canvas>
     </div>
-  </main>
-
-  <!-- EDUCATION SECTION -->
-  <div class="education-section">
-    <div class="education-grid">
-      <div class="education-card">
-        <div class="education-heading">Temporal Coherence</div>
-        <p class="education-text">
-          <strong>Quantum Temporal Coherence</strong> is the foundation of QTCL's consensus mechanism. By maintaining quantum coherence across distributed validators, we achieve Byzantine agreement without sacrificing quantum properties. The temporal dimension allows validators to reach consensus on the ordering of events across spacetime, creating an immutable audit trail.
-        </p>
-        <p class="education-text">
-          Our ledger preserves <strong>temporal causality</strong> while maintaining post-quantum security. Each block contains coherence measurements that prove validators maintained quantum state alignment during the consensus epoch, making attacks provably detectable.
-        </p>
-      </div>
-
-      <div class="education-card">
-        <div class="education-heading">NIST Post-Quantum Standard</div>
-        <p class="education-text">
-          In July 2024, NIST standardized the first suite of post-quantum cryptographic algorithms, designating lattice-based schemes as the primary candidates for long-term security. Our implementation follows <strong>NIST FIPS 203/204/205</strong> standards for key-encapsulation mechanisms and digital signatures.
-        </p>
-        <p class="education-text">
-          HLwE-based cryptography provides <strong>quantum-resistant security</strong> guarantees against adversaries with quantum capabilities. No known quantum algorithm can break these primitives, making them suitable for systems designed to remain secure for decades.
-        </p>
-      </div>
-
-      <div class="education-card">
-        <div class="education-heading">Wallet Architecture</div>
-        <p class="education-text">
-          Each wallet is protected by a <strong>lattice-based key pair</strong> derived from hyperbolic learning-with-errors problems. Private keys are computed from hard lattice instances, while public keys are distributed freely. Transaction signing uses lattice-based digital signatures that remain unforgeable even against quantum adversaries.
-        </p>
-        <p class="education-text">
-          Wallets can generate child keys via <strong>hierarchical deterministic (HD)</strong> derivation, following post-quantum variants of traditional key hierarchies. All signatures are verified against the posted public key on-chain.
-        </p>
-      </div>
-
-      <div class="education-card">
-        <div class="education-heading">Blockchain Consensus</div>
-        <p class="education-text">
-          Our blockchain uses a <strong>hybrid consensus model</strong>: lattice-based proof-of-work (PoW) and Byzantine Fault Tolerant (BFT) agreement. Miners solve computational puzzles rooted in the hardness of hyperbolic lattice problems. Validators use threshold signatures to attest to block validity.
-        </p>
-        <p class="education-text">
-          The Poincaré disk visualization shown above represents validator topology in hyperbolic geometry. Nodes closer to the boundary have higher latency; those near the center are validators. This topology naturally encodes network neighborhoods for efficient message propagation.
-        </p>
-      </div>
-
-      <div class="education-card">
-        <div class="education-heading">Quantum Entropy Mining</div>
-        <p class="education-text">
-          <strong>Entropy mining</strong> uses quantum-derived randomness as a source of genuine unpredictability. Each block includes entropy commitments to hyperbolic lattice noise distributions. Miners compete to find valid entropy states that advance the consensus state.
-        </p>
-        <p class="education-text">
-          This approach decouples computational hardness from energy expenditure. Instead of hash-based work, miners produce valid random states certified by the hyperbolic lattice algebra—a more elegant and environmentally sustainable security model.
-        </p>
-      </div>
-
-      <div class="education-card">
-        <div class="education-heading">Join QTCL</div>
-        <p class="education-text">
-          We are seeking <strong>developers, co-founders, and investors</strong> to build the future of post-quantum ledger technology. QTCL represents a paradigm shift in how distributed systems maintain security and coherence across temporal dimensions.
-        </p>
-        <p class="education-text" style="margin-top: 1rem;">
-          <strong>©2026 QTCL — Quantum Temporal Coherence Ledger<br>
-          <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="97e4fff2fae4fff6fbfbf6ffd7f0faf6fefbb9f4f8fa">[email&#160;protected]</a></strong><br>
-          Contact to join our mission or request a technical briefing.
-        </p>
+    
+    <!-- Education Section -->
+    <div class="education-section">
+      <div class="metrics-grid">
+        <div class="education-card">
+          <div class="education-card-title">Temporal Coherence</div>
+          <div class="education-card-text">
+            <span class="highlight">Quantum Temporal Coherence</span> is the foundation of QTCL's consensus mechanism. By maintaining quantum coherence across distributed validators, we achieve Byzantine agreement without sacrificing quantum properties. The temporal dimension allows classical and quantum proofs to coexist.
+          </div>
+        </div>
+        <div class="education-card">
+          <div class="education-card-title">NIST Post-Quantum Standard</div>
+          <div class="education-card-text">
+            QTCL implements FIPS 203/204/205 compliant <span class="highlight">lattice-based cryptography</span>. Module-Learning-With-Errors (ML-LWE) provides quantum-resistant security for wallets, signatures, and oracle commitments.
+          </div>
+        </div>
+        <div class="education-card">
+          <div class="education-card-title">Wallet Architecture</div>
+          <div class="education-card-text">
+            Wallets use <span class="highlight">lattice-based key pairs</span> derived from post-quantum random sources. HD wallet derivation follows quantum-resistant paths, ensuring wallet hierarchies remain secure against quantum adversaries.
+          </div>
+        </div>
+        <div class="education-card">
+          <div class="education-card-title">Blockchain Consensus</div>
+          <div class="education-card-text">
+            QTCL combines <span class="highlight">Hybrid PoW + BFT</span> consensus. Hyperbolic lattice puzzles replace traditional hashing, while W-state entanglement provides quantum consensus witnesses that prove validator agreement.
+          </div>
+        </div>
+        <div class="education-card">
+          <div class="education-card-title">Quantum Entropy Mining</div>
+          <div class="education-card-text">
+            Miners perform <span class="highlight">entropy measurement</span> on recovered W-states to derive puzzle seeds. This couples quantum information directly into the consensus mechanism, making QTCL the first blockchain secured by quantum entanglement.
+          </div>
+        </div>
+        <div class="education-card">
+          <div class="education-card-title">Join QTCL</div>
+          <div class="education-card-text">
+            We're seeking developers, validators, and investors. Contact: <span class="highlight">shemshallah@gmail.com</span>. Deploy a validator node, mine blocks with W-state entanglement, and be part of the quantum computing revolution.
+          </div>
+        </div>
       </div>
     </div>
   </div>
-</div>
-
-<!-- FOOTER -->
-<footer>
-  <div class="footer-left">
-    <div class="footer-section">
-      <div class="footer-label">Contact</div>
-      <a href="/cdn-cgi/l/email-protection#91e2f9f4fce2f9f0fdfdf0f9d1f6fcf0f8fdbff2fefc" class="footer-contact"><span class="__cf_email__" data-cfemail="96e5fef3fbe5fef7fafaf7fed6f1fbf7fffab8f5f9fb">[email&#160;protected]</span></a>
-    </div>
-    <div class="footer-section">
-      <div class="footer-label">We Are Hiring</div>
-      <span style="color: var(--accent-gold);">Developers • Co-Founders • Investors</span>
-    </div>
-  </div>
-
-  <div class="footer-right">
-    <div class="footer-cta">
-      <button class="cta-button" onclick="alert('Thank you for your interest. Contact shemshallah@gmail.com')">Request Demo</button>
-      <button class="cta-button" onclick="alert('Developer docs coming soon.')">Dev Docs</button>
-    </div>
-    <div>© 2026 QTCL — Quantum Temporal Coherence Ledger</div>
-  </div>
-</footer>
-
-<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script>
-const API = '/api';
-const POLL_MS = 2000;
-
-let diskAnim = 0;
-let diskPqs = [];
-let lastHeight = 0;
-
-// ─────────────────────────────────────────────────────────────────
-// POINCARÉ DISK VISUALIZATION
-// ─────────────────────────────────────────────────────────────────
-
-function initCanvas() {
-  const canvas = document.getElementById('poincare-canvas');
-  const container = canvas.parentElement;
-  canvas.width = container.offsetWidth * window.devicePixelRatio;
-  canvas.height = container.offsetHeight * window.devicePixelRatio;
-  const ctx = canvas.getContext('2d');
-  ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
-  return canvas;
-}
-
-function drawPoincare() {
-  const canvas = document.getElementById('poincare-canvas');
-  if (!canvas) return;
   
-  const ctx = canvas.getContext('2d');
-  const rect = canvas.getBoundingClientRect();
-  const w = rect.width;
-  const h = rect.height;
-  const cx = w / 2;
-  const cy = h / 2;
-  const R = Math.min(w, h) / 2 - 30;
-
-  ctx.clearRect(0, 0, w, h);
-
-  // Background
-  ctx.beginPath();
-  ctx.arc(cx, cy, R, 0, Math.PI * 2);
-  const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, R);
-  bg.addColorStop(0, 'rgba(15,20,41,0.8)');
-  bg.addColorStop(1, 'rgba(10,14,35,0.95)');
-  ctx.fillStyle = bg;
-  ctx.fill();
-
-  // Boundary
-  ctx.beginPath();
-  ctx.arc(cx, cy, R, 0, Math.PI * 2);
-  ctx.strokeStyle = 'rgba(212,175,55,0.3)';
-  ctx.lineWidth = 2;
-  ctx.stroke();
-
-  // Grid rings
-  for (let ringR of [0.36, 0.62, 0.78, 0.89, 0.95]) {
-    ctx.beginPath();
-    ctx.arc(cx, cy, ringR * R, 0, Math.PI * 2);
-    ctx.strokeStyle = 'rgba(212,175,55,0.08)';
-    ctx.lineWidth = 0.5;
-    ctx.stroke();
-  }
-
-  // Initialize PQs if empty
-  if (diskPqs.length === 0) {
-    diskPqs = Array.from({ length: 8 }, () => ({
-      x: Math.random() * 0.7 - 0.35,
-      y: Math.random() * 0.7 - 0.35
-    }));
-  }
-
-  // Gentle movement
-  for (let pq of diskPqs) {
-    pq.x += (Math.random() - 0.5) * 0.002;
-    pq.y += (Math.random() - 0.5) * 0.002;
-    const r = Math.sqrt(pq.x * pq.x + pq.y * pq.y);
-    if (r > 0.85) {
-      const scale = 0.85 / r;
-      pq.x *= scale;
-      pq.y *= scale;
+  <!-- Connection Status Indicator -->
+  <div class="connection-status">
+    <div class="connection-indicator" id="connection-indicator"></div>
+    <span id="connection-text">Connecting...</span>
+  </div>
+  
+  <!-- Scripts -->
+  <script>
+    // ═══════════════════════════════════════════════════════════════
+    // WEBSOCKET SETUP
+    // ═══════════════════════════════════════════════════════════════
+    
+    let socket = null;
+    
+    function initWebSocket() {
+      // Connect to server's WebSocket endpoint
+      socket = io(window.location.origin, {
+        reconnection: true,
+        reconnectionDelay: 1000,
+        reconnectionAttempts: 10
+      });
+      
+      socket.on('connect', () => {
+        console.log('✅ WebSocket connected');
+        document.getElementById('connection-indicator').classList.add('connected');
+        document.getElementById('connection-text').textContent = 'Connected (Real-time)';
+      });
+      
+      socket.on('disconnect', () => {
+        console.log('❌ WebSocket disconnected');
+        document.getElementById('connection-indicator').classList.remove('connected');
+        document.getElementById('connection-text').textContent = 'Disconnected';
+      });
+      
+      // Listen for metrics updates
+      socket.on('metrics_update', (data) => {
+        console.log('📊 Metrics update:', data);
+        updateDashboard(data);
+      });
+      
+      socket.on('error', (error) => {
+        console.error('❌ WebSocket error:', error);
+      });
     }
-  }
-
-  // Helper: hyperbolic to Euclidean
-  function diskXY(cx, cy, hx, hy) {
-    const d = Math.sqrt(hx * hx + hy * hy);
-    const factor = (1 + d) / (1 - d + 1e-9);
-    return [cx + hx * R * 0.95, cy + hy * R * 0.95];
-  }
-
-  // Draw edges
-  ctx.lineWidth = 0.5;
-  ctx.strokeStyle = 'rgba(157,127,255,0.2)';
-  for (let i = 0; i < diskPqs.length; i++) {
-    for (let j = i + 1; j < diskPqs.length; j++) {
-      const a = diskPqs[i];
-      const b = diskPqs[j];
-      const dx = a.x - b.x, dy = a.y - b.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist < 0.15) {
-        const [ax, ay] = diskXY(cx, cy, a.x, a.y);
-        const [bx, by] = diskXY(cx, cy, b.x, b.y);
-        ctx.beginPath();
-        ctx.moveTo(ax, ay);
-        ctx.lineTo(bx, by);
-        ctx.stroke();
+    
+    // ═══════════════════════════════════════════════════════════════
+    // DASHBOARD UPDATE
+    // ═══════════════════════════════════════════════════════════════
+    
+    function updateDashboard(metrics) {
+      try {
+        // Blockchain metrics
+        if (metrics.blockchain) {
+          document.getElementById('chain-height').textContent = metrics.blockchain.chain_height || '—';
+          document.getElementById('blocks-sealed').textContent = metrics.blockchain.blocks_sealed || '—';
+          document.getElementById('total-txs').textContent = (metrics.blockchain.total_transactions || 0).toLocaleString() || '—';
+          document.getElementById('block-time').textContent = (metrics.blockchain.avg_block_time_s || 0).toFixed(3) + 's' || '—';
+          document.getElementById('mempool-size').textContent = metrics.blockchain.pending_transactions || '—';
+          document.getElementById('pending-txs').textContent = metrics.blockchain.pending_transactions || '—';
+        }
+        
+        // Validation status
+        if (metrics.validation) {
+          const quantum = metrics.validation.quantum_validation_status === 'validated' ? 'VALIDATED' : 'INVALIDATED';
+          document.getElementById('quantum-validation').textContent = quantum;
+          document.getElementById('quantum-validation').className = 'metric-value ' + (metrics.validation.quantum_validation_status === 'validated' ? 'success' : 'danger');
+          
+          const pq = metrics.validation.pq_validation_status === 'verified' ? 'VERIFIED' : 'UNSIGNED';
+          document.getElementById('pq-validation').textContent = pq;
+          document.getElementById('pq-validation').className = 'metric-value ' + (metrics.validation.pq_validation_status === 'verified' ? 'success' : 'danger');
+          
+          const oracle = metrics.validation.oracle_consensus_reached ? 'REACHED' : 'PENDING';
+          document.getElementById('oracle-consensus').textContent = oracle;
+          document.getElementById('oracle-consensus').className = 'metric-value ' + (metrics.validation.oracle_consensus_reached ? 'success' : 'warning');
+        }
+        
+        // Quantum metrics
+        if (metrics.quantum) {
+          document.getElementById('coherence').textContent = (metrics.quantum.coherence || 0).toFixed(4);
+          document.getElementById('coherence-bar').style.width = Math.min(100, (metrics.quantum.coherence || 0) * 100) + '%';
+          
+          document.getElementById('fidelity').textContent = (metrics.quantum.fidelity || 0).toFixed(4);
+          document.getElementById('fidelity-bar').style.width = Math.min(100, (metrics.quantum.fidelity || 0) * 100) + '%';
+          
+          document.getElementById('entanglement').textContent = (metrics.quantum.entanglement || 0).toFixed(4);
+          document.getElementById('entanglement-bar').style.width = Math.min(100, (metrics.quantum.entanglement || 0) * 100) + '%';
+        }
+        
+        // Oracle metrics
+        if (metrics.oracle) {
+          const status = metrics.oracle.address ? 'ACTIVE' : 'OFFLINE';
+          document.getElementById('oracle-auth-status').textContent = status;
+          document.getElementById('oracle-issued').textContent = metrics.oracle.addresses_issued || '—';
+          document.getElementById('oracle-addr').textContent = metrics.oracle.address ? (metrics.oracle.address.length > 60 ? metrics.oracle.address.slice(0, 60) + '…' : metrics.oracle.address) : '—';
+        }
+        
+        // Network status
+        if (metrics.network) {
+          document.getElementById('peer-count').textContent = metrics.network.peers + ' Peer' + (metrics.network.peers !== 1 ? 's' : '');
+          setPill('pill-lattice', metrics.network.lattice_loaded);
+        }
+        
+        // Update status pills
+        if (metrics.validation) {
+          setPill('pill-consensus', metrics.validation.oracle_consensus_reached);
+        }
+      } catch (e) {
+        console.error('❌ Dashboard update error:', e);
       }
     }
-  }
-
-  // Draw nodes
-  for (let pq of diskPqs) {
-    const [px, py] = diskXY(cx, cy, pq.x, pq.y);
-    const nr = Math.sqrt(pq.x * pq.x + pq.y * pq.y);
-    const alpha = 0.3 + 0.5 * (1 - nr);
-    ctx.beginPath();
-    ctx.arc(px, py, 2, 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(0,217,255,${alpha})`;
-    ctx.fill();
-  }
-
-  // Oracle at center (pulsing)
-  const pulse = 0.5 + 0.5 * Math.sin(diskAnim * 0.05);
-  const rOracle = 5 + 3 * pulse;
-  ctx.beginPath();
-  ctx.arc(cx, cy, rOracle, 0, Math.PI * 2);
-  const og = ctx.createRadialGradient(cx, cy, 0, cx, cy, rOracle);
-  og.addColorStop(0, 'rgba(212,175,55,0.9)');
-  og.addColorStop(0.4, 'rgba(0,217,255,0.8)');
-  og.addColorStop(1, 'rgba(0,217,255,0)');
-  ctx.fillStyle = og;
-  ctx.fill();
-
-  // Oracle ring
-  ctx.beginPath();
-  ctx.arc(cx, cy, 18 + 6 * pulse, 0, Math.PI * 2);
-  ctx.strokeStyle = `rgba(212,175,55,${(0.15 + 0.2 * pulse).toFixed(2)})`;
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-
-  // Label
-  ctx.fillStyle = 'rgba(212,175,55,0.8)';
-  ctx.font = '11px "Space Grotesk"';
-  ctx.fillText('Oracle', cx + 15, cy - 8);
-
-  diskAnim++;
-  requestAnimationFrame(drawPoincare);
-}
-
-// ─────────────────────────────────────────────────────────────────
-// METRICS UPDATE
-// ─────────────────────────────────────────────────────────────────
-
-function updateMetric(id, value, formatter) {
-  const el = document.getElementById(id);
-  if (el) {
-    if (value === null || value === undefined) {
-      el.textContent = '—';
-    } else {
-      el.textContent = formatter ? formatter(value) : value;
+    
+    function setPill(pillId, active) {
+      const pill = document.getElementById(pillId);
+      if (active) {
+        pill.classList.add('active');
+      } else {
+        pill.classList.remove('active');
+      }
     }
-  }
-}
-
-function updateBar(id, value) {
-  const bar = document.getElementById(id);
-  if (bar && value != null) {
-    bar.style.width = Math.min(100, Math.max(0, value * 100)).toFixed(1) + '%';
-  }
-}
-
-function setPill(id, active) {
-  const pill = document.getElementById(id);
-  if (pill) {
-    if (active) {
-      pill.classList.add('active');
-    } else {
-      pill.classList.remove('active');
+    
+    // ═══════════════════════════════════════════════════════════════
+    // POINCARÉ DISK VISUALIZATION
+    // ═══════════════════════════════════════════════════════════════
+    
+    let diskAnim = 0;
+    
+    function drawPoincare() {
+      const canvas = document.getElementById('poincare-canvas');
+      if (!canvas) return;
+      
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = rect.width;
+      canvas.height = rect.height;
+      
+      const ctx = canvas.getContext('2d');
+      const cx = canvas.width / 2;
+      const cy = canvas.height / 2;
+      const radius = Math.min(canvas.width, canvas.height) / 2.5;
+      
+      // Background
+      ctx.fillStyle = 'rgba(10, 14, 39, 0.8)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      
+      // Poincaré disk boundary
+      ctx.strokeStyle = 'rgba(212, 175, 55, 0.3)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      ctx.stroke();
+      
+      // Inner grid
+      ctx.strokeStyle = 'rgba(0, 217, 255, 0.1)';
+      ctx.lineWidth = 1;
+      for (let i = -3; i <= 3; i++) {
+        ctx.beginPath();
+        ctx.moveTo(cx + i * radius / 3, cy - radius);
+        ctx.lineTo(cx + i * radius / 3, cy + radius);
+        ctx.stroke();
+        
+        ctx.beginPath();
+        ctx.moveTo(cx - radius, cy + i * radius / 3);
+        ctx.lineTo(cx + radius, cy + i * radius / 3);
+        ctx.stroke();
+      }
+      
+      // Validator nodes
+      const validators = 8;
+      for (let i = 0; i < validators; i++) {
+        const angle = (i / validators) * Math.PI * 2 + diskAnim * 0.01;
+        const dist = radius * 0.6;
+        const px = cx + Math.cos(angle) * dist;
+        const py = cy + Math.sin(angle) * dist;
+        const alpha = 0.3 + 0.7 * Math.sin(diskAnim * 0.05 + i);
+        
+        ctx.beginPath();
+        ctx.arc(px, py, 3, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(0,217,255,${alpha})`;
+        ctx.fill();
+      }
+      
+      // Oracle at center (pulsing)
+      const pulse = 0.5 + 0.5 * Math.sin(diskAnim * 0.05);
+      const rOracle = 5 + 3 * pulse;
+      ctx.beginPath();
+      ctx.arc(cx, cy, rOracle, 0, Math.PI * 2);
+      const og = ctx.createRadialGradient(cx, cy, 0, cx, cy, rOracle);
+      og.addColorStop(0, 'rgba(212,175,55,0.9)');
+      og.addColorStop(0.4, 'rgba(0,217,255,0.8)');
+      og.addColorStop(1, 'rgba(0,217,255,0)');
+      ctx.fillStyle = og;
+      ctx.fill();
+      
+      // Oracle ring
+      ctx.beginPath();
+      ctx.arc(cx, cy, 18 + 6 * pulse, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(212,175,55,${(0.15 + 0.2 * pulse).toFixed(2)})`;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      
+      // Label
+      ctx.fillStyle = 'rgba(212,175,55,0.8)';
+      ctx.font = '11px "Space Grotesk"';
+      ctx.fillText('Oracle', cx + 15, cy - 8);
+      
+      diskAnim++;
+      requestAnimationFrame(drawPoincare);
     }
-  }
-}
-
-async function fetchMetrics() {
-  try {
-    const resp = await fetch(`${API}/health`);
-    if (!resp.ok) {
-      console.error(`❌ Health failed: ${resp.status}`);
-      throw new Error(`HTTP ${resp.status}`);
-    }
-    const data = await resp.json();
-
-    // System status
-    const healthy = data.status === 'ok';
-    setPill('pill-lattice', data.lattice_loaded);
-    setPill('pill-consensus', healthy);
-
-    const peers = data.p2p_peers ?? 0;
-    document.getElementById('peer-count').textContent = `${peers} Peer${peers !== 1 ? 's' : ''}`;
-
-    // Quantum metrics from actual system
-    const qm = data.quantum_metrics || {};
-    updateMetric('coherence', qm.coherence, v => v ? v.toFixed(4) : '—');
-    updateMetric('fidelity', qm.w_state_fidelity, v => v ? v.toFixed(4) : '—');
-    updateMetric('entanglement', qm.entanglement, v => v ? v.toFixed(4) : '—');
-    updateBar('coherence-bar', qm.coherence);
-    updateBar('fidelity-bar', qm.w_state_fidelity);
-    updateBar('entanglement-bar', qm.entanglement);
     
-    console.log('✅ Health metrics from database:', data);
-  } catch (e) {
-    console.error('❌ Health fetch failed:', e.message);
-    setPill('pill-lattice', false);
-    setPill('pill-consensus', false);
-    // Clear metrics - don't show fallback data
-    updateMetric('coherence', null, () => '—');
-    updateMetric('fidelity', null, () => '—');
-    updateMetric('entanglement', null, () => '—');
-  }
-
-  try {
-    const resp = await fetch(`${API}/chain`);
-    if (!resp.ok) {
-      console.error(`❌ Chain failed: ${resp.status}`);
-      throw new Error(`HTTP ${resp.status}`);
-    }
-    const data = await resp.json();
-
-    updateMetric('chain-height', data.chain_height ?? null, v => v !== null ? v : '—');
-    updateMetric('blocks-sealed', data.blocks_sealed ?? null, v => v !== null ? v : '—');
-    updateMetric('total-txs', data.total_transactions ?? null, v => v !== null ? v.toLocaleString() : '—');
-    updateMetric('block-time', data.avg_block_seal_time_s, v => v ? v.toFixed(3) + 's' : '—');
-    updateMetric('mempool-size', data.mempool_size ?? null, v => v !== null ? v : '—');
-    updateMetric('pending-txs', data.pending_txs ?? null, v => v !== null ? v : '—');
+    // ═══════════════════════════════════════════════════════════════
+    // INITIALIZATION
+    // ═══════════════════════════════════════════════════════════════
     
-    // Update validation status
-    const quantum_val = data.quantum_validation_status === 'validated' ? 'VALIDATED' : 'INVALIDATED';
-    document.getElementById('quantum-validation').textContent = quantum_val;
-    document.getElementById('quantum-validation').className = 'metric-value ' + (data.quantum_validation_status === 'validated' ? 'success' : 'danger');
-    
-    const pq_val = data.pq_validation_status === 'verified' ? 'VERIFIED' : 'UNSIGNED';
-    document.getElementById('pq-validation').textContent = pq_val;
-    document.getElementById('pq-validation').className = 'metric-value ' + (data.pq_validation_status === 'verified' ? 'success' : 'danger');
-    
-    const oracle_val = data.oracle_consensus_reached ? 'REACHED' : 'PENDING';
-    document.getElementById('oracle-consensus').textContent = oracle_val;
-    document.getElementById('oracle-consensus').className = 'metric-value ' + (data.oracle_consensus_reached ? 'success' : 'warning');
-    
-    console.log('✅ Chain metrics from database:', {
-      height: data.chain_height,
-      blocks: data.blocks_sealed,
-      txs: data.total_transactions,
-      quantum: quantum_val,
-      pq: pq_val,
-      oracle: oracle_val,
-      coherence: data.temporal_coherence
+    window.addEventListener('DOMContentLoaded', () => {
+      console.log('🚀 Dashboard initializing...');
+      
+      // Start Poincaré visualization
+      drawPoincare();
+      
+      // Connect to WebSocket for real-time metrics
+      initWebSocket();
+      
+      console.log('✅ Dashboard ready!');
     });
-  } catch (e) {
-    console.error('❌ Chain fetch failed:', e.message);
-    // Clear chain metrics - don't show fallback
-    updateMetric('chain-height', null, () => '—');
-    updateMetric('blocks-sealed', null, () => '—');
-    updateMetric('total-txs', null, () => '—');
-    updateMetric('block-time', null, () => '—');
-    updateMetric('mempool-size', null, () => '—');
-    updateMetric('pending-txs', null, () => '—');
-    document.getElementById('quantum-validation').textContent = '—';
-    document.getElementById('pq-validation').textContent = '—';
-    document.getElementById('oracle-consensus').textContent = '—';
-  }
-
-  try {
-    const resp = await fetch(`${API}/oracle`);
-    if (!resp.ok) {
-      console.error(`❌ Oracle failed: ${resp.status}`);
-      throw new Error(`HTTP ${resp.status}`);
-    }
-    const data = await resp.json();
-
-    setPill('pill-oracle', !!data.oracle_address);
-    updateMetric('oracle-status', data.oracle_address ? 'ACTIVE' : 'OFFLINE', v => v);
-    updateMetric('oracle-issued', data.addresses_issued ?? null, v => v !== null ? v : '—');
-    
-    const wired = data.lattice_wired ? 'YES' : 'NO';
-    document.getElementById('oracle-wired').textContent = wired;
-    document.getElementById('oracle-wired').className = 'metric-value ' + (data.lattice_wired ? 'success' : 'danger');
-
-    const addr = String(data.oracle_address || '—');
-    document.getElementById('oracle-addr').textContent = addr.length > 60 ? addr.slice(0, 60) + '…' : addr;
-    
-    console.log('✅ Oracle metrics from database:', data);
-  } catch (e) {
-    console.error('❌ Oracle fetch failed:', e.message);
-    setPill('pill-oracle', false);
-    // Clear oracle metrics
-    updateMetric('oracle-status', 'OFFLINE', v => v);
-    updateMetric('oracle-issued', null, () => '—');
-    document.getElementById('oracle-wired').textContent = 'NO';
-    document.getElementById('oracle-wired').className = 'metric-value danger';
-    document.getElementById('oracle-addr').textContent = '—';
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────
-// CLOCK
-// ─────────────────────────────────────────────────────────────────
-
-function updateClock() {
-  const now = new Date();
-  const h = String(now.getHours()).padStart(2, '0');
-  const m = String(now.getMinutes()).padStart(2, '0');
-  const s = String(now.getSeconds()).padStart(2, '0');
-  document.getElementById(
+  </script>
+</body>
+</html>
