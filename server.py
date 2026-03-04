@@ -24,6 +24,8 @@
 ║    DATABASE_URL — PostgreSQL connection                                       ║
 ║    P2P_PORT — P2P listen port (default: 8333)                                ║
 ║    P2P_HOST — P2P bind address (default: 0.0.0.0)                            ║
+║    P2P_WEBSOCKET_URL — WebSocket P2P endpoint (e.g., wss://host.com)         ║
+║                        Set for cloud deployments where port 8333 unavailable  ║
 ║    MAX_PEERS — Max peer connections (default: 32)                            ║
 ║    BOOTSTRAP_NODES — Comma-separated peer addresses                          ║
 ║                                                                                ║
@@ -120,6 +122,14 @@ PEER_TIMEOUT = 30
 MESSAGE_MAX_SIZE = 1_000_000
 PEER_HANDSHAKE_TIMEOUT = 5
 PEER_KEEPALIVE_INTERVAL = 30
+
+# P2P WebSocket Configuration (for cloud/Koyeb deployments)
+# Override this if port 8333 is not exposed (e.g., Koyeb uses :443 or :80)
+# Examples:
+#   - Local: P2P_WEBSOCKET_URL=http://localhost:8333
+#   - Koyeb/Cloud: P2P_WEBSOCKET_URL=wss://qtcl-blockchain.koyeb.app
+#   - Self-hosted: P2P_WEBSOCKET_URL=wss://your-domain.com
+P2P_WEBSOCKET_URL = os.getenv('P2P_WEBSOCKET_URL', None)
 
 # ── Block policy ──────────────────────────────────────────────────────────────
 # Max USER transactions per block (coinbase not counted).
