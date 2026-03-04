@@ -24,10 +24,7 @@
       margin: 0 auto;
     }
     
-    /* ═══════════════════════════════════════════════════════════════ */
     /* HEADER */
-    /* ═══════════════════════════════════════════════════════════════ */
-    
     .header {
       text-align: center;
       margin-bottom: 40px;
@@ -50,10 +47,7 @@
       text-transform: uppercase;
     }
     
-    /* ═══════════════════════════════════════════════════════════════ */
     /* STATUS PILLS */
-    /* ═══════════════════════════════════════════════════════════════ */
-    
     .status-pills {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -69,6 +63,7 @@
       text-align: center;
       position: relative;
       overflow: hidden;
+      transition: all 0.3s ease;
     }
     
     .pill::before {
@@ -99,16 +94,14 @@
     }
     
     .pill-value {
-      font-size: 13px;
+      font-size: 16px;
       color: #d4af37;
       font-weight: 600;
       margin-left: 20px;
+      font-family: 'IBM Plex Mono', monospace;
     }
     
-    /* ═══════════════════════════════════════════════════════════════ */
     /* METRICS GRID */
-    /* ═══════════════════════════════════════════════════════════════ */
-    
     .metrics-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
@@ -119,580 +112,393 @@
     .metric-card {
       background: rgba(20, 24, 50, 0.6);
       border: 1px solid rgba(212, 175, 55, 0.15);
-      border-radius: 10px;
-      padding: 25px;
-      backdrop-filter: blur(10px);
+      border-radius: 12px;
+      padding: 24px;
+      transition: all 0.3s ease;
     }
     
-    .metric-card-title {
-      font-family: 'Crimson Text', serif;
-      font-size: 20px;
-      color: #d4af37;
-      margin-bottom: 20px;
-      font-weight: 600;
-      border-bottom: 1px solid rgba(212, 175, 55, 0.1);
-      padding-bottom: 12px;
-    }
-    
-    .metric-row {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 12px 0;
-      border-bottom: 1px solid rgba(100, 110, 140, 0.1);
-    }
-    
-    .metric-row:last-child {
-      border-bottom: none;
+    .metric-card:hover {
+      border-color: rgba(212, 175, 55, 0.4);
+      background: rgba(20, 24, 50, 0.8);
     }
     
     .metric-label {
-      font-size: 12px;
+      font-size: 11px;
       color: #7a8db8;
-      letter-spacing: 0.5px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+      display: block;
     }
     
     .metric-value {
+      font-size: 24px;
+      color: #d4af37;
+      font-weight: 600;
       font-family: 'IBM Plex Mono', monospace;
-      font-size: 14px;
-      color: #00d9ff;
-      font-weight: 500;
+      margin-bottom: 8px;
+      word-break: break-all;
     }
     
     .metric-value.success {
-      color: #4ade80;
+      color: #00ff88;
     }
     
     .metric-value.danger {
-      color: #ef4444;
+      color: #ff006e;
     }
     
     .metric-value.warning {
-      color: #f59e0b;
+      color: #ffb81c;
     }
     
-    /* ═══════════════════════════════════════════════════════════════ */
-    /* QUANTUM ENTROPY BARS */
-    /* ═══════════════════════════════════════════════════════════════ */
-    
-    .entropy-bar {
+    .metric-bar {
       width: 100%;
-      height: 4px;
-      background: rgba(100, 110, 140, 0.2);
-      border-radius: 2px;
+      height: 6px;
+      background: rgba(212, 175, 55, 0.1);
+      border-radius: 3px;
       overflow: hidden;
       margin-top: 8px;
     }
     
-    .entropy-fill {
+    .metric-bar-fill {
       height: 100%;
       background: linear-gradient(90deg, #00d9ff, #d4af37);
+      width: 0%;
       transition: width 0.3s ease;
-      border-radius: 2px;
+      border-radius: 3px;
     }
     
-    /* ═══════════════════════════════════════════════════════════════ */
-    /* POINCARÉ DISK */
-    /* ═══════════════════════════════════════════════════════════════ */
-    
-    .poincare-section {
-      margin-bottom: 40px;
-    }
-    
-    .poincare-title {
-      font-family: 'Crimson Text', serif;
-      font-size: 24px;
-      color: #d4af37;
-      margin-bottom: 20px;
-      font-weight: 600;
-    }
-    
-    .poincare-canvas {
-      width: 100%;
-      height: 400px;
-      background: rgba(10, 14, 39, 0.8);
-      border: 1px solid rgba(212, 175, 55, 0.2);
-      border-radius: 10px;
-    }
-    
-    /* ═══════════════════════════════════════════════════════════════ */
-    /* CONNECTION STATUS */
-    /* ═══════════════════════════════════════════════════════════════ */
-    
-    .connection-status {
-      position: fixed;
-      bottom: 20px;
-      right: 20px;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 10px 15px;
-      background: rgba(20, 24, 50, 0.9);
-      border: 1px solid rgba(0, 217, 255, 0.3);
-      border-radius: 6px;
-      font-size: 12px;
-      color: #7a8db8;
-    }
-    
-    .connection-indicator {
-      width: 8px;
-      height: 8px;
-      background: #666;
-      border-radius: 50%;
-      animation: pulse 2s infinite;
-    }
-    
-    .connection-indicator.connected {
-      background: #00d9ff;
-      animation: pulse-connected 1s infinite;
-    }
-    
-    @keyframes pulse {
-      0%, 100% { opacity: 0.5; }
-      50% { opacity: 1; }
-    }
-    
-    @keyframes pulse-connected {
-      0%, 100% { box-shadow: none; }
-      50% { box-shadow: 0 0 8px #00d9ff; }
-    }
-    
-    /* ═══════════════════════════════════════════════════════════════ */
-    /* EDUCATIONAL SECTION */
-    /* ═══════════════════════════════════════════════════════════════ */
-    
-    .education-section {
-      margin-top: 60px;
-      padding-top: 40px;
-      border-top: 1px solid rgba(212, 175, 55, 0.2);
-    }
-    
-    .education-cards {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-      gap: 20px;
-    }
-    
-    .education-card {
-      background: rgba(20, 24, 50, 0.6);
-      border: 1px solid rgba(212, 175, 55, 0.15);
-      border-radius: 10px;
-      padding: 25px;
-      backdrop-filter: blur(10px);
-    }
-    
-    .education-card-title {
-      font-family: 'Crimson Text', serif;
+    /* SECTION TITLE */
+    .section-title {
       font-size: 18px;
       color: #d4af37;
-      margin-bottom: 15px;
+      margin-bottom: 20px;
+      margin-top: 40px;
       font-weight: 600;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      border-bottom: 1px solid rgba(212, 175, 55, 0.2);
+      padding-bottom: 12px;
     }
     
-    .education-card-text {
-      font-size: 13px;
-      line-height: 1.6;
-      color: #9aa5b8;
+    /* ERROR BOX */
+    .error-box {
+      background: rgba(255, 0, 110, 0.1);
+      border: 1px solid #ff006e;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 20px;
+      color: #ff6b9d;
+      font-size: 12px;
+      display: none;
     }
     
-    .highlight {
-      color: #00d9ff;
+    .error-box.visible {
+      display: block;
+    }
+    
+    /* RESPONSIVE */
+    @media (max-width: 768px) {
+      .title {
+        font-size: 32px;
+      }
+      
+      .metrics-grid {
+        grid-template-columns: 1fr;
+      }
+      
+      .status-pills {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
 <body>
   <div class="container">
-    <!-- Header -->
     <div class="header">
-      <div class="title">QTCL</div>
-      <div class="subtitle">Quantum Temporal Coherence Ledger</div>
+      <h1 class="title">⚛️ QTCL</h1>
+      <p class="subtitle">Quantum Temporal Coherence Ledger</p>
     </div>
     
-    <!-- Status Pills -->
+    <div id="errorBox" class="error-box"></div>
+    
+    <!-- STATUS PILLS -->
     <div class="status-pills">
-      <div class="pill" id="pill-lattice">
-        <div class="pill-label">Lattice Engine</div>
-        <div class="pill-value" id="lattice-status">OFFLINE</div>
+      <div class="pill" id="connectionPill">
+        <div class="pill-label">Network</div>
+        <div class="pill-value" id="connectionStatus">Connecting...</div>
       </div>
-      <div class="pill" id="pill-oracle">
-        <div class="pill-label">Oracle</div>
-        <div class="pill-value" id="oracle-status">OFFLINE</div>
+      <div class="pill active" id="blockheightPill">
+        <div class="pill-label">Chain Height</div>
+        <div class="pill-value" id="chain-height">—</div>
       </div>
-      <div class="pill" id="pill-consensus">
-        <div class="pill-label">Consensus</div>
-        <div class="pill-value" id="consensus-status">OFFLINE</div>
+      <div class="pill active">
+        <div class="pill-label">Blocks Sealed</div>
+        <div class="pill-value" id="blocks-sealed">—</div>
       </div>
-      <div class="pill" id="pill-peers">
-        <div class="pill-label">Network Peers</div>
-        <div class="pill-value" id="peer-count">0 Peers</div>
+      <div class="pill active">
+        <div class="pill-label">Mempool</div>
+        <div class="pill-value" id="mempool-size">—</div>
       </div>
     </div>
     
-    <!-- Metrics Grid -->
+    <!-- BLOCKCHAIN METRICS -->
+    <h2 class="section-title">Blockchain</h2>
     <div class="metrics-grid">
-      <!-- Blockchain State -->
       <div class="metric-card">
-        <div class="metric-card-title">Blockchain State</div>
-        <div class="metric-row">
-          <span class="metric-label">Chain Height</span>
-          <span class="metric-value" id="chain-height">—</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-label">Blocks Sealed</span>
-          <span class="metric-value" id="blocks-sealed">—</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-label">Total Transactions</span>
-          <span class="metric-value" id="total-txs">—</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-label">Avg Block Time</span>
-          <span class="metric-value" id="block-time">—</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-label">Mempool Size</span>
-          <span class="metric-value" id="mempool-size">—</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-label">Pending Transactions</span>
-          <span class="metric-value" id="pending-txs">—</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-label">Quantum Validation</span>
-          <span class="metric-value success" id="quantum-validation">—</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-label">Post-Quantum Signature</span>
-          <span class="metric-value success" id="pq-validation">—</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-label">Oracle Consensus</span>
-          <span class="metric-value success" id="oracle-consensus">—</span>
-        </div>
+        <span class="metric-label">Total Transactions</span>
+        <div class="metric-value" id="total-txs">—</div>
       </div>
-      
-      <!-- Quantum Entropy -->
       <div class="metric-card">
-        <div class="metric-card-title">Quantum Entropy</div>
-        <div class="metric-row">
-          <span class="metric-label">Coherence</span>
-          <span class="metric-value" id="coherence">—</span>
-        </div>
-        <div class="entropy-bar">
-          <div class="entropy-fill" id="coherence-bar" style="width: 0%"></div>
-        </div>
-        
-        <div class="metric-row" style="margin-top: 20px;">
-          <span class="metric-label">Fidelity</span>
-          <span class="metric-value" id="fidelity">—</span>
-        </div>
-        <div class="entropy-bar">
-          <div class="entropy-fill" id="fidelity-bar" style="width: 0%"></div>
-        </div>
-        
-        <div class="metric-row" style="margin-top: 20px;">
-          <span class="metric-label">Entanglement</span>
-          <span class="metric-value" id="entanglement">—</span>
-        </div>
-        <div class="entropy-bar">
-          <div class="entropy-fill" id="entanglement-bar" style="width: 0%"></div>
-        </div>
+        <span class="metric-label">Pending Transactions</span>
+        <div class="metric-value" id="pending-txs">—</div>
       </div>
-      
-      <!-- Oracle Authority -->
       <div class="metric-card">
-        <div class="metric-card-title">Oracle Authority</div>
-        <div class="metric-row">
-          <span class="metric-label">Status</span>
-          <span class="metric-value" id="oracle-auth-status">OFFLINE</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-label">Addresses Issued</span>
-          <span class="metric-value" id="oracle-issued">—</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-label">Lattice Wired</span>
-          <span class="metric-value" id="oracle-wired">NO</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-label">Oracle Address</span>
-          <span class="metric-value" id="oracle-addr" style="font-size: 11px;">—</span>
+        <span class="metric-label">Average Block Time</span>
+        <div class="metric-value" id="block-time">—</div>
+      </div>
+    </div>
+    
+    <!-- VALIDATION STATUS -->
+    <h2 class="section-title">Validation</h2>
+    <div class="metrics-grid">
+      <div class="metric-card">
+        <span class="metric-label">Quantum Validation</span>
+        <div class="metric-value" id="quantum-validation">—</div>
+      </div>
+      <div class="metric-card">
+        <span class="metric-label">PQ Validation</span>
+        <div class="metric-value" id="pq-validation">—</div>
+      </div>
+      <div class="metric-card">
+        <span class="metric-label">Oracle Consensus</span>
+        <div class="metric-value" id="oracle-consensus">—</div>
+      </div>
+      <div class="metric-card">
+        <span class="metric-label">Temporal Coherence</span>
+        <div class="metric-value" id="temporal-coherence">—</div>
+        <div class="metric-bar">
+          <div class="metric-bar-fill" id="coherence-bar-temporal"></div>
         </div>
       </div>
     </div>
     
-    <!-- Poincaré Disk -->
-    <div class="poincare-section">
-      <div class="poincare-title">Hyperbolic Lattice Topology</div>
-      <canvas id="poincare-canvas" class="poincare-canvas"></canvas>
-    </div>
-    
-    <!-- Education Section -->
-    <div class="education-section">
-      <div class="metrics-grid">
-        <div class="education-card">
-          <div class="education-card-title">Temporal Coherence</div>
-          <div class="education-card-text">
-            <span class="highlight">Quantum Temporal Coherence</span> is the foundation of QTCL's consensus mechanism. By maintaining quantum coherence across distributed validators, we achieve Byzantine agreement without sacrificing quantum properties. The temporal dimension allows classical and quantum proofs to coexist.
-          </div>
+    <!-- QUANTUM METRICS -->
+    <h2 class="section-title">Quantum State</h2>
+    <div class="metrics-grid">
+      <div class="metric-card">
+        <span class="metric-label">Coherence</span>
+        <div class="metric-value" id="coherence">—</div>
+        <div class="metric-bar">
+          <div class="metric-bar-fill" id="coherence-bar"></div>
         </div>
-        <div class="education-card">
-          <div class="education-card-title">NIST Post-Quantum Standard</div>
-          <div class="education-card-text">
-            QTCL implements FIPS 203/204/205 compliant <span class="highlight">lattice-based cryptography</span>. Module-Learning-With-Errors (ML-LWE) provides quantum-resistant security for wallets, signatures, and oracle commitments.
-          </div>
+      </div>
+      <div class="metric-card">
+        <span class="metric-label">Fidelity (W-state)</span>
+        <div class="metric-value" id="fidelity">—</div>
+        <div class="metric-bar">
+          <div class="metric-bar-fill" id="fidelity-bar"></div>
         </div>
-        <div class="education-card">
-          <div class="education-card-title">Wallet Architecture</div>
-          <div class="education-card-text">
-            Wallets use <span class="highlight">lattice-based key pairs</span> derived from post-quantum random sources. HD wallet derivation follows quantum-resistant paths, ensuring wallet hierarchies remain secure against quantum adversaries.
-          </div>
-        </div>
-        <div class="education-card">
-          <div class="education-card-title">Blockchain Consensus</div>
-          <div class="education-card-text">
-            QTCL combines <span class="highlight">Hybrid PoW + BFT</span> consensus. Hyperbolic lattice puzzles replace traditional hashing, while W-state entanglement provides quantum consensus witnesses that prove validator agreement.
-          </div>
-        </div>
-        <div class="education-card">
-          <div class="education-card-title">Quantum Entropy Mining</div>
-          <div class="education-card-text">
-            Miners perform <span class="highlight">entropy measurement</span> on recovered W-states to derive puzzle seeds. This couples quantum information directly into the consensus mechanism, making QTCL the first blockchain secured by quantum entanglement.
-          </div>
-        </div>
-        <div class="education-card">
-          <div class="education-card-title">Join QTCL</div>
-          <div class="education-card-text">
-            We're seeking developers, validators, and investors. Contact: <span class="highlight">shemshallah@gmail.com</span>. Deploy a validator node, mine blocks with W-state entanglement, and be part of the quantum computing revolution.
-          </div>
+      </div>
+      <div class="metric-card">
+        <span class="metric-label">Entanglement</span>
+        <div class="metric-value" id="entanglement">—</div>
+        <div class="metric-bar">
+          <div class="metric-bar-fill" id="entanglement-bar"></div>
         </div>
       </div>
     </div>
+    
+    <!-- ORACLE -->
+    <h2 class="section-title">Oracle</h2>
+    <div class="metrics-grid">
+      <div class="metric-card">
+        <span class="metric-label">Oracle Address</span>
+        <div class="metric-value" id="oracle-address" style="font-size: 12px;">—</div>
+      </div>
+      <div class="metric-card">
+        <span class="metric-label">Addresses Issued</span>
+        <div class="metric-value" id="addresses-issued">—</div>
+      </div>
+    </div>
+    
+    <!-- NETWORK -->
+    <h2 class="section-title">Network</h2>
+    <div class="metrics-grid">
+      <div class="metric-card">
+        <span class="metric-label">Connected Peers</span>
+        <div class="metric-value" id="peer-count">—</div>
+      </div>
+      <div class="metric-card">
+        <span class="metric-label">Lattice Status</span>
+        <div class="metric-value" id="lattice-status">—</div>
+      </div>
+    </div>
   </div>
-  
-  <!-- Connection Status Indicator -->
-  <div class="connection-status">
-    <div class="connection-indicator" id="connection-indicator"></div>
-    <span id="connection-text">Connecting...</span>
-  </div>
-  
-  <!-- Scripts -->
+
   <script>
-    // ═══════════════════════════════════════════════════════════════
-    // WEBSOCKET SETUP
-    // ═══════════════════════════════════════════════════════════════
+    // ═════════════════════════════════════════════════════════════════
+    // MUSEUM-GRADE METRICS DASHBOARD
+    // ═════════════════════════════════════════════════════════════════
     
-    let socket = null;
+    const socket = io({
+      reconnection: true,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      reconnectionAttempts: Infinity,
+      transports: ['websocket', 'polling']
+    });
     
-    function initWebSocket() {
-      // Connect to server's WebSocket endpoint
-      socket = io(window.location.origin, {
-        reconnection: true,
-        reconnectionDelay: 1000,
-        reconnectionAttempts: 10
-      });
+    // Track connection status
+    let isConnected = false;
+    
+    socket.on('connect', () => {
+      isConnected = true;
+      updateConnectionStatus(true);
+      console.log('[METRICS] Connected to server');
+    });
+    
+    socket.on('disconnect', () => {
+      isConnected = false;
+      updateConnectionStatus(false);
+      console.log('[METRICS] Disconnected from server');
+    });
+    
+    socket.on('connect_error', (error) => {
+      showError('Connection error: ' + error.message);
+      console.error('[METRICS] Connection error:', error);
+    });
+    
+    // CRITICAL: Listen for metrics updates
+    socket.on('metrics_update', (metrics) => {
+      console.log('[METRICS] Received update:', metrics);
+      updateDashboard(metrics);
+    });
+    
+    function updateConnectionStatus(connected) {
+      const pill = document.getElementById('connectionPill');
+      const status = document.getElementById('connectionStatus');
       
-      socket.on('connect', () => {
-        console.log('✅ WebSocket connected');
-        document.getElementById('connection-indicator').classList.add('connected');
-        document.getElementById('connection-text').textContent = 'Connected (Real-time)';
-      });
-      
-      socket.on('disconnect', () => {
-        console.log('❌ WebSocket disconnected');
-        document.getElementById('connection-indicator').classList.remove('connected');
-        document.getElementById('connection-text').textContent = 'Disconnected';
-      });
-      
-      // Listen for metrics updates
-      socket.on('metrics_update', (data) => {
-        console.log('📊 Metrics update:', data);
-        updateDashboard(data);
-      });
-      
-      socket.on('error', (error) => {
-        console.error('❌ WebSocket error:', error);
-      });
+      if (connected) {
+        pill.classList.add('active');
+        status.textContent = 'Connected';
+        status.style.color = '#00ff88';
+      } else {
+        pill.classList.remove('active');
+        status.textContent = 'Offline';
+        status.style.color = '#ff006e';
+      }
     }
-    
-    // ═══════════════════════════════════════════════════════════════
-    // DASHBOARD UPDATE
-    // ═══════════════════════════════════════════════════════════════
     
     function updateDashboard(metrics) {
       try {
-        // Blockchain metrics
+        // Hide error box on successful update
+        hideError();
+        
+        // BLOCKCHAIN METRICS
         if (metrics.blockchain) {
-          document.getElementById('chain-height').textContent = metrics.blockchain.chain_height || '—';
-          document.getElementById('blocks-sealed').textContent = metrics.blockchain.blocks_sealed || '—';
-          document.getElementById('total-txs').textContent = (metrics.blockchain.total_transactions || 0).toLocaleString() || '—';
-          document.getElementById('block-time').textContent = (metrics.blockchain.avg_block_time_s || 0).toFixed(3) + 's' || '—';
-          document.getElementById('mempool-size').textContent = metrics.blockchain.pending_transactions || '—';
-          document.getElementById('pending-txs').textContent = metrics.blockchain.pending_transactions || '—';
+          setMetric('chain-height', metrics.blockchain.chain_height || 0);
+          setMetric('blocks-sealed', metrics.blockchain.blocks_sealed || 0);
+          setMetric('total-txs', formatNumber(metrics.blockchain.total_transactions || 0));
+          setMetric('pending-txs', metrics.blockchain.pending_transactions || 0);
+          setMetric('mempool-size', metrics.blockchain.pending_transactions || 0);
+          setMetric('block-time', (metrics.blockchain.avg_block_time_s || 0).toFixed(3) + 's');
         }
         
-        // Validation status
+        // VALIDATION STATUS
         if (metrics.validation) {
-          const quantum = metrics.validation.quantum_validation_status === 'validated' ? 'VALIDATED' : 'INVALIDATED';
-          document.getElementById('quantum-validation').textContent = quantum;
-          document.getElementById('quantum-validation').className = 'metric-value ' + (metrics.validation.quantum_validation_status === 'validated' ? 'success' : 'danger');
+          const qStatus = metrics.validation.quantum_validation_status;
+          setMetric('quantum-validation', qStatus === 'validated' ? '✓ VALIDATED' : '✗ UNVALIDATED');
+          document.getElementById('quantum-validation').className = 'metric-value ' + 
+            (qStatus === 'validated' ? 'success' : 'danger');
           
-          const pq = metrics.validation.pq_validation_status === 'verified' ? 'VERIFIED' : 'UNSIGNED';
-          document.getElementById('pq-validation').textContent = pq;
-          document.getElementById('pq-validation').className = 'metric-value ' + (metrics.validation.pq_validation_status === 'verified' ? 'success' : 'danger');
+          const pqStatus = metrics.validation.pq_validation_status;
+          setMetric('pq-validation', pqStatus === 'verified' ? '✓ VERIFIED' : '✗ UNSIGNED');
+          document.getElementById('pq-validation').className = 'metric-value ' + 
+            (pqStatus === 'verified' ? 'success' : 'danger');
           
-          const oracle = metrics.validation.oracle_consensus_reached ? 'REACHED' : 'PENDING';
-          document.getElementById('oracle-consensus').textContent = oracle;
-          document.getElementById('oracle-consensus').className = 'metric-value ' + (metrics.validation.oracle_consensus_reached ? 'success' : 'warning');
+          const oracleStatus = metrics.validation.oracle_consensus_reached;
+          setMetric('oracle-consensus', oracleStatus ? '✓ REACHED' : '⏳ PENDING');
+          document.getElementById('oracle-consensus').className = 'metric-value ' + 
+            (oracleStatus ? 'success' : 'warning');
+          
+          const coherence = metrics.validation.temporal_coherence || 0;
+          setMetric('temporal-coherence', (coherence * 100).toFixed(2) + '%');
+          setBar('coherence-bar-temporal', coherence * 100);
         }
         
-        // Quantum metrics
+        // QUANTUM METRICS
         if (metrics.quantum) {
-          document.getElementById('coherence').textContent = (metrics.quantum.coherence || 0).toFixed(4);
-          document.getElementById('coherence-bar').style.width = Math.min(100, (metrics.quantum.coherence || 0) * 100) + '%';
+          const coh = metrics.quantum.coherence || 0;
+          setMetric('coherence', coh.toFixed(4));
+          setBar('coherence-bar', coh * 100);
           
-          document.getElementById('fidelity').textContent = (metrics.quantum.fidelity || 0).toFixed(4);
-          document.getElementById('fidelity-bar').style.width = Math.min(100, (metrics.quantum.fidelity || 0) * 100) + '%';
+          const fid = metrics.quantum.fidelity || 0;
+          setMetric('fidelity', fid.toFixed(4));
+          setBar('fidelity-bar', fid * 100);
           
-          document.getElementById('entanglement').textContent = (metrics.quantum.entanglement || 0).toFixed(4);
-          document.getElementById('entanglement-bar').style.width = Math.min(100, (metrics.quantum.entanglement || 0) * 100) + '%';
+          const ent = metrics.quantum.entanglement || 0;
+          setMetric('entanglement', ent.toFixed(4));
+          setBar('entanglement-bar', ent * 100);
         }
         
-        // Oracle metrics
+        // ORACLE
         if (metrics.oracle) {
-          const status = metrics.oracle.address ? 'ACTIVE' : 'OFFLINE';
-          document.getElementById('oracle-auth-status').textContent = status;
-          document.getElementById('oracle-issued').textContent = metrics.oracle.addresses_issued || '—';
-          document.getElementById('oracle-addr').textContent = metrics.oracle.address ? (metrics.oracle.address.length > 60 ? metrics.oracle.address.slice(0, 60) + '…' : metrics.oracle.address) : '—';
+          setMetric('oracle-address', metrics.oracle.address || 'N/A');
+          setMetric('addresses-issued', metrics.oracle.addresses_issued || 0);
         }
         
-        // Network status
+        // NETWORK
         if (metrics.network) {
-          document.getElementById('peer-count').textContent = metrics.network.peers + ' Peer' + (metrics.network.peers !== 1 ? 's' : '');
-          setPill('pill-lattice', metrics.network.lattice_loaded);
+          setMetric('peer-count', metrics.network.peers || 0);
+          const latticeStatus = metrics.network.lattice_loaded ? '✓ Loaded' : '✗ Offline';
+          setMetric('lattice-status', latticeStatus);
+          document.getElementById('lattice-status').className = 'metric-value ' + 
+            (metrics.network.lattice_loaded ? 'success' : 'danger');
         }
         
-        // Update status pills
-        if (metrics.validation) {
-          setPill('pill-consensus', metrics.validation.oracle_consensus_reached);
-        }
       } catch (e) {
-        console.error('❌ Dashboard update error:', e);
+        showError('Dashboard update error: ' + e.message);
+        console.error('[METRICS] Update error:', e);
       }
     }
     
-    function setPill(pillId, active) {
-      const pill = document.getElementById(pillId);
-      if (active) {
-        pill.classList.add('active');
-      } else {
-        pill.classList.remove('active');
+    function setMetric(id, value) {
+      const el = document.getElementById(id);
+      if (el) {
+        el.textContent = String(value);
       }
     }
     
-    // ═══════════════════════════════════════════════════════════════
-    // POINCARÉ DISK VISUALIZATION
-    // ═══════════════════════════════════════════════════════════════
-    
-    let diskAnim = 0;
-    
-    function drawPoincare() {
-      const canvas = document.getElementById('poincare-canvas');
-      if (!canvas) return;
-      
-      const rect = canvas.getBoundingClientRect();
-      canvas.width = rect.width;
-      canvas.height = rect.height;
-      
-      const ctx = canvas.getContext('2d');
-      const cx = canvas.width / 2;
-      const cy = canvas.height / 2;
-      const radius = Math.min(canvas.width, canvas.height) / 2.5;
-      
-      // Background
-      ctx.fillStyle = 'rgba(10, 14, 39, 0.8)';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      
-      // Poincaré disk boundary
-      ctx.strokeStyle = 'rgba(212, 175, 55, 0.3)';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-      ctx.stroke();
-      
-      // Inner grid
-      ctx.strokeStyle = 'rgba(0, 217, 255, 0.1)';
-      ctx.lineWidth = 1;
-      for (let i = -3; i <= 3; i++) {
-        ctx.beginPath();
-        ctx.moveTo(cx + i * radius / 3, cy - radius);
-        ctx.lineTo(cx + i * radius / 3, cy + radius);
-        ctx.stroke();
-        
-        ctx.beginPath();
-        ctx.moveTo(cx - radius, cy + i * radius / 3);
-        ctx.lineTo(cx + radius, cy + i * radius / 3);
-        ctx.stroke();
+    function setBar(id, percentage) {
+      const el = document.getElementById(id);
+      if (el) {
+        el.style.width = Math.min(100, Math.max(0, percentage)) + '%';
       }
-      
-      // Validator nodes
-      const validators = 8;
-      for (let i = 0; i < validators; i++) {
-        const angle = (i / validators) * Math.PI * 2 + diskAnim * 0.01;
-        const dist = radius * 0.6;
-        const px = cx + Math.cos(angle) * dist;
-        const py = cy + Math.sin(angle) * dist;
-        const alpha = 0.3 + 0.7 * Math.sin(diskAnim * 0.05 + i);
-        
-        ctx.beginPath();
-        ctx.arc(px, py, 3, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(0,217,255,${alpha})`;
-        ctx.fill();
-      }
-      
-      // Oracle at center (pulsing)
-      const pulse = 0.5 + 0.5 * Math.sin(diskAnim * 0.05);
-      const rOracle = 5 + 3 * pulse;
-      ctx.beginPath();
-      ctx.arc(cx, cy, rOracle, 0, Math.PI * 2);
-      const og = ctx.createRadialGradient(cx, cy, 0, cx, cy, rOracle);
-      og.addColorStop(0, 'rgba(212,175,55,0.9)');
-      og.addColorStop(0.4, 'rgba(0,217,255,0.8)');
-      og.addColorStop(1, 'rgba(0,217,255,0)');
-      ctx.fillStyle = og;
-      ctx.fill();
-      
-      // Oracle ring
-      ctx.beginPath();
-      ctx.arc(cx, cy, 18 + 6 * pulse, 0, Math.PI * 2);
-      ctx.strokeStyle = `rgba(212,175,55,${(0.15 + 0.2 * pulse).toFixed(2)})`;
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
-      
-      // Label
-      ctx.fillStyle = 'rgba(212,175,55,0.8)';
-      ctx.font = '11px "Space Grotesk"';
-      ctx.fillText('Oracle', cx + 15, cy - 8);
-      
-      diskAnim++;
-      requestAnimationFrame(drawPoincare);
     }
     
-    // ═══════════════════════════════════════════════════════════════
-    // INITIALIZATION
-    // ═══════════════════════════════════════════════════════════════
+    function formatNumber(n) {
+      return n.toLocaleString();
+    }
     
-    window.addEventListener('DOMContentLoaded', () => {
-      console.log('🚀 Dashboard initializing...');
-      
-      // Start Poincaré visualization
-      drawPoincare();
-      
-      // Connect to WebSocket for real-time metrics
-      initWebSocket();
-      
-      console.log('✅ Dashboard ready!');
-    });
+    function showError(msg) {
+      const box = document.getElementById('errorBox');
+      box.textContent = '⚠️ ' + msg;
+      box.classList.add('visible');
+    }
+    
+    function hideError() {
+      const box = document.getElementById('errorBox');
+      box.classList.remove('visible');
+    }
+    
+    // Request metrics every 5 seconds if no updates received
+    setInterval(() => {
+      if (isConnected) {
+        socket.emit('request_metrics');
+      }
+    }, 5000);
   </script>
 </body>
 </html>

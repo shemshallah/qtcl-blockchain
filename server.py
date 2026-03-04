@@ -705,11 +705,13 @@ class MetricsCollector:
                 
                 # ── AVERAGE BLOCK TIME ──
                 cur.execute("""
-                    SELECT AVG(timestamp - LAG(timestamp) OVER (ORDER BY height))
-                    FROM blocks WHERE timestamp IS NOT NULL
+                    SELECT AVG(block_time) FROM (
+                        SELECT EXTRACT(EPOCH FROM (timestamp - LAG(timestamp) OVER (ORDER BY height)))
+                        FROM blocks WHERE timestamp IS NOT NULL
+                    ) AS t(block_time)
                 """)
-                avg_block_time_row = cur.fetchone()
-                avg_block_time = float(avg_block_time_row[0]) if avg_block_time_row and avg_block_time_row[0] is not None else 0.0
+                avg_row = cur.fetchone()
+                avg_block_time = float(avg_row[0]) if avg_row and avg_row[0] is not None else 0.0
                 
                 # ── QUANTUM METRICS (from system state) ──
                 snapshot = state.get_state()
@@ -789,6 +791,18 @@ def handle_connect():
 def handle_disconnect():
     """Client disconnected from WebSocket"""
     logger.info(f"[WEBSOCKET] Client disconnected")
+
+@socketio.on('request_metrics')
+def handle_request_metrics():
+    """Client requesting metrics on demand"""
+    try:
+        metrics = _metrics_collector._gather_metrics()
+        emit('metrics_update', metrics)
+    except Exception as e:
+        logger.error(f"[WEBSOCKET] On-demand metrics error: {e}")
+        emit('error', {'message': str(e)})
+
+# ═════════════════════════════════════════════════════════════════════════════════
 # SYSTEM STATE & GLOBAL MANAGEMENT
 # ═════════════════════════════════════════════════════════════════════════════════
 
@@ -2851,9 +2865,11 @@ def chain_status():
             
             # Calculate average block time
             cur.execute("""
-                SELECT AVG(timestamp - LAG(timestamp) OVER (ORDER BY height))
-                FROM blocks
-                WHERE timestamp IS NOT NULL
+                SELECT AVG(block_time) FROM (
+                    SELECT EXTRACT(EPOCH FROM (timestamp - LAG(timestamp) OVER (ORDER BY height)))
+                    FROM blocks
+                    WHERE timestamp IS NOT NULL
+                ) AS t(block_time)
             """)
             avg_time_row = cur.fetchone()
             avg_block_time = float(avg_time_row[0]) if avg_time_row[0] is not None else 0.0
