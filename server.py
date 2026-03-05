@@ -4335,29 +4335,87 @@ def oracle_w_state():
 
 @app.route('/api/mempool', methods=['GET'])
 def get_mempool():
-    """Get pending TRANSFER transactions — coinbase txs are never returned here.
-    
-    Coinbase transactions are block-internal rewards, not user-submitted transfers.
-    Returning them here would cause miners to re-include them as mempool txs,
-    creating an infinite coinbase loop (each block triggers the next).
+    """
+    Get pending TRANSFER transactions — reads from DB (primary) + LATTICE in-memory pool (secondary).
+
+    DB is the authoritative source. LATTICE in-memory pool supplements it.
+    Coinbase txs are NEVER returned here.
+
+    This is what miners poll to build the next block's transaction list.
+    TXs submitted via /api/submit_transaction appear here immediately (status='pending').
     """
     try:
-        if LATTICE is None or LATTICE.mempool is None:
-            return jsonify({'transactions': [], 'size': 0}), 200
-        
-        mempool_txs = LATTICE.mempool.get_pending_transactions(max_count=100)
-        # Defensive filter: strip any coinbase-type txs that should never be here
-        user_txs = [
-            tx for tx in mempool_txs
-            if str(tx.get('tx_type', 'transfer')).lower() != 'coinbase'
-            and str(tx.get('from_addr', tx.get('from_address', ''))).strip('0') != ''
-        ]
+        db_txs = {}  # tx_hash → tx_dict
+
+        # ── PRIMARY: Read from DB pending transactions ────────────────────────
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    SELECT tx_hash, from_address, to_address, amount,
+                           nonce, tx_type, status, quantum_state_hash, metadata
+                    FROM transactions
+                    WHERE status = 'pending'
+                      AND tx_type NOT IN ('coinbase')
+                      AND from_address != %s
+                    ORDER BY created_at ASC
+                    LIMIT %s
+                """, ('0' * 64, MAX_BLOCK_TX_SERVER * 4))
+                for row in cur.fetchall():
+                    raw_amount = int(row[3]) if row[3] is not None else 0
+                    meta = row[8]
+                    if isinstance(meta, str):
+                        try: meta = json.loads(meta)
+                        except: meta = {}
+                    elif meta is None:
+                        meta = {}
+                    tx_hash = row[0]
+                    db_txs[tx_hash] = {
+                        'tx_hash'     : tx_hash,
+                        'tx_id'       : tx_hash,
+                        'from_addr'   : row[1],
+                        'from_address': row[1],
+                        'to_addr'     : row[2],
+                        'to_address'  : row[2],
+                        'amount'      : raw_amount / 100,       # QTCL float for wire compat
+                        'amount_base' : raw_amount,
+                        'nonce'       : row[4] or 0,
+                        'tx_type'     : row[5] or 'transfer',
+                        'status'      : row[6] or 'pending',
+                        'fee'         : meta.get('fee_qtcl', 0.001),
+                        'fee_base'    : meta.get('fee_base', 1),
+                        'signature'   : row[7] or '',
+                    }
+            logger.debug(f"[MEMPOOL] DB pending TXs: {len(db_txs)}")
+        except Exception as db_err:
+            logger.warning(f"[MEMPOOL] DB read error (falling back to LATTICE): {db_err}")
+
+        # ── SECONDARY: LATTICE in-memory pool (supplement, don't duplicate) ───
+        if LATTICE is not None and LATTICE.mempool is not None:
+            try:
+                lattice_txs = LATTICE.mempool.get_pending_transactions(max_count=100)
+                for tx in lattice_txs:
+                    tx_hash = str(tx.get('tx_id', tx.get('tx_hash', '')))
+                    if not tx_hash or tx_hash in db_txs:
+                        continue
+                    tx_type = str(tx.get('tx_type', 'transfer')).lower()
+                    from_a  = str(tx.get('from_addr', tx.get('from_address', ''))).strip('0')
+                    if tx_type == 'coinbase' or not from_a:
+                        continue
+                    db_txs[tx_hash] = tx
+                logger.debug(f"[MEMPOOL] After LATTICE supplement: {len(db_txs)} total TXs")
+            except Exception as lat_err:
+                logger.debug(f"[MEMPOOL] LATTICE mempool read error: {lat_err}")
+
+        all_txs = list(db_txs.values())[:MAX_BLOCK_TX_SERVER]
+
         return jsonify({
-            'size':         len(user_txs),
-            'transactions': user_txs[:MAX_BLOCK_TX_SERVER],
+            'size'        : len(all_txs),
+            'transactions': all_txs,
+            'source'      : 'db+lattice',
         }), 200
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"[MEMPOOL] Unhandled error: {e}")
+        return jsonify({'error': str(e), 'transactions': [], 'size': 0}), 500
 
 
 @app.route('/api/blocks/height/<int:height>', methods=['GET'])
@@ -5135,65 +5193,80 @@ def submit_transaction():
             'hlwe_signature'     : data.get('hlwe_signature', {}),
         }
 
+        # ── INSERT INTO DB — primary persistence, TX queryable immediately ──────
+        # Wallet upsert uses ON CONFLICT(address) DO NOTHING.
+        # wallet_fingerprint UNIQUE(fp, derivation_path): derivation_path=NULL is always
+        # treated as distinct in PostgreSQL UNIQUE indexes so no collision possible.
+        db_inserted = False
+        db_error_msg = None
         try:
-            with get_db_cursor() as cur:
-                # Ensure wallet rows exist (upsert no-op)
-                def _fp(a): return hashlib.sha256(a.encode()).hexdigest()[:64]
-                def _pk(a): return hashlib.sha3_256(a.encode()).hexdigest()
-                cur.execute("""
-                    INSERT INTO wallet_addresses (address, wallet_fingerprint, public_key, balance, transaction_count, address_type)
-                    VALUES (%s, %s, %s, 0, 0, %s) ON CONFLICT (address) DO NOTHING
-                """, (from_addr, _fp(from_addr), _pk(from_addr), 'sending'))
-                cur.execute("""
-                    INSERT INTO wallet_addresses (address, wallet_fingerprint, public_key, balance, transaction_count, address_type)
-                    VALUES (%s, %s, %s, 0, 0, %s) ON CONFLICT (address) DO NOTHING
-                """, (to_addr, _fp(to_addr), _pk(to_addr), 'receiving'))
+            def _fp(a): return hashlib.sha256(a.encode()).hexdigest()[:64]
+            def _pk(a): return hashlib.sha3_256(a.encode()).hexdigest()
 
-                # Insert pending TX — ON CONFLICT DO NOTHING (idempotent resubmit)
+            with get_db_cursor() as cur:
+                # Wallet rows — INSERT ... ON CONFLICT(address) DO NOTHING is safe.
+                # We use a unique wallet_fingerprint per address (sha256 of address → 64 hex chars).
+                # The UNIQUE(wallet_fingerprint, derivation_path) constraint cannot fire here because
+                # each address has a unique sha256 fingerprint (negligible collision probability)
+                # and derivation_path=NULL (not set), which PostgreSQL treats as distinct per-row.
+                for addr, atype in [(from_addr, 'sending'), (to_addr, 'receiving')]:
+                    cur.execute("""
+                        INSERT INTO wallet_addresses
+                            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type)
+                        VALUES (%s, %s, %s, 0, 0, %s)
+                        ON CONFLICT (address) DO NOTHING
+                    """, (addr, _fp(addr), _pk(addr), atype))
+
+                # Insert pending TX
                 cur.execute("""
-                    INSERT INTO transactions (
-                        tx_hash, from_address, to_address, amount,
-                        nonce, tx_type, status,
-                        quantum_state_hash, commitment_hash, metadata
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (tx_hash) DO NOTHING
+                    INSERT INTO transactions
+                        (tx_hash, from_address, to_address, amount,
+                         nonce, tx_type, status,
+                         quantum_state_hash, commitment_hash, metadata)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (tx_hash) DO UPDATE SET
+                        status = EXCLUDED.status,
+                        updated_at = NOW()
                 """, (
-                    tx_hash_hex,
-                    from_addr,
-                    to_addr,
-                    amount_base,
-                    nonce,
-                    'transfer',
-                    'pending',
-                    signature_json or '',
-                    tx_hash_hex,
+                    tx_hash_hex, from_addr, to_addr, amount_base,
+                    nonce, 'transfer', 'pending',
+                    signature_json or '', tx_hash_hex,
                     json.dumps(tx_metadata),
                 ))
-                # If client has a different tx_id (old hash), store alias row so lookup works
+                db_inserted = True
+
+                # Client alias row — only if client sent a different hash
                 if client_tx_id and client_tx_id != tx_hash_hex and len(client_tx_id) == 64:
-                    cur.execute("""
-                        INSERT INTO transactions (
-                            tx_hash, from_address, to_address, amount,
-                            nonce, tx_type, status,
-                            quantum_state_hash, commitment_hash, metadata
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (tx_hash) DO NOTHING
-                    """, (
-                        client_tx_id,
-                        from_addr,
-                        to_addr,
-                        amount_base,
-                        nonce,
-                        'transfer',
-                        'pending',
-                        signature_json or '',
-                        tx_hash_hex,          # commitment_hash points to canonical
-                        json.dumps({**tx_metadata, 'alias_of': tx_hash_hex}),
-                    ))
-                    logger.info(f"[TRANSACT] 🔗 Client alias stored: {client_tx_id[:16]}… → {tx_hash_hex[:16]}…")
-            logger.info(f"[TRANSACT] ✅ TX persisted to DB | status=pending | hash={tx_hash_hex[:16]}…")
+                    try:
+                        cur.execute("""
+                            INSERT INTO transactions
+                                (tx_hash, from_address, to_address, amount,
+                                 nonce, tx_type, status,
+                                 quantum_state_hash, commitment_hash, metadata)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (tx_hash) DO NOTHING
+                        """, (
+                            client_tx_id, from_addr, to_addr, amount_base,
+                            nonce, 'transfer', 'pending',
+                            signature_json or '', tx_hash_hex,
+                            json.dumps({**tx_metadata, 'alias_of': tx_hash_hex}),
+                        ))
+                        logger.info(f"[TRANSACT] 🔗 Alias stored: {client_tx_id[:16]}… → {tx_hash_hex[:16]}…")
+                    except Exception as alias_err:
+                        logger.debug(f"[TRANSACT] Alias insert skipped: {alias_err}")
+
+            logger.info(f"[TRANSACT] ✅ TX in DB | status=pending | hash={tx_hash_hex[:16]}… | {amount_float} QTCL")
+
         except Exception as db_err:
-            logger.error(f"[TRANSACT] ⚠️  DB insert failed (non-fatal, TX still in mempool): {db_err}")
+            db_error_msg = str(db_err)
+            # Log FULL traceback so we can diagnose DB issues
+            logger.error(f"[TRANSACT] ❌ DB insert FAILED: {db_err}")
+            logger.error(f"[TRANSACT]    TX hash  : {tx_hash_hex}")
+            logger.error(f"[TRANSACT]    from_addr: {from_addr}")
+            logger.error(f"[TRANSACT]    to_addr  : {to_addr}")
+            logger.error(f"[TRANSACT]    amount   : {amount_base}")
+            logger.error(traceback.format_exc())
+            # TX still continues (DHT + mempool will carry it) but we now know the error
 
         # ── STORE IN DHT FOR P2P PEER VALIDATION ───────────────────────────────
         try:
@@ -5209,12 +5282,12 @@ def submit_transaction():
                 'timestamp_ns': timestamp_ns,
                 'status'      : 'pending',
                 'oracle_signed': signature_json is not None,
+                'in_db'       : db_inserted,
                 'submitted_at': time.time(),
             })
-            # Also index by client tx_id so peer lookup works by either hash
             if client_tx_id and client_tx_id != tx_hash_hex:
                 dht.store_state(f"tx:{client_tx_id}", {'alias_of': tx_hash_hex, 'status': 'pending'})
-            logger.debug(f"[TRANSACT] 🌐 TX stored in DHT: tx:{tx_hash_hex[:16]}…")
+            logger.debug(f"[TRANSACT] 🌐 DHT stored: tx:{tx_hash_hex[:16]}…")
         except Exception as dht_err:
             logger.debug(f"[TRANSACT] DHT store failed (non-fatal): {dht_err}")
 
@@ -5267,20 +5340,22 @@ def submit_transaction():
                 logger.warning(f"[TRANSACT] P2P broadcast error (non-fatal): {p2p_err}")
 
         return jsonify({
-            'tx_hash'      : tx_hash_hex,       # ← USE THIS for all lookups via /api/transactions/<hash>
-            'client_tx_id' : client_tx_id,      # ← client's original id (also queryable if 64-hex)
-            'status'       : 'pending',          # Bitcoin model: pending until block confirms
+            'tx_hash'      : tx_hash_hex,       # ← USE THIS for all lookups
+            'client_tx_id' : client_tx_id,
+            'status'       : 'pending',
             'from'         : from_addr,
             'to'           : to_addr,
             'amount'       : amount_float,
             'amount_base'  : amount_base,
             'fee'          : fee_qtcl,
             'signed'       : signature_json is not None,
-            'in_mempool'   : True,               # in-memory BlockManager pool
-            'in_db'        : True,               # queryable via /api/transactions/<tx_hash>
+            'in_mempool'   : bm_accepted,
+            'in_db'        : db_inserted,
+            'db_error'     : db_error_msg,       # ← non-null means DB insert failed — check server logs
             'message'      : (
-                f'TX accepted. Query status at /api/transactions/{tx_hash_hex}. '
-                f'Will be confirmed when miner seals a block (Bitcoin model — pending until then).'
+                f'TX {"persisted to DB and " if db_inserted else "DHT-only (DB failed — see db_error) — "}'
+                f'queryable at /api/transactions/{tx_hash_hex}. '
+                f'{"Pending until miner seals a block." if db_inserted else "Will appear in mempool once DB error resolved."}'
             ),
         }), 201
 
