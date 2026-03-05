@@ -37,14 +37,32 @@ import sys
 import json
 import time
 import socket
+import hashlib
+import secrets
+import logging
+import threading
+import traceback
+from typing import Dict, Any, Optional, List, Tuple, Set
+from datetime import datetime, timezone, timedelta
+
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# EARLY LOGGER SETUP (before DHT/other classes)
+# ═════════════════════════════════════════════════════════════════════════════════════════
+
+if not logging.getLogger().hasHandlers():
+    logging.basicConfig(
+        level=logging.INFO,
+        format='[%(asctime)s] %(levelname)s: %(message)s',
+        handlers=[logging.StreamHandler(sys.stdout)]
+    )
+
+logger = logging.getLogger(__name__)
+
 # ═════════════════════════════════════════════════════════════════════════════════════════
 # DISTRIBUTED HASH TABLE (DHT) — KADEMLIA-BASED PEER DISCOVERY
 # ═════════════════════════════════════════════════════════════════════════════════════════
 # Museum-Grade DHT for decentralized peer discovery and state storage
 # Implements XOR distance metric, k-buckets routing table, and peer queries
-
-import hashlib
-from typing import Tuple
 
 class DHTNode:
     """Museum-Grade DHT Node - Kademlia peer discovery"""
@@ -227,19 +245,19 @@ class DHTManager:
         # In real system: query nodes in routing table
         return None
 
+
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# REMAINING IMPORTS (Flask, gRPC, utilities)
+# ═════════════════════════════════════════════════════════════════════════════════════════
+
 from decimal import Decimal
 import random
-import secrets
 from concurrent.futures import ThreadPoolExecutor  # H2: Thread pooling for DoS prevention
 
 from flask import Flask, jsonify, request, render_template_string, send_file
 from io import BytesIO
 import msgpack
 import base64
-
-# ── gRPC streaming layer ─────────────────────────────────────────────────────
-# Compiled at startup from the proto embedded below — no pre-build step needed.
-# Falls back gracefully if grpcio / grpcio-tools not installed.
 import queue as _queue_mod
 
 _GRPC_AVAILABLE = False
