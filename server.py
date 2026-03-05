@@ -1770,6 +1770,9 @@ class MetricsCollector:
                 'miners'             : {},
             }
 
+# Instantiate metrics collector (required for websocket handlers)
+_metrics_collector = MetricsCollector()
+
 # ═════════════════════════════════════════════════════════════════════════════════
 # WEBSOCKET HANDLERS
 # ═════════════════════════════════════════════════════════════════════════════════
