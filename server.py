@@ -53,86 +53,177 @@ import random
 import secrets
 from concurrent.futures import ThreadPoolExecutor  # H2: Thread pooling for DoS prevention
 
-from flask import Flask, jsonify, request
-from flask_cors import CORS
+from flask import Flask, jsonify, request, render_template_string, send_file
+from flask_socketio import SocketIO, emit, join_room, leave_room
 from io import BytesIO
 import msgpack
 import base64
-import queue
 
+# ── gRPC streaming layer ─────────────────────────────────────────────────────
+# Compiled at startup from the proto embedded below — no pre-build step needed.
+# Falls back gracefully if grpcio / grpcio-tools not installed.
+import queue as _queue_mod
+
+_GRPC_AVAILABLE = False
+_grpc           = None
+_wstate_pb2     = None
+_wstate_pb2_grpc = None
+
+_PROTO_CONTENT = r"""
+syntax = "proto3";
+package qtcl;
+service WStateService {
+  rpc StreamSnapshots(StreamRequest) returns (stream WStateSnapshot);
+  rpc GetLatestSnapshot(StreamRequest) returns (WStateSnapshot);
+  rpc Ping(PingRequest) returns (PingResponse);
+}
+message StreamRequest  { string miner_id = 1; string miner_address = 2; uint64 known_ts = 3; }
+message PingRequest    { string miner_id = 1; }
+message PingResponse   { bool ok = 1; uint64 server_ts_ns = 2; uint32 miner_count = 3; }
+message HLWESignature  { string commitment = 1; string witness = 2; string proof = 3;
+                         string w_entropy_hash = 4; string derivation_path = 5; string public_key_hex = 6; }
+message WStateSnapshot { uint64 timestamp_ns = 1; string oracle_address = 2; string w_entropy_hash = 3;
+                         double fidelity = 4; double coherence = 5; double purity = 6; double entanglement = 7;
+                         string density_matrix_hex = 8; bool signature_valid = 9;
+                         HLWESignature hlwe_signature = 10; uint64 block_height = 11; }
+"""
+
+def # gRPC removed
+
+# ── SSE DISTRIBUTOR ─────────────────────────────────────────────────────────────
+
+# Active stream queues: miner_id → queue.Queue[dict | None]
+# None sentinel = server shutting down, close the stream.
+_grpc_stream_queues: dict = {}
+_grpc_queues_lock = threading.RLock()
+
+def _grpc_push_snapshot(snapshot: dict) -> None:
+    """Called by _broadcast_snapshot_to_gossip_network — pushes to every gRPC stream."""
+    if not _GRPC_AVAILABLE or not _grpc_stream_queues:
+        return
+    with _grpc_queues_lock:
+        dead = []
+        for mid, q in _grpc_stream_queues.items():
+            try:
+                q.put_nowait(snapshot)
+            except _queue_mod.Full:
+                dead.append(mid)  # slow consumer — evict
+        for mid in dead:
+            del _grpc_stream_queues[mid]
+            logger.debug(f'[GRPC] Evicted slow consumer: {mid[:16]}…')
+
+def _make_grpc_servicer():
+    """Create the WStateServicer class once stubs are compiled."""
+    if not _GRPC_AVAILABLE:
+        return None
+
+    class WStateServicer(_wstate_pb2_grpc.WStateServiceServicer):
+
+        def _dict_to_snapshot_pb(self, snap: dict):
+            sig = snap.get('hlwe_signature') or {}
+            return _wstate_pb2.WStateSnapshot(
+                timestamp_ns       = int(snap.get('timestamp_ns', 0)),
+                oracle_address     = str(snap.get('oracle_address', '')),
+                w_entropy_hash     = str(snap.get('w_entropy_hash', '')),
+                fidelity           = float(snap.get('fidelity', snap.get('w_state_fidelity', 0.94))),
+                coherence          = float(snap.get('coherence', 0.85)),
+                purity             = float(snap.get('purity', 0.95)),
+                entanglement       = float(snap.get('entanglement', 0.5)),
+                density_matrix_hex = str(snap.get('density_matrix_hex', '')),
+                signature_valid    = bool(snap.get('signature_valid', True)),
+                block_height       = int(snap.get('block_height', 0)),
+                hlwe_signature     = _wstate_pb2.HLWESignature(
+                    commitment      = str(sig.get('commitment', '')),
+                    witness         = str(sig.get('witness', '')),
+                    proof           = str(sig.get('proof', '')),
+                    w_entropy_hash  = str(sig.get('w_entropy_hash', '')),
+                    derivation_path = str(sig.get('derivation_path', '')),
+                    public_key_hex  = str(sig.get('public_key_hex', '')),
+                ),
+            )
+
+        def StreamSnapshots(self, request, context):
+            miner_id = request.miner_id or 'unknown'
+            q: _queue_mod.Queue = _queue_mod.Queue(maxsize=200)
+            with _grpc_queues_lock:
+                _grpc_stream_queues[miner_id] = q
+            logger.info(f'[GRPC] 🔗 Stream opened | miner={miner_id[:20]}…')
+            try:
+                # Immediately send latest cached snapshot so miner doesn't wait
+                if _latest_snapshot:
+                    yield self._dict_to_snapshot_pb(_latest_snapshot)
+                while context.is_active():
+                    try:
+                        snap = q.get(timeout=5.0)
+                        if snap is None:   # shutdown sentinel
+                            break
+                        yield self._dict_to_snapshot_pb(snap)
+                    except _queue_mod.Empty:
+                        continue  # keep-alive: gRPC framework handles ping
+            except Exception as e:
+                logger.debug(f'[GRPC] Stream error for {miner_id[:16]}…: {e}')
+            finally:
+                with _grpc_queues_lock:
+                    _grpc_stream_queues.pop(miner_id, None)
+                logger.info(f'[GRPC] 🔌 Stream closed | miner={miner_id[:20]}…')
+
+        def GetLatestSnapshot(self, request, context):
+            snap = _latest_snapshot or {
+                'timestamp_ns': int(time.time() * 1e9),
+                'oracle_address': 'qtcl1oracle',
+                'w_entropy_hash': 'a' * 64,
+                'fidelity': 0.95,
+                'purity': 0.95,
+                'coherence': 0.85,
+                'signature_valid': True,
+            }
+            return self._dict_to_snapshot_pb(snap)
+
+        def Ping(self, request, context):
+            with _miners_lock:
+                n = len(_registered_miners)
+            return _wstate_pb2.PingResponse(
+                ok=True,
+                server_ts_ns=int(time.time() * 1e9),
+                miner_count=n,
+            )
+
+    return WStateServicer()
+
+
+def _start_grpc_server() -> None:
+    """Start the gRPC server on GRPC_PORT (default 50051) in a background thread."""
+    if not _GRPC_AVAILABLE:
+        return
+    grpc_port = int(os.getenv('GRPC_PORT', 50051))
+    servicer  = _make_grpc_servicer()
+    if servicer is None:
+        return
+
+    def _serve():
+        import grpc as _g
+        server = _g.server(
+            __import__('concurrent.futures').futures.ThreadPoolExecutor(max_workers=50),
+            options=[
+                ('grpc.keepalive_time_ms',              20_000),
+                ('grpc.keepalive_timeout_ms',           10_000),
+                ('grpc.keepalive_permit_without_calls', 1),
+                ('grpc.max_connection_idle_ms',         300_000),
+            ],
+        )
+        _wstate_pb2_grpc.add_WStateServiceServicer_to_server(servicer, server)
+        server.add_insecure_port(f'[::]:{grpc_port}')
+        server.start()
+        logger.info(f'[GRPC] 🚀 Server listening on port {grpc_port} (insecure — TLS via Koyeb)')
+        server.wait_for_termination()
+
+    t = threading.Thread(target=_serve, daemon=True, name='GRPCServer')
+    t.start()
+# ── end gRPC block ────────────────────────────────────────────────────────────
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # LOGGING SETUP (MUST BE FIRST - all subsequent code depends on logger)
 # ═════════════════════════════════════════════════════════════════════════════════
-
-
-# ═════════════════════════════════════════════════════════════════════════════════════════
-# SSE SNAPSHOT DISTRIBUTION (replacing gRPC/WebSocket)
-# ═════════════════════════════════════════════════════════════════════════════════════════
-
-_sse_clients: Dict[str, queue.Queue] = {}
-_sse_lock = threading.RLock()
-_latest_snapshot = None
-
-def _sse_push_snapshot(snapshot: dict) -> None:
-    """Push snapshot to all connected SSE clients."""
-    global _latest_snapshot
-    _latest_snapshot = snapshot
-    with _sse_lock:
-        dead = []
-        for client_id, q in _sse_clients.items():
-            try:
-                q.put_nowait(snapshot)
-            except queue.Full:
-                dead.append(client_id)
-        for client_id in dead:
-            if client_id in _sse_clients:
-                del _sse_clients[client_id]
-
-@app.route('/api/snapshot/sse', methods=['GET'])
-def sse_snapshot_stream():
-    """Server-Sent Events endpoint for real-time snapshot streaming."""
-    client_id = request.args.get('client_id', f"sse_{int(time.time()*1000)}")
-    miner_address = request.args.get('miner', 'unknown')
-    
-    try:
-        q = queue.Queue(maxsize=100)
-        with _sse_lock:
-            _sse_clients[client_id] = q
-        
-        logger.info(f"[SSE] 📡 Client connected: {client_id} | Miner: {miner_address}")
-        
-        # Backfill with latest snapshot
-        global _latest_snapshot
-        if _latest_snapshot:
-            yield f"data: {json.dumps(_latest_snapshot)}\n\n"
-        
-        while True:
-            try:
-                snapshot = q.get(timeout=60)
-                yield f"data: {json.dumps(snapshot)}\n\n"
-            except queue.Empty:
-                yield ": keepalive\n\n"
-    except Exception as e:
-        logger.error(f"[SSE] ❌ Stream error: {e}")
-    finally:
-        with _sse_lock:
-            if client_id in _sse_clients:
-                del _sse_clients[client_id]
-        logger.info(f"[SSE] 🔌 Client disconnected: {client_id}")
-
-@app.route('/api/oracle/push_snapshot', methods=['POST'])
-def oracle_push_snapshot():
-    """Oracle pushes snapshots here for distribution to all SSE clients."""
-    try:
-        snapshot = request.get_json()
-        if not snapshot:
-            return jsonify({'error': 'No JSON body'}), 400
-        _sse_push_snapshot(snapshot)
-        return jsonify({'status': 'received', 'sse_clients': len(_sse_clients)})
-    except Exception as e:
-        logger.error(f"[ORACLE] ❌ Push error: {e}")
-        return jsonify({'error': str(e)}), 500
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1139,20 +1230,87 @@ class BinarySerializer:
 
 app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
+
+
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# SSE SNAPSHOT DISTRIBUTION (replacing gRPC/WebSocket)
+# ═════════════════════════════════════════════════════════════════════════════════════════
+
+_sse_clients: Dict[str, queue.Queue] = {}
+_sse_lock = threading.RLock()
+_sse_broadcast_count = 0
+
+def _sse_push_snapshot(snapshot: dict) -> None:
+    """Push snapshot to all connected SSE clients."""
+    global _sse_broadcast_count
+    with _sse_lock:
+        _sse_broadcast_count += 1
+        dead = []
+        for client_id, q in _sse_clients.items():
+            try:
+                q.put_nowait(snapshot)
+            except queue.Full:
+                try:
+                    q.get_nowait()
+                    q.put_nowait(snapshot)
+                except:
+                    dead.append(client_id)
+        for client_id in dead:
+            if client_id in _sse_clients:
+                del _sse_clients[client_id]
+        if _sse_broadcast_count % 1000 == 0:
+            logger.info(f"[SSE] 📊 Broadcast #{_sse_broadcast_count} | Clients: {len(_sse_clients)}")
+
+@app.route('/api/snapshot/sse', methods=['GET'])
+def sse_snapshot_stream():
+    """Server-Sent Events endpoint for real-time snapshot streaming."""
+    client_id = request.args.get('client_id', f"sse_{int(time.time()*1000)}")
+    miner_address = request.args.get('miner', 'unknown')
+    
+    try:
+        q = queue.Queue(maxsize=100)
+        with _sse_lock:
+            _sse_clients[client_id] = q
+        logger.info(f"[SSE] 📡 Client connected: {client_id} | Miner: {miner_address}")
+        
+        global _latest_snapshot
+        if _latest_snapshot:
+            yield f"data: {json.dumps(_latest_snapshot)}\n\n"
+        
+        while True:
+            try:
+                snapshot = q.get(timeout=60)
+                yield f"data: {json.dumps(snapshot)}\n\n"
+            except queue.Empty:
+                yield ": keepalive\n\n"
+    except Exception as e:
+        logger.error(f"[SSE] ❌ Error: {e}")
+    finally:
+        with _sse_lock:
+            if client_id in _sse_clients:
+                del _sse_clients[client_id]
+        logger.info(f"[SSE] 🔌 Client disconnected: {client_id}")
+
+@app.route('/api/oracle/push_snapshot', methods=['POST'])
+def oracle_push_snapshot():
+    """Oracle pushes snapshots here for SSE distribution."""
+    try:
+        snapshot = request.get_json()
+        if not snapshot:
+            return jsonify({'error': 'No JSON body'}), 400
+        global _latest_snapshot
+        _latest_snapshot = snapshot
+        _sse_push_snapshot(snapshot)
+        return jsonify({'status': 'received', 'sse_clients': len(_sse_clients)})
+    except Exception as e:
+        logger.error(f"[ORACLE] ❌ Error: {e}")
+        return jsonify({'error': str(e)}), 500
+
 application = app  # WSGI entry point
 
 # Initialize SocketIO for real-time metrics streaming (port 5000, HTTP)
 # AFTER:
-# REMOVED: socketio = SocketIO(
-    app,
-    cors_allowed_origins="*",
-    async_mode='threading',
-    # SSE only - no WebSocket
-    engineio_logger=False,
-    socketio_logger=False,
-    ping_timeout=60,
-    ping_interval=25,
-)
+# socketio removed - SSE only
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # MINER P2P WEBSOCKET SERVER (port 8000) - UNIFIED WITH REST API
@@ -1161,10 +1319,7 @@ application = app  # WSGI entry point
 # Separate Flask app for P2P Socket.IO on port 8000 (unified)
 p2p_app = Flask(__name__)
 p2p_app.config['SECRET_KEY'] = secrets.token_hex(32)
-# REMOVED: p2p_socketio = SocketIO(    p2p_app,
-    cors_allowed_origins="*",
-    async_mode='threading',
-    # SSE only - no WebSocket (no WebSocket on Koyeb)
+p2p_# socketio removed - SSE only
     engineio_logger=False,
     socketio_logger=False,
     ping_timeout=60,
@@ -1250,7 +1405,8 @@ def _broadcast_snapshot_to_gossip_network(snapshot):
         
         # Send to all connected clients via broadcast (Socket.IO handles HTTP long-polling transport)
         # ✅ ALWAYS broadcast every second (real-time metrics needed)
-        # Socket.IO emit removed - using SSE instead,
+        p2p_socketio.emit('w_state_snapshot', {
+            'timestamp_ns': snapshot.get('timestamp_ns', 0),
             'oracle_address': snapshot.get('oracle_address', 'qtcl1oracle'),
             'w_entropy_hash': snapshot.get('w_entropy_hash', ''),
             'purity': snapshot.get('purity', 0.95),
@@ -1303,7 +1459,7 @@ def handle_miner_register(data):
         supports_gossip = data.get('supports_gossip', False)
         
         if not miner_id or not address:
-            # Socket.IO emit removed - using SSE instead
+            p2p_socketio.emit('miner_register_ack', {'status': 'error', 'message': 'Missing miner_id or address'})
             return
         
         # Register miner with gossip support tracking
@@ -1323,13 +1479,19 @@ def handle_miner_register(data):
         known_peers = _get_active_miners_for_gossip()
         
         # Send confirmation with peer list
-        # Socket.IO emit removed - using SSE instead
+        p2p_socketio.emit('miner_register_ack', {
+            'status': 'registered',
+            'miner_id': miner_id,
+            'message': 'Registration successful with gossip support',
+            'known_peers': known_peers,  # ← NEW: Send active peers
+            'latest_snapshot_ts': _latest_snapshot_ts
+        })
         
         logger.debug(f"[GOSSIP] 👥 Sent {len(known_peers)} known peers to miner {miner_id[:20]}…")
         
     except Exception as e:
         logger.error(f"[P2P-LONGPOLL] Registration error: {e}")
-        # Socket.IO emit removed - using SSE instead})
+        p2p_socketio.emit('miner_register_ack', {'status': 'error', 'message': str(e)})
 
 @p2p_socketio.on('miner_heartbeat')
 def handle_miner_heartbeat(data):
@@ -1356,13 +1518,16 @@ def handle_miner_heartbeat(data):
                                      if int(time.time() * 1000) - m.get('last_heartbeat', 0) < 120000]
                 max_peer_height = max([m.get('block_height', 0) for m in active_miners_list], default=0)
                 
-                # Socket.IO emit removed - using SSE instead,
+                p2p_socketio.emit('miner_heartbeat_ack', {
+                    'status': 'ok',
+                    'miner_id': miner_id,
+                    'active_miners': len(active_miners_list),
                     'max_peer_height': max_peer_height,  # ← NEW: Tell miner the highest peer height
                     'your_height': block_height,
                     'snapshot_ts_received': snapshot_ts,
                 })
             else:
-                # Socket.IO emit removed - using SSE instead
+                p2p_socketio.emit('miner_heartbeat_ack', {'status': 'error', 'message': 'Miner not registered'})
     except Exception as e:
         logger.error(f"[P2P-LONGPOLL] Heartbeat error: {e}")
 
@@ -1391,11 +1556,11 @@ def handle_miner_snapshot_request(data):
             'signature_valid': True
         }
         
-        # Socket.IO emit removed - using SSE instead
+        p2p_socketio.emit('miner_snapshot', snapshot)
         logger.debug(f"[P2P-LONGPOLL] Snapshot sent to miner {miner_id[:20]}…")
     except Exception as e:
         logger.error(f"[P2P-LONGPOLL] Snapshot request error: {e}")
-        # Socket.IO emit removed - using SSE instead})
+        p2p_socketio.emit('miner_snapshot_error', {'message': str(e)})
 
 @p2p_socketio.on('gossip_peer_list_request')
 def handle_gossip_peer_list_request(data):
@@ -1419,7 +1584,8 @@ def handle_gossip_peer_list_request(data):
             server_height = 0
         
         # Emit peer list with height info
-        # Socket.IO emit removed - using SSE instead),
+        p2p_socketio.emit('gossip_peer_list', {
+            'timestamp': int(time.time()),
             'peers': known_peers,
             'total_active': len(known_peers),
             'latest_snapshot_ts': _latest_snapshot_ts,
@@ -1430,7 +1596,7 @@ def handle_gossip_peer_list_request(data):
         logger.debug(f"[GOSSIP] 👥 Peer list sent to {miner_id[:20]}… | {len(known_peers)} active peers | server_height={server_height}")
     except Exception as e:
         logger.error(f"[GOSSIP] Peer list request error: {e}")
-        # Socket.IO emit removed - using SSE instead})
+        p2p_socketio.emit('gossip_peer_list_error', {'message': str(e)})
 
 @p2p_socketio.on('miner_disconnect')
 def handle_miner_disconnect(data):
@@ -1449,7 +1615,8 @@ def handle_miner_disconnect(data):
                 # Broadcast updated peer list to remaining miners
                 if _registered_miners:
                     known_peers = _get_active_miners_for_gossip()
-                    # Socket.IO emit removed - using SSE instead),
+                    p2p_socketio.emit('gossip_peer_list', {
+                        'timestamp': int(time.time()),
                         'peers': known_peers,
                         'total_active': len(known_peers),
                         'latest_snapshot_ts': _latest_snapshot_ts
@@ -1586,7 +1753,7 @@ def _start_p2p_daemons():
         logger.warning("[P2P-LONGPOLL] ⚠️  Cleanup daemon already running")
 
     # gRPC server (port 50051 / GRPC_PORT env)
-    # gRPC server removed
+    _start_grpc_server()
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # REAL-TIME METRICS COLLECTOR (Background Thread)

@@ -45,7 +45,6 @@ from enum import Enum
 
 getcontext().prec = 150
 
-import requests
 logger = logging.getLogger(__name__)
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
@@ -779,6 +778,23 @@ class OracleWStateManager:
             with self._state_lock:
                 self.current_density_matrix = snapshot
                 self.density_matrix_buffer.append(snapshot)
+                # Push to server for SSE distribution
+                if self.oracle_signer and snapshot:
+                    snap_dict = {
+                        "timestamp_ns": snapshot.timestamp_ns,
+                        "oracle_address": snapshot.oracle_address or "qtcl1oracle",
+                        "w_entropy_hash": snapshot.w_entropy_hash or hashlib.sha256(snapshot.density_matrix_hex.encode()).hexdigest(),
+                        "w_state_fidelity": snapshot.w_state_fidelity,
+                        "fidelity": snapshot.w_state_fidelity,
+                        "purity": snapshot.purity,
+                        "coherence": snapshot.coherence_l1,
+                        "entanglement": snapshot.entanglement_witness,
+                        "density_matrix_hex": snapshot.density_matrix_hex[:256],
+                        "hlwe_signature": snapshot.hlwe_signature or {},
+                        "signature_valid": snapshot.signature_valid,
+                        "block_height": 0,
+                    }
+                    _push_snapshot_to_server(snap_dict)
 
                 # Sign snapshot if signer is wired
                 if self.oracle_signer:
@@ -841,23 +857,6 @@ class OracleWStateManager:
                             self.stream_queue.put_nowait(snapshot)
                         except: pass
                     self._broadcast_to_clients(snapshot)
-                    # Push to server for SSE distribution to all miners
-                    if snapshot:
-                        snap_dict = {
-                            'timestamp_ns': snapshot.timestamp_ns,
-                            'oracle_address': snapshot.oracle_address or 'qtcl1oracle',
-                            'w_entropy_hash': snapshot.w_entropy_hash or hashlib.sha256(snapshot.density_matrix_hex.encode()).hexdigest(),
-                            'w_state_fidelity': snapshot.w_state_fidelity,
-                            'fidelity': snapshot.w_state_fidelity,
-                            'purity': snapshot.purity,
-                            'coherence': snapshot.coherence_l1,
-                            'entanglement': snapshot.entanglement_witness,
-                            'density_matrix_hex': snapshot.density_matrix_hex[:256],
-                            'hlwe_signature': snapshot.hlwe_signature or {},
-                            'signature_valid': snapshot.signature_valid,
-                            'block_height': 0,
-                        }
-                        _push_snapshot_to_server(snap_dict)
                 time.sleep(W_STATE_STREAM_INTERVAL_MS / 1000.0)
             except Exception as e:
                 logger.error(f"[ORACLE W-STATE] Stream error: {e}")
@@ -1314,19 +1313,16 @@ def json_stable_bytes(obj) -> bytes:
 # W-State Manager singleton
 ORACLE_W_STATE_MANAGER = OracleWStateManager()
 
-# ═════════════════════════════════════════════════════════════════════════════════
-# SERVER INTEGRATION — Push snapshots to server for SSE distribution
-# ═════════════════════════════════════════════════════════════════════════════════
+
+
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# SERVER INTEGRATION - Push snapshots for SSE distribution
+# ═════════════════════════════════════════════════════════════════════════════════════════
 
 import requests
 
 def _push_snapshot_to_server(snapshot_dict: dict) -> bool:
-    """
-    Push snapshot to server /api/oracle/push_snapshot for SSE distribution to all miners.
-    
-    Called when new W-state snapshot is generated.
-    Server forwards to all connected SSE clients.
-    """
+    """Push snapshot to server for SSE distribution."""
     server_url = os.getenv('SERVER_URL', 'http://localhost:8000')
     try:
         response = requests.post(
@@ -1334,20 +1330,10 @@ def _push_snapshot_to_server(snapshot_dict: dict) -> bool:
             json=snapshot_dict,
             timeout=5
         )
-        if response.status_code == 200:
-            data = response.json()
-            sse_clients = data.get('sse_clients', 0)
-            if sse_clients > 0:
-                logger.info(f"[ORACLE] ✅ Pushed to {sse_clients} SSE clients")
-            return True
-        else:
-            logger.warning(f"[ORACLE] ⚠️  Server returned {response.status_code}")
-            return False
+        return response.status_code == 200
     except Exception as e:
-        logger.warning(f"[ORACLE] ⚠️  Server push failed: {e}")
+        logger.debug(f"[SERVER-PUSH] Failed: {e}")
         return False
-
-# ═════════════════════════════════════════════════════════════════════════════════
 
 # Main Oracle singleton
 ORACLE = OracleEngine()
