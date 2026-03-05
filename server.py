@@ -1234,7 +1234,7 @@ app.config['JSON_SORT_KEYS'] = False
 # SSE SNAPSHOT DISTRIBUTION (replacing gRPC/WebSocket)
 # ═════════════════════════════════════════════════════════════════════════════════════════
 
-_sse_clients: Dict[str, queue.Queue] = {}
+_sse_clients: Dict[str, _queue_mod.Queue] = {}
 _sse_lock = threading.RLock()
 _sse_broadcast_count = 0
 
@@ -1247,7 +1247,7 @@ def _sse_push_snapshot(snapshot: dict) -> None:
         for client_id, q in _sse_clients.items():
             try:
                 q.put_nowait(snapshot)
-            except queue.Full:
+            except _queue_mod.Full:
                 try:
                     q.get_nowait()
                     q.put_nowait(snapshot)
@@ -1266,7 +1266,7 @@ def sse_snapshot_stream():
     miner_address = request.args.get('miner', 'unknown')
     
     try:
-        q = queue.Queue(maxsize=100)
+        q = _queue_mod.Queue(maxsize=100)
         with _sse_lock:
             _sse_clients[client_id] = q
         logger.info(f"[SSE] 📡 Client connected: {client_id} | Miner: {miner_address}")
@@ -1279,7 +1279,7 @@ def sse_snapshot_stream():
             try:
                 snapshot = q.get(timeout=60)
                 yield f"data: {json.dumps(snapshot)}\n\n"
-            except queue.Empty:
+            except _queue_mod.Empty:
                 yield ": keepalive\n\n"
     except Exception as e:
         logger.error(f"[SSE] ❌ Error: {e}")
