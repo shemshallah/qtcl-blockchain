@@ -73,6 +73,15 @@ except ImportError:
     def get_entropy_from_block_field(block_data=None):
         return b'\x00' * 32
 
+# Museum-Grade Mempool Integration
+try:
+    from mempool import get_mempool, Transaction, TransactionInput, TransactionOutput
+    MEMPOOL_AVAILABLE = True
+except ImportError:
+    MEMPOOL_AVAILABLE = False
+    def get_mempool():
+        return None
+
 # Logging setup
 if not logging.getLogger().hasHandlers():
     logging.basicConfig(
@@ -105,7 +114,7 @@ GENESIS_BLOCK_HASH = None  # Will be set after mining genesis
 
 @dataclass
 class QuantumBlock:
-    """Block structure in blockchain"""
+    """Museum-Grade Block structure with transactions and temporal anchoring"""
     block_height: int
     block_hash: str
     parent_hash: str
@@ -119,11 +128,15 @@ class QuantumBlock:
     timestamp_s: int
     miner_address: str
     mining_reward: float
-    transactions: List[Any] = field(default_factory=list)
+    transactions: List[Dict[str, Any]] = field(default_factory=list)  # Transaction dicts
     tx_count: int = 0
     
+    # Museum-Grade: Temporal anchoring for quantum timestamp verification
+    temporal_anchor: Optional[Dict[str, Any]] = None
+    w_entropy_hash: str = ""  # Blake3 of W-state used for mining
+    
     def to_header_dict(self) -> Dict[str, Any]:
-        """Convert to block header (for hashing)"""
+        """Convert to block header (for hashing) — includes temporal anchor"""
         return {
             'block_height': self.block_height,
             'parent_hash': self.parent_hash,
@@ -133,6 +146,32 @@ class QuantumBlock:
             'pq_next': self.pq_next,
             'timestamp_s': self.timestamp_s,
             'miner_address': self.miner_address,
+            'tx_count': self.tx_count,
+            'w_entropy_hash': self.w_entropy_hash,
+            # Include temporal anchor ID for blockchain verification
+            'temporal_anchor_id': self.temporal_anchor.get('temporal_anchor_id', '') if self.temporal_anchor else '',
+        }
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize block to dict (for storage/transmission)"""
+        return {
+            'block_height': self.block_height,
+            'block_hash': self.block_hash,
+            'parent_hash': self.parent_hash,
+            'merkle_root': self.merkle_root,
+            'pq_last': self.pq_last,
+            'pq_curr': self.pq_curr,
+            'pq_next': self.pq_next,
+            'entropy_nonce': self.entropy_nonce,
+            'coherence_snapshot': self.coherence_snapshot,
+            'w_state_signature': self.w_state_signature,
+            'timestamp_s': self.timestamp_s,
+            'miner_address': self.miner_address,
+            'mining_reward': self.mining_reward,
+            'transactions': self.transactions,
+            'tx_count': self.tx_count,
+            'temporal_anchor': self.temporal_anchor,
+            'w_entropy_hash': self.w_entropy_hash,
         }
 
 
@@ -375,6 +414,68 @@ class BlockSealer:
             'seal_times': [],  # seconds
         }
     
+    def build_transaction_list(
+        self,
+        block_height: int,
+        miner_address: str,
+        block_reward_sats: int,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """
+        Museum-Grade: Build transaction list for block (coinbase + pending TXs).
+        
+        Equivalent to Bitcoin's block building:
+        1. Create coinbase transaction (block reward)
+        2. Get pending transactions from mempool (sorted by fee)
+        3. Return [coinbase, tx1, tx2, ...] with tx hashes immutable
+        
+        Args:
+            block_height: Current block height
+            miner_address: Miner's address (recipient of reward)
+            block_reward_sats: Coinbase reward in satoshis
+            limit: Maximum transactions to include
+            
+        Returns:
+            List of transaction dicts ready for block inclusion
+        """
+        try:
+            txs = []
+            
+            # Step 1: Create coinbase transaction
+            if MEMPOOL_AVAILABLE:
+                mempool = get_mempool()
+                coinbase = Transaction.create_coinbase(
+                    block_height=block_height,
+                    miner_address=miner_address,
+                    reward_sats=block_reward_sats
+                )
+                txs.append(coinbase.to_dict())
+                logger.info(f"[MINING] 💰 Coinbase created | reward={block_reward_sats} sats | hash={coinbase.tx_hash[:16]}…")
+                
+                # Step 2: Get pending transactions (sorted by fee)
+                pending = mempool.get_pending_transactions(limit=limit-1, min_fee=0)
+                for tx in pending:
+                    txs.append(tx.to_dict())
+                
+                logger.info(f"[MINING] 📦 Block TX list | coinbase + {len(pending)} pending | total={len(txs)}")
+            else:
+                # Fallback: just coinbase
+                coinbase_tx = {
+                    'tx_hash': f"coinbase_{block_height}_{int(time.time()*1000)}",
+                    'inputs': [{'previous_tx_hash': '00'*32, 'previous_output_index': 0xffffffff}],
+                    'outputs': [{'amount': block_reward_sats, 'address': miner_address}],
+                    'fee_sats': 0,
+                }
+                txs.append(coinbase_tx)
+                logger.debug(f"[MINING] ⚠️  Mempool unavailable, using coinbase only")
+            
+            return txs
+        
+        except Exception as e:
+            logger.error(f"[MINING] ❌ Failed to build TX list: {e}")
+            traceback.print_exc()
+            return []
+    
     def seal_block(
         self,
         block_height: int,
@@ -386,7 +487,9 @@ class BlockSealer:
         pq_next: int,
         miner_address: str,
         coherence_snapshot: float = 0.95,
-        w_state_signature: str = ""
+        w_state_signature: str = "",
+        temporal_anchor: Optional[Dict[str, Any]] = None,
+        w_entropy_hash: str = ""
     ) -> Optional[QuantumBlock]:
         """
         Seal a block (atomic operation)
@@ -430,6 +533,9 @@ class BlockSealer:
                 mining_reward=RewardCalculator.get_reward_for_block(block_height),
                 transactions=transactions,
                 tx_count=len(transactions),
+                # Museum-Grade: Temporal anchoring for quantum timestamp verification
+                temporal_anchor=temporal_anchor,
+                w_entropy_hash=w_entropy_hash,
             )
             
             # Step 3: Compute block hash

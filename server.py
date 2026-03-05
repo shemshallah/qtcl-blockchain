@@ -37,17 +37,196 @@ import sys
 import json
 import time
 import socket
-import logging
-import threading
-import traceback
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# DISTRIBUTED HASH TABLE (DHT) — KADEMLIA-BASED PEER DISCOVERY
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# Museum-Grade DHT for decentralized peer discovery and state storage
+# Implements XOR distance metric, k-buckets routing table, and peer queries
+
 import hashlib
-import psycopg2
-from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, Optional, Tuple, List, Set, Callable
-from contextlib import contextmanager
-from collections import deque, OrderedDict
-from dataclasses import dataclass, field, asdict
-from enum import Enum
+from typing import Tuple
+
+class DHTNode:
+    """Museum-Grade DHT Node - Kademlia peer discovery"""
+    
+    def __init__(self, node_id: Optional[str] = None, address: str = "unknown", port: int = 8000):
+        """
+        Initialize DHT node.
+        
+        Args:
+            node_id: 160-bit hex identifier (SHA1 of pubkey), or auto-generated
+            address: Network address (IP or hostname)
+            port: Listen port
+        """
+        if node_id is None:
+            # Generate from address hash
+            node_id = hashlib.sha1(f"{address}:{port}:{secrets.token_hex(16)}".encode()).hexdigest()
+        
+        self.node_id = node_id
+        self.node_id_int = int(node_id, 16)
+        self.address = address
+        self.port = port
+        self.last_seen = time.time()
+        self.failed_pings = 0
+        self.rpc_version = "1.0"
+    
+    def distance_to(self, other_id: str) -> int:
+        """Calculate XOR distance to another node (Kademlia metric)"""
+        other_int = int(other_id, 16)
+        return self.node_id_int ^ other_int
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "node_id": self.node_id,
+            "address": self.address,
+            "port": self.port,
+            "last_seen": self.last_seen,
+            "failed_pings": self.failed_pings,
+        }
+    
+    def is_alive(self, timeout_sec: int = 300) -> bool:
+        """Check if node is considered alive (seen within timeout)"""
+        return (time.time() - self.last_seen) < timeout_sec
+
+
+class DHTRoutingTable:
+    """Museum-Grade Kademlia routing table with k-buckets"""
+    
+    def __init__(self, local_node_id: str, k: int = 20):
+        """
+        Initialize routing table.
+        
+        Args:
+            local_node_id: Local node's 160-bit hex ID
+            k: Bucket size (default 20 for Kademlia)
+        """
+        self.local_node_id = local_node_id
+        self.local_node_id_int = int(local_node_id, 16)
+        self.k = k
+        self.buckets: Dict[int, List[DHTNode]] = {}
+        self.lock = threading.RLock()
+        self.bucket_refreshes: Dict[int, float] = {}
+    
+    def _get_bucket_index(self, node_id: str) -> int:
+        """Get bucket index (0-159) based on XOR distance"""
+        other_int = int(node_id, 16)
+        xor_distance = self.local_node_id_int ^ other_int
+        if xor_distance == 0:
+            return 0
+        return xor_distance.bit_length() - 1
+    
+    def add_node(self, node: DHTNode) -> bool:
+        """Add node to routing table, return True if added/updated"""
+        with self.lock:
+            bucket_idx = self._get_bucket_index(node.node_id)
+            if bucket_idx not in self.buckets:
+                self.buckets[bucket_idx] = []
+            
+            bucket = self.buckets[bucket_idx]
+            
+            # Check if already exists
+            for existing in bucket:
+                if existing.node_id == node.node_id:
+                    existing.last_seen = time.time()
+                    existing.failed_pings = 0
+                    logger.debug(f"[DHT] ✓ Node updated: {node.node_id[:16]}…")
+                    return True
+            
+            # Add new node if bucket not full
+            if len(bucket) < self.k:
+                bucket.append(node)
+                logger.info(f"[DHT] ✅ Node added: {node.address}:{node.port} | {node.node_id[:16]}…")
+                return True
+            else:
+                logger.debug(f"[DHT] ⚠️  Bucket {bucket_idx} full, cannot add {node.node_id[:16]}…")
+                return False
+    
+    def get_closest_nodes(self, target_id: str, count: int = 20) -> List[DHTNode]:
+        """Get k closest nodes to target ID"""
+        with self.lock:
+            all_nodes = []
+            for bucket in self.buckets.values():
+                all_nodes.extend(bucket)
+            
+            # Sort by XOR distance
+            target_int = int(target_id, 16)
+            all_nodes.sort(key=lambda n: n.node_id_int ^ target_int)
+            return all_nodes[:count]
+    
+    def mark_node_failed(self, node_id: str) -> bool:
+        """Mark node as failed, return True if removed"""
+        with self.lock:
+            bucket_idx = self._get_bucket_index(node_id)
+            if bucket_idx not in self.buckets:
+                return False
+            
+            bucket = self.buckets[bucket_idx]
+            for node in bucket:
+                if node.node_id == node_id:
+                    node.failed_pings += 1
+                    if node.failed_pings >= 3:
+                        bucket.remove(node)
+                        logger.warning(f"[DHT] ❌ Node removed (failed pings): {node_id[:16]}…")
+                        return True
+                    return False
+            return False
+    
+    def get_all_nodes(self) -> List[DHTNode]:
+        """Get all nodes in routing table"""
+        with self.lock:
+            return [node for bucket in self.buckets.values() for node in bucket]
+    
+    def count_peers(self) -> int:
+        """Count total peers in routing table"""
+        with self.lock:
+            return sum(len(bucket) for bucket in self.buckets.values())
+
+
+class DHTManager:
+    """Museum-Grade DHT Manager - coordinates peer discovery and state storage"""
+    
+    def __init__(self, local_address: str = "localhost", local_port: int = 8000):
+        self.local_node = DHTNode(address=local_address, port=local_port)
+        self.routing_table = DHTRoutingTable(self.local_node.node_id)
+        self.state_store: Dict[str, Dict[str, Any]] = {}  # key → {data, timestamp}
+        self.store_lock = threading.RLock()
+        self.lookup_cache: Dict[str, List[DHTNode]] = {}
+        logger.info(f"[DHT] ✅ Manager initialized | node_id={self.local_node.node_id[:16]}… | {local_address}:{local_port}")
+    
+    def store_state(self, key: str, value: Dict[str, Any]) -> bool:
+        """Store (key, value) pair in DHT"""
+        with self.store_lock:
+            self.state_store[key] = {
+                "data": value,
+                "timestamp": time.time(),
+                "replicas": [self.local_node.node_id],
+            }
+            logger.debug(f"[DHT] 💾 State stored: {key[:32]}…")
+            return True
+    
+    def retrieve_state(self, key: str) -> Optional[Dict[str, Any]]:
+        """Retrieve (key, value) from DHT"""
+        with self.store_lock:
+            if key in self.state_store:
+                return self.state_store[key]["data"]
+            return None
+    
+    def find_node(self, target_id: str) -> List[DHTNode]:
+        """Find nodes closest to target ID"""
+        closest = self.routing_table.get_closest_nodes(target_id, count=20)
+        self.lookup_cache[target_id] = closest
+        logger.info(f"[DHT] 🔍 Lookup: target={target_id[:16]}… | found {len(closest)} nodes")
+        return closest
+    
+    def find_value(self, key: str) -> Optional[Dict[str, Any]]:
+        """Find value for key, return stored value or None"""
+        result = self.retrieve_state(key)
+        if result:
+            logger.debug(f"[DHT] ✓ Value found locally: {key[:32]}…")
+            return result
+        # In real system: query nodes in routing table
+        return None
+
 from decimal import Decimal
 import random
 import secrets
@@ -1228,6 +1407,21 @@ class BinarySerializer:
 
 app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
+
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# DISTRIBUTED HASH TABLE (DHT) INITIALIZATION
+# ═════════════════════════════════════════════════════════════════════════════════════════
+_dht_manager: Optional[DHTManager] = None
+_dht_lock = threading.RLock()
+
+def get_dht_manager() -> DHTManager:
+    """Get or create global DHT manager"""
+    global _dht_manager
+    if _dht_manager is None:
+        host = os.getenv('FLASK_HOST', '0.0.0.0')
+        port = int(os.getenv('PORT', 8000))
+        _dht_manager = DHTManager(local_address=host, local_port=port)
+    return _dht_manager
 
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
@@ -4976,6 +5170,339 @@ def p2p_discovery():
             'candidate_peers': len(discovery_engine.peer_candidates),
             'tested_peers': len(discovery_engine.tested_peers),
         }), 200
+
+
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# DHT ENDPOINTS — Museum-Grade Peer Discovery and State Storage
+# ═════════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/dht/node', methods=['GET'])
+def dht_local_node():
+    """Get local DHT node information"""
+    dht = get_dht_manager()
+    return jsonify({
+        'node_id': dht.local_node.node_id,
+        'address': dht.local_node.address,
+        'port': dht.local_node.port,
+        'peers': dht.routing_table.count_peers(),
+        'state_entries': len(dht.state_store),
+    }), 200
+
+
+@app.route('/api/dht/peers', methods=['GET'])
+def dht_peers():
+    """Get all known DHT peers"""
+    dht = get_dht_manager()
+    peers = dht.routing_table.get_all_nodes()
+    return jsonify({
+        'count': len(peers),
+        'peers': [
+            {
+                'node_id': p.node_id,
+                'address': p.address,
+                'port': p.port,
+                'last_seen': p.last_seen,
+                'failed_pings': p.failed_pings,
+                'alive': p.is_alive(),
+            }
+            for p in peers
+        ]
+    }), 200
+
+
+@app.route('/api/dht/add-peer', methods=['POST'])
+def dht_add_peer():
+    """Add a peer to DHT routing table"""
+    data = request.get_json() or {}
+    node_id = data.get('node_id')
+    address = data.get('address')
+    port = data.get('port', 8000)
+    
+    if not node_id or not address:
+        return jsonify({'error': 'Missing node_id or address'}), 400
+    
+    dht = get_dht_manager()
+    node = DHTNode(node_id=node_id, address=address, port=port)
+    success = dht.routing_table.add_node(node)
+    
+    return jsonify({
+        'success': success,
+        'peer_count': dht.routing_table.count_peers(),
+    }), 200
+
+
+@app.route('/api/dht/lookup/<target_id>', methods=['GET'])
+def dht_lookup(target_id: str):
+    """Find nodes closest to target ID"""
+    dht = get_dht_manager()
+    closest = dht.find_node(target_id)
+    return jsonify({
+        'target': target_id,
+        'results': len(closest),
+        'nodes': [
+            {
+                'node_id': n.node_id,
+                'address': n.address,
+                'port': n.port,
+                'distance_xor': hex(n.distance_to(target_id)),
+            }
+            for n in closest[:20]
+        ]
+    }), 200
+
+
+@app.route('/api/dht/state/store', methods=['POST'])
+def dht_store_state():
+    """Store state in DHT"""
+    data = request.get_json() or {}
+    key = data.get('key')
+    value = data.get('value')
+    
+    if not key or value is None:
+        return jsonify({'error': 'Missing key or value'}), 400
+    
+    dht = get_dht_manager()
+    success = dht.store_state(key, value)
+    
+    return jsonify({
+        'success': success,
+        'key': key,
+        'state_entries': len(dht.state_store),
+    }), 200
+
+
+@app.route('/api/dht/state/retrieve/<key>', methods=['GET'])
+def dht_retrieve_state(key: str):
+    """Retrieve state from DHT"""
+    dht = get_dht_manager()
+    value = dht.retrieve_state(key)
+    
+    if value is None:
+        return jsonify({'error': 'Key not found'}), 404
+    
+    return jsonify({
+        'key': key,
+        'value': value,
+    }), 200
+
+
+@app.route('/api/dht/stats', methods=['GET'])
+def dht_stats():
+    """Get DHT statistics"""
+    dht = get_dht_manager()
+    peers = dht.routing_table.get_all_nodes()
+    alive_count = sum(1 for p in peers if p.is_alive())
+    
+    return jsonify({
+        'total_peers': len(peers),
+        'alive_peers': alive_count,
+        'dead_peers': len(peers) - alive_count,
+        'state_entries': len(dht.state_store),
+        'lookup_cache_size': len(dht.lookup_cache),
+        'local_node_id': dht.local_node.node_id,
+    }), 200
+
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# UTXO MEMPOOL REST ENDPOINTS — Museum-Grade Transaction Management
+# ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/utxo/mempool', methods=['GET'])
+def utxo_mempool():
+    """Get pending transactions in UTXO mempool (sorted by fee)"""
+    try:
+        from mempool import get_mempool
+        mempool = get_mempool()
+        
+        limit = request.args.get('limit', 100, type=int)
+        min_fee = request.args.get('min_fee', 0, type=int)
+        
+        pending_txs = mempool.get_pending_transactions(limit=limit, min_fee=min_fee)
+        
+        return jsonify({
+            'count': len(pending_txs),
+            'limit': limit,
+            'min_fee': min_fee,
+            'transactions': [tx.to_dict() for tx in pending_txs],
+            'stats': mempool.get_stats(),
+        }), 200
+    except Exception as e:
+        logger.error(f"[UTXO-MEMPOOL] Error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/utxo/submit-transaction', methods=['POST'])
+def utxo_submit_transaction():
+    """
+    Submit a UTXO transaction to mempool.
+    
+    Request body:
+    {
+        "inputs": [{"previous_tx_hash": "...", "previous_output_index": 0, "script_sig": "..."}],
+        "outputs": [{"amount": 500, "address": "qtcl1..."}],
+        "lock_time": 0
+    }
+    """
+    try:
+        from mempool import get_mempool, Transaction, TransactionInput, TransactionOutput
+        
+        data = request.get_json() or {}
+        
+        # Parse inputs
+        inputs = [
+            TransactionInput(**inp) for inp in data.get('inputs', [])
+        ]
+        
+        # Parse outputs
+        outputs = [
+            TransactionOutput(**out) for out in data.get('outputs', [])
+        ]
+        
+        if not inputs or not outputs:
+            return jsonify({'error': 'Missing inputs or outputs'}), 400
+        
+        # Create transaction
+        tx = Transaction(
+            inputs=inputs,
+            outputs=outputs,
+            lock_time=data.get('lock_time', 0),
+            version=data.get('version', 1)
+        )
+        
+        # Submit to mempool
+        mempool = get_mempool()
+        accepted, message = mempool.accept_transaction(tx)
+        
+        return jsonify({
+            'accepted': accepted,
+            'message': message,
+            'tx_hash': tx.tx_hash,
+            'fee_sats': tx.fee_sats,
+            'mempool_size': len(mempool.pending_txs),
+        }), 200 if accepted else 400
+    
+    except Exception as e:
+        logger.error(f"[UTXO-SUBMIT] Error: {e}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/utxo/transaction/<tx_hash>', methods=['GET'])
+def utxo_get_transaction(tx_hash: str):
+    """Get transaction by hash"""
+    try:
+        from mempool import get_mempool
+        mempool = get_mempool()
+        
+        tx = mempool.get_transaction(tx_hash)
+        
+        if tx is None:
+            return jsonify({'error': 'Transaction not found'}), 404
+        
+        return jsonify({
+            'tx_hash': tx.tx_hash,
+            'transaction': tx.to_dict(),
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"[UTXO-GET-TX] Error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/utxo/address/<address>/balance', methods=['GET'])
+def utxo_address_balance(address: str):
+    """Get UTXO balance for address"""
+    try:
+        from mempool import get_mempool
+        mempool = get_mempool()
+        
+        balance = mempool.utxo_set.get_address_balance(address)
+        utxos = mempool.utxo_set.get_address_utxos(address)
+        
+        return jsonify({
+            'address': address,
+            'balance_sats': balance,
+            'balance_qtcl': balance / 100.0,
+            'utxo_count': len(utxos),
+            'utxos': [
+                {
+                    'tx_hash': key[0],
+                    'output_index': key[1],
+                    'amount_sats': utxo.amount,
+                    'amount_qtcl': utxo.amount / 100.0,
+                }
+                for key, utxo in utxos
+            ]
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"[UTXO-BALANCE] Error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/utxo/stats', methods=['GET'])
+def utxo_stats():
+    """Get UTXO set statistics"""
+    try:
+        from mempool import get_mempool
+        mempool = get_mempool()
+        
+        return jsonify({
+            'mempool': mempool.get_stats(),
+            'utxo_set': mempool.utxo_set.stats_snapshot(),
+            'validator': mempool.validator.stats_snapshot(),
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"[UTXO-STATS] Error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/mining/build-transactions', methods=['POST'])
+def mining_build_transactions():
+    """
+    Build transaction list for block (miners use this).
+    
+    Request body:
+    {
+        "block_height": 62,
+        "miner_address": "qtcl1...",
+        "block_reward_sats": 1250,
+        "limit": 100
+    }
+    
+    Returns: [coinbase_tx, tx1, tx2, ...]
+    """
+    try:
+        from blockchain_entropy_mining import BlockSealer
+        
+        data = request.get_json() or {}
+        block_height = data.get('block_height', 0)
+        miner_address = data.get('miner_address', '')
+        block_reward_sats = data.get('block_reward_sats', 1250)
+        limit = data.get('limit', 100)
+        
+        if not miner_address:
+            return jsonify({'error': 'Missing miner_address'}), 400
+        
+        sealer = BlockSealer()
+        txs = sealer.build_transaction_list(
+            block_height=block_height,
+            miner_address=miner_address,
+            block_reward_sats=block_reward_sats,
+            limit=limit
+        )
+        
+        return jsonify({
+            'block_height': block_height,
+            'tx_count': len(txs),
+            'transactions': txs,
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"[MINING-BUILD-TX] Error: {e}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 
 @app.errorhandler(404)

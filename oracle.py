@@ -669,10 +669,57 @@ class HLWEVerifier:
 # ORACLE W-STATE MANAGER
 # ═════════════════════════════════════════════════════════════════════════════════
 
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# TEMPORAL ANCHOR POINTS — QUANTUM TIMESTAMPS VIA COHERENCE DECAY
+# ═════════════════════════════════════════════════════════════════════════════════════════
+@dataclass
+class TemporalAnchorPoint:
+    """
+    Museum-Grade Temporal Anchor: W-state coherence as immutable quantum timestamp.
+    
+    Physics: C(t) = C_0 * exp(-t / τ)  where τ ≈ 100ms
+    Given C_measured, can infer elapsed time: t = -τ * ln(C_measured / C_0)
+    Cannot fake: Coherence decay is physical law
+    """
+    wall_clock_ns: int
+    coherence_at_emission: float
+    decoherence_tau_ms: float = 100.0
+    block_height: int = 0
+    w_entropy_hash: str = ""
+    temporal_anchor_id: str = field(default_factory=lambda: hashlib.blake3(secrets.token_bytes(32)).hexdigest()[:16])
+    
+    def infer_elapsed_time_ms(self, coherence_measured: float) -> float:
+        """Infer elapsed time since emission by measuring coherence decay."""
+        if coherence_measured > self.coherence_at_emission * 1.01:
+            raise ValueError(f"Impossible coherence increase: {coherence_measured:.4f} > {self.coherence_at_emission:.4f}")
+        if coherence_measured <= 0 or self.coherence_at_emission <= 0:
+            return float('inf')
+        ratio = coherence_measured / self.coherence_at_emission
+        elapsed_ms = -self.decoherence_tau_ms * np.log(ratio)
+        return max(0.0, elapsed_ms)
+    
+    def infer_block_timestamp_ns(self, coherence_measured: float) -> int:
+        """Infer block timestamp (ns) by coherence decay."""
+        elapsed_ms = self.infer_elapsed_time_ms(coherence_measured)
+        elapsed_ns = int(elapsed_ms * 1_000_000)
+        return self.wall_clock_ns + elapsed_ns
+    
+    def is_stale(self, coherence_measured: float, max_age_ms: float = 2000.0) -> bool:
+        """Check if snapshot is too old based on coherence."""
+        return self.infer_elapsed_time_ms(coherence_measured) > max_age_ms
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+    
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> 'TemporalAnchorPoint':
+        return TemporalAnchorPoint(**data)
+
+
 class OracleWStateManager:
     """
     Manages W-state snapshots, quantum simulation, density matrix buffer,
-    and P2P client synchronization.
+    temporal anchoring, and P2P client synchronization.
     """
 
     def __init__(self):
@@ -690,6 +737,12 @@ class OracleWStateManager:
         self.oracle_signer: Optional['OracleEngine'] = None
         self._state_lock = threading.Lock()
         self._client_lock = threading.Lock()
+        
+        # ═══ Temporal Anchor Points (Museum-Grade) ═══
+        self.temporal_anchors: OrderedDict[str, TemporalAnchorPoint] = OrderedDict()
+        self.temporal_anchor_buffer: deque = deque(maxlen=1000)  # Keep last 1000 anchors
+        self.current_block_height: int = 0
+        self._temporal_lock = threading.RLock()
 
     def set_oracle_signer(self, oracle_engine: 'OracleEngine'):
         """Wire the oracle engine so we can sign W-state snapshots."""
@@ -879,11 +932,92 @@ class OracleWStateManager:
                 sync.last_density_matrix_timestamp = snapshot.timestamp_ns
                 sync.last_sync_ns = time.time_ns()
 
+    def create_temporal_anchor(self, snapshot: Optional[DensityMatrixSnapshot] = None) -> Optional[TemporalAnchorPoint]:
+        """
+        Museum-Grade: Create temporal anchor from current W-state snapshot.
+        
+        This embeds the snapshot's coherence as a quantum timestamp. Miners can later
+        verify staleness by measuring coherence decay without trusting wall-clock time.
+        
+        Returns:
+            TemporalAnchorPoint with embedded coherence baseline, or None if snapshot unavailable
+        """
+        with self._state_lock, self._temporal_lock:
+            if snapshot is None:
+                snapshot = self.current_density_matrix
+            if snapshot is None:
+                logger.warning("[TEMPORAL] ❌ Cannot create anchor: no snapshot available")
+                return None
+            
+            # Use geometric mean of coherence metrics as baseline
+            coherence_baseline = snapshot.coherence_geometric if snapshot.coherence_geometric > 0 else snapshot.coherence_l1
+            
+            anchor = TemporalAnchorPoint(
+                wall_clock_ns=int(time.time_ns()),
+                coherence_at_emission=coherence_baseline,
+                decoherence_tau_ms=100.0,  # Tunable based on oracle hardware
+                block_height=self.current_block_height,
+                w_entropy_hash=snapshot.w_entropy_hash,
+                temporal_anchor_id=hashlib.blake3(
+                    f"{snapshot.w_entropy_hash}:{self.current_block_height}:{time.time_ns()}".encode()
+                ).hexdigest()[:16]
+            )
+            
+            self.temporal_anchors[anchor.temporal_anchor_id] = anchor
+            self.temporal_anchor_buffer.append(anchor)
+            
+            logger.info(
+                f"[TEMPORAL] ✅ Anchor created | id={anchor.temporal_anchor_id} | "
+                f"C_baseline={coherence_baseline:.4f} | height={self.current_block_height}"
+            )
+            return anchor
+    
+    def verify_snapshot_staleness(self, snapshot: Dict[str, Any], coherence_measured: Optional[float] = None) -> Tuple[bool, float]:
+        """
+        Verify if snapshot is too stale based on coherence decay.
+        
+        Returns:
+            (is_fresh, elapsed_time_ms) — is_fresh=True if < 2 seconds old
+        """
+        with self._temporal_lock:
+            # Use current coherence if not provided
+            if coherence_measured is None:
+                if self.current_density_matrix:
+                    coherence_measured = self.current_density_matrix.coherence_geometric
+                else:
+                    return True, 0.0
+            
+            # Get most recent anchor
+            if not self.temporal_anchor_buffer:
+                return True, 0.0
+            
+            latest_anchor = self.temporal_anchor_buffer[-1]
+            try:
+                elapsed_ms = latest_anchor.infer_elapsed_time_ms(coherence_measured)
+                is_fresh = not latest_anchor.is_stale(coherence_measured, max_age_ms=2000.0)
+                
+                if not is_fresh:
+                    logger.warning(
+                        f"[TEMPORAL] ⚠️  Snapshot stale | elapsed={elapsed_ms:.1f}ms | "
+                        f"C_measured={coherence_measured:.4f} | anchor_C={latest_anchor.coherence_at_emission:.4f}"
+                    )
+                
+                return is_fresh, elapsed_ms
+            except ValueError as e:
+                logger.error(f"[TEMPORAL] ❌ Staleness check failed: {e}")
+                return False, 0.0
+
     def get_latest_density_matrix(self) -> Optional[Dict[str, Any]]:
-        with self._state_lock:
+        with self._state_lock, self._temporal_lock:
             if self.current_density_matrix is None: return None
             s = self.current_density_matrix
-            return {
+            
+            # Get latest temporal anchor for this snapshot
+            latest_anchor = None
+            if self.temporal_anchor_buffer:
+                latest_anchor = self.temporal_anchor_buffer[-1]
+            
+            result = {
                 "timestamp_ns": s.timestamp_ns, "density_matrix_hex": s.density_matrix_hex,
                 "purity": s.purity, "von_neumann_entropy": s.von_neumann_entropy,
                 "coherence_l1": s.coherence_l1, "coherence_renyi": s.coherence_renyi,
@@ -894,7 +1028,10 @@ class OracleWStateManager:
                 "entanglement_witness": s.entanglement_witness, "trace_purity": s.trace_purity,
                 "w_entropy_hash": s.w_entropy_hash, "hlwe_signature": s.hlwe_signature,
                 "oracle_address": s.oracle_address, "signature_valid": s.signature_valid,
+                # Museum-Grade: Include temporal anchor for quantum timestamp verification
+                "temporal_anchor": latest_anchor.to_dict() if latest_anchor else None,
             }
+            return result
 
     def get_density_matrix_stream(self, limit: int = 100) -> List[Dict[str, Any]]:
         with self._state_lock:

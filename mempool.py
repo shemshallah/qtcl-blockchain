@@ -39,6 +39,7 @@ import logging
 import time
 import json
 import hashlib
+import secrets
 import psycopg2
 import psycopg2.extras
 from typing import Dict, Any, Optional, List, Callable, Tuple
@@ -77,6 +78,168 @@ POOLER_URL = (
     f"{quote_plus(POOLER_PASSWORD)}@"
     f"{POOLER_HOST}:{POOLER_PORT}/{POOLER_DB}"
 )
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# UTXO TRANSACTION SYSTEM — Museum-Grade Bitcoin-Like Transactions
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class TransactionInput:
+    """Transaction input: references previous UTXO (txid + vout index)"""
+    previous_tx_hash: str
+    previous_output_index: int
+    script_sig: str = ""
+    sequence: int = 0xffffffff
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {'previous_tx_hash': self.previous_tx_hash, 'previous_output_index': self.previous_output_index,
+                'script_sig': self.script_sig, 'sequence': self.sequence}
+    
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> 'TransactionInput':
+        return TransactionInput(**data)
+
+
+@dataclass
+class TransactionOutput:
+    """Transaction output: unspent transaction output (UTXO)"""
+    amount: int  # Base units
+    address: str  # Recipient address
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {'amount': self.amount, 'address': self.address}
+    
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> 'TransactionOutput':
+        return TransactionOutput(**data)
+
+
+class Transaction:
+    """Museum-Grade Bitcoin-Like Transaction with UTXO model"""
+    
+    def __init__(self, inputs: List[TransactionInput], outputs: List[TransactionOutput],
+                 lock_time: int = 0, version: int = 1, tx_hash: Optional[str] = None):
+        self.version = version
+        self.inputs = inputs
+        self.outputs = outputs
+        self.lock_time = lock_time
+        self.tx_hash = tx_hash or self._compute_hash()
+        self.timestamp_ns = int(time.time() * 1e9)
+        self.fee_sats = 0
+    
+    def _compute_hash(self) -> str:
+        serialized = self._serialize()
+        tx_hash = hashlib.blake3(serialized.encode()).hexdigest()
+        return tx_hash
+    
+    def _serialize(self) -> str:
+        data = {'version': self.version, 'inputs': [inp.to_dict() for inp in self.inputs],
+                'outputs': [out.to_dict() for out in self.outputs], 'lock_time': self.lock_time}
+        return json.dumps(data, separators=(',', ':'), sort_keys=True)
+    
+    def compute_fee(self, input_total: int) -> int:
+        output_total = sum(out.amount for out in self.outputs)
+        self.fee_sats = input_total - output_total
+        return self.fee_sats
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {'tx_hash': self.tx_hash, 'version': self.version,
+                'inputs': [inp.to_dict() for inp in self.inputs],
+                'outputs': [out.to_dict() for out in self.outputs],
+                'lock_time': self.lock_time, 'fee_sats': self.fee_sats, 'timestamp_ns': self.timestamp_ns}
+    
+    @staticmethod
+    def from_dict(data: Dict[str, Any]) -> 'Transaction':
+        tx = Transaction(version=data.get('version', 1),
+                        inputs=[TransactionInput.from_dict(inp) for inp in data.get('inputs', [])],
+                        outputs=[TransactionOutput.from_dict(out) for out in data.get('outputs', [])],
+                        lock_time=data.get('lock_time', 0), tx_hash=data.get('tx_hash'))
+        tx.fee_sats = data.get('fee_sats', 0)
+        tx.timestamp_ns = data.get('timestamp_ns', int(time.time() * 1e9))
+        return tx
+    
+    @staticmethod
+    def create_coinbase(block_height: int, miner_address: str, reward_sats: int) -> 'Transaction':
+        """Create coinbase transaction (block reward)"""
+        coinbase_input = TransactionInput(previous_tx_hash="00" * 32, previous_output_index=0xffffffff,
+                                        script_sig=str(block_height), sequence=0xffffffff)
+        miner_output = TransactionOutput(amount=reward_sats, address=miner_address)
+        tx = Transaction(version=1, inputs=[coinbase_input], outputs=[miner_output], lock_time=0)
+        return tx
+
+
+class UTXOSet:
+    """Museum-Grade UTXO Set: tracks unspent transaction outputs"""
+    
+    def __init__(self):
+        self.utxos: Dict[Tuple[str, int], TransactionOutput] = {}
+        self.lock = threading.RLock()
+        self.stats = {'total_utxos': 0, 'total_value': 0, 'changes': 0}
+    
+    def add_utxo(self, tx_hash: str, output_index: int, output: TransactionOutput) -> bool:
+        with self.lock:
+            key = (tx_hash, output_index)
+            if key in self.utxos: return False
+            self.utxos[key] = output
+            self.stats['total_utxos'] += 1
+            self.stats['total_value'] += output.amount
+            self.stats['changes'] += 1
+            return True
+    
+    def spend_utxo(self, tx_hash: str, output_index: int) -> Optional[TransactionOutput]:
+        with self.lock:
+            key = (tx_hash, output_index)
+            utxo = self.utxos.pop(key, None)
+            if utxo:
+                self.stats['total_utxos'] -= 1
+                self.stats['total_value'] -= utxo.amount
+                self.stats['changes'] += 1
+            return utxo
+    
+    def get_utxo(self, tx_hash: str, output_index: int) -> Optional[TransactionOutput]:
+        with self.lock:
+            return self.utxos.get((tx_hash, output_index))
+    
+    def get_address_balance(self, address: str) -> int:
+        with self.lock:
+            return sum(utxo.amount for utxo in self.utxos.values() if utxo.address == address)
+    
+    def count(self) -> int:
+        with self.lock:
+            return len(self.utxos)
+
+
+class TransactionValidator:
+    """Museum-Grade Transaction Validator"""
+    
+    def __init__(self, utxo_set: UTXOSet):
+        self.utxo_set = utxo_set
+        self.stats = {'validated': 0, 'rejected': 0, 'errors': {}}
+        self.lock = threading.RLock()
+    
+    def validate_transaction(self, tx: Transaction) -> Tuple[bool, str]:
+        with self.lock:
+            if not tx.inputs: return False, "No inputs"
+            if not tx.outputs: return False, "No outputs"
+            
+            input_total = 0
+            is_coinbase = tx.inputs[0].previous_tx_hash == "00" * 32
+            
+            if not is_coinbase:
+                for i, inp in enumerate(tx.inputs):
+                    utxo = self.utxo_set.get_utxo(inp.previous_tx_hash, inp.previous_output_index)
+                    if utxo is None: return False, f"Input {i}: UTXO not found"
+                    input_total += utxo.amount
+            else:
+                input_total = sum(out.amount for out in tx.outputs)
+            
+            output_total = sum(out.amount for out in tx.outputs)
+            if output_total > input_total: return False, f"Output sum > input sum"
+            
+            tx.compute_fee(input_total)
+            self.stats['validated'] += 1
+            return True, "OK"
+
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # CONSTANTS & ENUMS
