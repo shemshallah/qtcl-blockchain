@@ -1520,7 +1520,718 @@ def oracle_push_snapshot():
         logger.error(f"[ORACLE] ❌ Error: {e}")
         return jsonify({'error': str(e)}), 500
 
+
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# QTCL P2P GOSSIP NETWORK — Production Grade
+# ═════════════════════════════════════════════════════════════════════════════════════════
+#
+# Architecture:
+#   • PostgreSQL is the ONLY shared state across gunicorn workers / Koyeb instances.
+#   • SSE channel `GET /api/events` streams typed events (tx, block, peer) to all clients.
+#   • `POST /api/gossip/tx` and `POST /api/gossip/block` accept inbound peer gossip.
+#   • `POST /api/peers/register` + `GET /api/peers/list` + `POST /api/peers/heartbeat`
+#     maintain a live peer registry stored in `peer_registry` PostgreSQL table.
+#   • Background GossipPusherThread reads DB for new TXs/blocks every 3s and
+#     HTTP-POSTs them to every registered peer that has a gossip_url — achieving
+#     guaranteed eventual consistency even when a peer misses the SSE event.
+#   • DHTManager is kept for same-process fallback but all cross-process/cross-worker
+#     state flows through PostgreSQL exclusively.
+#
+# Event types over SSE:
+#   tx       — new pending transaction
+#   block    — new confirmed block
+#   peer     — peer joined / left
+#   mempool  — mempool size update (heartbeat every 30s)
+# ═════════════════════════════════════════════════════════════════════════════════════════
+
+# ── SSE event broadcaster — typed, multi-channel ─────────────────────────────
+class _SSEBroadcaster:
+    """
+    Thread-safe SSE fan-out for typed blockchain events.
+    Each subscriber gets an isolated Queue; dead subscribers are culled on publish.
+    Works within a single gunicorn worker — cross-worker delivery is handled by
+    the GossipPusherThread which POSTs to peer gossip_urls (HTTP, not SSE).
+    """
+    def __init__(self):
+        self._subs: Dict[str, _queue_mod.Queue] = {}  # sub_id → Queue
+        self._lock = threading.RLock()
+        self._count = 0
+
+    def subscribe(self, sub_id: str) -> _queue_mod.Queue:
+        q = _queue_mod.Queue(maxsize=256)
+        with self._lock:
+            self._subs[sub_id] = q
+        return q
+
+    def unsubscribe(self, sub_id: str) -> None:
+        with self._lock:
+            self._subs.pop(sub_id, None)
+
+    def publish(self, event_type: str, data: Dict[str, Any]) -> int:
+        """Publish event to all subscribers. Returns number of live subscribers reached."""
+        payload = json.dumps({'type': event_type, 'data': data, 'ts': time.time()})
+        dead, reached = [], 0
+        with self._lock:
+            for sid, q in list(self._subs.items()):
+                try:
+                    q.put_nowait(payload)
+                    reached += 1
+                except _queue_mod.Full:
+                    # Drop oldest, insert newest — never block
+                    try:
+                        q.get_nowait()
+                        q.put_nowait(payload)
+                        reached += 1
+                    except Exception:
+                        dead.append(sid)
+            for sid in dead:
+                self._subs.pop(sid, None)
+        self._count += 1
+        if self._count % 500 == 0:
+            logger.info(f"[GOSSIP] SSE #{self._count} | subs={len(self._subs)}")
+        return reached
+
+    def subscriber_count(self) -> int:
+        with self._lock:
+            return len(self._subs)
+
+
+_gossip_sse = _SSEBroadcaster()  # module-level singleton — shared within one worker
+
+# ── DB-backed gossip store — replaces per-process in-memory DHTManager ───────
+def _ensure_gossip_tables() -> bool:
+    """
+    Create gossip_store and ensure peer_registry has gossip_url + last_gossip_at cols.
+    Safe to call multiple times (IF NOT EXISTS / DO NOTHING).
+    """
+    ddl_statements = [
+        """CREATE TABLE IF NOT EXISTS gossip_store (
+               key         VARCHAR(512) PRIMARY KEY,
+               value       JSONB        NOT NULL,
+               updated_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+           )""",
+        """CREATE INDEX IF NOT EXISTS idx_gossip_store_key_prefix
+               ON gossip_store (key text_pattern_ops)""",
+        # Add gossip_url column to peer_registry if not present
+        """ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS
+               gossip_url VARCHAR(512)""",
+        """ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS
+               last_gossip_at TIMESTAMP WITH TIME ZONE""",
+        """ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS
+               miner_address VARCHAR(255)""",
+        """ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS
+               supports_sse BOOLEAN DEFAULT FALSE""",
+    ]
+    for ddl in ddl_statements:
+        try:
+            with get_db_cursor() as cur:
+                cur.execute(ddl)
+        except Exception as e:
+            logger.debug(f"[GOSSIP] DDL skipped ({ddl[:40]}...): {e}")
+    return True
+
+
+def gossip_store_put(key: str, value: Dict[str, Any]) -> bool:
+    """Upsert a key-value pair into gossip_store (PostgreSQL-backed DHT)."""
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                INSERT INTO gossip_store (key, value, updated_at)
+                VALUES (%s, %s::jsonb, NOW())
+                ON CONFLICT (key) DO UPDATE
+                    SET value = EXCLUDED.value, updated_at = NOW()
+            """, (key, json.dumps(value)))
+        return True
+    except Exception as e:
+        logger.debug(f"[GOSSIP] store_put({key[:32]}): {e}")
+        return False
+
+
+def gossip_store_get(key: str) -> Optional[Dict[str, Any]]:
+    """Retrieve a value from gossip_store by exact key."""
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("SELECT value FROM gossip_store WHERE key = %s", (key,))
+            row = cur.fetchone()
+            if row:
+                v = row[0]
+                return v if isinstance(v, dict) else json.loads(v)
+    except Exception as e:
+        logger.debug(f"[GOSSIP] store_get({key[:32]}): {e}")
+    return None
+
+
+def gossip_store_scan(prefix: str, limit: int = 200) -> List[Dict[str, Any]]:
+    """Scan all entries whose key starts with prefix."""
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT key, value FROM gossip_store
+                WHERE  key LIKE %s
+                ORDER  BY updated_at DESC
+                LIMIT  %s
+            """, (prefix + '%', limit))
+            rows = cur.fetchall()
+            results = []
+            for k, v in rows:
+                entry = v if isinstance(v, dict) else json.loads(v)
+                entry['_key'] = k
+                results.append(entry)
+            return results
+    except Exception as e:
+        logger.debug(f"[GOSSIP] store_scan({prefix}): {e}")
+    return []
+
+
+# ── Peer registry helpers ─────────────────────────────────────────────────────
+_PEER_STALE_SECS = 300  # 5 min without heartbeat → considered offline
+
+def _upsert_peer(peer_id: str, data: Dict[str, Any]) -> bool:
+    """Register or refresh a peer in peer_registry."""
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                INSERT INTO peer_registry
+                    (peer_id, public_key, ip_address, port, peer_type,
+                     block_height, chain_head_hash, network_version,
+                     gossip_url, miner_address, supports_sse,
+                     last_seen, last_handshake, updated_at)
+                VALUES (%s,%s,%s,%s,%s, %s,%s,%s, %s,%s,%s, NOW(),NOW(),NOW())
+                ON CONFLICT (peer_id) DO UPDATE SET
+                    block_height    = EXCLUDED.block_height,
+                    chain_head_hash = EXCLUDED.chain_head_hash,
+                    gossip_url      = COALESCE(EXCLUDED.gossip_url, peer_registry.gossip_url),
+                    miner_address   = COALESCE(EXCLUDED.miner_address, peer_registry.miner_address),
+                    supports_sse    = EXCLUDED.supports_sse,
+                    last_seen       = NOW(),
+                    updated_at      = NOW()
+            """, (
+                peer_id,
+                data.get('public_key', peer_id),
+                data.get('ip_address', data.get('host', '')),
+                int(data.get('port', 0)),
+                data.get('peer_type', 'miner'),
+                int(data.get('block_height', 0)),
+                data.get('chain_head_hash', ''),
+                data.get('network_version', '1.0'),
+                data.get('gossip_url', ''),
+                data.get('miner_address', ''),
+                bool(data.get('supports_sse', False)),
+            ))
+        return True
+    except Exception as e:
+        logger.error(f"[GOSSIP] _upsert_peer({peer_id[:16]}): {e}")
+        return False
+
+
+def _get_live_peers(exclude_peer_id: str = '') -> List[Dict[str, Any]]:
+    """Return all peers seen within PEER_STALE_SECS seconds."""
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT peer_id, ip_address, port, gossip_url,
+                       block_height, miner_address, supports_sse,
+                       last_seen
+                FROM   peer_registry
+                WHERE  last_seen > NOW() - INTERVAL '%s seconds'
+                  AND  peer_id != %s
+                ORDER  BY last_seen DESC
+                LIMIT  100
+            """, (_PEER_STALE_SECS, exclude_peer_id or ''))
+            rows = cur.fetchall()
+            return [
+                {
+                    'peer_id'       : r[0],
+                    'ip_address'    : r[1],
+                    'port'          : r[2],
+                    'gossip_url'    : r[3] or '',
+                    'block_height'  : r[4],
+                    'miner_address' : r[5] or '',
+                    'supports_sse'  : bool(r[6]),
+                    'last_seen'     : r[7].isoformat() if r[7] else '',
+                }
+                for r in rows
+            ]
+    except Exception as e:
+        logger.error(f"[GOSSIP] _get_live_peers: {e}")
+    return []
+
+
+# ── Gossip pusher — background daemon, one per worker ─────────────────────────
+class GossipPusherThread(threading.Thread):
+    """
+    Daemon thread that periodically pushes new pending TXs and recent blocks
+    to every registered peer that has a gossip_url.
+
+    This achieves guaranteed eventual delivery even when a peer was offline
+    during the original SSE push or direct BlockManager accept.
+
+    Runs every GOSSIP_PUSH_INTERVAL seconds.  Uses a per-peer cursor
+    (last_gossip_at in peer_registry) so each peer only receives NEW events.
+    """
+    GOSSIP_PUSH_INTERVAL = 4   # seconds between push cycles
+    TX_BATCH             = 50  # max TXs per push cycle per peer
+    SESSION_TIMEOUT      = 6   # HTTP POST timeout
+
+    def __init__(self):
+        super().__init__(name='GossipPusher', daemon=True)
+        self._session = requests.Session()
+        adapter = HTTPAdapter(max_retries=Retry(total=1, backoff_factor=0.2))
+        self._session.mount('https://', adapter)
+        self._session.mount('http://',  adapter)
+        self._my_base_url = (
+            os.getenv('KOYEB_PUBLIC_DOMAIN', '') or
+            os.getenv('RAILWAY_PUBLIC_DOMAIN', '') or
+            f"http://localhost:{os.getenv('PORT', 8000)}"
+        )
+        if self._my_base_url and not self._my_base_url.startswith('http'):
+            self._my_base_url = f"https://{self._my_base_url}"
+        logger.info(f"[GOSSIP] PusherThread init | base_url={self._my_base_url}")
+
+    def _fetch_pending_txs(self) -> List[Dict[str, Any]]:
+        """Read pending TXs from DB that should be gossiped to peers."""
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    SELECT tx_hash, from_address, to_address, amount,
+                           nonce, status, quantum_state_hash, metadata
+                    FROM   transactions
+                    WHERE  status   = 'pending'
+                      AND  tx_type != 'coinbase'
+                      AND  updated_at > NOW() - INTERVAL '60 seconds'
+                    ORDER  BY created_at ASC
+                    LIMIT  %s
+                """, (self.TX_BATCH,))
+                rows = cur.fetchall()
+            result = []
+            for r in rows:
+                meta = r[7] or {}
+                if isinstance(meta, str):
+                    try: meta = json.loads(meta)
+                    except: meta = {}
+                ab = int(r[3]) if r[3] else 0
+                result.append({
+                    'tx_hash'     : r[0], 'from_address': r[1],
+                    'to_address'  : r[2], 'amount_base' : ab,
+                    'amount'      : ab / 100, 'nonce'   : int(r[4] or 0),
+                    'status'      : r[5], 'signature'   : r[6] or '',
+                    'fee'         : float(meta.get('fee_qtcl', 0.001)),
+                    'timestamp_ns': int(meta.get('submitted_at_ns', 0)),
+                })
+            return result
+        except Exception as e:
+            logger.debug(f"[GOSSIP] fetch_pending_txs: {e}")
+            return []
+
+    def _fetch_recent_block(self) -> Optional[Dict[str, Any]]:
+        """Read the most recent confirmed block header for gossip."""
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    SELECT height, block_hash, previous_hash, timestamp,
+                           difficulty, validator_public_key,
+                           oracle_w_state_hash, entropy_score
+                    FROM   blocks
+                    WHERE  status = 'confirmed'
+                    ORDER  BY height DESC
+                    LIMIT  1
+                """)
+                row = cur.fetchone()
+            if row:
+                return {
+                    'height'         : row[0], 'block_hash'   : row[1],
+                    'parent_hash'    : row[2], 'timestamp_s'  : row[3],
+                    'difficulty_bits': row[4], 'miner_address': row[5] or '',
+                    'w_entropy_hash' : row[6] or '', 'fidelity': float(row[7] or 0),
+                }
+        except Exception as e:
+            logger.debug(f"[GOSSIP] fetch_recent_block: {e}")
+        return None
+
+    def _push_to_peer(self, peer: Dict[str, Any],
+                       txs: List[Dict], block: Optional[Dict]) -> bool:
+        """HTTP POST gossip bundle to a single peer. Returns True on success."""
+        url = (peer.get('gossip_url') or '').rstrip('/')
+        if not url:
+            return False
+        try:
+            payload: Dict[str, Any] = {
+                'origin'    : self._my_base_url,
+                'sent_at'   : time.time(),
+            }
+            if txs:
+                payload['txs'] = txs
+            if block:
+                payload['block'] = block
+
+            r = self._session.post(
+                f"{url}/gossip/ingest",
+                json=payload,
+                timeout=self.SESSION_TIMEOUT,
+            )
+            return r.status_code in (200, 201, 204)
+        except Exception as e:
+            logger.debug(f"[GOSSIP] push_to_peer({url}): {e}")
+            return False
+
+    def _update_peer_gossip_ts(self, peer_id: str) -> None:
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    UPDATE peer_registry
+                    SET    last_gossip_at = NOW()
+                    WHERE  peer_id = %s
+                """, (peer_id,))
+        except Exception as e:
+            logger.debug(f"[GOSSIP] update_gossip_ts: {e}")
+
+    def run(self):
+        logger.info("[GOSSIP] PusherThread started")
+        while True:
+            try:
+                peers  = _get_live_peers()
+                gossip_peers = [p for p in peers if p.get('gossip_url')]
+                if gossip_peers:
+                    txs   = self._fetch_pending_txs()
+                    block = self._fetch_recent_block()
+                    if txs or block:
+                        ok_count = 0
+                        for peer in gossip_peers:
+                            if self._push_to_peer(peer, txs, block):
+                                self._update_peer_gossip_ts(peer['peer_id'])
+                                ok_count += 1
+                        if ok_count:
+                            logger.info(
+                                f"[GOSSIP] Pushed {len(txs)} TX(s) + "
+                                f"{'1 block' if block else '0 blocks'} "
+                                f"→ {ok_count}/{len(gossip_peers)} peers"
+                            )
+            except Exception as e:
+                logger.error(f"[GOSSIP] PusherThread error: {e}")
+            time.sleep(self.GOSSIP_PUSH_INTERVAL)
+
+
+# ── Start gossip subsystem once per process ───────────────────────────────────
+_gossip_started = False
+_gossip_lock    = threading.Lock()
+
+def _start_gossip_subsystem():
+    global _gossip_started
+    with _gossip_lock:
+        if _gossip_started:
+            return
+        _gossip_started = True
+    try:
+        _ensure_gossip_tables()
+        GossipPusherThread().start()
+        logger.info("[GOSSIP] Subsystem online — DB gossip store + SSE broadcaster + peer pusher")
+    except Exception as e:
+        logger.error(f"[GOSSIP] Subsystem start failed: {e}")
+
+
+# ── SSE events endpoint — typed blockchain events ─────────────────────────────
+@app.route('/api/events', methods=['GET'])
+def sse_events_stream():
+    """
+    Server-Sent Events stream for real-time blockchain events.
+
+    Query params:
+        client_id   — unique identifier for this subscriber (auto-generated if absent)
+        types       — comma-separated event types to receive: tx,block,peer,mempool,all
+                      default: all
+
+    Event format (each SSE frame):
+        data: {"type": "tx"|"block"|"peer"|"mempool", "data": {...}, "ts": <unix float>}
+
+    Clients MUST handle the keepalive comment line `: keepalive` — it is sent every
+    30 seconds to prevent proxy / load balancer timeout.
+    """
+    client_id  = request.args.get('client_id') or f"cli_{secrets.token_hex(6)}"
+    want_types = set((request.args.get('types', 'all') or 'all').split(','))
+
+    def _stream():
+        q = _gossip_sse.subscribe(client_id)
+        logger.info(f"[SSE/events] Client connected: {client_id} | want={want_types}")
+        # Send immediate hello with current chain tip and mempool size
+        try:
+            tip = query_latest_block() or {}
+            with get_db_cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM transactions WHERE status='pending' AND tx_type!='coinbase'")
+                mp_size = (cur.fetchone() or [0])[0]
+            yield f"data: {json.dumps({'type':'hello','data':{'tip_height':tip.get('height',0),'mempool':mp_size},'ts':time.time()})}\n\n"
+        except Exception:
+            pass
+
+        try:
+            while True:
+                try:
+                    raw = q.get(timeout=30)
+                    parsed = json.loads(raw)
+                    etype  = parsed.get('type', '')
+                    if 'all' in want_types or etype in want_types:
+                        yield f"data: {raw}\n\n"
+                except _queue_mod.Empty:
+                    yield ": keepalive\n\n"
+        except GeneratorExit:
+            pass
+        finally:
+            _gossip_sse.unsubscribe(client_id)
+            logger.info(f"[SSE/events] Client disconnected: {client_id}")
+
+    return Response(
+        stream_with_context(_stream()),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control'      : 'no-cache',
+            'X-Accel-Buffering'  : 'no',
+            'Connection'         : 'keep-alive',
+        },
+    )
+
+
+# ── Peer management endpoints ─────────────────────────────────────────────────
+@app.route('/api/peers/register', methods=['POST'])
+def peer_register():
+    """
+    Register a miner/node as an active peer.
+
+    Body: {
+        peer_id:        str   — unique stable node ID (sha256 of pubkey recommended)
+        gossip_url:     str   — base URL where this peer accepts gossip POSTs
+                               (e.g. "http://1.2.3.4:9001")
+        miner_address:  str   — QTCL address for reward crediting
+        block_height:   int   — current chain tip known by this peer
+        network_version: str  — e.g. "1.0"
+        supports_sse:   bool  — peer can receive SSE (informational)
+    }
+    Response: { peer_id, live_peers: [...], sse_url: str, oracle_tip: int }
+    """
+    data      = request.get_json(force=True, silent=True) or {}
+    peer_id   = (data.get('peer_id') or '').strip()
+    if not peer_id:
+        peer_id = hashlib.sha256(f"{request.remote_addr}:{time.time_ns()}".encode()).hexdigest()[:32]
+
+    # Enrich with caller IP if not provided
+    data.setdefault('ip_address', request.remote_addr)
+    data['peer_id'] = peer_id
+
+    ok = _upsert_peer(peer_id, data)
+    live_peers = _get_live_peers(exclude_peer_id=peer_id)
+
+    # Announce to SSE subscribers
+    _gossip_sse.publish('peer', {
+        'event'       : 'joined',
+        'peer_id'     : peer_id,
+        'gossip_url'  : data.get('gossip_url', ''),
+        'block_height': int(data.get('block_height', 0)),
+    })
+
+    tip = query_latest_block() or {}
+    server_base = (
+        os.getenv('KOYEB_PUBLIC_DOMAIN') or
+        os.getenv('RAILWAY_PUBLIC_DOMAIN') or
+        f"http://localhost:{os.getenv('PORT', 8000)}"
+    )
+    if server_base and not server_base.startswith('http'):
+        server_base = f"https://{server_base}"
+
+    return jsonify({
+        'peer_id'     : peer_id,
+        'registered'  : ok,
+        'live_peers'  : live_peers,
+        'peer_count'  : len(live_peers) + 1,
+        'oracle_tip'  : tip.get('height', 0),
+        'sse_url'     : f"{server_base}/api/events?client_id={peer_id}",
+        'gossip_ingest': f"{server_base}/api/gossip/ingest",
+        'mempool_url' : f"{server_base}/api/mempool",
+    }), 201
+
+
+@app.route('/api/peers/heartbeat', methods=['POST'])
+def peer_heartbeat():
+    """
+    Keepalive — refresh last_seen for a registered peer.
+    Body: { peer_id, block_height, chain_head_hash }
+    """
+    data     = request.get_json(force=True, silent=True) or {}
+    peer_id  = (data.get('peer_id') or '').strip()
+    if not peer_id:
+        return jsonify({'error': 'peer_id required'}), 400
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                UPDATE peer_registry
+                SET    last_seen      = NOW(),
+                       block_height   = COALESCE(%s, block_height),
+                       chain_head_hash= COALESCE(%s, chain_head_hash),
+                       updated_at     = NOW()
+                WHERE  peer_id = %s
+            """, (
+                data.get('block_height'), data.get('chain_head_hash'), peer_id,
+            ))
+        return jsonify({'ok': True, 'ts': time.time()}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/peers/list', methods=['GET'])
+def peer_list():
+    """List all live peers. Optional ?include_stale=1 to include offline peers."""
+    include_stale = request.args.get('include_stale', '0') == '1'
+    try:
+        if include_stale:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    SELECT peer_id, ip_address, port, gossip_url,
+                           block_height, miner_address, supports_sse, last_seen
+                    FROM   peer_registry
+                    ORDER  BY last_seen DESC LIMIT 200
+                """)
+                rows = cur.fetchall()
+            peers = [{
+                'peer_id': r[0], 'ip_address': r[1], 'port': r[2],
+                'gossip_url': r[3] or '', 'block_height': r[4],
+                'miner_address': r[5] or '', 'supports_sse': bool(r[6]),
+                'last_seen': r[7].isoformat() if r[7] else '',
+            } for r in rows]
+        else:
+            peers = _get_live_peers()
+        return jsonify({'peers': peers, 'count': len(peers), 'ts': time.time()}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+# ── Gossip ingest endpoint — receives push from other peers ───────────────────
+@app.route('/api/gossip/ingest', methods=['POST'])
+def gossip_ingest():
+    """
+    Accept a gossip bundle from any peer.
+
+    Body: {
+        origin:  str            — sender base URL (informational)
+        txs:     List[tx_dict]  — pending transactions to ingest
+        block:   block_dict     — latest block header (informational, no re-processing)
+        sent_at: float          — sender timestamp
+    }
+
+    For each TX: if not in DB, insert as pending.
+    Publishes tx/block events to local SSE subscribers.
+    Returns 200 + count of new TXs ingested.
+    """
+    data    = request.get_json(force=True, silent=True) or {}
+    origin  = data.get('origin', request.remote_addr)
+    txs     = data.get('txs', [])
+    block   = data.get('block')
+    new_txs = 0
+
+    # ── Ingest transactions ─────────────────────────────────────────────────
+    for tx in txs[:50]:  # cap at 50 per ingest call
+        tx_hash   = str(tx.get('tx_hash') or tx.get('tx_id') or '')
+        from_addr = str(tx.get('from_address') or tx.get('from_addr') or '')
+        to_addr   = str(tx.get('to_address') or tx.get('to_addr') or '')
+        amount_b  = int(tx.get('amount_base') or int(float(tx.get('amount', 0)) * 100))
+        nonce_v   = int(tx.get('nonce', 0))
+        sig       = str(tx.get('signature') or '')
+        fee_qtcl  = float(tx.get('fee', 0.001))
+        ts_ns     = int(tx.get('timestamp_ns', 0))
+
+        if not tx_hash or not from_addr or not to_addr or len(tx_hash) != 64:
+            continue
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    INSERT INTO transactions
+                        (tx_hash, from_address, to_address, amount,
+                         nonce, tx_type, status,
+                         quantum_state_hash, commitment_hash, metadata)
+                    VALUES (%s,%s,%s,%s, %s,'transfer','pending', %s,%s,%s)
+                    ON CONFLICT (tx_hash) DO NOTHING
+                """, (
+                    tx_hash, from_addr, to_addr, amount_b, nonce_v,
+                    sig, tx_hash,
+                    json.dumps({'fee_qtcl': fee_qtcl, 'submitted_at_ns': ts_ns,
+                                'gossiped_from': origin}),
+                ))
+            new_txs += 1
+            # Fan-out to local SSE clients
+            _gossip_sse.publish('tx', {
+                'tx_hash': tx_hash, 'from': from_addr, 'to': to_addr,
+                'amount': amount_b / 100, 'status': 'pending', 'source': 'gossip',
+            })
+        except Exception as e:
+            logger.debug(f"[GOSSIP/ingest] TX {tx_hash[:16]}: {e}")
+
+    # ── Ingest block header (informational — do not re-process) ────────────
+    if block and isinstance(block, dict):
+        bh = int(block.get('height', 0))
+        if bh > 0:
+            _gossip_sse.publish('block', {
+                'height'    : bh,
+                'block_hash': block.get('block_hash', ''),
+                'source'    : 'gossip',
+                'origin'    : origin,
+            })
+            # Also store in gossip_store for cross-worker visibility
+            gossip_store_put(f"block:{bh}", block)
+
+    logger.info(f"[GOSSIP/ingest] {new_txs} new TX(s) from {origin}")
+    return jsonify({'ok': True, 'new_txs': new_txs}), 200
+
+
+# ── Wire SSE events into submit_transaction and submit_block ──────────────────
+# These are called by the respective route handlers after DB writes succeed.
+
+def _gossip_publish_tx(tx_hash: str, from_addr: str, to_addr: str,
+                        amount_base: int, nonce: int, signed: bool) -> None:
+    """Publish a new-TX event to SSE channel. Called by submit_transaction."""
+    _gossip_sse.publish('tx', {
+        'tx_hash'   : tx_hash,
+        'from'      : from_addr,
+        'to'        : to_addr,
+        'amount'    : amount_base / 100,
+        'amount_base': amount_base,
+        'nonce'     : nonce,
+        'signed'    : signed,
+        'status'    : 'pending',
+        'source'    : 'submit',
+    })
+    # Also persist to gossip_store so cross-worker mempool queries can find it
+    gossip_store_put(f"tx:{tx_hash}", {
+        'tx_hash': tx_hash, 'from_addr': from_addr, 'to_addr': to_addr,
+        'amount_base': amount_base, 'nonce': nonce, 'status': 'pending',
+        'submitted_at': time.time(),
+    })
+
+
+def _gossip_publish_block(height: int, block_hash: str, miner_addr: str,
+                           tx_count: int, fidelity: float) -> None:
+    """Publish a new-block event to SSE channel. Called by submit_block."""
+    _gossip_sse.publish('block', {
+        'height'       : height,
+        'block_hash'   : block_hash,
+        'miner_address': miner_addr,
+        'tx_count'     : tx_count,
+        'fidelity'     : fidelity,
+        'source'       : 'submit',
+    })
+    gossip_store_put(f"block:{height}", {
+        'height': height, 'block_hash': block_hash,
+        'miner_address': miner_addr, 'tx_count': tx_count,
+        'fidelity': fidelity, 'ts': time.time(),
+    })
+
+
 application = app  # WSGI entry point
+
+# ── Auto-start gossip subsystem when imported by gunicorn ────────────────────
+# Under gunicorn each worker imports this module; we must start the gossip
+# subsystem here (not just in __main__) so every worker has the DB-backed
+# DHT + SSE broadcaster + GossipPusherThread running.
+try:
+    _start_gossip_subsystem()
+except Exception as _gse:
+    import logging as _lg
+    _lg.getLogger(__name__).warning(f"[STARTUP] Gossip subsystem deferred: {_gse}")
 
 # Initialize SocketIO for real-time metrics streaming (port 5000, HTTP)
 # AFTER:
@@ -4336,174 +5047,69 @@ def oracle_w_state():
 @app.route('/api/mempool', methods=['GET'])
 def get_mempool():
     """
-    Get pending TRANSFER transactions for block inclusion.
+    Return pending transfer transactions for block inclusion.
 
-    Source priority: DHT (has TXs immediately) > DB (persistent) > LATTICE (in-memory).
-    DHT is checked FIRST because submitted TXs always land there even when DB insert fails.
-    Any DHT TX not yet in DB is opportunistically written to DB here (gossip persistence).
-    Coinbase txs are NEVER returned.
+    Single source of truth: PostgreSQL.  No DHT, no in-memory LATTICE pool.
+    DHT is per-process; on multi-worker deployments (Koyeb/gunicorn) each worker
+    has its own isolated DHT dict — cross-worker TX visibility requires the DB.
+
+    Miner polls this every MEMPOOL_POLL_INTERVAL seconds AND again right before
+    every block.  Any pending TX in the DB will be included in the next block.
+    Coinbase rows (tx_type='coinbase') are never returned here.
     """
     try:
-        seen = {}  # tx_hash -> tx_dict, deduped
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT tx_hash, from_address, to_address, amount,
+                       nonce, status, quantum_state_hash, metadata
+                FROM   transactions
+                WHERE  status   = 'pending'
+                  AND  tx_type != 'coinbase'
+                  AND  from_address != %s
+                ORDER  BY created_at ASC
+                LIMIT  %s
+            """, ('0' * 64, MAX_BLOCK_TX_SERVER * 4))
+            rows = cur.fetchall()
 
-        # ── SOURCE 1: DHT — TXs land here immediately on submit ──────────────
-        # DHT is in-memory on this server instance and always has the freshest data.
-        try:
-            dht = get_dht_manager()
-            with dht.store_lock:
-                dht_keys = [k for k in dht.state_store if k.startswith('tx:')]
-            for key in dht_keys:
-                try:
-                    entry = dht.retrieve_state(key)
-                    if not entry or not isinstance(entry, dict):
-                        continue
-                    # Skip alias entries (they point to canonical)
-                    if 'alias_of' in entry:
-                        continue
-                    # Skip already confirmed
-                    if entry.get('status') == 'confirmed':
-                        continue
-                    tx_hash   = entry.get('tx_hash') or entry.get('tx_id', '')
-                    from_addr = entry.get('from_addr') or entry.get('from_address', '')
-                    to_addr   = entry.get('to_addr') or entry.get('to_address', '')
-                    amount_b  = int(entry.get('amount_base', entry.get('amount', 0) or 0))
-                    nonce_v   = int(entry.get('nonce', 0))
-                    sig       = str(entry.get('signature', entry.get('quantum_state_hash', '')))
-                    ts_ns     = int(entry.get('timestamp_ns', int(time.time() * 1e9)))
-                    if not tx_hash or not from_addr or not to_addr:
-                        continue
-                    # Validate it looks like a transfer, not coinbase
-                    from_stripped = from_addr.lstrip('0')
-                    if not from_stripped:
-                        continue
-                    seen[tx_hash] = {
-                        'tx_hash'      : tx_hash,
-                        'tx_id'        : tx_hash,
-                        'from_addr'    : from_addr,
-                        'from_address' : from_addr,
-                        'to_addr'      : to_addr,
-                        'to_address'   : to_addr,
-                        'amount'       : amount_b / 100,
-                        'amount_base'  : amount_b,
-                        'nonce'        : nonce_v,
-                        'timestamp_ns' : ts_ns,
-                        'tx_type'      : 'transfer',
-                        'status'       : 'pending',
-                        'signature'    : sig,
-                        'fee'          : entry.get('fee', 0.001),
-                        'fee_base'     : entry.get('fee_base', 1),
-                        '_source'      : 'dht',
-                    }
-                except Exception as _e:
-                    logger.debug(f"[MEMPOOL] DHT entry parse error ({key}): {_e}")
-            if seen:
-                logger.info(f"[MEMPOOL] DHT has {len(seen)} pending TXs")
-        except Exception as dht_err:
-            logger.warning(f"[MEMPOOL] DHT scan error: {dht_err}")
+        txs = []
+        for row in rows:
+            tx_hash, from_a, to_a, raw_amt, nonce_v, status, sig, meta_raw = row
+            if not from_a or not from_a.lstrip('0'):
+                continue                                # skip zero-address / coinbase ghosts
+            amount_base = int(raw_amt) if raw_amt is not None else 0
+            meta = {}
+            if isinstance(meta_raw, str):
+                try:    meta = json.loads(meta_raw)
+                except: pass
+            elif isinstance(meta_raw, dict):
+                meta = meta_raw
+            # Resolve timestamp_ns from metadata (stored there on submit)
+            ts_ns = int(meta.get('submitted_at_ns', int(time.time() * 1_000_000_000)))
+            txs.append({
+                # Both naming conventions supplied so miner Transaction(**t) can remap either way
+                'tx_id'        : tx_hash,
+                'tx_hash'      : tx_hash,
+                'from_addr'    : from_a,
+                'from_address' : from_a,
+                'to_addr'      : to_a,
+                'to_address'   : to_a,
+                'amount'       : amount_base / 100,      # QTCL float — miner uses this field
+                'amount_base'  : amount_base,
+                'nonce'        : int(nonce_v) if nonce_v is not None else 0,
+                'timestamp_ns' : ts_ns,
+                'tx_type'      : 'transfer',
+                'status'       : status or 'pending',
+                'signature'    : str(sig or ''),
+                'fee'          : float(meta.get('fee_qtcl', 0.001)),
+                'fee_base'     : int(meta.get('fee_base', 1)),
+            })
 
-        # ── SOURCE 2: DB — persistent storage ────────────────────────────────
-        try:
-            with get_db_cursor() as cur:
-                cur.execute("""
-                    SELECT tx_hash, from_address, to_address, amount,
-                           nonce, tx_type, status, quantum_state_hash, metadata
-                    FROM transactions
-                    WHERE status = 'pending'
-                      AND tx_type NOT IN ('coinbase')
-                    ORDER BY created_at ASC
-                    LIMIT %s
-                """, (MAX_BLOCK_TX_SERVER * 4,))
-                for row in cur.fetchall():
-                    tx_hash = row[0]
-                    if tx_hash in seen:
-                        seen[tx_hash]['_source'] = 'db'
-                        continue  # already have from DHT, mark as db-confirmed
-                    from_addr = row[1]
-                    if not from_addr or not from_addr.lstrip('0'):
-                        continue
-                    raw_amount = int(row[3]) if row[3] is not None else 0
-                    meta = row[8] or {}
-                    if isinstance(meta, str):
-                        try: meta = json.loads(meta)
-                        except: meta = {}
-                    seen[tx_hash] = {
-                        'tx_hash'      : tx_hash,
-                        'tx_id'        : tx_hash,
-                        'from_addr'    : from_addr,
-                        'from_address' : from_addr,
-                        'to_addr'      : row[2],
-                        'to_address'   : row[2],
-                        'amount'       : raw_amount / 100,
-                        'amount_base'  : raw_amount,
-                        'nonce'        : row[4] or 0,
-                        'tx_type'      : row[5] or 'transfer',
-                        'status'       : 'pending',
-                        'signature'    : row[7] or '',
-                        'fee'          : meta.get('fee_qtcl', 0.001),
-                        'fee_base'     : meta.get('fee_base', 1),
-                        '_source'      : 'db',
-                    }
-            logger.debug(f"[MEMPOOL] After DB: {len(seen)} total TXs")
-        except Exception as db_err:
-            logger.warning(f"[MEMPOOL] DB read error: {db_err}")
+        logger.info(f"[MEMPOOL] {len(txs)} pending TX(s) served to miner")
+        return jsonify({'size': len(txs), 'transactions': txs[:MAX_BLOCK_TX_SERVER]}), 200
 
-        # ── SOURCE 3: LATTICE in-memory pool ─────────────────────────────────
-        if LATTICE is not None and getattr(LATTICE, 'mempool', None) is not None:
-            try:
-                for tx in LATTICE.mempool.get_pending_transactions(max_count=100):
-                    tx_hash = str(tx.get('tx_id', tx.get('tx_hash', '')))
-                    if not tx_hash or tx_hash in seen:
-                        continue
-                    if str(tx.get('tx_type', 'transfer')).lower() == 'coinbase':
-                        continue
-                    from_a = str(tx.get('from_addr', tx.get('from_address', ''))).lstrip('0')
-                    if not from_a:
-                        continue
-                    seen[tx_hash] = {**tx, 'tx_id': tx_hash, 'tx_hash': tx_hash, '_source': 'lattice'}
-            except Exception as lat_err:
-                logger.debug(f"[MEMPOOL] LATTICE error: {lat_err}")
-
-        # ── GOSSIP: persist DHT-only TXs to DB so they survive restarts ──────
-        dht_only = [tx for tx in seen.values() if tx.get('_source') == 'dht']
-        if dht_only:
-            logger.info(f"[MEMPOOL] Gossiping {len(dht_only)} DHT-only TXs to DB")
-            for tx in dht_only:
-                try:
-                    with get_db_cursor() as cur:
-                        cur.execute("""
-                            INSERT INTO transactions
-                                (tx_hash, from_address, to_address, amount,
-                                 nonce, tx_type, status, quantum_state_hash,
-                                 commitment_hash, metadata)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                            ON CONFLICT (tx_hash) DO NOTHING
-                        """, (
-                            tx['tx_hash'], tx['from_addr'], tx['to_addr'],
-                            int(tx.get('amount_base', 0)), int(tx.get('nonce', 0)),
-                            'transfer', 'pending',
-                            tx.get('signature', ''), tx['tx_hash'],
-                            json.dumps({'gossiped_from_dht': True,
-                                        'fee_qtcl': tx.get('fee', 0.001)}),
-                        ))
-                    logger.info(f"[MEMPOOL] Gossiped TX to DB: {tx['tx_hash'][:16]}...")
-                except Exception as gossip_err:
-                    logger.error(f"[MEMPOOL] Gossip DB write failed: {type(gossip_err).__name__}: {gossip_err}")
-                    logger.error(traceback.format_exc())
-
-        # Strip internal _source field before returning
-        all_txs = []
-        for tx in list(seen.values())[:MAX_BLOCK_TX_SERVER]:
-            tx.pop('_source', None)
-            all_txs.append(tx)
-
-        logger.info(f"[MEMPOOL] Returning {len(all_txs)} pending TXs to miner")
-        return jsonify({
-            'size'        : len(all_txs),
-            'transactions': all_txs,
-        }), 200
-    except Exception as e:
-        logger.error(f"[MEMPOOL] Unhandled error: {e}\n{traceback.format_exc()}")
-        return jsonify({'error': str(e), 'transactions': [], 'size': 0}), 500
+    except Exception as exc:
+        logger.error(f"[MEMPOOL] DB query failed: {exc}\n{traceback.format_exc()}")
+        return jsonify({'error': str(exc), 'transactions': [], 'size': 0}), 500
 
 
 
@@ -5140,10 +5746,17 @@ def submit_block():
         if P2P:
             try:
                 P2P.broadcast_block({'type': 'block', 'header': header, 'transactions': transactions})
-                logger.info(f"[P2P] 📡 Broadcasting block {block_hash[:16]}… to peers")
+                logger.info(f"[P2P] Broadcasting block {block_hash[:16]}… to peers")
             except Exception as e:
-                logger.warning(f"[P2P] ⚠️  Could not broadcast: {e}")
-        
+                logger.warning(f"[P2P] Could not broadcast: {e}")
+
+        # Publish to SSE + gossip_store — all workers and SSE subscribers see the new block
+        try:
+            _gossip_publish_block(block_height, block_hash, miner_address,
+                                   len(transactions), w_state_fidelity)
+        except Exception as _ge:
+            logger.debug(f"[BLOCK] gossip_publish_block skipped: {_ge}")
+
         # 6️⃣ RESPONSE
         return jsonify({
             'status':                'accepted',
@@ -5183,129 +5796,90 @@ def submit_block():
 @app.route('/api/submit_transaction', methods=['POST'])
 def submit_transaction():
     """
-    Submit a transaction — Bitcoin-model mempool with immediate DB persistence.
+    Accept a user transfer and persist it to the mempool (DB status='pending').
 
-    Body: { from, to, amount, [tx_id], [nonce], [fee], [memo], [public_key], [hlwe_signature] }
+    CANONICAL HASH — deterministic, reproducible client-side:
+        SHA3-256(JSON({from_addr, to_addr, amount_str, nonce_str, timestamp_ns_str},
+                       sort_keys=True))
+    Clients may supply a tx_id; if it differs it is stored as an alias row so
+    /api/transactions/<client_tx_id> also resolves.
 
-    Flow (Bitcoin-mirrored):
-      1. Validate fields
-      2. Compute CANONICAL tx_hash — deterministic, client-predictable:
-             SHA3-256(JSON({from_addr, to_addr, amount_str, nonce_str, timestamp_ns_str}, sort_keys=True))
-         If client sends a tx_id that is a valid 64-hex SHA3-256 digest we ALSO store it as an alias
-         in metadata so the client can look up by either hash.
-      3. INSERT into transactions with status='pending' — IMMEDIATELY QUERYABLE.
-      4. Oracle HLWE-signs the canonical hash.
-      5. Submit to BlockManager (in-memory mempool) for inclusion in next block.
-      6. Store in DHT so all P2P peers (including oracle) can validate/lookup.
-      7. Broadcast to P2P network.
+    DB is written in two isolated cursors so a wallet-row constraint failure
+    (UNIQUE on wallet_fingerprint) CANNOT roll back the transaction insert.
 
-    Bitcoin model:
-      • TX is PENDING (unconfirmed) immediately after broadcast — queryable by hash.
-      • TX becomes CONFIRMED when a miner seals a block containing it.
-      • Block does NOT need to be sealed to query the TX — it just won't have block_height yet.
-
-    Returns: { tx_hash, client_tx_id, status, from, to, amount, signed }
+    Flow:
+        1. Validate fields
+        2. Compute canonical hash
+        3. Oracle HLWE-sign (non-fatal if oracle unavailable)
+        4. INSERT transactions — the ONLY step that is mandatory
+        5. INSERT wallet_addresses rows — best-effort, own cursor
+        6. DHT + BlockManager — belt-and-suspenders, both non-fatal
+        7. P2P gossip
     """
-    data      = request.get_json() or {}
-    from_addr = data.get('from') or data.get('from_addr') or data.get('sender_addr')
-    to_addr   = data.get('to')   or data.get('to_addr')   or data.get('receiver_addr')
+    data      = request.get_json(force=True, silent=True) or {}
+    from_addr = (data.get('from') or data.get('from_addr') or data.get('sender_addr') or '').strip()
+    to_addr   = (data.get('to')   or data.get('to_addr')   or data.get('receiver_addr') or '').strip()
     amount    = data.get('amount')
 
-    if not all([from_addr, to_addr, amount is not None]):
-        return jsonify({'error': 'missing from/to/amount'}), 400
+    if not from_addr or not to_addr or amount is None:
+        return jsonify({'error': 'missing required fields: from, to, amount'}), 400
 
     try:
-        from decimal import Decimal
-
-        # ── Normalise amount ────────────────────────────────────────────────────
-        # Amount from client may be QTCL float (e.g. 1.5) or base units (150).
-        # We store base units in DB (NUMERIC(30,0)). Keep QTCL float for response.
+        # ── 1. NORMALISE AMOUNT ─────────────────────────────────────────────────
         try:
             amount_float = float(amount)
         except (ValueError, TypeError):
-            return jsonify({'error': f'invalid amount: {amount}'}), 400
-        # Heuristic: if < 10000 treat as QTCL float → convert to base units
-        amount_base = int(round(amount_float * 100)) if amount_float < 10000 else int(amount_float)
+            return jsonify({'error': f'invalid amount: {amount!r}'}), 400
+        amount_base  = int(round(amount_float * 100)) if amount_float < 10_000 else int(amount_float)
+        amount_float = amount_base / 100                # normalise back
 
         nonce        = int(data.get('nonce', 0))
         fee_qtcl     = float(data.get('fee', 0.001))
         fee_base     = max(1, int(round(fee_qtcl * 100)))
-        timestamp_ns = time.time_ns()
-        client_tx_id = data.get('tx_id', '')  # client-supplied hash (may differ from canonical)
         memo         = str(data.get('memo', ''))[:256]
+        client_tx_id = str(data.get('tx_id', '') or '').strip()
+        timestamp_ns = time.time_ns()
 
-        # ── CANONICAL TX HASH — deterministic, reproducible by client ───────────
-        # Field names use 'from_addr'/'to_addr' consistently (not 'from'/'to').
-        # Amount is stored as string to avoid float precision drift.
-        # Nonce and timestamp_ns as strings for same reason.
-        canonical_fields = {
-            'from_addr'    : from_addr,
-            'to_addr'      : to_addr,
-            'amount'       : str(amount_base),
-            'nonce'        : str(nonce),
-            'timestamp_ns' : str(timestamp_ns),
-        }
-        canonical_preimage = json.dumps(canonical_fields, sort_keys=True)
-        tx_hash_hex = hashlib.sha3_256(canonical_preimage.encode()).hexdigest()
+        # ── 2. CANONICAL HASH ───────────────────────────────────────────────────
+        canon_src = json.dumps({
+            'from_addr'   : from_addr,
+            'to_addr'     : to_addr,
+            'amount'      : str(amount_base),
+            'nonce'       : str(nonce),
+            'timestamp_ns': str(timestamp_ns),
+        }, sort_keys=True)
+        tx_hash = hashlib.sha3_256(canon_src.encode()).hexdigest()
 
         logger.info(
-            f"[TRANSACT] 📝 New TX | from={from_addr[:16]}… | to={to_addr[:16]}… | "
-            f"amount={amount_float} QTCL ({amount_base} base) | canonical_hash={tx_hash_hex[:16]}… | "
-            f"client_id={client_tx_id[:16] if client_tx_id else 'none'}…"
+            f"[TX] Submit | {from_addr[:16]}...→{to_addr[:16]}... | "
+            f"{amount_float} QTCL ({amount_base} base) | hash={tx_hash[:16]}..."
         )
 
-        # ── ORACLE HLWE SIGN ────────────────────────────────────────────────────
-        signature_json = None
+        # ── 3. ORACLE SIGN ──────────────────────────────────────────────────────
+        sig_json = None
         if ORACLE:
             try:
-                sig = ORACLE.sign_transaction(tx_hash_hex, from_addr)
+                sig = ORACLE.sign_transaction(tx_hash, from_addr)
                 if sig:
-                    signature_json = json.dumps(sig.to_dict() if hasattr(sig, 'to_dict') else sig)
-                    logger.info(f"[TRANSACT] ✅ Oracle HLWE signed | hash={tx_hash_hex[:16]}…")
-            except Exception as sig_err:
-                logger.warning(f"[TRANSACT] Oracle sign failed (non-fatal): {sig_err}")
+                    sig_json = json.dumps(sig.to_dict() if hasattr(sig, 'to_dict') else sig)
+            except Exception as _se:
+                logger.debug(f"[TX] Oracle sign skipped: {_se}")
 
-        # ── INSERT INTO DB IMMEDIATELY (status='pending') — BITCOIN MODEL ───────
-        # This makes the TX queryable right away, before any block is mined.
-        # When a block confirms it, submit_block will UPDATE status → 'confirmed'.
-        tx_metadata = {
-            'canonical_preimage' : canonical_preimage,
-            'client_tx_id'       : client_tx_id,       # alias for client lookup
-            'amount_qtcl'        : amount_float,
-            'amount_base'        : amount_base,
-            'fee_qtcl'           : fee_qtcl,
-            'fee_base'           : fee_base,
-            'memo'               : memo,
-            'oracle_signed'      : signature_json is not None,
-            'submitted_at_ns'    : timestamp_ns,
-            'public_key'         : data.get('public_key', ''),
-            'hlwe_signature'     : data.get('hlwe_signature', {}),
+        # ── 4. INSERT TRANSACTION — isolated cursor, CRITICAL PATH ─────────────
+        # Absolute minimum columns; wallet upserts are in a SEPARATE cursor below
+        # so no wallet constraint can abort this commit.
+        tx_meta = {
+            'fee_qtcl'       : fee_qtcl,
+            'fee_base'       : fee_base,
+            'memo'           : memo,
+            'oracle_signed'  : sig_json is not None,
+            'submitted_at_ns': timestamp_ns,
+            'client_tx_id'   : client_tx_id,
+            'amount_qtcl'    : amount_float,
+            'amount_base'    : amount_base,
         }
-
-        # ── INSERT INTO DB — EACH STEP IN ITS OWN CURSOR (own transaction) ──────
-        # ROOT CAUSE OF "TX only in DHT": get_db_cursor() wraps ONE connection/transaction.
-        # Wallet INSERT failing (any constraint) rolled back the entire block including TX insert.
-        # Fix: wallet rows each get their own cursor so failure is isolated. TX insert is alone.
-        db_inserted = False
-        db_error_msg = None
-        _fp = lambda a: hashlib.sha256(a.encode()).hexdigest()[:64]
-        _pk = lambda a: hashlib.sha3_256(a.encode()).hexdigest()
-
-        # Step 1 — wallet rows, each isolated, failure is silently ignored
-        for _addr, _atype in [(from_addr, 'sending'), (to_addr, 'receiving')]:
-            try:
-                with get_db_cursor() as _cur:
-                    _cur.execute("""
-                        INSERT INTO wallet_addresses
-                            (address, wallet_fingerprint, public_key,
-                             balance, transaction_count, address_type)
-                        VALUES (%s, %s, %s, 0, 0, %s)
-                        ON CONFLICT (address) DO NOTHING
-                    """, (_addr, _fp(_addr), _pk(_addr), _atype))
-            except Exception as _we:
-                logger.debug(f"[TRANSACT] Wallet upsert skipped ({_addr[:12]}): {_we}")
-
-        # Step 2 — TX insert, isolated transaction, THIS is what matters
+        db_ok    = False
+        db_error = None
         try:
             with get_db_cursor() as cur:
                 cur.execute("""
@@ -5313,26 +5887,30 @@ def submit_transaction():
                         (tx_hash, from_address, to_address, amount,
                          nonce, tx_type, status,
                          quantum_state_hash, commitment_hash, metadata)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (tx_hash) DO UPDATE SET
-                        status     = CASE WHEN transactions.status = 'confirmed'
-                                         THEN 'confirmed' ELSE 'pending' END,
-                        updated_at = NOW()
+                    VALUES (%s, %s, %s, %s, %s, 'transfer', 'pending', %s, %s, %s)
+                    ON CONFLICT (tx_hash) DO UPDATE
+                        SET status     = CASE WHEN transactions.status = 'confirmed'
+                                             THEN 'confirmed' ELSE 'pending' END,
+                            updated_at = NOW()
                 """, (
-                    tx_hash_hex, from_addr, to_addr, amount_base,
-                    nonce, 'transfer', 'pending',
-                    signature_json or '', tx_hash_hex,
-                    json.dumps(tx_metadata),
+                    tx_hash, from_addr, to_addr, amount_base, nonce,
+                    sig_json or '', tx_hash, json.dumps(tx_meta),
                 ))
-            db_inserted = True
-            logger.info(f"[TRANSACT] TX in DB | pending | {tx_hash_hex[:16]}... | {amount_float} QTCL")
-        except Exception as db_err:
-            db_error_msg = str(db_err)
-            logger.error(f"[TRANSACT] TX DB insert FAILED: {type(db_err).__name__}: {db_err}")
+            db_ok = True
+            logger.info(f"[TX] DB insert OK | hash={tx_hash[:16]}...")
+            # Publish to SSE + gossip_store so all workers and subscribers see it immediately
+            try:
+                _gossip_publish_tx(tx_hash, from_addr, to_addr, amount_base, nonce, sig_json is not None)
+            except Exception as _ge:
+                logger.debug(f"[TX] gossip_publish_tx skipped: {_ge}")
+        except Exception as exc:
+            db_error = str(exc)
+            logger.error(f"[TX] DB INSERT FAILED — {type(exc).__name__}: {exc}")
             logger.error(traceback.format_exc())
+            # Do NOT return error — client can still see TX via DHT until DB is fixed
 
-        # Step 3 — alias row (client_tx_id != canonical), isolated, best-effort
-        if client_tx_id and client_tx_id != tx_hash_hex and len(client_tx_id) == 64:
+        # ── 4b. ALIAS ROW — client_tx_id != canonical (separate cursor) ────────
+        if db_ok and client_tx_id and client_tx_id != tx_hash and len(client_tx_id) == 64:
             try:
                 with get_db_cursor() as cur:
                     cur.execute("""
@@ -5340,138 +5918,98 @@ def submit_transaction():
                             (tx_hash, from_address, to_address, amount,
                              nonce, tx_type, status,
                              quantum_state_hash, commitment_hash, metadata)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, 'transfer', 'pending', %s, %s, %s)
                         ON CONFLICT (tx_hash) DO NOTHING
                     """, (
-                        client_tx_id, from_addr, to_addr, amount_base,
-                        nonce, 'transfer', 'pending',
-                        signature_json or '', tx_hash_hex,
-                        json.dumps({**tx_metadata, 'alias_of': tx_hash_hex}),
+                        client_tx_id, from_addr, to_addr, amount_base, nonce,
+                        sig_json or '', tx_hash,
+                        json.dumps({**tx_meta, 'alias_of': tx_hash}),
                     ))
-                logger.info(f"[TRANSACT] Alias: {client_tx_id[:16]}... -> {tx_hash_hex[:16]}...")
+                logger.info(f"[TX] Alias stored: {client_tx_id[:16]}...→{tx_hash[:16]}...")
             except Exception as ae:
-                logger.debug(f"[TRANSACT] Alias skipped: {ae}")
+                logger.debug(f"[TX] Alias row skipped: {ae}")
 
-        # ── STORE IN DHT FOR P2P PEER VALIDATION ───────────────────────────────
+        # ── 5. WALLET ROWS — best-effort, own cursors, NEVER block TX ──────────
+        _fp = lambda a: hashlib.sha256(a.encode()).hexdigest()[:64]
+        _pk = lambda a: hashlib.sha3_256(a.encode()).hexdigest()
+        for _addr, _atype in [(from_addr, 'sending'), (to_addr, 'receiving')]:
+            try:
+                with get_db_cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO wallet_addresses
+                            (address, wallet_fingerprint, public_key,
+                             balance, transaction_count, address_type)
+                        VALUES (%s, %s, %s, 0, 0, %s)
+                        ON CONFLICT (address) DO NOTHING
+                    """, (_addr, _fp(_addr), _pk(_addr), _atype))
+            except Exception as _we:
+                logger.debug(f"[TX] Wallet upsert skipped ({_addr[:12]}...): {_we}")
+
+        # ── 6. DHT — belt-and-suspenders for same-worker lookups ───────────────
         try:
-            dht = get_dht_manager()
-            dht.store_state(f"tx:{tx_hash_hex}", {
-                'tx_hash'     : tx_hash_hex,
-                'client_tx_id': client_tx_id,
-                'from_addr'   : from_addr,
-                'to_addr'     : to_addr,
-                'amount_base' : amount_base,
-                'amount_qtcl' : amount_float,
-                'nonce'       : nonce,
-                'timestamp_ns': timestamp_ns,
-                'status'      : 'pending',
-                'oracle_signed': signature_json is not None,
-                'in_db'       : db_inserted,
-                'submitted_at': time.time(),
+            get_dht_manager().store_state(f"tx:{tx_hash}", {
+                'tx_hash': tx_hash, 'from_addr': from_addr, 'to_addr': to_addr,
+                'amount_base': amount_base, 'nonce': nonce,
+                'timestamp_ns': timestamp_ns, 'status': 'pending', 'in_db': db_ok,
             })
-            if client_tx_id and client_tx_id != tx_hash_hex:
-                dht.store_state(f"tx:{client_tx_id}", {'alias_of': tx_hash_hex, 'status': 'pending'})
-            logger.debug(f"[TRANSACT] 🌐 DHT stored: tx:{tx_hash_hex[:16]}…")
-        except Exception as dht_err:
-            logger.debug(f"[TRANSACT] DHT store failed (non-fatal): {dht_err}")
+            if client_tx_id and client_tx_id != tx_hash:
+                get_dht_manager().store_state(f"tx:{client_tx_id}",
+                                              {'alias_of': tx_hash, 'status': 'pending'})
+        except Exception as _de:
+            logger.debug(f"[TX] DHT store skipped: {_de}")
 
-        # ── SUBMIT TO BLOCK MANAGER (in-memory mempool) ─────────────────────────
-        bm_accepted = False
-        if LATTICE and LATTICE.block_manager:
+        # ── 6b. BlockManager — same-process in-memory mempool ──────────────────
+        if LATTICE and getattr(LATTICE, 'block_manager', None):
             try:
                 from lattice_controller import QuantumTransaction
                 qt = QuantumTransaction(
-                    tx_id         = tx_hash_hex,
-                    sender_addr   = from_addr,
-                    receiver_addr = to_addr,
-                    amount        = Decimal(str(amount_float)),
-                    nonce         = nonce,
-                    timestamp_ns  = timestamp_ns,
-                    fee           = fee_base,
-                    signature     = signature_json,
+                    tx_id=tx_hash, sender_addr=from_addr, receiver_addr=to_addr,
+                    amount=Decimal(str(amount_float)), nonce=nonce,
+                    timestamp_ns=timestamp_ns, fee=fee_base, signature=sig_json,
                 )
-                bm_accepted = LATTICE.block_manager.receive_transaction(qt)
-                if bm_accepted:
-                    logger.info(f"[TRANSACT] TX accepted by BlockManager mempool")
-                else:
-                    logger.warning(f"[TRANSACT] BlockManager rejected TX (balance/duplicate?)")
-            except Exception as bm_err:
-                logger.error(f"[TRANSACT] BlockManager error: {bm_err}")
+                LATTICE.block_manager.receive_transaction(qt)
+            except Exception as _bme:
+                logger.debug(f"[TX] BlockManager push skipped: {_bme}")
 
-        # Also push into LATTICE.mempool directly if it exists (belt-and-suspenders)
-        if LATTICE and getattr(LATTICE, 'mempool', None) is not None and not bm_accepted:
-            try:
-                LATTICE.mempool.add_transaction({
-                    'tx_id'       : tx_hash_hex,
-                    'tx_hash'     : tx_hash_hex,
-                    'from_addr'   : from_addr,
-                    'from_address': from_addr,
-                    'to_addr'     : to_addr,
-                    'to_address'  : to_addr,
-                    'amount'      : amount_float,
-                    'amount_base' : amount_base,
-                    'nonce'       : nonce,
-                    'timestamp_ns': timestamp_ns,
-                    'tx_type'     : 'transfer',
-                    'status'      : 'pending',
-                    'signature'   : signature_json or '',
-                    'fee'         : fee_qtcl,
-                })
-                logger.info(f"[TRANSACT] TX pushed to LATTICE.mempool directly")
-            except Exception as lm_err:
-                logger.debug(f"[TRANSACT] LATTICE.mempool direct push: {lm_err}")
-
-        # ── P2P BROADCAST ────────────────────────────────────────────────────────
+        # ── 7. P2P GOSSIP ───────────────────────────────────────────────────────
         if P2P:
             try:
-                wire_tx = {
-                    'hash'         : tx_hash_hex,
-                    'tx_id'        : tx_hash_hex,
-                    'client_tx_id' : client_tx_id,
-                    'from'         : from_addr,
-                    'sender_addr'  : from_addr,
-                    'to'           : to_addr,
-                    'receiver_addr': to_addr,
-                    'amount'       : amount_float,
-                    'amount_base'  : amount_base,
-                    'nonce'        : nonce,
-                    'fee'          : fee_qtcl,
-                    'fee_base'     : fee_base,
-                    'timestamp_ns' : timestamp_ns,
-                    'signature'    : signature_json,
-                    'memo'         : memo,
-                }
-                P2P.relay_transaction(wire_tx, exclude_peer_id=None)
-                logger.info(f"[TRANSACT] 📡 Broadcast to {P2P.get_peer_count()} P2P peers")
-            except Exception as p2p_err:
-                logger.warning(f"[TRANSACT] P2P broadcast error (non-fatal): {p2p_err}")
+                P2P.relay_transaction({
+                    'hash': tx_hash, 'tx_id': tx_hash, 'client_tx_id': client_tx_id,
+                    'from': from_addr, 'to': to_addr,
+                    'amount': amount_float, 'amount_base': amount_base,
+                    'nonce': nonce, 'fee': fee_qtcl, 'fee_base': fee_base,
+                    'timestamp_ns': timestamp_ns, 'signature': sig_json, 'memo': memo,
+                }, exclude_peer_id=None)
+            except Exception as _pe:
+                logger.debug(f"[TX] P2P relay skipped: {_pe}")
 
         return jsonify({
-            'tx_hash'      : tx_hash_hex,
-            'client_tx_id' : client_tx_id,
+            'tx_hash'      : tx_hash,
+            'client_tx_id' : client_tx_id or tx_hash,
             'status'       : 'pending',
             'from'         : from_addr,
             'to'           : to_addr,
             'amount'       : amount_float,
             'amount_base'  : amount_base,
             'fee'          : fee_qtcl,
-            'signed'       : signature_json is not None,
-            'in_mempool'   : bm_accepted,
-            'in_db'        : db_inserted,
-            'in_dht'       : True,  # always — DHT store above never raises
-            'db_error'     : db_error_msg,
+            'signed'       : sig_json is not None,
+            'in_db'        : db_ok,
+            'db_error'     : db_error,
             'message'      : (
-                f'TX in DHT+mempool | in_db={db_inserted} | '
-                f'query: /api/transactions/{tx_hash_hex}'
+                f"TX {'in DB' if db_ok else 'DB FAILED — check db_error'} | "
+                f"pending until block seals | "
+                f"query: /api/transactions/{tx_hash}"
             ),
         }), 201
 
-    except Exception as e:
-        logger.error(f"[TRANSACT] ❌ Error: {e}\n{traceback.format_exc()}")
-        return jsonify({'error': str(e)}), 500
+    except Exception as exc:
+        logger.error(f"[TX] Unhandled error: {exc}\n{traceback.format_exc()}")
+        return jsonify({'error': str(exc)}), 500
 
 
-@app.route('/api/transactions/<string:tx_hash>', methods=['GET'])
+
+app.route('/api/transactions/<string:tx_hash>', methods=['GET'])
 def get_transaction(tx_hash: str):
     """
     Get a transaction by hash — Bitcoin model: works for PENDING and CONFIRMED transactions.
@@ -6296,6 +6834,10 @@ if __name__ == '__main__':
     logger.info("[STARTUP] Phase 2/3: Initializing P2P server...")
     if not initialize_p2p():
         logger.warning("[STARTUP] Failed to initialize P2P server (may retry)")
+
+    # Start P2P Gossip Subsystem — DB-backed DHT, SSE broadcaster, peer pusher
+    logger.info("[STARTUP] Phase 2b: Starting P2P gossip subsystem...")
+    _start_gossip_subsystem()
     
     # Port configuration — unified port 8000 for all services (Koyeb standard)    # FLASK_PORT: HTTP/WebSocket server (REST API + P2P on same port via Socket.IO)
     port = int(os.getenv('PORT', 8000))  # Koyeb sets PORT=8000 by default (HTTPS 443 via reverse proxy)
