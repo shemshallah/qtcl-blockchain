@@ -1084,6 +1084,11 @@ socketio = SocketIO(
 )
 
 # ═════════════════════════════════════════════════════════════════════════════════
+# METRICS COLLECTOR — Initialize BEFORE WebSocket handlers
+# ═════════════════════════════════════════════════════════════════════════════════
+_metrics_collector = MetricsCollector()
+
+# ═════════════════════════════════════════════════════════════════════════════════
 # MINER P2P WEBSOCKET SERVER (port 8000) - UNIFIED WITH REST API
 # ═════════════════════════════════════════════════════════════════════════════════
 
@@ -4595,7 +4600,8 @@ def submit_block():
                 0,                  # ALWAYS index 0 — Bitcoin convention
                 'coinbase',
                 'confirmed',
-                w_proof,            # W-state entropy witness                block_hash,         # commitment = block hash
+                w_proof,            # quantum_state_hash — W-state entropy witness
+                block_hash,         # commitment_hash
                 json.dumps({
                     'block_reward_base':  BLOCK_REWARD_BASE,
                     'fee_total_base':     fee_total_base,
