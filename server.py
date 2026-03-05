@@ -258,7 +258,10 @@ from decimal import Decimal
 import random
 from concurrent.futures import ThreadPoolExecutor  # H2: Thread pooling for DoS prevention
 
-from flask import Flask, jsonify, request, render_template_string, send_file
+from flask import Flask, jsonify, request, render_template_string, send_file, Response, stream_with_context
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from io import BytesIO
 import msgpack
 import base64
