@@ -44,6 +44,9 @@ import threading
 import traceback
 from typing import Dict, Any, Optional, List, Tuple, Set
 from datetime import datetime, timezone, timedelta
+from enum import Enum
+from dataclasses import dataclass, field
+from collections import deque, OrderedDict
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
 # EARLY LOGGER SETUP (before DHT/other classes)
