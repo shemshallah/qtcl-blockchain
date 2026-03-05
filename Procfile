@@ -1,1 +1,2 @@
-web: gunicorn -w 1 -b 0.0.0.0:$PORT --timeout 120 wsgi_config:app
+web: python server.py
+oracle: python oracle.py

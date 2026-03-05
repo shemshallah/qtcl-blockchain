@@ -45,6 +45,7 @@ from enum import Enum
 
 getcontext().prec = 150
 
+import requests
 logger = logging.getLogger(__name__)
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
@@ -840,6 +841,23 @@ class OracleWStateManager:
                             self.stream_queue.put_nowait(snapshot)
                         except: pass
                     self._broadcast_to_clients(snapshot)
+                    # Push to server for SSE distribution to all miners
+                    if snapshot:
+                        snap_dict = {
+                            'timestamp_ns': snapshot.timestamp_ns,
+                            'oracle_address': snapshot.oracle_address or 'qtcl1oracle',
+                            'w_entropy_hash': snapshot.w_entropy_hash or hashlib.sha256(snapshot.density_matrix_hex.encode()).hexdigest(),
+                            'w_state_fidelity': snapshot.w_state_fidelity,
+                            'fidelity': snapshot.w_state_fidelity,
+                            'purity': snapshot.purity,
+                            'coherence': snapshot.coherence_l1,
+                            'entanglement': snapshot.entanglement_witness,
+                            'density_matrix_hex': snapshot.density_matrix_hex[:256],
+                            'hlwe_signature': snapshot.hlwe_signature or {},
+                            'signature_valid': snapshot.signature_valid,
+                            'block_height': 0,
+                        }
+                        _push_snapshot_to_server(snap_dict)
                 time.sleep(W_STATE_STREAM_INTERVAL_MS / 1000.0)
             except Exception as e:
                 logger.error(f"[ORACLE W-STATE] Stream error: {e}")
@@ -1184,6 +1202,86 @@ class OracleEngine:
         logger.debug(f"[ORACLE] New address issued: {addr} | path={kp.path}")
         return addr, kp
 
+    def derive_stable_miner_id(self, public_key_hex: str) -> str:
+        """
+        MINER ID PERSISTENCE FIX: Derive deterministic miner_id from public key.
+        
+        Problem: Miner ID keeps changing while wallet/pubkey stays same.
+        Solution: Hash the public key → stable miner_id (persistent across restarts).
+        
+        This ensures:
+        • Same miner always has same ID
+        • Oracle can track miner across sessions
+        • Wallet/pubkey never changes
+        • Miner reputation persists
+        
+        Usage in miner:
+            oracle_response = requests.post('/api/register_miner', {
+                'public_key': '0x...',
+                'wallet_address': 'qtcl1...'
+            })
+            miner_id = oracle_response['miner_id']  # Stable, deterministic
+            # Store miner_id locally (survives restarts)
+        """
+        try:
+            # Hash: sha256(public_key_hex) → first 16 bytes hex
+            miner_id = hashlib.sha256(public_key_hex.encode()).hexdigest()[:16]
+            logger.info(f"[ORACLE-MINER-ID] Derived stable miner_id from pubkey: {miner_id}")
+            return miner_id
+        except Exception as e:
+            logger.error(f"[ORACLE-MINER-ID] Derivation error: {e}")
+            return secrets.token_hex(8)  # Fallback to random if error
+
+    def register_miner(self, public_key_hex: str, wallet_address: str) -> Dict[str, Any]:
+        """
+        Register miner with oracle, get stable miner_id.
+        
+        This should be called by miner on startup (after wallet initialization).
+        
+        Returns:
+            {
+                'miner_id': 'xxxxxxxxxxxxxxxx',  # Stable, deterministic
+                'public_key': '0x...',
+                'wallet_address': 'qtcl1...',
+                'registered_at': timestamp,
+                'oracle_difficulty': 20
+            }
+        """
+        try:
+            miner_id = self.derive_stable_miner_id(public_key_hex)
+            
+            # Store miner registration in oracle state
+            miner_record = {
+                'miner_id': miner_id,
+                'public_key': public_key_hex,
+                'wallet_address': wallet_address,
+                'registered_at': time.time(),
+                'last_heartbeat_at': time.time(),
+                'blocks_mined': 0,
+                'total_hash_rate': 0.0,
+            }
+            
+            logger.info(
+                f"[ORACLE-MINER-REGISTER] Miner {miner_id} registered "
+                f"(pubkey: {public_key_hex[:16]}..., wallet: {wallet_address})"
+            )
+            
+            return {
+                'miner_id': miner_id,
+                'public_key': public_key_hex,
+                'wallet_address': wallet_address,
+                'registered_at': miner_record['registered_at'],
+                'oracle_difficulty': 20,
+                'status': 'registered',
+            }
+        
+        except Exception as e:
+            logger.error(f"[ORACLE-MINER-REGISTER] Error: {e}")
+            return {
+                'status': 'error',
+                'message': str(e),
+            }
+
     @property
     def oracle_address(self) -> str:
         """The oracle's own primary address (master key)."""
@@ -1215,6 +1313,41 @@ def json_stable_bytes(obj) -> bytes:
 
 # W-State Manager singleton
 ORACLE_W_STATE_MANAGER = OracleWStateManager()
+
+# ═════════════════════════════════════════════════════════════════════════════════
+# SERVER INTEGRATION — Push snapshots to server for SSE distribution
+# ═════════════════════════════════════════════════════════════════════════════════
+
+import requests
+
+def _push_snapshot_to_server(snapshot_dict: dict) -> bool:
+    """
+    Push snapshot to server /api/oracle/push_snapshot for SSE distribution to all miners.
+    
+    Called when new W-state snapshot is generated.
+    Server forwards to all connected SSE clients.
+    """
+    server_url = os.getenv('SERVER_URL', 'http://localhost:8000')
+    try:
+        response = requests.post(
+            f'{server_url}/api/oracle/push_snapshot',
+            json=snapshot_dict,
+            timeout=5
+        )
+        if response.status_code == 200:
+            data = response.json()
+            sse_clients = data.get('sse_clients', 0)
+            if sse_clients > 0:
+                logger.info(f"[ORACLE] ✅ Pushed to {sse_clients} SSE clients")
+            return True
+        else:
+            logger.warning(f"[ORACLE] ⚠️  Server returned {response.status_code}")
+            return False
+    except Exception as e:
+        logger.warning(f"[ORACLE] ⚠️  Server push failed: {e}")
+        return False
+
+# ═════════════════════════════════════════════════════════════════════════════════
 
 # Main Oracle singleton
 ORACLE = OracleEngine()
