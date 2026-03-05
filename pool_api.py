@@ -283,6 +283,10 @@ class EntropyPoolManager:
                         # Parse failed
                         self._mark_source_failing(source_key, "Parse error")
                         return None
+                except (requests.Timeout, requests.ConnectionError) as e:
+                    # Retry on request errors
+                    logger.debug(f"[ENTROPY] {source.name} attempt {attempt + 1} failed: {e}")
+                    continue
             
         except requests.Timeout:
             self._mark_source_failing(source_key, "Timeout")

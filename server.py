@@ -88,7 +88,6 @@ message WStateSnapshot { uint64 timestamp_ns = 1; string oracle_address = 2; str
                          HLWESignature hlwe_signature = 10; uint64 block_height = 11; }
 """
 
-def # gRPC removed
 
 # ── SSE DISTRIBUTOR ─────────────────────────────────────────────────────────────
 
@@ -1319,12 +1318,6 @@ application = app  # WSGI entry point
 # Separate Flask app for P2P Socket.IO on port 8000 (unified)
 p2p_app = Flask(__name__)
 p2p_app.config['SECRET_KEY'] = secrets.token_hex(32)
-p2p_# socketio removed - SSE only
-    engineio_logger=False,
-    socketio_logger=False,
-    ping_timeout=60,
-    ping_interval=25,
-)
 
 # Registered miners tracking with gossip support
 _registered_miners = {}  # {miner_id: {'sid': session_id, 'address': addr, 'registered_at': ts, 'last_heartbeat': ts, 'snapshot_ts': ns, 'supports_gossip': bool, ...}}
@@ -1348,15 +1341,6 @@ _p2p_metrics = {
     'startup_time': datetime.now(timezone.utc).isoformat(),
 }
 _metrics_lock = threading.RLock()
-
-@p2p_socketio.on('connect')
-def handle_p2p_connect():
-    """Client connected to P2P WebSocket (port 8000 unified)"""
-    logger.info(f"[P2P-LONGPOLL] ✅ Client connected | sid={request.sid[:16]}")
-
-# ═════════════════════════════════════════════════════════════════════════════════
-# GOSSIP PROTOCOL HELPERS
-# ═════════════════════════════════════════════════════════════════════════════════
 
 def _get_active_miners_for_gossip():
     """Get list of active miners for gossip peer discovery with block height awareness.
@@ -1405,17 +1389,6 @@ def _broadcast_snapshot_to_gossip_network(snapshot):
         
         # Send to all connected clients via broadcast (Socket.IO handles HTTP long-polling transport)
         # ✅ ALWAYS broadcast every second (real-time metrics needed)
-        p2p_socketio.emit('w_state_snapshot', {
-            'timestamp_ns': snapshot.get('timestamp_ns', 0),
-            'oracle_address': snapshot.get('oracle_address', 'qtcl1oracle'),
-            'w_entropy_hash': snapshot.get('w_entropy_hash', ''),
-            'purity': snapshot.get('purity', 0.95),
-            'w_state_fidelity': snapshot.get('w_state_fidelity', 0.94),
-            'coherence': snapshot.get('coherence', 0.5),
-            'entanglement': snapshot.get('entanglement', 0.5),
-            'density_matrix_hex': snapshot.get('density_matrix_hex', ''),
-            'hlwe_signature': snapshot.get('hlwe_signature', {}),            'signature_valid': snapshot.get('signature_valid', True)
-        }, broadcast=True)
         
         with _metrics_lock:
             _p2p_metrics['snapshots_sent'] += 1
@@ -1440,190 +1413,6 @@ def _broadcast_snapshot_to_gossip_network(snapshot):
         logger.error(f"[P2P-LONGPOLL] Snapshot broadcast error: {e}")
         logger.error(traceback.format_exc())
 
-
-@p2p_socketio.on('disconnect')
-def handle_p2p_disconnect():
-    """Client disconnected from P2P WebSocket"""
-    logger.info(f"[P2P-LONGPOLL] Client disconnected from port 8000")
-
-@p2p_socketio.on('miner_register')
-def handle_miner_register(data):
-    """Handle miner registration via P2P WebSocket.
-    
-    ENHANCED: Track gossip support, snapshot timestamps, and send peer list.
-    """
-    try:
-        miner_id = data.get('miner_id', '')
-        address = data.get('address', '')
-        public_key = data.get('public_key', '')
-        supports_gossip = data.get('supports_gossip', False)
-        
-        if not miner_id or not address:
-            p2p_socketio.emit('miner_register_ack', {'status': 'error', 'message': 'Missing miner_id or address'})
-            return
-        
-        # Register miner with gossip support tracking
-        with _miners_lock:
-            _registered_miners[miner_id] = {
-                'sid': request.sid,
-                'address': address,                'public_key': public_key,
-                'registered_at': int(time.time() * 1000),
-                'last_heartbeat': int(time.time() * 1000),
-                'snapshot_ts': data.get('snapshot_ts', 0),
-                'supports_gossip': supports_gossip
-            }
-        
-        logger.info(f"[P2P-LONGPOLL] ✅ Miner registered | miner_id={miner_id[:30]}… | gossip={'enabled' if supports_gossip else 'disabled'}")
-        
-        # Get current peer list for gossip discovery
-        known_peers = _get_active_miners_for_gossip()
-        
-        # Send confirmation with peer list
-        p2p_socketio.emit('miner_register_ack', {
-            'status': 'registered',
-            'miner_id': miner_id,
-            'message': 'Registration successful with gossip support',
-            'known_peers': known_peers,  # ← NEW: Send active peers
-            'latest_snapshot_ts': _latest_snapshot_ts
-        })
-        
-        logger.debug(f"[GOSSIP] 👥 Sent {len(known_peers)} known peers to miner {miner_id[:20]}…")
-        
-    except Exception as e:
-        logger.error(f"[P2P-LONGPOLL] Registration error: {e}")
-        p2p_socketio.emit('miner_register_ack', {'status': 'error', 'message': str(e)})
-
-@p2p_socketio.on('miner_heartbeat')
-def handle_miner_heartbeat(data):
-    """Handle miner heartbeat (keep-alive) with block height tracking.
-    
-    ENHANCED: Track snapshot timestamps, block heights for gossip network awareness.
-    Enables P2P sync to know peer heights and avoid "No peer height information" warnings.
-    """
-    try:
-        miner_id = data.get('miner_id', '')
-        snapshot_ts = data.get('snapshot_ts', 0)
-        known_peers = data.get('known_peers', 0)
-        block_height = data.get('block_height', 0)  # ← NEW: Accept miner's current block height
-        timestamp_ms = data.get('timestamp', int(time.time() * 1000))
-        
-        with _miners_lock:
-            if miner_id in _registered_miners:
-                _registered_miners[miner_id]['last_heartbeat'] = timestamp_ms
-                _registered_miners[miner_id]['snapshot_ts'] = snapshot_ts
-                _registered_miners[miner_id]['block_height'] = block_height  # ← STORE: Miner's block height
-                _registered_miners[miner_id]['known_peers_count'] = known_peers
-                
-                active_miners_list = [m for m in _registered_miners.values() 
-                                     if int(time.time() * 1000) - m.get('last_heartbeat', 0) < 120000]
-                max_peer_height = max([m.get('block_height', 0) for m in active_miners_list], default=0)
-                
-                p2p_socketio.emit('miner_heartbeat_ack', {
-                    'status': 'ok',
-                    'miner_id': miner_id,
-                    'active_miners': len(active_miners_list),
-                    'max_peer_height': max_peer_height,  # ← NEW: Tell miner the highest peer height
-                    'your_height': block_height,
-                    'snapshot_ts_received': snapshot_ts,
-                })
-            else:
-                p2p_socketio.emit('miner_heartbeat_ack', {'status': 'error', 'message': 'Miner not registered'})
-    except Exception as e:
-        logger.error(f"[P2P-LONGPOLL] Heartbeat error: {e}")
-
-@p2p_socketio.on('miner_snapshot_request')
-def handle_miner_snapshot_request(data):
-    """Handle miner requesting W-state snapshot"""
-    try:
-        miner_id = data.get('miner_id', '')
-        known_snapshot_ts = data.get('known_snapshot_ts', 0)
-        
-        # Send latest W-state snapshot
-        snapshot = {
-            'oracle_address': 'qtcl1oracle',
-            'timestamp_ns': int(time.time() * 1e9),
-            'w_entropy_hash': 'a' * 64,
-            'fidelity': 0.95,
-            'density_matrix_hex': 'b' * 512,
-            'hlwe_signature': {
-                'commitment': 'c' * 64,
-                'witness': 'd' * 64,
-                'proof': 'e' * 128,
-                'w_entropy_hash': 'f' * 64,
-                'derivation_path': "m/838'/0'/0'",
-                'public_key_hex': 'g' * 66,
-            },
-            'signature_valid': True
-        }
-        
-        p2p_socketio.emit('miner_snapshot', snapshot)
-        logger.debug(f"[P2P-LONGPOLL] Snapshot sent to miner {miner_id[:20]}…")
-    except Exception as e:
-        logger.error(f"[P2P-LONGPOLL] Snapshot request error: {e}")
-        p2p_socketio.emit('miner_snapshot_error', {'message': str(e)})
-
-@p2p_socketio.on('gossip_peer_list_request')
-def handle_gossip_peer_list_request(data):
-    """Handle miner requesting peer list for gossip discovery with height awareness.
-        Returns active peers AND server's current block height for P2P sync decisions.
-    """
-    try:
-        miner_id = data.get('miner_id', '')
-        
-        # Get active miners list
-        known_peers = _get_active_miners_for_gossip()
-        
-        # Get server's current block height
-        server_height = 0
-        try:
-            with get_db_cursor() as cur:
-                cur.execute("SELECT MAX(height) FROM blocks")
-                row = cur.fetchone()
-                server_height = row[0] if row and row[0] is not None else 0
-        except:
-            server_height = 0
-        
-        # Emit peer list with height info
-        p2p_socketio.emit('gossip_peer_list', {
-            'timestamp': int(time.time()),
-            'peers': known_peers,
-            'total_active': len(known_peers),
-            'latest_snapshot_ts': _latest_snapshot_ts,
-            'server_block_height': server_height,  # ← NEW: Miners now know server's height
-            'max_peer_height': max([p.get('block_height', 0) for p in known_peers], default=0)  # ← NEW: Highest peer
-        })
-        
-        logger.debug(f"[GOSSIP] 👥 Peer list sent to {miner_id[:20]}… | {len(known_peers)} active peers | server_height={server_height}")
-    except Exception as e:
-        logger.error(f"[GOSSIP] Peer list request error: {e}")
-        p2p_socketio.emit('gossip_peer_list_error', {'message': str(e)})
-
-@p2p_socketio.on('miner_disconnect')
-def handle_miner_disconnect(data):
-    """Handle explicit miner disconnect.
-    
-    ENHANCED: Clean up miner records and update gossip network.
-    """
-    try:
-        miner_id = data.get('miner_id', '')
-        
-        with _miners_lock:
-            if miner_id in _registered_miners:
-                del _registered_miners[miner_id]
-                logger.info(f"[P2P-LONGPOLL] Miner disconnected | miner_id={miner_id[:30]}… | remaining={len(_registered_miners)}")
-                
-                # Broadcast updated peer list to remaining miners
-                if _registered_miners:
-                    known_peers = _get_active_miners_for_gossip()
-                    p2p_socketio.emit('gossip_peer_list', {
-                        'timestamp': int(time.time()),
-                        'peers': known_peers,
-                        'total_active': len(known_peers),
-                        'latest_snapshot_ts': _latest_snapshot_ts
-                    }, broadcast=True)
-                    logger.debug(f"[GOSSIP] 📡 Updated peer list broadcast to {len(_registered_miners)} miners")
-    except Exception as e:
-        logger.error(f"[P2P-LONGPOLL] Disconnect error: {e}")
 
 def _cleanup_stale_miners():
     """Periodically remove stale miner connections (no heartbeat for 5+ minutes).
