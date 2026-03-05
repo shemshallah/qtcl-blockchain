@@ -5193,31 +5193,32 @@ def submit_transaction():
             'hlwe_signature'     : data.get('hlwe_signature', {}),
         }
 
-        # ── INSERT INTO DB — primary persistence, TX queryable immediately ──────
-        # Wallet upsert uses ON CONFLICT(address) DO NOTHING.
-        # wallet_fingerprint UNIQUE(fp, derivation_path): derivation_path=NULL is always
-        # treated as distinct in PostgreSQL UNIQUE indexes so no collision possible.
+        # ── INSERT INTO DB — EACH STEP IN ITS OWN CURSOR (own transaction) ──────
+        # ROOT CAUSE OF "TX only in DHT": get_db_cursor() wraps ONE connection/transaction.
+        # Wallet INSERT failing (any constraint) rolled back the entire block including TX insert.
+        # Fix: wallet rows each get their own cursor so failure is isolated. TX insert is alone.
         db_inserted = False
         db_error_msg = None
-        try:
-            def _fp(a): return hashlib.sha256(a.encode()).hexdigest()[:64]
-            def _pk(a): return hashlib.sha3_256(a.encode()).hexdigest()
+        _fp = lambda a: hashlib.sha256(a.encode()).hexdigest()[:64]
+        _pk = lambda a: hashlib.sha3_256(a.encode()).hexdigest()
 
-            with get_db_cursor() as cur:
-                # Wallet rows — INSERT ... ON CONFLICT(address) DO NOTHING is safe.
-                # We use a unique wallet_fingerprint per address (sha256 of address → 64 hex chars).
-                # The UNIQUE(wallet_fingerprint, derivation_path) constraint cannot fire here because
-                # each address has a unique sha256 fingerprint (negligible collision probability)
-                # and derivation_path=NULL (not set), which PostgreSQL treats as distinct per-row.
-                for addr, atype in [(from_addr, 'sending'), (to_addr, 'receiving')]:
-                    cur.execute("""
+        # Step 1 — wallet rows, each isolated, failure is silently ignored
+        for _addr, _atype in [(from_addr, 'sending'), (to_addr, 'receiving')]:
+            try:
+                with get_db_cursor() as _cur:
+                    _cur.execute("""
                         INSERT INTO wallet_addresses
-                            (address, wallet_fingerprint, public_key, balance, transaction_count, address_type)
+                            (address, wallet_fingerprint, public_key,
+                             balance, transaction_count, address_type)
                         VALUES (%s, %s, %s, 0, 0, %s)
                         ON CONFLICT (address) DO NOTHING
-                    """, (addr, _fp(addr), _pk(addr), atype))
+                    """, (_addr, _fp(_addr), _pk(_addr), _atype))
+            except Exception as _we:
+                logger.debug(f"[TRANSACT] Wallet upsert skipped ({_addr[:12]}): {_we}")
 
-                # Insert pending TX
+        # Step 2 — TX insert, isolated transaction, THIS is what matters
+        try:
+            with get_db_cursor() as cur:
                 cur.execute("""
                     INSERT INTO transactions
                         (tx_hash, from_address, to_address, amount,
@@ -5225,7 +5226,8 @@ def submit_transaction():
                          quantum_state_hash, commitment_hash, metadata)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (tx_hash) DO UPDATE SET
-                        status = EXCLUDED.status,
+                        status     = CASE WHEN transactions.status = 'confirmed'
+                                         THEN 'confirmed' ELSE 'pending' END,
                         updated_at = NOW()
                 """, (
                     tx_hash_hex, from_addr, to_addr, amount_base,
@@ -5233,40 +5235,33 @@ def submit_transaction():
                     signature_json or '', tx_hash_hex,
                     json.dumps(tx_metadata),
                 ))
-                db_inserted = True
-
-                # Client alias row — only if client sent a different hash
-                if client_tx_id and client_tx_id != tx_hash_hex and len(client_tx_id) == 64:
-                    try:
-                        cur.execute("""
-                            INSERT INTO transactions
-                                (tx_hash, from_address, to_address, amount,
-                                 nonce, tx_type, status,
-                                 quantum_state_hash, commitment_hash, metadata)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                            ON CONFLICT (tx_hash) DO NOTHING
-                        """, (
-                            client_tx_id, from_addr, to_addr, amount_base,
-                            nonce, 'transfer', 'pending',
-                            signature_json or '', tx_hash_hex,
-                            json.dumps({**tx_metadata, 'alias_of': tx_hash_hex}),
-                        ))
-                        logger.info(f"[TRANSACT] 🔗 Alias stored: {client_tx_id[:16]}… → {tx_hash_hex[:16]}…")
-                    except Exception as alias_err:
-                        logger.debug(f"[TRANSACT] Alias insert skipped: {alias_err}")
-
-            logger.info(f"[TRANSACT] ✅ TX in DB | status=pending | hash={tx_hash_hex[:16]}… | {amount_float} QTCL")
-
+            db_inserted = True
+            logger.info(f"[TRANSACT] TX in DB | pending | {tx_hash_hex[:16]}... | {amount_float} QTCL")
         except Exception as db_err:
             db_error_msg = str(db_err)
-            # Log FULL traceback so we can diagnose DB issues
-            logger.error(f"[TRANSACT] ❌ DB insert FAILED: {db_err}")
-            logger.error(f"[TRANSACT]    TX hash  : {tx_hash_hex}")
-            logger.error(f"[TRANSACT]    from_addr: {from_addr}")
-            logger.error(f"[TRANSACT]    to_addr  : {to_addr}")
-            logger.error(f"[TRANSACT]    amount   : {amount_base}")
+            logger.error(f"[TRANSACT] TX DB insert FAILED: {type(db_err).__name__}: {db_err}")
             logger.error(traceback.format_exc())
-            # TX still continues (DHT + mempool will carry it) but we now know the error
+
+        # Step 3 — alias row (client_tx_id != canonical), isolated, best-effort
+        if client_tx_id and client_tx_id != tx_hash_hex and len(client_tx_id) == 64:
+            try:
+                with get_db_cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO transactions
+                            (tx_hash, from_address, to_address, amount,
+                             nonce, tx_type, status,
+                             quantum_state_hash, commitment_hash, metadata)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (tx_hash) DO NOTHING
+                    """, (
+                        client_tx_id, from_addr, to_addr, amount_base,
+                        nonce, 'transfer', 'pending',
+                        signature_json or '', tx_hash_hex,
+                        json.dumps({**tx_metadata, 'alias_of': tx_hash_hex}),
+                    ))
+                logger.info(f"[TRANSACT] Alias: {client_tx_id[:16]}... -> {tx_hash_hex[:16]}...")
+            except Exception as ae:
+                logger.debug(f"[TRANSACT] Alias skipped: {ae}")
 
         # ── STORE IN DHT FOR P2P PEER VALIDATION ───────────────────────────────
         try:
