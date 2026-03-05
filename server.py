@@ -47,6 +47,7 @@ from datetime import datetime, timezone, timedelta
 from enum import Enum
 from dataclasses import dataclass, field
 from collections import deque, OrderedDict
+from contextlib import contextmanager
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
 # EARLY LOGGER SETUP (before DHT/other classes)
