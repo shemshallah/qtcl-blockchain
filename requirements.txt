@@ -8,4 +8,4 @@ gunicorn==21.2.0
 psycopg2-binary==2.9.9
 msgpack==1.0.7
 Qiskit==0.43.0
-qiskit-aer==0.13.1
+qiskit-aer==0.12.0
