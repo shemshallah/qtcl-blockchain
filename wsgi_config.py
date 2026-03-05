@@ -15,11 +15,11 @@
 ║    5. Export WSGI-compliant app object                                                        ║
 ║                                                                                                ║
 ║  Usage:                                                                                       ║
-║    gunicorn -w1 -b0.0.0.0:8000 wsgi_config:app                                                ║
-║    gunicorn -w1 -b0.0.0.0:8000 --timeout 120 wsgi_config:app  (production, Koyeb)           ║
+║    gunicorn -w1 -b0.0.0.0:$PORT wsgi_config:app                                                ║
+║    gunicorn -w1 -b0.0.0.0:$PORT --timeout 120 wsgi_config:app  (production, Koyeb)           ║
 ║                                                                                                ║
-║  Procfile (Heroku/Koyeb/Railway) — Port 8000 internal, 443 external:                         ║
-║    web: gunicorn -w1 -b0.0.0.0:8000 --timeout 120 wsgi_config:app                           ║
+║  Procfile (Heroku/Koyeb/Railway) — Port 443 HTTPS (external via Koyeb):                         ║
+║    web: gunicorn -w1 -b0.0.0.0:$PORT --timeout 120 wsgi_config:app                           ║
 ║                                                                                                ║
 ║  All subsystem initialization (lattice, P2P, database, oracle) happens in server.py           ║
 ║  This file is a clean, minimal WSGI wrapper with proper logging.                              ║
@@ -87,7 +87,7 @@ logger.info("║" + " " * 90 + "║")
 logger.info("║" + "  ✅ WSGI APPLICATION READY FOR DEPLOYMENT".center(90) + "║")
 logger.info("║" + " " * 90 + "║")
 logger.info("║  Entry Point: wsgi_config:app".ljust(90) + "║")
-logger.info("║  Command: gunicorn -w1 -b0.0.0.0:8000 --timeout 120 wsgi_config:app".ljust(90) + "║")
+logger.info("║  Command: gunicorn -w1 -b0.0.0.0:$PORT --timeout 120 wsgi_config:app".ljust(90) + "║")
 logger.info("║" + " " * 90 + "║")
 logger.info("║  Subsystems Initialized:".ljust(90) + "║")
 logger.info("║    ✓ Logging & Configuration".ljust(90) + "║")
