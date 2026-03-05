@@ -471,7 +471,7 @@ DB_URL = POOLER_URL
 logger.info(f"[DB] ✨ Using Supabase Pooler: {POOLER_HOST or 'configured'}")
 
 # P2P Network — All on port 8000 (unified with REST API via Flask-SocketIO)
-P2P_PORT = int(os.getenv('PORT', int(os.getenv('FLASK_PORT', 443))))  # Use PORT (443 on Koyeb) or FLASK_PORT
+P2P_PORT = int(os.getenv('PORT', int(os.getenv('FLASK_PORT', 8000))))  # Use PORT (8000 on Koyeb) or FLASK_PORT
 P2P_HOST = os.getenv('P2P_HOST', '0.0.0.0')
 P2P_TESTNET_PORT = P2P_PORT + 10000  # Testnet offset (not used on production)
 MAX_PEERS = int(os.getenv('MAX_PEERS', 32))
@@ -1084,10 +1084,10 @@ socketio = SocketIO(
 )
 
 # ═════════════════════════════════════════════════════════════════════════════════
-# MINER P2P WEBSOCKET SERVER (port 8333) - HTTP LONG-POLLING ONLY
+# MINER P2P WEBSOCKET SERVER (port 8000) - UNIFIED WITH REST API
 # ═════════════════════════════════════════════════════════════════════════════════
 
-# Separate Flask app for P2P Socket.IO on port 8333
+# Separate Flask app for P2P Socket.IO on port 8000 (unified)
 p2p_app = Flask(__name__)
 p2p_app.config['SECRET_KEY'] = secrets.token_hex(32)
 p2p_socketio = SocketIO(    p2p_app,
@@ -1125,7 +1125,7 @@ _metrics_lock = threading.RLock()
 
 @p2p_socketio.on('connect')
 def handle_p2p_connect():
-    """Client connected to P2P WebSocket (port 8333)"""
+    """Client connected to P2P WebSocket (port 8000 unified)"""
     logger.info(f"[P2P-LONGPOLL] ✅ Client connected | sid={request.sid[:16]}")
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -1215,7 +1215,7 @@ def _broadcast_snapshot_to_gossip_network(snapshot):
 @p2p_socketio.on('disconnect')
 def handle_p2p_disconnect():
     """Client disconnected from P2P WebSocket"""
-    logger.info(f"[P2P-LONGPOLL] Client disconnected from port 8333")
+    logger.info(f"[P2P-LONGPOLL] Client disconnected from port 8000")
 
 @p2p_socketio.on('miner_register')
 def handle_miner_register(data):
@@ -5091,12 +5091,12 @@ if __name__ == '__main__':
         logger.warning("[STARTUP] Failed to initialize P2P server (may retry)")
     
     # Port configuration — unified port 8000 for all services (Koyeb standard)    # FLASK_PORT: HTTP/WebSocket server (REST API + P2P on same port via Socket.IO)
-    port = int(os.getenv('PORT', 443))  # Koyeb sets PORT=443 for HTTPS
+    port = int(os.getenv('PORT', 8000))  # Koyeb sets PORT=8000 by default (HTTPS 443 via reverse proxy)
     debug = os.getenv('FLASK_ENV') == 'development'
     
     logger.info("╔" + "═" * 78 + "╗")
     logger.info("║ QTCL SERVER v6 STARTING (WITH INTEGRATED P2P & CONNECTION POOLING)")
-    logger.info("║ HTTPS Port: %d (443 on Koyeb) (REST API + P2P WebSocket) | Debug: %s" % (port, debug))
+    logger.info("║ Port: %d (8000 internal, 443 HTTPS via Koyeb) (REST API + P2P WebSocket) | Debug: %s" % (port, debug))
     logger.info("║ Lattice: %s | P2P: %s" % (state.lattice_loaded, P2P is not None))
     logger.info("╚" + "═" * 78 + "╝")
     
@@ -5106,7 +5106,7 @@ if __name__ == '__main__':
     logger.info("[STARTUP] ✓ Metrics collector started (updates every 2 seconds)")
     
     logger.info("╔" + "═" * 78 + "╗")
-    logger.info("║ QTCL SERVER v6 READY — UNIFIED PORT 443 (HTTPS) (REST + P2P + WEBSOCKET)")
+    logger.info("║ QTCL SERVER v6 READY — UNIFIED PORT 8000 (REST + P2P + WEBSOCKET) (HTTPS 443 via Koyeb)")
     logger.info("║ Port: %d | Transport: HTTP/WebSocket | Metrics: LIVE | Koyeb: ✅" % port)
     logger.info("║ Lattice: %s | P2P: %s" % (state.lattice_loaded, P2P is not None))
     logger.info("╚" + "═" * 78 + "╝")
@@ -5117,7 +5117,7 @@ if __name__ == '__main__':
         logger.info("[STARTUP] Running in production mode (Koyeb-optimized).")
         logger.info("[STARTUP] Command: gunicorn -w1 -b0.0.0.0:$PORT --timeout 120 server:app")
     
-    # P2P communication integrated into main Flask-SocketIO app on port 443 HTTPS
+    # P2P communication integrated into main Flask-SocketIO app on port 8000 (HTTPS 443 via Koyeb reverse proxy)
     # All clients (miners, peers) connect via WebSocket to same port as REST API
     # No separate P2P port needed — everything unified on 8000
     logger.info("[P2P-SOCKETIO] P2P communication enabled on main port %d (unified)" % port)
