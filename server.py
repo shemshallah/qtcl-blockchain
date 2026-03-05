@@ -54,7 +54,6 @@ import secrets
 from concurrent.futures import ThreadPoolExecutor  # H2: Thread pooling for DoS prevention
 
 from flask import Flask, jsonify, request, render_template_string, send_file
-from flask_socketio import SocketIO, emit, join_room, leave_room
 from io import BytesIO
 import msgpack
 import base64
@@ -1572,8 +1571,8 @@ class MetricsCollector:
         while self.running:
             try:
                 metrics = self._gather_metrics()
-                # Broadcast to all connected clients
-                socketio.emit('metrics_update', metrics, broadcast=True)
+                # SSE only - broadcast to connected clients via _sse_push_snapshot
+                _sse_push_snapshot(metrics)
                 time.sleep(2)  # Update every 2 seconds
             except Exception as e:
                 logger.error(f"[METRICS] Collection error: {e}")
@@ -1799,43 +1798,6 @@ _metrics_collector = MetricsCollector()
 # ═════════════════════════════════════════════════════════════════════════════════
 # WEBSOCKET HANDLERS
 # ═════════════════════════════════════════════════════════════════════════════════
-
-@socketio.on('connect')
-def handle_connect():
-    """Client connected to WebSocket"""
-    logger.info(f"[WEBSOCKET] Client connected")
-    # Send initial metrics immediately
-    try:
-        metrics = _metrics_collector._gather_metrics()
-        emit('metrics_update', metrics)
-    except Exception as e:
-        logger.error(f"[WEBSOCKET] Initial metrics error: {e}")
-
-@socketio.on('disconnect')
-def handle_disconnect():
-    """Client disconnected from WebSocket"""
-    logger.info(f"[WEBSOCKET] Client disconnected")
-
-@socketio.on('request_metrics')
-def handle_request_metrics():
-    """Client requesting metrics on demand"""
-    try:
-        metrics = _metrics_collector._gather_metrics()
-        emit('metrics_update', metrics)
-    except Exception as e:
-        logger.error(f"[WEBSOCKET] On-demand metrics error: {e}")
-        emit('error', {'message': str(e)})
-
-# ── Alias events (miners/clients may emit either name) ────────────────────────
-@socketio.on('get_metrics')
-def handle_get_metrics():
-    """Alias for request_metrics"""
-    handle_request_metrics()
-
-@socketio.on('ping')
-def handle_ws_ping():
-    """WebSocket ping keepalive"""
-    emit('pong', {'ts': time.time()})
 
 # ── REST endpoints for HTTP fallback polling ──────────────────────────────────
 @app.route('/metrics', methods=['GET'])
@@ -5152,8 +5114,8 @@ if __name__ == '__main__':
     
     # Start P2P daemons (streaming + cleanup)
     _start_p2p_daemons()
-    logger.info("[P2P-SOCKETIO] ✅ P2P daemons started (heartbeat, snapshot broadcast)")
+    logger.info("[P2P-SSE] ✅ P2P daemons started (heartbeat, snapshot broadcast)")
     
-    # Use SocketIO to run unified Flask HTTP+WebSocket server on port 8000
-    logger.info(f"[HTTP] Starting unified HTTP REST + P2P WebSocket server on port {port}...")
-    socketio.run(app, host='0.0.0.0', port=port, debug=debug, allow_unsafe_werkzeug=True)
+    # Use Flask to run unified HTTP REST + SSE server on port 8000
+    logger.info(f"[HTTP] Starting unified HTTP REST + P2P SSE server on port {port}...")
+    app.run(host='0.0.0.0', port=port, debug=debug, threaded=True)
