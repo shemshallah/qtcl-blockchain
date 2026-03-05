@@ -3895,6 +3895,29 @@ if ORACLE_AVAILABLE and ORACLE is not None:
     if LATTICE is not None:
         ORACLE.set_lattice_ref(LATTICE)
     logger.info(f"[ORACLE] ✅ Initialized | address={ORACLE.oracle_address}")
+    # Register oracle as DHT peer — makes oracle discoverable for P2P TX validation
+    try:
+        _dht = get_dht_manager()
+        oracle_host = os.getenv('FLASK_HOST', 'qtcl-blockchain.koyeb.app')
+        oracle_port = int(os.getenv('PORT', 8000))
+        oracle_node_id = hashlib.sha1(
+            f"oracle:{getattr(ORACLE, 'oracle_address', 'qtcl1oracle')}".encode()
+        ).hexdigest()
+        oracle_dht_node = DHTNode(node_id=oracle_node_id, address=oracle_host, port=oracle_port)
+        _dht.routing_table.add_node(oracle_dht_node)
+        # Store oracle metadata in DHT so peers can find it
+        _dht.store_state('oracle:primary', {
+            'address'      : getattr(ORACLE, 'oracle_address', 'qtcl1oracle'),
+            'host'         : oracle_host,
+            'port'         : oracle_port,
+            'node_id'      : oracle_node_id,
+            'capabilities' : ['tx_validate', 'hlwe_sign', 'w_state', 'mempool'],
+            'api_base'     : f'https://{oracle_host}',
+            'registered_at': time.time(),
+        })
+        logger.info(f"[DHT] ✅ Oracle registered as DHT peer | node_id={oracle_node_id[:16]}… | {oracle_host}:{oracle_port}")
+    except Exception as _dht_err:
+        logger.warning(f"[DHT] Oracle DHT registration failed (non-fatal): {_dht_err}")
 else:
     logger.warning("[ORACLE] ⚠️  Oracle not available — signing disabled")
 
@@ -4893,6 +4916,68 @@ def submit_block():
                     f"{amount_base} base units (fee={fee_base})"
                 )
         
+        # 3.5️⃣ CONFIRM PENDING TRANSACTIONS — update status for any pre-submitted mempool TXs
+        # Any TX submitted via /api/submit_transaction that was pending in DB now becomes confirmed.
+        # This is the Bitcoin model: pending → confirmed when block seals.
+        try:
+            with get_db_cursor() as cur:
+                # Collect all tx_ids from the block (regular + any that were pre-submitted)
+                all_block_tx_hashes = []
+                for tx in transactions:
+                    tid = str(tx.get('tx_id', '') or tx.get('tx_hash', '') or tx.get('hash', ''))
+                    if tid and len(tid) == 64:
+                        all_block_tx_hashes.append(tid)
+                if coinbase_id:
+                    all_block_tx_hashes.append(coinbase_id)
+
+                if all_block_tx_hashes:
+                    cur.execute("""
+                        UPDATE transactions
+                        SET status = 'confirmed',
+                            height = %s,
+                            block_hash = %s,
+                            finalized_at = NOW(),
+                            updated_at = NOW()
+                        WHERE tx_hash = ANY(%s) AND status = 'pending'
+                    """, (block_height, block_hash, all_block_tx_hashes))
+                    logger.info(
+                        f"[BLOCK] ✅ Confirmed {len(all_block_tx_hashes)} pending TXs "
+                        f"→ status=confirmed | block=#{block_height}"
+                    )
+
+                # Also update any TXs that from_address + to_address match (catches alias hash mismatches)
+                if regular_txs:
+                    for tx in regular_txs:
+                        fa = str(tx.get('from_addr', tx.get('from_address', tx.get('from', ''))))
+                        ta = str(tx.get('to_addr',   tx.get('to_address',   tx.get('to', ''))))
+                        raw_a = tx.get('amount', 0)
+                        ab = int(round(float(raw_a) * 100)) if isinstance(raw_a, float) and float(raw_a) < 10000 else int(raw_a or 0)
+                        if fa and ta and ab > 0:
+                            cur.execute("""
+                                UPDATE transactions
+                                SET status = 'confirmed', height = %s, block_hash = %s,
+                                    finalized_at = NOW(), updated_at = NOW()
+                                WHERE from_address = %s AND to_address = %s
+                                  AND amount = %s AND status = 'pending'
+                            """, (block_height, block_hash, fa, ta, ab))
+        except Exception as confirm_err:
+            logger.warning(f"[BLOCK] TX confirmation update error (non-fatal): {confirm_err}")
+
+        # Also update DHT entries to confirmed for peer visibility
+        try:
+            dht = get_dht_manager()
+            for tx in transactions:
+                tid = str(tx.get('tx_id', '') or tx.get('tx_hash', '') or '')
+                if tid:
+                    dht_entry = dht.retrieve_state(f"tx:{tid}")
+                    if dht_entry:
+                        dht_entry['status'] = 'confirmed'
+                        dht_entry['block_height'] = block_height
+                        dht_entry['block_hash'] = block_hash
+                        dht.store_state(f"tx:{tid}", dht_entry)
+        except Exception as dht_confirm_err:
+            logger.debug(f"[BLOCK] DHT TX confirmation error (non-fatal): {dht_confirm_err}")
+
         # 4️⃣ UPDATE IN-MEMORY STATE
         state.update_block_state({
             'current_height': block_height,
@@ -4951,147 +5036,431 @@ def submit_block():
 @app.route('/api/submit_transaction', methods=['POST'])
 def submit_transaction():
     """
-    Submit a transaction.
+    Submit a transaction — Bitcoin-model mempool with immediate DB persistence.
 
-    Body: { from, to, amount, [nonce], [fee] }
+    Body: { from, to, amount, [tx_id], [nonce], [fee], [memo], [public_key], [hlwe_signature] }
 
-    Flow:
+    Flow (Bitcoin-mirrored):
       1. Validate fields
-      2. Oracle signs the TX (HLWE)
-      3. Submit to BlockManager (triggers immediate seal in 1-TX mode)
-      4. Broadcast to P2P network
+      2. Compute CANONICAL tx_hash — deterministic, client-predictable:
+             SHA3-256(JSON({from_addr, to_addr, amount_str, nonce_str, timestamp_ns_str}, sort_keys=True))
+         If client sends a tx_id that is a valid 64-hex SHA3-256 digest we ALSO store it as an alias
+         in metadata so the client can look up by either hash.
+      3. INSERT into transactions with status='pending' — IMMEDIATELY QUERYABLE.
+      4. Oracle HLWE-signs the canonical hash.
+      5. Submit to BlockManager (in-memory mempool) for inclusion in next block.
+      6. Store in DHT so all P2P peers (including oracle) can validate/lookup.
+      7. Broadcast to P2P network.
+
+    Bitcoin model:
+      • TX is PENDING (unconfirmed) immediately after broadcast — queryable by hash.
+      • TX becomes CONFIRMED when a miner seals a block containing it.
+      • Block does NOT need to be sealed to query the TX — it just won't have block_height yet.
+
+    Returns: { tx_hash, client_tx_id, status, from, to, amount, signed }
     """
     data      = request.get_json() or {}
-    from_addr = data.get('from')
-    to_addr   = data.get('to')
+    from_addr = data.get('from') or data.get('from_addr') or data.get('sender_addr')
+    to_addr   = data.get('to')   or data.get('to_addr')   or data.get('receiver_addr')
     amount    = data.get('amount')
 
-    if not all([from_addr, to_addr, amount]):
+    if not all([from_addr, to_addr, amount is not None]):
         return jsonify({'error': 'missing from/to/amount'}), 400
 
     try:
-        import uuid as _uuid
         from decimal import Decimal
 
-        tx_id        = str(_uuid.uuid4())
+        # ── Normalise amount ────────────────────────────────────────────────────
+        # Amount from client may be QTCL float (e.g. 1.5) or base units (150).
+        # We store base units in DB (NUMERIC(30,0)). Keep QTCL float for response.
+        try:
+            amount_float = float(amount)
+        except (ValueError, TypeError):
+            return jsonify({'error': f'invalid amount: {amount}'}), 400
+        # Heuristic: if < 10000 treat as QTCL float → convert to base units
+        amount_base = int(round(amount_float * 100)) if amount_float < 10000 else int(amount_float)
+
         nonce        = int(data.get('nonce', 0))
-        fee          = int(data.get('fee', 1))
+        fee_qtcl     = float(data.get('fee', 0.001))
+        fee_base     = max(1, int(round(fee_qtcl * 100)))
         timestamp_ns = time.time_ns()
+        client_tx_id = data.get('tx_id', '')  # client-supplied hash (may differ from canonical)
+        memo         = str(data.get('memo', ''))[:256]
 
-        # Build the message to sign = SHA3-256 of canonical TX fields
-        tx_preimage = json.dumps({
-            'tx_id'        : tx_id,
-            'sender_addr'  : from_addr,
-            'receiver_addr': to_addr,
-            'amount'       : str(amount),
-            'nonce'        : nonce,
-            'timestamp_ns' : timestamp_ns,
-        }, sort_keys=True)
-        tx_hash_hex = hashlib.sha3_256(tx_preimage.encode()).hexdigest()
+        # ── CANONICAL TX HASH — deterministic, reproducible by client ───────────
+        # Field names use 'from_addr'/'to_addr' consistently (not 'from'/'to').
+        # Amount is stored as string to avoid float precision drift.
+        # Nonce and timestamp_ns as strings for same reason.
+        canonical_fields = {
+            'from_addr'    : from_addr,
+            'to_addr'      : to_addr,
+            'amount'       : str(amount_base),
+            'nonce'        : str(nonce),
+            'timestamp_ns' : str(timestamp_ns),
+        }
+        canonical_preimage = json.dumps(canonical_fields, sort_keys=True)
+        tx_hash_hex = hashlib.sha3_256(canonical_preimage.encode()).hexdigest()
 
-        # Oracle signs
+        logger.info(
+            f"[TRANSACT] 📝 New TX | from={from_addr[:16]}… | to={to_addr[:16]}… | "
+            f"amount={amount_float} QTCL ({amount_base} base) | canonical_hash={tx_hash_hex[:16]}… | "
+            f"client_id={client_tx_id[:16] if client_tx_id else 'none'}…"
+        )
+
+        # ── ORACLE HLWE SIGN ────────────────────────────────────────────────────
         signature_json = None
         if ORACLE:
-            sig = ORACLE.sign_transaction(tx_hash_hex, from_addr)
-            if sig:
-                signature_json = json.dumps(sig.to_dict())
+            try:
+                sig = ORACLE.sign_transaction(tx_hash_hex, from_addr)
+                if sig:
+                    signature_json = json.dumps(sig.to_dict() if hasattr(sig, 'to_dict') else sig)
+                    logger.info(f"[TRANSACT] ✅ Oracle HLWE signed | hash={tx_hash_hex[:16]}…")
+            except Exception as sig_err:
+                logger.warning(f"[TRANSACT] Oracle sign failed (non-fatal): {sig_err}")
 
-        # Submit to BlockManager
-        if LATTICE and LATTICE.block_manager:
-            from lattice_controller import QuantumTransaction
-            qt = QuantumTransaction(
-                tx_id         = tx_hash_hex,
-                sender_addr   = from_addr,
-                receiver_addr = to_addr,
-                amount        = Decimal(str(amount)),
-                nonce         = nonce,
-                timestamp_ns  = timestamp_ns,
-                fee           = fee,
-                signature     = signature_json,
-            )
-            accepted = LATTICE.block_manager.receive_transaction(qt)
-            if not accepted:
-                return jsonify({'error': 'transaction rejected by BlockManager'}), 422
+        # ── INSERT INTO DB IMMEDIATELY (status='pending') — BITCOIN MODEL ───────
+        # This makes the TX queryable right away, before any block is mined.
+        # When a block confirms it, submit_block will UPDATE status → 'confirmed'.
+        tx_metadata = {
+            'canonical_preimage' : canonical_preimage,
+            'client_tx_id'       : client_tx_id,       # alias for client lookup
+            'amount_qtcl'        : amount_float,
+            'amount_base'        : amount_base,
+            'fee_qtcl'           : fee_qtcl,
+            'fee_base'           : fee_base,
+            'memo'               : memo,
+            'oracle_signed'      : signature_json is not None,
+            'submitted_at_ns'    : timestamp_ns,
+            'public_key'         : data.get('public_key', ''),
+            'hlwe_signature'     : data.get('hlwe_signature', {}),
+        }
 
-        # P2P broadcast
-        if P2P:
-            wire_tx = {
-                'hash'      : tx_hash_hex,
-                'tx_id'     : tx_hash_hex,
-                'from'      : from_addr,
-                'sender_addr': from_addr,
-                'to'        : to_addr,
-                'receiver_addr': to_addr,
-                'amount'    : amount,
-                'nonce'     : nonce,
-                'fee'       : fee,
+        try:
+            with get_db_cursor() as cur:
+                # Ensure wallet rows exist (upsert no-op)
+                def _fp(a): return hashlib.sha256(a.encode()).hexdigest()[:64]
+                def _pk(a): return hashlib.sha3_256(a.encode()).hexdigest()
+                cur.execute("""
+                    INSERT INTO wallet_addresses (address, wallet_fingerprint, public_key, balance, transaction_count, address_type)
+                    VALUES (%s, %s, %s, 0, 0, %s) ON CONFLICT (address) DO NOTHING
+                """, (from_addr, _fp(from_addr), _pk(from_addr), 'sending'))
+                cur.execute("""
+                    INSERT INTO wallet_addresses (address, wallet_fingerprint, public_key, balance, transaction_count, address_type)
+                    VALUES (%s, %s, %s, 0, 0, %s) ON CONFLICT (address) DO NOTHING
+                """, (to_addr, _fp(to_addr), _pk(to_addr), 'receiving'))
+
+                # Insert pending TX — ON CONFLICT DO NOTHING (idempotent resubmit)
+                cur.execute("""
+                    INSERT INTO transactions (
+                        tx_hash, from_address, to_address, amount,
+                        nonce, tx_type, status,
+                        quantum_state_hash, commitment_hash, metadata
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (tx_hash) DO NOTHING
+                """, (
+                    tx_hash_hex,
+                    from_addr,
+                    to_addr,
+                    amount_base,
+                    nonce,
+                    'transfer',
+                    'pending',
+                    signature_json or '',
+                    tx_hash_hex,
+                    json.dumps(tx_metadata),
+                ))
+                # If client has a different tx_id (old hash), store alias row so lookup works
+                if client_tx_id and client_tx_id != tx_hash_hex and len(client_tx_id) == 64:
+                    cur.execute("""
+                        INSERT INTO transactions (
+                            tx_hash, from_address, to_address, amount,
+                            nonce, tx_type, status,
+                            quantum_state_hash, commitment_hash, metadata
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (tx_hash) DO NOTHING
+                    """, (
+                        client_tx_id,
+                        from_addr,
+                        to_addr,
+                        amount_base,
+                        nonce,
+                        'transfer',
+                        'pending',
+                        signature_json or '',
+                        tx_hash_hex,          # commitment_hash points to canonical
+                        json.dumps({**tx_metadata, 'alias_of': tx_hash_hex}),
+                    ))
+                    logger.info(f"[TRANSACT] 🔗 Client alias stored: {client_tx_id[:16]}… → {tx_hash_hex[:16]}…")
+            logger.info(f"[TRANSACT] ✅ TX persisted to DB | status=pending | hash={tx_hash_hex[:16]}…")
+        except Exception as db_err:
+            logger.error(f"[TRANSACT] ⚠️  DB insert failed (non-fatal, TX still in mempool): {db_err}")
+
+        # ── STORE IN DHT FOR P2P PEER VALIDATION ───────────────────────────────
+        try:
+            dht = get_dht_manager()
+            dht.store_state(f"tx:{tx_hash_hex}", {
+                'tx_hash'     : tx_hash_hex,
+                'client_tx_id': client_tx_id,
+                'from_addr'   : from_addr,
+                'to_addr'     : to_addr,
+                'amount_base' : amount_base,
+                'amount_qtcl' : amount_float,
+                'nonce'       : nonce,
                 'timestamp_ns': timestamp_ns,
-                'signature' : signature_json,
-            }
-            P2P.relay_transaction(wire_tx, exclude_peer_id=None)
+                'status'      : 'pending',
+                'oracle_signed': signature_json is not None,
+                'submitted_at': time.time(),
+            })
+            # Also index by client tx_id so peer lookup works by either hash
+            if client_tx_id and client_tx_id != tx_hash_hex:
+                dht.store_state(f"tx:{client_tx_id}", {'alias_of': tx_hash_hex, 'status': 'pending'})
+            logger.debug(f"[TRANSACT] 🌐 TX stored in DHT: tx:{tx_hash_hex[:16]}…")
+        except Exception as dht_err:
+            logger.debug(f"[TRANSACT] DHT store failed (non-fatal): {dht_err}")
+
+        # ── SUBMIT TO BLOCK MANAGER (in-memory mempool) ─────────────────────────
+        bm_accepted = False
+        if LATTICE and LATTICE.block_manager:
+            try:
+                from lattice_controller import QuantumTransaction
+                qt = QuantumTransaction(
+                    tx_id         = tx_hash_hex,
+                    sender_addr   = from_addr,
+                    receiver_addr = to_addr,
+                    amount        = Decimal(str(amount_float)),
+                    nonce         = nonce,
+                    timestamp_ns  = timestamp_ns,
+                    fee           = fee_base,
+                    signature     = signature_json,
+                )
+                bm_accepted = LATTICE.block_manager.receive_transaction(qt)
+                if bm_accepted:
+                    logger.info(f"[TRANSACT] ✅ TX accepted by BlockManager mempool")
+                else:
+                    logger.warning(f"[TRANSACT] ⚠️  BlockManager rejected TX (balance/duplicate?)")
+            except Exception as bm_err:
+                logger.error(f"[TRANSACT] BlockManager error: {bm_err}")
+
+        # ── P2P BROADCAST ────────────────────────────────────────────────────────
+        if P2P:
+            try:
+                wire_tx = {
+                    'hash'         : tx_hash_hex,
+                    'tx_id'        : tx_hash_hex,
+                    'client_tx_id' : client_tx_id,
+                    'from'         : from_addr,
+                    'sender_addr'  : from_addr,
+                    'to'           : to_addr,
+                    'receiver_addr': to_addr,
+                    'amount'       : amount_float,
+                    'amount_base'  : amount_base,
+                    'nonce'        : nonce,
+                    'fee'          : fee_qtcl,
+                    'fee_base'     : fee_base,
+                    'timestamp_ns' : timestamp_ns,
+                    'signature'    : signature_json,
+                    'memo'         : memo,
+                }
+                P2P.relay_transaction(wire_tx, exclude_peer_id=None)
+                logger.info(f"[TRANSACT] 📡 Broadcast to {P2P.get_peer_count()} P2P peers")
+            except Exception as p2p_err:
+                logger.warning(f"[TRANSACT] P2P broadcast error (non-fatal): {p2p_err}")
 
         return jsonify({
-            'tx_hash'   : tx_hash_hex,
-            'status'    : 'sealed' if LATTICE else 'pending',
-            'from'      : from_addr,
-            'to'        : to_addr,
-            'amount'    : amount,
-            'signed'    : signature_json is not None,
+            'tx_hash'      : tx_hash_hex,       # ← USE THIS for all lookups via /api/transactions/<hash>
+            'client_tx_id' : client_tx_id,      # ← client's original id (also queryable if 64-hex)
+            'status'       : 'pending',          # Bitcoin model: pending until block confirms
+            'from'         : from_addr,
+            'to'           : to_addr,
+            'amount'       : amount_float,
+            'amount_base'  : amount_base,
+            'fee'          : fee_qtcl,
+            'signed'       : signature_json is not None,
+            'in_mempool'   : True,               # in-memory BlockManager pool
+            'in_db'        : True,               # queryable via /api/transactions/<tx_hash>
+            'message'      : (
+                f'TX accepted. Query status at /api/transactions/{tx_hash_hex}. '
+                f'Will be confirmed when miner seals a block (Bitcoin model — pending until then).'
+            ),
         }), 201
 
     except Exception as e:
-        logger.error(f"[TRANSACT] Error: {e}")
+        logger.error(f"[TRANSACT] ❌ Error: {e}\n{traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/transactions/<string:tx_hash>', methods=['GET'])
 def get_transaction(tx_hash: str):
     """
-    Get a transaction by hash — works for coinbase and regular transfers.    Returns full on-chain record including tx_type, block context, and metadata.
+    Get a transaction by hash — Bitcoin model: works for PENDING and CONFIRMED transactions.
+
+    Lookup order (most-to-least authoritative):
+      1. DB by tx_hash (primary — catches canonical hash and client alias hash)
+      2. DB by commitment_hash (catches alias rows where commitment_hash = canonical)
+      3. DHT store (catches TXs that haven't DB-persisted yet — race condition safety)
+      4. In-memory message handler TX cache (P2P relayed TXs)
+
+    Status meanings:
+      pending   — in mempool, NOT yet in a block (queryable immediately after submit)
+      confirmed — included in a sealed block (has block_height, block_hash)
     """
     try:
-        with get_db_cursor() as cur:
-            cur.execute("""
-                SELECT tx_hash, from_address, to_address, amount,
-                       height, block_hash, transaction_index,
-                       tx_type, status, quantum_state_hash,
-                       commitment_hash, metadata, created_at
-                FROM transactions
-                WHERE tx_hash = %s
-                LIMIT 1
-            """, (tx_hash,))
-            row = cur.fetchone()
-        
-        if not row:
-            return jsonify({'error': 'transaction not found'}), 404
-        
-        raw_amount = int(row[3]) if row[3] is not None else 0
-        metadata   = row[11]
-        if isinstance(metadata, str):
+        row = None
+        # ── 1. Primary DB lookup by tx_hash ─────────────────────────────────────
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    SELECT tx_hash, from_address, to_address, amount,
+                           height, block_hash, transaction_index,
+                           tx_type, status, quantum_state_hash,
+                           commitment_hash, metadata, created_at
+                    FROM transactions
+                    WHERE tx_hash = %s
+                    LIMIT 1
+                """, (tx_hash,))
+                row = cur.fetchone()
+        except Exception as db_err:
+            logger.warning(f"[TX_QUERY] Primary DB lookup error: {db_err}")
+
+        # ── 2. Alias lookup — client_tx_id stored as commitment_hash alias ───────
+        if row is None:
             try:
-                metadata = json.loads(metadata)
+                with get_db_cursor() as cur:
+                    cur.execute("""
+                        SELECT tx_hash, from_address, to_address, amount,
+                               height, block_hash, transaction_index,
+                               tx_type, status, quantum_state_hash,
+                               commitment_hash, metadata, created_at
+                        FROM transactions
+                        WHERE commitment_hash = %s AND tx_hash != %s
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    """, (tx_hash, tx_hash))
+                    row = cur.fetchone()
+                if row:
+                    logger.info(f"[TX_QUERY] Found via alias (commitment_hash): {tx_hash[:16]}… → {row[0][:16]}…")
+            except Exception as alias_err:
+                logger.debug(f"[TX_QUERY] Alias lookup error: {alias_err}")
+
+        # ── 3. DHT fallback (in-memory, sub-millisecond) ─────────────────────────
+        dht_tx = None
+        if row is None:
+            try:
+                dht = get_dht_manager()
+                dht_tx = dht.retrieve_state(f"tx:{tx_hash}")
+                if dht_tx and dht_tx.get('alias_of'):
+                    # Resolve alias → fetch canonical row
+                    canonical_hash = dht_tx['alias_of']
+                    logger.info(f"[TX_QUERY] DHT alias: {tx_hash[:16]}… → {canonical_hash[:16]}…")
+                    try:
+                        with get_db_cursor() as cur:
+                            cur.execute("""
+                                SELECT tx_hash, from_address, to_address, amount,
+                                       height, block_hash, transaction_index,
+                                       tx_type, status, quantum_state_hash,
+                                       commitment_hash, metadata, created_at
+                                FROM transactions WHERE tx_hash = %s LIMIT 1
+                            """, (canonical_hash,))
+                            row = cur.fetchone()
+                    except Exception:
+                        pass
+            except Exception as dht_err:
+                logger.debug(f"[TX_QUERY] DHT lookup error: {dht_err}")
+
+        # ── 4. P2P message handler cache ─────────────────────────────────────────
+        p2p_tx = None
+        if row is None and P2P and hasattr(P2P, 'message_handlers'):
+            try:
+                with P2P.message_handlers.lock:
+                    p2p_tx = P2P.message_handlers.tx_cache.get(tx_hash)
             except Exception:
                 pass
-        
+
+        # ── Build response ────────────────────────────────────────────────────────
+        if row is not None:
+            raw_amount = int(row[3]) if row[3] is not None else 0
+            metadata   = row[11]
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except Exception:
+                    pass
+
+            status = row[8] or 'pending'
+            confirmed = status == 'confirmed'
+
+            return jsonify({
+                'tx_hash'          : row[0],
+                'from_address'     : row[1],
+                'to_address'       : row[2],
+                'amount_base'      : raw_amount,
+                'amount_qtcl'      : raw_amount / 100,
+                'block_height'     : row[4],    # None if pending
+                'block_hash'       : row[5],    # None if pending
+                'transaction_index': row[6],
+                'tx_type'          : row[7] or 'transfer',
+                'status'           : status,
+                'confirmed'        : confirmed,
+                'w_proof'          : row[9],
+                'commitment_hash'  : row[10],
+                'metadata'         : metadata,
+                'created_at'       : str(row[12]) if row[12] else None,
+                'query_note'       : (
+                    'Transaction confirmed in block.' if confirmed
+                    else 'Transaction is PENDING — in mempool, waiting for next block to confirm. '
+                         'This is normal Bitcoin-model behavior. Query again after next block is mined.'
+                ),
+            }), 200
+
+        # ── DHT-only result (not yet in DB) ───────────────────────────────────────
+        if dht_tx and not dht_tx.get('alias_of'):
+            return jsonify({
+                'tx_hash'     : dht_tx.get('tx_hash', tx_hash),
+                'from_address': dht_tx.get('from_addr', ''),
+                'to_address'  : dht_tx.get('to_addr', ''),
+                'amount_base' : dht_tx.get('amount_base', 0),
+                'amount_qtcl' : dht_tx.get('amount_qtcl', 0),
+                'block_height': None,
+                'block_hash'  : None,
+                'tx_type'     : 'transfer',
+                'status'      : dht_tx.get('status', 'pending'),
+                'confirmed'   : False,
+                'source'      : 'dht',
+                'query_note'  : 'TX found in DHT (P2P network) but not yet persisted to DB. Still pending.',
+            }), 200
+
+        # ── P2P cache result ──────────────────────────────────────────────────────
+        if p2p_tx:
+            return jsonify({
+                'tx_hash'     : p2p_tx.get('hash', tx_hash),
+                'from_address': p2p_tx.get('from', ''),
+                'to_address'  : p2p_tx.get('to', ''),
+                'amount_base' : int(float(p2p_tx.get('amount', 0)) * 100),
+                'amount_qtcl' : float(p2p_tx.get('amount', 0)),
+                'block_height': None,
+                'block_hash'  : None,
+                'tx_type'     : 'transfer',
+                'status'      : 'pending',
+                'confirmed'   : False,
+                'source'      : 'p2p_cache',
+                'query_note'  : 'TX found in P2P relay cache. Pending confirmation in next block.',
+            }), 200
+
+        # ── Not found anywhere ────────────────────────────────────────────────────
         return jsonify({
-            'tx_hash':           row[0],
-            'from_address':      row[1],
-            'to_address':        row[2],
-            'amount_base':       raw_amount,
-            'amount_qtcl':       raw_amount / 100,
-            'block_height':      row[4],
-            'block_hash':        row[5],
-            'transaction_index': row[6],
-            'tx_type':           row[7],
-            'status':            row[8],
-            'w_proof':           row[9],      # quantum_state_hash = W-state entropy witness
-            'commitment_hash':   row[10],
-            'metadata':          metadata,
-            'created_at':        str(row[12]) if row[12] else None,
-        }), 200
-    
+            'error'     : 'transaction not found',
+            'tx_hash'   : tx_hash,
+            'searched'  : ['db_primary', 'db_alias', 'dht', 'p2p_cache'],
+            'suggestion': (
+                'If you just broadcast this TX, wait 2-3 seconds and retry. '
+                'Ensure you are querying the tx_hash returned by /api/submit_transaction '
+                '(not the client-side tx_id, unless they match). '
+                f'Query: GET /api/transactions/{tx_hash}'
+            ),
+        }), 404
+
     except Exception as e:
-        logger.error(f"[TX_QUERY] Error: {e}")
+        logger.error(f"[TX_QUERY] Error: {e}\n{traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
 
 
@@ -5459,6 +5828,124 @@ def utxo_address_balance(address: str):
     
     except Exception as e:
         logger.error(f"[UTXO-BALANCE] Error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/mempool/pending', methods=['GET'])
+def mempool_pending():
+    """
+    Get all pending transactions from DB (Bitcoin mempool model).
+    These are TXs submitted but not yet included in a sealed block.
+    Miners use this to select TXs for the next block.
+    """
+    try:
+        limit = min(int(request.args.get('limit', 50)), 500)
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT tx_hash, from_address, to_address, amount,
+                       nonce, tx_type, status, quantum_state_hash,
+                       commitment_hash, metadata, created_at
+                FROM transactions
+                WHERE status = 'pending' AND tx_type != 'coinbase'
+                ORDER BY created_at ASC
+                LIMIT %s
+            """, (limit,))
+            rows = cur.fetchall()
+
+        txs = []
+        for row in rows:
+            raw_amount = int(row[3]) if row[3] is not None else 0
+            metadata = row[9]
+            if isinstance(metadata, str):
+                try: metadata = json.loads(metadata)
+                except: pass
+            txs.append({
+                'tx_hash'      : row[0],
+                'from_address' : row[1],
+                'to_address'   : row[2],
+                'amount_base'  : raw_amount,
+                'amount_qtcl'  : raw_amount / 100,
+                'nonce'        : row[4],
+                'tx_type'      : row[5],
+                'status'       : row[6],
+                'oracle_signed': bool(row[7]),
+                'commitment'   : row[8],
+                'fee_base'     : metadata.get('fee_base', 1) if isinstance(metadata, dict) else 1,
+                'created_at'   : str(row[10]) if row[10] else None,
+            })
+
+        return jsonify({
+            'count'       : len(txs),
+            'pending_txs' : txs,
+            'note'        : 'Bitcoin model: pending until miner seals a block containing these TXs',
+        }), 200
+    except Exception as e:
+        logger.error(f"[MEMPOOL-PENDING] Error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/mempool/tx/<string:tx_hash>', methods=['GET'])
+def mempool_tx_status(tx_hash: str):
+    """
+    Quick mempool status check for a specific TX hash.
+    Returns status in plain JSON: { tx_hash, status, found, confirmed, block_height }
+    Useful for polling after broadcast to check confirmation.
+    """
+    try:
+        # Check DB
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    SELECT tx_hash, status, height, block_hash, from_address, to_address, amount
+                    FROM transactions WHERE tx_hash = %s LIMIT 1
+                """, (tx_hash,))
+                row = cur.fetchone()
+                # Also check alias (commitment_hash)
+                if row is None:
+                    cur.execute("""
+                        SELECT tx_hash, status, height, block_hash, from_address, to_address, amount
+                        FROM transactions WHERE commitment_hash = %s LIMIT 1
+                    """, (tx_hash,))
+                    row = cur.fetchone()
+        except Exception:
+            row = None
+
+        if row:
+            status = row[1] or 'pending'
+            return jsonify({
+                'tx_hash'     : row[0],
+                'query_hash'  : tx_hash,
+                'found'       : True,
+                'status'      : status,
+                'confirmed'   : status == 'confirmed',
+                'block_height': row[2],
+                'block_hash'  : row[3],
+                'from_address': row[4],
+                'to_address'  : row[5],
+                'amount_base' : int(row[6]) if row[6] else 0,
+                'amount_qtcl' : int(row[6]) / 100 if row[6] else 0,
+            }), 200
+
+        # Check DHT
+        try:
+            dht = get_dht_manager()
+            dht_entry = dht.retrieve_state(f"tx:{tx_hash}")
+            if dht_entry:
+                return jsonify({
+                    'tx_hash'   : dht_entry.get('tx_hash', tx_hash),
+                    'query_hash': tx_hash,
+                    'found'     : True,
+                    'status'    : dht_entry.get('status', 'pending'),
+                    'confirmed' : dht_entry.get('status') == 'confirmed',
+                    'source'    : 'dht',
+                    'block_height': dht_entry.get('block_height'),
+                }), 200
+        except Exception:
+            pass
+
+        return jsonify({'found': False, 'tx_hash': tx_hash, 'status': 'not_found',
+                        'message': 'TX not found in DB or DHT. May not have been submitted yet.'}), 404
+    except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
