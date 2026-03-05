@@ -1084,11 +1084,6 @@ socketio = SocketIO(
 )
 
 # ═════════════════════════════════════════════════════════════════════════════════
-# METRICS COLLECTOR — Initialize BEFORE WebSocket handlers
-# ═════════════════════════════════════════════════════════════════════════════════
-_metrics_collector = MetricsCollector()
-
-# ═════════════════════════════════════════════════════════════════════════════════
 # MINER P2P WEBSOCKET SERVER (port 8000) - UNIFIED WITH REST API
 # ═════════════════════════════════════════════════════════════════════════════════
 
@@ -1774,6 +1769,11 @@ class MetricsCollector:
                 'mempool_txs'        : [],
                 'miners'             : {},
             }
+
+# ═════════════════════════════════════════════════════════════════════════════════
+# METRICS COLLECTOR — Initialize AFTER class definition, BEFORE WebSocket handlers
+# ═════════════════════════════════════════════════════════════════════════════════
+_metrics_collector = MetricsCollector()
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # WEBSOCKET HANDLERS
