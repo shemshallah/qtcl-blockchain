@@ -4336,18 +4336,72 @@ def oracle_w_state():
 @app.route('/api/mempool', methods=['GET'])
 def get_mempool():
     """
-    Get pending TRANSFER transactions — reads from DB (primary) + LATTICE in-memory pool (secondary).
+    Get pending TRANSFER transactions for block inclusion.
 
-    DB is the authoritative source. LATTICE in-memory pool supplements it.
-    Coinbase txs are NEVER returned here.
-
-    This is what miners poll to build the next block's transaction list.
-    TXs submitted via /api/submit_transaction appear here immediately (status='pending').
+    Source priority: DHT (has TXs immediately) > DB (persistent) > LATTICE (in-memory).
+    DHT is checked FIRST because submitted TXs always land there even when DB insert fails.
+    Any DHT TX not yet in DB is opportunistically written to DB here (gossip persistence).
+    Coinbase txs are NEVER returned.
     """
     try:
-        db_txs = {}  # tx_hash → tx_dict
+        seen = {}  # tx_hash -> tx_dict, deduped
 
-        # ── PRIMARY: Read from DB pending transactions ────────────────────────
+        # ── SOURCE 1: DHT — TXs land here immediately on submit ──────────────
+        # DHT is in-memory on this server instance and always has the freshest data.
+        try:
+            dht = get_dht_manager()
+            with dht.store_lock:
+                dht_keys = [k for k in dht.state_store if k.startswith('tx:')]
+            for key in dht_keys:
+                try:
+                    entry = dht.retrieve_state(key)
+                    if not entry or not isinstance(entry, dict):
+                        continue
+                    # Skip alias entries (they point to canonical)
+                    if 'alias_of' in entry:
+                        continue
+                    # Skip already confirmed
+                    if entry.get('status') == 'confirmed':
+                        continue
+                    tx_hash   = entry.get('tx_hash') or entry.get('tx_id', '')
+                    from_addr = entry.get('from_addr') or entry.get('from_address', '')
+                    to_addr   = entry.get('to_addr') or entry.get('to_address', '')
+                    amount_b  = int(entry.get('amount_base', entry.get('amount', 0) or 0))
+                    nonce_v   = int(entry.get('nonce', 0))
+                    sig       = str(entry.get('signature', entry.get('quantum_state_hash', '')))
+                    ts_ns     = int(entry.get('timestamp_ns', int(time.time() * 1e9)))
+                    if not tx_hash or not from_addr or not to_addr:
+                        continue
+                    # Validate it looks like a transfer, not coinbase
+                    from_stripped = from_addr.lstrip('0')
+                    if not from_stripped:
+                        continue
+                    seen[tx_hash] = {
+                        'tx_hash'      : tx_hash,
+                        'tx_id'        : tx_hash,
+                        'from_addr'    : from_addr,
+                        'from_address' : from_addr,
+                        'to_addr'      : to_addr,
+                        'to_address'   : to_addr,
+                        'amount'       : amount_b / 100,
+                        'amount_base'  : amount_b,
+                        'nonce'        : nonce_v,
+                        'timestamp_ns' : ts_ns,
+                        'tx_type'      : 'transfer',
+                        'status'       : 'pending',
+                        'signature'    : sig,
+                        'fee'          : entry.get('fee', 0.001),
+                        'fee_base'     : entry.get('fee_base', 1),
+                        '_source'      : 'dht',
+                    }
+                except Exception as _e:
+                    logger.debug(f"[MEMPOOL] DHT entry parse error ({key}): {_e}")
+            if seen:
+                logger.info(f"[MEMPOOL] DHT has {len(seen)} pending TXs")
+        except Exception as dht_err:
+            logger.warning(f"[MEMPOOL] DHT scan error: {dht_err}")
+
+        # ── SOURCE 2: DB — persistent storage ────────────────────────────────
         try:
             with get_db_cursor() as cur:
                 cur.execute("""
@@ -4356,66 +4410,101 @@ def get_mempool():
                     FROM transactions
                     WHERE status = 'pending'
                       AND tx_type NOT IN ('coinbase')
-                      AND from_address != %s
                     ORDER BY created_at ASC
                     LIMIT %s
-                """, ('0' * 64, MAX_BLOCK_TX_SERVER * 4))
+                """, (MAX_BLOCK_TX_SERVER * 4,))
                 for row in cur.fetchall():
+                    tx_hash = row[0]
+                    if tx_hash in seen:
+                        seen[tx_hash]['_source'] = 'db'
+                        continue  # already have from DHT, mark as db-confirmed
+                    from_addr = row[1]
+                    if not from_addr or not from_addr.lstrip('0'):
+                        continue
                     raw_amount = int(row[3]) if row[3] is not None else 0
-                    meta = row[8]
+                    meta = row[8] or {}
                     if isinstance(meta, str):
                         try: meta = json.loads(meta)
                         except: meta = {}
-                    elif meta is None:
-                        meta = {}
-                    tx_hash = row[0]
-                    db_txs[tx_hash] = {
-                        'tx_hash'     : tx_hash,
-                        'tx_id'       : tx_hash,
-                        'from_addr'   : row[1],
-                        'from_address': row[1],
-                        'to_addr'     : row[2],
-                        'to_address'  : row[2],
-                        'amount'      : raw_amount / 100,       # QTCL float for wire compat
-                        'amount_base' : raw_amount,
-                        'nonce'       : row[4] or 0,
-                        'tx_type'     : row[5] or 'transfer',
-                        'status'      : row[6] or 'pending',
-                        'fee'         : meta.get('fee_qtcl', 0.001),
-                        'fee_base'    : meta.get('fee_base', 1),
-                        'signature'   : row[7] or '',
+                    seen[tx_hash] = {
+                        'tx_hash'      : tx_hash,
+                        'tx_id'        : tx_hash,
+                        'from_addr'    : from_addr,
+                        'from_address' : from_addr,
+                        'to_addr'      : row[2],
+                        'to_address'   : row[2],
+                        'amount'       : raw_amount / 100,
+                        'amount_base'  : raw_amount,
+                        'nonce'        : row[4] or 0,
+                        'tx_type'      : row[5] or 'transfer',
+                        'status'       : 'pending',
+                        'signature'    : row[7] or '',
+                        'fee'          : meta.get('fee_qtcl', 0.001),
+                        'fee_base'     : meta.get('fee_base', 1),
+                        '_source'      : 'db',
                     }
-            logger.debug(f"[MEMPOOL] DB pending TXs: {len(db_txs)}")
+            logger.debug(f"[MEMPOOL] After DB: {len(seen)} total TXs")
         except Exception as db_err:
-            logger.warning(f"[MEMPOOL] DB read error (falling back to LATTICE): {db_err}")
+            logger.warning(f"[MEMPOOL] DB read error: {db_err}")
 
-        # ── SECONDARY: LATTICE in-memory pool (supplement, don't duplicate) ───
-        if LATTICE is not None and LATTICE.mempool is not None:
+        # ── SOURCE 3: LATTICE in-memory pool ─────────────────────────────────
+        if LATTICE is not None and getattr(LATTICE, 'mempool', None) is not None:
             try:
-                lattice_txs = LATTICE.mempool.get_pending_transactions(max_count=100)
-                for tx in lattice_txs:
+                for tx in LATTICE.mempool.get_pending_transactions(max_count=100):
                     tx_hash = str(tx.get('tx_id', tx.get('tx_hash', '')))
-                    if not tx_hash or tx_hash in db_txs:
+                    if not tx_hash or tx_hash in seen:
                         continue
-                    tx_type = str(tx.get('tx_type', 'transfer')).lower()
-                    from_a  = str(tx.get('from_addr', tx.get('from_address', ''))).strip('0')
-                    if tx_type == 'coinbase' or not from_a:
+                    if str(tx.get('tx_type', 'transfer')).lower() == 'coinbase':
                         continue
-                    db_txs[tx_hash] = tx
-                logger.debug(f"[MEMPOOL] After LATTICE supplement: {len(db_txs)} total TXs")
+                    from_a = str(tx.get('from_addr', tx.get('from_address', ''))).lstrip('0')
+                    if not from_a:
+                        continue
+                    seen[tx_hash] = {**tx, 'tx_id': tx_hash, 'tx_hash': tx_hash, '_source': 'lattice'}
             except Exception as lat_err:
-                logger.debug(f"[MEMPOOL] LATTICE mempool read error: {lat_err}")
+                logger.debug(f"[MEMPOOL] LATTICE error: {lat_err}")
 
-        all_txs = list(db_txs.values())[:MAX_BLOCK_TX_SERVER]
+        # ── GOSSIP: persist DHT-only TXs to DB so they survive restarts ──────
+        dht_only = [tx for tx in seen.values() if tx.get('_source') == 'dht']
+        if dht_only:
+            logger.info(f"[MEMPOOL] Gossiping {len(dht_only)} DHT-only TXs to DB")
+            for tx in dht_only:
+                try:
+                    with get_db_cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO transactions
+                                (tx_hash, from_address, to_address, amount,
+                                 nonce, tx_type, status, quantum_state_hash,
+                                 commitment_hash, metadata)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (tx_hash) DO NOTHING
+                        """, (
+                            tx['tx_hash'], tx['from_addr'], tx['to_addr'],
+                            int(tx.get('amount_base', 0)), int(tx.get('nonce', 0)),
+                            'transfer', 'pending',
+                            tx.get('signature', ''), tx['tx_hash'],
+                            json.dumps({'gossiped_from_dht': True,
+                                        'fee_qtcl': tx.get('fee', 0.001)}),
+                        ))
+                    logger.info(f"[MEMPOOL] Gossiped TX to DB: {tx['tx_hash'][:16]}...")
+                except Exception as gossip_err:
+                    logger.error(f"[MEMPOOL] Gossip DB write failed: {type(gossip_err).__name__}: {gossip_err}")
+                    logger.error(traceback.format_exc())
 
+        # Strip internal _source field before returning
+        all_txs = []
+        for tx in list(seen.values())[:MAX_BLOCK_TX_SERVER]:
+            tx.pop('_source', None)
+            all_txs.append(tx)
+
+        logger.info(f"[MEMPOOL] Returning {len(all_txs)} pending TXs to miner")
         return jsonify({
             'size'        : len(all_txs),
             'transactions': all_txs,
-            'source'      : 'db+lattice',
         }), 200
     except Exception as e:
-        logger.error(f"[MEMPOOL] Unhandled error: {e}")
+        logger.error(f"[MEMPOOL] Unhandled error: {e}\n{traceback.format_exc()}")
         return jsonify({'error': str(e), 'transactions': [], 'size': 0}), 500
+
 
 
 @app.route('/api/blocks/height/<int:height>', methods=['GET'])
@@ -5303,11 +5392,34 @@ def submit_transaction():
                 )
                 bm_accepted = LATTICE.block_manager.receive_transaction(qt)
                 if bm_accepted:
-                    logger.info(f"[TRANSACT] ✅ TX accepted by BlockManager mempool")
+                    logger.info(f"[TRANSACT] TX accepted by BlockManager mempool")
                 else:
-                    logger.warning(f"[TRANSACT] ⚠️  BlockManager rejected TX (balance/duplicate?)")
+                    logger.warning(f"[TRANSACT] BlockManager rejected TX (balance/duplicate?)")
             except Exception as bm_err:
                 logger.error(f"[TRANSACT] BlockManager error: {bm_err}")
+
+        # Also push into LATTICE.mempool directly if it exists (belt-and-suspenders)
+        if LATTICE and getattr(LATTICE, 'mempool', None) is not None and not bm_accepted:
+            try:
+                LATTICE.mempool.add_transaction({
+                    'tx_id'       : tx_hash_hex,
+                    'tx_hash'     : tx_hash_hex,
+                    'from_addr'   : from_addr,
+                    'from_address': from_addr,
+                    'to_addr'     : to_addr,
+                    'to_address'  : to_addr,
+                    'amount'      : amount_float,
+                    'amount_base' : amount_base,
+                    'nonce'       : nonce,
+                    'timestamp_ns': timestamp_ns,
+                    'tx_type'     : 'transfer',
+                    'status'      : 'pending',
+                    'signature'   : signature_json or '',
+                    'fee'         : fee_qtcl,
+                })
+                logger.info(f"[TRANSACT] TX pushed to LATTICE.mempool directly")
+            except Exception as lm_err:
+                logger.debug(f"[TRANSACT] LATTICE.mempool direct push: {lm_err}")
 
         # ── P2P BROADCAST ────────────────────────────────────────────────────────
         if P2P:
@@ -5335,7 +5447,7 @@ def submit_transaction():
                 logger.warning(f"[TRANSACT] P2P broadcast error (non-fatal): {p2p_err}")
 
         return jsonify({
-            'tx_hash'      : tx_hash_hex,       # ← USE THIS for all lookups
+            'tx_hash'      : tx_hash_hex,
             'client_tx_id' : client_tx_id,
             'status'       : 'pending',
             'from'         : from_addr,
@@ -5346,11 +5458,11 @@ def submit_transaction():
             'signed'       : signature_json is not None,
             'in_mempool'   : bm_accepted,
             'in_db'        : db_inserted,
-            'db_error'     : db_error_msg,       # ← non-null means DB insert failed — check server logs
+            'in_dht'       : True,  # always — DHT store above never raises
+            'db_error'     : db_error_msg,
             'message'      : (
-                f'TX {"persisted to DB and " if db_inserted else "DHT-only (DB failed — see db_error) — "}'
-                f'queryable at /api/transactions/{tx_hash_hex}. '
-                f'{"Pending until miner seals a block." if db_inserted else "Will appear in mempool once DB error resolved."}'
+                f'TX in DHT+mempool | in_db={db_inserted} | '
+                f'query: /api/transactions/{tx_hash_hex}'
             ),
         }), 201
 
