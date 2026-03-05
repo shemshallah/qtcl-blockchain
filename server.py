@@ -7,7 +7,7 @@
 ║  Museum-Grade Implementation — Unified Port 443 (HTTPS via Koyeb) (Internal) / 443 (External)  ║
 ║  ─────────────────────────────────────────────────────────────────────────    ║
 ║                                                                                ║
-║  Single Unified Server (All on Port 443 HTTPS via Koyeb):                        ║
+║  Single Unified Server (All on Port 8000 Internal, 443 External via Koyeb):   ║
 ║    • REST API Layer (port 443 HTTPS (Koyeb))                 ║
 ║    • P2P WebSocket Layer (port 443 HTTPS (Koyeb))            ║
 ║    • Database Layer (internal) — persistent state (PostgreSQL)              ║
@@ -470,7 +470,7 @@ if not POOLER_URL:
 DB_URL = POOLER_URL
 logger.info(f"[DB] ✨ Using Supabase Pooler: {POOLER_HOST or 'configured'}")
 
-# P2P Network — All on port 443 (unified with REST API via Flask-SocketIO)
+# P2P Network — All on port 8000 (unified with REST API via Flask-SocketIO)
 P2P_PORT = int(os.getenv('PORT', int(os.getenv('FLASK_PORT', 443))))  # Use PORT (443 on Koyeb) or FLASK_PORT
 P2P_HOST = os.getenv('P2P_HOST', '0.0.0.0')
 P2P_TESTNET_PORT = P2P_PORT + 10000  # Testnet offset (not used on production)
@@ -480,8 +480,8 @@ MESSAGE_MAX_SIZE = 1_000_000
 PEER_HANDSHAKE_TIMEOUT = 5
 PEER_KEEPALIVE_INTERVAL = 30
 
-# P2P and WebSocket unified on port 443
-# No separate P2P endpoint needed — all communication via Flask-SocketIO on 443
+# P2P and WebSocket unified on port 8000
+# No separate P2P endpoint needed — all communication via Flask-SocketIO on 8000
 P2P_WEBSOCKET_URL = os.getenv('P2P_WEBSOCKET_URL', None)  # Deprecated, for backward compatibility only
 
 # ── Block policy ──────────────────────────────────────────────────────────────
@@ -1084,10 +1084,10 @@ socketio = SocketIO(
 )
 
 # ═════════════════════════════════════════════════════════════════════════════════
-# MINER P2P WEBSOCKET SERVER (port 443) - HTTP LONG-POLLING + WEBSOCKET
+# MINER P2P WEBSOCKET SERVER (port 8333) - HTTP LONG-POLLING ONLY
 # ═════════════════════════════════════════════════════════════════════════════════
 
-# Separate Flask app for P2P Socket.IO on port 443
+# Separate Flask app for P2P Socket.IO on port 8333
 p2p_app = Flask(__name__)
 p2p_app.config['SECRET_KEY'] = secrets.token_hex(32)
 p2p_socketio = SocketIO(    p2p_app,
@@ -1125,7 +1125,7 @@ _metrics_lock = threading.RLock()
 
 @p2p_socketio.on('connect')
 def handle_p2p_connect():
-    """Client connected to P2P WebSocket (port 443)"""
+    """Client connected to P2P WebSocket (port 8333)"""
     logger.info(f"[P2P-LONGPOLL] ✅ Client connected | sid={request.sid[:16]}")
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -1215,7 +1215,7 @@ def _broadcast_snapshot_to_gossip_network(snapshot):
 @p2p_socketio.on('disconnect')
 def handle_p2p_disconnect():
     """Client disconnected from P2P WebSocket"""
-    logger.info(f"[P2P-LONGPOLL] Client disconnected from port 443")
+    logger.info(f"[P2P-LONGPOLL] Client disconnected from port 8333")
 
 @p2p_socketio.on('miner_register')
 def handle_miner_register(data):
@@ -2742,7 +2742,7 @@ class P2PServer:
     """
     Museum-Grade P2P Server with Dynamic Port Binding & Thread Pooling.
     
-    H1 FIX: Auto-probes ports 443-445 when primary port occupied (Termux/Koyeb).
+    H1 FIX: Auto-probes ports 8000-8010 when primary port occupied (Termux/Koyeb).
     H2 FIX: Uses ThreadPoolExecutor(max_workers=32) to prevent thread DoS.
     """
     
@@ -2795,7 +2795,7 @@ class P2PServer:
         """
         Start P2P server with intelligent port binding (H1) and thread pooling (H2).
         
-        H1: Auto-probes ports 443-445 to find first available (Termux/Koyeb safety).
+        H1: Auto-probes ports 8000-8010 to find first available (Termux/Koyeb safety).
         H2: Initializes ThreadPoolExecutor(max_workers=32) to prevent thread DoS.
         
         Returns:
@@ -2814,7 +2814,7 @@ class P2PServer:
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
-        # H1 FIX: Auto-probe ports 443-445 for Termux/Koyeb environments
+        # H1 FIX: Auto-probe ports 8000-8010 for Termux/Koyeb environments
         bound_port = None
         probe_range = range(self.initial_port, self.initial_port + 11)
         
@@ -5090,7 +5090,7 @@ if __name__ == '__main__':
     if not initialize_p2p():
         logger.warning("[STARTUP] Failed to initialize P2P server (may retry)")
     
-    # Port configuration — unified port 443 for all services (Koyeb standard)    # FLASK_PORT: HTTP/WebSocket server (REST API + P2P on same port via Socket.IO)
+    # Port configuration — unified port 8000 for all services (Koyeb standard)    # FLASK_PORT: HTTP/WebSocket server (REST API + P2P on same port via Socket.IO)
     port = int(os.getenv('PORT', 443))  # Koyeb sets PORT=443 for HTTPS
     debug = os.getenv('FLASK_ENV') == 'development'
     
@@ -5119,7 +5119,7 @@ if __name__ == '__main__':
     
     # P2P communication integrated into main Flask-SocketIO app on port 443 HTTPS
     # All clients (miners, peers) connect via WebSocket to same port as REST API
-    # No separate P2P port needed — everything unified on 443
+    # No separate P2P port needed — everything unified on 8000
     logger.info("[P2P-SOCKETIO] P2P communication enabled on main port %d (unified)" % port)
     logger.info("[P2P-SOCKETIO] Miners and peers connect via: wss://your-domain/socket.io")
     
@@ -5127,6 +5127,6 @@ if __name__ == '__main__':
     _start_p2p_daemons()
     logger.info("[P2P-SOCKETIO] ✅ P2P daemons started (heartbeat, snapshot broadcast)")
     
-    # Use SocketIO to run unified Flask HTTP+WebSocket server on port 443
+    # Use SocketIO to run unified Flask HTTP+WebSocket server on port 8000
     logger.info(f"[HTTP] Starting unified HTTP REST + P2P WebSocket server on port {port}...")
     socketio.run(app, host='0.0.0.0', port=port, debug=debug, allow_unsafe_werkzeug=True)
