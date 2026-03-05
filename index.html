@@ -1,502 +1,352 @@
-<p dir="ltr">&lt;!DOCTYPE html&gt;<br>
-&lt;html lang="en"&gt;<br>
-&lt;head&gt;<br>
-&lt;meta charset="UTF-8"/&gt;<br>
-&lt;meta name="viewport" content="width=device-width, initial-scale=1.0"/&gt;<br>
-&lt;title&gt;QTCL &#8212; Quantum Blockchain Explorer&lt;/title&gt;<br>
-&lt;script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"&gt;&lt;/script&gt;<br>
-&lt;script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"&gt;&lt;/script&gt;<br>
-&lt;style&gt;<br>
-*{margin:0;padding:0;box-sizing:border-box}<br>
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:linear-gradient(135deg,#0a0e27 0%,#1a1a3a 50%,#0f1629 100%);color:#b0b8d0;min-height:100vh;padding:20px}<br>
-.container{max-width:1600px;margin:0 auto}<br>
-.header{text-align:center;margin-bottom:40px;padding-bottom:20px;border-bottom:2px solid rgba(212,175,55,0.3)}<br>
-.title{font-size:42px;color:#d4af37;margin-bottom:5px;font-weight:600;letter-spacing:-0.5px}<br>
-.subtitle{font-size:13px;color:#7a8db8;letter-spacing:3px;text-transform:uppercase}<br>
-.status-bar{display:flex;align-items:center;justify-content:center;gap:12px;margin-top:12px;font-size:12px;font-family:'Courier New',monospace}<br>
-.status-dot{width:10px;height:10px;border-radius:50%;background:#ff4444;flex-shrink:0;transition:all .3s;display:inline-block}<br>
-.status-dot.live{background:#00ff00;box-shadow:0 0 10px #00ff00}<br>
-.status-text{color:#7a8db8;transition:color .3s}<br>
-.status-text.live{color:#00ff00}<br>
-.transport-badge{background:rgba(212,175,55,.1);border:1px solid rgba(212,175,55,.3);color:#d4af37;padding:2px 8px;border-radius:4px;font-size:10px;letter-spacing:1px}<br>
-.debug-toggle{background:rgba(0,217,255,0.1);border:1px solid rgba(0,217,255,0.3);color:#00d9ff;padding:4px 12px;border-radius:4px;font-size:10px;cursor:pointer;margin-top:8px;font-family:'Courier New',monospace;letter-spacing:1px}<br>
-#debug-panel{background:rgba(0,0,0,0.85);border:1px solid rgba(0,217,255,0.3);border-radius:8px;padding:16px;margin-bottom:20px;font-family:'Courier New',monospace;font-size:11px;display:none}<br>
-#debug-panel.visible{display:block}<br>
-.debug-title{color:#00d9ff;font-weight:bold;margin-bottom:6px;font-size:12px}<br>
-#debug-payload{color:#b0ffb0;white-space:pre-wrap;word-break:break-all;max-height:180px;overflow-y:auto;line-height:1.5}<br>
-#debug-log{color:#7a8db8;max-height:100px;overflow-y:auto;line-height:1.8;margin-top:8px;border-top:1px solid rgba(255,255,255,0.1);padding-top:8px}<br>
-.reconnect-info{text-align:center;font-size:10px;color:#7a8db8;font-family:'Courier New',monospace;margin-top:4px;min-height:14px}<br>
-.metrics-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:15px;margin-bottom:30px}<br>
-.metric-card{background:rgba(20,24,50,0.9);border:1px solid rgba(212,175,55,0.2);border-radius:8px;padding:20px;position:relative;overflow:hidden;transition:border-color .3s}<br>
-.metric-card::before{content:'';position:absolute;top:0;left:0;width:100%;height:3px;background:linear-gradient(90deg,#d4af37,#00d9ff)}<br>
-.metric-card.updated{border-color:rgba(0,217,255,0.6);animation:flash .4s ease-out}<br>
-@keyframes flash{0%{box-shadow:0 0 14px rgba(0,217,255,0.6)}100%{box-shadow:none}}<br>
-.metric-label{font-size:11px;color:#7a8db8;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px}<br>
-.metric-value{font-size:28px;color:#d4af37;font-weight:600;font-family:'Courier New',monospace;word-break:break-all;min-height:36px;transition:color .3s}<br>
-.metric-value.stale{color:#555a70}<br>
-.metric-unit{font-size:12px;color:#7a8db8;margin-top:5px}<br>
-.metric-delta{font-size:11px;color:#00ff00;margin-top:5px;min-height:14px}<br>
-.metric-delta.neg{color:#ff4444}<br>
-.section-header{font-size:18px;color:#d4af37;font-weight:600;margin-top:40px;margin-bottom:20px;padding-bottom:10px;border-bottom:1px solid rgba(212,175,55,0.2);display:flex;align-items:center;gap:10px}<br>
-.section-count{background:rgba(212,175,55,0.15);color:#d4af37;font-size:11px;padding:2px 8px;border-radius:12px;font-weight:normal}<br>
-.blocks-container{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:15px;margin-bottom:40px}<br>
-.block-item{background:rgba(20,24,50,0.9);border:1px solid rgba(0,217,255,0.3);border-radius:8px;padding:15px;font-family:'Courier New',monospace;font-size:12px;transition:border-color .3s}<br>
-.block-item.fresh{animation:freshBlock .7s ease-out}<br>
-@keyframes freshBlock{0%{background:rgba(0,217,255,0.18);border-color:#00d9ff}100%{background:rgba(20,24,50,0.9);border-color:rgba(0,217,255,0.3)}}<br>
-.block-height{color:#d4af37;font-weight:600;margin-bottom:8px;font-size:14px}<br>
-.block-field{color:#7a8db8;margin:4px 0;word-break:break-all}<br>
-.block-field-value{color:#00d9ff}<br>
-.table-wrapper{overflow-x:auto;margin-bottom:30px}<br>
-table{width:100%;border-collapse:collapse;background:rgba(20,24,50,0.9);border:1px solid rgba(212,175,55,0.2);border-radius:8px;overflow:hidden}<br>
-table th{background:rgba(212,175,55,0.1);color:#d4af37;padding:12px 15px;text-align:left;font-size:12px;font-weight:600;letter-spacing:1px;text-transform:uppercase;border-bottom:1px solid rgba(212,175,55,0.2)}<br>
-table td{padding:10px 15px;border-bottom:1px solid rgba(212,175,55,0.08);color:#b0b8d0;font-family:'Courier New',monospace;font-size:12px}<br>
-table tr:hover{background:rgba(212,175,55,0.05)}<br>
-.chart-container{background:rgba(20,24,50,0.9);border:1px solid rgba(212,175,55,0.2);border-radius:8px;padding:20px;margin-bottom:30px;position:relative;height:300px}<br>
-.chart-label{font-size:14px;color:#d4af37;font-weight:600;margin-bottom:15px}<br>
-@media(max-width:768px){.metrics-grid{grid-template-columns:1fr}.blocks-container{grid-template-columns:1fr}.title{font-size:28px}}<br>
-&lt;/style&gt;<br>
-&lt;/head&gt;<br>
-&lt;body&gt;<br>
-&lt;div class="container"&gt;</p>
-<p dir="ltr">&nbsp; &lt;div class="header"&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;div class="title"&gt;&#9883;&#65039; QTCL Explorer&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;div class="subtitle"&gt;Quantum Temporal Coherence Ledger &#8212; Real-Time Blockchain Monitor&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;div class="status-bar"&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;span class="status-dot" id="statusDot"&gt;&lt;/span&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;span class="status-text" id="statusText"&gt;Connecting...&lt;/span&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;span class="transport-badge" id="transportBadge"&gt;&#8212;&lt;/span&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;div class="reconnect-info" id="reconnectInfo"&gt;&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;button class="debug-toggle" onclick="toggleDebug()"&gt;&#9881; DEBUG PANEL&lt;/button&gt;<br>
-&nbsp; &lt;/div&gt;</p>
-<p dir="ltr">&nbsp; &lt;div id="debug-panel"&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;div class="debug-title"&gt;&#128300; RAW PAYLOAD &#8212; last metrics_update (keys + values)&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;div id="debug-payload"&gt;Awaiting first metrics_update&#8230;&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;div class="debug-title" style="margin-top:8px"&gt;&#128225; EVENT LOG&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;div id="debug-log"&gt;&lt;/div&gt;<br>
-&nbsp; &lt;/div&gt;</p>
-<p dir="ltr">&nbsp; &lt;div class="metrics-grid"&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;div class="metric-card" id="card-height"&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-label"&gt;Chain Height&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-value stale" id="height"&gt;&#8212;&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-unit"&gt;blocks&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-delta" id="height-delta"&gt;&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;div class="metric-card" id="card-difficulty"&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-label"&gt;Network Difficulty&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-value stale" id="difficulty"&gt;&#8212;&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-unit"&gt;bits&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;div class="metric-card" id="card-hashRate"&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-label"&gt;Hash Rate&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-value stale" id="hashRate"&gt;&#8212;&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-unit" id="hashRate-unit"&gt;H/s&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;div class="metric-card" id="card-fidelity"&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-label"&gt;W-State Fidelity&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-value stale" id="fidelity"&gt;&#8212;&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-unit"&gt;%&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;div class="metric-card" id="card-peers"&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-label"&gt;Active Peers&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-value stale" id="peers"&gt;&#8212;&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-unit"&gt;nodes&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;div class="metric-card" id="card-mempool"&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-label"&gt;Mempool&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-value stale" id="mempool"&gt;&#8212;&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-unit"&gt;pending txns&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;div class="metric-card" id="card-lastBlockTime"&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-label"&gt;Last Block&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-value stale" id="lastBlockTime"&gt;&#8212;&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-unit"&gt;seconds ago&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;div class="metric-card" id="card-activeMiners"&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-label"&gt;Active Miners&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-value stale" id="activeMiners"&gt;&#8212;&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="metric-unit"&gt;mining&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;/div&gt;<br>
-&nbsp; &lt;/div&gt;</p>
-<p dir="ltr">&nbsp; &lt;div class="section-header"&gt;&#128230; Recent Blocks &lt;span class="section-count" id="block-count"&gt;0&lt;/span&gt;&lt;/div&gt;<br>
-&nbsp; &lt;div class="blocks-container" id="blocks-list"&gt;&lt;div style="padding:20px;color:#7a8db8"&gt;Waiting for block data&#8230;&lt;/div&gt;&lt;/div&gt;</p>
-<p dir="ltr">&nbsp; &lt;div class="section-header"&gt;&#128184; Pending Transactions &lt;span class="section-count" id="mempool-count"&gt;0&lt;/span&gt;&lt;/div&gt;<br>
-&nbsp; &lt;div class="table-wrapper"&gt;&lt;table&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;thead&gt;&lt;tr&gt;&lt;th&gt;Hash&lt;/th&gt;&lt;th&gt;From&lt;/th&gt;&lt;th&gt;To&lt;/th&gt;&lt;th&gt;Amount&lt;/th&gt;&lt;th&gt;Fee&lt;/th&gt;&lt;th&gt;Status&lt;/th&gt;&lt;/tr&gt;&lt;/thead&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;tbody id="mempool-list"&gt;&lt;tr&gt;&lt;td colspan="6" style="text-align:center;color:#7a8db8"&gt;No pending transactions&lt;/td&gt;&lt;/tr&gt;&lt;/tbody&gt;<br>
-&nbsp; &lt;/table&gt;&lt;/div&gt;</p>
-<p dir="ltr">&nbsp; &lt;div class="section-header"&gt;&#9935;&#65039; Miner Leaderboard &lt;span class="section-count" id="miner-count"&gt;0&lt;/span&gt;&lt;/div&gt;<br>
-&nbsp; &lt;div class="table-wrapper"&gt;&lt;table&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;thead&gt;&lt;tr&gt;&lt;th&gt;Rank&lt;/th&gt;&lt;th&gt;Miner ID&lt;/th&gt;&lt;th&gt;Blocks Mined&lt;/th&gt;&lt;th&gt;Hash Rate&lt;/th&gt;&lt;th&gt;Last Block&lt;/th&gt;&lt;th&gt;Wallet&lt;/th&gt;&lt;/tr&gt;&lt;/thead&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;tbody id="miners-list"&gt;&lt;tr&gt;&lt;td colspan="6" style="text-align:center;color:#7a8db8"&gt;No miner data yet&lt;/td&gt;&lt;/tr&gt;&lt;/tbody&gt;<br>
-&nbsp; &lt;/table&gt;&lt;/div&gt;</p>
-<p dir="ltr">&nbsp; &lt;div class="section-header"&gt;&#128202; Network Hash Rate (24h)&lt;/div&gt;<br>
-&nbsp; &lt;div class="chart-container"&gt;&lt;div class="chart-label"&gt;Hash Rate Over Time&lt;/div&gt;&lt;canvas id="hashRateChart"&gt;&lt;/canvas&gt;&lt;/div&gt;<br>
-&nbsp; &lt;div class="section-header"&gt;&#9881;&#65039; Difficulty Adjustment (24h)&lt;/div&gt;<br>
-&nbsp; &lt;div class="chart-container"&gt;&lt;div class="chart-label"&gt;Difficulty Over Time&lt;/div&gt;&lt;canvas id="difficultyChart"&gt;&lt;/canvas&gt;&lt;/div&gt;</p>
-<p dir="ltr">&lt;/div&gt;<br>
-&lt;script&gt;<br>
-// &#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;<br>
-// QTCL EXPLORER ENGINE v4.0<br>
-// Transport: websocket (preferred) + polling (fallback) &#8212; matches server config<br>
-// Key normalization covers every snake/camel variant the server might emit<br>
-// Self-healing: HTTP fallback polls /metrics if WS drops<br>
-// Debug panel: toggle shows raw JSON of last payload + event log<br>
-// &#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;&#9552;</p>
-<p dir="ltr">const ORIGIN&nbsp;&nbsp; = 'https://qtcl-blockchain.koyeb.app';<br>
-const API_BASE = 'https://qtcl-blockchain.koyeb.app';</p>
-<p dir="ltr">// &#9472;&#9472; State &#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;<br>
-let S = {<br>
-&nbsp; blocks: [], mempool: [], miners: {},<br>
-&nbsp; hrHist: [], diffHist: [],<br>
-&nbsp; prevHeight: null, lastDataTs: null,<br>
-&nbsp; reconnects: 0, httpActive: false, httpTimer: null,<br>
-&nbsp; charts: { hr: null, diff: null },<br>
-&nbsp; debugLog: [],<br>
-};</p>
-<p dir="ltr">// &#9472;&#9472; Debug helpers &#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;<br>
-function dbg(msg, color='#7a8db8') {<br>
-&nbsp; const ts = new Date().toLocaleTimeString();<br>
-&nbsp; S.debugLog.unshift(`&lt;span style="color:${color}"&gt;[${ts}] ${msg}&lt;/span&gt;`);<br>
-&nbsp; if (S.debugLog.length &gt; 80) S.debugLog.pop();<br>
-&nbsp; const el = document.getElementById('debug-log');<br>
-&nbsp; if (el) el.innerHTML = S.debugLog.join('');<br>
-}<br>
-function showPayload(d) {<br>
-&nbsp; const el = document.getElementById('debug-payload');<br>
-&nbsp; if (el) el.textContent = JSON.stringify(d, null, 2);<br>
-}<br>
-function toggleDebug() { document.getElementById('debug-panel').classList.toggle('visible'); }</p>
-<p dir="ltr">// &#9472;&#9472; Socket.IO &#8212; matches server transports:['websocket','polling'] &#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;<br>
-const socket = io(ORIGIN, {<br>
-&nbsp; transports&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : ['websocket', 'polling'],&nbsp; // websocket first, polling fallback<br>
-&nbsp; secure&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : true,<br>
-&nbsp; rejectUnauthorized: false,<br>
-&nbsp; reconnection&nbsp;&nbsp;&nbsp;&nbsp; : true,<br>
-&nbsp; reconnectionDelay: 1500,<br>
-&nbsp; reconnectionDelayMax: 12000,<br>
-&nbsp; reconnectionAttempts: Infinity,<br>
-&nbsp; timeout&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; : 20000,<br>
-});</p>
-<p dir="ltr">// &#9472;&#9472; Connection lifecycle &#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;<br>
-socket.on('connect', () =&gt; {<br>
-&nbsp; const transport = socket.io.engine.transport.name.toUpperCase();<br>
-&nbsp; dbg(`&#9989; Connected | id=${socket.id} | ${transport}`, '#00ff00');<br>
-&nbsp; S.reconnects = 0;<br>
-&nbsp; setStatus('live', `LIVE &#8212; ${transport}`);<br>
-&nbsp; document.getElementById('transportBadge').textContent = transport;<br>
-&nbsp; document.getElementById('reconnectInfo').textContent = '';<br>
-&nbsp; stopHttp();<br>
-&nbsp; // Pull fresh state immediately<br>
-&nbsp; socket.emit('request_metrics');<br>
-&nbsp; socket.emit('get_metrics');<br>
-});</p>
-<p dir="ltr">socket.on('disconnect', reason =&gt; {<br>
-&nbsp; dbg(`&#10060; Disconnected: ${reason}`, '#ff4444');<br>
-&nbsp; setStatus('offline', `OFFLINE &#8212; ${reason}`);<br>
-&nbsp; startHttp();<br>
-});</p>
-<p dir="ltr">socket.on('connect_error', err =&gt; {<br>
-&nbsp; S.reconnects++;<br>
-&nbsp; dbg(`&#9888;&#65039; connect_error #${S.reconnects}: ${err.message}`, '#ffaa00');<br>
-&nbsp; setStatus('offline', `ERR &#8212; retry #${S.reconnects}`);<br>
-&nbsp; document.getElementById('reconnectInfo').textContent = err.message;<br>
-&nbsp; if (S.reconnects &gt;= 3) startHttp();<br>
-});</p>
-<p dir="ltr">socket.io.engine.on('upgrade', t =&gt; {<br>
-&nbsp; dbg(`&#11014;&#65039; Upgraded &#8594; ${t.name.toUpperCase()}`, '#00d9ff');<br>
-&nbsp; document.getElementById('transportBadge').textContent = t.name.toUpperCase();<br>
-});</p>
-<p dir="ltr">// &#9472;&#9472; Data events &#8212; catch every event name variant &#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;<br>
-['metrics_update','update','state','blockchain_state','chain_update','metrics'].forEach(ev =&gt;<br>
-&nbsp; socket.on(ev, d =&gt; {<br>
-&nbsp;&nbsp;&nbsp; dbg(`&#128202; ${ev} &#8594; keys:[${Object.keys(d||{}).slice(0,8).join(',')}&#8230;]`, '#00d9ff');<br>
-&nbsp;&nbsp;&nbsp; showPayload(d);<br>
-&nbsp;&nbsp;&nbsp; ingest(d);<br>
-&nbsp; })<br>
-);</p>
-<p dir="ltr">socket.on('new_block', b =&gt; {<br>
-&nbsp; dbg(`&#128230; new_block h=${b?.height ?? b?.block_height ?? '?'}`, '#d4af37');<br>
-&nbsp; const nb = normBlock(b);<br>
-&nbsp; if (!S.blocks.find(x =&gt; x.height === nb.height)) {<br>
-&nbsp;&nbsp;&nbsp; S.blocks.unshift(nb);<br>
-&nbsp;&nbsp;&nbsp; if (S.blocks.length &gt; 10) S.blocks.pop();<br>
-&nbsp;&nbsp;&nbsp; renderBlocks(true);<br>
-&nbsp; }<br>
-&nbsp; // Also update height metric immediately<br>
-&nbsp; if (nb.height) ingest({ block_height: nb.height });<br>
-&nbsp; socket.emit('request_metrics');<br>
-});</p>
-<p dir="ltr">socket.on('block', b =&gt; {<br>
-&nbsp; const nb = normBlock(b);<br>
-&nbsp; if (!S.blocks.find(x =&gt; x.height === nb.height)) {<br>
-&nbsp;&nbsp;&nbsp; S.blocks.unshift(nb);<br>
-&nbsp;&nbsp;&nbsp; if (S.blocks.length &gt; 10) S.blocks.pop();<br>
-&nbsp;&nbsp;&nbsp; renderBlocks(true);<br>
-&nbsp; }<br>
-});</p>
-<p dir="ltr">socket.on('mempool_update', d =&gt; {<br>
-&nbsp; S.mempool = Array.isArray(d) ? d : (d?.transactions ?? d?.txs ?? []);<br>
-&nbsp; renderMempool();<br>
-});</p>
-<p dir="ltr">['miner_heartbeat','miner_update'].forEach(ev =&gt; socket.on(ev, d =&gt; {<br>
-&nbsp; if (Array.isArray(d)) d.forEach(m =&gt; { if (m?.miner_id) S.miners[m.miner_id] = m; });<br>
-&nbsp; else if (d?.miner_id) S.miners[d.miner_id] = d;<br>
-&nbsp; renderMiners();<br>
-}));</p>
-<p dir="ltr">// &#9472;&#9472; Core ingestion &#8212; normalizes EVERY field naming variant &#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;<br>
-function ingest(raw) {<br>
-&nbsp; if (!raw || typeof raw !== 'object') return;<br>
-&nbsp; S.lastDataTs = Date.now();</p>
-<p dir="ltr">&nbsp; const pick = (...keys) =&gt; {<br>
-&nbsp;&nbsp;&nbsp; for (const k of keys) if (raw[k] !== undefined &amp;&amp; raw[k] !== null) return raw[k];<br>
-&nbsp;&nbsp;&nbsp; return undefined;<br>
-&nbsp; };</p>
-<p dir="ltr">&nbsp; // Block height<br>
-&nbsp; const h = pick('block_height','height','blockHeight','chain_height','chainHeight');<br>
-&nbsp; if (h !== undefined) {<br>
-&nbsp;&nbsp;&nbsp; const n = parseInt(h, 10);<br>
-&nbsp;&nbsp;&nbsp; if (!isNaN(n) &amp;&amp; n &gt;= 0) {<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (S.prevHeight !== null &amp;&amp; n &gt; S.prevHeight) flashCard('card-height', '+' + (n - S.prevHeight));<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; S.prevHeight = n;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; setText('height', n.toLocaleString());<br>
-&nbsp;&nbsp;&nbsp; }<br>
-&nbsp; }</p>
-<p dir="ltr">&nbsp; // Difficulty<br>
-&nbsp; const d = pick('difficulty','network_difficulty','diff');<br>
-&nbsp; if (d !== undefined) {<br>
-&nbsp;&nbsp;&nbsp; const n = parseFloat(d);<br>
-&nbsp;&nbsp;&nbsp; if (!isNaN(n)) {<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; setText('difficulty', n &gt; 1e6 ? (n/1e6).toFixed(2)+'M' : n &gt; 1e3 ? (n/1e3).toFixed(2)+'K' : n.toFixed(2));<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; S.diffHist.push({ t: new Date(), v: n });<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (S.diffHist.length &gt; 1440) S.diffHist.shift();<br>
-&nbsp;&nbsp;&nbsp; }<br>
-&nbsp; }</p>
-<p dir="ltr">&nbsp; // Hash rate<br>
-&nbsp; const hr = pick('network_hash_rate','hash_rate','hashrate','hashRate');<br>
-&nbsp; if (hr !== undefined) {<br>
-&nbsp;&nbsp;&nbsp; const n = parseFloat(hr);<br>
-&nbsp;&nbsp;&nbsp; if (!isNaN(n)) {<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; const f = fmtHR(n);<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; setText('hashRate', f.v);<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; document.getElementById('hashRate-unit').textContent = f.u;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; S.hrHist.push({ t: new Date(), v: n });<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (S.hrHist.length &gt; 1440) S.hrHist.shift();<br>
-&nbsp;&nbsp;&nbsp; }<br>
-&nbsp; }</p>
-<p dir="ltr">&nbsp; // W-state fidelity (0&#8211;1 float OR 0&#8211;100 float)<br>
-&nbsp; const fid = pick('w_state_fidelity','fidelity','wstate_fidelity','quantum_fidelity');<br>
-&nbsp; if (fid !== undefined) {<br>
-&nbsp;&nbsp;&nbsp; const n = parseFloat(fid);<br>
-&nbsp;&nbsp;&nbsp; if (!isNaN(n)) setText('fidelity', (n &gt; 1 ? n : n * 100).toFixed(2));<br>
-&nbsp; }</p>
-<p dir="ltr">&nbsp; // Peers<br>
-&nbsp; const pc = pick('peer_count','peers','peerCount','active_peers');<br>
-&nbsp; if (pc !== undefined) { const n = parseInt(pc, 10); if (!isNaN(n)) setText('peers', n); }</p>
-<p dir="ltr">&nbsp; // Mempool size<br>
-&nbsp; const mp = pick('mempool_size','pending_count','mempool_count');<br>
-&nbsp; if (mp !== undefined) {<br>
-&nbsp;&nbsp;&nbsp; const n = parseInt(mp, 10);<br>
-&nbsp;&nbsp;&nbsp; if (!isNaN(n)) {<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; setText('mempool', n);<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; document.getElementById('mempool-count').textContent = n;<br>
-&nbsp;&nbsp;&nbsp; }<br>
-&nbsp; }</p>
-<p dir="ltr">&nbsp; // Last block time ago (unix timestamp OR seconds-ago value)<br>
-&nbsp; const lbt = pick('last_block_time_ago','time_since_block','last_block_time');<br>
-&nbsp; if (lbt !== undefined) {<br>
-&nbsp;&nbsp;&nbsp; let s = 0;<br>
-&nbsp;&nbsp;&nbsp; if (typeof lbt === 'number') s = lbt &gt; 1e9 ? Math.floor(Date.now()/1000 - lbt) : lbt;<br>
-&nbsp;&nbsp;&nbsp; else if (typeof lbt === 'string') {<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; const p = Date.parse(lbt);<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; s = isNaN(p) ? parseFloat(lbt) || 0 : Math.floor((Date.now() - p) / 1000);<br>
-&nbsp;&nbsp;&nbsp; }<br>
-&nbsp;&nbsp;&nbsp; setText('lastBlockTime', s &gt;= 0 ? s.toFixed(0) : '&#8212;');<br>
-&nbsp; }</p>
-<p dir="ltr">&nbsp; // Active miners count (from registry or direct field)<br>
-&nbsp; const am = pick('active_miners','miner_count');<br>
-&nbsp; if (am !== undefined) { const n = parseInt(am, 10); if (!isNaN(n)) setText('activeMiners', n); }<br>
-&nbsp; else { const mc = Object.keys(S.miners).length; if (mc &gt; 0) setText('activeMiners', mc); }</p>
-<p dir="ltr">&nbsp; // Embedded recent_blocks array<br>
-&nbsp; const rb = raw.recent_blocks ?? raw.blocks ?? raw.recentBlocks;<br>
-&nbsp; if (Array.isArray(rb) &amp;&amp; rb.length) {<br>
-&nbsp;&nbsp;&nbsp; rb.forEach(b =&gt; {<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; const nb = normBlock(b);<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (!S.blocks.find(x =&gt; x.height === nb.height)) S.blocks.unshift(nb);<br>
-&nbsp;&nbsp;&nbsp; });<br>
-&nbsp;&nbsp;&nbsp; S.blocks.sort((a, b) =&gt; b.height - a.height);<br>
-&nbsp;&nbsp;&nbsp; S.blocks = S.blocks.slice(0, 10);<br>
-&nbsp;&nbsp;&nbsp; renderBlocks(false);<br>
-&nbsp; }</p>
-<p dir="ltr">&nbsp; // Embedded mempool transactions<br>
-&nbsp; const mt = raw.mempool_txs ?? raw.mempool ?? raw.pending_transactions;<br>
-&nbsp; if (Array.isArray(mt) &amp;&amp; mt.length) { S.mempool = mt; renderMempool(); }</p>
-<p dir="ltr">&nbsp; // Embedded miners<br>
-&nbsp; const mi = raw.miners;<br>
-&nbsp; if (mi &amp;&amp; typeof mi === 'object' &amp;&amp; !Array.isArray(mi)) {<br>
-&nbsp;&nbsp;&nbsp; Object.assign(S.miners, mi);<br>
-&nbsp;&nbsp;&nbsp; renderMiners();<br>
-&nbsp; }</p>
-<p dir="ltr">&nbsp; updateCharts();<br>
-}</p>
-<p dir="ltr">// &#9472;&#9472; Block normalization &#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;<br>
-function normBlock(b) {<br>
-&nbsp; if (!b) return {};<br>
-&nbsp; return {<br>
-&nbsp;&nbsp;&nbsp; height&nbsp;&nbsp; : b.height ?? b.block_height ?? b.blockHeight ?? 0,<br>
-&nbsp;&nbsp;&nbsp; hash&nbsp;&nbsp;&nbsp;&nbsp; : b.hash ?? b.block_hash ?? b.id ?? '',<br>
-&nbsp;&nbsp;&nbsp; miner&nbsp;&nbsp;&nbsp; : b.miner ?? b.miner_id ?? b.validator_public_key ?? b.mined_by ?? 'unknown',<br>
-&nbsp;&nbsp;&nbsp; timestamp: b.timestamp ?? b.time ?? b.created_at ?? (Date.now()/1000),<br>
-&nbsp;&nbsp;&nbsp; tx_count : b.tx_count ?? b.transactions ?? b.txCount ?? 0,<br>
-&nbsp;&nbsp;&nbsp; entropy&nbsp; : b.entropy ?? b.entropy_score ?? null,<br>
-&nbsp; };<br>
-}</p>
-<p dir="ltr">// &#9472;&#9472; DOM setters &#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;<br>
-function setText(id, val) {<br>
-&nbsp; const e = document.getElementById(id);<br>
-&nbsp; if (!e) return;<br>
-&nbsp; e.textContent = val;<br>
-&nbsp; e.classList.remove('stale');<br>
-}<br>
-function flashCard(id, delta) {<br>
-&nbsp; const c = document.getElementById(id); if (!c) return;<br>
-&nbsp; c.classList.remove('updated'); void c.offsetWidth; c.classList.add('updated');<br>
-&nbsp; if (delta !== undefined) {<br>
-&nbsp;&nbsp;&nbsp; const de = c.querySelector('.metric-delta');<br>
-&nbsp;&nbsp;&nbsp; if (de) { de.textContent = delta; de.className = 'metric-delta' + (String(delta).startsWith('-') ? ' neg' : ''); }<br>
-&nbsp; }<br>
-}<br>
-function setStatus(s, txt) {<br>
-&nbsp; const dot = document.getElementById('statusDot'), t = document.getElementById('statusText');<br>
-&nbsp; if (dot) dot.className = 'status-dot' + (s==='live'?' live':'');<br>
-&nbsp; if (t) { t.className='status-text'+(s==='live'?' live':''); t.textContent=txt; }<br>
-}</p>
-<p dir="ltr">// &#9472;&#9472; Renderers &#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;<br>
-function renderBlocks(animFirst) {<br>
-&nbsp; const c = document.getElementById('blocks-list');<br>
-&nbsp; document.getElementById('block-count').textContent = S.blocks.length;<br>
-&nbsp; if (!S.blocks.length) { c.innerHTML='&lt;div style="padding:20px;color:#7a8db8"&gt;No blocks yet&lt;/div&gt;'; return; }<br>
-&nbsp; c.innerHTML = S.blocks.map((b, i) =&gt; `<br>
-&nbsp;&nbsp;&nbsp; &lt;div class="block-item ${animFirst&amp;&amp;i===0?'fresh':''}"&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="block-height"&gt;Block #${Number(b.height).toLocaleString()}&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="block-field"&gt;Hash: &lt;span class="block-field-value"&gt;${String(b.hash||'').substring(0,20)}&#8230;&lt;/span&gt;&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="block-field"&gt;Miner: &lt;span class="block-field-value"&gt;${String(b.miner||'unknown').substring(0,18)}&#8230;&lt;/span&gt;&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="block-field"&gt;Time: &lt;span class="block-field-value"&gt;${new Date(b.timestamp&gt;1e10?b.timestamp:b.timestamp*1000).toLocaleString()}&lt;/span&gt;&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;div class="block-field"&gt;Txns: &lt;span class="block-field-value"&gt;${b.tx_count}&lt;/span&gt;&lt;/div&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${b.entropy!=null?`&lt;div class="block-field"&gt;Entropy: &lt;span class="block-field-value"&gt;${typeof b.entropy==='number'?b.entropy.toFixed(6):b.entropy}&lt;/span&gt;&lt;/div&gt;`:''}<br>
-&nbsp;&nbsp;&nbsp; &lt;/div&gt;`).join('');<br>
-}</p>
-<p dir="ltr">function renderMempool() {<br>
-&nbsp; const tbody = document.getElementById('mempool-list');<br>
-&nbsp; document.getElementById('mempool-count').textContent = S.mempool.length;<br>
-&nbsp; if (!S.mempool.length) { tbody.innerHTML='&lt;tr&gt;&lt;td colspan="6" style="text-align:center;color:#7a8db8"&gt;No pending transactions&lt;/td&gt;&lt;/tr&gt;'; return; }<br>
-&nbsp; tbody.innerHTML = S.mempool.slice(0,10).map(tx =&gt; `&lt;tr&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;td&gt;${String(tx.hash??tx.tx_hash??tx.id??'').substring(0,16)}&lt;/td&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;td&gt;${String(tx.from??tx.from_address??tx.sender??'').substring(0,12)}&#8230;&lt;/td&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;td&gt;${String(tx.to??tx.to_address??tx.receiver??'').substring(0,12)}&#8230;&lt;/td&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;td&gt;${tx.amount??0}&lt;/td&gt;&lt;td&gt;${tx.fee??0}&lt;/td&gt;<br>
-&nbsp;&nbsp;&nbsp; &lt;td style="color:#00ff00"&gt;Pending&lt;/td&gt;&lt;/tr&gt;`).join('');<br>
-}</p>
-<p dir="ltr">function renderMiners() {<br>
-&nbsp; const tbody = document.getElementById('miners-list');<br>
-&nbsp; const arr = Object.values(S.miners)<br>
-&nbsp;&nbsp;&nbsp; .sort((a,b)=&gt;(b.blocks_mined??b.block_count??0)-(a.blocks_mined??a.block_count??0)).slice(0,10);<br>
-&nbsp; document.getElementById('miner-count').textContent = arr.length;<br>
-&nbsp; if (arr.length &gt; 0) setText('activeMiners', arr.length);<br>
-&nbsp; if (!arr.length) { tbody.innerHTML='&lt;tr&gt;&lt;td colspan="6" style="text-align:center;color:#7a8db8"&gt;No miner data yet&lt;/td&gt;&lt;/tr&gt;'; return; }<br>
-&nbsp; tbody.innerHTML = arr.map((m,i) =&gt; {<br>
-&nbsp;&nbsp;&nbsp; const f = fmtHR(m.hash_rate ?? m.hashrate ?? 0);<br>
-&nbsp;&nbsp;&nbsp; const ts = m.last_block_time ?? m.last_block_ts ?? m.last_seen ?? Date.now()/1000;<br>
-&nbsp;&nbsp;&nbsp; return `&lt;tr&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;td&gt;${i+1}&lt;/td&gt;&lt;td&gt;${String(m.miner_id??m.id??'?').substring(0,18)}&#8230;&lt;/td&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;td&gt;${m.blocks_mined??m.block_count??0}&lt;/td&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;td&gt;${f.v} ${f.u}&lt;/td&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;td&gt;${new Date(ts&gt;1e10?ts:ts*1000).toLocaleString()}&lt;/td&gt;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &lt;td&gt;${String(m.wallet_address??m.wallet??m.address??m.miner_id??'').substring(0,12)}&#8230;&lt;/td&gt;&lt;/tr&gt;`;<br>
-&nbsp; }).join('');<br>
-}</p>
-<p dir="ltr">// &#9472;&#9472; Charts &#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;<br>
-function updateCharts() {<br>
-&nbsp; if (S.charts.hr &amp;&amp; S.hrHist.length &gt; 1) {<br>
-&nbsp;&nbsp;&nbsp; S.charts.hr.data.labels = S.hrHist.map(d =&gt; d.t.toLocaleTimeString());<br>
-&nbsp;&nbsp;&nbsp; S.charts.hr.data.datasets[0].data = S.hrHist.map(d =&gt; d.v);<br>
-&nbsp;&nbsp;&nbsp; S.charts.hr.update('none');<br>
-&nbsp; }<br>
-&nbsp; if (S.charts.diff &amp;&amp; S.diffHist.length &gt; 1) {<br>
-&nbsp;&nbsp;&nbsp; S.charts.diff.data.labels = S.diffHist.map(d =&gt; d.t.toLocaleTimeString());<br>
-&nbsp;&nbsp;&nbsp; S.charts.diff.data.datasets[0].data = S.diffHist.map(d =&gt; d.v);<br>
-&nbsp;&nbsp;&nbsp; S.charts.diff.update('none');<br>
-&nbsp; }<br>
-}<br>
-function initCharts() {<br>
-&nbsp; const base = {<br>
-&nbsp;&nbsp;&nbsp; responsive: true, maintainAspectRatio: false,<br>
-&nbsp;&nbsp;&nbsp; plugins: { legend: { labels: { color: '#d4af37' } } },<br>
-&nbsp;&nbsp;&nbsp; scales: {<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; y: { ticks: { color: '#7a8db8' }, grid: { color: 'rgba(212,175,55,0.1)' } },<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; x: { ticks: { color: '#7a8db8', maxTicksLimit: 8 }, grid: { color: 'rgba(212,175,55,0.1)' } }<br>
-&nbsp;&nbsp;&nbsp; }<br>
-&nbsp; };<br>
-&nbsp; const hr = document.getElementById('hashRateChart');<br>
-&nbsp; if (hr) S.charts.hr = new Chart(hr, { type:'line', data:{ labels:[], datasets:[{ label:'Hash Rate', data:[],<br>
-&nbsp;&nbsp;&nbsp; borderColor:'#00d9ff', backgroundColor:'rgba(0,217,255,0.1)', tension:0.3, fill:true }] }, options:{...base} });<br>
-&nbsp; const df = document.getElementById('difficultyChart');<br>
-&nbsp; if (df) S.charts.diff = new Chart(df, { type:'line', data:{ labels:[], datasets:[{ label:'Difficulty', data:[],<br>
-&nbsp;&nbsp;&nbsp; borderColor:'#d4af37', backgroundColor:'rgba(212,175,55,0.1)', tension:0.3, fill:true }] }, options:{...base} });<br>
-}</p>
-<p dir="ltr">// &#9472;&#9472; HTTP fallback polling &#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;<br>
-function startHttp() {<br>
-&nbsp; if (S.httpActive) return;<br>
-&nbsp; S.httpActive = true;<br>
-&nbsp; dbg('&#128260; HTTP fallback active', '#ffaa00');<br>
-&nbsp; httpPoll();<br>
-&nbsp; S.httpTimer = setInterval(httpPoll, 5000);<br>
-}<br>
-function stopHttp() {<br>
-&nbsp; if (!S.httpActive) return;<br>
-&nbsp; S.httpActive = false;<br>
-&nbsp; clearInterval(S.httpTimer);<br>
-&nbsp; dbg('&#9989; HTTP fallback stopped', '#00ff00');<br>
-}<br>
-async function httpPoll() {<br>
-&nbsp; const eps = ['/metrics', '/api/metrics', '/stats', '/api/stats', '/api/health'];<br>
-&nbsp; for (const ep of eps) {<br>
-&nbsp;&nbsp;&nbsp; try {<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; const r = await fetch(API_BASE + ep, { mode:'cors', signal: AbortSignal.timeout(4000) });<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; if (r.ok) {<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; const d = await r.json();<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; dbg(`&#128225; HTTP ${ep} &#8594; ${Object.keys(d).slice(0,4).join(',')}&#8230;`, '#00d9ff');<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ingest(d); showPayload(d); return;<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; }<br>
-&nbsp;&nbsp;&nbsp; } catch(e) { /* try next */ }<br>
-&nbsp; }<br>
-}</p>
-<p dir="ltr">// &#9472;&#9472; Format hash rate &#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;<br>
-function fmtHR(n) {<br>
-&nbsp; n = parseFloat(n) || 0;<br>
-&nbsp; if (n&gt;=1e12) return {v:(n/1e12).toFixed(2),u:'TH/s'};<br>
-&nbsp; if (n&gt;=1e9)&nbsp; return {v:(n/1e9).toFixed(2), u:'GH/s'};<br>
-&nbsp; if (n&gt;=1e6)&nbsp; return {v:(n/1e6).toFixed(2), u:'MH/s'};<br>
-&nbsp; if (n&gt;=1e3)&nbsp; return {v:(n/1e3).toFixed(2), u:'KH/s'};<br>
-&nbsp; return {v:n.toFixed(0), u:'H/s'};<br>
-}</p>
-<p dir="ltr">// &#9472;&#9472; Stale detection + keepalive heartbeat &#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;<br>
-setInterval(() =&gt; {<br>
-&nbsp; if (socket.connected) { socket.emit('request_metrics'); socket.emit('get_metrics'); }<br>
-&nbsp; if (S.lastDataTs &amp;&amp; Date.now() - S.lastDataTs &gt; 30000) {<br>
-&nbsp;&nbsp;&nbsp; ['height','difficulty','hashRate','fidelity','peers','mempool','lastBlockTime','activeMiners']<br>
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; .forEach(id =&gt; { const e=document.getElementById(id); if(e)e.classList.add('stale'); });<br>
-&nbsp; }<br>
-}, 5000);</p>
-<p dir="ltr">// &#9472;&#9472; Boot &#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;<br>
-window.addEventListener('load', () =&gt; {<br>
-&nbsp; initCharts();<br>
-&nbsp; ['height','difficulty','hashRate','fidelity','peers','mempool','lastBlockTime','activeMiners']<br>
-&nbsp;&nbsp;&nbsp; .forEach(id =&gt; { const e=document.getElementById(id); if(e)e.classList.add('stale'); });<br>
-&nbsp; dbg('&#128640; QTCL Explorer v4.0 ready', '#d4af37');<br>
-&nbsp; dbg(`&#127760; ${ORIGIN}`, '#7a8db8');<br>
-&nbsp; httpPoll(); // prefetch before WS handshake completes<br>
-});<br>
-&lt;/script&gt;<br>
-&lt;/body&gt;<br>
-&lt;/html&gt;</p>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>QTCL — Quantum Blockchain Explorer</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:linear-gradient(135deg,#0a0e27 0%,#1a1a3a 50%,#0f1629 100%);color:#b0b8d0;min-height:100vh;padding:20px}
+.container{max-width:1600px;margin:0 auto}
+.header{text-align:center;margin-bottom:40px;padding-bottom:20px;border-bottom:2px solid rgba(212,175,55,0.3)}
+.title{font-size:42px;color:#d4af37;margin-bottom:5px;font-weight:600;letter-spacing:-0.5px}
+.subtitle{font-size:13px;color:#7a8db8;letter-spacing:3px;text-transform:uppercase}
+.status-bar{display:flex;align-items:center;justify-content:center;gap:12px;margin-top:12px;font-size:12px;font-family:'Courier New',monospace}
+.status-dot{width:10px;height:10px;border-radius:50%;background:#ff4444;flex-shrink:0;transition:all .3s;display:inline-block}
+.status-dot.live{background:#00ff00;box-shadow:0 0 10px #00ff00}
+.status-text{color:#7a8db8;transition:color .3s}
+.status-text.live{color:#00ff00}
+.transport-badge{background:rgba(212,175,55,.1);border:1px solid rgba(212,175,55,.3);color:#d4af37;padding:2px 8px;border-radius:4px;font-size:10px;letter-spacing:1px}
+.debug-toggle{background:rgba(0,217,255,0.1);border:1px solid rgba(0,217,255,0.3);color:#00d9ff;padding:4px 12px;border-radius:4px;font-size:10px;cursor:pointer;margin-top:8px;font-family:'Courier New',monospace;letter-spacing:1px}
+#debug-panel{background:rgba(0,0,0,0.85);border:1px solid rgba(0,217,255,0.3);border-radius:8px;padding:16px;margin-bottom:20px;font-family:'Courier New',monospace;font-size:11px;display:none}
+#debug-panel.visible{display:block}
+.debug-title{color:#00d9ff;font-weight:bold;margin-bottom:6px;font-size:12px}
+#debug-payload{color:#b0ffb0;white-space:pre-wrap;word-break:break-all;max-height:180px;overflow-y:auto;line-height:1.5}
+#debug-log{color:#7a8db8;max-height:100px;overflow-y:auto;line-height:1.8;margin-top:8px;border-top:1px solid rgba(255,255,255,0.1);padding-top:8px}
+.reconnect-info{text-align:center;font-size:10px;color:#7a8db8;font-family:'Courier New',monospace;margin-top:4px;min-height:14px}
+.metrics-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:15px;margin-bottom:30px}
+.metric-card{background:rgba(20,24,50,0.9);border:1px solid rgba(212,175,55,0.2);border-radius:8px;padding:20px;position:relative;overflow:hidden;transition:border-color .3s}
+.metric-card::before{content:'';position:absolute;top:0;left:0;width:100%;height:3px;background:linear-gradient(90deg,#d4af37,#00d9ff)}
+.metric-card.updated{border-color:rgba(0,217,255,0.6);animation:flash .4s ease-out}
+@keyframes flash{0%{box-shadow:0 0 14px rgba(0,217,255,0.6)}100%{box-shadow:none}}
+.metric-label{font-size:11px;color:#7a8db8;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px}
+.metric-value{font-size:28px;color:#d4af37;font-weight:600;font-family:'Courier New',monospace;word-break:break-all;min-height:36px;transition:color .3s}
+.metric-value.stale{color:#555a70}
+.metric-unit{font-size:12px;color:#7a8db8;margin-top:5px}
+.metric-delta{font-size:11px;color:#00ff00;margin-top:5px;min-height:14px}
+.metric-delta.neg{color:#ff4444}
+.section-header{font-size:18px;color:#d4af37;font-weight:600;margin-top:40px;margin-bottom:20px;padding-bottom:10px;border-bottom:1px solid rgba(212,175,55,0.2);display:flex;align-items:center;gap:10px}
+.section-count{background:rgba(212,175,55,0.15);color:#d4af37;font-size:11px;padding:2px 8px;border-radius:12px;font-weight:normal}
+.blocks-container{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:15px;margin-bottom:40px}
+.block-item{background:rgba(20,24,50,0.9);border:1px solid rgba(0,217,255,0.3);border-radius:8px;padding:15px;font-family:'Courier New',monospace;font-size:12px;transition:border-color .3s}
+.block-item.fresh{animation:freshBlock .7s ease-out}
+@keyframes freshBlock{0%{background:rgba(0,217,255,0.18);border-color:#00d9ff}100%{background:rgba(20,24,50,0.9);border-color:rgba(0,217,255,0.3)}}
+.block-height{color:#d4af37;font-weight:600;margin-bottom:8px;font-size:14px}
+.block-field{color:#7a8db8;margin:4px 0;word-break:break-all}
+.block-field-value{color:#00d9ff}
+.table-wrapper{overflow-x:auto;margin-bottom:30px}
+table{width:100%;border-collapse:collapse;background:rgba(20,24,50,0.9);border:1px solid rgba(212,175,55,0.2);border-radius:8px;overflow:hidden}
+table th{background:rgba(212,175,55,0.1);color:#d4af37;padding:12px 15px;text-align:left;font-size:12px;font-weight:600;letter-spacing:1px;text-transform:uppercase;border-bottom:1px solid rgba(212,175,55,0.2)}
+table td{padding:10px 15px;border-bottom:1px solid rgba(212,175,55,0.08);color:#b0b8d0;font-family:'Courier New',monospace;font-size:12px}
+table tr:hover{background:rgba(212,175,55,0.05)}
+.chart-container{background:rgba(20,24,50,0.9);border:1px solid rgba(212,175,55,0.2);border-radius:8px;padding:20px;margin-bottom:30px;position:relative;height:300px}
+.chart-label{font-size:14px;color:#d4af37;font-weight:600;margin-bottom:15px}
+@media(max-width:768px){.metrics-grid{grid-template-columns:1fr}.blocks-container{grid-template-columns:1fr}.title{font-size:28px}}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div class="title">⚛️ QTCL Explorer</div>
+    <div class="subtitle">Quantum Temporal Coherence Ledger — Real-Time Blockchain Monitor</div>
+    <div class="status-bar">
+      <span class="status-dot" id="statusDot"></span>
+      <span class="status-text" id="statusText">Connecting...</span>
+      <span class="transport-badge" id="transportBadge">—</span>
+    </div>
+    <div class="reconnect-info" id="reconnectInfo"></div>
+    <button class="debug-toggle" onclick="toggleDebug()">⚙️ DEBUG PANEL</button>
+  </div>
+
+  <div id="debug-panel">
+    <div class="debug-title">🔐 RAW PAYLOAD — last metrics_update (keys + values)</div>
+    <div id="debug-payload">Awaiting first metrics_update…</div>
+    <div class="debug-title" style="margin-top:8px">📥 EVENT LOG</div>
+    <div id="debug-log"></div>
+  </div>
+
+  <div class="metrics-grid">
+    <div class="metric-card" id="card-height">
+      <div class="metric-label">Chain Height</div>
+      <div class="metric-value stale" id="height">—</div>
+      <div class="metric-unit">blocks</div>
+      <div class="metric-delta" id="height-delta"></div>
+    </div>
+    <div class="metric-card" id="card-difficulty">
+      <div class="metric-label">Network Difficulty</div>
+      <div class="metric-value stale" id="difficulty">—</div>
+      <div class="metric-unit">bits</div>
+    </div>
+    <div class="metric-card" id="card-hashRate">
+      <div class="metric-label">Hash Rate</div>
+      <div class="metric-value stale" id="hashRate">—</div>
+      <div class="metric-unit" id="hashRate-unit">H/s</div>
+    </div>
+    <div class="metric-card" id="card-fidelity">
+      <div class="metric-label">W-State Fidelity</div>
+      <div class="metric-value stale" id="fidelity">—</div>
+      <div class="metric-unit">quantum confidence</div>
+    </div>
+    <div class="metric-card" id="card-peers">
+      <div class="metric-label">Active Peers</div>
+      <div class="metric-value stale" id="peers">—</div>
+      <div class="metric-unit">nodes</div>
+    </div>
+    <div class="metric-card" id="card-mempool">
+      <div class="metric-label">Mempool Size</div>
+      <div class="metric-value stale" id="mempool">—</div>
+      <div class="metric-unit">pending transactions</div>
+    </div>
+    <div class="metric-card" id="card-lastBlockTime">
+      <div class="metric-label">Last Block Time</div>
+      <div class="metric-value stale" id="lastBlockTime">—</div>
+      <div class="metric-unit" id="lastBlockTime-unit">seconds ago</div>
+    </div>
+    <div class="metric-card" id="card-activeMiners">
+      <div class="metric-label">Active Miners</div>
+      <div class="metric-value stale" id="activeMiners">—</div>
+      <div class="metric-unit">connected</div>
+    </div>
+  </div>
+
+  <div class="section-header">⛓️ Recent Blocks</div>
+  <div class="blocks-container" id="blocks-list"></div>
+
+  <div class="section-header">📊 Hash Rate</div>
+  <div class="chart-container">
+    <div class="chart-label">Hash Rate (H/s)</div>
+    <canvas id="hashRateChart"></canvas>
+  </div>
+
+  <div class="section-header">🎯 Difficulty</div>
+  <div class="chart-container">
+    <div class="chart-label">Network Difficulty (bits)</div>
+    <canvas id="difficultyChart"></canvas>
+  </div>
+
+  <div class="section-header">👷 Top Miners</div>
+  <div class="table-wrapper">
+    <table>
+      <thead>
+        <tr>
+          <th>Rank</th>
+          <th>Miner ID</th>
+          <th>Blocks Mined</th>
+          <th>Hash Rate</th>
+          <th>Last Block</th>
+          <th>Address</th>
+        </tr>
+      </thead>
+      <tbody id="miners-list">
+        <tr><td colspan="6" style="text-align:center;color:#7a8db8">Waiting for miner data...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const API_BASE = location.origin;
+const ORIGIN = location.origin;
+const socket = io(API_BASE, { reconnection: true, reconnectionDelay: 1000, reconnectionDelayMax: 5000, reconnectionAttempts: Infinity });
+
+const S = {
+  lastDataTs: null,
+  httpActive: false,
+  httpTimer: null,
+  lastHeight: 0,
+  hrHist: [],
+  diffHist: [],
+  charts: {}
+};
+
+socket.on('connect', () => {
+  document.getElementById('statusDot').classList.add('live');
+  document.getElementById('statusText').classList.add('live');
+  document.getElementById('statusText').textContent = '🟢 Connected';
+  document.getElementById('transportBadge').textContent = 'WebSocket';
+  stopHttp();
+  dbg('✅ WebSocket connected', '#00ff00');
+});
+
+socket.on('disconnect', () => {
+  document.getElementById('statusDot').classList.remove('live');
+  document.getElementById('statusText').classList.remove('live');
+  document.getElementById('statusText').textContent = '🔴 Disconnected';
+  startHttp();
+  dbg('❌ WebSocket disconnected', '#ff4444');
+});
+
+socket.on('metrics_update', (data) => {
+  ingest(data);
+  showPayload(data);
+});
+
+function dbg(msg, color='#7a8db8') {
+  const log = document.getElementById('debug-log');
+  const ts = new Date().toLocaleTimeString();
+  const entry = document.createElement('div');
+  entry.style.color = color;
+  entry.textContent = `[${ts}] ${msg}`;
+  log.insertBefore(entry, log.firstChild);
+  while (log.children.length > 5) log.removeChild(log.lastChild);
+}
+
+function toggleDebug() {
+  document.getElementById('debug-panel').classList.toggle('visible');
+}
+
+function showPayload(data) {
+  const out = Object.entries(data).slice(0, 8).map(([k, v]) => `${k}: ${JSON.stringify(v).substring(0, 50)}`).join('\n');
+  document.getElementById('debug-payload').textContent = out || 'No data';
+}
+
+function ingest(m) {
+  S.lastDataTs = Date.now();
+  if (m.current_height !== undefined) {
+    const d = document.getElementById('height');
+    if (m.current_height !== S.lastHeight) {
+      d.parentElement.classList.add('updated');
+      document.getElementById('height-delta').textContent = `+1 block`;
+      setTimeout(() => d.parentElement.classList.remove('updated'), 400);
+    }
+    S.lastHeight = m.current_height;
+    d.textContent = m.current_height;
+    d.classList.remove('stale');
+  }
+  ['difficulty', 'network_hash_rate', 'connected_peers', 'mempool_size', 'active_miners'].forEach(k => {
+    const el = document.getElementById(k.replace('network_hash_rate', 'hashRate').replace('connected_peers', 'peers').replace('mempool_size', 'mempool').replace('active_miners', 'activeMiners'));
+    if (el && m[k] !== undefined) {
+      if (k === 'network_hash_rate') {
+        const f = fmtHR(m[k]);
+        el.textContent = f.v;
+        document.getElementById('hashRate-unit').textContent = f.u;
+        if (S.hrHist.length > 20) S.hrHist.shift();
+        S.hrHist.push({ t: new Date(), v: parseFloat(m[k]) });
+      } else {
+        el.textContent = m[k];
+      }
+      el.classList.remove('stale');
+    }
+  });
+  if (m.quantum_metrics?.w_state_fidelity !== undefined) {
+    const f = document.getElementById('fidelity');
+    f.textContent = (m.quantum_metrics.w_state_fidelity * 100).toFixed(1) + '%';
+    f.classList.remove('stale');
+  }
+  if (m.recent_blocks && Array.isArray(m.recent_blocks)) {
+    const list = document.getElementById('blocks-list');
+    list.innerHTML = m.recent_blocks.slice(0, 6).map(b => {
+      const cls = (Date.now() - (b.timestamp || 0) * 1000) < 30000 ? 'fresh' : '';
+      return `<div class="block-item ${cls}"><div class="block-height">Block #${b.height}</div><div class="block-field"><span class="block-field-value">${b.hash?.substring(0,16)}…</span></div><div class="block-field">⏱️ ${new Date(b.timestamp * 1000).toLocaleTimeString()}</div></div>`;
+    }).join('');
+  }
+  if (m.top_miners && Array.isArray(m.top_miners)) {
+    const tbody = document.getElementById('miners-list');
+    tbody.innerHTML = m.top_miners.map((m, i) => {
+      const f = fmtHR(m.hash_rate || m.hashRate || 0);
+      const ts = m.last_block_timestamp || m.ts || Date.now() / 1000;
+      return `<tr><td>${i+1}</td><td>${String(m.miner_id??m.id??'?').substring(0,18)}…</td><td>${m.blocks_mined??m.block_count??0}</td><td>${f.v} ${f.u}</td><td>${new Date(ts>1e10?ts:ts*1000).toLocaleString()}</td><td>${String(m.wallet_address??m.wallet??m.address??m.miner_id??'').substring(0,12)}…</td></tr>`;
+    }).join('');
+  }
+}
+
+function updateCharts() {
+  if (S.charts.hr && S.hrHist.length > 1) {
+    S.charts.hr.data.labels = S.hrHist.map(d => d.t.toLocaleTimeString());
+    S.charts.hr.data.datasets[0].data = S.hrHist.map(d => d.v);
+    S.charts.hr.update('none');
+  }
+  if (S.charts.diff && S.diffHist.length > 1) {
+    S.charts.diff.data.labels = S.diffHist.map(d => d.t.toLocaleTimeString());
+    S.charts.diff.data.datasets[0].data = S.diffHist.map(d => d.v);
+    S.charts.diff.update('none');
+  }
+}
+
+function initCharts() {
+  const base = {
+    responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { labels: { color: '#d4af37' } } },
+    scales: {
+      y: { ticks: { color: '#7a8db8' }, grid: { color: 'rgba(212,175,55,0.1)' } },
+      x: { ticks: { color: '#7a8db8', maxTicksLimit: 8 }, grid: { color: 'rgba(212,175,55,0.1)' } }
+    }
+  };
+  const hr = document.getElementById('hashRateChart');
+  if (hr) S.charts.hr = new Chart(hr, { type:'line', data:{ labels:[], datasets:[{ label:'Hash Rate', data:[],
+    borderColor:'#00d9ff', backgroundColor:'rgba(0,217,255,0.1)', tension:0.3, fill:true }] }, options:{...base} });
+  const df = document.getElementById('difficultyChart');
+  if (df) S.charts.diff = new Chart(df, { type:'line', data:{ labels:[], datasets:[{ label:'Difficulty', data:[],
+    borderColor:'#d4af37', backgroundColor:'rgba(212,175,55,0.1)', tension:0.3, fill:true }] }, options:{...base} });
+}
+
+function startHttp() {
+  if (S.httpActive) return;
+  S.httpActive = true;
+  dbg('🔄 HTTP fallback active', '#ffaa00');
+  httpPoll();
+  S.httpTimer = setInterval(httpPoll, 5000);
+}
+
+function stopHttp() {
+  if (!S.httpActive) return;
+  S.httpActive = false;
+  clearInterval(S.httpTimer);
+  dbg('✅ HTTP fallback stopped', '#00ff00');
+}
+
+async function httpPoll() {
+  const eps = ['/api/metrics', '/metrics', '/stats', '/api/stats', '/api/health'];
+  for (const ep of eps) {
+    try {
+      const r = await fetch(API_BASE + ep, { mode:'cors', signal: AbortSignal.timeout(4000) });
+      if (r.ok) {
+        const d = await r.json();
+        dbg(`📨 HTTP ${ep} → ${Object.keys(d).slice(0,4).join(',')}…`, '#00d9ff');
+        ingest(d); showPayload(d); return;
+      }
+    } catch(e) { /* try next */ }
+  }
+}
+
+function fmtHR(n) {
+  n = parseFloat(n) || 0;
+  if (n>=1e12) return {v:(n/1e12).toFixed(2),u:'TH/s'};
+  if (n>=1e9)  return {v:(n/1e9).toFixed(2), u:'GH/s'};
+  if (n>=1e6)  return {v:(n/1e6).toFixed(2), u:'MH/s'};
+  if (n>=1e3)  return {v:(n/1e3).toFixed(2), u:'KH/s'};
+  return {v:n.toFixed(0), u:'H/s'};
+}
+
+setInterval(() => {
+  if (socket.connected) { socket.emit('request_metrics'); socket.emit('get_metrics'); }
+  if (S.lastDataTs && Date.now() - S.lastDataTs > 30000) {
+    ['height','difficulty','hashRate','fidelity','peers','mempool','lastBlockTime','activeMiners']
+      .forEach(id => { const e=document.getElementById(id); if(e)e.classList.add('stale'); });
+  }
+  updateCharts();
+}, 5000);
+
+window.addEventListener('load', () => {
+  initCharts();
+  ['height','difficulty','hashRate','fidelity','peers','mempool','lastBlockTime','activeMiners']
+    .forEach(id => { const e=document.getElementById(id); if(e)e.classList.add('stale'); });
+  dbg('🚀 QTCL Explorer v4.0 ready', '#d4af37');
+  dbg(`🌐 ${ORIGIN}`, '#7a8db8');
+  httpPoll();
+});
+</script>
+</body>
+</html>

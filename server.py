@@ -3805,11 +3805,9 @@ def initialize_p2p():
 
 @app.route('/')
 def dashboard():
-    """Serve dashboard"""
+    """Serve dashboard HTML"""
     try:
-        with open('index.html', 'r') as f:
-            html_content = f.read()
-        return render_template_string(html_content)
+        return send_file('index.html', mimetype='text/html')
     except FileNotFoundError:
         return """
         <html>
