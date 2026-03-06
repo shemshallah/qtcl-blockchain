@@ -1044,7 +1044,7 @@ class DatabasePool:
                 logger.info(f"[DB] Initializing app-level pooling: min={min_connections}, max={max_connections}")
                 logger.info(f"[DB] Connecting to Supabase pooler (aws-0-us-west-2.pooler.supabase.com)")
                 
-                self.pool = psycopg2_pool.SimpleConnectionPool(
+                self.pool = psycopg2_pool.ThreadedConnectionPool(
                     min_connections,
                     max_connections,
                     DB_URL,
