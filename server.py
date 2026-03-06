@@ -6663,17 +6663,6 @@ def get_address_balance(address: str):
     except Exception as e:
         logger.error(f"[GET-BALANCE] Error: {e}")
         return jsonify({'error': str(e)}), 500
-                    'output_index': key[1],
-                    'amount_sats': utxo.amount,
-                    'amount_qtcl': utxo.amount / 100.0,
-                }
-                for key, utxo in utxos
-            ]
-        }), 200
-    
-    except Exception as e:
-        logger.error(f"[UTXO-BALANCE] Error: {e}")
-        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/mempool/pending', methods=['GET'])
