@@ -75,8 +75,46 @@ except ImportError:
 
 # Museum-Grade Mempool Integration
 try:
-    from mempool import get_mempool, Transaction, TransactionInput, TransactionOutput
+    from postgres_mempool import get_mempool, MempoolTransaction
     MEMPOOL_AVAILABLE = True
+
+    class Transaction:
+        """Thin shim — wraps postgres_mempool for coinbase creation."""
+        def __init__(self, tx_hash: str, inputs: list, outputs: list, fee_sats: int = 0):
+            self.tx_hash = tx_hash
+            self._dict = {
+                'tx_hash': tx_hash,
+                'inputs': inputs,
+                'outputs': outputs,
+                'fee_sats': fee_sats,
+            }
+
+        def to_dict(self) -> dict:
+            return self._dict
+
+        @staticmethod
+        def create_coinbase(block_height: int, miner_address: str, reward_sats: int) -> 'Transaction':
+            import hashlib, time as _time
+            raw = f"coinbase:{block_height}:{miner_address}:{reward_sats}:{int(_time.time_ns())}".encode()
+            tx_hash = hashlib.sha256(raw).hexdigest()
+            return Transaction(
+                tx_hash=tx_hash,
+                inputs=[{'previous_tx_hash': '00' * 32, 'previous_output_index': 0xffffffff,
+                         'coinbase_data': f"height:{block_height}"}],
+                outputs=[{'amount': reward_sats, 'address': miner_address}],
+                fee_sats=0,
+            )
+
+    # MempoolTransaction already has .to_dict() — add fee_sats alias if missing
+    _orig_to_dict = MempoolTransaction.to_dict
+    def _compat_to_dict(self):
+        d = _orig_to_dict(self)
+        d.setdefault('fee_sats', d.get('fee', 0))
+        d.setdefault('inputs', [])
+        d.setdefault('outputs', [{'amount': d.get('amount', 0), 'address': d.get('to_address', '')}])
+        return d
+    MempoolTransaction.to_dict = _compat_to_dict
+
 except ImportError:
     MEMPOOL_AVAILABLE = False
     def get_mempool():
@@ -453,7 +491,7 @@ class BlockSealer:
                 logger.info(f"[MINING] 💰 Coinbase created | reward={block_reward_sats} sats | hash={coinbase.tx_hash[:16]}…")
                 
                 # Step 2: Get pending transactions (sorted by fee)
-                pending = mempool.get_pending_transactions(limit=limit-1, min_fee=0)
+                pending = mempool.get_pending_transactions(max_count=limit - 1)
                 for tx in pending:
                     txs.append(tx.to_dict())
                 

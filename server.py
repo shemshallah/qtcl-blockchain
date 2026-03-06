@@ -1547,34 +1547,6 @@ def oracle_push_snapshot():
 #   mempool  — mempool size update (heartbeat every 30s)
 # ═════════════════════════════════════════════════════════════════════════════════════════
 
-# ── Pooler URL builder — used by both initial DB config and SSE LISTEN reconnections ─
-def _build_pooler_url() -> str:
-    """
-    Build PostgreSQL connection URL from environment variables.
-    Handles both explicit POOLER_URL and component-based (POOLER_HOST/USER/PASSWORD).
-    Used by SSE broadcaster thread for LISTEN reconnections.
-    """
-    url = os.getenv('POOLER_URL')
-    if url:
-        return url
-    
-    # Build from components
-    host = os.getenv('POOLER_HOST')
-    user = os.getenv('POOLER_USER')
-    passwd = os.getenv('POOLER_PASSWORD')
-    db = os.getenv('POOLER_DB', 'postgres')
-    port = os.getenv('POOLER_PORT', '6543')
-    
-    if host and user and passwd:
-        return f"postgresql://{user}:{passwd}@{host}:{port}/{db}"
-    
-    # Fall back to DATABASE_URL if available
-    fallback = os.getenv('DATABASE_URL')
-    if fallback:
-        return fallback
-    
-    raise ValueError("Cannot build pooler URL: POOLER_URL or POOLER_HOST+POOLER_USER+POOLER_PASSWORD required")
-
 # ── SSE event broadcaster — PostgreSQL LISTEN/NOTIFY backed, enterprise-scale ─
 class _SSEBroadcaster:
     """
@@ -5734,7 +5706,6 @@ def submit_block():
             cur.execute("""
                 UPDATE wallet_addresses
                 SET balance              = balance + %s,
-                    transaction_count    = transaction_count + 1,
                     last_used_at         = NOW(),
                     balance_updated_at   = NOW(),
                     balance_at_height    = %s
@@ -5787,7 +5758,6 @@ def submit_block():
                 cur.execute("""
                     UPDATE wallet_addresses
                     SET balance           = balance - %s,
-                        transaction_count = transaction_count + 1,
                         last_used_at      = NOW()
                     WHERE address = %s
                 """, (amount_base + fee_base, from_addr))
@@ -5796,7 +5766,6 @@ def submit_block():
                 cur.execute("""
                     UPDATE wallet_addresses
                     SET balance              = balance + %s,
-                        transaction_count    = transaction_count + 1,
                         last_used_at         = NOW(),
                         balance_updated_at   = NOW()
                     WHERE address = %s
@@ -6558,124 +6527,142 @@ def dht_stats():
 
 @app.route('/api/utxo/mempool', methods=['GET'])
 def utxo_mempool():
-    """Get pending transactions in UTXO mempool (sorted by fee)"""
+    """Get pending transactions in PostgreSQL mempool (sorted by fee, real-time from DB)"""
     try:
-        from mempool import get_mempool
+        from postgres_mempool import get_mempool
         mempool = get_mempool()
         
-        limit = request.args.get('limit', 100, type=int)
-        min_fee = request.args.get('min_fee', 0, type=int)
+        limit = request.args.get('limit', 1000, type=int)
         
-        pending_txs = mempool.get_pending_transactions(limit=limit, min_fee=min_fee)
+        # All pending transactions, sorted by fee DESC (via DB index)
+        pending_txs = mempool.get_pending_transactions(max_count=limit)
         
         return jsonify({
             'count': len(pending_txs),
             'limit': limit,
-            'min_fee': min_fee,
             'transactions': [tx.to_dict() for tx in pending_txs],
             'stats': mempool.get_stats(),
         }), 200
     except Exception as e:
-        logger.error(f"[UTXO-MEMPOOL] Error: {e}")
+        logger.error(f"[MEMPOOL] Error: {e}")
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/utxo/submit-transaction', methods=['POST'])
-def utxo_submit_transaction():
+@app.route('/api/transactions/submit', methods=['POST'])
+def submit_transaction():
     """
-    Submit a UTXO transaction to mempool.
+    Submit a transaction to mempool.
+    
+    PostgreSQL triggers will automatically:
+    1. Update wallet_addresses.transaction_count ✓
+    2. NOTIFY all listening clients ✓
+    3. Enforce state machine ✓
     
     Request body:
     {
-        "inputs": [{"previous_tx_hash": "...", "previous_output_index": 0, "script_sig": "..."}],
-        "outputs": [{"amount": 500, "address": "qtcl1..."}],
-        "lock_time": 0
+        "tx_hash": "...",
+        "from_address": "hlwe_...",
+        "to_address": "hlwe_...",
+        "amount": 1000,
+        "nonce": 5,
+        "signature": "...",
+        "fee": 100,
+        "tx_type": "transfer"
     }
     """
     try:
-        from mempool import get_mempool, Transaction, TransactionInput, TransactionOutput
+        from postgres_mempool import get_mempool
         
         data = request.get_json() or {}
         
-        # Parse inputs
-        inputs = [
-            TransactionInput(**inp) for inp in data.get('inputs', [])
-        ]
+        # Validate required fields
+        required_fields = {'tx_hash', 'from_address', 'to_address', 'amount', 'nonce', 'signature'}
+        if not all(field in data for field in required_fields):
+            missing = required_fields - set(data.keys())
+            return jsonify({'error': f'Missing fields: {missing}'}), 400
         
-        # Parse outputs
-        outputs = [
-            TransactionOutput(**out) for out in data.get('outputs', [])
-        ]
-        
-        if not inputs or not outputs:
-            return jsonify({'error': 'Missing inputs or outputs'}), 400
-        
-        # Create transaction
-        tx = Transaction(
-            inputs=inputs,
-            outputs=outputs,
-            lock_time=data.get('lock_time', 0),
-            version=data.get('version', 1)
-        )
-        
-        # Submit to mempool
+        # Submit to PostgreSQL mempool
+        # Validation layers: format → signature → state
         mempool = get_mempool()
-        accepted, message = mempool.accept_transaction(tx)
+        accepted, message = mempool.add_transaction(data)
         
         return jsonify({
             'accepted': accepted,
             'message': message,
-            'tx_hash': tx.tx_hash,
-            'fee_sats': tx.fee_sats,
-            'mempool_size': len(mempool.pending_txs),
+            'tx_hash': data.get('tx_hash'),
         }), 200 if accepted else 400
     
     except Exception as e:
-        logger.error(f"[UTXO-SUBMIT] Error: {e}")
-        traceback.print_exc()
+        logger.error(f"[SUBMIT-TX] Error: {e}")
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/utxo/transaction/<tx_hash>', methods=['GET'])
-def utxo_get_transaction(tx_hash: str):
-    """Get transaction by hash"""
+@app.route('/api/transactions/<tx_hash>', methods=['GET'])
+def get_transaction(tx_hash: str):
+    """Get transaction by hash from PostgreSQL mempool"""
     try:
-        from mempool import get_mempool
+        from postgres_mempool import get_mempool
         mempool = get_mempool()
         
-        tx = mempool.get_transaction(tx_hash)
+        tx = mempool.get_transaction_by_hash(tx_hash)
         
         if tx is None:
             return jsonify({'error': 'Transaction not found'}), 404
         
         return jsonify({
             'tx_hash': tx.tx_hash,
-            'transaction': tx.to_dict(),
+            'from_address': tx.from_address,
+            'to_address': tx.to_address,
+            'amount': tx.amount,
+            'fee': tx.fee,
+            'status': tx.status,
+            'nonce': tx.nonce,
+            'created_at': tx.created_at.isoformat() if tx.created_at else None,
+            'included_in_block': tx.included_in_block,
         }), 200
     
     except Exception as e:
-        logger.error(f"[UTXO-GET-TX] Error: {e}")
+        logger.error(f"[GET-TX] Error: {e}")
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/utxo/address/<address>/balance', methods=['GET'])
-def utxo_address_balance(address: str):
-    """Get UTXO balance for address"""
+@app.route('/api/address/<address>/balance', methods=['GET'])
+def get_address_balance(address: str):
+    """Get address balance and transaction count from PostgreSQL wallet"""
     try:
-        from mempool import get_mempool
-        mempool = get_mempool()
-        
-        balance = mempool.utxo_set.get_address_balance(address)
-        utxos = mempool.utxo_set.get_address_utxos(address)
+        # Get wallet data directly from PostgreSQL (no UTXO set needed)
+        with _db_pool.cursor() as cur:
+            cur.execute("""
+                SELECT balance, transaction_count, address_type
+                FROM wallet_addresses
+                WHERE address = %s
+            """, (address,))
+            
+            wallet = cur.fetchone()
+            if not wallet:
+                return jsonify({'error': 'Address not found'}), 404
+            
+            # Get pending transactions for this address (mempool)
+            cur.execute("""
+                SELECT COUNT(*) as pending_count
+                FROM mempool
+                WHERE (from_address = %s OR to_address = %s)
+                AND status = 'pending'
+            """, (address, address))
+            
+            mempool_info = cur.fetchone()
         
         return jsonify({
             'address': address,
-            'balance_sats': balance,
-            'balance_qtcl': balance / 100.0,
-            'utxo_count': len(utxos),
-            'utxos': [
-                {
-                    'tx_hash': key[0],
+            'balance': wallet['balance'],
+            'transaction_count': wallet['transaction_count'],
+            'pending_transactions': mempool_info['pending_count'],
+            'address_type': wallet['address_type'],
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"[GET-BALANCE] Error: {e}")
+        return jsonify({'error': str(e)}), 500
                     'output_index': key[1],
                     'amount_sats': utxo.amount,
                     'amount_qtcl': utxo.amount / 100.0,
@@ -6811,15 +6798,13 @@ def mempool_tx_status(tx_hash: str):
 def utxo_stats():
     """Get UTXO set statistics"""
     try:
-        from mempool import get_mempool
+        from postgres_mempool import get_mempool
         mempool = get_mempool()
-        
+
         return jsonify({
             'mempool': mempool.get_stats(),
-            'utxo_set': mempool.utxo_set.stats_snapshot(),
-            'validator': mempool.validator.stats_snapshot(),
         }), 200
-    
+
     except Exception as e:
         logger.error(f"[UTXO-STATS] Error: {e}")
         return jsonify({'error': str(e)}), 500
