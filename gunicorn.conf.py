@@ -1,50 +1,57 @@
 """
-gunicorn.conf.py — QTCL Blockchain Production Configuration
-════════════════════════════════════════════════════════════
-Auto-loaded by gunicorn at startup (before CLI args in some versions,
-alongside them in others — worker_class here is the canonical source).
+gunicorn.conf.py — QTCL Blockchain Enterprise Production Configuration
+═══════════════════════════════════════════════════════════════════════
+Auto-loaded by gunicorn at startup. Overrides dashboard/CLI worker settings.
 
-WHY gthread WORKER:
-  The sync worker processes one request at a time. An SSE connection
-  (/api/events) holds the socket open indefinitely. With sync, it
-  captures the single worker permanently — every subsequent API call
-  (mempool poll, W-state, peer registration) queues behind it and hits
-  the 10s read timeout. gthread gives each request its own OS thread;
-  SSE and API calls run concurrently with zero blocking.
+WORKER MODEL — gthread:
+  SSE (/api/events) holds a connection open indefinitely. sync worker = SSE
+  captures the only thread → every API call times out. gthread gives each
+  request an OS thread; SSE + API calls are fully concurrent.
 
-WHY NOT gevent:
-  Would require monkey-patching psycopg2 and all stdlib. ThreadedConnectionPool
-  required. Adds fragility. gthread needs zero changes to existing code.
+SCALE ARCHITECTURE:
+  • Single Koyeb instance:  1 worker × 64 threads = 64 concurrent requests
+  • Horizontal scale:       Multiple Koyeb instances, each 1 worker × 64 threads
+  • Cross-instance events:  PostgreSQL LISTEN/NOTIFY (built into _SSEBroadcaster)
+    Any instance publishes a TX → PG NOTIFY → all instances fan out to their
+    local SSE subscribers. Zero Redis. Zero message broker.
+  • Database:               Supabase pooler handles connection multiplexing.
+    Each worker holds 1 persistent LISTEN conn + borrows from ThreadedConnectionPool.
+
+SCALING ROADMAP:
+  1. Now:     1 worker, 64 threads, PG NOTIFY cross-instance SSE  ← THIS CONFIG
+  2. Phase 2: Increase Koyeb instance count (horizontal) — works automatically
+  3. Phase 3: workers = 2-4 per instance if CPU-bound (PG NOTIFY handles SSE fanout)
 """
 
 import os
 import multiprocessing
 
 # ── Binding ────────────────────────────────────────────────────────────────────
-bind        = f"0.0.0.0:{os.environ.get('PORT', '8000')}"
+bind = f"0.0.0.0:{os.environ.get('PORT', '8000')}"
 
 # ── Worker model ───────────────────────────────────────────────────────────────
-# gthread: 1 worker process, N threads. SSE + API calls are fully concurrent.
-# sync:    1 worker process, 1 thread. SSE locks out every other request. BROKEN.
 worker_class   = "gthread"
-workers        = 1          # Single process — shared in-memory state (SSE queues, mempool)
-threads        = 32         # 32 concurrent requests: SSE subscribers + API calls + heartbeats
+workers        = 1          # 1 per Koyeb instance — shared in-memory state safe
+                            # Scale horizontally via multiple Koyeb instances
+threads        = 64         # 64 concurrent: SSE subscribers + API + heartbeats
 
 # ── Timeouts ───────────────────────────────────────────────────────────────────
 timeout        = 0          # SSE workers must NEVER time out — 0 = infinite
-graceful_timeout = 30       # Graceful shutdown window
-keepalive      = 75         # TCP keep-alive seconds (> Koyeb's 60s idle timeout)
+graceful_timeout = 30
+keepalive      = 75         # > Koyeb's 60s idle TCP timeout
+
+# ── Lifecycle ──────────────────────────────────────────────────────────────────
+preload_app    = False      # False = each worker initializes independently
+                            # Required for PG LISTEN (each worker needs own conn)
+max_requests   = 10000      # Recycle worker after 10k requests (memory leak guard)
+max_requests_jitter = 1000  # Spread recycling to avoid thundering herd
 
 # ── Logging ────────────────────────────────────────────────────────────────────
-loglevel       = "info"
-accesslog      = "-"        # stdout
-errorlog       = "-"        # stdout
-access_log_format = '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s"'
+loglevel             = "info"
+accesslog            = "-"
+errorlog             = "-"
+access_log_format    = '%(h)s %(l)s %(t)s "%(r)s" %(s)s %(b)s "%(a)s"'
 
-# ── Performance ────────────────────────────────────────────────────────────────
-preload_app    = True       # Load app once in master — workers fork, saving memory
-max_requests   = 0          # Don't recycle workers (would drop SSE connections)
-max_requests_jitter = 0
-
-# ── Connection limits ──────────────────────────────────────────────────────────
-backlog        = 512
+# ── Connection ─────────────────────────────────────────────────────────────────
+backlog          = 2048
+worker_connections = 1000   # per worker (gthread ignores this but good to declare)
