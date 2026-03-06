@@ -851,7 +851,7 @@ P2P_WEBSOCKET_URL = os.getenv('P2P_WEBSOCKET_URL', None)  # Deprecated, for back
 # ── Block policy ──────────────────────────────────────────────────────────────
 # Max USER transactions per block (coinbase not counted).
 # Matches miner's MAX_BLOCK_TX — must be kept in sync.
-MAX_BLOCK_TX_SERVER = 3
+MAX_BLOCK_TX_SERVER = 100
 # Coinbase null address — 64 hex zeros, provably unspendable
 COINBASE_NULL_ADDRESS = '0' * 64
 PEER_DISCOVERY_INTERVAL = 60
