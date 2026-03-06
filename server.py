@@ -1547,6 +1547,34 @@ def oracle_push_snapshot():
 #   mempool  — mempool size update (heartbeat every 30s)
 # ═════════════════════════════════════════════════════════════════════════════════════════
 
+# ── Pooler URL builder — used by both initial DB config and SSE LISTEN reconnections ─
+def _build_pooler_url() -> str:
+    """
+    Build PostgreSQL connection URL from environment variables.
+    Handles both explicit POOLER_URL and component-based (POOLER_HOST/USER/PASSWORD).
+    Used by SSE broadcaster thread for LISTEN reconnections.
+    """
+    url = os.getenv('POOLER_URL')
+    if url:
+        return url
+    
+    # Build from components
+    host = os.getenv('POOLER_HOST')
+    user = os.getenv('POOLER_USER')
+    passwd = os.getenv('POOLER_PASSWORD')
+    db = os.getenv('POOLER_DB', 'postgres')
+    port = os.getenv('POOLER_PORT', '6543')
+    
+    if host and user and passwd:
+        return f"postgresql://{user}:{passwd}@{host}:{port}/{db}"
+    
+    # Fall back to DATABASE_URL if available
+    fallback = os.getenv('DATABASE_URL')
+    if fallback:
+        return fallback
+    
+    raise ValueError("Cannot build pooler URL: POOLER_URL or POOLER_HOST+POOLER_USER+POOLER_PASSWORD required")
+
 # ── SSE event broadcaster — PostgreSQL LISTEN/NOTIFY backed, enterprise-scale ─
 class _SSEBroadcaster:
     """
