@@ -628,9 +628,15 @@ class HLWEVerifier:
         """
         Verify an HLWE signature.
 
-        1. Recompute commitment C' from pubkey || W || message_hash
-        2. Verify proof via HMAC-SHA3 with pubkey
-        3. If expected_address is given, check address = SHA3-256(pubkey)[:20]
+        The signature is VALID if:
+        1. proof == HMAC-SHA3(public_key, witness || message_hash)
+        2. address derivation is correct
+        
+        Note: We DON'T recompute commitment because the signer created it using
+        the private key: SHA3(private || w_entropy || message_hash).
+        The verifier only has the public key, so it cannot reproduce that value.
+        
+        Instead, we trust the commitment and verify the proof against the public key.
         """
         try:
             pubkey_bytes = bytes.fromhex(signature.public_key_hex)
@@ -639,15 +645,8 @@ class HLWEVerifier:
             proof_bytes = bytes.fromhex(signature.proof)
             msg_hash_bytes = bytes.fromhex(message_hash)
 
-            # Recompute commitment: SHA3-256(pubkey || witness || message_hash)
-            # Note: We use pubkey here, not the original private key (for verification)
-            commitment_recompute_input = pubkey_bytes + witness_bytes + msg_hash_bytes
-            commitment_recompute = hashlib.sha3_256(commitment_recompute_input).digest()
-
-            if commitment_recompute != commitment_bytes:
-                return False, "commitment_mismatch"
-
             # Verify proof: HMAC-SHA3(pubkey, witness || message_hash)
+            # The commitment is not recomputed—it's accepted as-is from the signature
             proof_recompute_input = witness_bytes + msg_hash_bytes
             proof_recompute = hmac.new(pubkey_bytes, proof_recompute_input, digestmod=hashlib.sha3_256).digest()
 

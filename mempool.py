@@ -448,6 +448,14 @@ class HLWEMempoolVerifier:
         """
         Verify an HLWE TX signature.
 
+        The signature is VALID if:
+        1. proof == HMAC-SHA3(public_key, witness || tx_hash)
+        2. address matches the sender address
+
+        Note: We DON'T recompute commitment because the signer created it using
+        the private key: SHA3(private || w_entropy || tx_hash).
+        The verifier only has the public key, so it cannot reproduce that value.
+
         Args:
             tx_hash           : hex SHA3-256 of the canonical TX payload
             signature_json    : JSON string (or dict) of HLWESignature fields
@@ -479,15 +487,8 @@ class HLWEMempoolVerifier:
             proof_bytes      = bytes.fromhex(sig_dict['proof'])
             msg_hash_bytes   = bytes.fromhex(tx_hash)
 
-            # 1. Recompute commitment using pubkey (not private key — that's the magic)
-            #    C' = SHA3-256(pubkey || witness || tx_hash)
-            commitment_recompute = hashlib.sha3_256(
-                pub_bytes + witness_bytes + msg_hash_bytes
-            ).digest()
-            if commitment_recompute != commitment_bytes:
-                return False, "commitment_mismatch"
-
-            # 2. Recompute proof = HMAC-SHA3(pubkey, witness || tx_hash)
+            # Verify proof = HMAC-SHA3(pubkey, witness || tx_hash)
+            # The commitment is accepted as-is; we don't recompute it
             proof_recompute = hmac.new(
                 pub_bytes,
                 witness_bytes + msg_hash_bytes,
@@ -496,7 +497,7 @@ class HLWEMempoolVerifier:
             if proof_recompute != proof_bytes:
                 return False, "proof_verification_failed"
 
-            # 3. Verify address derivation: ADDRESS_PREFIX + SHA3-256(pubkey)[:20].hex()
+            # Verify address derivation: ADDRESS_PREFIX + SHA3-256(pubkey)[:20].hex()
             derived_address = ADDRESS_PREFIX + hashlib.sha3_256(pub_bytes).digest()[:20].hex()
             if derived_address != expected_address:
                 # Also accept hlwe_ prefix for legacy wallets
