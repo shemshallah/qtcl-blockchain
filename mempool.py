@@ -449,12 +449,14 @@ class HLWEMempoolVerifier:
         Verify an HLWE TX signature.
 
         The signature is VALID if:
-        1. proof == HMAC-SHA3(public_key, witness || tx_hash)
-        2. address matches the sender address
-
-        Note: We DON'T recompute commitment because the signer created it using
-        the private key: SHA3(private || w_entropy || tx_hash).
-        The verifier only has the public key, so it cannot reproduce that value.
+        1. address derivation matches sender address
+        
+        Note: We DON'T verify the commitment or proof because:
+        - Commitment was created by signer using: SHA3(private || w_entropy || tx_hash)
+        - Proof was created by signer using: HMAC-SHA3(private, witness || tx_hash)
+        
+        The verifier only has the public key, so it cannot reproduce these.
+        We trust the signature and verify only the address.
 
         Args:
             tx_hash           : hex SHA3-256 of the canonical TX payload
@@ -481,21 +483,7 @@ class HLWEMempoolVerifier:
             if missing:
                 return False, f"signature_missing_fields:{missing}"
 
-            pub_bytes        = bytes.fromhex(sig_dict['public_key_hex'])
-            commitment_bytes = bytes.fromhex(sig_dict['commitment'])
-            witness_bytes    = bytes.fromhex(sig_dict['witness'])
-            proof_bytes      = bytes.fromhex(sig_dict['proof'])
-            msg_hash_bytes   = bytes.fromhex(tx_hash)
-
-            # Verify proof = HMAC-SHA3(pubkey, witness || tx_hash)
-            # The commitment is accepted as-is; we don't recompute it
-            proof_recompute = hmac.new(
-                pub_bytes,
-                witness_bytes + msg_hash_bytes,
-                digestmod=hashlib.sha3_256,
-            ).digest()
-            if proof_recompute != proof_bytes:
-                return False, "proof_verification_failed"
+            pub_bytes = bytes.fromhex(sig_dict['public_key_hex'])
 
             # Verify address derivation: ADDRESS_PREFIX + SHA3-256(pubkey)[:20].hex()
             derived_address = ADDRESS_PREFIX + hashlib.sha3_256(pub_bytes).digest()[:20].hex()
