@@ -5154,6 +5154,27 @@ def oracle_w_state():
             'error': 'fallback mode'
         }), 200
 
+@app.route('/api/mempool/fee_estimate', methods=['GET'])
+def mempool_fee_estimate():
+    """Bitcoin-equivalent estimatesmartfee. target_blocks param (default 1)."""
+    try:
+        from mempool import get_mempool as _gm
+        tb = request.args.get('target_blocks', 1, type=int)
+        return jsonify(_gm().fee_estimate(max(1, tb))), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/mempool/stats', methods=['GET'])
+def mempool_stats_v2():
+    """Full Python mempool health stats."""
+    try:
+        from mempool import get_mempool as _gm
+        return jsonify(_gm().stats()), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/mempool', methods=['GET'])
 def get_mempool():
     """
@@ -5903,216 +5924,72 @@ def submit_block():
 @app.route('/api/submit_transaction', methods=['POST'])
 def submit_transaction():
     """
-    Accept a user transfer and persist it to the mempool (DB status='pending').
+    Accept a user transfer into the Python mempool.
 
-    CANONICAL HASH — deterministic, reproducible client-side:
-        SHA3-256(JSON({from_addr, to_addr, amount_str, nonce_str, timestamp_ns_str},
-                       sort_keys=True))
-    Clients may supply a tx_id; if it differs it is stored as an alias row so
-    /api/transactions/<client_tx_id> also resolves.
+    Full validation pipeline (inside mempool.accept):
+        Format → Dust → Self-send → Fee-rate → Nonce → Balance → HLWE-sig → Capacity
 
-    DB is written in two isolated cursors so a wallet-row constraint failure
-    (UNIQUE on wallet_fingerprint) CANNOT roll back the transaction insert.
+    Canonical hash (reproducible client-side):
+        SHA3-256(JSON({from_address,to_address,amount:str,nonce:str,fee:str,timestamp_ns:str}, sort_keys=True))
 
-    Flow:
-        1. Validate fields
-        2. Compute canonical hash
-        3. Oracle HLWE-sign (non-fatal if oracle unavailable)
-        4. INSERT transactions — the ONLY step that is mandatory
-        5. INSERT wallet_addresses rows — best-effort, own cursor
-        6. DHT + BlockManager — belt-and-suspenders, both non-fatal
-        7. P2P gossip
+    W-state entanglement: SHA3-256(block_field_entropy()) captured at accept-time and
+    stored on the TX — permanently binding it to the instantaneous quantum state.
     """
+    from mempool import get_mempool, AcceptCode
     data      = request.get_json(force=True, silent=True) or {}
-    from_addr = (data.get('from') or data.get('from_addr') or data.get('sender_addr') or '').strip()
-    to_addr   = (data.get('to')   or data.get('to_addr')   or data.get('receiver_addr') or '').strip()
+    from_addr = (data.get('from') or data.get('from_addr') or data.get('from_address') or '').strip()
+    to_addr   = (data.get('to')   or data.get('to_addr')   or data.get('to_address')   or '').strip()
     amount    = data.get('amount')
 
     if not from_addr or not to_addr or amount is None:
         return jsonify({'error': 'missing required fields: from, to, amount'}), 400
 
+    # Pass the raw dict directly — mempool normalises everything internally
+    raw = dict(data)
+    raw.setdefault('from_address', from_addr)
+    raw.setdefault('to_address',   to_addr)
+
     try:
-        # ── 1. NORMALISE AMOUNT ─────────────────────────────────────────────────
-        try:
-            amount_float = float(amount)
-        except (ValueError, TypeError):
-            return jsonify({'error': f'invalid amount: {amount!r}'}), 400
-        amount_base  = int(round(amount_float * 100)) if amount_float < 10_000 else int(amount_float)
-        amount_float = amount_base / 100                # normalise back
+        code, msg, tx = get_mempool().accept(raw)
+    except Exception as exc:
+        logger.error(f"[TX] mempool.accept error: {exc}\n{traceback.format_exc()}")
+        return jsonify({'error': str(exc)}), 500
 
-        nonce        = int(data.get('nonce', 0))
-        fee_qtcl     = float(data.get('fee', 0.001))
-        fee_base     = max(1, int(round(fee_qtcl * 100)))
-        memo         = str(data.get('memo', ''))[:256]
-        client_tx_id = str(data.get('tx_id', '') or '').strip()
-        timestamp_ns = time.time_ns()
-
-        # ── 2. CANONICAL HASH ───────────────────────────────────────────────────
-        canon_src = json.dumps({
-            'from_addr'   : from_addr,
-            'to_addr'     : to_addr,
-            'amount'      : str(amount_base),
-            'nonce'       : str(nonce),
-            'timestamp_ns': str(timestamp_ns),
-        }, sort_keys=True)
-        tx_hash = hashlib.sha3_256(canon_src.encode()).hexdigest()
-
-        logger.info(
-            f"[TX] Submit | {from_addr[:16]}...→{to_addr[:16]}... | "
-            f"{amount_float} QTCL ({amount_base} base) | hash={tx_hash[:16]}..."
-        )
-
-        # ── 3. ORACLE SIGN ──────────────────────────────────────────────────────
-        sig_json = None
-        if ORACLE:
-            try:
-                sig = ORACLE.sign_transaction(tx_hash, from_addr)
-                if sig:
-                    sig_json = json.dumps(sig.to_dict() if hasattr(sig, 'to_dict') else sig)
-            except Exception as _se:
-                logger.debug(f"[TX] Oracle sign skipped: {_se}")
-
-        # ── 4. INSERT TRANSACTION — isolated cursor, CRITICAL PATH ─────────────
-        # Absolute minimum columns; wallet upserts are in a SEPARATE cursor below
-        # so no wallet constraint can abort this commit.
-        tx_meta = {
-            'fee_qtcl'       : fee_qtcl,
-            'fee_base'       : fee_base,
-            'memo'           : memo,
-            'oracle_signed'  : sig_json is not None,
-            'submitted_at_ns': timestamp_ns,
-            'client_tx_id'   : client_tx_id,
-            'amount_qtcl'    : amount_float,
-            'amount_base'    : amount_base,
+    if code.success():
+        resp = {
+            'tx_hash'     : tx.tx_hash,
+            'client_tx_id': tx.client_tx_id or tx.tx_hash,
+            'status'      : 'pending',
+            'from'        : tx.from_address,
+            'to'          : tx.to_address,
+            'amount'      : tx.amount_base / 100,
+            'amount_base' : tx.amount_base,
+            'fee'         : tx.fee_base / 100,
+            'fee_rate'    : round(tx.fee_rate, 6),
+            'w_entropy_hash': tx.w_entropy_hash,
+            'replaced_by_fee': code == AcceptCode.RBF,
+            'message'     : f"TX pending | query: /api/transactions/{tx.tx_hash}",
         }
-        db_ok    = False
-        db_error = None
-        try:
-            with get_db_cursor() as cur:
-                cur.execute("""
-                    INSERT INTO transactions
-                        (tx_hash, from_address, to_address, amount,
-                         nonce, tx_type, status,
-                         quantum_state_hash, commitment_hash, metadata)
-                    VALUES (%s, %s, %s, %s, %s, 'transfer', 'pending', %s, %s, %s)
-                    ON CONFLICT (tx_hash) DO UPDATE
-                        SET status     = CASE WHEN transactions.status = 'confirmed'
-                                             THEN 'confirmed' ELSE 'pending' END,
-                            updated_at = NOW()
-                """, (
-                    tx_hash, from_addr, to_addr, amount_base, nonce,
-                    sig_json or '', tx_hash, json.dumps(tx_meta),
-                ))
-            db_ok = True
-            logger.info(f"[TX] DB insert OK | hash={tx_hash[:16]}...")
-            # Publish to SSE + gossip_store so all workers and subscribers see it immediately
-            try:
-                _gossip_publish_tx(tx_hash, from_addr, to_addr, amount_base, nonce, sig_json is not None)
-            except Exception as _ge:
-                logger.debug(f"[TX] gossip_publish_tx skipped: {_ge}")
-        except Exception as exc:
-            db_error = str(exc)
-            logger.error(f"[TX] DB INSERT FAILED — {type(exc).__name__}: {exc}")
-            logger.error(traceback.format_exc())
-            # Do NOT return error — client can still see TX via DHT until DB is fixed
-
-        # ── 4b. ALIAS ROW — client_tx_id != canonical (separate cursor) ────────
-        if db_ok and client_tx_id and client_tx_id != tx_hash and len(client_tx_id) == 64:
-            try:
-                with get_db_cursor() as cur:
-                    cur.execute("""
-                        INSERT INTO transactions
-                            (tx_hash, from_address, to_address, amount,
-                             nonce, tx_type, status,
-                             quantum_state_hash, commitment_hash, metadata)
-                        VALUES (%s, %s, %s, %s, %s, 'transfer', 'pending', %s, %s, %s)
-                        ON CONFLICT (tx_hash) DO NOTHING
-                    """, (
-                        client_tx_id, from_addr, to_addr, amount_base, nonce,
-                        sig_json or '', tx_hash,
-                        json.dumps({**tx_meta, 'alias_of': tx_hash}),
-                    ))
-                logger.info(f"[TX] Alias stored: {client_tx_id[:16]}...→{tx_hash[:16]}...")
-            except Exception as ae:
-                logger.debug(f"[TX] Alias row skipped: {ae}")
-
-        # ── 5. WALLET ROWS — best-effort, own cursors, NEVER block TX ──────────
-        _fp = lambda a: hashlib.sha256(a.encode()).hexdigest()[:64]
-        _pk = lambda a: hashlib.sha3_256(a.encode()).hexdigest()
-        for _addr, _atype in [(from_addr, 'sending'), (to_addr, 'receiving')]:
-            try:
-                with get_db_cursor() as cur:
-                    cur.execute("""
-                        INSERT INTO wallet_addresses
-                            (address, wallet_fingerprint, public_key,
-                             balance, transaction_count, address_type)
-                        VALUES (%s, %s, %s, 0, 0, %s)
-                        ON CONFLICT (address) DO NOTHING
-                    """, (_addr, _fp(_addr), _pk(_addr), _atype))
-            except Exception as _we:
-                logger.debug(f"[TX] Wallet upsert skipped ({_addr[:12]}...): {_we}")
-
-        # ── 6. DHT — belt-and-suspenders for same-worker lookups ───────────────
-        try:
-            get_dht_manager().store_state(f"tx:{tx_hash}", {
-                'tx_hash': tx_hash, 'from_addr': from_addr, 'to_addr': to_addr,
-                'amount_base': amount_base, 'nonce': nonce,
-                'timestamp_ns': timestamp_ns, 'status': 'pending', 'in_db': db_ok,
-            })
-            if client_tx_id and client_tx_id != tx_hash:
-                get_dht_manager().store_state(f"tx:{client_tx_id}",
-                                              {'alias_of': tx_hash, 'status': 'pending'})
-        except Exception as _de:
-            logger.debug(f"[TX] DHT store skipped: {_de}")
-
-        # ── 6b. BlockManager — same-process in-memory mempool ──────────────────
-        if LATTICE and getattr(LATTICE, 'block_manager', None):
-            try:
-                from lattice_controller import QuantumTransaction
-                qt = QuantumTransaction(
-                    tx_id=tx_hash, sender_addr=from_addr, receiver_addr=to_addr,
-                    amount=Decimal(str(amount_float)), nonce=nonce,
-                    timestamp_ns=timestamp_ns, fee=fee_base, signature=sig_json,
-                )
-                LATTICE.block_manager.receive_transaction(qt)
-            except Exception as _bme:
-                logger.debug(f"[TX] BlockManager push skipped: {_bme}")
-
-        # ── 7. P2P GOSSIP ───────────────────────────────────────────────────────
+        # P2P gossip
         if P2P:
             try:
                 P2P.relay_transaction({
-                    'hash': tx_hash, 'tx_id': tx_hash, 'client_tx_id': client_tx_id,
-                    'from': from_addr, 'to': to_addr,
-                    'amount': amount_float, 'amount_base': amount_base,
-                    'nonce': nonce, 'fee': fee_qtcl, 'fee_base': fee_base,
-                    'timestamp_ns': timestamp_ns, 'signature': sig_json, 'memo': memo,
+                    'hash': tx.tx_hash, 'tx_id': tx.tx_hash,
+                    'from': tx.from_address, 'to': tx.to_address,
+                    'amount': tx.amount_base / 100, 'amount_base': tx.amount_base,
+                    'nonce': tx.nonce, 'fee': tx.fee_base / 100,
+                    'timestamp_ns': tx.timestamp_ns,
                 }, exclude_peer_id=None)
             except Exception as _pe:
                 logger.debug(f"[TX] P2P relay skipped: {_pe}")
+        return jsonify(resp), 201
 
-        return jsonify({
-            'tx_hash'      : tx_hash,
-            'client_tx_id' : client_tx_id or tx_hash,
-            'status'       : 'pending',
-            'from'         : from_addr,
-            'to'           : to_addr,
-            'amount'       : amount_float,
-            'amount_base'  : amount_base,
-            'fee'          : fee_qtcl,
-            'signed'       : sig_json is not None,
-            'in_db'        : db_ok,
-            'db_error'     : db_error,
-            'message'      : (
-                f"TX {'in DB' if db_ok else 'DB FAILED — check db_error'} | "
-                f"pending until block seals | "
-                f"query: /api/transactions/{tx_hash}"
-            ),
-        }), 201
+    # Rejection — map AcceptCode to HTTP status
+    http = 409 if code in (AcceptCode.DUP, AcceptCode.NONCE_DUP, AcceptCode.NONCE_REPLAY) else (
+           402 if code in (AcceptCode.LOW_FEE, AcceptCode.INSUF_BAL, AcceptCode.DUST)    else (
+           403 if code == AcceptCode.BAD_SIG                                              else 400))
+    return jsonify({'error': msg, 'code': code.value}), http
 
-    except Exception as exc:
-        logger.error(f"[TX] Unhandled error: {exc}\n{traceback.format_exc()}")
-        return jsonify({'error': str(exc)}), 500
 
 
 

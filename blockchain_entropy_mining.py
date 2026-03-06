@@ -75,50 +75,16 @@ except ImportError:
 
 # Museum-Grade Mempool Integration
 try:
-    from postgres_mempool import get_mempool, MempoolTransaction
+    from mempool import (
+        get_mempool, Transaction, CoinbaseBuilder,
+        MempoolTx, mark_included_in_block, COINBASE_PREFIX,
+    )
     MEMPOOL_AVAILABLE = True
-
-    class Transaction:
-        """Thin shim — wraps postgres_mempool for coinbase creation."""
-        def __init__(self, tx_hash: str, inputs: list, outputs: list, fee_sats: int = 0):
-            self.tx_hash = tx_hash
-            self._dict = {
-                'tx_hash': tx_hash,
-                'inputs': inputs,
-                'outputs': outputs,
-                'fee_sats': fee_sats,
-            }
-
-        def to_dict(self) -> dict:
-            return self._dict
-
-        @staticmethod
-        def create_coinbase(block_height: int, miner_address: str, reward_sats: int) -> 'Transaction':
-            import hashlib, time as _time
-            raw = f"coinbase:{block_height}:{miner_address}:{reward_sats}:{int(_time.time_ns())}".encode()
-            tx_hash = hashlib.sha256(raw).hexdigest()
-            return Transaction(
-                tx_hash=tx_hash,
-                inputs=[{'previous_tx_hash': '00' * 32, 'previous_output_index': 0xffffffff,
-                         'coinbase_data': f"height:{block_height}"}],
-                outputs=[{'amount': reward_sats, 'address': miner_address}],
-                fee_sats=0,
-            )
-
-    # MempoolTransaction already has .to_dict() — add fee_sats alias if missing
-    _orig_to_dict = MempoolTransaction.to_dict
-    def _compat_to_dict(self):
-        d = _orig_to_dict(self)
-        d.setdefault('fee_sats', d.get('fee', 0))
-        d.setdefault('inputs', [])
-        d.setdefault('outputs', [{'amount': d.get('amount', 0), 'address': d.get('to_address', '')}])
-        return d
-    MempoolTransaction.to_dict = _compat_to_dict
-
-except ImportError:
+    logger.info("[MINING] ✅ Python mempool (Bitcoin-model, HLWE-entangled)")
+except ImportError as _me:
     MEMPOOL_AVAILABLE = False
-    def get_mempool():
-        return None
+    logger.warning(f"[MINING] ⚠️  mempool.py not found ({_me})")
+    def get_mempool(): return None   # type: ignore[misc]
 
 # Logging setup
 if not logging.getLogger().hasHandlers():
@@ -485,27 +451,31 @@ class BlockSealer:
                 coinbase = Transaction.create_coinbase(
                     block_height=block_height,
                     miner_address=miner_address,
-                    reward_sats=block_reward_sats
+                    reward_sats=block_reward_sats,
                 )
                 txs.append(coinbase.to_dict())
-                logger.info(f"[MINING] 💰 Coinbase created | reward={block_reward_sats} sats | hash={coinbase.tx_hash[:16]}…")
-                
-                # Step 2: Get pending transactions (sorted by fee)
-                pending = mempool.get_pending_transactions(max_count=limit - 1)
-                for tx in pending:
-                    txs.append(tx.to_dict())
-                
-                logger.info(f"[MINING] 📦 Block TX list | coinbase + {len(pending)} pending | total={len(txs)}")
+                logger.info(f"[MINING] 💰 Coinbase | reward={block_reward_sats} | hash={coinbase.tx_hash[:16]}…")
+
+                # Step 2: fee-rate-ordered pending TXs via Python mempool
+                pending, _ = mempool.select_for_block(
+                    max_txs=limit - 1,
+                    height=block_height,
+                    miner=miner_address,
+                    reward_base=block_reward_sats,
+                )
+                for ptx in pending:
+                    txs.append(ptx.to_dict())
+
+                logger.info(f"[MINING] 📦 coinbase + {len(pending)} pending | total={len(txs)}")
             else:
-                # Fallback: just coinbase
                 coinbase_tx = {
-                    'tx_hash': f"coinbase_{block_height}_{int(time.time()*1000)}",
-                    'inputs': [{'previous_tx_hash': '00'*32, 'previous_output_index': 0xffffffff}],
-                    'outputs': [{'amount': block_reward_sats, 'address': miner_address}],
+                    'tx_hash' : f"coinbase_{block_height}_{int(time.time()*1000)}",
+                    'inputs'  : [{'previous_tx_hash': '00'*32, 'previous_output_index': 0xffffffff}],
+                    'outputs' : [{'amount': block_reward_sats, 'address': miner_address}],
                     'fee_sats': 0,
                 }
                 txs.append(coinbase_tx)
-                logger.debug(f"[MINING] ⚠️  Mempool unavailable, using coinbase only")
+                logger.debug("[MINING] ⚠️  Mempool unavailable, coinbase-only block")
             
             return txs
         
@@ -662,7 +632,20 @@ class BlockSealer:
             conn.commit()
             cur.close()
             self.db_pool.putconn(conn)
-            
+
+            # Notify Python mempool — evict confirmed TXs, update nonces/balances
+            if MEMPOOL_AVAILABLE:
+                try:
+                    hashes = [
+                        tx.get('tx_hash') or tx.get('tx_id', '')
+                        for tx in block.transactions
+                    ]
+                    hashes = [h for h in hashes if h and not h.startswith(COINBASE_PREFIX)]
+                    if hashes:
+                        mark_included_in_block(hashes, block.block_height)
+                except Exception as _me:
+                    logger.debug(f"[SEALING] mempool notify skipped: {_me}")
+
             logger.debug(f"[SEALING] Block #{block.block_height} persisted to PostgreSQL")
             return True
         
