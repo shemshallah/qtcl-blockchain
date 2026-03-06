@@ -1700,7 +1700,7 @@ class _SSEBroadcaster:
     def _make_pg_conn():
         import psycopg2 as _pg2
         url = (os.getenv('DATABASE_URL') or os.getenv('POOLER_URL') or
-               _build_pooler_url())  # reuse server.py's URL builder
+               POOLER_URL)  # module-level Supabase pooler URL
         conn = _pg2.connect(url, connect_timeout=5,
                             options='-c statement_timeout=0 -c idle_in_transaction_session_timeout=0')
         return conn
@@ -6116,181 +6116,6 @@ def submit_transaction():
 
 
 
-app.route('/api/transactions/<string:tx_hash>', methods=['GET'])
-def get_transaction(tx_hash: str):
-    """
-    Get a transaction by hash — Bitcoin model: works for PENDING and CONFIRMED transactions.
-
-    Lookup order (most-to-least authoritative):
-      1. DB by tx_hash (primary — catches canonical hash and client alias hash)
-      2. DB by commitment_hash (catches alias rows where commitment_hash = canonical)
-      3. DHT store (catches TXs that haven't DB-persisted yet — race condition safety)
-      4. In-memory message handler TX cache (P2P relayed TXs)
-
-    Status meanings:
-      pending   — in mempool, NOT yet in a block (queryable immediately after submit)
-      confirmed — included in a sealed block (has block_height, block_hash)
-    """
-    try:
-        row = None
-        # ── 1. Primary DB lookup by tx_hash ─────────────────────────────────────
-        try:
-            with get_db_cursor() as cur:
-                cur.execute("""
-                    SELECT tx_hash, from_address, to_address, amount,
-                           height, block_hash, transaction_index,
-                           tx_type, status, quantum_state_hash,
-                           commitment_hash, metadata, created_at
-                    FROM transactions
-                    WHERE tx_hash = %s
-                    LIMIT 1
-                """, (tx_hash,))
-                row = cur.fetchone()
-        except Exception as db_err:
-            logger.warning(f"[TX_QUERY] Primary DB lookup error: {db_err}")
-
-        # ── 2. Alias lookup — client_tx_id stored as commitment_hash alias ───────
-        if row is None:
-            try:
-                with get_db_cursor() as cur:
-                    cur.execute("""
-                        SELECT tx_hash, from_address, to_address, amount,
-                               height, block_hash, transaction_index,
-                               tx_type, status, quantum_state_hash,
-                               commitment_hash, metadata, created_at
-                        FROM transactions
-                        WHERE commitment_hash = %s AND tx_hash != %s
-                        ORDER BY created_at DESC
-                        LIMIT 1
-                    """, (tx_hash, tx_hash))
-                    row = cur.fetchone()
-                if row:
-                    logger.info(f"[TX_QUERY] Found via alias (commitment_hash): {tx_hash[:16]}… → {row[0][:16]}…")
-            except Exception as alias_err:
-                logger.debug(f"[TX_QUERY] Alias lookup error: {alias_err}")
-
-        # ── 3. DHT fallback (in-memory, sub-millisecond) ─────────────────────────
-        dht_tx = None
-        if row is None:
-            try:
-                dht = get_dht_manager()
-                dht_tx = dht.retrieve_state(f"tx:{tx_hash}")
-                if dht_tx and dht_tx.get('alias_of'):
-                    # Resolve alias → fetch canonical row
-                    canonical_hash = dht_tx['alias_of']
-                    logger.info(f"[TX_QUERY] DHT alias: {tx_hash[:16]}… → {canonical_hash[:16]}…")
-                    try:
-                        with get_db_cursor() as cur:
-                            cur.execute("""
-                                SELECT tx_hash, from_address, to_address, amount,
-                                       height, block_hash, transaction_index,
-                                       tx_type, status, quantum_state_hash,
-                                       commitment_hash, metadata, created_at
-                                FROM transactions WHERE tx_hash = %s LIMIT 1
-                            """, (canonical_hash,))
-                            row = cur.fetchone()
-                    except Exception:
-                        pass
-            except Exception as dht_err:
-                logger.debug(f"[TX_QUERY] DHT lookup error: {dht_err}")
-
-        # ── 4. P2P message handler cache ─────────────────────────────────────────
-        p2p_tx = None
-        if row is None and P2P and hasattr(P2P, 'message_handlers'):
-            try:
-                with P2P.message_handlers.lock:
-                    p2p_tx = P2P.message_handlers.tx_cache.get(tx_hash)
-            except Exception:
-                pass
-
-        # ── Build response ────────────────────────────────────────────────────────
-        if row is not None:
-            raw_amount = int(row[3]) if row[3] is not None else 0
-            metadata   = row[11]
-            if isinstance(metadata, str):
-                try:
-                    metadata = json.loads(metadata)
-                except Exception:
-                    pass
-
-            status = row[8] or 'pending'
-            confirmed = status == 'confirmed'
-
-            return jsonify({
-                'tx_hash'          : row[0],
-                'from_address'     : row[1],
-                'to_address'       : row[2],
-                'amount_base'      : raw_amount,
-                'amount_qtcl'      : raw_amount / 100,
-                'block_height'     : row[4],    # None if pending
-                'block_hash'       : row[5],    # None if pending
-                'transaction_index': row[6],
-                'tx_type'          : row[7] or 'transfer',
-                'status'           : status,
-                'confirmed'        : confirmed,
-                'w_proof'          : row[9],
-                'commitment_hash'  : row[10],
-                'metadata'         : metadata,
-                'created_at'       : str(row[12]) if row[12] else None,
-                'query_note'       : (
-                    'Transaction confirmed in block.' if confirmed
-                    else 'Transaction is PENDING — in mempool, waiting for next block to confirm. '
-                         'This is normal Bitcoin-model behavior. Query again after next block is mined.'
-                ),
-            }), 200
-
-        # ── DHT-only result (not yet in DB) ───────────────────────────────────────
-        if dht_tx and not dht_tx.get('alias_of'):
-            return jsonify({
-                'tx_hash'     : dht_tx.get('tx_hash', tx_hash),
-                'from_address': dht_tx.get('from_addr', ''),
-                'to_address'  : dht_tx.get('to_addr', ''),
-                'amount_base' : dht_tx.get('amount_base', 0),
-                'amount_qtcl' : dht_tx.get('amount_qtcl', 0),
-                'block_height': None,
-                'block_hash'  : None,
-                'tx_type'     : 'transfer',
-                'status'      : dht_tx.get('status', 'pending'),
-                'confirmed'   : False,
-                'source'      : 'dht',
-                'query_note'  : 'TX found in DHT (P2P network) but not yet persisted to DB. Still pending.',
-            }), 200
-
-        # ── P2P cache result ──────────────────────────────────────────────────────
-        if p2p_tx:
-            return jsonify({
-                'tx_hash'     : p2p_tx.get('hash', tx_hash),
-                'from_address': p2p_tx.get('from', ''),
-                'to_address'  : p2p_tx.get('to', ''),
-                'amount_base' : int(float(p2p_tx.get('amount', 0)) * 100),
-                'amount_qtcl' : float(p2p_tx.get('amount', 0)),
-                'block_height': None,
-                'block_hash'  : None,
-                'tx_type'     : 'transfer',
-                'status'      : 'pending',
-                'confirmed'   : False,
-                'source'      : 'p2p_cache',
-                'query_note'  : 'TX found in P2P relay cache. Pending confirmation in next block.',
-            }), 200
-
-        # ── Not found anywhere ────────────────────────────────────────────────────
-        return jsonify({
-            'error'     : 'transaction not found',
-            'tx_hash'   : tx_hash,
-            'searched'  : ['db_primary', 'db_alias', 'dht', 'p2p_cache'],
-            'suggestion': (
-                'If you just broadcast this TX, wait 2-3 seconds and retry. '
-                'Ensure you are querying the tx_hash returned by /api/submit_transaction '
-                '(not the client-side tx_id, unless they match). '
-                f'Query: GET /api/transactions/{tx_hash}'
-            ),
-        }), 404
-
-    except Exception as e:
-        logger.error(f"[TX_QUERY] Error: {e}\n{traceback.format_exc()}")
-        return jsonify({'error': str(e)}), 500
-
-
 @app.route('/api/blocks/height/<int:height>/transactions', methods=['GET'])
 def block_transactions(height: int):
     """
@@ -6525,102 +6350,73 @@ def dht_stats():
 # UTXO MEMPOOL REST ENDPOINTS — Museum-Grade Transaction Management
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/utxo/mempool', methods=['GET'])
-def utxo_mempool():
-    """Get pending transactions in PostgreSQL mempool (sorted by fee, real-time from DB)"""
-    try:
-        from postgres_mempool import get_mempool
-        mempool = get_mempool()
-        
-        limit = request.args.get('limit', 1000, type=int)
-        
-        # All pending transactions, sorted by fee DESC (via DB index)
-        pending_txs = mempool.get_pending_transactions(max_count=limit)
-        
-        return jsonify({
-            'count': len(pending_txs),
-            'limit': limit,
-            'transactions': [tx.to_dict() for tx in pending_txs],
-            'stats': mempool.get_stats(),
-        }), 200
-    except Exception as e:
-        logger.error(f"[MEMPOOL] Error: {e}")
-        return jsonify({'error': str(e)}), 500
-
 
 @app.route('/api/transactions/submit', methods=['POST'])
-def submit_transaction():
-    """
-    Submit a transaction to mempool.
-    
-    PostgreSQL triggers will automatically:
-    1. Update wallet_addresses.transaction_count ✓
-    2. NOTIFY all listening clients ✓
-    3. Enforce state machine ✓
-    
-    Request body:
-    {
-        "tx_hash": "...",
-        "from_address": "hlwe_...",
-        "to_address": "hlwe_...",
-        "amount": 1000,
-        "nonce": 5,
-        "signature": "...",
-        "fee": 100,
-        "tx_type": "transfer"
-    }
-    """
-    try:
-        from postgres_mempool import get_mempool
-        
-        data = request.get_json() or {}
-        
-        # Validate required fields
-        required_fields = {'tx_hash', 'from_address', 'to_address', 'amount', 'nonce', 'signature'}
-        if not all(field in data for field in required_fields):
-            missing = required_fields - set(data.keys())
-            return jsonify({'error': f'Missing fields: {missing}'}), 400
-        
-        # Submit to PostgreSQL mempool
-        # Validation layers: format → signature → state
-        mempool = get_mempool()
-        accepted, message = mempool.add_transaction(data)
-        
-        return jsonify({
-            'accepted': accepted,
-            'message': message,
-            'tx_hash': data.get('tx_hash'),
-        }), 200 if accepted else 400
-    
-    except Exception as e:
-        logger.error(f"[SUBMIT-TX] Error: {e}")
-        return jsonify({'error': str(e)}), 500
+def submit_transaction_alias():
+    """Alias — delegates to canonical /api/submit_transaction handler."""
+    return submit_transaction()
 
 
 @app.route('/api/transactions/<tx_hash>', methods=['GET'])
-def get_transaction(tx_hash: str):
-    """Get transaction by hash from PostgreSQL mempool"""
+def get_transaction_by_hash(tx_hash: str):
+    """Get transaction by hash from the transactions table (pending or confirmed)."""
     try:
-        from postgres_mempool import get_mempool
-        mempool = get_mempool()
-        
-        tx = mempool.get_transaction_by_hash(tx_hash)
-        
-        if tx is None:
-            return jsonify({'error': 'Transaction not found'}), 404
-        
+        row = None
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT tx_hash, from_address, to_address, amount,
+                       nonce, height, block_hash, tx_type, status,
+                       quantum_state_hash, commitment_hash, metadata, created_at
+                FROM transactions WHERE tx_hash = %s LIMIT 1
+            """, (tx_hash,))
+            row = cur.fetchone()
+            if row is None:
+                cur.execute("""
+                    SELECT tx_hash, from_address, to_address, amount,
+                           nonce, height, block_hash, tx_type, status,
+                           quantum_state_hash, commitment_hash, metadata, created_at
+                    FROM transactions WHERE commitment_hash = %s LIMIT 1
+                """, (tx_hash,))
+                row = cur.fetchone()
+
+        if row is None:
+            try:
+                dht_entry = get_dht_manager().retrieve_state(f"tx:{tx_hash}")
+                if dht_entry:
+                    return jsonify({
+                        'tx_hash': dht_entry.get('tx_hash', tx_hash),
+                        'status': dht_entry.get('status', 'pending'),
+                        'confirmed': False,
+                        'source': 'dht',
+                    }), 200
+            except Exception:
+                pass
+            return jsonify({'error': 'Transaction not found', 'tx_hash': tx_hash}), 404
+
+        raw_amount = int(row[3]) if row[3] is not None else 0
+        metadata = row[11]
+        if isinstance(metadata, str):
+            try: metadata = json.loads(metadata)
+            except Exception: pass
+        status = row[8] or 'pending'
         return jsonify({
-            'tx_hash': tx.tx_hash,
-            'from_address': tx.from_address,
-            'to_address': tx.to_address,
-            'amount': tx.amount,
-            'fee': tx.fee,
-            'status': tx.status,
-            'nonce': tx.nonce,
-            'created_at': tx.created_at.isoformat() if tx.created_at else None,
-            'included_in_block': tx.included_in_block,
+            'tx_hash':         row[0],
+            'from_address':    row[1],
+            'to_address':      row[2],
+            'amount_base':     raw_amount,
+            'amount_qtcl':     raw_amount / 100,
+            'nonce':           row[4],
+            'block_height':    row[5],
+            'block_hash':      row[6],
+            'tx_type':         row[7],
+            'status':          status,
+            'confirmed':       status == 'confirmed',
+            'w_proof':         row[9],
+            'commitment_hash': row[10],
+            'metadata':        metadata,
+            'created_at':      str(row[12]) if row[12] else None,
         }), 200
-    
+
     except Exception as e:
         logger.error(f"[GET-TX] Error: {e}")
         return jsonify({'error': str(e)}), 500
@@ -6645,7 +6441,7 @@ def get_address_balance(address: str):
             # Get pending transactions for this address (mempool)
             cur.execute("""
                 SELECT COUNT(*) as pending_count
-                FROM mempool
+                FROM transactions
                 WHERE (from_address = %s OR to_address = %s)
                 AND status = 'pending'
             """, (address, address))
@@ -6785,13 +6581,24 @@ def mempool_tx_status(tx_hash: str):
 
 @app.route('/api/utxo/stats', methods=['GET'])
 def utxo_stats():
-    """Get UTXO set statistics"""
+    """Get mempool/UTXO statistics from transactions table"""
     try:
-        from postgres_mempool import get_mempool
-        mempool = get_mempool()
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT
+                    COUNT(*) FILTER (WHERE status = 'pending')   AS pending_count,
+                    COUNT(*) FILTER (WHERE status = 'confirmed') AS confirmed_count,
+                    COUNT(*) FILTER (WHERE status = 'pending' AND tx_type != 'coinbase') AS spendable_pending,
+                    COALESCE(SUM(amount) FILTER (WHERE status = 'pending' AND tx_type != 'coinbase'), 0) AS total_pending_amount
+                FROM transactions
+            """)
+            row = cur.fetchone()
 
         return jsonify({
-            'mempool': mempool.get_stats(),
+            'pending_count':       int(row[0]),
+            'confirmed_count':     int(row[1]),
+            'spendable_pending':   int(row[2]),
+            'total_pending_amount': int(row[3]),
         }), 200
 
     except Exception as e:
