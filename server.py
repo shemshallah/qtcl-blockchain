@@ -4973,7 +4973,7 @@ def blocks_tip():
                 'parent_hash':    '0' * 64,
                 'merkle_root':    '0' * 64,
                 'timestamp_s':    int(db_block.get('timestamp', time.time())),
-                'difficulty_bits': 12,
+                'difficulty_bits': _get_network_difficulty_from_db(),
                 'nonce':          0,
                 'miner_address':  '',
                 'w_state_fidelity': 0.9,
@@ -4985,7 +4985,7 @@ def blocks_tip():
             return jsonify({
                 'block_height': 0, 'block_hash': '0' * 64,
                 'parent_hash': '0' * 64, 'merkle_root': '0' * 64,
-                'timestamp_s': int(time.time()), 'difficulty_bits': 12,
+                'timestamp_s': int(time.time()), 'difficulty_bits': _get_network_difficulty_from_db(),
                 'nonce': 0, 'miner_address': 'genesis',
                 'w_state_fidelity': 1.0, 'w_entropy_hash': 'genesis',
             }), 200
@@ -5264,7 +5264,7 @@ def block_by_height(height: int):
                     'parent_hash': genesis_hash,
                     'merkle_root': genesis_hash,
                     'timestamp_s': 1700000000,
-                    'difficulty_bits': 12,
+                    'difficulty_bits': _get_network_difficulty_from_db(),
                     'nonce': 0,                    'miner_address': 'genesis',
                     'w_state_fidelity': 1.0,
                     'w_entropy_hash': 'genesis',
@@ -5422,6 +5422,19 @@ def chain_status():
         return jsonify({'error': str(e), 'message': 'Failed to fetch chain data from database'}), 500
 
 
+
+def _get_network_difficulty_from_db(fallback: int = 20) -> int:
+    """Read current network difficulty from last block in DB. Never returns < fallback."""
+    try:
+        with get_db_cursor() as _c:
+            _c.execute("SELECT difficulty FROM blocks ORDER BY height DESC LIMIT 1")
+            row = _c.fetchone()
+            if row and row[0] is not None:
+                return max(int(float(row[0])), fallback)
+    except Exception:
+        pass
+    return fallback
+
 @app.route('/api/submit_block', methods=['POST'])
 def submit_block():
     """
@@ -5469,15 +5482,45 @@ def submit_block():
                 'error': f'Too many user transactions: {user_tx_count} > {MAX_BLOCK_TX_SERVER} (coinbase excluded from count)'
             }), 422
         
-        # ✅ VALIDATION 3: PoW check
-        target = 2 ** (256 - difficulty_bits)
+        # ✅ VALIDATION 2c: Enforce submitted difficulty >= network difficulty
+        # Fetch network difficulty from DB (last block's difficulty column — authoritative).
+        # Prevents miners submitting blocks with artificially low difficulty.
+        network_difficulty = difficulty_bits  # safe fallback if DB unreachable
+        try:
+            with get_db_cursor() as _cur:
+                _cur.execute("SELECT difficulty FROM blocks ORDER BY height DESC LIMIT 1")
+                _row = _cur.fetchone()
+                if _row and _row[0] is not None:
+                    network_difficulty = int(float(_row[0]))
+        except Exception as _e:
+            logger.warning(f"[BLOCK] Cannot fetch network difficulty: {_e} — skipping floor enforcement")
+            network_difficulty = difficulty_bits
+
+        if network_difficulty > 0 and difficulty_bits < network_difficulty:
+            logger.warning(
+                f"[BLOCK] ❌ Difficulty too low: submitted={difficulty_bits} required>={network_difficulty} "
+                f"| miner={miner_address[:20]}… height={block_height}"
+            )
+            return jsonify({
+                'error': f'Difficulty too low: submitted {difficulty_bits} but network requires >= {network_difficulty}',
+                'submitted_difficulty': difficulty_bits,
+                'required_difficulty':  network_difficulty,
+            }), 422
+
+        # ✅ VALIDATION 3: PoW check — enforce against network difficulty floor, not claimed value
+        enforced_difficulty = max(difficulty_bits, network_difficulty)
+        target = 2 ** (256 - enforced_difficulty)
         try:
             block_hash_int = int(block_hash, 16) if len(block_hash) == 64 else int(block_hash, 10)
         except:
             return jsonify({'error': 'invalid block_hash format'}), 400
-        
+
         if block_hash_int >= target:
-            return jsonify({'error': f'PoW invalid: hash does not meet difficulty'}), 422
+            return jsonify({
+                'error': f'PoW invalid: hash does not meet difficulty',
+                'submitted_difficulty': difficulty_bits,
+                'enforced_difficulty':  enforced_difficulty,
+            }), 422
         
         # ✅ VALIDATION 4: Parent and height check — read from DB (authoritative source)
         # In-memory state may be stale on multi-worker deployments (Koyeb/gunicorn).
