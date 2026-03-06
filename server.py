@@ -5935,7 +5935,7 @@ def submit_transaction():
     W-state entanglement: SHA3-256(block_field_entropy()) captured at accept-time and
     stored on the TX — permanently binding it to the instantaneous quantum state.
     """
-    from mempool import get_mempool, AcceptCode
+    from mempool import get_mempool, AcceptResult
     data      = request.get_json(force=True, silent=True) or {}
     from_addr = (data.get('from') or data.get('from_addr') or data.get('from_address') or '').strip()
     to_addr   = (data.get('to')   or data.get('to_addr')   or data.get('to_address')   or '').strip()
@@ -5955,7 +5955,7 @@ def submit_transaction():
         logger.error(f"[TX] mempool.accept error: {exc}\n{traceback.format_exc()}")
         return jsonify({'error': str(exc)}), 500
 
-    if code.success():
+    if code in (AcceptResult.ACCEPTED, AcceptResult.REPLACED_BY_FEE):
         resp = {
             'tx_hash'     : tx.tx_hash,
             'client_tx_id': tx.client_tx_id or tx.tx_hash,
@@ -5967,7 +5967,7 @@ def submit_transaction():
             'fee'         : tx.fee_base / 100,
             'fee_rate'    : round(tx.fee_rate, 6),
             'w_entropy_hash': tx.w_entropy_hash,
-            'replaced_by_fee': code == AcceptCode.RBF,
+            'replaced_by_fee': code == AcceptResult.REPLACED_BY_FEE,
             'message'     : f"TX pending | query: /api/transactions/{tx.tx_hash}",
         }
         # P2P gossip
@@ -5984,10 +5984,10 @@ def submit_transaction():
                 logger.debug(f"[TX] P2P relay skipped: {_pe}")
         return jsonify(resp), 201
 
-    # Rejection — map AcceptCode to HTTP status
-    http = 409 if code in (AcceptCode.DUP, AcceptCode.NONCE_DUP, AcceptCode.NONCE_REPLAY) else (
-           402 if code in (AcceptCode.LOW_FEE, AcceptCode.INSUF_BAL, AcceptCode.DUST)    else (
-           403 if code == AcceptCode.BAD_SIG                                              else 400))
+    # Rejection — map AcceptResult to HTTP status
+    http = 409 if code in (AcceptResult.DUPLICATE, AcceptResult.NONCE_REUSE) else (
+           402 if code in (AcceptResult.LOW_FEE, AcceptResult.INSUFFICIENT_BAL, AcceptResult.DUST)    else (
+           403 if code == AcceptResult.INVALID_SIG                                              else 400))
     return jsonify({'error': msg, 'code': code.value}), http
 
 
