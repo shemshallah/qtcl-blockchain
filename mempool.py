@@ -85,8 +85,8 @@ logger = logging.getLogger(__name__)
 
 MAX_MEMPOOL_SIZE          = 100_000          # maximum accepted transactions
 TX_VSIZE_BYTES            = 250              # normalized virtual size per QTCL TX
-MIN_RELAY_FEE_RATE        = 0.001            # minimum sat/vbyte to relay (dev/test: allow 0.001 QTCL)
-MIN_RELAY_FEE_ABS         = 1               # absolute minimum fee in base units (0.001 QTCL)
+MIN_RELAY_FEE_RATE        = 1                # minimum sat/vbyte to relay
+MIN_RELAY_FEE_ABS         = 1               # absolute minimum fee in base units
 MEMPOOL_TTL_HOURS         = 72              # purge TXs older than this
 RBF_FEE_BUMP_PCT          = 10             # replace-by-fee requires +10% fee_rate
 EVICTION_BATCH            = 500            # how many low-fee TXs to drop when full
@@ -96,6 +96,7 @@ DUST_THRESHOLD            = 1             # min spendable amount in base units
 MAX_TX_PER_SENDER         = 25            # max in-flight TXs from same sender (anti-spam)
 BACKGROUND_INTERVAL_S     = 30            # background worker sleep interval
 PERSISTENCE_BATCH_SIZE    = 500           # DB batch write size
+DEV_MODE                  = os.getenv('QTCL_DEV_MODE', '').lower() in ('1', 'true', 'yes')  # bypass balance check for testing
 
 ADDRESS_PREFIX            = "qtcl1"       # canonical address prefix
 
@@ -447,16 +448,9 @@ class HLWEMempoolVerifier:
     def verify(tx_hash: str, signature_json: str, expected_address: str) -> Tuple[bool, str]:
         """
         Verify an HLWE TX signature.
-
-        The signature is VALID if:
-        1. address derivation matches sender address
         
-        Note: We DON'T verify the commitment or proof because:
-        - Commitment was created by signer using: SHA3(private || w_entropy || tx_hash)
-        - Proof was created by signer using: HMAC-SHA3(private, witness || tx_hash)
-        
-        The verifier only has the public key, so it cannot reproduce these.
-        We trust the signature and verify only the address.
+        Only checks address derivation. Does not verify commitment or proof
+        because the verifier only has the public key, not the private key.
 
         Args:
             tx_hash           : hex SHA3-256 of the canonical TX payload
@@ -830,7 +824,8 @@ class Mempool:
                 net_cost = total_cost - replaced_cost
                 if net_cost > 0:
                     spendable = self._balances.spendable(from_addr)
-                    if spendable < net_cost:
+                    # In DEV_MODE, allow 0-balance TXs for testing
+                    if spendable < net_cost and not DEV_MODE:
                         self._stats['total_rejected'] += 1
                         return AcceptResult.INSUFFICIENT_BAL, (
                             f"need {net_cost} base units, spendable={spendable}"
