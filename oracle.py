@@ -917,6 +917,21 @@ class OracleWStateManager:
             for client_id, sync in self.p2p_clients.items():
                 sync.last_density_matrix_timestamp = snapshot.timestamp_ns
                 sync.last_sync_ns = time.time_ns()
+        
+        # ─── CONSENSUS: Record quantum witness ───
+        try:
+            from globals import record_quantum_witness
+            record_quantum_witness(
+                block_height=self.current_block_height,
+                block_hash=hashlib.sha3_256(
+                    json.dumps({'height': self.current_block_height, 'fidelity': snapshot.w_state_fidelity},
+                    sort_keys=True).encode()
+                ).hexdigest(),
+                w_state_fidelity=snapshot.w_state_fidelity,
+                timestamp_ns=snapshot.timestamp_ns
+            )
+        except Exception as e:
+            logger.debug(f"[ORACLE] Consensus witness hook skipped: {e}")
 
     def create_temporal_anchor(self, snapshot: Optional[DensityMatrixSnapshot] = None) -> Optional[TemporalAnchorPoint]:
         """

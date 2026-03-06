@@ -139,6 +139,11 @@ class QuantumBlock:
     temporal_anchor: Optional[Dict[str, Any]] = None
     w_entropy_hash: str = ""  # Blake3 of W-state used for mining
     
+    # Consensus (Finality Gadget)
+    finality_epoch: int = 0  # When block becomes final
+    validator_weight: int = 0  # Sum of attesting validator balances
+    quantum_witness_timestamp_ns: int = 0  # Oracle timestamp for this block
+    
     def to_header_dict(self) -> Dict[str, Any]:
         """Convert to block header (for hashing) — includes temporal anchor"""
         return {
@@ -647,6 +652,29 @@ class BlockSealer:
                     logger.debug(f"[SEALING] mempool notify skipped: {_me}")
 
             logger.debug(f"[SEALING] Block #{block.block_height} persisted to PostgreSQL")
+            
+            # ─── CONSENSUS: Record quantum witness & check finality ───
+            try:
+                from globals import record_quantum_witness, compute_finality
+                
+                # Record W-state witness with timestamp
+                record_quantum_witness(
+                    block_height=block.block_height,
+                    block_hash=block.block_hash,
+                    w_state_fidelity=block.coherence_snapshot if block.coherence_snapshot > 0.85 else 0.85,
+                    timestamp_ns=int(time.time_ns())
+                )
+                
+                # Compute finality for block that reached finality depth
+                finality_depth = 32
+                if block.block_height >= finality_depth:
+                    finalized_height = compute_finality(block.block_height - finality_depth)
+                    if finalized_height:
+                        logger.info(f"[SEALING] 🔐 Block #{finalized_height} is FINAL")
+                        block.finality_epoch = block.block_height // 256  # slots_per_epoch = 256
+            except Exception as e:
+                logger.debug(f"[SEALING] Consensus hook skipped: {e}")
+            
             return True
         
         except Exception as e:

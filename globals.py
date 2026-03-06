@@ -23,9 +23,9 @@
 
 from __future__ import annotations
 
-import threading, logging, json, sys, hashlib
+import threading, logging, json, sys, hashlib, time
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field
 
 # Database
@@ -78,6 +78,16 @@ _GLOBAL_STATE = {
     'lattice_controller': None,
     'heartbeat': None,
     'lattice_initialized': False,
+    
+    # Consensus (Finality Gadget)
+    'validators': {},  # validator_index → {pubkey, balance, status, ...}
+    'finality_depth': 32,  # Blocks until finality
+    'finality_threshold': 2/3,  # Validator supermajority
+    'finality_checkpoints': {},  # epoch → {block_height, block_hash, timestamp}
+    'quantum_witnesses': {},  # block_height → {w_state_fidelity, timestamp_ns}
+    'pending_attestations': [],  # List of pending validator votes
+    'current_epoch': 0,
+    'slots_per_epoch': 256,
     
     # Server metadata
     'startup_time': datetime.now(timezone.utc).isoformat(),
@@ -549,6 +559,122 @@ def get_block_field_entropy() -> bytes:
     return get_entropy_from_block_field()
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CONSENSUS (FINALITY GADGET) — Integrated Functions
+# ─────────────────────────────────────────────────────────────────────────────
+
+def register_validator(pubkey: str, balance: int) -> Tuple[bool, int]:
+    """Register validator (staking). Returns (success, validator_index)"""
+    with _STATE_LOCK:
+        validators = get_state('validators', {})
+        if len(validators) >= 1024:  # MAX_VALIDATORS
+            return False, -1
+        
+        validator_index = len(validators)
+        validators[validator_index] = {
+            'pubkey': pubkey,
+            'balance': balance,
+            'status': 'active',
+            'activation_epoch': get_state('current_epoch', 0),
+            'exit_epoch': 2**63 - 1,
+            'slashed': False,
+        }
+        set_state('validators', validators)
+        logger.info(f"[CONSENSUS] ✅ Validator {validator_index} registered (balance={balance/10**18:.2f} QTCL)")
+        return True, validator_index
+
+def record_quantum_witness(block_height: int, block_hash: str, 
+                          w_state_fidelity: float, timestamp_ns: int) -> bool:
+    """Record W-state quantum witness from oracle"""
+    with _STATE_LOCK:
+        witnesses = get_state('quantum_witnesses', {})
+        witnesses[block_height] = {
+            'block_hash': block_hash,
+            'w_state_fidelity': w_state_fidelity,
+            'timestamp_ns': timestamp_ns,
+        }
+        set_state('quantum_witnesses', witnesses)
+        logger.debug(f"[CONSENSUS] Quantum witness recorded (block #{block_height}, fidelity={w_state_fidelity:.4f})")
+        return True
+
+def accept_attestation(validator_index: int, slot: int, beacon_block_root: str,
+                      source_epoch: int, target_epoch: int, signature: str) -> Tuple[bool, str]:
+    """Accept validator attestation. Check for double-attest and surround-vote."""
+    with _STATE_LOCK:
+        attestations = get_state('pending_attestations', [])
+        
+        # Check for double-attest
+        for att in attestations:
+            if (att.get('slot') == slot and 
+                att.get('validator_index') == validator_index and
+                att.get('beacon_block_root') != beacon_block_root):
+                return False, "Double-attest detected"
+        
+        # Check for surround-vote
+        for att in attestations:
+            if (att.get('validator_index') == validator_index and
+                att.get('source_epoch') < source_epoch < target_epoch < att.get('target_epoch', 2**63)):
+                return False, "Surround-vote detected"
+        
+        # Add attestation
+        attestations.append({
+            'validator_index': validator_index,
+            'slot': slot,
+            'beacon_block_root': beacon_block_root,
+            'source_epoch': source_epoch,
+            'target_epoch': target_epoch,
+            'signature': signature,
+            'timestamp_ns': time.time_ns(),
+        })
+        set_state('pending_attestations', attestations)
+        logger.debug(f"[CONSENSUS] Attestation from validator {validator_index} for slot {slot}")
+        return True, "Accepted"
+
+def compute_finality(block_height: int) -> Optional[int]:
+    """Check if block is final (depth + quantum + 2/3 validators)"""
+    with _STATE_LOCK:
+        # 1. Check depth
+        finality_depth = get_state('finality_depth', 32)
+        if block_height < finality_depth:
+            return None
+        
+        # 2. Check quantum witness
+        witnesses = get_state('quantum_witnesses', {})
+        if block_height not in witnesses:
+            return None
+        
+        witness = witnesses[block_height]
+        if witness.get('w_state_fidelity', 0.0) < 0.85:  # Fidelity threshold
+            return None
+        
+        # 3. Check 2/3 validator supermajority
+        validators = get_state('validators', {})
+        total_balance = sum(v.get('balance', 0) for v in validators.values() 
+                          if v.get('status') == 'active')
+        quorum_balance = (total_balance * 2) // 3
+        
+        attestations = get_state('pending_attestations', [])
+        attesting_balance = sum(
+            validators.get(att.get('validator_index', -1), {}).get('balance', 0)
+            for att in attestations
+            if att.get('beacon_block_root') == witnesses[block_height].get('block_hash')
+        )
+        
+        if attesting_balance >= quorum_balance:
+            epoch = block_height // get_state('slots_per_epoch', 256)
+            checkpoints = get_state('finality_checkpoints', {})
+            checkpoints[epoch] = {
+                'block_height': block_height,
+                'block_hash': witness.get('block_hash'),
+                'timestamp': int(time.time()),
+                'validator_weight': attesting_balance,
+            }
+            set_state('finality_checkpoints', checkpoints)
+            logger.info(f"[CONSENSUS] ✅ FINALITY: Block #{block_height} finalized at epoch {epoch}")
+            return block_height
+        
+        return None
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MODULE EXPORTS
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -567,6 +693,10 @@ __all__ = [
     'set_current_block_field',
     'get_entropy_from_block_field',
     'get_block_field_entropy',
+    'register_validator',
+    'record_quantum_witness',
+    'accept_attestation',
+    'compute_finality',
     'get_hlwe_system',
     'get_lattice_controller',
     'get_heartbeat',

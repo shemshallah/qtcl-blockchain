@@ -1693,7 +1693,27 @@ def init_mempool(dsn: str) -> Mempool:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def add_transaction(raw: Dict[str, Any]) -> Tuple[bool, str]:
-    """Add a transaction. Returns (accepted: bool, message: str)."""
+    """Add a transaction. Returns (accepted: bool, message: str).
+    Special handling for attestation_tx (consensus votes)."""
+    
+    # Handle attestation transactions (consensus)
+    if raw.get('type') == 'attestation':
+        try:
+            from globals import accept_attestation
+            
+            success, reason = accept_attestation(
+                validator_index=int(raw.get('validator_index', -1)),
+                slot=int(raw.get('slot', 0)),
+                beacon_block_root=raw.get('beacon_block_root', ''),
+                source_epoch=int(raw.get('source_epoch', 0)),
+                target_epoch=int(raw.get('target_epoch', 0)),
+                signature=raw.get('signature', '')
+            )
+            return success, reason
+        except Exception as e:
+            return False, f"Attestation error: {str(e)}"
+    
+    # Regular transaction
     result, msg, _ = get_mempool().accept(raw)
     return result in (AcceptResult.ACCEPTED, AcceptResult.REPLACED_BY_FEE), msg
 

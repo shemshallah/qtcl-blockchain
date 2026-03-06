@@ -6530,6 +6530,161 @@ def mining_build_transactions():
         return jsonify({'error': str(e)}), 500
 
 
+# ═════════════════════════════════════════════════════════════════════
+# CONSENSUS (FINALITY GADGET) — REST ENDPOINTS
+# ═════════════════════════════════════════════════════════════════════
+
+@app.route('/api/validators/register', methods=['POST'])
+def register_validator():
+    """Register new validator (staking)"""
+    try:
+        from globals import register_validator
+        
+        data = request.get_json() or {}
+        pubkey = data.get('pubkey', '')
+        balance = int(data.get('balance', 32 * 10**18))  # Wei
+        
+        if not pubkey or balance < 32 * 10**18:
+            return jsonify({'error': 'Invalid pubkey or insufficient balance (min 32 QTCL)'}), 400
+        
+        success, validator_index = register_validator(pubkey, balance)
+        
+        if success:
+            return jsonify({
+                'success': True,
+                'validator_index': validator_index,
+                'balance': balance / 10**18,
+                'activation_epoch': 256,  # +256 epochs from now
+            }), 201
+        else:
+            return jsonify({'error': f'Registration failed (max validators reached?)'}), 400
+    except Exception as e:
+        logger.error(f"[CONSENSUS-REGISTER] {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/validators', methods=['GET'])
+def get_validators():
+    """Get active validator set"""
+    try:
+        from globals import get_state
+        
+        validators = get_state('validators', {})
+        active = {idx: v for idx, v in validators.items() if v.get('status') == 'active'}
+        total_balance = sum(v.get('balance', 0) for v in active.values())
+        
+        return jsonify({
+            'count': len(active),
+            'total_stake': total_balance / 10**18,
+            'epoch': get_state('current_epoch', 0),
+            'validators': {
+                str(idx): {
+                    'balance': v.get('balance', 0) / 10**18,
+                    'status': v.get('status', 'unknown'),
+                    'activation_epoch': v.get('activation_epoch', 0),
+                }
+                for idx, v in list(active.items())[:20]  # Return first 20
+            }
+        }), 200
+    except Exception as e:
+        logger.error(f"[CONSENSUS-VALIDATORS] {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/attestations', methods=['POST'])
+def submit_attestation():
+    """Submit validator attestation"""
+    try:
+        from globals import accept_attestation
+        
+        data = request.get_json() or {}
+        validator_index = int(data.get('validator_index', -1))
+        slot = int(data.get('slot', 0))
+        beacon_block_root = data.get('beacon_block_root', '')
+        source_epoch = int(data.get('source_epoch', 0))
+        target_epoch = int(data.get('target_epoch', 0))
+        signature = data.get('signature', '')
+        
+        if validator_index < 0 or not beacon_block_root or not signature:
+            return jsonify({'error': 'Missing required fields'}), 400
+        
+        success, reason = accept_attestation(
+            validator_index=validator_index,
+            slot=slot,
+            beacon_block_root=beacon_block_root,
+            source_epoch=source_epoch,
+            target_epoch=target_epoch,
+            signature=signature
+        )
+        
+        if success:
+            return jsonify({
+                'success': True,
+                'message': reason,
+                'validator_index': validator_index,
+                'slot': slot,
+            }), 201
+        else:
+            return jsonify({'success': False, 'error': reason}), 400
+    except Exception as e:
+        logger.error(f"[CONSENSUS-ATTESTATION] {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/finality', methods=['GET'])
+def get_finality_status():
+    """Get finality status"""
+    try:
+        from globals import get_state
+        
+        checkpoints = get_state('finality_checkpoints', {})
+        latest_epoch = max(checkpoints.keys()) if checkpoints else 0
+        latest_checkpoint = checkpoints.get(latest_epoch, {})
+        
+        return jsonify({
+            'current_epoch': get_state('current_epoch', 0),
+            'finalized_epoch': latest_epoch,
+            'finalized_block': latest_checkpoint.get('block_height', 0),
+            'finalized_block_hash': latest_checkpoint.get('block_hash', '')[:16] + '...',
+            'validator_weight': latest_checkpoint.get('validator_weight', 0) / 10**18,
+            'quantum_witnesses': len(get_state('quantum_witnesses', {})),
+            'pending_attestations': len(get_state('pending_attestations', [])),
+        }), 200
+    except Exception as e:
+        logger.error(f"[CONSENSUS-FINALITY] {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/quantum_witness', methods=['POST'])
+def record_quantum_witness_endpoint():
+    """Record quantum witness from oracle"""
+    try:
+        from globals import record_quantum_witness
+        
+        data = request.get_json() or {}
+        block_height = int(data.get('block_height', 0))
+        block_hash = data.get('block_hash', '')
+        w_state_fidelity = float(data.get('w_state_fidelity', 0.85))
+        
+        if block_height <= 0 or not block_hash:
+            return jsonify({'error': 'Invalid block_height or block_hash'}), 400
+        
+        success = record_quantum_witness(
+            block_height=block_height,
+            block_hash=block_hash,
+            w_state_fidelity=w_state_fidelity,
+            timestamp_ns=int(time.time_ns())
+        )
+        
+        if success:
+            return jsonify({
+                'success': True,
+                'message': f'Quantum witness recorded for block #{block_height}',
+                'fidelity': w_state_fidelity,
+            }), 201
+        else:
+            return jsonify({'error': 'Failed to record witness'}), 500
+    except Exception as e:
+        logger.error(f"[CONSENSUS-WITNESS] {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.errorhandler(404)
 def not_found(e):
     return jsonify({'error': 'not found'}), 404
