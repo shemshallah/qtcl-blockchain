@@ -100,7 +100,6 @@ class OracleCluster:
 
 # Initialize oracle cluster
 oracle_cluster = OracleCluster()
-ing
 import traceback
 from typing import Dict, Any, Optional, List, Tuple, Set
 from datetime import datetime, timezone, timedelta
