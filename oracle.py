@@ -341,11 +341,34 @@ class QuantumInformationMetrics:
     
     @staticmethod
     def coherence_l1_norm(dm: np.ndarray) -> float:
+        """
+        Compute coherence as L1 norm of off-diagonal elements.
+        
+        ⚛️ LAYER 1 FIX: Normalize by 2*N to ensure output ∈ [0, 1]
+        
+        For W-state in 8×8 basis:
+          - Perfect W-state has max L1 sum ≈ 2.0 (all off-diagonals equally non-zero)
+          - Maximally mixed state has zero coherence
+          - Result is normalized: C = L1_sum / (2*N) → always ∈ [0, 1]
+        """
         try:
-            if dm is None: return 0.0
-            coh = sum(abs(dm[i, j]) for i in range(dm.shape[0]) for j in range(dm.shape[0]) if i != j)
-            return float(coh)
-        except: return 0.0
+            if dm is None: 
+                return 0.0
+            
+            n = dm.shape[0]
+            if n < 2:
+                return 0.0
+            
+            # Sum absolute values of off-diagonal elements
+            coh = sum(abs(dm[i, j]) for i in range(n) for j in range(n) if i != j)
+            
+            # Normalize by 2*N (theoretical maximum for density matrix)
+            # This ensures coherence always ∈ [0, 1]
+            normalized = min(1.0, float(coh) / (2.0 * n))
+            
+            return normalized
+        except: 
+            return 0.0
     
     @staticmethod
     def coherence_renyi(dm: np.ndarray, order: float = 2) -> float:
