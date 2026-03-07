@@ -5876,7 +5876,7 @@ def quantum_metrics_thread():
                 'pq0_bloch_theta':round(theta,6),'pq0_bloch_phi':round(phi,6),
                 'batch_field_mean':round(field.get('field_mean',0.5),6),
                 'geodesic_dist':round(geodesic,6),'qrng_health':round(qh,4),
-                'ch0_weight':round(w0/total_w,4),'ch1_weight':round(w1/total_w,4),'ch2_weight':round(w2/total_w,4),
+                'ch0_weight':round(w0,4),'ch1_weight':round(w1,4),'ch2_weight':round(w2,4),
                 'n_peers':N-1,'cycle':_ENG_STATE['cycle']+1,
             }
             new['rho_hist'] = _ENG_STATE['rho_hist']
