@@ -40,7 +40,7 @@ import socket
 import hashlib
 import secrets
 import logging
-import thread
+import threading
 # ═══════════════════════════════════════════════════════════════════════════════
 # 5-ORACLE BYZANTINE CONSENSUS INTEGRATION
 # ═══════════════════════════════════════════════════════════════════════════════
