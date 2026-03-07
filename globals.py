@@ -778,3 +778,17 @@ __all__ = [
     'start_heartbeat',
     'stop_heartbeat',
 ]
+
+# ═════════════════════════════════════════════════════════════════════════════════
+# 5-ORACLE CONSENSUS GLOBALS
+# ═════════════════════════════════════════════════════════════════════════════════
+
+ORACLE_COUNT = 5
+ORACLE_PORTS = [5000, 5001, 5002, 5003, 5004]
+ORACLE_ROLES = ['PRIMARY_LATTICE', 'SECONDARY_LATTICE', 'VALIDATION', 'ARBITER', 'METRICS']
+CONSENSUS_THRESHOLD = 3
+BYZANTINE_TOLERANCE = 2
+ORACLE_MEASUREMENT_TIMEOUT = 10
+ORACLE_HEALTH_CHECK_INTERVAL = 5
+W_STATE_FIDELITY_THRESHOLD = 0.75
+ORACLE_LATENCY_SPIKE_THRESHOLD = 5000  # milliseconds

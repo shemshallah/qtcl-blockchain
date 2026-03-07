@@ -348,5 +348,48 @@ window.addEventListener('load', () => {
   httpPoll();
 });
 </script>
+
+<!-- 5-Oracle Cluster Status -->
+<div id="oracle-status" style="margin: 20px 0; padding: 15px; border: 2px solid #00ff88; border-radius: 8px;">
+    <h3 style="color: #00ffff; margin-bottom: 10px;">🔮 5-Oracle Byzantine Consensus</h3>
+    <div id="oracle-info" style="color: #00dd88; font-size: 12px;">
+        <div>Oracles: <span id="oracle-count">5/5</span> ONLINE</div>
+        <div>Consensus Threshold: 3/5 ✓</div>
+        <div>Byzantine Tolerance: 2 faulty oracles</div>
+        <div id="oracle-vote-status">Waiting for votes...</div>
+    </div>
+    <div id="oracle-list" style="margin-top: 10px; font-size: 11px;">
+        <div>Oracle-1 (PRIMARY_LATTICE): <span style="color: #00ff88;">●</span> 4 workers</div>
+        <div>Oracle-2 (SECONDARY_LATTICE): <span style="color: #00ff88;">●</span> 4 workers</div>
+        <div>Oracle-3 (VALIDATION): <span style="color: #00ff88;">●</span> 2 workers</div>
+        <div>Oracle-4 (ARBITER): <span style="color: #00ff88;">●</span> 2 workers</div>
+        <div>Oracle-5 (METRICS): <span style="color: #00ff88;">●</span> 2 workers</div>
+    </div>
+</div>
+
+<script>
+// Poll oracle consensus endpoint
+async function updateOracleStatus() {
+    try {
+        const response = await fetch('/consensus/health');
+        const health = await response.json();
+        
+        const online = Object.values(health).filter(o => o.status === 'ONLINE').length;
+        document.getElementById('oracle-count').textContent = online + '/5';
+        
+        // Update vote status
+        const voteResponse = await fetch('/consensus/stats');
+        const stats = await voteResponse.json();
+        document.getElementById('oracle-vote-status').textContent = 
+            'Oracles: ' + stats.oracles + ' | Threshold: ' + stats.consensus_threshold;
+    } catch (e) {
+        console.log('Oracle status check failed (expected if not deployed)');
+    }
+}
+
+// Update every 5 seconds
+setInterval(updateOracleStatus, 5000);
+updateOracleStatus();
+</script>
 </body>
 </html>

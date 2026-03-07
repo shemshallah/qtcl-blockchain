@@ -110,3 +110,15 @@ __all__ = ['app', 'application']
 
 # WSGI-compliant app object ready for gunicorn
 # gunicorn expects either 'app' or 'application' at module level
+
+# 5-Oracle cluster configuration
+ORACLE_CLUSTER_ENABLED = True
+ORACLE_CONSENSUS_REQUIRED = True
+ORACLE_PORTS = [5000, 5001, 5002, 5003, 5004]
+ORACLE_WORKERS = [4, 4, 2, 2, 2]
+ORACLE_TIMEOUT = 15
+
+# Consensus settings
+CONSENSUS_THRESHOLD = 3
+BYZANTINE_TOLERANCE = 2
+MEASUREMENT_TIMEOUT = 10
