@@ -5777,7 +5777,7 @@ def quantum_metrics_thread():
             dt = max(0.001, time.monotonic()-_prev_t); _prev_t = time.monotonic()
             with _ENG_LOCK:
                 lat_ema = _ENG_STATE['lat_ema']; jit_ema = _ENG_STATE['jit_ema']
-                rho3_prev = (_ENG_STATE['rho3'] or _w_dm(3)).copy()
+                rho3_prev = (_ENG_STATE['rho3'] if _ENG_STATE['rho3'] is not None else _w_dm(3)).copy()
                 rho_hist  = list(_ENG_STATE['rho_hist'])
             lat_ema = 0.9*lat_ema + 0.1*db_lat
             jit_ema = 0.9*jit_ema + 0.1*abs(dt-2.0)
