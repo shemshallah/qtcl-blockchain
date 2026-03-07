@@ -883,47 +883,55 @@ if FLASK_AVAILABLE:
             "export_timestamp_iso": datetime.utcnow().isoformat(),
         }), 200
 
-    # ─────────────────────────────────────────────────────────────────────────────
-    # HEALTH CHECK
-    # ─────────────────────────────────────────────────────────────────────────────
+__all__ = [
+    'EntropyPoolManager',
+    'get_entropy_pool_manager',
+    'get_entropy',
+    'get_entropy_stats',
+]
 
-    @w_state_api.route('/health', methods=['GET'])
-    @error_handler
-    def w_state_health():
-        """GET /api/w-state/health — Health check (HLWE signature status)."""
-        oracle = current_app.config.get('ORACLE_W_STATE_MANAGER')
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HEALTH CHECK
+# ─────────────────────────────────────────────────────────────────────────────
+
+@w_state_api.route('/health', methods=['GET'])
+@error_handler
+def w_state_health():
+    """GET /api/w-state/health — Health check (HLWE signature status)."""
+    oracle = current_app.config.get('ORACLE_W_STATE_MANAGER')
         
-        if oracle is None:
-            return jsonify({
-                "status": "unavailable",
-                "oracle": "not initialized",
-            }), 503
-        
-        status = oracle.get_status()
-        snapshot = oracle.get_latest_density_matrix()
-        
+    if oracle is None:
         return jsonify({
-            "status": status.get("status", "unknown"),
-            "oracle": "ready" if status.get("status") == "running" else "not running",
-            "hlwe_signer": "ready" if snapshot and snapshot.get('oracle_address') else "initializing",
-            "latest_snapshot_signed": snapshot.get('signature_valid', False) if snapshot else False,
-            "server_timestamp_iso": datetime.utcnow().isoformat(),
-        }), 200
-
-    # ─────────────────────────────────────────────────────────────────────────────
-    # INTEGRATION FUNCTION
-    # ─────────────────────────────────────────────────────────────────────────────
-
-    def register_w_state_api(app, oracle_manager):
-        """
-        Register W-state API blueprint with Flask app.
+            "status": "unavailable",
+            "oracle": "not initialized",
+        }), 503
         
-        This version includes HLWE signature verification for all snapshots.
-        Snapshots are cryptographically signed with oracle's master key.
-        """
-        app.config['ORACLE_W_STATE_MANAGER'] = oracle_manager
-        app.register_blueprint(w_state_api)
-        logger.info("[W-STATE API] ✅ Registered unified W-state API with HLWE signature verification")
+    status = oracle.get_status()
+    snapshot = oracle.get_latest_density_matrix()
+        
+    return jsonify({
+        "status": status.get("status", "unknown"),
+        "oracle": "ready" if status.get("status") == "running" else "not running",
+        "hlwe_signer": "ready" if snapshot and snapshot.get('oracle_address') else "initializing",
+        "latest_snapshot_signed": snapshot.get('signature_valid', False) if snapshot else False,
+        "server_timestamp_iso": datetime.utcnow().isoformat(),
+    }), 200
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INTEGRATION FUNCTION
+# ─────────────────────────────────────────────────────────────────────────────
+
+def register_w_state_api(app, oracle_manager):
+    """
+    Register W-state API blueprint with Flask app.
+        
+    This version includes HLWE signature verification for all snapshots.
+    Snapshots are cryptographically signed with oracle's master key.
+    """
+    app.config['ORACLE_W_STATE_MANAGER'] = oracle_manager
+    app.register_blueprint(w_state_api)
+    logger.info("[W-STATE API] ✅ Registered unified W-state API with HLWE signature verification")
 
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -934,10 +942,10 @@ if __name__ == '__main__':
     logging.getLogger().setLevel(logging.DEBUG)
     
     print("""
-    🌌 ENTROPY POOL MANAGER & W-STATE API — Testing 🌌
+🌌 ENTROPY POOL MANAGER & W-STATE API — Testing 🌌
     
-    Initializing QRNG ensemble...
-    """)
+Initializing QRNG ensemble...
+""")
     
     pool = get_entropy_pool_manager()
     

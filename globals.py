@@ -585,7 +585,7 @@ def set_current_block_field(block_data: Dict[str, Any]) -> None:
 def get_canonical_entropy(size: int = 32) -> bytes:
     """Get entropy from canonical qrng_ensemble with fallback chain"""
     try:
-        from qrng_ensemble import EntropyPoolManager
+        # from qrng_ensemble import (moved to pool_api) EntropyPoolManager
         pool = EntropyPoolManager()
         return pool.get_entropy(size)
     except Exception:
@@ -601,7 +601,7 @@ def get_canonical_entropy(size: int = 32) -> bytes:
 def initialize_entropy_pool():
     """Initialize entropy pool (delegates to qrng_ensemble)"""
     try:
-        from qrng_ensemble import EntropyPoolManager
+        # from qrng_ensemble import (moved to pool_api) EntropyPoolManager
         return EntropyPoolManager()
     except:
         return None

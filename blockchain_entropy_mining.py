@@ -38,6 +38,7 @@
 """
 
 import os
+from pool_api import get_entropy_pool_manager, get_entropy, get_entropy_stats
 import sys
 import threading
 import logging
@@ -825,7 +826,7 @@ def get_block_sealer(db_pool=None) -> BlockSealer:
 def _get_canonical_entropy(size: int = 32) -> bytes:
     """Get entropy from canonical qrng_ensemble, fallback to block field"""
     try:
-        from qrng_ensemble import EntropyPoolManager
+        # from qrng_ensemble import (use pool_api instead) EntropyPoolManager
         pool = EntropyPoolManager()
         return pool.get_entropy(size)
     except Exception as e:
