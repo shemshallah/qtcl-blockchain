@@ -529,15 +529,15 @@ class QuantumEntropyEnsemble:
             )
     
     def _fetch_random_org(self, config: QRNGSourceConfig, num_bytes: int) -> bytes:
-        """Fetch from Random.org API"""
-        api_key = os.getenv(config.api_key_env)
+        """Fetch from Random.org API with comprehensive validation"""
+        api_key: Optional[str] = os.getenv(config.api_key_env)
         if not api_key:
             raise ValueError(f"Missing API key: {config.api_key_env}")
         
         # Calculate base64 size needed (4/3 of byte size)
-        base64_size = ((num_bytes + 2) // 3) * 4
+        base64_size: int = ((num_bytes + 2) // 3) * 4
         
-        params = config.params_template.copy()
+        params: Dict[str, Any] = config.params_template.copy()
         params["params"]["apiKey"] = api_key
         params["params"]["size"] = min(base64_size, 64)  # Random.org max 64
         params["id"] = int(time.time() * 1000)
@@ -550,30 +550,46 @@ class QuantumEntropyEnsemble:
         )
         
         if response.status_code != 200:
-            raise ValueError(f"Random.org returned {response.status_code}")
+            raise ValueError(f"Random.org returned {response.status_code}: {response.text[:100]}")
         
-        data = response.json()
-        if "result" not in data or "random" not in data["result"]:
-            raise ValueError("Invalid response format")
+        try:
+            data: Dict[str, Any] = response.json()
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Random.org response is not valid JSON: {e}")
         
-        base64_data = data["result"]["random"]["data"][0]
-        decoded = base64.b64decode(base64_data)
+        if "result" not in data:
+            raise ValueError(f"Random.org response missing 'result' field. Keys: {list(data.keys())}")
+        if "random" not in data["result"]:
+            raise ValueError(f"Random.org response missing 'random' field in result")
+        if "data" not in data["result"]["random"]:
+            raise ValueError(f"Random.org response missing 'data' field in random")
+        
+        result_data: Any = data["result"]["random"]["data"]
+        if not isinstance(result_data, list) or len(result_data) == 0:
+            raise ValueError(f"Random.org 'data' is not a non-empty list: {type(result_data).__name__}")
+        
+        base64_data: str = str(result_data[0])
+        
+        try:
+            decoded: bytes = base64.b64decode(base64_data)
+        except Exception as e:
+            raise ValueError(f"Failed to decode base64 from Random.org: {e}")
         
         if len(decoded) < num_bytes:
             # Hash and expand to needed size
-            expanded = hashlib.shake_256(decoded).digest(num_bytes)
+            expanded: bytes = hashlib.shake_256(decoded).digest(num_bytes)
             return expanded
         
         return decoded[:num_bytes]
     
     def _fetch_anu(self, config: QRNGSourceConfig, num_bytes: int) -> bytes:
-        """Fetch from ANU QRNG API"""
-        api_key = os.getenv(config.api_key_env)
+        """Fetch from ANU QRNG API with comprehensive validation"""
+        api_key: Optional[str] = os.getenv(config.api_key_env)
         if not api_key:
             raise ValueError(f"Missing API key: {config.api_key_env}")
         
-        headers = {"x-api-key": api_key}
-        params = config.params_template.copy()
+        headers: Dict[str, str] = {"x-api-key": api_key}
+        params: Dict[str, Any] = config.params_template.copy()
         params["length"] = min(num_bytes, config.max_bytes_per_request)
         
         response = requests.get(
@@ -584,32 +600,51 @@ class QuantumEntropyEnsemble:
         )
         
         if response.status_code != 200:
-            raise ValueError(f"ANU returned {response.status_code}")
+            raise ValueError(f"ANU returned {response.status_code}: {response.text[:100]}")
         
-        data = response.json()
-        if not data.get("success") or "data" not in data:
-            raise ValueError("Invalid response format")
+        try:
+            data: Dict[str, Any] = response.json()
+        except json.JSONDecodeError as e:
+            raise ValueError(f"ANU response is not valid JSON: {e}. Content: {response.text[:100]}")
         
-        byte_array = data["data"][:num_bytes]
-        return bytes(byte_array)
+        # Validate response structure: either {"success": true, "data": [...]} or just {"data": [...]}
+        if "data" not in data:
+            raise ValueError(f"ANU response missing 'data' field. Keys: {list(data.keys())}")
+        
+        byte_data: Any = data["data"]
+        if not isinstance(byte_data, list):
+            raise ValueError(f"ANU 'data' field is {type(byte_data).__name__}, expected list")
+        
+        if len(byte_data) < num_bytes:
+            raise ValueError(f"ANU returned {len(byte_data)} bytes, requested {num_bytes}")
+        
+        try:
+            # Validate and convert each byte
+            result = bytearray()
+            for i, val in enumerate(byte_data[:num_bytes]):
+                if not isinstance(val, (int, float)):
+                    raise TypeError(f"Value at index {i} is {type(val).__name__}, expected int")
+                byte_val: int = int(val) & 0xFF
+                result.append(byte_val)
+            
+            return bytes(result)
+        except (TypeError, ValueError, OverflowError) as e:
+            raise ValueError(f"ANU byte validation failed: {e}. First 3 values: {byte_data[:3]}")
     
     def _fetch_qbck(self, config: QRNGSourceConfig, num_bytes: int) -> bytes:
-        """Fetch from QBICK (Quantum Blockchains) API"""
-        api_key = os.getenv(config.api_key_env)
+        """Fetch from QBICK (Quantum Blockchains) API with comprehensive validation"""
+        api_key: Optional[str] = os.getenv(config.api_key_env)
         if not api_key:
             raise ValueError(f"Missing API key: {config.api_key_env}")
         
-        url = config.url_template.format(
+        url: str = config.url_template.format(
             api_key=api_key,
             provider="qbck",
             format="hex"
         )
         
-        params = {
-            "size": num_bytes
-        }
-        
-        verify = config.ssl_cert_path if config.requires_ssl_cert else True
+        params: Dict[str, Any] = {"size": num_bytes}
+        verify: Union[bool, str] = config.ssl_cert_path if config.requires_ssl_cert else True
         
         response = requests.get(
             url,
@@ -619,15 +654,29 @@ class QuantumEntropyEnsemble:
         )
         
         if response.status_code != 200:
-            raise ValueError(f"QBICK returned {response.status_code}")
+            raise ValueError(f"QBICK returned {response.status_code}: {response.text[:100]}")
         
-        data = response.json()
-        if "data" not in data or "result" not in data["data"]:
-            raise ValueError("Invalid response format")
+        try:
+            data: Dict[str, Any] = response.json()
+        except json.JSONDecodeError as e:
+            raise ValueError(f"QBICK response is not valid JSON: {e}")
         
-        hex_strings = data["data"]["result"]
-        combined = "".join(hex_strings)
-        combined_bytes = bytes.fromhex(combined)
+        if "data" not in data:
+            raise ValueError(f"QBICK response missing 'data' field. Keys: {list(data.keys())}")
+        
+        data_obj: Any = data["data"]
+        if not isinstance(data_obj, dict) or "result" not in data_obj:
+            raise ValueError(f"QBICK 'data' missing 'result' field or is not a dict")
+        
+        hex_strings: Any = data_obj["result"]
+        if not isinstance(hex_strings, list):
+            raise ValueError(f"QBICK 'result' is {type(hex_strings).__name__}, expected list")
+        
+        try:
+            combined: str = "".join(str(h) for h in hex_strings)
+            combined_bytes: bytes = bytes.fromhex(combined)
+        except ValueError as e:
+            raise ValueError(f"QBICK hex conversion failed: {e}")
         
         if len(combined_bytes) < num_bytes:
             # Expand using SHAKE
@@ -636,16 +685,16 @@ class QuantumEntropyEnsemble:
         return combined_bytes[:num_bytes]
     
     def _fetch_outshift(self, config: QRNGSourceConfig, num_bytes: int) -> bytes:
-        """Fetch from Outshift API"""
-        api_key = os.getenv(config.api_key_env)
+        """Fetch from Outshift API with comprehensive validation"""
+        api_key: Optional[str] = os.getenv(config.api_key_env)
         if not api_key:
             raise ValueError(f"Missing API key: {config.api_key_env}")
         
-        headers = {}
+        headers: Dict[str, str] = {}
         for key, value in config.headers.items():
             headers[key] = value.format(api_key=api_key)
         
-        params = config.params_template.copy()
+        params: Dict[str, Any] = config.params_template.copy()
         params["bytes"] = min(num_bytes, config.max_bytes_per_request)
         
         response = requests.get(
@@ -656,14 +705,22 @@ class QuantumEntropyEnsemble:
         )
         
         if response.status_code != 200:
-            raise ValueError(f"Outshift returned {response.status_code}")
+            raise ValueError(f"Outshift returned {response.status_code}: {response.text[:100]}")
         
-        data = response.json()
+        try:
+            data: Dict[str, Any] = response.json()
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Outshift response is not valid JSON: {e}")
+        
         if "entropy" not in data:
-            raise ValueError("Invalid response format")
+            raise ValueError(f"Outshift response missing 'entropy' field. Keys: {list(data.keys())}")
         
-        entropy_hex = data["entropy"]
-        entropy_bytes = bytes.fromhex(entropy_hex)
+        entropy_hex: str = str(data["entropy"])
+        
+        try:
+            entropy_bytes: bytes = bytes.fromhex(entropy_hex)
+        except ValueError as e:
+            raise ValueError(f"Outshift hex conversion failed: {e}")
         
         if len(entropy_bytes) < num_bytes:
             return hashlib.shake_256(entropy_bytes).digest(num_bytes)
@@ -671,8 +728,8 @@ class QuantumEntropyEnsemble:
         return entropy_bytes[:num_bytes]
     
     def _fetch_hu_berlin(self, config: QRNGSourceConfig, num_bytes: int) -> bytes:
-        """Fetch from HU Berlin public QRNG"""
-        params = config.params_template.copy()
+        """Fetch from HU Berlin public QRNG with comprehensive validation"""
+        params: Dict[str, Any] = config.params_template.copy()
         params["length"] = min(num_bytes, config.max_bytes_per_request)
         
         response = requests.get(
@@ -682,14 +739,36 @@ class QuantumEntropyEnsemble:
         )
         
         if response.status_code != 200:
-            raise ValueError(f"HU Berlin returned {response.status_code}")
+            raise ValueError(f"HU Berlin returned {response.status_code}: {response.text[:100]}")
         
-        data = response.json()
+        try:
+            data: Dict[str, Any] = response.json()
+        except json.JSONDecodeError as e:
+            raise ValueError(f"HU Berlin response is not valid JSON: {e}")
+        
         if "data" not in data:
-            raise ValueError("Invalid response format")
+            raise ValueError(f"HU Berlin response missing 'data' field. Keys: {list(data.keys())}")
         
-        byte_array = data["data"][:num_bytes]
-        return bytes(byte_array)
+        byte_array: Any = data["data"]
+        
+        if not isinstance(byte_array, list):
+            raise ValueError(f"HU Berlin 'data' is {type(byte_array).__name__}, expected list")
+        
+        if len(byte_array) < num_bytes:
+            raise ValueError(f"HU Berlin returned {len(byte_array)} bytes, requested {num_bytes}")
+        
+        try:
+            # Validate and convert each byte
+            result: bytearray = bytearray()
+            for i, val in enumerate(byte_array[:num_bytes]):
+                if not isinstance(val, (int, float)):
+                    raise TypeError(f"Value at index {i} is {type(val).__name__}, expected int")
+                byte_val: int = int(val) & 0xFF
+                result.append(byte_val)
+            
+            return bytes(result)
+        except (TypeError, ValueError, OverflowError) as e:
+            raise ValueError(f"HU Berlin byte validation failed: {e}. First 3 values: {byte_array[:3]}")
     
     # =========================================================================
     # PUBLIC API METHODS

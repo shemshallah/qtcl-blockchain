@@ -32,6 +32,7 @@ import logging
 import time
 import hashlib
 import json
+import traceback
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
@@ -339,10 +340,39 @@ class EntropyPoolManager:
             data = response.json()
 
             if source_key == 'anu':
-                # {'type': 'uint8', 'length': N, 'data': [int,...]}
-                lst = data.get('data')
-                if isinstance(lst, list) and len(lst) >= ENTROPY_SIZE_BYTES:
-                    return bytes([b & 0xFF for b in lst[:ENTROPY_SIZE_BYTES]])
+                # ANU QRNG response format: {'type': 'uint8', 'length': N, 'data': [int,...]}
+                lst: Optional[Any] = data.get('data', None)
+                
+                # Comprehensive type validation
+                if lst is None:
+                    logger.warning(f"[ENTROPY:ANU] Response missing 'data' field. Keys present: {list(data.keys())}")
+                    return None
+                
+                if not isinstance(lst, list):
+                    logger.warning(f"[ENTROPY:ANU] Expected 'data' as list, got {type(lst).__name__}. Value: {repr(lst)[:100]}")
+                    return None
+                
+                if len(lst) < ENTROPY_SIZE_BYTES:
+                    logger.warning(f"[ENTROPY:ANU] Insufficient data: got {len(lst)} bytes, need {ENTROPY_SIZE_BYTES}")
+                    return None
+                
+                try:
+                    # Validate all values are int-like and in valid byte range
+                    entropy_bytes = bytearray()
+                    for i, val in enumerate(lst[:ENTROPY_SIZE_BYTES]):
+                        if not isinstance(val, (int, float)):
+                            raise TypeError(f"Element {i}: expected int, got {type(val).__name__}")
+                        byte_val = int(val) & 0xFF
+                        if not (0 <= byte_val <= 255):
+                            raise ValueError(f"Element {i}: value {byte_val} out of byte range")
+                        entropy_bytes.append(byte_val)
+                    
+                    logger.debug(f"[ENTROPY:ANU] Successfully parsed {len(entropy_bytes)} bytes")
+                    return bytes(entropy_bytes)
+                
+                except (TypeError, ValueError) as e:
+                    logger.error(f"[ENTROPY:ANU] Validation error: {e}. First 3 values: {lst[:3]}")
+                    return None
 
             elif source_key == 'hotbits':
                 # {"bytes":[int,...], "status":"OK"}
@@ -365,8 +395,12 @@ class EntropyPoolManager:
 
             return None
 
+        except json.JSONDecodeError as e:
+            logger.warning(f"[ENTROPY:PARSE] JSON error ({source_key}): {e}. Response text: {response.text[:200]}")
+            return None
         except Exception as e:
-            logger.debug(f"[ENTROPY] Parse error ({source_key}): {e}")
+            logger.error(f"[ENTROPY:PARSE] Critical error ({source_key}): {e}")
+            logger.debug(f"[ENTROPY:PARSE] Full traceback: {traceback.format_exc()}")
             return None
     
     def _mark_source_failing(self, source_key: str, reason: str) -> None:

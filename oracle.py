@@ -1,50 +1,3 @@
-
-# ═══════════════════════════════════════════════════════════════════════════════════════════
-# UNIFIED W-STATE VALIDATOR (Single canonical validator - used everywhere)
-# Eliminates 3 duplicate validators (Oracle, Server, Miner all use same rules)
-# ═══════════════════════════════════════════════════════════════════════════════════════════
-import os
-import sys
-import time
-import logging
-import json
-
-# Logger initialization (must be before classes that use it)
-if not logging.getLogger().hasHandlers():
-    logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
-logger = logging.getLogger(__name__)
-
-class UnifiedWStateValidator:
-    """Single canonical W-state validator for entire system"""
-    
-    def __init__(self, mode: str = 'normal'):
-        from globals import WSTATE_MODE, WSTATE_FIDELITY_THRESHOLD
-        self.mode = mode or WSTATE_MODE
-        thresholds = {'strict': 0.80, 'normal': 0.75, 'relaxed': 0.70}
-        self.threshold = thresholds.get(self.mode, WSTATE_FIDELITY_THRESHOLD)
-        logger.debug(f"[VALIDATOR] Init (mode={self.mode}, threshold={self.threshold:.2f})")
-    
-    def validate(self, fidelity: float, coherence: float = None):
-        """Validate W-state. Returns (is_valid, quality_score, diagnostics)"""
-        if not isinstance(fidelity, (int, float)) or not (0 <= fidelity <= 1):
-            return False, 0.0, {'error': 'Invalid fidelity'}
-        
-        if fidelity < self.threshold:
-            return False, fidelity, {'error': f'Below threshold {self.threshold:.2f}', 'mode': self.mode}
-        
-        quality = fidelity
-        if coherence and 0 <= coherence <= 1:
-            quality = (fidelity + coherence) / 2
-        
-        return True, quality, {'valid': True, 'quality': quality, 'fidelity': fidelity}
-
-_validator = UnifiedWStateValidator()
-
-def validate_w_state(fidelity: float, coherence: float = None):
-    """Canonical W-state validator (used by Oracle, Server, Miner, Lattice)"""
-    return _validator.validate(fidelity, coherence)[:2]
-
-
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════════╗
@@ -92,7 +45,45 @@ from enum import Enum
 
 getcontext().prec = 150
 
+# Logger initialization (must be before classes that use it)
+if not logging.getLogger().hasHandlers():
+    logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# UNIFIED W-STATE VALIDATOR (Single canonical validator - used everywhere)
+# Eliminates 3 duplicate validators (Oracle, Server, Miner all use same rules)
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+
+class UnifiedWStateValidator:
+    """Single canonical W-state validator for entire system"""
+    
+    def __init__(self, mode: str = 'normal'):
+        from globals import WSTATE_MODE, WSTATE_FIDELITY_THRESHOLD
+        self.mode = mode or WSTATE_MODE
+        thresholds = {'strict': 0.80, 'normal': 0.75, 'relaxed': 0.70}
+        self.threshold = thresholds.get(self.mode, WSTATE_FIDELITY_THRESHOLD)
+        logger.debug(f"[VALIDATOR] Init (mode={self.mode}, threshold={self.threshold:.2f})")
+    
+    def validate(self, fidelity: float, coherence: float = None):
+        """Validate W-state. Returns (is_valid, quality_score, diagnostics)"""
+        if not isinstance(fidelity, (int, float)) or not (0 <= fidelity <= 1):
+            return False, 0.0, {'error': 'Invalid fidelity'}
+        
+        if fidelity < self.threshold:
+            return False, fidelity, {'error': f'Below threshold {self.threshold:.2f}', 'mode': self.mode}
+        
+        quality = fidelity
+        if coherence and 0 <= coherence <= 1:
+            quality = (fidelity + coherence) / 2
+        
+        return True, quality, {'valid': True, 'quality': quality, 'fidelity': fidelity}
+
+_validator = UnifiedWStateValidator()
+
+def validate_w_state(fidelity: float, coherence: float = None):
+    """Canonical W-state validator (used by Oracle, Server, Miner, Lattice)"""
+    return _validator.validate(fidelity, coherence)[:2]
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
 # M1 FIX: EXPONENTIAL BACKOFF QUEUE FOR ORACLE BROADCAST RESILIENCE
