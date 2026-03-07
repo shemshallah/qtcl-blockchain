@@ -130,7 +130,7 @@ logger = logging.getLogger(__name__)
 class DHTNode:
     """Museum-Grade DHT Node - Kademlia peer discovery"""
     
-    def __init__(self, node_id: Optional[str] = None, address: str = "unknown", port: int = 8000):
+    def __init__(self, node_id: Optional[str] = None, address: str = "unknown", port: int = 9091):
         """
         Initialize DHT node.
         
@@ -266,7 +266,7 @@ class DHTRoutingTable:
 class DHTManager:
     """Museum-Grade DHT Manager - coordinates peer discovery and state storage"""
     
-    def __init__(self, local_address: str = "localhost", local_port: int = 8000):
+    def __init__(self, local_address: str = "localhost", local_port: int = 9091):
         self.local_node = DHTNode(address=local_address, port=local_port)
         self.routing_table = DHTRoutingTable(self.local_node.node_id)
         self.state_store: Dict[str, Dict[str, Any]] = {}  # key → {data, timestamp}
@@ -415,19 +415,19 @@ _peer_oracle_env = os.getenv('BOOTSTRAP_NODES', '')
 PEER_ORACLE_URLS = [u.strip() for u in _peer_oracle_env.split(',') if u.strip()] if _peer_oracle_env else []
 logger.info(f"[ORACLE] 🌐 Identity: id={ORACLE_ID} role={ORACLE_ROLE} peers={len(PEER_ORACLE_URLS)}")
 
-# SSE + Gossip unified on port 8000
-P2P_PORT = int(os.getenv('PORT', int(os.getenv('FLASK_PORT', 8000))))  # Use PORT (8000 on Koyeb) or FLASK_PORT
+# P2P raw-TCP port — separate from HTTP/gunicorn.
+# Koyeb: set P2P_PORT=9091 env var (HTTP service on 9091, routes /api/*).
+# Gunicorn binds PORT (typically 8000). P2P binds P2P_PORT (9091).
+# They MUST be different ports; using PORT here caused the 8000→8001 fallback bug.
+P2P_PORT = int(os.getenv('P2P_PORT', 9091))
 P2P_HOST = os.getenv('P2P_HOST', '0.0.0.0')
-P2P_TESTNET_PORT = P2P_PORT + 10000  # Testnet offset (not used on production)
+P2P_TESTNET_PORT = P2P_PORT + 10000
 MAX_PEERS = int(os.getenv('MAX_PEERS', 32))
 PEER_TIMEOUT = 30
 MESSAGE_MAX_SIZE = 1_000_000
 PEER_HANDSHAKE_TIMEOUT = 5
 PEER_KEEPALIVE_INTERVAL = 30
 
-# P2P and WebSocket unified on port 8000
-# SSE + Gossip unified on port 8000
-P2P_WEBSOCKET_URL = os.getenv('P2P_WEBSOCKET_URL', None)  # Deprecated, for backward compatibility only
 
 # ── Block policy ──────────────────────────────────────────────────────────────
 # Max USER transactions per block (coinbase not counted).
@@ -1113,35 +1113,13 @@ def insert_transaction(from_addr: str, to_addr: str, amount: int) -> Optional[st
     return None
 
 
-def store_peer_info(peer_info: PeerInfo):
-    """Store peer information in database for persistence"""
-    try:
-        with get_db_cursor() as cur:
-            cur.execute("""
-                INSERT INTO peer_registry (peer_id, address, port, last_seen, block_height, user_agent)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT(peer_id) DO UPDATE SET
-                    last_seen = EXCLUDED.last_seen,
-                    block_height = EXCLUDED.block_height,
-                    user_agent = EXCLUDED.user_agent
-            """, (
-                peer_info.peer_id,
-                peer_info.address,
-                peer_info.port,
-                int(time.time()),
-                peer_info.last_block_height,
-                peer_info.user_agent,
-            ))
-    except Exception as e:
-        logger.error(f"[DB] Failed to store peer info: {e}")
-
 
 def load_known_peers() -> List[Tuple[str, int]]:
     """Load known peers from database"""
     try:
         with get_db_cursor() as cur:
             cur.execute("""
-                SELECT address, port FROM peer_registry
+                SELECT ip_address, port FROM peer_registry
                 WHERE last_seen > NOW() - INTERVAL '7 days'
                 ORDER BY last_seen DESC
                 LIMIT 100
@@ -1166,11 +1144,15 @@ _dht_manager: Optional[DHTManager] = None
 _dht_lock = threading.RLock()
 
 def get_dht_manager() -> DHTManager:
-    """Get or create global DHT manager"""
+    """Get or create global DHT manager. Uses P2P_PORT (9091) — not gunicorn HTTP PORT."""
     global _dht_manager
     if _dht_manager is None:
-        host = os.getenv('FLASK_HOST', '0.0.0.0')
-        port = int(os.getenv('PORT', 8000))
+        # Public hostname so remote peers can reach this node.
+        # Falls back to 0.0.0.0 for local/dev use.
+        host = (os.getenv('KOYEB_PUBLIC_DOMAIN') or
+                os.getenv('RAILWAY_PUBLIC_DOMAIN') or
+                os.getenv('FLASK_HOST') or '0.0.0.0')
+        port = P2P_PORT  # 9091 — never gunicorn's HTTP port
         _dht_manager = DHTManager(local_address=host, local_port=port)
     return _dht_manager
 
@@ -2889,7 +2871,18 @@ class MessageHandlers:
             )
             peer_conn.send_message(response)
             peer_conn.version_received = True
-            
+
+            # ── Mirror connected peer into DHT routing table ────────────────
+            # Keeps DHT and live TCP peers in sync automatically
+            try:
+                _dn = DHTNode(
+                    address=peer_conn.peer_info.address,
+                    port=peer_conn.peer_info.port,
+                )
+                get_dht_manager().routing_table.add_node(_dn)
+            except Exception:
+                pass
+
         except Exception as e:
             logger.error(f"[PEER {peer_conn.peer_id}] Version handler error: {e}")
             peer_conn.peer_info.ban_score += 1
@@ -3315,7 +3308,7 @@ class MessageHandlers:
             
             logger.debug(f"[PEER {peer_conn.peer_id}] ADDR: {len(addresses)} peers")
             
-            # Add to discovery engine
+            # Add to both discovery engine AND DHT routing table (single source of truth)
             for addr in addresses:
                 try:
                     ip = addr.get('ip')
@@ -3323,6 +3316,13 @@ class MessageHandlers:
                     if ip and port:
                         with discovery_engine.lock:
                             discovery_engine.peer_candidates.add((ip, port))
+                        # Mirror into DHT so /api/dht/peers reflects all known peers
+                        try:
+                            node_id = addr.get('node_id') or None
+                            _dn = DHTNode(node_id=node_id, address=ip, port=port)
+                            get_dht_manager().routing_table.add_node(_dn)
+                        except Exception:
+                            pass
                 except Exception as e:
                     logger.debug(f"Invalid address in ADDR: {e}")
         
@@ -3472,7 +3472,7 @@ class P2PServer:
     """
     Museum-Grade P2P Server with Dynamic Port Binding & Thread Pooling.
     
-    H1 FIX: Auto-probes ports 8000-8010 when primary port occupied (Termux/Koyeb).
+    H1 FIX: Auto-probes ports 9091-9101 when primary port occupied (Termux/Koyeb).
     H2 FIX: Uses ThreadPoolExecutor(max_workers=32) to prevent thread DoS.
     """
     
@@ -3525,7 +3525,7 @@ class P2PServer:
         """
         Start P2P server with intelligent port binding (H1) and thread pooling (H2).
         
-        H1: Auto-probes ports 8000-8010 to find first available (Termux/Koyeb safety).
+        H1: Auto-probes ports 9091-9101 to find first available (Termux/Koyeb safety).
         H2: Initializes ThreadPoolExecutor(max_workers=32) to prevent thread DoS.
         
         Returns:
@@ -3544,7 +3544,7 @@ class P2PServer:
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
-        # H1 FIX: Auto-probe ports 8000-8010 for Termux/Koyeb environments
+        # H1 FIX: Auto-probe ports 9091-9101 for Termux/Koyeb environments
         bound_port = None
         probe_range = range(self.initial_port, self.initial_port + 11)
         
@@ -3823,7 +3823,14 @@ class P2PServer:
                 self.stats['total_peers_connected'] += 1
             
             logger.info(f"[P2P] Connected to {address}:{port} (outbound)")
-            
+
+            # Register peer in DHT routing table so it's discoverable
+            try:
+                _dn = DHTNode(address=address, port=port)
+                get_dht_manager().routing_table.add_node(_dn)
+            except Exception:
+                pass
+
             # Send version
             self._send_version_to_peer(peer_conn)
             
@@ -4101,8 +4108,10 @@ if ORACLE_AVAILABLE and ORACLE is not None:
     # Register oracle as DHT peer — makes oracle discoverable for P2P TX validation
     try:
         _dht = get_dht_manager()
-        oracle_host = os.getenv('FLASK_HOST', 'qtcl-blockchain.koyeb.app')
-        oracle_port = int(os.getenv('PORT', 8000))
+        oracle_host = (os.getenv('KOYEB_PUBLIC_DOMAIN') or
+                       os.getenv('RAILWAY_PUBLIC_DOMAIN') or
+                       os.getenv('FLASK_HOST') or 'qtcl-blockchain.koyeb.app')
+        oracle_port = P2P_PORT  # 9091 — the P2P TCP port, not gunicorn HTTP
         oracle_node_id = hashlib.sha1(
             f"oracle:{getattr(ORACLE, 'oracle_address', 'qtcl1oracle')}".encode()
         ).hexdigest()
@@ -5172,29 +5181,60 @@ metrics_thread.start()
 P2P = None
 
 def initialize_p2p():
-    """Initialize P2P server.
-    On PythonAnywhere (USE_HTTP_DB=1) inbound raw TCP sockets are not permitted —
-    P2P is unavailable and we skip cleanly so health reports p2p_enabled=false honestly."""
+    """Initialize P2P server and synchronise with DHT.
+
+    - On PythonAnywhere (USE_HTTP_DB=1): raw inbound TCP blocked → skip cleanly.
+    - On Koyeb: P2P binds P2P_PORT (9091). HTTP/gunicorn uses PORT (8000).
+      These are separate ports and must never share the same value.
+    - After bind: updates DHT local_node to reflect the actual bound port,
+      so DHT peer discovery advertises the correct address.
+    """
     global P2P
     if _USE_HTTP_DB:
-        logger.info("[P2P] Skipped — PythonAnywhere does not permit raw inbound TCP sockets. "
-                    "P2P requires a platform with direct TCP access (Koyeb, VPS, etc.).")
+        logger.info("[P2P] Skipped — PythonAnywhere does not permit raw inbound TCP. "
+                    "P2P requires a platform with direct TCP (Koyeb, VPS, etc.).")
         P2P = None
         return False
     try:
-        P2P = P2PServer(
-            host=P2P_HOST,
-            port=P2P_PORT,
-            testnet=False
-        )
-        if P2P.start():
-            logger.info("✨ [P2P] P2P server started successfully")
-            discovery_engine.discover_peers()
-            return True
-        else:
+        P2P = P2PServer(host=P2P_HOST, port=P2P_PORT, testnet=False)
+        if not P2P.start():
             logger.warning("[P2P] Failed to start P2P server")
             P2P = None
             return False
+
+        # ── Sync DHT local node to match actual bound port ─────────────────
+        # P2P may have probed to a fallback port (e.g. 9092 if 9091 busy).
+        # Update DHT so it advertises the correct port to remote peers.
+        try:
+            dht = get_dht_manager()
+            if dht.local_node.port != P2P.port:
+                logger.info(f"[DHT] Updating local port {dht.local_node.port} → {P2P.port} "
+                             f"(P2P bound to fallback)")
+                dht.local_node.port = P2P.port
+        except Exception as _e:
+            logger.warning(f"[DHT] Port sync warning: {_e}")
+
+        # ── Register this node in its own routing table ─────────────────────
+        try:
+            dht = get_dht_manager()
+            dht.routing_table.add_node(dht.local_node)
+        except Exception as _e:
+            logger.debug(f"[DHT] Self-register: {_e}")
+
+        # ── Seed DHT from discovery engine's peer list ──────────────────────
+        try:
+            known = discovery_engine.discover_peers()
+            for addr, port in known:
+                node = DHTNode(address=addr, port=port)
+                dht.routing_table.add_node(node)
+            logger.info(f"[DHT] Seeded {len(known)} peers from discovery engine")
+        except Exception as _e:
+            logger.warning(f"[DHT] Peer seeding warning: {_e}")
+
+        logger.info(f"✨ [P2P+DHT] P2P server running on {P2P_HOST}:{P2P.port} | "
+                    f"DHT node_id={dht.local_node.node_id[:16]}…")
+        return True
+
     except Exception as e:
         logger.error(f"[P2P] Initialization failed: {e}")
         P2P = None
@@ -5265,10 +5305,13 @@ def health_check():
     """Unconditional 200 — Koyeb liveness probe for ALL ports (8000, 9091, any).
     Same Flask process answers both. Never blocks, never queries DB.
     DB health is in /api/health only."""
+    _p2p_running = P2P is not None and getattr(P2P, 'is_running', False)
+    _p2p_port    = getattr(P2P, 'port', P2P_PORT) if _p2p_running else P2P_PORT
     return jsonify({
         'status':        'healthy',
         'app_ready':     _APP_READY,
-        'p2p_enabled':   P2P is not None and getattr(P2P, 'is_running', False),
+        'p2p_enabled':   _p2p_running,
+        'p2p_port':      _p2p_port,
         'lattice_loaded': getattr(state, 'lattice_loaded', False),
         'oracle_id':     ORACLE_ID,
         'timestamp':     datetime.now(timezone.utc).isoformat(),
@@ -6785,11 +6828,20 @@ def heartbeat():
 
 @app.route('/api/p2p/stats', methods=['GET'])
 def p2p_stats():
-    """Get P2P network statistics"""
-    if P2P is None or not P2P.is_running:
-        return jsonify({'error': 'P2P not initialized'}), 503
-    
-    return jsonify(P2P.get_stats()), 200
+    """Unified P2P+DHT network statistics."""
+    dht = get_dht_manager()
+    dht_peers = dht.routing_table.get_all_nodes()
+    base = {
+        'dht_routing_peers': len(dht_peers),
+        'dht_alive_peers':   sum(1 for p in dht_peers if p.is_alive()),
+        'dht_state_entries': len(dht.state_store),
+        'dht_node_id':       dht.local_node.node_id[:16] + '…',
+        'dht_local_port':    dht.local_node.port,
+        'p2p_running':       P2P is not None and P2P.is_running,
+    }
+    if P2P and P2P.is_running:
+        base.update(P2P.get_stats())
+    return jsonify(base), 200
 
 
 @app.route('/api/p2p/peers', methods=['GET'])
@@ -6858,7 +6910,7 @@ def dht_add_peer():
     data = request.get_json() or {}
     node_id = data.get('node_id')
     address = data.get('address')
-    port = data.get('port', 8000)
+    port = data.get('port', 9091)
     
     if not node_id or not address:
         return jsonify({'error': 'Missing node_id or address'}), 400
@@ -6935,13 +6987,17 @@ def dht_stats():
     peers = dht.routing_table.get_all_nodes()
     alive_count = sum(1 for p in peers if p.is_alive())
     
+    p2p_connected = P2P.get_peer_count() if P2P and P2P.is_running else 0
     return jsonify({
-        'total_peers': len(peers),
-        'alive_peers': alive_count,
-        'dead_peers': len(peers) - alive_count,
-        'state_entries': len(dht.state_store),
+        'total_peers':      len(peers),
+        'alive_peers':      alive_count,
+        'dead_peers':       len(peers) - alive_count,
+        'p2p_connected':    p2p_connected,   # live TCP connections
+        'state_entries':    len(dht.state_store),
         'lookup_cache_size': len(dht.lookup_cache),
-        'local_node_id': dht.local_node.node_id,
+        'local_node_id':    dht.local_node.node_id,
+        'local_address':    dht.local_node.address,
+        'local_port':       dht.local_node.port,
     }), 200
 
 
@@ -7555,7 +7611,6 @@ if __name__ == '__main__':
         logger.info("[STARTUP] Running in production mode (Koyeb-optimized).")
         logger.info("[STARTUP] Command: gunicorn -w1 -b0.0.0.0:$PORT --timeout 120 server:app")
     
-# SSE + Gossip unified on port 8000
     # All clients (miners, peers) connect via WebSocket to same port as REST API
     # No separate P2P port needed — everything unified on 8000
     logger.info("[P2P-SOCKETIO] P2P communication enabled on main port %d (unified)" % port)
