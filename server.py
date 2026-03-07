@@ -5788,7 +5788,7 @@ def quantum_metrics_thread():
             gamma_geo= min(1.0, geodesic/max(1.0, _np.log(max(2,pq_max))))
 
             # ── 5. OU bath memory ─────────────────────────────────────────
-            ou_mem = _ou_memory(rho_hist)
+            ou_mem = _safe_numeric(_ou_memory(rho_hist), 0.0)
             gamma1_eff = gamma1*(1.0 - ou_mem*_KAPPA3)
 
             # ── 6. Non-Markovian blend + GKSL RK4 ─────────────────────────
@@ -5803,30 +5803,30 @@ def quantum_metrics_thread():
             rho3 = _gksl_step(rho_mix, dt, omega, gamma1_eff, gammaphi, gammadep, 3)
 
             # ── 7. W-state sector correction (EVERY cycle, aggressive threshold) ──
-            sector_occ = _sector_occupation(rho3)
+            sector_occ = _safe_numeric(_sector_occupation(rho3), 0.5)
             # Aggressively correct if sector occupation < 0.85 (was 0.80, only every 4th)
             # This ensures W-state manifold enforcement at high fidelity
             if sector_occ < 0.85:
                 rho3 = _w_sector_correct(rho3, threshold=0.85)
-                sector_occ = _sector_occupation(rho3)  # re-compute after correction
+                sector_occ = _safe_numeric(_sector_occupation(rho3), 0.5)  # re-compute after correction
 
             # ── 8. Full entanglement measures ─────────────────────────────
-            w3_fid  = _w3_fidelity(rho3)
-            neg     = _negativity(rho3)
+            w3_fid  = _safe_numeric(_w3_fidelity(rho3), 0.5)
+            neg     = _safe_numeric(_negativity(rho3), 0.0)
             # Concurrence on qubit-0,1 reduced state (trace out qubit 2)
             rho_ab  = _partial_trace_out(rho3, 2, 3)
-            conc    = _concurrence_2q(rho_ab)
-            qfi     = _qfi_jx(rho3)
-            discord = _quantum_discord_approx(rho3)
-            coh     = _coherence_l1(rho3)
-            pur     = _purity(rho3)
-            ent     = _entanglement_witness(rho3)
+            conc    = _safe_numeric(_concurrence_2q(rho_ab), 0.0)
+            qfi     = _safe_numeric(_qfi_jx(rho3), 0.0)
+            discord = _safe_numeric(_quantum_discord_approx(rho3), 0.0)
+            coh     = _safe_numeric(_coherence_l1(rho3), 0.0)
+            pur     = _safe_numeric(_purity(rho3), 0.5)
+            ent     = _safe_numeric(_entanglement_witness(rho3), 0.0)
 
             with _ENG_LOCK: prev_phi = _ENG_STATE['_prev_phi']
             phase_drift = min(1.0, abs(phi-(prev_phi or phi))/(max(dt,0.001)*2*_np.pi))
 
             # Teleportation fidelity (negativity-based lower bound)
-            tele_fid = _teleportation_fidelity(neg)
+            tele_fid = _safe_numeric(_teleportation_fidelity(neg), 0.5)
 
             # ── 9. N-oracle joint state ───────────────────────────────────
             now = time.time()
