@@ -51,6 +51,18 @@ from enum import Enum
 import traceback
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# LOGGING SETUP (Must be first, before any code uses logger)
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+if not logging.getLogger().hasHandlers():
+    logging.basicConfig(
+        level=logging.INFO,
+        format='[%(asctime)s] %(levelname)s: %(message)s',
+        handlers=[logging.StreamHandler(sys.stdout)]
+    )
+logger = logging.getLogger(__name__)
+
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # CURRENT BLOCK FIELD AS ENTROPY POOL (Nonmarkovian Noise Bath Mining)
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -85,15 +97,6 @@ except ImportError as _me:
     MEMPOOL_AVAILABLE = False
     logger.warning(f"[MINING] ⚠️  mempool.py not found ({_me})")
     def get_mempool(): return None   # type: ignore[misc]
-
-# Logging setup
-if not logging.getLogger().hasHandlers():
-    logging.basicConfig(
-        level=logging.INFO,
-        format='[%(asctime)s] %(levelname)s: %(message)s',
-        handlers=[logging.StreamHandler(sys.stdout)]
-    )
-logger = logging.getLogger(__name__)
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # CONSTANTS

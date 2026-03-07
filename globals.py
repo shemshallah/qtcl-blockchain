@@ -20,10 +20,15 @@
 ║  Museum-grade implementation. Zero shortcuts. Deploy with confidence. 🚀⚛️💎                 ║
 ╚════════════════════════════════════════════════════════════════════════════════════════════════╝
 """
-
 from __future__ import annotations
 
-import threading, logging, json, sys, hashlib, time
+import os
+import sys
+import logging
+import threading
+import json
+import hashlib
+import time
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field
@@ -571,6 +576,40 @@ def set_current_block_field(block_data: Dict[str, Any]) -> None:
         # Extract entropy from block field (nonmarkovian noise)
         _GLOBAL_STATE['block_field_entropy'] = get_entropy_from_block_field(block_data)
         logger.debug("[ENTROPY] Updated current block field entropy")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# UNIFIED ENTROPY (Canonical source: qrng_ensemble, fallback to block field)
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+
+def get_canonical_entropy(size: int = 32) -> bytes:
+    """Get entropy from canonical qrng_ensemble with fallback chain"""
+    try:
+        from qrng_ensemble import EntropyPoolManager
+        pool = EntropyPoolManager()
+        return pool.get_entropy(size)
+    except Exception:
+        pass
+    
+    # Fallback: block field entropy
+    try:
+        return get_entropy_from_block_field()[:size]
+    except:
+        import secrets
+        return secrets.token_bytes(size)
+
+def initialize_entropy_pool():
+    """Initialize entropy pool (delegates to qrng_ensemble)"""
+    try:
+        from qrng_ensemble import EntropyPoolManager
+        return EntropyPoolManager()
+    except:
+        return None
+
+def get_entropy_from_pool(size: int = 32) -> bytes:
+    """Get entropy from pool (delegates to canonical source)"""
+    return get_canonical_entropy(size)
+
 
 def get_entropy_from_block_field(block_data: Optional[Dict[str, Any]] = None) -> bytes:
     """Extract entropy from current block field (nonmarkovian noise bath)"""

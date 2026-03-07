@@ -700,7 +700,7 @@ _peer_oracle_env = os.getenv('BOOTSTRAP_NODES', '')
 PEER_ORACLE_URLS = [u.strip() for u in _peer_oracle_env.split(',') if u.strip()] if _peer_oracle_env else []
 logger.info(f"[ORACLE] 🌐 Identity: id={ORACLE_ID} role={ORACLE_ROLE} peers={len(PEER_ORACLE_URLS)}")
 
-# P2P Network — All on port 8000 (unified with REST API via Flask-SocketIO)
+# SSE + Gossip unified on port 8000
 P2P_PORT = int(os.getenv('PORT', int(os.getenv('FLASK_PORT', 8000))))  # Use PORT (8000 on Koyeb) or FLASK_PORT
 P2P_HOST = os.getenv('P2P_HOST', '0.0.0.0')
 P2P_TESTNET_PORT = P2P_PORT + 10000  # Testnet offset (not used on production)
@@ -711,7 +711,7 @@ PEER_HANDSHAKE_TIMEOUT = 5
 PEER_KEEPALIVE_INTERVAL = 30
 
 # P2P and WebSocket unified on port 8000
-# No separate P2P endpoint needed — all communication via Flask-SocketIO on 8000
+# SSE + Gossip unified on port 8000
 P2P_WEBSOCKET_URL = os.getenv('P2P_WEBSOCKET_URL', None)  # Deprecated, for backward compatibility only
 
 # ── Block policy ──────────────────────────────────────────────────────────────
@@ -1475,7 +1475,6 @@ def load_known_peers() -> List[Tuple[str, int]]:
 
 
 # ═════════════════════════════════════════════════════════════════════════════════
-# BINARY SERIALIZATION (Socket.IO + msgpack for density matrices)
 # ═════════════════════════════════════════════════════════════════════════════════
 
 class BinarySerializer:
@@ -2547,7 +2546,6 @@ except Exception as _gse:
 # MINER P2P WEBSOCKET SERVER (port 8000) - UNIFIED WITH REST API
 # ═════════════════════════════════════════════════════════════════════════════════
 
-# Separate Flask app for P2P Socket.IO on port 8000 (unified)
 p2p_app = Flask(__name__)
 p2p_app.config['SECRET_KEY'] = secrets.token_hex(32)
 
@@ -2619,8 +2617,7 @@ def _broadcast_snapshot_to_gossip_network(snapshot):
         with _miners_lock:
             active_count = len(_registered_miners)
         
-        # Send to all connected clients via broadcast (Socket.IO handles HTTP long-polling transport)
-        # ✅ ALWAYS broadcast every second (real-time metrics needed)
+                # ✅ ALWAYS broadcast every second (real-time metrics needed)
         
         with _metrics_lock:
             _p2p_metrics['snapshots_sent'] += 1
@@ -8271,7 +8268,6 @@ if __name__ == '__main__':
     logger.info("[STARTUP] Phase 2b: Starting P2P gossip subsystem...")
     _start_gossip_subsystem()
     
-    # Port configuration — unified port 8000 for all services (Koyeb standard)    # FLASK_PORT: HTTP/WebSocket server (REST API + P2P on same port via Socket.IO)
     port = int(os.getenv('PORT', 8000))  # Koyeb sets PORT=8000 by default (HTTPS 443 via reverse proxy)
     debug = os.getenv('FLASK_ENV') == 'development'
     
@@ -8315,7 +8311,7 @@ if __name__ == '__main__':
         logger.info("[STARTUP] Running in production mode (Koyeb-optimized).")
         logger.info("[STARTUP] Command: gunicorn -w1 -b0.0.0.0:$PORT --timeout 120 server:app")
     
-    # P2P communication integrated into main Flask-SocketIO app on port 8000 (HTTPS 443 via Koyeb reverse proxy)
+# SSE + Gossip unified on port 8000
     # All clients (miners, peers) connect via WebSocket to same port as REST API
     # No separate P2P port needed — everything unified on 8000
     logger.info("[P2P-SOCKETIO] P2P communication enabled on main port %d (unified)" % port)

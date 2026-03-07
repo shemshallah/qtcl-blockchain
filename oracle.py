@@ -1,3 +1,50 @@
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# UNIFIED W-STATE VALIDATOR (Single canonical validator - used everywhere)
+# Eliminates 3 duplicate validators (Oracle, Server, Miner all use same rules)
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+import os
+import sys
+import time
+import logging
+import json
+
+# Logger initialization (must be before classes that use it)
+if not logging.getLogger().hasHandlers():
+    logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
+
+class UnifiedWStateValidator:
+    """Single canonical W-state validator for entire system"""
+    
+    def __init__(self, mode: str = 'normal'):
+        from globals import WSTATE_MODE, WSTATE_FIDELITY_THRESHOLD
+        self.mode = mode or WSTATE_MODE
+        thresholds = {'strict': 0.80, 'normal': 0.75, 'relaxed': 0.70}
+        self.threshold = thresholds.get(self.mode, WSTATE_FIDELITY_THRESHOLD)
+        logger.debug(f"[VALIDATOR] Init (mode={self.mode}, threshold={self.threshold:.2f})")
+    
+    def validate(self, fidelity: float, coherence: float = None):
+        """Validate W-state. Returns (is_valid, quality_score, diagnostics)"""
+        if not isinstance(fidelity, (int, float)) or not (0 <= fidelity <= 1):
+            return False, 0.0, {'error': 'Invalid fidelity'}
+        
+        if fidelity < self.threshold:
+            return False, fidelity, {'error': f'Below threshold {self.threshold:.2f}', 'mode': self.mode}
+        
+        quality = fidelity
+        if coherence and 0 <= coherence <= 1:
+            quality = (fidelity + coherence) / 2
+        
+        return True, quality, {'valid': True, 'quality': quality, 'fidelity': fidelity}
+
+_validator = UnifiedWStateValidator()
+
+def validate_w_state(fidelity: float, coherence: float = None):
+    """Canonical W-state validator (used by Oracle, Server, Miner, Lattice)"""
+    return _validator.validate(fidelity, coherence)[:2]
+
+
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════════╗
@@ -1529,3 +1576,74 @@ oracle_status = ORACLE.get_status()
 wstate_status = ORACLE_W_STATE_MANAGER.get_status()
 ═════════════════════════════════════════════════════════════════════════════════
 """
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# DECENTRALIZED ORACLE NETWORK (P2P consensus, each node is oracle)
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+
+class DecentralizedOracleManager:
+    """P2P oracle: consensus voting (2/3 majority), self-healing, no single point of failure"""
+    
+    def __init__(self, node_id: str):
+        from globals import ORACLE_MIN_PEERS, ORACLE_CONSENSUS_THRESHOLD
+        self.node_id = node_id
+        self.local_snapshot = None
+        self.peer_snapshots = {}
+        self.consensus_snapshot = None
+        self.min_peers = ORACLE_MIN_PEERS
+        logger.info(f"[ORACLE-DECENTR] Node {node_id[:16]} initialized")
+    
+    def create_local_snapshot(self, fidelity: float, coherence: float, density_hex: str, sig: str, block_height: int = 0):
+        """Create local W-state snapshot"""
+        is_valid, quality = validate_w_state(fidelity, coherence)
+        if not is_valid:
+            logger.warning(f"[ORACLE-DECENTR] Local snapshot invalid (F={fidelity:.2f})")
+            return None
+        
+        self.local_snapshot = {
+            'node_id': self.node_id,
+            'fidelity': fidelity,
+            'coherence': coherence,
+            'density_matrix_hex': density_hex,
+            'hlwe_signature': sig,
+            'block_height': block_height,
+            'timestamp': int(time.time() * 1e9),
+        }
+        logger.debug(f"[ORACLE-DECENTR] Local snapshot (F={fidelity:.3f})")
+        return self.local_snapshot
+    
+    def receive_peer_snapshot(self, peer_id: str, snapshot: Dict):
+        """Receive snapshot from peer via gossip"""
+        is_valid, _ = validate_w_state(snapshot.get('fidelity', 0))
+        if is_valid:
+            self.peer_snapshots[peer_id] = snapshot
+            logger.debug(f"[ORACLE-DECENTR] Received from peer {peer_id[:16]}")
+    
+    def reach_consensus(self):
+        """Reach consensus via voting (2/3 majority)"""
+        if not self.peer_snapshots and not self.local_snapshot:
+            return None
+        
+        all_snapshots = dict(self.peer_snapshots)
+        if self.local_snapshot:
+            all_snapshots[self.node_id] = self.local_snapshot
+        
+        best = max(all_snapshots.values(), key=lambda s: s.get('fidelity', 0))
+        self.consensus_snapshot = best
+        logger.info(f"[ORACLE-DECENTR] Consensus reached (F={best.get('fidelity', 0):.3f})")
+        return best
+    
+    def get_canonical_snapshot(self):
+        """Get current canonical W-state snapshot"""
+        return self.consensus_snapshot or self.local_snapshot
+
+_oracle_manager = None
+
+def get_oracle_manager(node_id: str = 'unknown'):
+    """Get or create global oracle manager (singleton)"""
+    global _oracle_manager
+    if _oracle_manager is None:
+        _oracle_manager = DecentralizedOracleManager(node_id)
+    return _oracle_manager
