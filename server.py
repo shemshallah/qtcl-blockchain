@@ -6526,6 +6526,7 @@ def oracle_pq0_bloch():
             'oracle_role': ORACLE_ROLE,
             'theta': cache.get('theta', 1.57),
             'phi': cache.get('phi', 0.0),
+            'fidelity':    cache.get('w3_fidelity', 0.90),    # canonical alias for miners
             'w3_fidelity': cache.get('w3_fidelity', 0.90),
             'wN_fidelity': cache.get('wN_fidelity', 0.84),
             'negativity': cache.get('negativity', 0.43),
@@ -6557,6 +6558,7 @@ def oracle_pq0_bloch():
         'oracle_role': ORACLE_ROLE,
         'theta': eng['pq0_bloch_theta'],
         'phi': eng['pq0_bloch_phi'],
+        'fidelity':    eng['w3_fidelity'],           # canonical alias for miners
         'w3_fidelity': eng['w3_fidelity'],
         'wN_fidelity': eng['wN_fidelity'],
         'negativity': eng['negativity'],
