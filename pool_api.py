@@ -94,7 +94,7 @@ class QRNGSourceConfig:
 QRNG_SOURCES = {
     'anu': QRNGSourceConfig(
         name='ANU QRNG',
-        url='https://qrng.anu.edu.au/API/jsonI.php?length=256&type=uint8',
+        url='https://qrng.anu.edu.au/API/jsonI.php?length=256&format=uint8',  # ⚛️ FIXED: type → format
         priority=1,
     ),
     'random_org': QRNGSourceConfig(
