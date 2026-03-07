@@ -99,8 +99,10 @@ QRNG_SOURCES = {
     ),
     'random_org': QRNGSourceConfig(
         name='Random.org',
-        url='https://www.random.org/integers/?num=256&min=0&max=255&col=1&base=10&format=json',
+        # format=plain → plain-text newline-delimited ints, no JSON wrapper
+        url='https://www.random.org/integers/?num=256&min=0&max=255&col=1&base=10&format=plain&rnd=new',
         priority=2,
+        timeout_seconds=15.0,
     ),
     'qbick': QRNGSourceConfig(
         name='QBICK',
@@ -109,13 +111,16 @@ QRNG_SOURCES = {
     ),
     'hotbits': QRNGSourceConfig(
         name='HotBits',
-        url='https://www.fourmilab.ch/cgi-bin/Hotbits?fmt=json',
+        # nbytes=256 → {"bytes":[int,...]} JSON response
+        url='https://www.fourmilab.ch/cgi-bin/Hotbits?nbytes=256&fmt=json',
         priority=4,
     ),
-    'fourmilab': QRNGSourceConfig(
-        name='Fourmilab',
-        url='https://www.fourmilab.ch/cgi-bin/Hotbits?fmt=json&num=256',
+    'nist_beacon': QRNGSourceConfig(
+        name='NIST Beacon',
+        # SHA-512 pulse output — 64 hex bytes = 128 char, take first 32 bytes
+        url='https://beacon.nist.gov/beacon/2.0/pulse/last',
         priority=5,
+        timeout_seconds=15.0,
     ),
 }
 
@@ -263,29 +268,42 @@ class EntropyPoolManager:
                 try:
                     response = requests.get(
                         source.url,
-                        timeout=source.timeout_seconds
+                        timeout=source.timeout_seconds,
+                        headers={'User-Agent': 'QTCL-Blockchain/1.0 (+https://qtcl-blockchain.koyeb.app)'},
                     )
                     response.raise_for_status()
-                    
+
                     entropy = self._parse_entropy_response(source_key, response)
-                    
+
                     if entropy and len(entropy) >= ENTROPY_SIZE_BYTES:
-                        # Success
                         with self._lock:
                             source.status = QRNGSourceStatus.WORKING
                             source.last_success_time = time.time()
                             source.failure_count = 0
                             source.success_count += 1
-                        
                         logger.debug(f"[ENTROPY] {source.name} ✓ ({len(entropy)} bytes)")
                         return entropy
                     else:
-                        # Parse failed
-                        self._mark_source_failing(source_key, "Parse error")
+                        # Parse failed — log but retry (don't permanently fail on parse)
+                        logger.debug(f"[ENTROPY] {source.name} parse failed attempt {attempt+1}")
+                        time.sleep(0.5 * (attempt + 1))
+                        continue
+
+                except requests.HTTPError as e:
+                    sc = e.response.status_code if e.response is not None else 0
+                    if sc in (429, 503, 502, 504):
+                        # Rate-limited or transient — back off and retry
+                        wait = 2.0 ** attempt
+                        logger.debug(f"[ENTROPY] {source.name} HTTP {sc} — retry in {wait:.1f}s")
+                        time.sleep(wait)
+                        continue
+                    else:
+                        # Hard error (404, 401, etc.) — bail immediately
+                        self._mark_source_failing(source_key, f"HTTP {sc}")
                         return None
                 except (requests.Timeout, requests.ConnectionError) as e:
-                    # Retry on request errors
-                    logger.debug(f"[ENTROPY] {source.name} attempt {attempt + 1} failed: {e}")
+                    logger.debug(f"[ENTROPY] {source.name} attempt {attempt+1} failed: {e}")
+                    time.sleep(0.5 * (attempt + 1))
                     continue
             
         except requests.Timeout:
@@ -299,35 +317,54 @@ class EntropyPoolManager:
             return None
     
     def _parse_entropy_response(self, source_key: str, response) -> Optional[bytes]:
-        """Parse entropy from API response"""
+        """Parse entropy from API response — source-specific format handling."""
         try:
+            if source_key == 'random_org':
+                # format=plain → newline-separated decimal integers, NOT JSON
+                lines = [ln.strip() for ln in response.text.strip().split('\n') if ln.strip()]
+                ints  = [int(x) for x in lines if x.lstrip('-').isdigit()]
+                if len(ints) >= ENTROPY_SIZE_BYTES:
+                    return bytes([b & 0xFF for b in ints[:ENTROPY_SIZE_BYTES]])
+                return None
+
+            if source_key == 'nist_beacon':
+                # {"pulse": {"outputValue": "<128-hex-char SHA-512>"}}
+                data = response.json()
+                hex_val = (data.get('pulse') or {}).get('outputValue', '')
+                if len(hex_val) >= ENTROPY_SIZE_BYTES * 2:
+                    return bytes.fromhex(hex_val[:ENTROPY_SIZE_BYTES * 2])
+                return None
+
+            # All JSON-based sources
             data = response.json()
-            
-            # Source-specific parsing
+
             if source_key == 'anu':
-                # ANU returns {'type': 'uint8', 'length': 256, 'data': [0, 1, 2, ...]}
-                if 'data' in data:
-                    entropy_list = data['data']
-                    if isinstance(entropy_list, list):
-                        return bytes([b & 0xFF for b in entropy_list[:ENTROPY_SIZE_BYTES]])
-            
-            elif source_key == 'random_org':
-                # Random.org returns {'random': {'data': [...]}, ...}
-                if 'random' in data and 'data' in data['random']:
-                    entropy_list = data['random']['data']
-                    return bytes([b & 0xFF for b in entropy_list[:ENTROPY_SIZE_BYTES]])
-            
-            elif source_key in ['qbick', 'hotbits', 'fourmilab']:
-                # Try to extract 'data' or 'random' field
-                for key in ['data', 'random', 'bytes']:
-                    if key in data:
-                        if isinstance(data[key], list):
-                            return bytes([b & 0xFF for b in data[key][:ENTROPY_SIZE_BYTES]])
-                        elif isinstance(data[key], str):
-                            return bytes.fromhex(data[key][:ENTROPY_SIZE_BYTES*2])
-            
+                # {'type': 'uint8', 'length': N, 'data': [int,...]}
+                lst = data.get('data')
+                if isinstance(lst, list) and len(lst) >= ENTROPY_SIZE_BYTES:
+                    return bytes([b & 0xFF for b in lst[:ENTROPY_SIZE_BYTES]])
+
+            elif source_key == 'hotbits':
+                # {"bytes":[int,...], "status":"OK"}
+                lst = data.get('bytes') or data.get('data')
+                if isinstance(lst, list) and len(lst) >= ENTROPY_SIZE_BYTES:
+                    return bytes([b & 0xFF for b in lst[:ENTROPY_SIZE_BYTES]])
+                # Fallback: hex string under 'data'
+                hex_s = data.get('data') if isinstance(data.get('data'), str) else None
+                if hex_s and len(hex_s) >= ENTROPY_SIZE_BYTES * 2:
+                    return bytes.fromhex(hex_s[:ENTROPY_SIZE_BYTES * 2])
+
+            elif source_key == 'qbick':
+                for key in ('data', 'random', 'bytes', 'values'):
+                    v = data.get(key)
+                    if isinstance(v, list) and len(v) >= ENTROPY_SIZE_BYTES:
+                        return bytes([b & 0xFF for b in v[:ENTROPY_SIZE_BYTES]])
+                    if isinstance(v, str) and len(v) >= ENTROPY_SIZE_BYTES * 2:
+                        try: return bytes.fromhex(v[:ENTROPY_SIZE_BYTES * 2])
+                        except ValueError: pass
+
             return None
-        
+
         except Exception as e:
             logger.debug(f"[ENTROPY] Parse error ({source_key}): {e}")
             return None

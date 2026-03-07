@@ -2015,6 +2015,51 @@ class _SSEBroadcaster:
 _gossip_sse = _SSEBroadcaster()  # module-level singleton — one per worker, cross-worker via PG NOTIFY
 
 # ── DB-backed gossip store — replaces per-process in-memory DHTManager ───────
+def _ensure_oracle_registry() -> bool:
+    """CREATE TABLE IF NOT EXISTS oracle_registry — idempotent, safe every deploy."""
+    ddl_statements = [
+        """CREATE TABLE IF NOT EXISTS oracle_registry (
+               oracle_id       VARCHAR(128)  PRIMARY KEY,
+               oracle_url      VARCHAR(512)  NOT NULL DEFAULT '',
+               oracle_address  VARCHAR(128)  NOT NULL DEFAULT '',
+               is_primary      BOOLEAN       NOT NULL DEFAULT FALSE,
+               last_seen       BIGINT        NOT NULL DEFAULT 0,
+               block_height    BIGINT        NOT NULL DEFAULT 0,
+               peer_count      INTEGER       NOT NULL DEFAULT 0,
+               gossip_url      JSONB         NOT NULL DEFAULT '{}'::JSONB,
+               created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+           )""",
+        """CREATE INDEX IF NOT EXISTS idx_oracle_registry_last_seen
+               ON oracle_registry (last_seen DESC)""",
+        """CREATE INDEX IF NOT EXISTS idx_oracle_registry_primary
+               ON oracle_registry (is_primary) WHERE is_primary = TRUE""",
+        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS last_seen BIGINT NOT NULL DEFAULT 0",
+        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS block_height BIGINT NOT NULL DEFAULT 0",
+        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS peer_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS gossip_url JSONB NOT NULL DEFAULT '{}'::JSONB",
+    ]
+    ok = True
+    for ddl in ddl_statements:
+        try:
+            with get_db_cursor() as cur: cur.execute(ddl)
+        except Exception as e:
+            logger.debug(f"[ORACLE_REG] DDL skipped ({ddl[:50]}): {e}")
+            ok = False
+    if ok: logger.info("[ORACLE_REG] ✅ oracle_registry verified/created")
+    return ok
+
+_oracle_registry_ensured = False
+_oracle_registry_lock    = threading.Lock()
+
+def _lazy_ensure_oracle_registry():
+    global _oracle_registry_ensured
+    if _oracle_registry_ensured: return
+    with _oracle_registry_lock:
+        if _oracle_registry_ensured: return
+        _ensure_oracle_registry()
+        _oracle_registry_ensured = True
+
+
 def _ensure_gossip_tables() -> bool:
     """
     Create gossip_store and ensure peer_registry has gossip_url + last_gossip_at cols.
@@ -2045,65 +2090,6 @@ def _ensure_gossip_tables() -> bool:
         except Exception as e:
             logger.debug(f"[GOSSIP] DDL skipped ({ddl[:40]}...): {e}")
     return True
-
-
-def _ensure_oracle_registry() -> bool:
-    """
-    CREATE TABLE IF NOT EXISTS oracle_registry — safe to call multiple times.
-    Captures every oracle instance heartbeat (primary + replicas).
-    Also adds any missing columns to handle rolling deploys against older schema.
-    """
-    ddl_statements = [
-        """CREATE TABLE IF NOT EXISTS oracle_registry (
-               oracle_id       VARCHAR(128)  PRIMARY KEY,
-               oracle_url      VARCHAR(512)  NOT NULL DEFAULT '',
-               oracle_address  VARCHAR(128)  NOT NULL DEFAULT '',
-               is_primary      BOOLEAN       NOT NULL DEFAULT FALSE,
-               last_seen       BIGINT        NOT NULL DEFAULT 0,
-               block_height    BIGINT        NOT NULL DEFAULT 0,
-               peer_count      INTEGER       NOT NULL DEFAULT 0,
-               gossip_url      JSONB         NOT NULL DEFAULT '{}'::JSONB,
-               created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-           )""",
-        """CREATE INDEX IF NOT EXISTS idx_oracle_registry_last_seen
-               ON oracle_registry (last_seen DESC)""",
-        """CREATE INDEX IF NOT EXISTS idx_oracle_registry_primary
-               ON oracle_registry (is_primary) WHERE is_primary = TRUE""",
-        # Idempotent column guards for rolling deploys
-        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS oracle_url     VARCHAR(512) NOT NULL DEFAULT ''",
-        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS oracle_address VARCHAR(128) NOT NULL DEFAULT ''",
-        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS is_primary     BOOLEAN      NOT NULL DEFAULT FALSE",
-        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS last_seen      BIGINT       NOT NULL DEFAULT 0",
-        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS block_height   BIGINT       NOT NULL DEFAULT 0",
-        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS peer_count     INTEGER      NOT NULL DEFAULT 0",
-        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS gossip_url     JSONB        NOT NULL DEFAULT '{}'::JSONB",
-    ]
-    ok = True
-    for ddl in ddl_statements:
-        try:
-            with get_db_cursor() as cur:
-                cur.execute(ddl)
-        except Exception as e:
-            logger.debug(f"[ORACLE_REG] DDL skipped ({ddl[:50]}…): {e}")
-            ok = False
-    if ok:
-        logger.info("[ORACLE_REG] ✅ oracle_registry table verified/created")
-    return ok
-
-
-_oracle_registry_ensured = False
-_oracle_registry_lock    = threading.Lock()
-
-def _lazy_ensure_oracle_registry():
-    """Thread-safe once-only call to _ensure_oracle_registry."""
-    global _oracle_registry_ensured
-    if _oracle_registry_ensured:
-        return
-    with _oracle_registry_lock:
-        if _oracle_registry_ensured:
-            return
-        _ensure_oracle_registry()
-        _oracle_registry_ensured = True
 
 
 def gossip_store_put(key: str, value: Dict[str, Any]) -> bool:
@@ -5224,35 +5210,43 @@ def _gksl_step(rho: _np.ndarray, dt: float,
                omega: float, g1: float, gphi: float, gdep: float,
                n: int) -> _np.ndarray:
     """
-    4th-order Runge-Kutta integration of GKSL master equation.
-    H = ω/2 · Σ_q σ_z^(q)   (free precession)
-    Per-qubit collapse:
-      L_amp  = √γ₁  · σ-    (amplitude damping, T1)
-      L_dep  = √γ₁  · σ+    (detailed balance upward — keeps trace)
-      L_phs  = √γφ  · σz/2  (pure dephasing, T2*)
-      L_dep  = √γdep· I/√2  (isotropic depolarising)
+    4th-order Runge-Kutta GKSL with adaptive sub-stepping:
+    h_sub = min(dt, 0.05/gamma_max) — keeps RK4 inside stability region
+    regardless of how large γ or dt grow.
     """
     def _lind(r):
         d = _np.zeros_like(r)
         for q in range(n):
             H_q = (omega/2.0) * _embed(_SZ, q, n)
             d  += -1j*(H_q@r - r@H_q)
-            for gam, op in ((g1, _embed(_SM, q, n)),
-                            (g1*0.1, _embed(_SP, q, n)),   # weak up (detailed balance)
-                            (gphi, _embed(_SZ*0.5, q, n)),
-                            (gdep, _np.eye(2**n, dtype=complex)*_np.sqrt(0.5))):
+            for gam, op in ((g1,      _embed(_SM,        q, n)),
+                            (g1*0.1,  _embed(_SP,        q, n)),
+                            (gphi,    _embed(_SZ*0.5,    q, n)),
+                            (gdep,    _np.eye(2**n, dtype=complex)*_np.sqrt(0.5))):
                 if gam < 1e-14: continue
                 L  = _np.sqrt(gam)*op; Ld = L.conj().T
                 d += L@r@Ld - 0.5*(Ld@L@r + r@Ld@L)
         return d
-    k1 = _lind(rho)
-    k2 = _lind(rho+0.5*dt*k1)
-    k3 = _lind(rho+0.5*dt*k2)
-    k4 = _lind(rho+dt*k3)
-    out = rho + (dt/6.0)*(k1+2*k2+2*k3+k4)
-    out = 0.5*(out+out.conj().T)
-    tr  = _np.real(_np.trace(out))
-    return out/max(tr, 1e-12)
+    def _rk4_sub(r, h):
+        k1 = _lind(r)
+        k2 = _lind(r + 0.5*h*k1)
+        k3 = _lind(r + 0.5*h*k2)
+        k4 = _lind(r + h*k3)
+        out = r + (h/6.0)*(k1 + 2*k2 + 2*k3 + k4)
+        out = 0.5*(out + out.conj().T)
+        tr  = _np.real(_np.trace(out))
+        return out / max(tr, 1e-12)
+    gamma_max = max(g1, gphi, gdep, abs(omega)/(2*_np.pi+1e-9), 1e-9)
+    h_max     = 0.05 / gamma_max
+    n_steps   = max(1, int(_np.ceil(dt / h_max)))
+    h_sub     = dt / n_steps
+    cur = rho.copy()
+    for _ in range(n_steps):
+        cur = _rk4_sub(cur, h_sub)
+        if not _np.all(_np.isfinite(cur)):
+            cur = _w_dm(n)
+            break
+    return cur
 
 # ── Ornstein-Uhlenbeck bath memory ─────────────────────────────────────────────
 _BATH_ETA3, _BATH_WC, _BATH_W0, _BATH_GR, _KAPPA3 = 0.12, 6.283, 3.14159, 0.11, 0.11
@@ -5654,6 +5648,19 @@ def _db_peer(pid:str):
     except Exception: pass
     return None
 
+def _sanitize_for_json(v):
+    """Replace inf/nan/overflow with finite sentinel for PostgreSQL JSONB."""
+    if isinstance(v, float):
+        if _np.isnan(v) or _np.isinf(v): return 0.0
+        if abs(v) > 1e15: return float(_np.sign(v)) * 1e15
+    if isinstance(v, _np.floating):
+        f = float(v)
+        if _np.isnan(f) or _np.isinf(f): return 0.0
+        if abs(f) > 1e15: return float(_np.sign(f)) * 1e15
+        return f
+    if isinstance(v, _np.integer): return int(v)
+    return v
+
 def _write_db(cycle,metrics):
     import json as _j
     try:
@@ -5668,16 +5675,16 @@ def _write_db(cycle,metrics):
                     peer_count=EXCLUDED.peer_count,gossip_url=EXCLUDED.gossip_url
             """,(ORACLE_ID,os.getenv('PUBLIC_URL',''),ORACLE_ID,ORACLE_ROLE=='primary',
                  state.block_state.get('current_height',0),metrics.get('n_peers',0),
-                 _j.dumps({k:metrics.get(k) for k in ('theta','phi','w3_fidelity','wN_fidelity',
+                 _j.dumps({k:_sanitize_for_json(metrics.get(k)) for k in (
+                    'theta','phi','w3_fidelity','wN_fidelity',
                     'negativity','concurrence','qfi','discord','coherence','purity','sector_occ',
                     'gamma1','gammaphi','gammadep','gamma_geo','omega','ou_mem','n_peers','cycle')})))
     except Exception as _e:
         _emsg = str(_e)
         if 'oracle_registry' in _emsg and 'does not exist' in _emsg:
-            logger.warning("[ENT v3] oracle_registry missing — auto-creating schema")
+            logger.warning("[ENT v3] oracle_registry missing — auto-creating")
             _ensure_oracle_registry()
-            global _oracle_registry_ensured
-            _oracle_registry_ensured = True
+            global _oracle_registry_ensured; _oracle_registry_ensured = True
         else:
             logger.debug(f"[ENT v3] DB write: {_e}")
 
@@ -5869,6 +5876,11 @@ def quantum_metrics_thread():
             omega = (qp + (int(bh[:8],16)/0xFFFFFFFF)*2*_np.pi)/(2*_np.pi)
 
             rho3 = _gksl_step(rho_mix, dt, omega, gamma1_eff, gammaphi, gammadep, 3)
+
+            # NaN/Inf hard guard: rho3 must be finite before any measures
+            if not _np.all(_np.isfinite(rho3)):
+                logger.warning("[ENT v3] rho3 diverged — resetting to W-state")
+                rho3 = _w_dm(3)
 
             # ── 7. W-state sector correction (EVERY cycle, aggressive threshold) ──
             sector_occ = _safe_numeric(_sector_occupation(rho3), 0.5)
