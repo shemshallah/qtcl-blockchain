@@ -41,6 +41,7 @@ import hashlib
 import secrets
 import logging
 import _thread
+import threading
 # ═══════════════════════════════════════════════════════════════════════════════
 # 5-ORACLE BYZANTINE CONSENSUS INTEGRATION
 # ═══════════════════════════════════════════════════════════════════════════════
