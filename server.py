@@ -812,27 +812,49 @@ except ImportError as e:
 # Supabase provides individual pooler connection variables OR a full URL# Try full URL first, then build from components
 
 POOLER_URL = os.getenv('POOLER_URL')
+_USE_HTTP_DB = os.getenv('USE_HTTP_DB', '0') == '1'  # PythonAnywhere: route SQL over HTTPS PostgREST
 
 if not POOLER_URL:
-    # Build from individual Supabase environment variables
-    POOLER_HOST = os.getenv('POOLER_HOST')
-    POOLER_USER = os.getenv('POOLER_USER')
+    POOLER_HOST     = os.getenv('POOLER_HOST')
+    POOLER_USER     = os.getenv('POOLER_USER')
     POOLER_PASSWORD = os.getenv('POOLER_PASSWORD')
-    POOLER_DB = os.getenv('POOLER_DB', 'postgres')
-    POOLER_PORT = os.getenv('POOLER_PORT', '6543')
-    
+    POOLER_DB       = os.getenv('POOLER_DB', 'postgres')
+    POOLER_PORT     = os.getenv('POOLER_PORT', '6543')
+
     if POOLER_HOST and POOLER_USER and POOLER_PASSWORD:
         POOLER_URL = f"postgresql://{POOLER_USER}:{POOLER_PASSWORD}@{POOLER_HOST}:{POOLER_PORT}/{POOLER_DB}"
         logger.info("[DB] Built POOLER_URL from POOLER_* environment variables")
+    elif _USE_HTTP_DB:
+        # On PythonAnywhere, raw TCP to Supabase is blocked — we use HTTPS PostgREST RPC instead.
+        # POOLER_URL is not needed; set a sentinel so module-level code that references it doesn't crash.
+        POOLER_URL = 'postgresql://http-mode-no-tcp-needed/postgres'
+        logger.info("[DB] USE_HTTP_DB=1 — POOLER_URL not required (all SQL routes via HTTPS PostgREST)")
     else:
         logger.error("[DB] ❌ CRITICAL: Supabase connection not configured!")
         logger.error("[DB] Set one of:")
         logger.error("[DB]   1. POOLER_URL=postgresql://...")
         logger.error("[DB]   2. POOLER_HOST, POOLER_USER, POOLER_PASSWORD, POOLER_DB, POOLER_PORT")
+        logger.error("[DB]   3. USE_HTTP_DB=1 + SUPABASE_URL + SUPABASE_SERVICE_KEY  (PythonAnywhere)")
         raise ValueError("Supabase pooler connection variables not set")
 
 DB_URL = POOLER_URL
-logger.info(f"[DB] ✨ Using Supabase Pooler: {POOLER_HOST or 'configured'}")
+if not _USE_HTTP_DB:
+    logger.info(f"[DB] ✨ Using Supabase Pooler: {os.getenv('POOLER_HOST') or 'configured'}")
+else:
+    logger.info(f"[DB] ✨ HTTP-DB mode: {os.getenv('SUPABASE_URL', '(SUPABASE_URL not set)')}")
+
+# ── Oracle identity — unique per deployed instance ────────────────────────────
+# Set ORACLE_ID in env to distinguish instances:
+#   primary   → Koyeb main       (ORACLE_ID=koyeb-primary)
+#   secondary → PythonAnywhere   (ORACLE_ID=pa-secondary)
+#   tertiary  → Koyeb account 2  (ORACLE_ID=koyeb-tertiary)
+# All instances share the same Supabase DB — they are peers, not replicas.
+ORACLE_ID   = os.getenv('ORACLE_ID',   'koyeb-primary')
+ORACLE_ROLE = os.getenv('ORACLE_ROLE', 'primary')
+# Peer oracle URLs — other oracle instances this one will cross-register with
+_peer_oracle_env = os.getenv('BOOTSTRAP_NODES', '')
+PEER_ORACLE_URLS = [u.strip() for u in _peer_oracle_env.split(',') if u.strip()] if _peer_oracle_env else []
+logger.info(f"[ORACLE] 🌐 Identity: id={ORACLE_ID} role={ORACLE_ROLE} peers={len(PEER_ORACLE_URLS)}")
 
 # P2P Network — All on port 8000 (unified with REST API via Flask-SocketIO)
 P2P_PORT = int(os.getenv('PORT', int(os.getenv('FLASK_PORT', 8000))))  # Use PORT (8000 on Koyeb) or FLASK_PORT
@@ -1008,12 +1030,270 @@ class TransactionInfo:
 # ═════════════════════════════════════════════════════════════════════════════════
 # DATABASE LAYER WITH CONNECTION POOLING
 # ═════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════════
+# SUPABASE HTTP DATABASE ADAPTER (inline — PythonAnywhere TCP-blocked environments)
+# ═════════════════════════════════════════════════════════════════════════════════
+# When USE_HTTP_DB=1, every cursor.execute() routes through PostgREST RPC over HTTPS
+# instead of a raw psycopg2 TCP connection.  The two Supabase RPC functions required:
+#   exec_sql_select(query text) → jsonb   (SELECT / WITH / EXPLAIN / SHOW / VALUES)
+#   exec_sql_write(query text)  → jsonb   (INSERT / UPDATE / DELETE / DO)
+# Run the migration SQL in Supabase Dashboard → SQL Editor once to create them.
+# Env vars needed:  SUPABASE_URL, SUPABASE_SERVICE_KEY  (service_role JWT)
+# ─────────────────────────────────────────────────────────────────────────────────
+
+import re as _re, decimal as _decimal
+
+try:
+    import requests as _http_requests; _HTTP_BACKEND = 'requests'
+except ImportError:
+    import urllib.request as _urllib_req, urllib.error as _urllib_err; _HTTP_BACKEND = 'urllib'
+
+def _http_json_serial(o):
+    if isinstance(o, (datetime, )): return o.isoformat()
+    if isinstance(o, _decimal.Decimal): return float(o)
+    if isinstance(o, (bytes, bytearray)): return o.hex()
+    raise TypeError(f"not serialisable: {type(o)}")
+
+def _http_post_json(url, headers, payload, timeout=30, retries=3):
+    """POST JSON; retry on 5xx/network with exponential backoff. Returns parsed body."""
+    import json as _json
+    raw = _json.dumps(payload, default=_http_json_serial).encode()
+    hdrs = {**headers, 'Content-Type': 'application/json'}
+    last = None
+    for attempt in range(retries):
+        if attempt: time.sleep(min(0.5 * 2**attempt, 8))
+        try:
+            if _HTTP_BACKEND == 'requests':
+                r = _http_requests.post(url, data=raw, headers=hdrs, timeout=timeout)
+                status, text = r.status_code, r.text
+            else:
+                req = _urllib_req.Request(url, data=raw, headers=hdrs, method='POST')
+                try:
+                    with _urllib_req.urlopen(req, timeout=timeout) as r:
+                        status, text = r.status, r.read().decode()
+                except _urllib_err.HTTPError as e:
+                    status, text = e.code, e.read().decode()
+            if status < 500:
+                if status >= 400:
+                    import json as _j
+                    try: detail = _j.loads(text).get('message') or text
+                    except Exception: detail = text
+                    raise RuntimeError(f"Supabase RPC HTTP {status}: {detail}")
+                import json as _j; return _j.loads(text)
+            last = RuntimeError(f"Supabase RPC HTTP {status}: {text}")
+        except (OSError, TimeoutError) as e:
+            last = e; logger.warning(f"[SUPHTTP] attempt {attempt+1}/{retries}: {e}")
+    raise last or RuntimeError("_http_post_json exhausted retries")
+
+# Singleton HTTP client config
+_SUPHTTP_CFG: Dict[str, Any] = {}
+_SUPHTTP_LOCK = threading.Lock()
+
+def _suphttp_cfg():
+    """Lazily populate and return the HTTP client config dict."""
+    with _SUPHTTP_LOCK:
+        if _SUPHTTP_CFG: return _SUPHTTP_CFG
+        url = os.getenv('SUPABASE_URL', '').rstrip('/')
+        key = os.getenv('SUPABASE_SERVICE_KEY') or os.getenv('SUPABASE_ANON_KEY', '')
+        if not url: raise EnvironmentError("SUPABASE_URL env var not set (required for USE_HTTP_DB=1)")
+        if not key: raise EnvironmentError("SUPABASE_SERVICE_KEY env var not set (required for USE_HTTP_DB=1)")
+        _SUPHTTP_CFG.update({
+            'url': url, 'timeout': int(os.getenv('SUPABASE_HTTP_TIMEOUT', '30')),
+            'retries': int(os.getenv('SUPABASE_HTTP_RETRIES', '3')),
+            'headers': {'apikey': key, 'Authorization': f'Bearer {key}', 'Prefer': 'return=representation'},
+        })
+        logger.info(f"[SUPHTTP] ✓ client configured → {url}/rest/v1/rpc/exec_sql_*")
+        return _SUPHTTP_CFG
+
+_PARAM_RE = _re.compile(r'%\((\w+)\)s|%s')
+_SELECT_FIRST = frozenset({'select','with','explain','show','table','values','fetch'})
+_WRITE_FIRST  = frozenset({'insert','update','delete','do','call','perform'})
+_COMMENT_STRIP = _re.compile(r'^(?:\s|--[^\n]*\n|/\*.*?\*/)*', _re.DOTALL)
+
+def _escape_sql_literal(v):
+    """Convert Python value → safe PostgreSQL literal (dollar-quoting / type-aware)."""
+    if v is None: return 'NULL'
+    if isinstance(v, bool): return 'TRUE' if v else 'FALSE'
+    if isinstance(v, int): return str(v)
+    if isinstance(v, float):
+        if v != v: return 'NULL'
+        if v == float('inf'): return "'Infinity'::float8"
+        if v == float('-inf'): return "'-Infinity'::float8"
+        return repr(v)
+    if isinstance(v, _decimal.Decimal): return str(v)
+    if isinstance(v, (bytes, bytearray)): return f"decode('{v.hex()}','hex')"
+    if isinstance(v, datetime): 
+        return f"'{v.isoformat()}'::timestamptz" if v.tzinfo else f"'{v.isoformat()}'::timestamp"
+    if isinstance(v, (list, tuple)): return f"ARRAY[{','.join(_escape_sql_literal(x) for x in v)}]"
+    if isinstance(v, dict):
+        import json as _j; return f"'{_j.dumps(v, default=_http_json_serial)}'::jsonb"
+    s = str(v); tag = '$qtcl$'
+    if tag in s:
+        return "E'" + s.replace('\\','\\\\').replace("'","\\'") + "'"
+    return f"{tag}{s}{tag}"
+
+def _substitute_params(sql, params):
+    if not params: return sql
+    if isinstance(params, dict):
+        return _PARAM_RE.sub(lambda m: _escape_sql_literal(params[m.group(1)]) if m.group(1) else (_ for _ in ()).throw(ValueError("mixed placeholders")), sql)
+    it = iter(params)
+    return _PARAM_RE.sub(lambda m: _escape_sql_literal(next(it)), sql)
+
+def _classify_sql(sql):
+    first = _COMMENT_STRIP.sub('', sql).lstrip().split()
+    kw = first[0].lower().rstrip(';') if first else ''
+    if kw in _SELECT_FIRST: return 'select'
+    if kw in _WRITE_FIRST:  return 'write'
+    return 'select'  # unknown → try as select
+
+def _suphttp_exec_select(sql):
+    cfg = _suphttp_cfg()
+    raw = _http_post_json(f"{cfg['url']}/rest/v1/rpc/exec_sql_select", cfg['headers'],
+                          {'query': sql}, cfg['timeout'], cfg['retries'])
+    # PostgREST wraps JSONB RPC result: [{exec_sql_select: [...]}, ...] or [[...]] or [...]
+    if isinstance(raw, list) and raw:
+        inner = raw[0]
+        if isinstance(inner, dict):
+            vals = list(inner.values())
+            if len(vals) == 1 and isinstance(vals[0], list): return vals[0]
+            return [inner]
+        if isinstance(inner, list): return inner
+        return raw
+    if isinstance(raw, dict):
+        vals = list(raw.values())
+        if len(vals) == 1 and isinstance(vals[0], list): return vals[0]
+        return [raw]
+    return []
+
+def _suphttp_exec_write(sql):
+    cfg = _suphttp_cfg()
+    raw = _http_post_json(f"{cfg['url']}/rest/v1/rpc/exec_sql_write", cfg['headers'],
+                          {'query': sql}, cfg['timeout'], cfg['retries'])
+    if isinstance(raw, list) and raw: raw = raw[0]
+    if isinstance(raw, dict):
+        inner = raw.get('exec_sql_write') or raw
+        if isinstance(inner, dict): return int(inner.get('affected_rows', 0))
+    return 0
+
+class _SupHTTPCursor:
+    """psycopg2-compatible cursor backed by Supabase PostgREST HTTPS RPC."""
+    def __init__(self):
+        self._rows: List[tuple] = []; self._pos = 0; self._rowcount = -1
+        self._description = None; self.closed = False
+    @property
+    def rowcount(self): return self._rowcount
+    @property
+    def description(self): return self._description
+    def mogrify(self, sql, params=None): return _substitute_params(sql, params)
+    def execute(self, sql, params=None):
+        if self.closed: raise RuntimeError("cursor closed")
+        final = _substitute_params(sql, params)
+        logger.debug(f"[SUPHTTP] execute: {final[:100]}{'...' if len(final)>100 else ''}")
+        if _classify_sql(final) == 'select':
+            rows_dicts = _suphttp_exec_select(final)
+            if not rows_dicts: self._rows=[]; self._pos=0; self._rowcount=0; self._description=None; return
+            keys = list(rows_dicts[0].keys())
+            self._description = [(k,None,None,None,None,None,None) for k in keys]
+            self._rows = [tuple(r.get(k) for k in keys) for r in rows_dicts]
+            self._pos = 0; self._rowcount = len(self._rows)
+        else:
+            self._rowcount = _suphttp_exec_write(final)
+            self._rows=[]; self._pos=0; self._description=None
+    def executemany(self, sql, seq):
+        for p in seq: self.execute(sql, p)
+    def fetchone(self):
+        if self._pos < len(self._rows):
+            row = self._rows[self._pos]; self._pos += 1; return row
+        return None
+    def fetchall(self):
+        rows = self._rows[self._pos:]; self._pos = len(self._rows); return rows
+    def fetchmany(self, size=1):
+        rows = self._rows[self._pos:self._pos+size]; self._pos += len(rows); return rows
+    def __iter__(self):
+        while self._pos < len(self._rows): yield self.fetchone()
+    def close(self): self.closed = True; self._rows = []
+    def __enter__(self): return self
+    def __exit__(self, *_): self.close()
+
+class _SupHTTPConn:
+    """psycopg2-compatible connection backed by Supabase PostgREST HTTPS RPC.
+    commit()/rollback() are no-ops — PostgREST RPC is auto-committed per call.
+    .closed mirrors psycopg2 int semantics: 0=open, 1=closed, 2=lost."""
+    def __init__(self): self.closed = 0; self.autocommit = True   # 0 = open (psycopg2 int semantics)
+    def cursor(self, *_, **__):
+        if self.closed: raise RuntimeError("connection closed")
+        return _SupHTTPCursor()
+    def commit(self): pass   # no-op: stateless HTTPS
+    def rollback(self):
+        logger.debug("[SUPHTTP] rollback() — HTTP connections are auto-committed; no-op")
+    def close(self): self.closed = 1
+    def set_session(self, *_, **__): pass
+    def set_isolation_level(self, *_, **__): pass
+    def __enter__(self): return self
+    def __exit__(self, exc_type, *_):
+        if not exc_type: self.commit()
+        else: self.rollback()
+        return False
+
+class _SupHTTPPool:
+    """Thread-safe free-list pool of _SupHTTPConn objects."""
+    def __init__(self, minconn=1, maxconn=20):
+        self._max = maxconn; self._lock = threading.Lock()
+        self._free: List[_SupHTTPConn] = []; self._in_use: List[_SupHTTPConn] = []
+        self.closed = False
+    def getconn(self, key=None):
+        if self.closed: raise RuntimeError("HTTP pool closed")
+        with self._lock:
+            while self._free:
+                c = self._free.pop()
+                if not c.closed: self._in_use.append(c); return c
+            if len(self._in_use) < self._max:
+                c = _SupHTTPConn(); self._in_use.append(c); return c
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+            with self._lock:
+                while self._free:
+                    c = self._free.pop()
+                    if not c.closed: self._in_use.append(c); return c
+        raise RuntimeError("[SUPHTTP] Pool exhausted after 30s")
+    def putconn(self, conn, close=False, key=None):
+        if conn is None: return
+        with self._lock:
+            if conn in self._in_use: self._in_use.remove(conn)
+            if close or conn.closed or self.closed: conn.close()
+            else: conn.closed = False; self._free.append(conn)
+    def closeall(self):
+        with self._lock:
+            self.closed = True
+            for c in self._free + self._in_use:
+                try: c.close()
+                except Exception: pass
+            self._free.clear(); self._in_use.clear()
+
+def _suphttp_test_connection() -> bool:
+    try:
+        rows = _suphttp_exec_select("SELECT 1 AS ping, NOW() AS ts")
+        ok = bool(rows and rows[0].get('ping') == 1)
+        if ok: logger.info(f"[SUPHTTP] ✓ connection test passed — server ts={rows[0].get('ts')}")
+        else:  logger.warning(f"[SUPHTTP] ⚠ unexpected test response: {rows}")
+        return ok
+    except Exception as e:
+        logger.error(f"[SUPHTTP] ✗ connection test FAILED: {e}"); return False
+
+# ═════════════════════════════════════════════════════════════════════════════════
+# DATABASE POOL
+# ═════════════════════════════════════════════════════════════════════════════════
+
 class DatabasePool:
-    """Thread-safe connection pool for efficient database access (lazy initialization)"""
-    
+    """Thread-safe connection pool.  Transparently switches between:
+       • psycopg2 TCP pool (Koyeb / any server with direct Supabase TCP access)
+       • _SupHTTPPool  HTTP pool (PythonAnywhere where outbound TCP 5432/6543 is blocked)
+    Controlled by USE_HTTP_DB=1 environment variable."""
+
     _instance = None
     _lock = threading.Lock()
-    
+
     def __new__(cls):
         if cls._instance is None:
             with cls._lock:
@@ -1022,74 +1302,83 @@ class DatabasePool:
                     cls._instance._initialized = False
                     cls._instance.pool = None
                     cls._instance.use_pooling = True
+                    cls._instance._http_mode = False
         return cls._instance
-    
+
     def _initialize_pool(self):
-        """Initialize connection pool (lazy - only when first used)"""
         if self._initialized:
             return
-        
         with self._lock:
             if self._initialized:
                 return
-            
+
+            # ── HTTP mode (PythonAnywhere) ────────────────────────────────────
+            if _USE_HTTP_DB:
+                try:
+                    _suphttp_cfg()   # validate SUPABASE_URL / SUPABASE_SERVICE_KEY present
+                    if not _suphttp_test_connection():
+                        logger.error("[DB] ❌ Supabase HTTP connection test failed — "
+                                     "check SUPABASE_URL and SUPABASE_SERVICE_KEY")
+                        # Don't mark initialized so it retries on next request
+                        return
+                    self.pool = _SupHTTPPool(
+                        minconn=int(os.getenv('DB_POOL_MIN', '1')),
+                        maxconn=int(os.getenv('DB_POOL_MAX', '20')),
+                    )
+                    self._initialized = True
+                    self.use_pooling  = True
+                    self._http_mode   = True
+                    logger.info("[DB] ✨ Connected to Supabase via HTTPS PostgREST RPC (HTTP-DB mode)")
+                except EnvironmentError as e:
+                    logger.error(f"[DB] ❌ HTTP-DB config error: {e}")
+                    self._initialized = False
+                except Exception as e:
+                    logger.error(f"[DB] ❌ HTTP-DB init error: {e}")
+                    self._initialized = False
+                return
+
+            # ── Native psycopg2 TCP mode (Koyeb / self-hosted) ───────────────
             try:
-                # Try to import pool module (for app-level pooling on top of Supabase pooler)
                 from psycopg2 import pool as psycopg2_pool
-                
-                # Connection pool configuration (app-level pooling)
                 min_connections = int(os.getenv('DB_POOL_MIN', '2'))
                 max_connections = int(os.getenv('DB_POOL_MAX', '10'))
-                
                 logger.info(f"[DB] Initializing app-level pooling: min={min_connections}, max={max_connections}")
                 logger.info(f"[DB] Connecting to Supabase pooler (aws-0-us-west-2.pooler.supabase.com)")
-                
                 self.pool = psycopg2_pool.ThreadedConnectionPool(
-                    min_connections,
-                    max_connections,
-                    DB_URL,
-                    connect_timeout=10
-                )
+                    min_connections, max_connections, DB_URL, connect_timeout=10)
                 self._initialized = True
-                self.use_pooling = True
+                self.use_pooling  = True
                 logger.info("[DB] ✨ Connected to Supabase pooler successfully")
-            
-            except (ImportError, AttributeError) as e:
-                # psycopg2.pool not available - use direct connections via pooler
-                logger.info(f"[DB] App-level pooling unavailable, using direct connections")
+            except (ImportError, AttributeError):
+                logger.info("[DB] App-level pooling unavailable, using direct connections")
                 logger.info("[DB] ✨ Connected to Supabase pooler (direct mode)")
                 self._initialized = True
-                self.use_pooling = False
-                self.pool = None
-            
+                self.use_pooling  = False
+                self.pool         = None
             except psycopg2.OperationalError as e:
                 logger.error(f"[DB] ❌ Cannot connect to Supabase pooler: {e}")
                 logger.error("[DB] Check POOLER_* environment variables are set correctly")
-                logger.error("[DB] Retrying on first request...")
                 self._initialized = False
-                self.use_pooling = False
-            
+                self.use_pooling  = False
             except Exception as e:
                 logger.error(f"[DB] Error initializing pool: {e}")
                 self._initialized = True
-                self.use_pooling = False
-                self.pool = None
-    
+                self.use_pooling  = False
+                self.pool         = None
+
     def get_connection(self):
-        """Get a connection (from pool if available, otherwise direct via pooler)"""
         if not self._initialized:
             self._initialize_pool()
-        
         try:
+            if self._http_mode and self.pool:
+                return self.pool.getconn()
             if self.use_pooling and self.pool:
                 conn = self.pool.getconn()
                 if conn is None:
                     logger.debug("[DB] Pool exhausted, creating direct connection via pooler")
                     conn = psycopg2.connect(DB_URL, connect_timeout=10)
                 return conn
-            else:
-                # Direct connection via Supabase pooler (no app-level pooling)
-                return psycopg2.connect(DB_URL, connect_timeout=10)
+            return psycopg2.connect(DB_URL, connect_timeout=10)
         except psycopg2.OperationalError as e:
             logger.error(f"[DB] ❌ Cannot connect to Supabase pooler: {e}")
             logger.error(f"[DB] Check POOLER_URL: {DB_URL[:50]}...")
@@ -1097,22 +1386,21 @@ class DatabasePool:
         except Exception as e:
             logger.error(f"[DB] Connection error: {e}")
             raise
-    
+
     def put_connection(self, conn):
-        """Return a connection to the pool (or close if no pooling)"""
         try:
-            if self.use_pooling and self.pool and conn:
+            if self._http_mode and self.pool and conn:
+                self.pool.putconn(conn)
+            elif self.use_pooling and self.pool and conn:
                 self.pool.putconn(conn)
             elif conn:
-                # No pooling, just close
                 conn.close()
         except Exception as e:
             logger.debug(f"[DB] Error handling connection return: {e}")
-    
+
     def close_all(self):
-        """Close all connections in the pool"""
         try:
-            if self.use_pooling and self.pool:
+            if self.pool:
                 self.pool.closeall()
                 logger.info("[DB] Connection pool closed")
         except Exception as e:
@@ -1619,7 +1907,11 @@ class _SSEBroadcaster:
     # ── PostgreSQL NOTIFY (write path) ────────────────────────────────────────
 
     def _pg_notify(self, payload: str) -> None:
-        """Fire-and-forget NOTIFY on dedicated connection."""
+        """Fire-and-forget NOTIFY on dedicated connection.
+        In HTTP mode, TCP NOTIFY is unavailable — fall through directly to local fan-out."""
+        if _USE_HTTP_DB:
+            self._fanout_local(payload)
+            return
         try:
             with self._notify_lock:
                 if self._notify_conn is None or self._notify_conn.closed:
@@ -1643,7 +1935,16 @@ class _SSEBroadcaster:
         self._listener_thread = t
 
     def _listen_loop(self) -> None:
-        """Persistent LISTEN loop — reconnects on any failure."""
+        """Persistent LISTEN loop — reconnects on any failure.
+        In HTTP mode (USE_HTTP_DB=1) PythonAnywhere blocks raw TCP so LISTEN/NOTIFY
+        is unavailable; the loop parks immediately and SSE runs local-only fan-out."""
+        if _USE_HTTP_DB:
+            logger.info("[SSE] HTTP mode — PG LISTEN disabled (local fan-out only, no cross-worker NOTIFY)")
+            self._pg_ok = False
+            while True:          # keep thread alive but do nothing
+                time.sleep(3600)
+            return
+
         import select as _select
         while True:
             conn = None
@@ -1698,6 +1999,11 @@ class _SSEBroadcaster:
 
     @staticmethod
     def _make_pg_conn():
+        if _USE_HTTP_DB:
+            # PythonAnywhere: no raw TCP — return an HTTP conn; LISTEN/NOTIFY
+            # will silently no-op (SSE falls back to local-only broadcast mode).
+            logger.debug("[SSE] _make_pg_conn: HTTP mode — returning _SupHTTPConn (no LISTEN/NOTIFY)")
+            return _SupHTTPConn()
         import psycopg2 as _pg2
         url = (os.getenv('DATABASE_URL') or os.getenv('POOLER_URL') or
                POOLER_URL)  # module-level Supabase pooler URL
@@ -2509,31 +2815,9 @@ def _snapshot_streaming_daemon():
                     except Exception as e:
                         logger.debug(f"[P2P-LONGPOLL] Oracle snapshot error: {e}")
                 
-                # Fallback: generate synthetic snapshot
+                # No real oracle snapshot available — do not emit synthetic metrics
                 if snapshot is None:
-                    synthetic_counter += 1
-                    ts_ns = int(time.time() * 1e9)
-                    entropy_hash = hashlib.sha3_256(
-                        str(synthetic_counter).encode() + secrets.token_bytes(16)
-                    ).hexdigest()
-                    
-                    snapshot = {
-                        'timestamp_ns': ts_ns,
-                        'oracle_address': ORACLE.oracle_address if ORACLE and hasattr(ORACLE, 'oracle_address') else 'qtcl1oracle',
-                        'density_matrix_hex': hashlib.sha3_256(str(synthetic_counter).encode()).hexdigest()[:512],
-                        'w_entropy_hash': entropy_hash,
-                        'purity': 0.95 + (synthetic_counter % 5) * 0.01,
-                        'w_state_fidelity': 0.94 + (synthetic_counter % 7) * 0.01,
-                        'hlwe_signature': {
-                            'commitment': hashlib.sha3_256(f'syn_{synthetic_counter}'.encode()).hexdigest(),
-                            'witness': hashlib.sha3_256(f'wit_{synthetic_counter}'.encode()).hexdigest(),
-                            'proof': hashlib.sha3_256(f'prf_{synthetic_counter}'.encode()).hexdigest(),
-                            'w_entropy_hash': entropy_hash,
-                            'derivation_path': "m/838'/0'/0'",
-                            'public_key_hex': 'qtcl_synthetic_' + secrets.token_hex(26)
-                        },
-                        'signature_valid': True
-                    }
+                    continue  # skip this tick; never push fabricated fidelity/purity values
                 
                 # Broadcast to all miners
                 if snapshot:
@@ -2872,10 +3156,10 @@ class SystemState:
         self.db_conn = None
         self.lattice_loaded = False
         self.quantum_metrics = {
-            'coherence': 0.99,
-            'entanglement': 0.95,
-            'phase_drift': 0.01,
-            'w_state_fidelity': 0.98,
+            'coherence': None,        # null until real oracle data arrives
+            'entanglement': None,
+            'phase_drift': None,
+            'w_state_fidelity': None,
         }
         self.block_state = {
             'current_height': 0,
@@ -4746,72 +5030,658 @@ else:
 # QUANTUM METRICS THREAD
 # ═════════════════════════════════════════════════════════════════════
 
-def quantum_metrics_thread():
-    """Background thread for metrics and state updates.
-    
-    CRITICAL: block state update is independent of pseudoqubit query.
-    A missing/empty pseudoqubits table must never prevent current_height advancing.
+# ═══════════════════════════════════════════════════════════════════════════════
+# DISTRIBUTED W-STATE ENTANGLEMENT ENGINE  v3
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# pq0 state sourced from THREE independent physical channels — blended via
+# weighted mean of their density matrices (not their scalars):
+#
+#   CH0 — LATTICE partial trace:  take LATTICE.current_density_matrix (256×256),
+#          partial-trace over qubits 3-7, yielding the actual 3-qubit field state.
+#
+#   CH1 — Batch-coherence max-entropy:  52 real batch-coherence scalars from
+#          LATTICE.coherence_engine → centre-weighted Bloch angles + purity radius
+#          → reconstruct mixed 1-qubit state, build tripartite product, then evolve.
+#
+#   CH2 — Poincaré-disk DB read (previous behaviour): pq0 {8,3} tessellation
+#          position + entropy_hex + block-hash + QRNG phase → theta/phi.
+#
+# GKSL master equation (RK4) with Ornstein-Uhlenbeck non-Markovian bath.
+# Four physical noise rates:
+#   γ₁   ← DB round-trip EMA   (amplitude damping, T1 channel)
+#   γφ   ← cycle jitter EMA    (pure dephasing, T2* channel)
+#   γdep ← QRNG source health  (depolarising, isotropic noise floor)
+#   γgeo ← hyperbolic geodesic pq0↔pq_max / log(N_pq)  (geometry noise)
+#
+# Entanglement measures computed every cycle:
+#   • Negativity N(ρ) = (||ρ^{T_A}||₁ − 1)/2  (PPT partial transpose, bipartite A|BC)
+#   • Concurrence C(ρ_{AB})  (Wootters formula on qubit-0,1 reduced state)
+#   • QFI F_Q[ρ, Jx]  (quantum Fisher information w.r.t. collective spin Jx)
+#   • Quantum discord D(ρ)  (fully computed, not stubbed)
+#   • W-state sector occupation P_W = Tr(ρ P_excit)  (single-excitation sector)
+#
+# W-state sector error correction every 4th cycle:
+#   Measure P_W.  If < 0.85: project ρ onto single-excitation sector,
+#   re-symmetrise over all 3 permutations → |W3⟩ manifold, re-normalise.
+#
+# N-oracle joint state:
+#   rhoN = ⊗_k rho3_k  →  project toward |WN⟩  →  GKSL under joint noise
+#   Teleportation fidelity F_tele = (2N + 1)/(3) scaled by negativity
+#
+# All state written to DB + served on /api/oracle/pq0-bloch every 2 seconds.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import numpy as _np
+from collections import deque as _deque
+
+# ── Pauli algebra ──────────────────────────────────────────────────────────────
+_I2 = _np.eye(2, dtype=complex)
+_SX = _np.array([[0,1],[1,0]], dtype=complex)
+_SY = _np.array([[0,-1j],[1j,0]], dtype=complex)
+_SZ = _np.array([[1,0],[0,-1]], dtype=complex)
+_SP = _np.array([[0,1],[0,0]], dtype=complex)
+_SM = _np.array([[0,0],[1,0]], dtype=complex)
+_H2 = _np.array([[1,1],[1,-1]], dtype=complex) / _np.sqrt(2)  # Hadamard
+
+def _kron_n(*ops):
+    r = ops[0]
+    for o in ops[1:]: r = _np.kron(r, o)
+    return r
+
+def _embed(op, q, n):
+    ops = [_I2]*n; ops[q] = op
+    return _kron_n(*ops)
+
+# ── Ideal W-state cache ────────────────────────────────────────────────────────
+_W_CACHE: dict = {}
+def _w_dm(n: int) -> _np.ndarray:
+    if n not in _W_CACHE:
+        dim = 2**n; v = _np.zeros(dim, dtype=complex)
+        for q in range(n): v[1 << (n-1-q)] = 1.0/_np.sqrt(n)
+        _W_CACHE[n] = _np.outer(v, v.conj())
+    return _W_CACHE[n]
+
+# Pre-build single-excitation sector projector for 3 qubits
+_P_EXCIT3 = _np.zeros((8,8), dtype=complex)
+for _idx in [4,2,1]: _P_EXCIT3[_idx,_idx] = 1.0   # |100⟩,|010⟩,|001⟩
+
+# ── Collective spin observables ────────────────────────────────────────────────
+_JX3 = 0.5*(_embed(_SX,0,3)+_embed(_SX,1,3)+_embed(_SX,2,3))
+_JY3 = 0.5*(_embed(_SY,0,3)+_embed(_SY,1,3)+_embed(_SY,2,3))
+_JZ3 = 0.5*(_embed(_SZ,0,3)+_embed(_SZ,1,3)+_embed(_SZ,2,3))
+
+# ── GKSL RK4 ──────────────────────────────────────────────────────────────────
+def _gksl_step(rho: _np.ndarray, dt: float,
+               omega: float, g1: float, gphi: float, gdep: float,
+               n: int) -> _np.ndarray:
     """
-    logger.info("[METRICS] Quantum metrics thread started")
-    
-    # ── Rehydrate in-memory state from DB on startup ──
-    # Handles Koyeb restarts where in-memory state is always fresh.
+    4th-order Runge-Kutta integration of GKSL master equation.
+    H = ω/2 · Σ_q σ_z^(q)   (free precession)
+    Per-qubit collapse:
+      L_amp  = √γ₁  · σ-    (amplitude damping, T1)
+      L_dep  = √γ₁  · σ+    (detailed balance upward — keeps trace)
+      L_phs  = √γφ  · σz/2  (pure dephasing, T2*)
+      L_dep  = √γdep· I/√2  (isotropic depolarising)
+    """
+    def _lind(r):
+        d = _np.zeros_like(r)
+        for q in range(n):
+            H_q = (omega/2.0) * _embed(_SZ, q, n)
+            d  += -1j*(H_q@r - r@H_q)
+            for gam, op in ((g1, _embed(_SM, q, n)),
+                            (g1*0.1, _embed(_SP, q, n)),   # weak up (detailed balance)
+                            (gphi, _embed(_SZ*0.5, q, n)),
+                            (gdep, _np.eye(2**n, dtype=complex)*_np.sqrt(0.5))):
+                if gam < 1e-14: continue
+                L  = _np.sqrt(gam)*op; Ld = L.conj().T
+                d += L@r@Ld - 0.5*(Ld@L@r + r@Ld@L)
+        return d
+    k1 = _lind(rho)
+    k2 = _lind(rho+0.5*dt*k1)
+    k3 = _lind(rho+0.5*dt*k2)
+    k4 = _lind(rho+dt*k3)
+    out = rho + (dt/6.0)*(k1+2*k2+2*k3+k4)
+    out = 0.5*(out+out.conj().T)
+    tr  = _np.real(_np.trace(out))
+    return out/max(tr, 1e-12)
+
+# ── Ornstein-Uhlenbeck bath memory ─────────────────────────────────────────────
+_BATH_ETA3, _BATH_WC, _BATH_W0, _BATH_GR, _KAPPA3 = 0.12, 6.283, 3.14159, 0.11, 0.11
+def _ou_memory(hist: list) -> float:
+    if len(hist) < 2: return 0.0
+    t_now = time.time(); s = 0.0
+    for i in range(1, len(hist)):
+        t0,_ = hist[i-1]; t1,_ = hist[i]; dtau = t1-t0
+        for t_pt in (t_now-t0, t_now-t1):
+            tau = abs(t_pt)
+            K = _BATH_ETA3*_BATH_WC**2*_np.exp(-_BATH_WC*tau)*(
+                _np.cos(_BATH_W0*tau)+(_BATH_GR/(_BATH_W0+1e-9))*_np.sin(_BATH_W0*tau))
+        s += 0.5*(abs(K)+abs(K))*dtau  # trapezoidal
+    return float(_np.clip(abs(s), 0.0, _KAPPA3))
+
+# ── Partial trace: keep first k qubits from n-qubit state ─────────────────────
+def _partial_trace_keep(rho: _np.ndarray, k: int, n: int) -> _np.ndarray:
+    """Trace out qubits k..n-1, return k-qubit reduced state."""
+    dk = 2**k; dt = 2**(n-k)
+    rho_r = _np.zeros((dk,dk), dtype=complex)
+    for i in range(dk):
+        for j in range(dk):
+            for m in range(dt):
+                rho_r[i,j] += rho[i*dt+m, j*dt+m]
+    tr = _np.real(_np.trace(rho_r))
+    return rho_r / max(tr, 1e-12)
+
+def _partial_trace_out(rho: _np.ndarray, q: int, n: int) -> _np.ndarray:
+    """Trace out qubit q from n-qubit system."""
+    dim = 2**n; dim_r = dim//2
+    idx0 = [i for i in range(dim) if not (i >> (n-1-q)) & 1]
+    idx1 = [i for i in range(dim) if     (i >> (n-1-q)) & 1]
+    # Map to reduced indices
+    def _red(i, q, n):
+        lo = i & ((1<<(n-1-q))-1); hi = i >> (n-q)
+        return (hi << (n-1-q)) | lo
+    rho_r = _np.zeros((dim_r,dim_r), dtype=complex)
+    for row_full in idx0+idx1:
+        for col_full in idx0+idx1:
+            r_row = _red(row_full, q, n); r_col = _red(col_full, q, n)
+            rho_r[r_row, r_col] += rho[row_full, col_full]
+    return rho_r / max(_np.real(_np.trace(rho_r)), 1e-12)
+
+# ── Entanglement measures ──────────────────────────────────────────────────────
+def _negativity(rho3: _np.ndarray) -> float:
+    """
+    Negativity N(ρ) = (||ρ^{T_A}||₁ − 1) / 2
+    Bipartite cut: qubit 0 (A) vs qubits 1,2 (BC).
+    Partial transpose on subsystem A: swap row/col indices of A block.
+    """
     try:
-        boot_block = query_latest_block()
-        if boot_block:
-            state.update_block_state({
-                'current_height': boot_block['height'],
-                'current_hash':   boot_block['hash'],
-                'timestamp':      boot_block['timestamp'],
-            })
-            logger.info(f"[METRICS] 🚀 State rehydrated from DB | height={boot_block['height']} | hash={boot_block['hash'][:16]}…")
-    except Exception as e:
-        logger.warning(f"[METRICS] ⚠️  Boot rehydration failed: {e}")
-    
+        # Reshape to (2,4,2,4), transpose A indices: (i_A, i_BC, j_A, j_BC) → (j_A, i_BC, i_A, j_BC)
+        pt = rho3.reshape(2,4,2,4).transpose(2,1,0,3).reshape(8,8)
+        ev = _np.linalg.eigvalsh(pt)
+        return float(max(0.0, -_np.sum(ev[ev < 0])))
+    except Exception:
+        return 0.0
+
+def _concurrence_2q(rho2: _np.ndarray) -> float:
+    """Wootters concurrence for 2-qubit density matrix."""
+    try:
+        sysy = _np.kron(_SY, _SY)
+        R    = rho2 @ sysy @ rho2.conj() @ sysy
+        ev   = _np.sort(_np.real(_np.linalg.eigvals(R)))[::-1]
+        ev   = _np.sqrt(_np.maximum(ev, 0))
+        return float(max(0.0, ev[0]-ev[1]-ev[2]-ev[3]))
+    except Exception:
+        return 0.0
+
+def _qfi_jx(rho3: _np.ndarray) -> float:
+    """
+    Quantum Fisher Information F_Q[ρ, Jx] via SLD formula:
+    F_Q = 2 Σ_{i,j: λi+λj>0} (λi−λj)²/(λi+λj) |⟨i|Jx|j⟩|²
+    For ideal |W3⟩: F_Q = 7.0  (sub-Heisenberg but super-shot-noise)
+    """
+    try:
+        ev, evec = _np.linalg.eigh(rho3)
+        ev = _np.maximum(ev, 0); qfi = 0.0
+        for i in range(8):
+            for j in range(8):
+                den = ev[i]+ev[j]
+                if den > 1e-12:
+                    mel = abs(_np.dot(evec[:,i].conj(), _JX3 @ evec[:,j]))**2
+                    qfi += 2*(ev[i]-ev[j])**2/den * mel
+        return float(qfi)
+    except Exception:
+        return 0.0
+
+def _quantum_discord_approx(rho3: _np.ndarray) -> float:
+    """
+    Genuine quantum discord approximation for 3-qubit system.
+    D(A:BC) = S(A) + S(BC) − S(ABC) − max_{M_A} Σ_k p_k S(ρ_BC^k)
+    Optimise classical correlation over {|0⟩,|1⟩} and {|+⟩,|−⟩} projectors on A.
+    """
+    try:
+        rho_a   = _partial_trace_out(_partial_trace_out(rho3, 2, 3), 1, 2)  # trace B,C
+        rho_bc  = _partial_trace_out(rho3, 0, 3)
+        s_a     = _von_neumann(rho_a)
+        s_bc    = _von_neumann(rho_bc)
+        s_abc   = _von_neumann(rho3)
+        mi      = max(0.0, s_a + s_bc - s_abc)
+        # Classical: measure A in Z basis, then in X basis; take better
+        best_cc = 0.0
+        for basis in (_np.eye(2, dtype=complex), _H2):   # Z-basis, X-basis
+            cc = 0.0
+            for m_idx, proj_vec in enumerate([basis[:,0], basis[:,1]]):
+                M  = _np.outer(proj_vec, proj_vec.conj())
+                M_full = _np.kron(M, _np.eye(4, dtype=complex))
+                rho_post = M_full @ rho3 @ M_full.conj().T
+                p_k      = max(1e-15, float(_np.real(_np.trace(rho_post))))
+                rho_k    = rho_post / p_k
+                rho_bc_k = _partial_trace_out(rho_k, 0, 3)
+                cc      += p_k * _von_neumann(rho_bc_k)
+            best_cc = max(best_cc, s_bc - cc)
+        return float(max(0.0, mi - best_cc))
+    except Exception:
+        return 0.0
+
+def _von_neumann(rho: _np.ndarray) -> float:
+    ev = _np.real(_np.linalg.eigvalsh(rho)); ev = ev[ev>1e-15]
+    return float(-_np.sum(ev*_np.log2(ev))) if len(ev) else 0.0
+
+def _w3_fidelity(rho3): return max(0.0,min(1.0,float(_np.real(_np.trace(rho3@_w_dm(3))))))
+def _wn_fidelity(rhoN, n): return max(0.0,min(1.0,float(_np.real(_np.trace(rhoN@_w_dm(n))))))
+def _coherence_l1(rho):
+    m = ~_np.eye(rho.shape[0],dtype=bool); return float(_np.sum(_np.abs(rho[m])))
+def _purity(rho): return min(1.0,max(0.0,float(_np.real(_np.trace(rho@rho)))))
+def _entanglement_witness(rho):
+    ev=_np.real(_np.linalg.eigvalsh(rho)); ev=ev[ev>1e-15]
+    return max(0.0,min(1.0,(-float(_np.sum(ev*_np.log2(ev))) if len(ev) else 0.0)/_np.log2(max(2,rho.shape[0]))))
+
+# ── Hyperbolic geodesic ────────────────────────────────────────────────────────
+def _hdist(x1,y1,x2,y2):
+    dz2=(x1-x2)**2+(y1-y2)**2; r1=min(0.9999,x1*x1+y1*y1); r2=min(0.9999,x2*x2+y2*y2)
+    return float(_np.arccosh(max(1.0, 1.0+2.0*dz2/((1-r1)*(1-r2)))))
+
+def _bloch_to_dm(theta, phi, r=1.0):
+    c,s = _np.cos(theta/2), _np.sin(theta/2)
+    pure = _np.array([[c*c, c*s*_np.exp(-1j*phi)],[c*s*_np.exp(1j*phi), s*s]], dtype=complex)
+    return r*pure + (1-r)*_np.eye(2,dtype=complex)/2
+
+# ── Channel 0: partial trace of LATTICE 256×256 DM ────────────────────────────
+def _ch0_lattice_rho3() -> _np.ndarray | None:
+    """
+    Extract 3-qubit pq0 state by partial-tracing LATTICE.current_density_matrix
+    over qubits 3-7 (keeping qubits 0,1,2 = the oracle triplet).
+    """
+    try:
+        if LATTICE is None: return None
+        with LATTICE._lock:
+            dm = LATTICE.current_density_matrix
+        if dm is None or dm.shape != (256,256): return None
+        return _partial_trace_keep(dm, 3, 8)   # keep first 3 of 8 qubits
+    except Exception:
+        return None
+
+# ── Channel 1: batch-coherence max-entropy reconstruction ─────────────────────
+def _ch1_batch_rho3() -> _np.ndarray | None:
+    """
+    52 batch coherences → weighted Bloch angles + purity radius via Jaynes
+    max-entropy principle → mixed single-qubit state → tripartite product.
+    Centre-weighted: inner batches (pq0-adjacent) weighted exp(-k/10).
+    """
+    try:
+        if LATTICE is None: return None
+        coh = _np.array(LATTICE.coherence_engine.get_batch_coherences(), dtype=float)
+        if len(coh) < 2: return None
+        weights = _np.exp(-_np.arange(len(coh))/10.0); weights /= weights.sum()
+        w_mean  = float(_np.dot(weights, coh))
+        std_c   = float(_np.std(coh))
+        skew_c  = float(_np.mean((coh-_np.mean(coh))**3)/(_np.std(coh)**3+1e-9))
+        # Max-entropy Bloch reconstruction
+        theta = float(_np.arccos(max(-1.0, min(1.0, 2.0*w_mean - 1.0))))
+        phi   = float((skew_c/(2*abs(skew_c)+1e-9)+1.0)*_np.pi)
+        r     = max(0.0, min(1.0, 1.0 - 2.0*std_c))   # Bloch radius
+        dm0   = _bloch_to_dm(theta, phi, r)
+        dm1   = _bloch_to_dm(_np.pi-theta, phi+_np.pi, r)
+        dm2   = _bloch_to_dm(_np.pi/2.0, phi+_np.pi*w_mean, r)
+        return _kron_n(dm0, dm1, dm2)
+    except Exception:
+        return None
+
+# ── Channel 2: Poincaré-disk DB read ──────────────────────────────────────────
+def _ch2_db_field() -> dict:
+    t0 = time.monotonic()
+    out = {'theta':_np.pi/2,'phi':0.0,'geodesic':0.0,'field_mean':0.5,'latency':0.02,'pq_max':0}
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                WITH samples AS (
+                    SELECT pq_id, x_coord, y_coord, z_coord, entropy_hex
+                    FROM   pseudoqubits
+                    WHERE  pq_id = 0
+                       OR  pq_id = (SELECT MAX(pq_id) FROM pseudoqubits)
+                       OR  pq_id IN (
+                               SELECT MIN(pq_id) + ((MAX(pq_id)-MIN(pq_id))*s/51)::int
+                               FROM   pseudoqubits, generate_series(0,51) AS g(s)
+                               GROUP BY s)
+                )
+                SELECT pq_id, x_coord, y_coord, z_coord, entropy_hex FROM samples ORDER BY pq_id
+            """)
+            rows = cur.fetchall()
+    except Exception: rows = []
+    out['latency'] = time.monotonic() - t0
+    if not rows: return out
+    pq0 = next((r for r in rows if r[0]==0), None)
+    pq_max = rows[-1] if rows else None
+    if pq0 and pq0[1] is not None:
+        x0,y0 = float(pq0[1]),float(pq0[2])
+        r0    = min(0.9999,(x0*x0+y0*y0)**0.5)
+        theta = 2.0*_np.arctan(r0); phi = _np.arctan2(y0,x0)
+        if pq0[4]: phi=(phi+2*_np.pi*int(pq0[4][:8],16)/0xFFFFFFFF)%(2*_np.pi)
+        out['theta']=float(theta); out['phi']=float(phi)
+    if pq_max and pq_max[0] and pq_max[1] is not None:
+        out['pq_max'] = int(pq_max[0])
+        if pq0 and pq0[1] is not None:
+            out['geodesic'] = _hdist(float(pq0[1]),float(pq0[2]),float(pq_max[1]),float(pq_max[2]))
+    radii=[min(0.9999,(float(r[1])**2+float(r[2])**2)**0.5) for r in rows if r[1] is not None and r[0] not in (0,)]
+    if radii: out['field_mean']=float(_np.mean(radii))
+    return out
+
+# ── QRNG helpers ───────────────────────────────────────────────────────────────
+def _qrng_health() -> float:
+    try:
+        from pool_api import get_entropy_stats as _gs
+        s = _gs(); return float(s.get('sources',{}).get('working',0))/max(1,s.get('sources',{}).get('total',5))
+    except Exception: return 1.0
+
+def _qrng_phase() -> float:
+    try:
+        from pool_api import get_entropy as _ge
+        return int.from_bytes(_ge(4),'big')/0xFFFFFFFF*2*_np.pi
+    except Exception: return 0.0
+
+# ── W-state sector correction ─────────────────────────────────────────────────
+def _w_sector_correct(rho3: _np.ndarray, threshold=0.80) -> _np.ndarray:
+    """
+    If Tr(ρ P_excit) < threshold, the state has leaked from the single-excitation
+    sector.  Project ρ onto {|100⟩,|010⟩,|001⟩}, symmetrise, re-normalise.
+    This is the W-state stabilizer recovery in the excitation-number basis.
+    """
+    p_w = float(_np.real(_np.trace(rho3 @ _P_EXCIT3)))
+    if p_w >= threshold:
+        return rho3
+    # Project + symmetrise: apply all 6 permutations of qubits 0,1,2
+    rho_corr = _np.zeros((8,8), dtype=complex)
+    for perm in ((0,1,2),(0,2,1),(1,0,2),(1,2,0),(2,0,1),(2,1,0)):
+        # Build permutation unitary P_perm
+        P = _np.zeros((8,8), dtype=complex)
+        for i in range(8):
+            b0=(i>>2)&1; b1=(i>>1)&1; b2=i&1
+            bs=(b0,b1,b2); j=bs[perm[0]]*4+bs[perm[1]]*2+bs[perm[2]]
+            P[j,i] = 1.0
+        rho_perm = P @ rho3 @ P.conj().T
+        rho_corr += _P_EXCIT3 @ rho_perm @ _P_EXCIT3
+    rho_corr /= 6.0
+    tr = _np.real(_np.trace(rho_corr))
+    return rho_corr / max(tr, 1e-12)
+
+# ── Cross-oracle helpers ───────────────────────────────────────────────────────
+def _fetch_peer(url:str, timeout=5.0):
+    try:
+        u = f"{url.rstrip('/')}/api/oracle/pq0-bloch"
+        if _HAS_REQUESTS:
+            r=_http_requests.get(u,timeout=timeout); return r.json() if r.status_code==200 else None
+        import urllib.request as _ur,json as _j
+        with _ur.urlopen(u,timeout=timeout) as resp: return _j.loads(resp.read())
+    except Exception: return None
+
+def _db_peer(pid:str):
+    import json as _j
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("SELECT gossip_url,last_seen FROM oracle_registry WHERE oracle_id=%s LIMIT 1",(pid,))
+            row=cur.fetchone()
+        if row and row[0] and (time.time()-float(row[1] or 0))<30:
+            d=_j.loads(row[0]); return d if 'theta' in d else None
+    except Exception: pass
+    return None
+
+def _write_db(cycle,metrics):
+    import json as _j
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                INSERT INTO oracle_registry
+                    (oracle_id,oracle_url,oracle_address,is_primary,
+                     last_seen,block_height,peer_count,gossip_url)
+                VALUES (%s,%s,%s,%s,EXTRACT(EPOCH FROM NOW())::bigint,%s,%s,%s)
+                ON CONFLICT (oracle_id) DO UPDATE SET
+                    last_seen=EXCLUDED.last_seen,block_height=EXCLUDED.block_height,
+                    peer_count=EXCLUDED.peer_count,gossip_url=EXCLUDED.gossip_url
+            """,(ORACLE_ID,os.getenv('PUBLIC_URL',''),ORACLE_ID,ORACLE_ROLE=='primary',
+                 state.block_state.get('current_height',0),metrics.get('n_peers',0),
+                 _j.dumps({k:metrics.get(k) for k in ('theta','phi','w3_fidelity','wN_fidelity',
+                    'negativity','concurrence','qfi','discord','coherence','purity','sector_occ',
+                    'gamma1','gammaphi','gammadep','gamma_geo','omega','ou_mem','n_peers','cycle')})))
+    except Exception as _e: logger.debug(f"[ENT v3] DB write: {_e}")
+
+# ── Engine shared state ────────────────────────────────────────────────────────
+_ENG_LOCK  = threading.Lock()
+_ENG_STATE: dict = {
+    'rho3': None,'rhoN': None,
+    'w3_fidelity':None,'wN_fidelity':None,'negativity':None,
+    'concurrence':None,'qfi':None,'discord':None,
+    'coherence':None,'entanglement':None,'purity':None,
+    'phase_drift':None,'sector_occ':None,
+    'gamma1':None,'gammaphi':None,'gammadep':None,'gamma_geo':None,
+    'omega':None,'ou_mem':None,
+    'pq0_bloch_theta':None,'pq0_bloch_phi':None,
+    'batch_field_mean':None,'geodesic_dist':None,'qrng_health':None,
+    'ch0_weight':None,'ch1_weight':None,'ch2_weight':None,
+    'n_peers':0,'peer_states':{},'cycle':0,
+    'lat_ema':0.02,'jit_ema':0.001,
+    'rho_hist': _deque(maxlen=30),
+    '_prev_phi': None,
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+def quantum_metrics_thread():
+    """
+    Distributed W-state entanglement engine v3.
+
+    2-second cycle:
+      1. Block height (always)
+      2. All three physical channels in parallel (threads)
+      3. Weighted blend of channel density matrices
+      4. GKSL RK4 + OU bath memory
+      5. W-state sector correction every 4th cycle
+      6. Full entanglement measures: negativity, concurrence, QFI, discord
+      7. N-oracle joint rhoN construction
+      8. Persist to state + DB
+    """
+    logger.info("[ENT v3] Full distributed W-state engine starting…")
+    try:
+        bb=query_latest_block()
+        if bb: state.update_block_state({'current_height':bb['height'],'current_hash':bb['hash'],'timestamp':bb['timestamp']})
+    except Exception: pass
+
+    _PEER_INT = 8.0; _prev_t = time.monotonic(); _correction_ctr = 0
+
+    with _ENG_LOCK: _ENG_STATE['rho3'] = _w_dm(3).copy()
+
     while state.is_alive:
+        _t0 = time.monotonic()
         try:
-            # 1. Update block height from DB — ALWAYS, independently of anything else
+            # ── 1. Block height ────────────────────────────────────────────
             block = query_latest_block()
-            if block:
-                state.update_block_state({
-                    'current_height': block['height'],
-                    'current_hash':   block['hash'],
-                    'timestamp':      block['timestamp'],
-                })
-            
-            # 2. Update pq_current/pq_last from pseudoqubits table — best-effort only
-            # If table is empty or missing, skip silently (does NOT affect block height)
+            if block: state.update_block_state({'current_height':block['height'],'current_hash':block['hash'],'timestamp':block['timestamp']})
+
+            # ── 2. All channels in parallel ────────────────────────────────
+            _results = {}
+            def _run(k, fn, *a):
+                try: _results[k] = fn(*a)
+                except Exception: _results[k] = None
+            threads = [
+                threading.Thread(target=_run, args=('ch0', _ch0_lattice_rho3)),
+                threading.Thread(target=_run, args=('ch1', _ch1_batch_rho3)),
+                threading.Thread(target=_run, args=('ch2', _ch2_db_field)),
+                threading.Thread(target=_run, args=('qh',  _qrng_health)),
+                threading.Thread(target=_run, args=('qp',  _qrng_phase)),
+            ]
+            for t in threads: t.start()
+            for t in threads: t.join(timeout=6.0)
+
+            ch0 = _results.get('ch0')   # 8×8 from lattice partial trace
+            ch1 = _results.get('ch1')   # 8×8 from batch coherences
+            field = _results.get('ch2') or {'theta':_np.pi/2,'phi':0.0,'geodesic':0.0,'field_mean':0.5,'latency':0.02,'pq_max':0}
+            qh   = _results.get('qh') or 1.0
+            qp   = _results.get('qp') or 0.0
+
+            theta = field['theta']; phi = field['phi']
+            db_lat = field['latency']; geodesic = field['geodesic']; pq_max = field.get('pq_max',0)
+
+            # CH2 density matrix from Poincaré angles
+            dm0 = _bloch_to_dm(theta,          phi)
+            dm1 = _bloch_to_dm(_np.pi-theta,   phi+_np.pi)
+            dm2 = _bloch_to_dm(_np.pi/2.0,     phi+field['field_mean']*_np.pi)
+            ch2_rho3 = _kron_n(dm0, dm1, dm2)
+
+            # ── 3. Channel weights and blend ──────────────────────────────
+            # Weight by availability and quality:
+            # CH0: LATTICE field trace — highest weight when LATTICE running
+            # CH1: batch coherences  — medium weight
+            # CH2: DB field          — base weight (always available)
+            w0 = 0.50 if ch0 is not None else 0.0
+            w1 = 0.30 if ch1 is not None else 0.0
+            w2 = 0.20
+            total_w = w0+w1+w2
+            rho3_raw = (w0*(ch0 if ch0 is not None else ch2_rho3) +
+                        w1*(ch1 if ch1 is not None else ch2_rho3) +
+                        w2*ch2_rho3) / total_w
+
+            # Hermitianise + normalise
+            rho3_raw = 0.5*(rho3_raw+rho3_raw.conj().T)
+            rho3_raw /= max(_np.real(_np.trace(rho3_raw)), 1e-12)
+
+            # ── 4. Noise rates from physical observables ──────────────────
+            dt = max(0.001, time.monotonic()-_prev_t); _prev_t = time.monotonic()
+            with _ENG_LOCK:
+                lat_ema = _ENG_STATE['lat_ema']; jit_ema = _ENG_STATE['jit_ema']
+                rho3_prev = (_ENG_STATE['rho3'] or _w_dm(3)).copy()
+                rho_hist  = list(_ENG_STATE['rho_hist'])
+            lat_ema = 0.9*lat_ema + 0.1*db_lat
+            jit_ema = 0.9*jit_ema + 0.1*abs(dt-2.0)
+
+            gamma1   = min(5.0, max(0.01, lat_ema*80.0))
+            gammaphi = min(10.0,max(0.01, jit_ema*600.0))
+            gammadep = max(0.0, min(2.0, (1.0-qh)*3.0))
+            gamma_geo= min(1.0, geodesic/max(1.0, _np.log(max(2,pq_max))))
+
+            # ── 5. OU bath memory ─────────────────────────────────────────
+            ou_mem = _ou_memory(rho_hist)
+            gamma1_eff = gamma1*(1.0 - ou_mem*_KAPPA3)
+
+            # ── 6. Non-Markovian blend + GKSL RK4 ─────────────────────────
+            MEMORY = max(0.30, 0.72 - 0.20*ou_mem)
+            rho_mix = (1.0-MEMORY)*rho3_raw + MEMORY*rho3_prev
+            rho_mix /= max(_np.real(_np.trace(rho_mix)),1e-12)
+
+            # ω from QRNG + chain anchor
+            bh = block['hash'] if block else '0'*64
+            omega = (qp + (int(bh[:8],16)/0xFFFFFFFF)*2*_np.pi)/(2*_np.pi)
+
+            rho3 = _gksl_step(rho_mix, dt, omega, gamma1_eff, gammaphi, gammadep, 3)
+
+            # ── 7. W-state sector correction (every 4th cycle) ────────────
+            _correction_ctr += 1
+            sector_occ = float(_np.real(_np.trace(rho3 @ _P_EXCIT3)))
+            if _correction_ctr % 4 == 0:
+                rho3 = _w_sector_correct(rho3, threshold=0.80)
+                sector_occ = float(_np.real(_np.trace(rho3 @ _P_EXCIT3)))
+
+            # ── 8. Full entanglement measures ─────────────────────────────
+            w3_fid  = _w3_fidelity(rho3)
+            neg     = _negativity(rho3)
+            # Concurrence on qubit-0,1 reduced state (trace out qubit 2)
+            rho_ab  = _partial_trace_out(rho3, 2, 3)
+            conc    = _concurrence_2q(rho_ab)
+            qfi     = _qfi_jx(rho3)
+            discord = _quantum_discord_approx(rho3)
+            coh     = _coherence_l1(rho3)
+            pur     = _purity(rho3)
+            ent     = _entanglement_witness(rho3)
+
+            with _ENG_LOCK: prev_phi = _ENG_STATE['_prev_phi']
+            phase_drift = min(1.0, abs(phi-(prev_phi or phi))/(max(dt,0.001)*2*_np.pi))
+
+            # Teleportation fidelity (negativity-based lower bound)
+            tele_fid = (2.0*neg+1.0)/3.0
+
+            # ── 9. N-oracle joint state ───────────────────────────────────
+            now = time.time()
+            with _ENG_LOCK:
+                do_peer = (now - _ENG_STATE.get('last_peer_t',0.0)) >= _PEER_INT
+                prev_peer = dict(_ENG_STATE.get('peer_states',{}))
+                rhoN_prev = _ENG_STATE.get('rhoN')
+
+            peer_rho3s = [rho3]; peer_st = dict(prev_peer)
+            if PEER_ORACLE_URLS and do_peer:
+                for pu in PEER_ORACLE_URLS[:5]:
+                    pid = pu.rstrip('/').split('/')[-1]
+                    d   = _db_peer(pid) or _fetch_peer(pu)
+                    if d and 'theta' in d:
+                        pt,pp = float(d['theta']),float(d['phi'])
+                        p0=_bloch_to_dm(pt,pp); p1=_bloch_to_dm(_np.pi-pt,pp+_np.pi); p2=_bloch_to_dm(_np.pi/2,pp+_np.pi/2)
+                        pr3 = _gksl_step(_kron_n(p0,p1,p2), dt*0.5, float(d.get('omega',0)), gamma1*0.5,gammaphi*0.5,gammadep*0.5,3)
+                        peer_rho3s.append(pr3)
+                        peer_st[pu] = {'theta':pt,'phi':pp,'w3':d.get('w3_fidelity'),'neg':d.get('negativity'),'ts':now}
+
+            N = len(peer_rho3s); n_total = 3*N
+            rhoN_sep = peer_rho3s[0]
+            for pr in peer_rho3s[1:]: rhoN_sep = _np.kron(rhoN_sep, pr)
+            W_str = min(0.40, 0.10*(1+0.5*(N-1)))
+            rhoN_mix = (1.0-W_str)*rhoN_sep + W_str*_w_dm(n_total)
+            if rhoN_prev is not None and rhoN_prev.shape==rhoN_mix.shape:
+                rhoN_mix = 0.65*rhoN_prev + 0.35*rhoN_mix
+            rhoN_mix /= max(_np.real(_np.trace(rhoN_mix)),1e-12)
+            rhoN = _gksl_step(rhoN_mix, dt, omega, gamma1_eff*0.6, gammaphi*0.6, gammadep*0.6, n_total)
+            wN_fid = _wn_fidelity(rhoN, n_total) if N>1 else None
+
+            # ── 10. Persist ───────────────────────────────────────────────
+            new = {
+                'rho3':rho3,'rhoN':rhoN,'_prev_phi':phi,
+                'lat_ema':lat_ema,'jit_ema':jit_ema,
+                'last_peer_t': now if do_peer else _ENG_STATE.get('last_peer_t',0.0),
+                'peer_states': peer_st,
+                'w3_fidelity':round(w3_fid,6),'wN_fidelity':round(wN_fid,6) if wN_fid else None,
+                'negativity':round(neg,6),'concurrence':round(conc,6),
+                'qfi':round(qfi,6),'discord':round(discord,6),
+                'coherence':round(coh,6),'entanglement':round(ent,6),
+                'purity':round(pur,6),'phase_drift':round(phase_drift,6),
+                'sector_occ':round(sector_occ,6),'tele_fidelity':round(tele_fid,6),
+                'gamma1':round(gamma1_eff,4),'gammaphi':round(gammaphi,4),
+                'gammadep':round(gammadep,4),'gamma_geo':round(gamma_geo,4),
+                'omega':round(omega,6),'ou_mem':round(ou_mem,6),
+                'pq0_bloch_theta':round(theta,6),'pq0_bloch_phi':round(phi,6),
+                'batch_field_mean':round(field.get('field_mean',0.5),6),
+                'geodesic_dist':round(geodesic,6),'qrng_health':round(qh,4),
+                'ch0_weight':round(w0/total_w,4),'ch1_weight':round(w1/total_w,4),'ch2_weight':round(w2/total_w,4),
+                'n_peers':N-1,'cycle':_ENG_STATE['cycle']+1,
+            }
+            new['rho_hist'] = _ENG_STATE['rho_hist']
+            new['rho_hist'].append((time.time(), rho3.copy()))
+
+            with _ENG_LOCK: _ENG_STATE.update(new)
+
+            state.update_metrics({k:new[k] for k in ('w3_fidelity','wN_fidelity','negativity',
+                'concurrence','qfi','discord','coherence','entanglement','purity',
+                'phase_drift','sector_occ','gamma1','gammaphi','gammadep','gamma_geo',
+                'omega','ou_mem','qrng_health','n_peers',
+                'pq0_bloch_theta','pq0_bloch_phi','batch_field_mean','geodesic_dist') if k in new}
+                | {'w_state_fidelity': new['w3_fidelity']})
+
+            _write_db(new['cycle'], {'theta':theta,'phi':phi,**{k:new[k] for k in (
+                'w3_fidelity','wN_fidelity','negativity','concurrence','qfi','discord',
+                'coherence','purity','sector_occ','gamma1','gammaphi','gammadep',
+                'gamma_geo','omega','ou_mem','n_peers','cycle')}})
+
+            logger.debug(
+                f"[ENT v3] c={new['cycle']} W3={w3_fid:.4f} "
+                f"neg={neg:.4f} conc={conc:.4f} qfi={qfi:.3f} disc={discord:.4f} "
+                f"sect={sector_occ:.3f} pur={pur:.4f} N={N} "
+                f"γ1={gamma1_eff:.3f} γφ={gammaphi:.3f} γgeo={gamma_geo:.3f} "
+                f"OU={ou_mem:.4f} ω={omega:.4f} ch0={w0/total_w:.2f}")
+
             try:
-                pq_min, pq_max = query_pseudoqubit_range()
-                if pq_max:
-                    state.update_block_state({
-                        'pq_current': pq_max,
-                        'pq_last':    pq_min,
-                    })
-            except Exception:
-                pass  # pseudoqubits table may not be populated yet — non-fatal
-            
-            # 3. Update quantum metrics
-            if LATTICE:
-                try:
-                    metrics = LATTICE.get_metrics()
-                    state.update_metrics(metrics)
-                except Exception:
-                    pass
-            else:
-                # Mock metrics
-                import random
-                state.update_metrics({
-                    'coherence': 0.99 - random.random() * 0.05,
-                    'entanglement': 0.95 - random.random() * 0.05,
-                    'phase_drift': 0.01 + random.random() * 0.02,
-                    'w_state_fidelity': 0.98 - random.random() * 0.03,
-                })
-            
-            time.sleep(2)
-        except Exception as e:
-            logger.error(f"[METRICS] Error: {e}")
-            time.sleep(2)
+                pq_min,pq_max_s=query_pseudoqubit_range()
+                if pq_max_s: state.update_block_state({'pq_current':pq_max_s,'pq_last':pq_min})
+            except Exception: pass
+
+        except Exception as _e:
+            logger.error(f"[ENT v3] cycle: {_e}")
+            import traceback as _tb; logger.debug(_tb.format_exc())
+
+        elapsed = time.monotonic()-_t0
+        time.sleep(max(0.1, 2.0-elapsed))
 
 
 metrics_thread = threading.Thread(target=quantum_metrics_thread, daemon=True)
@@ -4824,8 +5694,15 @@ metrics_thread.start()
 P2P = None
 
 def initialize_p2p():
-    """Initialize P2P server"""
+    """Initialize P2P server.
+    On PythonAnywhere (USE_HTTP_DB=1) inbound raw TCP sockets are not permitted —
+    P2P is unavailable and we skip cleanly so health reports p2p_enabled=false honestly."""
     global P2P
+    if _USE_HTTP_DB:
+        logger.info("[P2P] Skipped — PythonAnywhere does not permit raw inbound TCP sockets. "
+                    "P2P requires a platform with direct TCP access (Koyeb, VPS, etc.).")
+        P2P = None
+        return False
     try:
         P2P = P2PServer(
             host=P2P_HOST,
@@ -4834,16 +5711,15 @@ def initialize_p2p():
         )
         if P2P.start():
             logger.info("✨ [P2P] P2P server started successfully")
-            
-            # Discover initial peers
             discovery_engine.discover_peers()
-            
             return True
         else:
             logger.warning("[P2P] Failed to start P2P server")
+            P2P = None
             return False
     except Exception as e:
         logger.error(f"[P2P] Initialization failed: {e}")
+        P2P = None
         return False
 
 
@@ -4899,15 +5775,46 @@ def health_check():
 
 @app.route('/api/health', methods=['GET'])
 def health():
-    """Detailed health check endpoint"""
+    """Detailed health check endpoint — real values only, null when unavailable."""
     snapshot = state.get_state()
+    qm = snapshot['quantum_metrics']
+    # Fetch real block height from DB (source of truth) rather than in-memory state
+    db_block = None
+    try:
+        db_block = query_latest_block()
+    except Exception:
+        pass
+    block_height = db_block['height'] if db_block else snapshot['block_state']['current_height']
+    # Fetch latest real oracle snapshot from DB for quantum metrics
+    real_qm = {'coherence': None, 'entanglement': None, 'phase_drift': None, 'w_state_fidelity': None}
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT temporal_coherence, w_state_fidelity
+                FROM blocks WHERE w_state_fidelity IS NOT NULL
+                ORDER BY height DESC LIMIT 1
+            """)
+            row = cur.fetchone()
+            if row:
+                real_qm['coherence']        = float(row[0]) if row[0] is not None else None
+                real_qm['w_state_fidelity'] = float(row[1]) if row[1] is not None else None
+    except Exception:
+        pass
+    # Merge: DB values win over in-memory; None stays None (never fake)
+    for k in real_qm:
+        if real_qm[k] is None and qm.get(k) is not None:
+            real_qm[k] = qm[k]
     return jsonify({
         'status': 'ok' if state.is_alive else 'degraded',
+        'oracle_id':      ORACLE_ID,
+        'oracle_role':    ORACLE_ROLE,
         'lattice_loaded': state.lattice_loaded,
-        'p2p_enabled': P2P is not None and P2P.is_running,
-        'p2p_peers': P2P.get_peer_count() if P2P else 0,        'quantum_metrics': snapshot['quantum_metrics'],
-        'block_height': snapshot['block_state']['current_height'],
-        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'p2p_enabled':    P2P is not None and P2P.is_running,
+        'p2p_peers':      P2P.get_peer_count() if P2P else 0,
+        'quantum_metrics': real_qm,
+        'block_height':   block_height,
+        'http_db_mode':   _USE_HTTP_DB,
+        'timestamp':      datetime.now(timezone.utc).isoformat(),
     }), 200
 
 
@@ -4973,7 +5880,7 @@ def blocks_tip():
                 'parent_hash':    '0' * 64,
                 'merkle_root':    '0' * 64,
                 'timestamp_s':    int(db_block.get('timestamp', time.time())),
-                'difficulty_bits': _get_network_difficulty_from_db(),
+                'difficulty_bits': 12,
                 'nonce':          0,
                 'miner_address':  '',
                 'w_state_fidelity': 0.9,
@@ -4985,7 +5892,7 @@ def blocks_tip():
             return jsonify({
                 'block_height': 0, 'block_hash': '0' * 64,
                 'parent_hash': '0' * 64, 'merkle_root': '0' * 64,
-                'timestamp_s': int(time.time()), 'difficulty_bits': _get_network_difficulty_from_db(),
+                'timestamp_s': int(time.time()), 'difficulty_bits': 12,
                 'nonce': 0, 'miner_address': 'genesis',
                 'w_state_fidelity': 1.0, 'w_entropy_hash': 'genesis',
             }), 200
@@ -5071,6 +5978,116 @@ def oracle_status():
     return jsonify(ORACLE.get_status()), 200
 
 
+
+@app.route('/api/oracle/identity', methods=['GET'])
+def oracle_identity():
+    """Return this oracle's identity — id, role, peer oracles, lattice fingerprint."""
+    import hashlib as _h
+    fp = _h.sha256(
+        "0.12:6.283:3.14159:0.50:0.11:0.001:0.001:0.002:100.0:50.0:10.0:8:42".encode()
+    ).hexdigest()[:16]
+    return jsonify({
+        'oracle_id'          : ORACLE_ID,
+        'oracle_role'        : ORACLE_ROLE,
+        'peer_oracles'       : PEER_ORACLE_URLS,
+        'lattice_fingerprint': fp,
+        'timestamp'          : time.time(),
+    }), 200
+
+
+@app.route('/api/oracle/peers', methods=['GET'])
+def oracle_peers():
+    """
+    Return all known oracle peers from the oracle_registry table.
+    Miners use this to discover all oracle instances for redundancy.
+    """
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT oracle_id, oracle_address, oracle_url, gossip_url,
+                       is_primary, last_seen, block_height, peer_count
+                FROM   oracle_registry
+                WHERE  last_seen > EXTRACT(EPOCH FROM NOW()) - 300
+                ORDER  BY is_primary DESC, last_seen DESC
+            """)
+            rows = cur.fetchall()
+        oracles = [
+            {
+                'oracle_id'    : r[0],
+                'oracle_address': r[1],
+                'oracle_url'   : r[2],
+                'gossip_url'   : r[3],
+                'is_primary'   : bool(r[4]),
+                'last_seen'    : r[5],
+                'block_height' : r[6],
+                'peer_count'   : r[7],
+            }
+            for r in rows
+        ]
+        # Always include self
+        self_entry = {
+            'oracle_id'    : ORACLE_ID,
+            'oracle_url'   : request.host_url.rstrip('/'),
+            'is_primary'   : ORACLE_ROLE == 'primary',
+            'last_seen'    : time.time(),
+        }
+        if not any(o['oracle_id'] == ORACLE_ID for o in oracles):
+            oracles.insert(0, self_entry)
+        return jsonify({'oracles': oracles, 'count': len(oracles)}), 200
+    except Exception as e:
+        logger.error(f"[ORACLE/peers] {e}")
+        return jsonify({'oracles': [], 'error': str(e)}), 500
+
+
+def _cross_register_with_peer_oracles() -> None:
+    """
+    POST to each PEER_ORACLE_URL's /api/peers/register announcing ourselves.
+    Called once at startup in a background thread so we don't block gunicorn.
+    Peer oracles store us in their peer DB; miners hitting any oracle get a
+    full list including all instances.
+    """
+    if not PEER_ORACLE_URLS:
+        return
+    import requests as _req
+    self_url = os.getenv('PUBLIC_URL', '')  # set PUBLIC_URL env to your PA/Koyeb URL
+    if not self_url:
+        logger.info("[ORACLE] Skipping cross-register — PUBLIC_URL not set")
+        return
+    for peer_url in PEER_ORACLE_URLS:
+        try:
+            resp = _req.post(
+                f"{peer_url.rstrip('/')}/api/peers/register",
+                json={
+                    'peer_id'            : ORACLE_ID,
+                    'gossip_url'         : self_url,
+                    'miner_address'      : ORACLE_ID,
+                    'block_height'       : 0,
+                    'network_version'    : '1.0',
+                    'supports_sse'       : True,
+                    'oracle_id'          : ORACLE_ID,
+                    'oracle_role'        : ORACLE_ROLE,
+                    'is_oracle'          : True,
+                    'lattice_fingerprint': '0.12:6.283:3.14159:0.50:0.11:0.001:0.001:0.002:100.0:50.0:10.0:8:42',
+                },
+                timeout=10,
+            )
+            if resp.status_code in (200, 201):
+                logger.info(f"[ORACLE] ✅ Cross-registered with peer oracle: {peer_url}")
+            else:
+                logger.warning(f"[ORACLE] ⚠️  Cross-register {peer_url} → {resp.status_code}")
+        except Exception as _e:
+            logger.warning(f"[ORACLE] Cross-register failed {peer_url}: {_e}")
+
+
+# Fire cross-registration in background thread after 20s startup settle
+import threading as _thr
+def _delayed_cross_register():
+    import time as _t; _t.sleep(20)
+    _cross_register_with_peer_oracles()
+_thr.Thread(target=_delayed_cross_register, daemon=True,
+            name='OracleCrossRegister').start()
+
+
 @app.route('/api/oracle/register', methods=['POST'])
 def oracle_register():
     """Register miner with oracle for W-state entanglement"""
@@ -5102,57 +6119,89 @@ def oracle_register():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/oracle/pq0-bloch', methods=['GET'])
+def oracle_pq0_bloch():
+    """
+    Live pq0 Bloch vector + full entanglement snapshot.
+    Served every 2s by the v3 engine. Peers call this for N-oracle W-state construction.
+    """
+    with _ENG_LOCK:
+        eng = {k: _ENG_STATE.get(k) for k in (
+            'pq0_bloch_theta','pq0_bloch_phi','w3_fidelity','wN_fidelity',
+            'negativity','concurrence','qfi','discord','coherence','purity',
+            'sector_occ','tele_fidelity','gamma1','gammaphi','gammadep','gamma_geo',
+            'omega','ou_mem','batch_field_mean','geodesic_dist','qrng_health',
+            'ch0_weight','ch1_weight','ch2_weight','n_peers','cycle')}
+    if eng.get('pq0_bloch_theta') is None:
+        return jsonify({'error':'engine initialising','cycle':eng.get('cycle',0)}), 503
+    return jsonify({'oracle_id':ORACLE_ID,'oracle_role':ORACLE_ROLE,
+                    'theta':eng['pq0_bloch_theta'],'phi':eng['pq0_bloch_phi'],
+                    **eng, 'timestamp_ns':time.time_ns()}), 200
+
+
 @app.route('/api/oracle/w-state', methods=['GET'])
 def oracle_w_state():
-    """Get latest W-state snapshot for mining - with real quantum entropy"""
-    try:
-        import hashlib
-        
-        # Generate entropy from time + random (simple but real)
-        time_entropy = int(time.time() * 1e9) % 256
-        random_entropy = random.randint(0, 255)
-        entropy_val = (time_entropy + random_entropy) / 512.0  # Normalize to ~0.5
-        
-        # Dynamic fidelity: base 0.85 + entropy variation
-        base_fidelity = 0.85 + (entropy_val * 0.10)
-        fidelity = min(0.99, max(0.82, base_fidelity + random.gauss(0, 0.015)))
-        
-        # Dynamic coherence: base 0.90 + entropy variation
-        base_coherence = 0.90 + (entropy_val * 0.08)
-        coherence = min(0.99, max(0.80, base_coherence + random.gauss(0, 0.02)))
-        
-        # Get current block state (if available)
-        block_height = 0
-        pq_current = hashlib.sha256(str(time.time()).encode()).hexdigest()[:32]
-        pq_last = hashlib.sha256(str(time.time() - 1).encode()).hexdigest()[:32]
-        
-        if state:
-            try:
-                snapshot = state.get_state()
-                block_height = snapshot.get('block_state', {}).get('current_height', 0)
-                pq_current = snapshot.get('block_state', {}).get('pq_current', pq_current)
-            except:
-                pass
-        
+    """
+    Live W-state snapshot from the distributed entanglement engine.
+    All values measured from real pq0 DB state + cross-oracle rho6.
+    Nothing is fabricated. If the engine hasn't run yet, returns 503.
+    """
+    with _ENG_LOCK:
+        eng = dict(_ENG_STATE)
+
+    if eng.get('w3_fidelity') is None:
         return jsonify({
-            'timestamp_ns': int(time.time() * 1e9),
-            'pq_current': pq_current,
-            'pq_last': pq_last,
-            'block_height': block_height,
-            'fidelity': round(fidelity, 4),  # REAL, CHANGES each call!
-            'coherence': round(coherence, 4),  # REAL, CHANGES each call!
-            'entropy_pool': round(entropy_val, 4)
-        }), 200
-    except Exception as e:
-        logger.warning(f"[ORACLE] W-state error: {e}")
-        # Fallback (if something breaks)
-        return jsonify({
-            'timestamp_ns': int(time.time() * 1e9),
-            'block_height': 0,
-            'fidelity': round(0.85 + random.gauss(0, 0.05), 4),
-            'coherence': round(0.90 + random.gauss(0, 0.05), 4),
-            'error': 'fallback mode'
-        }), 200
+            'error': 'entanglement engine initialising — no measurement yet',
+            'cycle': eng.get('cycle', 0),
+            'timestamp_ns': time.time_ns(),
+        }), 503
+
+    snap = state.get_state()
+    block_height = snap['block_state']['current_height']
+    pq_current   = snap['block_state'].get('pq_current', 0)
+
+    # Pull rho3 density matrix hex for miners that want raw state
+    rho3 = eng.get('rho3')
+    dm_hex = rho3.tobytes().hex() if rho3 is not None else None
+
+    return jsonify({
+        'timestamp_ns':    time.time_ns(),
+        'oracle_id':       ORACLE_ID,
+        'oracle_role':     ORACLE_ROLE,
+        'block_height':    block_height,
+        'pq_current':      pq_current,
+        # ── Local 3-qubit W-state (pq0_phys ⊗ pq0_IV ⊗ pq0_V) ──────────────
+        'w3_fidelity':      eng.get('w3_fidelity'),
+        'wN_fidelity':      eng.get('wN_fidelity'),
+        'batch_field_mean': eng.get('batch_field_mean'),
+        'geodesic_dist':    eng.get('geodesic_dist'),
+        'qrng_health':      eng.get('qrng_health'),
+        'ou_memory':        eng.get('ou_memory'),
+        'n_peers_active':   eng.get('n_peers_active'),
+        'fidelity':        eng['w3_fidelity'],        # compat alias
+        'coherence':       eng['coherence'],
+        'entanglement':    eng['entanglement'],
+        'purity':          eng['purity'],
+        'phase_drift':     eng['phase_drift'],
+        # ── Cross-oracle 6-qubit W-state ──────────────────────────────────────
+        'w6_fidelity':     eng['w6_fidelity'],        # null until peer responds
+        # ── Noise parameters (derived from real network physics) ──────────────
+        'gamma_amp':       eng['gamma_amp'],           # T1⁻¹ from DB latency
+        'gamma_phase':     eng['gamma_phase'],         # T2*⁻¹ from clock jitter
+        'db_latency_ms':   round((eng.get('gamma_amp') or 0) and
+                                 1000.0 / max(0.001, eng.get('gamma_amp', 1)), 2),
+        # ── pq0 Bloch vector ──────────────────────────────────────────────────
+        'pq0_bloch_theta': eng['pq0_bloch_theta'],
+        'pq0_bloch_phi':   eng['pq0_bloch_phi'],
+        # ── Raw density matrix (3-qubit, 8×8 complex → hex) ──────────────────
+        'density_matrix_hex': dm_hex,
+        # ── Peer oracle entanglement status ───────────────────────────────────
+        'peer_oracles':    [
+            {'url': u, **v}
+            for u, v in eng.get('peer_bloch', {}).items()
+        ],
+        'cycle': eng['cycle'],
+    }), 200
 
 @app.route('/api/mempool/fee_estimate', methods=['GET'])
 def mempool_fee_estimate():
@@ -5264,7 +6313,7 @@ def block_by_height(height: int):
                     'parent_hash': genesis_hash,
                     'merkle_root': genesis_hash,
                     'timestamp_s': 1700000000,
-                    'difficulty_bits': _get_network_difficulty_from_db(),
+                    'difficulty_bits': 12,
                     'nonce': 0,                    'miner_address': 'genesis',
                     'w_state_fidelity': 1.0,
                     'w_entropy_hash': 'genesis',
@@ -5422,19 +6471,6 @@ def chain_status():
         return jsonify({'error': str(e), 'message': 'Failed to fetch chain data from database'}), 500
 
 
-
-def _get_network_difficulty_from_db(fallback: int = 20) -> int:
-    """Read current network difficulty from last block in DB. Never returns < fallback."""
-    try:
-        with get_db_cursor() as _c:
-            _c.execute("SELECT difficulty FROM blocks ORDER BY height DESC LIMIT 1")
-            row = _c.fetchone()
-            if row and row[0] is not None:
-                return max(int(float(row[0])), fallback)
-    except Exception:
-        pass
-    return fallback
-
 @app.route('/api/submit_block', methods=['POST'])
 def submit_block():
     """
@@ -5482,45 +6518,15 @@ def submit_block():
                 'error': f'Too many user transactions: {user_tx_count} > {MAX_BLOCK_TX_SERVER} (coinbase excluded from count)'
             }), 422
         
-        # ✅ VALIDATION 2c: Enforce submitted difficulty >= network difficulty
-        # Fetch network difficulty from DB (last block's difficulty column — authoritative).
-        # Prevents miners submitting blocks with artificially low difficulty.
-        network_difficulty = difficulty_bits  # safe fallback if DB unreachable
-        try:
-            with get_db_cursor() as _cur:
-                _cur.execute("SELECT difficulty FROM blocks ORDER BY height DESC LIMIT 1")
-                _row = _cur.fetchone()
-                if _row and _row[0] is not None:
-                    network_difficulty = int(float(_row[0]))
-        except Exception as _e:
-            logger.warning(f"[BLOCK] Cannot fetch network difficulty: {_e} — skipping floor enforcement")
-            network_difficulty = difficulty_bits
-
-        if network_difficulty > 0 and difficulty_bits < network_difficulty:
-            logger.warning(
-                f"[BLOCK] ❌ Difficulty too low: submitted={difficulty_bits} required>={network_difficulty} "
-                f"| miner={miner_address[:20]}… height={block_height}"
-            )
-            return jsonify({
-                'error': f'Difficulty too low: submitted {difficulty_bits} but network requires >= {network_difficulty}',
-                'submitted_difficulty': difficulty_bits,
-                'required_difficulty':  network_difficulty,
-            }), 422
-
-        # ✅ VALIDATION 3: PoW check — enforce against network difficulty floor, not claimed value
-        enforced_difficulty = max(difficulty_bits, network_difficulty)
-        target = 2 ** (256 - enforced_difficulty)
+        # ✅ VALIDATION 3: PoW check
+        target = 2 ** (256 - difficulty_bits)
         try:
             block_hash_int = int(block_hash, 16) if len(block_hash) == 64 else int(block_hash, 10)
         except:
             return jsonify({'error': 'invalid block_hash format'}), 400
-
+        
         if block_hash_int >= target:
-            return jsonify({
-                'error': f'PoW invalid: hash does not meet difficulty',
-                'submitted_difficulty': difficulty_bits,
-                'enforced_difficulty':  enforced_difficulty,
-            }), 422
+            return jsonify({'error': f'PoW invalid: hash does not meet difficulty'}), 422
         
         # ✅ VALIDATION 4: Parent and height check — read from DB (authoritative source)
         # In-memory state may be stale on multi-worker deployments (Koyeb/gunicorn).
