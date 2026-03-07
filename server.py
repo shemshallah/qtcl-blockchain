@@ -2047,6 +2047,65 @@ def _ensure_gossip_tables() -> bool:
     return True
 
 
+def _ensure_oracle_registry() -> bool:
+    """
+    CREATE TABLE IF NOT EXISTS oracle_registry — safe to call multiple times.
+    Captures every oracle instance heartbeat (primary + replicas).
+    Also adds any missing columns to handle rolling deploys against older schema.
+    """
+    ddl_statements = [
+        """CREATE TABLE IF NOT EXISTS oracle_registry (
+               oracle_id       VARCHAR(128)  PRIMARY KEY,
+               oracle_url      VARCHAR(512)  NOT NULL DEFAULT '',
+               oracle_address  VARCHAR(128)  NOT NULL DEFAULT '',
+               is_primary      BOOLEAN       NOT NULL DEFAULT FALSE,
+               last_seen       BIGINT        NOT NULL DEFAULT 0,
+               block_height    BIGINT        NOT NULL DEFAULT 0,
+               peer_count      INTEGER       NOT NULL DEFAULT 0,
+               gossip_url      JSONB         NOT NULL DEFAULT '{}'::JSONB,
+               created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+           )""",
+        """CREATE INDEX IF NOT EXISTS idx_oracle_registry_last_seen
+               ON oracle_registry (last_seen DESC)""",
+        """CREATE INDEX IF NOT EXISTS idx_oracle_registry_primary
+               ON oracle_registry (is_primary) WHERE is_primary = TRUE""",
+        # Idempotent column guards for rolling deploys
+        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS oracle_url     VARCHAR(512) NOT NULL DEFAULT ''",
+        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS oracle_address VARCHAR(128) NOT NULL DEFAULT ''",
+        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS is_primary     BOOLEAN      NOT NULL DEFAULT FALSE",
+        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS last_seen      BIGINT       NOT NULL DEFAULT 0",
+        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS block_height   BIGINT       NOT NULL DEFAULT 0",
+        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS peer_count     INTEGER      NOT NULL DEFAULT 0",
+        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS gossip_url     JSONB        NOT NULL DEFAULT '{}'::JSONB",
+    ]
+    ok = True
+    for ddl in ddl_statements:
+        try:
+            with get_db_cursor() as cur:
+                cur.execute(ddl)
+        except Exception as e:
+            logger.debug(f"[ORACLE_REG] DDL skipped ({ddl[:50]}…): {e}")
+            ok = False
+    if ok:
+        logger.info("[ORACLE_REG] ✅ oracle_registry table verified/created")
+    return ok
+
+
+_oracle_registry_ensured = False
+_oracle_registry_lock    = threading.Lock()
+
+def _lazy_ensure_oracle_registry():
+    """Thread-safe once-only call to _ensure_oracle_registry."""
+    global _oracle_registry_ensured
+    if _oracle_registry_ensured:
+        return
+    with _oracle_registry_lock:
+        if _oracle_registry_ensured:
+            return
+        _ensure_oracle_registry()
+        _oracle_registry_ensured = True
+
+
 def gossip_store_put(key: str, value: Dict[str, Any]) -> bool:
     """Upsert a key-value pair into gossip_store (PostgreSQL-backed DHT)."""
     try:
@@ -2339,6 +2398,7 @@ def _start_gossip_subsystem():
         _gossip_started = True
     try:
         _ensure_gossip_tables()
+        _lazy_ensure_oracle_registry()
         GossipPusherThread().start()
         logger.info("[GOSSIP] Subsystem online — DB gossip store + SSE broadcaster + peer pusher")
     except Exception as e:
@@ -5611,7 +5671,15 @@ def _write_db(cycle,metrics):
                  _j.dumps({k:metrics.get(k) for k in ('theta','phi','w3_fidelity','wN_fidelity',
                     'negativity','concurrence','qfi','discord','coherence','purity','sector_occ',
                     'gamma1','gammaphi','gammadep','gamma_geo','omega','ou_mem','n_peers','cycle')})))
-    except Exception as _e: logger.debug(f"[ENT v3] DB write: {_e}")
+    except Exception as _e:
+        _emsg = str(_e)
+        if 'oracle_registry' in _emsg and 'does not exist' in _emsg:
+            logger.warning("[ENT v3] oracle_registry missing — auto-creating schema")
+            _ensure_oracle_registry()
+            global _oracle_registry_ensured
+            _oracle_registry_ensured = True
+        else:
+            logger.debug(f"[ENT v3] DB write: {_e}")
 
 # ── Engine shared state ────────────────────────────────────────────────────────
 _ENG_LOCK  = threading.Lock()
