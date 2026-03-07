@@ -40,7 +40,7 @@ import socket
 import hashlib
 import secrets
 import logging
-import threading
+import threading  # FIX: was Python2 "import thread" — threading provides RLock/Thread/Lock/Event used throughout
 # ═══════════════════════════════════════════════════════════════════════════════
 # 5-ORACLE BYZANTINE CONSENSUS INTEGRATION
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -100,7 +100,6 @@ class OracleCluster:
 
 # Initialize oracle cluster
 oracle_cluster = OracleCluster()
-ing
 import traceback
 from typing import Dict, Any, Optional, List, Tuple, Set
 from datetime import datetime, timezone, timedelta
@@ -6467,11 +6466,11 @@ def _cross_register_with_peer_oracles() -> None:
 
 
 # Fire cross-registration in background thread after 20s startup settle
-import threading as _thr
+# threading already imported at top of file
 def _delayed_cross_register():
     import time as _t; _t.sleep(20)
     _cross_register_with_peer_oracles()
-_thr.Thread(target=_delayed_cross_register, daemon=True,
+threading.Thread(target=_delayed_cross_register, daemon=True,
             name='OracleCrossRegister').start()
 
 
