@@ -814,6 +814,41 @@ def get_block_sealer(db_pool=None) -> BlockSealer:
         _sealer_instance = BlockSealer(db_pool)
     return _sealer_instance
 
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# UNIFIED ENTROPY FUNCTIONS (Consolidated from globals.py)
+# All entropy comes from canonical qrng_ensemble + fallback to block field
+# ═════════════════════════════════════════════════════════════════════════════════════════
+
+def _get_canonical_entropy(size: int = 32) -> bytes:
+    """Get entropy from canonical qrng_ensemble, fallback to block field"""
+    try:
+        from qrng_ensemble import EntropyPoolManager
+        pool = EntropyPoolManager()
+        return pool.get_entropy(size)
+    except Exception as e:
+        logger.debug(f"[ENTROPY] qrng_ensemble failed: {e}, falling back")
+    
+    # Fallback: block field entropy
+    try:
+        from globals import get_entropy_from_block_field
+        return get_entropy_from_block_field()[:size]
+    except:
+        import secrets
+        return secrets.token_bytes(size)
+
+def get_quantum_entropy(size: int = 32) -> bytes:
+    """Get entropy for quantum operations"""
+    return _get_canonical_entropy(size)
+
+def get_w_state_entropy() -> bytes:
+    """Get entropy for W-state mining (32 bytes)"""
+    return _get_canonical_entropy(32)
+
+def get_block_nonce_entropy() -> bytes:
+    """Get entropy for block nonce (16 bytes)"""
+    return _get_canonical_entropy(16)
+
+
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # MAIN / TESTING

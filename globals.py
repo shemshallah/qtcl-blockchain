@@ -36,9 +36,51 @@ try:
 except ImportError:
     DB_AVAILABLE = False
 
+# Pool API (Entropy Management) — 5-source QRNG ensemble
+try:
+    from pool_api import get_entropy_pool_manager, get_entropy, get_entropy_stats
+    POOL_API_AVAILABLE = True
+except ImportError:
+    POOL_API_AVAILABLE = False
+    # Fallback stubs if pool_api unavailable
+    def get_entropy_pool_manager(): return None
+    def get_entropy(size=32): 
+        import secrets
+        return secrets.token_bytes(size)
+    def get_entropy_stats(): return {}
+
 # Current Block Field (entropy pool = current block field, nonmarkovian noise bath)
 ENTROPY_SIZE_BYTES = 32  # 256 bits
 BLOCK_FIELD_ENTROPY_KEY = 'current_block_field_entropy'
+
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# UNIFIED CONFIGURATION (Single Source of Truth)
+# ═════════════════════════════════════════════════════════════════════════════════════════
+
+# DATABASE
+DB_POOL_SIZE = int(os.getenv('DB_POOL_SIZE', '10'))
+DB_MAX_CONNECTIONS = int(os.getenv('DB_MAX_CONN', '20'))
+
+# W-STATE VALIDATION THRESHOLDS (Unified across all validators)
+WSTATE_MODE = os.getenv('WSTATE_MODE', 'normal').lower()
+WSTATE_STRICT_THRESHOLD = 0.80
+WSTATE_NORMAL_THRESHOLD = 0.75
+WSTATE_RELAXED_THRESHOLD = 0.70
+WSTATE_FIDELITY_THRESHOLD = {
+    'strict': WSTATE_STRICT_THRESHOLD,
+    'normal': WSTATE_NORMAL_THRESHOLD,
+    'relaxed': WSTATE_RELAXED_THRESHOLD,
+}.get(WSTATE_MODE, WSTATE_NORMAL_THRESHOLD)
+
+# ORACLE CONSENSUS
+ORACLE_MIN_PEERS = int(os.getenv('ORACLE_MIN_PEERS', '3'))
+ORACLE_CONSENSUS_THRESHOLD = 2/3  # 2/3 majority
+
+# P2P NETWORK
+MAX_PEERS = int(os.getenv('MAX_PEERS', '32'))
+
+# MINING
+MINING_COINBASE_REWARD = 1250  # sats
 
 # Logging
 if not logging.getLogger().hasHandlers():
@@ -200,12 +242,6 @@ def initialize_entropy_pool() -> bool:
     except Exception as e:
         logger.error(f"[ENTROPY] Initialization failed: {e}")
         return False
-
-def get_entropy_pool_manager() -> Optional[Any]:
-    """Get entropy pool manager instance (singleton)"""
-    if not get_state('entropy_pool_initialized'):
-        initialize_entropy_pool()
-    return get_state('entropy_pool_manager')
 
 def get_fresh_entropy(size: int = 32) -> bytes:
     """

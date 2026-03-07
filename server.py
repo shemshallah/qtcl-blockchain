@@ -267,175 +267,19 @@ import msgpack
 import base64
 import queue as _queue_mod
 
-_GRPC_AVAILABLE = False
-_grpc           = None
-_wstate_pb2     = None
-_wstate_pb2_grpc = None
-
-_PROTO_CONTENT = r"""
-syntax = "proto3";
-package qtcl;
-service WStateService {
-  rpc StreamSnapshots(StreamRequest) returns (stream WStateSnapshot);
-  rpc GetLatestSnapshot(StreamRequest) returns (WStateSnapshot);
-  rpc Ping(PingRequest) returns (PingResponse);
-}
-message StreamRequest  { string miner_id = 1; string miner_address = 2; uint64 known_ts = 3; }
-message PingRequest    { string miner_id = 1; }
-message PingResponse   { bool ok = 1; uint64 server_ts_ns = 2; uint32 miner_count = 3; }
-message HLWESignature  { string commitment = 1; string witness = 2; string proof = 3;
-                         string w_entropy_hash = 4; string derivation_path = 5; string public_key_hex = 6; }
-message WStateSnapshot { uint64 timestamp_ns = 1; string oracle_address = 2; string w_entropy_hash = 3;
-                         double fidelity = 4; double coherence = 5; double purity = 6; double entanglement = 7;
-                         string density_matrix_hex = 8; bool signature_valid = 9;
-                         HLWESignature hlwe_signature = 10; uint64 block_height = 11; }
-"""
-
-
-# ── SSE DISTRIBUTOR ─────────────────────────────────────────────────────────────
-
-# Active stream queues: miner_id → queue.Queue[dict | None]
-# None sentinel = server shutting down, close the stream.
-_grpc_stream_queues: dict = {}
-_grpc_queues_lock = threading.RLock()
-
-def _grpc_push_snapshot(snapshot: dict) -> None:
-    """Called by _broadcast_snapshot_to_gossip_network — pushes to every gRPC stream."""
-    if not _GRPC_AVAILABLE or not _grpc_stream_queues:
-        return
-    with _grpc_queues_lock:
-        dead = []
-        for mid, q in _grpc_stream_queues.items():
-            try:
-                q.put_nowait(snapshot)
-            except _queue_mod.Full:
-                dead.append(mid)  # slow consumer — evict
-        for mid in dead:
-            del _grpc_stream_queues[mid]
-            logger.debug(f'[GRPC] Evicted slow consumer: {mid[:16]}…')
-
-def _make_grpc_servicer():
-    """Create the WStateServicer class once stubs are compiled."""
-    if not _GRPC_AVAILABLE:
-        return None
-
-    class WStateServicer(_wstate_pb2_grpc.WStateServiceServicer):
-
-        def _dict_to_snapshot_pb(self, snap: dict):
-            sig = snap.get('hlwe_signature') or {}
-            return _wstate_pb2.WStateSnapshot(
-                timestamp_ns       = int(snap.get('timestamp_ns', 0)),
-                oracle_address     = str(snap.get('oracle_address', '')),
-                w_entropy_hash     = str(snap.get('w_entropy_hash', '')),
-                fidelity           = float(snap.get('fidelity', snap.get('w_state_fidelity', 0.94))),
-                coherence          = float(snap.get('coherence', 0.85)),
-                purity             = float(snap.get('purity', 0.95)),
-                entanglement       = float(snap.get('entanglement', 0.5)),
-                density_matrix_hex = str(snap.get('density_matrix_hex', '')),
-                signature_valid    = bool(snap.get('signature_valid', True)),
-                block_height       = int(snap.get('block_height', 0)),
-                hlwe_signature     = _wstate_pb2.HLWESignature(
-                    commitment      = str(sig.get('commitment', '')),
-                    witness         = str(sig.get('witness', '')),
-                    proof           = str(sig.get('proof', '')),
-                    w_entropy_hash  = str(sig.get('w_entropy_hash', '')),
-                    derivation_path = str(sig.get('derivation_path', '')),
-                    public_key_hex  = str(sig.get('public_key_hex', '')),
-                ),
-            )
-
-        def StreamSnapshots(self, request, context):
-            miner_id = request.miner_id or 'unknown'
-            q: _queue_mod.Queue = _queue_mod.Queue(maxsize=200)
-            with _grpc_queues_lock:
-                _grpc_stream_queues[miner_id] = q
-            logger.info(f'[GRPC] 🔗 Stream opened | miner={miner_id[:20]}…')
-            try:
-                # Immediately send latest cached snapshot so miner doesn't wait
-                if _latest_snapshot:
-                    yield self._dict_to_snapshot_pb(_latest_snapshot)
-                while context.is_active():
-                    try:
-                        snap = q.get(timeout=5.0)
-                        if snap is None:   # shutdown sentinel
-                            break
-                        yield self._dict_to_snapshot_pb(snap)
-                    except _queue_mod.Empty:
-                        continue  # keep-alive: gRPC framework handles ping
-            except Exception as e:
-                logger.debug(f'[GRPC] Stream error for {miner_id[:16]}…: {e}')
-            finally:
-                with _grpc_queues_lock:
-                    _grpc_stream_queues.pop(miner_id, None)
-                logger.info(f'[GRPC] 🔌 Stream closed | miner={miner_id[:20]}…')
-
-        def GetLatestSnapshot(self, request, context):
-            snap = _latest_snapshot or {
-                'timestamp_ns': int(time.time() * 1e9),
-                'oracle_address': 'qtcl1oracle',
-                'w_entropy_hash': 'a' * 64,
-                'fidelity': 0.95,
-                'purity': 0.95,
-                'coherence': 0.85,
-                'signature_valid': True,
-            }
-            return self._dict_to_snapshot_pb(snap)
-
-        def Ping(self, request, context):
-            with _miners_lock:
-                n = len(_registered_miners)
-            return _wstate_pb2.PingResponse(
-                ok=True,
-                server_ts_ns=int(time.time() * 1e9),
-                miner_count=n,
-            )
-
-    return WStateServicer()
-
-
-def _start_grpc_server() -> None:
-    """Start the gRPC server on GRPC_PORT (default 50051) in a background thread."""
-    if not _GRPC_AVAILABLE:
-        return
-    grpc_port = int(os.getenv('GRPC_PORT', 50051))
-    servicer  = _make_grpc_servicer()
-    if servicer is None:
-        return
-
-    def _serve():
-        import grpc as _g
-        server = _g.server(
-            __import__('concurrent.futures').futures.ThreadPoolExecutor(max_workers=50),
-            options=[
-                ('grpc.keepalive_time_ms',              20_000),
-                ('grpc.keepalive_timeout_ms',           10_000),
-                ('grpc.keepalive_permit_without_calls', 1),
-                ('grpc.max_connection_idle_ms',         300_000),
-            ],
-        )
-        _wstate_pb2_grpc.add_WStateServiceServicer_to_server(servicer, server)
-        server.add_insecure_port(f'[::]:{grpc_port}')
-        server.start()
-        logger.info(f'[GRPC] 🚀 Server listening on port {grpc_port} (insecure — TLS via Koyeb)')
-        server.wait_for_termination()
-
-    t = threading.Thread(target=_serve, daemon=True, name='GRPCServer')
-    t.start()
-# ── end gRPC block ────────────────────────────────────────────────────────────
-
-# ═════════════════════════════════════════════════════════════════════════════════
-# LOGGING SETUP (MUST BE FIRST - all subsequent code depends on logger)
-# ═════════════════════════════════════════════════════════════════════════════════
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] %(levelname)s [%(name)s]: %(message)s'
-)
-logger = logging.getLogger(__name__)
-
 # ═════════════════════════════════════════════════════════════════════════════════════════
+# NOTE: gRPC transport layer was superseded by SSE (Server-Sent Events)
+# SSE provides:
+#   ✓ Real-time snapshot broadcasting
+#   ✓ Automatic connection management
+#   ✓ PostgreSQL LISTEN/NOTIFY cross-instance fanout
+#   ✓ Simplified client integration (HTTP + WebSocket)
+# gRPC code removed 2026-03-07. All snapshot distribution now via /api/events (SSE).
+# ═════════════════════════════════════════════════════════════════════════════════════════
+
+# ═════════════════════════════════════════════════════════════════════════════════
 # M2 FIX: DELAYED START SYNC (INTEGRATED)
-# ═════════════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════════
 
 class M2_DelayedStartSync:
     """
