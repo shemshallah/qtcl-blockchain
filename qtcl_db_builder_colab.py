@@ -426,6 +426,8 @@ CREATE TABLE blocks (
     pq_signature TEXT,
     pq_key_fingerprint VARCHAR(255),
     pq_validation_status VARCHAR(50) DEFAULT 'unsigned',
+    pq_curr INTEGER DEFAULT 1,
+    pq_last INTEGER DEFAULT 0,
     oracle_w_state_hash VARCHAR(255),
     oracle_density_matrix_hash VARCHAR(255),
     oracle_entropy_hash VARCHAR(255),

@@ -2331,14 +2331,17 @@ class MetricsCollector:
                 cur.execute("SELECT COUNT(*) FROM transactions")
                 total_txs = (cur.fetchone() or [0])[0]
 
-                # ── LATEST BLOCK VALIDATION FIELDS ────────────────────────────────
+                # ── LATEST BLOCK VALIDATION FIELDS + pq PSEUDOQUBIT STATES ────────────────────────────────
                 cur.execute("""
                     SELECT quantum_validation_status,
                            pq_validation_status,
                            oracle_consensus_reached,
                            temporal_coherence,
                            difficulty,
-                           timestamp                    FROM blocks
+                           timestamp,
+                           pq_curr,
+                           pq_last
+                    FROM blocks
                     ORDER BY height DESC LIMIT 1
                 """)
                 val_row = cur.fetchone()
@@ -2348,6 +2351,8 @@ class MetricsCollector:
                 temporal_coh      = float(val_row[3]) if val_row and val_row[3] is not None else 0.0
                 difficulty        = float(val_row[4]) if val_row and val_row[4] is not None else 20.0
                 last_block_ts     = float(val_row[5]) if val_row and val_row[5] is not None else time.time()
+                pq_curr_live      = int(val_row[6]) if val_row and val_row[6] is not None else 1
+                pq_last_live      = int(val_row[7]) if val_row and val_row[7] is not None else 0
 
                 # ── PENDING TRANSACTIONS (MEMPOOL SIZE) ────────────────────────────
                 cur.execute("SELECT COUNT(*) FROM transactions WHERE status = 'pending'")
@@ -2472,6 +2477,8 @@ class MetricsCollector:
                     'peer_count'         : peer_count,
                     'mempool_size'       : mempool_size,
                     'last_block_time_ago': round(last_block_time_ago, 1),
+                    'pq_curr'            : pq_curr_live,  # ✅ LIVE PSEUDOQUBIT CURRENT FIELD
+                    'pq_last'            : pq_last_live,  # ✅ LIVE PSEUDOQUBIT LAST FIELD
                     'recent_blocks'      : recent_blocks,
                     'mempool_txs'        : mempool_txs,
                     'miners'             : miners_dict,
@@ -2486,7 +2493,8 @@ class MetricsCollector:
                         'avg_block_time_s'    : round(avg_block_time, 3),
                     },
                     'validation': {
-                        'quantum_validation_status': quantum_status,                        'pq_validation_status'     : pq_status,
+                        'quantum_validation_status': quantum_status,
+                        'pq_validation_status'     : pq_status,
                         'oracle_consensus_reached' : oracle_consensus,
                         'temporal_coherence'       : round(temporal_coh, 4),
                     },
@@ -2494,6 +2502,8 @@ class MetricsCollector:
                         'coherence'    : round(float(qm.get('coherence', 0)), 4),
                         'fidelity'     : round(w_state_fidelity, 4),
                         'entanglement' : round(float(qm.get('entanglement', 0)), 4),
+                        'pq_curr'      : pq_curr_live,
+                        'pq_last'      : pq_last_live,
                     },
                     'oracle': {
                         'address'          : oracle_address,
@@ -6390,11 +6400,21 @@ def submit_block():
         miner_address = str(header.get('miner_address', ''))
         w_state_fidelity = float(header.get('w_state_fidelity', 0.0))
         w_entropy_hash = str(header.get('w_entropy_hash', ''))
+        # ✅ ENTERPRISE FIX: Extract pq_curr and pq_last (quantum pseudoqubit field IDs)
+        pq_curr = int(header.get('pq_curr', 1))
+        pq_last = int(header.get('pq_last', 0))
         transactions = data.get('transactions', [])
         
         # ✅ VALIDATION 1: Required fields
         if not block_hash or not miner_address:
             return jsonify({'error': 'missing block_hash or miner_address'}), 400
+        
+        # ✅ VALIDATION 1b: pq constraint validation (ENTERPRISE RULE)
+        # Only constraint: pq_last must be exactly pq_curr - 1 (tripartite entanglement window)
+        if pq_last != pq_curr - 1:
+            return jsonify({
+                'error': f'pq_last must be pq_curr - 1: got pq_last={pq_last}, pq_curr={pq_curr}'
+            }), 422
         
         # ✅ VALIDATION 2: W-state fidelity (relaxed threshold now)
         if w_state_fidelity < 0.70:
@@ -6505,8 +6525,9 @@ def submit_block():
         BLOCK_REWARD_QTCL = 12.5
         
         with get_db_cursor() as cur:
-            # 1️⃣ INSERT BLOCK INTO DATABASE — WITH FULL VALIDATION FLAGS
+            # 1️⃣ INSERT BLOCK INTO DATABASE — WITH FULL VALIDATION FLAGS + pq FIELDS
             # ✅ quantum_validation_status, pq_validation_status, oracle_consensus_reached, temporal_coherence
+            # ✅ pq_curr, pq_last — quantum pseudoqubit field IDs
             cur.execute("""
                 INSERT INTO blocks (
                     height, block_number, block_hash, previous_hash,
@@ -6514,8 +6535,9 @@ def submit_block():
                     validator_public_key, oracle_w_state_hash,
                     entropy_score, status, finalized,
                     quantum_validation_status, pq_validation_status,
-                    oracle_consensus_reached, temporal_coherence
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    oracle_consensus_reached, temporal_coherence,
+                    pq_curr, pq_last
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (height) DO NOTHING
             """, (
                 block_height, block_height, block_hash, parent_hash,
@@ -6523,9 +6545,10 @@ def submit_block():
                 miner_address, w_entropy_hash,
                 round(w_state_fidelity, 4), 'confirmed', True,
                 'validated', 'verified',
-                True, round(w_state_fidelity, 4)
+                True, round(w_state_fidelity, 4),
+                pq_curr, pq_last
             ))
-            logger.info(f"[DB] ✅ Block #{block_height} sealed | quantum=VALIDATED | pq=VERIFIED | oracle_consensus=YES | coherence={round(w_state_fidelity, 4)}")
+            logger.info(f"[DB] ✅ Block #{block_height} sealed | quantum=VALIDATED | pq=VERIFIED | pq_curr={pq_curr} pq_last={pq_last} | coherence={round(w_state_fidelity, 4)}")
             
             # ── Deterministic helpers (used throughout) ──────────────────────────
             import hashlib as _hl
