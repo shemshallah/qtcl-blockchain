@@ -890,9 +890,10 @@ class OracleNode:
             return
         try:
             nm = NoiseModel()
-            nm.add_all_qubit_quantum_error(depolarizing_error(self.kappa, 1),     ["ry", "cx"])
+            nm.add_all_qubit_quantum_error(depolarizing_error(self.kappa, 1),           ["ry", "id"])
+            nm.add_all_qubit_quantum_error(depolarizing_error(self.kappa * 2.0, 2),       ["cx"])
             nm.add_all_qubit_quantum_error(amplitude_damping_error(0.04 + self.oracle_id * 0.002), ["measure"])
-            nm.add_all_qubit_quantum_error(phase_damping_error(0.02),             ["id"])
+            nm.add_all_qubit_quantum_error(phase_damping_error(0.02),                     ["id"])
             self.noise_model = nm
             self.aer = AerSimulator(noise_model=nm, seed_simulator=self.noise_seed)
             logger.info(
