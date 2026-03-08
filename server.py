@@ -2640,7 +2640,8 @@ class PeerConnection:
             with self.lock:
                 data = message.to_bytes()
                 
-                # Frame: 4-byte length + message                length = len(data)
+                # Frame: 4-byte length + message
+                length = len(data)
                 if length > MESSAGE_MAX_SIZE:
                     logger.error(f"[PEER {self.peer_id}] Message too large: {length}")
                     return False
