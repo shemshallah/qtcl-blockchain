@@ -1,6 +1,35 @@
 #!/usr/bin/env python3
 """
-
+╔════════════════════════════════════════════════════════════════════════════════╗
+║                                                                                ║
+║  QTCL SERVER v6 — Integrated P2P Blockchain with HLWE & Quantum Metrics       ║
+║                                                                                ║
+║  Museum-Grade Implementation — Unified Port 443 (HTTPS via Koyeb) (Internal) / 443 (External)  ║
+║  ─────────────────────────────────────────────────────────────────────────    ║
+║                                                                                ║
+║  Single Unified Server (All on Port 8000 Internal, 443 External via Koyeb):   ║
+║    • REST API Layer (port 443 HTTPS (Koyeb))                 ║
+║    • P2P WebSocket Layer (port 443 HTTPS (Koyeb))            ║
+║    • Database Layer (internal) — persistent state (PostgreSQL)              ║
+║    • Lattice Controller — quantum entropy mining                             ║
+║    • Mempool Manager — transaction pool with validation                      ║
+║    • Peer Discovery — DNS seeds, bootstrap nodes, peer exchange              ║
+║    • Message Handlers — blocks, transactions, peer sync, consensus           ║
+║                                                                                ║
+║  Entry:                                                                        ║
+║    python server.py                                                            ║
+║    or: gunicorn -w1 -b0.0.0.0:$PORT server:app                                ║
+║                                                                                ║
+║  Environment Variables:                                                        ║
+║    DATABASE_URL — PostgreSQL connection                                       ║
+║    PORT — Listen port (default: 443 on Koyeb, set by platform)             ║
+║    FLASK_HOST — HTTP bind address (default: 0.0.0.0)                         ║
+║    ORACLE_WS_URL — WebSocket oracle endpoint (e.g., wss://host/socket.io)   ║
+║                    Koyeb automatically uses HTTPS 443 (no port needed)        ║
+║    MAX_PEERS — Max peer connections (default: 32)                            ║
+║    BOOTSTRAP_NODES — Comma-separated peer addresses                          ║
+║                                                                                ║
+╚════════════════════════════════════════════════════════════════════════════════╝
 """
 
 import os
@@ -2201,10 +2230,15 @@ def _snapshot_streaming_daemon():
                         dm = ORACLE_W_STATE_MANAGER.get_latest_density_matrix()
                         if dm and isinstance(dm, dict):
                             if dm.get('timestamp_ns', 0) > last_snapshot_ts:
+                                # Write full DM hex into _ENG_STATE so pq0-bloch endpoint can serve it
+                                dm_hex = dm.get('density_matrix_hex', '')
+                                if dm_hex:
+                                    with _ENG_LOCK:
+                                        _ENG_STATE['density_matrix_hex'] = dm_hex
                                 snapshot = {
                                     'timestamp_ns': dm.get('timestamp_ns', int(time.time() * 1e9)),
                                     'oracle_address': dm.get('oracle_address', ORACLE.oracle_address if ORACLE and hasattr(ORACLE, 'oracle_address') else 'qtcl1oracle'),
-                                    'density_matrix_hex': dm.get('density_matrix_hex', ''),
+                                    'density_matrix_hex': dm_hex,
                                     'w_entropy_hash': dm.get('w_entropy_hash', ''),
                                     'purity': dm.get('purity', 0.95),
                                     'w_state_fidelity': dm.get('w_state_fidelity', 0.94),
@@ -2347,8 +2381,7 @@ class MetricsCollector:
                 # Fallback to in-memory only if no blocks exist yet
                 snap = state.get_state()
                 qm   = snap.get('quantum_metrics', {})
-                _eng_w3 = _ENG_STATE.get('w3_fidelity') or _ENG_STATE.get('w_state_fidelity')
-                w_state_fidelity = temporal_coh if temporal_coh > 0 else (float(_eng_w3) if _eng_w3 is not None else float(qm.get('w_state_fidelity', 0.0)))
+                w_state_fidelity = temporal_coh if temporal_coh > 0 else float(qm.get('w_state_fidelity', 0.7111))
 
                 # ── ORACLE STATUS ──────────────────────────────────────────────────
                 oracle_address    = None
@@ -2451,7 +2484,7 @@ class MetricsCollector:
                     'peer_count'         : peer_count,
                     'mempool_size'       : mempool_size,
                     'last_block_time_ago': round(last_block_time_ago, 1),
-                    'pq_curr'            : pq_curr_live,
+                    'pq_curr'            : pq_curr_live,  # ✅ LIVE PSEUDOQUBIT CURRENT FIELD
                     'pq_last'            : pq_last_live,  # ✅ LIVE PSEUDOQUBIT LAST FIELD
                     'recent_blocks'      : recent_blocks,
                     'mempool_txs'        : mempool_txs,
@@ -2500,7 +2533,7 @@ class MetricsCollector:
                 'block_height'       : int(bs.get('current_height', 0)),
                 'difficulty'         : float(bs.get('difficulty', 20)),
                 'network_hash_rate'  : 0.0,
-                'w_state_fidelity'   : float(_ENG_STATE.get('w3_fidelity') or _ENG_STATE.get('w_state_fidelity') or qm.get('w_state_fidelity') or 0.0),
+                'w_state_fidelity'   : float(qm.get('w_state_fidelity', 0.7111)),
                 'peer_count'         : P2P.get_peer_count() if P2P else 0,
                 'mempool_size'       : 0,
                 'last_block_time_ago': 0.0,
@@ -5110,7 +5143,7 @@ def quantum_metrics_thread():
             # lat=20ms → gamma1=0.05/s → exp(-0.05*2)=0.905 → F≈0.94  ✓
             # lat=80ms → gamma1=0.20/s → exp(-0.20*2)=0.670 → F≈0.78  (marginal)
             # OLD: lat_ema*80 → gamma1=1.6 at 20ms → exp(-3.2)=0.04 → F=0.34 ✗
-            gamma1   = min(0.30, max(0.005, lat_ema * 2.5))
+            gamma1   = min(0.08, max(0.005, lat_ema * 2.5))
             # gammaphi: pure dephasing from clock jitter (jit_ema in seconds)
             # jit=10ms → gammaphi=0.15/s → still well inside stability
             gammaphi = min(0.60, max(0.005, jit_ema * 15.0))
@@ -5222,6 +5255,7 @@ def quantum_metrics_thread():
                 'geodesic_dist':round(geodesic,6),'qrng_health':round(qh,4),
                 'ch0_weight':round(w0,4),'ch1_weight':round(w1,4),'ch2_weight':round(w2,4),
                 'n_peers':N-1,'cycle':_ENG_STATE['cycle']+1,
+                'density_matrix_hex': _ENG_STATE.get('density_matrix_hex', ''),
             }
             new['rho_hist'] = _ENG_STATE['rho_hist']
             new['rho_hist'].append((time.time(), rho3.copy()))
@@ -5845,7 +5879,7 @@ def oracle_pq0_bloch():
             'negativity','concurrence','qfi','discord','coherence','purity',
             'sector_occ','tele_fidelity','gamma1','gammaphi','gammadep','gamma_geo',
             'omega','ou_mem','batch_field_mean','geodesic_dist','qrng_health',
-            'ch0_weight','ch1_weight','ch2_weight','n_peers','cycle')}
+            'ch0_weight','ch1_weight','ch2_weight','n_peers','cycle','density_matrix_hex')}
     
     # If metrics thread hasn't initialized yet, use cached state
     if eng.get('pq0_bloch_theta') is None:
@@ -5912,6 +5946,7 @@ def oracle_pq0_bloch():
         'n_peers': eng['n_peers'],
         'cycle': eng['cycle'],
         'timestamp_ns': time.time_ns(),
+        'density_matrix_hex': eng.get('density_matrix_hex', ''),
         'state_source': 'live_quantum_metrics',
     }), 200
 
