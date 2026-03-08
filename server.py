@@ -5088,7 +5088,7 @@ def quantum_metrics_thread():
 
     with _ENG_LOCK: _ENG_STATE['rho3'] = _w_dm(3).copy()
 
-    while state.is_alive:
+    while getattr(state, 'is_alive', True):
         _t0 = time.monotonic()
         try:
             # ── 1. Block height ────────────────────────────────────────────
@@ -5355,7 +5355,7 @@ def quantum_metrics_thread_wrapper():
     """
     logger.info("[ENT v3] Quantum metrics thread wrapper starting...")
     
-    while state.is_alive:
+    while getattr(state, 'is_alive', True):
         try:
             quantum_metrics_thread()
         except Exception as e:
@@ -7055,9 +7055,9 @@ def p2p_stats():
         'dht_state_entries': len(dht.state_store),
         'dht_node_id':       dht.local_node.node_id[:16] + '…',
         'dht_local_port':    dht.local_node.port,
-        'p2p_running':       P2P is not None and P2P.is_running,
+        'p2p_running':       P2P is not None and hasattr(P2P, 'is_running') and P2P.is_running,
     }
-    if P2P and P2P.is_running:
+    if P2P is not None and hasattr(P2P, 'is_running') and P2P.is_running:
         base.update(P2P.get_stats())
     return jsonify(base), 200
 
@@ -7065,7 +7065,7 @@ def p2p_stats():
 @app.route('/api/p2p/peers', methods=['GET'])
 def p2p_peers():
     """Get connected peers information"""
-    if P2P is None or not P2P.is_running:
+    if P2P is None or not (hasattr(P2P, 'is_running') and P2P.is_running):
         return jsonify({'error': 'P2P not initialized'}), 503
     
     return jsonify({
@@ -7205,7 +7205,7 @@ def dht_stats():
     peers = dht.routing_table.get_all_nodes()
     alive_count = sum(1 for p in peers if p.is_alive())
     
-    p2p_connected = P2P.get_peer_count() if P2P and P2P.is_running else 0
+    p2p_connected = P2P.get_peer_count() if (P2P is not None and hasattr(P2P, 'is_running') and P2P.is_running) else 0
     return jsonify({
         'total_peers':      len(peers),
         'alive_peers':      alive_count,
@@ -7732,10 +7732,13 @@ def shutdown_handler():
     logger.info("[SERVER] Shutting down...")
     state.is_alive = False
     
-    if P2P:
-        P2P.shutdown()
+    if P2P is not None and hasattr(P2P, 'shutdown'):
+        try:
+            P2P.shutdown()
+        except Exception as e:
+            logger.error(f"[SERVER] P2P shutdown error: {e}")
     
-    if LATTICE:
+    if LATTICE is not None and hasattr(LATTICE, 'stop'):
         try:
             LATTICE.stop()
         except Exception as e:
