@@ -1,35 +1,6 @@
 #!/usr/bin/env python3
 """
-╔════════════════════════════════════════════════════════════════════════════════╗
-║                                                                                ║
-║  QTCL SERVER v6 — Integrated P2P Blockchain with HLWE & Quantum Metrics       ║
-║                                                                                ║
-║  Museum-Grade Implementation — Unified Port 443 (HTTPS via Koyeb) (Internal) / 443 (External)  ║
-║  ─────────────────────────────────────────────────────────────────────────    ║
-║                                                                                ║
-║  Single Unified Server (All on Port 8000 Internal, 443 External via Koyeb):   ║
-║    • REST API Layer (port 443 HTTPS (Koyeb))                 ║
-║    • P2P WebSocket Layer (port 443 HTTPS (Koyeb))            ║
-║    • Database Layer (internal) — persistent state (PostgreSQL)              ║
-║    • Lattice Controller — quantum entropy mining                             ║
-║    • Mempool Manager — transaction pool with validation                      ║
-║    • Peer Discovery — DNS seeds, bootstrap nodes, peer exchange              ║
-║    • Message Handlers — blocks, transactions, peer sync, consensus           ║
-║                                                                                ║
-║  Entry:                                                                        ║
-║    python server.py                                                            ║
-║    or: gunicorn -w1 -b0.0.0.0:$PORT server:app                                ║
-║                                                                                ║
-║  Environment Variables:                                                        ║
-║    DATABASE_URL — PostgreSQL connection                                       ║
-║    PORT — Listen port (default: 443 on Koyeb, set by platform)             ║
-║    FLASK_HOST — HTTP bind address (default: 0.0.0.0)                         ║
-║    ORACLE_WS_URL — WebSocket oracle endpoint (e.g., wss://host/socket.io)   ║
-║                    Koyeb automatically uses HTTPS 443 (no port needed)        ║
-║    MAX_PEERS — Max peer connections (default: 32)                            ║
-║    BOOTSTRAP_NODES — Comma-separated peer addresses                          ║
-║                                                                                ║
-╚════════════════════════════════════════════════════════════════════════════════╝
+
 """
 
 import os
