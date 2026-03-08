@@ -570,6 +570,9 @@ try:
 except ImportError:
     import urllib.request as _urllib_req, urllib.error as _urllib_err; _HTTP_BACKEND = 'urllib'
 
+# True when `requests` lib is available (used by _fetch_peer and cross-oracle helpers)
+_HAS_REQUESTS: bool = (_HTTP_BACKEND == 'requests')
+
 def _http_json_serial(o):
     if isinstance(o, (datetime, )): return o.isoformat()
     if isinstance(o, _decimal.Decimal): return float(o)
@@ -1164,6 +1167,14 @@ def get_dht_manager() -> DHTManager:
 _sse_clients: Dict[str, _queue_mod.Queue] = {}
 _sse_lock = threading.RLock()
 _sse_broadcast_count = 0
+
+# ── Snapshot distribution globals (MUST be declared before any function uses them) ──
+_latest_snapshot: Optional[dict]  = None          # last broadcast snapshot for new SSE clients
+_latest_snapshot_ts: int          = 0             # timestamp_ns of latest snapshot
+_last_snapshot_log_time: float    = 0.0           # rate-limit snapshot log messages
+_verbose_p2p_logging: bool        = os.getenv('VERBOSE_P2P', '').lower() in ('1', 'true', 'yes')
+_snapshot_log_interval: float     = 60.0          # seconds between snapshot log entries
+_snapshot_lock                    = threading.RLock()   # guards _latest_snapshot / _ts
 
 def _sse_push_snapshot(snapshot: dict) -> None:
     """Push snapshot to all connected SSE clients."""
@@ -3613,16 +3624,17 @@ class P2PServer:
                 try:
                     client_sock, address = self.server_socket.accept()
 
-                    # ── HTTP PROBE INTERCEPTOR ────────────────────────────────────────
-                    # Koyeb (and any load-balancer) health-checks every exposed port via
-                    # HTTP GET.  Our raw-TCP framing reads the first 4 bytes as a big-
-                    # endian uint32 message-length; "GET " → 0x47455420 = 1,195,725,856
-                    # which exceeds MESSAGE_MAX_SIZE and crashes the peer immediately,
-                    # causing Koyeb to declare the instance unhealthy and kill it.
+                    # ── HTTP REVERSE PROXY INTERCEPTOR ───────────────────────────────
+                    # Koyeb exposes P2P_PORT (9091) as the public HTTP endpoint and routes
+                    # ALL traffic there — including every /api/* call from miners.
+                    # Raw-TCP framing reads "GET " as uint32 0x47455420 = 1.1 GB → crash.
+                    # A dumb "200 OK\r\nOK" response breaks every miner API call
+                    # (non-JSON body → JSONDecodeError → infinite retry loops).
                     #
-                    # Fix: MSG_PEEK the first 4 bytes.  If they match any HTTP method
-                    # prefix we swallow the socket, reply with a minimal HTTP 200 OK,
-                    # and close — the P2P layer never sees the connection.
+                    # Fix: peek 4 bytes, detect HTTP, read the full request, forward to
+                    # Flask/Gunicorn on localhost:$PORT, pipe the real JSON response back.
+                    # Health probes (/ /health /healthz /ping) get a fast-path JSON 200
+                    # without touching Flask.
                     # ─────────────────────────────────────────────────────────────────
                     try:
                         client_sock.settimeout(0.5)
@@ -3630,27 +3642,150 @@ class P2PServer:
                         client_sock.settimeout(None)
                         _HTTP_PREFIXES = (b'GET ', b'POST', b'HEAD', b'PUT ', b'DELE', b'OPTI', b'PATC', b'HTTP')
                         if peek and peek[:4] in _HTTP_PREFIXES:
-                            _http_resp = (
-                                b'HTTP/1.1 200 OK\r\n'
-                                b'Content-Type: text/plain\r\n'
-                                b'Content-Length: 2\r\n'
-                                b'Connection: close\r\n'
-                                b'\r\n'
-                                b'OK'
-                            )
-                            try:
-                                client_sock.sendall(_http_resp)
-                            except Exception:
-                                pass
-                            client_sock.close()
-                            logger.debug(f"[P2P] HTTP probe from {address[0]}:{address[1]} → 200 OK (closed)")
+                            _csock, _addr = client_sock, address
+                            def _proxy_http(sock=_csock, addr=_addr):
+                                import http.client as _hc
+                                # ── Port selection ──────────────────────────────────────────────
+                                # FLASK_INTERNAL_PORT decouples Flask from Koyeb's $PORT.
+                                # Always set FLASK_INTERNAL_PORT=8000 in Koyeb env vars.
+                                # P2P_PORT (9091) is the external-facing TCP server.
+                                # Flask/gunicorn must NEVER share P2P_PORT.
+                                _FLASK_PORT = int(os.environ.get('FLASK_INTERNAL_PORT',
+                                                  os.environ.get('PORT', 8000)))
+                                _HEALTH_PATHS = {b'/', b'/health', b'/healthz', b'/ping'}
+                                _path = b'/'
+                                try:
+                                    sock.settimeout(10)
+                                    _raw = b''
+                                    while b'\r\n\r\n' not in _raw:
+                                        _chunk = sock.recv(4096)
+                                        if not _chunk:
+                                            break
+                                        _raw += _chunk
+                                        if len(_raw) > 65536:
+                                            break
+                                    _req_line = _raw.split(b'\r\n', 1)[0]
+                                    _parts = _req_line.split(b' ')
+                                    _method = _parts[0].decode('ascii', errors='replace') if _parts else 'GET'
+                                    _path   = _parts[1] if len(_parts) > 1 else b'/'
+                                    _path_s = _path.decode('ascii', errors='replace')
+                                    if _path.split(b'?')[0] in _HEALTH_PATHS:
+                                        _body = b'{"status":"ok"}'
+                                        sock.sendall(
+                                            b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n'
+                                            b'Content-Length: ' + str(len(_body)).encode() +
+                                            b'\r\nConnection: close\r\n\r\n' + _body
+                                        )
+                                        logger.debug(f"[P2P] health probe {addr[0]} → fast-path 200")
+                                        return
+                                    _hdr_end  = _raw.index(b'\r\n\r\n') + 4
+                                    _hdr_blob = _raw[len(_req_line)+2:_hdr_end]
+                                    _body_buf = _raw[_hdr_end:]
+                                    # Build case-preserving header dict for forwarding,
+                                    # plus a lowercase lookup dict for our own checks.
+                                    _headers    = {}
+                                    _headers_lc = {}
+                                    for _hl in _hdr_blob.split(b'\r\n'):
+                                        if b':' in _hl:
+                                            _hk, _hv = _hl.split(b':', 1)
+                                            _k = _hk.strip().decode()
+                                            _v = _hv.strip().decode()
+                                            _headers[_k]       = _v
+                                            _headers_lc[_k.lower()] = _v
+                                    # Case-insensitive Content-Length lookup
+                                    _clen = int(_headers_lc.get('content-length', 0))
+                                    while len(_body_buf) < _clen:
+                                        _more = sock.recv(min(4096, _clen - len(_body_buf)))
+                                        if not _more:
+                                            break
+                                        _body_buf += _more
+                                    _conn = _hc.HTTPConnection('127.0.0.1', _FLASK_PORT, timeout=15)
+                                    _fwd  = {k: v for k, v in _headers.items()
+                                             if k.lower() not in ('host', 'connection', 'transfer-encoding',
+                                                                   'accept-encoding')}
+                                    # Always inject correct Host so Flask routing works
+                                    _fwd['Host']            = f'127.0.0.1:{_FLASK_PORT}'
+                                    _fwd['Connection']      = 'close'
+                                    # Force uncompressed response — proxy can't transparently
+                                    # decompress gzip before rewriting Content-Length
+                                    _fwd['Accept-Encoding'] = 'identity'
+                                    # FIX: use truthiness-safe body — b'' should pass as None, not zero-length body
+                                    _send_body = _body_buf if _body_buf else None
+                                    _conn.request(_method, _path_s, body=_send_body, headers=_fwd)
+                                    _resp      = _conn.getresponse()
+                                    # ── Streaming / SSE detection ────────────────
+                                    # SSE endpoints (/api/events, /api/snapshot/sse)
+                                    # return text/event-stream with chunked encoding.
+                                    # Calling _resp.read() would block forever.
+                                    # Detect and pipe in real-time instead.
+                                    _ct = _resp.getheader('Content-Type', '')
+                                    _is_sse = ('text/event-stream' in _ct or
+                                               _path_s in ('/api/events', '/api/snapshot/sse') or
+                                               '/api/events' in _path_s)
+                                    if _is_sse:
+                                        # SSE streaming pipe mode
+                                        _s_hdr = f'HTTP/1.1 {_resp.status} {_resp.reason}\r\n'.encode()
+                                        _s_rh  = b''
+                                        for _rh, _rv in _resp.getheaders():
+                                            if _rh.lower() not in ('transfer-encoding', 'connection', 'content-length'):
+                                                _s_rh += f'{_rh}: {_rv}\r\n'.encode()
+                                        _s_rh += b'Transfer-Encoding: chunked\r\nConnection: keep-alive\r\n'
+                                        sock.sendall(_s_hdr + _s_rh + b'\r\n')
+                                        # Pipe chunks from Flask to client in real-time
+                                        _conn.close = lambda: None  # keep open while piping
+                                        try:
+                                            while True:
+                                                _chunk = _resp.read(512)
+                                                if not _chunk:
+                                                    break
+                                                sock.sendall(
+                                                    f'{len(_chunk):x}\r\n'.encode() +
+                                                    _chunk + b'\r\n'
+                                                )
+                                        except Exception:
+                                            pass
+                                        try: sock.sendall(b'0\r\n\r\n')
+                                        except Exception: pass
+                                        logger.debug(f"[P2P] SSE pipe closed {_path_s}")
+                                        return
+                                    # ── Normal (non-streaming) response ──────────
+                                    _resp_body = _resp.read()
+                                    _conn.close()
+                                    _status = f'HTTP/1.1 {_resp.status} {_resp.reason}\r\n'.encode()
+                                    _rhdrs  = b''
+                                    for _rh, _rv in _resp.getheaders():
+                                        if _rh.lower() not in ('transfer-encoding', 'connection', 'content-length'):
+                                            _rhdrs += f'{_rh}: {_rv}\r\n'.encode()
+                                    _rhdrs += b'Content-Length: ' + str(len(_resp_body)).encode() + b'\r\n'
+                                    _rhdrs += b'Connection: close\r\n'
+                                    sock.sendall(_status + _rhdrs + b'\r\n' + _resp_body)
+                                    logger.debug(f"[P2P] proxied {_method} {_path_s} → Flask:{_FLASK_PORT} {_resp.status} ({len(_resp_body)}b)")
+                                except Exception as _px:
+                                    logger.debug(f"[P2P] proxy error {addr[0]} {_path!r}: {_px}")
+                                    try:
+                                        _e = b'{"error":"proxy_unavailable"}'
+                                        sock.sendall(
+                                            b'HTTP/1.1 503 Service Unavailable\r\n'
+                                            b'Content-Type: application/json\r\n'
+                                            b'Content-Length: ' + str(len(_e)).encode() +
+                                            b'\r\nConnection: close\r\n\r\n' + _e
+                                        )
+                                    except Exception:
+                                        pass
+                                finally:
+                                    try: sock.close()
+                                    except Exception: pass
+                            if self.executor:
+                                self.executor.submit(_proxy_http)
+                            else:
+                                threading.Thread(target=_proxy_http, daemon=True).start()
                             continue
                     except socket.timeout:
                         client_sock.settimeout(None)
                     except Exception as _pe:
                         logger.debug(f"[P2P] Peek error from {address[0]}:{address[1]}: {_pe}")
                         client_sock.settimeout(None)
-                    # ── END HTTP PROBE INTERCEPTOR ────────────────────────────────────
+                    # ── END HTTP REVERSE PROXY INTERCEPTOR ───────────────────────────
 
                     peer_id = self._generate_peer_id()
                     

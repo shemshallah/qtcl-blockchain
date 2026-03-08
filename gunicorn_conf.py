@@ -27,7 +27,14 @@ import os
 import multiprocessing
 
 # ── Binding ────────────────────────────────────────────────────────────────────
-bind = f"0.0.0.0:{os.environ.get('PORT', '8000')}"
+# FLASK_INTERNAL_PORT (default 8000) is the port gunicorn/Flask binds internally.
+# This is SEPARATE from Koyeb's $PORT env var which is set to the P2P service port (9091).
+# Architecture:
+#   External HTTPS → Koyeb → :9091 (P2P TCP server, HTTP proxy interceptor)
+#                          → :8000 (health check, direct Flask)
+#   P2P proxy on :9091 → forwards all /api/* to Flask on :8000
+# Set FLASK_INTERNAL_PORT=8000 in Koyeb env vars to make this explicit.
+bind = f"0.0.0.0:{os.environ.get('FLASK_INTERNAL_PORT', '8000')}"
 
 # ── Worker model ───────────────────────────────────────────────────────────────
 worker_class   = "gthread"
