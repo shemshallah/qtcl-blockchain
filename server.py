@@ -3612,6 +3612,46 @@ class P2PServer:
             while self.is_running:
                 try:
                     client_sock, address = self.server_socket.accept()
+
+                    # ── HTTP PROBE INTERCEPTOR ────────────────────────────────────────
+                    # Koyeb (and any load-balancer) health-checks every exposed port via
+                    # HTTP GET.  Our raw-TCP framing reads the first 4 bytes as a big-
+                    # endian uint32 message-length; "GET " → 0x47455420 = 1,195,725,856
+                    # which exceeds MESSAGE_MAX_SIZE and crashes the peer immediately,
+                    # causing Koyeb to declare the instance unhealthy and kill it.
+                    #
+                    # Fix: MSG_PEEK the first 4 bytes.  If they match any HTTP method
+                    # prefix we swallow the socket, reply with a minimal HTTP 200 OK,
+                    # and close — the P2P layer never sees the connection.
+                    # ─────────────────────────────────────────────────────────────────
+                    try:
+                        client_sock.settimeout(0.5)
+                        peek = client_sock.recv(4, socket.MSG_PEEK)
+                        client_sock.settimeout(None)
+                        _HTTP_PREFIXES = (b'GET ', b'POST', b'HEAD', b'PUT ', b'DELE', b'OPTI', b'PATC', b'HTTP')
+                        if peek and peek[:4] in _HTTP_PREFIXES:
+                            _http_resp = (
+                                b'HTTP/1.1 200 OK\r\n'
+                                b'Content-Type: text/plain\r\n'
+                                b'Content-Length: 2\r\n'
+                                b'Connection: close\r\n'
+                                b'\r\n'
+                                b'OK'
+                            )
+                            try:
+                                client_sock.sendall(_http_resp)
+                            except Exception:
+                                pass
+                            client_sock.close()
+                            logger.debug(f"[P2P] HTTP probe from {address[0]}:{address[1]} → 200 OK (closed)")
+                            continue
+                    except socket.timeout:
+                        client_sock.settimeout(None)
+                    except Exception as _pe:
+                        logger.debug(f"[P2P] Peek error from {address[0]}:{address[1]}: {_pe}")
+                        client_sock.settimeout(None)
+                    # ── END HTTP PROBE INTERCEPTOR ────────────────────────────────────
+
                     peer_id = self._generate_peer_id()
                     
                     logger.info(f"[P2P] Inbound connection from {address[0]}:{address[1]}")
