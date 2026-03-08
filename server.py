@@ -2377,11 +2377,21 @@ class MetricsCollector:
                 last_block_time_ago = max(0.0, time.time() - last_block_ts)
 
                 # ── QUANTUM METRICS ─────────────────────────────────────────────────
-                # Use temporal_coherence from latest block (stored as w_state_fidelity)
-                # Fallback to in-memory only if no blocks exist yet
+                # Priority: live GKSL engine > oracle cluster snapshot > DB temporal_coherence
+                # temporal_coh from the DB is a historical write-once value per block — never use as live metric
+                with _ENG_LOCK:
+                    live_w3 = _ENG_STATE.get('w3_fidelity')
+                _eng_w3 = _ENG_STATE.get('w3_fidelity') or _ENG_STATE.get('w_state_fidelity')
                 snap = state.get_state()
                 qm   = snap.get('quantum_metrics', {})
-                w_state_fidelity = temporal_coh if temporal_coh > 0 else float(qm.get('w_state_fidelity', 0.7111))
+                if live_w3 is not None and live_w3 > 0:
+                    w_state_fidelity = float(live_w3)
+                elif _eng_w3 is not None and float(_eng_w3) > 0:
+                    w_state_fidelity = float(_eng_w3)
+                elif temporal_coh > 0:
+                    w_state_fidelity = temporal_coh
+                else:
+                    w_state_fidelity = float(qm.get('w_state_fidelity') or 0.0)
 
                 # ── ORACLE STATUS ──────────────────────────────────────────────────
                 oracle_address    = None
