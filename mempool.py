@@ -85,8 +85,8 @@ logger = logging.getLogger(__name__)
 
 MAX_MEMPOOL_SIZE          = 100_000          # maximum accepted transactions
 TX_VSIZE_BYTES            = 250              # normalized virtual size per QTCL TX
-MIN_RELAY_FEE_RATE        = 1                # minimum sat/vbyte to relay
-MIN_RELAY_FEE_ABS         = 1               # absolute minimum fee in base units
+MIN_RELAY_FEE_RATE        = 0.001            # minimum sat/vbyte to relay (lowered from 1 to enable typical QTCL fees)
+MIN_RELAY_FEE_ABS         = 1               # absolute minimum fee in base units (0.01 QTCL)
 MEMPOOL_TTL_HOURS         = 72              # purge TXs older than this
 RBF_FEE_BUMP_PCT          = 10             # replace-by-fee requires +10% fee_rate
 EVICTION_BATCH            = 500            # how many low-fee TXs to drop when full
