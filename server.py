@@ -8113,13 +8113,18 @@ class GossipProtocolHandler:
                 logger.warning(f"[LAYER-6] Gossip broadcast error to {peer_url}: {e}")
 
 
-    logger.info("[P2P-SOCKETIO] P2P communication enabled on main port %d (unified)" % port)
-    logger.info("[P2P-SOCKETIO] Miners and peers connect via: wss://your-domain/socket.io")
-    
-    # Start P2P daemons (streaming + cleanup)
-    _start_p2p_daemons()
-    logger.info("[P2P-SSE] ✅ P2P daemons started (heartbeat, snapshot broadcast)")
-    
-    # Use Flask to run unified HTTP REST + SSE server on port 8000
-    logger.info(f"[HTTP] Starting unified HTTP REST + P2P SSE server on port {port}...")
-    app.run(host='0.0.0.0', port=port, debug=debug, threaded=True)
+# MODULE LEVEL: Initialize P2P after class definition
+PORT = 9091  # Match PORT_CONFIGURATION in config
+DEBUG = False  # Production
+
+logger.info("[P2P-SOCKETIO] P2P communication enabled on main port %d (unified)" % PORT)
+logger.info("[P2P-SOCKETIO] Miners and peers connect via: wss://your-domain/socket.io")
+
+# Start P2P daemons (streaming + cleanup)
+_start_p2p_daemons()
+logger.info("[P2P-SSE] ✅ P2P daemons started (heartbeat, snapshot broadcast)")
+
+# Use Flask to run unified HTTP REST + SSE server on port 9091
+logger.info(f"[HTTP] Starting unified HTTP REST + P2P SSE server on port {PORT}...")
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=PORT, debug=DEBUG, threaded=True)
