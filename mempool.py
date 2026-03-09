@@ -85,8 +85,8 @@ logger = logging.getLogger(__name__)
 
 MAX_MEMPOOL_SIZE          = 100_000          # maximum accepted transactions
 TX_VSIZE_BYTES            = 250              # normalized virtual size per QTCL TX
-MIN_RELAY_FEE_RATE        = 0.001            # minimum sat/vbyte to relay (lowered from 1 to enable typical QTCL fees)
-MIN_RELAY_FEE_ABS         = 1               # absolute minimum fee in base units (0.01 QTCL)
+MIN_RELAY_FEE_RATE        = 1                # minimum sat/vbyte to relay
+MIN_RELAY_FEE_ABS         = 1               # absolute minimum fee in base units
 MEMPOOL_TTL_HOURS         = 72              # purge TXs older than this
 RBF_FEE_BUMP_PCT          = 10             # replace-by-fee requires +10% fee_rate
 EVICTION_BATCH            = 500            # how many low-fee TXs to drop when full
@@ -1235,30 +1235,111 @@ class Mempool:
         self, tx_hash: str, sig_raw: Any, from_address: str
     ) -> Tuple[bool, str]:
         """
-        Verify HLWE signature.
+        Verify HLWE signature with COMPLETE format compatibility.
+
+        CRITICAL FIX: Accepts BOTH formats:
+        1. Plain hex string: "abc123def456..." (64 chars, SHA3-256)
+        2. JSON object: {"signature": "...", "method": "...", ...}
 
         Verification hierarchy:
-            1. Use Oracle.verify_transaction() if oracle is available
-            2. Fall back to standalone HLWEMempoolVerifier
-            3. If neither is available (dev/test mode), advisory pass with warning
+            1. Normalize signature to JSON format
+            2. Try Oracle.verify_transaction() if available
+            3. Fall back to standalone HLWEMempoolVerifier
+            4. Advisory pass if neither available (dev mode)
         """
+        import json as _json
+        
+        # ── STEP 1: HANDLE EMPTY SIGNATURES ──────────────────────────────
         if sig_raw is None or sig_raw == '' or sig_raw == '{}':
-            # No signature submitted — advisory pass (useful in testing)
             logger.debug(f"[MEMPOOL-SIG] No signature for {tx_hash[:12]}… — advisory pass")
             return True, "no_signature_advisory"
-
-        # Try Oracle first
+        
+        # ── STEP 2: NORMALIZE SIGNATURE FORMAT ───────────────────────────
+        # Convert to consistent JSON format, accepting both input types
+        sig_dict = None
+        sig_json_str = None
+        error_reason = None
+        
+        if isinstance(sig_raw, str):
+            # It's a string — could be JSON or plain hex
+            
+            # Try parsing as JSON first (HLWE format)
+            if sig_raw.strip().startswith('{'):
+                try:
+                    sig_dict = _json.loads(sig_raw)
+                    sig_json_str = sig_raw
+                    logger.debug(f"[MEMPOOL-SIG] ✅ Parsed JSON signature for {tx_hash[:12]}…")
+                except (ValueError, _json.JSONDecodeError) as e:
+                    logger.debug(f"[MEMPOOL-SIG] Failed to parse as JSON: {e}, trying hex format")
+                    error_reason = f"invalid_json: {str(e)[:30]}"
+            
+            # If not JSON, treat as plain hex string (SHA3-256)
+            if sig_dict is None:
+                # Validate hex format: 64 chars, all 0-9a-f
+                if isinstance(sig_raw, str) and len(sig_raw) == 64 and all(
+                    c in '0123456789abcdefABCDEF' for c in sig_raw
+                ):
+                    # Valid plain hex signature
+                    sig_dict = {
+                        "signature_hex": sig_raw.lower(),
+                        "method": "sha3_256_plain",
+                        "format": "plain_hex",
+                        "public_key": "",  # Will be looked up from wallet
+                        "timestamp_ns": str(time.time_ns())
+                    }
+                    sig_json_str = _json.dumps(sig_dict)
+                    logger.debug(f"[MEMPOOL-SIG] ✅ Wrapped plain hex signature for {tx_hash[:12]}…")
+                else:
+                    # Invalid format
+                    logger.warning(
+                        f"[MEMPOOL-SIG] ❌ Invalid signature format for {tx_hash[:12]}… "
+                        f"(expected 64-char hex or JSON object, got: {str(sig_raw)[:50]})"
+                    )
+                    return False, "invalid_signature_format"
+        
+        elif isinstance(sig_raw, dict):
+            # Already a dictionary
+            sig_dict = sig_raw
+            sig_json_str = _json.dumps(sig_dict)
+            logger.debug(f"[MEMPOOL-SIG] ✅ Received dict signature for {tx_hash[:12]}…")
+        
+        else:
+            # Unknown type
+            logger.warning(f"[MEMPOOL-SIG] ❌ Unknown signature type: {type(sig_raw)}")
+            return False, "invalid_signature_type"
+        
+        # Safety check: sig_dict should be populated by now
+        if sig_dict is None:
+            logger.error(f"[MEMPOOL-SIG] CRITICAL: sig_dict is None after normalization")
+            return False, "signature_normalization_failed"
+        
+        # ── STEP 3: VERIFY USING ORACLE (if available) ──────────────────
         if _ORACLE_AVAILABLE:
             try:
-                sig_dict = json.loads(sig_raw) if isinstance(sig_raw, str) else sig_raw
                 ok, reason = ORACLE.verify_transaction(tx_hash, sig_dict, from_address)
+                if ok:
+                    logger.debug(f"[MEMPOOL-SIG] ✅ Oracle verified signature for {tx_hash[:12]}…")
+                else:
+                    logger.debug(f"[MEMPOOL-SIG] ❌ Oracle rejected signature: {reason}")
                 return ok, reason
             except Exception as exc:
-                logger.debug(f"[MEMPOOL-SIG] Oracle verify failed ({exc}), falling back")
-
-        # Standalone HLWE verifier
-        ok, reason = _hlwe_verifier.verify(tx_hash, sig_raw, from_address)
-        return ok, reason
+                logger.debug(
+                    f"[MEMPOOL-SIG] Oracle verification failed ({exc}), "
+                    f"falling back to standalone verifier"
+                )
+        
+        # ── STEP 4: STANDALONE HLWE VERIFIER (fallback) ──────────────────
+        try:
+            # Pass JSON string to standalone verifier
+            ok, reason = _hlwe_verifier.verify(tx_hash, sig_json_str or _json.dumps(sig_dict), from_address)
+            if ok:
+                logger.debug(f"[MEMPOOL-SIG] ✅ Standalone verifier approved signature for {tx_hash[:12]}…")
+            else:
+                logger.debug(f"[MEMPOOL-SIG] ❌ Standalone verifier rejected: {reason}")
+            return ok, reason
+        except Exception as e:
+            logger.error(f"[MEMPOOL-SIG] Standalone verifier crashed: {e}")
+            return False, f"verifier_error: {str(e)[:30]}"
 
     def _validate_format(
         self, raw: Dict[str, Any]
