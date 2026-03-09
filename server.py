@@ -5116,6 +5116,26 @@ def quantum_metrics_thread():
     while getattr(state, 'is_alive', True):
         _t0 = time.monotonic()
         try:
+            # ── ORACLE SNAPSHOT CHECK (FRESH METRICS FIX #3) ─────────────────
+            # Pull real metrics from oracle cluster if available (every cycle)
+            try:
+                from oracle import ORACLE_W_STATE_MANAGER
+                if ORACLE_W_STATE_MANAGER and hasattr(ORACLE_W_STATE_MANAGER, 'get_latest_snapshot'):
+                    snapshot = ORACLE_W_STATE_MANAGER.get_latest_snapshot()
+                    if snapshot and snapshot.w_state_fidelity > 0.0:
+                        # Use REAL oracle cluster metrics (5-node consensus)
+                        with _ENG_LOCK:
+                            _ENG_STATE.update({
+                                'w3_fidelity': round(snapshot.w_state_fidelity, 6),
+                                'purity': round(snapshot.purity, 6),
+                                'coherence': round(snapshot.coherence_l1, 6),
+                                'entanglement': round(snapshot.entanglement_witness, 6),
+                                'cycle': _ENG_STATE.get('cycle', 0) + 1,
+                            })
+                        logger.debug(f"[METRICS] Real oracle: F={snapshot.w_state_fidelity:.4f}")
+            except Exception as e:
+                logger.debug(f"[METRICS] Oracle check skipped: {e}")
+            
             # ── 1. Block height ────────────────────────────────────────────
             block = query_latest_block()
             if block: state.update_block_state({'current_height':block['height'],'current_hash':block['hash'],'timestamp':block['timestamp']})

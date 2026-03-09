@@ -1225,60 +1225,14 @@ class OracleWStateManager:
 
     def _select_pair(self) -> Tuple[OracleNode, OracleNode]:
         """
-        Return the next scheduled pair of oracle nodes (round-robin).
-        Rotates through all 10 distinct pairs: (0,1), (0,2), (0,3), (0,4), (1,2), (1,3), (1,4), (2,3), (2,4), (3,4)
-        Ensures every node pair is measured equally over 10 measurement cycles.
+        Return the next scheduled pair of oracle nodes.
+        Rotates through all 10 distinct pairs so every combination is measured
+        with equal frequency over time.
         """
         with self._pair_lock:
             a_idx, b_idx = self._PAIR_SCHEDULE[self._pair_idx % len(self._PAIR_SCHEDULE)]
             self._pair_idx += 1
-            logger.debug(f"[PAIR ROTATION] Cycle {self._pair_idx}: nodes {a_idx+1}↔{b_idx+1}")
         return self.nodes[a_idx], self.nodes[b_idx]
-    
-    def _collect_all_node_metrics(self) -> Dict[int, Dict[str, float]]:
-        """
-        Concurrently collect the last fidelity measurement from all 5 nodes.
-        Returns: {node_id: {'fidelity': f, 'coherence': c, 'entropy': e}}
-        """
-        metrics = {}
-        with self._state_lock:
-            for node in self.nodes:
-                metrics[node.oracle_id] = {
-                    'fidelity': node.last_fidelity,
-                    'role': node.role,
-                    'measurements': node.measurement_count
-                }
-        return metrics
-    
-    def _average_5_node_metrics(self, metrics: Dict[int, Dict[str, float]]) -> Dict[str, float]:
-        """
-        Compute consensus metrics: average fidelity across all 5 nodes.
-        Returns: {'avg_fidelity': float, 'node_count': int, 'per_node': [...]}
-        """
-        if not metrics:
-            return {}
-        
-        fidelities = [m['fidelity'] for m in metrics.values() if m['fidelity'] > 0]
-        if not fidelities:
-            return {}
-        
-        avg_fidelity = sum(fidelities) / len(fidelities)
-        
-        return {
-            'consensus_fidelity': round(avg_fidelity, 6),
-            'fidelity_min': round(min(fidelities), 6),
-            'fidelity_max': round(max(fidelities), 6),
-            'node_count': len(fidelities),
-            'per_node': [
-                {
-                    'node_id': nid + 1,
-                    'role': metrics[nid]['role'],
-                    'fidelity': metrics[nid]['fidelity'],
-                    'measurements': metrics[nid]['measurements']
-                }
-                for nid in sorted(metrics.keys())
-            ]
-        }
 
     def _consensus_from_pair(
         self,
@@ -1286,13 +1240,12 @@ class OracleWStateManager:
         snap_b: Optional[DensityMatrixSnapshot],
     ) -> Optional[DensityMatrixSnapshot]:
         """
-        IMPROVED: Build consensus from pair measurements + all 5 nodes' last metrics.
-        
-        Steps:
-          1. Create consensus DM from pair (as before)
-          2. Rebuild entanglement on unmeasured nodes using consensus DM
-          3. Collect metrics from all 5 nodes (round-robin refresh)
-          4. Return snapshot with full 5-node consensus metadata
+        Build a consensus DensityMatrixSnapshot from two independent measurements.
+
+        Byzantine check: if fidelities differ by > 0.10 the higher-fidelity
+        snapshot is used verbatim (Byzantine fault assumed on the lower).
+        Otherwise the consensus DM is the arithmetic mean of both DMs and all
+        scalar metrics are averaged.
         """
         if snap_a is None and snap_b is None:
             return None
@@ -1310,7 +1263,7 @@ class OracleWStateManager:
             )
             return winner
 
-        # Arithmetic mean DM (pair consensus)
+        # Arithmetic mean DM
         dm_mean = (snap_a.density_matrix + snap_b.density_matrix) * 0.5
         tr = np.trace(dm_mean)
         if abs(tr) > 1e-12:
@@ -1323,10 +1276,6 @@ class OracleWStateManager:
         counts_merged = dict(snap_a.measurement_counts)
         for k, v in snap_b.measurement_counts.items():
             counts_merged[k] = counts_merged.get(k, 0) + v
-
-        # Collect all 5 nodes' metrics (AGENT Β improvement)
-        node_metrics_5 = self._collect_all_node_metrics()
-        consensus_5node = self._average_5_node_metrics(node_metrics_5)
 
         return DensityMatrixSnapshot(
             timestamp_ns         = time.time_ns(),
@@ -1341,11 +1290,9 @@ class OracleWStateManager:
             w_state_fidelity     = QIM.w_state_fidelity_to_ideal(dm_mean),
             measurement_counts   = counts_merged,
             aer_noise_state      = {
-                "consensus_2node": True,
-                "consensus_5node": consensus_5node,
+                "consensus": True,
                 "node_a":    snap_a.aer_noise_state.get("oracle_id"),
                 "node_b":    snap_b.aer_noise_state.get("oracle_id"),
-                "all_nodes": node_metrics_5,
             },
             lattice_refresh_counter = self.lattice_refresh_counter,
             w_state_strength        = QIM.w_state_strength(dm_mean, counts_merged),
@@ -1356,10 +1303,8 @@ class OracleWStateManager:
 
     def _measure_all_block_fields(self, pq_curr: int, pq_last: int) -> Dict[str, Any]:
         """
-        IMPROVED: Submit all 5 oracle nodes concurrently to measure block-field.
-        Returns AVERAGE (not median) of entropy, fidelity, coherence across all 5.
-        
-        Ensures all nodes participate equally (round-robin metric collection).
+        Submit all 5 oracle nodes to measure the pq_curr/pq_last block-field
+        window concurrently. Returns aggregated cluster median metrics.
         """
         futures = {
             self._pool.submit(node.measure_block_field, pq_curr, pq_last): node.oracle_id
@@ -1379,14 +1324,10 @@ class OracleWStateManager:
         if not readings:
             return {}
 
-        # IMPROVED: Use AVERAGE instead of median (AGENT Γ)
         entropies  = [r.entropy   for r in readings]
         fidelities = [r.fidelity  for r in readings]
         coherences = [r.coherence for r in readings]
 
-        def _avg(vals: list) -> float:
-            return sum(vals) / len(vals) if vals else 0.0
-        
         def _median(vals: list) -> float:
             s = sorted(vals)
             n = len(s)
@@ -1395,13 +1336,9 @@ class OracleWStateManager:
         return {
             "pq_curr":            pq_curr,
             "pq_last":            pq_last,
-            # IMPROVED: Report both average and median
-            "block_field_entropy":   round(_avg(entropies),  6),
-            "block_field_entropy_median": round(_median(entropies), 6),
-            "block_field_fidelity":  round(_avg(fidelities), 6),
-            "block_field_fidelity_median": round(_median(fidelities), 6),
-            "block_field_coherence": round(_avg(coherences), 6),
-            "block_field_coherence_median": round(_median(coherences), 6),
+            "block_field_entropy":   round(_median(entropies),  6),
+            "block_field_fidelity":  round(_median(fidelities), 6),
+            "block_field_coherence": round(_median(coherences), 6),
             "node_count":         len(readings),
             "per_node": [
                 {
@@ -1449,29 +1386,18 @@ class OracleWStateManager:
         if snapshot is None:
             return self.nodes[0]._synthetic_snapshot()
 
-        # ── Step 4: rebuild entanglement on idle nodes (AGENT Β) ────────────────────────
+        # ── Step 4: rebuild entanglement on idle nodes ────────────────────────
         measured_ids = {node_a.oracle_id, node_b.oracle_id}
-        unmeasured_count = 0
         for node in self.nodes:
             if node.oracle_id not in measured_ids:
                 node.rebuild_entanglement(snapshot.density_matrix)
-                unmeasured_count += 1
-        
-        logger.debug(
-            f"[ENTANGLEMENT REFRESH] Consensus DM sent to {unmeasured_count} idle nodes "
-            f"(F={snapshot.w_state_fidelity:.4f})"
-        )
 
-        # ── Step 5: all-nodes block-field measurement (AGENT Γ: average of all 5) ─────────────────────────
+        # ── Step 5: all-nodes block-field measurement ─────────────────────────
         bf_metrics = self._measure_all_block_fields(pq_curr, pq_last)
 
-        # ── Step 6: commit snapshot with full 5-node consensus metadata (AGENT Δ) ───────────────────────
+        # ── Step 6: commit snapshot ───────────────────────────────────────────
         snapshot.aer_noise_state["block_field"] = bf_metrics
-        
-        # Extract 5-node consensus metrics for logging
-        consensus_5node = snapshot.aer_noise_state.get("consensus_5node", {})
-        consensus_fid = consensus_5node.get("consensus_fidelity", 0.0)
-        
+
         with self._state_lock:
             self.current_density_matrix = snapshot
             self.density_matrix_buffer.append(snapshot)
@@ -1507,29 +1433,17 @@ class OracleWStateManager:
                     "block_field":       bf_metrics,
                 })
 
-        # AGENT Ε: Log comprehensive 5-node consensus metrics
-        consensus_5node = snapshot.aer_noise_state.get("consensus_5node", {})
-        consensus_fid = consensus_5node.get("consensus_fidelity", 0.0)
-        bf_fid_avg = bf_metrics.get('block_field_fidelity', 0.0)
-        bf_entropy_avg = bf_metrics.get('block_field_entropy', 0.0)
-        
-        logger.info(
-            f"[ORACLE CONSENSUS] Cycle #{self.lattice_refresh_counter} | "
-            f"Pair: ({node_a.oracle_id+1}↔{node_b.oracle_id+1}) | "
-            f"2-node F={snapshot.w_state_fidelity:.4f} | "
-            f"5-node F_avg={consensus_fid:.4f} | "
-            f"Block-field F_avg={bf_fid_avg:.4f} S_avg={bf_entropy_avg:.4f} | "
-            f"Nodes: {bf_metrics.get('node_count', 0)}/5 ✅"
+        logger.debug(
+            f"[ORACLE CLUSTER] cycle=#{self.lattice_refresh_counter} "
+            f"pair=({node_a.oracle_id+1},{node_b.oracle_id+1}) "
+            f"F={snapshot.w_state_fidelity:.4f} "
+            f"BF_F={bf_metrics.get('block_field_fidelity', 0):.4f} "
+            f"BF_S={bf_metrics.get('block_field_entropy', 0):.4f}"
         )
-        
         return snapshot
 
     def _stream_worker(self):
         logger.info("[ORACLE CLUSTER] 📡 Measurement stream started (pair-rotation, 5-node)")
-        logger.info(f"[ORACLE CLUSTER] Pair schedule: {len(self._PAIR_SCHEDULE)} unique combinations")
-        logger.info("[ORACLE CLUSTER] Measurement cycle: 2-node measurement → entanglement refresh → all-node block-field")
-        
-        measurement_count = 0
         while self.running:
             try:
                 snapshot = self._extract_snapshot()
@@ -1542,40 +1456,11 @@ class OracleWStateManager:
                             self.stream_queue.put_nowait(snapshot)
                         except Exception:
                             pass
-                    
                     self._broadcast_to_clients(snapshot)
-                    measurement_count += 1
-                    
-                    # Log per-node health every 10 cycles (AGENT Ζ: monitoring)
-                    if measurement_count % 10 == 0:
-                        self._log_node_health()
-                    
                 time.sleep(W_STATE_STREAM_INTERVAL_MS / 1000.0)
             except Exception as exc:
                 logger.error(f"[ORACLE CLUSTER] Stream error: {exc}")
                 time.sleep(0.1)
-    
-    def _log_node_health(self):
-        """Log per-node measurement health (AGENT Ζ: health monitoring)"""
-        try:
-            node_metrics = self._collect_all_node_metrics()
-            if not node_metrics:
-                return
-            
-            health_lines = ["[NODE HEALTH] 5-node status:"]
-            for nid in sorted(node_metrics.keys()):
-                m = node_metrics[nid]
-                role = m['role']
-                fid = m['fidelity']
-                meas = m['measurements']
-                status = "✅" if fid > 0.80 else "⚠️ " if fid > 0.70 else "❌"
-                health_lines.append(
-                    f"  Node {nid+1} ({role[:8]:8s}): F={fid:.4f} {status}  |  Measurements: {meas}"
-                )
-            
-            logger.info("\n".join(health_lines))
-        except Exception as e:
-            logger.debug(f"[NODE HEALTH] Logging failed: {e}")
 
     def _refresh_worker(self):
         """Lightweight housekeeping: evict stale temporal anchors."""
@@ -1817,6 +1702,14 @@ class OracleWStateManager:
         if self.refresh_thread: self.refresh_thread.join(timeout=5)
         self._pool.shutdown(wait=False)
         logger.info("[ORACLE CLUSTER] ✅ Stopped")
+
+    def get_latest_snapshot(self) -> Optional['DensityMatrixSnapshot']:
+        """
+        FRESH METRICS FIX: Expose latest snapshot for server.py metrics daemon.
+        Server uses this to publish REAL oracle metrics instead of synthetic values.
+        """
+        with self._state_lock:
+            return self.current_density_matrix
 
     def get_status(self) -> Dict[str, Any]:
         with self._state_lock:
