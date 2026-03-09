@@ -233,6 +233,106 @@ ROUTE_DIMENSION = 3                # 3D spatial routing
 # ENUMS
 # ════════════════════════════════════════════════════════════════════════════════
 
+
+# ════════════════════════════════════════════════════════════════════════════════
+# LAYER 1: HYPERBOLIC FIELD GEOMETRY
+# ════════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class FieldGeometry:
+    """Hyperbolic field topology between lattice points (pq_last → pq_curr)"""
+    field_id: str
+    pq_last: int
+    pq_curr: int
+    hyperbolic_distance: float
+    route_hash: str
+    geodesic_length: float
+    route_points: List[int] = field(default_factory=list)
+    field_topology_complexity: int = 0
+
+    def to_dict(self) -> Dict:
+        return asdict(self)
+
+class HyperbolicFieldEngine:
+    """Generate and navigate hyperbolic field geometries between lattice points"""
+
+    def __init__(self):
+        self.fields: Dict[str, FieldGeometry] = {}
+        logger.info("[LAYER-1] HyperbolicFieldEngine initialized")
+
+    def generate_field(self, pq_last: int, pq_curr: int, entropy_seed: str) -> FieldGeometry:
+        """Generate field topology between lattice points"""
+        field_id = str(uuid.uuid4())
+        
+        distance = self._poincare_distance(pq_last, pq_curr)
+        route_points = self._enumerate_route(pq_last, pq_curr, entropy_seed)
+        route_hash = self._hash_route(route_points)
+        geodesic = self._calculate_geodesic_length(route_points, distance)
+        
+        geometry = FieldGeometry(
+            field_id=field_id,
+            pq_last=pq_last,
+            pq_curr=pq_curr,
+            hyperbolic_distance=distance,
+            route_hash=route_hash,
+            geodesic_length=geodesic,
+            route_points=route_points,
+            field_topology_complexity=len(route_points)
+        )
+        
+        self.fields[field_id] = geometry
+        logger.debug(f"[LAYER-1] Field {field_id[:8]} created: pq {pq_last}→{pq_curr}, distance={distance:.4f}")
+        return geometry
+
+    @staticmethod
+    def _poincare_distance(p1: int, p2: int) -> float:
+        """Poincaré disk distance metric (hyperbolic geometry)"""
+        if p1 == p2:
+            return 0.0
+        x = abs(p2 - p1) / 1024.0
+        if x >= 1.0:
+            x = 0.999
+        return (2.0 * 0.1 * x) / (1.0 - x * x)
+
+    @staticmethod
+    def _enumerate_route(pq_last: int, pq_curr: int, entropy_seed: str) -> List[int]:
+        """Deterministic route enumeration from entropy seed"""
+        route = [pq_last]
+        current = pq_last
+        seed_hash = int(hashlib.sha256(entropy_seed.encode()).hexdigest()[:8], 16)
+        
+        steps = abs(pq_curr - pq_last)
+        direction = 1 if pq_curr > pq_last else -1
+        
+        for i in range(1, min(steps, 16)):
+            offset = (seed_hash ^ (i * 31)) % max(1, steps // 8 + 1)
+            current += direction * (1 + offset)
+            if (direction > 0 and current >= pq_curr) or (direction < 0 and current <= pq_curr):
+                break
+            route.append(current)
+        
+        route.append(pq_curr)
+        return route
+
+    @staticmethod
+    def _hash_route(route: List[int]) -> str:
+        """Deterministic route hash"""
+        route_str = ','.join(map(str, route))
+        return hashlib.sha256(route_str.encode()).hexdigest()[:32]
+
+    @staticmethod
+    def _calculate_geodesic_length(route: List[int], hyperbolic_distance: float) -> float:
+        """Calculate geodesic length through route points"""
+        if len(route) < 2:
+            return hyperbolic_distance
+        
+        total = 0.0
+        for i in range(len(route) - 1):
+            segment = abs(route[i+1] - route[i]) / 1024.0
+            total += 0.1 * segment / (1.0 - (segment * segment))
+        return total + hyperbolic_distance
+
+
 class BathSpectralDensity(str, Enum):
     OHMIC = "ohmic"
     SUB_OHMIC = "sub_ohmic"

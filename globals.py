@@ -788,6 +788,121 @@ ORACLE_PORTS = [5000, 5001, 5002, 5003, 5004]
 ORACLE_ROLES = ['PRIMARY_LATTICE', 'SECONDARY_LATTICE', 'VALIDATION', 'ARBITER', 'METRICS']
 CONSENSUS_THRESHOLD = 3
 BYZANTINE_TOLERANCE = 2
+
+# ════════════════════════════════════════════════════════════════════════════════
+# LAYER 5: P2P CONSENSUS AGGREGATION
+# ════════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class ConsensusSnapshot:
+    """Aggregated consensus from all peers"""
+    field_id: str
+    consensus_pq_last: float
+    consensus_pq_curr: float
+    consensus_fidelity: float
+    consensus_coherence: float
+    contributing_peers: int
+    aggregation_timestamp: str
+    weights: Dict[str, float] = None
+
+    def __post_init__(self):
+        if self.weights is None:
+            self.weights = {}
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'field_id': self.field_id,
+            'consensus_pq_last': self.consensus_pq_last,
+            'consensus_pq_curr': self.consensus_pq_curr,
+            'consensus_fidelity': self.consensus_fidelity,
+            'consensus_coherence': self.consensus_coherence,
+            'contributing_peers': self.contributing_peers,
+            'aggregation_timestamp': self.aggregation_timestamp,
+            'weights': self.weights
+        }
+
+class ConsensusAggregator:
+    """Collect and aggregate field snapshots from peers (MEAN weighted by fidelity)"""
+
+    def __init__(self):
+        self.peer_snapshots: Dict[str, Dict[str, Any]] = {}
+        logger.info("[LAYER-5] ConsensusAggregator initialized")
+
+    def register_peer_snapshot(self, peer_id: str, snapshot: Dict[str, Any]):
+        """Register snapshot from peer"""
+        if peer_id not in self.peer_snapshots:
+            self.peer_snapshots[peer_id] = {}
+        
+        field_id = snapshot.get('field_id')
+        if field_id:
+            self.peer_snapshots[peer_id][field_id] = snapshot
+            logger.debug(f"[LAYER-5] Registered peer snapshot: {peer_id[:8]} → {field_id[:8]}")
+
+    def aggregate_consensus(self, field_id: str) -> Optional[ConsensusSnapshot]:
+        """
+        Calculate consensus for field from all available peer snapshots.
+        Weights by fidelity (MEAN aggregate).
+        """
+        snapshots = []
+        for peer_snaps in self.peer_snapshots.values():
+            if field_id in peer_snaps:
+                snapshots.append(peer_snaps[field_id])
+        
+        if not snapshots:
+            return None
+
+        # Weight by average fidelity
+        fidelities = []
+        for snap in snapshots:
+            fid_traj = snap.get('fidelity_trajectory', [])
+            avg_fid = sum(fid_traj) / len(fid_traj) if fid_traj else 0.5
+            fidelities.append(avg_fid)
+
+        total_weight = sum(fidelities)
+        if total_weight == 0:
+            return None
+
+        weights = {f"peer_{i}": f / total_weight for i, f in enumerate(fidelities)}
+
+        # Weighted mean aggregation
+        consensus_pq_last = sum(
+            snap.get('pq_last', 0) * weights[f"peer_{i}"]
+            for i, snap in enumerate(snapshots)
+        )
+        consensus_pq_curr = sum(
+            snap.get('pq_curr', 0) * weights[f"peer_{i}"]
+            for i, snap in enumerate(snapshots)
+        )
+        
+        consensus_fidelity = sum(
+            (sum(snap.get('fidelity_trajectory', [])) / len(snap.get('fidelity_trajectory', [1]))) * weights[f"peer_{i}"]
+            for i, snap in enumerate(snapshots)
+        )
+        
+        consensus_coherence = sum(
+            (sum(snap.get('coherence_samples', [])) / len(snap.get('coherence_samples', [1]))) * weights[f"peer_{i}"]
+            for i, snap in enumerate(snapshots)
+        )
+
+        consensus = ConsensusSnapshot(
+            field_id=field_id,
+            consensus_pq_last=consensus_pq_last,
+            consensus_pq_curr=consensus_pq_curr,
+            consensus_fidelity=consensus_fidelity,
+            consensus_coherence=consensus_coherence,
+            contributing_peers=len(snapshots),
+            aggregation_timestamp=str(datetime.now(timezone.utc).isoformat()),
+            weights=weights
+        )
+
+        logger.info(f"[LAYER-5] Consensus aggregated: {field_id[:8]}, {len(snapshots)} peers, F={consensus_fidelity:.4f}")
+        return consensus
+
+    def peer_count(self) -> int:
+        """Count active peers"""
+        return len(self.peer_snapshots)
+
+
 ORACLE_MEASUREMENT_TIMEOUT = 10
 ORACLE_HEALTH_CHECK_INTERVAL = 5
 W_STATE_FIDELITY_THRESHOLD = 0.75

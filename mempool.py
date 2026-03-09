@@ -2013,3 +2013,96 @@ __all__ = [
     'MIN_RELAY_FEE_RATE',
     'COINBASE_PREFIX',
 ]
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# LAYER 4: ATOMIC FIELD STATE PERSISTENCE
+# ════════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class FieldSnapshot:
+    """Atomic DB snapshot: complete field state"""
+    field_id: str
+    pq_last: int
+    pq_curr: int
+    route_hash: str
+    entropy_seed: str
+    difficulty_bits: int
+    fidelity_trajectory: list
+    coherence_samples: list
+    entropy_vn: float
+    purity: float
+    witness: float
+    mining_time: float
+    mining_attempts: int
+    entropy_attempts: int
+    timestamp: str
+    peer_id: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'field_id': self.field_id,
+            'pq_last': self.pq_last,
+            'pq_curr': self.pq_curr,
+            'route_hash': self.route_hash,
+            'entropy_seed': self.entropy_seed,
+            'difficulty_bits': self.difficulty_bits,
+            'fidelity_trajectory': self.fidelity_trajectory,
+            'coherence_samples': self.coherence_samples,
+            'entropy_vn': self.entropy_vn,
+            'purity': self.purity,
+            'witness': self.witness,
+            'mining_time': self.mining_time,
+            'mining_attempts': self.mining_attempts,
+            'entropy_attempts': self.entropy_attempts,
+            'timestamp': self.timestamp,
+            'peer_id': self.peer_id
+        }
+
+class FieldStateDB:
+    """In-memory field snapshot storage with atomic writes"""
+
+    def __init__(self):
+        self.snapshots: Dict[str, FieldSnapshot] = {}
+        self.coherence_trajectories: Dict[str, List[float]] = {}
+        logger.info("[LAYER-4] FieldStateDB initialized")
+
+    def write_atomic(self, snapshot: FieldSnapshot) -> bool:
+        """Atomic write of field snapshot"""
+        try:
+            self.snapshots[snapshot.field_id] = snapshot
+            self.coherence_trajectories[snapshot.field_id] = snapshot.coherence_samples
+            logger.debug(f"[LAYER-4] ✓ Atomic snapshot: {snapshot.field_id[:8]} (coherence samples: {len(snapshot.coherence_samples)})")
+            return True
+        except Exception as e:
+            logger.error(f"[LAYER-4] Atomic write failed: {e}")
+            return False
+
+    def get_snapshot(self, field_id: str) -> Optional[FieldSnapshot]:
+        """Retrieve field snapshot"""
+        return self.snapshots.get(field_id)
+
+    def get_coherence_trajectory(self, field_id: str) -> List[float]:
+        """Get coherence measurements for field"""
+        return self.coherence_trajectories.get(field_id, [])
+
+    def all_field_ids(self) -> List[str]:
+        """List all local field IDs"""
+        return list(self.snapshots.keys())
+
+    def snapshot_count(self) -> int:
+        """Count stored snapshots"""
+        return len(self.snapshots)
+
+    def delete_snapshot(self, field_id: str) -> bool:
+        """Delete field snapshot"""
+        try:
+            if field_id in self.snapshots:
+                del self.snapshots[field_id]
+            if field_id in self.coherence_trajectories:
+                del self.coherence_trajectories[field_id]
+            logger.debug(f"[LAYER-4] Snapshot deleted: {field_id[:8]}")
+            return True
+        except Exception as e:
+            logger.error(f"[LAYER-4] Delete failed: {e}")
+            return False

@@ -1662,3 +1662,105 @@ if __name__ == '__main__':
             print(f"  ⚠️  No solution found (max iterations reached)")
     
     print(f"\n✅ Mining tests complete!")
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# LAYER 3: ENTROPY-DRIVEN FIELD MINING (Phase 1+2 Unified)
+# ════════════════════════════════════════════════════════════════════════════════
+
+class EntropyFieldMiner:
+    """Phase 1+2 unified: entropy quality → field topology → mining difficulty → field mining"""
+
+    def __init__(self):
+        self.mining_attempts = 0
+        self.entropy_attempts = 0
+        logger.info("[LAYER-3] EntropyFieldMiner initialized")
+
+    def mine_field(
+        self,
+        entropy_quality: float,
+        target_bits: int,
+        pq_last: int,
+        entropy_seed: str = None,
+        timeout_seconds: float = 30.0
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Mine field using entropy quality to select topology and difficulty.
+        Unified Phase 1+2: entropy drives both field selection AND difficulty.
+        """
+        import time
+        start_time = time.time()
+        self.mining_attempts = 0
+        self.entropy_attempts = 0
+
+        # Phase 1: Difficulty scales with entropy quality
+        adjusted_bits = max(8, min(24, int(target_bits * (0.5 + entropy_quality))))
+        difficulty_target = (1 << adjusted_bits) - 1
+
+        # Generate entropy-driven field seed
+        if entropy_seed is None:
+            entropy_seed = hashlib.sha256(
+                f"{int(time.time() * 1e6)}{os.urandom(16).hex()}".encode()
+            ).hexdigest()
+
+        logger.info(f"[LAYER-3] Mining field: entropy_q={entropy_quality:.2f}, bits={adjusted_bits}, pq_last={pq_last}")
+
+        while time.time() - start_time < timeout_seconds:
+            self.mining_attempts += 1
+            
+            # Phase 2: Select pseudoqubit based on entropy quality
+            pq_curr = pq_last + 1 + int(entropy_quality * 255)
+            
+            # Generate field geometry (from lattice_controller.HyperbolicFieldEngine)
+            route_hash_int = int(
+                hashlib.sha256(
+                    f"{pq_last}:{pq_curr}:{entropy_seed}:{self.mining_attempts}".encode()
+                ).hexdigest()[:16],
+                16
+            )
+            
+            route_hash = hashlib.sha256(
+                f"{pq_last},{pq_curr}".encode()
+            ).hexdigest()[:32]
+            
+            # Check difficulty
+            if route_hash_int <= difficulty_target:
+                mining_time = time.time() - start_time
+                
+                result = {
+                    'pq_last': pq_last,
+                    'pq_curr': pq_curr,
+                    'route_hash': route_hash,
+                    'entropy_seed': entropy_seed,
+                    'difficulty_bits': adjusted_bits,
+                    'mining_time': mining_time,
+                    'mining_attempts': self.mining_attempts,
+                    'entropy_attempts': self.entropy_attempts,
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'field_id': str(uuid.uuid4())
+                }
+                
+                logger.info(f"[LAYER-3] ✓ Field mined in {mining_time:.2f}s ({self.mining_attempts} attempts)")
+                return result
+            
+            self.entropy_attempts += 1
+            time.sleep(0.001)
+        
+        logger.warning(f"[LAYER-3] Mining timeout after {self.mining_attempts} attempts")
+        return None
+
+    def validate_entropy_field(self, field_data: Dict[str, Any]) -> bool:
+        """Validate field meets entropy-driven constraints"""
+        if not field_data:
+            return False
+        
+        required_keys = {'pq_last', 'pq_curr', 'route_hash', 'difficulty_bits'}
+        if not required_keys.issubset(set(field_data.keys())):
+            return False
+        
+        # Entropy quality should influence difficulty
+        if field_data.get('difficulty_bits', 0) < 8 or field_data.get('difficulty_bits', 0) > 24:
+            return False
+        
+        logger.debug(f"[LAYER-3] Field validation passed: {field_data.get('field_id', 'unknown')[:8]}")
+        return True

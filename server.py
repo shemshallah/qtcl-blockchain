@@ -7996,6 +7996,123 @@ if __name__ == '__main__':
     
     # All clients (miners, peers) connect via WebSocket to same port as REST API
     # No separate P2P port needed — everything unified on 8000
+
+# ════════════════════════════════════════════════════════════════════════════════
+# LAYER 6: P2P GOSSIP PROTOCOL + DHT BROADCAST
+# ════════════════════════════════════════════════════════════════════════════════
+
+class GossipProtocolHandler:
+    """SSE-based gossip protocol with inventory sync: HELLOACK→COMPARE→REQUEST→LIST→RECEIVE→CLOSEACK"""
+
+    def __init__(self, peer_id: str = None):
+        self.peer_id = peer_id or str(uuid.uuid4())[:8]
+        self.connected_peers: Dict[str, str] = {}
+        self.message_queue: queue.Queue = queue.Queue()
+        logger.info(f"[LAYER-6] GossipProtocolHandler initialized: peer_id={self.peer_id}")
+
+    def get_inventory_hash(self, field_ids: List[str]) -> str:
+        """Hash of field inventory"""
+        sorted_ids = sorted(field_ids)
+        inventory = ','.join(sorted_ids)
+        return hashlib.sha256(inventory.encode()).hexdigest()[:16]
+
+    async def handle_helloack(self, peer_id: str, inventory_hash: str, field_ids: List[str]) -> Dict[str, Any]:
+        """HELLOACK: Handshake with peer"""
+        self.connected_peers[peer_id] = inventory_hash
+        logger.debug(f"[LAYER-6] HELLOACK from {peer_id[:8]}: {len(field_ids)} fields")
+        return {
+            'type': 'HELLOACK_RESPONSE',
+            'peer_id': self.peer_id,
+            'inventory_hash': self.get_inventory_hash(field_ids),
+            'field_ids': field_ids
+        }
+
+    async def handle_compare(self, peer_id: str, peer_inventory: List[str], local_inventory: List[str]) -> Dict[str, Any]:
+        """COMPARE: Find missing items"""
+        local_fields = set(local_inventory)
+        peer_fields = set(peer_inventory)
+        
+        missing = peer_fields - local_fields
+        have = local_fields & peer_fields
+        
+        logger.debug(f"[LAYER-6] COMPARE {peer_id[:8]}: missing={len(missing)}, have={len(have)}")
+        
+        return {
+            'type': 'COMPARE_RESPONSE',
+            'missing_fields': list(missing),
+            'have_fields': list(have),
+            'count': len(missing)
+        }
+
+    async def handle_request(self, request_spec: Dict[str, Any], available_snapshots: Dict[str, Any]) -> Dict[str, Any]:
+        """REQUEST: Field request (single item or ALL)"""
+        req = request_spec.get('req')
+        
+        if req == 'ALL':
+            snapshots = [snap for snap in available_snapshots.values() if snap]
+            logger.debug(f"[LAYER-6] REQUEST ALL: returning {len(snapshots)} snapshots")
+            return {
+                'type': 'REQUEST_RESPONSE',
+                'snapshots': [s if isinstance(s, dict) else (s.to_dict() if hasattr(s, 'to_dict') else s) for s in snapshots],
+                'count': len(snapshots)
+            }
+        else:
+            field_id = req
+            snapshot = available_snapshots.get(field_id)
+            if snapshot:
+                snap_dict = snapshot if isinstance(snapshot, dict) else (snapshot.to_dict() if hasattr(snapshot, 'to_dict') else snapshot)
+                logger.debug(f"[LAYER-6] REQUEST: returning field {field_id[:8]}")
+                return {
+                    'type': 'REQUEST_RESPONSE',
+                    'snapshot': snap_dict
+                }
+            return {'type': 'REQUEST_RESPONSE', 'error': f'Field {field_id} not found'}
+
+    async def send_list(self, available_field_ids: List[str]) -> Dict[str, Any]:
+        """LIST: Send list of available fields"""
+        logger.debug(f"[LAYER-6] LIST: {len(available_field_ids)} fields available")
+        return {
+            'type': 'LIST',
+            'field_ids': available_field_ids,
+            'count': len(available_field_ids),
+            'timestamp': str(datetime.now(timezone.utc).isoformat())
+        }
+
+    async def send_snapshots(self, snapshots: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """RECEIVE: Send snapshots to peer"""
+        logger.debug(f"[LAYER-6] RECEIVE: sending {len(snapshots)} snapshots")
+        return {
+            'type': 'RECEIVE',
+            'snapshots': snapshots,
+            'count': len(snapshots),
+            'timestamp': str(datetime.now(timezone.utc).isoformat())
+        }
+
+    async def handle_closeack(self) -> Dict[str, Any]:
+        """CLOSEACK: Close handshake"""
+        logger.debug(f"[LAYER-6] CLOSEACK from {self.peer_id[:8]}")
+        return {
+            'type': 'CLOSEACK',
+            'status': 'closed',
+            'peer_id': self.peer_id,
+            'timestamp': str(datetime.now(timezone.utc).isoformat())
+        }
+
+    async def gossip_broadcast(self, snapshot: Dict[str, Any], dht_peers: List[str]):
+        """Broadcast field snapshot to DHT peers via SSE"""
+        for peer_url in dht_peers:
+            try:
+                logger.debug(f"[LAYER-6] Broadcasting to {peer_url[:30]}")
+                # In production: async HTTP POST to /dht/gossip endpoint
+                self.message_queue.put({
+                    'type': 'GOSSIP',
+                    'target': peer_url,
+                    'snapshot': snapshot
+                })
+            except Exception as e:
+                logger.warning(f"[LAYER-6] Gossip broadcast error to {peer_url}: {e}")
+
+
     logger.info("[P2P-SOCKETIO] P2P communication enabled on main port %d (unified)" % port)
     logger.info("[P2P-SOCKETIO] Miners and peers connect via: wss://your-domain/socket.io")
     
