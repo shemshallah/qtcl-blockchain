@@ -5265,7 +5265,7 @@ def quantum_metrics_thread():
                 'geodesic_dist':round(geodesic,6),'qrng_health':round(qh,4),
                 'ch0_weight':round(w0,4),'ch1_weight':round(w1,4),'ch2_weight':round(w2,4),
                 'n_peers':N-1,'cycle':_ENG_STATE['cycle']+1,
-                'density_matrix_hex': rho3.tobytes().hex(),  # FIX-S2: fresh dm_hex every cycle
+                'density_matrix_hex': _ENG_STATE.get('density_matrix_hex', ''),
             }
             new['rho_hist'] = _ENG_STATE['rho_hist']
             new['rho_hist'].append((time.time(), rho3.copy()))
@@ -5896,19 +5896,9 @@ def oracle_pq0_bloch():
         with _STATE_CACHE_LOCK:
             cache = _STATE_CACHE.copy()
         
-        # FIX-S1: include block_height + normalised coherence in cache fallback too
-        _snap_fb  = state.get_state()
-        _bh_fb    = _snap_fb['block_state']['current_height']
-        _coh_fb_raw = float(cache.get('coherence', 0.68))
-        _coh_fb = round(min(1.0, _coh_fb_raw / 16.0), 6)  # FIX-S1: L1 norm ÷ 2*N (N=8)
         return jsonify({
             'oracle_id': ORACLE_ID,
             'oracle_role': ORACLE_ROLE,
-            # FIX-S1: block_height ← was missing
-            'block_height': _bh_fb,
-            'pq_curr':      str(_bh_fb),
-            'pq_last':      str(max(0, _bh_fb - 1)),
-            'height':       _bh_fb,
             'theta': cache.get('theta', 1.57),
             'phi': cache.get('phi', 0.0),
             'fidelity':    cache.get('w3_fidelity', 0.90),    # canonical alias for miners
@@ -5918,9 +5908,7 @@ def oracle_pq0_bloch():
             'concurrence': cache.get('concurrence', 0.30),
             'qfi': cache.get('qfi', 6.5),
             'discord': cache.get('discord', 1.50),
-            # FIX-S1: normalised coherence
-            'coherence': _coh_fb,
-            'coherence_raw': _coh_fb_raw,
+            'coherence': cache.get('coherence', 0.68),
             'purity': cache.get('purity', 0.80),
             'sector_occ': cache.get('sector_occ', 0.90),
             'tele_fidelity': cache.get('tele_fidelity', 0.60),
@@ -5939,22 +5927,10 @@ def oracle_pq0_bloch():
             'state_source': 'cache_fallback',
         }), 200
     
-    # FIX-S1: normal case — serve live state WITH block_height and normalised coherence
-    _snap_live = state.get_state()
-    _bh_live   = _snap_live['block_state']['current_height']
-    _coh_raw_live = float(eng['coherence'] or 0)
-    _coh_norm_live = round(min(1.0, _coh_raw_live / 16.0), 6)  # FIX-S1: L1 norm ÷ 2*N (N=8) matches oracle.py
-    # FIX-S1b: write fresh dm_hex from live rho3 on every cycle
-    _rho3_live = eng.get('rho3')
-    _dm_hex_live = _rho3_live.tobytes().hex() if _rho3_live is not None else eng.get('density_matrix_hex', '')
+    # Normal case: serve live state
     return jsonify({
         'oracle_id': ORACLE_ID,
         'oracle_role': ORACLE_ROLE,
-        # FIX-S1: block_height / pq identifiers  ← was missing, caused client bh=0
-        'block_height': _bh_live,
-        'pq_curr':      str(_bh_live),
-        'pq_last':      str(max(0, _bh_live - 1)),
-        'height':       _bh_live,
         'theta': eng['pq0_bloch_theta'],
         'phi': eng['pq0_bloch_phi'],
         'fidelity':    eng['w3_fidelity'],           # canonical alias for miners
@@ -5964,9 +5940,7 @@ def oracle_pq0_bloch():
         'concurrence': eng['concurrence'],
         'qfi': eng['qfi'],
         'discord': eng['discord'],
-        # FIX-S1: normalised coherence ÷ (d-1)=7 so client sees [0,1]
-        'coherence': _coh_norm_live,
-        'coherence_raw': _coh_raw_live,
+        'coherence': eng['coherence'],
         'purity': eng['purity'],
         'sector_occ': eng['sector_occ'],
         'tele_fidelity': eng['tele_fidelity'],
@@ -5982,7 +5956,7 @@ def oracle_pq0_bloch():
         'n_peers': eng['n_peers'],
         'cycle': eng['cycle'],
         'timestamp_ns': time.time_ns(),
-        'density_matrix_hex': _dm_hex_live,
+        'density_matrix_hex': eng.get('density_matrix_hex', ''),
         'state_source': 'live_quantum_metrics',
     }), 200
 
@@ -6090,10 +6064,6 @@ def oracle_w_state():
     rho3  = eng.get('rho3')
     dm_hex = rho3.tobytes().hex() if rho3 is not None else None
 
-    # FIX-S3: normalise coherence for w-state endpoint too — raw L1 ÷ (d-1)=7
-    _wstate_coh_raw = float(eng.get('coherence', 0.0) or 0.0)
-    _wstate_coh = round(min(1.0, _wstate_coh_raw / 16.0), 6)  # FIX-S3: L1 norm ÷ 2*N (N=8)
-
     # gamma_amp / gamma_phase — derived from gamma1/gammaphi (real names in _ENG_STATE)
     gamma_amp   = eng.get('gamma1')   or eng.get('gamma_amp')   or 0.04
     gamma_phase = eng.get('gammaphi') or eng.get('gamma_phase') or 0.12
@@ -6115,8 +6085,7 @@ def oracle_w_state():
         'w6_fidelity':      w6_fidelity,
         'w_state_fidelity': eng.get('w3_fidelity', 0.90),   # miner _normalize compat
         # ── Coherence / entanglement ──────────────────────────────────────────
-        'coherence':        _wstate_coh,          # FIX-S3: normalised ÷7
-        'coherence_raw':    _wstate_coh_raw,
+        'coherence':        eng.get('coherence',    0.70),
         'entanglement':     eng.get('entanglement', 0.65),
         'purity':           eng.get('purity',       0.80),
         'phase_drift':      eng.get('phase_drift',  0.02),
@@ -6480,15 +6449,20 @@ def submit_block():
                 'error': f'Too many user transactions: {user_tx_count} > {MAX_BLOCK_TX_SERVER} (coinbase excluded from count)'
             }), 422
         
-        # ✅ VALIDATION 3: PoW check
-        target = 2 ** (256 - difficulty_bits)
-        try:
-            block_hash_int = int(block_hash, 16) if len(block_hash) == 64 else int(block_hash, 10)
-        except:
-            return jsonify({'error': 'invalid block_hash format'}), 400
-        
-        if block_hash_int >= target:
-            return jsonify({'error': f'PoW invalid: hash does not meet difficulty'}), 422
+        # ✅ VALIDATION 3: Standard leading-zero PoW
+        # difficulty_bits = N means block_hash must start with N hex '0' characters.
+        # Equivalent to: int(hash,16) < 2^(256 - 4*N)  [hex digit = 4 bits]
+        # Both miner and server now use this identical check.
+        if len(block_hash) != 64:
+            return jsonify({'error': 'invalid block_hash: must be 64-char hex'}), 400
+        if not all(c in '0123456789abcdef' for c in block_hash.lower()):
+            return jsonify({'error': 'invalid block_hash: non-hex characters'}), 400
+        if not block_hash.lower().startswith('0' * difficulty_bits):
+            have = len(block_hash) - len(block_hash.lstrip('0'))
+            return jsonify({
+                'error': (f'PoW invalid: need {difficulty_bits} leading hex zeros, '
+                          f'got {have} (hash={block_hash[:24]}…)')
+            }), 422
         
         # ✅ VALIDATION 4: Parent and height check — read from DB (authoritative source)
         # In-memory state may be stale on multi-worker deployments (Koyeb/gunicorn).
@@ -7362,6 +7336,58 @@ def get_address_balance(address: str):
     
     except Exception as e:
         logger.error(f"[GET-BALANCE] Error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/address/<address>/earned', methods=['GET'])
+def get_address_earned(address: str):
+    """
+    SUB-AGENT δ: Ground-truth earnings from confirmed coinbase + transfer TXs.
+    Bypasses wallet_addresses (which may be stale) and reads the transactions
+    table directly. Use this to verify a miner's actual credited balance.
+    """
+    try:
+        with get_db_cursor() as cur:
+            # Sum all confirmed incoming TXs (coinbase + transfers)
+            cur.execute("""
+                SELECT
+                    COALESCE(SUM(CASE WHEN to_address = %s AND status='confirmed'
+                                THEN amount ELSE 0 END), 0) AS total_credits_base,
+                    COALESCE(SUM(CASE WHEN from_address = %s AND status='confirmed'
+                                THEN amount ELSE 0 END), 0) AS total_debits_base,
+                    COUNT(CASE WHEN to_address = %s AND tx_type='coinbase'
+                               AND status='confirmed' THEN 1 END) AS blocks_mined,
+                    COUNT(CASE WHEN to_address = %s AND status='confirmed'
+                               THEN 1 END) AS total_received_txs
+                FROM transactions
+                WHERE to_address = %s OR from_address = %s
+            """, (address, address, address, address, address, address))
+            row = cur.fetchone()
+
+        credits_base = int(row[0] or 0)
+        debits_base  = int(row[1] or 0)
+        blocks_mined = int(row[2] or 0)
+        total_rx_txs = int(row[3] or 0)
+        net_base     = max(0, credits_base - debits_base)
+        net_qtcl     = net_base / 100.0
+        credits_qtcl = credits_base / 100.0
+        debits_qtcl  = debits_base / 100.0
+
+        return jsonify({
+            'address':        address,
+            'balance':        net_qtcl,          # QTCL float (net confirmed)
+            'balance_qtcl':   net_qtcl,
+            'confirmed_balance': net_qtcl,
+            'credits_qtcl':   credits_qtcl,      # total received
+            'debits_qtcl':    debits_qtcl,        # total sent
+            'credits_base':   credits_base,
+            'debits_base':    debits_base,
+            'blocks_mined':   blocks_mined,       # coinbase TXs confirmed
+            'total_rx_txs':   total_rx_txs,
+            'source':         'transaction_ledger',  # not wallet_addresses cache
+        }), 200
+    except Exception as e:
+        logger.error(f"[EARNED] {e}")
         return jsonify({'error': str(e)}), 500
 
 
