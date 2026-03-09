@@ -1141,6 +1141,31 @@ app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
+# PRODUCTION DEPLOYMENT HEADERS & MIDDLEWARE
+# ═════════════════════════════════════════════════════════════════════════════════════════
+
+@app.before_request
+def add_cors_headers():
+    """Add CORS headers for Koyeb/cloud deployment cross-origin requests."""
+    if request.method == 'OPTIONS':
+        response = jsonify({'status': 'ok'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        response.headers.add('Access-Control-Max-Age', '3600')
+        return response, 200
+
+@app.after_request
+def set_response_headers(response):
+    """Ensure CORS headers on all responses."""
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+    response.headers.add('X-Content-Type-Options', 'nosniff')
+    response.headers.add('X-Frame-Options', 'DENY')
+    return response
+
+# ═════════════════════════════════════════════════════════════════════════════════════════
 # DISTRIBUTED HASH TABLE (DHT) INITIALIZATION
 # ═════════════════════════════════════════════════════════════════════════════════════════
 _dht_manager: Optional[DHTManager] = None
@@ -5576,8 +5601,72 @@ def health():
     }), 200
 
 
-@app.route('/api/blocks', methods=['GET'])
-def blocks():
+@app.route('/api/diagnostics', methods=['GET'])
+def diagnostics():
+    """Comprehensive server diagnostics endpoint for client debugging."""
+    snapshot = state.get_state()
+    
+    # Get database info
+    db_info = {'status': 'unknown', 'block_count': None}
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM blocks")
+            count = cur.fetchone()
+            db_info['block_count'] = count[0] if count else 0
+            db_info['status'] = 'connected'
+    except Exception as e:
+        db_info['status'] = f'error: {str(e)[:50]}'
+    
+    # Get P2P info
+    p2p_info = {
+        'enabled': P2P is not None,
+        'running': P2P.is_running if P2P else False,
+        'peers': P2P.get_peer_count() if P2P else 0,
+    }
+    
+    # Get mempool info
+    mempool_info = {
+        'total_transactions': 0,
+        'memory_used_kb': 0,
+    }
+    try:
+        mp = get_mempool()
+        mempool_info['total_transactions'] = len(mp.txs) if hasattr(mp, 'txs') else 0
+    except Exception:
+        pass
+    
+    return jsonify({
+        'status': 'ok' if state.is_alive else 'degraded',
+        'oracle_id': ORACLE_ID,
+        'oracle_role': ORACLE_ROLE,
+        'uptime_seconds': time.time() - getattr(state, '_created_at', time.time()),
+        'database': db_info,
+        'p2p': p2p_info,
+        'mempool': mempool_info,
+        'lattice': {
+            'loaded': state.lattice_loaded,
+            'coherence': snapshot.get('quantum_metrics', {}).get('coherence'),
+            'fidelity': snapshot.get('quantum_metrics', {}).get('w_state_fidelity'),
+        },
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'version': '6.0-enhanced',
+    }), 200
+
+@app.route('/api/dht/hello', methods=['GET', 'OPTIONS'])
+def dht_hello():
+    """Simple DHT hello endpoint — useful for health checks and peer discovery."""
+    if request.method == 'OPTIONS':
+        return '', 204
+    
+    snapshot = state.get_state()
+    return jsonify({
+        'status': 'ok' if state.is_alive else 'degraded',
+        'oracle_id': ORACLE_ID,
+        'block_height': snapshot['block_state']['current_height'],
+        'w_state_fidelity': snapshot['quantum_metrics'].get('w_state_fidelity', 0.0),
+        'peers': P2P.get_peer_count() if P2P else 0,
+        'timestamp': time.time(),
+    }), 200
     """Get current block information"""
     snapshot = state.get_state()
     block = snapshot['block_state']
@@ -6909,7 +6998,7 @@ def submit_block():
             'error_details': str(e)[:200]
         }), 500
 
-@app.route('/api/submit_transaction', methods=['POST'])
+@app.route('/api/submit_transaction', methods=['POST', 'OPTIONS'])
 def submit_transaction():
     """
     Accept a user transfer into the Python mempool.
@@ -6922,14 +7011,25 @@ def submit_transaction():
 
     W-state entanglement: SHA3-256(block_field_entropy()) captured at accept-time and
     stored on the TX — permanently binding it to the instantaneous quantum state.
+    
+    ENHANCED: Better error logging, diagnostics, and request tracking.
     """
     from mempool import get_mempool, AcceptResult
+    
+    # Handle OPTIONS for CORS preflight
+    if request.method == 'OPTIONS':
+        return '', 204
+    
     data      = request.get_json(force=True, silent=True) or {}
     from_addr = (data.get('from') or data.get('from_addr') or data.get('from_address') or '').strip()
     to_addr   = (data.get('to')   or data.get('to_addr')   or data.get('to_address')   or '').strip()
     amount    = data.get('amount')
+    
+    # Log incoming request
+    logger.debug(f"[TX] Received submission: from={from_addr[:16]}… to={to_addr[:16]}… amount={amount}")
 
     if not from_addr or not to_addr or amount is None:
+        logger.warning(f"[TX] Rejected (missing fields): from={bool(from_addr)}, to={bool(to_addr)}, amount={amount is not None}")
         return jsonify({'error': 'missing required fields: from, to, amount'}), 400
 
     # Pass the raw dict directly — mempool normalises everything internally
@@ -6939,6 +7039,7 @@ def submit_transaction():
 
     try:
         code, msg, tx = get_mempool().accept(raw)
+        logger.debug(f"[TX] Mempool response: code={code.value}, msg={msg[:60]}…")
     except Exception as exc:
         logger.error(f"[TX] mempool.accept error: {exc}\n{traceback.format_exc()}")
         return jsonify({'error': str(exc)}), 500
@@ -6958,6 +7059,8 @@ def submit_transaction():
             'replaced_by_fee': code == AcceptResult.REPLACED_BY_FEE,
             'message'     : f"TX pending | query: /api/transactions/{tx.tx_hash}",
         }
+        logger.info(f"[TX] ✅ ACCEPTED: {tx.tx_hash[:16]}… | from={from_addr[:16]}… amt={amount}")
+        
         # P2P gossip
         if P2P:
             try:
@@ -6973,6 +7076,8 @@ def submit_transaction():
         return jsonify(resp), 201
 
     # Rejection — map AcceptResult to HTTP status
+    logger.warning(f"[TX] ❌ REJECTED: code={code.value} msg={msg[:60]}… | from={from_addr[:16]}… to={to_addr[:16]}…")
+    
     http = 409 if code in (AcceptResult.DUPLICATE, AcceptResult.NONCE_REUSE) else (
            402 if code in (AcceptResult.LOW_FEE, AcceptResult.INSUFFICIENT_BAL, AcceptResult.DUST)    else (
            403 if code == AcceptResult.INVALID_SIG                                              else 400))
