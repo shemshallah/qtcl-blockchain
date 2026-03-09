@@ -5265,7 +5265,7 @@ def quantum_metrics_thread():
                 'geodesic_dist':round(geodesic,6),'qrng_health':round(qh,4),
                 'ch0_weight':round(w0,4),'ch1_weight':round(w1,4),'ch2_weight':round(w2,4),
                 'n_peers':N-1,'cycle':_ENG_STATE['cycle']+1,
-                'density_matrix_hex': _ENG_STATE.get('density_matrix_hex', ''),
+                'density_matrix_hex': rho3.tobytes().hex(),  # FIX-S2: fresh dm_hex every cycle
             }
             new['rho_hist'] = _ENG_STATE['rho_hist']
             new['rho_hist'].append((time.time(), rho3.copy()))
@@ -5896,9 +5896,19 @@ def oracle_pq0_bloch():
         with _STATE_CACHE_LOCK:
             cache = _STATE_CACHE.copy()
         
+        # FIX-S1: include block_height + normalised coherence in cache fallback too
+        _snap_fb  = state.get_state()
+        _bh_fb    = _snap_fb['block_state']['current_height']
+        _coh_fb_raw = float(cache.get('coherence', 0.68))
+        _coh_fb = round(min(1.0, _coh_fb_raw / 16.0), 6)  # FIX-S1: L1 norm ÷ 2*N (N=8)
         return jsonify({
             'oracle_id': ORACLE_ID,
             'oracle_role': ORACLE_ROLE,
+            # FIX-S1: block_height ← was missing
+            'block_height': _bh_fb,
+            'pq_curr':      str(_bh_fb),
+            'pq_last':      str(max(0, _bh_fb - 1)),
+            'height':       _bh_fb,
             'theta': cache.get('theta', 1.57),
             'phi': cache.get('phi', 0.0),
             'fidelity':    cache.get('w3_fidelity', 0.90),    # canonical alias for miners
@@ -5908,7 +5918,9 @@ def oracle_pq0_bloch():
             'concurrence': cache.get('concurrence', 0.30),
             'qfi': cache.get('qfi', 6.5),
             'discord': cache.get('discord', 1.50),
-            'coherence': cache.get('coherence', 0.68),
+            # FIX-S1: normalised coherence
+            'coherence': _coh_fb,
+            'coherence_raw': _coh_fb_raw,
             'purity': cache.get('purity', 0.80),
             'sector_occ': cache.get('sector_occ', 0.90),
             'tele_fidelity': cache.get('tele_fidelity', 0.60),
@@ -5927,10 +5939,22 @@ def oracle_pq0_bloch():
             'state_source': 'cache_fallback',
         }), 200
     
-    # Normal case: serve live state
+    # FIX-S1: normal case — serve live state WITH block_height and normalised coherence
+    _snap_live = state.get_state()
+    _bh_live   = _snap_live['block_state']['current_height']
+    _coh_raw_live = float(eng['coherence'] or 0)
+    _coh_norm_live = round(min(1.0, _coh_raw_live / 16.0), 6)  # FIX-S1: L1 norm ÷ 2*N (N=8) matches oracle.py
+    # FIX-S1b: write fresh dm_hex from live rho3 on every cycle
+    _rho3_live = eng.get('rho3')
+    _dm_hex_live = _rho3_live.tobytes().hex() if _rho3_live is not None else eng.get('density_matrix_hex', '')
     return jsonify({
         'oracle_id': ORACLE_ID,
         'oracle_role': ORACLE_ROLE,
+        # FIX-S1: block_height / pq identifiers  ← was missing, caused client bh=0
+        'block_height': _bh_live,
+        'pq_curr':      str(_bh_live),
+        'pq_last':      str(max(0, _bh_live - 1)),
+        'height':       _bh_live,
         'theta': eng['pq0_bloch_theta'],
         'phi': eng['pq0_bloch_phi'],
         'fidelity':    eng['w3_fidelity'],           # canonical alias for miners
@@ -5940,7 +5964,9 @@ def oracle_pq0_bloch():
         'concurrence': eng['concurrence'],
         'qfi': eng['qfi'],
         'discord': eng['discord'],
-        'coherence': eng['coherence'],
+        # FIX-S1: normalised coherence ÷ (d-1)=7 so client sees [0,1]
+        'coherence': _coh_norm_live,
+        'coherence_raw': _coh_raw_live,
         'purity': eng['purity'],
         'sector_occ': eng['sector_occ'],
         'tele_fidelity': eng['tele_fidelity'],
@@ -5956,7 +5982,7 @@ def oracle_pq0_bloch():
         'n_peers': eng['n_peers'],
         'cycle': eng['cycle'],
         'timestamp_ns': time.time_ns(),
-        'density_matrix_hex': eng.get('density_matrix_hex', ''),
+        'density_matrix_hex': _dm_hex_live,
         'state_source': 'live_quantum_metrics',
     }), 200
 
@@ -6064,6 +6090,10 @@ def oracle_w_state():
     rho3  = eng.get('rho3')
     dm_hex = rho3.tobytes().hex() if rho3 is not None else None
 
+    # FIX-S3: normalise coherence for w-state endpoint too — raw L1 ÷ (d-1)=7
+    _wstate_coh_raw = float(eng.get('coherence', 0.0) or 0.0)
+    _wstate_coh = round(min(1.0, _wstate_coh_raw / 16.0), 6)  # FIX-S3: L1 norm ÷ 2*N (N=8)
+
     # gamma_amp / gamma_phase — derived from gamma1/gammaphi (real names in _ENG_STATE)
     gamma_amp   = eng.get('gamma1')   or eng.get('gamma_amp')   or 0.04
     gamma_phase = eng.get('gammaphi') or eng.get('gamma_phase') or 0.12
@@ -6085,7 +6115,8 @@ def oracle_w_state():
         'w6_fidelity':      w6_fidelity,
         'w_state_fidelity': eng.get('w3_fidelity', 0.90),   # miner _normalize compat
         # ── Coherence / entanglement ──────────────────────────────────────────
-        'coherence':        eng.get('coherence',    0.70),
+        'coherence':        _wstate_coh,          # FIX-S3: normalised ÷7
+        'coherence_raw':    _wstate_coh_raw,
         'entanglement':     eng.get('entanglement', 0.65),
         'purity':           eng.get('purity',       0.80),
         'phase_drift':      eng.get('phase_drift',  0.02),
