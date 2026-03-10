@@ -8877,6 +8877,88 @@ def shutdown_handler():
     logger.info("[SERVER] ✨ Shutdown complete")
 
 
+    # Start oracle finalization loops
+    _oracle_threads = start_oracle_finalization_system(get_db_cursor)
+    
+
+# ═════════════════════════════════════════════════════════════════════════════════
+# ORACLE FINALIZATION SYSTEM — 5 AUTONOMOUS LOOPS
+# ═════════════════════════════════════════════════════════════════════════════════
+
+import threading
+import time
+from collections import Counter
+
+class OracleFinalizationLoop:
+    """Autonomous oracle finalization thread"""
+    
+    def __init__(self, oracle_id: int, oracle_url: str, db_cursor_func):
+        self.oracle_id = oracle_id
+        self.oracle_url = oracle_url
+        self.get_db_cursor = db_cursor_func
+        self.running = True
+    
+    def query_oracle_height(self):
+        try:
+            r = requests.get(f"{self.oracle_url}/status", timeout=3, json={'query': 'height'})
+            return r.json().get('block_height', 0)
+        except Exception as e:
+            logger.debug(f"[ORACLE-{self.oracle_id}] Query failed: {e}")
+            return None
+    
+    def finalize_pending_blocks(self, oracle_height):
+        if not oracle_height:
+            return
+        
+        try:
+            with self.get_db_cursor() as cur:
+                cur.execute("""SELECT height, miner_address FROM blocks WHERE oracle_consensus_reached = FALSE AND height <= %s ORDER BY height DESC LIMIT 20""", (oracle_height,))
+                
+                for block_h, miner_addr in cur.fetchall():
+                    logger.info(f"[ORACLE-{self.oracle_id}] ✅ Confirms block #{block_h}")
+                    
+                    cur.execute("""UPDATE blocks SET oracle_consensus_reached = TRUE WHERE height = %s""", (block_h,))
+                    
+                    cur.execute("""UPDATE wallet_addresses SET finalized_balance = COALESCE(finalized_balance, 0) + 1250, pending_balance = COALESCE(pending_balance, 0) - 1250 WHERE address = %s AND pending_balance >= 1250""", (miner_addr,))
+                    
+                    logger.info(f"[ORACLE-{self.oracle_id}] 💰 Finalized {miner_addr}")
+        
+        except Exception as e:
+            logger.error(f"[ORACLE-{self.oracle_id}] Error: {e}")
+    
+    def run(self):
+        logger.info(f"[ORACLE-{self.oracle_id}] 🚀 Loop started")
+        
+        while self.running:
+            try:
+                h = self.query_oracle_height()
+                if h:
+                    self.finalize_pending_blocks(h)
+                time.sleep(5)
+            except Exception as e:
+                logger.error(f"[ORACLE-{self.oracle_id}] Loop error: {e}")
+                time.sleep(10)
+
+
+def start_oracle_finalization_system(db_cursor_func):
+    oracle_config = [
+        (1, 'https://qtcl-blockchain.koyeb.app/api/oracle/1'),
+        (2, 'https://qtcl-blockchain.koyeb.app/api/oracle/2'),
+        (3, 'https://qtcl-blockchain.koyeb.app/api/oracle/3'),
+        (4, 'https://qtcl-blockchain.koyeb.app/api/oracle/4'),
+        (5, 'https://qtcl-blockchain.koyeb.app/api/oracle/5'),
+    ]
+    
+    for oracle_id, oracle_url in oracle_config:
+        loop = OracleFinalizationLoop(oracle_id, oracle_url, db_cursor_func)
+        thread = threading.Thread(target=loop.run, daemon=True, name=f"OracleFinalize-{oracle_id}")
+        thread.start()
+        logger.info(f"[STARTUP] 🟢 Oracle #{oracle_id} finalization loop started")
+        time.sleep(0.5)
+    
+    logger.info("[STARTUP] ✅ 5 oracle finalization loops activated")
+
+
 if __name__ == '__main__':
     import atexit
     atexit.register(shutdown_handler)
