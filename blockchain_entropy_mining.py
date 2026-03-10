@@ -1664,7 +1664,7 @@ class EntropyFieldMiner:
 
         # Difficulty is now independent of entropy (use DifficultyManager)
         # Fixed difficulty for PoW, entropy still drives field generation
-        adjusted_bits = 13
+        adjusted_bits = 6
         difficulty_target = (1 << adjusted_bits) - 1
 
         # Generate entropy-driven field seed

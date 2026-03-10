@@ -2433,10 +2433,10 @@ class BlockManager:
                         """,
                         (
                             0, genesis_hash, '0x' + '0'*64, GENESIS_WITNESS,
-                            GENESIS_TIMESTAMP, 0, GENESIS_MERKLE, GENESIS_WITNESS, 13, 0,
+                            GENESIS_TIMESTAMP, 0, GENESIS_MERKLE, GENESIS_WITNESS, 6, 0,
                         ),
                     )
-                    logger.info("[GENESIS] ✅ Genesis block persisted to DB (difficulty=13)")
+                    logger.info("[GENESIS] ✅ Genesis block persisted to DB (difficulty=6)")
                 except Exception as persist_err:
                     logger.warning(f"[GENESIS] DB persist failed ({persist_err}); genesis lives in-memory only")
     

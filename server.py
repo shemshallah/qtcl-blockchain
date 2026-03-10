@@ -1358,10 +1358,10 @@ def get_measurement_service() -> MeasurementService:
 class DifficultyManager:
     """Manage blockchain difficulty independently of entropy."""
     
-    def __init__(self, initial_difficulty: int = 13):
+    def __init__(self, initial_difficulty: int = 6):
         self.current_difficulty = initial_difficulty
-        self.min_difficulty = 8
-        self.max_difficulty = 20
+        self.min_difficulty = 4
+        self.max_difficulty = 10
         self.target_block_time_s = 60
         self.adjustment_interval = 10
         logger.info(
