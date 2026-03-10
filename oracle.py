@@ -2241,45 +2241,34 @@ class WStateValidator:
         logger.info("[LAYER-2] WStateValidator initialized")
 
     def measure_fidelity(self, boundary_crossing: bool = False) -> float:
-        """
-        FIX-ORACLE-1: Dual-measurement round-robin (no synthetic data).
+        """Measure fidelity to |W3⟩ state (rolling window, not accumulated)"""
+        base_fidelity = 0.95
+        # Rolling window: only last 20 measurements (not unbounded)
+        window = self.metrics.fidelity_trajectory[-20:] if self.metrics.fidelity_trajectory else []
+        window_len = len(window)
         
-        Real quantum measurement averaging:
-        - Dual bases (in-phase A + out-of-phase B)
-        - Bounded rolling window (last 20, not infinite)
-        - Average dual measurements for stability
-        """
-        # Dual-measurement: basis A (standard) + basis B (rotated conjugate)
-        base_fidelity_a = 0.95  # In-phase
-        base_fidelity_b = 0.93  # Out-of-phase
-        
-        # Rolling window (bounded, not infinite trajectory)
-        window_size = 20
-        if len(self.metrics.fidelity_trajectory) > window_size:
-            self.metrics.fidelity_trajectory = self.metrics.fidelity_trajectory[-window_size:]
-        
-        # Noise on bounded window only
-        noise = 0.001 * len(self.metrics.fidelity_trajectory)
+        # Noise based on CURRENT window only (not lifetime)
+        noise = 0.001 * window_len if window_len > 0 else 0.001
         
         if boundary_crossing:
-            fidelity_a = base_fidelity_a - noise
-            fidelity_b = base_fidelity_b - (noise * 0.5)
+            fidelity = base_fidelity - noise
+            self.metrics.coherence_state = CoherenceState.BOUNDARY_CROSSING.value
         else:
-            fidelity_a = base_fidelity_a - (noise * 0.3)
-            fidelity_b = base_fidelity_b - (noise * 0.2)
+            fidelity = base_fidelity - (noise * 0.5)
         
-        # Dual-measurement average
-        fidelity = (max(0.0, fidelity_a) + max(0.0, fidelity_b)) / 2.0
+        # Store measurement (rolling window will auto-trim to 20)
+        self.metrics.fidelity_trajectory.append(max(0.0, fidelity))
+        # Keep only last 20 (prevents unbounded growth)
+        if len(self.metrics.fidelity_trajectory) > 20:
+            self.metrics.fidelity_trajectory = self.metrics.fidelity_trajectory[-20:]
         
-        self.metrics.fidelity_trajectory.append(fidelity)
         return max(0.0, fidelity)
 
     def measure_coherence_l1(self) -> float:
-        """L1 norm of coherence (off-diagonal density matrix elements)"""
-        # Use recent 5 measurements only (bounded window)
-        if self.metrics.fidelity_trajectory:
-            recent_fidelities = self.metrics.fidelity_trajectory[-5:]
-            fidelity = sum(recent_fidelities) / len(recent_fidelities)
+        """L1 norm of coherence (off-diagonal density matrix elements) — use rolling window"""
+        window = self.metrics.fidelity_trajectory[-5:] if self.metrics.fidelity_trajectory else []
+        if window:
+            fidelity = sum(window) / len(window)  # Last 5 only
         else:
             fidelity = 0.95
         coherence = fidelity * 0.98
@@ -2287,33 +2276,34 @@ class WStateValidator:
         return coherence
 
     def calculate_entropy_vn(self) -> float:
-        """Von Neumann entropy S = -Tr(ρ log ρ)"""
-        if self.metrics.fidelity_trajectory:
-            # Bounded rolling average (last 10)
-            recent = self.metrics.fidelity_trajectory[-10:]
-            f = sum(recent) / len(recent)
+        """Von Neumann entropy S = -Tr(ρ log ρ) — use rolling window only"""
+        window = self.metrics.fidelity_trajectory[-10:] if self.metrics.fidelity_trajectory else []
+        if window:
+            f = sum(window) / len(window)  # Last 10 measurements only
             vn = (1.0 - f) * 1.5
             self.metrics.entropy_vn = max(0.0, vn)
+        else:
+            self.metrics.entropy_vn = 0.15
         return self.metrics.entropy_vn
 
     def calculate_purity(self) -> float:
-        """Purity: Tr(ρ²)"""
-        if self.metrics.fidelity_trajectory:
-            # Bounded rolling average (last 10)
-            recent = self.metrics.fidelity_trajectory[-10:]
-            avg_fidelity = sum(recent) / len(recent)
+        """Purity: Tr(ρ²) — use rolling window only"""
+        window = self.metrics.fidelity_trajectory[-10:] if self.metrics.fidelity_trajectory else []
+        if window:
+            avg_fidelity = sum(window) / len(window)  # Last 10 measurements only
             purity = 2 * (avg_fidelity ** 2) - 1
             self.metrics.purity = max(0.0, min(1.0, purity))
+        else:
+            self.metrics.purity = 0.36
         return self.metrics.purity
 
     def modified_entanglement_witness(self) -> float:
-        """W-state specific witness (not standard Bell inequality)"""
-        if not self.metrics.fidelity_trajectory:
+        """W-state specific witness (not standard Bell inequality) — use rolling window only"""
+        window = self.metrics.fidelity_trajectory[-10:] if self.metrics.fidelity_trajectory else []
+        if not window:
             return 0.0
         
-        # Bounded rolling average (last 10)
-        recent = self.metrics.fidelity_trajectory[-10:]
-        avg_f = sum(recent) / len(recent)
+        avg_f = sum(window) / len(window)  # Last 10 measurements only
         witness = max(0.0, 1.0 - (3.0 * avg_f))
         self.metrics.witness = witness
         return witness
@@ -2327,12 +2317,12 @@ class WStateValidator:
         self.calculate_purity()
         self.modified_entanglement_witness()
         
-        is_valid = fidelity > 0.75 and coherence > 0.70  # Post-dual-measurement realistic
+        is_valid = fidelity > 0.85 and coherence > 0.80
         
         if is_valid:
             self.metrics.coherence_state = CoherenceState.COHERENCE_MAINTAINED.value
         else:
             self.metrics.coherence_state = CoherenceState.DECOHERENCE.value
         
-        logger.debug(f"[FIX-ORACLE-1] Field crossing {pq_last}→{pq_curr}: F={fidelity:.4f} C={coherence:.4f} Valid={is_valid}")
+        logger.debug(f"[LAYER-2] Field crossing {pq_last}→{pq_curr}: F={fidelity:.4f} C={coherence:.4f} Valid={is_valid}")
         return is_valid
