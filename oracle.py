@@ -1,49 +1,16 @@
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 5-ORACLE CLUSTER CONFIGURATION
+# ⚡ ORACLE MEASUREMENT MODULE (In-Process Only)
+# ═══════════════════════════════════════════════════════════════════════════════
+# 
+# NOTE: Oracles are now IN-PROCESS within server.py on port 9091 ONLY.
+# No separate ports (5000-5004) are used.
+# 
+# This module provides measurement classes (WStateValidator, etc.)
+# that are imported and used by InProcessOracleMeasurementEngine in server.py.
+#
 # ═══════════════════════════════════════════════════════════════════════════════
 
-ORACLE_CLUSTER_CONFIG = {
-    'oracle_1': {
-        'role': 'PRIMARY_LATTICE',
-        'port': 5000,
-        'workers': 4,
-        'timeout': 15,
-        'enabled': True
-    },
-    'oracle_2': {
-        'role': 'SECONDARY_LATTICE',
-        'port': 5001,
-        'workers': 4,
-        'timeout': 15,
-        'enabled': True
-    },
-    'oracle_3': {
-        'role': 'VALIDATION',
-        'port': 5002,
-        'workers': 2,
-        'timeout': 10,
-        'enabled': True
-    },
-    'oracle_4': {
-        'role': 'ARBITER',
-        'port': 5003,
-        'workers': 2,
-        'timeout': 10,
-        'enabled': True
-    },
-    'oracle_5': {
-        'role': 'METRICS',
-        'port': 5004,
-        'workers': 2,
-        'timeout': 10,
-        'enabled': True
-    }
-}
-
-CONSENSUS_THRESHOLD = 3  # 3-of-5 majority
-BYZANTINE_TOLERANCE = 2  # Can tolerate 2 faulty oracles
-MEASUREMENT_TIMEOUT = 10  # seconds
 
 
 #!/usr/bin/env python3
