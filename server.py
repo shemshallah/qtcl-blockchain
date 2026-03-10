@@ -2298,12 +2298,17 @@ def peer_register():
     if server_base and not server_base.startswith('http'):
         server_base = f"https://{server_base}"
 
+    # ✅ FORK FIX: Use canonical oracle height (immutable during validation round)
+    # NOT the live tip, which races when multiple miners submit blocks simultaneously.
+    # This prevents fork where Miner A mines h+1, Miner B also mines h+1 with stale oracle_tip.
+    canonical_height = globals().get('_ORACLE_CANONICAL_HEIGHT', tip.get('height', 0))
+    
     return jsonify({
         'peer_id'     : peer_id,
         'registered'  : ok,
         'live_peers'  : live_peers,
         'peer_count'  : len(live_peers) + 1,
-        'oracle_tip'  : tip.get('height', 0),
+        'oracle_tip'  : canonical_height,
         'sse_url'     : f"{server_base}/api/events?client_id={peer_id}",
         'gossip_ingest': f"{server_base}/api/gossip/ingest",
         'mempool_url' : f"{server_base}/api/mempool",
@@ -7813,6 +7818,11 @@ def submit_block():
         except Exception as _ge:
             logger.debug(f"[BLOCK] gossip_publish_block skipped: {_ge}")
 
+        # ✅ FORK FIX: Update canonical oracle height atomically with block acceptance
+        # This ensures all miners get the same oracle_tip for the next mining round
+        globals()['_ORACLE_CANONICAL_HEIGHT'] = block_height
+        logger.info(f"[FORK-FIX] Canonical oracle height updated: {block_height}")
+
         # 6️⃣ RESPONSE
         return jsonify({
             'status':                'accepted',
@@ -8962,6 +8972,13 @@ def start_oracle_finalization_system(db_cursor_func):
 if __name__ == '__main__':
     import atexit
     atexit.register(shutdown_handler)
+    
+    # ✅ FORK FIX: Initialize canonical oracle height from latest block in DB
+    # This ensures all miners start with consistent oracle_tip and prevents forks
+    # from race conditions between block submission and oracle height reporting
+    tip = query_latest_block() or {}
+    globals()['_ORACLE_CANONICAL_HEIGHT'] = tip.get('height', 0)
+    logger.info(f"[FORK-FIX] Initialized canonical oracle height: {globals()['_ORACLE_CANONICAL_HEIGHT']}")
     
     # Initialize Entropy Pool (CRITICAL - must be first)
     logger.info("[STARTUP] Phase 1/3: Initializing block field entropy pool...")
