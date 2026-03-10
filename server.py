@@ -2529,6 +2529,7 @@ def get_oracle_engines() -> InProcessOracleMeasurementEngine:
     return _oracle_engines
 
 # ═════════════════════════════════════════════════════════════════════════════════
+class UnifiedOracleMux:
     """
     Unified oracle multiplexer for port 9091.
     
