@@ -84,8 +84,8 @@ logger = logging.getLogger(__name__)
 # ══════════════════════════════════════════════════════════════════════════════
 
 MAX_MEMPOOL_SIZE          = 100_000          # maximum accepted transactions
-TX_VSIZE_BYTES            = 250              # normalized virtual size per QTCL TX
-MIN_RELAY_FEE_RATE        = 1                # minimum sat/vbyte to relay
+TX_VSIZE_BYTES            = 1                # QTCL TX unit size — fee_rate = fee_base directly (not Bitcoin vbyte model)
+MIN_RELAY_FEE_RATE        = 1                # minimum fee_rate to relay (= 1 base unit minimum)
 MIN_RELAY_FEE_ABS         = 1               # absolute minimum fee in base units
 MEMPOOL_TTL_HOURS         = 72              # purge TXs older than this
 RBF_FEE_BUMP_PCT          = 10             # replace-by-fee requires +10% fee_rate
