@@ -1352,6 +1352,73 @@ def get_measurement_service() -> MeasurementService:
     return _measurement_service
 
 # ═════════════════════════════════════════════════════════════════════════════════
+# DIFFICULTY MANAGER (Independent of Entropy)
+# ═════════════════════════════════════════════════════════════════════════════════
+
+class DifficultyManager:
+    """Manage blockchain difficulty independently of entropy."""
+    
+    def __init__(self, initial_difficulty: int = 13):
+        self.current_difficulty = initial_difficulty
+        self.min_difficulty = 8
+        self.max_difficulty = 20
+        self.target_block_time_s = 60
+        self.adjustment_interval = 10
+        logger.info(
+            f"[DIFFICULTY] Manager initialized: {initial_difficulty} leading hex zeros, "
+            f"target {self.target_block_time_s}s blocks"
+        )
+    
+    def get_difficulty(self) -> int:
+        """Get current difficulty"""
+        return self.current_difficulty
+    
+    def set_difficulty(self, difficulty: int) -> bool:
+        """Set difficulty (8-20 range)"""
+        if not (self.min_difficulty <= difficulty <= self.max_difficulty):
+            return False
+        old_diff = self.current_difficulty
+        self.current_difficulty = difficulty
+        logger.info(f"[DIFFICULTY] Set: {old_diff} → {difficulty}")
+        return True
+    
+    def auto_adjust(self, blocks: list) -> int:
+        """Auto-adjust based on block times"""
+        if len(blocks) < 2:
+            return self.current_difficulty
+        
+        time_span = blocks[-1].get('timestamp', 0) - blocks[0].get('timestamp', 0)
+        block_count = len(blocks) - 1
+        actual_block_time = time_span / block_count if block_count > 0 else 0
+        
+        ratio = self.target_block_time_s / actual_block_time if actual_block_time > 0 else 1.0
+        ratio = max(0.75, min(1.25, ratio))
+        
+        new_difficulty = max(
+            self.min_difficulty,
+            min(self.max_difficulty, int(self.current_difficulty * ratio))
+        )
+        
+        if new_difficulty != self.current_difficulty:
+            old_diff = self.current_difficulty
+            self.current_difficulty = new_difficulty
+            logger.info(
+                f"[DIFFICULTY] Auto-adjusted: {old_diff} → {new_difficulty} "
+                f"(actual_time={actual_block_time:.1f}s, target={self.target_block_time_s}s)"
+            )
+        
+        return self.current_difficulty
+
+_difficulty_manager = None
+
+def get_difficulty_manager() -> DifficultyManager:
+    """Get global difficulty manager"""
+    global _difficulty_manager
+    if _difficulty_manager is None:
+        _difficulty_manager = DifficultyManager(initial_difficulty=13)
+    return _difficulty_manager
+
+# ═════════════════════════════════════════════════════════════════════════════════
 # FLASK APP SETUP
 # ═════════════════════════════════════════════════════════════════════════════════
 
@@ -2529,7 +2596,6 @@ def get_oracle_engines() -> InProcessOracleMeasurementEngine:
     return _oracle_engines
 
 # ═════════════════════════════════════════════════════════════════════════════════
-class UnifiedOracleMux:
     """
     Unified oracle multiplexer for port 9091.
     
@@ -2575,26 +2641,6 @@ class UnifiedOracleMux:
         oracle_id = self.oracle_order[self.round_robin_index]
         self.round_robin_index = (self.round_robin_index + 1) % len(self.oracle_order)
         return oracle_id
-    
-    def measure_all_oracles(self) -> None:
-        """
-        Measure all 5 oracles in sequence via HTTP round-robin.
-        
-        Queries each oracle (ports 5000-5004) and caches results.
-        Called every 10ms by _snapshot_streaming_daemon() to maintain
-        fresh measurements for aggregation.
-        
-        Thread-safe: uses measurements_lock to protect cache.
-        Non-blocking: individual oracle timeouts don't block others.
-        """
-        for oracle_id in self.oracle_order:
-            try:
-                measurement = self.measure_oracle_http(oracle_id)
-                if measurement:
-                    with self.measurements_lock:
-                        self.measurements_cache[oracle_id] = measurement
-            except Exception as e:
-                logger.debug(f"[ORACLE-MUX] Measure {oracle_id} in batch: {e}")
     
     def measure_oracle_http(self, oracle_id: str) -> Optional[dict]:
         """
@@ -6477,12 +6523,13 @@ def blocks_tip():
                     """, (tip_height,))
                     row = cur.fetchone()
                 if row:
+                    mgr = get_difficulty_manager()
                     return jsonify({
                         'block_height': row[0],
                         'block_hash':   row[1],                        'parent_hash':  row[4] or ('0' * 64),
                         'merkle_root':  row[9] or ('0' * 64),
                         'timestamp_s':  int(row[2]) if row[2] else int(time.time()),
-                        'difficulty_bits': int(float(row[7])) if row[7] else 12,
+                        'difficulty_bits': mgr.get_difficulty(),
                         'nonce':        int(row[6]) if row[6] else 0,
                         'miner_address': row[5] or '',
                         'w_state_fidelity': float(row[8]) if row[8] is not None else 0.9,
@@ -6492,13 +6539,14 @@ def blocks_tip():
                 logger.warning(f"[BLOCKS_TIP] DB detail query failed: {db_err}")
             
             # DB row fetch failed but we have height/hash — return minimal valid response
+            mgr = get_difficulty_manager()
             return jsonify({
                 'block_height':   db_block['height'],
                 'block_hash':     db_block['hash'],
                 'parent_hash':    '0' * 64,
                 'merkle_root':    '0' * 64,
                 'timestamp_s':    int(db_block.get('timestamp', time.time())),
-                'difficulty_bits': 12,
+                'difficulty_bits': mgr.get_difficulty(),
                 'nonce':          0,
                 'miner_address':  '',
                 'w_state_fidelity': 0.9,
@@ -6506,11 +6554,12 @@ def blocks_tip():
             }), 200
         
         # ── Fallback: in-memory state (single-worker or before first block) ──
+        mgr = get_difficulty_manager()
         if state is None:
             return jsonify({
                 'block_height': 0, 'block_hash': '0' * 64,
                 'parent_hash': '0' * 64, 'merkle_root': '0' * 64,
-                'timestamp_s': int(time.time()), 'difficulty_bits': 12,
+                'timestamp_s': int(time.time()), 'difficulty_bits': mgr.get_difficulty(),
                 'nonce': 0, 'miner_address': 'genesis',
                 'w_state_fidelity': 1.0, 'w_entropy_hash': 'genesis',
             }), 200
@@ -6523,10 +6572,8 @@ def blocks_tip():
         block_hash   = block.get('current_hash') or ('0' * 64)
         parent_hash  = block.get('parent_hash')  or ('0' * 64)
         
-        try:
-            difficulty = int(block.get('difficulty', 12))
-        except (ValueError, TypeError):
-            difficulty = 12
+        mgr = get_difficulty_manager()
+        difficulty = mgr.get_difficulty()
         try:
             nonce = int(block.get('nonce', 0))
         except (ValueError, TypeError):
@@ -8633,6 +8680,65 @@ def record_quantum_witness_endpoint():
     except Exception as e:
         logger.error(f"[CONSENSUS-WITNESS] {e}")
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/difficulty', methods=['GET'])
+def get_difficulty():
+    """Get current difficulty info"""
+    mgr = get_difficulty_manager()
+    return jsonify({
+        'difficulty_bits': mgr.get_difficulty(),
+        'difficulty_type': 'leading_hex_zeros',
+        'description': f'{mgr.get_difficulty()} leading hex zero characters',
+        'min': mgr.min_difficulty,
+        'max': mgr.max_difficulty,
+        'target_block_time_s': mgr.target_block_time_s,
+    }), 200
+
+
+@app.route('/api/difficulty/set', methods=['POST'])
+def set_difficulty():
+    """Set difficulty manually"""
+    data = request.get_json() or {}
+    difficulty = data.get('difficulty')
+    
+    if difficulty is None:
+        return jsonify({'error': 'missing difficulty parameter'}), 400
+    
+    try:
+        difficulty = int(difficulty)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'difficulty must be an integer'}), 400
+    
+    mgr = get_difficulty_manager()
+    if mgr.set_difficulty(difficulty):
+        return jsonify({
+            'status': 'set',
+            'difficulty_bits': difficulty,
+            'description': f'{difficulty} leading hex zeros'
+        }), 200
+    else:
+        return jsonify({
+            'error': f'difficulty out of bounds: {mgr.min_difficulty}-{mgr.max_difficulty}'
+        }), 422
+
+
+@app.route('/api/difficulty/adjust', methods=['POST'])
+def adjust_difficulty():
+    """Trigger block-time-based difficulty adjustment"""
+    data = request.get_json() or {}
+    blocks = data.get('blocks', [])
+    
+    if not blocks:
+        return jsonify({'error': 'no blocks provided'}), 400
+    
+    mgr = get_difficulty_manager()
+    new_diff = mgr.auto_adjust(blocks)
+    
+    return jsonify({
+        'status': 'adjusted',
+        'difficulty_bits': new_diff
+    }), 200
 
 
 @app.errorhandler(404)

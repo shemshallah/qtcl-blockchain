@@ -176,37 +176,6 @@ class EntropyPoolQualityOracle:
             avg = sum(m['quality'] for m in self.quality_history) / len(self.quality_history)
             return avg
     
-    def scale_difficulty(self, pool_quality: Optional[float] = None) -> Tuple[int, int]:
-        """
-        Convert pool quality to mining difficulty.
-        
-        Returns: (pow_bits, entropy_bytes)
-        Higher quality pool → Higher difficulty
-        Lower quality pool → Lower difficulty
-        """
-        
-        if pool_quality is None:
-            pool_quality = self.measure_entropy_quality()
-        
-        logger.debug(f"[MINING] Pool entropy quality: {pool_quality:.2%}")
-        
-        if pool_quality > 0.95:
-            return 24, 512
-        elif pool_quality > 0.90:
-            return 23, 448
-        elif pool_quality > 0.85:
-            return 22, 384
-        elif pool_quality > 0.75:
-            return 21, 320
-        elif pool_quality > 0.70:
-            return 20, 256
-        elif pool_quality > 0.60:
-            return 19, 192
-        elif pool_quality > 0.50:
-            return 18, 128
-        else:
-            return 16, 64
-
 @dataclass
 class HybridMiningConfig:
     """Configuration for Hybrid Entropy-PoW Mining (Phase 1)"""
@@ -1693,8 +1662,9 @@ class EntropyFieldMiner:
         self.mining_attempts = 0
         self.entropy_attempts = 0
 
-        # Phase 1: Difficulty scales with entropy quality
-        adjusted_bits = max(8, min(24, int(target_bits * (0.5 + entropy_quality))))
+        # Difficulty is now independent of entropy (use DifficultyManager)
+        # Fixed difficulty for PoW, entropy still drives field generation
+        adjusted_bits = 13
         difficulty_target = (1 << adjusted_bits) - 1
 
         # Generate entropy-driven field seed
@@ -1703,7 +1673,7 @@ class EntropyFieldMiner:
                 f"{int(time.time() * 1e6)}{os.urandom(16).hex()}".encode()
             ).hexdigest()
 
-        logger.info(f"[LAYER-3] Mining field: entropy_q={entropy_quality:.2f}, bits={adjusted_bits}, pq_last={pq_last}")
+        logger.info(f"[LAYER-3] Mining field: entropy_q={entropy_quality:.2f}, pq_last={pq_last}")
 
         while time.time() - start_time < timeout_seconds:
             self.mining_attempts += 1

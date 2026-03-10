@@ -2427,16 +2427,16 @@ class BlockManager:
                         """
                         INSERT INTO blocks
                             (block_height, block_hash, parent_hash, oracle_w_state_hash,
-                             timestamp, tx_count, merkle_root, hlwe_witness)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                             timestamp, tx_count, merkle_root, hlwe_witness, difficulty, nonce)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (block_height) DO NOTHING
                         """,
                         (
                             0, genesis_hash, '0x' + '0'*64, GENESIS_WITNESS,
-                            GENESIS_TIMESTAMP, 0, GENESIS_MERKLE, GENESIS_WITNESS,
+                            GENESIS_TIMESTAMP, 0, GENESIS_MERKLE, GENESIS_WITNESS, 13, 0,
                         ),
                     )
-                    logger.info("[GENESIS] ✅ Genesis block persisted to DB")
+                    logger.info("[GENESIS] ✅ Genesis block persisted to DB (difficulty=13)")
                 except Exception as persist_err:
                     logger.warning(f"[GENESIS] DB persist failed ({persist_err}); genesis lives in-memory only")
     
