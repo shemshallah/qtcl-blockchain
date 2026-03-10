@@ -2576,6 +2576,26 @@ class UnifiedOracleMux:
         self.round_robin_index = (self.round_robin_index + 1) % len(self.oracle_order)
         return oracle_id
     
+    def measure_all_oracles(self) -> None:
+        """
+        Measure all 5 oracles in sequence via HTTP round-robin.
+        
+        Queries each oracle (ports 5000-5004) and caches results.
+        Called every 10ms by _snapshot_streaming_daemon() to maintain
+        fresh measurements for aggregation.
+        
+        Thread-safe: uses measurements_lock to protect cache.
+        Non-blocking: individual oracle timeouts don't block others.
+        """
+        for oracle_id in self.oracle_order:
+            try:
+                measurement = self.measure_oracle_http(oracle_id)
+                if measurement:
+                    with self.measurements_lock:
+                        self.measurements_cache[oracle_id] = measurement
+            except Exception as e:
+                logger.debug(f"[ORACLE-MUX] Measure {oracle_id} in batch: {e}")
+    
     def measure_oracle_http(self, oracle_id: str) -> Optional[dict]:
         """
         Measure a single oracle via HTTP (port 5000-5004).
