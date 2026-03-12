@@ -2892,6 +2892,7 @@ class UnifiedOracleMux:
             oracle_count = snapshot.get('oracle_count', 0)
             lattice = snapshot.get('lattice_quantum', {})
             lattice_status = lattice.get('lattice_status', 'unavailable') if lattice else 'unavailable'
+            lattice_coherence = lattice.get('coherence', 0.0) if lattice else 0.0
             
             logger.info(
                 f"[ORACLE-MUX] 📡 Chirp #{self.chirp_count}: "
@@ -2900,7 +2901,7 @@ class UnifiedOracleMux:
                 f"coherence={consensus.get('coherence', 0):.6f} | "
                 f"confidence={consensus.get('confidence', 0):.6f} | "
                 f"lattice={lattice_status} | "
-                f"lattice_coherence={lattice.get('coherence', 0):.6f if lattice else 0}"
+                f"lattice_coherence={lattice_coherence:.6f}"
             )
 
 # Global unified oracle multiplexer (singleton)
