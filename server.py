@@ -42,6 +42,7 @@ import secrets
 import logging
 import threading  # FIX: was Python2 "import thread" — threading provides RLock/Thread/Lock/Event used throughout
 from typing import Dict, Any, Optional, List, Tuple, Set, Callable, Union, Deque
+import numpy as np
 # ═══════════════════════════════════════════════════════════════════════════════
 # 5-ORACLE BYZANTINE CONSENSUS INTEGRATION
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1568,6 +1569,13 @@ def get_difficulty_manager() -> DifficultyManager:
 
 app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
+
+# ─── Lazy Metrics Initialization (after all classes defined) ──────────────────
+@app.before_serving
+def _init_metrics_on_startup():
+    """Initialize metrics agents on first startup (avoids circular imports)"""
+    _lazy_initialize_metrics_agents()
+
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
 # PRODUCTION DEPLOYMENT HEADERS & MIDDLEWARE
@@ -5592,8 +5600,24 @@ def _initialize_metrics_agents():
         return False
 
 # Initialize agents if systems are ready
-if LATTICE is not None and ORACLE is not None:
-    _initialize_metrics_agents()
+# DEFERRED: This is called lazily from app startup, not at module load time
+# (This avoids circular imports since MetricsMuxDaemon is defined later in the file)
+_metrics_agents_initialized = False
+
+def _lazy_initialize_metrics_agents():
+    """Lazy initialization - called from app startup after all classes defined"""
+    global _metrics_agents_initialized
+    if _metrics_agents_initialized:
+        return
+    
+    try:
+        if LATTICE is not None and ORACLE is not None:
+            _initialize_metrics_agents()
+            _metrics_agents_initialized = True
+    except Exception as e:
+        logger.error(f"[AGENTS] Lazy initialization failed: {e}")
+        _metrics_agents_initialized = False
+
 
 # Wire oracle to lattice for W-state entropy
 if ORACLE_AVAILABLE and ORACLE is not None:
