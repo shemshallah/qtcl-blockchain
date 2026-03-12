@@ -40,12 +40,37 @@ import socket
 import hashlib
 import secrets
 import logging
-import threading  # FIX: was Python2 "import thread" — threading provides RLock/Thread/Lock/Event used throughout
+import threading
 from typing import Dict, Any, Optional, List, Tuple, Set, Callable, Union, Deque
 import numpy as np
-# ═══════════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# ENTERPRISE GRADE INITIALIZATION: QUANTUM ENTROPY + HLWE CRYPTOGRAPHY
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+logger = logging.getLogger(__name__)
+
+# Initialize QRNG_ENSEMBLE at MODULE LOAD TIME (NO FALLBACKS)
+try:
+    from qrng_ensemble import get_qrng_ensemble
+    QRNG_ENSEMBLE = get_qrng_ensemble()
+    logger.info("[INIT-QRNG] ✅ Quantum RNG Ensemble initialized at module load")
+except Exception as e:
+    logger.critical(f"[INIT-QRNG] ❌ FATAL: Cannot initialize QRNG_ENSEMBLE: {e}")
+    raise RuntimeError(f"[INIT-QRNG] Cannot initialize Quantum RNG. System requires enterprise-grade entropy. Error: {e}")
+
+# Initialize HLWE_ENGINE at MODULE LOAD TIME (NO FALLBACKS)
+try:
+    from hlwe_engine import HLWEEngine
+    HLWE_ENGINE = HLWEEngine()
+    logger.info("[INIT-HLWE] ✅ HLWE Post-Quantum Cryptography initialized at module load")
+except Exception as e:
+    logger.critical(f"[INIT-HLWE] ❌ FATAL: Cannot initialize HLWE_ENGINE: {e}")
+    raise RuntimeError(f"[INIT-HLWE] Cannot initialize HLWE cryptography. System requires post-quantum security. Error: {e}")
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
 # 5-ORACLE BYZANTINE CONSENSUS INTEGRATION
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════════════
 
 class OracleCluster:
     """5 independent oracles with 3-of-5 Byzantine consensus + individual pq_curr/pq_last tracking"""
@@ -73,8 +98,9 @@ class OracleCluster:
             }
     
     def measure_lattice(self, transaction_data):
-        """REAL quantum measurement: evolve density matrices via GKSL, compute true fidelity/coherence"""
-        from qrng_ensemble import QRNG_ENSEMBLE
+        """REAL quantum measurement: evolve density matrices via GKSL, compute true fidelity/coherence
+        ENTERPRISE GRADE: Module-level QRNG_ENSEMBLE guaranteed initialized"""
+        
         try:
             from lattice_controller import QuantumInformationMetrics, NonMarkovianNoiseBath
         except (ImportError, AttributeError):
@@ -85,8 +111,8 @@ class OracleCluster:
         measure_count = getattr(self, '_measure_count', 0) + 1
         self._measure_count = measure_count
         
-        # LOG EVERY INVOCATION
-        logger.info(f"[MEASURE-LATTICE-INVOKED] Measurement cycle #{measure_count} | {len(self.oracles)} oracles")
+        # Module-level QRNG_ENSEMBLE (singleton) is guaranteed available or boot fails
+        logger.info(f"[MEASURE-LATTICE-INVOKED] Measurement cycle #{measure_count} | {len(self.oracles)} oracles | Entropy: LIVE")
         
         with self.oracle_pq_lock:
             for oracle_id, config in self.oracles.items():
@@ -10175,8 +10201,8 @@ def _start_measurement_feed_daemon():
                         else:
                             # Fallback to QRNG-based noise if measure_lattice unavailable
                             for i in range(5):
-                                qrng_fid = QRNG_ENSEMBLE.get_random_float()
-                                qrng_coh = QRNG_ENSEMBLE.get_random_float()
+                                qrng_fid = get_random_float()
+                                qrng_coh = get_random_float()
                                 oracle_measurements.append({
                                     'oracle_id': f'oracle_{i+1}',
                                     'fidelity': 0.92 + (qrng_fid * 0.05 - 0.025),
@@ -10193,10 +10219,10 @@ def _start_measurement_feed_daemon():
                         for node_idx in range(10):
                             node_id = f"pq_{node_idx}"
                             # Use QRNG for quantum measurement noise (2% gaussian)
-                            qrng_fid_curr = QRNG_ENSEMBLE.get_random_float()
-                            qrng_fid_last = QRNG_ENSEMBLE.get_random_float()
-                            qrng_coh_curr = QRNG_ENSEMBLE.get_random_float()
-                            qrng_coh_last = QRNG_ENSEMBLE.get_random_float()
+                            qrng_fid_curr = get_random_float()
+                            qrng_fid_last = get_random_float()
+                            qrng_coh_curr = get_random_float()
+                            qrng_coh_last = get_random_float()
                             
                             pq_curr_fid = 0.91 + (qrng_fid_curr * 0.06 - 0.03)
                             pq_last_fid = 0.90 + (qrng_fid_last * 0.06 - 0.03)
@@ -10226,7 +10252,7 @@ def _start_measurement_feed_daemon():
                         
                         # Generate 64-dim fidelity vector using QRNG
                         lattice_fid_vec = _np.array([
-                            0.90 + (QRNG_ENSEMBLE.get_random_float() * 0.1 - 0.05)
+                            0.90 + (get_random_float() * 0.1 - 0.05)
                             for _ in range(64)
                         ])
                         noise_state = 0.1
@@ -10243,7 +10269,7 @@ def _start_measurement_feed_daemon():
                         # Simulate gate effects: apply Pauli rotations (simple model)
                         # In real system: actually apply gates to batch and measure
                         # For now: use QRNG to simulate post-gate fidelity (0-10% improvement)
-                        recovery_gain = QRNG_ENSEMBLE.get_random_float() * 0.1  # 0-10% gain
+                        recovery_gain = get_random_float() * 0.1  # 0-10% gain
                         fidelity_after = min(1.0, fidelity_before + recovery_gain)
                         
                         # Train network on revival reward (fidelity improvement)
@@ -10623,7 +10649,7 @@ def _start_comprehensive_measurement_feed():
                         )
                         
                         # Simulate gate effects: evolve fidelity based on QRNG + coherence
-                        recovery_gain = QRNG_ENSEMBLE.get_random_float() * 0.05 * lattice_state.get('coherence', 0.89)
+                        recovery_gain = get_random_float() * 0.05 * lattice_state.get('coherence', 0.89)
                         fidelity_after = min(1.0, fidelity_before + recovery_gain)
                         
                         # Train on revival reward
