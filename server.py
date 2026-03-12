@@ -5630,7 +5630,7 @@ import numpy as _np
 from collections import deque as _deque
 
 # ── Pauli algebra ──────────────────────────────────────────────────────────────
-_I2 = __np.eye(2, dtype=complex)
+_I2 = _np.eye(2, dtype=complex)
 _SX = _np.array([[0,1],[1,0]], dtype=complex)
 _SY = _np.array([[0,-1j],[1j,0]], dtype=complex)
 _SZ = _np.array([[1,0],[0,-1]], dtype=complex)
