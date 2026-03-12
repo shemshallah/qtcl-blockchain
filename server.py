@@ -3411,6 +3411,45 @@ def metrics_stream():
         logger.error(f"[METRICS-STREAM] Error: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
+
+@app.route('/api/entropy/stream', methods=['GET'])
+def entropy_stream():
+    """Fetch block field entropy for HLWE lattice mining (mandatory for clients)"""
+    try:
+        from globals import get_block_field_entropy
+        
+        # Get query parameters
+        height = request.args.get('height', type=int)
+        pq_curr = request.args.get('pq_curr', default='')
+        
+        # Fetch entropy from block field
+        entropy_bytes = get_block_field_entropy()
+        entropy_b64 = base64.b64encode(entropy_bytes).decode('utf-8')
+        
+        # Oracle signature (HLWE if available)
+        oracle_hash = hashlib.sha256(entropy_bytes).hexdigest()
+        
+        response_payload = {
+            'entropy': entropy_b64,
+            'entropy_size': len(entropy_bytes),
+            'oracle_hash': oracle_hash,
+            'height': height,
+            'pq_curr': pq_curr,
+            'timestamp': time.time(),
+            'server_id': os.getenv('SERVER_ID', 'qtcl-server-primary')
+        }
+        
+        logger.info(f"[ENTROPY-STREAM] Served entropy (size={len(entropy_bytes)}, height={height})")
+        return jsonify(response_payload), 200
+    
+    except ImportError:
+        logger.error("[ENTROPY-STREAM] globals module not available")
+        return jsonify({'error': 'Entropy source unavailable'}), 503
+    except Exception as e:
+        logger.error(f"[ENTROPY-STREAM] Error: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/stats', methods=['GET'])
 @app.route('/api/stats', methods=['GET'])
 def rest_stats():
