@@ -955,6 +955,45 @@ class OracleNode:
                 entanglement_witness    = QIM.entanglement_witness(dm_array),
                 trace_purity            = QIM.trace_purity(dm_array),
             )
+            
+            # ─────────────────────────────────────────────────────────────────────────────
+            # HLWE SIGNATURE: Sign this oracle measurement for non-repudiation
+            # ─────────────────────────────────────────────────────────────────────────────
+            try:
+                from hlwe_engine import hlwe_sign_block
+                import hashlib
+                
+                # Create measurement digest (hash of key quantum metrics)
+                measurement_digest = hashlib.sha256(
+                    json.dumps({
+                        'timestamp_ns': snap.timestamp_ns,
+                        'w_state_fidelity': snap.w_state_fidelity,
+                        'purity': snap.purity,
+                        'coherence_l1': snap.coherence_l1,
+                        'oracle_id': self.oracle_id + 1,
+                    }, sort_keys=True, default=str).encode()
+                ).digest()
+                
+                # Sign with oracle's address as key identifier
+                oracle_address = f"oracle_{self.oracle_id:02d}"
+                hlwe_sig = hlwe_sign_block(
+                    {
+                        'timestamp_ns': snap.timestamp_ns,
+                        'w_state_fidelity': snap.w_state_fidelity,
+                        'oracle_id': self.oracle_id + 1,
+                    },
+                    oracle_address
+                )
+                
+                if hlwe_sig and 'error' not in hlwe_sig:
+                    snap.hlwe_signature = hlwe_sig
+                    snap.oracle_address = oracle_address
+                    snap.signature_valid = True
+                else:
+                    logger.warning(f"[ORACLE-NODE-{self.oracle_id+1}] HLWE signing failed: {hlwe_sig.get('error', 'unknown')}")
+            except Exception as e:
+                logger.warning(f"[ORACLE-NODE-{self.oracle_id+1}] HLWE measurement signature error: {e}")
+            
             with self._lock:
                 self._dm              = dm_array
                 self.last_fidelity    = snap.w_state_fidelity

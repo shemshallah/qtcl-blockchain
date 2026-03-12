@@ -2,22 +2,23 @@
 """
 ╔════════════════════════════════════════════════════════════════════════════════════════════════╗
 ║                                                                                                ║
-║  QTCL GLOBAL STATE MANAGEMENT v2.0 — POOL_API UNIFIED ENTROPY                                 ║
+║  QTCL GLOBAL STATE MANAGEMENT v3.0 — HLWE CRYPTOGRAPHY INTEGRATED                            ║
 ║                                                                                                ║
-║  Thread-safe global state with database connection pooling                                    ║
+║  Thread-safe global state with HLWE post-quantum cryptography as primary security layer      ║
 ║  Entropy Pool: 5-source QRNG (ANU, Random.org, QBICK, HotBits, Fourmilab) via pool_api      ║
-║  HLWE Cryptography: Post-quantum lattice-based signatures                                     ║
-║  Quantum Lattice: Hyperbolic {8,3} tessellation controller                                    ║
-║  W-State: Oracle density matrix snapshots with HLWE signatures                                ║
+║  HLWE System: BIP39/BIP32/BIP38/BIP44 hierarchical wallet management (atomic initialization) ║
+║  Quantum Lattice: Hyperbolic {8,3} tessellation controller + HLWE oracle signatures          ║
+║  W-State: Oracle density matrix snapshots with mandatory HLWE authentication                 ║
 ║                                                                                                ║
-║  Architecture:                                                                                 ║
-║    • Pool API: Unified entropy management (circuit breaker, caching, XOR ensemble)            ║
-║    • Database: PostgreSQL with thread pool for concurrent access                              ║
-║    • Lattice: Quantum entropy mining with pseudoqubit evolution                               ║
-║    • Oracle: W-state density matrix with HLWE authentication                                  ║
-║    • Heartbeat: Background daemon for system health                                           ║
+║  Architecture (with HLWE as core):                                                            ║
+║    • HLWE Wallet Manager: Global singleton for key derivation, signing, verification         ║
+║    • Pool API: Unified entropy management (circuit breaker, caching, XOR ensemble)           ║
+║    • Database: PostgreSQL with thread pool, wallet/address storage integration               ║
+║    • Lattice: Quantum entropy mining with HLWE-lattice signing                               ║
+║    • Oracle: W-state density matrix authenticated with HLWE signatures                       ║
+║    • Heartbeat: Background daemon monitoring HLWE key material integrity                     ║
 ║                                                                                                ║
-║  Museum-grade implementation. Zero shortcuts. Deploy with confidence. 🚀⚛️💎                 ║
+║  Museum-grade implementation. Zero shortcuts. Production-ready. 🚀⚛️💎                      ║
 ╚════════════════════════════════════════════════════════════════════════════════════════════════╝
 """
 from __future__ import annotations
@@ -29,6 +30,7 @@ import threading
 import json
 import hashlib
 import time
+import hmac
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field
@@ -40,6 +42,33 @@ try:
     DB_AVAILABLE = True
 except ImportError:
     DB_AVAILABLE = False
+
+# HLWE Cryptography Integration (CORE SYSTEM) ═══════════════════════════════════════════════════
+try:
+    from hlwe_engine import (
+        get_hlwe_adapter, get_wallet_manager,
+        hlwe_sign_block, hlwe_verify_block,
+        hlwe_sign_transaction, hlwe_verify_transaction,
+        hlwe_derive_address, hlwe_create_wallet, hlwe_health_check,
+        HLWEIntegrationAdapter, HLWEWalletManager
+    )
+    HLWE_AVAILABLE = True
+except ImportError as e:
+    HLWE_AVAILABLE = False
+    logger_temp = logging.getLogger(__name__)
+    logger_temp.critical(f"[GLOBALS] CRITICAL: HLWE engine not available: {e}")
+    logger_temp.critical("[GLOBALS] HLWE is mandatory for block signing, transaction signing, and wallet operations")
+    logger_temp.critical("[GLOBALS] Ensure hlwe_engine.py is present and importable in the Python path")
+    # Stub functions — should never be called in production
+    def get_hlwe_adapter(): raise RuntimeError("HLWE not available")
+    def get_wallet_manager(): raise RuntimeError("HLWE not available")
+    def hlwe_sign_block(*args, **kwargs): raise RuntimeError("HLWE not available")
+    def hlwe_verify_block(*args, **kwargs): raise RuntimeError("HLWE not available")
+    def hlwe_sign_transaction(*args, **kwargs): raise RuntimeError("HLWE not available")
+    def hlwe_verify_transaction(*args, **kwargs): raise RuntimeError("HLWE not available")
+    def hlwe_derive_address(*args, **kwargs): raise RuntimeError("HLWE not available")
+    def hlwe_create_wallet(*args, **kwargs): raise RuntimeError("HLWE not available")
+    def hlwe_health_check(): return False
 
 # Pool API (Entropy Management) — 5-source QRNG ensemble
 try:

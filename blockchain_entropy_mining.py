@@ -796,6 +796,11 @@ class QuantumBlock:
     validator_weight: int = 0  # Sum of attesting validator balances
     quantum_witness_timestamp_ns: int = 0  # Oracle timestamp for this block
     
+    # HLWE Post-Quantum Cryptography (Mandatory for block finality)
+    hlwe_signature: str = ""  # HLWE lattice-based block signature
+    hlwe_auth_tag: str = ""  # HMAC authentication tag for signature verification
+    hlwe_timestamp: str = ""  # Timestamp of cryptographic signing
+    
     def to_header_dict(self) -> Dict[str, Any]:
         """Convert to block header (for hashing) — includes temporal anchor"""
         return {
@@ -833,6 +838,10 @@ class QuantumBlock:
             'tx_count': self.tx_count,
             'temporal_anchor': self.temporal_anchor,
             'w_entropy_hash': self.w_entropy_hash,
+            # HLWE Post-Quantum Cryptography
+            'hlwe_signature': self.hlwe_signature,
+            'hlwe_auth_tag': self.hlwe_auth_tag,
+            'hlwe_timestamp': self.hlwe_timestamp,
         }
 
 
@@ -1243,6 +1252,53 @@ class BlockSealer:
             header_json = json.dumps(header_dict, sort_keys=True)
             block.block_hash = hashlib.sha3_256(header_json.encode()).hexdigest()
             logger.debug(f"[SEALING] Block hash computed: {block.block_hash[:16]}...")
+            
+            # ─────────────────────────────────────────────────────────────────────────────────
+            # HLWE CRYPTOGRAPHIC SIGNING (POST-QUANTUM) — MANDATORY FOR BLOCK FINALITY
+            # ─────────────────────────────────────────────────────────────────────────────────
+            try:
+                from hlwe_engine import hlwe_sign_block, hlwe_health_check
+                
+                # Health check before signing
+                if not hlwe_health_check():
+                    logger.error("[SEALING] 🚨 CRITICAL: HLWE system unhealthy, block signing FAILED")
+                    raise RuntimeError("HLWE system unhealthy — cannot seal block")
+                
+                # Sign entire block with HLWE private key (post-quantum secure)
+                block_for_signing = {
+                    'block_height': block.block_height,
+                    'block_hash': block.block_hash,
+                    'parent_hash': block.parent_hash,
+                    'merkle_root': block.merkle_root,
+                    'timestamp_s': block.timestamp_s,
+                    'pq_last': block.pq_last,
+                    'pq_curr': block.pq_curr,
+                    'pq_next': block.pq_next,
+                    'entropy_nonce': block.entropy_nonce,
+                }
+                
+                # Use miner address as key identifier (maps to miner's private key)
+                # In production, this would be derived from miner's wallet via BIP32 path
+                hlwe_sig = hlwe_sign_block(block_for_signing, miner_address)
+                
+                if 'error' in hlwe_sig:
+                    logger.error(f"[SEALING] HLWE signing failed: {hlwe_sig.get('error')}")
+                    raise RuntimeError(f"HLWE signing failed: {hlwe_sig.get('error')}")
+                
+                # Attach cryptographic witness to block
+                block.hlwe_signature = hlwe_sig.get('signature', '')
+                block.hlwe_auth_tag = hlwe_sig.get('auth_tag', '')
+                block.hlwe_timestamp = hlwe_sig.get('timestamp', '')
+                
+                logger.debug(f"[SEALING] ✅ HLWE block signature: {hlwe_sig.get('auth_tag', '')[:16]}...")
+                
+            except ImportError:
+                logger.error("[SEALING] 🚨 CRITICAL: HLWE engine not available — cannot sign block")
+                logger.error("[SEALING] HLWE is mandatory for block finality and consensus")
+                raise RuntimeError("HLWE engine not available")
+            except Exception as e:
+                logger.error(f"[SEALING] 🚨 HLWE signing error: {e}")
+                raise
             
             # Step 4: Persist to database (if available)
             if self.db_pool:
