@@ -1571,10 +1571,21 @@ app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
 
 # ─── Lazy Metrics Initialization (after all classes defined) ──────────────────
-@app.before_serving
-def _init_metrics_on_startup():
-    """Initialize metrics agents on first startup (avoids circular imports)"""
-    _lazy_initialize_metrics_agents()
+_metrics_initialized = False
+_metrics_init_lock = threading.RLock()
+
+@app.before_request
+def _init_metrics_on_first_request():
+    """Initialize metrics agents on first request (WSGI-compatible, avoids circular imports)"""
+    global _metrics_initialized
+    if not _metrics_initialized:
+        with _metrics_init_lock:
+            if not _metrics_initialized:
+                try:
+                    _lazy_initialize_metrics_agents()
+                    _metrics_initialized = True
+                except Exception as e:
+                    logger.warning(f"[METRICS] Delayed initialization failed: {e}")
 
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
