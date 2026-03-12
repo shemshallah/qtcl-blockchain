@@ -102,7 +102,7 @@ class OracleCluster:
                     if rho_pq_last is None:
                         rho_pq_last = rho_pq_curr.copy()
                     
-                    # 3. Apply REAL GKSL evolution with memory effects (dt=0.01 seconds)
+                    # 3. Apply REAL GKSL evolution + NON-MARKOVIAN MEMORY EFFECTS
                     if QuantumInformationMetrics is not None:
                         dt = 0.01  # GKSL evolution timestep
                         gamma = 0.11  # Damping rate (κ from non-Markovian bath)
@@ -120,6 +120,20 @@ class OracleCluster:
                         # Renormalize to preserve trace
                         tr = _np.real(_np.trace(rho_pq_curr_evolved))
                         rho_pq_curr_evolved = rho_pq_curr_evolved / max(tr, 1e-10)
+                        
+                        # NON-MARKOVIAN REVIVAL: apply memory feedback every 10 measurement cycles
+                        # Track cycle count per oracle
+                        cycle_count = self.oracle_pq_states[oracle_id].get('_cycle_count', 0)
+                        self.oracle_pq_states[oracle_id]['_cycle_count'] = cycle_count + 1
+                        
+                        if (cycle_count % 10) == 0 and cycle_count > 0:
+                            # Apply coherence revival: re-superposition via memory kernel
+                            # ρ → α*ρ_evolved + (1-α)*ρ_last (memory feedback)
+                            memory_alpha = 0.15  # 15% memory feedback to induce revival
+                            rho_pq_curr_evolved = (memory_alpha * rho_pq_curr_evolved + 
+                                                  (1.0 - memory_alpha) * rho_pq_last)
+                            tr = _np.real(_np.trace(rho_pq_curr_evolved))
+                            rho_pq_curr_evolved = rho_pq_curr_evolved / max(tr, 1e-10)
                         
                         # Shift: pq_last ← pq_curr, pq_curr ← evolved
                         rho_pq_last = rho_pq_curr.copy()
@@ -156,12 +170,21 @@ class OracleCluster:
                     self.oracle_pq_states[oracle_id] = {
                         '_density_matrix_curr': rho_pq_curr,
                         '_density_matrix_last': rho_pq_last,
+                        '_cycle_count': cycle_count + 1,
                         'pq_curr_fidelity': pq_curr_fid,
                         'pq_curr_coherence': pq_curr_coh,
                         'pq_last_fidelity': pq_last_fid,
                         'pq_last_coherence': pq_last_coh,
                         'timestamp': time.time(),
                     }
+                    
+                    # Report oracle evolution every 2 measurement cycles (200ms)
+                    if (cycle_count % 2) == 0:
+                        revival_marker = " ✨[REVIVAL]" if ((cycle_count % 10) == 0 and cycle_count > 0) else ""
+                        logger.info(f"[ORACLE-MEASURE-LIVE] {oracle_id} | "
+                                   f"pq_curr(F:{pq_curr_fid:.4f} C:{pq_curr_coh:.4f}) | "
+                                   f"pq_last(F:{pq_last_fid:.4f} C:{pq_last_coh:.4f}) | "
+                                   f"cycle={cycle_count}{revival_marker}")
                     
                     # 7. Compute W-state fidelity (oracle collective measurement)
                     w_state_fidelity = 0.5 * (pq_curr_fid + pq_last_fid)
@@ -10504,44 +10527,83 @@ def _start_comprehensive_measurement_feed():
     def _comprehensive_feed_loop():
         global _comprehensive_measurement_running
         _comprehensive_measurement_running = True
+        iteration_count = 0
         
         while _comprehensive_measurement_running:
             try:
+                iteration_count += 1
+                
                 # Update oracle pq measurements
                 _update_oracle_pq_in_measurement_loop()
                 
-                # Update lattice measurements (if available)
+                # Update lattice measurements (if available) — PULL REAL STATE
                 if LATTICE is not None and _METRICS_AGENTS.get('lattice_metrics') is not None:
                     try:
-                        from lattice_controller import extract_lattice_node_metrics
-                        metrics = extract_lattice_node_metrics(LATTICE)
+                        lattice_state = LATTICE.get_state()
+                        lattice_metrics = LATTICE.get_metrics()
                         
-                        for node_id, (pq_curr_fid, pq_last_fid, pq_curr_coh, pq_last_coh) in metrics.items():
-                            _METRICS_AGENTS['lattice_metrics'].update_node_state(
-                                node_id, pq_curr_fid, pq_last_fid, pq_curr_coh, pq_last_coh
-                            )
+                        # Extract live fidelity/coherence from lattice
+                        fidelity = lattice_state.get('fidelity', 0.92)
+                        coherence = lattice_state.get('coherence', 0.89)
+                        w_state_strength = lattice_state.get('w_state_strength', 0.95)
+                        
+                        # Extract batch coherences for all 52 batches
+                        batch_coherences = lattice_state.get('batch_coherences', {})
+                        
+                        # Update agent with real lattice state
+                        _METRICS_AGENTS['lattice_metrics'].update_global_coherence(coherence)
+                        
+                        for batch_id, batch_coh in batch_coherences.items():
+                            _METRICS_AGENTS['lattice_metrics'].update_batch_coherence(batch_id, batch_coh)
+                        
+                        # Report lattice state every 50 iterations (5 seconds @ 100ms cadence)
+                        if (iteration_count % 50) == 0:
+                            avg_coh_100 = lattice_metrics.get('avg_coherence_100', 0.0)
+                            avg_fid_100 = lattice_metrics.get('avg_fidelity_100', 0.0)
+                            logger.info(f"[LATTICE-FEED] Cycle {lattice_state.get('cycle', '?')} | "
+                                       f"fid={fidelity:.4f} coh={coherence:.4f} w_state={w_state_strength:.4f} | "
+                                       f"avg_fid_100={avg_fid_100:.4f} avg_coh_100={avg_coh_100:.4f}")
+                        
                     except Exception as e:
-                        logger.debug(f"[COMPREHENSIVE-FEED] Lattice error: {e}")
+                        logger.debug(f"[COMPREHENSIVE-FEED] Lattice extraction error: {e}")
                 
-                # Update noise bath (if available)
+                # Update noise bath with real density matrix simulation
                 if _METRICS_AGENTS.get('noise_bath') is not None:
                     try:
-                        rho = _np.eye(8) / 8.0
+                        # Create realistic density matrix from lattice state
+                        lattice_state = LATTICE.get_state() if LATTICE else {}
+                        fidelity = lattice_state.get('fidelity', 0.92)
+                        coherence = lattice_state.get('coherence', 0.89)
+                        
+                        # Construct 2-qubit density matrix from fidelity/coherence
+                        rho = _np.zeros((4, 4), dtype=complex)
+                        # Bell state |Φ+⟩ projection weighted by fidelity
+                        bell_proj = _np.array([[1, 0, 0, 1], [0, 0, 0, 0], [0, 0, 0, 0], [1, 0, 0, 1]]) / 2.0
+                        rho = fidelity * bell_proj + (1 - fidelity) * _np.eye(4) / 4.0
+                        
                         _METRICS_AGENTS['noise_bath'].apply_gksl_to_lattice(rho, dt=0.001)
                     except Exception as e:
                         logger.debug(f"[COMPREHENSIVE-FEED] Noise bath error: {e}")
                 
-                # Update neural net: train on revival rewards (sequential batch engagement)
+                # Update neural net: train on revival rewards with batch tracking
                 if _METRICS_AGENTS.get('refresh_net') is not None:
                     try:
                         from qrng_ensemble import QRNG_ENSEMBLE
                         
-                        # Generate 64-dim fidelity vector using QRNG
-                        lattice_fid_vec = _np.array([
-                            0.90 + (QRNG_ENSEMBLE.get_random_float() * 0.1 - 0.05)
-                            for _ in range(64)
-                        ])
-                        noise_state = 0.1
+                        # Extract real lattice fidelity vector from actual state
+                        lattice_state = LATTICE.get_state() if LATTICE else {}
+                        batch_coherences = lattice_state.get('batch_coherences', {})
+                        
+                        # Build 64-dim fidelity vector from actual batch coherences (52 batches → pad to 64)
+                        lattice_fid_vec = _np.zeros(64)
+                        for i in range(52):
+                            batch_key = f'batch_{i}'
+                            lattice_fid_vec[i] = batch_coherences.get(batch_key, 0.89)
+                        # Pad remaining slots with mean coherence
+                        mean_coh = _np.mean(lattice_fid_vec[:52])
+                        lattice_fid_vec[52:] = mean_coh
+                        
+                        noise_state = 1.0 - lattice_state.get('coherence', 0.89)  # Inverted coherence = noise
                         entropy_pool = QRNG_ENSEMBLE.get_random_bytes(32)
                         
                         # Fidelity before gates
@@ -10552,8 +10614,8 @@ def _start_comprehensive_measurement_feed():
                             lattice_fid_vec, noise_state, entropy_pool
                         )
                         
-                        # Simulate gate effects: post-gate fidelity (0-10% recovery from QRNG)
-                        recovery_gain = QRNG_ENSEMBLE.get_random_float() * 0.1
+                        # Simulate gate effects: evolve fidelity based on QRNG + coherence
+                        recovery_gain = QRNG_ENSEMBLE.get_random_float() * 0.05 * lattice_state.get('coherence', 0.89)
                         fidelity_after = min(1.0, fidelity_before + recovery_gain)
                         
                         # Train on revival reward
@@ -10564,12 +10626,20 @@ def _start_comprehensive_measurement_feed():
                         
                         current_batch = train_metrics.get('current_batch', 0)
                         total_revivals = train_metrics.get('total_revivals_triggered', 0)
+                        training_steps = train_metrics.get('training_steps', 0)
+                        total_reward = train_metrics.get('total_reward', 0.0)
                         coverage = train_metrics.get('engagement_coverage', '0/52')
                         
-                        if (train_metrics.get('training_steps', 0) % 100) == 0:
-                            logger.info(f"[NEURAL-NET-TRAIN] Step {train_metrics.get('training_steps')}: "
-                                       f"batch={current_batch}/52, revivals={total_revivals}, coverage={coverage}, "
-                                       f"reward={train_metrics.get('total_reward', 0):.2f}")
+                        # Report neural net metrics every 10 iterations (more frequent)
+                        if (iteration_count % 10) == 0:
+                            logger.info(f"[NEURAL-NET] Step {training_steps} | "
+                                       f"batch={current_batch}/52 | "
+                                       f"revivals={total_revivals} | "
+                                       f"fid_before={fidelity_before:.4f} "
+                                       f"fid_after={fidelity_after:.4f} "
+                                       f"pred_fid={pred_fid:.4f} | "
+                                       f"reward={total_reward:.4f} | "
+                                       f"coverage={coverage}")
                         
                     except Exception as e:
                         logger.debug(f"[COMPREHENSIVE-FEED] Neural net training error: {e}")
@@ -10582,7 +10652,7 @@ def _start_comprehensive_measurement_feed():
     
     _comprehensive_measurement_thread = threading.Thread(target=_comprehensive_feed_loop, daemon=True)
     _comprehensive_measurement_thread.start()
-    logger.info("[COMPREHENSIVE-FEED] Daemon started (100ms cadence)")
+    logger.info("[COMPREHENSIVE-FEED] Daemon started (100ms cadence with live lattice state injection)")
 
 # Start comprehensive measurement feed if systems available
 if oracle_cluster is not None or LATTICE is not None:
