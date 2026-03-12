@@ -3411,6 +3411,152 @@ def metrics_stream():
         logger.error(f"[METRICS-STREAM] Error: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
+
+# ═════════════════════════════════════════════════════════════════════════════════
+# LATTICE NOISE BATH METRICS — Real-time monitoring of quantum effects
+# ═════════════════════════════════════════════════════════════════════════════════
+
+_LATTICE_METRICS_HISTORY = deque(maxlen=1000)  # Last 1000 samples (~2.7 hours @ 10s intervals)
+_LATTICE_REVIVAL_COUNT = 0
+_LATTICE_LAST_REPORT_TIME = time.time()
+
+
+def _report_lattice_metrics():
+    """
+    Periodic lattice metrics reporter (every 10 seconds).
+    Tracks noise bath effects: coherence decay, revivals, entropy evolution.
+    """
+    global _LATTICE_REVIVAL_COUNT, _LATTICE_LAST_REPORT_TIME
+    
+    while True:
+        try:
+            if LATTICE and LATTICE.block_manager and hasattr(LATTICE, 'coherence'):
+                now = time.time()
+                
+                # Collect lattice quantum metrics
+                metrics = {
+                    'timestamp': now,
+                    'cycle_count': getattr(LATTICE, 'cycle_count', 0),
+                    'coherence': round(getattr(LATTICE, 'coherence', 0.0), 4),
+                    'fidelity': round(getattr(LATTICE, 'fidelity', 0.0), 4),
+                    'w_state_strength': round(getattr(LATTICE, 'w_state_strength', 0.0), 4),
+                    'entropy': round(getattr(LATTICE, 'entropy', 0.0), 4) if hasattr(LATTICE, 'entropy') else 0.0,
+                    'running': LATTICE.running,
+                    'block_height': getattr(LATTICE.block_manager, 'current_block_height', 0) if LATTICE.block_manager else 0,
+                }
+                
+                # Track entanglement revivals from maintenance loop
+                # (If coherence increased significantly, it's a revival signature)
+                if len(_LATTICE_METRICS_HISTORY) > 0:
+                    prev = _LATTICE_METRICS_HISTORY[-1]
+                    if metrics['coherence'] > prev['coherence'] + 0.02:  # 2% rise
+                        _LATTICE_REVIVAL_COUNT += 1
+                        logger.info(
+                            f"✨ [LATTICE-METRICS] Entanglement revival #{_LATTICE_REVIVAL_COUNT} detected "
+                            f"(coherence: {prev['coherence']:.4f} → {metrics['coherence']:.4f})"
+                        )
+                
+                # Store in history
+                _LATTICE_METRICS_HISTORY.append(metrics)
+                
+                # Log every 60 seconds (6 samples @ 10s interval)
+                if now - _LATTICE_LAST_REPORT_TIME >= 60.0:
+                    logger.info(
+                        f"[LATTICE-METRICS] ⚛️  Quantum noise bath report | "
+                        f"Coherence={metrics['coherence']:.4f} | "
+                        f"Fidelity={metrics['fidelity']:.4f} | "
+                        f"W-state={metrics['w_state_strength']:.4f} | "
+                        f"Entropy={metrics['entropy']:.4f} | "
+                        f"Revivals={_LATTICE_REVIVAL_COUNT} | "
+                        f"Cycles={metrics['cycle_count']} | "
+                        f"Height={metrics['block_height']}"
+                    )
+                    _LATTICE_LAST_REPORT_TIME = now
+        
+        except Exception as e:
+            logger.debug(f"[LATTICE-METRICS] Report error: {e}")
+        
+        # Sleep 10 seconds before next report
+        time.sleep(10.0)
+
+
+@app.route('/api/lattice/metrics', methods=['GET'])
+def lattice_metrics():
+    """
+    Real-time lattice noise bath metrics.
+    Shows coherence, fidelity, W-state strength, entropy, entanglement revivals.
+    
+    Museum-grade monitoring of non-Markovian noise bath effects on quantum lattice.
+    """
+    try:
+        if not LATTICE:
+            return jsonify({'error': 'Lattice controller not initialized'}), 503
+        
+        # Current state
+        current = {
+            'timestamp': time.time(),
+            'coherence': round(getattr(LATTICE, 'coherence', 0.0), 4),
+            'fidelity': round(getattr(LATTICE, 'fidelity', 0.0), 4),
+            'w_state_strength': round(getattr(LATTICE, 'w_state_strength', 0.0), 4),
+            'entropy': round(getattr(LATTICE, 'entropy', 0.0), 4) if hasattr(LATTICE, 'entropy') else 0.0,
+            'cycle_count': getattr(LATTICE, 'cycle_count', 0),
+            'running': LATTICE.running,
+            'block_height': getattr(LATTICE.block_manager, 'current_block_height', 0) if LATTICE.block_manager else 0,
+        }
+        
+        # Historical trends (last 10 samples = ~100 seconds)
+        history = list(_LATTICE_METRICS_HISTORY)[-10:] if _LATTICE_METRICS_HISTORY else []
+        
+        # Compute statistics
+        if history:
+            coherences = [m['coherence'] for m in history]
+            fidelities = [m['fidelity'] for m in history]
+            
+            stats = {
+                'coherence_mean': round(sum(coherences) / len(coherences), 4),
+                'coherence_min': round(min(coherences), 4),
+                'coherence_max': round(max(coherences), 4),
+                'coherence_trend': 'rising' if coherences[-1] > coherences[0] else 'falling',
+                'fidelity_mean': round(sum(fidelities) / len(fidelities), 4),
+                'entanglement_revivals_total': _LATTICE_REVIVAL_COUNT,
+                'samples_in_history': len(_LATTICE_METRICS_HISTORY),
+            }
+        else:
+            stats = {
+                'coherence_mean': 0.0,
+                'coherence_min': 0.0,
+                'coherence_max': 0.0,
+                'coherence_trend': 'unknown',
+                'fidelity_mean': 0.0,
+                'entanglement_revivals_total': _LATTICE_REVIVAL_COUNT,
+                'samples_in_history': 0,
+            }
+        
+        # Quantum noise bath parameters (from NOISE_BATH)
+        noise_params = {
+            'kappa_memory': 0.35,  # Non-Markovian memory strength
+            'omega_c_hz': 200,  # Cutoff frequency (BATH_OMEGA_C / 2π)
+            'omega_0_hz': 100,  # Lorentz peak frequency
+            'eta': 0.40,  # System-bath coupling strength
+            't1_ms': 100.0,  # Energy relaxation time
+            't2_ms': 50.0,  # Phase relaxation time
+            'memory_depth': 50,  # History buffer length
+        }
+        
+        return jsonify({
+            'status': 'online',
+            'current': current,
+            'statistics': stats,
+            'history': history,
+            'noise_bath_parameters': noise_params,
+            'description': 'Real-time quantum lattice noise bath metrics (updated every 10 seconds)'
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"[LATTICE-METRICS] Error: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/stats', methods=['GET'])
 @app.route('/api/stats', methods=['GET'])
 def rest_stats():
@@ -9118,6 +9264,16 @@ if __name__ == '__main__':
     logger.info("[STARTUP] Phase 3/3: Starting real-time metrics collector...")
     _metrics_collector.start()
     logger.info("[STARTUP] ✓ Metrics collector started (updates every 2 seconds)")
+    
+    # Start lattice noise bath metrics reporting (every 10 seconds)
+    logger.info("[STARTUP] Starting lattice noise bath metrics reporter...")
+    lattice_metrics_thread = threading.Thread(
+        target=_report_lattice_metrics,
+        daemon=True,
+        name="LatticeMetricsReporter"
+    )
+    lattice_metrics_thread.start()
+    logger.info("[STARTUP] ✓ Lattice metrics reporter started (reports every 10 seconds to /api/lattice/metrics)")
     
     logger.info("╔" + "═" * 78 + "╗")
     logger.info("║ QTCL SERVER v6 READY — UNIFIED PORT %d (REST + P2P + WEBSOCKET)" % port)
