@@ -308,14 +308,14 @@ def initialize_hlwe_engine() -> bool:
     Integrates with database for wallet management
     """
     try:
-        db_pool = get_db_pool()
-        if not db_pool:
-            logger.warning("[HLWE] Database not available - HLWE will work in memory only")
+        from hlwe_engine import get_hlwe_adapter
+        adapter = get_hlwe_adapter()
         
-        from hlwe_engine_fresh import get_hlwe_system
-        hlwe = get_hlwe_system(db_pool)
+        is_healthy = adapter.health_check()
+        if not is_healthy:
+            logger.warning("[HLWE] Health check failed but continuing...")
         
-        set_state('hlwe_system', hlwe)
+        set_state('hlwe_system', adapter)
         set_state('hlwe_initialized', True)
         
         logger.info("[HLWE] ✓ HLWE cryptographic system initialized")
@@ -329,6 +329,10 @@ def get_hlwe_system() -> Optional[Any]:
     if not get_state('hlwe_initialized'):
         initialize_hlwe_engine()
     return get_state('hlwe_system')
+
+def get_hlwe_adapter():
+    """Get HLWE integration adapter (alias for get_hlwe_system)"""
+    return get_hlwe_system()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # QUANTUM LATTICE MANAGEMENT

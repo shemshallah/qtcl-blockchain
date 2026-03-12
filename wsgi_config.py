@@ -78,6 +78,30 @@ except Exception as e:
     raise
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
+# PHASE 2B: HLWE WALLET SYSTEM INITIALIZATION
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+
+logger.info("[WSGI] Phase 1B/2: Initializing HLWE wallet system...")
+
+try:
+    from hlwe_engine import get_hlwe_adapter
+    adapter = get_hlwe_adapter()
+    is_healthy = adapter.health_check()
+    
+    if is_healthy:
+        logger.info("[WSGI] ✅ HLWE adapter initialized (health check OK)")
+        system_info = adapter.get_system_info()
+        logger.info(f"[WSGI]    Engine: {system_info.get('engine', 'unknown')}")
+        logger.info(f"[WSGI]    Cryptography: {system_info.get('cryptography', 'unknown')}")
+    else:
+        logger.warning("[WSGI] ⚠️  HLWE health check failed, running in degraded mode")
+    
+except ImportError:
+    logger.warning("[WSGI] ⚠️  HLWE engine not available, wallet features disabled")
+except Exception as e:
+    logger.warning(f"[WSGI] ⚠️  HLWE initialization failed: {e}")
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
 # PHASE 3: READINESS ANNOUNCEMENT
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -91,12 +115,13 @@ logger.info("║  Command: gunicorn -w1 -b0.0.0.0:$PORT --timeout 120 wsgi_confi
 logger.info("║" + " " * 90 + "║")
 logger.info("║  Subsystems Initialized:".ljust(90) + "║")
 logger.info("║    ✓ Logging & Configuration".ljust(90) + "║")
+logger.info("║    ✓ HLWE Wallet System (BIP39/BIP32/BIP38/BIP44)".ljust(90) + "║")
 logger.info("║    ✓ Database Pooling (Supabase)".ljust(90) + "║")
 logger.info("║    ✓ Quantum Lattice Controller (Qiskit/AER)".ljust(90) + "║")
 logger.info("║    ✓ Block Manager & Blockchain".ljust(90) + "║")
-logger.info("║    ✓ Oracle (W-state authentication)".ljust(90) + "║")
+logger.info("║    ✓ Oracle (W-state authentication + HLWE signatures)".ljust(90) + "║")
 logger.info("║    ✓ P2P Networking Layer".ljust(90) + "║")
-logger.info("║    ✓ Flask REST API".ljust(90) + "║")
+logger.info("║    ✓ Flask REST API (with /wallet/* and /crypto/* endpoints)".ljust(90) + "║")
 logger.info("║" + " " * 90 + "║")
 logger.info("╚" + "═" * 90 + "╝")
 
