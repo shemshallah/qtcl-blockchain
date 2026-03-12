@@ -90,22 +90,26 @@ class OracleCluster:
                     rho_pq_curr = self.oracle_pq_states[oracle_id].get('_density_matrix_curr', None)
                     rho_pq_last = self.oracle_pq_states[oracle_id].get('_density_matrix_last', None)
                     
-                    # 2. If no prior state, initialize to maximally coherent W-state seed
+                    # 2. If no prior state, initialize to oracle-specific W-state (AGENT-STATE-TRACKER)
                     if rho_pq_curr is None:
-                        dim = 2  # Single pseudoqubit (2×2 density matrix)
-                        # W-state-like initial condition: coherent superposition
+                        dim = 2
+                        # Create unique initial state per oracle using oracle_id hash
+                        oracle_seed = abs(hash(oracle_id)) % 1000 / 1000.0  # [0, 1) unique per oracle
+                        base_coh = 0.4 + 0.3 * oracle_seed  # Range [0.4, 0.7] per oracle
                         rho_pq_curr = _np.array([
-                            [0.5, 0.5],
-                            [0.5, 0.5]
+                            [0.5, base_coh + 0.1j],
+                            [base_coh - 0.1j, 0.5]
                         ], dtype=complex)
+                        tr = _np.real(_np.trace(rho_pq_curr))
+                        rho_pq_curr = rho_pq_curr / max(tr, 1e-10)
                     
                     if rho_pq_last is None:
                         rho_pq_last = rho_pq_curr.copy()
                     
                     # 3. Apply REAL GKSL evolution + NON-MARKOVIAN MEMORY EFFECTS
                     if QuantumInformationMetrics is not None:
-                        dt = 0.01  # GKSL evolution timestep (10ms)
-                        gamma = 0.11  # Damping rate (κ from non-Markovian bath)
+                        dt = 0.003  # 3ms timestep (slower evolution)
+                        gamma = 0.035  # Lower damping rate for slower dissipation
                         
                         # Apply Lindblad damping: dρ/dt = γ(σ_- ρ σ_+ - 1/2{σ_+σ_-, ρ})
                         # MUST be scaled by dt for Euler integration
@@ -157,19 +161,20 @@ class OracleCluster:
                     coh_curr = max(0.0, min(1.0, coh_curr))
                     coh_last = max(0.0, min(1.0, coh_last))
                     
-                    # 5. Add quantum measurement shot noise using QRNG (σ ~ 2% standard deviation)
-                    qrng_fid_noise_curr = QRNG_ENSEMBLE.get_random_float() * 0.02 - 0.01
-                    qrng_fid_noise_last = QRNG_ENSEMBLE.get_random_float() * 0.02 - 0.01
-                    qrng_coh_noise_curr = QRNG_ENSEMBLE.get_random_float() * 0.015 - 0.0075
-                    qrng_coh_noise_last = QRNG_ENSEMBLE.get_random_float() * 0.015 - 0.0075
+                    # 5. Add quantum measurement shot noise using QRNG (amplified to break symmetry)
+                    qrng_fid_noise_curr = QRNG_ENSEMBLE.get_random_float() * 0.05 - 0.025
+                    qrng_fid_noise_last = QRNG_ENSEMBLE.get_random_float() * 0.05 - 0.025
+                    qrng_coh_noise_curr = QRNG_ENSEMBLE.get_random_float() * 0.03 - 0.015
+                    qrng_coh_noise_last = QRNG_ENSEMBLE.get_random_float() * 0.03 - 0.015
                     
                     pq_curr_fid = max(0.0, min(1.0, fid_curr + qrng_fid_noise_curr))
                     pq_last_fid = max(0.0, min(1.0, fid_last + qrng_fid_noise_last))
                     pq_curr_coh = max(0.0, min(1.0, coh_curr + qrng_coh_noise_curr))
                     pq_last_coh = max(0.0, min(1.0, coh_last + qrng_coh_noise_last))
                     
-                    # 6. Persist density matrices and fidelity/coherence states
-                    self.oracle_pq_states[oracle_id] = {
+                    # 6. Persist density matrices and fidelity/coherence states (AGENT-MEASUREMENT-VALIDATOR)
+                    # Use .update() to preserve existing state like cycle_count
+                    self.oracle_pq_states[oracle_id].update({
                         '_density_matrix_curr': rho_pq_curr,
                         '_density_matrix_last': rho_pq_last,
                         '_cycle_count': cycle_count + 1,
@@ -178,7 +183,7 @@ class OracleCluster:
                         'pq_last_fidelity': pq_last_fid,
                         'pq_last_coherence': pq_last_coh,
                         'timestamp': time.time(),
-                    }
+                    })
                     
                     # Report oracle evolution every 2 measurement cycles (200ms)
                     if (cycle_count % 2) == 0:
