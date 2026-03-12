@@ -64,10 +64,11 @@ class OracleCluster:
         self.oracle_pq_lock = threading.RLock()
         for oracle_id in self.oracles.keys():
             self.oracle_pq_states[oracle_id] = {
-                'pq_curr_fidelity': 0.92,
-                'pq_curr_coherence': 0.89,
-                'pq_last_fidelity': 0.91,
-                'pq_last_coherence': 0.88,
+                # Initialize empty — measure_lattice() will populate with real values
+                'pq_curr_fidelity': None,
+                'pq_curr_coherence': None,
+                'pq_last_fidelity': None,
+                'pq_last_coherence': None,
                 'timestamp': time.time(),
             }
     
@@ -81,6 +82,11 @@ class OracleCluster:
             NonMarkovianNoiseBath = None
         
         results = {}
+        measure_count = getattr(self, '_measure_count', 0) + 1
+        self._measure_count = measure_count
+        
+        # LOG EVERY INVOCATION
+        logger.info(f"[MEASURE-LATTICE-INVOKED] Measurement cycle #{measure_count} | {len(self.oracles)} oracles")
         
         with self.oracle_pq_lock:
             for oracle_id, config in self.oracles.items():
@@ -184,6 +190,10 @@ class OracleCluster:
                         'pq_last_coherence': pq_last_coh,
                         'timestamp': time.time(),
                     })
+                    
+                    # VERIFY UPDATE PERSISTED
+                    verify_fid = self.oracle_pq_states[oracle_id].get('pq_curr_fidelity')
+                    logger.info(f"[MEASURE-PERSISTED] {oracle_id} | Computed F={pq_curr_fid:.4f} C={pq_curr_coh:.4f} | Verified in state: F={verify_fid:.4f} | cycle={cycle_count}")
                     
                     # Report oracle evolution every 2 measurement cycles (200ms)
                     if (cycle_count % 2) == 0:
@@ -10332,6 +10342,10 @@ def _start_oracle_pq_reporting_daemon():
         
         while _oracle_pq_reporting_running:
             try:
+                # MANDATORY: Trigger fresh measurement cycle before every report (AGENT-EVOLUTION-AUDIT)
+                if oracle_cluster is not None:
+                    oracle_cluster.measure_lattice(None)
+                    
                 # Get current oracle pq states from OracleCluster
                 if oracle_cluster is not None:
                     oracle_states = oracle_cluster.get_oracle_pq_states()
