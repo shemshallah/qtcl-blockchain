@@ -10527,11 +10527,12 @@ def _start_comprehensive_measurement_feed():
     def _comprehensive_feed_loop():
         global _comprehensive_measurement_running
         _comprehensive_measurement_running = True
-        iteration_count = 0
+        last_lattice_report = time.time()
+        last_neural_report = time.time()
         
         while _comprehensive_measurement_running:
             try:
-                iteration_count += 1
+                current_time = time.time()
                 
                 # Update oracle pq measurements
                 _update_oracle_pq_in_measurement_loop()
@@ -10556,34 +10557,20 @@ def _start_comprehensive_measurement_feed():
                         for batch_id, batch_coh in batch_coherences.items():
                             _METRICS_AGENTS['lattice_metrics'].update_batch_coherence(batch_id, batch_coh)
                         
-                        # Report lattice state every 50 iterations (5 seconds @ 100ms cadence)
-                        if (iteration_count % 50) == 0:
+                        # Report lattice state every 5 seconds
+                        if (current_time - last_lattice_report) > 5.0:
                             avg_coh_100 = lattice_metrics.get('avg_coherence_100', 0.0)
                             avg_fid_100 = lattice_metrics.get('avg_fidelity_100', 0.0)
                             logger.info(f"[LATTICE-FEED] Cycle {lattice_state.get('cycle', '?')} | "
                                        f"fid={fidelity:.4f} coh={coherence:.4f} w_state={w_state_strength:.4f} | "
                                        f"avg_fid_100={avg_fid_100:.4f} avg_coh_100={avg_coh_100:.4f}")
+                            last_lattice_report = current_time
                         
                     except Exception as e:
                         logger.debug(f"[COMPREHENSIVE-FEED] Lattice extraction error: {e}")
                 
-                # Update noise bath with real density matrix simulation
-                if _METRICS_AGENTS.get('noise_bath') is not None:
-                    try:
-                        # Create realistic density matrix from lattice state
-                        lattice_state = LATTICE.get_state() if LATTICE else {}
-                        fidelity = lattice_state.get('fidelity', 0.92)
-                        coherence = lattice_state.get('coherence', 0.89)
-                        
-                        # Construct 2-qubit density matrix from fidelity/coherence
-                        rho = _np.zeros((4, 4), dtype=complex)
-                        # Bell state |Φ+⟩ projection weighted by fidelity
-                        bell_proj = _np.array([[1, 0, 0, 1], [0, 0, 0, 0], [0, 0, 0, 0], [1, 0, 0, 1]]) / 2.0
-                        rho = fidelity * bell_proj + (1 - fidelity) * _np.eye(4) / 4.0
-                        
-                        _METRICS_AGENTS['noise_bath'].apply_gksl_to_lattice(rho, dt=0.001)
-                    except Exception as e:
-                        logger.debug(f"[COMPREHENSIVE-FEED] Noise bath error: {e}")
+                # Skip noise bath here - lattice maintenance loop already applies GKSL evolution
+                # Adding it here causes redundant expensive operations and condition number issues
                 
                 # Update neural net: train on revival rewards with batch tracking
                 if _METRICS_AGENTS.get('refresh_net') is not None:
@@ -10630,8 +10617,8 @@ def _start_comprehensive_measurement_feed():
                         total_reward = train_metrics.get('total_reward', 0.0)
                         coverage = train_metrics.get('engagement_coverage', '0/52')
                         
-                        # Report neural net metrics every 10 iterations (more frequent)
-                        if (iteration_count % 10) == 0:
+                        # Report neural net metrics every 2 seconds
+                        if (current_time - last_neural_report) > 2.0:
                             logger.info(f"[NEURAL-NET] Step {training_steps} | "
                                        f"batch={current_batch}/52 | "
                                        f"revivals={total_revivals} | "
@@ -10640,19 +10627,20 @@ def _start_comprehensive_measurement_feed():
                                        f"pred_fid={pred_fid:.4f} | "
                                        f"reward={total_reward:.4f} | "
                                        f"coverage={coverage}")
+                            last_neural_report = current_time
                         
                     except Exception as e:
                         logger.debug(f"[COMPREHENSIVE-FEED] Neural net training error: {e}")
                 
-                time.sleep(0.1)  # 100ms cadence
+                time.sleep(0.5)  # 500ms cadence (reduced from 100ms to avoid lattice state extraction overload)
                 
             except Exception as e:
                 logger.error(f"[COMPREHENSIVE-FEED] Loop error: {e}")
-                time.sleep(0.1)
+                time.sleep(0.5)
     
     _comprehensive_measurement_thread = threading.Thread(target=_comprehensive_feed_loop, daemon=True)
     _comprehensive_measurement_thread.start()
-    logger.info("[COMPREHENSIVE-FEED] Daemon started (100ms cadence with live lattice state injection)")
+    logger.info("[COMPREHENSIVE-FEED] Daemon started (500ms cadence with live lattice state injection)")
 
 # Start comprehensive measurement feed if systems available
 if oracle_cluster is not None or LATTICE is not None:
