@@ -3411,45 +3411,6 @@ def metrics_stream():
         logger.error(f"[METRICS-STREAM] Error: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
-
-@app.route('/api/entropy/stream', methods=['GET'])
-def entropy_stream():
-    """Fetch block field entropy for HLWE lattice mining (mandatory for clients)"""
-    try:
-        from globals import get_block_field_entropy
-        
-        # Get query parameters
-        height = request.args.get('height', type=int)
-        pq_curr = request.args.get('pq_curr', default='')
-        
-        # Fetch entropy from block field
-        entropy_bytes = get_block_field_entropy()
-        entropy_b64 = base64.b64encode(entropy_bytes).decode('utf-8')
-        
-        # Oracle signature (HLWE if available)
-        oracle_hash = hashlib.sha256(entropy_bytes).hexdigest()
-        
-        response_payload = {
-            'entropy': entropy_b64,
-            'entropy_size': len(entropy_bytes),
-            'oracle_hash': oracle_hash,
-            'height': height,
-            'pq_curr': pq_curr,
-            'timestamp': time.time(),
-            'server_id': os.getenv('SERVER_ID', 'qtcl-server-primary')
-        }
-        
-        logger.info(f"[ENTROPY-STREAM] Served entropy (size={len(entropy_bytes)}, height={height})")
-        return jsonify(response_payload), 200
-    
-    except ImportError:
-        logger.error("[ENTROPY-STREAM] globals module not available")
-        return jsonify({'error': 'Entropy source unavailable'}), 503
-    except Exception as e:
-        logger.error(f"[ENTROPY-STREAM] Error: {e}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
-
-
 @app.route('/stats', methods=['GET'])
 @app.route('/api/stats', methods=['GET'])
 def rest_stats():
@@ -7525,10 +7486,86 @@ def submit_block():
                 # and server dict may differ for regular txs. Coinbase is always verified
                 # by tx_id determinism check below. Strict enforcement can be added later.
         
-        # ✅✅✅ BLOCK ACCEPTED - NOW PERSIST TO DATABASE ✅✅✅
+        # ✅✅✅ BLOCK ACCEPTED - VALIDATE VIA LATTICE QUANTUM ENGINE ✅✅✅
         logger.info(f"[BLOCK] ✅ Valid block #{block_height} from {miner_address[:20]}… | F={w_state_fidelity:.4f}")
         
-        # Block reward in base units (NUMERIC(30,0) schema stores integers)        # 1250 base units = 12.50 QTCL  (like Bitcoin's satoshis)
+        # ═════════════════════════════════════════════════════════════════════════════
+        # LATTICE CONTROLLER INTEGRATION — MANDATORY QUANTUM VALIDATION
+        # ═════════════════════════════════════════════════════════════════════════════
+        
+        if not LATTICE or not LATTICE.block_manager:
+            logger.critical("[LATTICE] Block manager unavailable — cannot proceed")
+            return jsonify({'error': 'Lattice controller unavailable'}), 503
+        
+        try:
+            from lattice_controller import QuantumBlock, QuantumTransaction
+            from decimal import Decimal
+            
+            # Reconstruct QuantumBlock from validated REST payload
+            qblock = QuantumBlock(
+                block_height=block_height,
+                block_hash=block_hash,
+                parent_hash=parent_hash,
+                merkle_root=merkle_root,
+                timestamp_s=timestamp_s,
+                difficulty_bits=difficulty_bits,
+                nonce=nonce,
+                miner_address=miner_address,
+                w_state_fidelity=w_state_fidelity,
+                w_entropy_hash=w_entropy_hash,
+                pq_curr=pq_curr,
+                pq_last=pq_last,
+                transactions=[],  # Will populate below
+            )
+            
+            # Reconstruct QuantumTransaction objects for block
+            for tx in transactions:
+                try:
+                    tx_type = str(tx.get('tx_type', 'transfer')).lower()
+                    qtx = QuantumTransaction(
+                        tx_id=tx.get('tx_id', ''),
+                        sender_addr=tx.get('from_addr', tx.get('sender_addr', '')),
+                        receiver_addr=tx.get('to_addr', tx.get('receiver_addr', '')),
+                        amount=Decimal(str(tx.get('amount', 0))),
+                        nonce=int(tx.get('nonce', 0)),
+                        timestamp_ns=int(tx.get('timestamp_ns', time.time_ns())),
+                        fee=int(tx.get('fee', 1)),
+                        signature=tx.get('signature', ''),
+                    )
+                    qblock.transactions.append(qtx)
+                except Exception as qtx_err:
+                    logger.warning(f"[LATTICE] TX reconstruction failed: {qtx_err}, skipping")
+                    continue
+            
+            # CRITICAL: Submit to LATTICE for quantum validation
+            logger.info(f"[LATTICE] Submitting block #{block_height} for quantum validation…")
+            lattice_accepted = LATTICE.block_manager.add_block(qblock)
+            
+            if not lattice_accepted:
+                logger.error(f"[LATTICE] ❌ Block #{block_height} REJECTED by quantum validator")
+                return jsonify({
+                    'error': 'Block rejected by lattice quantum validator',
+                    'block_height': block_height,
+                    'lattice_status': 'quantum_validation_failed'
+                }), 422
+            
+            logger.info(f"[LATTICE] ✅ Block #{block_height} ACCEPTED by quantum validator — proceeding to blockchain persistence")
+        
+        except Exception as lattice_err:
+            logger.critical(f"[LATTICE] Block submission to quantum engine failed: {lattice_err}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({
+                'error': 'Lattice quantum validation error',
+                'details': str(lattice_err)
+            }), 500
+        
+        # ═════════════════════════════════════════════════════════════════════════════
+        # LATTICE ACCEPTED — NOW PERSIST TO BLOCKCHAIN DATABASE
+        # ═════════════════════════════════════════════════════════════════════════════
+        
+        # Block reward in base units (NUMERIC(30,0) schema stores integers)
+        # 1250 base units = 12.50 QTCL  (like Bitcoin's satoshis)
         BLOCK_REWARD_BASE = 1250
         BLOCK_REWARD_QTCL = 12.5
         
@@ -7552,11 +7589,11 @@ def submit_block():
                 merkle_root, timestamp_s, float(difficulty_bits), str(nonce),
                 miner_address, w_entropy_hash,
                 round(w_state_fidelity, 4), 'confirmed', True,
-                'validated', 'verified',
+                'lattice_validated', 'verified',
                 True, round(w_state_fidelity, 4),
                 pq_curr, pq_last
             ))
-            logger.info(f"[DB] ✅ Block #{block_height} sealed | quantum=VALIDATED | pq=VERIFIED | pq_curr={pq_curr} pq_last={pq_last} | coherence={round(w_state_fidelity, 4)}")
+            logger.info(f"[DB] ✅ Block #{block_height} sealed | lattice=VALIDATED | pq=VERIFIED | pq_curr={pq_curr} pq_last={pq_last} | coherence={round(w_state_fidelity, 4)}")
             
             # ── Deterministic helpers (used throughout) ──────────────────────────
             import hashlib as _hl
