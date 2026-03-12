@@ -41,6 +41,7 @@ import hashlib
 import secrets
 import logging
 import threading  # FIX: was Python2 "import thread" — threading provides RLock/Thread/Lock/Event used throughout
+from typing import Dict, Any
 # ═══════════════════════════════════════════════════════════════════════════════
 # 5-ORACLE BYZANTINE CONSENSUS INTEGRATION
 # ═══════════════════════════════════════════════════════════════════════════════
