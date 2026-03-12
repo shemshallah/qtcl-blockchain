@@ -9983,7 +9983,7 @@ def _start_measurement_feed_daemon():
     
     def _measurement_feed_loop():
         """Continuously feed oracle and lattice measurements into agents"""
-        nonlocal _measurement_feed_running
+        global _measurement_feed_running
         _measurement_feed_running = True
         
         while _measurement_feed_running:
@@ -10070,7 +10070,7 @@ def _start_lattice_measurement_feed():
         return
     
     def _lattice_feed_loop():
-        nonlocal _lattice_measurement_running
+        global _lattice_measurement_running
         _lattice_measurement_running = True
         
         while _lattice_measurement_running and LATTICE:
@@ -10117,7 +10117,7 @@ def _start_oracle_pq_reporting_daemon():
         return
     
     def _oracle_pq_reporting_loop():
-        nonlocal _oracle_pq_reporting_running
+        global _oracle_pq_reporting_running
         _oracle_pq_reporting_running = True
         report_count = 0
         
@@ -10323,7 +10323,7 @@ def _start_comprehensive_measurement_feed():
         return
     
     def _comprehensive_feed_loop():
-        nonlocal _comprehensive_measurement_running
+        global _comprehensive_measurement_running
         _comprehensive_measurement_running = True
         
         while _comprehensive_measurement_running:
