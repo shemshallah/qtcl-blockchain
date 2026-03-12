@@ -2332,3 +2332,78 @@ class WStateValidator:
         
         logger.debug(f"[LAYER-2] Field crossing {pq_last}→{pq_curr}: F={fidelity:.4f} C={coherence:.4f} Valid={is_valid}")
         return is_valid
+
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# AGENT 1: ORACLE 5-MEASUREMENT AVERAGE COLLECTOR (Museum Grade • θ Deployment Ready)
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+
+class OracleMetricsCollector:
+    """Collects 5 independent oracle W-state measurements with exponential moving average"""
+    
+    def __init__(self, window_size: int = 10, alpha: float = 0.3):
+        self.window_size = window_size
+        self.alpha = alpha  # EMA smoothing factor
+        self.fidelity_history = deque(maxlen=window_size)
+        self.coherence_history = deque(maxlen=window_size)
+        self.ema_fidelity = 0.0
+        self.ema_coherence = 0.0
+        self.lock = threading.RLock()
+        self.last_update = time.time()
+        self.measurement_count = 0
+    
+    def collect_oracle_measurements(self, oracle_measurements: List[Dict[str, float]]) -> Tuple[float, float]:
+        """
+        Collect measurements from 5 independent oracles.
+        oracle_measurements: [
+            {'oracle_id': 'oracle_1', 'fidelity': 0.92, 'coherence': 0.88},
+            ...
+        ]
+        Returns: (avg_fidelity, avg_coherence) with EMA smoothing
+        """
+        with self.lock:
+            if not oracle_measurements:
+                return self.ema_fidelity, self.ema_coherence
+            
+            assert len(oracle_measurements) == 5, "Expected 5 oracle measurements"
+            
+            # Average across all oracle measurements
+            avg_fid = np.mean([m['fidelity'] for m in oracle_measurements])
+            avg_coh = np.mean([m['coherence'] for m in oracle_measurements])
+            
+            # Clamp to [0, 1]
+            avg_fid = np.clip(avg_fid, 0.0, 1.0)
+            avg_coh = np.clip(avg_coh, 0.0, 1.0)
+            
+            self.fidelity_history.append(avg_fid)
+            self.coherence_history.append(avg_coh)
+            
+            # Exponential moving average
+            if self.measurement_count == 0:
+                self.ema_fidelity = avg_fid
+                self.ema_coherence = avg_coh
+            else:
+                self.ema_fidelity = (self.alpha * avg_fid) + (1 - self.alpha) * self.ema_fidelity
+                self.ema_coherence = (self.alpha * avg_coh) + (1 - self.alpha) * self.ema_coherence
+            
+            self.last_update = time.time()
+            self.measurement_count += 1
+            
+            return self.ema_fidelity, self.ema_coherence
+    
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return current aggregated metrics"""
+        with self.lock:
+            return {
+                'ema_fidelity': float(self.ema_fidelity),
+                'ema_coherence': float(self.ema_coherence),
+                'raw_fidelity': [float(x) for x in self.fidelity_history],
+                'raw_coherence': [float(x) for x in self.coherence_history],
+                'timestamp': self.last_update,
+                'measurement_count': self.measurement_count,
+            }
+    
+    def get_consensus(self) -> Tuple[bool, float]:
+        """Check if oracle consensus is valid (fidelity >= 0.75)"""
+        with self.lock:
+            return self.ema_fidelity >= 0.75, self.ema_fidelity

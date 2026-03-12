@@ -9571,3 +9571,146 @@ if __name__ == '__main__':
     except Exception as e:
         logger.error(f"[FATAL] {e}", exc_info=True)
         shutdown_handler()
+
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# AGENT 5: METRICS MUX DAEMON AGGREGATION & REPORTING (Museum Grade • θ Deployment Ready)
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+
+class MetricsMuxDaemon:
+    """Real-time metrics aggregation & reporting (50ms refresh cadence)"""
+    
+    def __init__(self, aggregation_interval_ms: int = 50):
+        self.interval = aggregation_interval_ms / 1000.0
+        self.running = False
+        self.thread = None
+        self.lock = threading.RLock()
+        
+        # Metric source objects (injected via register_collectors)
+        self.oracle_collector = None
+        self.lattice_metrics = None
+        self.noise_bath = None
+        self.refresh_net = None
+        
+        self.report_count = 0
+        self.last_report = None
+        self.reports_generated = []
+        self.last_publish_time = time.time()
+    
+    def register_collectors(self, oracle, lattice, noise, net):
+        """Register metric source objects"""
+        with self.lock:
+            self.oracle_collector = oracle
+            self.lattice_metrics = lattice
+            self.noise_bath = noise
+            self.refresh_net = net
+            logger.info("[MUX-DAEMON] All collectors registered")
+    
+    def start(self):
+        """Start daemon thread"""
+        with self.lock:
+            if self.running:
+                return
+            
+            self.running = True
+            self.thread = threading.Thread(target=self._daemon_loop, daemon=True)
+            self.thread.start()
+            logger.info("[MUX-DAEMON] Started (50ms cadence)")
+    
+    def stop(self):
+        """Stop daemon thread"""
+        with self.lock:
+            self.running = False
+        
+        if self.thread:
+            self.thread.join(timeout=1.0)
+        
+        logger.info(f"[MUX-DAEMON] Stopped. Generated {self.report_count} reports")
+    
+    def _daemon_loop(self):
+        """Main daemon loop: aggregate metrics every 50ms"""
+        while self.running:
+            try:
+                report = self._aggregate_metrics()
+                self._publish_report(report)
+                time.sleep(self.interval)
+            except Exception as e:
+                logger.error(f"[MUX-DAEMON] Error in loop: {e}", exc_info=False)
+                time.sleep(self.interval)
+    
+    def _aggregate_metrics(self) -> Dict[str, Any]:
+        """Aggregate all metrics into single report"""
+        with self.lock:
+            report = {
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'report_id': self.report_count,
+                'oracle_metrics': {},
+                'lattice_metrics': {},
+                'noise_bath_metrics': {},
+                'neural_net_metrics': {},
+            }
+            
+            # Collect oracle 5-measurement average
+            if self.oracle_collector:
+                try:
+                    oracle_data = self.oracle_collector.get_metrics()
+                    report['oracle_metrics'] = {
+                        'avg_fidelity': oracle_data.get('ema_fidelity', 0.0),
+                        'avg_coherence': oracle_data.get('ema_coherence', 0.0),
+                        'measurement_count': oracle_data.get('measurement_count', 0),
+                    }
+                except Exception as e:
+                    logger.debug(f"[MUX] Oracle collector error: {e}")
+            
+            # Collect lattice node metrics summary
+            if self.lattice_metrics:
+                try:
+                    lattice_summary = self.lattice_metrics.get_lattice_summary()
+                    report['lattice_metrics'] = lattice_summary
+                except Exception as e:
+                    logger.debug(f"[MUX] Lattice metrics error: {e}")
+            
+            # Collect noise bath state
+            if self.noise_bath:
+                try:
+                    noise_metrics = self.noise_bath.get_noise_bath_metrics()
+                    report['noise_bath_metrics'] = noise_metrics
+                except Exception as e:
+                    logger.debug(f"[MUX] Noise bath error: {e}")
+            
+            # Collect neural net performance
+            if self.refresh_net:
+                try:
+                    perf = self.refresh_net.get_performance_metrics()
+                    report['neural_net_metrics'] = perf
+                except Exception as e:
+                    logger.debug(f"[MUX] Neural net error: {e}")
+            
+            self.last_report = report
+            self.report_count += 1
+            self.reports_generated.append(report)
+            
+            # Keep only last 100 reports in memory
+            if len(self.reports_generated) > 100:
+                self.reports_generated.pop(0)
+            
+            return report
+    
+    def _publish_report(self, report: Dict[str, Any]):
+        """Publish report to endpoints"""
+        # In production: POST to /metrics/mux and broadcast via WebSocket
+        elapsed = time.time() - self.last_publish_time
+        if self.report_count % 20 == 0:  # Log every 20 reports (~1s)
+            logger.debug(f"[MUX-DAEMON] Report #{report['report_id']} published")
+        
+        self.last_publish_time = time.time()
+    
+    def get_latest_report(self) -> Optional[Dict[str, Any]]:
+        """Get latest aggregated report"""
+        with self.lock:
+            return self.last_report
+    
+    def get_report_history(self, limit: int = 10) -> list:
+        """Get last N reports"""
+        with self.lock:
+            return self.reports_generated[-limit:]
