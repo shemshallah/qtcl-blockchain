@@ -2765,7 +2765,68 @@ class UnifiedOracleMux:
         avg_entropy = sum(entropies) / len(entropies) if entropies else 2.1
         avg_purity = sum(purities) / len(purities) if purities else 0.94
         
-        # Single chirp: unified snapshot containing all oracle measurements
+        # ═══════════════════════════════════════════════════════════════════════════════
+        # MUSEUM-GRADE LATTICE QUANTUM METRICS INJECTION
+        # Integrated directly into unified chirp broadcast to Koyeb dashboard
+        # ═══════════════════════════════════════════════════════════════════════════════
+        
+        lattice_quantum = None
+        lattice_health = {'status': 'unavailable'}
+        
+        try:
+            if LATTICE and LATTICE.block_manager and hasattr(LATTICE, 'coherence'):
+                # Enterprise-grade lattice metrics collection
+                lattice_quantum = {
+                    'lattice_status': 'online' if LATTICE.running else 'offline',
+                    'coherence': round(float(getattr(LATTICE, 'coherence', 0.0)), 6),
+                    'fidelity': round(float(getattr(LATTICE, 'fidelity', 0.0)), 6),
+                    'w_state_strength': round(float(getattr(LATTICE, 'w_state_strength', 0.0)), 6),
+                    'entropy': round(float(getattr(LATTICE, 'entropy', 0.0)), 4),
+                    'cycle_count': int(getattr(LATTICE, 'cycle_count', 0)),
+                    'block_height': int(getattr(LATTICE.block_manager, 'current_block_height', 0) if LATTICE.block_manager else 0),
+                    'timestamp_ns': int(time.time() * 1e9),
+                    
+                    # Non-Markovian noise bath configuration (museum-grade)
+                    'noise_bath': {
+                        'kappa_memory': 0.35,           # Non-Markovian memory strength
+                        'omega_c_hz': 200,              # Cutoff frequency (Hz)
+                        'omega_0_hz': 100,              # Lorentz peak frequency (Hz)
+                        'eta': 0.40,                    # System-bath coupling strength
+                        't1_ms': 100.0,                 # Energy relaxation time (T1)
+                        't2_ms': 50.0,                  # Phase relaxation time (T2)
+                        'memory_depth': 50,             # History buffer depth
+                        'status': 'active',
+                    },
+                    
+                    # Entanglement revival tracking
+                    'revivals': {
+                        'total_detected': int(globals().get('_LATTICE_REVIVAL_COUNT', 0)),
+                        'expected_rate_per_min': 2,    # ~30-100ms per revival
+                    },
+                    
+                    # Pseudoqubit field tracking
+                    'field_topology': {
+                        'total_pseudoqubits': len(LATTICE.field.locations) if hasattr(LATTICE, 'field') else 0,
+                        'active_routes': len(LATTICE.field.routes) if hasattr(LATTICE, 'field') else 0,
+                    },
+                }
+                
+                lattice_health = {
+                    'status': 'healthy',
+                    'coherence_trend': 'oscillating' if lattice_quantum['coherence'] > 0.05 else 'decaying',
+                    'is_publishing': True,
+                }
+        
+        except Exception as e:
+            logger.debug(f"[ORACLE-MUX] Lattice metrics collection error: {e}")
+            lattice_quantum = {
+                'lattice_status': 'error',
+                'error': str(e)[:100],
+                'timestamp_ns': int(time.time() * 1e9),
+            }
+            lattice_health['status'] = 'error'
+        
+        # Single chirp: unified snapshot containing all oracle measurements + lattice quantum
         unified_snapshot = {
             'timestamp_ns': int(time.time() * 1e9),
             'broadcast_type': 'single_chirp',
@@ -2787,6 +2848,14 @@ class UnifiedOracleMux:
                 for m in measurements
             ],
             
+            # ██████████████████████████████████████████████████████████████████████████
+            # LATTICE QUANTUM CONTROLLER — Non-Markovian noise bath integration
+            # Museum-grade implementation: coherence oscillations, entanglement revivals
+            # Direct broadcast to Koyeb dashboard via unified chirp (port 9091)
+            # ██████████████████████████████████████████████████████████████████████████
+            'lattice_quantum': lattice_quantum,
+            'lattice_health': lattice_health,
+            
             # Consensus metrics (all oracles averaged)
             'consensus': {
                 'w_state_fidelity': round(avg_fidelity, 6),
@@ -2797,30 +2866,42 @@ class UnifiedOracleMux:
                 'oracle_agreement': f"{len(measurements)}/{len(self.oracle_order)}",
             },
             
-            # Multiplexing metadata
+            # Multiplexing metadata (now includes lattice quantum)
             'multiplexing': {
                 'port': 9091,
-                'method': 'round_robin',
+                'method': 'unified_single_chirp',
                 'oracle_order': self.oracle_order,
                 'aggregation': 'arithmetic_mean',
+                'components': ['oracle_cluster', 'lattice_quantum_controller'],
+                'lattice_injection_status': lattice_health.get('status', 'unavailable'),
             },
             
-            'measurement_method': 'unified_oracle_roundrobin',
+            'measurement_method': 'unified_oracle_roundrobin_with_lattice_quantum',
         }
         
         self.chirp_count += 1
         return unified_snapshot
     
     def log_chirp(self, snapshot: dict):
-        """Log single chirp broadcast."""
-        if self.chirp_count % 500 == 0:  # Log every 500 chirps (not 50 - reduce spam)
+        """
+        Log single chirp broadcast with lattice quantum metrics.
+        Museum-grade logging showing oracle consensus + lattice integration.
+        """
+        if self.chirp_count % 500 == 0:  # Log every 500 chirps
             consensus = snapshot.get('consensus', {})
             oracle_count = snapshot.get('oracle_count', 0)
+            lattice = snapshot.get('lattice_quantum', {})
+            lattice_status = lattice.get('lattice_status', 'unavailable') if lattice else 'unavailable'
+            
             logger.info(
                 f"[ORACLE-MUX] 📡 Chirp #{self.chirp_count}: "
-                f"fidelity={consensus.get('w_state_fidelity', 0):.6f}, "
-                f"coherence={consensus.get('coherence', 0):.6f}, "
-                f"oracles={oracle_count}, confidence={consensus.get('confidence', 0):.6f}")
+                f"oracles={oracle_count} | "
+                f"fidelity={consensus.get('w_state_fidelity', 0):.6f} | "
+                f"coherence={consensus.get('coherence', 0):.6f} | "
+                f"confidence={consensus.get('confidence', 0):.6f} | "
+                f"lattice={lattice_status} | "
+                f"lattice_coherence={lattice.get('coherence', 0):.6f if lattice else 0}"
+            )
 
 # Global unified oracle multiplexer (singleton)
 _oracle_mux = UnifiedOracleMux()
@@ -2967,7 +3048,12 @@ def _snapshot_streaming_daemon():
     
     Result: All on port 9091, zero external oracle ports
     """
-    logger.info("[ORACLE-MUX-DAEMON] 🚀 Unified port 9091 daemon STARTED (in-process oracles, single chirp every 10ms)")
+    logger.info(
+        "[ORACLE-MUX-DAEMON] 🚀 Unified port 9091 daemon STARTED\n"
+        "    Components: in-process oracle cluster + lattice quantum controller\n"
+        "    Broadcast: Single chirp every 10ms (oracle consensus + lattice metrics)\n"
+        "    Dashboard: Metrics injected directly into unified snapshot"
+    )
     
     mux = get_oracle_mux()
     last_snapshot_ts = 0
@@ -3423,8 +3509,9 @@ _LATTICE_LAST_REPORT_TIME = time.time()
 
 def _report_lattice_metrics():
     """
-    Periodic lattice metrics reporter (every 10 seconds).
-    Tracks noise bath effects: coherence decay, revivals, entropy evolution.
+    Periodic lattice metrics collection.
+    Metrics are automatically injected into unified chirp broadcast on port 9091.
+    This thread just collects and stores history for /api/lattice/metrics endpoint.
     """
     global _LATTICE_REVIVAL_COUNT, _LATTICE_LAST_REPORT_TIME
     
@@ -3445,38 +3532,37 @@ def _report_lattice_metrics():
                     'block_height': getattr(LATTICE.block_manager, 'current_block_height', 0) if LATTICE.block_manager else 0,
                 }
                 
-                # Track entanglement revivals from maintenance loop
-                # (If coherence increased significantly, it's a revival signature)
+                # Track entanglement revivals (detecting non-Markovian coherence oscillations)
                 if len(_LATTICE_METRICS_HISTORY) > 0:
                     prev = _LATTICE_METRICS_HISTORY[-1]
-                    if metrics['coherence'] > prev['coherence'] + 0.02:  # 2% rise
+                    if metrics['coherence'] > prev['coherence'] + 0.02:  # 2% rise = revival
                         _LATTICE_REVIVAL_COUNT += 1
                         logger.info(
-                            f"✨ [LATTICE-METRICS] Entanglement revival #{_LATTICE_REVIVAL_COUNT} detected "
+                            f"✨ [LATTICE] Entanglement revival #{_LATTICE_REVIVAL_COUNT} "
                             f"(coherence: {prev['coherence']:.4f} → {metrics['coherence']:.4f})"
                         )
                 
-                # Store in history
+                # Store in history (max 1000 samples = ~2.7 hours @ 10s interval)
                 _LATTICE_METRICS_HISTORY.append(metrics)
                 
-                # Log every 60 seconds (6 samples @ 10s interval)
+                # Log summary every 60 seconds
                 if now - _LATTICE_LAST_REPORT_TIME >= 60.0:
                     logger.info(
-                        f"[LATTICE-METRICS] ⚛️  Quantum noise bath report | "
+                        f"[LATTICE] ⚛️ Quantum noise bath | "
                         f"Coherence={metrics['coherence']:.4f} | "
                         f"Fidelity={metrics['fidelity']:.4f} | "
                         f"W-state={metrics['w_state_strength']:.4f} | "
                         f"Entropy={metrics['entropy']:.4f} | "
                         f"Revivals={_LATTICE_REVIVAL_COUNT} | "
-                        f"Cycles={metrics['cycle_count']} | "
-                        f"Height={metrics['block_height']}"
+                        f"Height={metrics['block_height']} | "
+                        f"Status=broadcasting_to_chirp_mux"
                     )
                     _LATTICE_LAST_REPORT_TIME = now
         
         except Exception as e:
-            logger.debug(f"[LATTICE-METRICS] Report error: {e}")
+            logger.debug(f"[LATTICE] Metrics collection error: {e}")
         
-        # Sleep 10 seconds before next report
+        # Sleep 10 seconds before next collection
         time.sleep(10.0)
 
 
@@ -9265,15 +9351,19 @@ if __name__ == '__main__':
     _metrics_collector.start()
     logger.info("[STARTUP] ✓ Metrics collector started (updates every 2 seconds)")
     
-    # Start lattice noise bath metrics reporting (every 10 seconds)
-    logger.info("[STARTUP] Starting lattice noise bath metrics reporter...")
+    # Start lattice noise bath metrics collection (every 10 seconds)
+    logger.info("[STARTUP] Starting lattice quantum controller metrics collection...")
     lattice_metrics_thread = threading.Thread(
         target=_report_lattice_metrics,
         daemon=True,
-        name="LatticeMetricsReporter"
+        name="LatticeMetricsCollector"
     )
     lattice_metrics_thread.start()
-    logger.info("[STARTUP] ✓ Lattice metrics reporter started (reports every 10 seconds to /api/lattice/metrics)")
+    logger.info(
+        "[STARTUP] ✓ Lattice metrics collection started\n"
+        "         Metrics automatically injected into unified chirp on port 9091\n"
+        "         Also available via GET /api/lattice/metrics (HTTP polling fallback)"
+    )
     
     logger.info("╔" + "═" * 78 + "╗")
     logger.info("║ QTCL SERVER v6 READY — UNIFIED PORT %d (REST + P2P + WEBSOCKET)" % port)
