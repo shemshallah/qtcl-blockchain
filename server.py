@@ -5726,7 +5726,7 @@ import numpy as _np
 from collections import deque as _deque
 
 # ── Pauli algebra ──────────────────────────────────────────────────────────────
-_I2 = __np.eye(2, dtype=complex)
+_I2 = _np.eye(2, dtype=complex)
 _SX = _np.array([[0,1],[1,0]], dtype=complex)
 _SY = _np.array([[0,-1j],[1j,0]], dtype=complex)
 _SZ = _np.array([[1,0],[0,-1]], dtype=complex)
@@ -5778,7 +5778,7 @@ def _gksl_step(rho: _np.ndarray, dt: float,
             for gam, op in ((g1,      _embed(_SM,        q, n)),
                             (g1*0.1,  _embed(_SP,        q, n)),
                             (gphi,    _embed(_SZ*0.5,    q, n)),
-                            (gdep,    __np.eye(2**n, dtype=complex)*_np.sqrt(0.5))):
+                            (gdep,    _np.eye(2**n, dtype=complex)*_np.sqrt(0.5))):
                 if gam < 1e-14: continue
                 L  = _np.sqrt(gam)*op; Ld = L.conj().T
                 d += L@r@Ld - 0.5*(Ld@L@r + r@Ld@L)
@@ -5906,11 +5906,11 @@ def _quantum_discord_approx(rho3: _np.ndarray) -> float:
         mi      = max(0.0, s_a + s_bc - s_abc)
         # Classical: measure A in Z basis, then in X basis; take better
         best_cc = 0.0
-        for basis in (__np.eye(2, dtype=complex), _H2):   # Z-basis, X-basis
+        for basis in (_np.eye(2, dtype=complex), _H2):   # Z-basis, X-basis
             cc = 0.0
             for m_idx, proj_vec in enumerate([basis[:,0], basis[:,1]]):
                 M  = _np.outer(proj_vec, proj_vec.conj())
-                M_full = _np.kron(M, __np.eye(4, dtype=complex))
+                M_full = _np.kron(M, _np.eye(4, dtype=complex))
                 rho_post = M_full @ rho3 @ M_full.conj().T
                 p_k      = max(1e-15, float(_np.real(_np.trace(rho_post))))
                 rho_k    = rho_post / p_k
@@ -5928,7 +5928,7 @@ def _von_neumann(rho: _np.ndarray) -> float:
 def _w3_fidelity(rho3): return max(0.0,min(1.0,float(_np.real(_np.trace(rho3@_w_dm(3))))))
 def _wn_fidelity(rhoN, n): return max(0.0,min(1.0,float(_np.real(_np.trace(rhoN@_w_dm(n))))))
 def _coherence_l1(rho):
-    m = ~__np.eye(rho.shape[0],dtype=bool); return float(_np.sum(_np.abs(rho[m])))
+    m = ~_np.eye(rho.shape[0],dtype=bool); return float(_np.sum(_np.abs(rho[m])))
 # ── Type Safety Helper ────────────────────────────────────────────────────────
 def _safe_numeric(value, default=0.0):
     """Coerce any numeric value (array, scalar, numpy type) to pure Python float.
@@ -5962,7 +5962,7 @@ def _hdist(x1,y1,x2,y2):
 def _bloch_to_dm(theta, phi, r=1.0):
     c,s = _np.cos(theta/2), _np.sin(theta/2)
     pure = _np.array([[c*c, c*s*_np.exp(-1j*phi)],[c*s*_np.exp(1j*phi), s*s]], dtype=complex)
-    return r*pure + (1-r)*__np.eye(2,dtype=complex)/2
+    return r*pure + (1-r)*_np.eye(2,dtype=complex)/2
 
 # ── Channel 0: partial trace of LATTICE 256×256 DM ────────────────────────────
 def _ch0_lattice_rho3() -> _np.ndarray | None:
@@ -6098,7 +6098,7 @@ def _w_dm_rotated(theta: float, phi: float, n: int = 3) -> _np.ndarray:
     from scipy.linalg import expm as _expm
     _sx = _np.array([[0,1],[1,0]],dtype=complex)/2
     _sy = _np.array([[0,-1j],[1j,0]],dtype=complex)/2
-    _I2 = __np.eye(2,dtype=complex)
+    _I2 = _np.eye(2,dtype=complex)
     def _embed(op, q):
         ops = [_I2]*n; ops[q] = op
         r = ops[0]
