@@ -1,41 +1,38 @@
 #!/usr/bin/env python3
 """
-╔════════════════════════════════════════════════════════════════════════════════════════════════╗
-║                                                                                                ║
-║  ⚛️  WSGI ENTRY POINT v2.0 — QUANTUM LATTICE BLOCKCHAIN PRODUCTION DEPLOYMENT ⚛️              ║
-║                                                                                                ║
-║  Unified WSGI server entry point for Gunicorn, Heroku, Koyeb, Railway, Fly.io, etc.          ║
-║  Museum-grade orchestration with proper initialization sequencing.                            ║
-║                                                                                                ║
-║  INITIALIZATION SEQUENCE:                                                                     ║
-║    1. Logging setup (FIRST)                                                                   ║
-║    2. Configuration & environment variables                                                   ║
-║    3. Import server.py (triggers full initialization cascade)                                 ║
-║    4. Extract Flask app & application objects                                                 ║
-║    5. Export WSGI-compliant app object                                                        ║
-║                                                                                                ║
-║  Usage:                                                                                       ║
-║    gunicorn -w1 -b0.0.0.0:$PORT wsgi_config:app                                                ║
-║    gunicorn -w1 -b0.0.0.0:$PORT --timeout 120 wsgi_config:app  (production, Koyeb)           ║
-║                                                                                                ║
-║  Procfile (Heroku/Koyeb/Railway) — Port 443 HTTPS (external via Koyeb):                         ║
-║    web: gunicorn -w1 -b0.0.0.0:$PORT --timeout 120 wsgi_config:app                           ║
-║                                                                                                ║
-║  All subsystem initialization (lattice, P2P, database, oracle) happens in server.py           ║
-║  This file is a clean, minimal WSGI wrapper with proper logging.                              ║
-║                                                                                                ║
-║  Made by Claude. Museum-grade production code. Zero shortcuts. 🚀⚛️💎                         ║
-║                                                                                                ║
-╚════════════════════════════════════════════════════════════════════════════════════════════════╝
+╔════════════════════════════════════════════════════════════════════════════════════════════╗
+║                                                                                            ║
+║  ⚛️  WSGI ENTRY POINT v2.1 — CIRCULAR IMPORT FIXED — HLWE FIRST ⚛️                       ║
+║                                                                                            ║
+║  Unified WSGI server entry point for Gunicorn, Heroku, Koyeb, Railway, Fly.io, etc.      ║
+║  Museum-grade orchestration with proper initialization sequencing.                        ║
+║                                                                                            ║
+║  INITIALIZATION SEQUENCE:                                                                 ║
+║    1. Logging setup (FIRST)                                                               ║
+║    2. HLWE cryptography initialization (DIRECT IMPORT, SECOND)                            ║
+║    3. Flask/server initialization (depends on HLWE)                                       ║
+║    4. Extract Flask app & application objects                                             ║
+║    5. Export WSGI-compliant app object                                                    ║
+║                                                                                            ║
+║  Usage:                                                                                    ║
+║    gunicorn -w1 -b0.0.0.0:$PORT wsgi_config:app                                           ║
+║    gunicorn -w1 -b0.0.0.0:$PORT --timeout 120 wsgi_config:app  (production, Koyeb)      ║
+║                                                                                            ║
+║  Procfile (Heroku/Koyeb/Railway):                                                         ║
+║    web: gunicorn -w1 -b0.0.0.0:$PORT --timeout 120 wsgi_config:app                      ║
+║                                                                                            ║
+║  Made by Claude. Museum-grade production code. Zero shortcuts. 🚀⚛️💎                    ║
+║                                                                                            ║
+╚════════════════════════════════════════════════════════════════════════════════════════════╝
 """
 
 import os
 import sys
 import logging
 
-# ═════════════════════════════════════════════════════════════════════════════════════════════════
-# PHASE 1: LOGGING SETUP (MUST BE FIRST - everything depends on this)
-# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════════════════════
+# PHASE 0: LOGGING SETUP (MUST BE FIRST - everything depends on this)
+# ═════════════════════════════════════════════════════════════════════════════════════════════
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,26 +44,31 @@ logger = logging.getLogger(__name__)
 
 logger.info("╔" + "═" * 90 + "╗")
 logger.info("║" + " " * 90 + "║")
-logger.info("║" + "  🌌 QUANTUM LATTICE BLOCKCHAIN — WSGI ENTRY POINT v2.0 LOADING 🌌".center(90) + "║")
+logger.info("║" + "  🌌 QUANTUM LATTICE BLOCKCHAIN — WSGI ENTRY POINT v2.1 LOADING 🌌".center(90) + "║")
 logger.info("║" + " " * 90 + "║")
 logger.info("╚" + "═" * 90 + "╝")
 
-# ═════════════════════════════════════════════════════════════════════════════════════════════════
-# PHASE 1A: HLWE WALLET SYSTEM INITIALIZATION (BEFORE SERVER, CRITICAL PATH)
-# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════════════════════
+# PHASE 1A: HLWE CRYPTOGRAPHY INITIALIZATION (DIRECT IMPORT, BEFORE SERVER)
+# ═════════════════════════════════════════════════════════════════════════════════════════════
 
 logger.info("[WSGI] Phase 1A/3: Initializing HLWE post-quantum cryptography...")
 
 _HLWE_READY = False
 try:
+    # DIRECT IMPORT OF HLWE (avoids circular dependency with globals)
     from hlwe_engine import (
         get_hlwe_adapter, get_wallet_manager,
         hlwe_health_check, hlwe_system_info
     )
     
+    logger.info("[WSGI] [HLWE] Import successful, initializing system...")
+    
     # Initialize HLWE adapter
     adapter = get_hlwe_adapter()
     wallet_mgr = get_wallet_manager()
+    
+    logger.info("[WSGI] [HLWE] Wallet manager initialized")
     
     # Health check
     is_healthy = hlwe_health_check()
@@ -102,9 +104,9 @@ if not _HLWE_READY:
 
 logger.info("[WSGI] ═════════════════════════════════════════════════════════════════════")
 
-# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════════════════════
 # PHASE 1B: IMPORT SERVER & EXTRACT WSGI APP (NOW HLWE IS READY FOR SERVER STARTUP)
-# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════════════════════
 
 logger.info("[WSGI] Phase 1B/3: Importing Flask application from server.py...")
 
@@ -128,9 +130,9 @@ except Exception as e:
     traceback.print_exc()
     raise
 
-# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════════════════════
 # PHASE 2: VERIFY HLWE INTEGRATION (SERVER ALREADY INITIALIZED WITH HLWE)
-# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════════════════════
 
 logger.info("[WSGI] Phase 2/3: Verifying HLWE integration with Flask application...")
 
@@ -144,9 +146,9 @@ try:
 except Exception as e:
     logger.warning(f"[WSGI] ⚠️  HLWE verification failed: {e}")
 
-# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════════════════════
 # PHASE 3: READINESS ANNOUNCEMENT
-# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════════════════════
 
 logger.info("")
 logger.info("╔" + "═" * 90 + "╗")
@@ -171,13 +173,14 @@ logger.info("║" + " " * 90 + "║")
 logger.info("║  Security: HLWE-256 (post-quantum lattice cryptography)".ljust(90) + "║")
 logger.info("║  Block Signing: MANDATORY HLWE signatures on every block".ljust(90) + "║")
 logger.info("║  Transaction Signing: MANDATORY HLWE signatures on every transaction".ljust(90) + "║")
+logger.info("║  Oracle Measurements: MANDATORY HLWE signatures on quantum data".ljust(90) + "║")
 logger.info("║  Status: PRODUCTION READY ⚛️ 🚀".ljust(90) + "║")
 logger.info("║" + " " * 90 + "║")
 logger.info("╚" + "═" * 90 + "╝")
 
-# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════════════════════
 # WSGI EXPORT
-# ═════════════════════════════════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════════════════════════════
 
 # These are the standard WSGI names that gunicorn and other servers look for
 # We provide both for maximum compatibility
