@@ -104,18 +104,20 @@ class OracleCluster:
                     
                     # 3. Apply REAL GKSL evolution + NON-MARKOVIAN MEMORY EFFECTS
                     if QuantumInformationMetrics is not None:
-                        dt = 0.01  # GKSL evolution timestep
+                        dt = 0.01  # GKSL evolution timestep (10ms)
                         gamma = 0.11  # Damping rate (κ from non-Markovian bath)
                         
-                        # Apply Lindblad damping: L = sqrt(gamma) * σ_-
-                        # ρ → L ρ L† - 0.5(L†L ρ + ρ L†L)
+                        # Apply Lindblad damping: dρ/dt = γ(σ_- ρ σ_+ - 1/2{σ_+σ_-, ρ})
+                        # MUST be scaled by dt for Euler integration
                         s_minus = _np.array([[0, 0], [1, 0]], dtype=complex)
                         s_plus = _np.array([[0, 1], [0, 0]], dtype=complex)
                         
-                        # Superoperator action
+                        # Superoperator action (derivative)
                         L_term = gamma * (s_minus @ rho_pq_curr @ s_plus)
                         dissipation = -0.5 * gamma * (s_plus @ s_minus @ rho_pq_curr + rho_pq_curr @ s_plus @ s_minus)
-                        rho_pq_curr_evolved = L_term + dissipation
+                        
+                        # CRITICAL: Scale by dt for first-order Euler: ρ(t+dt) = ρ(t) + dt * dρ/dt
+                        rho_pq_curr_evolved = rho_pq_curr + dt * (L_term + dissipation)
                         
                         # Renormalize to preserve trace
                         tr = _np.real(_np.trace(rho_pq_curr_evolved))
