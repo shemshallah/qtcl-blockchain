@@ -9871,7 +9871,7 @@ def _feed_lattice_node_to_agents(node_id: str, pq_curr_fid: float, pq_last_fid: 
     except Exception as e:
         logger.debug(f"[AGENT-FEED] Lattice node error: {e}")
 
-def _feed_lattice_density_matrix_to_agents(rho: np.ndarray):
+def _feed_lattice_density_matrix_to_agents(rho: _np.ndarray):
     """Feed entire lattice density matrix into Agent 3 (FullLatticeNonMarkovianBath)"""
     if _METRICS_AGENTS['noise_bath'] is None:
         return
@@ -9883,7 +9883,7 @@ def _feed_lattice_density_matrix_to_agents(rho: np.ndarray):
         logger.debug(f"[AGENT-FEED] Noise bath error: {e}")
         return rho, 0.0
 
-def _feed_to_neural_net_refresh(lattice_fid_vec: np.ndarray, noise_state: float, entropy_pool: bytes):
+def _feed_to_neural_net_refresh(lattice_fid_vec: _np.ndarray, noise_state: float, entropy_pool: bytes):
     """Feed data into Agent 4 (LatticeRefreshNet) for prediction"""
     if _METRICS_AGENTS['refresh_net'] is None:
         return None, 0.0, 0.0
