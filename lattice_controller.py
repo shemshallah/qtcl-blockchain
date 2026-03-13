@@ -2278,6 +2278,13 @@ class QuantumBlock:
     hlwe_witness: str = ""
     finalized: bool = False
     finalized_at: Optional[int] = None
+    # ── FIX: fields submitted by miner via /api/submit_block ──────────────────
+    w_state_fidelity: float = 0.0
+    w_entropy_hash:   str   = ""
+    pq_curr:          int   = 0
+    pq_last:          int   = 0
+    difficulty_bits:  int   = 5
+    nonce:            int   = 0
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -2775,8 +2782,28 @@ class BlockManager:
                 
                 # ═════════════════════════════════════════════════════════════════
                 # VALIDATION 3: BLOCK HEIGHT CONSISTENCY (no gaps)
+                # FIX: re-sync chain_height from DB before checking to avoid
+                # stale in-memory state rejecting valid blocks after worker restart.
                 # ═════════════════════════════════════════════════════════════════
-                
+                if self.db is not None:
+                    try:
+                        rows = self.db.execute_fetch_all(
+                            "SELECT block_height, block_hash FROM blocks "
+                            "ORDER BY block_height DESC LIMIT 1"
+                        )
+                        if rows:
+                            db_tip_h    = int(rows[0].get('block_height', 0))
+                            db_tip_hash = str(rows[0].get('block_hash', '0' * 64))
+                            if db_tip_h + 1 != self.chain_height:
+                                logger.info(
+                                    f"[LATTICE] chain_height resync: "
+                                    f"{self.chain_height} → {db_tip_h + 1} (DB tip={db_tip_h})"
+                                )
+                                self.chain_height       = db_tip_h + 1
+                                self.current_block_hash = db_tip_hash
+                    except Exception as _sync_err:
+                        logger.warning(f"[LATTICE] chain_height DB resync failed: {_sync_err}")
+
                 expected_height = self.chain_height
                 if qblock.block_height != expected_height:
                     logger.warning(
