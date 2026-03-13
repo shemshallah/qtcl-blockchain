@@ -873,9 +873,13 @@ class OracleNode:
     # ── W-state circuit builders ───────────────────────────────────────────────
 
     def _build_dm_circuit(self) -> 'QuantumCircuit':
+        # FIX: save_density_matrix() forces AerSimulator into density_matrix simulation
+        # method, which is required for the noise_model to be applied. Without it, AER
+        # defaults to statevector mode and ignores the noise model → F=1.0 always.
         qc = QuantumCircuit(NUM_QUBITS_WSTATE)
         qc.ry(_W_THETA_0, 0); qc.cx(0, 1)
         qc.ry(_W_THETA_1, 1); qc.cx(1, 2)
+        qc.save_density_matrix()
         return qc
 
     def _build_meas_circuit(self) -> 'QuantumCircuit':
@@ -912,6 +916,9 @@ class OracleNode:
         qc.cx(4, 1)
         # Ancilla q5: Bell-pair with pq_curr for entropy probe
         qc.h(5); qc.cx(5, 3)
+        # FIX: save_density_matrix() forces density_matrix simulation method so
+        # the noise model is applied. Without this AER uses statevector → F=1.0.
+        qc.save_density_matrix()
         return qc
 
     # ── Self-measurement ───────────────────────────────────────────────────────
@@ -926,7 +933,14 @@ class OracleNode:
         try:
             # DM run
             dm_result  = self.aer.run(self._build_dm_circuit()).result()
-            dm_array   = np.array(DensityMatrix(dm_result.data(0)).data, dtype=complex)
+            # FIX: with save_density_matrix(), result.data(0) is a dict with key
+            # 'density_matrix'. Without it, data(0) was a raw statevector array.
+            # This extraction handles both formats defensively.
+            _dm_data = dm_result.data(0)
+            _dm_raw  = (_dm_data['density_matrix']
+                        if isinstance(_dm_data, dict) and 'density_matrix' in _dm_data
+                        else _dm_data)
+            dm_array   = np.array(DensityMatrix(_dm_raw).data, dtype=complex)
             # Shot run (independent RNG advance)
             counts     = dict(self.aer.run(self._build_meas_circuit(), shots=1024).result().get_counts())
 
@@ -1021,7 +1035,12 @@ class OracleNode:
         try:
             qc  = self._build_block_field_circuit(pq_curr, pq_last)
             res = self.aer.run(qc).result()
-            composite_dm = np.array(DensityMatrix(res.data(0)).data, dtype=complex)
+            # FIX: save_density_matrix() stores result under 'density_matrix' key
+            _bf_data = res.data(0)
+            _bf_raw  = (_bf_data['density_matrix']
+                        if isinstance(_bf_data, dict) and 'density_matrix' in _bf_data
+                        else _bf_data)
+            composite_dm = np.array(DensityMatrix(_bf_raw).data, dtype=complex)
 
             # Partial trace over block-field qubits (q3, q4, q5) → oracle sub-DM (q0-q2)
             # DensityMatrix axes: qubit 0 = leftmost in tensor product

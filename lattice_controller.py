@@ -1067,26 +1067,24 @@ class NonMarkovianNoiseBath:
                         
                         # Accumulate weighted previous state
                         memory_contribution += kernel_weight * rho_prev
-                    
+
                     # Add memory-weighted contribution (scaled by KAPPA_MEMORY)
                     result = result + self.memory_kernel * memory_contribution
-                
-                # 3️⃣ NORMALIZATION: Restore trace without erasing decoherence
-                # CRITICAL: Do NOT renormalize after noise — trace < 1 is correct!
-                # Instead: clip to valid density matrix range [0, 1] per eigenvalue
+
+                # 3️⃣ NORMALIZATION: Valid density matrix — Hermitian, trace=1, PSD
+                # FIX: enforce Hermitian symmetry first (float drift accumulates),
+                # then clip negative eigenvalues, then renormalise trace.
                 try:
+                    result = 0.5 * (result + result.conj().T)   # enforce Hermiticity
                     eigenvalues, eigenvectors = np.linalg.eigh(result)
-                    # Clip negative eigenvalues to zero (valid density matrix constraint)
                     eigenvalues = np.clip(eigenvalues, 0.0, None)
-                    # Renormalize only eigenvalues, preserving decoherence structure
                     trace = np.sum(eigenvalues)
                     if trace > 1e-10:
                         eigenvalues = eigenvalues / trace
                     result = eigenvectors @ np.diag(eigenvalues) @ eigenvectors.conj().T
-                except:
-                    # Fallback: return decayed state without modification
+                except Exception:
                     pass
-                
+
                 return result
         except Exception as e:
             logger.debug(f"[NOISE] Memory effect application failed: {e}")
@@ -1690,14 +1688,26 @@ class QuantumLatticeController:
         self.w_state_constructor = WStateConstructor(self.field)
         self.sigma_tracker = SigmaPhaseTracker()
         self.noise_discriminator = NoiseChannelDiscriminator()
-        
+
         # Quantum state
-        self.current_density_matrix = np.eye(256, dtype=np.complex128) / 256
+        # FIX: np.eye(256)/256 is maximally DIAGONAL — coherence_l1_norm = 0 always.
+        # Replace with 8-qubit W-state DM |W_8⟩ which has off-diagonal elements in the
+        # single-excitation sector. Noise bath can then decohere it and produce
+        # non-zero (and time-varying) lattice_coherence in the chirp broadcasts.
+        _N = 256  # 2^8
+        _w8 = np.zeros((_N, _N), dtype=np.complex128)
+        _excitations = [1 << i for i in range(8)]  # single-excitation basis indices
+        _amp = 1.0 / 8.0                            # |W_8⟩ = (1/√8) Σ |100…0⟩_k
+        for _i in _excitations:
+            for _j in _excitations:
+                _w8[_i, _j] = _amp                  # ρ_ij = 1/8 for all single-excit pairs
+        # Blend 70% W-state coherence + 30% maximally mixed for stability at startup
+        self.current_density_matrix = 0.70 * _w8 + 0.30 * (np.eye(_N, dtype=np.complex128) / _N)
         self.w_state_strength = 0.8
         self.coherence = 0.9
         self.fidelity = 0.99
         self.metrics_history = deque(maxlen=10000)
-        
+
         self._lock = threading.RLock()
         self.running = False
         self.maintenance_thread = None
