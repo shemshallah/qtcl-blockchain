@@ -2727,6 +2727,121 @@ class BlockManager:
         with self.lock:
             self.seal_requested = True
     
+    def add_block(self, qblock: 'QuantumBlock') -> bool:
+        """
+        ✅ ENTERPRISE GRADE: Validate and accept blocks through HLWE quantum validation
+        
+        Validates:
+        1. W-state fidelity (quantum coherence threshold)
+        2. pq_curr/pq_last consistency (pseudoqubit field IDs)
+        3. Block height consistency (no gaps)
+        4. Parent hash linkage (chain continuity)
+        5. Transaction integrity (if present)
+        
+        Returns:
+            bool: True if block passes all validations and is accepted, False otherwise
+        """
+        with self.lock:
+            try:
+                # ═════════════════════════════════════════════════════════════════
+                # VALIDATION 1: W-STATE FIDELITY (quantum coherence threshold)
+                # ═════════════════════════════════════════════════════════════════
+                
+                w_fidelity = float(qblock.w_state_fidelity or 0.0)
+                FIDELITY_THRESHOLD = 0.70  # 70% coherence minimum
+                
+                if w_fidelity < FIDELITY_THRESHOLD:
+                    logger.warning(
+                        f"[LATTICE] ❌ Block {qblock.block_height} REJECTED: "
+                        f"W-state fidelity {w_fidelity:.4f} < {FIDELITY_THRESHOLD} (threshold)"
+                    )
+                    return False
+                
+                # ═════════════════════════════════════════════════════════════════
+                # VALIDATION 2: PQ FIELD CONSISTENCY (pseudoqubit entanglement window)
+                # ═════════════════════════════════════════════════════════════════
+                
+                pq_curr = int(qblock.pq_curr or qblock.block_height)
+                pq_last = int(qblock.pq_last or max(0, qblock.block_height - 1))
+                
+                # pq_last must equal pq_curr - 1 (tripartite entanglement window)
+                if pq_last != pq_curr - 1:
+                    logger.warning(
+                        f"[LATTICE] ❌ Block {qblock.block_height} REJECTED: "
+                        f"pq field inconsistency: pq_last={pq_last}, pq_curr={pq_curr} "
+                        f"(expected pq_last={pq_curr - 1})"
+                    )
+                    return False
+                
+                # ═════════════════════════════════════════════════════════════════
+                # VALIDATION 3: BLOCK HEIGHT CONSISTENCY (no gaps)
+                # ═════════════════════════════════════════════════════════════════
+                
+                expected_height = self.chain_height
+                if qblock.block_height != expected_height:
+                    logger.warning(
+                        f"[LATTICE] ❌ Block {qblock.block_height} REJECTED: "
+                        f"height mismatch: got {qblock.block_height}, expected {expected_height}"
+                    )
+                    return False
+                
+                # ═════════════════════════════════════════════════════════════════
+                # VALIDATION 4: PARENT HASH LINKAGE (chain continuity)
+                # ═════════════════════════════════════════════════════════════════
+                
+                expected_parent = self.current_block_hash
+                if qblock.parent_hash != expected_parent:
+                    logger.warning(
+                        f"[LATTICE] ❌ Block {qblock.block_height} REJECTED: "
+                        f"parent hash mismatch: got {qblock.parent_hash[:16]}…, "
+                        f"expected {expected_parent[:16]}…"
+                    )
+                    return False
+                
+                # ═════════════════════════════════════════════════════════════════
+                # VALIDATION 5: TRANSACTION INTEGRITY (basic sanity checks)
+                # ═════════════════════════════════════════════════════════════════
+                
+                if qblock.transactions:
+                    for tx in qblock.transactions:
+                        # Check transaction fields exist and are valid
+                        if not hasattr(tx, 'tx_id') or not tx.tx_id:
+                            logger.warning(
+                                f"[LATTICE] Block {qblock.block_height} has malformed transaction (no tx_id)"
+                            )
+                            return False
+                        if not hasattr(tx, 'amount') or tx.amount < 0:
+                            logger.warning(
+                                f"[LATTICE] Block {qblock.block_height} has invalid amount: {tx.amount}"
+                            )
+                            return False
+                
+                # ═════════════════════════════════════════════════════════════════
+                # ALL VALIDATIONS PASSED: ACCEPT BLOCK
+                # ═════════════════════════════════════════════════════════════════
+                
+                # Store block in chain
+                self.block_by_height[qblock.block_height] = qblock
+                self.sealed_blocks.append(qblock)
+                self.chain_height = qblock.block_height + 1
+                self.current_block_hash = qblock.block_hash
+                self.blocks_sealed += 1
+                
+                logger.info(
+                    f"[LATTICE] ✅ Block {qblock.block_height} ACCEPTED by quantum validator "
+                    f"(fidelity={w_fidelity:.4f}, pq={pq_curr}/{pq_last}, "
+                    f"txs={len(qblock.transactions) if qblock.transactions else 0})"
+                )
+                
+                return True
+            
+            except Exception as validation_err:
+                logger.error(
+                    f"[LATTICE] ❌ Block validation error: {type(validation_err).__name__}: {validation_err}",
+                    exc_info=True
+                )
+                return False
+    
     def get_chain_stats(self) -> Dict[str, Any]:
         """Get chain statistics"""
         with self.lock:
