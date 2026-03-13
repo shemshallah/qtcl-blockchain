@@ -1027,67 +1027,80 @@ class NonMarkovianNoiseBath:
     
     def apply_memory_effect(self, density_matrix: np.ndarray, time_step: float) -> np.ndarray:
         """
-        Apply true non-Markovian memory effects via O-U kernel convolution.
-        
-        ρ̃(t) = exp(-t/T₂) ρ(t) + KAPPA_MEMORY ∫₀ᵗ K(t-s) ρ(s) ds
-        
-        MUSEUM-GRADE: Full history convolution, T1/T2 decay, no trace cancellation
+        Apply non-Markovian Lindblad + O-U memory bath.
+
+        Two-stage pipeline (order matters):
+          STAGE 1  — Lindblad dephasing on off-diagonals FIRST.
+                     ρ_ij(t+dt) = ρ_ij(t) * exp(-γ_φ * dt)  for i≠j
+                     ρ_ii stays (no amplitude damping for simplicity at 256×256 scale)
+                     This decay is applied BEFORE any renormalization so it cannot be
+                     undone by the trace-rescale step that follows.
+          STAGE 2  — Non-Markovian O-U revival: blend in a weighted average of recent
+                     states (scaled by κ × 0.05 so revival is present but subdominant).
+          STAGE 3  — Enforce valid DM: Hermitian symmetry + PSD clip + trace=1.
         """
         if density_matrix is None or not NUMPY_AVAILABLE:
             return density_matrix
-        
+
         try:
             with self.lock:
-                # Store current state
+                T2_s  = T2_MS  / 1000.0
+                T1_s  = T1_MS  / 1000.0
+                dt    = float(time_step)
+
+                # ── STAGE 1: Lindblad dephasing ─────────────────────────────────────
+                # Off-diagonals decay at rate γ_φ = 1/T2 per second.
+                # This is the PHYSICAL correct step; must come before any renorm.
+                gamma_phi    = 1.0 / max(T2_s, 1e-9)
+                deph_factor  = float(np.exp(-gamma_phi * dt))   # ∈ (0, 1)
+
+                diag_vals    = np.diag(density_matrix).copy()   # populations preserved
+                result       = deph_factor * density_matrix     # decay ALL elements
+                np.fill_diagonal(result, diag_vals)             # restore populations
+
+                # Amplitude damping: decay excited populations toward ground at rate 1/T1
+                amp_factor   = float(np.exp(-dt / max(T1_s, 1e-9)))
+                new_diag     = diag_vals * amp_factor
+                ground_gain  = np.sum(diag_vals) * (1.0 - amp_factor)
+                new_diag[0] += ground_gain                      # add to ground state
+                np.fill_diagonal(result, new_diag)
+
+                # ── STAGE 2: O-U non-Markovian revival (subdominant) ────────────────
                 self.history.append((time.time(), density_matrix.copy()))
-                
-                # 1️⃣ MARKOVIAN COMPONENT: T1/T2 exponential decay
-                # ρ_Markovian(t) = exp(-t/T₂) ρ(t)
-                T2_s = T2_MS / 1000.0  # Convert ms to seconds
-                markovian_decay = np.exp(-time_step / max(T2_s, 1e-6))
-                result = markovian_decay * density_matrix
-                
-                # 2️⃣ NON-MARKOVIAN COMPONENT: Full O-U kernel convolution over history
-                if len(self.history) > 1:
-                    # Current time (relative)
-                    t_now = time.time()
-                    
-                    # Convolve all historical states with O-U kernel
-                    memory_contribution = np.zeros_like(density_matrix)
-                    
-                    for hist_idx in range(len(self.history) - 1):  # Exclude current (just added)
-                        t_prev, rho_prev = self.history[hist_idx]
-                        tau = t_now - t_prev  # Time since this state
-                        
-                        # Evaluate O-U kernel at this lag time
-                        K_tau = self.ornstein_uhlenbeck_kernel(tau, t_now)
-                        
-                        # Weight by kernel value (normalized by history depth)
-                        kernel_weight = K_tau / max(len(self.history), 1)
-                        
-                        # Accumulate weighted previous state
-                        memory_contribution += kernel_weight * rho_prev
 
-                    # Add memory-weighted contribution (scaled by KAPPA_MEMORY)
-                    result = result + self.memory_kernel * memory_contribution
+                if len(self.history) > 2:
+                    t_now      = time.time()
+                    mem_accum  = np.zeros_like(density_matrix)
+                    norm_accum = 0.0
+                    # Use only the most recent MEMORY_DEPTH//2 states to keep revival local
+                    recent     = list(self.history)[:-1]   # exclude just-appended current
+                    for t_prev, rho_prev in recent[-max(len(recent)//2, 1):]:
+                        tau         = max(t_now - t_prev, 1e-9)
+                        K_tau       = abs(self.ornstein_uhlenbeck_kernel(tau, t_now))
+                        mem_accum  += K_tau * rho_prev
+                        norm_accum += K_tau
+                    if norm_accum > 1e-12:
+                        mem_accum /= norm_accum     # normalise so kernel amplitude is ≤ 1
+                    # Revival weight capped at 0.05 * κ so it never overwhelms Stage 1 decay
+                    revival_weight = min(self.memory_kernel * 0.05, 0.02)
+                    result = (1.0 - revival_weight) * result + revival_weight * mem_accum
 
-                # 3️⃣ NORMALIZATION: Valid density matrix — Hermitian, trace=1, PSD
-                # FIX: enforce Hermitian symmetry first (float drift accumulates),
-                # then clip negative eigenvalues, then renormalise trace.
+                # ── STAGE 3: Valid density matrix ───────────────────────────────────
+                # Hermitian symmetry (float drift), PSD clip, trace renorm.
+                result = 0.5 * (result + result.conj().T)
                 try:
-                    result = 0.5 * (result + result.conj().T)   # enforce Hermiticity
-                    eigenvalues, eigenvectors = np.linalg.eigh(result)
-                    eigenvalues = np.clip(eigenvalues, 0.0, None)
-                    trace = np.sum(eigenvalues)
-                    if trace > 1e-10:
-                        eigenvalues = eigenvalues / trace
-                    result = eigenvectors @ np.diag(eigenvalues) @ eigenvectors.conj().T
+                    evals, evecs = np.linalg.eigh(result)
+                    evals = np.clip(evals, 0.0, None)
+                    tr    = float(np.sum(evals))
+                    if tr > 1e-12:
+                        evals /= tr
+                    result = evecs @ np.diag(evals) @ evecs.conj().T
                 except Exception:
                     pass
 
                 return result
-        except Exception as e:
-            logger.debug(f"[NOISE] Memory effect application failed: {e}")
+        except Exception as exc:
+            logger.debug(f"[NOISE] Memory effect failed: {exc}")
             return density_matrix
     
     def get_noise_model(self):
@@ -2014,9 +2027,12 @@ class QuantumLatticeController:
                 self.current_density_matrix = NOISE_BATH.apply_memory_effect(
                     self.current_density_matrix, CYCLE_TIME_MS / 1000.0
                 )
-                
+
                 # Compute quantum metrics
-                self.coherence = QuantumInformationMetrics.coherence_l1_norm(self.current_density_matrix)
+                # FIX: normalise L1-coherence to [0,1] so LATTICE.coherence is always
+                # a physically meaningful [0,1] metric (max for 256-dim = 255).
+                _raw_coh = QuantumInformationMetrics.coherence_l1_norm(self.current_density_matrix)
+                self.coherence = float(np.clip(_raw_coh / 255.0, 0.0, 1.0))
                 self.fidelity = QuantumInformationMetrics.state_fidelity(
                     self.current_density_matrix,
                     np.eye(256, dtype=np.complex128) / 256

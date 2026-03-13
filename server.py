@@ -3044,10 +3044,17 @@ class UnifiedOracleMux:
                 # Fallback to controller metrics if agents not ready
                 if lattice_coherence == 0.0:
                     lattice_coherence = float(getattr(LATTICE, 'coherence', 0.0))
-                
+
+                # FIX: L1-coherence of 256×256 W-state can exceed 7 (sum of all off-diagonals).
+                # Normalise to [0,1] using the theoretical max for an N-qubit W-state:
+                # C_max = N*(N-1) * (1/N) = N-1.  For N=256: max = 255.
+                # Clamp to [0,1] so chirp broadcasts a sensible confidence-style metric.
+                _C_MAX = 255.0  # theoretical L1-coherence max for 256-dim space
+                lattice_coherence = float(np.clip(lattice_coherence / _C_MAX, 0.0, 1.0))
+
                 if lattice_fidelity == 0.0:
                     lattice_fidelity = float(getattr(LATTICE, 'fidelity', 0.0))
-                
+
                 # Enterprise-grade lattice metrics collection
                 lattice_quantum = {
                     'lattice_status': 'online' if LATTICE.running else 'offline',
