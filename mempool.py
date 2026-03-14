@@ -808,8 +808,11 @@ class Mempool:
                     client_tx_id = client_tx_id or client_hash
 
                 # ── DUPLICATE CHECK ────────────────────────────────────────
+                # Return existing TX so callers can treat idempotent re-submits
+                # as success (the TX IS pending, not lost). Don't increment rejected.
                 if tx_hash in self._index:
-                    return AcceptResult.DUPLICATE, f"tx already in mempool: {tx_hash[:16]}", None
+                    _existing_tx = self._index[tx_hash]
+                    return AcceptResult.DUPLICATE, f"tx already in mempool: {tx_hash[:16]}", _existing_tx
 
                 # ── [D] DUST ───────────────────────────────────────────────
                 if amount_base < DUST_THRESHOLD:
@@ -1442,6 +1445,13 @@ class Mempool:
         """Write TX to transactions table.  Non-fatal if DB is unavailable."""
         if not _db.available:
             return
+        # Ensure critical fields survive metadata round-trip (needed by _recover_from_db)
+        persist_meta = dict(tx.metadata)
+        persist_meta['fee_base']     = tx.fee_base
+        persist_meta['amount_base']  = tx.amount_base
+        persist_meta['nonce']        = tx.nonce
+        persist_meta['timestamp_ns'] = tx.timestamp_ns
+        persist_meta.setdefault('signature', tx.signature)
         try:
             with _db.cursor() as cur:
                 cur.execute("""
@@ -1452,6 +1462,7 @@ class Mempool:
                     ON CONFLICT (tx_hash) DO UPDATE
                         SET status     = CASE WHEN transactions.status = 'confirmed'
                                               THEN 'confirmed' ELSE 'pending' END,
+                            metadata   = EXCLUDED.metadata,
                             updated_at = NOW()
                 """, (
                     tx.tx_hash,
@@ -1462,7 +1473,7 @@ class Mempool:
                     tx.tx_type,
                     tx.w_entropy_hash,
                     tx.tx_hash,          # commitment_hash = canonical hash
-                    json.dumps(tx.metadata),
+                    json.dumps(persist_meta),
                 ))
         except Exception as exc:
             logger.warning(f"[MEMPOOL-DB] persist_tx failed for {tx.tx_hash[:12]}…: {exc}")
@@ -1653,7 +1664,14 @@ class Mempool:
                     if isinstance(meta, str):
                         meta = json.loads(meta)
                     fee_base    = int(meta.get('fee_base', MIN_RELAY_FEE_ABS))
-                    ts_ns       = int(row['created_at'].timestamp() * 1e9) if row['created_at'] else time.time_ns()
+                    # Prefer stored timestamp_ns; fall back to created_at conversion
+                    ts_ns       = int(meta.get('timestamp_ns', 0)) or (
+                                  int(row['created_at'].timestamp() * 1e9)
+                                  if row['created_at'] else time.time_ns())
+                    # signature stored in metadata by _persist_tx; fall back to quantum_state_hash
+                    recovered_sig = (meta.get('signature')
+                                     or row.get('quantum_state_hash')
+                                     or '')
                     tx = MempoolTx(
                         tx_hash        = row['tx_hash'],
                         from_address   = row['from_address'],
@@ -1661,7 +1679,7 @@ class Mempool:
                         amount_base    = amount_base,
                         fee_base       = fee_base,
                         nonce          = row['nonce'] or 0,
-                        signature      = meta.get('signature', ''),
+                        signature      = recovered_sig,
                         w_entropy_hash = row['quantum_state_hash'] or '',
                         timestamp_ns   = ts_ns,
                         tx_type        = row['tx_type'] or 'transfer',

@@ -8567,21 +8567,20 @@ def submit_transaction():
 
     if code in (AcceptResult.ACCEPTED, AcceptResult.REPLACED_BY_FEE):
         resp = {
-            'tx_hash'     : tx.tx_hash,
-            'client_tx_id': tx.client_tx_id or tx.tx_hash,
-            'status'      : 'pending',
-            'from'        : tx.from_address,
-            'to'          : tx.to_address,
-            'amount'      : tx.amount_base / 100,
-            'amount_base' : tx.amount_base,
-            'fee'         : tx.fee_base / 100,
-            'fee_rate'    : round(tx.fee_rate, 6),
-            'w_entropy_hash': tx.w_entropy_hash,
+            'tx_hash'        : tx.tx_hash,
+            'client_tx_id'   : tx.client_tx_id or tx.tx_hash,
+            'status'         : 'pending',
+            'from'           : tx.from_address,
+            'to'             : tx.to_address,
+            'amount'         : tx.amount_base / 100,
+            'amount_base'    : tx.amount_base,
+            'fee'            : tx.fee_base / 100,
+            'fee_rate'       : round(tx.fee_rate, 6),
+            'w_entropy_hash' : tx.w_entropy_hash,
             'replaced_by_fee': code == AcceptResult.REPLACED_BY_FEE,
-            'message'     : f"TX pending | query: /api/transactions/{tx.tx_hash}",
+            'message'        : f"TX pending | query: /api/transactions/{tx.tx_hash}",
         }
         logger.info(f"[TX] ✅ ACCEPTED: {tx.tx_hash[:16]}… | from={from_addr[:16]}… amt={amount}")
-        
         # P2P gossip
         if P2P:
             try:
@@ -8596,12 +8595,29 @@ def submit_transaction():
                 logger.debug(f"[TX] P2P relay skipped: {_pe}")
         return jsonify(resp), 201
 
+    # ── DUPLICATE: idempotent re-submit — return 200 with TX info, not 409 ──
+    # This fires when client retried a timed-out request and the TX was already
+    # accepted on the first attempt. The TX IS safely in the mempool.
+    if code == AcceptResult.DUPLICATE and tx is not None:
+        resp = {
+            'tx_hash'      : tx.tx_hash,
+            'client_tx_id' : tx.client_tx_id or tx.tx_hash,
+            'status'       : 'already_pending',
+            'from'         : tx.from_address,
+            'to'           : tx.to_address,
+            'amount'       : tx.amount_base / 100,
+            'amount_base'  : tx.amount_base,
+            'fee'          : tx.fee_base / 100,
+            'message'      : f"TX already pending (idempotent) | query: /api/transactions/{tx.tx_hash}",
+        }
+        logger.info(f"[TX] ♻️  DUPLICATE (idempotent): {tx.tx_hash[:16]}… — returning 200")
+        return jsonify(resp), 200
+
     # Rejection — map AcceptResult to HTTP status
     logger.warning(f"[TX] ❌ REJECTED: code={code.value} msg={msg[:60]}… | from={from_addr[:16]}… to={to_addr[:16]}…")
-    
-    http = 409 if code in (AcceptResult.DUPLICATE, AcceptResult.NONCE_REUSE) else (
-           402 if code in (AcceptResult.LOW_FEE, AcceptResult.INSUFFICIENT_BAL, AcceptResult.DUST)    else (
-           403 if code == AcceptResult.INVALID_SIG                                              else 400))
+    http = 409 if code == AcceptResult.NONCE_REUSE else (
+           402 if code in (AcceptResult.LOW_FEE, AcceptResult.INSUFFICIENT_BAL, AcceptResult.DUST) else (
+           403 if code == AcceptResult.INVALID_SIG else 400))
     return jsonify({'error': msg, 'code': code.value}), http
 
 
@@ -8853,6 +8869,32 @@ def dht_stats():
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # UTXO MEMPOOL REST ENDPOINTS — Museum-Grade Transaction Management
 # ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+
+@app.route('/api/nonce/<address>', methods=['GET'])
+def get_address_nonce(address):
+    """
+    Return the next expected nonce for a sender address.
+    Clients MUST call this before building a transaction to avoid nonce
+    collisions and duplicate-TX errors.
+
+    Response:
+        expected_next  — nonce the mempool wants to see next (use this)
+        confirmed      — highest nonce in a confirmed block
+        pending        — list of nonces currently in mempool for this address
+    """
+    from mempool import get_mempool
+    try:
+        mp = get_mempool()
+        return jsonify({
+            'address'       : address,
+            'expected_next' : mp._nonces.expected_next(address),
+            'confirmed'     : mp._nonces.confirmed_nonce(address),
+            'pending'       : sorted(mp._nonces.pending_nonces(address)),
+        }), 200
+    except Exception as exc:
+        logger.error(f"[NONCE] get_address_nonce error: {exc}")
+        return jsonify({'error': str(exc)}), 500
 
 
 @app.route('/api/transactions/submit', methods=['POST'])
