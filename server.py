@@ -1590,66 +1590,135 @@ def get_measurement_service() -> MeasurementService:
 # ═════════════════════════════════════════════════════════════════════════════════
 
 class DifficultyManager:
-    """Manage blockchain difficulty independently of entropy."""
-    
-    def __init__(self, initial_difficulty: int = 6):
-        self.current_difficulty = initial_difficulty
-        self.min_difficulty = 4
-        self.max_difficulty = 10
-        self.target_block_time_s = 60
-        self.adjustment_interval = 10
+    """
+    Manage blockchain difficulty — N = number of leading hex zeros required.
+
+    Difficulty scale (hex zeros, at ~20k H/s):
+        diff=4  →   3.3s  (too fast, spam risk)
+        diff=5  →  52.4s  (target sweet-spot at 20k H/s)
+        diff=6  →  ~14min (appropriate for >300k H/s)
+
+    Rule: 16^diff / target_block_time_s  ≈  required_hash_rate
+    Target 60s blocks:  required_rate = 16^diff / 60
+        diff=5  needs    17k H/s  ✅ matches typical miner
+        diff=6  needs   280k H/s
+        diff=7  needs   4.5M H/s
+    """
+
+    # Hard bounds — never let adjustment drift outside these
+    ABS_MIN = 1
+    ABS_MAX = 7   # diff=7 needs 4.5M H/s for 60s blocks; anything higher is absurd
+
+    def __init__(self, initial_difficulty: int = 5):
+        # Clamp initial value inside abs bounds regardless of what caller passes
+        self.current_difficulty = max(self.ABS_MIN, min(self.ABS_MAX, initial_difficulty))
+        self.min_difficulty = 3        # never go below 3 (instant mining)
+        self.max_difficulty = self.ABS_MAX
+        self.target_block_time_s = 60  # target 60-second blocks
+        self.adjustment_interval = 10  # adjust every 10 blocks
         logger.info(
-            f"[DIFFICULTY] Manager initialized: {initial_difficulty} leading hex zeros, "
-            f"target {self.target_block_time_s}s blocks"
+            f"[DIFFICULTY] Manager initialized: diff={self.current_difficulty} leading hex zeros | "
+            f"target={self.target_block_time_s}s blocks | "
+            f"range=[{self.min_difficulty}, {self.max_difficulty}]"
         )
-    
+
     def get_difficulty(self) -> int:
-        """Get current difficulty"""
         return self.current_difficulty
-    
+
     def set_difficulty(self, difficulty: int) -> bool:
-        """Set difficulty (8-20 range)"""
-        if not (self.min_difficulty <= difficulty <= self.max_difficulty):
-            return False
-        old_diff = self.current_difficulty
-        self.current_difficulty = difficulty
-        logger.info(f"[DIFFICULTY] Set: {old_diff} → {difficulty}")
-        return True
-    
+        """Manually set difficulty — clamps to [min, max]."""
+        clamped = max(self.min_difficulty, min(self.max_difficulty, difficulty))
+        if clamped != difficulty:
+            logger.warning(
+                f"[DIFFICULTY] Requested {difficulty} clamped to {clamped} "
+                f"(range [{self.min_difficulty}, {self.max_difficulty}])"
+            )
+        old = self.current_difficulty
+        self.current_difficulty = clamped
+        logger.info(f"[DIFFICULTY] Set: {old} → {self.current_difficulty}")
+        return True   # always succeeds (clamped)
+
     def auto_adjust(self, blocks: list) -> int:
-        """Auto-adjust based on block times"""
+        """
+        Retarget difficulty so expected block time approaches target_block_time_s.
+
+        Algorithm (Bitcoin-style):
+            ratio       = actual_avg_time / target_time
+            new_diff    = solve_diff(current_diff, ratio)
+
+        Uses additive ±1 steps instead of multiplicative to avoid oscillation
+        at low difficulty integers where ×1.25 jumps unevenly.
+        """
         if len(blocks) < 2:
             return self.current_difficulty
-        
-        time_span = blocks[-1].get('timestamp', 0) - blocks[0].get('timestamp', 0)
+
+        time_span   = blocks[-1].get('timestamp', 0) - blocks[0].get('timestamp', 0)
         block_count = len(blocks) - 1
-        actual_block_time = time_span / block_count if block_count > 0 else 0
-        
-        ratio = self.target_block_time_s / actual_block_time if actual_block_time > 0 else 1.0
-        ratio = max(0.75, min(1.25, ratio))
-        
-        new_difficulty = max(
-            self.min_difficulty,
-            min(self.max_difficulty, int(self.current_difficulty * ratio))
-        )
-        
+        actual_time = time_span / block_count if block_count > 0 else self.target_block_time_s
+
+        if actual_time <= 0:
+            return self.current_difficulty
+
+        # Expected hashes at current diff
+        expected_hashes = 16 ** self.current_difficulty
+        # Implied hash rate from observed block time
+        implied_rate = expected_hashes / actual_time
+        # New diff that would hit target at the same implied rate
+        import math as _m
+        ideal_diff = _m.log(implied_rate * self.target_block_time_s) / _m.log(16)
+        target_diff = int(round(ideal_diff))
+
+        # Clamp to ±1 change per adjustment window (anti-oscillation)
+        if target_diff > self.current_difficulty:
+            new_difficulty = self.current_difficulty + 1
+        elif target_diff < self.current_difficulty:
+            new_difficulty = self.current_difficulty - 1
+        else:
+            new_difficulty = self.current_difficulty
+
+        new_difficulty = max(self.min_difficulty, min(self.max_difficulty, new_difficulty))
+
         if new_difficulty != self.current_difficulty:
-            old_diff = self.current_difficulty
+            old = self.current_difficulty
             self.current_difficulty = new_difficulty
             logger.info(
-                f"[DIFFICULTY] Auto-adjusted: {old_diff} → {new_difficulty} "
-                f"(actual_time={actual_block_time:.1f}s, target={self.target_block_time_s}s)"
+                f"[DIFFICULTY] Auto-adjusted: {old} → {new_difficulty} "
+                f"(actual={actual_time:.1f}s target={self.target_block_time_s}s "
+                f"implied_rate={implied_rate:.0f} H/s)"
             )
-        
+
         return self.current_difficulty
+
 
 _difficulty_manager = None
 
 def get_difficulty_manager() -> DifficultyManager:
-    """Get global difficulty manager"""
+    """Get or create the global DifficultyManager.
+
+    Bootstraps from the DB tip block's stored difficulty so the value
+    survives server restarts without resetting to the initial default.
+    """
     global _difficulty_manager
-    if _difficulty_manager is None:
-        _difficulty_manager = DifficultyManager(initial_difficulty=13)
+    if _difficulty_manager is not None:
+        return _difficulty_manager
+
+    # Try to restore last-used difficulty from DB
+    db_difficulty = None
+    try:
+        tip = query_latest_block()
+        if tip:
+            raw = tip.get('difficulty') or tip.get('difficulty_bits')
+            if raw is not None:
+                db_difficulty = max(DifficultyManager.ABS_MIN,
+                                    min(DifficultyManager.ABS_MAX, int(float(raw))))
+    except Exception as _de:
+        logger.debug(f"[DIFFICULTY] DB bootstrap failed: {_de}")
+
+    # Use DB value if sane, otherwise default to 5 (safe for typical miners)
+    initial = db_difficulty if db_difficulty is not None else 5
+    _difficulty_manager = DifficultyManager(initial_difficulty=initial)
+    if db_difficulty is not None:
+        logger.info(f"[DIFFICULTY] Restored from DB: diff={initial}")
     return _difficulty_manager
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -8490,9 +8559,29 @@ def submit_block():
             logger.debug(f"[BLOCK] gossip_publish_block skipped: {_ge}")
 
         # ✅ FORK FIX: Update canonical oracle height atomically with block acceptance
-        # This ensures all miners get the same oracle_tip for the next mining round
         globals()['_ORACLE_CANONICAL_HEIGHT'] = block_height
         logger.info(f"[FORK-FIX] Canonical oracle height updated: {block_height}")
+
+        # ── Auto-adjust difficulty every N blocks ────────────────────────────────
+        # Pull the last adjustment_interval blocks from DB and retarget if needed
+        _mgr = get_difficulty_manager()
+        if block_height > 0 and block_height % _mgr.adjustment_interval == 0:
+            try:
+                with get_db_cursor() as _dc:
+                    _dc.execute("""
+                        SELECT height, timestamp FROM blocks
+                        WHERE height > %s
+                        ORDER BY height ASC
+                        LIMIT %s
+                    """, (block_height - _mgr.adjustment_interval - 1, _mgr.adjustment_interval + 1))
+                    _adj_rows = _dc.fetchall()
+                if len(_adj_rows) >= 2:
+                    _adj_blocks = [{'height': r[0], 'timestamp': float(r[1]) if r[1] else 0}
+                                   for r in _adj_rows]
+                    _new_diff = _mgr.auto_adjust(_adj_blocks)
+                    logger.info(f"[DIFFICULTY] Retarget at h={block_height}: diff={_new_diff}")
+            except Exception as _ae:
+                logger.debug(f"[DIFFICULTY] Auto-adjust error: {_ae}")
 
         # 6️⃣ RESPONSE
         return jsonify({
@@ -8506,6 +8595,7 @@ def submit_block():
             'transactions_included': len(transactions),
             'w_state_fidelity':      f"{w_state_fidelity:.4f}",
             'tip':                   block_height,
+            'next_difficulty':       get_difficulty_manager().get_difficulty(),
         }), 201
     
     except Exception as e:
@@ -9446,16 +9536,18 @@ def set_difficulty():
         return jsonify({'error': 'difficulty must be an integer'}), 400
     
     mgr = get_difficulty_manager()
-    if mgr.set_difficulty(difficulty):
-        return jsonify({
-            'status': 'set',
-            'difficulty_bits': difficulty,
-            'description': f'{difficulty} leading hex zeros'
-        }), 200
-    else:
-        return jsonify({
-            'error': f'difficulty out of bounds: {mgr.min_difficulty}-{mgr.max_difficulty}'
-        }), 422
+    old_diff = mgr.get_difficulty()
+    mgr.set_difficulty(difficulty)   # always succeeds — clamps internally
+    new_diff = mgr.get_difficulty()
+    return jsonify({
+        'status': 'set',
+        'difficulty_bits': new_diff,
+        'previous': old_diff,
+        'clamped': new_diff != difficulty,
+        'description': f'{new_diff} leading hex zeros',
+        'range': [mgr.min_difficulty, mgr.max_difficulty],
+        'expected_block_time_s': round((16**new_diff) / 20000, 1),  # estimate at 20k H/s
+    }), 200
 
 
 @app.route('/api/difficulty/adjust', methods=['POST'])
