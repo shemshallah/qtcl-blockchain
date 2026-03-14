@@ -802,7 +802,7 @@ class QuantumBlock:
     hlwe_timestamp: str = ""  # Timestamp of cryptographic signing
     
     def to_header_dict(self) -> Dict[str, Any]:
-        """Convert to block header (for hashing) — includes temporal anchor"""
+        """Convert to block header (for hashing and server submission)."""
         return {
             'block_height': self.block_height,
             'parent_hash': self.parent_hash,
@@ -814,8 +814,11 @@ class QuantumBlock:
             'miner_address': self.miner_address,
             'tx_count': self.tx_count,
             'w_entropy_hash': self.w_entropy_hash,
-            # Include temporal anchor ID for blockchain verification
             'temporal_anchor_id': self.temporal_anchor.get('temporal_anchor_id', '') if self.temporal_anchor else '',
+            # w_state_fidelity is what the server validates against (>= 0.70 required).
+            # coherence_snapshot is the oracle-measured W-state fidelity — same value,
+            # surfaced here under the key submit_block reads from header.
+            'w_state_fidelity': float(self.coherence_snapshot),
         }
     
     def to_dict(self) -> Dict[str, Any]:
@@ -1734,8 +1737,12 @@ class EntropyFieldMiner:
         while time.time() - start_time < timeout_seconds:
             self.mining_attempts += 1
             
-            # Phase 2: Select pseudoqubit based on entropy quality
-            pq_curr = pq_last + 1 + int(entropy_quality * 255)
+            # Phase 2: pq_curr MUST equal pq_last + 1 (tripartite entanglement window).
+            # The old formula pq_last + 1 + int(entropy_quality * 255) broke the
+            # pq_last == pq_curr - 1 invariant that both submit_block and BlockManager.add_block
+            # enforce, causing every block to be rejected. Entropy quality is still used
+            # in the route_hash nonce below — the pq gap must stay fixed at exactly 1.
+            pq_curr = pq_last + 1
             
             # Generate field geometry (from lattice_controller.HyperbolicFieldEngine)
             route_hash_int = int(
