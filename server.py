@@ -7943,7 +7943,12 @@ def submit_block():
         parent_hash = str(header.get('parent_hash', ''))
         merkle_root = str(header.get('merkle_root', ''))
         timestamp_s = int(header.get('timestamp_s', int(time.time())))
-        difficulty_bits = int(header.get('difficulty_bits', 12))
+        # ── Miner-submitted difficulty is IGNORED for validation purposes ──────
+        # The server's DifficultyManager is the authoritative source of truth.
+        # Trusting the miner's claimed difficulty_bits would let any miner submit
+        # difficulty_bits=1 and pass PoW with just 1 leading zero.
+        _miner_claimed_difficulty = int(header.get('difficulty_bits', 1))
+        difficulty_bits = get_difficulty_manager().get_difficulty()
         nonce = int(header.get('nonce', 0))
         miner_address = str(header.get('miner_address', ''))
         w_state_fidelity = float(header.get('w_state_fidelity', 0.0))
@@ -7952,18 +7957,18 @@ def submit_block():
         pq_curr = int(header.get('pq_curr', 1))
         pq_last = int(header.get('pq_last', 0))
         transactions = data.get('transactions', [])
-        
+
         # ✅ VALIDATION 1: Required fields
         if not block_hash or not miner_address:
             return jsonify({'error': 'missing block_hash or miner_address'}), 400
-        
+
         # ✅ VALIDATION 1b: pq constraint validation (ENTERPRISE RULE)
         # Only constraint: pq_last must be exactly pq_curr - 1 (tripartite entanglement window)
         if pq_last != pq_curr - 1:
             return jsonify({
                 'error': f'pq_last must be pq_curr - 1: got pq_last={pq_last}, pq_curr={pq_curr}'
             }), 422
-        
+
         # ✅ VALIDATION 2: W-state fidelity (relaxed threshold now)
         if w_state_fidelity < 0.70:
             return jsonify({'error': f'W-state fidelity too low: {w_state_fidelity:.4f} < 0.70'}), 422
@@ -7981,7 +7986,12 @@ def submit_block():
         # ✅ VALIDATION 3: Standard leading-zero PoW
         # difficulty_bits = N means block_hash must start with N hex '0' characters.
         # Equivalent to: int(hash,16) < 2^(256 - 4*N)  [hex digit = 4 bits]
-        # Both miner and server now use this identical check.
+        # Server uses DifficultyManager's value — miner's claimed value is informational only.
+        if _miner_claimed_difficulty != difficulty_bits:
+            logger.warning(
+                f"[BLOCK] ⚠️  Miner claimed difficulty={_miner_claimed_difficulty} "
+                f"but server requires difficulty={difficulty_bits} — using server value"
+            )
         if len(block_hash) != 64:
             return jsonify({'error': 'invalid block_hash: must be 64-char hex'}), 400
         if not all(c in '0123456789abcdef' for c in block_hash.lower()):
