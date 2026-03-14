@@ -2304,12 +2304,10 @@ class QuantumBlock:
     hlwe_witness: str = ""
     finalized: bool = False
     finalized_at: Optional[int] = None
-    # Fields submitted by miner via /api/submit_block.
-    # w_state_fidelity must be >= 0.70 — no default that would pass validation.
-    # pq_curr/pq_last must satisfy pq_last == pq_curr - 1 — no zero defaults.
-    w_state_fidelity: float = 0.0   # 0.0 = not set; add_block rejects < 0.70
+    # ── FIX: fields submitted by miner via /api/submit_block ──────────────────
+    w_state_fidelity: float = 0.0
     w_entropy_hash:   str   = ""
-    pq_curr:          int   = 1     # pq_curr=1, pq_last=0 is the only valid zero-state pair
+    pq_curr:          int   = 0
     pq_last:          int   = 0
     difficulty_bits:  int   = 5
     nonce:            int   = 0
@@ -2494,20 +2492,12 @@ class BlockManager:
             GENESIS_MERKLE    = hashlib.sha3_256(b"QTCL_GENESIS").hexdigest()
             GENESIS_WITNESS   = hashlib.sha3_256(b"GENESIS_WITNESS").hexdigest()
 
-            genesis_preimage = json.dumps({
-                'block_height':   0,
-                'parent_hash':    '0x' + '0'*64,
-                'merkle_root':    GENESIS_MERKLE,
-                'miner_address':  self.validator.miner_address,
-                'timestamp_s':    GENESIS_TIMESTAMP,
-                'tx_count':       0,
-            }, sort_keys=True)
-            genesis_hash = "0x" + hashlib.sha3_256(genesis_preimage.encode()).hexdigest()
+            genesis_hash = '0' * 64
 
             genesis = QuantumBlock(
                 block_height       = 0,
                 block_hash         = genesis_hash,
-                parent_hash        = '0x' + '0'*64,
+                parent_hash        = '0' * 64,
                 miner_address      = self.validator.miner_address,
                 tx_count           = 0,
                 merkle_root        = GENESIS_MERKLE,
@@ -2763,54 +2753,28 @@ class BlockManager:
             self.seal_requested = True
     
     def add_block(self, qblock: 'QuantumBlock') -> bool:
-        """
-        Validate and accept a block through the lattice quantum validator.
-
-        By the time a block reaches this method it has already passed all HTTP-layer
-        checks in submit_block() (PoW, w_state_fidelity >= 0.70, pq invariant,
-        height, parent hash, merkle root, timestamp).  add_block owns only:
-
-          1. W-state fidelity  — re-check the exact value the miner sent, no fallbacks.
-             0.0 means the miner did not fetch an oracle snapshot: hard reject.
-          2. pq_curr / pq_last — re-check the exact values sent, no derivation.
-             pq_last must equal pq_curr - 1, period.
-          3. Height consistency — re-sync from DB first (stale in-memory state after
-             gunicorn worker restart), then require block_height == chain_height.
-          4. Parent hash       — must match current chain tip exactly.
-          5. Transaction integrity — every tx must have a non-empty tx_id and amount >= 0.
-        """
+        """Validate and accept a block into the chain."""
         with self.lock:
             try:
-                # ═════════════════════════════════════════════════════════════════
-                # VALIDATION 1: W-STATE FIDELITY
-                # Exactly what the miner sent. 0.0 = oracle not fetched = reject.
-                # ═════════════════════════════════════════════════════════════════
-                w_fidelity = float(qblock.w_state_fidelity)
-                if w_fidelity < 0.70:
-                    logger.warning(
-                        f"[LATTICE] ❌ Block {qblock.block_height} REJECTED: "
-                        f"w_state_fidelity={w_fidelity:.4f} < 0.70"
-                    )
+                h  = qblock.block_height
+                wf = float(qblock.w_state_fidelity)
+                pc = int(qblock.pq_curr)
+                pl = int(qblock.pq_last)
+
+                # V1: fidelity
+                if wf < 0.70:
+                    logger.warning(f"[LATTICE] ❌ h={h} REJECTED fidelity={wf:.4f} < 0.70")
                     return False
 
-                # ═════════════════════════════════════════════════════════════════
-                # VALIDATION 2: PQ FIELD CONSISTENCY
-                # Exactly what the miner sent. pq_last must equal pq_curr - 1.
-                # ═════════════════════════════════════════════════════════════════
-                pq_curr = int(qblock.pq_curr)
-                pq_last = int(qblock.pq_last)
-                if pq_last != pq_curr - 1:
-                    logger.warning(
-                        f"[LATTICE] ❌ Block {qblock.block_height} REJECTED: "
-                        f"pq_last={pq_last} != pq_curr-1={pq_curr - 1}"
-                    )
+                # V2: pq invariant
+                if pl != pc - 1:
+                    logger.warning(f"[LATTICE] ❌ h={h} REJECTED pq_last={pl} != pq_curr-1={pc-1}")
                     return False
 
-                # ═════════════════════════════════════════════════════════════════
-                # VALIDATION 3: HEIGHT CONSISTENCY
-                # Re-sync from DB before checking — guards against stale in-memory
-                # chain_height after a gunicorn worker restart.
-                # ═════════════════════════════════════════════════════════════════
+                # V3+V4: re-sync height and tip hash from DB, then validate.
+                # Critical: when only genesis (height=0) exists in DB, the parent
+                # for h=1 is '0'*64 (null hash), NOT the genesis block's own hash.
+                # submit_block also uses '0'*64 as tip_hash when db_tip.height==0.
                 if self.db is not None:
                     try:
                         rows = self.db.execute_fetch_all(
@@ -2818,73 +2782,57 @@ class BlockManager:
                             "ORDER BY block_height DESC LIMIT 1"
                         )
                         if rows:
-                            db_tip_h    = int(rows[0]['block_height'])
-                            db_tip_hash = str(rows[0]['block_hash'])
-                            if self.chain_height != db_tip_h + 1:
+                            db_h    = int(rows[0]['block_height'])
+                            db_hash = str(rows[0]['block_hash'])
+                            # When only genesis (height=0) is in DB, the expected
+                            # parent for the next block is the null hash, matching
+                            # what submit_block and the miner both use.
+                            if db_h == 0:
+                                expected_tip = '0' * 64
+                            else:
+                                expected_tip = db_hash
+                            if self.chain_height != db_h + 1 or self.current_block_hash != expected_tip:
                                 logger.info(
-                                    f"[LATTICE] chain_height resync: "
-                                    f"{self.chain_height} → {db_tip_h + 1} (DB tip h={db_tip_h})"
+                                    f"[LATTICE] resync: chain_h={self.chain_height}→{db_h+1} "
+                                    f"tip={self.current_block_hash[:12]}→{expected_tip[:12]}"
                                 )
-                                self.chain_height       = db_tip_h + 1
-                                self.current_block_hash = db_tip_hash
-                    except Exception as _sync_err:
-                        logger.warning(f"[LATTICE] DB resync failed: {_sync_err}")
+                                self.chain_height       = db_h + 1
+                                self.current_block_hash = expected_tip
+                    except Exception as e:
+                        logger.warning(f"[LATTICE] DB resync error: {e}")
 
-                if qblock.block_height != self.chain_height:
+                if h != self.chain_height:
                     logger.warning(
-                        f"[LATTICE] ❌ Block {qblock.block_height} REJECTED: "
-                        f"height={qblock.block_height} != expected={self.chain_height}"
+                        f"[LATTICE] ❌ h={h} REJECTED height={h} != expected={self.chain_height}"
                     )
                     return False
 
-                # ═════════════════════════════════════════════════════════════════
-                # VALIDATION 4: PARENT HASH LINKAGE
-                # ═════════════════════════════════════════════════════════════════
                 if qblock.parent_hash != self.current_block_hash:
                     logger.warning(
-                        f"[LATTICE] ❌ Block {qblock.block_height} REJECTED: "
+                        f"[LATTICE] ❌ h={h} REJECTED "
                         f"parent={qblock.parent_hash[:16]}… != tip={self.current_block_hash[:16]}…"
                     )
                     return False
 
-                # ═════════════════════════════════════════════════════════════════
-                # VALIDATION 5: TRANSACTION INTEGRITY
-                # ═════════════════════════════════════════════════════════════════
+                # V5: transactions
                 for tx in qblock.transactions:
-                    if not tx.tx_id:
-                        logger.warning(
-                            f"[LATTICE] ❌ Block {qblock.block_height} REJECTED: tx missing tx_id"
-                        )
+                    if not getattr(tx, 'tx_id', None):
+                        logger.warning(f"[LATTICE] ❌ h={h} REJECTED tx missing tx_id")
                         return False
-                    if tx.amount < 0:
-                        logger.warning(
-                            f"[LATTICE] ❌ Block {qblock.block_height} REJECTED: "
-                            f"tx {tx.tx_id[:16]} amount={tx.amount} < 0"
-                        )
+                    if getattr(tx, 'amount', 0) < 0:
+                        logger.warning(f"[LATTICE] ❌ h={h} REJECTED tx amount < 0")
                         return False
 
-                # ═════════════════════════════════════════════════════════════════
-                # ACCEPT
-                # ═════════════════════════════════════════════════════════════════
-                self.block_by_height[qblock.block_height] = qblock
+                self.block_by_height[h] = qblock
                 self.sealed_blocks.append(qblock)
-                self.chain_height       = qblock.block_height + 1
+                self.chain_height       = h + 1
                 self.current_block_hash = qblock.block_hash
                 self.blocks_sealed      += 1
-
-                logger.info(
-                    f"[LATTICE] ✅ Block {qblock.block_height} ACCEPTED "
-                    f"F={w_fidelity:.4f} pq={pq_curr}/{pq_last} "
-                    f"txs={len(qblock.transactions)}"
-                )
+                logger.info(f"[LATTICE] ✅ h={h} ACCEPTED F={wf:.4f} pq={pc}/{pl} txs={len(qblock.transactions)}")
                 return True
 
-            except Exception as validation_err:
-                logger.error(
-                    f"[LATTICE] ❌ Block validation exception: "
-                    f"{type(validation_err).__name__}: {validation_err}",
-                    exc_info=True
-                )
+            except Exception as e:
+                logger.error(f"[LATTICE] ❌ add_block exception: {type(e).__name__}: {e}", exc_info=True)
                 return False
     
     def get_chain_stats(self) -> Dict[str, Any]:
