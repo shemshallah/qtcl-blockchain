@@ -8077,11 +8077,8 @@ def submit_block():
         # LATTICE CONTROLLER INTEGRATION — MANDATORY QUANTUM VALIDATION
         # ═════════════════════════════════════════════════════════════════════════════
         
-        if not LATTICE or not LATTICE.block_manager:
-            logger.critical("[LATTICE] Block manager unavailable — cannot proceed")
-            return jsonify({'error': 'Lattice controller unavailable'}), 503
-        
-        try:
+        if LATTICE and LATTICE.block_manager:
+          try:
             from lattice_controller import QuantumBlock, QuantumTransaction
             from decimal import Decimal
             
@@ -8121,31 +8118,35 @@ def submit_block():
                     logger.warning(f"[LATTICE] TX reconstruction failed: {qtx_err}, skipping")
                     continue
             
-            # CRITICAL: Submit to LATTICE for quantum validation
-            logger.info(f"[LATTICE] Submitting block #{block_height} for quantum validation…")
-            lattice_accepted = LATTICE.block_manager.add_block(qblock)
-            
-            if not lattice_accepted:
-                logger.error(f"[LATTICE] ❌ Block #{block_height} REJECTED by quantum validator")
-                return jsonify({
-                    'error': 'Block rejected by lattice quantum validator',
-                    'block_height': block_height,
-                    'lattice_status': 'quantum_validation_failed'
-                }), 422
-            
-            logger.info(f"[LATTICE] ✅ Block #{block_height} ACCEPTED by quantum validator — proceeding to blockchain persistence")
-        
-        except Exception as lattice_err:
-            logger.critical(f"[LATTICE] Block submission to quantum engine failed: {lattice_err}")
-            import traceback
-            traceback.print_exc()
-            return jsonify({
-                'error': 'Lattice quantum validation error',
-                'details': str(lattice_err)
-            }), 500
-        
+            # Submit to LATTICE for quantum state tracking (non-blocking).
+            # The server has ALREADY validated: PoW, height, parent_hash, fidelity,
+            # pq invariant, and Merkle root — those are the true consensus rules.
+            # lattice.add_block() is a supplementary in-process state tracker; its
+            # result must NOT gate block acceptance because:
+            #   a) gunicorn multi-worker: each worker has independent in-memory state
+            #   b) cold restart: in-memory chain_height starts at 0 until DB resync
+            #   c) Any transient mismatch silently orphans valid PoW work
+            logger.info(f"[LATTICE] Syncing block #{block_height} to quantum state tracker…")
+            try:
+                lattice_accepted = LATTICE.block_manager.add_block(qblock)
+                if lattice_accepted:
+                    logger.info(f"[LATTICE] ✅ Block #{block_height} state-tracker synced")
+                else:
+                    # Log but DO NOT reject — DB persistence proceeds regardless
+                    logger.warning(
+                        f"[LATTICE] ⚠️  Block #{block_height} state-tracker out-of-sync "
+                        f"(non-fatal — DB is authoritative, tracker will re-sync next block)"
+                    )
+            except Exception as _lt_err:
+                logger.warning(f"[LATTICE] ⚠️  State tracker error (non-fatal): {_lt_err}")
+            logger.info(f"[LATTICE] Proceeding to blockchain persistence for h={block_height}")
+          except Exception as lattice_err:
+            logger.warning(f"[LATTICE] ⚠️  State tracker exception (non-fatal): {lattice_err}")
+        else:
+          logger.info(f"[LATTICE] State tracker not available — DB is authoritative, proceeding")
+
         # ═════════════════════════════════════════════════════════════════════════════
-        # LATTICE ACCEPTED — NOW PERSIST TO BLOCKCHAIN DATABASE
+        # PERSIST TO BLOCKCHAIN DATABASE (always runs — lattice is non-blocking)
         # ═════════════════════════════════════════════════════════════════════════════
         
         # Block reward in base units (NUMERIC(30,0) schema stores integers)

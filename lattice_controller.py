@@ -2772,9 +2772,8 @@ class BlockManager:
                     return False
 
                 # V3+V4: re-sync height and tip hash from DB, then validate.
-                # Critical: when only genesis (height=0) exists in DB, the parent
-                # for h=1 is '0'*64 (null hash), NOT the genesis block's own hash.
-                # submit_block also uses '0'*64 as tip_hash when db_tip.height==0.
+                # expected_tip is set to in-memory default first; overwritten by DB.
+                expected_tip = self.current_block_hash
                 if self.db is not None:
                     try:
                         rows = self.db.execute_fetch_all(
@@ -2807,10 +2806,14 @@ class BlockManager:
                     )
                     return False
 
-                if qblock.parent_hash != self.current_block_hash:
+                # Use the DB-resynced expected_tip (set above) as the authoritative
+                # parent reference — NOT the stale in-memory current_block_hash which
+                # diverges across gunicorn workers and after restarts.
+                _authoritative_tip = expected_tip if self.db is not None else self.current_block_hash
+                if qblock.parent_hash != _authoritative_tip:
                     logger.warning(
                         f"[LATTICE] ❌ h={h} REJECTED "
-                        f"parent={qblock.parent_hash[:16]}… != tip={self.current_block_hash[:16]}…"
+                        f"parent={qblock.parent_hash[:16]}… != tip={_authoritative_tip[:16]}…"
                     )
                     return False
 
