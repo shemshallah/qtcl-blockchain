@@ -82,10 +82,6 @@ def get_oracle_address_from_registry(oracle_idx: int, role: str, fallback: str =
     
     Returns:
         HLWE address from registry, or fallback if unavailable
-    
-    Example:
-        addr = get_oracle_address_from_registry(1, 'PRIMARY_LATTICE')
-        # Returns: qtcl1primary_lattice_<hash>
     """
     oracle_id = f'oracle_{oracle_idx}'
     
@@ -93,7 +89,6 @@ def get_oracle_address_from_registry(oracle_idx: int, role: str, fallback: str =
         fallback = f'qtcl1{role.lower()}_{oracle_idx:02d}'
     
     try:
-        # Build DB URL from environment
         pooler_host = os.getenv('POOLER_HOST', 'aws-0-us-west-2.pooler.supabase.com')
         pooler_port = int(os.getenv('POOLER_PORT', 6543))
         db_name = os.getenv('POSTGRES_DB', 'postgres')
@@ -315,8 +310,8 @@ def _oracle_qrng_bytes(n: int) -> bytes:
         with _ORACLE_QRNG_LOCK:
             if _ORACLE_QRNG_INSTANCE is None:
                 try:
-                    from qrng_ensemble import QRNGEnsemble
-                    _ORACLE_QRNG_INSTANCE = QRNGEnsemble()
+                    from qrng_ensemble import QuantumEntropyEnsemble
+                    _ORACLE_QRNG_INSTANCE = QuantumEntropyEnsemble()
                     logger.info("[ORACLE] ✅ QRNG ensemble wired — per-call stochastic channels active")
                 except Exception as _qe:
                     logger.warning(f"[ORACLE] QRNG unavailable ({_qe}), using os.urandom")
