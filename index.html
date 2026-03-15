@@ -2,1399 +2,461 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>QTCL — Quantum Temporal Coherence Ledger</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>QTCL &middot; Quantum Temporal Coherence Ledger</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=JetBrains+Mono:wght@300;400;600&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
 <style>
-:root {
-  --void: #03050f;
-  --void2: #070b1a;
-  --void3: #0d1226;
-  --card: #0a0f21;
-  --card2: #0f1530;
-  --border: rgba(0,229,255,0.12);
-  --border-gold: rgba(212,160,23,0.2);
-  --cyan: #00e5ff;
-  --cyan-dim: rgba(0,229,255,0.15);
-  --cyan-glow: rgba(0,229,255,0.4);
-  --gold: #d4a017;
-  --gold-dim: rgba(212,160,23,0.15);
-  --violet: #7b2fff;
-  --violet-dim: rgba(123,47,255,0.15);
-  --green: #00ff9d;
-  --green-dim: rgba(0,255,157,0.12);
-  --red: #ff2d55;
-  --red-dim: rgba(255,45,85,0.15);
-  --text: #c8d4e8;
-  --text-dim: #4a5878;
-  --text-bright: #e8f0ff;
-  --mono: 'JetBrains Mono', monospace;
-  --display: 'Orbitron', sans-serif;
-  --body: 'DM Sans', sans-serif;
-}
 *{margin:0;padding:0;box-sizing:border-box}
-html,body{width:100%;height:100%;overflow:hidden;background:var(--void)}
-body{font-family:var(--body);color:var(--text);display:flex;flex-direction:column}
-
-/* ── SCANLINE OVERLAY ── */
-body::after{
-  content:'';position:fixed;inset:0;pointer-events:none;z-index:9999;
-  background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.04) 2px,rgba(0,0,0,0.04) 4px);
+:root{
+  --bg:#030610;--bg2:#060c1c;--bg3:#0a1228;--card:#080e20;
+  --border:rgba(0,220,255,.10);--border2:rgba(0,220,255,.18);
+  --cyan:#00dcff;--cyan2:rgba(0,220,255,.12);
+  --gold:#d4a020;--gold2:rgba(212,160,32,.12);
+  --violet:#8040ff;--violet2:rgba(128,64,255,.12);
+  --green:#00ff9d;--green2:rgba(0,255,157,.10);
+  --red:#ff3355;--dim:#3a4a68;--text:#bbc8e0;--bright:#e8f0ff;
+  --mono:'JetBrains Mono',monospace;
+  --display:'Orbitron',sans-serif;
+  --body:'DM Sans',sans-serif;
 }
-
-/* ── HEADER ── */
-#header{
+html{font-size:14px;background:var(--bg)}
+body{
+  font-family:var(--body);color:var(--text);background:var(--bg);
+  min-height:100vh;display:flex;flex-direction:column;
+}
+body::before{
+  content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
+  background:repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,.05) 3px,rgba(0,0,0,.05) 4px);
+}
+#hdr{
   display:flex;align-items:center;justify-content:space-between;
-  padding:0 24px;height:56px;flex-shrink:0;
-  background:rgba(3,5,15,0.95);
-  border-bottom:1px solid var(--border);
-  backdrop-filter:blur(12px);
-  position:relative;z-index:100;
+  padding:0 20px;height:52px;background:rgba(3,6,16,.97);
+  border-bottom:1px solid var(--border2);
+  position:sticky;top:0;z-index:100;flex-shrink:0;
 }
-#header::after{
-  content:'';position:absolute;bottom:0;left:0;right:0;height:1px;
-  background:linear-gradient(90deg,transparent,var(--cyan),transparent);
-  opacity:0.6;
+#hdr::after{
+  content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px;
+  background:linear-gradient(90deg,transparent,var(--cyan) 40%,var(--violet) 70%,transparent);opacity:.5;
 }
-.header-brand{display:flex;align-items:center;gap:14px}
-.header-logo{
-  width:36px;height:36px;position:relative;flex-shrink:0;
+.hdr-brand{display:flex;align-items:center;gap:12px}
+#logo-canvas{display:block;flex-shrink:0}
+.hdr-title{font-family:var(--display);font-size:15px;font-weight:900;letter-spacing:4px;color:var(--cyan);text-shadow:0 0 18px rgba(0,220,255,.5)}
+.hdr-sub{font-size:9px;color:var(--dim);letter-spacing:2px;text-transform:uppercase;margin-top:2px}
+.hdr-right{display:flex;align-items:center;gap:20px}
+.hdr-stat{text-align:right}
+.hdr-stat-label{font-size:8px;color:var(--dim);letter-spacing:1px;text-transform:uppercase}
+.hdr-stat-value{font-family:var(--mono);font-size:13px;color:var(--gold);margin-top:2px}
+#conn-pill{
+  display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:9px;
+  letter-spacing:1px;padding:4px 10px;border-radius:20px;
+  background:var(--green2);border:1px solid rgba(0,255,157,.25);color:var(--green);transition:all .3s;
 }
-.header-logo canvas{display:block}
-.brand-text h1{
-  font-family:var(--display);font-size:17px;font-weight:900;
-  letter-spacing:3px;color:var(--cyan);
-  text-shadow:0 0 20px var(--cyan-glow);
+#conn-pill.off{background:rgba(255,51,85,.1);border-color:rgba(255,51,85,.25);color:var(--red)}
+.conn-dot{width:6px;height:6px;border-radius:50%;background:var(--green);animation:pulse 2s infinite;flex-shrink:0}
+#conn-pill.off .conn-dot{background:var(--red);animation:none}
+@keyframes pulse{0%,100%{opacity:1;box-shadow:0 0 6px var(--green)}50%{opacity:.4;box-shadow:none}}
+#hdr-clock{font-family:var(--mono);font-size:10px;color:var(--dim)}
+#page{flex:1;padding:16px 20px 32px;display:flex;flex-direction:column;gap:16px;max-width:1600px;width:100%;margin:0 auto}
+.sec-title{font-family:var(--display);font-size:8px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:var(--dim);margin-bottom:10px}
+.metric-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px}
+.metric-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px 16px;position:relative;overflow:hidden;transition:border-color .2s}
+.metric-card:hover{border-color:var(--border2)}
+.metric-card::after{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--cyan),var(--violet));opacity:.6}
+.metric-card.gold::after{background:linear-gradient(90deg,var(--gold),#ffcf60)}
+.metric-card.violet::after{background:linear-gradient(90deg,var(--violet),var(--cyan))}
+.metric-card.green::after{background:var(--green)}
+.mc-label{font-size:9px;color:var(--dim);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px}
+.mc-value{font-family:var(--mono);font-size:24px;font-weight:600;color:var(--cyan);line-height:1;min-height:28px;transition:color .3s}
+.mc-value.gold{color:var(--gold)}.mc-value.violet{color:var(--violet)}.mc-value.green{color:var(--green)}.mc-value.dim{color:var(--dim)}
+.mc-sub{font-size:9px;color:var(--dim);margin-top:5px;font-family:var(--mono)}
+.mc-bar{height:2px;background:var(--bg3);border-radius:2px;margin-top:8px;overflow:hidden}
+.mc-bar-fill{height:100%;border-radius:2px;background:linear-gradient(90deg,var(--cyan),var(--violet));transition:width .8s ease}
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:900px){.two-col{grid-template-columns:1fr}}
+.panel{background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.panel-hdr{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--border);background:rgba(0,0,0,.2)}
+.panel-hdr-title{font-family:var(--display);font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--dim)}
+.panel-badge{font-family:var(--mono);font-size:8px;letter-spacing:1px;padding:2px 8px;border-radius:3px;background:var(--cyan2);color:var(--cyan);border:1px solid rgba(0,220,255,.2)}
+.panel-badge.gold{background:var(--gold2);color:var(--gold);border-color:rgba(212,160,32,.2)}
+.panel-badge.violet{background:var(--violet2);color:var(--violet);border-color:rgba(128,64,255,.2)}
+.panel-badge.green{background:var(--green2);color:var(--green);border-color:rgba(0,255,157,.2)}
+#disk-canvas,#qwave-canvas{display:block;width:100%}
+#chain-scroll{overflow-x:auto;padding:12px 16px;display:flex;align-items:center;gap:0;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+#chain-scroll::-webkit-scrollbar{height:3px}
+#chain-scroll::-webkit-scrollbar-thumb{background:var(--border)}
+.b-node{flex-shrink:0;display:flex;flex-direction:column;align-items:center}
+.b-conn{width:24px;height:2px;flex-shrink:0;background:var(--border2);position:relative;align-self:center}
+.b-conn::after{content:'';position:absolute;right:-4px;top:-3px;border:4px solid transparent;border-left-color:var(--border2)}
+.b-hex{width:56px;height:56px;display:flex;flex-direction:column;align-items:center;justify-content:center;cursor:pointer;position:relative;transition:transform .2s}
+.b-hex:hover{transform:scale(1.12)}
+.b-hex canvas{position:absolute;inset:0}
+.b-num{font-family:var(--mono);font-size:10px;font-weight:600;color:var(--gold);z-index:1}
+.b-txs{font-family:var(--mono);font-size:8px;color:var(--dim);z-index:1}
+.b-lbl{font-family:var(--mono);font-size:8px;color:var(--dim);margin-top:4px;max-width:56px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center}
+.b-node.fresh .b-hex{animation:bhex .6s cubic-bezier(.34,1.56,.64,1)}
+@keyframes bhex{0%{transform:scale(0);opacity:0}100%{transform:scale(1);opacity:1}}
+.tx-table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11px}
+.tx-table th{font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--dim);padding:8px 14px;border-bottom:1px solid var(--border);text-align:left;background:rgba(0,0,0,.15);font-family:var(--display);font-weight:700}
+.tx-table td{padding:8px 14px;border-bottom:1px solid rgba(0,220,255,.04);color:var(--text)}
+.tx-table tr:hover td{background:var(--cyan2)}
+.tx-table tr.fresh td{animation:txfresh .5s ease-out}
+@keyframes txfresh{0%{background:rgba(0,220,255,.15)}100%{background:transparent}}
+.tx-hash{color:var(--cyan)}.tx-amt{color:var(--green)}.tx-fee{color:var(--dim)}
+.tx-badge{display:inline-block;font-size:8px;padding:2px 7px;border-radius:3px;letter-spacing:.5px;font-family:var(--display)}
+.tx-badge.pending{background:var(--gold2);color:var(--gold)}
+.tx-badge.confirmed{background:var(--green2);color:var(--green)}
+.tx-badge.coinbase{background:var(--violet2);color:var(--violet)}
+.tx-badge.transfer{background:var(--cyan2);color:var(--cyan)}
+.oracle-row{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--border);transition:background .2s}
+.oracle-row:hover{background:rgba(128,64,255,.05)}
+.oracle-row:last-child{border-bottom:none}
+.oracle-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.oracle-dot.on{background:var(--green);box-shadow:0 0 6px var(--green)}
+.oracle-dot.off{background:var(--red)}
+.oracle-name{font-family:var(--mono);font-size:10px;color:var(--bright);flex:1}
+.oracle-role{font-size:8px;color:var(--dim)}
+.oracle-fid{font-family:var(--mono);font-size:11px;color:var(--violet);font-weight:600}
+.noise-row{display:flex;justify-content:space-between;padding:7px 16px;border-bottom:1px solid rgba(0,220,255,.05)}
+.noise-row:last-child{border-bottom:none}
+.noise-k{font-size:9px;color:var(--dim)}.noise-v{font-family:var(--mono);font-size:10px;color:var(--violet)}
+.mermin-display{padding:16px;display:flex;align-items:center;gap:20px}
+.mermin-big{font-family:var(--display);font-size:48px;font-weight:900;line-height:1;flex-shrink:0;transition:color .5s}
+.mermin-big.quantum{color:var(--cyan);text-shadow:0 0 30px rgba(0,220,255,.4)}
+.mermin-big.classical{color:var(--red);text-shadow:0 0 20px rgba(255,51,85,.3)}
+.mermin-info{flex:1;min-width:0}
+.mermin-verdict{font-size:11px;color:var(--bright);font-weight:500;margin-bottom:6px}
+.mermin-sub{font-family:var(--mono);font-size:9px;color:var(--dim);margin-bottom:4px}
+.mermin-bar{height:4px;background:var(--bg3);border-radius:2px;overflow:hidden;margin-top:8px}
+.mermin-bar-fill{height:100%;border-radius:2px;background:linear-gradient(90deg,var(--violet),var(--cyan));transition:width .8s ease}
+.mermin-bar-labels{display:flex;justify-content:space-between;font-family:var(--mono);font-size:8px;color:var(--dim);margin-top:4px}
+.mermin-angles{padding:0 16px 12px;display:flex;flex-wrap:wrap;gap:4px}
+.angle-chip{font-family:var(--mono);font-size:8px;padding:2px 6px;border-radius:3px;background:var(--bg3);color:var(--dim);border:1px solid var(--border)}
+.bloch-strip{display:flex;border-top:1px solid var(--border)}
+.bloch-val{flex:1;padding:10px 14px;border-right:1px solid var(--border);text-align:center}
+.bloch-val:last-child{border-right:none}
+.bloch-label{font-size:8px;color:var(--dim);letter-spacing:1px;text-transform:uppercase;margin-bottom:4px}
+.bloch-num{font-family:var(--mono);font-size:13px;color:var(--violet)}
+#bbar{
+  position:sticky;bottom:0;display:flex;align-items:center;gap:0;height:26px;
+  background:rgba(3,6,16,.98);border-top:1px solid var(--border2);
+  font-family:var(--mono);font-size:9px;overflow:hidden;flex-shrink:0;
 }
-.brand-text p{font-size:9px;color:var(--text-dim);letter-spacing:2px;text-transform:uppercase;margin-top:1px}
-.header-status{display:flex;align-items:center;gap:20px}
-.live-badge{
-  display:flex;align-items:center;gap:7px;
-  font-family:var(--mono);font-size:10px;letter-spacing:1px;color:var(--green);
-}
-.live-dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);animation:livepulse 2s infinite}
-@keyframes livepulse{0%,100%{opacity:1;box-shadow:0 0 8px var(--green)}50%{opacity:0.5;box-shadow:0 0 2px var(--green)}}
-.live-badge.offline .live-dot{background:var(--red);box-shadow:0 0 8px var(--red);animation:none}
-.live-badge.offline{color:var(--red)}
-.header-meta{display:flex;gap:24px}
-.hmeta{text-align:right}
-.hmeta-label{font-size:9px;color:var(--text-dim);letter-spacing:1px;text-transform:uppercase}
-.hmeta-value{font-family:var(--mono);font-size:13px;color:var(--gold);margin-top:1px}
-.header-time{font-family:var(--mono);font-size:11px;color:var(--text-dim)}
-
-/* ── MAIN LAYOUT ── */
-#main{flex:1;display:grid;grid-template-columns:280px 1fr 300px;overflow:hidden;min-height:0}
-
-/* ── LEFT PANEL ── */
-#left{
-  background:var(--void2);
-  border-right:1px solid var(--border);
-  display:flex;flex-direction:column;overflow:hidden;
-}
-
-/* ── CENTER PANEL ── */
-#center{
-  display:flex;flex-direction:column;overflow:hidden;
-  background:var(--void);
-}
-
-/* ── RIGHT PANEL ── */
-#right{
-  background:var(--void2);
-  border-left:1px solid var(--border);
-  display:flex;flex-direction:column;overflow:hidden;
-}
-
-/* ── PANEL HEADER ── */
-.panel-hdr{
-  display:flex;align-items:center;justify-content:space-between;
-  padding:10px 16px;border-bottom:1px solid var(--border);flex-shrink:0;
-}
-.panel-hdr-title{
-  font-family:var(--display);font-size:9px;font-weight:700;
-  letter-spacing:2px;text-transform:uppercase;color:var(--text-dim);
-}
-.panel-hdr-badge{
-  font-family:var(--mono);font-size:9px;
-  padding:2px 8px;border-radius:3px;
-  background:var(--cyan-dim);color:var(--cyan);
-  border:1px solid rgba(0,229,255,0.2);
-}
-.panel-hdr-badge.gold{background:var(--gold-dim);color:var(--gold);border-color:rgba(212,160,23,0.2)}
-.panel-hdr-badge.violet{background:var(--violet-dim);color:var(--violet);border-color:rgba(123,47,255,0.2)}
-.panel-hdr-badge.green{background:var(--green-dim);color:var(--green);border-color:rgba(0,255,157,0.2)}
-
-/* ── METRIC TILES ── */
-.metric-tile{
-  padding:14px 16px;border-bottom:1px solid var(--border);
-  position:relative;overflow:hidden;cursor:default;
-  transition:background 0.2s;
-}
-.metric-tile:hover{background:rgba(0,229,255,0.03)}
-.metric-tile::before{
-  content:'';position:absolute;left:0;top:0;bottom:0;width:2px;
-  background:var(--cyan);opacity:0;transition:opacity 0.3s;
-}
-.metric-tile:hover::before{opacity:0.6}
-.metric-tile.gold-accent::before{background:var(--gold)}
-.metric-tile.violet-accent::before{background:var(--violet)}
-.metric-tile.green-accent::before{background:var(--green)}
-.tile-label{font-size:9px;color:var(--text-dim);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:5px}
-.tile-value{
-  font-family:var(--mono);font-size:22px;font-weight:600;color:var(--cyan);
-  line-height:1;transition:color 0.3s;
-}
-.tile-value.gold{color:var(--gold)}
-.tile-value.violet{color:var(--violet)}
-.tile-value.green{color:var(--green)}
-.tile-value.stale{color:var(--text-dim)}
-.tile-sub{font-family:var(--mono);font-size:10px;color:var(--text-dim);margin-top:4px}
-.tile-delta{font-family:var(--mono);font-size:10px;color:var(--green);margin-top:3px}
-.tile-delta.neg{color:var(--red)}
-.tile-row{display:flex;gap:0;border-bottom:1px solid var(--border)}
-.tile-row .metric-tile{flex:1;border-bottom:none}
-.tile-row .metric-tile+.metric-tile{border-left:1px solid var(--border)}
-.tile-row .tile-value{font-size:18px}
-
-/* ── PROGRESS BAR ── */
-.prog-bar{
-  height:3px;background:var(--void3);border-radius:2px;margin-top:8px;overflow:hidden;
-}
-.prog-fill{
-  height:100%;border-radius:2px;transition:width 0.8s cubic-bezier(0.4,0,0.2,1);
-  background:linear-gradient(90deg,var(--cyan),var(--violet));
-}
-.prog-fill.gold-fill{background:linear-gradient(90deg,var(--gold),#ffcf60)}
-.prog-fill.green-fill{background:linear-gradient(90deg,var(--green),#00ccff)}
-
-/* ── QUANTUM STATE PANEL ── */
-#q-canvas-wrap{
-  padding:12px 16px;border-bottom:1px solid var(--border);flex-shrink:0;
-}
-#q-canvas{display:block;width:100%;border-radius:6px}
-.bloch-row{display:flex;gap:8px;padding:10px 16px;border-bottom:1px solid var(--border);flex-shrink:0}
-.bloch-val{flex:1;text-align:center}
-.bloch-val .label{font-size:8px;color:var(--text-dim);letter-spacing:1px;text-transform:uppercase;margin-bottom:3px}
-.bloch-val .val{font-family:var(--mono);font-size:12px;color:var(--violet)}
-
-/* ── SCROLLABLE SECTIONS ── */
-.scroll-area{flex:1;overflow-y:auto;min-height:0}
-.scroll-area::-webkit-scrollbar{width:3px}
-.scroll-area::-webkit-scrollbar-track{background:transparent}
-.scroll-area::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
-
-/* ── POINCARÉ DISK ── */
-#disk-section{
-  flex:1;position:relative;overflow:hidden;
-  display:flex;align-items:center;justify-content:center;
-  min-height:0;
-}
-#disk-canvas{display:block}
-.disk-overlay{
-  position:absolute;inset:0;pointer-events:none;
-  background:radial-gradient(ellipse at center,transparent 40%,var(--void) 90%);
-}
-.disk-info{
-  position:absolute;top:12px;left:16px;
-  font-family:var(--mono);font-size:10px;color:var(--text-dim);
-  display:flex;flex-direction:column;gap:4px;
-}
-.disk-info span{color:var(--cyan)}
-.disk-legend{
-  position:absolute;bottom:12px;right:16px;
-  display:flex;flex-direction:column;gap:4px;align-items:flex-end;
-}
-.legend-item{display:flex;align-items:center;gap:6px;font-size:9px;color:var(--text-dim)}
-.legend-dot{width:8px;height:8px;border-radius:50%}
-
-/* ── CHAIN STREAM ── */
-#chain-section{
-  height:140px;flex-shrink:0;
-  border-top:1px solid var(--border);
-  position:relative;overflow:hidden;
-  background:var(--void2);
-}
-.chain-hdr{
-  position:absolute;top:0;left:0;right:0;
-  display:flex;align-items:center;justify-content:space-between;
-  padding:8px 16px;border-bottom:1px solid var(--border);
-  background:rgba(7,11,26,0.9);z-index:10;
-}
-.chain-hdr-title{font-family:var(--display);font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--text-dim)}
-#chain-stream{
-  position:absolute;top:37px;bottom:0;left:0;right:0;
-  overflow-x:auto;overflow-y:hidden;display:flex;align-items:center;
-  padding:0 20px;gap:0;
-}
-#chain-stream::-webkit-scrollbar{height:3px}
-#chain-stream::-webkit-scrollbar-track{background:transparent}
-#chain-stream::-webkit-scrollbar-thumb{background:var(--border)}
-.block-node{
-  flex-shrink:0;position:relative;
-  width:80px;
-  display:flex;flex-direction:column;align-items:center;
-}
-.block-connector{
-  width:28px;height:2px;flex-shrink:0;
-  background:linear-gradient(90deg,var(--cyan-dim),var(--cyan-dim));
-  position:relative;
-}
-.block-connector::after{
-  content:'';position:absolute;right:-4px;top:-3px;
-  border-left:6px solid var(--cyan-dim);
-  border-top:4px solid transparent;border-bottom:4px solid transparent;
-}
-.block-hex{
-  width:60px;height:60px;position:relative;
-  display:flex;flex-direction:column;align-items:center;justify-content:center;
-  cursor:pointer;transition:transform 0.2s;
-}
-.block-hex:hover{transform:scale(1.1)}
-.block-hex canvas{position:absolute;inset:0}
-.block-num{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--gold);z-index:1;text-align:center}
-.block-txs{font-family:var(--mono);font-size:8px;color:var(--text-dim);z-index:1;text-align:center;margin-top:1px}
-.block-label{font-family:var(--mono);font-size:8px;color:var(--text-dim);margin-top:4px;text-align:center;max-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.block-node.fresh .block-hex{animation:blockAppear 0.6s cubic-bezier(0.34,1.56,0.64,1)}
-@keyframes blockAppear{0%{transform:scale(0);opacity:0}100%{transform:scale(1);opacity:1}}
-
-/* ── TX FEED ── */
-.tx-row{
-  display:flex;align-items:center;gap:12px;
-  padding:9px 16px;border-bottom:1px solid var(--border);
-  font-family:var(--mono);font-size:10px;
-  transition:background 0.2s;cursor:default;
-}
-.tx-row:hover{background:var(--cyan-dim)}
-.tx-row.fresh{animation:txFresh 0.5s ease-out}
-@keyframes txFresh{0%{background:rgba(0,229,255,0.15)}100%{background:transparent}}
-.tx-icon{
-  width:22px;height:22px;border-radius:4px;flex-shrink:0;
-  display:flex;align-items:center;justify-content:center;
-  font-size:10px;
-}
-.tx-icon.transfer{background:var(--cyan-dim);color:var(--cyan)}
-.tx-icon.coinbase{background:var(--gold-dim);color:var(--gold)}
-.tx-hash{color:var(--cyan);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.tx-amount{color:var(--green);white-space:nowrap}
-.tx-fee{color:var(--text-dim);font-size:9px;white-space:nowrap}
-.tx-status{
-  font-size:8px;padding:2px 6px;border-radius:2px;white-space:nowrap;
-}
-.tx-status.pending{background:var(--gold-dim);color:var(--gold)}
-.tx-status.confirmed{background:var(--green-dim);color:var(--green)}
-
-/* ── ORACLE GRID ── */
-.oracle-grid{display:flex;flex-direction:column;gap:0}
-.oracle-row{
-  display:flex;align-items:center;gap:12px;
-  padding:10px 16px;border-bottom:1px solid var(--border);
-  transition:background 0.2s;
-}
-.oracle-row:hover{background:rgba(123,47,255,0.05)}
-.oracle-indicator{
-  width:8px;height:8px;border-radius:50%;flex-shrink:0;
-  transition:all 0.3s;
-}
-.oracle-indicator.active{background:var(--green);box-shadow:0 0 6px var(--green)}
-.oracle-indicator.warning{background:var(--gold);box-shadow:0 0 6px var(--gold)}
-.oracle-indicator.offline{background:var(--red);animation:none}
-.oracle-name{font-family:var(--mono);font-size:10px;color:var(--text);flex:1}
-.oracle-role{font-size:8px;color:var(--text-dim);letter-spacing:0.5px}
-.oracle-fid{font-family:var(--mono);font-size:11px;color:var(--violet)}
-
-/* ── MEMPOOL VIZ ── */
-.mempool-bar-wrap{padding:12px 16px;border-bottom:1px solid var(--border)}
-.mempool-bar-label{display:flex;justify-content:space-between;margin-bottom:6px}
-.mempool-bar-label span{font-size:9px;color:var(--text-dim)}
-.fee-histogram{display:flex;gap:2px;height:40px;align-items:flex-end}
-.fee-bucket{
-  flex:1;background:var(--violet-dim);border-radius:2px 2px 0 0;
-  border:1px solid rgba(123,47,255,0.2);transition:height 0.5s;
-  cursor:pointer;position:relative;
-}
-.fee-bucket:hover{background:var(--violet-dim);border-color:var(--violet)}
-.fee-bucket::after{
-  content:attr(data-tip);
-  position:absolute;bottom:calc(100% + 4px);left:50%;transform:translateX(-50%);
-  background:var(--card2);border:1px solid var(--border);
-  font-family:var(--mono);font-size:8px;color:var(--text);
-  padding:2px 6px;border-radius:3px;white-space:nowrap;
-  opacity:0;pointer-events:none;transition:opacity 0.2s;
-}
-.fee-bucket:hover::after{opacity:1}
-
-/* ── PEERS ── */
-.peer-item{
-  display:flex;align-items:center;gap:10px;
-  padding:8px 16px;border-bottom:1px solid var(--border);font-size:10px;
-}
-.peer-dot{width:6px;height:6px;border-radius:50%;background:var(--green);flex-shrink:0}
-.peer-dot.slow{background:var(--gold)}
-.peer-id{font-family:var(--mono);color:var(--cyan);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.peer-lat{font-family:var(--mono);font-size:9px;color:var(--text-dim)}
-.peer-height{font-family:var(--mono);font-size:9px;color:var(--gold)}
-
-/* ── SECTION SCROLL WRAPPER ── */
-.section-wrap{display:flex;flex-direction:column;border-bottom:1px solid var(--border)}
-.section-scroll{overflow-y:auto;max-height:200px}
-.section-scroll::-webkit-scrollbar{width:3px}
-.section-scroll::-webkit-scrollbar-thumb{background:var(--border)}
-
-/* ── NOISE BATH PANEL ── */
-.noise-row{display:flex;justify-content:space-between;align-items:center;padding:7px 16px;border-bottom:1px solid rgba(0,229,255,0.06)}
-.noise-key{font-size:9px;color:var(--text-dim);letter-spacing:1px}
-.noise-val{font-family:var(--mono);font-size:10px;color:var(--violet)}
-
-/* ── BOTTOM BAR ── */
-#bottom-bar{
-  height:28px;flex-shrink:0;
-  background:rgba(3,5,15,0.98);border-top:1px solid var(--border);
-  display:flex;align-items:center;padding:0 16px;gap:24px;
-  font-family:var(--mono);font-size:9px;overflow:hidden;
-}
-.bbar-item{display:flex;align-items:center;gap:6px;white-space:nowrap;color:var(--text-dim)}
-.bbar-item .v{color:var(--cyan)}
-.bbar-item .vg{color:var(--green)}
-.bbar-item .vr{color:var(--red)}
-.bbar-item .vy{color:var(--gold)}
-.bbar-sep{color:var(--border);font-size:14px;opacity:0.4}
-#bbar-scroll{flex:1;overflow:hidden;white-space:nowrap;position:relative}
-#bbar-ticker{display:inline-block;animation:ticker 30s linear infinite}
-@keyframes ticker{0%{transform:translateX(100%)}100%{transform:translateX(-100%)}}
-
-/* ── ANIMATIONS ── */
-.flash-cyan{animation:flashCyan 0.4s ease-out}
-@keyframes flashCyan{0%{color:var(--cyan);text-shadow:0 0 10px var(--cyan)}100%{color:inherit;text-shadow:none}}
-
-/* ── TOOLTIP ── */
-.qtip{position:relative}
-.qtip::after{
-  content:attr(data-tip);position:absolute;bottom:calc(100%+4px);left:50%;
-  transform:translateX(-50%);white-space:nowrap;
-  background:var(--card2);border:1px solid var(--border);
-  font-size:9px;color:var(--text);padding:3px 8px;border-radius:3px;
-  opacity:0;pointer-events:none;transition:opacity 0.2s;z-index:1000;
-}
-.qtip:hover::after{opacity:1}
-
-/* ── LOADING SPINNER ── */
-.loading-shimmer{
-  background:linear-gradient(90deg,var(--void3) 25%,var(--card) 50%,var(--void3) 75%);
-  background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:3px;
-}
-@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+.bb-item{display:flex;align-items:center;gap:5px;padding:0 12px;white-space:nowrap;border-right:1px solid var(--border)}
+.bb-lbl{color:var(--dim)}.bb-val{color:var(--cyan)}.bb-val.g{color:var(--green)}.bb-val.y{color:var(--gold)}
+#bb-ticker-wrap{flex:1;overflow:hidden;position:relative}
+#bb-ticker{display:inline-block;animation:ticker 35s linear infinite;white-space:nowrap;color:var(--dim);padding-left:100%}
+@keyframes ticker{0%{transform:translateX(0)}100%{transform:translateX(-100%)}}
+#bb-update{padding:0 10px;white-space:nowrap;color:var(--dim);border-left:1px solid var(--border)}
+.scroll-y{overflow-y:auto;max-height:280px;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+.scroll-y::-webkit-scrollbar{width:3px}
+.scroll-y::-webkit-scrollbar-thumb{background:var(--border)}
+.flash{animation:flash .4s ease-out}
+@keyframes flash{0%{color:var(--cyan);text-shadow:0 0 12px var(--cyan)}100%{}}
+.empty-state{padding:24px;text-align:center;font-size:11px;color:var(--dim)}
 </style>
 </head>
 <body>
-
-<!-- HEADER -->
-<header id="header">
-  <div class="header-brand">
-    <div class="header-logo"><canvas id="logo-canvas" width="36" height="36"></canvas></div>
-    <div class="brand-text">
-      <h1>QTCL</h1>
-      <p>Quantum Temporal Coherence Ledger · Explorer v3.0</p>
+<header id="hdr">
+  <div class="hdr-brand">
+    <canvas id="logo-canvas" width="36" height="36"></canvas>
+    <div>
+      <div class="hdr-title">QTCL</div>
+      <div class="hdr-sub">Quantum Temporal Coherence Ledger &middot; Explorer</div>
     </div>
   </div>
-  <div class="header-status">
-    <div class="live-badge" id="live-badge">
-      <span class="live-dot" id="live-dot"></span>
-      <span id="live-label">CONNECTING</span>
-    </div>
-    <div class="header-meta">
-      <div class="hmeta">
-        <div class="hmeta-label">Block Height</div>
-        <div class="hmeta-value" id="hdr-height">—</div>
-      </div>
-      <div class="hmeta">
-        <div class="hmeta-label">W-State Fidelity</div>
-        <div class="hmeta-value" id="hdr-fidelity">—</div>
-      </div>
-      <div class="hmeta">
-        <div class="hmeta-label">Mempool</div>
-        <div class="hmeta-value" id="hdr-mempool">—</div>
-      </div>
-    </div>
-    <div class="header-time" id="header-clock">—</div>
+  <div class="hdr-right">
+    <div class="hdr-stat"><div class="hdr-stat-label">Height</div><div class="hdr-stat-value" id="hdr-h">&mdash;</div></div>
+    <div class="hdr-stat"><div class="hdr-stat-label">W-Fidelity</div><div class="hdr-stat-value" id="hdr-f">&mdash;</div></div>
+    <div class="hdr-stat"><div class="hdr-stat-label">Mempool</div><div class="hdr-stat-value" id="hdr-m">&mdash;</div></div>
+    <div id="conn-pill"><span class="conn-dot"></span><span id="conn-txt">CONNECTING</span></div>
+    <div id="hdr-clock"></div>
   </div>
 </header>
-
-<!-- MAIN -->
-<div id="main">
-
-  <!-- LEFT PANEL: CHAIN + QUANTUM METRICS -->
-  <div id="left">
-
-    <div class="panel-hdr">
-      <span class="panel-hdr-title">Chain Metrics</span>
-      <span class="panel-hdr-badge gold" id="chain-status-badge">LIVE</span>
+<div id="page">
+  <div>
+    <div class="sec-title">Chain Metrics</div>
+    <div class="metric-grid">
+      <div class="metric-card gold"><div class="mc-label">Block Height</div><div class="mc-value gold dim" id="m-height">&mdash;</div><div class="mc-sub" id="m-hash-short">hash: &mdash;</div></div>
+      <div class="metric-card"><div class="mc-label">W-State Fidelity</div><div class="mc-value dim" id="m-fid">&mdash;</div><div class="mc-bar"><div class="mc-bar-fill" id="m-fid-bar" style="width:0"></div></div><div class="mc-sub" id="m-fid-sub">quantum confidence</div></div>
+      <div class="metric-card violet"><div class="mc-label">Coherence</div><div class="mc-value violet dim" id="m-coh">&mdash;</div><div class="mc-bar"><div class="mc-bar-fill" id="m-coh-bar" style="width:0;background:linear-gradient(90deg,var(--violet),var(--cyan))"></div></div></div>
+      <div class="metric-card green"><div class="mc-label">Avg Block Time</div><div class="mc-value green dim" id="m-btime">&mdash;</div><div class="mc-sub">seconds</div></div>
+      <div class="metric-card"><div class="mc-label">Total Transactions</div><div class="mc-value dim" id="m-txcount">&mdash;</div><div class="mc-sub">on-chain</div></div>
+      <div class="metric-card"><div class="mc-label">Difficulty</div><div class="mc-value dim" id="m-diff">&mdash;</div><div class="mc-sub">leading hex zeros</div></div>
+      <div class="metric-card"><div class="mc-label">Purity</div><div class="mc-value violet dim" id="m-purity">&mdash;</div><div class="mc-sub" id="m-negat">negativity: &mdash;</div></div>
+      <div class="metric-card"><div class="mc-label">QFI</div><div class="mc-value dim" id="m-qfi">&mdash;</div><div class="mc-sub" id="m-discord">discord: &mdash;</div></div>
     </div>
-
-    <div class="tile-row">
-      <div class="metric-tile gold-accent">
-        <div class="tile-label">Height</div>
-        <div class="tile-value gold stale" id="m-height">—</div>
-        <div class="tile-sub">blocks sealed</div>
-      </div>
-      <div class="metric-tile">
-        <div class="tile-label">Transactions</div>
-        <div class="tile-value stale" id="m-txs">—</div>
-        <div class="tile-sub">total on-chain</div>
-      </div>
-    </div>
-
-    <div class="tile-row">
-      <div class="metric-tile">
-        <div class="tile-label">Difficulty</div>
-        <div class="tile-value stale" id="m-diff">—</div>
-        <div class="tile-sub">leading zeros</div>
-      </div>
-      <div class="metric-tile green-accent">
-        <div class="tile-label">Block Time</div>
-        <div class="tile-value green stale" id="m-btime">—</div>
-        <div class="tile-sub">avg seconds</div>
+  </div>
+  <div class="two-col">
+    <div class="panel">
+      <div class="panel-hdr"><span class="panel-hdr-title">Poincare Lattice Field</span><span class="panel-badge violet" id="disk-badge">pq &mdash;</span></div>
+      <canvas id="disk-canvas" height="300"></canvas>
+      <div class="bloch-strip">
+        <div class="bloch-val"><div class="bloch-label">|W3| Fidelity</div><div class="bloch-num" id="b-fid">&mdash;</div></div>
+        <div class="bloch-val"><div class="bloch-label">Entanglement</div><div class="bloch-num" id="b-ent">&mdash;</div></div>
+        <div class="bloch-val"><div class="bloch-label">Concurrence</div><div class="bloch-num" id="b-conc">&mdash;</div></div>
+        <div class="bloch-val"><div class="bloch-label">Tele-Fidelity</div><div class="bloch-num" id="b-tele">&mdash;</div></div>
       </div>
     </div>
-
-    <div class="metric-tile">
-      <div class="tile-label">Latest Block Hash</div>
-      <div class="tile-value stale" id="m-hash" style="font-size:11px;word-break:break-all;color:var(--cyan)">—</div>
-      <div class="prog-bar"><div class="prog-fill" id="hash-prog" style="width:0%"></div></div>
-    </div>
-
-    <div class="metric-tile">
-      <div class="tile-label">Temporal Coherence</div>
-      <div class="tile-value violet stale" id="m-coherence">—</div>
-      <div class="prog-bar"><div class="prog-fill" id="coh-prog" style="width:0%"></div></div>
-      <div class="tile-sub" id="m-coherence-trend">—</div>
-    </div>
-
-    <div class="panel-hdr" style="margin-top:0">
-      <span class="panel-hdr-title">Quantum State</span>
-      <span class="panel-hdr-badge violet" id="q-cycle-badge">cycle —</span>
-    </div>
-
-    <div id="q-canvas-wrap">
-      <canvas id="q-canvas" height="120"></canvas>
-    </div>
-
-    <div class="bloch-row">
-      <div class="bloch-val">
-        <div class="label">|W₃⟩ Fidelity</div>
-        <div class="val" id="q-fid" style="color:var(--cyan);font-size:14px">—</div>
+    <div class="panel">
+      <div class="panel-hdr"><span class="panel-hdr-title">Quantum State Waveform</span><span class="panel-badge" id="q-cycle">cycle &mdash;</span></div>
+      <canvas id="qwave-canvas" height="160"></canvas>
+      <div class="panel-hdr"><span class="panel-hdr-title">Mermin Inequality Test</span><span class="panel-badge" id="mermin-badge">M &mdash;</span></div>
+      <div class="mermin-display">
+        <div class="mermin-big classical" id="mermin-M">&mdash;</div>
+        <div class="mermin-info">
+          <div class="mermin-verdict" id="mermin-verdict">Awaiting oracle measurement&hellip;</div>
+          <div class="mermin-sub">Classical bound: 2.0 &middot; W-max: 3.046 &middot; GHZ-max: 4.0</div>
+          <div class="mermin-bar"><div class="mermin-bar-fill" id="mermin-bar" style="width:0"></div></div>
+          <div class="mermin-bar-labels"><span>0</span><span>2.0</span><span>3.046</span><span>4.0</span></div>
+        </div>
       </div>
-      <div class="bloch-val">
-        <div class="label">Purity</div>
-        <div class="val" id="q-purity">—</div>
-      </div>
-      <div class="bloch-val">
-        <div class="label">Negativity</div>
-        <div class="val" id="q-neg">—</div>
-      </div>
-      <div class="bloch-val">
-        <div class="label">QFI</div>
-        <div class="val" id="q-qfi">—</div>
-      </div>
-    </div>
-
-    <div class="scroll-area">
-      <!-- Noise bath params -->
-      <div class="panel-hdr">
-        <span class="panel-hdr-title">Noise Bath Parameters</span>
-        <span class="panel-hdr-badge">GKSL</span>
-      </div>
-      <div id="noise-params">
-        <div class="noise-row"><span class="noise-key">γ amplitude</span><span class="noise-val" id="nb-gamma-amp">—</span></div>
-        <div class="noise-row"><span class="noise-key">γ dephasing</span><span class="noise-val" id="nb-gamma-phi">—</span></div>
-        <div class="noise-row"><span class="noise-key">Entanglement</span><span class="noise-val" id="nb-entangle">—</span></div>
-        <div class="noise-row"><span class="noise-key">Discord</span><span class="noise-val" id="nb-discord">—</span></div>
-        <div class="noise-row"><span class="noise-key">Concurrence</span><span class="noise-val" id="nb-concur">—</span></div>
-        <div class="noise-row"><span class="noise-key">Tele Fidelity</span><span class="noise-val" id="nb-tele">—</span></div>
-        <div class="noise-row"><span class="noise-key">QRNG Health</span><span class="noise-val" id="nb-qrng">—</span></div>
-        <div class="noise-row"><span class="noise-key">ω (oscillation)</span><span class="noise-val" id="nb-omega">—</span></div>
+      <div class="mermin-angles" id="mermin-angles"></div>
+      <div class="panel-hdr"><span class="panel-hdr-title">GKSL Noise Bath</span><span class="panel-badge">LIVE</span></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr">
+        <div>
+          <div class="noise-row"><span class="noise-k">gamma amplitude</span><span class="noise-v" id="nb-ga">&mdash;</span></div>
+          <div class="noise-row"><span class="noise-k">gamma dephasing</span><span class="noise-v" id="nb-gp">&mdash;</span></div>
+          <div class="noise-row"><span class="noise-k">omega oscillation</span><span class="noise-v" id="nb-om">&mdash;</span></div>
+          <div class="noise-row"><span class="noise-k">QRNG health</span><span class="noise-v" id="nb-qrng">&mdash;</span></div>
+        </div>
+        <div>
+          <div class="noise-row"><span class="noise-k">Discord</span><span class="noise-v" id="nb-disc">&mdash;</span></div>
+          <div class="noise-row"><span class="noise-k">OU memory</span><span class="noise-v" id="nb-ou">&mdash;</span></div>
+          <div class="noise-row"><span class="noise-k">Phase drift</span><span class="noise-v" id="nb-pd">&mdash;</span></div>
+          <div class="noise-row"><span class="noise-k">Sector occ.</span><span class="noise-v" id="nb-so">&mdash;</span></div>
+        </div>
       </div>
     </div>
   </div>
-
-  <!-- CENTER PANEL: POINCARÉ DISK + CHAIN STREAM -->
-  <div id="center">
-
-    <div class="panel-hdr">
-      <span class="panel-hdr-title">Poincaré Lattice Field — Hyperbolic Geometry</span>
-      <span class="panel-hdr-badge violet" id="disk-stats">pq_curr: — / pq_last: —</span>
-    </div>
-
-    <div id="disk-section">
-      <canvas id="disk-canvas"></canvas>
-      <div class="disk-overlay"></div>
-      <div class="disk-info">
-        <div>height <span id="di-height">—</span></div>
-        <div>coherence <span id="di-coh">—</span></div>
-        <div>entropy <span id="di-ent">—</span></div>
-        <div>revivals <span id="di-rev" style="color:var(--violet)">—</span></div>
-      </div>
-      <div class="disk-legend">
-        <div class="legend-item"><div class="legend-dot" style="background:var(--cyan)"></div> Lattice nodes</div>
-        <div class="legend-item"><div class="legend-dot" style="background:var(--gold)"></div> Block events</div>
-        <div class="legend-item"><div class="legend-dot" style="background:var(--violet)"></div> W-state paths</div>
-        <div class="legend-item"><div class="legend-dot" style="background:var(--green)"></div> Active oracle</div>
-      </div>
-    </div>
-
-    <!-- CHAIN STREAM -->
-    <div id="chain-section">
-      <div class="chain-hdr">
-        <span class="chain-hdr-title">⛓ Block Chain — Live Feed</span>
-        <span class="panel-hdr-badge gold" id="chain-count">0 blocks</span>
-      </div>
-      <div id="chain-stream"></div>
-    </div>
-
+  <div class="panel">
+    <div class="panel-hdr"><span class="panel-hdr-title">Block Stream &mdash; Live</span><span class="panel-badge gold" id="chain-count">0 blocks</span></div>
+    <div id="chain-scroll"></div>
   </div>
-
-  <!-- RIGHT PANEL: TRANSACTIONS + ORACLES + PEERS -->
-  <div id="right">
-
-    <!-- MEMPOOL -->
-    <div class="panel-hdr">
-      <span class="panel-hdr-title">Mempool</span>
-      <span class="panel-hdr-badge" id="mempool-count">0 pending</span>
+  <div class="two-col">
+    <div class="panel">
+      <div class="panel-hdr"><span class="panel-hdr-title">Recent Transactions</span><span class="panel-badge green" id="tx-badge">0 txs</span></div>
+      <div class="scroll-y"><table class="tx-table"><thead><tr><th>Type</th><th>Hash</th><th>Amount</th><th>Fee</th><th>Status</th></tr></thead><tbody id="tx-tbody"><tr><td colspan="5" class="empty-state">Loading transactions&hellip;</td></tr></tbody></table></div>
     </div>
-
-    <div class="mempool-bar-wrap">
-      <div class="mempool-bar-label">
-        <span>Fee Distribution</span>
-        <span id="mempool-fee-est">est. —</span>
-      </div>
-      <div class="fee-histogram" id="fee-histogram">
-        <div class="fee-bucket" style="height:10%"></div>
-        <div class="fee-bucket" style="height:20%"></div>
-        <div class="fee-bucket" style="height:40%"></div>
-        <div class="fee-bucket" style="height:80%"></div>
-        <div class="fee-bucket" style="height:100%"></div>
-        <div class="fee-bucket" style="height:60%"></div>
-        <div class="fee-bucket" style="height:30%"></div>
-        <div class="fee-bucket" style="height:15%"></div>
-        <div class="fee-bucket" style="height:10%"></div>
-        <div class="fee-bucket" style="height:5%"></div>
+    <div class="panel">
+      <div class="panel-hdr"><span class="panel-hdr-title">Oracle Network</span><span class="panel-badge violet">3-of-5 Byzantine</span></div>
+      <div id="oracle-list"><div class="empty-state">Loading&hellip;</div></div>
+      <div class="panel-hdr"><span class="panel-hdr-title">Validation Status</span><span class="panel-badge green" id="val-badge">&mdash;</span></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr">
+        <div style="padding:12px 14px;border-right:1px solid var(--border)"><div class="mc-label" style="margin-bottom:4px">Quantum</div><div class="mc-value dim" id="v-q" style="font-size:11px;word-break:break-all">&mdash;</div></div>
+        <div style="padding:12px 14px;border-right:1px solid var(--border)"><div class="mc-label" style="margin-bottom:4px">PQ-Lattice</div><div class="mc-value dim" id="v-pq" style="font-size:11px">&mdash;</div></div>
+        <div style="padding:12px 14px"><div class="mc-label" style="margin-bottom:4px">Consensus</div><div class="mc-value dim" id="v-oc" style="font-size:11px">&mdash;</div></div>
       </div>
     </div>
-
-    <div class="tile-row" style="border-bottom:1px solid var(--border)">
-      <div class="metric-tile" style="border-bottom:none">
-        <div class="tile-label">Pending TXs</div>
-        <div class="tile-value stale" id="mp-pending">—</div>
-      </div>
-      <div class="metric-tile" style="border-bottom:none">
-        <div class="tile-label">Min Fee Rate</div>
-        <div class="tile-value violet stale" id="mp-fee-rate">—</div>
-      </div>
-    </div>
-
-    <!-- TRANSACTIONS FEED -->
-    <div class="panel-hdr">
-      <span class="panel-hdr-title">Recent Transactions</span>
-      <span class="panel-hdr-badge green" id="tx-count-badge">0 txs</span>
-    </div>
-
-    <div class="section-scroll" id="tx-feed" style="max-height:220px">
-      <!-- populated by JS -->
-    </div>
-
-    <!-- ORACLE NETWORK -->
-    <div class="panel-hdr">
-      <span class="panel-hdr-title">Oracle Network</span>
-      <span class="panel-hdr-badge violet" id="consensus-badge">3-of-5</span>
-    </div>
-
-    <div class="oracle-grid" id="oracle-grid">
-      <div class="oracle-row"><div class="oracle-indicator" style="background:var(--text-dim)"></div><div style="flex:1"><div class="oracle-name">ORACLE_1 · PRIMARY</div><div class="oracle-role">Initializing…</div></div><div class="oracle-fid">—</div></div>
-      <div class="oracle-row"><div class="oracle-indicator" style="background:var(--text-dim)"></div><div style="flex:1"><div class="oracle-name">ORACLE_2 · SECONDARY</div><div class="oracle-role">Initializing…</div></div><div class="oracle-fid">—</div></div>
-      <div class="oracle-row"><div class="oracle-indicator" style="background:var(--text-dim)"></div><div style="flex:1"><div class="oracle-name">ORACLE_3 · VALIDATION</div><div class="oracle-role">Initializing…</div></div><div class="oracle-fid">—</div></div>
-      <div class="oracle-row"><div class="oracle-indicator" style="background:var(--text-dim)"></div><div style="flex:1"><div class="oracle-name">ORACLE_4 · ARBITER</div><div class="oracle-role">Initializing…</div></div><div class="oracle-fid">—</div></div>
-      <div class="oracle-row"><div class="oracle-indicator" style="background:var(--text-dim)"></div><div style="flex:1"><div class="oracle-name">ORACLE_5 · METRICS</div><div class="oracle-role">Initializing…</div></div><div class="oracle-fid">—</div></div>
-    </div>
-
-    <!-- PEERS -->
-    <div class="panel-hdr">
-      <span class="panel-hdr-title">P2P Peers</span>
-      <span class="panel-hdr-badge" id="peer-count-badge">0 peers</span>
-    </div>
-
-    <div class="section-scroll" id="peer-list" style="max-height:120px">
-      <div class="peer-item"><div class="peer-dot" style="background:var(--text-dim)"></div><span class="peer-id" style="color:var(--text-dim)">No peers connected</span></div>
-    </div>
-
-    <!-- VALIDATION STATUS -->
-    <div style="margin-top:auto;border-top:1px solid var(--border)">
-      <div class="panel-hdr">
-        <span class="panel-hdr-title">Validation Status</span>
-        <span class="panel-hdr-badge green" id="val-badge">—</span>
-      </div>
-      <div class="tile-row">
-        <div class="metric-tile" style="border-bottom:none;padding:10px 14px">
-          <div class="tile-label">Quantum</div>
-          <div class="tile-value stale" id="v-quantum" style="font-size:11px">—</div>
-        </div>
-        <div class="metric-tile" style="border-bottom:none;padding:10px 14px">
-          <div class="tile-label">PQ-Lattice</div>
-          <div class="tile-value stale" id="v-pq" style="font-size:11px">—</div>
-        </div>
-        <div class="metric-tile" style="border-bottom:none;padding:10px 14px">
-          <div class="tile-label">Oracle Con.</div>
-          <div class="tile-value stale" id="v-oracle" style="font-size:11px">—</div>
-        </div>
-      </div>
-    </div>
-
   </div>
 </div>
-
-<!-- BOTTOM BAR -->
-<div id="bottom-bar">
-  <div class="bbar-item">NET <span class="v" id="bb-net">QTCL-1</span></div>
-  <div class="bbar-sep">|</div>
-  <div class="bbar-item">PEERS <span class="vg" id="bb-peers">—</span></div>
-  <div class="bbar-sep">|</div>
-  <div class="bbar-item">HASHRATE <span class="v" id="bb-hr">—</span></div>
-  <div class="bbar-sep">|</div>
-  <div class="bbar-item">ENTROPY <span class="v" id="bb-entropy">—</span></div>
-  <div class="bbar-sep">|</div>
-  <div class="bbar-item">T₁ <span class="vy" id="bb-t1">100ms</span></div>
-  <div class="bbar-sep">|</div>
-  <div class="bbar-item">T₂ <span class="vy" id="bb-t2">50ms</span></div>
-  <div class="bbar-sep">|</div>
-  <div id="bbar-scroll" style="flex:1">
-    <span id="bbar-ticker">⚛ QTCL — Post-quantum blockchain — HLWE cryptography — W-state entangled mining — 5-oracle Byzantine consensus — Poincaré disk topology</span>
-  </div>
-  <div class="bbar-sep">|</div>
-  <div class="bbar-item" id="bb-last-update" style="color:var(--text-dim)">Updated —</div>
+<div id="bbar">
+  <div class="bb-item"><span class="bb-lbl">NET</span><span class="bb-val">QTCL-1</span></div>
+  <div class="bb-item"><span class="bb-lbl">DIFF</span><span class="bb-val y" id="bb-diff">&mdash;</span></div>
+  <div class="bb-item"><span class="bb-lbl">PEERS</span><span class="bb-val g" id="bb-peers">&mdash;</span></div>
+  <div class="bb-item"><span class="bb-lbl">ENTROPY</span><span class="bb-val" id="bb-ent">&mdash;</span></div>
+  <div id="bb-ticker-wrap"><span id="bb-ticker">QTCL &mdash; Post-quantum blockchain &middot; HLWE cryptography &middot; W-state entangled mining &middot; 5-oracle Byzantine consensus &middot; Mermin inequality certified &middot; Poincare disk topology &middot; Memory-hard QTCL-PoW &middot; QRNG-seeded oracles</span></div>
+  <div id="bb-update">Updated &mdash;</div>
 </div>
-
 <script>
-// ═══════════════════════════════════════════════════════════════════════
-// QTCL EXPLORER — MUSEUM GRADE FRONTEND
-// ═══════════════════════════════════════════════════════════════════════
-const BASE = window.location.origin;
-let _state = { height:0, fidelity:0.9, coherence:0.85, peers:0, mempool:0, btime:0 };
-let _blocks = [];
-let _txs = [];
-let _fidelityHistory = Array(60).fill(0.9);
-let _revivals = 0;
-let _lastUpdate = 0;
-let _diskParticles = [];
-let _diskBlocks = [];
-let _diskPhase = 0;
-let _quantumSparkle = [];
+'use strict';
+var BASE=window.location.origin;
+var S={height:0,fidelity:.9,coherence:.85,purity:.8,diff:5,btime:0,txcount:0,mempool:0,peers:0,cycle:0,qfi:0,discord:0,entanglement:0,concurrence:0,negat:0,gamma1:.04,gammaphi:.12,omega:.5,qrng:1,ou:.03,pd:.02,sector:.9,tele:.6,validQ:'--',validPQ:'--',validOC:false,hash:'',mermin:null};
+var blocks=[],txs=[],fidHist=[],diskPhase=0,diskBlocks=[],wavePhase=0,lastUpdate=0;
+for(var _i=0;_i<80;_i++)fidHist.push(.9);
 
-// ── CLOCK ──
-function updateClock(){
-  const n=new Date();
-  document.getElementById('header-clock').textContent =
-    n.toISOString().replace('T',' ').substring(0,19)+' UTC';
-}
-setInterval(updateClock,1000);updateClock();
+function tick(){var d=new Date();document.getElementById('hdr-clock').textContent=d.toISOString().replace('T',' ').slice(0,19)+' UTC';}
+setInterval(tick,1000);tick();
 
-// ── LOGO ──
-(function logoAnim(){
-  const c=document.getElementById('logo-canvas'),ctx=c.getContext('2d');
-  let t=0;
-  function draw(){
+(function(){
+  var c=document.getElementById('logo-canvas'),ctx=c.getContext('2d'),t=0;
+  (function fr(){
     ctx.clearRect(0,0,36,36);
-    const cx=18,cy=18,r=13;
-    ctx.strokeStyle='rgba(0,229,255,0.25)';ctx.lineWidth=1;
-    ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.stroke();
-    // W-state 3 nodes
-    for(let i=0;i<3;i++){
-      const a=(i*Math.PI*2/3)+t;
-      const x=cx+r*Math.cos(a),y=cy+r*Math.sin(a);
-      const x2=cx+r*0.4*Math.cos(a+0.3),y2=cy+r*0.4*Math.sin(a+0.3);
-      ctx.strokeStyle=`rgba(0,229,255,${0.4+0.3*Math.sin(t*2+i)})`;
-      ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(x,y);ctx.stroke();
-      ctx.fillStyle=`rgba(0,229,255,${0.7+0.3*Math.sin(t*3+i)})`;
-      ctx.beginPath();ctx.arc(x,y,2.5,0,Math.PI*2);ctx.fill();
-    }
-    ctx.fillStyle='rgba(212,160,23,0.9)';
-    ctx.beginPath();ctx.arc(cx,cy,3,0,Math.PI*2);ctx.fill();
-    t+=0.02;requestAnimationFrame(draw);
-  }
-  draw();
+    var cx=18,cy=18,r=13;
+    ctx.strokeStyle='rgba(0,220,255,.2)';ctx.lineWidth=1;ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.stroke();
+    for(var i=0;i<3;i++){var a=i*Math.PI*2/3+t,x=cx+r*Math.cos(a),y=cy+r*Math.sin(a);ctx.strokeStyle='rgba(0,220,255,'+(0.35+0.25*Math.sin(t*2+i))+')';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(x,y);ctx.stroke();ctx.fillStyle='rgba(0,220,255,'+(0.7+0.3*Math.sin(t*3+i))+')';ctx.beginPath();ctx.arc(x,y,2.5,0,Math.PI*2);ctx.fill();}
+    ctx.fillStyle='rgba(212,160,32,.95)';ctx.beginPath();ctx.arc(cx,cy,3,0,Math.PI*2);ctx.fill();
+    t+=0.02;requestAnimationFrame(fr);
+  })();
 })();
 
-// ═══════════════════════════════════════════════════════════════════════
-// POINCARÉ DISK RENDERER
-// ═══════════════════════════════════════════════════════════════════════
-const diskCanvas=document.getElementById('disk-canvas');
-const diskCtx=diskCanvas.getContext('2d');
+var diskC=document.getElementById('disk-canvas'),diskCtx=diskC.getContext('2d');
+function sizeDisk(){diskC.width=diskC.parentElement.clientWidth;}
+window.addEventListener('resize',sizeDisk);sizeDisk();
 
-function resizeDisk(){
-  const sec=document.getElementById('disk-section');
-  const w=sec.clientWidth,h=sec.clientHeight;
-  diskCanvas.width=w;diskCanvas.height=h;
-}
-window.addEventListener('resize',resizeDisk);
-resizeDisk();
+var particles=[];
+(function(){for(var i=0;i<70;i++)particles.push({r:Math.random()*.82,a:Math.random()*Math.PI*2,dr:(Math.random()-.5)*.0008,da:(Math.random()-.5)*.003,sz:Math.random()*1.4+.3,al:Math.random()*.35+.08,type:Math.floor(Math.random()*3)});})();
 
-// Init particles
-function initDiskParticles(){
-  _diskParticles=[];
-  for(let i=0;i<80;i++){
-    const r=Math.random()*0.85;
-    const a=Math.random()*Math.PI*2;
-    _diskParticles.push({
-      r,a,dr:(Math.random()-0.5)*0.001,da:(Math.random()-0.5)*0.003,
-      size:Math.random()*1.5+0.3,
-      alpha:Math.random()*0.4+0.1,
-      type:Math.floor(Math.random()*3), // 0=cyan 1=violet 2=gold
-    });
-  }
-}
-initDiskParticles();
-
-function poincareToXY(r,a,cx,cy,R){
-  return{x:cx+r*R*Math.cos(a),y:cy+r*R*Math.sin(a)};
-}
-
-// Geodesic line in Poincaré disk (simplified: straight for now with curvature effect)
-function drawGeodesic(ctx,r1,a1,r2,a2,cx,cy,R,color,alpha){
-  const p1=poincareToXY(r1,a1,cx,cy,R);
-  const p2=poincareToXY(r2,a2,cx,cy,R);
-  // Compute midpoint curved toward center (Poincaré-like)
-  const mr=(r1+r2)/2*0.7;
-  const ma=(a1+a2)/2;
-  const mp=poincareToXY(mr,ma,cx,cy,R);
-  ctx.beginPath();
-  ctx.moveTo(p1.x,p1.y);
-  ctx.quadraticCurveTo(mp.x,mp.y,p2.x,p2.y);
-  ctx.strokeStyle=color;ctx.globalAlpha=alpha;ctx.lineWidth=0.8;ctx.stroke();
-  ctx.globalAlpha=1;
-}
-
-function renderDisk(){
-  const w=diskCanvas.width,h=diskCanvas.height;
-  const cx=w/2,cy=h/2,R=Math.min(w,h)/2-20;
+function drawDisk(){
+  var w=diskC.width,h=diskC.height,cx=w/2,cy=h/2,R=Math.min(w,h)/2-16;
   diskCtx.clearRect(0,0,w,h);
-
-  // Background field
-  const grd=diskCtx.createRadialGradient(cx,cy,0,cx,cy,R);
-  grd.addColorStop(0,'rgba(7,11,26,0.98)');
-  grd.addColorStop(0.6,'rgba(5,8,20,0.95)');
-  grd.addColorStop(1,'rgba(3,5,15,0.9)');
-  diskCtx.fillStyle=grd;
-  diskCtx.beginPath();diskCtx.arc(cx,cy,R,0,Math.PI*2);diskCtx.fill();
-
-  // Poincaré circles (geodesics / constant curvature lines)
-  for(let i=1;i<=5;i++){
-    diskCtx.beginPath();
-    diskCtx.arc(cx,cy,R*(i/5),0,Math.PI*2);
-    diskCtx.strokeStyle=`rgba(0,229,255,${0.04+i*0.01})`;
-    diskCtx.lineWidth=0.5;diskCtx.stroke();
-  }
-  // Radial lines
-  for(let i=0;i<12;i++){
-    const a=i*Math.PI/6+_diskPhase*0.05;
-    diskCtx.beginPath();
-    diskCtx.moveTo(cx,cy);
-    diskCtx.lineTo(cx+R*Math.cos(a),cy+R*Math.sin(a));
-    diskCtx.strokeStyle='rgba(0,229,255,0.04)';diskCtx.lineWidth=0.5;diskCtx.stroke();
-  }
-
-  // W-state triangle (tripartite entanglement)
-  const wFid=_state.fidelity||0.9;
-  const wR=R*0.5*wFid;
-  const wNodes=[];
-  for(let i=0;i<3;i++){
-    const a=(i*Math.PI*2/3)+_diskPhase;
-    wNodes.push({x:cx+wR*Math.cos(a),y:cy+wR*Math.sin(a)});
-  }
-  // Triangle
-  diskCtx.beginPath();
-  diskCtx.moveTo(wNodes[0].x,wNodes[0].y);
-  diskCtx.lineTo(wNodes[1].x,wNodes[1].y);
-  diskCtx.lineTo(wNodes[2].x,wNodes[2].y);
-  diskCtx.closePath();
-  diskCtx.strokeStyle=`rgba(123,47,255,${0.3+0.2*Math.sin(_diskPhase*2)})`;
-  diskCtx.lineWidth=1.5;diskCtx.stroke();
-  diskCtx.fillStyle='rgba(123,47,255,0.04)';diskCtx.fill();
-  // W-state nodes
-  wNodes.forEach((n,i)=>{
-    const pulse=0.5+0.5*Math.sin(_diskPhase*3+i*Math.PI*2/3);
-    diskCtx.beginPath();diskCtx.arc(n.x,n.y,4+pulse*2,0,Math.PI*2);
-    diskCtx.fillStyle=`rgba(123,47,255,${0.7+0.3*pulse})`;diskCtx.fill();
-    // Glow
-    const g=diskCtx.createRadialGradient(n.x,n.y,0,n.x,n.y,12);
-    g.addColorStop(0,`rgba(123,47,255,${0.4*pulse})`);
-    g.addColorStop(1,'rgba(123,47,255,0)');
-    diskCtx.beginPath();diskCtx.arc(n.x,n.y,12,0,Math.PI*2);
-    diskCtx.fillStyle=g;diskCtx.fill();
-  });
-
-  // Oracle geodesics (5 oracle paths)
-  const oracleColors=['#00e5ff','#7b2fff','#d4a017','#00ff9d','#ff2d55'];
-  for(let i=0;i<5;i++){
-    const r1=R*0.3,a1=(i*Math.PI*2/5)+_diskPhase*0.3;
-    const r2=R*0.7,a2=a1+Math.PI/5+Math.sin(_diskPhase+i)*0.3;
-    const p1={x:cx+r1*Math.cos(a1)/R*R,y:cy+r1*Math.sin(a1)/R*R};
-    const p2={x:cx+r2*Math.cos(a2)/R*R,y:cy+r2*Math.sin(a2)/R*R};
-    const mp={x:(p1.x+p2.x)/2+(cy-p1.y)*0.1,y:(p1.y+p2.y)/2+(p1.x-cx)*0.1};
-    diskCtx.beginPath();diskCtx.moveTo(p1.x,p1.y);
-    diskCtx.quadraticCurveTo(mp.x,mp.y,p2.x,p2.y);
-    diskCtx.strokeStyle=oracleColors[i];diskCtx.globalAlpha=0.12;diskCtx.lineWidth=1;diskCtx.stroke();
-    diskCtx.globalAlpha=1;
-    // Node dot
-    diskCtx.beginPath();diskCtx.arc(p2.x,p2.y,3,0,Math.PI*2);
-    diskCtx.fillStyle=oracleColors[i];diskCtx.globalAlpha=0.5;diskCtx.fill();
-    diskCtx.globalAlpha=1;
-  }
-
-  // Particles
-  _diskParticles.forEach(p=>{
-    p.r=Math.max(0,Math.min(0.95,p.r+p.dr));
-    p.a+=p.da;
-    if(p.r<0.05||p.r>0.92){p.dr*=-1}
-    const pos=poincareToXY(p.r,p.a,cx,cy,R);
-    const colors=['rgba(0,229,255,','rgba(123,47,255,','rgba(212,160,23,'];
-    diskCtx.beginPath();diskCtx.arc(pos.x,pos.y,p.size,0,Math.PI*2);
-    diskCtx.fillStyle=colors[p.type]+p.alpha+')';diskCtx.fill();
-  });
-
-  // Block events on disk
-  _diskBlocks.forEach((b,i)=>{
-    b.age+=0.02;
-    if(b.age>1)return;
-    const pos=poincareToXY(b.r,b.a,cx,cy,R);
-    const sz=6*(1-b.age);
-    diskCtx.beginPath();diskCtx.arc(pos.x,pos.y,sz,0,Math.PI*2);
-    diskCtx.strokeStyle=`rgba(212,160,23,${1-b.age})`;diskCtx.lineWidth=1.5;diskCtx.stroke();
-    diskCtx.beginPath();diskCtx.arc(pos.x,pos.y,sz*2.5,0,Math.PI*2);
-    diskCtx.strokeStyle=`rgba(212,160,23,${(1-b.age)*0.3})`;diskCtx.lineWidth=1;diskCtx.stroke();
-  });
-  _diskBlocks=_diskBlocks.filter(b=>b.age<1);
-
-  // Center point (null hash / origin)
-  diskCtx.beginPath();diskCtx.arc(cx,cy,4,0,Math.PI*2);
-  const cg=diskCtx.createRadialGradient(cx,cy,0,cx,cy,8);
-  cg.addColorStop(0,'rgba(212,160,23,1)');cg.addColorStop(1,'rgba(212,160,23,0)');
-  diskCtx.fillStyle=cg;diskCtx.fill();
-
-  // Disk boundary
-  diskCtx.beginPath();diskCtx.arc(cx,cy,R,0,Math.PI*2);
-  diskCtx.strokeStyle='rgba(0,229,255,0.2)';diskCtx.lineWidth=1;diskCtx.stroke();
-
-  _diskPhase+=0.005;
-  requestAnimationFrame(renderDisk);
+  var g=diskCtx.createRadialGradient(cx,cy,0,cx,cy,R);g.addColorStop(0,'rgba(6,12,28,.98)');g.addColorStop(1,'rgba(3,6,16,.9)');diskCtx.fillStyle=g;diskCtx.beginPath();diskCtx.arc(cx,cy,R,0,Math.PI*2);diskCtx.fill();
+  for(var i=1;i<=5;i++){diskCtx.beginPath();diskCtx.arc(cx,cy,R*i/5,0,Math.PI*2);diskCtx.strokeStyle='rgba(0,220,255,'+(0.03+i*.008)+')';diskCtx.lineWidth=.5;diskCtx.stroke();}
+  for(var i=0;i<12;i++){var a=i*Math.PI/6+diskPhase*.04;diskCtx.beginPath();diskCtx.moveTo(cx,cy);diskCtx.lineTo(cx+R*Math.cos(a),cy+R*Math.sin(a));diskCtx.strokeStyle='rgba(0,220,255,.03)';diskCtx.lineWidth=.5;diskCtx.stroke();}
+  var wR=R*.5*Math.max(.5,S.fidelity),wNodes=[];
+  for(var i=0;i<3;i++){var a=i*Math.PI*2/3+diskPhase;wNodes.push({x:cx+wR*Math.cos(a),y:cy+wR*Math.sin(a)});}
+  diskCtx.beginPath();diskCtx.moveTo(wNodes[0].x,wNodes[0].y);diskCtx.lineTo(wNodes[1].x,wNodes[1].y);diskCtx.lineTo(wNodes[2].x,wNodes[2].y);diskCtx.closePath();diskCtx.strokeStyle='rgba(128,64,255,'+(0.25+0.15*Math.sin(diskPhase*2))+')';diskCtx.lineWidth=1.5;diskCtx.stroke();diskCtx.fillStyle='rgba(128,64,255,.04)';diskCtx.fill();
+  wNodes.forEach(function(n,i){var p=.5+.5*Math.sin(diskPhase*3+i*Math.PI*2/3);diskCtx.beginPath();diskCtx.arc(n.x,n.y,3.5+p*2,0,Math.PI*2);diskCtx.fillStyle='rgba(128,64,255,'+(0.7+0.3*p)+')';diskCtx.fill();});
+  var cols=['#00dcff','#8040ff','#d4a020','#00ff9d','#ff3355'];
+  cols.forEach(function(col,i){var r1=R*.3,a1=i*Math.PI*2/5+diskPhase*.25,r2=R*.7,a2=a1+Math.PI/5+Math.sin(diskPhase+i)*.25,p1={x:cx+r1*Math.cos(a1),y:cy+r1*Math.sin(a1)},p2={x:cx+r2*Math.cos(a2),y:cy+r2*Math.sin(a2)},mp={x:(p1.x+p2.x)/2+(cy-p1.y)*.08,y:(p1.y+p2.y)/2+(p1.x-cx)*.08};diskCtx.beginPath();diskCtx.moveTo(p1.x,p1.y);diskCtx.quadraticCurveTo(mp.x,mp.y,p2.x,p2.y);diskCtx.strokeStyle=col;diskCtx.globalAlpha=.10;diskCtx.lineWidth=1;diskCtx.stroke();diskCtx.globalAlpha=1;diskCtx.beginPath();diskCtx.arc(p2.x,p2.y,2.5,0,Math.PI*2);diskCtx.fillStyle=col;diskCtx.globalAlpha=.45;diskCtx.fill();diskCtx.globalAlpha=1;});
+  var pcols=['rgba(0,220,255,','rgba(128,64,255,','rgba(212,160,32,'];
+  particles.forEach(function(p){p.r=Math.max(.02,Math.min(.93,p.r+p.dr));p.a+=p.da;if(p.r<.04||p.r>.91)p.dr*=-1;var px=cx+p.r*R*Math.cos(p.a),py=cy+p.r*R*Math.sin(p.a);diskCtx.beginPath();diskCtx.arc(px,py,p.sz,0,Math.PI*2);diskCtx.fillStyle=pcols[p.type]+p.al+')';diskCtx.fill();});
+  diskBlocks=diskBlocks.filter(function(b){b.age+=.025;if(b.age>=1)return false;var bx=cx+b.r*R*Math.cos(b.a),by=cy+b.r*R*Math.sin(b.a),sz=7*(1-b.age);diskCtx.beginPath();diskCtx.arc(bx,by,sz,0,Math.PI*2);diskCtx.strokeStyle='rgba(212,160,32,'+(1-b.age)+')';diskCtx.lineWidth=1.5;diskCtx.stroke();diskCtx.beginPath();diskCtx.arc(bx,by,sz*2.2,0,Math.PI*2);diskCtx.strokeStyle='rgba(212,160,32,'+((1-b.age)*.25)+')';diskCtx.lineWidth=1;diskCtx.stroke();return true;});
+  diskCtx.beginPath();diskCtx.arc(cx,cy,4,0,Math.PI*2);var cg=diskCtx.createRadialGradient(cx,cy,0,cx,cy,8);cg.addColorStop(0,'rgba(212,160,32,1)');cg.addColorStop(1,'rgba(212,160,32,0)');diskCtx.fillStyle=cg;diskCtx.fill();
+  diskCtx.beginPath();diskCtx.arc(cx,cy,R,0,Math.PI*2);diskCtx.strokeStyle='rgba(0,220,255,.18)';diskCtx.lineWidth=1;diskCtx.stroke();
+  diskPhase+=.005;requestAnimationFrame(drawDisk);
 }
-renderDisk();
+drawDisk();
 
-// ═══════════════════════════════════════════════════════════════════════
-// QUANTUM STATE WAVEFORM
-// ═══════════════════════════════════════════════════════════════════════
-const qCanvas=document.getElementById('q-canvas');
-const qCtx=qCanvas.getContext('2d');
-let _qPhase=0;
+var qwC=document.getElementById('qwave-canvas'),qwCtx=qwC.getContext('2d');
+function sizeQW(){qwC.width=qwC.parentElement.clientWidth;}
+window.addEventListener('resize',sizeQW);sizeQW();
 
-function resizeQCanvas(){
-  const wrap=document.getElementById('q-canvas-wrap');
-  qCanvas.width=wrap.clientWidth-32;qCanvas.height=120;
+function drawQW(){
+  var w=qwC.width,h=qwC.height;
+  qwCtx.clearRect(0,0,w,h);
+  qwCtx.strokeStyle='rgba(0,220,255,.05)';qwCtx.lineWidth=.5;
+  for(var y=h*.25;y<h;y+=h*.25){qwCtx.beginPath();qwCtx.moveTo(0,y);qwCtx.lineTo(w,y);qwCtx.stroke();}
+  if(fidHist.length>1){
+    var step=w/(fidHist.length-1);
+    var grd=qwCtx.createLinearGradient(0,0,0,h);grd.addColorStop(0,'rgba(0,220,255,.28)');grd.addColorStop(1,'rgba(0,220,255,0)');
+    qwCtx.beginPath();qwCtx.moveTo(0,h*(1-fidHist[0]));
+    for(var i=0;i<fidHist.length;i++)qwCtx.lineTo(i*step,h*(1-Math.max(0,Math.min(1,fidHist[i]))));
+    qwCtx.lineTo(w,h);qwCtx.lineTo(0,h);qwCtx.closePath();qwCtx.fillStyle=grd;qwCtx.fill();
+    qwCtx.beginPath();qwCtx.moveTo(0,h*(1-fidHist[0]));
+    for(var i=0;i<fidHist.length;i++)qwCtx.lineTo(i*step,h*(1-Math.max(0,Math.min(1,fidHist[i]))));
+    qwCtx.strokeStyle='rgba(0,220,255,.75)';qwCtx.lineWidth=1.5;qwCtx.stroke();
+  }
+  qwCtx.beginPath();
+  for(var x=0;x<w;x++){var t=x/w*Math.PI*5+wavePhase,y=h/2+h*.14*S.coherence*Math.sin(t)*Math.cos(t*.33);x===0?qwCtx.moveTo(x,y):qwCtx.lineTo(x,y);}
+  qwCtx.strokeStyle='rgba(128,64,255,'+(0.2+0.15*S.purity)+')';qwCtx.lineWidth=1;qwCtx.stroke();
+  var ty=h*(1-.7);qwCtx.beginPath();qwCtx.moveTo(0,ty);qwCtx.lineTo(w,ty);qwCtx.strokeStyle='rgba(255,51,85,.2)';qwCtx.lineWidth=.8;qwCtx.setLineDash([3,6]);qwCtx.stroke();qwCtx.setLineDash([]);
+  var cx2=w-3,cy2=h*(1-S.fidelity);qwCtx.beginPath();qwCtx.arc(cx2,cy2,3.5,0,Math.PI*2);qwCtx.fillStyle='#00dcff';qwCtx.fill();
+  wavePhase+=.04;requestAnimationFrame(drawQW);
 }
-window.addEventListener('resize',resizeQCanvas);resizeQCanvas();
+drawQW();
 
-function renderQCanvas(){
-  const w=qCanvas.width,h=qCanvas.height;
-  qCtx.clearRect(0,0,w,h);
-
-  const fid=_state.fidelity||0.9;
-  const coh=_state.coherence||0.85;
-  const purity=_state.purity||0.8;
-
-  // Grid
-  qCtx.strokeStyle='rgba(0,229,255,0.06)';qCtx.lineWidth=0.5;
-  for(let y=0;y<h;y+=h/4){
-    qCtx.beginPath();qCtx.moveTo(0,y);qCtx.lineTo(w,y);qCtx.stroke();
-  }
-
-  // Fidelity waveform (historical)
-  if(_fidelityHistory.length>1){
-    const step=w/(_fidelityHistory.length-1);
-    // Gradient fill
-    const grd=qCtx.createLinearGradient(0,0,0,h);
-    grd.addColorStop(0,'rgba(0,229,255,0.3)');
-    grd.addColorStop(1,'rgba(0,229,255,0)');
-    qCtx.beginPath();
-    qCtx.moveTo(0,h*(1-_fidelityHistory[0]));
-    _fidelityHistory.forEach((v,i)=>{qCtx.lineTo(i*step,h*(1-v))});
-    qCtx.lineTo(w,h);qCtx.lineTo(0,h);qCtx.closePath();
-    qCtx.fillStyle=grd;qCtx.fill();
-    // Line
-    qCtx.beginPath();
-    qCtx.moveTo(0,h*(1-_fidelityHistory[0]));
-    _fidelityHistory.forEach((v,i)=>{qCtx.lineTo(i*step,h*(1-v))});
-    qCtx.strokeStyle='rgba(0,229,255,0.8)';qCtx.lineWidth=1.5;qCtx.stroke();
-  }
-
-  // Coherence oscillation overlay
-  qCtx.beginPath();
-  for(let x=0;x<w;x++){
-    const t=x/w*Math.PI*6+_qPhase;
-    const y=h/2+h*0.15*coh*Math.sin(t)*Math.cos(t*0.3);
-    if(x===0)qCtx.moveTo(x,y);else qCtx.lineTo(x,y);
-  }
-  qCtx.strokeStyle=`rgba(123,47,255,${0.3+0.2*purity})`;qCtx.lineWidth=1;qCtx.stroke();
-
-  // Current fidelity marker
-  const curX=w-2;
-  const curY=h*(1-fid);
-  qCtx.beginPath();qCtx.arc(curX,curY,3,0,Math.PI*2);
-  qCtx.fillStyle='#00e5ff';qCtx.fill();
-  qCtx.beginPath();qCtx.arc(curX,curY,6+Math.sin(_qPhase*4)*2,0,Math.PI*2);
-  qCtx.strokeStyle='rgba(0,229,255,0.4)';qCtx.lineWidth=1;qCtx.stroke();
-
-  // Threshold line at 0.7
-  const thresh=h*(1-0.7);
-  qCtx.beginPath();qCtx.moveTo(0,thresh);qCtx.lineTo(w,thresh);
-  qCtx.strokeStyle='rgba(255,45,85,0.25)';qCtx.lineWidth=0.8;qCtx.setLineDash([3,6]);qCtx.stroke();
-  qCtx.setLineDash([]);
-
-  _qPhase+=0.04;
-  requestAnimationFrame(renderQCanvas);
-}
-renderQCanvas();
-
-// ═══════════════════════════════════════════════════════════════════════
-// BLOCK HEX RENDERER
-// ═══════════════════════════════════════════════════════════════════════
-function drawBlockHex(canvas,fidelity,isFresh){
-  const ctx=canvas.getContext('2d');
-  const w=canvas.width,h=canvas.height;
-  ctx.clearRect(0,0,w,h);
-  const cx=w/2,cy=h/2,r=w/2-3;
-  // Hexagon
-  ctx.beginPath();
-  for(let i=0;i<6;i++){
-    const a=i*Math.PI/3-Math.PI/6;
-    if(i===0)ctx.moveTo(cx+r*Math.cos(a),cy+r*Math.sin(a));
-    else ctx.lineTo(cx+r*Math.cos(a),cy+r*Math.sin(a));
-  }
-  ctx.closePath();
-  const grd=ctx.createRadialGradient(cx,cy,0,cx,cy,r);
-  const col=isFresh?'212,160,23':'0,229,255';
-  grd.addColorStop(0,`rgba(${col},0.15)`);
-  grd.addColorStop(1,`rgba(${col},0.03)`);
-  ctx.fillStyle=grd;ctx.fill();
-  ctx.strokeStyle=`rgba(${col},${isFresh?0.9:0.5})`;ctx.lineWidth=1.5;ctx.stroke();
-  // Fidelity ring
-  if(fidelity>0){
-    ctx.beginPath();ctx.arc(cx,cy,r*0.35,0,Math.PI*2*fidelity);
-    ctx.strokeStyle=`rgba(123,47,255,0.6)`;ctx.lineWidth=2;ctx.stroke();
-  }
+function drawHex(canvas,fidelity,fresh){
+  var ctx=canvas.getContext('2d'),w=canvas.width,h=canvas.height,cx=w/2,cy=h/2,r=w/2-3;
+  ctx.clearRect(0,0,w,h);ctx.beginPath();
+  for(var i=0;i<6;i++){var a=i*Math.PI/3-Math.PI/6;i===0?ctx.moveTo(cx+r*Math.cos(a),cy+r*Math.sin(a)):ctx.lineTo(cx+r*Math.cos(a),cy+r*Math.sin(a));}
+  ctx.closePath();var col=fresh?'212,160,32':'0,220,255';
+  var grd=ctx.createRadialGradient(cx,cy,0,cx,cy,r);grd.addColorStop(0,'rgba('+col+',.14)');grd.addColorStop(1,'rgba('+col+',.03)');ctx.fillStyle=grd;ctx.fill();
+  ctx.strokeStyle='rgba('+col+','+(fresh?.9:.45)+')';ctx.lineWidth=1.5;ctx.stroke();
+  if(fidelity>0){ctx.beginPath();ctx.arc(cx,cy,r*.35,0,Math.PI*2*fidelity);ctx.strokeStyle='rgba(128,64,255,.6)';ctx.lineWidth=2;ctx.stroke();}
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// CHAIN STREAM RENDER
-// ═══════════════════════════════════════════════════════════════════════
-function renderChainStream(blocks){
-  const container=document.getElementById('chain-stream');
-  container.innerHTML='';
-  const display=[...blocks].slice(-16);
-  display.forEach((b,i)=>{
-    const isFresh=(i===display.length-1)&&b._fresh;
-    if(i>0){
-      const conn=document.createElement('div');
-      conn.className='block-connector';
-      container.appendChild(conn);
-    }
-    const node=document.createElement('div');
-    node.className='block-node'+(isFresh?' fresh':'');
-    const hexWrap=document.createElement('div');hexWrap.className='block-hex';
-    const canvas=document.createElement('canvas');
-    canvas.width=60;canvas.height=60;
-    drawBlockHex(canvas,b.fidelity||0.9,isFresh);
-    hexWrap.appendChild(canvas);
-    const num=document.createElement('div');num.className='block-num';num.textContent='#'+b.height;
-    const txs=document.createElement('div');txs.className='block-txs';txs.textContent=(b.tx_count||0)+' txs';
-    hexWrap.appendChild(num);hexWrap.appendChild(txs);
-    const label=document.createElement('div');label.className='block-label';
-    label.textContent=(b.hash||b.block_hash||'').substring(0,12)+'…';
-    node.appendChild(hexWrap);node.appendChild(label);
-    container.appendChild(node);
+function renderChain(){
+  var el=document.getElementById('chain-scroll'),show=blocks.slice(-18);
+  el.innerHTML='';
+  show.forEach(function(b,i){
+    if(i>0){var c=document.createElement('div');c.className='b-conn';el.appendChild(c);}
+    var node=document.createElement('div'),isFresh=i===show.length-1&&b._fresh;
+    node.className='b-node'+(isFresh?' fresh':'');
+    var hex=document.createElement('div');hex.className='b-hex';
+    var cv=document.createElement('canvas');cv.width=56;cv.height=56;drawHex(cv,b.fidelity||.9,isFresh);hex.appendChild(cv);
+    var num=document.createElement('div');num.className='b-num';num.textContent='#'+b.height;
+    var tx=document.createElement('div');tx.className='b-txs';tx.textContent=(b.tx_count||0)+' txs';
+    hex.appendChild(num);hex.appendChild(tx);
+    var lbl=document.createElement('div');lbl.className='b-lbl';lbl.textContent=(b.hash||b.block_hash||'').slice(0,10)+'...';
+    node.appendChild(hex);node.appendChild(lbl);el.appendChild(node);
   });
-  // Scroll to end
-  container.scrollLeft=container.scrollWidth;
+  el.scrollLeft=el.scrollWidth;
   document.getElementById('chain-count').textContent=blocks.length+' blocks';
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// TX FEED RENDER
-// ═══════════════════════════════════════════════════════════════════════
-function renderTxFeed(txs){
-  const feed=document.getElementById('tx-feed');
-  feed.innerHTML='';
-  const items=txs.slice(0,30);
-  items.forEach((tx,i)=>{
-    const row=document.createElement('div');
-    row.className='tx-row'+(i===0&&tx._fresh?' fresh':'');
-    const isCoinbase=(tx.tx_type||'transfer')==='coinbase';
-    row.innerHTML=`
-      <div class="tx-icon ${isCoinbase?'coinbase':'transfer'}">${isCoinbase?'⛏':'↗'}</div>
-      <div class="tx-hash">${(tx.tx_hash||tx.tx_id||'').substring(0,20)}…</div>
-      <div class="tx-amount">${formatQTCL(tx.amount||tx.amount_qtcl)}</div>
-      <div class="tx-fee">${formatQTCL(tx.fee||tx.fee_qtcl||0)}</div>
-      <div class="tx-status ${tx.status||'pending'}">${(tx.status||'pending').toUpperCase()}</div>
-    `;
-    feed.appendChild(row);
-  });
-  document.getElementById('tx-count-badge').textContent=txs.length+' txs';
+function fmt(v){return v==null?'--':parseFloat(v).toFixed(4);}
+function pct(v,mx){return Math.min(100,Math.max(0,v/mx*100))+'%';}
+
+function renderTxs(){
+  var tbody=document.getElementById('tx-tbody');
+  if(!txs.length){tbody.innerHTML='<tr><td colspan="5" class="empty-state">No transactions yet</td></tr>';return;}
+  tbody.innerHTML=txs.slice(0,25).map(function(tx,i){
+    var type=tx.tx_type||'transfer',isCB=type==='coinbase';
+    return '<tr class="'+(i===0&&tx._fresh?'fresh':'')+'"><td><span class="tx-badge '+(isCB?'coinbase':'transfer')+'">'+(type.toUpperCase())+'</span></td><td class="tx-hash">'+((tx.tx_hash||tx.tx_id||'').slice(0,18))+'...</td><td class="tx-amt">'+fmt(tx.amount||tx.amount_qtcl)+' Q</td><td class="tx-fee">'+fmt(tx.fee||tx.fee_qtcl||0)+' Q</td><td><span class="tx-badge '+(tx.status||'pending')+'">'+(tx.status||'pending').toUpperCase()+'</span></td></tr>';
+  }).join('');
+  document.getElementById('tx-badge').textContent=txs.length+' txs';
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// ORACLE GRID RENDER
-// ═══════════════════════════════════════════════════════════════════════
-const ORACLE_DEFS=[
-  {id:'oracle_1',name:'ORACLE_1',role:'PRIMARY_LATTICE'},
-  {id:'oracle_2',name:'ORACLE_2',role:'SECONDARY_LATTICE'},
-  {id:'oracle_3',name:'ORACLE_3',role:'VALIDATION'},
-  {id:'oracle_4',name:'ORACLE_4',role:'ARBITER'},
-  {id:'oracle_5',name:'ORACLE_5',role:'METRICS'},
-];
-function renderOracles(wState){
-  const grid=document.getElementById('oracle-grid');
-  grid.innerHTML='';
-  const peers=wState.peer_oracles||[];
-  ORACLE_DEFS.forEach((o,i)=>{
-    const peer=peers[i]||{};
-    const fid=peer.w3_fidelity||peer.fidelity||(0.85+Math.sin(i)*0.05);
-    const active=fid>0.7;
-    const row=document.createElement('div');row.className='oracle-row';
-    row.innerHTML=`
-      <div class="oracle-indicator ${active?'active':'warning'}"></div>
-      <div style="flex:1">
-        <div class="oracle-name">${o.name}</div>
-        <div class="oracle-role">${o.role} · ${active?'ONLINE':'SYNCING'}</div>
-      </div>
-      <div class="oracle-fid">${fid.toFixed(4)}</div>
-    `;
-    grid.appendChild(row);
-  });
+var ODEFS=[{name:'ORACLE_1',role:'PRIMARY_LATTICE'},{name:'ORACLE_2',role:'SECONDARY_LATTICE'},{name:'ORACLE_3',role:'VALIDATION'},{name:'ORACLE_4',role:'ARBITER'},{name:'ORACLE_5',role:'METRICS'}];
+function renderOracles(peers){
+  document.getElementById('oracle-list').innerHTML=ODEFS.map(function(o,i){
+    var p=(peers||[])[i]||{},fid=p.fidelity||p.w3_fidelity||(S.fidelity*.98+i*.002),on=fid>0.7;
+    return '<div class="oracle-row"><div class="oracle-dot '+(on?'on':'off')+'"></div><div style="flex:1"><div class="oracle-name">'+o.name+'</div><div class="oracle-role">'+o.role+' &middot; '+(on?'ONLINE':'SYNCING')+'</div></div><div class="oracle-fid">'+fid.toFixed(4)+'</div></div>';
+  }).join('');
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// PEER LIST RENDER
-// ═══════════════════════════════════════════════════════════════════════
-function renderPeers(peers){
-  const list=document.getElementById('peer-list');
-  list.innerHTML='';
-  if(!peers||peers.length===0){
-    list.innerHTML='<div class="peer-item"><div class="peer-dot" style="background:var(--text-dim)"></div><span class="peer-id" style="color:var(--text-dim)">No peers</span></div>';
-    return;
-  }
-  peers.slice(0,8).forEach(p=>{
-    const lat=p.latency_ms||p.last_seen_ms||0;
-    const slow=lat>500;
-    const el=document.createElement('div');el.className='peer-item';
-    el.innerHTML=`
-      <div class="peer-dot ${slow?'slow':''}"></div>
-      <span class="peer-id">${(p.peer_id||p.id||'unknown').substring(0,20)}</span>
-      <span class="peer-lat">${lat?lat+'ms':'—'}</span>
-      <span class="peer-height">#${p.block_height||p.height||'?'}</span>
-    `;
-    list.appendChild(el);
-  });
-  document.getElementById('peer-count-badge').textContent=peers.length+' peers';
-  document.getElementById('bb-peers').textContent=peers.length;
+function renderMermin(m){
+  if(!m)return;
+  var M=m.M_value||m.M||0,isQ=m.is_quantum||M>2;
+  var el=document.getElementById('mermin-M');
+  el.textContent=M.toFixed(3);el.className='mermin-big '+(isQ?'quantum':'classical');
+  document.getElementById('mermin-verdict').textContent=m.verdict||'--';
+  document.getElementById('mermin-badge').textContent='M='+M.toFixed(3);
+  document.getElementById('mermin-bar').style.width=Math.min(100,M/4*100)+'%';
+  var angles=m.angle_degrees||[],labels=m.angle_labels||['tA1','fA1','tA2','fA2','tA3','fA3','tB1','fB1','tB2','fB2','tB3','fB3'];
+  document.getElementById('mermin-angles').innerHTML=angles.map(function(a,i){return '<span class="angle-chip">'+(labels[i]||i)+'='+a+'</span>';}).join('');
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// FEE HISTOGRAM RENDER
-// ═══════════════════════════════════════════════════════════════════════
-function renderFeeHistogram(stats){
-  const hist=document.getElementById('fee-histogram');
-  const buckets=hist.querySelectorAll('.fee-bucket');
-  const data=stats.histogram||[];
-  if(data.length>0){
-    const max=Math.max(...data.map(b=>b.count||b||0),1);
-    data.slice(0,10).forEach((b,i)=>{
-      if(buckets[i]){
-        const pct=Math.max(4,((b.count||b||0)/max)*100);
-        buckets[i].style.height=pct+'%';
-        buckets[i].setAttribute('data-tip',`${(b.fee_rate||i).toFixed(2)} sat/vb`);
-      }
-    });
-  }
-  const est=stats.fee_estimate_1b||stats.fee_rate_sat_per_vbyte||0.001;
-  document.getElementById('mempool-fee-est').textContent='est. '+est.toFixed(4)+' sat/vb';
+function setTxt(id,v){var e=document.getElementById(id);if(e){var s=String(v);if(e.textContent!==s){e.textContent=s;e.classList.remove('flash');void e.offsetWidth;e.classList.add('flash');}}}
+
+function updateDOM(){
+  setTxt('hdr-h','#'+S.height);setTxt('hdr-f',(S.fidelity*100).toFixed(2)+'%');setTxt('hdr-m',S.mempool+' tx');
+  setTxt('m-height',S.height);setTxt('m-hash-short','hash: '+String(S.hash||'').slice(0,14)+'...');
+  setTxt('m-fid',(S.fidelity*100).toFixed(2)+'%');document.getElementById('m-fid-bar').style.width=pct(S.fidelity,1);
+  setTxt('m-fid-sub',S.fidelity>=.9?'excellent':S.fidelity>=.75?'good':S.fidelity>=.7?'marginal':'degraded');
+  setTxt('m-coh',(S.coherence*100).toFixed(2)+'%');document.getElementById('m-coh-bar').style.width=pct(S.coherence,1);
+  setTxt('m-btime',S.btime>0?S.btime.toFixed(1)+'s':'--');
+  setTxt('m-txcount',S.txcount);setTxt('m-diff',S.diff);
+  setTxt('m-purity',(S.purity*100).toFixed(2)+'%');setTxt('m-negat','negativity: '+S.negat.toFixed(4));
+  setTxt('m-qfi',S.qfi.toFixed(3));setTxt('m-discord','discord: '+S.discord.toFixed(4));
+  setTxt('b-fid',S.fidelity.toFixed(4));setTxt('b-ent',S.entanglement.toFixed(4));setTxt('b-conc',S.concurrence.toFixed(4));setTxt('b-tele',S.tele.toFixed(4));
+  setTxt('q-cycle','cycle '+S.cycle);setTxt('disk-badge','pq_curr='+S.height);
+  setTxt('nb-ga',S.gamma1.toFixed(4));setTxt('nb-gp',S.gammaphi.toFixed(4));setTxt('nb-om',S.omega.toFixed(4));setTxt('nb-qrng',S.qrng.toFixed(4));
+  setTxt('nb-disc',S.discord.toFixed(4));setTxt('nb-ou',S.ou.toFixed(4));setTxt('nb-pd',S.pd.toFixed(4));setTxt('nb-so',S.sector.toFixed(4));
+  setTxt('v-q',String(S.validQ).replace('_',' ').toUpperCase().slice(0,14));
+  setTxt('v-pq',String(S.validPQ).toUpperCase().slice(0,10));
+  setTxt('v-oc',S.validOC?'YES':'NO');
+  document.getElementById('val-badge').textContent=S.validOC?'CONSENSUS':'PENDING';
+  setTxt('bb-diff',S.diff);setTxt('bb-peers',S.peers);setTxt('bb-ent',S.qrng.toFixed(3));
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// HELPERS
-// ═══════════════════════════════════════════════════════════════════════
-function formatQTCL(v){
-  if(v===undefined||v===null)return'—';
-  return parseFloat(v).toFixed(4)+' Q';
-}
-function setVal(id,val,cls){
-  const el=document.getElementById(id);if(!el)return;
-  el.classList.remove('stale');
-  if(cls)el.className=el.className.replace(/tile-value\S*/,'tile-value')+' '+cls;
-  el.textContent=val;
-  el.classList.add('flash-cyan');
-  setTimeout(()=>el.classList.remove('flash-cyan'),500);
-}
-function pct(v,max){return Math.min(100,Math.max(0,(v/max)*100))+'%'}
-function shimmer(id){
-  const el=document.getElementById(id);
-  if(el&&el.textContent==='—'){el.style.width='60px';el.style.height='22px';el.classList.add('loading-shimmer')}
-}
+async function get(path){try{var r=await fetch(BASE+path,{signal:AbortSignal.timeout(6000)});if(!r.ok)return null;return await r.json();}catch(e){return null;}}
 
-// ═══════════════════════════════════════════════════════════════════════
-// DATA FETCHERS
-// ═══════════════════════════════════════════════════════════════════════
-async function fetchJSON(path){
+async function fetchChain(){var d=await get('/api/chain');if(!d)return;S.height=d.chain_height||0;S.txcount=d.total_transactions||0;S.btime=d.avg_block_seal_time_s||0;S.mempool=d.mempool_size||0;S.hash=d.latest_block_hash||'';S.validQ=d.quantum_validation_status||'--';S.validPQ=d.pq_validation_status||'--';S.validOC=!!d.oracle_consensus_reached;if(d.recent_blocks&&d.recent_blocks.length){d.recent_blocks.forEach(function(b){if(!blocks.find(function(x){return x.height===b.height;})){b._fresh=true;blocks.push(b);diskBlocks.push({r:Math.random()*.72+.1,a:Math.random()*Math.PI*2,age:0});}});blocks=blocks.sort(function(a,b){return a.height-b.height;}).slice(-60);renderChain();}}
+async function fetchWState(){var d=await get('/api/oracle/w-state');if(!d)return;S.fidelity=d.fidelity||d.w3_fidelity||S.fidelity;S.coherence=d.coherence||S.coherence;S.purity=d.purity||S.purity;S.negat=d.negativity||0;S.qfi=d.qfi||0;S.discord=d.discord||0;S.entanglement=d.entanglement||0;S.concurrence=d.concurrence||0;S.tele=d.tele_fidelity||0;S.gamma1=d.gamma1||d.gamma_amp||S.gamma1;S.gammaphi=d.gammaphi||d.gamma_phase||S.gammaphi;S.omega=d.omega||S.omega;S.qrng=d.qrng_health||1;S.ou=d.ou_mem||0;S.pd=d.phase_drift||0;S.sector=d.sector_occ||0;S.cycle=d.cycle||0;fidHist.push(S.fidelity);if(fidHist.length>80)fidHist.shift();renderOracles(d.peer_oracles||[]);if(d.mermin_test||d.bell_test){S.mermin=d.mermin_test||d.bell_test;renderMermin(S.mermin);}}
+async function fetchMempool(){var results=await Promise.all([get('/api/mempool/stats'),get('/api/mempool')]);var stats=results[0],pending=results[1];if(stats)S.mempool=stats.size||0;if(pending&&pending.transactions){var fresh=pending.transactions.filter(function(t){return!txs.find(function(x){return(x.tx_hash||x.tx_id)===(t.tx_hash||t.tx_id);});});fresh.forEach(function(t){t._fresh=true;});txs=fresh.concat(txs).slice(0,100);renderTxs();}}
+async function fetchDiff(){var d=await get('/api/difficulty');if(d)S.diff=d.difficulty_bits||S.diff;}
+async function fetchPeers(){var d=await get('/api/p2p/peers');if(d)S.peers=((d.peers||d.connected_peers)||[]).length;}
+
+function setOnline(ok){var p=document.getElementById('conn-pill'),t=document.getElementById('conn-txt');p.className='conn-pill'+(ok?'':' off');t.textContent=ok?'LIVE':'OFFLINE';}
+
+var refreshing=false;
+async function refresh(){
+  if(refreshing)return;refreshing=true;
   try{
-    const r=await fetch(BASE+path,{signal:AbortSignal.timeout(6000)});
-    if(!r.ok)return null;
-    return await r.json();
-  }catch(e){return null}
+    await Promise.allSettled([fetchChain(),fetchWState(),fetchDiff()]);
+    await Promise.allSettled([fetchMempool(),fetchPeers()]);
+    updateDOM();lastUpdate=Date.now();setOnline(true);
+    document.getElementById('bb-update').textContent='Updated '+new Date().toTimeString().slice(0,8);
+  }catch(e){setOnline(false);}
+  finally{refreshing=false;}
 }
 
-async function refreshChain(){
-  const d=await fetchJSON('/api/chain');
-  if(!d)return;
-  _state.height=d.chain_height||0;
-  _state.coherence=d.temporal_coherence||0;
-  setVal('m-height',d.chain_height||0,'gold');
-  setVal('m-txs',d.total_transactions||0);
-  const btime=d.avg_block_seal_time_s||0;
-  _state.btime=btime;
-  setVal('m-btime',btime>0?btime.toFixed(1)+'s':'—','green');
-  const hash=d.latest_block_hash||'';
-  document.getElementById('m-hash').textContent=hash.substring(0,32)+'…';
-  document.getElementById('hash-prog').style.width=pct(parseInt(hash.substring(0,2),16),255);
-  const coh=d.temporal_coherence||0;
-  setVal('m-coherence',(coh*100).toFixed(2)+'%','violet');
-  document.getElementById('coh-prog').style.width=pct(coh,1);
-  document.getElementById('hdr-height').textContent='#'+_state.height;
-  document.getElementById('hdr-mempool').textContent=(d.mempool_size||d.pending_txs||0)+' tx';
-  // Validation
-  document.getElementById('v-quantum').textContent=(d.quantum_validation_status||'—').replace('_',' ').toUpperCase();
-  document.getElementById('v-quantum').className='tile-value '+(d.quantum_validation_status==='lattice_validated'?'green':'violet');
-  document.getElementById('v-pq').textContent=(d.pq_validation_status||'—').toUpperCase();
-  document.getElementById('v-pq').className='tile-value '+(d.pq_validation_status==='verified'?'green':'gold');
-  const oc=d.oracle_consensus_reached;
-  document.getElementById('v-oracle').textContent=oc?'YES':'NO';
-  document.getElementById('v-oracle').className='tile-value '+(oc?'green':'red');
-  document.getElementById('val-badge').textContent=oc?'CONSENSUS':'PENDING';
-  // Recent blocks → chain stream
-  if(d.recent_blocks&&d.recent_blocks.length>0){
-    const newBlocks=d.recent_blocks;
-    newBlocks.forEach(b=>{
-      if(!_blocks.find(x=>x.height===b.height)){
-        b._fresh=true;
-        _blocks.push(b);
-        // Add disk event
-        _diskBlocks.push({r:Math.random()*0.75+0.1,a:Math.random()*Math.PI*2,age:0});
-      }
-    });
-    _blocks=_blocks.sort((a,b)=>a.height-b.height).slice(-50);
-    renderChainStream(_blocks);
-  }
-  document.getElementById('di-height').textContent='#'+_state.height;
-  document.getElementById('di-coh').textContent=coh.toFixed(4);
-}
+try{
+  var socket=io(BASE,{transports:['websocket','polling'],reconnectionDelay:2500,timeout:8000});
+  socket.on('connect',function(){setOnline(true);refresh();});
+  socket.on('disconnect',function(){setOnline(false);});
+  socket.on('metrics_update',function(d){if(!d)return;if(d.fidelity||d.w3_fidelity){S.fidelity=d.fidelity||d.w3_fidelity||S.fidelity;fidHist.push(S.fidelity);if(fidHist.length>80)fidHist.shift();}if(d.block_height&&parseInt(d.block_height)>S.height){S.height=parseInt(d.block_height);diskBlocks.push({r:Math.random()*.72+.1,a:Math.random()*Math.PI*2,age:0});setTimeout(function(){Promise.allSettled([fetchChain(),fetchMempool()]).then(updateDOM);},400);}if(d.mermin_test||d.bell_test){S.mermin=d.mermin_test||d.bell_test;renderMermin(S.mermin);}updateDOM();});
+  socket.on('new_block',function(d){if(d){var b={height:d.height||d.block_height,hash:d.block_hash||d.hash,tx_count:d.tx_count||0,fidelity:d.w_state_fidelity||.9,_fresh:true};blocks.push(b);blocks=blocks.sort(function(a,b){return a.height-b.height;}).slice(-60);renderChain();diskBlocks.push({r:Math.random()*.72+.1,a:Math.random()*Math.PI*2,age:0});}});
+  socket.on('new_transaction',function(d){if(d){d._fresh=true;txs=[d].concat(txs).slice(0,100);renderTxs();}});
+}catch(e){console.warn('Socket unavailable, polling only');}
 
-async function refreshDifficulty(){
-  const d=await fetchJSON('/api/difficulty');
-  if(!d)return;
-  const diff=d.difficulty||d.current_difficulty||d.difficulty_bits||5;
-  setVal('m-diff',diff);
-}
-
-async function refreshWState(){
-  const d=await fetchJSON('/api/oracle/w-state');
-  if(!d)return;
-  _state.fidelity=d.fidelity||d.w3_fidelity||0.9;
-  _state.purity=d.purity||0.8;
-  _state.coherence=d.coherence||_state.coherence;
-  // Update history
-  _fidelityHistory.push(_state.fidelity);
-  if(_fidelityHistory.length>60)_fidelityHistory.shift();
-  // Header fidelity
-  document.getElementById('hdr-fidelity').textContent=(_state.fidelity*100).toFixed(2)+'%';
-  // Quantum panel
-  document.getElementById('q-fid').textContent=_state.fidelity.toFixed(4);
-  document.getElementById('q-purity').textContent=(d.purity||0).toFixed(4);
-  document.getElementById('q-neg').textContent=(d.negativity||0).toFixed(4);
-  document.getElementById('q-qfi').textContent=(d.qfi||0).toFixed(2);
-  document.getElementById('q-cycle-badge').textContent='cycle '+(d.cycle||0);
-  // Noise bath
-  document.getElementById('nb-gamma-amp').textContent=(d.gamma_amp||d.gamma1||0).toFixed(4);
-  document.getElementById('nb-gamma-phi').textContent=(d.gamma_phase||d.gammaphi||0).toFixed(4);
-  document.getElementById('nb-entangle').textContent=(d.entanglement||0).toFixed(4);
-  document.getElementById('nb-discord').textContent=(d.discord||0).toFixed(4);
-  document.getElementById('nb-concur').textContent=(d.concurrence||0).toFixed(4);
-  document.getElementById('nb-tele').textContent=(d.tele_fidelity||0).toFixed(4);
-  document.getElementById('nb-qrng').textContent=(d.qrng_health||1).toFixed(4);
-  document.getElementById('nb-omega').textContent=(d.omega||0.5).toFixed(4);
-  // Disk info
-  document.getElementById('disk-stats').textContent=`pq_curr: ${d.pq_current||'—'} / pq_last: —`;
-  document.getElementById('di-ent').textContent=(d.entanglement||0).toFixed(4);
-  // Bottom bar
-  document.getElementById('bb-entropy').textContent=(d.qrng_health||1).toFixed(3);
-  // Oracle grid
-  renderOracles(d);
-}
-
-async function refreshMempool(){
-  const [stats,txs,feeEst]=await Promise.all([
-    fetchJSON('/api/mempool/stats'),
-    fetchJSON('/api/mempool'),
-    fetchJSON('/api/mempool/fee_estimate'),
-  ]);
-  if(stats){
-    document.getElementById('mempool-count').textContent=(stats.size||0)+' pending';
-    document.getElementById('mp-pending').textContent=(stats.size||0);
-    document.getElementById('mp-fee-rate').textContent=(stats.min_fee_rate||0).toFixed(4);
-    document.getElementById('hdr-mempool').textContent=(stats.size||0)+' tx';
-    renderFeeHistogram(stats);
-  }
-  if(txs&&txs.transactions){
-    const fresh=txs.transactions.filter(t=>!_txs.find(x=>(x.tx_hash||x.tx_id)===(t.tx_hash||t.tx_id)));
-    fresh.forEach(t=>{t._fresh=true});
-    _txs=[...fresh,..._txs].slice(0,100);
-    renderTxFeed(_txs);
-  }
-  if(feeEst){renderFeeHistogram(feeEst)}
-}
-
-async function refreshLattice(){
-  const d=await fetchJSON('/api/lattice/metrics');
-  if(!d)return;
-  const cur=d.current||{};
-  _revivals=(d.statistics||{}).entanglement_revivals_total||_revivals;
-  document.getElementById('di-rev').textContent=_revivals;
-  const trend=(d.statistics||{}).coherence_trend||'—';
-  document.getElementById('m-coherence-trend').textContent='Trend: '+trend;
-}
-
-async function refreshPeers(){
-  const d=await fetchJSON('/api/p2p/peers');
-  if(!d)return;
-  const list=d.peers||d.connected_peers||[];
-  _state.peers=list.length;
-  renderPeers(list);
-}
-
-async function refreshStats(){
-  const d=await fetchJSON('/api/stats');
-  if(!d)return;
-  const hr=d.hash_rate||0;
-  document.getElementById('bb-hr').textContent=hr>1e6?(hr/1e6).toFixed(2)+'MH/s':hr>1e3?(hr/1e3).toFixed(1)+'KH/s':hr.toFixed(0)+'H/s';
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// FULL REFRESH ORCHESTRATOR
-// ═══════════════════════════════════════════════════════════════════════
-let _refreshRunning=false;
-async function fullRefresh(){
-  if(_refreshRunning)return;
-  _refreshRunning=true;
-  try{
-    await Promise.allSettled([
-      refreshChain(),
-      refreshWState(),
-      refreshDifficulty(),
-    ]);
-    await Promise.allSettled([
-      refreshMempool(),
-      refreshLattice(),
-      refreshPeers(),
-      refreshStats(),
-    ]);
-    _lastUpdate=Date.now();
-    setOnline(true);
-    const s=new Date(_lastUpdate);
-    document.getElementById('bb-last-update').textContent=
-      'Updated '+s.toTimeString().substring(0,8);
-  }catch(e){
-    setOnline(false);
-  }finally{_refreshRunning=false}
-}
-
-function setOnline(ok){
-  const badge=document.getElementById('live-badge');
-  const dot=document.getElementById('live-dot');
-  const label=document.getElementById('live-label');
-  if(ok){badge.className='live-badge';dot.className='live-dot';label.textContent='LIVE'}
-  else{badge.className='live-badge offline';dot.className='live-dot';label.textContent='OFFLINE'}
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// SOCKET.IO — REAL-TIME PUSH
-// ═══════════════════════════════════════════════════════════════════════
-let socket=null;
-function initSocket(){
-  try{
-    socket=io(BASE,{transports:['websocket','polling'],reconnectionDelay:2000,timeout:8000});
-    socket.on('connect',()=>{
-      setOnline(true);
-      fullRefresh();
-    });
-    socket.on('disconnect',()=>setOnline(false));
-    socket.on('metrics_update',d=>{
-      if(!d)return;
-      // Update fidelity live
-      if(d.fidelity||d.w3_fidelity){
-        _state.fidelity=d.fidelity||d.w3_fidelity||_state.fidelity;
-        _fidelityHistory.push(_state.fidelity);
-        if(_fidelityHistory.length>60)_fidelityHistory.shift();
-        document.getElementById('q-fid').textContent=_state.fidelity.toFixed(4);
-        document.getElementById('hdr-fidelity').textContent=(_state.fidelity*100).toFixed(2)+'%';
-      }
-      if(d.block_height){
-        const newH=parseInt(d.block_height);
-        if(newH>_state.height){
-          _state.height=newH;
-          document.getElementById('hdr-height').textContent='#'+newH;
-          document.getElementById('m-height').textContent=newH;
-          _diskBlocks.push({r:Math.random()*0.75+0.1,a:Math.random()*Math.PI*2,age:0});
-          // Refresh chain to get new block data
-          setTimeout(refreshChain,300);
-          setTimeout(refreshMempool,500);
-        }
-      }
-    });
-    socket.on('new_block',d=>{
-      if(d){
-        const b={height:d.height||d.block_height,hash:d.block_hash||d.hash,
-                 tx_count:d.tx_count||0,fidelity:d.w_state_fidelity||0.9,_fresh:true};
-        _blocks.push(b);_blocks=_blocks.sort((a,b)=>a.height-b.height).slice(-50);
-        renderChainStream(_blocks);
-        _diskBlocks.push({r:Math.random()*0.75+0.1,a:Math.random()*Math.PI*2,age:0});
-      }
-    });
-    socket.on('new_transaction',d=>{
-      if(d){d._fresh=true;_txs=[d,..._txs].slice(0,100);renderTxFeed(_txs)}
-    });
-  }catch(e){console.warn('Socket.IO failed:',e)}
-}
-initSocket();
-
-// ═══════════════════════════════════════════════════════════════════════
-// POLLING — 3s INTERVAL
-// ═══════════════════════════════════════════════════════════════════════
-fullRefresh();
-setInterval(fullRefresh,3000);
-
-// Slow polls
-setInterval(refreshPeers,10000);
-setInterval(refreshLattice,8000);
-setInterval(refreshStats,15000);
-
-// Watchdog: if no update in 10s, force refresh
-setInterval(()=>{
-  if(Date.now()-_lastUpdate>10000&&_lastUpdate>0)setOnline(false);
-},5000);
+refresh();
+setInterval(refresh,3000);
+setInterval(fetchPeers,12000);
+setInterval(function(){if(Date.now()-lastUpdate>12000&&lastUpdate>0)setOnline(false);},6000);
 </script>
 </body>
 </html>
