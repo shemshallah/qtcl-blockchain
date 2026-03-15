@@ -51,6 +51,7 @@ import secrets
 import traceback
 import threading
 import numpy as np
+import psycopg2
 import queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any, Optional, List, Tuple
@@ -65,6 +66,76 @@ getcontext().prec = 150
 if not logging.getLogger().hasHandlers():
     logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# ORACLE ADDRESS REGISTRY — Per-oracle HLWE address lookup
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+
+def get_oracle_address_from_registry(oracle_idx: int, role: str, fallback: str = None) -> str:
+    """
+    Fetch this oracle's unique HLWE address from oracle_registry.
+    
+    Args:
+        oracle_idx: 1-based oracle index (1-5)
+        role: Oracle role string (PRIMARY_LATTICE, SECONDARY_LATTICE, etc.)
+        fallback: Address to return if DB lookup fails
+    
+    Returns:
+        HLWE address from registry, or fallback if unavailable
+    
+    Example:
+        addr = get_oracle_address_from_registry(1, 'PRIMARY_LATTICE')
+        # Returns: qtcl1primary_lattice_<hash>
+    """
+    oracle_id = f'oracle_{oracle_idx}'
+    
+    if fallback is None:
+        fallback = f'qtcl1{role.lower()}_{oracle_idx:02d}'
+    
+    try:
+        # Build DB URL from environment
+        pooler_host = os.getenv('POOLER_HOST', 'aws-0-us-west-2.pooler.supabase.com')
+        pooler_port = int(os.getenv('POOLER_PORT', 6543))
+        db_name = os.getenv('POSTGRES_DB', 'postgres')
+        db_user = os.getenv('POSTGRES_USER', 'postgres')
+        db_password = os.getenv('POSTGRES_PASSWORD', '')
+        
+        if not db_password:
+            logger.debug(f"[ORACLE-ADDR] No DB password, using fallback for {oracle_id}")
+            return fallback
+        
+        conn = psycopg2.connect(
+            host=pooler_host,
+            port=pooler_port,
+            database=db_name,
+            user=db_user,
+            password=db_password,
+            connect_timeout=5
+        )
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "SELECT oracle_address FROM oracle_registry WHERE oracle_id = %s",
+            (oracle_id,)
+        )
+        result = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        if result:
+            address = result[0]
+            logger.info(f"[ORACLE-ADDR] {oracle_id} ({role:18}) → {address}")
+            return address
+        else:
+            logger.warning(f"[ORACLE-ADDR] No entry for {oracle_id} in registry, using fallback")
+            return fallback
+            
+    except psycopg2.OperationalError as e:
+        logger.debug(f"[ORACLE-ADDR] DB connection failed for {oracle_id}: {e}")
+        return fallback
+    except Exception as e:
+        logger.warning(f"[ORACLE-ADDR] Lookup failed for {oracle_id}: {e}")
+        return fallback
 
 # Timeout for individual AER measurements (seconds)
 MEASUREMENT_TIMEOUT = 30
@@ -244,8 +315,8 @@ def _oracle_qrng_bytes(n: int) -> bytes:
         with _ORACLE_QRNG_LOCK:
             if _ORACLE_QRNG_INSTANCE is None:
                 try:
-                    from qrng_ensemble import QuantumEntropyEnsemble
-                    _ORACLE_QRNG_INSTANCE = QuantumEntropyEnsemble()
+                    from qrng_ensemble import QRNGEnsemble
+                    _ORACLE_QRNG_INSTANCE = QRNGEnsemble()
                     logger.info("[ORACLE] ✅ QRNG ensemble wired — per-call stochastic channels active")
                 except Exception as _qe:
                     logger.warning(f"[ORACLE] QRNG unavailable ({_qe}), using os.urandom")
@@ -996,6 +1067,14 @@ class OracleNode:
         self.noise_seed = (0xDEAD_BEEF + oracle_id * 0x1337) & 0xFFFF_FFFF
         self.kappa      = round(AER_NOISE_KAPPA + oracle_id * 0.004, 4)
 
+        # Fetch this oracle's unique HLWE address from registry
+        # Oracle indices are 1-based in DB (oracle_1 through oracle_5)
+        self.oracle_address = get_oracle_address_from_registry(
+            oracle_idx=oracle_id + 1,
+            role=role,
+            fallback=f'qtcl1{role.lower()[:12]}_{oracle_id+1:02d}'
+        )
+
         self.aer:         Optional[object]               = None
         self.noise_model: Optional[object]               = None
         self._lock                                       = threading.Lock()
@@ -1238,7 +1317,7 @@ class OracleNode:
             # Per-node HLWE signing removed: hlwe_sign_block() requires a hex
             # private key, not a node label. Cluster-level signing is done by
             # OracleWStateManager after consensus, using OracleEngine's keypair.
-            snap.oracle_address = f"oracle_{self.oracle_id+1:02d}"
+            snap.oracle_address = self.oracle_address
 
             with self._lock:
                 self._dm             = dm_array

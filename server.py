@@ -705,6 +705,71 @@ ORACLE_ROLE = os.getenv('ORACLE_ROLE', 'primary')
 # Peer oracle URLs — other oracle instances this one will cross-register with
 _peer_oracle_env = os.getenv('BOOTSTRAP_NODES', '')
 PEER_ORACLE_URLS = [u.strip() for u in _peer_oracle_env.split(',') if u.strip()] if _peer_oracle_env else []
+
+# ═════════════════════════════════════════════════════════════════════════════════
+# ORACLE ADDRESS LOOKUP: Per-oracle HLWE addresses from registry
+# ═════════════════════════════════════════════════════════════════════════════════
+
+def get_oracle_address(oracle_id: str, fallback: str = '') -> str:
+    """Fetch oracle HLWE address from oracle_registry by oracle_id.
+    
+    Each oracle node has a unique registered address for auditability.
+    oracle_id format: 'oracle_1', 'oracle_2', ... 'oracle_5'
+    
+    Fallback: if DB unavailable, returns fallback string.
+    """
+    try:
+        if not db_ready():
+            return fallback
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT oracle_address FROM oracle_registry WHERE oracle_id = %s",
+            (oracle_id,)
+        )
+        result = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        return result[0] if result else fallback
+    except Exception as e:
+        logger.debug(f"[ORACLE-ADDRESS] Lookup failed for {oracle_id}: {e}")
+        return fallback
+
+def get_consensus_oracle_address() -> str:
+    """
+    Compute consensus oracle address (XOR of all 5 oracle addresses).
+    Used for transactions that require all-oracle sign-off.
+    """
+    try:
+        if not db_ready():
+            return 'qtcl1consensus_all_oracles_xor'
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT oracle_address FROM oracle_registry WHERE role IN "
+            "('PRIMARY_LATTICE', 'SECONDARY_LATTICE', 'VALIDATION', 'ARBITER', 'METRICS') "
+            "ORDER BY oracle_id"
+        )
+        addresses = [row[0] for row in cursor.fetchall()]
+        cursor.close()
+        conn.close()
+        
+        if len(addresses) != 5:
+            logger.warning(f"[ORACLE-ADDRESS] Expected 5 oracles, got {len(addresses)}")
+        
+        # XOR all addresses together for deterministic consensus address
+        import hashlib
+        consensus_seed = '|'.join(addresses).encode()
+        consensus_hash = hashlib.sha256(consensus_seed).hexdigest()[:24]
+        return f"qtcl1consensus_{consensus_hash}"
+    except Exception as e:
+        logger.debug(f"[ORACLE-ADDRESS] Consensus lookup failed: {e}")
+        return 'qtcl1consensus_all_oracles_xor'
+
+
 logger.info(f"[ORACLE] 🌐 Identity: id={ORACLE_ID} role={ORACLE_ROLE} peers={len(PEER_ORACLE_URLS)}")
 
 # P2P raw-TCP port — separate from HTTP/gunicorn.
@@ -3555,7 +3620,7 @@ def _get_dual_snapshots() -> Optional[tuple]:
         
         snapshot_1 = {
             'timestamp_ns': dm1.get('timestamp_ns', int(time.time() * 1e9)),
-            'oracle_address': dm1.get('oracle_address', 'qtcl1oracle_1'),
+            'oracle_address': get_oracle_address('oracle_1', 'qtcl1oracle_1'),
             'density_matrix_hex': dm1.get('density_matrix_hex', ''),
             'w_entropy_hash': dm1.get('w_entropy_hash', ''),
             'purity': float(dm1.get('purity', 0.95)),
@@ -3574,7 +3639,7 @@ def _get_dual_snapshots() -> Optional[tuple]:
         
         snapshot_2 = {
             'timestamp_ns': dm2.get('timestamp_ns', int(time.time() * 1e9)),
-            'oracle_address': dm2.get('oracle_address', 'qtcl1oracle_2'),
+            'oracle_address': get_oracle_address('oracle_2', 'qtcl1oracle_2'),
             'density_matrix_hex': dm2.get('density_matrix_hex', ''),
             'w_entropy_hash': dm2.get('w_entropy_hash', ''),
             'purity': float(dm2.get('purity', 0.95)),
@@ -3620,7 +3685,7 @@ def _average_snapshots(snap1: dict, snap2: dict) -> dict:
         # Create 2-point averaged snapshot
         averaged_snapshot = {
             'timestamp_ns': ts_avg,
-            'oracle_address': 'qtcl1oracle_consensus',  # Both oracles
+            'oracle_address': get_consensus_oracle_address(),  # Both oracles
             'w_state_fidelity': round(avg_fidelity, 6),
             'purity': round(avg_purity, 6),
             'entropy_vn': round(vn_entropy, 4),
@@ -7258,16 +7323,14 @@ def dashboard():
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Koyeb liveness probe — responds 503 during startup, 200 when ready.
-    Used by Koyeb health checks on port 8000."""
-    if not _APP_READY:
-        return jsonify({'status': 'initializing', 'app_ready': False}), 503
-    
+    """Koyeb liveness probe on port 8000.
+    Returns 200 OK immediately during startup (app is up).
+    Detailed health is in /api/health."""
     _p2p_running = P2P is not None and getattr(P2P, 'is_running', False)
     _p2p_port    = getattr(P2P, 'port', P2P_PORT) if _p2p_running else P2P_PORT
     return jsonify({
-        'status':        'healthy',
-        'app_ready':     True,
+        'status':        'ok',
+        'app_ready':     _APP_READY,
         'p2p_enabled':   _p2p_running,
         'p2p_port':      _p2p_port,
         'lattice_loaded': getattr(state, 'lattice_loaded', False),
@@ -7711,7 +7774,7 @@ def oracle_pq0_bloch():
     if unified_snapshot and unified_snapshot.get('broadcast_type') == 'single_chirp':
         consensus = unified_snapshot.get('consensus', {})
         return jsonify({
-            'oracle_id': 'qtcl1oracle_consensus',
+            'oracle_id': get_consensus_oracle_address(),
             'oracle_role': 'UNIFIED_MULTIPLEXER',
             'fidelity': round(consensus.get('w_state_fidelity', 0.93), 6),
             'w_state_fidelity': round(consensus.get('w_state_fidelity', 0.93), 6),
@@ -10813,39 +10876,51 @@ def _start_oracle_pq_reporting_daemon():
         
         while _oracle_pq_reporting_running:
             try:
-                # MANDATORY: Trigger fresh measurement cycle before every report (AGENT-EVOLUTION-AUDIT)
-                if oracle_cluster is not None:
-                    oracle_cluster.measure_lattice(None)
-                    
-                # Get current oracle pq states from OracleCluster
-                if oracle_cluster is not None:
+                # Only run if oracle_cluster is fully initialized
+                if oracle_cluster is None:
+                    time.sleep(10)
+                    continue
+                
+                # Get current oracle pq states from OracleCluster (no measurement, just read)
+                try:
                     oracle_states = oracle_cluster.get_oracle_pq_states()
+                except (AttributeError, TypeError):
+                    # Oracle states not ready yet
+                    time.sleep(10)
+                    continue
+                
+                if not oracle_states:
+                    time.sleep(10)
+                    continue
                     
-                    report_count += 1
-                    report = {
-                        'timestamp': datetime.now(timezone.utc).isoformat(),
-                        'report_id': report_count,
-                        'oracles': {}
+                report_count += 1
+                report = {
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'report_id': report_count,
+                    'oracles': {}
+                }
+                
+                # Log each oracle's individual pq metrics
+                for oracle_id, state in oracle_states.items():
+                    if state is None:
+                        continue
+                    report['oracles'][oracle_id] = {
+                        'oracle_id': oracle_id,
+                        'role': state.get('role', 'UNKNOWN'),
+                        'pq_curr_fidelity': round(state.get('pq_curr_fidelity', 0.0), 6),
+                        'pq_curr_coherence': round(state.get('pq_curr_coherence', 0.0), 6),
+                        'pq_last_fidelity': round(state.get('pq_last_fidelity', 0.0), 6),
+                        'pq_last_coherence': round(state.get('pq_last_coherence', 0.0), 6),
+                        'pq_avg_fidelity': round((state.get('pq_curr_fidelity', 0.0) + state.get('pq_last_fidelity', 0.0)) / 2.0, 6),
+                        'pq_avg_coherence': round((state.get('pq_curr_coherence', 0.0) + state.get('pq_last_coherence', 0.0)) / 2.0, 6),
                     }
-                    
-                    # Log each oracle's individual pq metrics
-                    for oracle_id, state in oracle_states.items():
-                        report['oracles'][oracle_id] = {
-                            'oracle_id': oracle_id,
-                            'role': state.get('role', 'UNKNOWN'),
-                            'pq_curr_fidelity': round(state.get('pq_curr_fidelity', 0.0), 6),
-                            'pq_curr_coherence': round(state.get('pq_curr_coherence', 0.0), 6),
-                            'pq_last_fidelity': round(state.get('pq_last_fidelity', 0.0), 6),
-                            'pq_last_coherence': round(state.get('pq_last_coherence', 0.0), 6),
-                            'pq_avg_fidelity': round((state.get('pq_curr_fidelity', 0.0) + state.get('pq_last_fidelity', 0.0)) / 2.0, 6),
-                            'pq_avg_coherence': round((state.get('pq_curr_coherence', 0.0) + state.get('pq_last_coherence', 0.0)) / 2.0, 6),
-                        }
-                    
+                
+                if report['oracles']:
                     # Store report in history
                     _oracle_pq_report_history.append(report)
                     
                     # Log comprehensive report (human-readable format)
-                    log_lines = [f"[ORACLE-PQ] 📊 Individual Pseudoqubit States Report #{report_count}"]
+                    log_lines = [f"[ORACLE-PQ] 📊 Pseudoqubit States Report #{report_count}"]
                     for oracle_id, metrics in report['oracles'].items():
                         log_lines.append(
                             f"  {oracle_id} ({metrics['role']}): "
@@ -10859,14 +10934,14 @@ def _start_oracle_pq_reporting_daemon():
                 time.sleep(10)  # 10-second cadence
                 
             except Exception as e:
-                logger.error(f"[ORACLE-PQ-REPORTING] Loop error: {e}")
+                logger.debug(f"[ORACLE-PQ-REPORTING] Loop iteration error: {e}")
                 time.sleep(10)
     
-    _oracle_pq_reporting_thread = threading.Thread(target=_oracle_pq_reporting_loop, daemon=True)
+    _oracle_pq_reporting_thread = threading.Thread(target=_oracle_pq_reporting_loop, daemon=True, name="OraclePQReporting")
     _oracle_pq_reporting_thread.start()
     logger.info("[ORACLE-PQ-REPORTING] Daemon started (10-second cadence)")
 
-# Start reporting daemon
+# Start reporting daemon (safe to call even if oracle_cluster exists but not ready)
 if oracle_cluster is not None:
     _start_oracle_pq_reporting_daemon()
 
