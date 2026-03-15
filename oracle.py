@@ -74,14 +74,7 @@ logger = logging.getLogger(__name__)
 def get_oracle_address_from_registry(oracle_idx: int, role: str, fallback: str = None) -> str:
     """
     Fetch this oracle's unique HLWE address from oracle_registry.
-    
-    Args:
-        oracle_idx: 1-based oracle index (1-5)
-        role: Oracle role string (PRIMARY_LATTICE, SECONDARY_LATTICE, etc.)
-        fallback: Address to return if DB lookup fails
-    
-    Returns:
-        HLWE address from registry, or fallback if unavailable
+    Non-blocking: returns immediately with fallback if DB slow.
     """
     oracle_id = f'oracle_{oracle_idx}'
     
@@ -99,14 +92,16 @@ def get_oracle_address_from_registry(oracle_idx: int, role: str, fallback: str =
             logger.debug(f"[ORACLE-ADDR] No DB password, using fallback for {oracle_id}")
             return fallback
         
+        # Non-blocking: 2 second timeout instead of hanging
         conn = psycopg2.connect(
             host=pooler_host,
             port=pooler_port,
             database=db_name,
             user=db_user,
             password=db_password,
-            connect_timeout=5
+            connect_timeout=2  # 2 second timeout
         )
+        conn.set_session(autocommit=True)
         cursor = conn.cursor()
         
         cursor.execute(
@@ -122,14 +117,14 @@ def get_oracle_address_from_registry(oracle_idx: int, role: str, fallback: str =
             logger.info(f"[ORACLE-ADDR] {oracle_id} ({role:18}) → {address}")
             return address
         else:
-            logger.warning(f"[ORACLE-ADDR] No entry for {oracle_id} in registry, using fallback")
+            logger.warning(f"[ORACLE-ADDR] No entry for {oracle_id}, using fallback (will retry later)")
             return fallback
             
-    except psycopg2.OperationalError as e:
-        logger.debug(f"[ORACLE-ADDR] DB connection failed for {oracle_id}: {e}")
+    except psycopg2.OperationalError:
+        logger.debug(f"[ORACLE-ADDR] DB unavailable for {oracle_id}, using fallback")
         return fallback
     except Exception as e:
-        logger.warning(f"[ORACLE-ADDR] Lookup failed for {oracle_id}: {e}")
+        logger.debug(f"[ORACLE-ADDR] Lookup failed for {oracle_id}: {e}, using fallback")
         return fallback
 
 # Timeout for individual AER measurements (seconds)
