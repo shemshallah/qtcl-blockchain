@@ -7258,14 +7258,16 @@ def dashboard():
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Unconditional 200 — Koyeb liveness probe for ALL ports (8000, 9091, any).
-    Same Flask process answers both. Never blocks, never queries DB.
-    DB health is in /api/health only."""
+    """Koyeb liveness probe — responds 503 during startup, 200 when ready.
+    Used by Koyeb health checks on port 8000."""
+    if not _APP_READY:
+        return jsonify({'status': 'initializing', 'app_ready': False}), 503
+    
     _p2p_running = P2P is not None and getattr(P2P, 'is_running', False)
     _p2p_port    = getattr(P2P, 'port', P2P_PORT) if _p2p_running else P2P_PORT
     return jsonify({
         'status':        'healthy',
-        'app_ready':     _APP_READY,
+        'app_ready':     True,
         'p2p_enabled':   _p2p_running,
         'p2p_port':      _p2p_port,
         'lattice_loaded': getattr(state, 'lattice_loaded', False),
