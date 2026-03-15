@@ -1181,7 +1181,8 @@ class OracleNode:
           6. Store dm_array → self._dm for next call's circuit initialization
         """
         if not QISKIT_AVAILABLE or self.aer is None:
-            return self._synthetic_snapshot()
+            logger.error(f"[ORACLE-NODE-{self.oracle_id+1}] AER unavailable — no measurement possible (synthetic mode disabled)")
+            return None
         try:
             dm_result = self.aer.run(self._build_dm_circuit()).result()
             _d        = dm_result.data(0)
@@ -1252,7 +1253,7 @@ class OracleNode:
             return snap
         except Exception as exc:
             logger.error(f"[ORACLE-NODE-{self.oracle_id+1}] measure_self failed: {exc}")
-            return self._synthetic_snapshot()
+            return None  # real measurements only — no synthetic fallback
 
     # ── Block-field measurement ────────────────────────────────────────────────
 
@@ -1267,7 +1268,8 @@ class OracleNode:
           coherence — L1 coherence of the oracle sub-system DM
         """
         if not QISKIT_AVAILABLE or self.aer is None:
-            return self._synthetic_block_field(pq_curr, pq_last)
+            logger.error(f"[ORACLE-NODE-{self.oracle_id+1}] AER unavailable — block field measurement skipped")
+            return None
         try:
             qc  = self._build_block_field_circuit(pq_curr, pq_last)
             res = self.aer.run(qc).result()
@@ -1304,7 +1306,7 @@ class OracleNode:
             return reading
         except Exception as exc:
             logger.error(f"[ORACLE-NODE-{self.oracle_id+1}] measure_block_field failed: {exc}")
-            return self._synthetic_block_field(pq_curr, pq_last)
+            return None  # real measurements only
 
     # ── Entanglement rebuild from consensus DM ─────────────────────────────────
 
@@ -1340,68 +1342,7 @@ class OracleNode:
 
     # ── Synthetic fallbacks ────────────────────────────────────────────────────
 
-    def _synthetic_snapshot(self) -> DensityMatrixSnapshot:
-        """
-        Fallback snapshot when AER is unavailable.
 
-        Old behaviour: always returned the ideal pure W-state (F=1.0, identical
-        across all oracles and restarts) — useless as entropy source.
-
-        New behaviour: evolves self._dm (which is QRNG-seeded at __init__) via
-        a fresh QRNG stochastic channel each call, producing a unique mixed state.
-        If self._dm is somehow None, re-seeds from _qrng_initial_dm().
-        """
-        with self._lock:
-            if self._dm is None:
-                self._dm = self._qrng_initial_dm()
-            # Apply a fresh QRNG Kraus channel to advance the trajectory
-            dm = _oracle_stochastic_channel(self._dm.copy(), epsilon=0.08)
-            # Hermitian + normalise
-            dm = 0.5 * (dm + dm.conj().T)
-            tr = float(np.real(np.trace(dm)))
-            dm = dm / max(tr, 1e-12)
-            # Store as new current state (continuous trajectory even in synthetic mode)
-            self._dm = dm
-
-        QIM = QuantumInformationMetrics
-        F = float(np.real(np.trace(dm @ _W_IDEAL_DM)))
-        # Derive synthetic measurement counts from the QRNG-evolved diagonal
-        diag = np.real(np.diag(dm))
-        total_shots = 1024
-        counts = {
-            "100": max(1, int(diag[4] * total_shots)),
-            "010": max(1, int(diag[2] * total_shots)),
-            "001": max(1, int(diag[1] * total_shots)),
-        }
-        return DensityMatrixSnapshot(
-            timestamp_ns=time.time_ns(), density_matrix=dm,
-            density_matrix_hex=dm.tobytes().hex(),
-            purity=QIM.purity(dm), von_neumann_entropy=QIM.von_neumann_entropy(dm),
-            coherence_l1=QIM.coherence_l1_norm(dm), coherence_renyi=QIM.coherence_renyi(dm),
-            coherence_geometric=QIM.coherence_geometric(dm),
-            quantum_discord=QIM.quantum_discord(dm) if hasattr(QIM,'quantum_discord') else 0.3,
-            w_state_fidelity=max(0.0, min(1.0, F)),
-            measurement_counts=counts,
-            aer_noise_state={
-                "oracle_id": self.oracle_id+1, "role": self.role,
-                "synthetic": True, "qrng_evolved": True,
-            },
-            lattice_refresh_counter=self.measurement_count,
-            w_state_strength=max(0.0, min(1.0, F * 0.95)),
-            phase_coherence=float(abs(dm[1,2])) * 3.0,
-            entanglement_witness=max(0.0, F - 1/3),
-            trace_purity=QIM.trace_purity(dm),
-        )
-
-    def _synthetic_block_field(self, pq_curr: int, pq_last: int) -> BlockFieldReading:
-        phase_factor = ((pq_curr - pq_last) % 1024) / 1024.0
-        return BlockFieldReading(
-            oracle_id=self.oracle_id, pq_curr=pq_curr, pq_last=pq_last,
-            entropy=round(0.85 + 0.1 * phase_factor, 6),
-            fidelity=round(0.88 + 0.05 * phase_factor, 6),
-            coherence=round(0.72 + 0.08 * phase_factor, 6),
-            timestamp_ns=time.time_ns(),
-        )
 
     @staticmethod
     def _partial_trace_oracle(composite_dm: np.ndarray) -> np.ndarray:
@@ -1935,7 +1876,8 @@ class OracleWStateManager:
         # ── Step 3: consensus ─────────────────────────────────────────────────
         snapshot = self._consensus_from_pair(snap_a, snap_b)
         if snapshot is None:
-            return self.nodes[0]._synthetic_snapshot()
+            logger.warning("[ORACLE CLUSTER] No valid snapshots from any node")
+            return None
 
         # ── Step 4: rebuild entanglement on idle nodes ────────────────────────
         measured_ids = {node_a.oracle_id, node_b.oracle_id}

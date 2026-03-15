@@ -3982,7 +3982,7 @@ class MetricsCollector:
                 'block_height'       : int(bs.get('current_height', 0)),
                 'difficulty'         : float(bs.get('difficulty', 20)),
                 'network_hash_rate'  : 0.0,
-                'w_state_fidelity'   : float(qm.get('w_state_fidelity', 0.7111)),
+                'w_state_fidelity'   : qm.get('w_state_fidelity'),   # None until real oracle measurement
                 'peer_count'         : P2P.get_peer_count() if P2P else 0,
                 'mempool_size'       : 0,
                 'last_block_time_ago': 0.0,
@@ -6061,11 +6061,24 @@ def _lazy_initialize_metrics_agents():
         _metrics_agents_initialized = False
 
 
-# Wire oracle to lattice for W-state entropy
+# Wire oracle to lattice for W-state entropy + START the 5-node cluster
 if ORACLE_AVAILABLE and ORACLE is not None:
     if LATTICE is not None:
         ORACLE.set_lattice_ref(LATTICE)
     logger.info(f"[ORACLE] ✅ Initialized | address={ORACLE.oracle_address}")
+
+# START OracleWStateManager measurement loop — without this call current_density_matrix
+# stays None forever, get_latest_snapshot() returns None, quantum_metrics_thread falls
+# through to _STATE_CACHE, and every metric serves the synthetic default (0.7111, etc).
+if ORACLE_AVAILABLE and ORACLE_W_STATE_MANAGER is not None:
+    try:
+        _owsm_started = ORACLE_W_STATE_MANAGER.start()
+        if _owsm_started:
+            logger.info("[ORACLE-CLUSTER] ✅ 5-node W-state cluster STARTED — live measurements active")
+        else:
+            logger.warning("[ORACLE-CLUSTER] ⚠️  Cluster start returned False — check AER/Qiskit")
+    except Exception as _owsm_err:
+        logger.error(f"[ORACLE-CLUSTER] ❌ Failed to start cluster: {_owsm_err}")
     # Register oracle as DHT peer — makes oracle discoverable for P2P TX validation
     try:
         _dht = get_dht_manager()
@@ -6743,60 +6756,6 @@ def _write_db(cycle,metrics):
 _ENG_LOCK  = threading.Lock()
 
 # SYNTHETIC FALLBACK STATE (generated when thread dies or stalls)
-def _generate_synthetic_state() -> dict:
-    """Generate valid synthetic quantum state when metrics thread fails."""
-    try:
-        w3_base = 0.92
-        import hashlib
-        ts_hash = hashlib.sha256(str(time.time()).encode()).hexdigest()
-        ts_int = int(ts_hash, 16)
-        
-        theta = (ts_int % 314159) / 100000.0
-        phi = ((ts_int // 314159) % 628318) / 100000.0
-        
-        return {
-            'w3_fidelity': w3_base - 0.02 * _np.sin(ts_int / 1e6),
-            'wN_fidelity': 0.85,
-            'negativity': 0.44,
-            'concurrence': 0.31,
-            'qfi': 6.8,
-            'discord': 1.54,
-            'coherence': 0.70,
-            'entanglement': 0.68,
-            'purity': 0.81,
-            'phase_drift': 0.01,
-            'sector_occ': 0.92,
-            'tele_fidelity': 0.63,
-            'theta': float(theta),
-            'phi': float(phi),
-            'gamma1': 0.045,
-            'gammaphi': 0.120,
-            'gammadep': 0.008,
-            'gamma_geo': 0.005,
-            'omega': 0.5,
-            'ou_mem': 0.03,
-            'ch0_weight': 0.50,
-            'ch1_weight': 0.30,
-            'ch2_weight': 0.20,
-            'n_peers': 0,
-            'cycle': 0,
-            'source': 'synthetic_fallback',
-            'timestamp': time.time(),
-        }
-    except Exception:
-        # Ultimate fallback
-        return {
-            'w3_fidelity': 0.90, 'wN_fidelity': 0.84,
-            'negativity': 0.43, 'concurrence': 0.30, 'qfi': 6.5,
-            'discord': 1.50, 'coherence': 0.68, 'entanglement': 0.65,
-            'purity': 0.80, 'phase_drift': 0.02, 'sector_occ': 0.90,
-            'tele_fidelity': 0.60, 'theta': 1.57, 'phi': 0.0,
-            'gamma1': 0.04, 'gammaphi': 0.12, 'gammadep': 0.01,
-            'gamma_geo': 0.01, 'omega': 0.5, 'ou_mem': 0.03,
-            'ch0_weight': 0.50, 'ch1_weight': 0.30, 'ch2_weight': 0.20,
-            'n_peers': 0, 'cycle': 0, 'source': 'ultimate_fallback',
-            'timestamp': time.time(),
-        }
 
 _ENG_STATE: dict = {
     'rho3': None,'rhoN': None,
@@ -6818,7 +6777,8 @@ _ENG_STATE: dict = {
 }
 
 # STATE CACHE (served when metrics thread is dead)
-_STATE_CACHE = _generate_synthetic_state()
+# Synthetic state DISABLED — real measurements only
+_STATE_CACHE: dict = {}   # never served; here to avoid NameError on stale refs
 _STATE_CACHE_LOCK = threading.Lock()
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -7110,9 +7070,6 @@ def quantum_metrics_thread():
             import traceback as _tb; logger.debug(_tb.format_exc())
             
             # FALLBACK: use synthetic state on any error
-            with _STATE_CACHE_LOCK:
-                global _STATE_CACHE
-                _STATE_CACHE = _generate_synthetic_state()
 
         # ── UPDATE STATE CACHE (served when thread is healthy) ────────────────
         try:
@@ -7147,9 +7104,6 @@ def quantum_metrics_thread():
                     'source': 'quantum_metrics_thread',
                     'thread_alive': True,
                 }
-            
-            with _STATE_CACHE_LOCK:
-                _STATE_CACHE = current_metrics
         except Exception:
             pass
 
@@ -7160,7 +7114,7 @@ def quantum_metrics_thread():
 def quantum_metrics_thread_wrapper():
     """
     Bulletproof wrapper for quantum metrics thread.
-    NEVER CRASHES — if main loop fails, falls back to synthetic state.
+    Restarts after crash — no synthetic state. APIs return null until thread recovers.
     """
     logger.info("[ENT v3] Quantum metrics thread wrapper starting...")
     
@@ -7168,17 +7122,10 @@ def quantum_metrics_thread_wrapper():
         try:
             quantum_metrics_thread()
         except Exception as e:
-            logger.error(f"[ENT v3] CRITICAL: Thread crashed: {e}")
+            logger.error(f"[ENT v3] CRITICAL: Thread crashed — NO synthetic fallback: {e}")
             import traceback as tb
             logger.error(tb.format_exc())
-            
-            # EMERGENCY: generate synthetic state and serve it
-            logger.warning("[ENT v3] 🆘 Falling back to synthetic state...")
-            with _STATE_CACHE_LOCK:
-                global _STATE_CACHE
-                _STATE_CACHE = _generate_synthetic_state()
-            
-            # Wait before retry
+            # Synthetic state is disabled. API will return null fields until thread recovers.
             time.sleep(5.0)
             logger.info("[ENT v3] Retrying metrics thread...")
 
@@ -7784,8 +7731,6 @@ def oracle_pq0_bloch():
     
     # If metrics thread hasn't initialized yet, use cached state
     if eng.get('pq0_bloch_theta') is None:
-        with _STATE_CACHE_LOCK:
-            cache = _STATE_CACHE.copy()
         
         return jsonify({
             'oracle_id': ORACLE_ID,
@@ -7908,20 +7853,11 @@ def oracle_dual_source():
                 'n_peers': eng.get('n_peers', 0),
             })
         else:
-            # Fallback to cache
-            with _STATE_CACHE_LOCK:
-                cache = _STATE_CACHE.copy()
-            response.update({
-                'state_source': 'cache_fallback',
-                **cache
-            })
-        
-        # Include cache info if requested
-        if with_cache:
-            with _STATE_CACHE_LOCK:
-                response['cache'] = _STATE_CACHE.copy()
-        
+            # No real data yet — no fallback
+            return jsonify({'error': 'No real oracle measurement available yet', 'ready': False}), 503
+
         # Include recent history if requested (for trend analysis)
+        
         if with_history and len(_ENG_STATE.get('rho_hist', [])) > 0:
             hist = list(_ENG_STATE.get('rho_hist', []))
             response['recent_cycles'] = len(hist)
@@ -7937,16 +7873,14 @@ def oracle_dual_source():
 def oracle_w_state():
     """
     Live W-state snapshot from the distributed entanglement engine.
-    Falls back to synthetic state while engine initialises — never 500s.
+    Returns 503 until engine completes first real measurement cycle.
     """
     with _ENG_LOCK:
         eng = dict(_ENG_STATE)
 
-    # If engine hasn't completed its first cycle, serve synthetic state
-    # (avoids 503 spam on cold boot while lattice spins up)
+    # If engine hasn't run yet, return 503 — no synthetic fallback
     if eng.get('w3_fidelity') is None:
-        with _STATE_CACHE_LOCK:
-            eng = dict(_STATE_CACHE)
+        return jsonify({'error': 'Oracle engine initialising — no real measurements yet', 'ready': False}), 503
 
     snap = state.get_state()
     block_height = snap['block_state']['current_height']
@@ -7968,8 +7902,8 @@ def oracle_w_state():
     pow_seed_hex = _pow_seed.hex()
 
     # gamma_amp / gamma_phase — derived from gamma1/gammaphi (real names in _ENG_STATE)
-    gamma_amp   = eng.get('gamma1')   or eng.get('gamma_amp')   or 0.04
-    gamma_phase = eng.get('gammaphi') or eng.get('gamma_phase') or 0.12
+    gamma_amp   = eng.get('gamma1')   or eng.get('gamma_amp')
+    gamma_phase = eng.get('gammaphi') or eng.get('gamma_phase')
     db_lat_ms   = round(1000.0 / max(0.001, gamma_amp), 2)
 
     # wN_fidelity is the N-oracle joint state; expose as w6_fidelity for compat
@@ -7982,40 +7916,40 @@ def oracle_w_state():
         'block_height':    block_height,
         'pq_current':      pq_current,
         # ── W-state fidelities ────────────────────────────────────────────────
-        'fidelity':         eng.get('w3_fidelity', 0.90),   # canonical alias miners use
-        'w3_fidelity':      eng.get('w3_fidelity', 0.90),
+        'fidelity':         eng.get('w3_fidelity'),   # None until real measurement
+        'w3_fidelity':      eng.get('w3_fidelity'),
         'wN_fidelity':      eng.get('wN_fidelity'),
         'w6_fidelity':      w6_fidelity,
-        'w_state_fidelity': eng.get('w3_fidelity', 0.90),   # miner _normalize compat
+        'w_state_fidelity': eng.get('w3_fidelity'),   # None until real measurement
         # ── Coherence / entanglement ──────────────────────────────────────────
-        'coherence':        eng.get('coherence',    0.70),
-        'entanglement':     eng.get('entanglement', 0.65),
-        'purity':           eng.get('purity',       0.80),
-        'phase_drift':      eng.get('phase_drift',  0.02),
-        'negativity':       eng.get('negativity',   0.43),
-        'concurrence':      eng.get('concurrence',  0.30),
-        'qfi':              eng.get('qfi',          6.5),
-        'discord':          eng.get('discord',      1.50),
-        'sector_occ':       eng.get('sector_occ',   0.90),
-        'tele_fidelity':    eng.get('tele_fidelity',0.60),
+        'coherence':        eng.get('coherence'),
+        'entanglement':     eng.get('entanglement'),
+        'purity':           eng.get('purity'),
+        'phase_drift':      eng.get('phase_drift'),
+        'negativity':       eng.get('negativity'),
+        'concurrence':      eng.get('concurrence'),
+        'qfi':              eng.get('qfi'),
+        'discord':          eng.get('discord'),
+        'sector_occ':       eng.get('sector_occ'),
+        'tele_fidelity':    eng.get('tele_fidelity'),
         # ── Noise / physics parameters ────────────────────────────────────────
         'gamma_amp':        gamma_amp,
         'gamma_phase':      gamma_phase,
-        'gamma1':           eng.get('gamma1',    0.04),
-        'gammaphi':         eng.get('gammaphi',  0.12),
-        'gammadep':         eng.get('gammadep',  0.01),
-        'gamma_geo':        eng.get('gamma_geo', 0.01),
-        'omega':            eng.get('omega',     0.50),
-        'ou_mem':           eng.get('ou_mem',    0.03),
+        'gamma1':           eng.get('gamma1'),
+        'gammaphi':         eng.get('gammaphi'),
+        'gammadep':         eng.get('gammadep'),
+        'gamma_geo':        eng.get('gamma_geo'),
+        'omega':            eng.get('omega'),
+        'ou_mem':           eng.get('ou_mem'),
         'db_latency_ms':    db_lat_ms,
         # ── Lattice / field ───────────────────────────────────────────────────
-        'batch_field_mean': eng.get('batch_field_mean', 0.5),
-        'geodesic_dist':    eng.get('geodesic_dist',    0.0),
-        'qrng_health':      eng.get('qrng_health',      1.0),
-        'n_peers':          eng.get('n_peers', 0),
+        'batch_field_mean': eng.get('batch_field_mean'),
+        'geodesic_dist':    eng.get('geodesic_dist'),
+        'qrng_health':      eng.get('qrng_health'),
+        'n_peers':          eng.get('n_peers'),
         # ── pq0 Bloch vector ──────────────────────────────────────────────────
-        'pq0_bloch_theta':  eng.get('pq0_bloch_theta', 1.5708),
-        'pq0_bloch_phi':    eng.get('pq0_bloch_phi',   0.0),
+        'pq0_bloch_theta':  eng.get('pq0_bloch_theta'),
+        'pq0_bloch_phi':    eng.get('pq0_bloch_phi'),
         # ── QTCL-PoW seed (QRNG-injected, used by miners for scratchpad) ────────
         # This is SHA3-256(density_matrix XOR qrng_32 || timestamp_ns).
         # Miners build their 512KB scratchpad from SHAKE-256(this seed).
