@@ -66,6 +66,9 @@ if not logging.getLogger().hasHandlers():
     logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
+# Timeout for individual AER measurements (seconds)
+MEASUREMENT_TIMEOUT = 30
+
 # ═══════════════════════════════════════════════════════════════════════════════════════════
 # UNIFIED W-STATE VALIDATOR (Single canonical validator - used everywhere)
 # Eliminates 3 duplicate validators (Oracle, Server, Miner all use same rules)
@@ -1232,18 +1235,10 @@ class OracleNode:
                 trace_purity            = QIM.trace_purity(dm_array),
             )
 
-            try:
-                from hlwe_engine import hlwe_sign_block
-                hlwe_sig = hlwe_sign_block(
-                    {'timestamp_ns': snap.timestamp_ns, 'w_state_fidelity': snap.w_state_fidelity, 'oracle_id': self.oracle_id + 1},
-                    f"oracle_{self.oracle_id:02d}"
-                )
-                if hlwe_sig and 'error' not in hlwe_sig:
-                    snap.hlwe_signature = hlwe_sig
-                    snap.oracle_address = f"oracle_{self.oracle_id:02d}"
-                    snap.signature_valid = True
-            except Exception as e:
-                logger.warning(f"[ORACLE-NODE-{self.oracle_id+1}] HLWE signature error: {e}")
+            # Per-node HLWE signing removed: hlwe_sign_block() requires a hex
+            # private key, not a node label. Cluster-level signing is done by
+            # OracleWStateManager after consensus, using OracleEngine's keypair.
+            snap.oracle_address = f"oracle_{self.oracle_id+1:02d}"
 
             with self._lock:
                 self._dm             = dm_array
