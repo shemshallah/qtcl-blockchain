@@ -5366,7 +5366,7 @@ class P2PServer:
                                 # Flask/gunicorn must NEVER share P2P_PORT.
                                 _FLASK_PORT = int(os.environ.get('FLASK_INTERNAL_PORT',
                                                   os.environ.get('PORT', 8000)))
-                                _HEALTH_PATHS = {b'/', b'/health', b'/healthz', b'/ping'}
+                                _HEALTH_PATHS = {b'/health', b'/healthz', b'/ping'}  # / forwarded to Flask dashboard
                                 _path = b'/'
                                 try:
                                     sock.settimeout(10)
