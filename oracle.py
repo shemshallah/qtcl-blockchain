@@ -244,8 +244,8 @@ def _oracle_qrng_bytes(n: int) -> bytes:
         with _ORACLE_QRNG_LOCK:
             if _ORACLE_QRNG_INSTANCE is None:
                 try:
-                    from qrng_ensemble import QRNGEnsemble
-                    _ORACLE_QRNG_INSTANCE = QRNGEnsemble()
+                    from qrng_ensemble import QuantumEntropyEnsemble
+                    _ORACLE_QRNG_INSTANCE = QuantumEntropyEnsemble()
                     logger.info("[ORACLE] ✅ QRNG ensemble wired — per-call stochastic channels active")
                 except Exception as _qe:
                     logger.warning(f"[ORACLE] QRNG unavailable ({_qe}), using os.urandom")

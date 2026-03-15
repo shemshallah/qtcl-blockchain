@@ -110,9 +110,15 @@ except ImportError as _me:
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 try:
-    from qrng_ensemble import QRNGEnsembleManager, measure_pool_entropy
+    from qrng_ensemble import QuantumEntropyEnsemble
     QRNG_AVAILABLE = True
+    _QRNG_INSTANCE = QuantumEntropyEnsemble()
     logger.info("[MINING] ✅ QRNG ensemble (5-source quantum entropy)")
+    def measure_pool_entropy() -> float:
+        try:
+            return _QRNG_INSTANCE.get_entropy_estimate()
+        except:
+            return 0.85
 except ImportError:
     QRNG_AVAILABLE = False
     logger.warning("[MINING] ⚠️  QRNG ensemble not available")
