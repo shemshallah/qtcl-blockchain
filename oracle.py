@@ -71,6 +71,79 @@ logger = logging.getLogger(__name__)
 # ORACLE ADDRESS REGISTRY — Per-oracle HLWE address lookup
 # ═══════════════════════════════════════════════════════════════════════════════════════════
 
+def get_all_oracle_addresses_batch() -> Dict[int, str]:
+    """
+    Batch-fetch all 5 oracle addresses in a single DB query.
+    Prevents connection pool exhaustion from 5 simultaneous lookups.
+    
+    Returns:
+        Dict mapping oracle_idx (1-5) to HLWE address
+        Falls back to deterministic addresses if DB unavailable
+    """
+    _ORACLE_ROLES = [
+        'PRIMARY_LATTICE', 'SECONDARY_LATTICE', 'VALIDATION', 'ARBITER', 'METRICS'
+    ]
+    
+    # Deterministic fallbacks
+    fallbacks = {
+        i+1: f'qtcl1{_ORACLE_ROLES[i].lower()[:12]}_{i+1:02d}'
+        for i in range(5)
+    }
+    
+    try:
+        pooler_host = os.getenv('POOLER_HOST', 'aws-0-us-west-2.pooler.supabase.com')
+        pooler_port = int(os.getenv('POOLER_PORT', 6543))
+        db_name = os.getenv('POSTGRES_DB', 'postgres')
+        db_user = os.getenv('POSTGRES_USER', 'postgres')
+        db_password = os.getenv('POSTGRES_PASSWORD', '')
+        
+        if not db_password:
+            logger.debug("[ORACLE-ADDR-BATCH] No DB password, using fallbacks")
+            return fallbacks
+        
+        # Single connection for batch fetch
+        conn = psycopg2.connect(
+            host=pooler_host,
+            port=pooler_port,
+            database=db_name,
+            user=db_user,
+            password=db_password,
+            connect_timeout=2
+        )
+        conn.set_session(autocommit=True)
+        cursor = conn.cursor()
+        
+        # Fetch all 5 in one query
+        cursor.execute("""
+            SELECT oracle_id, oracle_address 
+            FROM oracle_registry 
+            WHERE oracle_id IN ('oracle_1', 'oracle_2', 'oracle_3', 'oracle_4', 'oracle_5')
+            ORDER BY oracle_id
+        """)
+        results = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        # Build dict: oracle_idx -> address
+        addresses = {}
+        for oracle_id, oracle_address in results:
+            # Extract index from 'oracle_1' → 1
+            idx = int(oracle_id.split('_')[1])
+            addresses[idx] = oracle_address
+            logger.info(f"[ORACLE-ADDR-BATCH] oracle_{idx} → {oracle_address}")
+        
+        # Fill in any missing with fallbacks
+        for idx in range(1, 6):
+            if idx not in addresses:
+                addresses[idx] = fallbacks[idx]
+                logger.warning(f"[ORACLE-ADDR-BATCH] oracle_{idx} missing from DB, using fallback")
+        
+        return addresses
+        
+    except Exception as e:
+        logger.debug(f"[ORACLE-ADDR-BATCH] Batch lookup failed: {e}, using all fallbacks")
+        return fallbacks
+
 def get_oracle_address_from_registry(oracle_idx: int, role: str, fallback: str = None) -> str:
     """
     Fetch this oracle's unique HLWE address from oracle_registry.
@@ -1050,20 +1123,23 @@ class OracleNode:
     slightly different κ, so concurrent pair measurements are truly independent.
     """
 
-    def __init__(self, oracle_id: int, role: str):
+    def __init__(self, oracle_id: int, role: str, pre_fetched_address: str = None):
         self.oracle_id = oracle_id   # 0-indexed
         self.role      = role
         # Deterministic but distinct seed per node
         self.noise_seed = (0xDEAD_BEEF + oracle_id * 0x1337) & 0xFFFF_FFFF
         self.kappa      = round(AER_NOISE_KAPPA + oracle_id * 0.004, 4)
 
-        # Fetch this oracle's unique HLWE address from registry
-        # Oracle indices are 1-based in DB (oracle_1 through oracle_5)
-        self.oracle_address = get_oracle_address_from_registry(
-            oracle_idx=oracle_id + 1,
-            role=role,
-            fallback=f'qtcl1{role.lower()[:12]}_{oracle_id+1:02d}'
-        )
+        # Use pre-fetched address if provided (from OracleCluster batch fetch)
+        # Otherwise fetch individually (slower, but works as fallback)
+        if pre_fetched_address:
+            self.oracle_address = pre_fetched_address
+        else:
+            self.oracle_address = get_oracle_address_from_registry(
+                oracle_idx=oracle_id + 1,
+                role=role,
+                fallback=f'qtcl1{role.lower()[:12]}_{oracle_id+1:02d}'
+            )
 
         self.aer:         Optional[object]               = None
         self.noise_model: Optional[object]               = None
@@ -1463,9 +1539,12 @@ class OracleWStateManager:
         self.running       = False
         self.boot_time_ns  = time.time_ns()
 
-        # Build 5 independent oracle nodes
+        # Batch-fetch all 5 oracle addresses in a single DB query (prevents pool exhaustion)
+        oracle_addresses = get_all_oracle_addresses_batch()
+
+        # Build 5 independent oracle nodes with pre-fetched addresses
         self.nodes: List[OracleNode] = [
-            OracleNode(oracle_id=i, role=_ORACLE_ROLES[i])
+            OracleNode(oracle_id=i, role=_ORACLE_ROLES[i], pre_fetched_address=oracle_addresses.get(i+1))
             for i in range(5)
         ]
 
