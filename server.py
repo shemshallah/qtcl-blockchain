@@ -7324,19 +7324,11 @@ def dashboard():
 @app.route('/health', methods=['GET'])
 def health_check():
     """Koyeb liveness probe on port 8000.
-    Returns 200 OK immediately during startup (app is up).
-    Detailed health is in /api/health."""
-    _p2p_running = P2P is not None and getattr(P2P, 'is_running', False)
-    _p2p_port    = getattr(P2P, 'port', P2P_PORT) if _p2p_running else P2P_PORT
-    return jsonify({
-        'status':        'ok',
-        'app_ready':     _APP_READY,
-        'p2p_enabled':   _p2p_running,
-        'p2p_port':      _p2p_port,
-        'lattice_loaded': getattr(state, 'lattice_loaded', False),
-        'oracle_id':     ORACLE_ID,
-        'timestamp':     datetime.now(timezone.utc).isoformat(),
-    }), 200
+    Returns 200 OK immediately - no dependencies, no failures."""
+    try:
+        return '', 200
+    except:
+        return '', 200
 
 
 
