@@ -2638,6 +2638,38 @@ class QuantumLatticeController:
             'is_revival_cycle': (self.cycle_count % 8) == 0,  # SIGMA-REVIVAL at mod 8
         }
     
+    def get_block_field_pq0(self) -> 'np.ndarray':
+        """
+        Return the canonical 8×8 pq0 W-state density matrix for oracle circuits.
+
+        All 5 oracle nodes call this ONCE per measurement window to get the
+        same initial state.  Each then runs it through their own independent
+        AerSimulator — noise divergence produces the 5 different readings that
+        Byzantine consensus aggregates.
+
+        Construction:
+          rho_pq0 = F * |W₃⟩⟨W₃| + (1-F) * I/8
+
+        where F = self.fidelity (the lattice's live W-state fidelity).
+        High F → near-pure W-state → high Mermin values.
+        Low F (e.g. after a π-pulse) → more mixed → lower Mermin, flags to daemon.
+        """
+        import numpy as np
+        F = float(max(0.0, min(1.0, self.fidelity)))
+        # Pure 3-qubit W-state: |W⟩⟨W| full outer product
+        w3 = np.zeros((8, 8), dtype=np.complex128)
+        for _i in (1, 2, 4):
+            for _j in (1, 2, 4):
+                w3[_i, _j] = 1.0 / 3.0
+        # Blend: F * |W><W| + (1-F) * I/8
+        rho = F * w3 + (1.0 - F) * (np.eye(8, dtype=np.complex128) / 8.0)
+        # Enforce valid DM
+        rho = 0.5 * (rho + rho.conj().T)
+        tr = float(np.real(np.trace(rho)))
+        if tr > 1e-12:
+            rho /= tr
+        return rho
+
     def get_oracle_measurement_window(self) -> Dict[str, Any]:
         """
         ✅ Export measurement window checkpoint for oracle sync.

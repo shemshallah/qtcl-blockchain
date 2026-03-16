@@ -10570,49 +10570,22 @@ def _start_oracle_measurement_sync_daemon():
 
                     # ───────────────────────────────────────────────────────────────────────────
                     # MEASUREMENT PHASE: All 5 oracles measure the SAME block field in parallel
+                    # One executor pass — collect results directly from futures
                     # ───────────────────────────────────────────────────────────────────────────
                     measurement_start = time.time_ns()
                     bf_readings = []
-                    oracle_metrics = []  # For broadcasting
+                    oracle_metrics = []
 
                     from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
                     with _TPE(max_workers=5, thread_name_prefix="OracleSyncMeas") as _ex:
                         _fmap = {
-                            _ex.submit(node.measure_block_field, pq_curr, pq_last, sync_pq0): node_idx
+                            _ex.submit(node.measure_block_field, pq_curr, pq_last, sync_pq0): (node_idx, node)
                             for node_idx, node in enumerate(ORACLE_W_STATE_MANAGER.nodes)
                         }
                         for _fut in _ac(_fmap, timeout=30):
-                            node_idx = _fmap[_fut]
+                            node_idx, node = _fmap[_fut]
                             try:
                                 bf = _fut.result()
-                            except Exception as e:
-                                logger.error(
-                                    f"[ORACLE-SYNC] ✗ Oracle-{node_idx} measurement FAILED: {type(e).__name__}: {e} | "
-                                    f"pq=[{pq_last}→{pq_curr}]",
-                                    exc_info=False
-                                )
-                                continue
-
-                    for node_idx, node in enumerate(ORACLE_W_STATE_MANAGER.nodes):
-                        try:
-                            bf = node.last_snapshot if hasattr(node, '_last_bf') else None
-                            # Re-use measure results already collected above via bf_readings
-                        except Exception:
-                            pass
-
-                    # Re-run sequentially for result collection (futures already ran above)
-                    # Reset and collect from parallel futures
-                    bf_readings = []
-                    oracle_metrics = []
-                    with _TPE(max_workers=5, thread_name_prefix="OracleSyncCollect") as _ex2:
-                        _fmap2 = {
-                            _ex2.submit(node.measure_block_field, pq_curr, pq_last, sync_pq0): (node_idx, node)
-                            for node_idx, node in enumerate(ORACLE_W_STATE_MANAGER.nodes)
-                        }
-                        for _fut2 in _ac(_fmap2, timeout=30):
-                            node_idx, node = _fmap2[_fut2]
-                            try:
-                                bf = _fut2.result()
                                 if bf:
                                     bf_readings.append((node_idx, bf))
                                     logger.critical(
@@ -10639,8 +10612,7 @@ def _start_oracle_measurement_sync_daemon():
                                     )
                             except Exception as e:
                                 logger.error(
-                                    f"[ORACLE-SYNC] ✗ Oracle-{node_idx} measurement FAILED: {type(e).__name__}: {e} | "
-                                    f"pq=[{pq_last}→{pq_curr}]",
+                                    f"[ORACLE-SYNC] ✗ Oracle-{node_idx} FAILED: {type(e).__name__}: {e}",
                                     exc_info=False
                                 )
                     

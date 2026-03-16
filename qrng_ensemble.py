@@ -57,6 +57,10 @@ from enum import Enum, IntEnum
 from collections import deque, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# Suppress noisy SSL warnings from qbck.io (self-signed cert, expected)
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 logger = logging.getLogger(__name__)
 
 # =============================================================================
