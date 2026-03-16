@@ -10976,96 +10976,9 @@ if LATTICE is not None and _METRICS_AGENTS.get('lattice_metrics') is not None:
 # ORACLE PQ METRICS REPORTING DAEMON: 10-second report of all 5 oracle pq_curr/pq_last states
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 
-_oracle_pq_reporting_thread = None
-_oracle_pq_reporting_running = False
-_oracle_pq_report_history = deque(maxlen=100)  # Keep last 100 reports (1000 seconds = 16+ minutes)
-
-def _start_oracle_pq_reporting_daemon():
-    """Start background daemon that logs individual oracle pq_curr/pq_last metrics every 10 seconds"""
-    global _oracle_pq_reporting_thread, _oracle_pq_reporting_running
-    
-    if _oracle_pq_reporting_running:
-        return
-    
-    def _oracle_pq_reporting_loop():
-        global _oracle_pq_reporting_running
-        _oracle_pq_reporting_running = True
-        report_count = 0
-        
-        while _oracle_pq_reporting_running:
-            try:
-                # Only run if oracle_cluster is fully initialized
-                if oracle_cluster is None:
-                    time.sleep(10)
-                    continue
-                
-                # Get current oracle pq states from OracleCluster (no measurement, just read)
-                try:
-                    oracle_states = oracle_cluster.get_oracle_pq_states()
-                except (AttributeError, TypeError):
-                    # Oracle states not ready yet
-                    time.sleep(10)
-                    continue
-                
-                if not oracle_states:
-                    time.sleep(10)
-                    continue
-                    
-                report_count += 1
-                report = {
-                    'timestamp': datetime.now(timezone.utc).isoformat(),
-                    'report_id': report_count,
-                    'oracles': {}
-                }
-                
-                # Log each oracle's individual pq metrics
-                for oracle_id, state in oracle_states.items():
-                    if state is None:
-                        continue
-                    report['oracles'][oracle_id] = {
-                        'oracle_id': oracle_id,
-                        'role': state.get('role', 'UNKNOWN'),
-                        'pq_curr_fidelity': round(state.get('pq_curr_fidelity', 0.0), 6),
-                        'pq_curr_coherence': round(state.get('pq_curr_coherence', 0.0), 6),
-                        'pq_last_fidelity': round(state.get('pq_last_fidelity', 0.0), 6),
-                        'pq_last_coherence': round(state.get('pq_last_coherence', 0.0), 6),
-                        'pq_avg_fidelity': round((state.get('pq_curr_fidelity', 0.0) + state.get('pq_last_fidelity', 0.0)) / 2.0, 6),
-                        'pq_avg_coherence': round((state.get('pq_curr_coherence', 0.0) + state.get('pq_last_coherence', 0.0)) / 2.0, 6),
-                    }
-                
-                if report['oracles']:
-                    # Store report in history
-                    _oracle_pq_report_history.append(report)
-                    
-                    # Log comprehensive report (human-readable format)
-                    log_lines = [f"[ORACLE-PQ] 📊 Pseudoqubit States Report #{report_count}"]
-                    for oracle_id, metrics in report['oracles'].items():
-                        log_lines.append(
-                            f"  {oracle_id} ({metrics['role']}): "
-                            f"pq_curr(F:{metrics['pq_curr_fidelity']:.4f} C:{metrics['pq_curr_coherence']:.4f}) | "
-                            f"pq_last(F:{metrics['pq_last_fidelity']:.4f} C:{metrics['pq_last_coherence']:.4f}) | "
-                            f"avg(F:{metrics['pq_avg_fidelity']:.4f} C:{metrics['pq_avg_coherence']:.4f})"
-                        )
-                    
-                    logger.info("\n".join(log_lines))
-                
-                time.sleep(10)  # 10-second cadence
-                
-            except Exception as e:
-                logger.debug(f"[ORACLE-PQ-REPORTING] Loop iteration error: {e}")
-                time.sleep(10)
-    
-    _oracle_pq_reporting_thread = threading.Thread(target=_oracle_pq_reporting_loop, daemon=True, name="OraclePQReporting")
-    _oracle_pq_reporting_thread.start()
-    logger.info("[ORACLE-PQ-REPORTING] Daemon started (10-second cadence)")
-
-# Start reporting daemon (safe to call even if oracle_cluster exists but not ready)
-if oracle_cluster is not None:
-    _start_oracle_pq_reporting_daemon()
-
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
-# ORACLE MEASUREMENT SYNC DAEMON — Block IS a lattice point, evolves under W-state
+# ORACLE MEASUREMENT SYNC DAEMON — Block field IS continuous lattice, unified with W-state
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 
 def _start_oracle_measurement_sync_daemon():
@@ -11169,145 +11082,16 @@ if LATTICE is not None and oracle_cluster is not None:
 
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
-# ORACLE PQ METRICS ENDPOINTS
-# ═════════════════════════════════════════════════════════════════════════════════════════════════
-
-@app.route('/metrics/oracle/pq/latest', methods=['GET'])
-def get_oracle_pq_latest():
-    """Get latest individual oracle pq_curr/pq_last metrics"""
-    if not _oracle_pq_report_history:
-        return jsonify({'status': 'waiting_for_data', 'message': 'No reports generated yet'}), 202
-    
-    try:
-        latest_report = _oracle_pq_report_history[-1]
-        return jsonify(latest_report), 200
-    except Exception as e:
-        logger.error(f"[ORACLE-PQ/LATEST] Error: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/metrics/oracle/pq/history', methods=['GET'])
-def get_oracle_pq_history():
-    """Get last N oracle pq metrics reports"""
-    try:
-        limit = request.args.get('limit', 10, type=int)
-        history = list(_oracle_pq_report_history)[-min(limit, 100):]
-        return jsonify({
-            'reports': history,
-            'count': len(history),
-            'total_available': len(_oracle_pq_report_history)
-        }), 200
-    except Exception as e:
-        logger.error(f"[ORACLE-PQ/HISTORY] Error: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/metrics/oracle/pq/summary', methods=['GET'])
-def get_oracle_pq_summary():
-    """Get summary statistics of oracle pq metrics (avg across all reports)"""
-    if not _oracle_pq_report_history:
-        return jsonify({'status': 'waiting_for_data'}), 202
-    
-    try:
-        oracle_summaries = {}
-        
-        # Aggregate across all reports
-        for report in _oracle_pq_report_history:
-            for oracle_id, metrics in report.get('oracles', {}).items():
-                if oracle_id not in oracle_summaries:
-                    oracle_summaries[oracle_id] = {
-                        'oracle_id': oracle_id,
-                        'role': metrics.get('role'),
-                        'measurements': 0,
-                        'pq_curr_fidelity_sum': 0.0,
-                        'pq_curr_coherence_sum': 0.0,
-                        'pq_last_fidelity_sum': 0.0,
-                        'pq_last_coherence_sum': 0.0,
-                        'pq_avg_fidelity_min': 1.0,
-                        'pq_avg_fidelity_max': 0.0,
-                        'pq_avg_coherence_min': 1.0,
-                        'pq_avg_coherence_max': 0.0,
-                    }
-                
-                summary = oracle_summaries[oracle_id]
-                summary['measurements'] += 1
-                summary['pq_curr_fidelity_sum'] += metrics.get('pq_curr_fidelity', 0.0)
-                summary['pq_curr_coherence_sum'] += metrics.get('pq_curr_coherence', 0.0)
-                summary['pq_last_fidelity_sum'] += metrics.get('pq_last_fidelity', 0.0)
-                summary['pq_last_coherence_sum'] += metrics.get('pq_last_coherence', 0.0)
-                
-                avg_fid = metrics.get('pq_avg_fidelity', 0.0)
-                avg_coh = metrics.get('pq_avg_coherence', 0.0)
-                summary['pq_avg_fidelity_min'] = min(summary['pq_avg_fidelity_min'], avg_fid)
-                summary['pq_avg_fidelity_max'] = max(summary['pq_avg_fidelity_max'], avg_fid)
-                summary['pq_avg_coherence_min'] = min(summary['pq_avg_coherence_min'], avg_coh)
-                summary['pq_avg_coherence_max'] = max(summary['pq_avg_coherence_max'], avg_coh)
-        
-        # Compute averages
-        for oracle_id, summary in oracle_summaries.items():
-            n = summary['measurements']
-            if n > 0:
-                summary['pq_curr_fidelity_avg'] = round(summary['pq_curr_fidelity_sum'] / n, 6)
-                summary['pq_curr_coherence_avg'] = round(summary['pq_curr_coherence_sum'] / n, 6)
-                summary['pq_last_fidelity_avg'] = round(summary['pq_last_fidelity_sum'] / n, 6)
-                summary['pq_last_coherence_avg'] = round(summary['pq_last_coherence_sum'] / n, 6)
-            
-            # Clean up sums
-            del summary['pq_curr_fidelity_sum']
-            del summary['pq_curr_coherence_sum']
-            del summary['pq_last_fidelity_sum']
-            del summary['pq_last_coherence_sum']
-        
-        return jsonify({
-            'timestamp': datetime.now(timezone.utc).isoformat(),
-            'oracles': oracle_summaries,
-            'total_reports': len(_oracle_pq_report_history)
-        }), 200
-    except Exception as e:
-        logger.error(f"[ORACLE-PQ/SUMMARY] Error: {e}")
-        return jsonify({'error': str(e)}), 500
-
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
-# ORACLE PQ FEED INTEGRATION: Feed oracle pq_curr/pq_last into measurement loop
-# ═════════════════════════════════════════════════════════════════════════════════════════════════
-
-def _update_oracle_pq_in_measurement_loop():
-    """Call this periodically to update oracle pq states (feeds into agents if available)"""
-    if oracle_cluster is None:
-        return
-    
-    try:
-        # Trigger new measurements from oracle cluster
-        oracle_cluster.measure_lattice(None)
-        
-        # Feed into Agent 1 (OracleMetricsCollector) if available
-        if _METRICS_AGENTS.get('oracle_collector') is not None:
-            try:
-                oracle_states = oracle_cluster.get_oracle_pq_states()
-                oracle_measurements = [
-                    {
-                        'oracle_id': oracle_id,
-                        'fidelity': state.get('pq_curr_fidelity', 0.92),
-                        'coherence': state.get('pq_curr_coherence', 0.89)
-                    }
-                    for oracle_id, state in oracle_states.items()
-                ]
-                _METRICS_AGENTS['oracle_collector'].collect_oracle_measurements(oracle_measurements)
-            except Exception as e:
-                logger.debug(f"[ORACLE-AGENT-FEED] Error: {e}")
-    
-    except Exception as e:
-        logger.debug(f"[ORACLE-PQ-FEED] Error: {e}")
-
-
-# ═════════════════════════════════════════════════════════════════════════════════════════════════
-# COMPREHENSIVE MEASUREMENT FEED DAEMON: Oracle PQ + Lattice + Noise Bath + Neural Net
+# COMPREHENSIVE MEASUREMENT FEED DAEMON: Lattice + Noise Bath only (Oracle sync via new daemon)
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 
 _comprehensive_measurement_thread = None
 _comprehensive_measurement_running = False
 
 def _start_comprehensive_measurement_feed():
-    """Start background daemon that feeds all measurements into agents (100ms cadence)"""
+    """Lattice metrics feed (Oracle PQ measurements now via ORACLE-SYNC daemon only)"""
     global _comprehensive_measurement_thread, _comprehensive_measurement_running
     
     if _comprehensive_measurement_running:
@@ -11317,14 +11101,13 @@ def _start_comprehensive_measurement_feed():
         global _comprehensive_measurement_running
         _comprehensive_measurement_running = True
         last_lattice_report = time.time()
-        last_neural_report = time.time()
         
         while _comprehensive_measurement_running:
             try:
                 current_time = time.time()
                 
-                # Update oracle pq measurements
-                _update_oracle_pq_in_measurement_loop()
+                # ✅ Oracle PQ measurements now handled by ORACLE-SYNC daemon
+                # (synchronized to lattice measurement windows)
                 
                 # Update lattice measurements (if available) — PULL REAL STATE
                 if LATTICE is not None and _METRICS_AGENTS.get('lattice_metrics') is not None:
@@ -11358,62 +11141,20 @@ def _start_comprehensive_measurement_feed():
                     except Exception as e:
                         logger.debug(f"[COMPREHENSIVE-FEED] Lattice extraction error: {e}")
                 
-                # Skip noise bath here - lattice maintenance loop already applies GKSL evolution
-                # Adding it here causes redundant expensive operations and condition number issues
+                time.sleep(0.5)
                 
-                # Update neural net: train on revival rewards with batch tracking
-                if _METRICS_AGENTS.get('refresh_net') is not None:
-                    try:
-                        from qrng_ensemble import QRNG_ENSEMBLE
-                        
-                        # Extract real lattice fidelity vector from actual state
-                        lattice_state = LATTICE.get_state() if LATTICE else {}
-                        batch_coherences = lattice_state.get('batch_coherences', {})
-                        
-                        # Build 64-dim fidelity vector from actual batch coherences (52 batches → pad to 64)
-                        lattice_fid_vec = _np.zeros(64)
-                        for i in range(52):
-                            batch_key = f'batch_{i}'
-                            lattice_fid_vec[i] = batch_coherences.get(batch_key, 0.89)
-                        # Pad remaining slots with mean coherence
-                        mean_coh = _np.mean(lattice_fid_vec[:52])
-                        lattice_fid_vec[52:] = mean_coh
-                        
-                        noise_state = 1.0 - lattice_state.get('coherence', 0.89)  # Inverted coherence = noise
-                        entropy_pool = QRNG_ENSEMBLE.get_random_bytes(32)
-                        
-                        # Fidelity before gates
-                        fidelity_before = _np.mean(lattice_fid_vec)
-                        
-                        # Forward: infer gate sequence for next batch
-                        gate_sequence, pred_fid, pred_coh = _METRICS_AGENTS['refresh_net'].forward(
-                            lattice_fid_vec, noise_state, entropy_pool
-                        )
-                        
-                        # Simulate gate effects: evolve fidelity based on QRNG + coherence
-                        recovery_gain = get_random_float() * 0.05 * lattice_state.get('coherence', 0.89)
-                        fidelity_after = min(1.0, fidelity_before + recovery_gain)
-                        
-                        # Train on revival reward
-                        train_metrics = _METRICS_AGENTS['refresh_net'].train_on_revival_reward(
-                            lattice_fid_vec, noise_state, entropy_pool,
-                            fidelity_before, fidelity_after
-                        )
-                        
-                        current_batch = train_metrics.get('current_batch', 0)
-                        total_revivals = train_metrics.get('total_revivals_triggered', 0)
-                        training_steps = train_metrics.get('training_steps', 0)
-                        total_reward = train_metrics.get('total_reward', 0.0)
-                        coverage = train_metrics.get('engagement_coverage', '0/52')
-                        
-                        # Report neural net metrics every 2 seconds
-                        if (current_time - last_neural_report) > 2.0:
-                            logger.info(f"[NEURAL-NET] Step {training_steps} | "
-                                       f"batch={current_batch}/52 | "
-                                       f"revivals={total_revivals} | "
-                                       f"fid_before={fidelity_before:.4f} "
-                                       f"fid_after={fidelity_after:.4f} "
-                                       f"pred_fid={pred_fid:.4f} | "
+            except Exception as e:
+                logger.debug(f"[COMPREHENSIVE-FEED] Loop error: {e}")
+                time.sleep(1.0)
+    
+    _comprehensive_measurement_thread = threading.Thread(target=_comprehensive_feed_loop, daemon=True, name="ComprehensiveMeasurementFeed")
+    _comprehensive_measurement_thread.start()
+    logger.info("[COMPREHENSIVE-FEED] Daemon started (lattice only, Oracle PQ via SYNC daemon)")
+
+
+# Start comprehensive feed daemon
+if LATTICE is not None:
+    _start_comprehensive_measurement_feed()
                                        f"reward={total_reward:.4f} | "
                                        f"coverage={coverage}")
                             last_neural_report = current_time
