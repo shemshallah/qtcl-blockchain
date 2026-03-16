@@ -2386,11 +2386,15 @@ class QuantumLatticeController:
                             (1.0 - injection_amplitude) * self.current_density_matrix
                             + injection_amplitude * anti_w_target
                         )
+                        # Recompute fidelity AFTER injection so the log shows the real new value
+                        fidelity_after_hahn = QuantumInformationMetrics.state_fidelity(
+                            self.current_density_matrix, self._w8_target
+                        )
                         logger.info(
                             f"🔬 [SIGMA-HAHN-4] Anti-W π-pulse at cycle {self.cycle_count} "
                             f"(t={self.cycle_count * CYCLE_TIME_NS:.0f}ns) | "
                             f"amplitude={injection_amplitude:.3f} | "
-                            f"F: {fidelity_before_injection:.6f} → {self.fidelity:.6f}"
+                            f"F: {fidelity_before_injection:.6f} → {fidelity_after_hahn:.6f}"
                         )
                     
                     # ─── LAYER 2: FULL W-STATE REVIVAL (σ ≡ 0 mod 8) ──────────────
@@ -2400,11 +2404,18 @@ class QuantumLatticeController:
                             (1.0 - injection_amplitude) * self.current_density_matrix
                             + injection_amplitude * self._w8_target
                         )
+                        # Recompute coherence AFTER injection so log shows true new values
+                        _raw_coh_post = QuantumInformationMetrics.coherence_l1_norm(self.current_density_matrix)
+                        fidelity_after_revival = QuantumInformationMetrics.state_fidelity(
+                            self.current_density_matrix, self._w8_target
+                        )
+                        coherence_after_revival = float(np.clip(_raw_coh_post / 255.0, 0.0, 1.0))
                         logger.info(
                             f"🔬 [SIGMA-REVIVAL-0] W-state revival at cycle {self.cycle_count} "
                             f"(t={self.cycle_count * CYCLE_TIME_NS:.0f}ns, Δt={CYCLE_TIME_NS * 8:.0f}ns/period) | "
                             f"amplitude={injection_amplitude:.3f} | "
-                            f"F={self.fidelity:.6f} coherence={self.coherence:.6f}"
+                            f"F: {fidelity_before_injection:.6f} → {fidelity_after_revival:.6f} | "
+                            f"coherence: → {coherence_after_revival:.6f}"
                         )
                     
                     # ─── LAYER 4: POWER-OF-2 BURST (cycles 2^k) ───────────────────

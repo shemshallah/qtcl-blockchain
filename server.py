@@ -3212,408 +3212,261 @@ def _broadcast_snapshot_to_gossip_network(snapshot: dict) -> None:
 # UNIFIED PORT 9091 SYSTEM: All 5 Oracles In-Process (No Separate HTTP Ports)
 # ═════════════════════════════════════════════════════════════════════════════════
 
-class InProcessOracleMeasurementEngine:
-    """
-    All 5 oracle engines run IN-PROCESS, no HTTP queries, no separate ports.
-    Shared state, thread-safe, measurement every 10ms.
-    """
-    
-    def __init__(self):
-        self.oracle_states = {
-            'oracle_1': {'role': 'PRIMARY_LATTICE', 'fidelity': 0.930, 'coherence': 0.890, 'cycle': 0},
-            'oracle_2': {'role': 'SECONDARY_LATTICE', 'fidelity': 0.930, 'coherence': 0.890, 'cycle': 0},
-            'oracle_3': {'role': 'VALIDATION', 'fidelity': 0.930, 'coherence': 0.890, 'cycle': 0},
-            'oracle_4': {'role': 'ARBITER', 'fidelity': 0.930, 'coherence': 0.890, 'cycle': 0},
-            'oracle_5': {'role': 'METRICS', 'fidelity': 0.930, 'coherence': 0.890, 'cycle': 0},
-        }
-        self.lock = threading.RLock()
-        self.cycle_counter = 0
-        logger.info("[IN-PROCESS-ORACLES] Initialized 5 oracle engines (all on port 9091)")
-    
-    def measure_all_oracles(self):
-        """
-        Measure all 5 oracles in-process (no HTTP, no separate ports).
-        Each oracle gets slightly different variation + time-based oscillation.
-        """
-        self.cycle_counter += 1
-        current_cycle = self.cycle_counter
-        time_phase = (current_cycle % 1000) / 1000.0  # 0.0-1.0
-        
-        with self.lock:
-            for idx, (oracle_id, state) in enumerate(self.oracle_states.items(), 1):
-                # Base metrics
-                base_fidelity = 0.9300
-                base_coherence = 0.8900
-                
-                # Per-oracle variation (each slightly different)
-                oracle_offset = (idx * 0.0008) - 0.002
-                
-                # Time-based oscillation (varies over time)
-                time_variation = (time_phase - 0.5) * 0.006
-                
-                # Calculate metrics
-                fidelity = base_fidelity + oracle_offset + time_variation
-                fidelity = max(0.920, min(0.940, fidelity))
-                
-                coherence = base_coherence + (time_phase - 0.5) * 0.004
-                coherence = max(0.880, min(0.900, coherence))
-                
-                # Update in-process state
-                state['fidelity'] = round(fidelity, 6)
-                state['coherence'] = round(coherence, 6)
-                state['entropy'] = round(2.1 - (fidelity - 0.92) * 10, 4)
-                state['purity'] = round(0.94 + (fidelity - 0.92), 6)
-                state['cycle'] = current_cycle
-                state['timestamp_ns'] = int(time.time() * 1e9)
-    
-    def get_oracle_state(self, oracle_id: str) -> dict:
-        """Get current state of oracle (in-process, thread-safe)."""
-        with self.lock:
-            return dict(self.oracle_states.get(oracle_id, {}))
-    
-    def get_all_oracle_states(self) -> dict:
-        """Get all oracle states for aggregation."""
-        with self.lock:
-            return {oid: dict(state) for oid, state in self.oracle_states.items()}
-
-# Global in-process oracle engine (singleton)
-_oracle_engines = InProcessOracleMeasurementEngine()
-
-def get_oracle_engines() -> InProcessOracleMeasurementEngine:
-    """Get global in-process oracle measurement engine."""
-    return _oracle_engines
-
 # ═════════════════════════════════════════════════════════════════════════════════
+# NOTE: InProcessOracleMeasurementEngine removed.
+# Oracle measurements now come exclusively from ORACLE_W_STATE_MANAGER
+# (OracleWStateManager in oracle.py) which runs real 5-qubit AER block-field
+# circuits and performs Byzantine 3-of-5 consensus. Zero synthetic values.
+# ═════════════════════════════════════════════════════════════════════════════════
+
 class UnifiedOracleMux:
     """
-    Unified oracle multiplexer for port 9091.
-    
-    Architecture:
-    - 5 independent oracle instances (ports 5000-5004)
-    - Round-robin collection (cycle through each oracle)
-    - Aggregate all measurements into single snapshot
-    - Single chirp broadcast (one SSE event per round)
-    - All clients receive identical unified measurement
-    
-    Round-robin flow:
-      Tick 0: Measure oracle_1 (PRIMARY_LATTICE, port 5000)
-      Tick 1: Measure oracle_2 (SECONDARY_LATTICE, port 5001)
-      Tick 2: Measure oracle_3 (VALIDATION, port 5002)
-      Tick 3: Measure oracle_4 (ARBITER, port 5003)
-      Tick 4: Measure oracle_5 (METRICS, port 5004)
-      Tick 5: [Repeat] Measure oracle_1
-      ...
-      
-    Aggregate into single snapshot with all measurements + consensus metrics.
-    Broadcast as single chirp to all SSE clients on port 9091.
+    Unified oracle multiplexer — aggregates the live ORACLE_W_STATE_MANAGER cluster
+    into a single chirp snapshot for SSE broadcast on port 9091.
+
+    Architecture
+    ────────────
+    OracleWStateManager (oracle.py) runs a continuous measurement loop:
+      • All 5 OracleNode instances each measure the 5-qubit block-field composite
+        (pq0 tripartite ⊗ pq_curr ⊗ pq_last) using their own evolving self._dm.
+      • Byzantine 3-of-5 consensus selects the middle 3 readings by fidelity.
+      • Consensus oracle sub-DM is built from the mean of the 3 accepted DMs.
+      • Mermin test runs every 10 cycles on the consensus DM.
+
+    This class aggregates those results into the chirp broadcast format consumed
+    by the Koyeb dashboard (index.html) via Socket.IO metrics_update events.
+
+    No synthetic values. No hardcoded constants. Real AER measurements only.
     """
-    
-    ORACLE_PORTS = {
-        'oracle_1': {'port': 5000, 'role': 'PRIMARY_LATTICE', 'url': 'http://localhost:5000'},
-        'oracle_2': {'port': 5001, 'role': 'SECONDARY_LATTICE', 'url': 'http://localhost:5001'},
-        'oracle_3': {'port': 5002, 'role': 'VALIDATION', 'url': 'http://localhost:5002'},
-        'oracle_4': {'port': 5003, 'role': 'ARBITER', 'url': 'http://localhost:5003'},
-        'oracle_5': {'port': 5004, 'role': 'METRICS', 'url': 'http://localhost:5004'},
+
+    _ORACLE_ROLES = {
+        'oracle_1': 'PRIMARY_LATTICE',
+        'oracle_2': 'SECONDARY_LATTICE',
+        'oracle_3': 'VALIDATION',
+        'oracle_4': 'ARBITER',
+        'oracle_5': 'METRICS',
     }
-    
+
     def __init__(self):
-        self.oracle_order = list(self.ORACLE_PORTS.keys())
-        self.round_robin_index = 0
-        self.measurements_cache = {}  # oracle_id -> last_measurement
-        self.measurements_lock = threading.RLock()
-        self.chirp_count = 0
+        self.oracle_order    = list(self._ORACLE_ROLES.keys())
+        self.chirp_count     = 0
+        self._lock           = threading.RLock()
         logger.info(f"[ORACLE-MUX] Initialized unified multiplexer on port 9091")
         logger.info(f"[ORACLE-MUX] Round-robin order: {' → '.join(self.oracle_order)} → repeat")
-    
-    def get_next_oracle(self) -> str:
-        """Get next oracle in round-robin sequence."""
-        oracle_id = self.oracle_order[self.round_robin_index]
-        self.round_robin_index = (self.round_robin_index + 1) % len(self.oracle_order)
-        return oracle_id
-    
-    def measure_all_oracles(self) -> None:
-        """Measure all 5 oracles in sequence via HTTP round-robin."""
-        for oracle_id in self.oracle_order:
+
+    def aggregate_all_measurements(self) -> Optional[dict]:
+        """
+        Pull the latest block-field consensus snapshot from ORACLE_W_STATE_MANAGER
+        and build the unified chirp broadcast payload.
+
+        Returns a dict containing:
+          oracle_measurements  — per-oracle block-field readings (5 entries)
+          consensus            — Byzantine median metrics
+          mermin_test          — Mermin inequality result on consensus oracle DM
+          lattice_quantum      — lattice controller metrics
+          pq0_components       — pq0_oracle / pq0_IV / pq0_V fidelities
+        """
+        # ── Pull live data from ORACLE_W_STATE_MANAGER ────────────────────────
+        latest_dm   = None
+        block_field = {}
+        mermin      = None
+        pq0_comps   = {}
+
+        if ORACLE_AVAILABLE and ORACLE_W_STATE_MANAGER is not None:
             try:
-                measurement = self.measure_oracle_http(oracle_id)
-                if measurement:
-                    with self.measurements_lock:
-                        self.measurements_cache[oracle_id] = measurement
+                latest_dm = ORACLE_W_STATE_MANAGER.get_latest_density_matrix()
+                if latest_dm:
+                    block_field = latest_dm.get("block_field", {})
+                    mermin      = latest_dm.get("mermin_test") or latest_dm.get("bell_test")
+                    pq0_comps   = {
+                        "pq0_oracle_fidelity": latest_dm.get("pq0_oracle_fidelity", 0.0),
+                        "pq0_IV_fidelity":     latest_dm.get("pq0_IV_fidelity",     0.0),
+                        "pq0_V_fidelity":      latest_dm.get("pq0_V_fidelity",      0.0),
+                    }
             except Exception as e:
-                logger.debug(f"[ORACLE-MUX] Measure {oracle_id}: {e}")
-    
-    def measure_oracle_http(self, oracle_id: str) -> Optional[dict]:
-        """
-        Measure a single oracle via HTTP (port 5000-5004).
-        
-        Queries:
-        - /api/oracle/pq0-bloch (W-state fidelity)
-        - /metrics (fidelity, coherence, entropy)
-        - Returns unified snapshot
-        """
-        config = self.ORACLE_PORTS.get(oracle_id)
-        if not config:
-            return None
-        
-        try:
-            base_url = config['url']
-            
-            # Query oracle's pq0-bloch endpoint
-            fidelity_url = f"{base_url}/api/oracle/pq0-bloch"
-            metrics_url = f"{base_url}/api/metrics"
-            
-            fidelity_resp = None
-            metrics_resp = None
-            
-            try:
-                fidelity_resp = requests.get(fidelity_url, timeout=2)
-                if fidelity_resp.status_code == 200:
-                    fidelity_data = fidelity_resp.json()
-                else:
-                    fidelity_data = {}
-            except:
-                fidelity_data = {}
-            
-            try:
-                metrics_resp = requests.get(metrics_url, timeout=2)
-                if metrics_resp.status_code == 200:
-                    metrics_data = metrics_resp.json()
-                else:
-                    metrics_data = {}
-            except:
-                metrics_data = {}
-            
-            # Aggregate measurement
-            # Add realistic variation: each oracle slightly different + time-varying
-            oracle_num = int(oracle_id.split('_')[1])  # oracle_1 → 1, oracle_2 → 2, etc.
-            time_cycle = (int(time.time() * 100) % 1000) / 1000.0  # 0.0-1.0, changes every 10ms
-            
-            # Base + per-oracle offset + time variation
-            base_fidelity = 0.930
-            oracle_offset = (oracle_num * 0.0008) - 0.002  # oracle_1: -0.0012, oracle_2: -0.0004, etc.
-            time_variation = (time_cycle - 0.5) * 0.006  # ±0.003 based on time
-            
-            fidelity = base_fidelity + oracle_offset + time_variation
-            fidelity = max(0.92, min(0.94, fidelity))  # Clamp to realistic range
-            
-            base_coherence = 0.890
-            coherence = base_coherence + (time_cycle - 0.5) * 0.004  # ±0.002 variation
-            coherence = max(0.88, min(0.90, coherence))
-            
-            measurement = {
-                'oracle_id': oracle_id,
-                'oracle_role': config['role'],
-                'oracle_port': config['port'],
-                'timestamp_ns': int(time.time() * 1e9),
-                'w_state_fidelity': round(fidelity, 6),
-                'coherence': round(coherence, 6),
-                'entropy': 2.1 - (fidelity - 0.92) * 10,  # Varies with fidelity
-                'purity': 0.94 + (fidelity - 0.92),  # Correlates with fidelity
-                'available': True,
-            }
-            
-            with self.measurements_lock:
-                self.measurements_cache[oracle_id] = measurement
-            
-            return measurement
-        
-        except Exception as e:
-            logger.debug(f"[ORACLE-MUX] Measure {oracle_id} error: {e}")
-            return None
-    
-    def aggregate_all_measurements(self) -> dict:
-        """
-        Aggregate all 5 oracle measurements into single unified snapshot.
-        
-        Returns single chirp containing:
-        - All 5 oracle measurements
-        - Averaged metrics (consensus)
-        - Confidence scores
-        - Single broadcast (one SSE event)
-        """
-        with self.measurements_lock:
-            measurements = list(self.measurements_cache.values())
-        
+                logger.debug(f"[ORACLE-MUX] ORACLE_W_STATE_MANAGER pull error: {e}")
+
+        # ── Build per-oracle measurement array from block_field.per_node ─────
+        per_node      = block_field.get("per_node", [])
+        measurements  = []
+        for node in per_node:
+            oid   = node.get("oracle_id", 0)
+            role  = node.get("role", self._ORACLE_ROLES.get(f"oracle_{oid}", "UNKNOWN"))
+            measurements.append({
+                "oracle_id":           f"oracle_{oid}",
+                "oracle_role":         role,
+                "w_state_fidelity":    round(float(node.get("fidelity",  0.0)), 6),
+                "coherence":           round(float(node.get("coherence", 0.0)), 6),
+                "entropy":             round(float(node.get("entropy",   0.0)), 4),
+                "pq0_oracle_fidelity": round(float(node.get("pq0_oracle_fidelity", 0.0)), 6),
+                "pq0_IV_fidelity":     round(float(node.get("pq0_IV_fidelity",     0.0)), 6),
+                "pq0_V_fidelity":      round(float(node.get("pq0_V_fidelity",      0.0)), 6),
+                "in_consensus":        bool(node.get("in_consensus", False)),
+                "timestamp_ns":        latest_dm.get("timestamp_ns", int(time.time()*1e9)) if latest_dm else int(time.time()*1e9),
+            })
+
+        # Fallback: if ORACLE_W_STATE_MANAGER not ready, emit empty oracle slots
         if not measurements:
-            return None
-        
-        # Average metrics across all available measurements
-        fidelities = [m.get('w_state_fidelity', 0.93) for m in measurements]
-        coherences = [m.get('coherence', 0.89) for m in measurements]
-        entropies = [m.get('entropy', 2.1) for m in measurements]
-        purities = [m.get('purity', 0.94) for m in measurements]
-        
-        avg_fidelity = sum(fidelities) / len(fidelities) if fidelities else 0.93
-        avg_coherence = sum(coherences) / len(coherences) if coherences else 0.89
-        avg_entropy = sum(entropies) / len(entropies) if entropies else 2.1
-        avg_purity = sum(purities) / len(purities) if purities else 0.94
-        
-        # ═══════════════════════════════════════════════════════════════════════════════
-        # MUSEUM-GRADE LATTICE QUANTUM METRICS INJECTION
-        # Integrated directly into unified chirp broadcast to Koyeb dashboard
-        # ═══════════════════════════════════════════════════════════════════════════════
-        
+            for oid, role in self._ORACLE_ROLES.items():
+                measurements.append({
+                    "oracle_id":        oid,
+                    "oracle_role":      role,
+                    "w_state_fidelity": 0.0,
+                    "coherence":        0.0,
+                    "entropy":          0.0,
+                    "pq0_oracle_fidelity": 0.0,
+                    "pq0_IV_fidelity":     0.0,
+                    "pq0_V_fidelity":      0.0,
+                    "in_consensus":     False,
+                    "timestamp_ns":     int(time.time() * 1e9),
+                })
+
+        # ── Consensus metrics from block-field Byzantine median ───────────────
+        cons_fidelity  = float(block_field.get("fidelity",  0.0) if block_field else
+                                (latest_dm.get("w_state_fidelity", 0.0) if latest_dm else 0.0))
+        cons_coherence = float(block_field.get("coherence", 0.0) if block_field else
+                                (latest_dm.get("coherence_l1",     0.0) if latest_dm else 0.0))
+        cons_entropy   = float(block_field.get("entropy",   0.0) if block_field else
+                                (latest_dm.get("von_neumann_entropy", 0.0) if latest_dm else 0.0))
+        cons_purity    = float(latest_dm.get("purity",      0.0) if latest_dm else 0.0)
+
+        # ── Lattice quantum metrics ───────────────────────────────────────────
         lattice_quantum = None
-        lattice_health = {'status': 'unavailable'}
-        
+        lattice_health  = {'status': 'unavailable'}
         try:
             if LATTICE and LATTICE.block_manager and hasattr(LATTICE, 'coherence'):
-                # Get lattice metrics from agents (pq_curr/pq_last averages)
-                lattice_coherence = 0.0
-                lattice_fidelity = 0.0
-                lattice_nodes_measured = 0
-                
+                lattice_coherence = float(getattr(LATTICE, 'coherence', 0.0))
+                lattice_fidelity  = float(getattr(LATTICE, 'fidelity',  0.0))
+
                 if _METRICS_AGENTS.get('lattice_metrics') is not None:
                     try:
-                        lattice_summary = _METRICS_AGENTS['lattice_metrics'].get_lattice_summary()
-                        lattice_coherence = lattice_summary.get('global_coherence_mean', 0.0)
-                        lattice_fidelity = lattice_summary.get('global_fidelity_mean', 0.0)
-                        lattice_nodes_measured = lattice_summary.get('nodes_measured', 0)
-                    except:
+                        summary = _METRICS_AGENTS['lattice_metrics'].get_lattice_summary()
+                        lattice_coherence = summary.get('global_coherence_mean', lattice_coherence)
+                        lattice_fidelity  = summary.get('global_fidelity_mean',  lattice_fidelity)
+                    except Exception:
                         pass
-                
-                # Fallback to controller metrics if agents not ready
-                if lattice_coherence == 0.0:
-                    lattice_coherence = float(getattr(LATTICE, 'coherence', 0.0))
 
-                # FIX: L1-coherence of 256×256 W-state can exceed 7 (sum of all off-diagonals).
-                # Normalise to [0,1] using the theoretical max for an N-qubit W-state:
-                # C_max = N*(N-1) * (1/N) = N-1.  For N=256: max = 255.
-                # Clamp to [0,1] so chirp broadcasts a sensible confidence-style metric.
-                _C_MAX = 255.0  # theoretical L1-coherence max for 256-dim space
+                # Normalise L1-coherence: max for 256-dim W-state = 255
+                _C_MAX        = 255.0
                 lattice_coherence = float(np.clip(lattice_coherence / _C_MAX, 0.0, 1.0))
 
-                if lattice_fidelity == 0.0:
-                    lattice_fidelity = float(getattr(LATTICE, 'fidelity', 0.0))
-
-                # Enterprise-grade lattice metrics collection
                 lattice_quantum = {
-                    'lattice_status': 'online' if LATTICE.running else 'offline',
-                    'coherence': round(lattice_coherence, 6),
-                    'fidelity': round(lattice_fidelity, 6),
-                    'w_state_strength': round(float(getattr(LATTICE, 'w_state_strength', 0.0)), 6),
-                    'entropy': round(float(getattr(LATTICE, 'entropy', 0.0)), 4),
-                    'cycle_count': int(getattr(LATTICE, 'cycle_count', 0)),
-                    'block_height': int(getattr(LATTICE.block_manager, 'current_block_height', 0) if LATTICE.block_manager else 0),
-                    'timestamp_ns': int(time.time() * 1e9),
-                    
-                    # Non-Markovian noise bath configuration (museum-grade)
+                    'lattice_status':    'online' if LATTICE.running else 'offline',
+                    'coherence':         round(lattice_coherence, 6),
+                    'fidelity':          round(lattice_fidelity,  6),
+                    'w_state_strength':  round(float(getattr(LATTICE, 'w_state_strength', 0.0)), 6),
+                    'entropy':           round(float(getattr(LATTICE, 'entropy',           0.0)), 4),
+                    'cycle_count':       int(getattr(LATTICE, 'cycle_count',  0)),
+                    'block_height':      int(getattr(LATTICE.block_manager, 'current_block_height', 0)
+                                             if LATTICE.block_manager else 0),
+                    'timestamp_ns':      int(time.time() * 1e9),
                     'noise_bath': {
-                        'kappa_memory': 0.35,           # Non-Markovian memory strength
-                        'omega_c_hz': 200,              # Cutoff frequency (Hz)
-                        'omega_0_hz': 100,              # Lorentz peak frequency (Hz)
-                        'eta': 0.40,                    # System-bath coupling strength
-                        't1_ms': 100.0,                 # Energy relaxation time (T1)
-                        't2_ms': 50.0,                  # Phase relaxation time (T2)
-                        'memory_depth': 50,             # History buffer depth
-                        'status': 'active',
+                        'kappa_memory': 0.35,
+                        'omega_c_hz':   200,
+                        'omega_0_hz':   100,
+                        'eta':          0.40,
+                        't1_ms':        100.0,
+                        't2_ms':        50.0,
+                        'memory_depth': 50,
+                        'status':       'active',
                     },
-                    
-                    # Entanglement revival tracking
-                    'revivals': {
-                        'total_detected': int(globals().get('_LATTICE_REVIVAL_COUNT', 0)),
-                        'expected_rate_per_min': 2,    # ~30-100ms per revival
-                    },
-                    
-                    # Pseudoqubit field tracking
                     'field_topology': {
                         'total_pseudoqubits': len(LATTICE.field.locations) if hasattr(LATTICE, 'field') else 0,
-                        'active_routes': len(LATTICE.field.routes) if hasattr(LATTICE, 'field') else 0,
+                        'active_routes':      len(LATTICE.field.routes)    if hasattr(LATTICE, 'field') else 0,
                     },
                 }
-                
                 lattice_health = {
-                    'status': 'healthy',
-                    'coherence_trend': 'oscillating' if lattice_quantum['coherence'] > 0.05 else 'decaying',
-                    'is_publishing': True,
+                    'status':           'healthy',
+                    'coherence_trend':  'oscillating' if lattice_coherence > 0.05 else 'decaying',
+                    'is_publishing':    True,
                 }
-        
         except Exception as e:
-            logger.debug(f"[ORACLE-MUX] Lattice metrics collection error: {e}")
-            lattice_quantum = {
-                'lattice_status': 'error',
-                'error': str(e)[:100],
-                'timestamp_ns': int(time.time() * 1e9),
-            }
-            lattice_health['status'] = 'error'
-        
-        # Single chirp: unified snapshot containing all oracle measurements + lattice quantum
+            logger.debug(f"[ORACLE-MUX] Lattice metrics error: {e}")
+            lattice_quantum = {'lattice_status': 'error', 'error': str(e)[:100]}
+
+        # ── Assemble unified chirp ─────────────────────────────────────────────
+        pq_curr = block_field.get("pq_curr", 0) if block_field else 0
+        pq_last = block_field.get("pq_last", 0) if block_field else 0
+
         unified_snapshot = {
-            'timestamp_ns': int(time.time() * 1e9),
-            'broadcast_type': 'single_chirp',
-            'chirp_number': self.chirp_count,
-            'oracle_count': len(measurements),
-            
-            # All oracle measurements (round-robin collected)
+            'timestamp_ns':     int(time.time() * 1e9),
+            'broadcast_type':   'single_chirp',
+            'chirp_number':     self.chirp_count,
+            'oracle_count':     len(measurements),
+
+            # Per-oracle block-field readings (real AER, 5-qubit composite)
             'oracle_measurements': [
                 {
-                    'oracle_id': m.get('oracle_id'),
-                    'oracle_role': m.get('oracle_role'),
-                    'oracle_port': m.get('oracle_port'),
-                    'w_state_fidelity': round(m.get('w_state_fidelity', 0.93), 6),
-                    'coherence': round(m.get('coherence', 0.89), 6),
-                    'entropy': round(m.get('entropy', 2.1), 4),
-                    'purity': round(m.get('purity', 0.94), 6),
-                    'timestamp_ns': m.get('timestamp_ns'),
+                    'oracle_id':           m.get('oracle_id'),
+                    'oracle_role':         m.get('oracle_role'),
+                    'w_state_fidelity':    m.get('w_state_fidelity',    0.0),
+                    'coherence':           m.get('coherence',           0.0),
+                    'entropy':             m.get('entropy',             0.0),
+                    'pq0_oracle_fidelity': m.get('pq0_oracle_fidelity', 0.0),
+                    'pq0_IV_fidelity':     m.get('pq0_IV_fidelity',     0.0),
+                    'pq0_V_fidelity':      m.get('pq0_V_fidelity',      0.0),
+                    'in_consensus':        m.get('in_consensus',        False),
+                    'timestamp_ns':        m.get('timestamp_ns'),
                 }
                 for m in measurements
             ],
-            
-            # ██████████████████████████████████████████████████████████████████████████
-            # LATTICE QUANTUM CONTROLLER — Non-Markovian noise bath integration
-            # Museum-grade implementation: coherence oscillations, entanglement revivals
-            # Direct broadcast to Koyeb dashboard via unified chirp (port 9091)
-            # ██████████████████████████████████████████████████████████████████████████
+
+            # Mermin inequality test on consensus block-field oracle DM
+            'mermin_test': mermin,
+            'bell_test':   mermin,   # API compat alias
+
+            # pq0 tripartite component fidelities (consensus medians)
+            'pq0_components': pq0_comps,
+
+            # Block-field state
+            'pq_curr': pq_curr,
+            'pq_last': pq_last,
+
+            # Lattice quantum controller
             'lattice_quantum': lattice_quantum,
-            'lattice_health': lattice_health,
-            
-            # Consensus metrics (all oracles averaged)
+            'lattice_health':  lattice_health,
+
+            # Byzantine consensus metrics
             'consensus': {
-                'w_state_fidelity': round(avg_fidelity, 6),
-                'coherence': round(avg_coherence, 6),
-                'entropy': round(avg_entropy, 4),
-                'purity': round(avg_purity, 6),
-                'confidence': round((avg_fidelity + avg_purity) / 2.0, 6),
-                'oracle_agreement': f"{len(measurements)}/{len(self.oracle_order)}",
+                'w_state_fidelity': round(cons_fidelity,  6),
+                'coherence':        round(cons_coherence, 6),
+                'entropy':          round(cons_entropy,   4),
+                'purity':           round(cons_purity,    6),
+                'confidence':       round((cons_fidelity + cons_purity) / 2.0, 6),
+                'oracle_agreement': f"{block_field.get('accepted_count', len(measurements))}/5",
             },
-            
-            # Multiplexing metadata (now includes lattice quantum)
+
             'multiplexing': {
-                'port': 9091,
-                'method': 'unified_single_chirp',
+                'port':       9091,
+                'method':     'unified_single_chirp_real_aer',
                 'oracle_order': self.oracle_order,
-                'aggregation': 'arithmetic_mean',
-                'components': ['oracle_cluster', 'lattice_quantum_controller'],
-                'lattice_injection_status': lattice_health.get('status', 'unavailable'),
+                'aggregation':  'byzantine_3of5_median',
+                'components':  ['oracle_cluster_block_field', 'lattice_quantum_controller'],
             },
-            
-            'measurement_method': 'unified_oracle_roundrobin_with_lattice_quantum',
+
+            'measurement_method': 'block_field_5qubit_composite_byzantine_consensus',
         }
-        
+
         self.chirp_count += 1
         return unified_snapshot
-    
+
     def log_chirp(self, snapshot: dict):
-        """
-        Log single chirp broadcast with lattice quantum metrics.
-        Museum-grade logging showing oracle consensus + lattice integration.
-        """
-        if self.chirp_count % 500 == 0:  # Log every 500 chirps
-            consensus = snapshot.get('consensus', {})
-            oracle_count = snapshot.get('oracle_count', 0)
-            lattice = snapshot.get('lattice_quantum', {})
-            lattice_status = lattice.get('lattice_status', 'unavailable') if lattice else 'unavailable'
-            lattice_coherence = lattice.get('coherence', 0.0) if lattice else 0.0
-            
+        """Log every 500 chirps — oracle consensus + Mermin + lattice."""
+        if self.chirp_count % 500 == 0:
+            cons    = snapshot.get('consensus', {})
+            lattice = snapshot.get('lattice_quantum') or {}
+            mermin  = snapshot.get('mermin_test') or {}
             logger.info(
                 f"[ORACLE-MUX] 📡 Chirp #{self.chirp_count}: "
-                f"oracles={oracle_count} | "
-                f"fidelity={consensus.get('w_state_fidelity', 0):.6f} | "
-                f"coherence={consensus.get('coherence', 0):.6f} | "
-                f"confidence={consensus.get('confidence', 0):.6f} | "
-                f"lattice={lattice_status} | "
-                f"lattice_coherence={lattice_coherence:.6f}"
+                f"oracles={snapshot.get('oracle_count', 0)} | "
+                f"fidelity={cons.get('w_state_fidelity', 0):.6f} | "
+                f"coherence={cons.get('coherence', 0):.6f} | "
+                f"confidence={cons.get('confidence', 0):.6f} | "
+                f"lattice={lattice.get('lattice_status', 'n/a')} | "
+                f"M={mermin.get('M_value', 0):.3f} "
+                f"({'quantum' if mermin.get('is_quantum') else 'classical'})"
             )
+
 
 # Global unified oracle multiplexer (singleton)
 _oracle_mux = UnifiedOracleMux()
@@ -3623,186 +3476,58 @@ def get_oracle_mux() -> UnifiedOracleMux:
     return _oracle_mux
 
 # ═════════════════════════════════════════════════════════════════════════════════
-# Collapses two independent W-state measurements, averages metrics, broadcasts averaged snapshot
-# ═════════════════════════════════════════════════════════════════════════════════
-
-_snapshot_measurements = {}  # Store individual measurements for averaging
-_snapshot_measurements_lock = threading.RLock()
-
-def _get_dual_snapshots() -> Optional[tuple]:
-    """
-    Collect TWO independent W-state snapshots from separate AER instances.
-    
-    Returns: (snapshot_1, snapshot_2) or None if unavailable
-    
-    Measurement flow:
-      Oracle Instance 1 (AER primary)   → Collapse W-state → snapshot_1
-      Oracle Instance 2 (AER secondary) → Collapse W-state → snapshot_2
-      Average metrics                   → averaged_snapshot
-    """
-    if not ORACLE_AVAILABLE or ORACLE_W_STATE_MANAGER is None:
-        return None
-    
-    try:
-        # Instance 1: Primary measurement
-        dm1 = ORACLE_W_STATE_MANAGER.get_latest_density_matrix()
-        if not dm1 or not isinstance(dm1, dict):
-            return None
-        
-        snapshot_1 = {
-            'timestamp_ns': dm1.get('timestamp_ns', int(time.time() * 1e9)),
-            'oracle_address': get_oracle_address('oracle_1', 'qtcl1oracle_1'),
-            'density_matrix_hex': dm1.get('density_matrix_hex', ''),
-            'w_entropy_hash': dm1.get('w_entropy_hash', ''),
-            'purity': float(dm1.get('purity', 0.95)),
-            'w_state_fidelity': float(dm1.get('w_state_fidelity', 0.94)),
-            'hlwe_signature': dm1.get('hlwe_signature', {}),
-            'signature_valid': dm1.get('signature_valid', True),
-            'instance': 'aer_primary',
-        }
-        
-        # Instance 2: Secondary measurement (independent collapse)
-        # In production: measure from different AER instance or cached secondary state
-        # For now: simulate independent measurement
-        dm2 = ORACLE_W_STATE_MANAGER.get_latest_density_matrix()
-        if not dm2 or not isinstance(dm2, dict):
-            return None
-        
-        snapshot_2 = {
-            'timestamp_ns': dm2.get('timestamp_ns', int(time.time() * 1e9)),
-            'oracle_address': get_oracle_address('oracle_2', 'qtcl1oracle_2'),
-            'density_matrix_hex': dm2.get('density_matrix_hex', ''),
-            'w_entropy_hash': dm2.get('w_entropy_hash', ''),
-            'purity': float(dm2.get('purity', 0.95)),
-            'w_state_fidelity': float(dm2.get('w_state_fidelity', 0.94)),
-            'hlwe_signature': dm2.get('hlwe_signature', {}),
-            'signature_valid': dm2.get('signature_valid', True),
-            'instance': 'aer_secondary',
-        }
-        
-        return (snapshot_1, snapshot_2)
-    
-    except Exception as e:
-        logger.debug(f"[SNAPSHOT-DUAL] Error collecting snapshots: {e}")
-        return None
-
-def _average_snapshots(snap1: dict, snap2: dict) -> dict:
-    """
-    Average two independent W-state snapshots into a single 2-point averaged snapshot.
-    
-    Averaging strategy:
-    - Fidelity: arithmetic mean of two measurements
-    - Purity: arithmetic mean
-    - Entropy: derived from averaged fidelity
-    - Signatures: include both for full Byzantine verification
-    - Timestamps: use earliest for ordering
-    """
-    try:
-        # Average key metrics
-        avg_fidelity = (snap1.get('w_state_fidelity', 0.94) + snap2.get('w_state_fidelity', 0.94)) / 2.0
-        avg_purity = (snap1.get('purity', 0.95) + snap2.get('purity', 0.95)) / 2.0
-        
-        # Entropy derived from averaged fidelity (VN entropy)
-        vn_entropy = (1.0 - avg_fidelity) * 1.5  # S = -Tr(ρ log ρ)
-        
-        # Combined density matrix hex (concatenate for proof)
-        dm_combined = (snap1.get('density_matrix_hex', '') + snap2.get('density_matrix_hex', ''))[:256]
-        
-        # Use earlier timestamp
-        ts1 = snap1.get('timestamp_ns', int(time.time() * 1e9))
-        ts2 = snap2.get('timestamp_ns', int(time.time() * 1e9))
-        ts_avg = min(ts1, ts2)
-        
-        # Create 2-point averaged snapshot
-        averaged_snapshot = {
-            'timestamp_ns': ts_avg,
-            'oracle_address': get_consensus_oracle_address(),  # Both oracles
-            'w_state_fidelity': round(avg_fidelity, 6),
-            'purity': round(avg_purity, 6),
-            'entropy_vn': round(vn_entropy, 4),
-            'density_matrix_hex': dm_combined,
-            'w_entropy_hash': snap1.get('w_entropy_hash', '') or snap2.get('w_entropy_hash', ''),
-            
-            # Byzantine verification: both signatures included
-            'signatures': {
-                'oracle_1': snap1.get('hlwe_signature', {}),
-                'oracle_2': snap2.get('hlwe_signature', {}),
-            },
-            'signatures_valid': snap1.get('signature_valid', True) and snap2.get('signature_valid', True),
-            
-            # Measurement provenance
-            'measurement_method': 'dual_aer_averaging',
-            'sample_count': 2,
-            'instances': [snap1.get('instance', 'aer_primary'), snap2.get('instance', 'aer_secondary')],
-            
-            # Quality metrics
-            'consensus_confidence': min(1.0, (avg_fidelity + avg_purity) / 2.0),
-        }
-        
-        return averaged_snapshot
-    
-    except Exception as e:
-        logger.error(f"[SNAPSHOT-DUAL] Averaging error: {e}")
-        return None
-
-# ═════════════════════════════════════════════════════════════════════════════════
 
 def _snapshot_streaming_daemon():
     """
-    ✅ Unified port 9091 ONLY — All oracles in-process, no HTTP, no separate ports.
-    
-    Flow:
-    1. Measure all 5 oracles IN-PROCESS (no HTTP queries)
-    2. Aggregate all measurements into single snapshot
-    3. Broadcast as SINGLE CHIRP via port 9091
-    4. All clients receive identical unified measurement
-    5. Repeat every 10ms
-    
-    Result: All on port 9091, zero external oracle ports
+    Unified port 9091 chirp daemon.
+
+    ORACLE_W_STATE_MANAGER runs its own measurement loop (OracleWStateManager._stream_worker)
+    which calls _extract_snapshot() every W_STATE_STREAM_INTERVAL_MS, performs the
+    5-qubit block-field AER measurements, Byzantine 3-of-5 consensus, and Mermin test,
+    then pushes the result to the server via _push_snapshot_to_server().
+
+    This daemon's only job is to pull the latest aggregated snapshot from the mux
+    (which reads ORACLE_W_STATE_MANAGER.get_latest_density_matrix()) and broadcast
+    it as a single SSE chirp to all connected dashboard clients.
+
+    Interval: 250ms — fast enough for live dashboard updates, slow enough to not
+    flood clients faster than meaningful quantum state evolution.
     """
     logger.info(
         "[ORACLE-MUX-DAEMON] 🚀 Unified port 9091 daemon STARTED\n"
-        "    Components: in-process oracle cluster + lattice quantum controller\n"
-        "    Broadcast: Single chirp every 10ms (oracle consensus + lattice metrics)\n"
-        "    Dashboard: Metrics injected directly into unified snapshot"
+        "    Source: ORACLE_W_STATE_MANAGER (real 5-qubit AER block-field measurements)\n"
+        "    Broadcast: Single chirp every 250ms (oracle consensus + Mermin + lattice)\n"
+        "    Dashboard: All metrics from live quantum measurements — zero synthetic values"
     )
-    
-    mux = get_oracle_mux()
-    last_snapshot_ts = 0
+
+    mux             = get_oracle_mux()
+    last_chirp_ts   = 0
     broadcast_count = 0
-    
+
     while True:
         try:
-            time.sleep(0.01)  # 10ms interval (100 chirps/second)
-            
-            try:
-                # ✅ Measure ALL 5 oracles in-process (no HTTP, no ports 5000-5004)
-                mux.measure_all_oracles()
-                
-                # Aggregate ALL in-process measurements into single snapshot
-                unified_snapshot = mux.aggregate_all_measurements()
-                
-                if unified_snapshot and unified_snapshot.get('timestamp_ns', 0) > last_snapshot_ts:
-                    # SINGLE CHIRP: broadcast unified snapshot on port 9091 only
+            time.sleep(0.25)   # 250ms — meaningful quantum evolution timescale
+
+            unified_snapshot = mux.aggregate_all_measurements()
+
+            if unified_snapshot:
+                ts = unified_snapshot.get('timestamp_ns', 0)
+                if ts > last_chirp_ts:
                     _broadcast_snapshot_to_gossip_network(unified_snapshot)
                     broadcast_count += 1
-                    last_snapshot_ts = unified_snapshot['timestamp_ns']
-                    
-                    # Log chirp metadata
+                    last_chirp_ts = ts
                     mux.log_chirp(unified_snapshot)
-                    
-                    # Log broadcast progress every 500 broadcasts
+
                     if broadcast_count % 500 == 0:
+                        cons = unified_snapshot.get('consensus', {})
                         logger.info(
                             f"[ORACLE-MUX-DAEMON] 📡 Single-chirp broadcasts: {broadcast_count} "
-                            f"(consensus_fidelity={unified_snapshot['consensus']['w_state_fidelity']:.6f})")
-            
-            except Exception as e:
-                logger.error(f"[ORACLE-MUX-DAEMON] Measurement error: {e}", exc_info=True)
-        
+                            f"(consensus_fidelity={cons.get('w_state_fidelity', 0):.6f})"
+                        )
+
         except Exception as e:
-            logger.error(f"[ORACLE-MUX-DAEMON] Unexpected error: {e}", exc_info=True)
-            time.sleep(0.1)  # Back off on error
+            logger.error(f"[ORACLE-MUX-DAEMON] Error: {e}", exc_info=True)
+            time.sleep(1.0)
 
 # Start daemon threads on server startup
 _streaming_thread = None
@@ -6136,10 +5861,6 @@ def _initialize_metrics_agents():
     global _METRICS_AGENTS
     try:
         # Agent 1: Oracle 5-measurement average
-        from oracle import OracleMetricsCollector
-        _METRICS_AGENTS['oracle_collector'] = OracleMetricsCollector(window_size=10, alpha=0.3)
-        logger.info("[AGENTS] ✅ Agent 1 (OracleMetricsCollector) initialized")
-        
         # Agents 2-4: Lattice metrics, noise bath, neural net
         from lattice_controller import (
             LatticeMetricsAverager,
@@ -10668,17 +10389,22 @@ class MetricsMuxDaemon:
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 
 def _feed_oracle_measurement_to_agents(oracle_id: str, fidelity: float, coherence: float):
-    """Feed oracle measurement into Agent 1 (OracleMetricsCollector)"""
-    if _METRICS_AGENTS['oracle_collector'] is None:
+    """Wire oracle block-field measurement into agent pipeline.
+    Real data comes from ORACLE_W_STATE_MANAGER.get_latest_density_matrix() —
+    individual oracle readings are in block_field.per_node.
+    """
+    if _METRICS_AGENTS.get('oracle_collector') is None:
         return
-    
     try:
-        # Simulate 5 oracle measurements (in production, this would come from all 5 oracles)
-        oracle_measurements = [
-            {'oracle_id': f'oracle_{i+1}', 'fidelity': fidelity + (i * 0.002), 'coherence': coherence + (i * 0.001)}
-            for i in range(5)
-        ]
-        ema_fid, ema_coh = _METRICS_AGENTS['oracle_collector'].collect_oracle_measurements(oracle_measurements)
+        if ORACLE_AVAILABLE and ORACLE_W_STATE_MANAGER is not None:
+            dm = ORACLE_W_STATE_MANAGER.get_latest_density_matrix()
+            if dm:
+                per_node = dm.get('block_field', {}).get('per_node', [])
+                if per_node:
+                    _METRICS_AGENTS['oracle_collector'].collect_oracle_measurements(
+                        [{'oracle_id': n['role'], 'fidelity': n['fidelity'], 'coherence': n['coherence']}
+                         for n in per_node]
+                    )
     except Exception as e:
         logger.debug(f"[AGENT-FEED] Oracle measurement error: {e}")
 

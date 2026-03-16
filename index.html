@@ -252,11 +252,14 @@ var S={
   qfi:6.5,discord:1.5,sector_occ:.9,tele_fidelity:.6,phase_drift:.02,
   gamma1:.04,gammaphi:.12,omega:.5,ou_mem:.03,qrng_health:1,
   n_peers:0,cycle:0,
+  pq_curr:0,pq_last:0,
+  pq0_components:{},
   // /api/difficulty
   difficulty_bits:5,
   // /api/p2p/peers
   peer_count:0,
-  mermin:null
+  mermin:null,
+  oracle_data:{}  // oracle_id -> {w_state_fidelity, coherence, pq0_*, in_consensus}
 };
 var blocks=[],txs=[],fidH=[],dp=0,dbk=[],wp=0,lu=0;
 for(var i=0;i<80;i++) fidH.push(.9);
@@ -398,12 +401,39 @@ function renderTxs(){
   document.getElementById('txb').textContent=txs.length+' txs';
 }
 function renderOracles(){
-  // Oracle nodes shown with live fidelity from S.fidelity (consensus)
-  // Individual node fidelities aren't available separately — use consensus fidelity with slight variation
-  var defs=[['ORACLE_1','PRIMARY_LATTICE'],['ORACLE_2','SECONDARY_LATTICE'],['ORACLE_3','VALIDATION'],['ORACLE_4','ARBITER'],['ORACLE_5','METRICS']];
-  document.getElementById('ol').innerHTML=defs.map(function(o,i){
-    var fid=Math.max(0,S.fidelity-i*0.005);var on=fid>0.7;
-    return '<div class="or"><div class="od '+(on?'on':'off')+'"></div><div style="flex:1"><div class="on2">'+o[0]+'</div><div class="ort">'+o[1]+' &middot; '+(on?'ONLINE':'SYNCING')+'</div></div><div class="of">'+fid.toFixed(4)+'</div></div>';
+  // S.oracle_data is populated from chirp oracle_measurements array
+  var defs=[
+    {id:'oracle_1',role:'PRIMARY_LATTICE'},
+    {id:'oracle_2',role:'SECONDARY_LATTICE'},
+    {id:'oracle_3',role:'VALIDATION'},
+    {id:'oracle_4',role:'ARBITER'},
+    {id:'oracle_5',role:'METRICS'}
+  ];
+  var data=S.oracle_data||{};
+  document.getElementById('ol').innerHTML=defs.map(function(o){
+    var m=data[o.id]||{};
+    var fid=m.w_state_fidelity!=null?m.w_state_fidelity:null;
+    var on=fid!=null&&fid>0.5;
+    var cons=m.in_consensus;
+    var fidStr=fid!=null?fid.toFixed(4):'—';
+    var cohStr=m.coherence!=null?m.coherence.toFixed(4):'—';
+    var pq0o=m.pq0_oracle_fidelity!=null?m.pq0_oracle_fidelity.toFixed(4):'—';
+    var pq0iv=m.pq0_IV_fidelity!=null?m.pq0_IV_fidelity.toFixed(4):'—';
+    var pq0v=m.pq0_V_fidelity!=null?m.pq0_V_fidelity.toFixed(4):'—';
+    return '<div class="or" style="flex-direction:column;gap:4px;padding:10px 14px;border-bottom:1px solid var(--b)">'
+      +'<div style="display:flex;align-items:center;gap:8px">'
+      +'<div class="od '+(on?'on':'off')+'"></div>'
+      +'<div style="flex:1"><div class="on2">'+o.id.toUpperCase()+(cons?'<span style="margin-left:6px;font-size:8px;color:var(--gr);font-family:var(--mono)">✓BYZ</span>':'')+'</div>'
+      +'<div class="ort">'+o.role+' · '+(on?'ONLINE':'AWAITING')+'</div></div>'
+      +'<div class="of">'+fidStr+'</div>'
+      +'</div>'
+      +'<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:4px;font-size:9px;font-family:var(--mono)">'
+      +'<div style="color:var(--dim)">coh: <span style="color:var(--vi)">'+cohStr+'</span></div>'
+      +'<div style="color:var(--dim)">pq0: <span style="color:var(--cy)">'+pq0o+'</span></div>'
+      +'<div style="color:var(--dim)">IV: <span style="color:var(--cy)">'+pq0iv+'</span></div>'
+      +'<div style="color:var(--dim)">V: <span style="color:var(--cy)">'+pq0v+'</span></div>'
+      +'</div>'
+      +'</div>';
   }).join('');
 }
 function renderPeers(peers){
@@ -427,8 +457,29 @@ function renderMermin(m){
   document.getElementById('mvd').textContent=m.verdict||'--';
   document.getElementById('mb3').textContent='M='+M.toFixed(3);
   document.getElementById('mbar').style.width=Math.min(100,M/4*100)+'%';
-  var angles=m.angle_degrees||[],labels=m.angle_labels||['tA1','fA1','tA2','fA2','tA3','fA3','tB1','fB1','tB2','fB2','tB3','fB3'];
-  document.getElementById('mac').innerHTML=angles.map(function(a,i){return '<span class="ac">'+(labels[i]||i)+'='+a+'</span>';}).join('');
+  var angles=m.angle_degrees||[],labels=m.angle_labels||['θA1','φA1','θA2','φA2','θA3','φA3','θB1','φB1','θB2','φB2','θB3','φB3'];
+  document.getElementById('mac').innerHTML=angles.map(function(a,i){return '<span class="ac">'+(labels[i]||i)+'='+a+'°</span>';}).join('');
+  // Console output — full Mermin result every time it updates
+  console.group('%c[MERMIN-TEST] Optimized-angle Mermin inequality result','color:#00dcff;font-weight:bold');
+  console.log('M_value    :', M.toFixed(6),'(classical bound: 2.0 | W-max: 3.046 | GHZ-max: 4.0)');
+  console.log('is_quantum :', isQ,'→',m.verdict);
+  console.log('W3_max_pct :', (m.w3_max_pct||0).toFixed(2)+'%  |  GHZ_pct: '+(m.ghz_max_pct||0).toFixed(2)+'%');
+  console.log('BF_fidelity:', (m.block_field_fidelity||0).toFixed(6),'(consensus oracle DM after block-field coupling)');
+  console.log('Measured on:', m.measured_on||'block_field_consensus_oracle_dm');
+  console.log('Iterations :', m.iterations||0);
+  if(m.per_node_fidelities&&m.per_node_fidelities.length){
+    console.log('Per-node fidelities:');
+    m.per_node_fidelities.forEach(function(n){
+      console.log('  oracle_'+n.oracle_id+' ['+n.role+']  F='+n.fidelity.toFixed(6));
+    });
+  }
+  if(angles.length===12){
+    console.log('Optimal angles (degrees):');
+    for(var i=0;i<12;i+=2){
+      console.log('  '+(labels[i]||'θ'+(i/2+1))+'='+angles[i]+'°  '+(labels[i+1]||'φ'+(i/2+1))+'='+angles[i+1]+'°');
+    }
+  }
+  console.groupEnd();
 }
 
 function st(id,v){
@@ -463,7 +514,7 @@ function updateDOM(){
   st('bte',S.tele_fidelity.toFixed(4));
   // oracle cycle
   st('qcy','cycle '+S.cycle);
-  st('dkb','pq_curr='+S.chain_height);
+  st('dkb','pq_last='+S.pq_last+'→pq_curr='+S.pq_curr);
   // noise bath — exact server key names
   st('ng1',S.gamma1.toFixed(4));
   st('ngp',S.gammaphi.toFixed(4));
@@ -521,7 +572,6 @@ async function fetchChain(){
 
 async function fetchWState(){
   var d=await api('/api/oracle/w-state');if(!d||d.error) return;
-  // Copy exact server key names into S
   S.fidelity=d.fidelity||d.w3_fidelity||S.fidelity;
   S.coherence=d.coherence||S.coherence;
   S.purity=d.purity||S.purity;
@@ -533,7 +583,7 @@ async function fetchWState(){
   S.sector_occ=d.sector_occ||S.sector_occ;
   S.tele_fidelity=d.tele_fidelity||S.tele_fidelity;
   S.phase_drift=d.phase_drift||S.phase_drift;
-  S.gamma1=d.gamma1||d.gamma_amp||S.gamma1;   // server sends both gamma1 and gamma_amp
+  S.gamma1=d.gamma1||d.gamma_amp||S.gamma1;
   S.gammaphi=d.gammaphi||d.gamma_phase||S.gammaphi;
   S.omega=d.omega||S.omega;
   S.ou_mem=d.ou_mem||S.ou_mem;
@@ -541,8 +591,15 @@ async function fetchWState(){
   S.n_peers=d.n_peers||S.n_peers;
   S.cycle=d.cycle||0;
   fidH.push(S.fidelity);if(fidH.length>80) fidH.shift();
-  // Mermin test result (set by oracle consensus)
   if(d.mermin_test||d.bell_test){S.mermin=d.mermin_test||d.bell_test;renderMermin(S.mermin);}
+  // Per-oracle block-field data from block_field.per_node
+  if(d.block_field&&d.block_field.per_node){
+    d.block_field.per_node.forEach(function(n){
+      var key='oracle_'+n.oracle_id;
+      S.oracle_data[key]=S.oracle_data[key]||{};
+      Object.assign(S.oracle_data[key],n);
+    });
+  }
 }
 
 async function fetchMempool(){
@@ -595,11 +652,12 @@ try{
   sk.on('disconnect',function(){setOnline(false);});
   sk.on('metrics_update',function(d){
     if(!d) return;
-    // metrics_update uses exact same key names as /api/oracle/w-state
     if(d.fidelity!=null) S.fidelity=d.fidelity;
     else if(d.w3_fidelity!=null) S.fidelity=d.w3_fidelity;
     else if(d.w_state_fidelity!=null) S.fidelity=d.w_state_fidelity;
+    else if(d.consensus&&d.consensus.w_state_fidelity!=null) S.fidelity=d.consensus.w_state_fidelity;
     if(d.coherence!=null) S.coherence=d.coherence;
+    else if(d.consensus&&d.consensus.coherence!=null) S.coherence=d.consensus.coherence;
     if(d.entropy!=null) S.entropy=d.entropy;
     if(d.cycle!=null) S.cycle=d.cycle;
     if(d.lattice_cycle!=null) S.cycle=d.lattice_cycle;
@@ -607,13 +665,26 @@ try{
     if(d.lattice_sigma_mod8!=null) S.sigma_mod8=d.lattice_sigma_mod8;
     if(d.n_peers!=null) S.n_peers=d.n_peers;
     if(d.qrng_health!=null) S.qrng_health=d.qrng_health;
+    // Ingest per-oracle block-field readings from chirp
+    if(d.oracle_measurements&&d.oracle_measurements.length){
+      d.oracle_measurements.forEach(function(m){
+        var key=m.oracle_id||('oracle_'+(m.oracle_id||1));
+        S.oracle_data[key]=m;
+      });
+    }
+    // pq0 tripartite component fidelities
+    if(d.pq0_components) S.pq0_components=d.pq0_components;
+    // Mermin
+    if(d.mermin_test||d.bell_test){S.mermin=d.mermin_test||d.bell_test;renderMermin(S.mermin);}
     fidH.push(S.fidelity);if(fidH.length>80) fidH.shift();
     if(d.block_height!=null&&parseInt(d.block_height)>S.chain_height){
       S.chain_height=parseInt(d.block_height);
       dbk.push({r:Math.random()*.72+.1,a:Math.random()*Math.PI*2,age:0});
       setTimeout(function(){Promise.allSettled([fetchChain(),fetchMempool()]).then(updateDOM);},400);
     }
-    if(d.mermin_test||d.bell_test){S.mermin=d.mermin_test||d.bell_test;renderMermin(S.mermin);}
+    // pq_curr/pq_last from chirp
+    if(d.pq_curr!=null) S.pq_curr=d.pq_curr;
+    if(d.pq_last!=null) S.pq_last=d.pq_last;
     updateDOM();
   });
   sk.on('new_block',function(d){
