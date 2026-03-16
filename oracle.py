@@ -1886,24 +1886,15 @@ class OracleNode:
 
         Qiskit convention: qubit 0 is the RIGHTMOST (least significant) tensor factor.
         partial_trace(dm, [3,4]) traces out qubits 3 and 4, keeping 0,1,2.
+        
+        ENTERPRISE: NO FALLBACKS. If this fails, the measurement MUST fail.
+        There are no synthetic states, no defaults, no silent recovery.
+        Either real measurement or fatal error.
         """
-        try:
-            from qiskit.quantum_info import DensityMatrix as QiskitDM, partial_trace
-            qk_dm  = QiskitDM(composite_dm)
-            traced = partial_trace(qk_dm, [3, 4])
-            return np.array(traced.data, dtype=complex)
-        except Exception:
-            # Manual fallback: reshape 32×32 → (8, 4, 8, 4), trace over field dims
-            try:
-                n_oracle = 8   # 2^3
-                n_field  = 4   # 2^2  (q3, q4)
-                rho = composite_dm.reshape(n_oracle, n_field, n_oracle, n_field)
-                # Trace over field index j: ρ_oracle[i,k] = Σ_j rho[i,j,k,j]
-                oracle_dm = np.einsum('ijkj->ik', rho).astype(complex)
-                tr = float(np.real(np.trace(oracle_dm)))
-                return oracle_dm / max(tr, 1e-12)
-            except Exception:
-                return _W_IDEAL_DM.copy()
+        from qiskit.quantum_info import DensityMatrix as QiskitDM, partial_trace
+        qk_dm  = QiskitDM(composite_dm)
+        traced = partial_trace(qk_dm, [3, 4])
+        return np.array(traced.data, dtype=complex)
 
     @staticmethod
     def _single_qubit_coherence(dm8: np.ndarray, qubit_idx: int) -> float:
