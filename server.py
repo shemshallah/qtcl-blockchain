@@ -5565,6 +5565,14 @@ def initialize_lattice_controller():
 
 LATTICE = initialize_lattice_controller()
 
+# Register LATTICE in globals so oracle.py can access it via `from globals import LATTICE`
+try:
+    from globals import set_lattice as _set_lattice_global
+    if LATTICE is not None:
+        _set_lattice_global(LATTICE)
+except Exception as _glat_err:
+    logger.warning(f"[SERVER] Could not register LATTICE in globals: {_glat_err}")
+
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 # AGENT INITIALIZATION: Instantiate all 5 metric agents (Museum Grade • θ Deployment)
 # ═════════════════════════════════════════════════════════════════════════════════════════════════

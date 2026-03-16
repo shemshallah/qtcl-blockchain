@@ -1354,9 +1354,13 @@ class OracleNode:
           ✓ No degradation pathways
           ✓ No soft fallbacks — either real or deterministic backup
         """
-        # Start with pure |W₃⟩ state (rank-1, purity=1.0)
+        # Start with PURE |W₃⟩ state — ALL 9 off-diagonal elements required for rank-1 purity=1.0
+        # |W⟩⟨W| = (|001⟩+|010⟩+|100⟩)(⟨001|+⟨010|+⟨100|) / 3
+        # Indices: |001⟩=1, |010⟩=2, |100⟩=4
         rho = np.zeros((8, 8), dtype=complex)
-        rho[1, 1] = rho[2, 2] = rho[4, 4] = 1.0 / 3.0  # |W⟩⟨W| diagonal
+        for _ri in (1, 2, 4):
+            for _rj in (1, 2, 4):
+                rho[_ri, _rj] = 1.0 / 3.0   # full outer product — purity=1.0
         
         # Measure initial purity (should be 1.0)
         init_purity = float(np.real(np.trace(rho @ rho)))
@@ -1379,7 +1383,9 @@ class OracleNode:
                     f"[ORACLE-{self.oracle_id}] QRNG DEGRADED TO {perturb_purity:.8f} (< 0.75) | REVERT TO PURE W"
                 )
                 rho = np.zeros((8, 8), dtype=complex)
-                rho[1, 1] = rho[2, 2] = rho[4, 4] = 1.0 / 3.0
+                for _ri in (1, 2, 4):
+                    for _rj in (1, 2, 4):
+                        rho[_ri, _rj] = 1.0 / 3.0
                 perturb_purity = 1.0
             
             logger.critical(
@@ -1390,9 +1396,10 @@ class OracleNode:
         
         except Exception as exc:
             logger.error(f"[ORACLE-{self.oracle_id}] QRNG init exception: {exc}")
-            # Deterministic fallback
             rho = np.zeros((8, 8), dtype=complex)
-            rho[1, 1] = rho[2, 2] = rho[4, 4] = 1.0 / 3.0
+            for _ri in (1, 2, 4):
+                for _rj in (1, 2, 4):
+                    rho[_ri, _rj] = 1.0 / 3.0
             logger.critical(f"[ORACLE-{self.oracle_id}] INIT FALLBACK | Purity=1.0 (pure W)")
             return rho
 
@@ -1551,7 +1558,7 @@ class OracleNode:
         # Fallback: use averaged pq0 from last measurement cycle
         # ─────────────────────────────────────────────────────────────────────────
         try:
-            from globals import LATTICE
+            from globals import get_lattice as _get_lattice_fn; LATTICE = _get_lattice_fn()
             shared_pq0 = None
             if LATTICE and hasattr(LATTICE, 'get_block_field_pq0'):
                 shared_pq0 = LATTICE.get_block_field_pq0()
@@ -1568,16 +1575,10 @@ class OracleNode:
                 shared_pq0 = self._dm
         
         # ─────────────────────────────────────────────────────────────────────────
-        # STEP 1: Barrier sync — all 5 oracles measure pq0 TOGETHER
+        # STEP 1: AER check
         # ─────────────────────────────────────────────────────────────────────────
-        measurement_id = _ORACLE_BLOCK_FIELD.wait_all_measure_together(self.oracle_id)
-        
         if not QISKIT_AVAILABLE or self.aer is None:
             logger.error(f"[ORACLE-NODE-{self.oracle_id+1}] AER unavailable — real quantum measurement required (no synthetic fallback)")
-            try:
-                _ORACLE_BLOCK_FIELD.sync_all_published(self.oracle_id)
-            except:
-                pass
             return None
         try:
             # ─────────────────────────────────────────────────────────────────────────
@@ -1623,7 +1624,7 @@ class OracleNode:
             
             try:
                 # Read real lattice fidelity recovery from sigma engine
-                from globals import LATTICE
+                from globals import get_lattice as _get_lattice_fn; LATTICE = _get_lattice_fn()
                 if LATTICE and hasattr(LATTICE, 'sigma_engine'):
                     sigma_stats = LATTICE.sigma_engine.get_statistics()
                     sigma_mod8 = sigma_stats.get('sigma_mod8', 0)
@@ -1724,10 +1725,7 @@ class OracleNode:
                 self.last_snapshot   = snap
                 self.measurement_count += 1
             
-            # ─────────────────────────────────────────────────────────────────────────
-            # CONCURRENT: Record this oracle's measurement of shared pq0
-            # All 5 oracles record their measurements concurrently
-            # ─────────────────────────────────────────────────────────────────────────
+            # Record this oracle's measurement for consensus averaging
             _ORACLE_BLOCK_FIELD.record_measurement(
                 self.oracle_id,
                 dm_array,
@@ -1738,16 +1736,9 @@ class OracleNode:
                     'coherence': snap.coherence_l1,
                 }
             )
-            # Sync all 5 oracles after publishing
-            _ORACLE_BLOCK_FIELD.sync_all_published(self.oracle_id)
-            
             return snap
         except Exception as exc:
             logger.error(f"[ORACLE-NODE-{self.oracle_id+1}] measure_self failed: {exc}")
-            try:
-                _ORACLE_BLOCK_FIELD.sync_all_published(self.oracle_id)
-            except:
-                pass
             return None  # real measurements only — no synthetic fallback
 
     # ── 5-Qubit Field Boundary Entanglement Test ────────────────────────────────────────
@@ -1884,10 +1875,6 @@ class OracleNode:
             E_A2B1 = expectation_safe(A2 @ B1, composite_dm, "E(A₂B₁)")
             E_A2B2 = expectation_safe(A2 @ B2, composite_dm, "E(A₂B₂)")
             
-            if any(v == 0.0 for v in [E_A1B1, E_A1B2, E_A2B1, E_A2B2]):
-                logger.warning(f"[ORACLE-{self.oracle_id}] Mermin-5Q: One or more expectation values failed")
-                return 0.0
-            
             # ═══════════════════════════════════════════════════════════════════════════════
             # MERMIN PARAMETER COMPUTATION
             # ═══════════════════════════════════════════════════════════════════════════════
@@ -1944,7 +1931,7 @@ class OracleNode:
             pq0_for_circuit = shared_pq0
             if pq0_for_circuit is None:
                 try:
-                    from globals import LATTICE
+                    from globals import get_lattice as _get_lattice_fn; LATTICE = _get_lattice_fn()
                     if LATTICE and hasattr(LATTICE, 'get_block_field_pq0'):
                         pq0_for_circuit = LATTICE.get_block_field_pq0()
                     if pq0_for_circuit is None and LATTICE and hasattr(LATTICE, 'current_density_matrix'):
@@ -2665,7 +2652,7 @@ class OracleWStateManager:
         # That's how you get 5 independent measurements of the SAME quantum object.
         shared_pq0: Optional[np.ndarray] = None
         try:
-            from globals import LATTICE
+            from globals import get_lattice as _get_lattice_fn; LATTICE = _get_lattice_fn()
             if LATTICE is not None:
                 # Prefer explicit get_block_field_pq0() if available
                 if hasattr(LATTICE, 'get_block_field_pq0'):

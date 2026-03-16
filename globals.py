@@ -292,6 +292,27 @@ def get_block_field_entropy() -> bytes:
         return entropy
     return get_entropy_from_block_field()
 
+# ─────────────────────────────────────────────────────────────────────────────
+# LATTICE SINGLETON — set by server.py after LatticeController is created
+# Oracle modules import LATTICE directly: `from globals import LATTICE`
+# OR call get_lattice() for the current reference.
+# ─────────────────────────────────────────────────────────────────────────────
+
+LATTICE = None  # type: Optional[Any]  # LatticeController instance
+_LATTICE_LOCK = threading.Lock()
+
+def get_lattice() -> Optional[Any]:
+    """Return the global LatticeController (None until server sets it)."""
+    return LATTICE
+
+def set_lattice(lattice_instance) -> None:
+    """Called by server.py once LatticeController is fully initialised."""
+    global LATTICE
+    with _LATTICE_LOCK:
+        LATTICE = lattice_instance
+    set_state('lattice_controller', lattice_instance)
+    logger.info(f"[GLOBALS] LATTICE singleton set: {type(lattice_instance).__name__}")
+
 # Export public symbols
 __all__ = [
     'get_state', 'set_state', 'update_state',
@@ -302,4 +323,5 @@ __all__ = [
     'get_hlwe_adapter', 'get_wallet_manager', 'get_hlwe_wallet_manager', 'get_hlwe_crypto_adapter',
     'HLWE_AVAILABLE', 'POOL_API_AVAILABLE',
     'WSTATE_FIDELITY_THRESHOLD', 'ORACLE_MIN_PEERS', 'MAX_PEERS', 'MINING_COINBASE_REWARD',
+    'LATTICE', 'get_lattice', 'set_lattice',
 ]
