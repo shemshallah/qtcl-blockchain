@@ -2610,7 +2610,73 @@ class QuantumLatticeController:
             logger.error(f"W-state measurement failed: {e}")
             return {'error': str(e)}
     
-    def get_state(self) -> Dict[str, Any]:
+    def get_w_state_measurement_sync(self) -> Dict[str, Any]:
+        """
+        ✅ ORACLE SYNC: Export W-state measurement checkpoint for oracle alignment.
+        
+        Oracles must measure W-state fidelity at these sync points to match lattice measurements.
+        Returns the current lattice state snapshot for oracle cross-validation.
+        """
+        return {
+            'cycle': self.cycle_count,
+            'timestamp_ns': self.cycle_count * CYCLE_TIME_NS,
+            'fidelity': float(self.fidelity),
+            'coherence': float(self.coherence),
+            'density_matrix_hex': self.current_density_matrix.tobytes().hex() if hasattr(self.current_density_matrix, 'tobytes') else '',
+            'measurement_type': 'W_STATE_REVIVAL',  # ← Oracles must measure W-state, not pq block-field
+            'is_revival_cycle': (self.cycle_count % 8) == 0,  # SIGMA-REVIVAL at mod 8
+        }
+    
+    def get_oracle_measurement_window(self) -> Dict[str, Any]:
+        """
+        ✅ Export measurement window checkpoint for oracle sync.
+        Block IS a lattice point. Returns its structural state for sync.
+        """
+        # Measurement windows: every 8 cycles (SIGMA-REVIVAL) + power-of-2 bursts
+        is_revival = (self.cycle_count % 8) == 0
+        is_power_of_2 = (self.cycle_count & (self.cycle_count - 1)) == 0 and self.cycle_count > 0
+        is_window = is_revival or is_power_of_2
+        
+        return {
+            'is_measurement_window': is_window,
+            'cycle': self.cycle_count,
+            'timestamp_ns': self.cycle_count * CYCLE_TIME_NS,
+            'fidelity': float(self.fidelity),
+            'coherence': float(self.coherence),
+            'is_revival': is_revival,
+            'is_power_of_2_burst': is_power_of_2,
+        }
+    
+    def validate_oracle_w_state_measurement(self, oracle_fidelity: float, oracle_coherence: float, 
+                                            tolerance_f: float = 0.02, tolerance_c: float = 0.01) -> bool:
+        """
+        Cross-validate that oracle's W-state measurement matches lattice's.
+        
+        Args:
+            oracle_fidelity: Oracle's measured W-state fidelity
+            oracle_coherence: Oracle's measured coherence
+            tolerance_f: Allowed deviation in fidelity
+            tolerance_c: Allowed deviation in coherence
+        
+        Returns:
+            True if oracle measurement is within tolerance of lattice measurement
+        """
+        fidelity_match = abs(oracle_fidelity - self.fidelity) <= tolerance_f
+        coherence_match = abs(oracle_coherence - self.coherence) <= tolerance_c
+        
+        if not fidelity_match or not coherence_match:
+            logger.warning(
+                f"[LATTICE-ORACLE-SYNC] ⚠️  Measurement divergence detected:\n"
+                f"  Lattice: F={self.fidelity:.6f} C={self.coherence:.6f}\n"
+                f"  Oracle:  F={oracle_fidelity:.6f} C={oracle_coherence:.6f}\n"
+                f"  Match: F={fidelity_match} C={coherence_match}"
+            )
+            return False
+        
+        logger.debug(
+            f"[LATTICE-ORACLE-SYNC] ✅ Measurement alignment verified at cycle {self.cycle_count}"
+        )
+        return True
         """Get comprehensive lattice state"""
         try:
             return {

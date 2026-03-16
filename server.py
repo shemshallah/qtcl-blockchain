@@ -11065,6 +11065,62 @@ if oracle_cluster is not None:
 
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
+# ORACLE MEASUREMENT SYNC DAEMON — Block IS a lattice point, evolves under W-state
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+
+def _start_oracle_measurement_sync_daemon():
+    """
+    ✅ Sync oracle measurements to lattice measurement windows.
+    
+    Block is a structural lattice point. When lattice reaches measurement window,
+    oracles sync their pseudoqubit/block-field measurements to same cycle.
+    """
+    
+    def _oracle_measurement_sync_loop():
+        logger.info("[ORACLE-SYNC] Measurement synchronization daemon started")
+        
+        while True:
+            try:
+                # Only sync if both systems active
+                if LATTICE is None or oracle_cluster is None:
+                    time.sleep(0.5)
+                    continue
+                
+                # Check if lattice is at measurement window (block IS a lattice point)
+                window_info = LATTICE.get_oracle_measurement_window()
+                
+                if window_info and window_info.get('is_measurement_window'):
+                    # ✅ Lattice at measurement window — sync oracles to same cycle
+                    sync_result = oracle_cluster.sync_w_state_measurement_with_lattice(window_info)
+                    
+                    if sync_result and sync_result.get('aligned'):
+                        logger.info(
+                            f"[ORACLE-SYNC] ✅ Aligned at cycle {window_info['cycle']} | "
+                            f"Lattice F={window_info['fidelity']:.6f} | "
+                            f"Oracle sync: {sync_result.get('fidelity_delta', 0):.6f} Δ"
+                        )
+                    else:
+                        logger.warning(
+                            f"[ORACLE-SYNC] ⚠️  Divergence at cycle {window_info['cycle']} | "
+                            f"Reason: {sync_result.get('reason', 'unknown') if sync_result else 'no_response'}"
+                        )
+                
+                time.sleep(0.1)  # Poll measurement window at 10Hz
+                
+            except Exception as e:
+                logger.debug(f"[ORACLE-SYNC] Loop error: {e}")
+                time.sleep(0.5)
+    
+    _oracle_sync_thread = threading.Thread(target=_oracle_measurement_sync_loop, daemon=True, name="OracleMeasurementSync")
+    _oracle_sync_thread.start()
+    logger.info("[ORACLE-SYNC] Daemon started (checks lattice window every 100ms)")
+
+# Start measurement sync daemon
+if LATTICE is not None and oracle_cluster is not None:
+    _start_oracle_measurement_sync_daemon()
+
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
 # ORACLE PQ METRICS ENDPOINTS
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 

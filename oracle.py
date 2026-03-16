@@ -1647,6 +1647,12 @@ class OracleWStateManager:
         # Per-node block-field readings (latest)
         self.block_field_readings: Dict[int, BlockFieldReading] = {}
         self._bf_lock = threading.Lock()
+        
+        # ✅ NEW: W-state fidelity tracking (lattice-synchronized)
+        self._lattice_w_fidelity: float = 0.0
+        self._lattice_w_coherence: float = 0.0
+        self._w_state_measurement_cycle: int = 0
+        self._w_state_lock = threading.Lock()
 
         # Measurement thread pool (2 workers — only ever 2 nodes measured simultaneously)
         self._pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="OracleMeasure")
@@ -2178,6 +2184,86 @@ class OracleWStateManager:
             except Exception as exc:
                 logger.error(f"[ORACLE CLUSTER] Refresh error: {exc}")
                 time.sleep(0.1)
+    
+    def sync_w_state_measurement_with_lattice(self, lattice_sync_info: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        ✅ LATTICE SYNC: Measure W-state fidelity at lattice cycle synchronization point.
+        
+        Called by server when lattice reaches measurement window.
+        Oracles measure W-state fidelity (not pq block-field) to cross-validate lattice.
+        
+        Args:
+            lattice_sync_info: {
+                'cycle': lattice cycle number,
+                'fidelity': lattice's W-state fidelity,
+                'coherence': lattice's coherence,
+                'measurement_type': 'W_STATE_REVIVAL',
+                'is_revival_cycle': bool
+            }
+        
+        Returns:
+            Oracle measurement result with alignment status
+        """
+        if not lattice_sync_info or 'fidelity' not in lattice_sync_info:
+            logger.warning("[ORACLE-SYNC] ⚠️  Invalid lattice sync info")
+            return {'aligned': False, 'reason': 'invalid_sync_info'}
+        
+        lattice_f = float(lattice_sync_info.get('fidelity', 0.0))
+        lattice_c = float(lattice_sync_info.get('coherence', 0.0))
+        lattice_cycle = int(lattice_sync_info.get('cycle', 0))
+        
+        try:
+            # Get current oracle consensus W-state
+            with self._state_lock:
+                if self.current_density_matrix is None:
+                    logger.warning("[ORACLE-SYNC] ⚠️  No consensus W-state available yet")
+                    return {'aligned': False, 'reason': 'no_consensus_state'}
+                
+                oracle_f = float(self.current_density_matrix.w_state_fidelity)
+                oracle_c = float(self.current_density_matrix.coherence_l1)
+            
+            # Cross-validate: oracles should measure similar W-state fidelity as lattice
+            # (may differ slightly due to independent noise seeds, but should be within ~5%)
+            fidelity_tol = 0.05
+            coherence_tol = 0.03
+            
+            fidelity_aligned = abs(oracle_f - lattice_f) <= fidelity_tol
+            coherence_aligned = abs(oracle_c - lattice_c) <= coherence_tol
+            
+            with self._w_state_lock:
+                self._lattice_w_fidelity = lattice_f
+                self._lattice_w_coherence = lattice_c
+                self._w_state_measurement_cycle = lattice_cycle
+            
+            result = {
+                'aligned': fidelity_aligned and coherence_aligned,
+                'lattice_cycle': lattice_cycle,
+                'lattice_fidelity': lattice_f,
+                'lattice_coherence': lattice_c,
+                'oracle_fidelity': oracle_f,
+                'oracle_coherence': oracle_c,
+                'fidelity_delta': abs(oracle_f - lattice_f),
+                'coherence_delta': abs(oracle_c - lattice_c),
+            }
+            
+            if result['aligned']:
+                logger.info(
+                    f"[ORACLE-SYNC] ✅ W-state measurement ALIGNED at cycle {lattice_cycle} | "
+                    f"F: Lattice={lattice_f:.4f} Oracle={oracle_f:.4f} Δ={result['fidelity_delta']:.4f} | "
+                    f"C: Lattice={lattice_c:.4f} Oracle={oracle_c:.4f} Δ={result['coherence_delta']:.4f}"
+                )
+            else:
+                logger.warning(
+                    f"[ORACLE-SYNC] ⚠️  W-state measurement DIVERGENCE at cycle {lattice_cycle} | "
+                    f"F: Lattice={lattice_f:.4f} Oracle={oracle_f:.4f} Δ={result['fidelity_delta']:.4f} | "
+                    f"C: Lattice={lattice_c:.4f} Oracle={oracle_c:.4f} Δ={result['coherence_delta']:.4f}"
+                )
+            
+            return result
+        
+        except Exception as e:
+            logger.error(f"[ORACLE-SYNC] ❌ Sync measurement failed: {e}")
+            return {'aligned': False, 'reason': str(e)}
 
     def _broadcast_to_clients(self, snapshot: DensityMatrixSnapshot):
         with self._client_lock:
