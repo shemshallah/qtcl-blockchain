@@ -1633,7 +1633,7 @@ class OracleNode:
             except Exception as exc:
                 logger.warning(f"[ORACLE-NODE-{self.oracle_id+1}] rebuild_entanglement failed: {exc}")
 
-
+    @staticmethod
     def _partial_trace_blockfield(composite_dm: np.ndarray) -> np.ndarray:
         """
         Partial trace over block-field qubits q3,q4 of a 5-qubit (32×32) DM.
