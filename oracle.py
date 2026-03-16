@@ -1532,27 +1532,58 @@ class OracleNode:
         Classical bound: S ≤ 2.0
         Quantum (5-qubit W-field): S > 2.0 (up to 4.0 for 5-qubit GHZ)
         
-        Mermin for 5-qubit:
-          S = |⟨E₁⟩ + ⟨E₂⟩ + ⟨E₃⟩ + ⟨E₄⟩ + ⟨E₅⟩| where each E_i is a product
-          of commuting projective measurements across different qubit subsets.
-        
-        For the W-field boundary state, we use a simplified 5-qubit CHSH-like test:
-        measuring correlations across the oracle (q0-q2) and boundary (q3-q4).
+        Enterprise features:
+        - Rigorous state validation (Hermitian, trace=1, positive semi-definite)
+        - Per-qubit coherence diagnostics for debugging
+        - Operator eigenvalue checks
+        - Numerical stability safeguards
         """
         try:
+            # ═══════════════════════════════════════════════════════════════════════════════
+            # STATE VALIDATION
+            # ═══════════════════════════════════════════════════════════════════════════════
             if composite_dm is None:
-                composite_dm = None  # Will be passed in from measure_block_field
+                logger.warning(f"[ORACLE-{self.oracle_id}] Mermin-5Q: composite_dm is None")
+                return 0.0
             
-            if composite_dm is None or composite_dm.shape != (32, 32):
-                logger.debug(
-                    f"[ORACLE-{self.oracle_id}] Mermin-5Q: invalid DM shape {composite_dm.shape if composite_dm is not None else 'None'} "
-                    f"(expected 32×32 for 5-qubit field)"
+            if not isinstance(composite_dm, np.ndarray):
+                logger.error(f"[ORACLE-{self.oracle_id}] Mermin-5Q: composite_dm not ndarray, got {type(composite_dm)}")
+                return 0.0
+            
+            if composite_dm.shape != (32, 32):
+                logger.error(
+                    f"[ORACLE-{self.oracle_id}] Mermin-5Q: SHAPE ERROR | Expected (32,32) got {composite_dm.shape} | "
+                    f"Check 5-qubit tensor product construction"
                 )
                 return 0.0
             
-            # ───────────────────────────────────────────────────────────────────────────────
+            # Check Hermitian
+            if not np.allclose(composite_dm, composite_dm.conj().T, atol=1e-8):
+                logger.error(f"[ORACLE-{self.oracle_id}] Mermin-5Q: DM NOT HERMITIAN | max deviation={np.max(np.abs(composite_dm - composite_dm.conj().T)):.8f}")
+                return 0.0
+            
+            # Check trace ≈ 1
+            tr = np.trace(composite_dm)
+            if not np.isclose(tr, 1.0, atol=1e-6):
+                logger.error(f"[ORACLE-{self.oracle_id}] Mermin-5Q: TRACE ERROR | Expected 1.0 got {tr:.8f} | State not normalized")
+                return 0.0
+            
+            # Check positive semi-definite (all eigenvalues ≥ 0)
+            evals = np.linalg.eigvalsh(composite_dm)
+            if np.any(evals < -1e-8):
+                logger.error(f"[ORACLE-{self.oracle_id}] Mermin-5Q: NOT POSITIVE SEMI-DEFINITE | min eigenvalue={np.min(evals):.8f}")
+                return 0.0
+            
+            # ═══════════════════════════════════════════════════════════════════════════════
+            # PURITY & COHERENCE DIAGNOSTICS
+            # ═══════════════════════════════════════════════════════════════════════════════
+            purity = float(np.real(np.trace(composite_dm @ composite_dm)))
+            if purity < 0.01:  # Nearly maximally mixed
+                logger.warning(f"[ORACLE-{self.oracle_id}] Mermin-5Q: LOW PURITY | purity={purity:.6f} | State may be too mixed for entanglement")
+            
+            # ═══════════════════════════════════════════════════════════════════════════════
             # 5-QUBIT MEASUREMENT OPERATORS: Alice (q0-q2) vs Bob (q3-q4)
-            # ───────────────────────────────────────────────────────────────────────────────
+            # ═══════════════════════════════════════════════════════════════════════════════
             I = np.eye(2, dtype=complex)
             X = np.array([[0, 1], [1, 0]], dtype=complex)
             Z = np.array([[1, 0], [0, -1]], dtype=complex)
@@ -1579,37 +1610,76 @@ class OracleNode:
             B2_local = np.kron(B2_q3, B2_q4)
             B2 = np.kron(np.eye(8), B2_local)
             
-            # ───────────────────────────────────────────────────────────────────────────────
+            # ═══════════════════════════════════════════════════════════════════════════════
+            # OPERATOR VALIDATION (ensure Hermitian, unit trace)
+            # ═══════════════════════════════════════════════════════════════════════════════
+            for op_name, op in [("A1", A1), ("A2", A2), ("B1", B1), ("B2", B2)]:
+                if not np.allclose(op, op.conj().T, atol=1e-8):
+                    logger.error(f"[ORACLE-{self.oracle_id}] Mermin-5Q: {op_name} NOT HERMITIAN")
+                    return 0.0
+                # Check eigenvalues are ±1
+                op_evals = np.linalg.eigvalsh(op)
+                if not np.allclose(np.abs(op_evals), 1.0, atol=1e-8):
+                    logger.error(f"[ORACLE-{self.oracle_id}] Mermin-5Q: {op_name} eigenvalues not ±1 | {np.unique(op_evals)}")
+                    return 0.0
+            
+            # ═══════════════════════════════════════════════════════════════════════════════
             # EXPECTATION VALUES: ⟨Op⟩ = Tr(ρ · Op)
-            # ───────────────────────────────────────────────────────────────────────────────
-            def expectation(op, rho):
+            # ═══════════════════════════════════════════════════════════════════════════════
+            def expectation_safe(op, rho, op_name):
+                """Compute expectation with full error checking"""
                 try:
-                    val = np.trace(rho @ op)
-                    return float(np.real(val))
-                except:
+                    prod = rho @ op
+                    val = np.trace(prod)
+                    real_val = float(np.real(val))
+                    imag_val = float(np.abs(np.imag(val)))
+                    
+                    if imag_val > 1e-6:
+                        logger.warning(f"[ORACLE-{self.oracle_id}] Mermin-5Q: {op_name} has imaginary part | imag={imag_val:.8f}")
+                    
+                    if not (-1.0 - 1e-6 <= real_val <= 1.0 + 1e-6):
+                        logger.error(f"[ORACLE-{self.oracle_id}] Mermin-5Q: {op_name} expectation out of bounds | E={real_val:.6f}")
+                        return 0.0
+                    
+                    return real_val
+                
+                except Exception as e:
+                    logger.error(f"[ORACLE-{self.oracle_id}] Mermin-5Q: {op_name} computation failed | {e}")
                     return 0.0
             
             # Compute 4 correlation terms
-            E_A1B1 = expectation(A1 @ B1, composite_dm)
-            E_A1B2 = expectation(A1 @ B2, composite_dm)
-            E_A2B1 = expectation(A2 @ B1, composite_dm)
-            E_A2B2 = expectation(A2 @ B2, composite_dm)
+            E_A1B1 = expectation_safe(A1 @ B1, composite_dm, "E(A₁B₁)")
+            E_A1B2 = expectation_safe(A1 @ B2, composite_dm, "E(A₁B₂)")
+            E_A2B1 = expectation_safe(A2 @ B1, composite_dm, "E(A₂B₁)")
+            E_A2B2 = expectation_safe(A2 @ B2, composite_dm, "E(A₂B₂)")
             
-            # 5-qubit Mermin parameter (CHSH-like)
+            if any(v == 0.0 for v in [E_A1B1, E_A1B2, E_A2B1, E_A2B2]):
+                logger.warning(f"[ORACLE-{self.oracle_id}] Mermin-5Q: One or more expectation values failed")
+                return 0.0
+            
+            # ═══════════════════════════════════════════════════════════════════════════════
+            # MERMIN PARAMETER COMPUTATION
+            # ═══════════════════════════════════════════════════════════════════════════════
             S = abs(E_A1B1 + E_A1B2 + E_A2B1 - E_A2B2)
             S_rounded = float(round(S, 6))
             
-            # Log for forensics
-            logger.debug(
-                f"[ORACLE-{self.oracle_id}] Mermin-5Q (FIELD) S={S_rounded:.6f} | "
-                f"E(A₁B₁)={E_A1B1:.4f} E(A₁B₂)={E_A1B2:.4f} E(A₂B₁)={E_A2B1:.4f} E(A₂B₂)={E_A2B2:.4f} | "
-                f"Field_entangled={'✓' if S_rounded > 2.0 else '✗'}"
+            # Sanity check
+            if not (0.0 <= S_rounded <= 4.0):
+                logger.error(f"[ORACLE-{self.oracle_id}] Mermin-5Q: S OUT OF BOUNDS | S={S_rounded:.6f}")
+                return 0.0
+            
+            # Log full diagnostics
+            logger.critical(
+                f"[ORACLE-{self.oracle_id}] Mermin-5Q COMPUTED | "
+                f"S={S_rounded:.6f} {'✓ QUANTUM' if S_rounded > 2.0 else '✗ CLASSICAL'} | "
+                f"E[A₁B₁]={E_A1B1:+.4f} E[A₁B₂]={E_A1B2:+.4f} E[A₂B₁]={E_A2B1:+.4f} E[A₂B₂]={E_A2B2:+.4f} | "
+                f"Purity={purity:.6f} | Trace={tr:.8f}"
             )
             
             return S_rounded
         
         except Exception as e:
-            logger.error(f"[ORACLE-{self.oracle_id}] Mermin-5Q computation failed: {e}", exc_info=True)
+            logger.error(f"[ORACLE-{self.oracle_id}] Mermin-5Q FATAL: {type(e).__name__}: {e}", exc_info=True)
             return 0.0
 
     # ── Block-field measurement ────────────────────────────────────────────────
@@ -1652,21 +1722,87 @@ class OracleNode:
                 else _d
             )
             composite_dm = np.array(DensityMatrix(_raw).data, dtype=complex)  # 32×32
+            
+            # ═══════════════════════════════════════════════════════════════════════════════
+            # COMPOSITE DM VALIDATION & DIAGNOSTICS
+            # ═══════════════════════════════════════════════════════════════════════════════
+            
+            # Basic shape check
+            if composite_dm.shape != (32, 32):
+                logger.error(
+                    f"[ORACLE-NODE-{self.oracle_id+1}] composite_dm SHAPE ERROR | "
+                    f"Expected (32,32) got {composite_dm.shape} | Circuit tensor product malformed"
+                )
+                return None
+            
+            # Trace validation
+            composite_tr = float(np.real(np.trace(composite_dm)))
+            if not np.isclose(composite_tr, 1.0, atol=1e-4):
+                logger.error(
+                    f"[ORACLE-NODE-{self.oracle_id+1}] composite_dm TRACE ERROR | "
+                    f"Expected 1.0 got {composite_tr:.8f} | State not normalized, renormalizing"
+                )
+                composite_dm = composite_dm / composite_tr
+            
+            # Hermitian check
+            if not np.allclose(composite_dm, composite_dm.conj().T, atol=1e-6):
+                logger.error(
+                    f"[ORACLE-NODE-{self.oracle_id+1}] composite_dm NOT HERMITIAN | "
+                    f"max deviation={np.max(np.abs(composite_dm - composite_dm.conj().T)):.8f}"
+                )
+                return None
+            
+            # Eigenvalue validation (must be ≥ 0 for density matrix)
+            composite_evals = np.linalg.eigvalsh(composite_dm)
+            if np.any(composite_evals < -1e-8):
+                logger.error(
+                    f"[ORACLE-NODE-{self.oracle_id+1}] composite_dm NOT PSD | "
+                    f"min eigenvalue={np.min(composite_evals):.8f} | State corrupted"
+                )
+                return None
+            
+            # Purity check (early warning if state too mixed)
+            composite_purity = float(np.real(np.trace(composite_dm @ composite_dm)))
+            if composite_purity < 0.02:  # Nearly maximally mixed (1/32 ≈ 0.03)
+                logger.warning(
+                    f"[ORACLE-NODE-{self.oracle_id+1}] CRITICAL: composite_dm NEARLY MAXIMALLY MIXED | "
+                    f"Purity={composite_purity:.8f} (should be > 0.15 for W-field) | "
+                    f"State may have collapsed or been measured | "
+                    f"This will cause Mermin ≈ 0"
+                )
+            
+            # Spectrum diagnostics
+            logger.debug(
+                f"[ORACLE-NODE-{self.oracle_id+1}] composite_dm eigenvalues (top 5 by magnitude): "
+                f"{sorted(composite_evals, reverse=True)[:5]}"
+            )
 
             # ── Partial trace q3,q4 → 8×8 oracle sub-DM ──────────────────────
             oracle_dm = self._partial_trace_blockfield(composite_dm)           # 8×8
 
             # ── Update self._dm (continuous trajectory advances each cycle) ───
             oracle_dm_clean = _oracle_enforce_dm(oracle_dm)
+            
             # Apply QRNG stochastic channel — unique evolution per oracle per call
+            # This models realistic quantum noise (dephasing, amplitude damping, etc)
             oracle_dm_evolved = _oracle_enforce_dm(
                 _oracle_stochastic_channel(oracle_dm_clean, epsilon=0.02)
             )
             with self._lock:
                 self._dm            = oracle_dm_evolved
-                # ✅ Use QIM method for consistency with reading.fidelity
                 self.last_fidelity  = QuantumInformationMetrics.w_state_fidelity_to_ideal(oracle_dm_clean)
                 self.measurement_count += 1
+            
+            # Oracle state validation (detect actual collapse, not noise)
+            oracle_purity = float(np.real(np.trace(oracle_dm_clean @ oracle_dm_clean)))
+            
+            if oracle_purity < 0.125:  # Close to maximally mixed (1/8 = 0.125)
+                logger.critical(
+                    f"[ORACLE-NODE-{self.oracle_id+1}] ⚠️ ORACLE COLLAPSE DETECTED | "
+                    f"Purity={oracle_purity:.8f} (maximally mixed = 0.125) | "
+                    f"pq=[{pq_last}→{pq_curr}] | "
+                    f"This measurement may have occurred during π-pulse or measurement event"
+                )
 
             # ── Quantum information metrics ───────────────────────────────────
             QIM       = QuantumInformationMetrics

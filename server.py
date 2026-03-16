@@ -10522,11 +10522,25 @@ def _start_oracle_measurement_sync_daemon():
                     pq_last = window_info.get('pq_last', 0)
                     lattice_f = window_info.get('fidelity', 0.0)
                     lattice_c = window_info.get('coherence', 0.0)
+                    lattice_phase = window_info.get('phase_name', 'unknown')
+                    
+                    # ───────────────────────────────────────────────────────────────────────────
+                    # CRITICAL: Detect if window opens during lattice collapse
+                    # ───────────────────────────────────────────────────────────────────────────
+                    # If lattice F < 0.3, we're in a π-pulse or measurement collapse phase.
+                    # DO NOT measure. Skip this cycle and wait for recovery.
+                    if lattice_f < 0.3:
+                        logger.warning(
+                            f"[ORACLE-SYNC] ⏭️ SKIP MEASUREMENT @ cycle {current_cycle} | "
+                            f"Lattice COLLAPSED (F={lattice_f:.4f}) | Phase={lattice_phase} | "
+                            f"Deferring oracle measurement to next window"
+                        )
+                        continue  # ← Skip this measurement window entirely
                     
                     logger.info(
                         f"[ORACLE-SYNC] ⏱️ MEASUREMENT WINDOW @ cycle {current_cycle} | "
                         f"pq=[{pq_last}→{pq_curr}] | Lattice=[F={lattice_f:.4f} C={lattice_c:.6f}] | "
-                        f"Window={'REVIVAL' if is_revival else 'POWER-2'}"
+                        f"Phase={lattice_phase} | Window={'REVIVAL' if is_revival else 'POWER-2'}"
                     )
                     
                     # ───────────────────────────────────────────────────────────────────────────
@@ -10701,7 +10715,7 @@ def _start_oracle_measurement_sync_daemon():
                         if consecutive_failures >= 5:
                             logger.critical(
                                 f"[ORACLE-SYNC] 🔴 CRITICAL: {consecutive_failures} consecutive measurement failures — "
-                                f"check oracle initialization"
+                                f"check oracle initialization | Recommend system restart"
                             )
                 
                 time.sleep(0.05)
