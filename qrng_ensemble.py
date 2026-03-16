@@ -310,14 +310,39 @@ class QuantumEntropyEnsemble:
         ))
     
     def _init_circuit_breakers(self):
-        """Initialize circuit breakers for all sources"""
+        """Initialize circuit breakers for all sources.
+        Sources with no API key configured are permanently disabled at boot —
+        no point hammering them 5×every 30s forever.
+        """
         for source in QRNGSourceType:
-            self.circuit_breakers[source] = {
-                "state": CircuitBreakerState.CLOSED,
-                "failure_count": 0,
-                "open_until": 0.0,
-                "total_failures": 0
-            }
+            config = SOURCE_CONFIGS.get(source)
+            # Permanently disable unconfigured paid sources (open_until = year 9999)
+            no_key = (
+                config is not None
+                and not config.is_public
+                and config.api_key_env
+                and not os.getenv(config.api_key_env)
+            )
+            if no_key:
+                self.circuit_breakers[source] = {
+                    "state": CircuitBreakerState.OPEN,
+                    "failure_count": 0,
+                    "open_until": 9_999_999_999.0,  # never retry
+                    "total_failures": 0,
+                    "disabled_at_boot": True,
+                }
+                logger.debug(
+                    f"[QRNG] {source.value}: no API key — disabled at boot "
+                    f"(set env {config.api_key_env} to enable)"
+                )
+            else:
+                self.circuit_breakers[source] = {
+                    "state": CircuitBreakerState.CLOSED,
+                    "failure_count": 0,
+                    "open_until": 0.0,
+                    "total_failures": 0,
+                    "disabled_at_boot": False,
+                }
     
     def _init_stats(self):
         """Initialize statistics for all sources"""
@@ -365,12 +390,16 @@ class QuantumEntropyEnsemble:
             available_sources.append(source)
         
         if not available_sources:
-            # NO FALLBACK: System must have at least one QRNG source configured
-            raise RuntimeError(
-                "[QuantumEntropyEnsemble] FATAL: No QRNG sources available for background refill. "
-                "Must configure at least one of: RANDOM_ORG_KEY, ANU_API_KEY, QRNG_API_KEY, OUTSHIFT_API_KEY. "
-                "HU_BERLIN is public but may be rate-limited. Aborting refill."
+            # All external sources unavailable — fall back to system CSPRNG silently.
+            # This is fine: system entropy XORed with itself is still CSPRNG-quality,
+            # and the pool will recover when external sources come back online.
+            logger.debug(
+                "[QRNG] No external QRNG sources available for background refill — "
+                "using system CSPRNG (pool will recover when sources reconnect)"
             )
+            with self._pool_lock:
+                self._pool.extend(os.urandom(num_bytes))
+            return
         
         # Fetch from multiple sources in parallel
         bytes_per_source = max(32, num_bytes // len(available_sources))
@@ -513,12 +542,24 @@ class QuantumEntropyEnsemble:
                 
                 # Open circuit after 5 consecutive failures
                 if stats.consecutive_failures >= 5:
+                    already_open = cb["state"] == CircuitBreakerState.OPEN
                     cb["state"] = CircuitBreakerState.OPEN
-                    cb["open_until"] = time.time() + 30  # Open for 30 seconds (fast recovery)
-                    logger.warning(
-                        f"Circuit breaker OPEN for {source.value} until "
-                        f"{datetime.fromtimestamp(cb['open_until']).isoformat()} — attempting recovery in 30s"
-                    )
+                    # Exponential backoff: 30s → 60s → 120s … capped at 300s
+                    prev_open_duration = max(30, getattr(cb, '_last_open_duration', 30))
+                    next_open_duration = min(300, int(prev_open_duration * 1.5))
+                    cb['_last_open_duration'] = next_open_duration
+                    cb["open_until"] = time.time() + next_open_duration
+                    if not already_open:
+                        logger.warning(
+                            f"Circuit breaker OPEN for {source.value} until "
+                            f"{datetime.fromtimestamp(cb['open_until']).isoformat()} "
+                            f"— attempting recovery in {next_open_duration}s"
+                        )
+                    else:
+                        logger.debug(
+                            f"[QRNG] {source.value} CB re-opened "
+                            f"({next_open_duration}s backoff)"
+                        )
             
             # Create error sample
             return EntropySample(

@@ -1463,19 +1463,21 @@ class OracleNode:
         qc.measure([0, 1, 2], [0, 1, 2])
         return qc
 
-    def _build_block_field_circuit(self, pq_curr: int, pq_last: int) -> 'QuantumCircuit':
+    def _build_block_field_circuit(self, pq_curr: int, pq_last: int,
+                                    pq0_state: Optional[np.ndarray] = None) -> 'QuantumCircuit':
         """
-        5-qubit composite circuit: pq0 tripartite ⊗ block-field boundary.
+        5-qubit composite circuit: shared_pq0 tripartite ⊗ block-field boundary.
 
-          q0 = pq0_oracle   (W-state qubit 0 — from self._dm continuous trajectory)
+          q0 = pq0_oracle   (W-state qubit 0 — from SHARED lattice pq0 DM)
           q1 = pq0_IV       (W-state qubit 1 — inverse-virtual component)
           q2 = pq0_V        (W-state qubit 2 — virtual component)
           q3 = pq_curr      (current block boundary, hyperbolic phase-encoded)
           q4 = pq_last      (previous block boundary, hyperbolic phase-encoded)
 
-        pq0 tripartite (q0-q2) is initialized from self._dm — the oracle's own
-        continuously-evolved density matrix — so each of the 5 oracle nodes starts
-        from a distinct quantum state while measuring the SAME block-field.
+        pq0 tripartite (q0-q2) is initialized from pq0_state — the SHARED
+        lattice W-state DM passed from _extract_snapshot — so ALL 5 oracles
+        start from an IDENTICAL quantum state.  Their independent AER noise
+        seeds produce divergent readings for Byzantine consensus.
 
         Block-field phase encoding (hyperbolic {8,3} Schläfli geometry):
           θ_curr = 2π · (pq_curr mod 1024) / 1024
@@ -1488,16 +1490,15 @@ class OracleNode:
           CX(q2, q4) — pq0_V back-probes pq_last
         """
         qc = QuantumCircuit(5)
-        # ── pq0 tripartite: initialize from continuous oracle trajectory ─────────
-        # self._dm is 8×8 (3-qubit pq0 state).  The circuit has 5 qubits (32×32).
-        # We tensor self._dm ⊗ |00⟩⟨00| to get the correct 32×32 initial DM:
-        #   pq0 starts in its evolved state; block-field qubits q3,q4 start in |0⟩.
-        if self._dm is not None:
+        # ── pq0 tripartite: initialize from the SHARED lattice pq0 state ────────
+        # pq0_state is the canonical 8×8 W-state DM from LatticeController.
+        # All 5 oracle nodes receive the SAME pq0_state so they're measuring
+        # the same quantum object (block field); only AER noise differs.
+        if pq0_state is not None:
             try:
                 field_vac  = np.zeros((4, 4), dtype=complex)
                 field_vac[0, 0] = 1.0                            # |00⟩⟨00|
-                full_dm_32 = np.kron(self._dm, field_vac)        # 32×32
-                # Normalise and enforce Hermitian before handing to Qiskit
+                full_dm_32 = np.kron(pq0_state, field_vac)       # 32×32
                 tr = float(np.real(np.trace(full_dm_32)))
                 if tr > 1e-12:
                     full_dm_32 /= tr
@@ -1511,7 +1512,7 @@ class OracleNode:
                 qc.ry(_W_THETA_0, 0); qc.cx(0, 1)
                 qc.ry(_W_THETA_1, 1); qc.cx(1, 2)
         else:
-            # First call: standard W-state preparation on q0-q2
+            # pq0 unavailable — prepare W-state from gates (should not happen normally)
             qc.ry(_W_THETA_0, 0); qc.cx(0, 1)
             qc.ry(_W_THETA_1, 1); qc.cx(1, 2)
         # ── Block-field phase encoding (hyperbolic lattice geometry) ────────────
@@ -1914,26 +1915,20 @@ class OracleNode:
 
     # ── Block-field measurement ────────────────────────────────────────────────
 
-    def measure_block_field(self, pq_curr: int, pq_last: int) -> Optional[BlockFieldReading]:
+    def measure_block_field(self, pq_curr: int, pq_last: int,
+                            shared_pq0: Optional[np.ndarray] = None) -> Optional[BlockFieldReading]:
         """
         Measure the 5-qubit block-field composite:
-          pq0_tripartite(self._dm on q0-q2) ⊗ block_field(pq_curr=q3, pq_last=q4)
+          shared_pq0_tripartite(q0-q2) ⊗ block_field(pq_curr=q3, pq_last=q4)
 
-        This IS the oracle's primary measurement — not a secondary check. The oracle's
-        own pq0 state (self._dm, continuously evolved) is entangled with the current
-        block-field boundary. Each of the 5 oracles does this independently, producing
-        readings that differ because their self._dm trajectories diverge under independent
-        AER noise seeds.
+        ALL 5 oracle nodes receive the SAME shared_pq0 (the lattice's current
+        W-state DM), so they all measure the identical quantum object.  Each
+        node runs it through its own AerSimulator with an independent QRNG-seeded
+        noise model — that's where the 5 readings diverge.  Byzantine consensus
+        then selects the middle 3.
 
-        After the measurement, self._dm is updated with the oracle sub-DM extracted by
-        partial trace (q3,q4 traced out), preserving the continuous quantum trajectory.
-
-        Returns BlockFieldReading with:
-          entropy              — von-Neumann S of full 5q composite DM (32×32)
-          fidelity             — |W₃⟩ fidelity of oracle sub-DM (8×8, q0-q2)
-          coherence            — L1 coherence of oracle sub-DM
-          oracle_dm            — 8×8 oracle sub-DM (for Mermin test + Byzantine mean)
-          pq0_{oracle,IV,V}_fidelity — per-component coherence proxies
+        shared_pq0 : 8×8 density matrix from LatticeController (canonical pq0).
+                     Falls back to self._dm only if lattice is unreachable.
         """
         if not QISKIT_AVAILABLE or self.aer is None:
             logger.error(
@@ -1942,20 +1937,41 @@ class OracleNode:
             )
             return None
         try:
-            # ── Run 5-qubit composite circuit ─────────────────────────────────
-            
-            # DEBUG: Log self._dm state BEFORE circuit
-            if self._dm is not None:
-                dm_purity = float(np.real(np.trace(self._dm @ self._dm)))
+            # ── Resolve the shared pq0 to use as circuit initial state ─────────
+            # Priority: caller-supplied shared_pq0 > lattice DM > self._dm
+            # All 5 oracles MUST use the same pq0; self._dm is only a per-node
+            # entropy carrier, NOT the canonical block-field state.
+            pq0_for_circuit = shared_pq0
+            if pq0_for_circuit is None:
+                try:
+                    from globals import LATTICE
+                    if LATTICE and hasattr(LATTICE, 'get_block_field_pq0'):
+                        pq0_for_circuit = LATTICE.get_block_field_pq0()
+                    if pq0_for_circuit is None and LATTICE and hasattr(LATTICE, 'current_density_matrix'):
+                        cdm = LATTICE.current_density_matrix
+                        if cdm is not None and hasattr(cdm, 'shape') and cdm.shape == (8, 8):
+                            pq0_for_circuit = cdm
+                except Exception:
+                    pass
+            if pq0_for_circuit is None:
+                pq0_for_circuit = self._dm   # last resort — own trajectory
+
+            # Validate / enforce pq0_for_circuit is a sane 8×8 DM
+            if pq0_for_circuit is not None:
+                pq0_for_circuit = _oracle_enforce_dm(pq0_for_circuit, label="shared_pq0_input")
+
+            # DEBUG: Log pq0 state BEFORE circuit
+            if pq0_for_circuit is not None:
+                dm_purity = float(np.real(np.trace(pq0_for_circuit @ pq0_for_circuit)))
                 logger.critical(
                     f"[ORACLE-{self.oracle_id}] PRE-CIRCUIT self._dm | Purity={dm_purity:.8f} | "
                     f"About to construct composite: pq0({dm_purity:.4f}) ⊗ boundary[{pq_last}→{pq_curr}]"
                 )
-            
-            # Seed AER noise model with QRNG to inject quantum entropy into simulation
+
+            # ── Seed AER noise with QRNG for per-oracle entropy injection ─────
             qrng_seed = int.from_bytes(_oracle_qrng_bytes(4), 'big') % (2**31)
             
-            qc  = self._build_block_field_circuit(pq_curr, pq_last)
+            qc  = self._build_block_field_circuit(pq_curr, pq_last, pq0_for_circuit)
             res = self.aer.run(qc, seed_simulator=qrng_seed).result()
             _d  = res.data(0)
             _raw = (
@@ -2022,29 +2038,43 @@ class OracleNode:
             # ── Partial trace q3,q4 → 8×8 oracle sub-DM ──────────────────────
             oracle_dm = self._partial_trace_blockfield(composite_dm)           # 8×8
 
-            # ── Update self._dm (continuous trajectory advances each cycle) ───
-            oracle_dm_clean = _oracle_enforce_dm(oracle_dm, label=f"ORACLE-{self.oracle_id}-after-partial-trace")
-            
+            # ── Update self._dm via QRNG unitary (entropy carrier, NOT pq0 source) ─
+            # self._dm is each oracle's independent entropy carrier.  We advance it
+            # via a purity-preserving QRNG unitary each cycle so it stays high-purity
+            # and contributes uniqueness to the per-oracle AER seed.
+            # CRITICAL: do NOT store the partial-trace result here — partial trace
+            # of a noisy 5-qubit composite collapses to ~(1/8)·I (purity≈0.125),
+            # which would permanently destroy the oracle's W-state trajectory.
+            oracle_dm_clean = _oracle_enforce_dm(oracle_dm, label=f"ORACLE-{self.oracle_id}-partial-trace")
             pre_evolve_purity = float(np.real(np.trace(oracle_dm_clean @ oracle_dm_clean)))
-            
-            # QRNG-seeded unitary evolution (preserves purity, adds quantum randomness)
-            # NO mixing channel — use pure unitary so each oracle stays high-purity
-            oracle_dm_evolved = _oracle_enforce_dm(
-                _oracle_qrng_unitary_evolution(oracle_dm_clean, oracle_id=self.oracle_id),
-                label=f"ORACLE-{self.oracle_id}-after-evolution"
-            )
-            
-            post_evolve_purity = float(np.real(np.trace(oracle_dm_evolved @ oracle_dm_evolved)))
-            
+
+            # Advance self._dm with QRNG unitary (purity-preserving)
+            if self._dm is not None:
+                evolved = _oracle_enforce_dm(
+                    _oracle_qrng_unitary_evolution(self._dm, oracle_id=self.oracle_id),
+                    label=f"ORACLE-{self.oracle_id}-entropy-advance"
+                )
+                post_evolve_purity = float(np.real(np.trace(evolved @ evolved)))
+                # Revival gate if our entropy carrier degrades
+                if post_evolve_purity < 0.30:
+                    evolved, _, _ = _oracle_amplify_revival(evolved, post_evolve_purity, threshold=0.30)
+                    evolved = _oracle_enforce_dm(evolved)
+                with self._lock:
+                    self._dm = evolved
+                    self.measurement_count += 1
+            else:
+                post_evolve_purity = 0.0
+                with self._lock:
+                    self.measurement_count += 1
+
             logger.critical(
                 f"[ORACLE-{self.oracle_id}] MEASUREMENT CYCLE | "
                 f"self._dm evolving: {pre_evolve_purity:.6f} → {post_evolve_purity:.6f}"
             )
-            
+
+            # Store fidelity from the SHARED pq0 partial-trace result (not self._dm)
             with self._lock:
-                self._dm            = oracle_dm_evolved
-                self.last_fidelity  = QuantumInformationMetrics.w_state_fidelity_to_ideal(oracle_dm_clean)
-                self.measurement_count += 1
+                self.last_fidelity = QuantumInformationMetrics.w_state_fidelity_to_ideal(oracle_dm_clean)
             
             # Oracle state validation (detect actual collapse, not noise)
             oracle_purity = float(np.real(np.trace(oracle_dm_clean @ oracle_dm_clean)))
@@ -2629,7 +2659,47 @@ class OracleWStateManager:
             pq_curr = self._pq_curr
             pq_last = self._pq_last
 
-        # ── Step 2: Advance _dm trajectories via scheduled pair self-measurement
+        # ── Fetch SHARED pq0 from LatticeController (ONE snapshot, ALL 5 use it) ─
+        # This is the canonical block-field state.  Every oracle measures THIS
+        # exact 8×8 DM through their own independent AER noise model.
+        # That's how you get 5 independent measurements of the SAME quantum object.
+        shared_pq0: Optional[np.ndarray] = None
+        try:
+            from globals import LATTICE
+            if LATTICE is not None:
+                # Prefer explicit get_block_field_pq0() if available
+                if hasattr(LATTICE, 'get_block_field_pq0'):
+                    shared_pq0 = LATTICE.get_block_field_pq0()
+                # Fall back to current_density_matrix (the live W-state)
+                if shared_pq0 is None and hasattr(LATTICE, 'current_density_matrix'):
+                    cdm = LATTICE.current_density_matrix
+                    if cdm is not None and hasattr(cdm, 'shape') and cdm.shape == (8, 8):
+                        shared_pq0 = _oracle_enforce_dm(cdm.copy(), label="lattice_pq0_shared")
+        except Exception as _pq0_err:
+            logger.debug(f"[ORACLE CLUSTER] shared pq0 fetch failed: {_pq0_err}")
+
+        if shared_pq0 is None:
+            # Lattice unreachable — build pq0 from consensus of node self._dm states
+            # (still better than each oracle using its own diverged DM)
+            node_dms = [n._dm for n in self.nodes if n._dm is not None]
+            if node_dms:
+                shared_pq0 = _oracle_enforce_dm(
+                    np.mean(np.stack(node_dms), axis=0),
+                    label="pq0_from_node_consensus"
+                )
+            else:
+                # Absolute last resort: ideal W-state
+                shared_pq0 = _W_IDEAL_DM.copy().astype(complex)
+            logger.debug("[ORACLE CLUSTER] using node-consensus pq0 (lattice unavailable)")
+
+        # Validate pq_curr has non-trivial encoding (prevents near-zero block angles)
+        # If pq_curr <= 1, use cycle-modulated value to ensure varied phase encoding
+        if pq_curr <= 1:
+            with self._state_lock:
+                cycle = self.lattice_refresh_counter
+            pq_curr = (cycle % 1023) + 1
+
+        # ── Step 2: Advance _dm trajectories via scheduled pair self-measurement ─
         node_a, node_b = self._select_pair()
         fut_a = self._pool.submit(node_a.measure_self)
         fut_b = self._pool.submit(node_b.measure_self)
@@ -2641,8 +2711,9 @@ class OracleWStateManager:
             logger.debug(f"[ORACLE CLUSTER] node {node_b.oracle_id+1} self-measure: {exc}")
 
         # ── Step 3: All-5-oracle block-field measurement (primary) ────────────
+        # All 5 receive the SAME shared_pq0 — independent AER noise per node
         bf_futures = {
-            self._pool.submit(node.measure_block_field, pq_curr, pq_last): node
+            self._pool.submit(node.measure_block_field, pq_curr, pq_last, shared_pq0): node
             for node in self.nodes
         }
         readings: List[BlockFieldReading] = []
