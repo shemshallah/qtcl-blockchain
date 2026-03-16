@@ -90,308 +90,6 @@ except Exception as e:
 # 5-ORACLE BYZANTINE CONSENSUS INTEGRATION
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
-class OracleCluster:
-    """5 independent oracles with 3-of-5 Byzantine consensus + individual pq_curr/pq_last tracking"""
-    def __init__(self):
-        self.oracles = {
-            'oracle_1': {'role': 'PRIMARY_LATTICE', 'port': 5000, 'workers': 4, 'url': 'http://localhost:5000'},
-            'oracle_2': {'role': 'SECONDARY_LATTICE', 'port': 5001, 'workers': 4, 'url': 'http://localhost:5001'},
-            'oracle_3': {'role': 'VALIDATION', 'port': 5002, 'workers': 2, 'url': 'http://localhost:5002'},
-            'oracle_4': {'role': 'ARBITER', 'port': 5003, 'workers': 2, 'url': 'http://localhost:5003'},
-            'oracle_5': {'role': 'METRICS', 'port': 5004, 'workers': 2, 'url': 'http://localhost:5004'}
-        }
-        self.consensus_threshold = 3
-        
-        # Per-oracle pq_curr/pq_last tracking (NEW)
-        self.oracle_pq_states = {}
-        self.oracle_pq_lock = threading.RLock()
-        for oracle_id in self.oracles.keys():
-            self.oracle_pq_states[oracle_id] = {
-                # Initialize empty — measure_lattice() will populate with real values
-                'pq_curr_fidelity': None,
-                'pq_curr_coherence': None,
-                'pq_last_fidelity': None,
-                'pq_last_coherence': None,
-                'timestamp': time.time(),
-            }
-    
-    def measure_lattice(self, transaction_data):
-        """REAL quantum measurement: evolve density matrices via GKSL, compute true fidelity/coherence
-        ENTERPRISE GRADE: Module-level QRNG_ENSEMBLE guaranteed initialized"""
-        
-        try:
-            from lattice_controller import QuantumInformationMetrics, NonMarkovianNoiseBath
-        except (ImportError, AttributeError):
-            QuantumInformationMetrics = None
-            NonMarkovianNoiseBath = None
-        
-        results = {}
-        measure_count = getattr(self, '_measure_count', 0) + 1
-        self._measure_count = measure_count
-        
-        
-        # Module-level QRNG_ENSEMBLE (singleton) is guaranteed available or boot fails
-        if measure_count == 1:
-            logger.warning(f"[MEASURE-LATTICE] Measurement subsystem active | oracles={len(self.oracles)} | entropy=LIVE")
-        
-        with self.oracle_pq_lock:
-            for oracle_id, config in self.oracles.items():
-                try:
-                    # ═══ REAL MEASUREMENT CYCLE ═══
-                    # 1. Get current density matrix state for this oracle's pseudoqubits
-                    rho_pq_curr = self.oracle_pq_states[oracle_id].get('_density_matrix_curr', None)
-                    rho_pq_last = self.oracle_pq_states[oracle_id].get('_density_matrix_last', None)
-                    
-                    # 2. If no prior state, initialize from QRNG-perturbed W-like state.
-                    # Old code used hash(oracle_id) — purely deterministic, same result
-                    # every restart, identical across processes. Every bit of the initial
-                    # density matrix was computable from a single integer.
-                    # New: U = exp(iεH), H sampled from 5-source QRNG ensemble (ANU vacuum,
-                    # random.org, HU Berlin, Outshift, QBICK). Result: each oracle instance
-                    # starts from a unique, physically unpredictable 2×2 mixed state.
-                    if rho_pq_curr is None:
-                        # Ideal 2-qubit W-like state: |ψ⟩ = (|01⟩+|10⟩)/√2
-                        _ideal_2q = _np.array([[0,0,0,0],[0,0.5,0.5,0],[0,0.5,0.5,0],[0,0,0,0]], dtype=complex)
-                        try:
-                            # QRNG unitary kick: exp(iεH), H from 5-source ensemble
-                            _raw_q = QRNG_ENSEMBLE.get_random_bytes(128)
-                            _H = _np.zeros((4,4), dtype=complex)
-                            _off = 0
-                            for _i in range(4):
-                                for _j in range(_i+1, 4):
-                                    _re = (int.from_bytes(_raw_q[_off:_off+8],'big')+0.5)/(2**64)-0.5; _off+=8
-                                    _im = (int.from_bytes(_raw_q[_off:_off+8],'big')+0.5)/(2**64)-0.5; _off+=8
-                                    _H[_i,_j]=complex(_re,_im); _H[_j,_i]=complex(_re,-_im)
-                            for _i in range(4):
-                                _H[_i,_i] = (int.from_bytes(_raw_q[_off:_off+8],'big')+0.5)/(2**64)-0.5; _off+=8
-                            _H -= (_np.trace(_H).real/4)*_np.eye(4,dtype=complex)
-                            _nrm = _np.linalg.norm(_H,'fro')
-                            if _nrm > 1e-12: _H /= _nrm
-                            # Cayley transform (Padé approx to matrix exponential, no scipy needed)
-                            _eps = 0.30  # 0.30 rad perturbation — strong enough to break degeneracy
-                            _I4 = _np.eye(4,dtype=complex)
-                            try:
-                                _U = (_I4 + 0.5j*_eps*_H) @ _np.linalg.inv(_I4 - 0.5j*_eps*_H)
-                            except _np.linalg.LinAlgError:
-                                _U = _I4
-                            rho_full = _U @ _ideal_2q @ _U.conj().T
-                            # Partial trace to 2×2 (pq_curr qubit)
-                            rho_pq_curr = rho_full.reshape(2,2,2,2).trace(axis1=1,axis2=3).astype(complex)
-                            rho_pq_curr = 0.5*(rho_pq_curr+rho_pq_curr.conj().T)
-                            _tr = _np.real(_np.trace(rho_pq_curr))
-                            rho_pq_curr = rho_pq_curr / max(_tr, 1e-10)
-                            logger.debug(f"[ORACLE-CLUSTER] {oracle_id} QRNG-seeded ρ | coh={abs(rho_pq_curr[0,1]):.4f}")
-                        except Exception as _qe:
-                            # Fallback: os.urandom gives at minimum non-deterministic init
-                            _rb = _np.frombuffer(os.urandom(32), dtype=_np.uint8).astype(float)/255.0
-                            _base_coh = 0.35 + 0.30*_rb[0]
-                            _phase    = 2*3.14159*_rb[1]
-                            rho_pq_curr = _np.array([
-                                [0.5, _base_coh*(_np.cos(_phase)+1j*_np.sin(_phase))],
-                                [_base_coh*(_np.cos(_phase)-1j*_np.sin(_phase)), 0.5]
-                            ], dtype=complex)
-                            _tr = _np.real(_np.trace(rho_pq_curr))
-                            rho_pq_curr = rho_pq_curr / max(_tr, 1e-10)
-                            logger.debug(f"[ORACLE-CLUSTER] {oracle_id} os.urandom-seeded ρ (QRNG failed: {_qe})")
-
-                    if rho_pq_last is None:
-                        # pq_last also gets an independent QRNG perturbation — not a copy
-                        try:
-                            _raw_last = QRNG_ENSEMBLE.get_random_bytes(16)
-                            _eps_last = 0.08 + 0.06*(int.from_bytes(_raw_last[:8],'big')/(2**64))
-                            _I2 = _np.eye(2,dtype=complex)
-                            _sz = _np.array([[1,0],[0,-1]],dtype=complex)
-                            _sx = _np.array([[0,1],[1,0]],dtype=complex)
-                            _Hx = (int.from_bytes(_raw_last[8:12],'big')/(2**32)-0.5)
-                            _Hz = (int.from_bytes(_raw_last[12:16],'big')/(2**32)-0.5)
-                            _H2 = _Hx*_sx + _Hz*_sz
-                            try:
-                                _U2 = (_I2 + 0.5j*_eps_last*_H2) @ _np.linalg.inv(_I2 - 0.5j*_eps_last*_H2)
-                            except _np.linalg.LinAlgError:
-                                _U2 = _I2
-                            rho_pq_last = _U2 @ rho_pq_curr @ _U2.conj().T
-                            rho_pq_last = 0.5*(rho_pq_last+rho_pq_last.conj().T)
-                            _trl = _np.real(_np.trace(rho_pq_last))
-                            rho_pq_last = rho_pq_last / max(_trl, 1e-10)
-                        except Exception:
-                            rho_pq_last = rho_pq_curr.copy()
-                    
-                    # 3. Apply REAL GKSL evolution + NON-MARKOVIAN MEMORY EFFECTS
-                    if QuantumInformationMetrics is not None:
-                        dt = 0.003  # 3ms timestep (slower evolution)
-                        gamma = 0.035  # Lower damping rate for slower dissipation
-                        
-                        # Apply Lindblad damping: dρ/dt = γ(σ_- ρ σ_+ - 1/2{σ_+σ_-, ρ})
-                        # MUST be scaled by dt for Euler integration
-                        s_minus = _np.array([[0, 0], [1, 0]], dtype=complex)
-                        s_plus = _np.array([[0, 1], [0, 0]], dtype=complex)
-                        
-                        # Superoperator action (derivative)
-                        L_term = gamma * (s_minus @ rho_pq_curr @ s_plus)
-                        dissipation = -0.5 * gamma * (s_plus @ s_minus @ rho_pq_curr + rho_pq_curr @ s_plus @ s_minus)
-                        
-                        # CRITICAL: Scale by dt for first-order Euler: ρ(t+dt) = ρ(t) + dt * dρ/dt
-                        rho_pq_curr_evolved = rho_pq_curr + dt * (L_term + dissipation)
-                        
-                        # Renormalize to preserve trace
-                        tr = _np.real(_np.trace(rho_pq_curr_evolved))
-                        rho_pq_curr_evolved = rho_pq_curr_evolved / max(tr, 1e-10)
-                        
-                        # NON-MARKOVIAN REVIVAL: apply memory feedback every 10 measurement cycles
-                        # Track cycle count per oracle
-                        cycle_count = self.oracle_pq_states[oracle_id].get('_cycle_count', 0)
-                        self.oracle_pq_states[oracle_id]['_cycle_count'] = cycle_count + 1
-                        
-                        if (cycle_count % 10) == 0 and cycle_count > 0:
-                            # Apply coherence revival: re-superposition via memory kernel
-                            # ρ → α*ρ_evolved + (1-α)*ρ_last (memory feedback)
-                            memory_alpha = 0.15  # 15% memory feedback to induce revival
-                            rho_pq_curr_evolved = (memory_alpha * rho_pq_curr_evolved + 
-                                                  (1.0 - memory_alpha) * rho_pq_last)
-                            tr = _np.real(_np.trace(rho_pq_curr_evolved))
-                            rho_pq_curr_evolved = rho_pq_curr_evolved / max(tr, 1e-10)
-                        
-                        # Shift: pq_last ← pq_curr, pq_curr ← evolved
-                        rho_pq_last = rho_pq_curr.copy()
-                        rho_pq_curr = rho_pq_curr_evolved
-                    
-                    # 4. REAL measurement: compute fidelity and coherence from density matrices
-                    # Fidelity = Tr(ρ |ψ⟩⟨ψ|) where |ψ⟩ = 1/√2(|0⟩ + |1⟩)  [W-like state]
-                    ideal_w_state = _np.array([[0.5, 0.5], [0.5, 0.5]], dtype=complex)
-                    fid_curr = _np.real(_np.trace(rho_pq_curr @ ideal_w_state))
-                    fid_last = _np.real(_np.trace(rho_pq_last @ ideal_w_state))
-                    
-                    # Coherence = L1 norm of off-diagonals (measure of superposition)
-                    coh_curr = abs(rho_pq_curr[0, 1]) + abs(rho_pq_curr[1, 0])
-                    coh_last = abs(rho_pq_last[0, 1]) + abs(rho_pq_last[1, 0])
-                    
-                    # Clamp to physical range [0, 1]
-                    fid_curr = max(0.0, min(1.0, fid_curr))
-                    fid_last = max(0.0, min(1.0, fid_last))
-                    coh_curr = max(0.0, min(1.0, coh_curr))
-                    coh_last = max(0.0, min(1.0, coh_last))
-                    
-                    # 5. Add quantum measurement shot noise using QRNG (amplified to break symmetry)
-                    qrng_fid_noise_curr = QRNG_ENSEMBLE.get_random_float() * 0.05 - 0.025
-                    qrng_fid_noise_last = QRNG_ENSEMBLE.get_random_float() * 0.05 - 0.025
-                    qrng_coh_noise_curr = QRNG_ENSEMBLE.get_random_float() * 0.03 - 0.015
-                    qrng_coh_noise_last = QRNG_ENSEMBLE.get_random_float() * 0.03 - 0.015
-                    
-                    pq_curr_fid = max(0.0, min(1.0, fid_curr + qrng_fid_noise_curr))
-                    pq_last_fid = max(0.0, min(1.0, fid_last + qrng_fid_noise_last))
-                    pq_curr_coh = max(0.0, min(1.0, coh_curr + qrng_coh_noise_curr))
-                    pq_last_coh = max(0.0, min(1.0, coh_last + qrng_coh_noise_last))
-                    
-                    # 6. Persist density matrices and fidelity/coherence states (AGENT-MEASUREMENT-VALIDATOR)
-                    # Use .update() to preserve existing state like cycle_count
-                    self.oracle_pq_states[oracle_id].update({
-                        '_density_matrix_curr': rho_pq_curr,
-                        '_density_matrix_last': rho_pq_last,
-                        '_cycle_count': cycle_count + 1,
-                        'pq_curr_fidelity': pq_curr_fid,
-                        'pq_curr_coherence': pq_curr_coh,
-                        'pq_last_fidelity': pq_last_fid,
-                        'pq_last_coherence': pq_last_coh,
-                        'timestamp': time.time(),
-                    })
-                    
-                    # VERIFY UPDATE PERSISTED
-                    verify_fid = self.oracle_pq_states[oracle_id].get('pq_curr_fidelity')
-                    if _should_log_oracle(oracle_id):
-                        logger.info(f"[MEASURE-PERSISTED] {oracle_id} | Computed F={pq_curr_fid:.4f} C={pq_curr_coh:.4f} | Verified in state: F={verify_fid:.4f} | cycle={cycle_count} | [SAMPLE]")
-                    
-                    # Report oracle evolution every 2 measurement cycles (200ms)
-                    if (cycle_count % 2) == 0:
-                        if _should_log_oracle(oracle_id):
-                            revival_marker = " ✨[REVIVAL]" if ((cycle_count % 10) == 0 and cycle_count > 0) else ""
-                            logger.debug(f"[ORACLE-MEASURE-LIVE] {oracle_id} | "
-                                       f"pq_curr(F:{pq_curr_fid:.4f} C:{pq_curr_coh:.4f}) | "
-                                       f"pq_last(F:{pq_last_fid:.4f} C:{pq_last_coh:.4f}) | "
-                                       f"cycle={cycle_count}{revival_marker}")
-                    
-                    # 7. Compute W-state fidelity (oracle collective measurement)
-                    w_state_fidelity = 0.5 * (pq_curr_fid + pq_last_fid)
-                    oracle_coherence = 0.5 * (pq_curr_coh + pq_last_coh)
-                    
-                    # 8. Measurement latency from QRNG (realistic 100-150ms range)
-                    qrng_latency_bytes = QRNG_ENSEMBLE.get_random_int(100000, 150000)
-                    latency_ms = 100.0 + (qrng_latency_bytes % 50000) / 1000.0
-                    
-                    results[oracle_id] = {
-                        'oracle_id': oracle_id,
-                        'role': config['role'],
-                        'port': config['port'],
-                        'measurement': 'valid',
-                        'w_state_fidelity': w_state_fidelity,
-                        'coherence': oracle_coherence,
-                        'pq_curr_fidelity': pq_curr_fid,
-                        'pq_curr_coherence': pq_curr_coh,
-                        'pq_last_fidelity': pq_last_fid,
-                        'pq_last_coherence': pq_last_coh,
-                        'latency_ms': latency_ms,
-                        'timestamp': time.time()
-                    }
-                    
-                except Exception as e:
-                    logger.debug(f"[ORACLE-MEASURE] {oracle_id} measurement error: {e}")
-                    # Fallback to prior state if measurement fails
-                    prior = self.oracle_pq_states[oracle_id]
-                    results[oracle_id] = {
-                        'oracle_id': oracle_id,
-                        'role': config['role'],
-                        'port': config['port'],
-                        'measurement': 'valid',
-                        'w_state_fidelity': prior.get('pq_curr_fidelity', 0.92),
-                        'coherence': prior.get('pq_curr_coherence', 0.89),
-                        'pq_curr_fidelity': prior.get('pq_curr_fidelity', 0.92),
-                        'pq_curr_coherence': prior.get('pq_curr_coherence', 0.89),
-                        'pq_last_fidelity': prior.get('pq_last_fidelity', 0.91),
-                        'pq_last_coherence': prior.get('pq_last_coherence', 0.88),
-                        'latency_ms': 125.0,
-                        'timestamp': time.time()
-                    }
-        
-        return results
-    
-    def get_oracle_pq_states(self) -> Dict[str, Any]:
-        """Get current pq_curr/pq_last for all 5 oracles"""
-        with self.oracle_pq_lock:
-            return {
-                oracle_id: {
-                    'oracle_id': oracle_id,
-                    'role': self.oracles[oracle_id]['role'],
-                    **state
-                }
-                for oracle_id, state in self.oracle_pq_states.items()
-            }
-    
-    def apply_consensus(self, measurements):
-        """3-of-5 majority consensus with Byzantine fault tolerance"""
-        agreement = sum(1 for m in measurements.values() if m['measurement'] == 'valid')
-        
-        if agreement >= self.consensus_threshold:
-            consensus_type = {
-                5: 'UNANIMOUS_5',
-                4: 'STRONG_MAJORITY_4',
-                3: 'MAJORITY_3'
-            }.get(agreement, 'DEADLOCKED')
-            
-            return {
-                'consensus': consensus_type,
-                'agreement': f"{agreement}/5",
-                'byzantine_detected': agreement < 5,
-                'confidence': min(0.95, 0.8 + agreement * 0.03),
-                'timestamp': time.time()
-            }
-        return {
-            'consensus': 'DEADLOCKED',
-            'agreement': f"{agreement}/5",
-            'byzantine_detected': True,
-            'confidence': 0.0
-        }
-
-# Initialize oracle cluster
-oracle_cluster = OracleCluster()
 import traceback
 from typing import Dict, Any, Optional, List, Tuple, Set
 from datetime import datetime, timezone, timedelta
@@ -2201,54 +1899,9 @@ def _set_app_ready():
     _APP_READY=True
     logger.info("[APP] ✅ Application ready for Koyeb health checks")
 
-# Call after all init
-
-@app.route('/consensus/vote', methods=['POST'])
-def consensus_vote():
-    """5-oracle Byzantine consensus voting endpoint"""
-    try:
-        data = request.get_json()
-        
-        # Submit to all 5 oracles
-        measurements = oracle_cluster.measure_lattice(data)
-        
-        # Apply consensus
-        consensus = oracle_cluster.apply_consensus(measurements)
-        
-        return jsonify({
-            'consensus': consensus['consensus'],
-            'agreement': consensus['agreement'],
-            'confidence': consensus['confidence'],
-            'byzantine_detected': consensus['byzantine_detected'],
-            'measurements': measurements,
-            'timestamp': consensus['timestamp']
-        }), 200
-    except Exception as e:
-        logger.error(f"Consensus vote error: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/consensus/health', methods=['GET'])
-def oracle_health():
-    """Check health of all 5 oracles"""
-    health = {}
-    for oracle_id, config in oracle_cluster.oracles.items():
-        health[oracle_id] = {
-            'role': config['role'],
-            'port': config['port'],
-            'workers': config['workers'],
-            'status': 'ONLINE'
-        }
-    return jsonify(health), 200
-
-@app.route('/consensus/stats', methods=['GET'])
-def consensus_stats():
-    """Get consensus voting statistics"""
-    return jsonify({
-        'oracles': len(oracle_cluster.oracles),
-        'consensus_threshold': oracle_cluster.consensus_threshold,
-        'byzantine_tolerance': 2,
-        'total_workers': 14
-    }), 200
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# API Endpoints
+# ═════════════════════════════════════════════════════════════════════════════════════════
 
 @app.route('/api/snapshot/sse', methods=['GET'])
 def sse_snapshot_stream():
@@ -10811,7 +10464,7 @@ def _start_oracle_measurement_sync_daemon():
         
         while True:
             try:
-                if LATTICE is None or oracle_cluster is None:
+                if LATTICE is None or ORACLE_W_STATE_MANAGER is None:
                     time.sleep(0.05)
                     continue
                 
@@ -10837,7 +10490,7 @@ def _start_oracle_measurement_sync_daemon():
                     measurement_start = time.time_ns()
                     
                     # ✅ CONCURRENT: Measure all 5 oracles at block-field (pq_curr, pq_last)
-                    for node_idx, node in enumerate(oracle_cluster.nodes):
+                    for node_idx, node in enumerate(ORACLE_W_STATE_MANAGER.nodes):
                         try:
                             bf = node.measure_block_field(pq_curr, pq_last)
                             if bf:
@@ -10936,7 +10589,7 @@ def _start_oracle_measurement_sync_daemon():
     logger.info("[ORACLE-SYNC] ✅ ENHANCED daemon running (real-time W3 fidelity + index tracking)")
 
 # Start measurement sync daemon
-if LATTICE is not None and oracle_cluster is not None:
+if LATTICE is not None and ORACLE_W_STATE_MANAGER is not None:
     _start_oracle_measurement_sync_daemon()
 
 
