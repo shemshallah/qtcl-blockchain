@@ -3547,6 +3547,64 @@ def _start_p2p_daemons() -> None:
 # REAL-TIME METRICS COLLECTOR (Background Thread)
 # ═════════════════════════════════════════════════════════════════════════════════
 
+def _gather_oracle_cluster_metrics() -> dict:
+    """
+    Pull the latest block-field consensus data from ORACLE_W_STATE_MANAGER and
+    return a flat dict suitable for merging into any SSE/API payload.
+
+    Returns oracle_measurements (5-element list), mermin_test, block_field,
+    and pq0 tripartite component fidelities.  Returns empty dict if the cluster
+    has not yet completed its first measurement cycle.
+    """
+    if not ORACLE_AVAILABLE or ORACLE_W_STATE_MANAGER is None:
+        return {}
+    try:
+        dm = ORACLE_W_STATE_MANAGER.get_latest_density_matrix()
+        if not dm:
+            return {}
+        bf        = dm.get('block_field', {})
+        per_node  = bf.get('per_node', [])
+        mermin    = dm.get('mermin_test') or dm.get('bell_test')
+        return {
+            # Per-oracle block-field readings — each node measured the same field
+            'oracle_measurements': [
+                {
+                    'oracle_id':           f"oracle_{n.get('oracle_id', i+1)}",
+                    'oracle_role':         n.get('role', ''),
+                    'w_state_fidelity':    round(float(n.get('fidelity',  0.0)), 6),
+                    'coherence':           round(float(n.get('coherence', 0.0)), 6),
+                    'entropy':             round(float(n.get('entropy',   0.0)), 4),
+                    'pq0_oracle_fidelity': round(float(n.get('pq0_oracle_fidelity', 0.0)), 6),
+                    'pq0_IV_fidelity':     round(float(n.get('pq0_IV_fidelity',     0.0)), 6),
+                    'pq0_V_fidelity':      round(float(n.get('pq0_V_fidelity',      0.0)), 6),
+                    'in_consensus':        bool(n.get('in_consensus', False)),
+                }
+                for i, n in enumerate(per_node)
+            ],
+            # Mermin inequality test on consensus oracle DM
+            'mermin_test': mermin,
+            'bell_test':   mermin,   # API compat alias
+            # pq0 tripartite component consensus medians
+            'pq0_oracle_fidelity': dm.get('pq0_oracle_fidelity', 0.0),
+            'pq0_IV_fidelity':     dm.get('pq0_IV_fidelity',     0.0),
+            'pq0_V_fidelity':      dm.get('pq0_V_fidelity',      0.0),
+            # Block-field state
+            'block_field': {
+                'pq_curr':    bf.get('pq_curr',    0),
+                'pq_last':    bf.get('pq_last',    0),
+                'fidelity':   bf.get('fidelity',   0.0),
+                'coherence':  bf.get('coherence',  0.0),
+                'entropy':    bf.get('entropy',    0.0),
+                'per_node':   per_node,
+                'node_count': bf.get('node_count', 0),
+                'accepted':   bf.get('accepted',   0),
+            },
+        }
+    except Exception as e:
+        logger.debug(f"[ORACLE-METRICS] gather error: {e}")
+        return {}
+
+
 class MetricsCollector:
     """Continuously collects and broadcasts blockchain metrics via WebSocket"""
     
@@ -3779,21 +3837,28 @@ class MetricsCollector:
                     'block_height'       : chain_height,
                     'difficulty'         : difficulty,
                     'network_hash_rate'  : network_hash_rate,
-                    'w_state_fidelity'   : round(w_state_fidelity, 4),  # Updated from LATTICE
-                    'coherence'          : round(live_coherence, 4),  # DECIMAL 0-1 (not %)
-                    'entropy'            : round(live_entropy, 4),  # DECIMAL
-                    'lattice_cycle'      : lattice_cycle,  # NEW: Sigma cycle number
-                    'lattice_sigma_mod8' : lattice_sigma_mod8,  # NEW: Sigma mode (0-8)
+                    'w_state_fidelity'   : round(w_state_fidelity, 4),
+                    'coherence'          : round(live_coherence, 4),
+                    'entropy'            : round(live_entropy, 4),
+                    'lattice_cycle'      : lattice_cycle,
+                    'lattice_sigma_mod8' : lattice_sigma_mod8,
                     'peer_count'         : peer_count,
                     'mempool_size'       : mempool_size,
                     'last_block_time_ago': round(last_block_time_ago, 1),
-                    'pq_curr'            : pq_curr_live,  # ✅ LIVE PSEUDOQUBIT CURRENT FIELD
-                    'pq_last'            : pq_last_live,  # ✅ LIVE PSEUDOQUBIT LAST FIELD
+                    'pq_curr'            : pq_curr_live,
+                    'pq_last'            : pq_last_live,
                     'recent_blocks'      : recent_blocks,
                     'mempool_txs'        : mempool_txs,
                     'miners'             : miners_dict,
 
-                    # NESTED FORMAT — for server-internal compatibility
+                    # ── ORACLE CLUSTER BLOCK-FIELD METRICS ───────────────────────
+                    # Pulled live from ORACLE_W_STATE_MANAGER every 2-second SSE cycle.
+                    # oracle_measurements: per-node block-field readings (5 nodes)
+                    # mermin_test:         Mermin inequality result on consensus oracle DM
+                    # pq0_components:      pq0_oracle / pq0_IV / pq0_V fidelities
+                    **_gather_oracle_cluster_metrics(),
+
+                    # NESTED FORMAT
                     'timestamp': datetime.now(timezone.utc).isoformat(),
                     'blockchain': {
                         'chain_height'        : chain_height,
@@ -7776,11 +7841,11 @@ def oracle_w_state():
         'block_height':    block_height,
         'pq_current':      pq_current,
         # ── W-state fidelities ────────────────────────────────────────────────
-        'fidelity':         eng.get('w3_fidelity'),   # None until real measurement
+        'fidelity':         eng.get('w3_fidelity'),
         'w3_fidelity':      eng.get('w3_fidelity'),
         'wN_fidelity':      eng.get('wN_fidelity'),
         'w6_fidelity':      w6_fidelity,
-        'w_state_fidelity': eng.get('w3_fidelity'),   # None until real measurement
+        'w_state_fidelity': eng.get('w3_fidelity'),
         # ── Coherence / entanglement ──────────────────────────────────────────
         'coherence':        eng.get('coherence'),
         'entanglement':     eng.get('entanglement'),
@@ -7810,10 +7875,7 @@ def oracle_w_state():
         # ── pq0 Bloch vector ──────────────────────────────────────────────────
         'pq0_bloch_theta':  eng.get('pq0_bloch_theta'),
         'pq0_bloch_phi':    eng.get('pq0_bloch_phi'),
-        # ── QTCL-PoW seed (QRNG-injected, used by miners for scratchpad) ────────
-        # This is SHA3-256(density_matrix XOR qrng_32 || timestamp_ns).
-        # Miners build their 512KB scratchpad from SHAKE-256(this seed).
-        # Server re-derives scratchpad from this seed to verify submitted blocks.
+        # ── QTCL-PoW seed ────────────────────────────────────────────────────
         'pow_seed_hex'      : pow_seed_hex,
         # ── Raw density matrix ────────────────────────────────────────────────
         'density_matrix_hex': dm_hex,
@@ -7824,6 +7886,10 @@ def oracle_w_state():
         ],
         'cycle':  eng.get('cycle', 0),
         'source': eng.get('source', 'live'),
+        # ── Oracle cluster block-field data (5-node Byzantine consensus) ──────
+        # Merged in from ORACLE_W_STATE_MANAGER — includes per-oracle fidelities,
+        # pq0 tripartite components, and Mermin inequality test result.
+        **_gather_oracle_cluster_metrics(),
     }), 200
 
 @app.route('/api/mempool/fee_estimate', methods=['GET'])

@@ -645,27 +645,29 @@ async function refresh(){
   finally{rfg=false;}
 }
 
-// Socket.IO
-try{
-  var sk=io(BASE,{transports:['websocket','polling'],reconnectionDelay:2500,timeout:8000});
-  sk.on('connect',function(){setOnline(true);refresh();});
-  sk.on('disconnect',function(){setOnline(false);});
-  sk.on('metrics_update',function(d){
+// ── Live SSE stream from /api/snapshot/sse ───────────────────────────────────
+// This is the direct endpoint that _snapshot_streaming_daemon broadcasts to.
+// The chirp payload includes oracle_measurements, mermin_test, consensus,
+// pq0_components, pq_curr, pq_last, lattice_quantum.
+(function(){
+  var _es=null,_reconnMs=2500;
+  function _ingestChirp(d){
     if(!d) return;
+    // Consensus fidelity/coherence from oracle block-field Byzantine median
+    if(d.consensus){
+      if(d.consensus.w_state_fidelity!=null) S.fidelity=d.consensus.w_state_fidelity;
+      if(d.consensus.coherence!=null) S.coherence=d.consensus.coherence;
+    }
     if(d.fidelity!=null) S.fidelity=d.fidelity;
-    else if(d.w3_fidelity!=null) S.fidelity=d.w3_fidelity;
     else if(d.w_state_fidelity!=null) S.fidelity=d.w_state_fidelity;
-    else if(d.consensus&&d.consensus.w_state_fidelity!=null) S.fidelity=d.consensus.w_state_fidelity;
     if(d.coherence!=null) S.coherence=d.coherence;
-    else if(d.consensus&&d.consensus.coherence!=null) S.coherence=d.consensus.coherence;
     if(d.entropy!=null) S.entropy=d.entropy;
-    if(d.cycle!=null) S.cycle=d.cycle;
     if(d.lattice_cycle!=null) S.cycle=d.lattice_cycle;
-    if(d.sigma_mod8!=null) S.sigma_mod8=d.sigma_mod8;
-    if(d.lattice_sigma_mod8!=null) S.sigma_mod8=d.lattice_sigma_mod8;
     if(d.n_peers!=null) S.n_peers=d.n_peers;
     if(d.qrng_health!=null) S.qrng_health=d.qrng_health;
-    // Ingest per-oracle block-field readings from chirp
+    if(d.pq_curr!=null) S.pq_curr=d.pq_curr;
+    if(d.pq_last!=null) S.pq_last=d.pq_last;
+    // Per-oracle block-field readings from chirp oracle_measurements
     if(d.oracle_measurements&&d.oracle_measurements.length){
       d.oracle_measurements.forEach(function(m){
         var key=m.oracle_id||('oracle_'+(m.oracle_id||1));
@@ -673,29 +675,45 @@ try{
       });
     }
     // pq0 tripartite component fidelities
-    if(d.pq0_components) S.pq0_components=d.pq0_components;
-    // Mermin
+    if(d.pq0_oracle_fidelity!=null||d.pq0_components){
+      var c=d.pq0_components||d;
+      S.pq0_components={
+        pq0_oracle_fidelity: c.pq0_oracle_fidelity||d.pq0_oracle_fidelity||0,
+        pq0_IV_fidelity:     c.pq0_IV_fidelity    ||d.pq0_IV_fidelity    ||0,
+        pq0_V_fidelity:      c.pq0_V_fidelity     ||d.pq0_V_fidelity     ||0,
+      };
+    }
+    // Mermin test
     if(d.mermin_test||d.bell_test){S.mermin=d.mermin_test||d.bell_test;renderMermin(S.mermin);}
-    fidH.push(S.fidelity);if(fidH.length>80) fidH.shift();
-    if(d.block_height!=null&&parseInt(d.block_height)>S.chain_height){
-      S.chain_height=parseInt(d.block_height);
+    // Block height bump
+    var bh=d.block_height||( d.lattice_quantum&&d.lattice_quantum.block_height);
+    if(bh!=null&&parseInt(bh)>S.chain_height){
+      S.chain_height=parseInt(bh);
       dbk.push({r:Math.random()*.72+.1,a:Math.random()*Math.PI*2,age:0});
       setTimeout(function(){Promise.allSettled([fetchChain(),fetchMempool()]).then(updateDOM);},400);
     }
-    // pq_curr/pq_last from chirp
-    if(d.pq_curr!=null) S.pq_curr=d.pq_curr;
-    if(d.pq_last!=null) S.pq_last=d.pq_last;
+    fidH.push(S.fidelity);if(fidH.length>80) fidH.shift();
     updateDOM();
-  });
-  sk.on('new_block',function(d){
-    if(d){
-      var b={height:d.height||d.block_height,hash:d.block_hash||d.hash,tx_count:d.tx_count||0,fidelity:d.w_state_fidelity||.9,_fr:true};
-      blocks.push(b);blocks=blocks.sort(function(a,b){return a.height-b.height;}).slice(-60);
-      renderChain();dbk.push({r:Math.random()*.72+.1,a:Math.random()*Math.PI*2,age:0});
-    }
-  });
-  sk.on('new_transaction',function(d){if(d){d._fr=true;txs=[d].concat(txs).slice(0,100);renderTxs();}});
-}catch(e){console.warn('Socket unavailable');}
+    lu=Date.now();setOnline(true);
+    document.getElementById('bu').textContent='Updated '+new Date().toTimeString().slice(0,8);
+  }
+  function connect(){
+    if(_es){_es.close();_es=null;}
+    _es=new EventSource(BASE+'/api/snapshot/sse?client_id=dashboard_'+Date.now());
+    _es.onopen=function(){setOnline(true);};
+    _es.onmessage=function(e){
+      try{_ingestChirp(JSON.parse(e.data));}catch(_){}
+    };
+    _es.onerror=function(){
+      setOnline(false);
+      _es.close();_es=null;
+      setTimeout(connect,_reconnMs);
+      _reconnMs=Math.min(_reconnMs*1.5,30000);
+    };
+    _es.onopen=function(){setOnline(true);_reconnMs=2500;};
+  }
+  connect();
+})();
 
 refresh();
 setInterval(refresh,3000);
