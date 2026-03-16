@@ -365,10 +365,12 @@ class QuantumEntropyEnsemble:
             available_sources.append(source)
         
         if not available_sources:
-            # Fallback to system entropy
-            with self._pool_lock:
-                self._pool.extend(os.urandom(num_bytes))
-            return
+            # NO FALLBACK: System must have at least one QRNG source configured
+            raise RuntimeError(
+                "[QuantumEntropyEnsemble] FATAL: No QRNG sources available for background refill. "
+                "Must configure at least one of: RANDOM_ORG_KEY, ANU_API_KEY, QRNG_API_KEY, OUTSHIFT_API_KEY. "
+                "HU_BERLIN is public but may be rate-limited. Aborting refill."
+            )
         
         # Fetch from multiple sources in parallel
         bytes_per_source = max(32, num_bytes // len(available_sources))
@@ -512,10 +514,10 @@ class QuantumEntropyEnsemble:
                 # Open circuit after 5 consecutive failures
                 if stats.consecutive_failures >= 5:
                     cb["state"] = CircuitBreakerState.OPEN
-                    cb["open_until"] = time.time() + 300  # Open for 5 minutes
+                    cb["open_until"] = time.time() + 30  # Open for 30 seconds (fast recovery)
                     logger.warning(
                         f"Circuit breaker OPEN for {source.value} until "
-                        f"{datetime.fromtimestamp(cb['open_until']).isoformat()}"
+                        f"{datetime.fromtimestamp(cb['open_until']).isoformat()} — attempting recovery in 30s"
                     )
             
             # Create error sample

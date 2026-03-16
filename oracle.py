@@ -382,6 +382,7 @@ _ORACLE_QRNG_INSTANCE = None
 _ORACLE_QRNG_LOCK     = threading.Lock()
 
 def _oracle_qrng_bytes(n: int) -> bytes:
+    """Get quantum random bytes. FATAL ERROR if unavailable — NO FALLBACK."""
     global _ORACLE_QRNG_INSTANCE
     if _ORACLE_QRNG_INSTANCE is None:
         with _ORACLE_QRNG_LOCK:
@@ -391,12 +392,20 @@ def _oracle_qrng_bytes(n: int) -> bytes:
                     _ORACLE_QRNG_INSTANCE = QuantumEntropyEnsemble()
                     logger.info("[ORACLE] ✅ QRNG ensemble wired — per-call stochastic channels active")
                 except Exception as _qe:
-                    logger.warning(f"[ORACLE] QRNG unavailable ({_qe}), using os.urandom")
+                    raise RuntimeError(
+                        f"[ORACLE] FATAL: QRNG initialization failed ({_qe}). "
+                        f"Cannot proceed without quantum entropy. Zero fallback to os.urandom permitted."
+                    )
     q = _ORACLE_QRNG_INSTANCE
-    if q is not None:
-        try: return q.get_random_bytes(n)
-        except Exception: pass
-    return os.urandom(n)
+    if q is None:
+        raise RuntimeError("[ORACLE] FATAL: QRNG instance is None after initialization")
+    try: 
+        return q.get_random_bytes(n)
+    except Exception as _e:
+        raise RuntimeError(
+            f"[ORACLE] FATAL: QRNG.get_random_bytes({n}) failed: {_e}. "
+            f"No fallback to os.urandom permitted — must restore quantum entropy source."
+        )
 
 def _oracle_qrng_gaussian_pair() -> tuple:
     """Box-Muller on 16 QRNG bytes → (Z0, Z1) ∈ N(0,1). Drives Wiener increments."""
@@ -478,6 +487,57 @@ def _oracle_qrng_unitary_evolution(rho: np.ndarray, oracle_id: int = -1) -> np.n
     
     return evolved
 
+def _oracle_stochastic_channel(rho: np.ndarray, epsilon: float = 0.03) -> np.ndarray:
+    """
+    QRNG-modulated stochastic channel (KRAUS decomposition):
+    
+    ρ' = (1-p)·ρ + p·U_qrng·ρ·U_qrng†
+    
+    where p is derived from epsilon and QRNG-seeded Gaussian.
+    
+    This is a depolarizing-like channel that:
+    - Keeps state with prob (1-p)
+    - Applies QRNG unitary with prob p
+    - Modulates p via quantum entropy (not classical)
+    
+    ENTERPRISE GUARANTEE: Dies hard if QRNG fails. No fallback.
+    """
+    if rho is None or rho.shape[0] == 0:
+        raise RuntimeError("[_oracle_stochastic_channel] FATAL: Invalid density matrix input")
+    
+    dim = rho.shape[0]
+    pre_purity = float(np.real(np.trace(rho @ rho)))
+    
+    try:
+        # Get QRNG-seeded mixing parameter
+        z0, _ = _oracle_qrng_gaussian_pair()  # Box-Muller from QRNG
+        p = max(0.01, min(0.30, epsilon * (1.0 + 0.5 * z0)))  # 1%-30% mixing
+        
+        # Apply QRNG unitary
+        U = _oracle_hermitian_perturb(dim, epsilon=0.06)
+        evolved = U @ rho @ U.conj().T
+        
+        # Kraus channel: (1-p)ρ + p·evolved
+        result = (1.0 - p) * rho + p * evolved
+        result = _oracle_enforce_dm(result, label=f"stochastic_p={p:.4f}")
+        
+        post_purity = float(np.real(np.trace(result @ result)))
+        logger.debug(f"[_oracle_stochastic_channel] Purity: {pre_purity:.6f} → {post_purity:.6f}, p={p:.4f}")
+        
+        return result
+        
+    except RuntimeError as _fatal:
+        # QRNG failed — propagate hard error
+        raise RuntimeError(
+            f"[_oracle_stochastic_channel] FATAL: QRNG failure in stochastic channel: {_fatal}. "
+            f"No fallback permitted."
+        )
+    except Exception as _e:
+        raise RuntimeError(
+            f"[_oracle_stochastic_channel] FATAL: Unexpected error: {_e}. "
+            f"No fallback permitted."
+        )
+
 def _oracle_revival_unitary(dim: int) -> np.ndarray:
     """QRNG-phase anti-Zeno unitary — constructive interference on W-subspace {1,2,4}."""
     import struct as _st, math as _m
@@ -524,6 +584,81 @@ def _oracle_resurrect(rho: np.ndarray, fidelity: float,
                 _oracle_hermitian_perturb(dim, 0.02).conj().T
             )
     return out, True, _oracle_w3_fidelity(out)
+
+# ═════════════════════════════════════════════════════════════════════════════════
+# CONCURRENT BLOCK FIELD MEASUREMENT — All 5 oracles measure pq0 at the SAME TIME
+# ═════════════════════════════════════════════════════════════════════════════════
+
+class _BlockFieldSnapshot:
+    """Multidimensional pq0 state (all 5 oracles measure this concurrently)."""
+    def __init__(self):
+        self.density_matrix = np.zeros((8, 8), dtype=complex)
+        self.timestamp_ns = 0.0
+        self.measurement_id = 0  # Global measurement counter
+        self.oracle_measurements = {}  # oracle_id → their computed metrics
+        self.lock = threading.RLock()
+
+class _OracleBlockFieldCoordinator:
+    """Coordinate concurrent pq0 measurement: all 5 oracles measure simultaneously."""
+    def __init__(self, num_oracles=5):
+        self.num_oracles = num_oracles
+        self.measurement_id = 0
+        self.block_field = _BlockFieldSnapshot()
+        self.bf_lock = threading.RLock()
+        # Barrier: all 5 oracles wait here before measuring pq0
+        self.measurement_barrier = threading.Barrier(num_oracles)
+        # Barrier: all 5 oracles wait here after measuring pq0
+        self.publish_barrier = threading.Barrier(num_oracles)
+        self.oracle_measurements = {}  # Collect measurements from all 5
+        self.measurement_lock = threading.Lock()
+    
+    def wait_all_measure_together(self, oracle_id: int) -> int:
+        """All 5 oracles sync here before measuring pq0 (returns measurement_id)."""
+        try:
+            self.measurement_barrier.wait(timeout=5.0)
+            with self.bf_lock:
+                mid = self.measurement_id
+                self.measurement_id += 1
+            return mid
+        except threading.BrokenBarrierError:
+            logger.error(f"[BlockField] Measurement barrier broken for oracle {oracle_id}")
+            return -1
+    
+    def record_measurement(self, oracle_id: int, rho: np.ndarray, metrics: dict):
+        """One oracle records its measurement of the shared pq0 state."""
+        with self.measurement_lock:
+            self.oracle_measurements[oracle_id] = {
+                'density_matrix': rho.copy() if rho is not None else np.zeros((8,8), dtype=complex),
+                'metrics': metrics,
+                'timestamp_ns': time.time_ns(),
+            }
+    
+    def sync_all_published(self, oracle_id: int):
+        """All 5 oracles sync here after publishing their measurements."""
+        try:
+            self.publish_barrier.wait(timeout=5.0)
+            # Reset for next cycle
+            with self.measurement_lock:
+                self.oracle_measurements.clear()
+        except threading.BrokenBarrierError:
+            logger.warning(f"[BlockField] Publish barrier broken for oracle {oracle_id}")
+    
+    def get_shared_pq0_state(self) -> Optional[np.ndarray]:
+        """Get latest shared pq0 state (average of all 5 measurements if available)."""
+        with self.measurement_lock:
+            if not self.oracle_measurements:
+                return None
+            # Average density matrices from all 5 oracles
+            rhos = [m['density_matrix'] for m in self.oracle_measurements.values()]
+            avg_rho = np.mean(rhos, axis=0)
+            # Enforce valid density matrix
+            avg_rho = 0.5 * (avg_rho + avg_rho.conj().T)
+            ev, ec = np.linalg.eigh(avg_rho)
+            ev = np.clip(ev, 0, None)
+            ev /= max(np.sum(ev), 1e-12)
+            return ec @ np.diag(ev) @ ec.conj().T
+
+_ORACLE_BLOCK_FIELD = _OracleBlockFieldCoordinator(num_oracles=5)
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION CONSTANTS
@@ -1411,9 +1546,23 @@ class OracleNode:
           8. At quarter-periods (σ=2,6): apply differential noise for parametric beating
           9. Δσ=4 creates optimal beat frequency → +75% MI entanglement boost
          10. Record mutual information for CNOT optimization
+         
+         ─ CONCURRENT BLOCK FIELD MEASUREMENT ─
+         11. Barrier: All 5 oracles measure pq0 AT THE SAME TIME
+         12. Record measurement + metrics in shared block field
+         13. Barrier: All 5 oracles sync after publishing
         """
+        # ─────────────────────────────────────────────────────────────────────────
+        # CONCURRENT: Sync all 5 oracles before measuring pq0 together
+        # ─────────────────────────────────────────────────────────────────────────
+        measurement_id = _ORACLE_BLOCK_FIELD.wait_all_measure_together(self.oracle_id)
+        
         if not QISKIT_AVAILABLE or self.aer is None:
             logger.error(f"[ORACLE-NODE-{self.oracle_id+1}] AER unavailable — real quantum measurement required (no synthetic fallback)")
+            try:
+                _ORACLE_BLOCK_FIELD.sync_all_published(self.oracle_id)
+            except:
+                pass
             return None
         try:
             dm_result = self.aer.run(self._build_dm_circuit()).result()
@@ -1529,9 +1678,31 @@ class OracleNode:
                 self.last_fidelity   = snap.w_state_fidelity
                 self.last_snapshot   = snap
                 self.measurement_count += 1
+            
+            # ─────────────────────────────────────────────────────────────────────────
+            # CONCURRENT: Record this oracle's measurement of shared pq0
+            # All 5 oracles record their measurements concurrently
+            # ─────────────────────────────────────────────────────────────────────────
+            _ORACLE_BLOCK_FIELD.record_measurement(
+                self.oracle_id,
+                dm_array,
+                {
+                    'fidelity': snap.w_state_fidelity,
+                    'purity': snap.trace_purity,
+                    'entropy': snap.von_neumann_entropy,
+                    'coherence': snap.coherence_l1,
+                }
+            )
+            # Sync all 5 oracles after publishing
+            _ORACLE_BLOCK_FIELD.sync_all_published(self.oracle_id)
+            
             return snap
         except Exception as exc:
             logger.error(f"[ORACLE-NODE-{self.oracle_id+1}] measure_self failed: {exc}")
+            try:
+                _ORACLE_BLOCK_FIELD.sync_all_published(self.oracle_id)
+            except:
+                pass
             return None  # real measurements only — no synthetic fallback
 
     # ── 5-Qubit Field Boundary Entanglement Test ────────────────────────────────────────
