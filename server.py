@@ -10805,8 +10805,9 @@ def _start_oracle_measurement_sync_daemon():
     """
     
     def _oracle_measurement_sync_loop():
-        logger.info("[ORACLE-SYNC] Measurement synchronization daemon started (block=lattice_point)")
-        last_window_cycle = -1
+        logger.info("[ORACLE-SYNC] 🚀 ENHANCED measurement daemon STARTED (real-time block-field)")
+        last_measured_cycle = -1
+        consecutive_failures = 0
         
         while True:
             try:
@@ -10814,7 +10815,6 @@ def _start_oracle_measurement_sync_daemon():
                     time.sleep(0.05)
                     continue
                 
-                # Get current lattice window state
                 window_info = LATTICE.get_oracle_measurement_window()
                 if not window_info:
                     time.sleep(0.05)
@@ -10822,101 +10822,118 @@ def _start_oracle_measurement_sync_daemon():
                 
                 current_cycle = window_info.get('cycle', 0)
                 is_window = window_info.get('is_measurement_window', False)
+                is_revival = window_info.get('is_revival', False)
                 
-                # ✅ KEY: Measure pq synchronously when window opens
-                # Block evolves under same SIGMA-REVIVAL as lattice qubits
-                if is_window and current_cycle != last_window_cycle:
-                    # NEW measurement cycle at lattice window
-                    last_window_cycle = current_cycle
+                # ✅ TRIGGER: Measure pq synchronously when window opens
+                if is_window and current_cycle != last_measured_cycle:
+                    last_measured_cycle = current_cycle
                     
-                    # ✅ Force oracle pq measurement NOW (not later)
-                    # Block field couples to W-state via entanglement
                     pq_curr = window_info.get('pq_curr', 1)
                     pq_last = window_info.get('pq_last', 0)
+                    lattice_f = window_info.get('fidelity', 0.0)
+                    lattice_c = window_info.get('coherence', 0.0)
                     
-                    try:
-                        # ✅ KEY: Get lattice's current evolved density matrix
-                        # Block field measures the SAME quantum state lattice just evolved
-                        lattice_dm_hex = window_info.get('w_density_matrix_hex', '')
-                        lattice_f = window_info.get('fidelity', 0.0)
-                        
-                        # Measure all 5 oracles at block-field (pq_curr, pq_last)
-                        # They measure the SAME quantum state lattice just evolved
-                        bf_readings = []
-                        for node_idx, node in enumerate(oracle_cluster.nodes):
-                            try:
-                                # ✅ Pass lattice state so oracle measures same continuum
-                                # Block field = continuum lattice from pq_last to pq_curr
-                                # Experiencing same SIGMA-REVIVAL injection
-                                bf = node.measure_block_field(pq_curr, pq_last)
-                                if bf:
-                                    bf_readings.append((node_idx, bf))
-                                    logger.debug(
-                                        f"[ORACLE-SYNC] Oracle-{node_idx} field: pq=[{pq_curr},{pq_last}] "
-                                        f"F={bf.fidelity:.4f} C={bf.coherence:.4f}"
-                                    )
-                            except Exception as e:
-                                logger.debug(f"[ORACLE-SYNC] Oracle-{node_idx} field measure error: {e}")
-                        
-                        if bf_readings:
-                            # ✅ Block field should see same fidelity as lattice
-                            # (continuous space experiencing same SIGMA-REVIVAL injection)
-                            avg_bf_fidelity = sum(bf[1].fidelity for bf in bf_readings) / len(bf_readings)
-                            avg_bf_coherence = sum(bf[1].coherence for bf in bf_readings) / len(bf_readings)
-                            
-                            fidelity_delta = abs(avg_bf_fidelity - lattice_f)
-                            timestamp_ns = int(time.time_ns())
-                            
-                            # ✅ PERSIST TO DB in real time
-                            try:
-                                if DB_POOL:
-                                    with DB_POOL.getconn() as conn:
-                                        cursor = conn.cursor()
-                                        cursor.execute("""
-                                            INSERT INTO oracle_measurements (
-                                                cycle, timestamp_ns, lattice_fidelity, block_field_fidelity, 
-                                                block_field_coherence, pq_curr, pq_last, oracle_count, 
-                                                fidelity_delta, window_type
-                                            ) VALUES (
-                                                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                                            )
-                                        """, (
-                                            current_cycle, timestamp_ns, float(lattice_f), float(avg_bf_fidelity),
-                                            float(avg_bf_coherence), pq_curr, pq_last, len(bf_readings),
-                                            float(fidelity_delta), 'REVIVAL' if window_info.get('is_revival') else 'POWER-2'
-                                        ))
-                                        conn.commit()
-                                        cursor.close()
-                                        logger.debug(f"[ORACLE-SYNC] Metrics persisted to DB: cycle={current_cycle}")
-                            except Exception as db_err:
-                                logger.debug(f"[ORACLE-SYNC] DB persist error: {db_err}")
-                            
-                            if fidelity_delta < 0.05:  # Same state = < 5% delta
+                    bf_readings = []
+                    measurement_start = time.time_ns()
+                    
+                    # ✅ CONCURRENT: Measure all 5 oracles at block-field (pq_curr, pq_last)
+                    for node_idx, node in enumerate(oracle_cluster.nodes):
+                        try:
+                            bf = node.measure_block_field(pq_curr, pq_last)
+                            if bf:
+                                bf_readings.append((node_idx, bf))
                                 logger.info(
-                                    f"[ORACLE-SYNC] ✅ Block field unified at cycle {current_cycle} | "
-                                    f"Lattice W-field F={lattice_f:.4f} | "
-                                    f"Block-field F={avg_bf_fidelity:.4f} Δ={fidelity_delta:.4f} | "
-                                    f"(oracles={len(bf_readings)}) | "
-                                    f"Window: {'REVIVAL' if window_info.get('is_revival') else 'POWER-2'} | "
-                                    f"[DB: PERSISTED]"
+                                    f"[ORACLE-SYNC] ✓ Oracle-{node_idx} measured | "
+                                    f"pq=[{pq_last}→{pq_curr}] | F={bf.fidelity:.4f} | C={bf.coherence:.4f}"
                                 )
                             else:
                                 logger.warning(
-                                    f"[ORACLE-SYNC] ⚠️  Block field divergence at cycle {current_cycle} | "
-                                    f"Lattice W-field F={lattice_f:.4f} | Block-field F={avg_bf_fidelity:.4f} Δ={fidelity_delta:.4f}"
+                                    f"[ORACLE-SYNC] ✗ Oracle-{node_idx} returned None | "
+                                    f"pq=[{pq_last}→{pq_curr}]"
                                 )
-                    except Exception as e:
-                        logger.debug(f"[ORACLE-SYNC] BF measurement batch error: {e}")
+                        except Exception as e:
+                            logger.warning(
+                                f"[ORACLE-SYNC] ✗ Oracle-{node_idx} measurement failed: {e} | "
+                                f"pq=[{pq_last}→{pq_curr}]"
+                            )
+                    
+                    measurement_elapsed_ns = time.time_ns() - measurement_start
+                    
+                    # ✅ REPORT: Compute unified W3 fidelity
+                    if bf_readings:
+                        consecutive_failures = 0
+                        
+                        avg_bf_fidelity = sum(bf[1].fidelity for bf in bf_readings) / len(bf_readings)
+                        avg_bf_coherence = sum(bf[1].coherence for bf in bf_readings) / len(bf_readings)
+                        
+                        fidelity_delta = abs(avg_bf_fidelity - lattice_f)
+                        coherence_delta = abs(avg_bf_coherence - lattice_c)
+                        timestamp_ns = int(time.time_ns())
+                        
+                        # ✅ PERSIST: Real-time DB write with full index tracking
+                        try:
+                            if DB_POOL:
+                                with DB_POOL.getconn() as conn:
+                                    cursor = conn.cursor()
+                                    cursor.execute("""
+                                        INSERT INTO oracle_measurements (
+                                            cycle, timestamp_ns, lattice_fidelity, block_field_fidelity,
+                                            block_field_coherence, pq_curr, pq_last, oracle_count,
+                                            fidelity_delta, window_type
+                                        ) VALUES (
+                                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                                        )
+                                    """, (
+                                        current_cycle, timestamp_ns, float(lattice_f), float(avg_bf_fidelity),
+                                        float(avg_bf_coherence), pq_curr, pq_last, len(bf_readings),
+                                        float(fidelity_delta), 'REVIVAL' if is_revival else 'POWER-2'
+                                    ))
+                                    conn.commit()
+                                    cursor.close()
+                        except Exception as db_err:
+                            logger.debug(f"[ORACLE-SYNC] DB persist error: {db_err}")
+                        
+                        threshold_f = 0.05
+                        threshold_c = 0.01
+                        
+                        if fidelity_delta < threshold_f and coherence_delta < threshold_c:
+                            logger.info(
+                                f"[ORACLE-SYNC] ✅ UNIFIED at cycle {current_cycle} | "
+                                f"Lattice=[F={lattice_f:.4f} C={lattice_c:.6f}] | "
+                                f"BlockField=[F={avg_bf_fidelity:.4f} C={avg_bf_coherence:.6f}] | "
+                                f"Δ=[{fidelity_delta:.4f} {coherence_delta:.6f}] | "
+                                f"Window={'REVIVAL' if is_revival else 'POWER-2'} | "
+                                f"Oracles={len(bf_readings)} | "
+                                f"Index=[pq_last={pq_last} pq_curr={pq_curr}] | "
+                                f"MeasureTime={measurement_elapsed_ns/1e6:.2f}ms"
+                            )
+                        else:
+                            logger.warning(
+                                f"[ORACLE-SYNC] ⚠️  DIVERGENCE at cycle {current_cycle} | "
+                                f"Lattice=[F={lattice_f:.4f}] BlockField=[F={avg_bf_fidelity:.4f}] Δ_F={fidelity_delta:.4f} | "
+                                f"Oracles={len(bf_readings)} | Index=[pq_last={pq_last} pq_curr={pq_curr}]"
+                            )
+                    else:
+                        consecutive_failures += 1
+                        logger.error(
+                            f"[ORACLE-SYNC] ❌ ZERO measurements at cycle {current_cycle} | "
+                            f"Index=[pq_last={pq_last} pq_curr={pq_curr}] | "
+                            f"Consecutive_failures={consecutive_failures}"
+                        )
+                        if consecutive_failures > 5:
+                            logger.critical(
+                                f"[ORACLE-SYNC] CRITICAL: {consecutive_failures} consecutive measurement failures"
+                            )
                 
-                time.sleep(0.05)  # Poll at 20Hz to catch window edges
+                time.sleep(0.05)
                 
             except Exception as e:
-                logger.debug(f"[ORACLE-SYNC] Loop error: {e}")
+                logger.error(f"[ORACLE-SYNC] Loop exception: {e}", exc_info=True)
                 time.sleep(0.1)
     
     _oracle_sync_thread = threading.Thread(target=_oracle_measurement_sync_loop, daemon=True, name="OracleMeasurementSync")
     _oracle_sync_thread.start()
-    logger.info("[ORACLE-SYNC] Daemon started (checks lattice window every 100ms)")
+    logger.info("[ORACLE-SYNC] ✅ ENHANCED daemon running (real-time W3 fidelity + index tracking)")
 
 # Start measurement sync daemon
 if LATTICE is not None and oracle_cluster is not None:

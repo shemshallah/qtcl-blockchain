@@ -761,20 +761,27 @@ class QuantumInformationMetrics:
         except: return 0.0
     
     @staticmethod
+    @staticmethod
     def w_state_fidelity_to_ideal(dm: np.ndarray) -> float:
         """
         F = Tr(rho @ rho_W)  where  |W⟩ = (|001⟩ + |010⟩ + |100⟩)/√3
-        Computational basis (big-endian 3-qubit): |001⟩→idx1, |010⟩→idx2, |100⟩→idx4
-        rho_W[i,j] = 1/3  for  i,j ∈ {1,2,4}
+        CRITICAL: Uses outer-product construction (symmetric across all 1,2,4 indices)
+        to match server.py _w_dm(3) exactly. No hybrid calculations.
+        
+        Indices in computational basis (LSB first): |001⟩=1, |010⟩=2, |100⟩=4
+        ρ_W[i,j] = 1/3 for all i,j ∈ {1,2,4}  (not diagonal-only)
         """
         try:
-            if dm is None or dm.shape[0] != 8: return 0.0
+            if dm is None or dm.shape[0] != 8: 
+                return 0.0
             _W = np.zeros((8, 8), dtype=complex)
             for i in (1, 2, 4):
                 for j in (1, 2, 4):
                     _W[i, j] = 1.0 / 3.0
-            return float(min(1.0, max(0.0, np.real(np.trace(dm @ _W)))))
-        except: return 0.0
+            fid = float(np.real(np.trace(dm @ _W)))
+            return float(min(1.0, max(0.0, fid)))
+        except: 
+            return 0.0
     
     @staticmethod
     def w_state_strength(dm: np.ndarray, measurement_counts: Dict[str, int]) -> float:
@@ -1563,7 +1570,8 @@ class OracleNode:
             )
             with self._lock:
                 self._dm            = oracle_dm_evolved
-                self.last_fidelity  = float(np.real(np.trace(oracle_dm_clean @ _W_IDEAL_DM)))
+                # ✅ Use QIM method for consistency with reading.fidelity
+                self.last_fidelity  = QuantumInformationMetrics.w_state_fidelity_to_ideal(oracle_dm_clean)
                 self.measurement_count += 1
 
             # ── Quantum information metrics ───────────────────────────────────
