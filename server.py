@@ -8483,12 +8483,16 @@ def submit_block():
             _raw_seed = hashlib.sha3_256(w_entropy_hash.encode()).digest()
 
         # Run QTCL-PoW verification (rebuilds identical scratchpad, one hash pass)
+        # ✅ FIX: Use _miner_claimed_difficulty, not live server difficulty
+        # The miner computed the hash target based on difficulty_bits they received
+        # from the server when they started mining. Server current difficulty may have
+        # changed since then. We verify against what the miner actually used.
         _pow_valid, _pow_reason = qtcl_pow_verify(
             height         = block_height,
             parent_hash    = parent_hash,
             merkle_root    = merkle_root,
             timestamp_s    = timestamp_s,
-            difficulty_bits= difficulty_bits,
+            difficulty_bits= _miner_claimed_difficulty,
             nonce          = nonce,
             miner_address  = miner_address,
             w_entropy_seed = _raw_seed,
@@ -8502,6 +8506,20 @@ def submit_block():
                 'error': f'QTCL-PoW verification failed: {_pow_reason}',
                 'algorithm': 'qtcl_pow_v1_qrng_memory_hard',
             }), 422
+        
+        # ✅ SECURITY: Reject if miner-claimed difficulty is below server minimum
+        # This prevents weak miners from trying to submit under-powered blocks
+        if _miner_claimed_difficulty < difficulty_bits:
+            logger.warning(
+                f"[BLOCK] ❌ REJECTED: Miner difficulty {_miner_claimed_difficulty} "
+                f"< server minimum {difficulty_bits}"
+            )
+            return jsonify({
+                'error': f'Block difficulty too low: {_miner_claimed_difficulty} < {difficulty_bits}',
+                'required': difficulty_bits,
+                'received': _miner_claimed_difficulty,
+            }), 422
+        
         logger.debug(f"[BLOCK] ✅ QTCL-PoW verified h={block_height} nonce={nonce} seed={w_entropy_hash[:16]}…")
         
         # ✅ VALIDATION 4: Parent and height check — read from DB (authoritative source)
@@ -8594,13 +8612,14 @@ def submit_block():
             from decimal import Decimal
             
             # Reconstruct QuantumBlock from validated REST payload
+            # ✅ FIX: Use _miner_claimed_difficulty (what miner actually used for PoW)
             qblock = QuantumBlock(
                 block_height=block_height,
                 block_hash=block_hash,
                 parent_hash=parent_hash,
                 merkle_root=merkle_root,
                 timestamp_s=timestamp_s,
-                difficulty_bits=difficulty_bits,
+                difficulty_bits=_miner_claimed_difficulty,
                 nonce=nonce,
                 miner_address=miner_address,
                 w_state_fidelity=w_state_fidelity,
@@ -8682,7 +8701,7 @@ def submit_block():
                 ON CONFLICT (height) DO NOTHING
             """, (
                 block_height, block_height, block_hash, parent_hash,
-                merkle_root, timestamp_s, float(difficulty_bits), str(nonce),
+                merkle_root, timestamp_s, float(_miner_claimed_difficulty), str(nonce),
                 miner_address, w_entropy_hash,
                 round(w_state_fidelity, 4), 'confirmed', True,
                 'lattice_validated', 'verified',
