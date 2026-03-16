@@ -3305,21 +3305,9 @@ class UnifiedOracleMux:
                 "timestamp_ns":        latest_dm.get("timestamp_ns", int(time.time()*1e9)) if latest_dm else int(time.time()*1e9),
             })
 
-        # Fallback: if ORACLE_W_STATE_MANAGER not ready, emit empty oracle slots
+        # No real data yet — don't broadcast zeros, return None so daemon skips
         if not measurements:
-            for oid, role in self._ORACLE_ROLES.items():
-                measurements.append({
-                    "oracle_id":        oid,
-                    "oracle_role":      role,
-                    "w_state_fidelity": 0.0,
-                    "coherence":        0.0,
-                    "entropy":          0.0,
-                    "pq0_oracle_fidelity": 0.0,
-                    "pq0_IV_fidelity":     0.0,
-                    "pq0_V_fidelity":      0.0,
-                    "in_consensus":     False,
-                    "timestamp_ns":     int(time.time() * 1e9),
-                })
+            return None
 
         # ── Consensus metrics from block-field Byzantine median ───────────────
         cons_fidelity  = float(block_field.get("fidelity",  0.0) if block_field else
@@ -3456,15 +3444,17 @@ class UnifiedOracleMux:
             cons    = snapshot.get('consensus', {})
             lattice = snapshot.get('lattice_quantum') or {}
             mermin  = snapshot.get('mermin_test') or {}
+            fid     = cons.get('w_state_fidelity', 0)
             logger.info(
                 f"[ORACLE-MUX] 📡 Chirp #{self.chirp_count}: "
                 f"oracles={snapshot.get('oracle_count', 0)} | "
-                f"fidelity={cons.get('w_state_fidelity', 0):.6f} | "
+                f"fidelity={fid:.6f} | "
                 f"coherence={cons.get('coherence', 0):.6f} | "
                 f"confidence={cons.get('confidence', 0):.6f} | "
                 f"lattice={lattice.get('lattice_status', 'n/a')} | "
                 f"M={mermin.get('M_value', 0):.3f} "
-                f"({'quantum' if mermin.get('is_quantum') else 'classical'})"
+                f"({'quantum' if mermin.get('is_quantum') else 'classical'}) | "
+                f"source={'real_aer' if fid > 0 else 'awaiting_first_measurement'}"
             )
 
 
@@ -3503,6 +3493,7 @@ def _snapshot_streaming_daemon():
     mux             = get_oracle_mux()
     last_chirp_ts   = 0
     broadcast_count = 0
+    _first_real_chirp_logged = False
 
     while True:
         try:
@@ -3510,20 +3501,32 @@ def _snapshot_streaming_daemon():
 
             unified_snapshot = mux.aggregate_all_measurements()
 
-            if unified_snapshot:
-                ts = unified_snapshot.get('timestamp_ns', 0)
-                if ts > last_chirp_ts:
-                    _broadcast_snapshot_to_gossip_network(unified_snapshot)
-                    broadcast_count += 1
-                    last_chirp_ts = ts
-                    mux.log_chirp(unified_snapshot)
+            # None means ORACLE_W_STATE_MANAGER has no real measurements yet — skip
+            if unified_snapshot is None:
+                continue
 
-                    if broadcast_count % 500 == 0:
-                        cons = unified_snapshot.get('consensus', {})
-                        logger.info(
-                            f"[ORACLE-MUX-DAEMON] 📡 Single-chirp broadcasts: {broadcast_count} "
-                            f"(consensus_fidelity={cons.get('w_state_fidelity', 0):.6f})"
-                        )
+            ts = unified_snapshot.get('timestamp_ns', 0)
+            if ts > last_chirp_ts:
+                _broadcast_snapshot_to_gossip_network(unified_snapshot)
+                broadcast_count += 1
+                last_chirp_ts = ts
+                mux.log_chirp(unified_snapshot)
+
+                if not _first_real_chirp_logged:
+                    cons = unified_snapshot.get('consensus', {})
+                    logger.info(
+                        f"[ORACLE-MUX-DAEMON] 🌌 First real chirp! "
+                        f"fidelity={cons.get('w_state_fidelity',0):.6f} "
+                        f"oracles={unified_snapshot.get('oracle_count',0)}/5"
+                    )
+                    _first_real_chirp_logged = True
+
+                if broadcast_count % 500 == 0:
+                    cons = unified_snapshot.get('consensus', {})
+                    logger.info(
+                        f"[ORACLE-MUX-DAEMON] 📡 Single-chirp broadcasts: {broadcast_count} "
+                        f"(consensus_fidelity={cons.get('w_state_fidelity', 0):.6f})"
+                    )
 
         except Exception as e:
             logger.error(f"[ORACLE-MUX-DAEMON] Error: {e}", exc_info=True)
@@ -5976,49 +5979,12 @@ def _lazy_initialize_metrics_agents():
         _metrics_agents_initialized = False
 
 
-# Wire oracle to lattice for W-state entropy + START the 5-node cluster
+# Wire oracle to lattice for W-state entropy (module-level lattice ref only —
+# .start() is deferred to _wsgi_startup/_heavy_init after oracle import completes)
 if ORACLE_AVAILABLE and ORACLE is not None:
     if LATTICE is not None:
         ORACLE.set_lattice_ref(LATTICE)
     logger.info(f"[ORACLE] ✅ Initialized | address={ORACLE.oracle_address}")
-
-# START OracleWStateManager measurement loop — without this call current_density_matrix
-# stays None forever, get_latest_snapshot() returns None, quantum_metrics_thread falls
-# through to _STATE_CACHE, and every metric serves the synthetic default (0.7111, etc).
-if ORACLE_AVAILABLE and ORACLE_W_STATE_MANAGER is not None:
-    try:
-        _owsm_started = ORACLE_W_STATE_MANAGER.start()
-        if _owsm_started:
-            logger.info("[ORACLE-CLUSTER] ✅ 5-node W-state cluster STARTED — live measurements active")
-        else:
-            logger.warning("[ORACLE-CLUSTER] ⚠️  Cluster start returned False — check AER/Qiskit")
-    except Exception as _owsm_err:
-        logger.error(f"[ORACLE-CLUSTER] ❌ Failed to start cluster: {_owsm_err}")
-    # Register oracle as DHT peer — makes oracle discoverable for P2P TX validation
-    try:
-        _dht = get_dht_manager()
-        oracle_host = (os.getenv('KOYEB_PUBLIC_DOMAIN') or
-                       os.getenv('RAILWAY_PUBLIC_DOMAIN') or
-                       os.getenv('FLASK_HOST') or 'qtcl-blockchain.koyeb.app')
-        oracle_port = P2P_PORT  # 9091 — the P2P TCP port, not gunicorn HTTP
-        oracle_node_id = hashlib.sha1(
-            f"oracle:{getattr(ORACLE, 'oracle_address', 'qtcl1oracle')}".encode()
-        ).hexdigest()
-        oracle_dht_node = DHTNode(node_id=oracle_node_id, address=oracle_host, port=oracle_port)
-        _dht.routing_table.add_node(oracle_dht_node)
-        # Store oracle metadata in DHT so peers can find it
-        _dht.store_state('oracle:primary', {
-            'address'      : getattr(ORACLE, 'oracle_address', 'qtcl1oracle'),
-            'host'         : oracle_host,
-            'port'         : oracle_port,
-            'node_id'      : oracle_node_id,
-            'capabilities' : ['tx_validate', 'hlwe_sign', 'w_state', 'mempool'],
-            'api_base'     : f'https://{oracle_host}',
-            'registered_at': time.time(),
-        })
-        logger.info(f"[DHT] ✅ Oracle registered as DHT peer | node_id={oracle_node_id[:16]}… | {oracle_host}:{oracle_port}")
-    except Exception as _dht_err:
-        logger.warning(f"[DHT] Oracle DHT registration failed (non-fatal): {_dht_err}")
 else:
     logger.warning("[ORACLE] ⚠️  Oracle not available — signing disabled")
 
@@ -7136,6 +7102,61 @@ def _wsgi_startup() -> None:
         _ORACLE_INIT_EVENT.wait(timeout=120)
         oracle_status = "✅ ready" if ORACLE_AVAILABLE else "⚠️  unavailable"
         logger.info(f"[WSGI-INIT] Oracle status: {oracle_status} — proceeding with subsystem init")
+
+        # ── START ORACLE W-STATE CLUSTER ─────────────────────────────────────
+        # Must run here — after oracle.py has been imported and ORACLE_W_STATE_MANAGER
+        # is set. The module-level call at import time fires before _deferred_oracle_init
+        # completes, so ORACLE_AVAILABLE is False there and .start() is never reached.
+        if ORACLE_AVAILABLE and ORACLE_W_STATE_MANAGER is not None:
+            try:
+                _owsm_started = ORACLE_W_STATE_MANAGER.start()
+                if _owsm_started:
+                    logger.info(
+                        "[WSGI-INIT] ✅ OracleWStateManager started — "
+                        "5-node block-field measurement cluster active"
+                    )
+                else:
+                    logger.warning(
+                        "[WSGI-INIT] ⚠️  OracleWStateManager.start() returned False — "
+                        "check AER/Qiskit installation"
+                    )
+            except Exception as _owsm_err:
+                logger.error(f"[WSGI-INIT] ❌ OracleWStateManager start failed: {_owsm_err}", exc_info=True)
+        else:
+            logger.warning("[WSGI-INIT] ⚠️  Oracle not available — W-state cluster not started")
+
+        # Wire oracle to lattice for W-state entropy (safe here — both are ready)
+        if ORACLE_AVAILABLE and ORACLE is not None and LATTICE is not None:
+            try:
+                ORACLE.set_lattice_ref(LATTICE)
+                logger.info("[WSGI-INIT] ✅ Oracle lattice reference wired")
+            except Exception as _wl_err:
+                logger.warning(f"[WSGI-INIT] Oracle lattice wire non-fatal: {_wl_err}")
+
+        # Register oracle as DHT peer
+        if ORACLE_AVAILABLE and ORACLE is not None:
+            try:
+                _dht = get_dht_manager()
+                oracle_host = (os.getenv('KOYEB_PUBLIC_DOMAIN') or
+                               os.getenv('RAILWAY_PUBLIC_DOMAIN') or
+                               os.getenv('FLASK_HOST') or 'qtcl-blockchain.koyeb.app')
+                oracle_port = P2P_PORT
+                oracle_node_id = hashlib.sha1(
+                    f"oracle:{getattr(ORACLE, 'oracle_address', 'qtcl1oracle')}".encode()
+                ).hexdigest()
+                _dht.routing_table.add_node(DHTNode(node_id=oracle_node_id, address=oracle_host, port=oracle_port))
+                _dht.store_state('oracle:primary', {
+                    'address'      : getattr(ORACLE, 'oracle_address', 'qtcl1oracle'),
+                    'host'         : oracle_host,
+                    'port'         : oracle_port,
+                    'node_id'      : oracle_node_id,
+                    'capabilities' : ['tx_validate', 'hlwe_sign', 'w_state', 'mempool'],
+                    'api_base'     : f'https://{oracle_host}',
+                    'registered_at': time.time(),
+                })
+                logger.info(f"[WSGI-INIT] ✅ Oracle registered as DHT peer | {oracle_node_id[:16]}…")
+            except Exception as _dht_err:
+                logger.warning(f"[WSGI-INIT] Oracle DHT registration non-fatal: {_dht_err}")
 
         try:
             initialize_p2p()

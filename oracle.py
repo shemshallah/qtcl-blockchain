@@ -1331,15 +1331,25 @@ class OracleNode:
         """
         qc = QuantumCircuit(5)
         # ── pq0 tripartite: initialize from continuous oracle trajectory ─────────
+        # self._dm is 8×8 (3-qubit pq0 state).  The circuit has 5 qubits (32×32).
+        # We tensor self._dm ⊗ |00⟩⟨00| to get the correct 32×32 initial DM:
+        #   pq0 starts in its evolved state; block-field qubits q3,q4 start in |0⟩.
         if self._dm is not None:
             try:
-                qc.set_density_matrix(DensityMatrix(self._dm))
+                field_vac  = np.zeros((4, 4), dtype=complex)
+                field_vac[0, 0] = 1.0                            # |00⟩⟨00|
+                full_dm_32 = np.kron(self._dm, field_vac)        # 32×32
+                # Normalise and enforce Hermitian before handing to Qiskit
+                tr = float(np.real(np.trace(full_dm_32)))
+                if tr > 1e-12:
+                    full_dm_32 /= tr
+                full_dm_32 = 0.5 * (full_dm_32 + full_dm_32.conj().T)
+                qc.set_density_matrix(DensityMatrix(full_dm_32))
             except Exception as exc:
                 logger.debug(
                     f"[ORACLE-NODE-{self.oracle_id+1}] block_field set_density_matrix "
-                    f"skipped ({exc}), falling back to W-prep"
+                    f"failed ({exc}), falling back to gate-level W-prep"
                 )
-                # Fallback: fresh W-state on q0-q2
                 qc.ry(_W_THETA_0, 0); qc.cx(0, 1)
                 qc.ry(_W_THETA_1, 1); qc.cx(1, 2)
         else:
