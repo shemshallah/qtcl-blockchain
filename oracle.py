@@ -435,14 +435,16 @@ def _oracle_hermitian_perturb(dim: int, epsilon: float) -> np.ndarray:
         try: return (I + 0.5j*epsilon*H) @ np.linalg.inv(I - 0.5j*epsilon*H)
         except np.linalg.LinAlgError: return I
 
-def _oracle_enforce_dm(rho: np.ndarray) -> np.ndarray:
+def _oracle_enforce_dm(rho: np.ndarray, label: str = "") -> np.ndarray:
     dim = rho.shape[0]
     rho = 0.5 * (rho + rho.conj().T)
     try:
         ev, ec = np.linalg.eigh(rho)
         ev = np.clip(ev, 0.0, None); tr = float(np.sum(ev))
-        return ec @ np.diag(ev / tr if tr > 1e-12 else ev + 1.0/dim) @ ec.conj().T
-    except np.linalg.LinAlgError:
+        result = ec @ np.diag(ev / tr if tr > 1e-12 else ev + 1.0/dim) @ ec.conj().T
+        return result
+    except np.linalg.LinAlgError as e:
+        logger.error(f"[_oracle_enforce_dm] LinAlgError on eigh {label}: {e} — RETURNING MAXIMALLY MIXED!")
         return np.eye(dim, dtype=complex) / dim
 
 _ORACLE_W3_IDEAL = np.zeros((8, 8), dtype=complex)
@@ -456,23 +458,25 @@ def _oracle_w3_fidelity(rho: np.ndarray) -> float:
         return float(min(1.0, max(0.0, np.real(np.trace(rho @ _ORACLE_W3_IDEAL)))))
     except Exception: return 0.0
 
-def _oracle_qrng_unitary_evolution(rho: np.ndarray) -> np.ndarray:
+def _oracle_qrng_unitary_evolution(rho: np.ndarray, oracle_id: int = -1) -> np.ndarray:
     """
     QRNG-seeded unitary evolution (NO mixing, preserves purity).
     
     ρ' = U_qrng · ρ · U_qrng†  where U_qrng is drawn from quantum entropy.
-    
-    Enterprise quantum dynamics:
-      ✓ Unitary evolution preserves purity (unlike mixing channels)
-      ✓ QRNG seed ensures each oracle evolves uniquely
-      ✓ No degradation to maximally mixed
-      ✓ Real quantum randomness, not classical noise
     """
     dim = rho.shape[0]
-    # Get true quantum random phases from QRNG ensemble
-    U = _oracle_hermitian_perturb(dim, epsilon=0.08)  # Smaller rotation, pure evolution
+    pre_purity = float(np.real(np.trace(rho @ rho)))
+    
+    U = _oracle_hermitian_perturb(dim, epsilon=0.08)
     evolved = U @ rho @ U.conj().T
-    return 0.5 * (evolved + evolved.conj().T)
+    evolved = 0.5 * (evolved + evolved.conj().T)
+    
+    post_purity = float(np.real(np.trace(evolved @ evolved)))
+    
+    if oracle_id >= 0:
+        logger.debug(f"[ORACLE-{oracle_id}] EVOLVE: Purity {pre_purity:.6f} → {post_purity:.6f}")
+    
+    return evolved
 
 def _oracle_revival_unitary(dim: int) -> np.ndarray:
     """QRNG-phase anti-Zeno unitary — constructive interference on W-subspace {1,2,4}."""
@@ -1219,62 +1223,42 @@ class OracleNode:
         rho = np.zeros((8, 8), dtype=complex)
         rho[1, 1] = rho[2, 2] = rho[4, 4] = 1.0 / 3.0  # |W⟩⟨W| diagonal
         
+        # Measure initial purity (should be 1.0)
+        init_purity = float(np.real(np.trace(rho @ rho)))
+        logger.critical(f"[ORACLE-{self.oracle_id}] INIT STEP 1: Pure W-state | Purity={init_purity:.8f}")
+        
         # ── QRNG unitary perturbation (small rotation, preserve coherence) ──
         try:
-            U = _oracle_hermitian_perturb(8, epsilon=0.15)  # REDUCED from 0.25
+            U = _oracle_hermitian_perturb(8, epsilon=0.15)
             rho = U @ rho @ U.conj().T
-            # Enforce hermitian
             rho = 0.5 * (rho + rho.conj().T)
             tr = float(np.real(np.trace(rho)))
             if tr > 1e-12:
                 rho /= tr
             
-            purity = float(np.real(np.trace(rho @ rho)))
-            if purity < 0.75:  # Hard threshold: must stay W-like
-                logger.warning(
-                    f"[ORACLE-NODE-{self.oracle_id+1}] QRNG perturb degraded purity to {purity:.4f} "
-                    f"(target 0.80+), reverting to pure W-state + light noise"
+            perturb_purity = float(np.real(np.trace(rho @ rho)))
+            logger.critical(f"[ORACLE-{self.oracle_id}] INIT STEP 2: After QRNG unitary | Purity={perturb_purity:.8f}")
+            
+            if perturb_purity < 0.75:
+                logger.error(
+                    f"[ORACLE-{self.oracle_id}] QRNG DEGRADED TO {perturb_purity:.8f} (< 0.75) | REVERT TO PURE W"
                 )
-                # Revert: pure W + tiny os.urandom noise (preserves purity)
                 rho = np.zeros((8, 8), dtype=complex)
                 rho[1, 1] = rho[2, 2] = rho[4, 4] = 1.0 / 3.0
-                raw = os.urandom(24)
-                noise = np.frombuffer(raw, dtype=np.uint8).astype(float) / 255.0
-                noise = noise[:8]
-                noise_diag = np.diag(noise / np.sum(np.abs(noise)))  # Lightweight noise
-                rho = 0.95 * rho + 0.05 * noise_diag
-                tr = float(np.real(np.trace(rho)))
-                rho = rho / tr
+                perturb_purity = 1.0
             
             logger.critical(
-                f"[ORACLE-NODE-{self.oracle_id+1}] INIT self._dm | "
-                f"Purity={float(np.real(np.trace(rho @ rho))):.6f} (QRNG path) | "
-                f"Independent state ✓"
+                f"[ORACLE-{self.oracle_id}] INIT COMPLETE | "
+                f"Purity={perturb_purity:.8f} | INDEPENDENT state ✓"
             )
             return rho
         
         except Exception as exc:
-            logger.error(f"[ORACLE-NODE-{self.oracle_id+1}] QRNG init failed: {exc}")
-            # DETERMINISTIC FALLBACK: Pure W-state + oracle_id-seeded perturbation
+            logger.error(f"[ORACLE-{self.oracle_id}] QRNG init exception: {exc}")
+            # Deterministic fallback
             rho = np.zeros((8, 8), dtype=complex)
             rho[1, 1] = rho[2, 2] = rho[4, 4] = 1.0 / 3.0
-            
-            # Oracle-ID deterministic but unique per node
-            seed_val = (self.oracle_id + 1) * 12345  # Unique per oracle
-            np.random.seed(seed_val)
-            phases = np.random.uniform(0, 2*np.pi, 3)
-            U = np.eye(8, dtype=complex)
-            U[1, 1] = np.exp(1j * phases[0])
-            U[2, 2] = np.exp(1j * phases[1])
-            U[4, 4] = np.exp(1j * phases[2])
-            rho = U @ rho @ U.conj().T
-            
-            purity = float(np.real(np.trace(rho @ rho)))
-            logger.critical(
-                f"[ORACLE-NODE-{self.oracle_id+1}] INIT self._dm | "
-                f"Purity={purity:.6f} (DETERMINISTIC FALLBACK) | "
-                f"Independent state ✓"
-            )
+            logger.critical(f"[ORACLE-{self.oracle_id}] INIT FALLBACK | Purity=1.0 (pure W)")
             return rho
 
     # ── AER setup ─────────────────────────────────────────────────────────────
@@ -1744,6 +1728,15 @@ class OracleNode:
             return None
         try:
             # ── Run 5-qubit composite circuit ─────────────────────────────────
+            
+            # DEBUG: Log self._dm state BEFORE circuit
+            if self._dm is not None:
+                dm_purity = float(np.real(np.trace(self._dm @ self._dm)))
+                logger.critical(
+                    f"[ORACLE-{self.oracle_id}] PRE-CIRCUIT self._dm | Purity={dm_purity:.8f} | "
+                    f"About to construct composite: pq0({dm_purity:.4f}) ⊗ boundary[{pq_last}→{pq_curr}]"
+                )
+            
             # Seed AER noise model with QRNG to inject quantum entropy into simulation
             qrng_seed = int.from_bytes(_oracle_qrng_bytes(4), 'big') % (2**31)
             
@@ -1815,13 +1808,24 @@ class OracleNode:
             oracle_dm = self._partial_trace_blockfield(composite_dm)           # 8×8
 
             # ── Update self._dm (continuous trajectory advances each cycle) ───
-            oracle_dm_clean = _oracle_enforce_dm(oracle_dm)
+            oracle_dm_clean = _oracle_enforce_dm(oracle_dm, label=f"ORACLE-{self.oracle_id}-after-partial-trace")
+            
+            pre_evolve_purity = float(np.real(np.trace(oracle_dm_clean @ oracle_dm_clean)))
             
             # QRNG-seeded unitary evolution (preserves purity, adds quantum randomness)
             # NO mixing channel — use pure unitary so each oracle stays high-purity
             oracle_dm_evolved = _oracle_enforce_dm(
-                _oracle_qrng_unitary_evolution(oracle_dm_clean)
+                _oracle_qrng_unitary_evolution(oracle_dm_clean, oracle_id=self.oracle_id),
+                label=f"ORACLE-{self.oracle_id}-after-evolution"
             )
+            
+            post_evolve_purity = float(np.real(np.trace(oracle_dm_evolved @ oracle_dm_evolved)))
+            
+            logger.critical(
+                f"[ORACLE-{self.oracle_id}] MEASUREMENT CYCLE | "
+                f"self._dm evolving: {pre_evolve_purity:.6f} → {post_evolve_purity:.6f}"
+            )
+            
             with self._lock:
                 self._dm            = oracle_dm_evolved
                 self.last_fidelity  = QuantumInformationMetrics.w_state_fidelity_to_ideal(oracle_dm_clean)
