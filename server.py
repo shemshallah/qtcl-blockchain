@@ -11181,16 +11181,6 @@ def _start_comprehensive_measurement_feed():
     logger.info("[COMPREHENSIVE-FEED] Daemon started (lattice only, Oracle PQ via SYNC daemon)")
 
 
-
 # Start comprehensive feed daemon
 if LATTICE is not None:
-    _start_comprehensive_measurement_feed()
-
-    
-    _comprehensive_measurement_thread = threading.Thread(target=_comprehensive_feed_loop, daemon=True)
-    _comprehensive_measurement_thread.start()
-    logger.info("[COMPREHENSIVE-FEED] Daemon started (500ms cadence with live lattice state injection)")
-
-# Start comprehensive measurement feed if systems available
-if oracle_cluster is not None or LATTICE is not None:
     _start_comprehensive_measurement_feed()
