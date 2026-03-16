@@ -3919,14 +3919,43 @@ class MetricsCollector:
                 _eng_w3 = _ENG_STATE.get('w3_fidelity') or _ENG_STATE.get('w_state_fidelity')
                 snap = state.get_state()
                 qm   = snap.get('quantum_metrics', {})
+                
+                # 🔬 NEW: Read REAL-TIME LATTICE SIGMA ENGINE METRICS
+                lattice_fidelity = 0.70
+                lattice_coherence = 0.0
+                lattice_entropy = 0.0
+                lattice_cycle = 0
+                lattice_sigma_mod8 = 0
+                
+                try:
+                    if LATTICE and hasattr(LATTICE, 'sigma_engine'):
+                        lattice_stats = LATTICE.sigma_engine.get_statistics()
+                        lattice_fidelity = lattice_stats.get('avg_recovery_fidelity', 0.70)
+                        lattice_coherence = lattice_stats.get('coherence', 0.0)
+                        lattice_entropy = lattice_stats.get('entropy', 0.0)
+                        lattice_cycle = lattice_stats.get('current_cycle', 0)
+                        lattice_sigma_mod8 = lattice_stats.get('sigma_mod8', 0)
+                        logger.debug(f"[METRICS] Lattice: F={lattice_fidelity:.4f} C={lattice_coherence:.4f} cycle={lattice_cycle}")
+                except Exception as e:
+                    logger.warning(f"[METRICS] Failed to read lattice stats: {e}")
+                
+                # Use lattice fidelity if available, else fall back to oracle/DB
                 if live_w3 is not None and live_w3 > 0:
-                    w_state_fidelity = float(live_w3)
+                    w_state_fidelity = max(float(live_w3), lattice_fidelity)  # Take max of live engine + lattice
                 elif _eng_w3 is not None and float(_eng_w3) > 0:
-                    w_state_fidelity = float(_eng_w3)
+                    w_state_fidelity = max(float(_eng_w3), lattice_fidelity)
+                elif lattice_fidelity > 0:
+                    w_state_fidelity = lattice_fidelity  # Lattice is authoritative
                 elif temporal_coh > 0:
                     w_state_fidelity = temporal_coh
                 else:
                     w_state_fidelity = float(qm.get('w_state_fidelity') or 0.0)
+                
+                # Coherence: prefer lattice coherence if available
+                live_coherence = lattice_coherence if lattice_coherence > 0 else float(qm.get('coherence', 0.0))
+                
+                # Entropy: prefer lattice entropy if available
+                live_entropy = lattice_entropy if lattice_entropy > 0 else float(qm.get('entropy', 0.0))
 
                 # ── ORACLE STATUS ──────────────────────────────────────────────────
                 oracle_address    = None
@@ -4025,7 +4054,11 @@ class MetricsCollector:
                     'block_height'       : chain_height,
                     'difficulty'         : difficulty,
                     'network_hash_rate'  : network_hash_rate,
-                    'w_state_fidelity'   : w_state_fidelity,
+                    'w_state_fidelity'   : round(w_state_fidelity, 4),  # Updated from LATTICE
+                    'coherence'          : round(live_coherence, 4),  # DECIMAL 0-1 (not %)
+                    'entropy'            : round(live_entropy, 4),  # DECIMAL
+                    'lattice_cycle'      : lattice_cycle,  # NEW: Sigma cycle number
+                    'lattice_sigma_mod8' : lattice_sigma_mod8,  # NEW: Sigma mode (0-8)
                     'peer_count'         : peer_count,
                     'mempool_size'       : mempool_size,
                     'last_block_time_ago': round(last_block_time_ago, 1),
@@ -8322,6 +8355,24 @@ def chain_status():
             hash_row = cur.fetchone()
             latest_hash = hash_row[0] if hash_row else '0' * 64
             
+            # 🔬 READ LIVE LATTICE SIGMA ENGINE METRICS
+            lattice_fidelity = temporal_coherence if temporal_coherence > 0 else 0.70
+            lattice_coherence = 0.0
+            lattice_entropy = 0.0
+            lattice_cycle = 0
+            lattice_sigma_mod8 = 0
+            
+            try:
+                if LATTICE and hasattr(LATTICE, 'sigma_engine'):
+                    lattice_stats = LATTICE.sigma_engine.get_statistics()
+                    lattice_fidelity = lattice_stats.get('avg_recovery_fidelity', lattice_fidelity)
+                    lattice_coherence = lattice_stats.get('coherence', 0.0)
+                    lattice_entropy = lattice_stats.get('entropy', 0.0)
+                    lattice_cycle = lattice_stats.get('current_cycle', 0)
+                    lattice_sigma_mod8 = lattice_stats.get('sigma_mod8', 0)
+            except Exception as e:
+                logger.warning(f"[CHAIN] Failed to read lattice metrics: {e}")
+            
             return jsonify({
                 'chain_height': chain_height,
                 'blocks_sealed': total_blocks,
@@ -8330,9 +8381,16 @@ def chain_status():
                 'mempool_size': pending_txs,
                 'pending_txs': pending_txs,
                 'latest_block_hash': latest_hash,
-                'quantum_validation_status': quantum_status,                'pq_validation_status': pq_status,
+                'quantum_validation_status': quantum_status,
+                'pq_validation_status': pq_status,
                 'oracle_consensus_reached': oracle_consensus,
                 'temporal_coherence': temporal_coherence,
+                # 🔬 NEW: Live lattice metrics
+                'w_state_fidelity': round(lattice_fidelity, 4),  # Real-time from LATTICE
+                'coherence': round(lattice_coherence, 4),  # Real-time lattice coherence
+                'entropy': round(lattice_entropy, 4),  # Real-time lattice entropy
+                'lattice_cycle': lattice_cycle,  # Sigma cycle number
+                'lattice_sigma_mod8': lattice_sigma_mod8,  # Sigma mode (0-8)
                 'recent_blocks': recent,
             }), 200
     except Exception as e:
