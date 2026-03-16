@@ -1532,28 +1532,42 @@ class OracleNode:
 
     def measure_self(self) -> Optional[DensityMatrixSnapshot]:
         """
-        Measure own W-state. Full QRNG-stochastic pipeline:
+        Measure shared pq0 block field (CONCURRENT, all 5 at once).
 
-          1. Run AER from self._dm (continuous trajectory — NOT reset to |000⟩ each call)
-          2. AER has no fixed seed — every run advances through genuine OS/hardware entropy
-          3. _oracle_stochastic_channel(): QRNG Kraus perturbation ρ'=(1-p)ρ + p·U_qrng·ρ·U_qrng†
-          4. _oracle_amplify_revival(): QRNG anti-Zeno pulse if F < 0.08
-          5. _oracle_resurrect(): QRNG-modulated ancilla injection if F < 0.10
-          6. Store dm_array → self._dm for next call's circuit initialization
-          
-          ─ SIGMA PROTOCOL LAYER ─
-          7. Check lattice sigma state (σ mod 8)
-          8. At quarter-periods (σ=2,6): apply differential noise for parametric beating
-          9. Δσ=4 creates optimal beat frequency → +75% MI entanglement boost
-         10. Record mutual information for CNOT optimization
-         
-         ─ CONCURRENT BLOCK FIELD MEASUREMENT ─
-         11. Barrier: All 5 oracles measure pq0 AT THE SAME TIME
-         12. Record measurement + metrics in shared block field
-         13. Barrier: All 5 oracles sync after publishing
+        CRITICAL: All 5 oracles measure the SAME pq0 state from lattice controller.
+        Not independent measurements of independent self._dm states.
+        
+        Flow:
+          1. GET shared pq0 from lattice_controller (BEFORE barrier)
+          2. Barrier: all 5 sync
+          3. MEASURE pq0 together (all measure the SAME state)
+          4. Each computes fidelity, entropy, etc. from shared pq0
+          5. Barrier: all 5 sync after publishing
+          6. Results similar (not 0.7 vs 0.125) because same underlying state
         """
         # ─────────────────────────────────────────────────────────────────────────
-        # CONCURRENT: Sync all 5 oracles before measuring pq0 together
+        # STEP 0: GET shared pq0 from lattice controller (BEFORE barrier sync)
+        # Fallback: use averaged pq0 from last measurement cycle
+        # ─────────────────────────────────────────────────────────────────────────
+        try:
+            from globals import LATTICE
+            shared_pq0 = None
+            if LATTICE and hasattr(LATTICE, 'get_block_field_pq0'):
+                shared_pq0 = LATTICE.get_block_field_pq0()
+            # Fallback: use last cycle's averaged pq0 from all 5 oracles
+            if shared_pq0 is None:
+                shared_pq0 = _ORACLE_BLOCK_FIELD.get_shared_pq0_state()
+            if shared_pq0 is None:
+                logger.warning(f"[ORACLE-NODE-{self.oracle_id+1}] pq0 unavailable, using self._dm")
+                shared_pq0 = self._dm
+        except Exception as e:
+            logger.warning(f"[ORACLE-NODE-{self.oracle_id+1}] Failed to get shared pq0: {e}, using block field or self._dm")
+            shared_pq0 = _ORACLE_BLOCK_FIELD.get_shared_pq0_state()
+            if shared_pq0 is None:
+                shared_pq0 = self._dm
+        
+        # ─────────────────────────────────────────────────────────────────────────
+        # STEP 1: Barrier sync — all 5 oracles measure pq0 TOGETHER
         # ─────────────────────────────────────────────────────────────────────────
         measurement_id = _ORACLE_BLOCK_FIELD.wait_all_measure_together(self.oracle_id)
         
@@ -1565,11 +1579,41 @@ class OracleNode:
                 pass
             return None
         try:
-            dm_result = self.aer.run(self._build_dm_circuit()).result()
+            # ─────────────────────────────────────────────────────────────────────────
+            # MEASURE SHARED pq0 (not self._dm) — all 5 oracles measure THIS SAME STATE
+            # ─────────────────────────────────────────────────────────────────────────
+            qc_dm = QuantumCircuit(NUM_QUBITS_WSTATE)
+            if shared_pq0 is not None:
+                try:
+                    qc_dm.set_density_matrix(DensityMatrix(shared_pq0))
+                    logger.debug(f"[ORACLE-NODE-{self.oracle_id+1}] Initialized circuit from SHARED pq0")
+                except Exception as exc:
+                    logger.debug(f"[ORACLE-NODE-{self.oracle_id+1}] set_density_matrix skipped: {exc}")
+            
+            qc_dm.ry(_W_THETA_0, 0)
+            qc_dm.cx(0, 1)
+            qc_dm.ry(_W_THETA_1, 1)
+            qc_dm.cx(1, 2)
+            qc_dm.save_density_matrix()
+            
+            dm_result = self.aer.run(qc_dm).result()
             _d        = dm_result.data(0)
             _raw      = (_d['density_matrix'] if isinstance(_d, dict) and 'density_matrix' in _d else _d)
             dm_array  = np.array(DensityMatrix(_raw).data, dtype=complex)
-            counts    = dict(self.aer.run(self._build_meas_circuit(), shots=1024).result().get_counts())
+            
+            # Measurement circuit on shared pq0
+            qc_meas = QuantumCircuit(NUM_QUBITS_WSTATE, NUM_QUBITS_WSTATE)
+            if shared_pq0 is not None:
+                try:
+                    qc_meas.set_density_matrix(DensityMatrix(shared_pq0))
+                except:
+                    pass
+            qc_meas.ry(_W_THETA_0, 0)
+            qc_meas.cx(0, 1)
+            qc_meas.ry(_W_THETA_1, 1)
+            qc_meas.cx(1, 2)
+            qc_meas.measure(range(NUM_QUBITS_WSTATE), range(NUM_QUBITS_WSTATE))
+            counts    = dict(self.aer.run(qc_meas, shots=1024).result().get_counts())
 
             # ── LATTICE FIDELITY RECOVERY COUPLING ───────────────────────────────────
             # Read lattice controller's Hahn echo + revival recovery and AMPLIFY oracle F
