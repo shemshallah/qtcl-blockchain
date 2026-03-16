@@ -642,18 +642,49 @@ except ImportError:
     logger.warning("[ENTROPY] Block field entropy not available - will use fallback")
 
 # ═════════════════════════════════════════════════════════════════════════════════
-# ORACLE & W-STATE INTEGRATION
+# ORACLE & W-STATE INTEGRATION  (deferred — must not block gunicorn startup)
+# ─────────────────────────────────────────────────────────────────────────────
+# oracle.py calls the QRNG ensemble at module-level; each QRNG source that is
+# unreachable on Koyeb takes 6-10 s to time out.  Importing oracle synchronously
+# here would block gunicorn for 16-28 s, causing Koyeb's health-check to
+# accumulate failures and fire SIGTERM before the worker ever binds port 8000.
+#
+# Solution: import oracle in a daemon thread; all code that uses ORACLE already
+# guards with `if ORACLE_AVAILABLE` / `if ORACLE is not None`.
 # ═════════════════════════════════════════════════════════════════════════════════
 
-try:
-    from oracle import ORACLE, ORACLE_W_STATE_MANAGER
-    ORACLE_AVAILABLE = True
-    logger.info("[ORACLE] ✅ Oracle engine imported")
-except ImportError as e:
-    ORACLE_AVAILABLE = False
-    ORACLE = None
-    ORACLE_W_STATE_MANAGER = None
-    logger.warning(f"[ORACLE] ⚠️  Oracle not available: {e}")
+ORACLE_AVAILABLE = False
+ORACLE = None
+ORACLE_W_STATE_MANAGER = None
+_ORACLE_INIT_EVENT = threading.Event()   # set once oracle is ready (or failed)
+
+def _deferred_oracle_init() -> None:
+    """Import and initialise oracle.py in a background thread.
+
+    oracle.py spends 16-28 s at module-level waiting for QRNG network sources
+    to respond (or time out).  Running this in a daemon thread lets gunicorn
+    bind port 8000 and start answering /health checks in < 2 s.
+    """
+    global ORACLE, ORACLE_W_STATE_MANAGER, ORACLE_AVAILABLE
+    try:
+        from oracle import ORACLE as _o, ORACLE_W_STATE_MANAGER as _owsm
+        ORACLE = _o
+        ORACLE_W_STATE_MANAGER = _owsm
+        ORACLE_AVAILABLE = True
+        logger.info("[ORACLE] ✅ Oracle engine initialised (deferred background thread)")
+    except ImportError as _ie:
+        logger.warning(f"[ORACLE] ⚠️  Oracle not available (ImportError): {_ie}")
+    except Exception as _ex:
+        logger.error(f"[ORACLE] ❌ Oracle deferred init error: {_ex}", exc_info=True)
+    finally:
+        _ORACLE_INIT_EVENT.set()   # unblock _wsgi_startup heavy-init thread
+
+threading.Thread(
+    target=_deferred_oracle_init,
+    daemon=True,
+    name="OracleDeferred",
+).start()
+logger.info("[ORACLE] 🔄 Oracle init deferred to background thread — gunicorn will serve /health immediately")
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION & CONSTANTS
@@ -7273,23 +7304,41 @@ def initialize_p2p():
 
 def _wsgi_startup() -> None:
     """Initialize all subsystems at WSGI import time so they run under gunicorn.
-    Idempotent — each subsystem guards against double-init internally."""
-    try:
-        initialize_p2p()
-        logger.info("[WSGI-INIT] ✅ P2P initialized")
-    except Exception as _e:
-        logger.warning(f"[WSGI-INIT] P2P init non-fatal: {_e}")
-    try:
-        _start_gossip_subsystem()
-        logger.info("[WSGI-INIT] ✅ Gossip subsystem started")
-    except Exception as _e:
-        logger.warning(f"[WSGI-INIT] Gossip init non-fatal: {_e}")
-    try:
-        _start_p2p_daemons()
-        logger.info("[WSGI-INIT] ✅ Snapshot daemon started")
-    except Exception as _e:
-        logger.warning(f"[WSGI-INIT] Daemon start non-fatal: {_e}")
-    _set_app_ready()
+
+    CRITICAL CHANGE — fully non-blocking:
+    The heavy subsystems (oracle, P2P, gossip) are kicked off in a daemon thread
+    that waits for _ORACLE_INIT_EVENT (set by _deferred_oracle_init).  This
+    function returns in microseconds so gunicorn can bind port 8000 and start
+    answering Koyeb's /health probe before the QRNG network timeouts complete.
+    """
+
+    def _heavy_init() -> None:
+        logger.info("[WSGI-INIT] ⏳ Waiting for oracle deferred init (up to 120 s)…")
+        _ORACLE_INIT_EVENT.wait(timeout=120)
+        oracle_status = "✅ ready" if ORACLE_AVAILABLE else "⚠️  unavailable"
+        logger.info(f"[WSGI-INIT] Oracle status: {oracle_status} — proceeding with subsystem init")
+
+        try:
+            initialize_p2p()
+            logger.info("[WSGI-INIT] ✅ P2P initialized")
+        except Exception as _e:
+            logger.warning(f"[WSGI-INIT] P2P init non-fatal: {_e}")
+        try:
+            _start_gossip_subsystem()
+            logger.info("[WSGI-INIT] ✅ Gossip subsystem started")
+        except Exception as _e:
+            logger.warning(f"[WSGI-INIT] Gossip init non-fatal: {_e}")
+        try:
+            _start_p2p_daemons()
+            logger.info("[WSGI-INIT] ✅ Snapshot daemon started")
+        except Exception as _e:
+            logger.warning(f"[WSGI-INIT] Daemon start non-fatal: {_e}")
+
+        _set_app_ready()
+        logger.info("[WSGI-INIT] ✅ All subsystems live — server fully operational")
+
+    threading.Thread(target=_heavy_init, daemon=True, name="HeavyInit").start()
+    logger.info("[WSGI-INIT] 🚀 Heavy init deferred to background — gunicorn binding port 8000 NOW")
 
 _wsgi_startup()
 
