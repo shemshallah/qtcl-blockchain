@@ -10984,9 +10984,11 @@ if LATTICE is not None and _METRICS_AGENTS.get('lattice_metrics') is not None:
 def _start_oracle_measurement_sync_daemon():
     """
     ✅ Force oracle pq measurement AT lattice measurement window (synchronous).
+    ✅ Persist metrics to database in real time.
     
     Block IS a lattice point. Must measure pq_curr/pq_last AT the exact cycle
     lattice measures W-state, not on independent 10s cadence.
+    All measurements saved to DB immediately for live dashboards.
     """
     
     def _oracle_measurement_sync_loop():
@@ -11047,8 +11049,34 @@ def _start_oracle_measurement_sync_daemon():
                             # ✅ Block field should see same fidelity as lattice
                             # (continuous space experiencing same SIGMA-REVIVAL injection)
                             avg_bf_fidelity = sum(bf[1].fidelity for bf in bf_readings) / len(bf_readings)
+                            avg_bf_coherence = sum(bf[1].coherence for bf in bf_readings) / len(bf_readings)
                             
                             fidelity_delta = abs(avg_bf_fidelity - lattice_f)
+                            timestamp_ns = int(time.time_ns())
+                            
+                            # ✅ PERSIST TO DB in real time
+                            try:
+                                if DB_POOL:
+                                    with DB_POOL.getconn() as conn:
+                                        cursor = conn.cursor()
+                                        cursor.execute("""
+                                            INSERT INTO oracle_measurements (
+                                                cycle, timestamp_ns, lattice_fidelity, block_field_fidelity, 
+                                                block_field_coherence, pq_curr, pq_last, oracle_count, 
+                                                fidelity_delta, window_type
+                                            ) VALUES (
+                                                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                                            )
+                                        """, (
+                                            current_cycle, timestamp_ns, float(lattice_f), float(avg_bf_fidelity),
+                                            float(avg_bf_coherence), pq_curr, pq_last, len(bf_readings),
+                                            float(fidelity_delta), 'REVIVAL' if window_info.get('is_revival') else 'POWER-2'
+                                        ))
+                                        conn.commit()
+                                        cursor.close()
+                                        logger.debug(f"[ORACLE-SYNC] Metrics persisted to DB: cycle={current_cycle}")
+                            except Exception as db_err:
+                                logger.debug(f"[ORACLE-SYNC] DB persist error: {db_err}")
                             
                             if fidelity_delta < 0.05:  # Same state = < 5% delta
                                 logger.info(
@@ -11056,7 +11084,8 @@ def _start_oracle_measurement_sync_daemon():
                                     f"Lattice W-field F={lattice_f:.4f} | "
                                     f"Block-field F={avg_bf_fidelity:.4f} Δ={fidelity_delta:.4f} | "
                                     f"(oracles={len(bf_readings)}) | "
-                                    f"Window: {'REVIVAL' if window_info.get('is_revival') else 'POWER-2'}"
+                                    f"Window: {'REVIVAL' if window_info.get('is_revival') else 'POWER-2'} | "
+                                    f"[DB: PERSISTED]"
                                 )
                             else:
                                 logger.warning(
@@ -11152,21 +11181,11 @@ def _start_comprehensive_measurement_feed():
     logger.info("[COMPREHENSIVE-FEED] Daemon started (lattice only, Oracle PQ via SYNC daemon)")
 
 
+
 # Start comprehensive feed daemon
 if LATTICE is not None:
     _start_comprehensive_measurement_feed()
-                                       f"reward={total_reward:.4f} | "
-                                       f"coverage={coverage}")
-                            last_neural_report = current_time
-                        
-                    except Exception as e:
-                        logger.debug(f"[COMPREHENSIVE-FEED] Neural net training error: {e}")
-                
-                time.sleep(0.5)  # 500ms cadence (reduced from 100ms to avoid lattice state extraction overload)
-                
-            except Exception as e:
-                logger.error(f"[COMPREHENSIVE-FEED] Loop error: {e}")
-                time.sleep(0.5)
+
     
     _comprehensive_measurement_thread = threading.Thread(target=_comprehensive_feed_loop, daemon=True)
     _comprehensive_measurement_thread.start()
