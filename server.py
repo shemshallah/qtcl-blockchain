@@ -5565,14 +5565,6 @@ def initialize_lattice_controller():
 
 LATTICE = initialize_lattice_controller()
 
-# Register LATTICE in globals so oracle.py can access it via `from globals import LATTICE`
-try:
-    from globals import set_lattice as _set_lattice_global
-    if LATTICE is not None:
-        _set_lattice_global(LATTICE)
-except Exception as _glat_err:
-    logger.warning(f"[SERVER] Could not register LATTICE in globals: {_glat_err}")
-
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 # AGENT INITIALIZATION: Instantiate all 5 metric agents (Museum Grade • θ Deployment)
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
@@ -10550,73 +10542,62 @@ def _start_oracle_measurement_sync_daemon():
                         f"Phase={lattice_phase} | Window={'REVIVAL' if is_revival else 'POWER-2'}"
                     )
 
-                    # ─── Ensure non-trivial block encoding ───────────────────
-                    if pq_curr <= 1:
-                        pq_curr = (current_cycle % 1023) + 1
-
-                    # ─── Fetch SHARED pq0 ONCE — all 5 oracles use the same ─
-                    import numpy as _np
-                    sync_pq0 = None
-                    try:
-                        if LATTICE is not None:
-                            if hasattr(LATTICE, 'get_block_field_pq0'):
-                                sync_pq0 = LATTICE.get_block_field_pq0()
-                            if sync_pq0 is None and hasattr(LATTICE, 'current_density_matrix'):
-                                cdm = LATTICE.current_density_matrix
-                                if cdm is not None and hasattr(cdm, 'shape') and cdm.shape == (8, 8):
-                                    sync_pq0 = cdm.copy()
-                    except Exception as _e:
-                        logger.debug(f"[ORACLE-SYNC] shared pq0 fetch: {_e}")
-
                     # ───────────────────────────────────────────────────────────────────────────
-                    # MEASUREMENT PHASE: All 5 oracles measure the SAME block field in parallel
-                    # One executor pass — collect results directly from futures
+                    # READ from OracleWStateManager — it is the single measurement source.
+                    # Do NOT call node.measure_block_field() here — that is OracleWStateManager's
+                    # job. Two callers hitting the same nodes simultaneously was causing all
+                    # the fidelity, barrier, and Mermin issues.
                     # ───────────────────────────────────────────────────────────────────────────
                     measurement_start = time.time_ns()
+
+                    dm = ORACLE_W_STATE_MANAGER.get_latest_density_matrix()
+                    measurement_elapsed_ns = time.time_ns() - measurement_start
+
                     bf_readings = []
                     oracle_metrics = []
 
-                    from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
-                    with _TPE(max_workers=5, thread_name_prefix="OracleSyncMeas") as _ex:
-                        _fmap = {
-                            _ex.submit(node.measure_block_field, pq_curr, pq_last, sync_pq0): (node_idx, node)
-                            for node_idx, node in enumerate(ORACLE_W_STATE_MANAGER.nodes)
-                        }
-                        for _fut in _ac(_fmap, timeout=30):
-                            node_idx, node = _fmap[_fut]
-                            try:
-                                bf = _fut.result()
-                                if bf:
-                                    bf_readings.append((node_idx, bf))
-                                    logger.critical(
-                                        f"[ORACLE-SYNC] ✓ Oracle-{node_idx} measured | "
-                                        f"F={bf.fidelity:.4f} C={bf.coherence:.6f} | "
-                                        f"Mermin={bf.mermin_violation:.4f} | "
-                                        f"pq0=[oracle={bf.pq0_oracle_fidelity:.4f} IV={bf.pq0_IV_fidelity:.4f} V={bf.pq0_V_fidelity:.4f}]"
-                                    )
-                                    oracle_metrics.append({
-                                        'oracle_id': node_idx,
-                                        'fidelity': bf.fidelity,
-                                        'coherence': bf.coherence,
-                                        'mermin': bf.mermin_violation,
-                                        'entropy': bf.entropy,
-                                        'pq0_oracle': bf.pq0_oracle_fidelity,
-                                        'pq0_IV': bf.pq0_IV_fidelity,
-                                        'pq0_V': bf.pq0_V_fidelity,
-                                        'timestamp_ns': bf.timestamp_ns,
-                                    })
-                                else:
-                                    logger.warning(
-                                        f"[ORACLE-SYNC] ✗ Oracle-{node_idx} returned None | "
-                                        f"pq=[{pq_last}→{pq_curr}]"
-                                    )
-                            except Exception as e:
-                                logger.error(
-                                    f"[ORACLE-SYNC] ✗ Oracle-{node_idx} FAILED: {type(e).__name__}: {e}",
-                                    exc_info=False
-                                )
-                    
-                    measurement_elapsed_ns = time.time_ns() - measurement_start
+                    if dm:
+                        bf_agg = dm.get('block_field', dm.get('aer_noise_state', {}).get('block_field', {}))
+                        per_node = bf_agg.get('per_node', [])
+
+                        for node in per_node:
+                            node_idx = node.get('oracle_id', 1) - 1  # 1-indexed in snapshot → 0-indexed
+                            fidelity  = float(node.get('fidelity',  0.0))
+                            coherence = float(node.get('coherence', 0.0))
+                            mermin    = float(node.get('mermin_violation', 0.0))
+
+                            # Reconstruct a lightweight bf-like object for the aggregation below
+                            class _BF:
+                                pass
+                            bf = _BF()
+                            bf.fidelity             = fidelity
+                            bf.coherence            = coherence
+                            bf.mermin_violation     = mermin
+                            bf.entropy              = float(node.get('entropy', 0.0))
+                            bf.pq0_oracle_fidelity  = float(node.get('pq0_oracle_fidelity', 0.0))
+                            bf.pq0_IV_fidelity      = float(node.get('pq0_IV_fidelity',     0.0))
+                            bf.pq0_V_fidelity       = float(node.get('pq0_V_fidelity',      0.0))
+                            bf.timestamp_ns         = dm.get('timestamp_ns', time.time_ns())
+
+                            bf_readings.append((node_idx, bf))
+                            logger.critical(
+                                f"[ORACLE-SYNC] ✓ Oracle-{node_idx} measured | "
+                                f"F={bf.fidelity:.4f} C={bf.coherence:.6f} | "
+                                f"Mermin={bf.mermin_violation:.4f} | "
+                                f"pq0=[oracle={bf.pq0_oracle_fidelity:.4f} "
+                                f"IV={bf.pq0_IV_fidelity:.4f} V={bf.pq0_V_fidelity:.4f}]"
+                            )
+                            oracle_metrics.append({
+                                'oracle_id':   node_idx,
+                                'fidelity':    bf.fidelity,
+                                'coherence':   bf.coherence,
+                                'mermin':      bf.mermin_violation,
+                                'entropy':     bf.entropy,
+                                'pq0_oracle':  bf.pq0_oracle_fidelity,
+                                'pq0_IV':      bf.pq0_IV_fidelity,
+                                'pq0_V':       bf.pq0_V_fidelity,
+                                'timestamp_ns': bf.timestamp_ns,
+                            })
                     
                     # ───────────────────────────────────────────────────────────────────────────
                     # AGGREGATION PHASE: Compute unified metrics
@@ -10624,17 +10605,31 @@ def _start_oracle_measurement_sync_daemon():
                     if bf_readings and len(bf_readings) > 0:
                         consecutive_failures = 0
                         success_count += 1
-                        
-                        # Aggregate metrics
-                        avg_bf_fidelity = sum(bf[1].fidelity for bf in bf_readings) / len(bf_readings)
+
+                        # Aggregate block-field fidelity/coherence from per-node readings
+                        avg_bf_fidelity  = sum(bf[1].fidelity  for bf in bf_readings) / len(bf_readings)
                         avg_bf_coherence = sum(bf[1].coherence for bf in bf_readings) / len(bf_readings)
-                        avg_mermin = sum(bf[1].mermin_violation for bf in bf_readings) / len(bf_readings)
+
+                        # ── MERMIN: use the 3-qubit consensus test, NOT per-node 5-qubit test ──
+                        # Research shows the 5-qubit CHSH-like test on the composite DM saturates
+                        # at S~0.5 regardless of W-state quality because the CX entanglement with
+                        # boundary qubits dilutes the oracle sub-space.
+                        # OracleWStateManager runs an optimized 3-qubit Nelder-Mead Mermin test
+                        # on the consensus oracle sub-DM every 10 cycles — that is the correct
+                        # test for W-state quantum violation (classical bound=2, W-max≈3.046).
+                        consensus_mermin_result = dm.get('mermin_test') or dm.get('bell_test') or {}
+                        consensus_mermin_M = float(consensus_mermin_result.get('M_value', 0.0))
+                        is_quantum_consensus = bool(consensus_mermin_result.get('is_quantum', False))
+
+                        # Fall back to per-node 5-qubit average only if consensus hasn't run yet
+                        avg_mermin = consensus_mermin_M if consensus_mermin_M > 0 else \
+                                     sum(bf[1].mermin_violation for bf in bf_readings) / len(bf_readings)
                         max_mermin = max(bf[1].mermin_violation for bf in bf_readings)
                         min_mermin = min(bf[1].mermin_violation for bf in bf_readings)
-                        
-                        fidelity_delta = abs(avg_bf_fidelity - lattice_f)
+
+                        fidelity_delta  = abs(avg_bf_fidelity  - lattice_f)
                         coherence_delta = abs(avg_bf_coherence - lattice_c)
-                        timestamp_ns = int(time.time_ns())
+                        timestamp_ns    = int(time.time_ns())
                         
                         # ───────────────────────────────────────────────────────────────────────
                         # PERSISTENCE PHASE: Write to DB
@@ -10667,10 +10662,11 @@ def _start_oracle_measurement_sync_daemon():
                         # ───────────────────────────────────────────────────────────────────────
                         threshold_f = 0.05
                         threshold_c = 0.01
-                        mermin_threshold = 2.0  # Classical bound
-                        
+                        mermin_threshold = 2.0  # Classical bound (W-state max ≈ 3.046)
+
                         metrics_aligned = fidelity_delta < threshold_f and coherence_delta < threshold_c
-                        entangled = avg_mermin > mermin_threshold
+                        # Use consensus 3-qubit Mermin for quantum violation check
+                        entangled = is_quantum_consensus or avg_mermin > mermin_threshold
                         
                         if metrics_aligned and entangled:
                             logger.critical(

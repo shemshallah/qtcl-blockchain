@@ -1256,6 +1256,14 @@ _ORACLE_ROLES = [
 ]
 
 # Fixed angles for |W⟩ = (|001⟩+|010⟩+|100⟩)/√3
+# Recursive W-state preparation angles for n=3 qubits
+# From research: recursive (CX-based) creates actual entanglement, F_max≈0.236 vs Dicke F≈0.11
+# θ_k = 2·arcsin(√(1/(k+1))) for each step k
+_W_RECURSIVE_ANGLES = [
+    float(2.0 * np.arcsin(np.sqrt(1.0 / 3.0))),  # k=1: angle for qubit 1
+    float(2.0 * np.arcsin(np.sqrt(1.0 / 2.0))),  # k=2: angle for qubit 2
+]
+# Keep Dicke angles for fallback compatibility
 _W_THETA_0 = float(np.arccos(np.sqrt(2.0 / 3.0)))
 _W_THETA_1 = float(np.arccos(np.sqrt(1.0 / 2.0)))
 
@@ -1474,33 +1482,48 @@ class OracleNode:
 
     # ── W-state circuit builders ───────────────────────────────────────────────
 
-    def _build_dm_circuit(self) -> 'QuantumCircuit':
+    @staticmethod
+    def _apply_recursive_w_prep(qc: 'QuantumCircuit', qubits: list) -> None:
         """
-        Build W-state circuit starting from self._dm (continuous quantum trajectory).
+        Recursive W-state preparation — creates actual entanglement via CX gates.
 
-        Old behaviour: always started from |000⟩ — same circuit + fixed seed = frozen output.
-        New behaviour:
-          • If self._dm exists: qc.set_density_matrix(self._dm) then apply W-state gates
-            as a coherent kick from the current evolved state toward the W-state target.
-          • First call only: standard |000⟩ → W-state prep (no prior state available).
-        This creates a genuine continuous quantum trajectory: ρ(t+dt) = U_W · ρ(t) · AER_noise.
+        From research (1_8_log): recursive gives F_max=0.236, I(A:B)>0 (true entanglement),
+        vs Dicke F_max=0.11, I(A:B)=0 (separable product state).
+
+        Algorithm (n=3 qubits, qubits=[q0,q1,q2]):
+          q0: X gate (|0⟩ → |1⟩) initializes single excitation
+          k=1: RY(θ₁,q1) — distribute excitation probability
+                CX(q0,q1)  — entangle
+          k=2: RY(θ₂,q2)
+                CX(q0,q2); CX(q1,q2)  — entangle with all previous
+
+        θ_k = 2·arcsin(√(1/(k+1)))
         """
+        n = len(qubits)
+        qc.x(qubits[0])
+        for k in range(1, n):
+            theta = float(2.0 * np.arcsin(np.sqrt(1.0 / (k + 1))))
+            qc.ry(theta, qubits[k])
+            for j in range(k):
+                qc.cx(qubits[j], qubits[k])
+
+    def _build_dm_circuit(self) -> 'QuantumCircuit':
+        """Build W-state circuit using recursive preparation (true entanglement)."""
         qc = QuantumCircuit(NUM_QUBITS_WSTATE)
         if self._dm is not None:
             try:
                 qc.set_density_matrix(DensityMatrix(self._dm))
             except Exception as exc:
                 logger.debug(f"[ORACLE-NODE-{self.oracle_id+1}] set_density_matrix skipped: {exc}")
-        qc.ry(_W_THETA_0, 0); qc.cx(0, 1)
-        qc.ry(_W_THETA_1, 1); qc.cx(1, 2)
+        self._apply_recursive_w_prep(qc, list(range(NUM_QUBITS_WSTATE)))
         qc.save_density_matrix()
         return qc
 
     def _build_meas_circuit(self) -> 'QuantumCircuit':
+        """Build W-state measurement circuit using recursive preparation."""
         qc = QuantumCircuit(NUM_QUBITS_WSTATE, NUM_QUBITS_WSTATE)
-        qc.ry(_W_THETA_0, 0); qc.cx(0, 1)
-        qc.ry(_W_THETA_1, 1); qc.cx(1, 2)
-        qc.measure([0, 1, 2], [0, 1, 2])
+        self._apply_recursive_w_prep(qc, list(range(NUM_QUBITS_WSTATE)))
+        qc.measure(list(range(NUM_QUBITS_WSTATE)), list(range(NUM_QUBITS_WSTATE)))
         return qc
 
     def _build_block_field_circuit(self, pq_curr: int, pq_last: int,
@@ -1508,62 +1531,63 @@ class OracleNode:
         """
         5-qubit composite circuit: shared_pq0 tripartite ⊗ block-field boundary.
 
-          q0 = pq0_oracle   (W-state qubit 0 — from SHARED lattice pq0 DM)
-          q1 = pq0_IV       (W-state qubit 1 — inverse-virtual component)
-          q2 = pq0_V        (W-state qubit 2 — virtual component)
-          q3 = pq_curr      (current block boundary, hyperbolic phase-encoded)
-          q4 = pq_last      (previous block boundary, hyperbolic phase-encoded)
+          q0 = pq0_oracle   (W-state qubit 0 — SHARED lattice pq0 DM, UNTOUCHED)
+          q1 = pq0_IV       (W-state qubit 1 — UNTOUCHED)
+          q2 = pq0_V        (W-state qubit 2 — UNTOUCHED)
+          q3 = pq_curr      (σ-language encoded: rx(σπ/4) + rz(σπ/2))
+          q4 = pq_last      (σ-language encoded: rx(σπ/4) + rz(σπ/2))
 
-        pq0 tripartite (q0-q2) is initialized from pq0_state — the SHARED
-        lattice W-state DM passed from _extract_snapshot — so ALL 5 oracles
-        start from an IDENTICAL quantum state.  Their independent AER noise
-        seeds produce divergent readings for Byzantine consensus.
+        CRITICAL: q0-q2 receive NO rotations after pq0 init.
+        σ-gates are applied to q3,q4 ONLY. This preserves the W-state basis
+        so Tr(ρ_oracle @ ρ_W) returns true fidelity after partial trace.
 
-        Block-field phase encoding (hyperbolic {8,3} Schläfli geometry):
-          θ_curr = 2π · (pq_curr mod 1024) / 1024
-          θ_last = 2π · (pq_last mod 1024) / 1024
-
-        Entanglement topology:
-          CX(q3, q0) — pq_curr couples into pq0_oracle
-          CX(q4, q1) — pq_last  couples into pq0_IV
-          CX(q2, q3) — pq0_V back-probes pq_curr (W-state coherence spreading)
-          CX(q2, q4) — pq0_V back-probes pq_last
+        Per-oracle independence: QRNG noise model seed + σ-offset on q3,q4.
+        σ-offset spreads 5 oracles across one full σ-period (0,1.6,3.2,4.8,6.4).
         """
         qc = QuantumCircuit(5)
-        # ── pq0 tripartite: initialize from the SHARED lattice pq0 state ────────
-        # pq0_state is the canonical 8×8 W-state DM from LatticeController.
-        # All 5 oracle nodes receive the SAME pq0_state so they're measuring
-        # the same quantum object (block field); only AER noise differs.
+        # ── pq0 tripartite: initialize from the SHARED lattice pq0 DM ────────
         if pq0_state is not None:
             try:
                 field_vac  = np.zeros((4, 4), dtype=complex)
-                field_vac[0, 0] = 1.0                            # |00⟩⟨00|
-                full_dm_32 = np.kron(pq0_state, field_vac)       # 32×32
+                field_vac[0, 0] = 1.0
+                full_dm_32 = np.kron(pq0_state, field_vac)
                 tr = float(np.real(np.trace(full_dm_32)))
                 if tr > 1e-12:
                     full_dm_32 /= tr
                 full_dm_32 = 0.5 * (full_dm_32 + full_dm_32.conj().T)
                 qc.set_density_matrix(DensityMatrix(full_dm_32))
             except Exception as exc:
-                logger.debug(
-                    f"[ORACLE-NODE-{self.oracle_id+1}] block_field set_density_matrix "
-                    f"failed ({exc}), falling back to gate-level W-prep"
-                )
-                qc.ry(_W_THETA_0, 0); qc.cx(0, 1)
-                qc.ry(_W_THETA_1, 1); qc.cx(1, 2)
+                logger.debug(f"[ORACLE-{self.oracle_id}] set_density_matrix failed ({exc}), using recursive W-prep")
+                # Recursive prep: creates actual entanglement, not just basis overlap
+                self._apply_recursive_w_prep(qc, [0, 1, 2])
         else:
-            # pq0 unavailable — prepare W-state from gates (should not happen normally)
-            qc.ry(_W_THETA_0, 0); qc.cx(0, 1)
-            qc.ry(_W_THETA_1, 1); qc.cx(1, 2)
-        # ── Block-field phase encoding (hyperbolic lattice geometry) ────────────
-        theta_curr = 2.0 * np.pi * (int(pq_curr) % 1024) / 1024.0
-        theta_last = 2.0 * np.pi * (int(pq_last) % 1024) / 1024.0
-        qc.ry(theta_curr, 3)
-        qc.ry(theta_last, 4)
-        # ── Tripartite entanglement: block-field couples into pq0 components ────
+            self._apply_recursive_w_prep(qc, [0, 1, 2])
+
+        # ── Block-field σ-encoding on q3,q4 — RX-ONLY ──────────────────────
+        # Research finding (1_8_log): RZ on |0⟩ is a global phase (zero population
+        # transfer). RX(θ)|0⟩ = cos(θ/2)|0⟩ + i·sin(θ/2)|1⟩ actually creates
+        # superposition. Drop RZ entirely.
+        SIGMA_PERIOD = 8.0
+
+        def _rx_only_sigma(qc_: 'QuantumCircuit', qubit: int, sigma: float, seed: int = 0):
+            """RX-only σ-gate: rx(σπ/4 + δ). RZ dropped — zero effect on |0⟩."""
+            import math
+            rng = np.random.RandomState(seed)
+            angle = (sigma * math.pi / 4.0 + rng.uniform(-0.001, 0.001)) % (4*math.pi) - 2*math.pi
+            qc_.rx(float(angle), qubit)
+
+        sigma_curr = (int(pq_curr) % 1024) * SIGMA_PERIOD / 1024.0
+        sigma_last = (int(pq_last) % 1024) * SIGMA_PERIOD / 1024.0
+        sigma_q3 = (sigma_curr + self.sigma_offset) % SIGMA_PERIOD
+        sigma_q4 = (sigma_last + self.sigma_offset) % SIGMA_PERIOD
+        seed_b = self.oracle_id * 997 + int(pq_curr) % 503
+        _rx_only_sigma(qc, 3, sigma_q3, seed=seed_b)
+        _rx_only_sigma(qc, 4, sigma_q4, seed=seed_b + 1)
+
+        # ── Entangle boundary into pq0 ────────────────────────────────────────
         qc.cx(3, 0)   # pq_curr → pq0_oracle
-        qc.cx(4, 1)   # pq_last  → pq0_IV
-        qc.cx(2, 3)   # pq0_V back-probes pq_curr (W-state coherence spreading)
+        qc.cx(4, 1)   # pq_last → pq0_IV
+        qc.cx(2, 3)   # pq0_V back-probes pq_curr
         qc.cx(2, 4)   # pq0_V back-probes pq_last
         # ── Force density-matrix simulation so AER noise model is applied ───────
         qc.save_density_matrix()
@@ -2871,6 +2895,7 @@ class OracleWStateManager:
                     "pq0_IV_fidelity":     r.pq0_IV_fidelity,
                     "pq0_V_fidelity":      r.pq0_V_fidelity,
                     "in_consensus":        r in accepted,
+                    "mermin_violation":    r.mermin_violation,
                 }
                 for r in sorted(readings, key=lambda r: r.oracle_id)
             ],
