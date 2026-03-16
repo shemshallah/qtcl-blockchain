@@ -2630,12 +2630,23 @@ class QuantumLatticeController:
     def get_oracle_measurement_window(self) -> Dict[str, Any]:
         """
         ✅ Export measurement window checkpoint for oracle sync.
-        Block IS a lattice point. Returns its structural state for sync.
+        Block field IS continuous lattice [pq_last, pq_curr].
+        Returns evolved state so block field measures same quantum continuum.
         """
         # Measurement windows: every 8 cycles (SIGMA-REVIVAL) + power-of-2 bursts
         is_revival = (self.cycle_count % 8) == 0
         is_power_of_2 = (self.cycle_count & (self.cycle_count - 1)) == 0 and self.cycle_count > 0
         is_window = is_revival or is_power_of_2
+        
+        # Get current block-field window from BlockManager
+        pq_curr = 1
+        pq_last = 0
+        if self.block_manager:
+            pq_curr = getattr(self.block_manager, 'pq_curr', 1)
+            pq_last = getattr(self.block_manager, 'pq_last', 0)
+        
+        # ✅ Export current density matrix so oracles measure same evolved state
+        dm_hex = self.current_density_matrix.tobytes().hex() if hasattr(self.current_density_matrix, 'tobytes') else ''
         
         return {
             'is_measurement_window': is_window,
@@ -2645,6 +2656,9 @@ class QuantumLatticeController:
             'coherence': float(self.coherence),
             'is_revival': is_revival,
             'is_power_of_2_burst': is_power_of_2,
+            'pq_curr': pq_curr,
+            'pq_last': pq_last,
+            'w_density_matrix_hex': dm_hex,
         }
     
     def validate_oracle_w_state_measurement(self, oracle_fidelity: float, oracle_coherence: float, 
