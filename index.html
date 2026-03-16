@@ -139,6 +139,7 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
     <div>
       <div class="ht">QTCL</div>
       <div class="hs">Quantum Temporal Coherence Ledger &middot; Explorer</div>
+      <div style="font-size:0.85rem; margin-top:4px; color:#00dcff;">Mining client is available at <a href="https://www.github.com/shemshallah/qtcl-miner" target="_blank" style="color:#00dcff; text-decoration:underline;">github.com/shemshallah/qtcl-miner</a></div>
     </div>
   </div>
   <div class="hr">
@@ -500,6 +501,12 @@ async function fetchChain(){
   S.pq_validation_status=d.pq_validation_status||'--';
   S.oracle_consensus_reached=!!d.oracle_consensus_reached;
   S.temporal_coherence=d.temporal_coherence||0;
+  // 🔬 NEW: Read live lattice metrics
+  if(d.w_state_fidelity!=null) S.fidelity=d.w_state_fidelity;
+  if(d.coherence!=null) S.coherence=d.coherence;
+  if(d.entropy!=null) S.entropy=d.entropy;
+  if(d.lattice_cycle!=null) S.cycle=d.lattice_cycle;
+  if(d.lattice_sigma_mod8!=null) S.sigma_mod8=d.lattice_sigma_mod8;
   // recent_blocks: [{height,hash,tx_count,fidelity,coherence}]
   if(d.recent_blocks&&d.recent_blocks.length){
     d.recent_blocks.forEach(function(b){
@@ -591,8 +598,13 @@ try{
     // metrics_update uses exact same key names as /api/oracle/w-state
     if(d.fidelity!=null) S.fidelity=d.fidelity;
     else if(d.w3_fidelity!=null) S.fidelity=d.w3_fidelity;
+    else if(d.w_state_fidelity!=null) S.fidelity=d.w_state_fidelity;
     if(d.coherence!=null) S.coherence=d.coherence;
+    if(d.entropy!=null) S.entropy=d.entropy;
     if(d.cycle!=null) S.cycle=d.cycle;
+    if(d.lattice_cycle!=null) S.cycle=d.lattice_cycle;
+    if(d.sigma_mod8!=null) S.sigma_mod8=d.sigma_mod8;
+    if(d.lattice_sigma_mod8!=null) S.sigma_mod8=d.lattice_sigma_mod8;
     if(d.n_peers!=null) S.n_peers=d.n_peers;
     if(d.qrng_health!=null) S.qrng_health=d.qrng_health;
     fidH.push(S.fidelity);if(fidH.length>80) fidH.shift();
