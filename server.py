@@ -6341,6 +6341,7 @@ def quantum_metrics_thread():
     # Seed rho3 from QRNG-perturbed W-state so the engine never starts from
     # a predictable pure state. _oracle_hermitian_perturb() draws from the
     # 5-source QRNG ensemble (same path used by OracleNode._qrng_initial_dm).
+    # ENTERPRISE GUARANTEE: Dies hard if QRNG unavailable. No os.urandom fallback.
     try:
         from oracle import _oracle_hermitian_perturb, _oracle_stochastic_channel
         _rho3_seed = _w_dm(3).copy()
@@ -6351,13 +6352,10 @@ def quantum_metrics_thread():
         _rho3_seed = _oracle_stochastic_channel(_rho3_seed, epsilon=0.10)
         logger.info(f"[ENT v3] QRNG-seeded rho3 | F={float(_np.real(_np.trace(_rho3_seed @ _w_dm(3)))):.4f}")
     except Exception as _seed_err:
-        logger.warning(f"[ENT v3] QRNG rho3 seed failed ({_seed_err}), using os.urandom perturbation")
-        _rho3_seed = _w_dm(3).copy()
-        _raw3 = _np.frombuffer(os.urandom(128), dtype=_np.uint8).astype(float)/255.0 - 0.5
-        _noise3 = (_raw3[:64].reshape(8,8) + 1j*_raw3[64:].reshape(8,8)) * 0.05
-        _rho3_seed = _rho3_seed + 0.5*(_noise3 + _noise3.conj().T)
-        _rho3_seed = 0.5*(_rho3_seed+_rho3_seed.conj().T)
-        _rho3_seed /= max(float(_np.real(_np.trace(_rho3_seed))), 1e-12)
+        raise RuntimeError(
+            f"[ENT v3] FATAL: QRNG rho3 seed initialization failed: {_seed_err}. "
+            f"Cannot proceed without quantum entropy seeding. No fallback to os.urandom permitted."
+        )
     with _ENG_LOCK: _ENG_STATE['rho3'] = _rho3_seed
 
     while getattr(state, 'is_alive', True):
@@ -6470,17 +6468,18 @@ def quantum_metrics_thread():
             # NaN/Inf hard guard: rho3 diverged — reset to QRNG-perturbed W-state.
             # Using the pure ideal _w_dm(3) here would re-introduce a predictable
             # checkpoint; a QRNG Kraus kick keeps the trajectory unique even after recovery.
+            # ENTERPRISE GUARANTEE: Dies hard if QRNG unavailable. No os.urandom fallback.
             if not _np.all(_np.isfinite(rho3)):
                 logger.warning("[ENT v3] rho3 diverged — resetting to QRNG-perturbed W-state")
                 _rho3_reset = _w_dm(3).copy()
                 try:
                     from oracle import _oracle_stochastic_channel
                     _rho3_reset = _oracle_stochastic_channel(_rho3_reset, epsilon=0.12)
-                except Exception:
-                    _raw_r = _np.frombuffer(os.urandom(64), dtype=_np.uint8).astype(float)/255.0 - 0.5
-                    _rho3_reset += 0.03 * (_raw_r[:32].reshape(8,4) @ _raw_r[32:].reshape(4,8))
-                    _rho3_reset = 0.5*(_rho3_reset+_rho3_reset.conj().T)
-                    _rho3_reset /= max(float(_np.real(_np.trace(_rho3_reset))), 1e-12)
+                except Exception as _reset_err:
+                    raise RuntimeError(
+                        f"[ENT v3] FATAL: QRNG rho3 reset after divergence failed: {_reset_err}. "
+                        f"Cannot recover without quantum entropy. No fallback to os.urandom permitted."
+                    )
                 rho3 = _rho3_reset
 
             # ── 7. W-state sector + coherence correction ─────────────────────────
