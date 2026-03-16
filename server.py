@@ -10458,7 +10458,7 @@ def _start_oracle_measurement_sync_daemon():
     """
     
     def _oracle_measurement_sync_loop():
-        logger.info("[ORACLE-SYNC] 🚀 ENHANCED measurement daemon STARTED (real-time block-field)")
+        logger.info("[ORACLE-SYNC] 🚀 ENHANCED measurement daemon STARTED (real-time block-field + Mermin)")
         last_measured_cycle = -1
         consecutive_failures = 0
         
@@ -10487,17 +10487,27 @@ def _start_oracle_measurement_sync_daemon():
                     lattice_c = window_info.get('coherence', 0.0)
                     
                     bf_readings = []
+                    mermin_values = []
                     measurement_start = time.time_ns()
                     
-                    # ✅ CONCURRENT: Measure all 5 oracles at block-field (pq_curr, pq_last)
+                    # ✅ CONCURRENT: Measure all 5 oracles at block-field (pq_curr, pq_last) + Mermin
                     for node_idx, node in enumerate(ORACLE_W_STATE_MANAGER.nodes):
                         try:
                             bf = node.measure_block_field(pq_curr, pq_last)
                             if bf:
                                 bf_readings.append((node_idx, bf))
+                                
+                                # ✅ MERMIN: Compute Mermin inequality for this oracle
+                                try:
+                                    mermin = node.compute_mermin_violation() if hasattr(node, 'compute_mermin_violation') else 0.0
+                                    mermin_values.append((node_idx, mermin))
+                                except:
+                                    mermin_values.append((node_idx, 0.0))
+                                
                                 logger.info(
                                     f"[ORACLE-SYNC] ✓ Oracle-{node_idx} measured | "
-                                    f"pq=[{pq_last}→{pq_curr}] | F={bf.fidelity:.4f} | C={bf.coherence:.4f}"
+                                    f"pq=[{pq_last}→{pq_curr}] | F={bf.fidelity:.4f} | C={bf.coherence:.4f} | "
+                                    f"Mermin={mermin_values[-1][1]:.4f}"
                                 )
                             else:
                                 logger.warning(
@@ -10512,18 +10522,19 @@ def _start_oracle_measurement_sync_daemon():
                     
                     measurement_elapsed_ns = time.time_ns() - measurement_start
                     
-                    # ✅ REPORT: Compute unified W3 fidelity
+                    # ✅ REPORT: Compute unified W3 fidelity + average Mermin
                     if bf_readings:
                         consecutive_failures = 0
                         
                         avg_bf_fidelity = sum(bf[1].fidelity for bf in bf_readings) / len(bf_readings)
                         avg_bf_coherence = sum(bf[1].coherence for bf in bf_readings) / len(bf_readings)
+                        avg_mermin = sum(m[1] for m in mermin_values) / len(mermin_values) if mermin_values else 0.0
                         
                         fidelity_delta = abs(avg_bf_fidelity - lattice_f)
                         coherence_delta = abs(avg_bf_coherence - lattice_c)
                         timestamp_ns = int(time.time_ns())
                         
-                        # ✅ PERSIST: Real-time DB write with full index tracking
+                        # ✅ PERSIST: Real-time DB write with full index tracking + Mermin
                         try:
                             if DB_POOL:
                                 with DB_POOL.getconn() as conn:
@@ -10532,14 +10543,15 @@ def _start_oracle_measurement_sync_daemon():
                                         INSERT INTO oracle_measurements (
                                             cycle, timestamp_ns, lattice_fidelity, block_field_fidelity,
                                             block_field_coherence, pq_curr, pq_last, oracle_count,
-                                            fidelity_delta, window_type
+                                            fidelity_delta, window_type, mermin_violation
                                         ) VALUES (
-                                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                                         )
                                     """, (
                                         current_cycle, timestamp_ns, float(lattice_f), float(avg_bf_fidelity),
                                         float(avg_bf_coherence), pq_curr, pq_last, len(bf_readings),
-                                        float(fidelity_delta), 'REVIVAL' if is_revival else 'POWER-2'
+                                        float(fidelity_delta), 'REVIVAL' if is_revival else 'POWER-2',
+                                        float(avg_mermin)
                                     ))
                                     conn.commit()
                                     cursor.close()
@@ -10555,6 +10567,7 @@ def _start_oracle_measurement_sync_daemon():
                                 f"Lattice=[F={lattice_f:.4f} C={lattice_c:.6f}] | "
                                 f"BlockField=[F={avg_bf_fidelity:.4f} C={avg_bf_coherence:.6f}] | "
                                 f"Δ=[{fidelity_delta:.4f} {coherence_delta:.6f}] | "
+                                f"Mermin={avg_mermin:.4f} | "
                                 f"Window={'REVIVAL' if is_revival else 'POWER-2'} | "
                                 f"Oracles={len(bf_readings)} | "
                                 f"Index=[pq_last={pq_last} pq_curr={pq_curr}] | "
@@ -10564,6 +10577,7 @@ def _start_oracle_measurement_sync_daemon():
                             logger.warning(
                                 f"[ORACLE-SYNC] ⚠️  DIVERGENCE at cycle {current_cycle} | "
                                 f"Lattice=[F={lattice_f:.4f}] BlockField=[F={avg_bf_fidelity:.4f}] Δ_F={fidelity_delta:.4f} | "
+                                f"Mermin={avg_mermin:.4f} | "
                                 f"Oracles={len(bf_readings)} | Index=[pq_last={pq_last} pq_curr={pq_curr}]"
                             )
                     else:
@@ -10584,13 +10598,23 @@ def _start_oracle_measurement_sync_daemon():
                 logger.error(f"[ORACLE-SYNC] Loop exception: {e}", exc_info=True)
                 time.sleep(0.1)
     
-    _oracle_sync_thread = threading.Thread(target=_oracle_measurement_sync_loop, daemon=True, name="OracleMeasurementSync")
-    _oracle_sync_thread.start()
-    logger.info("[ORACLE-SYNC] ✅ ENHANCED daemon running (real-time W3 fidelity + index tracking)")
+def _deferred_start_oracle_measurement_sync():
+    """Start oracle measurement sync daemon once oracle is ready (deferred from module load)"""
+    max_wait = 60
+    waited = 0
+    while waited < max_wait:
+        if LATTICE is not None and ORACLE_W_STATE_MANAGER is not None:
+            logger.info("[ORACLE-SYNC] 🚀 Conditions met (LATTICE + ORACLE_W_STATE_MANAGER) — starting daemon NOW")
+            _start_oracle_measurement_sync_daemon()
+            return
+        time.sleep(0.5)
+        waited += 0.5
+    logger.error(f"[ORACLE-SYNC] ❌ Timeout waiting for oracle init ({max_wait}s)")
 
-# Start measurement sync daemon
-if LATTICE is not None and ORACLE_W_STATE_MANAGER is not None:
-    _start_oracle_measurement_sync_daemon()
+# Spawn deferred daemon startup (waits for oracle to be ready, then starts)
+_oracle_deferred_thread = threading.Thread(target=_deferred_start_oracle_measurement_sync, daemon=True, name="OracleSyncDeferred")
+_oracle_deferred_thread.start()
+logger.info("[ORACLE-SYNC] ⏳ Deferred daemon waiter started (will launch once oracle ready)")
 
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
