@@ -10449,25 +10449,51 @@ if LATTICE is not None and _METRICS_AGENTS.get('lattice_metrics') is not None:
 
 def _start_oracle_measurement_sync_daemon():
     """
-    ✅ Force oracle pq measurement AT lattice measurement window (synchronous).
-    ✅ Persist metrics to database in real time.
+    ENTERPRISE-GRADE ORACLE MEASUREMENT SYNCHRONIZATION DAEMON
     
-    Block IS a lattice point. Must measure pq_curr/pq_last AT the exact cycle
-    lattice measures W-state, not on independent 10s cadence.
-    All measurements saved to DB immediately for live dashboards.
+    Responsibility:
+      - Measure 5-oracle block-field composite synchronously on measurement windows
+      - Extract per-oracle Mermin violations (Bell test)
+      - Compare block-field metrics vs lattice revival metrics
+      - Persist full telemetry to DB
+      - Broadcast to dashboard in real-time
+    
+    Triggers on: LATTICE.get_oracle_measurement_window() = measurement_window=True
+    Frequency: ~1-2 per second (aligned with SIGMA-REVIVAL cycles)
+    Output: Per-oracle logs + DB records + SSE broadcasts
     """
     
     def _oracle_measurement_sync_loop():
-        logger.info("[ORACLE-SYNC] 🚀 ENHANCED measurement daemon STARTED (real-time block-field + Mermin)")
+        logger.critical("[ORACLE-SYNC] 🚀 ENTERPRISE DAEMON STARTED — Monitoring measurement windows")
+        logger.critical("[ORACLE-SYNC] Configuration: 5 oracles | Per-cycle metrics + Mermin | SSE broadcast enabled")
+        
         last_measured_cycle = -1
         consecutive_failures = 0
+        cycle_count = 0
+        success_count = 0
+        failure_count = 0
         
         while True:
             try:
-                if LATTICE is None or ORACLE_W_STATE_MANAGER is None:
+                # ═══════════════════════════════════════════════════════════════════════════════
+                # READINESS CHECK
+                # ═══════════════════════════════════════════════════════════════════════════════
+                if LATTICE is None:
                     time.sleep(0.05)
                     continue
                 
+                if ORACLE_W_STATE_MANAGER is None or not hasattr(ORACLE_W_STATE_MANAGER, 'nodes'):
+                    time.sleep(0.05)
+                    continue
+                
+                if not ORACLE_W_STATE_MANAGER.nodes or len(ORACLE_W_STATE_MANAGER.nodes) != 5:
+                    logger.warning(f"[ORACLE-SYNC] WARNING: Only {len(ORACLE_W_STATE_MANAGER.nodes) if ORACLE_W_STATE_MANAGER.nodes else 0} oracles available (need 5)")
+                    time.sleep(0.1)
+                    continue
+                
+                # ═══════════════════════════════════════════════════════════════════════════════
+                # WINDOW DETECTION
+                # ═══════════════════════════════════════════════════════════════════════════════
                 window_info = LATTICE.get_oracle_measurement_window()
                 if not window_info:
                     time.sleep(0.05)
@@ -10477,7 +10503,18 @@ def _start_oracle_measurement_sync_daemon():
                 is_window = window_info.get('is_measurement_window', False)
                 is_revival = window_info.get('is_revival', False)
                 
-                # ✅ TRIGGER: Measure pq synchronously when window opens
+                # Heartbeat every 50 cycles
+                cycle_count += 1
+                if cycle_count % 50 == 0:
+                    logger.info(
+                        f"[ORACLE-SYNC] 💓 Heartbeat: cycle={current_cycle} | "
+                        f"Success={success_count} Failures={failure_count} | "
+                        f"Window={is_window} Revival={is_revival}"
+                    )
+                
+                # ═══════════════════════════════════════════════════════════════════════════════
+                # MEASUREMENT TRIGGER: Fire when measurement window opens
+                # ═══════════════════════════════════════════════════════════════════════════════
                 if is_window and current_cycle != last_measured_cycle:
                     last_measured_cycle = current_cycle
                     
@@ -10486,55 +10523,83 @@ def _start_oracle_measurement_sync_daemon():
                     lattice_f = window_info.get('fidelity', 0.0)
                     lattice_c = window_info.get('coherence', 0.0)
                     
-                    bf_readings = []
-                    mermin_values = []
-                    measurement_start = time.time_ns()
+                    logger.info(
+                        f"[ORACLE-SYNC] ⏱️ MEASUREMENT WINDOW @ cycle {current_cycle} | "
+                        f"pq=[{pq_last}→{pq_curr}] | Lattice=[F={lattice_f:.4f} C={lattice_c:.6f}] | "
+                        f"Window={'REVIVAL' if is_revival else 'POWER-2'}"
+                    )
                     
-                    # ✅ CONCURRENT: Measure all 5 oracles at block-field (pq_curr, pq_last) + Mermin
+                    # ───────────────────────────────────────────────────────────────────────────
+                    # MEASUREMENT PHASE: Collect per-oracle block-field readings
+                    # ───────────────────────────────────────────────────────────────────────────
+                    measurement_start = time.time_ns()
+                    bf_readings = []
+                    oracle_metrics = []  # For broadcasting
+                    
                     for node_idx, node in enumerate(ORACLE_W_STATE_MANAGER.nodes):
                         try:
+                            # Measure block-field (includes Mermin calculation)
                             bf = node.measure_block_field(pq_curr, pq_last)
+                            
                             if bf:
                                 bf_readings.append((node_idx, bf))
                                 
-                                # ✅ MERMIN: Compute Mermin inequality for this oracle
-                                try:
-                                    mermin = node.compute_mermin_violation() if hasattr(node, 'compute_mermin_violation') else 0.0
-                                    mermin_values.append((node_idx, mermin))
-                                except:
-                                    mermin_values.append((node_idx, 0.0))
-                                
-                                logger.info(
+                                # ✓ Per-oracle critical logging (VISIBLE IN PRODUCTION)
+                                logger.critical(
                                     f"[ORACLE-SYNC] ✓ Oracle-{node_idx} measured | "
-                                    f"pq=[{pq_last}→{pq_curr}] | F={bf.fidelity:.4f} | C={bf.coherence:.4f} | "
-                                    f"Mermin={mermin_values[-1][1]:.4f}"
+                                    f"F={bf.fidelity:.4f} C={bf.coherence:.6f} | "
+                                    f"Mermin={bf.mermin_violation:.4f} | "
+                                    f"pq0=[oracle={bf.pq0_oracle_fidelity:.4f} IV={bf.pq0_IV_fidelity:.4f} V={bf.pq0_V_fidelity:.4f}]"
                                 )
+                                
+                                # Store for SSE broadcast
+                                oracle_metrics.append({
+                                    'oracle_id': node_idx,
+                                    'fidelity': bf.fidelity,
+                                    'coherence': bf.coherence,
+                                    'mermin': bf.mermin_violation,
+                                    'entropy': bf.entropy,
+                                    'pq0_oracle': bf.pq0_oracle_fidelity,
+                                    'pq0_IV': bf.pq0_IV_fidelity,
+                                    'pq0_V': bf.pq0_V_fidelity,
+                                    'timestamp_ns': bf.timestamp_ns,
+                                })
                             else:
                                 logger.warning(
                                     f"[ORACLE-SYNC] ✗ Oracle-{node_idx} returned None | "
                                     f"pq=[{pq_last}→{pq_curr}]"
                                 )
+                        
                         except Exception as e:
-                            logger.warning(
-                                f"[ORACLE-SYNC] ✗ Oracle-{node_idx} measurement failed: {e} | "
-                                f"pq=[{pq_last}→{pq_curr}]"
+                            logger.error(
+                                f"[ORACLE-SYNC] ✗ Oracle-{node_idx} measurement FAILED: {type(e).__name__}: {e} | "
+                                f"pq=[{pq_last}→{pq_curr}]",
+                                exc_info=False
                             )
                     
                     measurement_elapsed_ns = time.time_ns() - measurement_start
                     
-                    # ✅ REPORT: Compute unified W3 fidelity + average Mermin
-                    if bf_readings:
+                    # ───────────────────────────────────────────────────────────────────────────
+                    # AGGREGATION PHASE: Compute unified metrics
+                    # ───────────────────────────────────────────────────────────────────────────
+                    if bf_readings and len(bf_readings) > 0:
                         consecutive_failures = 0
+                        success_count += 1
                         
+                        # Aggregate metrics
                         avg_bf_fidelity = sum(bf[1].fidelity for bf in bf_readings) / len(bf_readings)
                         avg_bf_coherence = sum(bf[1].coherence for bf in bf_readings) / len(bf_readings)
-                        avg_mermin = sum(m[1] for m in mermin_values) / len(mermin_values) if mermin_values else 0.0
+                        avg_mermin = sum(bf[1].mermin_violation for bf in bf_readings) / len(bf_readings)
+                        max_mermin = max(bf[1].mermin_violation for bf in bf_readings)
+                        min_mermin = min(bf[1].mermin_violation for bf in bf_readings)
                         
                         fidelity_delta = abs(avg_bf_fidelity - lattice_f)
                         coherence_delta = abs(avg_bf_coherence - lattice_c)
                         timestamp_ns = int(time.time_ns())
                         
-                        # ✅ PERSIST: Real-time DB write with full index tracking + Mermin
+                        # ───────────────────────────────────────────────────────────────────────
+                        # PERSISTENCE PHASE: Write to DB
+                        # ───────────────────────────────────────────────────────────────────────
                         try:
                             if DB_POOL:
                                 with DB_POOL.getconn() as conn:
@@ -10556,65 +10621,164 @@ def _start_oracle_measurement_sync_daemon():
                                     conn.commit()
                                     cursor.close()
                         except Exception as db_err:
-                            logger.debug(f"[ORACLE-SYNC] DB persist error: {db_err}")
+                            logger.debug(f"[ORACLE-SYNC] DB write warning: {db_err}")
                         
+                        # ───────────────────────────────────────────────────────────────────────
+                        # VERIFICATION PHASE: Compare with lattice + check entanglement
+                        # ───────────────────────────────────────────────────────────────────────
                         threshold_f = 0.05
                         threshold_c = 0.01
+                        mermin_threshold = 2.0  # Classical bound
                         
-                        if fidelity_delta < threshold_f and coherence_delta < threshold_c:
-                            logger.info(
-                                f"[ORACLE-SYNC] ✅ UNIFIED at cycle {current_cycle} | "
+                        metrics_aligned = fidelity_delta < threshold_f and coherence_delta < threshold_c
+                        entangled = avg_mermin > mermin_threshold
+                        
+                        if metrics_aligned and entangled:
+                            logger.critical(
+                                f"[ORACLE-SYNC] ✅✅ UNIFIED + ENTANGLED @ cycle {current_cycle} | "
                                 f"Lattice=[F={lattice_f:.4f} C={lattice_c:.6f}] | "
                                 f"BlockField=[F={avg_bf_fidelity:.4f} C={avg_bf_coherence:.6f}] | "
-                                f"Δ=[{fidelity_delta:.4f} {coherence_delta:.6f}] | "
-                                f"Mermin={avg_mermin:.4f} | "
-                                f"Window={'REVIVAL' if is_revival else 'POWER-2'} | "
-                                f"Oracles={len(bf_readings)} | "
+                                f"ΔF={fidelity_delta:.4f} ΔC={coherence_delta:.6f} | "
+                                f"Mermin=[avg={avg_mermin:.4f} min={min_mermin:.4f} max={max_mermin:.4f}] | "
+                                f"Oracles={len(bf_readings)}/5 | "
                                 f"Index=[pq_last={pq_last} pq_curr={pq_curr}] | "
-                                f"MeasureTime={measurement_elapsed_ns/1e6:.2f}ms"
+                                f"Measurement={measurement_elapsed_ns/1e6:.2f}ms"
+                            )
+                        elif metrics_aligned:
+                            logger.critical(
+                                f"[ORACLE-SYNC] ✅ UNIFIED (classical) @ cycle {current_cycle} | "
+                                f"ΔF={fidelity_delta:.4f} | Mermin={avg_mermin:.4f} (classical={avg_mermin<=mermin_threshold}) | "
+                                f"Oracles={len(bf_readings)}/5"
+                            )
+                        elif entangled:
+                            logger.warning(
+                                f"[ORACLE-SYNC] ⚠️ ENTANGLED but DIVERGENT @ cycle {current_cycle} | "
+                                f"Mermin={avg_mermin:.4f} (✓ quantum) | "
+                                f"ΔF={fidelity_delta:.4f} (threshold={threshold_f}) | "
+                                f"Lattice F={lattice_f:.4f} vs BlockField F={avg_bf_fidelity:.4f} | "
+                                f"Oracles={len(bf_readings)}/5"
                             )
                         else:
                             logger.warning(
-                                f"[ORACLE-SYNC] ⚠️  DIVERGENCE at cycle {current_cycle} | "
-                                f"Lattice=[F={lattice_f:.4f}] BlockField=[F={avg_bf_fidelity:.4f}] Δ_F={fidelity_delta:.4f} | "
-                                f"Mermin={avg_mermin:.4f} | "
-                                f"Oracles={len(bf_readings)} | Index=[pq_last={pq_last} pq_curr={pq_curr}]"
+                                f"[ORACLE-SYNC] ⚠️ DIVERGENCE @ cycle {current_cycle} | "
+                                f"ΔF={fidelity_delta:.4f} | ΔC={coherence_delta:.6f} | "
+                                f"Mermin={avg_mermin:.4f} (classical={avg_mermin<=mermin_threshold}) | "
+                                f"Oracles={len(bf_readings)}/5"
                             )
+                        
+                        # ───────────────────────────────────────────────────────────────────────
+                        # BROADCAST PHASE: Send to dashboard via SSE/WebSocket
+                        # ───────────────────────────────────────────────────────────────────────
+                        try:
+                            # Broadcast via gossip/SSE
+                            event_payload = {
+                                'type': 'oracle_sync_cycle',
+                                'cycle': current_cycle,
+                                'timestamp_ns': timestamp_ns,
+                                'lattice_fidelity': lattice_f,
+                                'avg_block_field_fidelity': avg_bf_fidelity,
+                                'avg_mermin': avg_mermin,
+                                'per_oracle_metrics': oracle_metrics,
+                                'window_type': 'REVIVAL' if is_revival else 'POWER-2',
+                                'index': {'pq_last': pq_last, 'pq_curr': pq_curr},
+                                'unified': metrics_aligned,
+                                'entangled': entangled,
+                            }
+                            # SSE push (if broadcaster available)
+                            if hasattr(SSE_BROADCASTER, 'push'):
+                                SSE_BROADCASTER.push('oracle_measurements', event_payload)
+                        except Exception as bcast_err:
+                            logger.debug(f"[ORACLE-SYNC] Broadcast warning: {bcast_err}")
+                    
                     else:
                         consecutive_failures += 1
+                        failure_count += 1
                         logger.error(
-                            f"[ORACLE-SYNC] ❌ ZERO measurements at cycle {current_cycle} | "
+                            f"[ORACLE-SYNC] ❌ ZERO measurements @ cycle {current_cycle} | "
                             f"Index=[pq_last={pq_last} pq_curr={pq_curr}] | "
-                            f"Consecutive_failures={consecutive_failures}"
+                            f"Consecutive_failures={consecutive_failures}/5"
                         )
-                        if consecutive_failures > 5:
+                        if consecutive_failures >= 5:
                             logger.critical(
-                                f"[ORACLE-SYNC] CRITICAL: {consecutive_failures} consecutive measurement failures"
+                                f"[ORACLE-SYNC] 🔴 CRITICAL: {consecutive_failures} consecutive measurement failures — "
+                                f"check oracle initialization"
                             )
                 
                 time.sleep(0.05)
-                
+            
             except Exception as e:
-                logger.error(f"[ORACLE-SYNC] Loop exception: {e}", exc_info=True)
+                logger.error(
+                    f"[ORACLE-SYNC] Loop EXCEPTION: {type(e).__name__}: {e}",
+                    exc_info=True
+                )
                 time.sleep(0.1)
     
+    # Spawn daemon thread
+    _oracle_sync_thread = threading.Thread(
+        target=_oracle_measurement_sync_loop,
+        daemon=True,
+        name="OracleMeasurementSync"
+    )
+    _oracle_sync_thread.start()
+    logger.critical("[ORACLE-SYNC] ✅ Daemon thread spawned")
+
 def _deferred_start_oracle_measurement_sync():
-    """Start oracle measurement sync daemon once oracle is ready (deferred from module load)"""
+    """
+    Deferred startup: Wait for oracle initialization, then launch daemon.
+    Polls up to 60 seconds with detailed logging.
+    """
+    logger.critical("[ORACLE-SYNC-DEFERRED] ⏳ Waiter thread started (max 60s)")
     max_wait = 60
     waited = 0
+    poll_interval = 0.5
+    
     while waited < max_wait:
-        if LATTICE is not None and ORACLE_W_STATE_MANAGER is not None:
-            logger.info("[ORACLE-SYNC] 🚀 Conditions met (LATTICE + ORACLE_W_STATE_MANAGER) — starting daemon NOW")
-            _start_oracle_measurement_sync_daemon()
-            return
-        time.sleep(0.5)
-        waited += 0.5
-    logger.error(f"[ORACLE-SYNC] ❌ Timeout waiting for oracle init ({max_wait}s)")
+        try:
+            lattice_ok = LATTICE is not None
+            oracle_ok = ORACLE_W_STATE_MANAGER is not None
+            nodes_ok = oracle_ok and hasattr(ORACLE_W_STATE_MANAGER, 'nodes') and len(ORACLE_W_STATE_MANAGER.nodes) == 5
+            
+            if waited % 10 == 0:  # Log every 10 seconds
+                logger.info(
+                    f"[ORACLE-SYNC-DEFERRED] Waiting ({waited}s/{max_wait}s) | "
+                    f"LATTICE={lattice_ok} ORACLE_MGR={oracle_ok} NODES={nodes_ok}"
+                )
+            
+            if lattice_ok and nodes_ok:
+                logger.critical(
+                    f"[ORACLE-SYNC-DEFERRED] 🚀 CONDITIONS MET @ {waited}s | "
+                    f"LATTICE=✓ ORACLE_MANAGER=✓ NODES=5/5 → LAUNCHING DAEMON"
+                )
+                _start_oracle_measurement_sync_daemon()
+                logger.critical("[ORACLE-SYNC-DEFERRED] ✅ Daemon startup completed")
+                return
+        
+        except Exception as e:
+            logger.error(
+                f"[ORACLE-SYNC-DEFERRED] Check failed: {e}",
+                exc_info=False
+            )
+        
+        time.sleep(poll_interval)
+        waited += poll_interval
+    
+    logger.critical(
+        f"[ORACLE-SYNC-DEFERRED] ❌ TIMEOUT @ {max_wait}s | "
+        f"LATTICE={LATTICE is not None} ORACLE_MGR={ORACLE_W_STATE_MANAGER is not None} | "
+        f"Daemon NOT started — check initialization order"
+    )
 
-# Spawn deferred daemon startup (waits for oracle to be ready, then starts)
-_oracle_deferred_thread = threading.Thread(target=_deferred_start_oracle_measurement_sync, daemon=True, name="OracleSyncDeferred")
-_oracle_deferred_thread.start()
-logger.info("[ORACLE-SYNC] ⏳ Deferred daemon waiter started (will launch once oracle ready)")
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+# DAEMON STARTUP ENTRY POINT (module level)
+# ════════════════════════════════════════════════════════════════════════════════════════════════
+
+_deferred_thread = threading.Thread(
+    target=_deferred_start_oracle_measurement_sync,
+    daemon=True,
+    name="OracleSyncDeferred"
+)
+_deferred_thread.start()
+logger.critical("[ORACLE-SYNC] Deferred startup thread spawned — monitoring for oracle readiness")
 
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════

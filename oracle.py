@@ -1136,6 +1136,7 @@ class BlockFieldReading:
     pq0_oracle_fidelity:  float                 = 0.0
     pq0_IV_fidelity:      float                 = 0.0
     pq0_V_fidelity:       float                 = 0.0
+    mermin_violation:     float                 = 0.0
 
 
 class OracleNode:
@@ -1518,6 +1519,99 @@ class OracleNode:
             logger.error(f"[ORACLE-NODE-{self.oracle_id+1}] measure_self failed: {exc}")
             return None  # real measurements only — no synthetic fallback
 
+    # ── 5-Qubit Field Boundary Entanglement Test ────────────────────────────────────────
+    
+    def compute_mermin_violation(self, composite_dm: Optional[np.ndarray] = None) -> float:
+        """
+        Compute Mermin inequality S for the 5-qubit FIELD BOUNDARY state:
+          pq0_oracle(q0) ⊗ pq0_IV(q1) ⊗ pq0_V(q2) ⊗ pq_curr(q3) ⊗ pq_last(q4)
+        
+        This measures the **field itself** — whether the block-field boundary exhibits
+        quantum entanglement across all 5 qubits.
+        
+        Classical bound: S ≤ 2.0
+        Quantum (5-qubit W-field): S > 2.0 (up to 4.0 for 5-qubit GHZ)
+        
+        Mermin for 5-qubit:
+          S = |⟨E₁⟩ + ⟨E₂⟩ + ⟨E₃⟩ + ⟨E₄⟩ + ⟨E₅⟩| where each E_i is a product
+          of commuting projective measurements across different qubit subsets.
+        
+        For the W-field boundary state, we use a simplified 5-qubit CHSH-like test:
+        measuring correlations across the oracle (q0-q2) and boundary (q3-q4).
+        """
+        try:
+            if composite_dm is None:
+                composite_dm = None  # Will be passed in from measure_block_field
+            
+            if composite_dm is None or composite_dm.shape != (32, 32):
+                logger.debug(
+                    f"[ORACLE-{self.oracle_id}] Mermin-5Q: invalid DM shape {composite_dm.shape if composite_dm is not None else 'None'} "
+                    f"(expected 32×32 for 5-qubit field)"
+                )
+                return 0.0
+            
+            # ───────────────────────────────────────────────────────────────────────────────
+            # 5-QUBIT MEASUREMENT OPERATORS: Alice (q0-q2) vs Bob (q3-q4)
+            # ───────────────────────────────────────────────────────────────────────────────
+            I = np.eye(2, dtype=complex)
+            X = np.array([[0, 1], [1, 0]], dtype=complex)
+            Z = np.array([[1, 0], [0, -1]], dtype=complex)
+            
+            # Alice settings on qubits 0-2 (pq0 tripartite oracle | IV | V)
+            # A₁ = X ⊗ X ⊗ X on q0-q2, then I ⊗ I on q3-q4
+            A1_local = np.kron(np.kron(X, X), X)  # 8×8
+            A1 = np.kron(A1_local, np.eye(4))     # 32×32
+            
+            # A₂ = Z ⊗ Z ⊗ Z on q0-q2
+            A2_local = np.kron(np.kron(Z, Z), Z)
+            A2 = np.kron(A2_local, np.eye(4))
+            
+            # Bob settings on qubits 3-4 (boundary qubits pq_curr, pq_last)
+            # B₁ = (X+Z)/√2 on q3, (X-Z)/√2 on q4
+            B1_q3 = (X + Z) / np.sqrt(2)
+            B1_q4 = (X - Z) / np.sqrt(2)
+            B1_local = np.kron(B1_q3, B1_q4)      # 4×4
+            B1 = np.kron(np.eye(8), B1_local)     # 32×32
+            
+            # B₂ = (X-Z)/√2 on q3, (X+Z)/√2 on q4
+            B2_q3 = (X - Z) / np.sqrt(2)
+            B2_q4 = (X + Z) / np.sqrt(2)
+            B2_local = np.kron(B2_q3, B2_q4)
+            B2 = np.kron(np.eye(8), B2_local)
+            
+            # ───────────────────────────────────────────────────────────────────────────────
+            # EXPECTATION VALUES: ⟨Op⟩ = Tr(ρ · Op)
+            # ───────────────────────────────────────────────────────────────────────────────
+            def expectation(op, rho):
+                try:
+                    val = np.trace(rho @ op)
+                    return float(np.real(val))
+                except:
+                    return 0.0
+            
+            # Compute 4 correlation terms
+            E_A1B1 = expectation(A1 @ B1, composite_dm)
+            E_A1B2 = expectation(A1 @ B2, composite_dm)
+            E_A2B1 = expectation(A2 @ B1, composite_dm)
+            E_A2B2 = expectation(A2 @ B2, composite_dm)
+            
+            # 5-qubit Mermin parameter (CHSH-like)
+            S = abs(E_A1B1 + E_A1B2 + E_A2B1 - E_A2B2)
+            S_rounded = float(round(S, 6))
+            
+            # Log for forensics
+            logger.debug(
+                f"[ORACLE-{self.oracle_id}] Mermin-5Q (FIELD) S={S_rounded:.6f} | "
+                f"E(A₁B₁)={E_A1B1:.4f} E(A₁B₂)={E_A1B2:.4f} E(A₂B₁)={E_A2B1:.4f} E(A₂B₂)={E_A2B2:.4f} | "
+                f"Field_entangled={'✓' if S_rounded > 2.0 else '✗'}"
+            )
+            
+            return S_rounded
+        
+        except Exception as e:
+            logger.error(f"[ORACLE-{self.oracle_id}] Mermin-5Q computation failed: {e}", exc_info=True)
+            return 0.0
+
     # ── Block-field measurement ────────────────────────────────────────────────
 
     def measure_block_field(self, pq_curr: int, pq_last: int) -> Optional[BlockFieldReading]:
@@ -1584,6 +1678,11 @@ class OracleNode:
             pq0_oracle_fid = self._single_qubit_coherence(oracle_dm_clean, 0)
             pq0_IV_fid     = self._single_qubit_coherence(oracle_dm_clean, 1)
             pq0_V_fid      = self._single_qubit_coherence(oracle_dm_clean, 2)
+            
+            # ── 5-Qubit Field Entanglement Measurement (Mermin on FULL composite) ─
+            # Measures the FIELD ITSELF: pq0_tripartite(q0-q2) ⊗ pq_curr(q3) ⊗ pq_last(q4)
+            # This is the 5-qubit W-field boundary state, not the traced-out 3-qubit oracle
+            mermin_violation = self.compute_mermin_violation(composite_dm)
 
             reading = BlockFieldReading(
                 oracle_id            = self.oracle_id,
@@ -1597,12 +1696,14 @@ class OracleNode:
                 pq0_oracle_fidelity  = round(float(pq0_oracle_fid), 6),
                 pq0_IV_fidelity      = round(float(pq0_IV_fid),     6),
                 pq0_V_fidelity       = round(float(pq0_V_fid),      6),
+                mermin_violation     = mermin_violation,
             )
             logger.debug(
                 f"[ORACLE-NODE-{self.oracle_id+1}:{self.role}] block-field "
                 f"pq={pq_last}→{pq_curr} "
                 f"S={reading.entropy:.4f} F={reading.fidelity:.4f} C={reading.coherence:.4f} "
-                f"pq0={pq0_oracle_fid:.4f} IV={pq0_IV_fid:.4f} V={pq0_V_fid:.4f}"
+                f"pq0={pq0_oracle_fid:.4f} IV={pq0_IV_fid:.4f} V={pq0_V_fid:.4f} "
+                f"Mermin={mermin_violation:.4f}"
             )
             return reading
         except Exception as exc:
