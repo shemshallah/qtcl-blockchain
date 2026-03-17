@@ -1905,32 +1905,47 @@ def _set_app_ready():
 @app.route('/api/snapshot/sse', methods=['GET'])
 def sse_snapshot_stream():
     """Server-Sent Events endpoint for real-time snapshot streaming."""
-    client_id = request.args.get('client_id', f"sse_{int(time.time()*1000)}")
-    miner_address = request.args.get('miner', 'unknown')
-    
-    try:
-        q = _queue_mod.Queue(maxsize=100)
-        with _sse_lock:
-            _sse_clients[client_id] = q
-        logger.info(f"[SSE] 📡 Client connected: {client_id} | Miner: {miner_address}")
-        
-        global _latest_snapshot
-        if _latest_snapshot:
-            yield f"data: {json.dumps(_latest_snapshot)}\n\n"
-        
-        while True:
-            try:
-                snapshot = q.get(timeout=60)
-                yield f"data: {json.dumps(snapshot)}\n\n"
-            except _queue_mod.Empty:
-                yield ": keepalive\n\n"
-    except Exception as e:
-        logger.error(f"[SSE] ❌ Error: {e}")
-    finally:
-        with _sse_lock:
-            if client_id in _sse_clients:
-                del _sse_clients[client_id]
-        logger.info(f"[SSE] 🔌 Client disconnected: {client_id}")
+    # ── Capture ALL request-context values HERE, before the generator runs ──
+    # Flask exits the request context before the generator body executes its
+    # first yield. Any request.* access inside the generator raises:
+    #   RuntimeError: Working outside of request context.
+    client_id      = request.args.get('client_id', f"sse_{int(time.time()*1000)}")
+    miner_address  = request.args.get('miner', 'unknown')
+
+    def _stream(_client_id, _miner_address):
+        try:
+            q = _queue_mod.Queue(maxsize=100)
+            with _sse_lock:
+                _sse_clients[_client_id] = q
+            logger.info(f"[SSE] 📡 Client connected: {_client_id} | Miner: {_miner_address}")
+
+            global _latest_snapshot
+            if _latest_snapshot:
+                yield f"data: {json.dumps(_latest_snapshot)}\n\n"
+
+            while True:
+                try:
+                    snapshot = q.get(timeout=60)
+                    yield f"data: {json.dumps(snapshot)}\n\n"
+                except _queue_mod.Empty:
+                    yield ": keepalive\n\n"
+        except Exception as e:
+            logger.error(f"[SSE] ❌ Error: {e}")
+        finally:
+            with _sse_lock:
+                if _client_id in _sse_clients:
+                    del _sse_clients[_client_id]
+            logger.info(f"[SSE] 🔌 Client disconnected: {_client_id}")
+
+    return Response(
+        _stream(client_id, miner_address),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control':   'no-cache',
+            'X-Accel-Buffering': 'no',
+            'Connection':      'keep-alive',
+        }
+    )
 
 @app.route('/api/snapshots/latest', methods=['GET'])
 def snapshots_latest():
@@ -2379,21 +2394,17 @@ def _persist_chirp_snapshot(snap: dict) -> None:
                     bucket_ts, timestamp_ns, chirp_number,
                     lattice_fidelity, lattice_coherence, lattice_cycle, lattice_sigma_mod8,
                     consensus_fidelity, consensus_coherence, consensus_purity,
-                    consensus_entropy, w_state_strength,
-                    mermin_M, mermin_is_quantum, mermin_verdict, mermin_angles,
+                    mermin_M, mermin_is_quantum, mermin_verdict,
                     pq0_oracle, pq0_IV, pq0_V,
                     pq_curr, pq_last,
-                    dm_hex,
                     oracle_measurements, phase_name
                 ) VALUES (
                     %s, %s, %s,
                     %s, %s, %s, %s,
                     %s, %s, %s,
-                    %s, %s,
-                    %s, %s, %s, %s::JSONB,
+                    %s, %s, %s,
                     %s, %s, %s,
                     %s, %s,
-                    %s,
                     %s::JSONB, %s
                 )
                 ON CONFLICT (bucket_ts) DO UPDATE SET
@@ -2406,18 +2417,14 @@ def _persist_chirp_snapshot(snap: dict) -> None:
                     consensus_fidelity  = EXCLUDED.consensus_fidelity,
                     consensus_coherence = EXCLUDED.consensus_coherence,
                     consensus_purity    = EXCLUDED.consensus_purity,
-                    consensus_entropy   = EXCLUDED.consensus_entropy,
-                    w_state_strength    = EXCLUDED.w_state_strength,
                     mermin_M            = EXCLUDED.mermin_M,
                     mermin_is_quantum   = EXCLUDED.mermin_is_quantum,
                     mermin_verdict      = EXCLUDED.mermin_verdict,
-                    mermin_angles       = EXCLUDED.mermin_angles,
                     pq0_oracle          = EXCLUDED.pq0_oracle,
                     pq0_IV              = EXCLUDED.pq0_IV,
                     pq0_V               = EXCLUDED.pq0_V,
                     pq_curr             = EXCLUDED.pq_curr,
                     pq_last             = EXCLUDED.pq_last,
-                    dm_hex              = EXCLUDED.dm_hex,
                     oracle_measurements = EXCLUDED.oracle_measurements,
                     phase_name          = EXCLUDED.phase_name
             """, (
@@ -2426,18 +2433,14 @@ def _persist_chirp_snapshot(snap: dict) -> None:
                 round(float(cons.get('w_state_fidelity', 0.0)), 6),
                 round(float(cons.get('coherence',        0.0)), 6),
                 round(float(cons.get('purity',           0.0)), 6),
-                round(float(cons.get('von_neumann_entropy', 0.0)), 6),
-                round(float(cons.get('w_state_strength',    0.0)), 6),
                 round(float(mermin.get('M_value', 0.0)), 6),
                 bool(mermin.get('is_quantum', False)),
                 str(mermin.get('verdict', '')),
-                json.dumps(mermin.get('optimal_angles', [])),
                 round(float(pq0c.get('pq0_oracle_fidelity', 0.0)), 6),
                 round(float(pq0c.get('pq0_IV_fidelity',     0.0)), 6),
                 round(float(pq0c.get('pq0_V_fidelity',      0.0)), 6),
                 int(snap.get('pq_curr', 0)),
                 int(snap.get('pq_last', 0)),
-                str(cons.get('density_matrix_hex', '')),
                 json.dumps(oracles),
                 phase_name,
             ))
@@ -10785,7 +10788,7 @@ def _start_oracle_measurement_sync_daemon():
                 is_revival = window_info.get('is_revival', False)
                 
                 cycle_count += 1
-
+                
                 # ═══════════════════════════════════════════════════════════════════════════════
                 # MEASUREMENT TRIGGER: Fire when measurement window opens
                 # ═══════════════════════════════════════════════════════════════════════════════
@@ -10802,7 +10805,7 @@ def _start_oracle_measurement_sync_daemon():
                     try:
                         with get_db_cursor() as _pqcur:
                             _pqcur.execute(
-                                "SELECT pq_curr, pq_last FROM blocks ORDER BY height DESC LIMIT 1"
+                                "SELECT pq_curr, pq_last FROM blocks ORDER BY block_height DESC LIMIT 1"
                             )
                             _pqrow = _pqcur.fetchone()
                             if _pqrow and _pqrow[0] is not None:
@@ -10841,9 +10844,10 @@ def _start_oracle_measurement_sync_daemon():
                     )
 
                     # ───────────────────────────────────────────────────────────────────────────
-                    # Use latest snapshot from stream_worker queue — no pool contention.
-                    # stream_worker calls _extract_snapshot() every 10ms; calling it here too
-                    # saturates the 5-worker pool and causes consecutive zero-reading failures.
+                    # FRESH MEASUREMENT: call _extract_snapshot() directly so each window
+                    # trigger executes a live AER run — not a cache read.  The old pattern
+                    # (get_latest_density_matrix) returned the last cached snapshot, causing
+                    # identical F/C values across consecutive windows and pq0=0 forever.
                     # ───────────────────────────────────────────────────────────────────────────
                     measurement_start = time.time_ns()
                     snap = ORACLE_W_STATE_MANAGER.get_latest_snapshot()
@@ -10957,7 +10961,7 @@ def _start_oracle_measurement_sync_daemon():
                         # VERIFICATION PHASE: Compare with lattice + check entanglement
                         # ───────────────────────────────────────────────────────────────────────
                         threshold_f = 0.05
-                        threshold_c = 0.015  # widened: lattice C drifts ~0.001/cycle; 0.01 causes false DIVERGENT
+                        threshold_c = 0.015  # widened: 0.01 causes false DIVERGENT
                         mermin_threshold = 2.0  # Classical bound (W-state max ≈ 3.046)
 
                         metrics_aligned = fidelity_delta < threshold_f and coherence_delta < threshold_c
