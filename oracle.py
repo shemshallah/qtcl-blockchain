@@ -808,8 +808,13 @@ class OracleNode:
             if tr > 1e-12: lattice_dm /= tr
             lattice_dm = 0.5 * (lattice_dm + lattice_dm.conj().T)
 
+            # CRITICAL: id gates on every qubit trigger AER Kraus operators.
+            # Without gates the noise model never fires and all 5 nodes return
+            # the identical input DM — no independent measurements possible.
             qc = QuantumCircuit(8)
             qc.set_density_matrix(DensityMatrix(lattice_dm))
+            for _q in range(8):
+                qc.id(_q)   # phase_damping_error attached to "id" in _init_aer
             qc.save_density_matrix()
             seed = (int.from_bytes(_oracle_qrng_bytes(4), 'big') % (2**31)
                     + int(self.sigma_offset * 1000)) % (2**31)
@@ -818,26 +823,32 @@ class OracleNode:
             _raw = _d['density_matrix'] if isinstance(_d, dict) and 'density_matrix' in _d else _d
             evolved = np.array(DensityMatrix(_raw).data, dtype=complex)
 
-            w8_target = getattr(_lat, '_w8_target', None)
-            if w8_target is None:
-                w8_target = np.zeros((256, 256), dtype=np.complex128)
-                for _i in [1 << k for k in range(8)]:
-                    for _j in [1 << k for k in range(8)]:
-                        w8_target[_i, _j] = 1.0 / 8.0
+            # Per-oracle stochastic channel — gives each node an independent
+            # decoherence trajectory beyond what AER noise already applies.
+            # This is what makes oracles diverge when measuring the same lattice DM.
+            oracle_dm_3q = self._partial_trace_8q_to_3q(evolved)
+            try:
+                oracle_dm_3q = _oracle_stochastic_channel(oracle_dm_3q, epsilon=0.02)
+            except Exception:
+                pass  # non-fatal: use AER-only output
 
-            fidelity  = float(min(1.0, max(0.0, np.real(np.trace(evolved @ w8_target)))))
-            n         = evolved.shape[0]
+            # Fidelity: Tr(oracle_3q @ W3_ideal)  — measures W-state preservation
+            fidelity  = float(min(1.0, max(0.0, np.real(np.trace(oracle_dm_3q @ _ORACLE_W3_IDEAL)))))
+
+            # Coherence: L1 off-diagonal of the 3-qubit oracle DM (properly normalized)
+            n8        = oracle_dm_3q.shape[0]
             coherence = float(min(1.0,
-                sum(abs(evolved[i,j]) for i in range(min(n,32))
-                    for j in range(min(n,32)) if i != j) / (2.0 * n)))
-            ev_e      = np.maximum(np.linalg.eigvalsh(evolved), 1e-15)
-            entropy   = float(-np.sum(ev_e * np.log2(ev_e)))
+                sum(abs(oracle_dm_3q[i,j]) for i in range(n8)
+                    for j in range(n8) if i != j) / (2.0 * n8)))
+
+            # Entropy from the 8-qubit evolved DM (full information)
+            ev_e    = np.maximum(np.linalg.eigvalsh(evolved), 1e-15)
+            entropy = float(-np.sum(ev_e * np.log2(ev_e)))
 
             with self._lock:
                 self.last_fidelity = fidelity
                 self.measurement_count += 1
 
-            oracle_dm_3q = self._partial_trace_8q_to_3q(evolved)
             return BlockFieldReading(
                 oracle_id           = self.oracle_id,
                 pq_curr             = pq_curr,

@@ -2341,7 +2341,13 @@ class QuantumLatticeController:
                 # FIX: normalise L1-coherence to [0,1] so LATTICE.coherence is always
                 # a physically meaningful [0,1] metric (max for 256-dim = 255).
                 _raw_coh = QuantumInformationMetrics.coherence_l1_norm(self.current_density_matrix)
-                self.coherence = float(np.clip(_raw_coh / 255.0, 0.0, 1.0))
+                # W8-COHERENCE FIX: the W8 state lives in the 8-state single-excitation
+                # subspace {|1>,|2>,|4>,...,|128>}.  Its max L1 off-diagonal sum is
+                # k*(k-1)/k = k-1 = 7  (not 255, which is the max for a fully-coherent
+                # 256-dim state like |+>^8).  Dividing by 255 gives ~0.022 for a healthy
+                # W-state instead of the correct ~0.82; dividing by 7 gives C ≈ F.
+                _W8_COHERENCE_MAX = 7.0  # = n_excitation_states - 1 = 8 - 1
+                self.coherence = float(np.clip(_raw_coh / _W8_COHERENCE_MAX, 0.0, 1.0))
 
                 # FIX: fidelity reference must be |W_8><W_8|, NOT the maximally-mixed
                 # state I/256.  F(rho, I/256) measures how close we are to THERMAL
@@ -2409,7 +2415,7 @@ class QuantumLatticeController:
                         fidelity_after_revival = QuantumInformationMetrics.state_fidelity(
                             self.current_density_matrix, self._w8_target
                         )
-                        coherence_after_revival = float(np.clip(_raw_coh_post / 255.0, 0.0, 1.0))
+                        coherence_after_revival = float(np.clip(_raw_coh_post / 7.0, 0.0, 1.0))
                         logger.info(
                             f"🔬 [SIGMA-REVIVAL-0] W-state revival at cycle {self.cycle_count} "
                             f"(t={self.cycle_count * CYCLE_TIME_NS:.0f}ns, Δt={CYCLE_TIME_NS * 8:.0f}ns/period) | "
