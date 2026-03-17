@@ -784,10 +784,20 @@ class OracleNode:
     def measure_block_field(self, pq_curr: int, pq_last: int,
                             shared_pq0: Optional[np.ndarray] = None,
                             lattice: Optional[Any] = None) -> Optional[BlockFieldReading]:
-        """Run the 256×256 lattice DM through this node's AER noise; return fidelity reading.
+        """
+        Oracle measurement of the lattice W-state.
 
-        `lattice` is passed down from OracleWStateManager._extract_snapshot() (direct ref).
-        Falls back to globals.get_lattice() if not provided.
+        Each oracle independently propagates lattice.current_density_matrix through
+        its own AER simulator (distinct QRNG-seeded κ/T1/T2 noise rates from _init_aer).
+        That IS the per-oracle noise — no additional oracle-side channels applied.
+
+        Pipeline:
+          1. Snapshot lattice.current_density_matrix (256×256)
+          2. Load into 8-qubit AER circuit with id gates (fires Kraus operators)
+          3. Per-oracle QRNG seed + sigma_offset → distinct noise realisation per node
+          4. Fidelity  = Tr(evolved_8q @ w8_target)  — full 8-qubit comparison
+          5. Coherence = L1_offdiag over W8 subspace / 7.0  — correct normalisation
+          6. oracle_dm_3q = partial_trace(evolved, keep qubits 0-2) for Mermin only
         """
         if not QISKIT_AVAILABLE or self.aer is None:
             return None
@@ -799,55 +809,60 @@ class OracleNode:
                     _lat = _glf()
                 except Exception: pass
             if _lat is None: return None
+
             lattice_dm = getattr(_lat, 'current_density_matrix', None)
             if lattice_dm is None or not hasattr(lattice_dm, 'shape'): return None
             if lattice_dm.shape != (256, 256): return None
 
+            # Enforce valid density matrix
             lattice_dm = lattice_dm.copy()
             tr = float(np.real(np.trace(lattice_dm)))
             if tr > 1e-12: lattice_dm /= tr
             lattice_dm = 0.5 * (lattice_dm + lattice_dm.conj().T)
 
-            # CRITICAL: id gates on every qubit trigger AER Kraus operators.
-            # Without gates the noise model never fires and all 5 nodes return
-            # the identical input DM — no independent measurements possible.
+            # ── AER circuit: id gates so the Kraus noise model fires ──────────
+            # Each oracle node has distinct κ/T1/T2 from _init_aer (QRNG-seeded).
+            # The per-oracle seed below further differentiates the noise realisation.
             qc = QuantumCircuit(8)
             qc.set_density_matrix(DensityMatrix(lattice_dm))
             for _q in range(8):
-                qc.id(_q)   # phase_damping_error attached to "id" in _init_aer
+                qc.id(_q)   # phase_damping + depolarizing attached to "id" in _init_aer
             qc.save_density_matrix()
+
             seed = (int.from_bytes(_oracle_qrng_bytes(4), 'big') % (2**31)
                     + int(self.sigma_offset * 1000)) % (2**31)
             res = self.aer.run(qc, shots=1, seed_simulator=seed).result()
-            _d  = res.data(0)
+            _d   = res.data(0)
             _raw = _d['density_matrix'] if isinstance(_d, dict) and 'density_matrix' in _d else _d
             evolved = np.array(DensityMatrix(_raw).data, dtype=complex)
 
-            # Per-oracle stochastic channel — gives each node an independent
-            # decoherence trajectory beyond what AER noise already applies.
-            # This is what makes oracles diverge when measuring the same lattice DM.
-            oracle_dm_3q = self._partial_trace_8q_to_3q(evolved)
-            try:
-                oracle_dm_3q = _oracle_stochastic_channel(oracle_dm_3q, epsilon=0.02)
-            except Exception:
-                pass  # non-fatal: use AER-only output
+            # ── Fidelity: Tr(evolved_8q @ w8_target) — no partial trace ───────
+            w8_target = getattr(_lat, '_w8_target', None)
+            if w8_target is None:
+                w8_target = np.zeros((256, 256), dtype=np.complex128)
+                for _i in [1 << k for k in range(8)]:
+                    for _j in [1 << k for k in range(8)]:
+                        w8_target[_i, _j] = 1.0 / 8.0
+            fidelity = float(min(1.0, max(0.0, np.real(np.trace(evolved @ w8_target)))))
 
-            # Fidelity: Tr(oracle_3q @ W3_ideal)  — measures W-state preservation
-            fidelity  = float(min(1.0, max(0.0, np.real(np.trace(oracle_dm_3q @ _ORACLE_W3_IDEAL)))))
+            # ── Coherence: L1 off-diagonal / 7.0 (W8 subspace normalisation) ─
+            # W8 has 8 single-excitation basis states; max off-diagonal sum = 7.
+            # Only sum over those 8 rows/cols — fast and dimensionally correct.
+            _w8_idx = [1 << k for k in range(8)]
+            coh_raw = sum(abs(evolved[i, j]) for i in _w8_idx for j in _w8_idx if i != j)
+            coherence = float(min(1.0, coh_raw / 7.0))
 
-            # Coherence: L1 off-diagonal of the 3-qubit oracle DM (properly normalized)
-            n8        = oracle_dm_3q.shape[0]
-            coherence = float(min(1.0,
-                sum(abs(oracle_dm_3q[i,j]) for i in range(n8)
-                    for j in range(n8) if i != j) / (2.0 * n8)))
-
-            # Entropy from the 8-qubit evolved DM (full information)
+            # ── Entropy: full 8-qubit von-Neumann ─────────────────────────────
             ev_e    = np.maximum(np.linalg.eigvalsh(evolved), 1e-15)
             entropy = float(-np.sum(ev_e * np.log2(ev_e)))
 
             with self._lock:
+                self._dm           = evolved   # entropy carrier continuity
                 self.last_fidelity = fidelity
                 self.measurement_count += 1
+
+            # oracle_dm_3q: partial trace kept only for Mermin inequality test
+            oracle_dm_3q = self._partial_trace_8q_to_3q(evolved)
 
             return BlockFieldReading(
                 oracle_id           = self.oracle_id,
