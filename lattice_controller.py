@@ -1952,7 +1952,6 @@ class QuantumLatticeController:
                 fidelity_before_injection = self.fidelity
                 
                 # Get sigma protocol directive from engine
-                sigma_directive = self.sigma_engine.advance_cycle(self.cycle_count)
                 injection_type = sigma_directive.get('injection_type')
                 injection_amplitude = sigma_directive.get('injection_amplitude', 0.0)
                 
@@ -2023,9 +2022,6 @@ class QuantumLatticeController:
                     fidelity_after = QuantumInformationMetrics.state_fidelity(
                         self.current_density_matrix, self._w8_target
                     )
-                    self.sigma_engine.record_recovery(
-                        fidelity_before_injection, fidelity_after, injection_type
-                    )
                     self.fidelity = fidelity_after
                 
                 # ──────────────────────────────────────────────────────────────────
@@ -2033,13 +2029,7 @@ class QuantumLatticeController:
                 # This will be wired to oracle for differential qubit group noise
                 # ──────────────────────────────────────────────────────────────────
                 sigma_mod8 = self.cycle_count % 8
-                if sigma_mod8 in [2, 6]:  # quarter-periods: entanglement amplifiers
-                    # Log parametric beating opportunity (oracle uses this)
-                    self.sigma_engine.record_parametric_beating(
-                        sigma_g1=float(sigma_mod8),
-                        sigma_g2=float((sigma_mod8 + 4) % 8),
-                        mi=0.075  # placeholder: oracle will measure actual MI
-                    )
+                
                 self.w_state_strength = min(1.0, self.coherence * QuantumInformationMetrics.purity(self.current_density_matrix))
                 
                 entropy = QuantumInformationMetrics.von_neumann_entropy(self.current_density_matrix)
@@ -2061,21 +2051,11 @@ class QuantumLatticeController:
                 except:
                     pass
                 
-                # Update neural network
-                neural_state = self.neural_refresh.update_quantum_state(
-                    coherence=self.coherence,
-                    fidelity=self.fidelity,
-                    entropy=entropy,
-                    revival=min(1.0, self.coherence * REVIVAL_AMPLIFIER),
-                )
-                
                 # Update batch coherences
                 for batch_id in range(NUM_BATCHES):
                     batch_coherence = self.coherence * (0.8 + 0.4 * (batch_id % 2))
-                    self.coherence_engine.update_batch_coherence(batch_id, batch_coherence)
                 
                 # Discriminate noise channels
-                noise_info = self.noise_discriminator.discriminate_noise(self.current_density_matrix)
                 
                 # Create result record
                 result = {
@@ -2085,7 +2065,6 @@ class QuantumLatticeController:
                     'w_state_strength': self.w_state_strength,
                     'entropy': entropy,
                     'neural_prediction': neural_state,
-                    'batch_coherences': self.coherence_engine.get_batch_coherences(),
                     'noise_info': noise_info,
                     'spatial_field_size': len(self.field.locations),
                     'routes_active': len(self.field.routes),
@@ -2328,9 +2307,6 @@ class QuantumLatticeController:
                 'fidelity': self.fidelity,
                 'w_state_strength': self.w_state_strength,
                 'cycle': self.cycle_count,
-                'neural_metrics': self.neural_refresh.get_metrics(),
-                'sigma_protocol': self.sigma_engine.get_statistics(),  # ← Full Hahn echo telemetry
-                'batch_coherences': self.coherence_engine.get_batch_coherences(),
                 'spatial_field': {
                     'pseudoqubits_registered': len(self.field.locations),
                     'blocks_created': len(self.field.blocks),
