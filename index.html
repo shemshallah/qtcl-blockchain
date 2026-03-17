@@ -288,38 +288,95 @@ setInterval(tick,1000);tick();
   })();
 })();
 
-// Poincare disk
+// Poincare disk — renders live {8,3} hyperbolic lattice topology
 var dc=document.getElementById('dc'),dctx=dc.getContext('2d');
 function szDisk(){dc.width=dc.parentElement.clientWidth;}
 window.addEventListener('resize',szDisk);szDisk();
-var parts=[];
-(function(){for(var i=0;i<70;i++) parts.push({r:Math.random()*.82,a:Math.random()*Math.PI*2,dr:(Math.random()-.5)*.0008,da:(Math.random()-.5)*.003,sz:Math.random()*1.4+.3,al:Math.random()*.35+.08,tp:Math.floor(Math.random()*3)});})();
+var dp=0;
+// Pre-generate {8,3} BFS vertex ring positions (Poincare disk, Schläfli {8,3})
+// r_fund = tanh(acosh(cos(π/3)/sin(π/8))/2) ≈ 0.7653
+var _r_fund=(function(){var c=Math.cos(Math.PI/3)/Math.sin(Math.PI/8);return Math.tanh(Math.acosh(c)/2);})();
+var _lattice_pts=[];
+(function(){
+  // Generate up to 200 BFS vertices of {8,3} tessellation for visual ring
+  var p=8,q=3,visited={},bfsQ=[];
+  function snap(re,im){return re.toFixed(6)+','+im.toFixed(6);}
+  function mobiusInv(zr,zi,ar,ai){// (z+a)/(1+conj(a)*z)
+    var nr=zr+ar,ni=zi+ai,dr=1+ar*zr+ai*zi,di=ar*zi-ai*zr,d2=dr*dr+di*di;
+    return d2<1e-20?{r:ar,i:ai}:{r:(nr*dr+ni*di)/d2,i:(ni*dr-nr*di)/d2};}
+  for(var k=0;k<p;k++){
+    var a=k*2*Math.PI/p,vr=_r_fund*Math.cos(a),vi=_r_fund*Math.sin(a);
+    var s=snap(vr,vi);if(!visited[s]){visited[s]=1;bfsQ.push([vr,vi,a+Math.PI]);_lattice_pts.push([vr,vi]);}
+  }
+  var qi=0;
+  while(qi<bfsQ.length&&_lattice_pts.length<300){
+    var v=bfsQ[qi++],vr=v[0],vi=v[1],inA=v[2];
+    if(vr*vr+vi*vi>0.995) continue;
+    for(var k=0;k<q;k++){
+      var ba=inA+k*2*Math.PI/q,rs=Math.tanh(_r_fund/2);
+      var dz={r:rs*Math.cos(ba),i:rs*Math.sin(ba)},nb=mobiusInv(dz.r,dz.i,vr,vi);
+      if(nb.r*nb.r+nb.i*nb.i>=0.995) continue;
+      var s=snap(nb.r,nb.i);if(visited[s]) continue;
+      visited[s]=1;bfsQ.push([nb.r,nb.i,ba+Math.PI]);_lattice_pts.push([nb.r,nb.i]);
+    }
+  }
+})();
+// Block-burst ring
+var dbk=[];
 function drawDisk(){
-  var w=dc.width,h=dc.height,cx=w/2,cy=h/2,R=Math.min(w,h)/2-16;
+  var w=dc.width,h=dc.height||w,cx=w/2,cy=h/2,R=Math.min(w,h)/2-16;
   dctx.clearRect(0,0,w,h);
-  var g=dctx.createRadialGradient(cx,cy,0,cx,cy,R);g.addColorStop(0,'rgba(6,12,28,.98)');g.addColorStop(1,'rgba(3,6,16,.9)');
+  // Background
+  var g=dctx.createRadialGradient(cx,cy,0,cx,cy,R);
+  g.addColorStop(0,'rgba(6,12,28,.98)');g.addColorStop(1,'rgba(3,6,16,.9)');
   dctx.fillStyle=g;dctx.beginPath();dctx.arc(cx,cy,R,0,Math.PI*2);dctx.fill();
+  // Concentric rings
   for(var i=1;i<=5;i++){dctx.beginPath();dctx.arc(cx,cy,R*i/5,0,Math.PI*2);dctx.strokeStyle='rgba(0,220,255,'+(0.03+i*.008)+')';dctx.lineWidth=.5;dctx.stroke();}
-  for(var i=0;i<12;i++){var a=i*Math.PI/6+dp*.04;dctx.beginPath();dctx.moveTo(cx,cy);dctx.lineTo(cx+R*Math.cos(a),cy+R*Math.sin(a));dctx.strokeStyle='rgba(0,220,255,.03)';dctx.lineWidth=.5;dctx.stroke();}
-  var wR=R*.5*Math.max(.5,S.fidelity),wN=[];
-  for(var i=0;i<3;i++){var a=i*Math.PI*2/3+dp;wN.push({x:cx+wR*Math.cos(a),y:cy+wR*Math.sin(a)});}
+  // Radial spokes (slowly rotating)
+  for(var i=0;i<8;i++){var a=i*Math.PI/4+dp*.015;dctx.beginPath();dctx.moveTo(cx,cy);dctx.lineTo(cx+R*Math.cos(a),cy+R*Math.sin(a));dctx.strokeStyle='rgba(0,220,255,.025)';dctx.lineWidth=.5;dctx.stroke();}
+  // {8,3} lattice points — color/size encode coherence proximity to pq0
+  var fid=Math.max(0,Math.min(1,S.fidelity||0.8));
+  var coh=Math.max(0,Math.min(1,S.coherence||0.75));
+  // pq_last and pq_curr mark the active block field endpoints
+  var pqc=S.pq_curr||0,pql=S.pq_last||0;
+  _lattice_pts.forEach(function(pt,idx){
+    var pr=Math.sqrt(pt[0]*pt[0]+pt[1]*pt[1]); // radial in Poincare disk [0,1)
+    var px=cx+pt[0]*R,py=cy+pt[1]*R;
+    // Coherence: nodes closer to origin (pq0) have higher coherence → brighter
+    var localCoh=coh*(1-pr*0.4);
+    // Active block field: pq_last and pq_curr nodes glow gold
+    var isActive=(idx===pql||idx===pqc);
+    // Recently active within block field range
+    var inRange=(idx>=Math.min(pql,pqc)&&idx<=Math.max(pql,pqc));
+    var sz,col,alpha;
+    if(isActive){sz=4.5;col='rgba(212,160,32,';alpha=0.95;}
+    else if(inRange){sz=2.5;col='rgba(212,160,32,';alpha=0.35+0.3*fid;}
+    else{sz=1.2+localCoh*1.8;col='rgba(0,220,255,';alpha=0.08+localCoh*0.28;}
+    dctx.beginPath();dctx.arc(px,py,sz,0,Math.PI*2);
+    dctx.fillStyle=col+alpha+')';dctx.fill();
+  });
+  // W-state tripartite triangle at pq0 (origin) — radius scales with fidelity
+  var wR=R*0.32*Math.max(0.4,fid);
+  var wN=[];
+  for(var i=0;i<3;i++){var a=i*Math.PI*2/3+dp*0.8;wN.push({x:cx+wR*Math.cos(a),y:cy+wR*Math.sin(a)});}
   dctx.beginPath();dctx.moveTo(wN[0].x,wN[0].y);dctx.lineTo(wN[1].x,wN[1].y);dctx.lineTo(wN[2].x,wN[2].y);dctx.closePath();
-  dctx.strokeStyle='rgba(128,64,255,'+(0.25+0.15*Math.sin(dp*2))+')';dctx.lineWidth=1.5;dctx.stroke();dctx.fillStyle='rgba(128,64,255,.04)';dctx.fill();
-  wN.forEach(function(n,i){var p=.5+.5*Math.sin(dp*3+i*Math.PI*2/3);dctx.beginPath();dctx.arc(n.x,n.y,3.5+p*2,0,Math.PI*2);dctx.fillStyle='rgba(128,64,255,'+(0.7+0.3*p)+')';dctx.fill();});
+  dctx.strokeStyle='rgba(128,64,255,'+(0.25+0.2*fid)+')';dctx.lineWidth=1.5;dctx.stroke();
+  dctx.fillStyle='rgba(128,64,255,.04)';dctx.fill();
+  wN.forEach(function(n,i){var p=.5+.5*Math.sin(dp*3+i*Math.PI*2/3);dctx.beginPath();dctx.arc(n.x,n.y,3+p*1.5,0,Math.PI*2);dctx.fillStyle='rgba(128,64,255,'+(0.6+0.3*p)+')';dctx.fill();});
+  // 5 oracle nodes — fixed pentagonal positions at r≈0.55, color by oracle fidelity
+  var oFids=(S.oracle_data&&S.oracle_data.per_node_fidelities)||[];
   ['#00dcff','#8040ff','#d4a020','#00ff9d','#ff3355'].forEach(function(col,i){
-    var r1=R*.3,a1=i*Math.PI*2/5+dp*.25,r2=R*.7,a2=a1+Math.PI/5+Math.sin(dp+i)*.25;
-    var p1={x:cx+r1*Math.cos(a1),y:cy+r1*Math.sin(a1)},p2={x:cx+r2*Math.cos(a2),y:cy+r2*Math.sin(a2)};
-    var mp={x:(p1.x+p2.x)/2+(cy-p1.y)*.08,y:(p1.y+p2.y)/2+(p1.x-cx)*.08};
-    dctx.beginPath();dctx.moveTo(p1.x,p1.y);dctx.quadraticCurveTo(mp.x,mp.y,p2.x,p2.y);
-    dctx.strokeStyle=col;dctx.globalAlpha=.1;dctx.lineWidth=1;dctx.stroke();dctx.globalAlpha=1;
-    dctx.beginPath();dctx.arc(p2.x,p2.y,2.5,0,Math.PI*2);dctx.fillStyle=col;dctx.globalAlpha=.45;dctx.fill();dctx.globalAlpha=1;
+    var a=i*Math.PI*2/5-Math.PI/2,r2=R*0.55;
+    var ox=cx+r2*Math.cos(a),oy=cy+r2*Math.sin(a);
+    var of=oFids[i]!=null?oFids[i]:fid;
+    var sz=3+of*3;
+    dctx.beginPath();dctx.arc(ox,oy,sz,0,Math.PI*2);
+    dctx.fillStyle=col;dctx.globalAlpha=0.15+of*0.5;dctx.fill();dctx.globalAlpha=1;
+    // geodesic line from oracle to pq0
+    dctx.beginPath();dctx.moveTo(cx,cy);dctx.lineTo(ox,oy);
+    dctx.strokeStyle=col;dctx.globalAlpha=0.06+of*0.1;dctx.lineWidth=1;dctx.stroke();dctx.globalAlpha=1;
   });
-  var pc=['rgba(0,220,255,','rgba(128,64,255,','rgba(212,160,32,'];
-  parts.forEach(function(p){
-    p.r=Math.max(.02,Math.min(.93,p.r+p.dr));p.a+=p.da;if(p.r<.04||p.r>.91)p.dr*=-1;
-    var px=cx+p.r*R*Math.cos(p.a),py=cy+p.r*R*Math.sin(p.a);
-    dctx.beginPath();dctx.arc(px,py,p.sz,0,Math.PI*2);dctx.fillStyle=pc[p.tp]+p.al+')';dctx.fill();
-  });
+  // Block-seal burst rings
   dbk=dbk.filter(function(b){
     b.age+=.025;if(b.age>=1) return false;
     var bx=cx+b.r*R*Math.cos(b.a),by=cy+b.r*R*Math.sin(b.a),sz=7*(1-b.age);
@@ -327,11 +384,14 @@ function drawDisk(){
     dctx.beginPath();dctx.arc(bx,by,sz*2.2,0,Math.PI*2);dctx.strokeStyle='rgba(212,160,32,'+((1-b.age)*.25)+')';dctx.lineWidth=1;dctx.stroke();
     return true;
   });
-  dctx.beginPath();dctx.arc(cx,cy,4,0,Math.PI*2);
-  var cg=dctx.createRadialGradient(cx,cy,0,cx,cy,8);cg.addColorStop(0,'rgba(212,160,32,1)');cg.addColorStop(1,'rgba(212,160,32,0)');
+  // pq0 oracle — gold center dot, pulses with coherence
+  var pulse=0.5+0.5*Math.sin(dp*6);
+  dctx.beginPath();dctx.arc(cx,cy,4+pulse*2,0,Math.PI*2);
+  var cg=dctx.createRadialGradient(cx,cy,0,cx,cy,10);cg.addColorStop(0,'rgba(212,160,32,1)');cg.addColorStop(1,'rgba(212,160,32,0)');
   dctx.fillStyle=cg;dctx.fill();
+  // Poincare disk boundary
   dctx.beginPath();dctx.arc(cx,cy,R,0,Math.PI*2);dctx.strokeStyle='rgba(0,220,255,.18)';dctx.lineWidth=1;dctx.stroke();
-  dp+=.005;requestAnimationFrame(drawDisk);
+  dp+=.004;requestAnimationFrame(drawDisk);
 }
 drawDisk();
 

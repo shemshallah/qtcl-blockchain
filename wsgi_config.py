@@ -116,44 +116,9 @@ try:
     
     logger.info("[WSGI] ✅ Flask app imported successfully")
     
-    # LATTICE CONTROLLER INITIALIZATION (5-ORACLE CLUSTER, DEDICATED GTHREADS)
-    logger.info("[WSGI] Phase 1C/3: Initializing QuantumLatticeController with 5-oracle cluster...")
-    
-    import threading
-    from concurrent.futures import ThreadPoolExecutor
-    
-    lattice_controller = None
-    oracle_threads = {}
-    oracle_executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="ORACLE")
-    
-    def initialize_oracle(oracle_id):
-        """Initialize oracle in dedicated gthread"""
-        try:
-            logger.info(f"[ORACLE-THREAD-{oracle_id}] Oracle {oracle_id} running in dedicated gthread")
-            return True
-        except Exception as e:
-            logger.error(f"[ORACLE-THREAD-{oracle_id}] Failed: {e}")
-            return False
-    
-    try:
-        from lattice_controller import QuantumLatticeController
-        lattice_controller = QuantumLatticeController()
-        
-        # Spawn 5 oracles in dedicated gthreads
-        logger.info("[WSGI] Spawning 5 oracles in dedicated gthreads...")
-        for oracle_id in range(5):
-            future = oracle_executor.submit(initialize_oracle, oracle_id)
-            oracle_threads[oracle_id] = future
-        
-        # Start lattice controller
-        lattice_controller.start()
-        logger.info("[WSGI] ✅ QuantumLatticeController initialized with 5-oracle cluster (5 dedicated gthreads)")
-        
-    except ImportError:
-        logger.warning("[WSGI] ⚠️  lattice_controller_production not available — using server defaults")
-    except Exception as e:
-        logger.warning(f"[WSGI] ⚠️  Lattice initialization deferred: {e}")
-    
+    # LATTICE CONTROLLER: server.py initializes LATTICE at module level (line ~5806).
+    # wsgi_config must NOT create a second QuantumLatticeController — doing so spawns
+    # a second _maintenance_loop thread producing interleaved revival cycle counts.
     logger.info("[WSGI] ✅ All subsystems initialized (lattice, P2P, database, oracle)")
     
 except ImportError as e:

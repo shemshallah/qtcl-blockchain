@@ -10772,15 +10772,8 @@ def _start_oracle_measurement_sync_daemon():
                 is_window = window_info.get('is_measurement_window', False)
                 is_revival = window_info.get('is_revival', False)
                 
-                # Heartbeat every 50 cycles
                 cycle_count += 1
-                if cycle_count % 50 == 0:
-                    logger.info(
-                        f"[ORACLE-SYNC] 💓 Heartbeat: cycle={current_cycle} | "
-                        f"Success={success_count} Failures={failure_count} | "
-                        f"Window={is_window} Revival={is_revival}"
-                    )
-                
+
                 # ═══════════════════════════════════════════════════════════════════════════════
                 # MEASUREMENT TRIGGER: Fire when measurement window opens
                 # ═══════════════════════════════════════════════════════════════════════════════
@@ -10797,7 +10790,7 @@ def _start_oracle_measurement_sync_daemon():
                     try:
                         with get_db_cursor() as _pqcur:
                             _pqcur.execute(
-                                "SELECT pq_curr, pq_last FROM blocks ORDER BY height DESC LIMIT 1"
+                                "SELECT pq_curr, pq_last FROM blocks ORDER BY block_height DESC LIMIT 1"
                             )
                             _pqrow = _pqcur.fetchone()
                             if _pqrow and _pqrow[0] is not None:
@@ -10836,13 +10829,16 @@ def _start_oracle_measurement_sync_daemon():
                     )
 
                     # ───────────────────────────────────────────────────────────────────────────
-                    # FRESH MEASUREMENT: call _extract_snapshot() directly so each window
-                    # trigger executes a live AER run — not a cache read.  The old pattern
-                    # (get_latest_density_matrix) returned the last cached snapshot, causing
-                    # identical F/C values across consecutive windows and pq0=0 forever.
+                    # READ LATEST SNAPSHOT from the stream_worker queue — do NOT call
+                    # _extract_snapshot() directly here.  _stream_worker() already drives
+                    # _extract_snapshot() every 10ms on the shared ThreadPoolExecutor; calling
+                    # it again from this thread saturates the pool (7 concurrent futures vs
+                    # max_workers=5), causing len(readings)<3 → return None after the first
+                    # two windows.  get_latest_snapshot() reads the already-computed result
+                    # with zero pool contention.
                     # ───────────────────────────────────────────────────────────────────────────
                     measurement_start = time.time_ns()
-                    snap = ORACLE_W_STATE_MANAGER._extract_snapshot()
+                    snap = ORACLE_W_STATE_MANAGER.get_latest_snapshot()
                     measurement_elapsed_ns = time.time_ns() - measurement_start
 
                     bf_readings = []
