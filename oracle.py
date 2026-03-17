@@ -3077,6 +3077,7 @@ class OracleWStateManager:
                     "mermin_violation":    r.mermin_violation,
                 }
                 for r in sorted(readings, key=lambda r: r.oracle_id)
+            ],
         }
         snapshot.aer_noise_state["block_field"] = bf_aggregate
 
