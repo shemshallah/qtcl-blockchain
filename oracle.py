@@ -1443,28 +1443,32 @@ class OracleWStateManager:
                         pq0_o  = snapshot.aer_noise_state.get("pq0_oracle_fidelity", 0)
                         pq0_iv = snapshot.aer_noise_state.get("pq0_IV_fidelity", 0)
                         pq0_v  = snapshot.aer_noise_state.get("pq0_V_fidelity", 0)
+                        node_f = " | ".join(f"{n.get('fidelity',0):.4f}" for n in per)
+                        node_c = " | ".join(f"{n.get('coherence',0):.4f}" for n in per)
+                        sep = "=" * 72
                         logger.info(
-                            f"\n{'='*72}\n"
-                            f"[ORACLE-SNAPSHOT] cycle={snapshot.lattice_refresh_counter} "
-                            f"ts={snapshot.timestamp_ns}\n"
-                            f"  Consensus : F={snapshot.w_state_fidelity:.6f}  "
-                            f"C={snapshot.coherence_l1:.6f}  "
-                            f"S={snapshot.von_neumann_entropy:.6f}  "
-                            f"purity={snapshot.purity:.6f}\n"
-                            f"  W-state   : strength={snapshot.w_state_strength:.6f}  "
-                            f"phase_coh={snapshot.phase_coherence:.6f}  "
-                            f"witness={snapshot.entanglement_witness:.6f}\n"
-                            f"  pq0       : oracle={pq0_o:.4f}  IV={pq0_iv:.4f}  V={pq0_v:.4f}\n"
-                            f"  Block     : pq_last={bf.get('pq_last',0)}→"
-                            f"pq_curr={bf.get('pq_curr',0)}  "
-                            f"entropy={bf.get('block_field_entropy',0):.6f}\n"
-                            f"  Per-node F: {' | '.join(f\"{n.get('fidelity',0):.4f}\" for n in per)}\n"
-                            f"  Per-node C: {' | '.join(f\"{n.get('coherence',0):.4f}\" for n in per)}\n"
-                            f"  Mermin    : M={mrt.get('M_value',0):.4f}  "
-                            f"quantum={mrt.get('is_quantum',False)}  "
-                            f"{mrt.get('verdict','pending')}\n"
-                            f"  DM-hex[:32]: {snapshot.density_matrix_hex[:64]}\n"
-                            f"{'='*72}"
+                            "\n" + sep + "\n"
+                            "[ORACLE-SNAPSHOT] cycle=" + str(snapshot.lattice_refresh_counter) +
+                            " ts=" + str(snapshot.timestamp_ns) + "\n"
+                            "  Consensus : F=" + f"{snapshot.w_state_fidelity:.6f}" +
+                            "  C=" + f"{snapshot.coherence_l1:.6f}" +
+                            "  S=" + f"{snapshot.von_neumann_entropy:.6f}" +
+                            "  purity=" + f"{snapshot.purity:.6f}" + "\n"
+                            "  W-state   : strength=" + f"{snapshot.w_state_strength:.6f}" +
+                            "  phase_coh=" + f"{snapshot.phase_coherence:.6f}" +
+                            "  witness=" + f"{snapshot.entanglement_witness:.6f}" + "\n"
+                            "  pq0       : oracle=" + f"{pq0_o:.4f}" +
+                            "  IV=" + f"{pq0_iv:.4f}" + "  V=" + f"{pq0_v:.4f}" + "\n"
+                            "  Block     : pq_last=" + str(bf.get("pq_last",0)) +
+                            "->pq_curr=" + str(bf.get("pq_curr",0)) +
+                            "  entropy=" + f"{bf.get('block_field_entropy',0):.6f}" + "\n"
+                            "  Per-node F: " + node_f + "\n"
+                            "  Per-node C: " + node_c + "\n"
+                            "  Mermin    : M=" + f"{mrt.get('M_value',0):.4f}" +
+                            "  quantum=" + str(mrt.get("is_quantum",False)) +
+                            "  " + str(mrt.get("verdict","pending")) + "\n"
+                            "  DM-hex[:32]: " + snapshot.density_matrix_hex[:64] + "\n" +
+                            sep
                         )
                 time.sleep(W_STATE_STREAM_INTERVAL_MS / 1000.0)
             except Exception as exc:
