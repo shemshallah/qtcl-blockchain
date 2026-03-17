@@ -10784,15 +10784,8 @@ def _start_oracle_measurement_sync_daemon():
                 is_window = window_info.get('is_measurement_window', False)
                 is_revival = window_info.get('is_revival', False)
                 
-                # Heartbeat every 50 cycles
                 cycle_count += 1
-                if cycle_count % 50 == 0:
-                    logger.info(
-                        f"[ORACLE-SYNC] 💓 Heartbeat: cycle={current_cycle} | "
-                        f"Success={success_count} Failures={failure_count} | "
-                        f"Window={is_window} Revival={is_revival}"
-                    )
-                
+
                 # ═══════════════════════════════════════════════════════════════════════════════
                 # MEASUREMENT TRIGGER: Fire when measurement window opens
                 # ═══════════════════════════════════════════════════════════════════════════════

@@ -274,7 +274,7 @@ PHASE_DAMPING_RATE = 0.002
 NUM_TOTAL_QUBITS = 8
 AER_SHOTS = 1000
 AER_SEED = 42
-CIRCUIT_TRANSPILE = True
+CIRCUIT_TRANSPILE = False          # transpile once at AER init, not per-call
 CIRCUIT_OPTIMIZATION_LEVEL = 2
 
 # Spatial-temporal field parameters
@@ -1209,15 +1209,21 @@ class QuantumCircuitBuilders:
     """Advanced quantum circuit construction"""
     
     @staticmethod
-    def build_oracle_pqivv_w(circuit: QuantumCircuit, 
+    def build_oracle_pqivv_w(circuit: QuantumCircuit,
                              oracle_qubit: int,
                              inversevirtual_qubit: int,
                              virtual_qubit: int) -> QuantumCircuit:
         """
-        Build tripartite W-state: |W⟩ = (1/√3)(|100⟩ + |010⟩ + |001⟩)
-        Between: pq0_oracle | inversevirtual_qubit | virtual_qubit (all at same location)
-        
-        W-state is symmetric, robust to decoherence, good for oracle-based finality.
+        Build tripartite W-state for pq0: |W⟩ = (1/√3)(|100⟩ + |010⟩ + |001⟩)
+
+        ALL THREE QUBITS ARE SUB-COMPONENTS OF pq0 AT THE ORIGIN — NOT SEPARATE PSEUDOQUBITS.
+          oracle_qubit (leg 0)          = pq0 oracle measurement channel
+          inversevirtual_qubit (leg 1)  = pq0 inverse-virtual channel
+          virtual_qubit (leg 2)         = pq0 virtual channel
+
+        pq1, pq2, ... are blockchain pseudoqubits on the {8,3} tessellation.
+        pq_last = pseudoqubit at height H-1, pq_curr = pseudoqubit at height H.
+        The W-state circuit indices (0,1,2) are Qiskit qubit indices for pq0's 3 legs only.
         """
         try:
             qubits = [oracle_qubit, inversevirtual_qubit, virtual_qubit]
@@ -1250,7 +1256,7 @@ class QuantumCircuitBuilders:
             # Measure all three qubits
             circuit.measure(qubits, qubits)
             
-            logger.info(f"✅ Built oracle_pqivv_w: pq0[{qubits[0]}] | IV[{qubits[1]}] | V[{qubits[2]}]")
+            logger.debug(f"✅ Built oracle_pqivv_w: pq0_oracle[leg0] | pq0_IV[leg1] | pq0_V[leg2] — all tripartite legs of pq0, co-located at origin")
             
             return circuit
             
@@ -1343,7 +1349,7 @@ class QuantumExecutionEngine:
                 'shots': AER_SHOTS,
                 'noise_model': NOISE_BATH.get_noise_model(),
             }
-            
+
             try:
                 sim_kwargs['seed_simulator'] = AER_SEED
                 self.aer_simulator = AerSimulator(**sim_kwargs)
@@ -1351,7 +1357,23 @@ class QuantumExecutionEngine:
                 logger.debug(f"seed_simulator not supported, continuing without seed")
                 del sim_kwargs['seed_simulator']
                 self.aer_simulator = AerSimulator(**sim_kwargs)
-            
+
+            # Pre-transpile the canonical W-state circuit once at init.
+            # CIRCUIT_TRANSPILE=False prevents per-call transpilation which was
+            # flooding logs with ~400ms PassManager noise every oracle cycle.
+            if QISKIT_AVAILABLE and self.aer_simulator is not None:
+                try:
+                    _wqc = QuantumCircuit(3, 3, name="W_pretranspile")
+                    _wqc = QuantumCircuitBuilders.build_oracle_pqivv_w(_wqc, 0, 1, 2)
+                    self._w_state_transpiled = transpile(
+                        _wqc, self.aer_simulator,
+                        optimization_level=CIRCUIT_OPTIMIZATION_LEVEL
+                    )
+                    logger.info("✅ W-state circuit pre-transpiled and cached")
+                except Exception as _te:
+                    logger.debug(f"W-state pre-transpile failed: {_te}")
+                    self._w_state_transpiled = None
+
             logger.info(f"✅ Qiskit AER simulators initialized ({self.num_threads} threads)")
         except Exception as e:
             logger.error(f"❌ AER initialization failed: {str(e)[:200]}")
@@ -1534,6 +1556,13 @@ class WStateConstructor:
         self.current_state = None
         self.timestamp = time.time()
         self.lock = threading.RLock()
+        self._engine: Optional['QuantumExecutionEngine'] = None  # cached — init once
+
+    def _get_engine(self) -> 'QuantumExecutionEngine':
+        """Return cached execution engine, creating once on first call."""
+        if self._engine is None:
+            self._engine = QuantumExecutionEngine()
+        return self._engine
     
     def construct_oracle_pqivv_w(self) -> QuantumCircuit:
         """Build oracle-PQ-InverseVirtual-Virtual W-state"""
@@ -1553,8 +1582,7 @@ class WStateConstructor:
                 if not qc:
                     return None
                 
-                engine = QuantumExecutionEngine()
-                results = engine.execute_circuit(qc, shots=1000)
+                results = self._get_engine().execute_circuit(qc, shots=1000)
                 
                 if not results:
                     return None
