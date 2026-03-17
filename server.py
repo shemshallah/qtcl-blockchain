@@ -5597,16 +5597,17 @@ def _initialize_metrics_agents():
     try:
         # Agent 1: Oracle 5-measurement average
         # Agents 2-4: Lattice metrics, noise bath, neural net
-        from lattice_controller import (
-            LatticeMetricsAverager,
-            FullLatticeNonMarkovianBath,
-            LatticeRefreshNet
-        )
-        _METRICS_AGENTS['lattice_metrics'] = LatticeMetricsAverager(cache_size=100)
-        _METRICS_AGENTS['noise_bath'] = FullLatticeNonMarkovianBath(lattice_dim=64, damping=0.11)
-        # Initialize REAL neural net: learns to apply gates sequentially to 52×2048 lattice
-        _METRICS_AGENTS['refresh_net'] = LatticeRefreshNet(lattice_dim=64, num_batches=52, qubits_per_batch=2048)
-        logger.info("[AGENTS] ✅ Agents 2-4 (Lattice/Noise/NN) initialized")
+        # DELETED CLASSES — no longer needed
+        # from lattice_controller import (
+        #     LatticeMetricsAverager,
+        #     FullLatticeNonMarkovianBath,
+        #     LatticeRefreshNet
+        # )
+        # _METRICS_AGENTS['lattice_metrics'] = LatticeMetricsAverager(cache_size=100)
+        # _METRICS_AGENTS['noise_bath'] = FullLatticeNonMarkovianBath(lattice_dim=64, damping=0.11)
+        # # Initialize REAL neural net: learns to apply gates sequentially to 52×2048 lattice
+        # _METRICS_AGENTS['refresh_net'] = LatticeRefreshNet(lattice_dim=64, num_batches=52, qubits_per_batch=2048)
+        # logger.info("[AGENTS] ✅ Agents 2-4 (Lattice/Noise/NN) initialized")
         
         # Agent 5: MUX daemon
         from server import MetricsMuxDaemon

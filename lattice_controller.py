@@ -1990,8 +1990,6 @@ class QuantumLatticeController:
                     'fidelity': self.fidelity,
                     'w_state_strength': self.w_state_strength,
                     'entropy': entropy,
-                    'neural_prediction': neural_state,
-                    'noise_info': noise_info,
                     'spatial_field_size': len(self.field.locations),
                     'routes_active': len(self.field.routes),
                     'timestamp': time.time(),
