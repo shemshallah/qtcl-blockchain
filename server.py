@@ -2379,17 +2379,21 @@ def _persist_chirp_snapshot(snap: dict) -> None:
                     bucket_ts, timestamp_ns, chirp_number,
                     lattice_fidelity, lattice_coherence, lattice_cycle, lattice_sigma_mod8,
                     consensus_fidelity, consensus_coherence, consensus_purity,
-                    mermin_M, mermin_is_quantum, mermin_verdict,
+                    consensus_entropy, w_state_strength,
+                    mermin_M, mermin_is_quantum, mermin_verdict, mermin_angles,
                     pq0_oracle, pq0_IV, pq0_V,
                     pq_curr, pq_last,
+                    dm_hex,
                     oracle_measurements, phase_name
                 ) VALUES (
                     %s, %s, %s,
                     %s, %s, %s, %s,
                     %s, %s, %s,
-                    %s, %s, %s,
+                    %s, %s,
+                    %s, %s, %s, %s::JSONB,
                     %s, %s, %s,
                     %s, %s,
+                    %s,
                     %s::JSONB, %s
                 )
                 ON CONFLICT (bucket_ts) DO UPDATE SET
@@ -2402,14 +2406,18 @@ def _persist_chirp_snapshot(snap: dict) -> None:
                     consensus_fidelity  = EXCLUDED.consensus_fidelity,
                     consensus_coherence = EXCLUDED.consensus_coherence,
                     consensus_purity    = EXCLUDED.consensus_purity,
+                    consensus_entropy   = EXCLUDED.consensus_entropy,
+                    w_state_strength    = EXCLUDED.w_state_strength,
                     mermin_M            = EXCLUDED.mermin_M,
                     mermin_is_quantum   = EXCLUDED.mermin_is_quantum,
                     mermin_verdict      = EXCLUDED.mermin_verdict,
+                    mermin_angles       = EXCLUDED.mermin_angles,
                     pq0_oracle          = EXCLUDED.pq0_oracle,
                     pq0_IV              = EXCLUDED.pq0_IV,
                     pq0_V               = EXCLUDED.pq0_V,
                     pq_curr             = EXCLUDED.pq_curr,
                     pq_last             = EXCLUDED.pq_last,
+                    dm_hex              = EXCLUDED.dm_hex,
                     oracle_measurements = EXCLUDED.oracle_measurements,
                     phase_name          = EXCLUDED.phase_name
             """, (
@@ -2418,14 +2426,18 @@ def _persist_chirp_snapshot(snap: dict) -> None:
                 round(float(cons.get('w_state_fidelity', 0.0)), 6),
                 round(float(cons.get('coherence',        0.0)), 6),
                 round(float(cons.get('purity',           0.0)), 6),
+                round(float(cons.get('von_neumann_entropy', 0.0)), 6),
+                round(float(cons.get('w_state_strength',    0.0)), 6),
                 round(float(mermin.get('M_value', 0.0)), 6),
                 bool(mermin.get('is_quantum', False)),
                 str(mermin.get('verdict', '')),
+                json.dumps(mermin.get('optimal_angles', [])),
                 round(float(pq0c.get('pq0_oracle_fidelity', 0.0)), 6),
                 round(float(pq0c.get('pq0_IV_fidelity',     0.0)), 6),
                 round(float(pq0c.get('pq0_V_fidelity',      0.0)), 6),
                 int(snap.get('pq_curr', 0)),
                 int(snap.get('pq_last', 0)),
+                str(cons.get('density_matrix_hex', '')),
                 json.dumps(oracles),
                 phase_name,
             ))
@@ -10772,8 +10784,15 @@ def _start_oracle_measurement_sync_daemon():
                 is_window = window_info.get('is_measurement_window', False)
                 is_revival = window_info.get('is_revival', False)
                 
+                # Heartbeat every 50 cycles
                 cycle_count += 1
-
+                if cycle_count % 50 == 0:
+                    logger.info(
+                        f"[ORACLE-SYNC] 💓 Heartbeat: cycle={current_cycle} | "
+                        f"Success={success_count} Failures={failure_count} | "
+                        f"Window={is_window} Revival={is_revival}"
+                    )
+                
                 # ═══════════════════════════════════════════════════════════════════════════════
                 # MEASUREMENT TRIGGER: Fire when measurement window opens
                 # ═══════════════════════════════════════════════════════════════════════════════
@@ -10829,13 +10848,9 @@ def _start_oracle_measurement_sync_daemon():
                     )
 
                     # ───────────────────────────────────────────────────────────────────────────
-                    # READ LATEST SNAPSHOT from the stream_worker queue — do NOT call
-                    # _extract_snapshot() directly here.  _stream_worker() already drives
-                    # _extract_snapshot() every 10ms on the shared ThreadPoolExecutor; calling
-                    # it again from this thread saturates the pool (7 concurrent futures vs
-                    # max_workers=5), causing len(readings)<3 → return None after the first
-                    # two windows.  get_latest_snapshot() reads the already-computed result
-                    # with zero pool contention.
+                    # Use latest snapshot from stream_worker queue — no pool contention.
+                    # stream_worker calls _extract_snapshot() every 10ms; calling it here too
+                    # saturates the 5-worker pool and causes consecutive zero-reading failures.
                     # ───────────────────────────────────────────────────────────────────────────
                     measurement_start = time.time_ns()
                     snap = ORACLE_W_STATE_MANAGER.get_latest_snapshot()
@@ -10949,7 +10964,7 @@ def _start_oracle_measurement_sync_daemon():
                         # VERIFICATION PHASE: Compare with lattice + check entanglement
                         # ───────────────────────────────────────────────────────────────────────
                         threshold_f = 0.05
-                        threshold_c = 0.015  # widened: lattice C drifts ~0.0001/cycle; 0.01 causes false DIVERGENT
+                        threshold_c = 0.015  # widened: lattice C drifts ~0.001/cycle; 0.01 causes false DIVERGENT
                         mermin_threshold = 2.0  # Classical bound (W-state max ≈ 3.046)
 
                         metrics_aligned = fidelity_delta < threshold_f and coherence_delta < threshold_c

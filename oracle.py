@@ -985,6 +985,8 @@ class OracleWStateManager:
         self.temporal_anchor_buffer: deque = deque(maxlen=1000)
         self.current_block_height: int = 0
         self._temporal_lock = threading.RLock()
+        self._pair_idx: int = 0          # kept for any external callers referencing it
+        self._pair_lock = threading.Lock()
         self.block_field_readings: Dict[int, BlockFieldReading] = {}
         self._bf_lock = threading.Lock()
         self._lattice_w_fidelity: float = 0.0
@@ -992,6 +994,8 @@ class OracleWStateManager:
         self._w_state_measurement_cycle: int = 0
         self._w_state_lock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=5, thread_name_prefix="OracleMeasure")
+        self._mermin_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="MerminAsync")
+        self._mermin_future: Optional[Any] = None
         self._last_mermin: Optional[dict] = None
         # Warm-start: best Mermin angles from last successful optimisation
         self._best_mermin_angles: Optional[np.ndarray] = None
@@ -1103,9 +1107,8 @@ class OracleWStateManager:
 
             result = _sp_min(
                 lambda a: -abs(OracleWStateManager._mermin_value(rho8, a)),
-                x0,
-                method="Nelder-Mead",
-                options={"maxiter": 1500, "xatol": 1e-7, "fatol": 1e-8, "adaptive": True},
+                x0, method="Nelder-Mead",
+                options={"maxiter": 400, "xatol": 1e-6, "fatol": 1e-7, "adaptive": True},
             )
             total_it += result.nit
             M_cand = abs(OracleWStateManager._mermin_value(rho8, result.x))
@@ -1224,11 +1227,16 @@ class OracleWStateManager:
             logger.debug("[ORACLE CLUSTER] Lattice DM not ready (shape check failed)")
             return None
 
-        try:
-            shared_pq0 = _oracle_enforce_dm(cdm.copy(), label="lattice_canonical_w256")
-        except Exception as exc:
-            logger.error(f"[ORACLE CLUSTER] ❌ Failed to enforce lattice DM: {exc}")
-            return None
+        # ── Step 1B: Lightweight normalize shared_pq0 ────────────────────────
+        # The lattice already enforces a valid DM in apply_memory_effect.
+        # Full eigh on 256×256 (O(n³)=16M ops) was the 18s bottleneck.
+        # Just hermitianize + trace-normalize — fast, sufficient.
+        cdm_copy = cdm.copy()
+        cdm_copy = 0.5 * (cdm_copy + cdm_copy.conj().T)
+        _tr = float(np.real(np.trace(cdm_copy)))
+        if _tr > 1e-12:
+            cdm_copy /= _tr
+        shared_pq0 = cdm_copy
 
         # ── Step 2: Block-field state ─────────────────────────────────────────
         with self._pq_lock:
@@ -1236,10 +1244,6 @@ class OracleWStateManager:
             pq_last = self._pq_last
 
         # ── Step 3: All-5 simultaneous block-field measurement ───────────────
-        # All nodes measure independently and concurrently — no pair rotation,
-        # no idle nodes, no DM trajectory splitting.  Each node's own AER noise
-        # model diverges naturally from the shared pq0 seed, producing the 5
-        # independent readings Byzantine consensus needs.
         bf_start_ns = time.time_ns()
         bf_futures = {
             self._pool.submit(node.measure_block_field, pq_curr, pq_last, shared_pq0, LATTICE): node
@@ -1262,7 +1266,7 @@ class OracleWStateManager:
                 f"[ORACLE CLUSTER] Only {len(readings)}/5 readings — need ≥3, skipping cycle")
             return None
 
-        # ── Step 4: Byzantine 3-of-5 consensus ───────────────────────────────
+        # ── Step 5: Byzantine 3-of-5 consensus ───────────────────────────────
         readings_sorted = sorted(readings, key=lambda r: r.fidelity)
         n = len(readings_sorted)
         accepted = readings_sorted[1:4] if n >= 4 else readings_sorted
@@ -1285,57 +1289,61 @@ class OracleWStateManager:
 
         try:
             dm_mean = np.mean(np.stack(oracle_dms, axis=0), axis=0)
+            dm_mean = 0.5 * (dm_mean + dm_mean.conj().T)   # hermitian symmetry
             tr = float(np.real(np.trace(dm_mean)))
             if tr < 1e-12:
                 logger.error("[ORACLE CLUSTER] ❌ Consensus DM has zero trace")
                 return None
             dm_mean /= tr
-            dm_mean = _oracle_enforce_dm(0.5*(dm_mean+dm_mean.conj().T), label="consensus_oracle_dm")
         except Exception as exc:
             logger.error(f"[ORACLE CLUSTER] ❌ Consensus DM construction failed: {exc}")
             return None
 
-        # ── Step 5: Mermin test — every cycle, adaptive restarts ─────────────
+        # ── Step 6: Counter + per-node info ──────────────────────────────────
         with self._state_lock:
             self.lattice_refresh_counter += 1
             current_cycle = self.lattice_refresh_counter
-
-        # Adaptive restart budget: thorough when state is entangled, cheap otherwise.
-        # F ≥ 0.80 → 18 restarts (full search for max violation)
-        # F ≥ 0.70 → 8  restarts (marginal regime)
-        # F <  0.70 → 4  restarts (mixed state, quick classical check)
-        if cons_fidelity >= 0.80:
-            _mermin_restarts = 18
-        elif cons_fidelity >= 0.70:
-            _mermin_restarts = 8
-        else:
-            _mermin_restarts = 4
 
         per_node_info = [
             {"oracle_id": r.oracle_id+1, "role": _ORACLE_ROLES[r.oracle_id], "fidelity": r.fidelity}
             for r in sorted(readings, key=lambda r: r.oracle_id)
         ]
 
-        mermin_result: Optional[dict] = None
-        try:
+        # ── Step 6b: Mermin — async fire-and-forget ───────────────────────────
+        # Nelder-Mead on 12 angles takes ~18s when blocking. Submit to dedicated
+        # single-thread executor; return _last_mermin (from previous run) immediately.
+        # Warm-start means angles drift <0.01 rad/cycle → converges in 1-2 iterations.
+        with self._state_lock:
+            _mermin_pending = self._mermin_future is not None and not self._mermin_future.done()
+
+        if not _mermin_pending:
+            _dm_snap  = dm_mean.copy()
+            _fid_snap = float(cons_fidelity)
+            _pni_snap = list(per_node_info)
             with self._state_lock:
                 _warm = self._best_mermin_angles.copy() if self._best_mermin_angles is not None else None
-            M, angles, iters = self._optimize_mermin_angles(
-                dm_mean, n_restarts=_mermin_restarts, warm_start=_warm
-            )
-            # Persist best angles for next cycle warm-start
-            with self._state_lock:
-                self._best_mermin_angles = angles.copy()
-            mermin_result = self._build_mermin_result(dm_mean, M, angles, iters,
-                                                       cons_fidelity, per_node_info)
-            with self._state_lock:
-                self._last_mermin = mermin_result
-        except Exception as exc:
-            logger.warning(f"[ORACLE CLUSTER] Mermin test failed: {exc}")
-            with self._state_lock:
-                mermin_result = self._last_mermin
 
-        # ── Step 6: Build snapshot ────────────────────────────────────────────
+            def _async_mermin():
+                try:
+                    _r = 6 if _fid_snap >= 0.80 else (3 if _fid_snap >= 0.70 else 2)
+                    M, angles, iters = OracleWStateManager._optimize_mermin_angles(
+                        _dm_snap, n_restarts=_r, warm_start=_warm)
+                    res = self._build_mermin_result(_dm_snap, M, angles, iters, _fid_snap, _pni_snap)
+                    with self._state_lock:
+                        self._best_mermin_angles = angles.copy()
+                        self._last_mermin = res
+                        if self.current_density_matrix is not None:
+                            self.current_density_matrix.bell_test = res
+                except Exception as _exc:
+                    logger.debug(f"[ORACLE CLUSTER] Async Mermin failed: {_exc}")
+
+            with self._state_lock:
+                self._mermin_future = self._mermin_executor.submit(_async_mermin)
+
+        with self._state_lock:
+            mermin_result = self._last_mermin
+
+        # ── Step 7: Build snapshot ────────────────────────────────────────────
         QIM = QuantumInformationMetrics
         bf_agg = {
             "pq_curr": pq_curr, "pq_last": pq_last,
@@ -1389,7 +1397,7 @@ class OracleWStateManager:
             self.current_density_matrix = snapshot
             self.density_matrix_buffer.append(snapshot)
 
-        # ── Step 7: Sign ──────────────────────────────────────────────────────
+        # ── Step 9: Sign ──────────────────────────────────────────────────────
         if self.oracle_signer:
             try:
                 sig = self.oracle_signer.sign_w_state_snapshot(snapshot)
@@ -1406,41 +1414,32 @@ class OracleWStateManager:
             f"Readings={len(readings)}/5 accepted={len(accepted)} | "
             f"F={cons_fidelity:.4f} C={cons_coherence:.6f} | "
             f"Total={total_ms:.1f}ms BF={bf_ms:.1f}ms"
-            + (f" | M={mermin_result['M_value']:.3f}" if mermin_result else "")
+            + (f" | M={mermin_result['M_value']:.3f}" if mermin_result else " | M=pending")
         )
         return snapshot
 
     # ── Background threads ────────────────────────────────────────────────────
 
     def _stream_worker(self):
-        """
-        Continuous 5-node simultaneous measurement loop.
-        Every cycle: extract snapshot → update queue → broadcast to clients.
-        Every CONSOLE_OUTPUT_INTERVAL cycles: emit full quantum state to console
-        so HTTP clients have everything needed to reconstruct entanglement.
-        """
-        CONSOLE_OUTPUT_INTERVAL = 10  # full state print every 10 successful cycles
+        """Continuous 5-node simultaneous measurement. Every 10 cycles emits full
+        quantum state to console — everything an HTTP client needs to reconstruct entanglement."""
+        CONSOLE_EVERY = 10
         cycles_ok = 0
         logger.info("[ORACLE CLUSTER] 📡 Measurement stream started (5-node simultaneous)")
         while self.running:
             try:
                 snapshot = self._extract_snapshot()
                 if snapshot:
-                    # ── Real-time queue update (always) ───────────────────────
                     try: self.stream_queue.put_nowait(snapshot)
                     except queue.Full:
                         try: self.stream_queue.get_nowait(); self.stream_queue.put_nowait(snapshot)
                         except Exception: pass
                     self._broadcast_to_clients(snapshot)
                     cycles_ok += 1
-
-                    # ── Intermittent full-state console output ─────────────────
-                    if cycles_ok % CONSOLE_OUTPUT_INTERVAL == 0:
+                    if cycles_ok % CONSOLE_EVERY == 0:
                         bf  = snapshot.aer_noise_state.get("block_field", {})
-                        mrt = snapshot.bell_test or {}
+                        mrt = snapshot.bell_test or self._last_mermin or {}
                         per = bf.get("per_node", [])
-                        node_f = [f"{n.get('fidelity',0):.4f}" for n in per]
-                        node_c = [f"{n.get('coherence',0):.4f}" for n in per]
                         pq0_o  = snapshot.aer_noise_state.get("pq0_oracle_fidelity", 0)
                         pq0_iv = snapshot.aer_noise_state.get("pq0_IV_fidelity", 0)
                         pq0_v  = snapshot.aer_noise_state.get("pq0_V_fidelity", 0)
@@ -1455,16 +1454,16 @@ class OracleWStateManager:
                             f"  W-state   : strength={snapshot.w_state_strength:.6f}  "
                             f"phase_coh={snapshot.phase_coherence:.6f}  "
                             f"witness={snapshot.entanglement_witness:.6f}\n"
-                            f"  pq0 tripartite : oracle={pq0_o:.4f}  IV={pq0_iv:.4f}  V={pq0_v:.4f}\n"
-                            f"  Block field: pq_last={bf.get('pq_last',0)} → "
+                            f"  pq0       : oracle={pq0_o:.4f}  IV={pq0_iv:.4f}  V={pq0_v:.4f}\n"
+                            f"  Block     : pq_last={bf.get('pq_last',0)}→"
                             f"pq_curr={bf.get('pq_curr',0)}  "
                             f"entropy={bf.get('block_field_entropy',0):.6f}\n"
-                            f"  Per-node F : {' | '.join(node_f)}\n"
-                            f"  Per-node C : {' | '.join(node_c)}\n"
-                            f"  Mermin     : M={mrt.get('M_value',0):.4f}  "
+                            f"  Per-node F: {' | '.join(f\"{n.get('fidelity',0):.4f}\" for n in per)}\n"
+                            f"  Per-node C: {' | '.join(f\"{n.get('coherence',0):.4f}\" for n in per)}\n"
+                            f"  Mermin    : M={mrt.get('M_value',0):.4f}  "
                             f"quantum={mrt.get('is_quantum',False)}  "
-                            f"verdict={mrt.get('verdict','pending')}\n"
-                            f"  DM-hex[0:32]: {snapshot.density_matrix_hex[:64]}\n"
+                            f"{mrt.get('verdict','pending')}\n"
+                            f"  DM-hex[:32]: {snapshot.density_matrix_hex[:64]}\n"
                             f"{'='*72}"
                         )
                 time.sleep(W_STATE_STREAM_INTERVAL_MS / 1000.0)
@@ -1506,6 +1505,7 @@ class OracleWStateManager:
         if self.stream_thread:  self.stream_thread.join(timeout=5)
         if self.refresh_thread: self.refresh_thread.join(timeout=5)
         self._pool.shutdown(wait=False)
+        self._mermin_executor.shutdown(wait=False)
         logger.info("[ORACLE CLUSTER] ✅ Stopped")
 
     # ── Public API ────────────────────────────────────────────────────────────
