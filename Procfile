@@ -1,1 +1,1 @@
-web: gunicorn wsgi_config:app --bind 0.0.0.0:${FLASK_INTERNAL_PORT:-8000} --config gunicorn_conf.py --timeout 120 --worker-tmp-dir /dev/shm
+web: gunicorn -c gunicorn_lattice_config.py wsgi_lattice_loader:application
