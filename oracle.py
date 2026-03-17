@@ -782,13 +782,22 @@ class OracleNode:
     # ── Block-field measurement ────────────────────────────────────────────────
 
     def measure_block_field(self, pq_curr: int, pq_last: int,
-                            shared_pq0: Optional[np.ndarray] = None) -> Optional[BlockFieldReading]:
-        """Run the 256×256 lattice DM through this node's AER noise; return fidelity reading."""
+                            shared_pq0: Optional[np.ndarray] = None,
+                            lattice: Optional[Any] = None) -> Optional[BlockFieldReading]:
+        """Run the 256×256 lattice DM through this node's AER noise; return fidelity reading.
+
+        `lattice` is passed down from OracleWStateManager._extract_snapshot() (direct ref).
+        Falls back to globals.get_lattice() if not provided.
+        """
         if not QISKIT_AVAILABLE or self.aer is None:
             return None
         try:
-            from globals import get_lattice as _glf
-            _lat = _glf()
+            _lat = lattice
+            if _lat is None:
+                try:
+                    from globals import get_lattice as _glf
+                    _lat = _glf()
+                except Exception: pass
             if _lat is None: return None
             lattice_dm = getattr(_lat, 'current_density_matrix', None)
             if lattice_dm is None or not hasattr(lattice_dm, 'shape'): return None
@@ -922,6 +931,9 @@ class OracleWStateManager:
         self._last_mermin: Optional[dict] = None
         # Rate-limit: log "Lattice is None" at most once per 30 s
         self._last_lattice_none_warn_ts: float = 0.0
+        # Direct lattice reference — set by server.py via set_lattice()
+        # Bypasses globals so wiring order doesn't matter
+        self._lattice_direct: Optional[Any] = None
 
     # ── Public wiring ──────────────────────────────────────────────────────────
 
@@ -933,6 +945,21 @@ class OracleWStateManager:
     def set_oracle_signer(self, oracle_engine: 'OracleEngine'):
         self.oracle_signer = oracle_engine
         logger.info("[ORACLE CLUSTER] Signer wired — snapshot authentication enabled")
+
+    def set_lattice(self, lattice_controller) -> None:
+        """
+        Wire the live LatticeController so _extract_snapshot() and
+        OracleNode.measure_block_field() can read the canonical 256×256 DM.
+
+        Called by server.py immediately after ORACLE.set_lattice_ref(LATTICE).
+        Mirrors the same pattern used by OracleEngine — direct reference,
+        no dependency on globals.LATTICE ordering.
+        """
+        self._lattice_direct = lattice_controller
+        logger.info(
+            f"[ORACLE CLUSTER] ✅ Lattice reference wired directly "
+            f"(type={type(lattice_controller).__name__}) — measurements will begin next cycle"
+        )
 
     def setup_quantum_backend(self) -> bool:
         ready = sum(1 for n in self.nodes if n.aer is not None)
@@ -1053,13 +1080,16 @@ class OracleWStateManager:
         measurement_start_ns = time.time_ns()
 
         # ── Step 1: Lattice health check ──────────────────────────────────────
-        LATTICE = None
-        try:
-            from globals import get_lattice as _glf
-            LATTICE = _glf()
-        except Exception as _e:
-            logger.error(f"[ORACLE CLUSTER] ❌ get_lattice() exception: {_e}")
-            return None
+        # Prefer the direct reference wired by server.py (set_lattice).
+        # Fall back to globals.get_lattice() for backward compatibility.
+        LATTICE = self._lattice_direct
+        if LATTICE is None:
+            try:
+                from globals import get_lattice as _glf
+                LATTICE = _glf()
+            except Exception as _e:
+                logger.error(f"[ORACLE CLUSTER] ❌ get_lattice() exception: {_e}")
+                return None
 
         if LATTICE is None:
             _now = time.time()
@@ -1101,7 +1131,7 @@ class OracleWStateManager:
         # ── Step 4: All-5 block-field measurement ────────────────────────────
         bf_start_ns = time.time_ns()
         bf_futures = {
-            self._pool.submit(node.measure_block_field, pq_curr, pq_last, shared_pq0): node
+            self._pool.submit(node.measure_block_field, pq_curr, pq_last, shared_pq0, LATTICE): node
             for node in self.nodes
         }
         readings: List[BlockFieldReading] = []

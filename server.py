@@ -5565,6 +5565,20 @@ def initialize_lattice_controller():
 
 LATTICE = initialize_lattice_controller()
 
+# ── FIX: Register in globals so OracleWStateManager._extract_snapshot() resolves it ──
+# OracleWStateManager calls `from globals import get_lattice` on every cycle.
+# globals.LATTICE was initialized to None at import time and never updated —
+# this one call fixes the flood of "Lattice is None" errors.
+try:
+    from globals import set_lattice as _glb_set_lattice
+    if LATTICE is not None:
+        _glb_set_lattice(LATTICE)
+        logger.info("[LATTICE] ✅ globals.LATTICE singleton registered — oracle measurements enabled")
+    else:
+        logger.warning("[LATTICE] ⚠️  LatticeController is None — oracle measurements will remain paused")
+except Exception as _glb_err:
+    logger.warning(f"[LATTICE] Could not register globals singleton: {_glb_err}")
+
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 # AGENT INITIALIZATION: Instantiate all 5 metric agents (Museum Grade • θ Deployment)
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
@@ -6784,6 +6798,18 @@ def _wsgi_startup() -> None:
                 logger.info("[WSGI-INIT] ✅ Oracle lattice reference wired")
             except Exception as _wl_err:
                 logger.warning(f"[WSGI-INIT] Oracle lattice wire non-fatal: {_wl_err}")
+
+        # ── FIX: wire lattice directly into OracleWStateManager ──────────────
+        # _extract_snapshot() and every OracleNode.measure_block_field() read
+        # _lattice_direct first, bypassing globals entirely.  This is the mirror
+        # of ORACLE.set_lattice_ref() above and must be called AFTER .start() so
+        # the cluster is running and ready to receive the reference.
+        if ORACLE_AVAILABLE and ORACLE_W_STATE_MANAGER is not None and LATTICE is not None:
+            try:
+                ORACLE_W_STATE_MANAGER.set_lattice(LATTICE)
+                logger.info("[WSGI-INIT] ✅ OracleWStateManager lattice wired — measurements live")
+            except Exception as _owsm_lat_err:
+                logger.warning(f"[WSGI-INIT] OracleWStateManager lattice wire failed: {_owsm_lat_err}")
 
         # Register oracle as DHT peer
         if ORACLE_AVAILABLE and ORACLE is not None:
