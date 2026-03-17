@@ -176,9 +176,7 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
       </div>
     </div>
     <div class="pn">
-      <div class="ph"><span class="pht">Quantum State Waveform</span><span class="pb" id="qcy">cycle &mdash;</span></div>
-      <canvas id="qc" height="160"></canvas>
-      <div class="ph"><span class="pht">Mermin Inequality Test</span><span class="pb" id="mb3">M &mdash;</span></div>
+      <div class="ph"><span class="pht">Mermin Inequality Test</span><span class="pb" id="mb3">M &mdash;</span><span class="pb vi" id="mcy" style="font-size:.72em;opacity:.6">cycle —</span></div>
       <div class="md">
         <div class="mb2 c" id="mM">&mdash;</div>
         <div class="mi">
@@ -262,8 +260,7 @@ var S={
   oracle_data:{},  // oracle_id -> {w_state_fidelity, coherence, pq0_*, in_consensus}
   lattice_fidelity:0  // direct from LATTICE.fidelity (not oracle consensus)
 };
-var blocks=[],txs=[],fidH=[],cohH=[],dp=0,dbk=[],wp=0,lu=0;
-for(var i=0;i<80;i++){fidH.push(.9);cohH.push(.75);}
+var blocks=[],txs=[],dp=0,dbk=[],lu=0;
 
 // clock
 function tick(){var d=new Date();document.getElementById('hck').textContent=d.toISOString().replace('T',' ').slice(0,19)+' UTC';}
@@ -291,7 +288,7 @@ setInterval(tick,1000);tick();
 // Poincare disk
 var dc=document.getElementById('dc'),dctx=dc.getContext('2d');
 function szDisk(){dc.width=dc.parentElement.clientWidth;}
-window.addEventListener('resize',szDisk);szDisk();
+szDisk();
 var parts=[];
 (function(){for(var i=0;i<70;i++) parts.push({r:Math.random()*.82,a:Math.random()*Math.PI*2,dr:(Math.random()-.5)*.0008,da:(Math.random()-.5)*.003,sz:Math.random()*1.4+.3,al:Math.random()*.35+.08,tp:Math.floor(Math.random()*3)});})();
 function drawDisk(){
@@ -336,44 +333,6 @@ function drawDisk(){
 drawDisk();
 
 // Waveform
-var qc=document.getElementById('qc'),qctx=qc.getContext('2d');
-function szQW(){qc.width=qc.parentElement.clientWidth;}
-window.addEventListener('resize',szQW);szQW();
-function drawQW(){
-  var w=qc.width,h=qc.height;qctx.clearRect(0,0,w,h);
-  qctx.strokeStyle='rgba(0,220,255,.05)';qctx.lineWidth=.5;
-  for(var y2=h*.25;y2<h;y2+=h*.25){qctx.beginPath();qctx.moveTo(0,y2);qctx.lineTo(w,y2);qctx.stroke();}
-  // Revival threshold 0.70
-  var ty70=h*(1-.70);qctx.beginPath();qctx.moveTo(0,ty70);qctx.lineTo(w,ty70);
-  qctx.strokeStyle='rgba(255,51,85,.22)';qctx.lineWidth=.8;qctx.setLineDash([4,6]);qctx.stroke();qctx.setLineDash([]);
-  if(fidH.length>1){
-    var step=w/(fidH.length-1);
-    // Coherence fill (purple, behind)
-    if(cohH.length>1){
-      var cgrd=qctx.createLinearGradient(0,0,0,h);cgrd.addColorStop(0,'rgba(128,64,255,.18)');cgrd.addColorStop(1,'rgba(128,64,255,0)');
-      qctx.beginPath();qctx.moveTo(0,h*(1-cohH[0]));
-      for(var i=1;i<cohH.length;i++) qctx.lineTo(i*step,h*(1-Math.max(0,Math.min(1,cohH[i]))));
-      qctx.lineTo(w,h);qctx.lineTo(0,h);qctx.closePath();qctx.fillStyle=cgrd;qctx.fill();
-      qctx.beginPath();qctx.moveTo(0,h*(1-cohH[0]));
-      for(var i=1;i<cohH.length;i++) qctx.lineTo(i*step,h*(1-Math.max(0,Math.min(1,cohH[i]))));
-      qctx.strokeStyle='rgba(128,64,255,.45)';qctx.lineWidth=1;qctx.stroke();
-    }
-    // Fidelity fill (cyan)
-    var grd=qctx.createLinearGradient(0,0,0,h);grd.addColorStop(0,'rgba(0,220,255,.28)');grd.addColorStop(1,'rgba(0,220,255,0)');
-    qctx.beginPath();qctx.moveTo(0,h*(1-fidH[0]));
-    for(var i=1;i<fidH.length;i++) qctx.lineTo(i*step,h*(1-Math.max(0,Math.min(1,fidH[i]))));
-    qctx.lineTo(w,h);qctx.lineTo(0,h);qctx.closePath();qctx.fillStyle=grd;qctx.fill();
-    qctx.beginPath();qctx.moveTo(0,h*(1-fidH[0]));
-    for(var i=1;i<fidH.length;i++) qctx.lineTo(i*step,h*(1-Math.max(0,Math.min(1,fidH[i]))));
-    qctx.strokeStyle='rgba(0,220,255,.85)';qctx.lineWidth=1.5;qctx.stroke();
-  }
-  // Live dots
-  var cx2=w-4,cy2=h*(1-S.fidelity),cy3=h*(1-S.coherence);
-  qctx.beginPath();qctx.arc(cx2,cy2,3.5,0,Math.PI*2);qctx.fillStyle='#00dcff';qctx.fill();
-  qctx.beginPath();qctx.arc(cx2-7,cy3,2.5,0,Math.PI*2);qctx.fillStyle='rgba(128,64,255,.8)';qctx.fill();
-  wp+=.04;requestAnimationFrame(drawQW);
-}
-drawQW();
 
 // hex block
 function drawHex(canvas,fid,fresh){
@@ -426,11 +385,12 @@ function renderOracles(){
   var data=S.oracle_data||{};
   document.getElementById('ol').innerHTML=defs.map(function(o){
     var m=data[o.id]||{};
-    var fid=m.w_state_fidelity!=null?m.w_state_fidelity:null;
+    // fidelity arrives as w_state_fidelity (SSE chirp) or fidelity (fetchWState polling) — accept both
+    var fid=m.w_state_fidelity!=null?m.w_state_fidelity:(m.fidelity!=null?m.fidelity:null);
     var on=fid!=null&&fid>0.5;
     var cons=m.in_consensus;
-    var fidStr=fid!=null?fid.toFixed(4):'—';
-    var cohStr=m.coherence!=null?m.coherence.toFixed(4):'—';
+    var fidStr=fid!=null?(fid*100).toFixed(2)+'%':'—';
+    var cohStr=m.coherence!=null?(m.coherence*100).toFixed(2)+'%':'—';
     var pq0o=m.pq0_oracle_fidelity!=null?m.pq0_oracle_fidelity.toFixed(4):'—';
     var pq0iv=m.pq0_IV_fidelity!=null?m.pq0_IV_fidelity.toFixed(4):'—';
     var pq0v=m.pq0_V_fidelity!=null?m.pq0_V_fidelity.toFixed(4):'—';
@@ -471,6 +431,9 @@ function renderMermin(m){
   document.getElementById('mvd').textContent=m.verdict||'--';
   document.getElementById('mb3').textContent='M='+M.toFixed(3);
   document.getElementById('mbar').style.width=Math.min(100,M/4*100)+'%';
+  // Show current lattice cycle in mermin header
+  var mcy=document.getElementById('mcy');
+  if(mcy){var sig=(S.cycle%8===0)?'· REVIVAL':(S.cycle%8===4)?'· ANTI-REV':'';mcy.textContent='cycle '+S.cycle+' '+sig;}
   var angles=m.angle_degrees||[],labels=m.angle_labels||['θA1','φA1','θA2','φA2','θA3','φA3','θB1','φB1','θB2','φB2','θB3','φB3'];
   document.getElementById('mac').innerHTML=angles.map(function(a,i){return '<span class="ac">'+(labels[i]||i)+'='+a+'°</span>';}).join('');
   // Console output — full Mermin result every time it updates
@@ -482,9 +445,10 @@ function renderMermin(m){
   console.log('Measured on:', m.measured_on||'block_field_consensus_oracle_dm');
   console.log('Iterations :', m.iterations||0);
   if(m.per_node_fidelities&&m.per_node_fidelities.length){
-    console.log('Per-node fidelities:');
+    console.log('Per-node fidelities (same as panel):');
     m.per_node_fidelities.forEach(function(n){
-      console.log('  oracle_'+n.oracle_id+' ['+n.role+']  F='+n.fidelity.toFixed(6));
+      var f=n.w_state_fidelity!=null?n.w_state_fidelity:(n.fidelity!=null?n.fidelity:0);
+      console.log('  oracle_'+n.oracle_id+' ['+n.role+']  F='+f.toFixed(6));
     });
   }
   if(angles.length===12){
@@ -526,9 +490,7 @@ function updateDOM(){
   st('ben',S.entanglement.toFixed(4));
   st('bcn',S.concurrence.toFixed(4));
   st('bte',S.tele_fidelity.toFixed(4));
-  // oracle cycle — from lattice σ-REVIVAL counter
-  var sigPhase=(S.cycle%8===0)?'REVIVAL':(S.cycle%8===4)?'ANTI-REV':(S.cycle%8===2||S.cycle%8===6)?'TRANSIT':'';
-  st('qcy','cycle '+S.cycle+(sigPhase?' · '+sigPhase:''));
+
   st('dkb','pq_last='+S.pq_last+'→pq_curr='+S.pq_curr);
   // noise bath — exact server key names
   st('ng1',S.gamma1.toFixed(4));
@@ -605,14 +567,14 @@ async function fetchWState(){
   S.qrng_health=d.qrng_health!=null?d.qrng_health:S.qrng_health;
   S.n_peers=d.n_peers||S.n_peers;
   // NOTE: S.cycle intentionally NOT updated here — SSE chirp (lattice_quantum.cycle_count) is authoritative
-  fidH.push(S.fidelity);if(fidH.length>80) fidH.shift();
-  cohH.push(S.coherence);if(cohH.length>80) cohH.shift();
   if(d.mermin_test||d.bell_test){S.mermin=d.mermin_test||d.bell_test;renderMermin(S.mermin);}
   // Per-oracle block-field data from block_field.per_node
+  // Normalize 'fidelity' → 'w_state_fidelity' so both SSE and polling paths use same key
   if(d.block_field&&d.block_field.per_node){
     d.block_field.per_node.forEach(function(n){
       var key='oracle_'+n.oracle_id;
-      S.oracle_data[key]=S.oracle_data[key]||{};
+      if(!S.oracle_data[key]) S.oracle_data[key]={};
+      if(n.fidelity!=null) n.w_state_fidelity=n.fidelity;
       Object.assign(S.oracle_data[key],n);
     });
   }
@@ -721,10 +683,7 @@ async function refresh(){
       S.chain_height=parseInt(bh);
       dbk.push({r:Math.random()*.72+.1,a:Math.random()*Math.PI*2,age:0});
       setTimeout(function(){Promise.allSettled([fetchChain(),fetchMempool()]).then(updateDOM);},400);
-    }
-    fidH.push(S.fidelity);if(fidH.length>80) fidH.shift();
-    cohH.push(S.coherence);if(cohH.length>80) cohH.shift();
-    updateDOM();
+    }    updateDOM();
     lu=Date.now();setOnline(true);
     document.getElementById('bu').textContent='Updated '+new Date().toTimeString().slice(0,8);
   }
