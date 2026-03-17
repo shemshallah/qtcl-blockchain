@@ -122,14 +122,7 @@ try:
     from qiskit_aer import AerSimulator
     from qiskit_aer.noise import NoiseModel, depolarizing_error, amplitude_damping_error, phase_damping_error
     QISKIT_AVAILABLE = True
-    # ── Silence AER/Qiskit internal logging — only surface WARNING+ ──────────
-    for _qlog in (
-        'qiskit', 'qiskit_aer', 'qiskit_aer.backends',
-        'qiskit_aer.backends.aer_simulator',
-        'qiskit.compiler', 'qiskit.transpiler',
-    ):
-        logging.getLogger(_qlog).setLevel(logging.WARNING)
-    logger.info("[ORACLE] ✅ Qiskit/AER available — quantum simulation enabled (AER logs silenced)")
+    logger.info("[ORACLE] ✅ Qiskit/AER available — quantum simulation enabled")
 except ImportError as _e:
     raise RuntimeError(
         f"[ORACLE] FATAL: Qiskit/AER required. pip install qiskit qiskit-aer. Error: {_e}"
@@ -668,9 +661,6 @@ class OracleNode:
             nm.add_all_qubit_quantum_error(phase_damping_error(p_eff),         ["id"])
             self.noise_model = nm
             self.aer = AerSimulator(method='density_matrix', noise_model=nm)
-            # Silence per-instance AER runtime logs
-            logging.getLogger('qiskit_aer').setLevel(logging.WARNING)
-            logging.getLogger('qiskit_aer.backends').setLevel(logging.WARNING)
             logger.info(
                 f"[ORACLE-NODE-{self.oracle_id+1}:{self.role}] "
                 f"AER ready (density_matrix+Kraus | κ={k_eff:.5f} T1={a_eff:.5f} "
@@ -882,31 +872,41 @@ class OracleNode:
             sub_8x8 = 0.5 * (sub_8x8 + sub_8x8.conj().T)
             oracle_dm_3q = _oracle_enforce_dm(sub_8x8, label="oracle_w3_subspace")
 
-            # ── pq0 / IV / V: single-qubit coherence of each W-state leg ──────
-            # For a pure |W_3> each qubit's reduced DM has |ρ_01| ≈ 1/(3√2) ≈ 0.236.
-            # Normalise by 0.5 (max single-qubit off-diagonal) → [0,1] range.
-            def _single_q_coh(rho8: np.ndarray, qubit_idx: int) -> float:
-                """L1 coherence of one qubit's reduced DM from the 8×8 W3 oracle DM."""
+            # ── pq0 / IV / V: W3 inter-leg cross-coherences ──────────────────────
+            #
+            # WHY _single_q_coh was wrong:
+            #   For ideal |W_3⟩ = (|001⟩+|010⟩+|100⟩)/√3, the single-qubit reduced
+            #   DMs are DIAGONAL: ρ_q0 = diag(2/3, 1/3).  Off-diagonal elements
+            #   ρ_q0[0,1] = 0 identically — _single_q_coh always returned 0.
+            #
+            # WHY _w3_leg_coherence is correct:
+            #   The W3 entanglement lives in the THREE inter-leg off-diagonals:
+            #     ρ[1,2]  ←  ⟨001|ρ|010⟩ = 1/3   (leg 0-1 pair)
+            #     ρ[1,4]  ←  ⟨001|ρ|100⟩ = 1/3   (leg 0-2 pair)
+            #     ρ[2,4]  ←  ⟨010|ρ|100⟩ = 1/3   (leg 1-2 pair)
+            #   These are exactly the coherences Mermin is sensitive to.
+            #   Normalising by 1/3 gives 1.0 for ideal W3, 0 for maximally mixed.
+            #   This is what pq0_oracle/IV/V SHOULD measure.
+            #
+            # Map:  pq0_oracle ↔ leg-01 pair (|001⟩↔|010⟩)  → ρ[1,2]
+            #        pq0_IV    ↔ leg-02 pair (|001⟩↔|100⟩)  → ρ[1,4]
+            #        pq0_V     ↔ leg-12 pair (|010⟩↔|100⟩)  → ρ[2,4]
+            _W3_NORM = 1.0 / 3.0  # ideal W3 inter-leg coherence magnitude
+
+            def _w3_leg_coherence(rho8: np.ndarray, i_idx: int, j_idx: int) -> float:
+                """
+                Normalised W3 inter-leg coherence: |ρ[i,j]| / (1/3).
+                Returns 1.0 for ideal |W_3⟩, 0 for maximally mixed.
+                """
                 try:
-                    others = [i for i in range(3) if i != qubit_idx]
-                    # Manual 2×2 partial trace (avoids Qiskit dependency in hot path)
-                    dm2 = np.zeros((2,2), dtype=complex)
-                    step = 1 << qubit_idx   # stride for this qubit
-                    for b0 in range(2):
-                        for b1 in range(2):
-                            # sum over the two other qubit indices
-                            for o0 in range(2):
-                                for o1 in range(2):
-                                    row = (o0 << others[0]) | (o1 << others[1]) | (b0 << qubit_idx)
-                                    col = (o0 << others[0]) | (o1 << others[1]) | (b1 << qubit_idx)
-                                    dm2[b0, b1] += rho8[row, col]
-                    return float(min(1.0, (abs(dm2[0,1]) + abs(dm2[1,0])) / 0.5))
+                    raw = 0.5 * (abs(rho8[i_idx, j_idx]) + abs(rho8[j_idx, i_idx]))
+                    return float(min(1.0, raw / _W3_NORM))
                 except Exception:
                     return 0.0
 
-            pq0_coh = _single_q_coh(oracle_dm_3q, 0)  # pq0_oracle
-            pqIV_coh = _single_q_coh(oracle_dm_3q, 1)  # pq0_IV
-            pqV_coh  = _single_q_coh(oracle_dm_3q, 2)  # pq0_V
+            pq0_coh  = _w3_leg_coherence(oracle_dm_3q, 1, 2)   # leg |001⟩↔|010⟩
+            pqIV_coh = _w3_leg_coherence(oracle_dm_3q, 1, 4)   # leg |001⟩↔|100⟩
+            pqV_coh  = _w3_leg_coherence(oracle_dm_3q, 2, 4)   # leg |010⟩↔|100⟩
 
             return BlockFieldReading(
                 oracle_id           = self.oracle_id,
