@@ -1588,12 +1588,9 @@ class QuantumLatticeController:
         self.router = HyperbolicRouter(self.field)
         
         # Quantum subsystems
-        self.coherence_engine = PseudoqubitCoherenceManager()
-        self.neural_refresh = NeuralLatticeRefresh()
         self.execution_engine = QuantumExecutionEngine(num_threads=4)
         self.w_state_constructor = WStateConstructor(self.field)
-        self.sigma_engine = SigmaResurrectionEngine()  # ← Real Hahn echo + parametric beating
-        self.noise_discriminator = NoiseChannelDiscriminator()
+        self.noise_bath = NonMarkovianNoiseBath()
 
         # Quantum state
         # |W_8⟩ target DM — single-excitation sector, symmetric, museum-grade reference.
