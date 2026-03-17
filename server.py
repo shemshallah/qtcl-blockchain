@@ -1932,6 +1932,80 @@ def sse_snapshot_stream():
                 del _sse_clients[client_id]
         logger.info(f"[SSE] 🔌 Client disconnected: {client_id}")
 
+@app.route('/api/snapshots/latest', methods=['GET'])
+def snapshots_latest():
+    """Return the most recent persisted quantum snapshot from quantum_snapshots table.
+
+    Allows dashboard clients to restore full quantum/oracle state on page load or
+    SSE reconnect without waiting for the next chirp cycle.  Returns the same
+    field structure as the SSE chirp consensus + oracle_measurements blocks so
+    _ingestChirp() in the dashboard can process it directly.
+    """
+    try:
+        _lazy_ensure_quantum_snapshots()
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT bucket_ts, timestamp_ns, chirp_number,
+                       lattice_fidelity, lattice_coherence, lattice_cycle, lattice_sigma_mod8,
+                       consensus_fidelity, consensus_coherence, consensus_purity,
+                       mermin_M, mermin_is_quantum, mermin_verdict,
+                       pq0_oracle, pq0_IV, pq0_V,
+                       pq_curr, pq_last,
+                       oracle_measurements, phase_name
+                FROM quantum_snapshots
+                ORDER BY timestamp_ns DESC
+                LIMIT 1
+            """)
+            row = cur.fetchone()
+        if not row:
+            return jsonify({'error': 'no snapshots persisted yet', 'ready': False}), 503
+
+        oracles = row[18] if isinstance(row[18], list) else []
+
+        mermin_result = {
+            'M_value':    float(row[10]),
+            'M':          float(row[10]),
+            'is_quantum': bool(row[11]),
+            'verdict':    str(row[12]),
+        } if row[10] else None
+
+        return jsonify({
+            'timestamp_ns':   int(row[1]),
+            'chirp_number':   int(row[2]),
+            'lattice_quantum': {
+                'fidelity':        float(row[3]),
+                'coherence':       float(row[4]),
+                'cycle_count':     int(row[5]),
+                'lattice_sigma_mod8': int(row[6]),
+                'phase_name':      str(row[19]),
+                'lattice_status':  'online',
+            },
+            'consensus': {
+                'w_state_fidelity': float(row[7]),
+                'coherence':        float(row[8]),
+                'purity':           float(row[9]),
+            },
+            'mermin_test': mermin_result,
+            'bell_test':   mermin_result,
+            'pq0_components': {
+                'pq0_oracle_fidelity': float(row[13]),
+                'pq0_IV_fidelity':     float(row[14]),
+                'pq0_V_fidelity':      float(row[15]),
+            },
+            'pq_curr':             int(row[16]),
+            'pq_last':             int(row[17]),
+            'oracle_measurements': oracles,
+            'fidelity':            float(row[7]),   # consensus alias for _ingestChirp
+            'coherence':           float(row[8]),
+            'lattice_cycle':       int(row[5]),
+            'source':              'db_snapshot',
+            'ready':               True,
+        }), 200
+    except Exception as e:
+        logger.error(f"[QSNAP] /api/snapshots/latest error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/oracle/push_snapshot', methods=['POST'])
 def oracle_push_snapshot():
     """Oracle pushes snapshots here for SSE distribution."""
@@ -2196,7 +2270,169 @@ def _lazy_ensure_oracle_registry():
         _oracle_registry_ensured = True
 
 
-def _ensure_gossip_tables() -> bool:
+def _ensure_quantum_snapshots_table() -> bool:
+    """CREATE TABLE IF NOT EXISTS quantum_snapshots — idempotent chirp persistence store.
+
+    Stores the last N unified chirp snapshots so dashboards/clients can replay the
+    latest quantum state without needing an open SSE connection.  Keyed on a 5-second
+    timestamp bucket so a single UPSERT per bucket avoids unbounded growth.
+    Also stores per-oracle readings and Mermin result for status indicator replay.
+    """
+    ddl = [
+        """CREATE TABLE IF NOT EXISTS quantum_snapshots (
+               bucket_ts        BIGINT        PRIMARY KEY,
+               timestamp_ns     BIGINT        NOT NULL,
+               chirp_number     BIGINT        NOT NULL DEFAULT 0,
+               lattice_fidelity NUMERIC(8,6)  NOT NULL DEFAULT 0,
+               lattice_coherence NUMERIC(8,6) NOT NULL DEFAULT 0,
+               lattice_cycle    BIGINT        NOT NULL DEFAULT 0,
+               lattice_sigma_mod8 SMALLINT    NOT NULL DEFAULT 0,
+               consensus_fidelity NUMERIC(8,6) NOT NULL DEFAULT 0,
+               consensus_coherence NUMERIC(8,6) NOT NULL DEFAULT 0,
+               consensus_purity   NUMERIC(8,6) NOT NULL DEFAULT 0,
+               mermin_M         NUMERIC(8,6)  NOT NULL DEFAULT 0,
+               mermin_is_quantum BOOLEAN      NOT NULL DEFAULT FALSE,
+               mermin_verdict   TEXT          NOT NULL DEFAULT '',
+               pq0_oracle       NUMERIC(8,6)  NOT NULL DEFAULT 0,
+               pq0_IV           NUMERIC(8,6)  NOT NULL DEFAULT 0,
+               pq0_V            NUMERIC(8,6)  NOT NULL DEFAULT 0,
+               pq_curr          BIGINT        NOT NULL DEFAULT 0,
+               pq_last          BIGINT        NOT NULL DEFAULT 0,
+               oracle_measurements JSONB      NOT NULL DEFAULT '[]'::JSONB,
+               phase_name       TEXT          NOT NULL DEFAULT '',
+               created_at       TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+           )""",
+        "CREATE INDEX IF NOT EXISTS idx_qsnap_ts ON quantum_snapshots (timestamp_ns DESC)",
+    ]
+    ok = True
+    for stmt in ddl:
+        try:
+            with get_db_cursor() as cur:
+                cur.execute(stmt)
+        except Exception as e:
+            logger.debug(f"[QSNAP] DDL skipped ({stmt[:60]}): {e}")
+            ok = False
+    if ok:
+        logger.info("[QSNAP] ✅ quantum_snapshots table verified/created")
+    return ok
+
+_qsnap_table_ensured = False
+_qsnap_table_lock    = threading.Lock()
+
+def _lazy_ensure_quantum_snapshots() -> None:
+    global _qsnap_table_ensured
+    if _qsnap_table_ensured:
+        return
+    with _qsnap_table_lock:
+        if _qsnap_table_ensured:
+            return
+        _ensure_quantum_snapshots_table()
+        _qsnap_table_ensured = True
+
+
+def _persist_chirp_snapshot(snap: dict) -> None:
+    """Upsert one chirp into quantum_snapshots keyed on 5-second bucket.
+
+    Called from _snapshot_streaming_daemon after every successful broadcast.
+    Failures are caught and logged at DEBUG — never allowed to stall the daemon.
+    """
+    try:
+        _lazy_ensure_quantum_snapshots()
+        ts_ns     = int(snap.get('timestamp_ns', time.time_ns()))
+        # 5-second bucket: bucket_ts = floor(ts_ns / 5e9) * 5e9
+        bucket_ts = (ts_ns // 5_000_000_000) * 5_000_000_000
+
+        lq        = snap.get('lattice_quantum') or {}
+        cons      = snap.get('consensus')       or {}
+        mermin    = snap.get('mermin_test')     or {}
+        pq0c      = snap.get('pq0_components')  or {}
+        oracles   = snap.get('oracle_measurements') or []
+
+        # lattice fidelity: prefer live LATTICE attributes over stale lq dict
+        lat_f = 0.0
+        lat_c = 0.0
+        lat_cy = 0
+        lat_s8 = 0
+        try:
+            if LATTICE and getattr(LATTICE, 'running', False):
+                lat_f  = float(getattr(LATTICE, 'fidelity',    0.0))
+                lat_c  = float(getattr(LATTICE, 'coherence',   0.0))
+                lat_cy = int(getattr(LATTICE,   'cycle_count', 0))
+                lat_s8 = int(lat_cy % 8)
+        except Exception:
+            lat_f  = float(lq.get('fidelity',  0.0))
+            lat_c  = float(lq.get('coherence', 0.0))
+            lat_cy = int(lq.get('cycle_count', 0))
+            lat_s8 = int(lat_cy % 8)
+
+        # phase name from lattice window if available
+        phase_name = ''
+        try:
+            if LATTICE and hasattr(LATTICE, 'get_oracle_measurement_window'):
+                phase_name = LATTICE.get_oracle_measurement_window().get('phase_name', '')
+        except Exception:
+            pass
+
+        with get_db_cursor() as cur:
+            cur.execute("""
+                INSERT INTO quantum_snapshots (
+                    bucket_ts, timestamp_ns, chirp_number,
+                    lattice_fidelity, lattice_coherence, lattice_cycle, lattice_sigma_mod8,
+                    consensus_fidelity, consensus_coherence, consensus_purity,
+                    mermin_M, mermin_is_quantum, mermin_verdict,
+                    pq0_oracle, pq0_IV, pq0_V,
+                    pq_curr, pq_last,
+                    oracle_measurements, phase_name
+                ) VALUES (
+                    %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s,
+                    %s::JSONB, %s
+                )
+                ON CONFLICT (bucket_ts) DO UPDATE SET
+                    timestamp_ns        = EXCLUDED.timestamp_ns,
+                    chirp_number        = EXCLUDED.chirp_number,
+                    lattice_fidelity    = EXCLUDED.lattice_fidelity,
+                    lattice_coherence   = EXCLUDED.lattice_coherence,
+                    lattice_cycle       = EXCLUDED.lattice_cycle,
+                    lattice_sigma_mod8  = EXCLUDED.lattice_sigma_mod8,
+                    consensus_fidelity  = EXCLUDED.consensus_fidelity,
+                    consensus_coherence = EXCLUDED.consensus_coherence,
+                    consensus_purity    = EXCLUDED.consensus_purity,
+                    mermin_M            = EXCLUDED.mermin_M,
+                    mermin_is_quantum   = EXCLUDED.mermin_is_quantum,
+                    mermin_verdict      = EXCLUDED.mermin_verdict,
+                    pq0_oracle          = EXCLUDED.pq0_oracle,
+                    pq0_IV              = EXCLUDED.pq0_IV,
+                    pq0_V               = EXCLUDED.pq0_V,
+                    pq_curr             = EXCLUDED.pq_curr,
+                    pq_last             = EXCLUDED.pq_last,
+                    oracle_measurements = EXCLUDED.oracle_measurements,
+                    phase_name          = EXCLUDED.phase_name
+            """, (
+                bucket_ts, ts_ns, int(snap.get('chirp_number', 0)),
+                round(lat_f,  6), round(lat_c, 6), lat_cy, lat_s8,
+                round(float(cons.get('w_state_fidelity', 0.0)), 6),
+                round(float(cons.get('coherence',        0.0)), 6),
+                round(float(cons.get('purity',           0.0)), 6),
+                round(float(mermin.get('M_value', 0.0)), 6),
+                bool(mermin.get('is_quantum', False)),
+                str(mermin.get('verdict', '')),
+                round(float(pq0c.get('pq0_oracle_fidelity', 0.0)), 6),
+                round(float(pq0c.get('pq0_IV_fidelity',     0.0)), 6),
+                round(float(pq0c.get('pq0_V_fidelity',      0.0)), 6),
+                int(snap.get('pq_curr', 0)),
+                int(snap.get('pq_last', 0)),
+                json.dumps(oracles),
+                phase_name,
+            ))
+    except Exception as e:
+        logger.debug(f"[QSNAP] persist failed (non-fatal): {e}")
+
+
     """
     Create gossip_store and ensure peer_registry has gossip_url + last_gossip_at cols.
     Safe to call multiple times (IF NOT EXISTS / DO NOTHING).
@@ -3164,6 +3400,10 @@ def _snapshot_streaming_daemon():
                 last_chirp_ts = ts
                 mux.log_chirp(unified_snapshot)
 
+                # Persist every 5th chirp (~1.25s cadence) — avoids DB flood
+                if broadcast_count % 5 == 0:
+                    _persist_chirp_snapshot(unified_snapshot)
+
                 if not _first_real_chirp_logged:
                     cons = unified_snapshot.get('consensus', {})
                     logger.info(
@@ -3358,24 +3598,25 @@ class MetricsCollector:
                 snap = state.get_state()
                 qm   = snap.get('quantum_metrics', {})
                 
-                # 🔬 NEW: Read REAL-TIME LATTICE SIGMA ENGINE METRICS
-                lattice_fidelity = 0.70
+                # 🔬 READ REAL-TIME LATTICE METRICS — direct attribute access
+                lattice_fidelity  = 0.0
                 lattice_coherence = 0.0
-                lattice_entropy = 0.0
-                lattice_cycle = 0
+                lattice_entropy   = 0.0
+                lattice_cycle     = 0
                 lattice_sigma_mod8 = 0
-                
                 try:
-                    if LATTICE and hasattr(LATTICE, 'sigma_engine'):
-                        lattice_stats = LATTICE.sigma_engine.get_statistics()
-                        lattice_fidelity = lattice_stats.get('avg_recovery_fidelity', 0.70)
-                        lattice_coherence = lattice_stats.get('coherence', 0.0)
-                        lattice_entropy = lattice_stats.get('entropy', 0.0)
-                        lattice_cycle = lattice_stats.get('current_cycle', 0)
-                        lattice_sigma_mod8 = lattice_stats.get('sigma_mod8', 0)
+                    if LATTICE and getattr(LATTICE, 'running', False):
+                        lattice_fidelity   = float(getattr(LATTICE, 'fidelity',    0.0))
+                        lattice_coherence  = float(getattr(LATTICE, 'coherence',   0.0))
+                        lattice_cycle      = int(getattr(LATTICE,   'cycle_count', 0))
+                        lattice_sigma_mod8 = int(lattice_cycle % 8)
+                        _hist = getattr(LATTICE, 'metrics_history', None)
+                        if _hist:
+                            _last = list(_hist)[-1] if len(_hist) else {}
+                            lattice_entropy = float(_last.get('entropy', 0.0))
                         logger.debug(f"[METRICS] Lattice: F={lattice_fidelity:.4f} C={lattice_coherence:.4f} cycle={lattice_cycle}")
                 except Exception as e:
-                    logger.warning(f"[METRICS] Failed to read lattice stats: {e}")
+                    logger.debug(f"[METRICS] Lattice attribute read failed: {e}")
                 
                 # Use lattice fidelity if available, else fall back to oracle/DB
                 if live_w3 is not None and live_w3 > 0:
@@ -7841,23 +8082,26 @@ def chain_status():
             hash_row = cur.fetchone()
             latest_hash = hash_row[0] if hash_row else '0' * 64
             
-            # 🔬 READ LIVE LATTICE SIGMA ENGINE METRICS
-            lattice_fidelity = temporal_coherence if temporal_coherence > 0 else 0.70
+            # 🔬 READ LIVE LATTICE METRICS — direct attribute access on LATTICE instance
+            # LATTICE.fidelity / .coherence / .cycle_count are maintained every cycle
+            # by _maintenance_loop() in lattice_controller.py. No sigma_engine needed.
+            lattice_fidelity  = 0.0
             lattice_coherence = 0.0
-            lattice_entropy = 0.0
-            lattice_cycle = 0
+            lattice_entropy   = 0.0
+            lattice_cycle     = 0
             lattice_sigma_mod8 = 0
-            
             try:
-                if LATTICE and hasattr(LATTICE, 'sigma_engine'):
-                    lattice_stats = LATTICE.sigma_engine.get_statistics()
-                    lattice_fidelity = lattice_stats.get('avg_recovery_fidelity', lattice_fidelity)
-                    lattice_coherence = lattice_stats.get('coherence', 0.0)
-                    lattice_entropy = lattice_stats.get('entropy', 0.0)
-                    lattice_cycle = lattice_stats.get('current_cycle', 0)
-                    lattice_sigma_mod8 = lattice_stats.get('sigma_mod8', 0)
+                if LATTICE and getattr(LATTICE, 'running', False):
+                    lattice_fidelity   = float(getattr(LATTICE, 'fidelity',    0.0))
+                    lattice_coherence  = float(getattr(LATTICE, 'coherence',   0.0))
+                    lattice_cycle      = int(getattr(LATTICE,   'cycle_count', 0))
+                    lattice_sigma_mod8 = int(lattice_cycle % 8)
+                    _hist = getattr(LATTICE, 'metrics_history', None)
+                    if _hist:
+                        _last = list(_hist)[-1] if len(_hist) else {}
+                        lattice_entropy = float(_last.get('entropy', 0.0))
             except Exception as e:
-                logger.warning(f"[CHAIN] Failed to read lattice metrics: {e}")
+                logger.debug(f"[CHAIN] Lattice attribute read failed: {e}")
             
             return jsonify({
                 'chain_height': chain_height,
@@ -10542,9 +10786,32 @@ def _start_oracle_measurement_sync_daemon():
                 # ═══════════════════════════════════════════════════════════════════════════════
                 if is_window and current_cycle != last_measured_cycle:
                     last_measured_cycle = current_cycle
-                    
-                    pq_curr = window_info.get('pq_curr', 1)
-                    pq_last = window_info.get('pq_last', 0)
+
+                    # ── pq_curr / pq_last: read from DB (authoritative) ────────────────
+                    # window_info.get('pq_curr') reads block_manager.pq_curr which is
+                    # never set → always returns default (1, 0).  Read the real values
+                    # from the blocks table and push into the oracle manager so they
+                    # propagate through block_field readings and into the chirp/SSE.
+                    pq_curr = 1
+                    pq_last = 0
+                    try:
+                        with get_db_cursor() as _pqcur:
+                            _pqcur.execute(
+                                "SELECT pq_curr, pq_last FROM blocks ORDER BY height DESC LIMIT 1"
+                            )
+                            _pqrow = _pqcur.fetchone()
+                            if _pqrow and _pqrow[0] is not None:
+                                pq_curr = int(_pqrow[0])
+                                pq_last = int(_pqrow[1]) if _pqrow[1] is not None else max(0, pq_curr - 1)
+                    except Exception as _pqe:
+                        logger.debug(f"[ORACLE-SYNC] pq DB read failed (using defaults): {_pqe}")
+                    # Feed real values into oracle cluster so block_field carries them
+                    if ORACLE_W_STATE_MANAGER is not None:
+                        try:
+                            ORACLE_W_STATE_MANAGER.set_pq_state(pq_curr, pq_last)
+                        except Exception:
+                            pass
+
                     lattice_f = window_info.get('fidelity', 0.0)
                     lattice_c = window_info.get('coherence', 0.0)
                     lattice_phase = window_info.get('phase_name', 'unknown')

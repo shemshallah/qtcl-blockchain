@@ -259,7 +259,8 @@ var S={
   // /api/p2p/peers
   peer_count:0,
   mermin:null,
-  oracle_data:{}  // oracle_id -> {w_state_fidelity, coherence, pq0_*, in_consensus}
+  oracle_data:{},  // oracle_id -> {w_state_fidelity, coherence, pq0_*, in_consensus}
+  lattice_fidelity:0  // direct from LATTICE.fidelity (not oracle consensus)
 };
 var blocks=[],txs=[],fidH=[],dp=0,dbk=[],wp=0,lu=0;
 for(var i=0;i<80;i++) fidH.push(.9);
@@ -669,10 +670,21 @@ async function refresh(){
     if(d.pq_last!=null) S.pq_last=d.pq_last;
     // Per-oracle block-field readings from chirp oracle_measurements
     if(d.oracle_measurements&&d.oracle_measurements.length){
-      d.oracle_measurements.forEach(function(m){
-        var key=m.oracle_id||('oracle_'+(m.oracle_id||1));
+      d.oracle_measurements.forEach(function(m,idx){
+        // oracle_id arrives as "oracle_1" (string), 1 (1-indexed int), or 0 (0-indexed int)
+        var raw=m.oracle_id,key;
+        if(typeof raw==='string'&&raw.indexOf('oracle_')===0) key=raw;
+        else if(typeof raw==='number'&&raw===0) key='oracle_'+(idx+1);
+        else if(typeof raw==='number'&&raw>=1)  key='oracle_'+raw;
+        else key='oracle_'+(idx+1);
         S.oracle_data[key]=m;
       });
+    }
+    // Lattice fidelity from lattice_quantum block (distinct from oracle consensus fidelity)
+    if(d.lattice_quantum){
+      if(d.lattice_quantum.fidelity!=null)  S.lattice_fidelity=d.lattice_quantum.fidelity;
+      if(d.lattice_quantum.cycle_count!=null) S.cycle=d.lattice_quantum.cycle_count;
+      else if(d.lattice_quantum.lattice_cycle!=null) S.cycle=d.lattice_quantum.lattice_cycle;
     }
     // pq0 tripartite component fidelities
     if(d.pq0_oracle_fidelity!=null||d.pq0_components){
@@ -715,6 +727,14 @@ async function refresh(){
   connect();
 })();
 
+// On page load: seed state from DB snapshot before first SSE chirp arrives
+async function fetchLatestSnapshot(){
+  var d=await api('/api/snapshots/latest');
+  if(!d||!d.ready) return;
+  _ingestChirp(d);  // same path as SSE — normalises oracle_data, pq_curr/last, mermin, lattice
+}
+
+fetchLatestSnapshot();
 refresh();
 setInterval(refresh,3000);
 setInterval(fetchPeers,12000);
