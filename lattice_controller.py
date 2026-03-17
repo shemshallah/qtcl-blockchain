@@ -111,28 +111,8 @@ try:
     QISKIT_AVAILABLE = True
     logger.info("✅ qiskit core imported successfully")
 except ImportError as _qiskit_err:
-    logger.warning(
-        f"⚠️  qiskit core not available ({_qiskit_err}). "
-        "Install: pip install qiskit>=1.0.0"
-    )
-    # Minimal stubs so module-level class definitions don't NameError
-    class QuantumCircuit:  # noqa: F811
-        def __init__(self, *a, name=None, **kw): self.name = name or "stub"
-        def h(self, *a): pass
-        def cx(self, *a): pass
-        def ry(self, *a): pass
-        def rz(self, *a): pass
-        def ch(self, *a): pass
-        def measure(self, *a): pass
-    class QuantumRegister:  # noqa: F811
-        def __init__(self, *a, **kw): pass
-    class ClassicalRegister:  # noqa: F811
-        def __init__(self, *a, **kw): pass
-    def transpile(circuit, **kw): return circuit
-    class Statevector:  # noqa: F811
-        pass
-    class DensityMatrix:  # noqa: F811
-        pass
+    logger.warning(f"⚠️  qiskit core not available ({_qiskit_err}). Install: pip install qiskit>=1.0.0")
+    QISKIT_AVAILABLE = False
 
 # ── Qiskit AER simulator ──────────────────────────────────────────────────────
 try:
@@ -146,19 +126,8 @@ try:
     QISKIT_AER_AVAILABLE = True
     logger.info("✅ qiskit-aer imported successfully")
 except ImportError as _aer_err:
-    logger.warning(
-        f"⚠️  qiskit-aer not available ({_aer_err}). "
-        "Install: pip install qiskit-aer>=0.14.0"
-    )
-    # Provide no-op stubs so the rest of the module doesn't NameError
-    class AerSimulator:  # noqa: F811
-        def __init__(self, **kwargs): pass
-        def run(self, *a, **kw): return None
-    class NoiseModel:  # noqa: F811
-        def add_quantum_error(self, *a, **kw): pass
-    def depolarizing_error(*a, **kw): return None
-    def amplitude_damping_error(*a, **kw): return None
-    def phase_damping_error(*a, **kw): return None
+    logger.warning(f"⚠️  qiskit-aer not available ({_aer_err}). Install: pip install qiskit-aer>=0.14.0")
+    QISKIT_AER_AVAILABLE = False
 
 # Overall flag used in guards throughout the file
 QISKIT_AVAILABLE = QISKIT_AVAILABLE and QISKIT_AER_AVAILABLE
@@ -179,7 +148,6 @@ except ImportError:
 # NUMPY CHECK
 # ─────────────────────────────────────────────────────────────────────────────
 NUMPY_AVAILABLE = True
-
 
 # ════════════════════════════════════════════════════════════════════════════════
 # CONSTANTS — CLAY MATHEMATICS / PHYSICS PARAMETERS
@@ -287,7 +255,6 @@ ROUTE_DIMENSION = 3                # 3D spatial routing
 # ENUMS
 # ════════════════════════════════════════════════════════════════════════════════
 
-
 # ════════════════════════════════════════════════════════════════════════════════
 # LAYER 1: HYPERBOLIC FIELD GEOMETRY
 # ════════════════════════════════════════════════════════════════════════════════
@@ -386,17 +353,10 @@ class HyperbolicFieldEngine:
             total += 0.1 * segment / (1.0 - (segment * segment))
         return total + hyperbolic_distance
 
-
 class BathSpectralDensity(str, Enum):
     OHMIC = "ohmic"
     SUB_OHMIC = "sub_ohmic"
     SUPER_OHMIC = "super_ohmic"
-
-class EntanglementRevivalState(str, Enum):
-    INITIAL = "initial"
-    DECAYING = "decaying"
-    REVIVING = "reviving"
-    MAXIMIZED = "maximized"
 
 class QuantumCircuitType(Enum):
     W_STATE_TRIPARTITE_ORACLE = "w_state_tripartite_oracle"
@@ -502,7 +462,7 @@ class PseudoqubitLocation:
 
 @dataclass
 class Block:
-    """Block = field/space between two pseudoqubits"""
+    """Block = field/space between three pseudoqubits (pq0 | pq_curr | pq_last)"""
     block_id: str
     pq_from: int
     pq_to: int
@@ -511,10 +471,55 @@ class Block:
     entanglement_strength: float = 0.0
     field_value: Optional[Dict[str, Any]] = None  # Transaction data encoded in field
     w_state_signature: Optional[Dict[str, Any]] = None
+    pq0: int = 0  # Oracle pseudoqubit (anchor)
+    pq_curr: int = 0  # Current pseudoqubit (chain present)
+    pq_last: int = 0  # Last pseudoqubit (chain past)
+    density_matrix_3d: Optional[np.ndarray] = None  # Shape (2,2,2) - 3D block field
     timestamp: float = field(default_factory=time.time)
     
+    def compute_density_matrix_3d(self) -> np.ndarray:
+        """
+        Compute 3D density matrix representing the block field between
+        oracle (pq0), current (pq_curr), and last (pq_last) pseudoqubits.
+        
+        ρ[i,j,k] where i,j,k ∈ {0,1} for each pseudoqubit's qubit state.
+        Basis: |pq0_state⟩|pq_curr_state⟩|pq_last_state⟩
+        W-state structure: |100⟩, |010⟩, |001⟩ at 1/√3 each
+        Modulated by: spatial_distance (decay), entanglement_strength (amplitude)
+        """
+        if self.pq0 == 0 and self.pq_curr == 0 and self.pq_last == 0:
+            # Not initialized—return empty tensor
+            rho = np.zeros((2, 2, 2), dtype=complex)
+            return rho
+        
+        rho = np.zeros((2, 2, 2), dtype=complex)
+        
+        # Standard W-state amplitudes
+        w_base = (1.0 / np.sqrt(3.0)) * self.entanglement_strength
+        
+        # Hyperbolic distance decay factor
+        distance_decay = 1.0 / (1.0 + self.spatial_distance)
+        
+        # W-state components: |100⟩, |010⟩, |001⟩
+        # |100⟩: pq0=1, pq_curr=0, pq_last=0
+        rho[1, 0, 0] = w_base * distance_decay
+        
+        # |010⟩: pq0=0, pq_curr=1, pq_last=0
+        rho[0, 1, 0] = w_base * distance_decay
+        
+        # |001⟩: pq0=0, pq_curr=0, pq_last=1
+        rho[0, 0, 1] = w_base * distance_decay
+        
+        # Store for later access
+        self.density_matrix_3d = rho
+        return rho
+    
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        # Convert numpy array to list for JSON serialization
+        if self.density_matrix_3d is not None:
+            d['density_matrix_3d'] = self.density_matrix_3d.tolist()
+        return d
 
 @dataclass
 class Route:
@@ -630,6 +635,29 @@ class SpatialTemporalField:
         """Get all pseudoqubit locations"""
         with self.lock:
             return list(self.locations.values())
+    
+    def compute_block_field_density_3d(self, block: Block, pq0: int, pq_curr: int, pq_last: int) -> np.ndarray:
+        """
+        Compute 3D block field density matrix between oracle and chain pseudoqubits.
+        
+        Args:
+            block: Block object
+            pq0: Oracle pseudoqubit ID (anchor)
+            pq_curr: Current pseudoqubit ID (chain present)
+            pq_last: Last pseudoqubit ID (chain past)
+        
+        Returns:
+            3D density matrix ρ[i,j,k] shape (2,2,2) representing the quantum field
+        """
+        with self.lock:
+            # Set pseudoqubit references
+            block.pq0 = pq0
+            block.pq_curr = pq_curr
+            block.pq_last = pq_last
+            
+            # Compute and store
+            rho_3d = block.compute_density_matrix_3d()
+            return rho_3d
 
 # ════════════════════════════════════════════════════════════════════════════════
 # SECTION 1: DATABASE CONNECTOR (ASYNC STREAMING)
@@ -785,10 +813,31 @@ class QuantumInformationMetrics:
     
     @staticmethod
     def von_neumann_entropy(density_matrix: np.ndarray) -> float:
-        """S(ρ) = -Tr(ρ log ρ)"""
+        """S(ρ) = -Tr(ρ log ρ)
+        
+        Handles both 2D and 3D density matrices.
+        For 3D: flattens (2,2,2) → 8×8 before diagonalization.
+        """
         try:
             if density_matrix is None:
                 return 0.0
+            
+            # Handle 3D tensor (block field)
+            if density_matrix.ndim == 3:
+                # Flatten (2,2,2) → 8×8
+                rho_flat = np.zeros((8, 8), dtype=complex)
+                for i in range(2):
+                    for j in range(2):
+                        for k in range(2):
+                            idx_ijk = i*4 + j*2 + k
+                            for i2 in range(2):
+                                for j2 in range(2):
+                                    for k2 in range(2):
+                                        idx_i2j2k2 = i2*4 + j2*2 + k2
+                                        if i==i2 and j==j2 and k==k2:
+                                            rho_flat[idx_ijk, idx_i2j2k2] = density_matrix[i, j, k]
+                density_matrix = rho_flat
+            
             eigenvalues = np.linalg.eigvalsh(density_matrix)
             eigenvalues = np.maximum(eigenvalues, 1e-15)
             entropy = -np.sum(eigenvalues * np.log2(eigenvalues))
@@ -814,16 +863,34 @@ class QuantumInformationMetrics:
     
     @staticmethod
     def coherence_l1_norm(density_matrix: np.ndarray) -> float:
-        """C(ρ) = Σ_{i≠j} |ρ_{ij}|"""
+        """C(ρ) = Σ_{i≠j} |ρ_{ij}|
+        
+        For 3D tensors, sums off-diagonal coherence terms.
+        """
         try:
             if density_matrix is None:
                 return 0.0
+            
             coherence = 0.0
-            n = density_matrix.shape[0]
-            for i in range(n):
-                for j in range(n):
-                    if i != j:
-                        coherence += abs(density_matrix[i, j])
+            
+            if density_matrix.ndim == 3:
+                # 3D case: sum coherence between all off-diagonal basis states
+                for i in range(2):
+                    for j in range(2):
+                        for k in range(2):
+                            for i2 in range(2):
+                                for j2 in range(2):
+                                    for k2 in range(2):
+                                        if not (i == i2 and j == j2 and k == k2):
+                                            coherence += abs(density_matrix[i, j, k])
+            else:
+                # 2D case
+                n = density_matrix.shape[0]
+                for i in range(n):
+                    for j in range(n):
+                        if i != j:
+                            coherence += abs(density_matrix[i, j])
+            
             return float(coherence)
         except:
             return 0.0
@@ -1588,408 +1655,17 @@ class WStateConstructor:
 # SECTION 7: PSEUDOQUBIT COHERENCE MANAGER
 # ════════════════════════════════════════════════════════════════════════════════
 
-class PseudoqubitCoherenceManager:
-    """Manages coherence of 106,496 pseudoqubits in 52 batches"""
-    
-    def __init__(self):
-        self.num_batches = NUM_BATCHES
-        self.pseudoqubits_per_batch = TOTAL_PSEUDOQUBITS // NUM_BATCHES
-        self.batch_coherences = [0.0] * NUM_BATCHES
-        self.batch_timestamps = [time.time()] * NUM_BATCHES
-        self.lock = threading.RLock()
-    
-    def update_batch_coherence(self, batch_id: int, coherence: float) -> bool:
-        """Update coherence for a batch"""
-        try:
-            with self.lock:
-                if 0 <= batch_id < self.num_batches:
-                    self.batch_coherences[batch_id] = max(0.0, min(1.0, coherence))
-                    self.batch_timestamps[batch_id] = time.time()
-                    return True
-            return False
-        except:
-            return False
-    
-    def get_average_coherence(self) -> float:
-        """Get average coherence across all batches"""
-        try:
-            with self.lock:
-                if not self.batch_coherences:
-                    return 0.0
-                return np.mean(self.batch_coherences)
-        except:
-            return 0.0
-    
-    def get_batch_coherences(self) -> List[float]:
-        """Get coherences of all batches"""
-        with self.lock:
-            return self.batch_coherences.copy()
-
 # ════════════════════════════════════════════════════════════════════════════════
 # SECTION 8: NEURAL LATTICE REFRESH (ADAPTIVE COHERENCE)
 # ════════════════════════════════════════════════════════════════════════════════
-
-class NeuralLatticeRefresh:
-    """Neural network refresh system for adaptive coherence"""
-    
-    def __init__(self):
-        self.weights = np.random.randn(8, 6) * 0.01
-        self.bias = np.random.randn(6) * 0.01
-        self.learning_rate = 0.001
-        self.momentum = 0.9
-        self.velocity = np.zeros_like(self.weights)
-        self._lock = threading.RLock()
-        self.training_steps = 0
-    
-    def forward(self, features: np.ndarray) -> Tuple[float, Dict[str, Any]]:
-        """Forward pass"""
-        try:
-            hidden = np.maximum(0, features @ self.weights + self.bias)
-            output = 1.0 / (1.0 + np.exp(-np.sum(hidden)))
-            return output, {'hidden': hidden, 'features': features}
-        except Exception as e:
-            logger.error(f"Forward pass failed: {e}")
-            return 0.5, {}
-    
-    def backward(self, loss: float) -> float:
-        """Backward pass"""
-        try:
-            with self._lock:
-                grad = loss * 0.01
-                self.velocity = self.momentum * self.velocity - self.learning_rate * grad
-                self.weights += self.velocity
-                self.training_steps += 1
-                return np.mean(np.abs(self.weights))
-        except Exception as e:
-            logger.error(f"Backward pass failed: {e}")
-            return 0.0
-    
-    def update_quantum_state(self, coherence: float, fidelity: float,
-                            entropy: float, revival: float) -> float:
-        """Update network's quantum state"""
-        try:
-            features = np.array([
-                coherence, fidelity, 1.0 - entropy / 5.0, revival,
-                BATH_ETA, KAPPA_MEMORY, CYCLE_TIME_NS / 1e9, time.time() % 3600
-            ])
-            
-            predicted_coherence, metadata = self.forward(features)
-            target = 0.9
-            loss = (predicted_coherence - target) ** 2
-            
-            self.backward(loss)
-            
-            return predicted_coherence
-            
-        except Exception as e:
-            logger.error(f"State update failed: {e}")
-            return 0.5
-    
-    def get_metrics(self) -> Dict[str, Any]:
-        """Get neural network metrics"""
-        with self._lock:
-            return {
-                'training_steps': self.training_steps,
-                'weights_norm': np.linalg.norm(self.weights),
-                'bias_norm': np.linalg.norm(self.bias),
-                'learning_rate': self.learning_rate,
-                'momentum': self.momentum,
-            }
 
 # ════════════════════════════════════════════════════════════════════════════════
 # SECTION 9: SIGMA PHASE TRACKER (NOISE REGIME ADAPTATION)
 # ════════════════════════════════════════════════════════════════════════════════
 
-class SigmaResurrectionEngine:
-    """
-    ╔════════════════════════════════════════════════════════════════════════════════════╗
-    ║                     🔬 SIGMA RESURRECTION ENGINE v1.0 🔬                          ║
-    ║                                                                                    ║
-    ║  QUANTUM HARDWARE TIMESCALES (Rigetti Ankaa-3 real device)                       ║
-    ║  ────────────────────────────────────────────────────────────────────────────    ║
-    ║  • CYCLE_TIME = 72ns (one quantum gate cycle)                                    ║
-    ║  • T2 = 12μs = 12,000ns (measured coherence lifetime)                          ║
-    ║  • Hahn echo gap = 4 cycles = 288ns = T2/42 ← only 2.4% decay ✓                ║
-    ║  • Period-8 revivals at 576ns = T2/21 ← 4.8% decay ✓                           ║
-    ║                                                                                    ║
-    ║  SIGMA PROTOCOL (F(σ) = cos²(πσ/8), machine precision 14 decimals)               ║
-    ║  ────────────────────────────────────────────────────────────────────────────    ║
-    ║  • σ mod 8 = 0: W-state revival (fidelity = 1.0)                                ║
-    ║  • σ mod 8 = 4: Anti-W flip via Hahn π-pulse (destructive anti-revival)         ║
-    ║  • σ = 2, 6, 10, ...: quarter-periods → +75% entanglement boost                 ║
-    ║  • Δσ = 2, 4, 8: constructive beating → CNOT fidelity +56%-+77%                 ║
-    ║  • Δσ = 1, 3, 5: destructive beating → entanglement suppression                 ║
-    ║                                                                                    ║
-    ║  INJECTION STRATEGY                                                               ║
-    ║  ────────────────────────────────────────────────────────────────────────────    ║
-    ║  Layer 1: Hahn Echo at σ ≡ 4 (mod 8)                                            ║
-    ║    → Inject Anti-W |Anti-W₈⟩ state (π-pulse recovery)                          ║
-    ║    → Recovers fidelity from F(4)=0.0 → F(4.5)=0.707 via controlled injection    ║
-    ║                                                                                    ║
-    ║  Layer 2: Full W-state Revival at σ ≡ 0 (mod 8)                                 ║
-    ║    → Inject full |W₈⟩ state with amplitude REVIVAL_STRENGTH/(k+1)              ║
-    ║    → Maintains baseline W-state correlations (MI = 0.0484 bits)                 ║
-    ║                                                                                    ║
-    ║  Layer 3: Parametric Beating Enhancement at σ ≈ 2.6, 6.6, 10.6 (Δσ ≈ 4)       ║
-    ║    → Differential noise injection across qubit groups                            ║
-    ║    → σ_group1 = 2, σ_group2 = 6 (Δσ=4) → MI +75%, optimal CNOT fidelity       ║
-    ║                                                                                    ║
-    ║  Layer 4: Power-of-2 Burst at cycles n = 2^k (k=0,1,2,...)                    ║
-    ║    → Fires at 72ns, 144ns, 288ns, 576ns, 1.152μs, 2.304μs, 4.608μs, 9.216μs  ║
-    ║    → Amplitude A(k) = REVIVAL_STRENGTH/(k+1) → diminishing returns as theory   ║
-    ║                                                                                    ║
-    ║  FIDELITY RECOVERY LAW                                                            ║
-    ║  ────────────────────────────────────────────────────────────────────────────    ║
-    ║  F(σ) = cos²(πσ/8) for σ ∈ [0, 200] with 14-decimal precision                  ║
-    ║                                                                                    ║
-    ║  σ=0.0: F=1.0000000000000 ✓ identity                                            ║
-    ║  σ=2.0: F=0.7071067811865 ✓ √X gate (90° rotation)                             ║
-    ║  σ=4.0: F=0.0000000000000 ✗ NOT gate (anti-resonance → Hahn injection)         ║
-    ║  σ=6.0: F=0.7071067811865 ✓ √X† gate (270° rotation)                          ║
-    ║  σ=8.0: F=1.0000000000000 ✓ period completes → full revival                    ║
-    ║                                                                                    ║
-    ║  THREAD SAFETY: Full atomic state updates, RLock on all critical sections       ║
-    ║  ENTERPRISE: 20+ diagnostic metrics, 100+ cycle history, SQL-ready logging      ║
-    ╚════════════════════════════════════════════════════════════════════════════════════╝
-    """
-    
-    def __init__(self):
-        # Sigma cycle tracking (not estimated, actual cycle count)
-        self.sigma_cycle = 0
-        self.cycle_at_last_hahn = -100
-        self.cycle_at_last_revival = -100
-        self.cycle_at_last_burst = -100
-        
-        # Fidelity tracking across sigma periods
-        self.fidelity_curve = {}  # {σ mod 8: fidelity}
-        self._compute_fidelity_curve()
-        
-        # Injection state machine
-        self.injection_state = "IDLE"  # IDLE, HAHN_PENDING, REVIVAL_PENDING, BURST_PENDING
-        self.injection_amplitude = 0.0
-        self.last_injection_type = None
-        
-        # Parametric beating tracking (Δσ measurements for CNOT optimization)
-        self.beating_pairs = deque(maxlen=100)  # Recent (σ_group1, σ_group2, MI) tuples
-        self.optimal_delta_sigma = 2.6  # Empirically best from experiments
-        
-        # Comprehensive history for enterprise auditing
-        self.injection_log = deque(maxlen=500)  # Full injection history
-        self.recovery_metrics = deque(maxlen=200)  # Fidelity recovery tracking
-        
-        # Thread safety
-        self.lock = threading.RLock()
-        
-        # Diagnostics
-        self.total_hahn_injections = 0
-        self.total_revival_injections = 0
-        self.total_burst_injections = 0
-        self.avg_recovery_fidelity = 0.9999
-        
-        logger.info("[SIGMA] SigmaResurrectionEngine initialized | T2=12μs | CYCLE=72ns | F(σ)=cos²(πσ/8)")
-    
-    def _compute_fidelity_curve(self):
-        """Precompute exact F(σ) = cos²(πσ/8) for all σ mod 8 points"""
-        for sigma in np.linspace(0, 8, 129):  # 0.0, 0.0625, ..., 8.0
-            f_val = (np.cos(np.pi * sigma / 8.0)) ** 2
-            self.fidelity_curve[round(sigma, 4)] = float(f_val)
-    
-    def get_sigma_fidelity(self, sigma: float) -> float:
-        """Get fidelity for any σ using exact law F(σ)=cos²(πσ/8)"""
-        sigma_mod8 = sigma % 8.0
-        # Find closest precomputed value
-        key = min(self.fidelity_curve.keys(), key=lambda k: abs(k - sigma_mod8))
-        return self.fidelity_curve[key]
-    
-    def advance_cycle(self, current_cycle: int) -> Dict[str, Any]:
-        """
-        Called every CYCLE_TIME=72ns by maintenance loop.
-        Returns injection directive if state change needed.
-        """
-        with self.lock:
-            self.sigma_cycle = current_cycle
-            sigma_mod8 = current_cycle % 8
-            
-            # Check for sigma protocol state transitions
-            injection_needed = False
-            injection_type = None
-            injection_amplitude = 0.0
-            
-            # ─── HAHN ECHO at σ ≡ 4 (mod 8) ──────────────────────────────────────
-            if sigma_mod8 == 4 and current_cycle - self.cycle_at_last_hahn > 5:
-                # Anti-W injection: recover from σ=4 (F=0.0)
-                # Gap size = 4 cycles = 288ns, T2=12μs → decay = exp(-288ns/12μs) ≈ 0.976 (only 2.4%)
-                injection_needed = True
-                injection_type = "HAHN_ANTI_W"
-                # Amplitude scales with how deep we are in anti-resonance
-                injection_amplitude = 0.85  # Strong: recover fidelity from 0.0 → 0.7
-                self.cycle_at_last_hahn = current_cycle
-                self.total_hahn_injections += 1
-            
-            # ─── FULL REVIVAL at σ ≡ 0 (mod 8) ────────────────────────────────────
-            elif sigma_mod8 == 0 and current_cycle > 0 and current_cycle - self.cycle_at_last_revival > 5:
-                # W-state injection: maintain baseline correlations above F=0.71
-                injection_needed = True
-                injection_type = "REVIVAL_W8"
-                k_rev = int(np.floor(np.log2(current_cycle + 1)))
-                # REAL QUANTUM: amplitude never drops below REVIVAL_MIN_FLOOR
-                # Formula: max(REVIVAL_STRENGTH/(k+1), REVIVAL_MIN_FLOOR)
-                # This maintains F > 0.71 even in late cycles
-                injection_amplitude = max(REVIVAL_STRENGTH / (k_rev + 1), REVIVAL_MIN_FLOOR)
-                self.cycle_at_last_revival = current_cycle
-                self.total_revival_injections += 1
-            
-            # ─── POWER-OF-2 BURST INJECTION ───────────────────────────────────────
-            # Fires at cycles 1, 2, 4, 8, 16, 32, 64, 128, ... (n & (n-1) == 0)
-            elif current_cycle > 0 and (current_cycle & (current_cycle - 1)) == 0 and current_cycle - self.cycle_at_last_burst > 1:
-                injection_needed = True
-                injection_type = "BURST_2^K"
-                k_burst = int(np.floor(np.log2(current_cycle)))
-                # REAL QUANTUM: amplitude with floor to maintain F > 0.70
-                injection_amplitude = max(REVIVAL_STRENGTH / (k_burst + 2), REVIVAL_MIN_FLOOR * 0.9)
-                self.cycle_at_last_burst = current_cycle
-                self.total_burst_injections += 1
-            
-            # ─── PARAMETRIC BEATING ENHANCEMENT at σ ≈ 2.6 (quarter-period + offset) ──
-            # This is applied DIFFERENTIALLY across groups, not here
-            # But we track it for CNOT-optimization guidance
-            
-            result = {
-                'sigma_mod8': sigma_mod8,
-                'cycle': current_cycle,
-                'injection_needed': injection_needed,
-                'injection_type': injection_type,
-                'injection_amplitude': injection_amplitude,
-                'fidelity_target': self.get_sigma_fidelity(float(current_cycle % 8)),
-                'expected_recovery': self._estimate_recovery(injection_type, injection_amplitude),
-            }
-            
-            if injection_needed:
-                self.injection_log.append({
-                    'cycle': current_cycle,
-                    'type': injection_type,
-                    'amplitude': injection_amplitude,
-                    'timestamp': time.time(),
-                })
-                self.injection_state = injection_type
-            else:
-                self.injection_state = "IDLE"
-            
-            return result
-    
-    def _estimate_recovery(self, injection_type: Optional[str], amplitude: float) -> float:
-        """Estimate fidelity after injection"""
-        if injection_type == "HAHN_ANTI_W":
-            # Hahn echo recovers from Anti-W back toward identity
-            return 0.707 * (1.0 + amplitude)  # Max 1.414, clipped to 1.0
-        elif injection_type == "REVIVAL_W8":
-            # Full revival maintains high fidelity
-            return 0.999 * amplitude + 0.5 * (1.0 - amplitude)  # Weighted blend
-        elif injection_type == "BURST_2^K":
-            # Power-of-2 burst aids revival
-            return 0.95 * amplitude + 0.6 * (1.0 - amplitude)
-        else:
-            return 0.5
-    
-    def record_recovery(self, fidelity_before: float, fidelity_after: float, injection_type: str):
-        """Record actual recovery metrics for continuous optimization"""
-        with self.lock:
-            self.recovery_metrics.append({
-                'cycle': self.sigma_cycle,
-                'type': injection_type,
-                'fidelity_before': fidelity_before,
-                'fidelity_after': fidelity_after,
-                'recovery_gain': fidelity_after - fidelity_before,
-                'timestamp': time.time(),
-            })
-            
-            # Update running average
-            if len(self.recovery_metrics) > 0:
-                recent_recoveries = [m['fidelity_after'] for m in list(self.recovery_metrics)[-50:]]
-                self.avg_recovery_fidelity = float(np.mean(recent_recoveries))
-    
-    def record_parametric_beating(self, sigma_g1: float, sigma_g2: float, mi: float):
-        """Log parametric beating pair for CNOT optimization"""
-        with self.lock:
-            self.beating_pairs.append({
-                'sigma_1': sigma_g1,
-                'sigma_2': sigma_g2,
-                'delta_sigma': abs(sigma_g2 - sigma_g1),
-                'mutual_information': mi,
-                'cycle': self.sigma_cycle,
-                'timestamp': time.time(),
-            })
-    
-    def get_statistics(self) -> Dict[str, Any]:
-        """Comprehensive enterprise metrics"""
-        with self.lock:
-            return {
-                'current_cycle': self.sigma_cycle,
-                'sigma_mod8': self.sigma_cycle % 8,
-                'injection_state': self.injection_state,
-                'total_hahn_injections': self.total_hahn_injections,
-                'total_revival_injections': self.total_revival_injections,
-                'total_burst_injections': self.total_burst_injections,
-                'avg_recovery_fidelity': self.avg_recovery_fidelity,
-                'recent_injections': list(self.injection_log)[-10:],
-                'recent_recoveries': list(self.recovery_metrics)[-10:],
-                'optimal_delta_sigma': self.optimal_delta_sigma,
-                'beating_data': {
-                    'total_pairs': len(self.beating_pairs),
-                    'avg_delta_sigma': float(np.mean([p['delta_sigma'] for p in self.beating_pairs])) if self.beating_pairs else 0.0,
-                    'best_mi': float(max([p['mutual_information'] for p in self.beating_pairs])) if self.beating_pairs else 0.0,
-                },
-            }
-
-
 # ════════════════════════════════════════════════════════════════════════════════
 # SECTION 10: NOISE CHANNEL DISCRIMINATOR
 # ════════════════════════════════════════════════════════════════════════════════
-
-class NoiseChannelDiscriminator:
-    """Detects which noise channel is dominant"""
-    
-    def __init__(self):
-        self.measurements = deque(maxlen=100)
-        self.lock = threading.RLock()
-    
-    def discriminate_noise(self, density_matrix: np.ndarray) -> Dict[str, float]:
-        """Estimate probability of each noise channel"""
-        try:
-            coherence = QuantumInformationMetrics.coherence_l1_norm(density_matrix)
-            purity = QuantumInformationMetrics.purity(density_matrix)
-            entropy = QuantumInformationMetrics.von_neumann_entropy(density_matrix)
-            
-            # Simple discrimination heuristic
-            depol_prob = 1.0 - purity
-            amp_prob = 1.0 - coherence
-            phase_prob = entropy / 3.0
-            
-            total = depol_prob + amp_prob + phase_prob
-            if total == 0:
-                total = 1.0
-            
-            result = {
-                'depolarizing': min(1.0, depol_prob / total),
-                'amplitude_damping': min(1.0, amp_prob / total),
-                'phase_damping': min(1.0, phase_prob / total),
-                'dominant': max(
-                    ('depolarizing', depol_prob),
-                    ('amplitude_damping', amp_prob),
-                    ('phase_damping', phase_prob),
-                    key=lambda x: x[1]
-                )[0],
-                'timestamp': time.time(),
-            }
-            
-            with self.lock:
-                self.measurements.append(result)
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Noise discrimination failed: {e}")
-            return {}
 
 # ════════════════════════════════════════════════════════════════════════════════
 # SECTION 11: PRIMARY LATTICE CONTROLLER (REFACTORED)
@@ -2821,7 +2497,6 @@ class QuantumTransaction:
         data = json.dumps(tx_dict, sort_keys=True)
         return hashlib.sha3_256(data.encode('utf-8')).hexdigest()
 
-
 @dataclass
 class QuantumBlock:
     """Block in the quantum blockchain"""
@@ -2864,7 +2539,6 @@ class QuantumBlock:
             'finalized': self.finalized,
             'finalized_at': self.finalized_at,
         }
-
 
 class IndividualValidator:
     """Individual validator (each peer validates independently, Bitcoin-style)"""
@@ -2931,7 +2605,6 @@ class IndividualValidator:
             'tx_count': block.tx_count,
         }, sort_keys=True)
         return "0x" + hashlib.sha3_256(preimage.encode()).hexdigest()
-
 
 class BlockManager:
     """Manages transaction pool and block creation (IF/THEN sealing logic)"""
@@ -3387,8 +3060,6 @@ class BlockManager:
                 'pending_txs': len(self.pending_block.transactions) if self.pending_block else 0,
             }
 
-
-
 # ════════════════════════════════════════════════════════════════════════════════
 # GLOBAL INSTANCE
 # ════════════════════════════════════════════════════════════════════════════════
@@ -3483,450 +3154,15 @@ if __name__ == '__main__':
     finally:
         shutdown_lattice()
 
-
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 # AGENT 2: INDIVIDUAL LATTICE METRICS AVERAGER (Museum Grade • θ Deployment Ready)
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
-
-class LatticeMetricsAverager:
-    """Measures individual lattice nodes: (fid_curr + fid_last)/2, (coh_curr + coh_last)/2"""
-    
-    def __init__(self, cache_size: int = 100):
-        self.cache_size = cache_size
-        self.metrics_cache = OrderedDict()
-        self.lock = threading.RLock()
-        self.update_count = 0
-    
-    def update_node_state(self, node_id: str, pq_curr_fid: float, pq_last_fid: float,
-                         pq_curr_coh: float, pq_last_coh: float) -> Tuple[float, float]:
-        """
-        Update single lattice node state by averaging pq_curr and pq_last metrics.
-        Returns: (avg_fidelity, avg_coherence)
-        """
-        with self.lock:
-            # Clamp to [0, 1]
-            pq_curr_fid = np.clip(pq_curr_fid, 0.0, 1.0)
-            pq_last_fid = np.clip(pq_last_fid, 0.0, 1.0)
-            pq_curr_coh = np.clip(pq_curr_coh, 0.0, 1.0)
-            pq_last_coh = np.clip(pq_last_coh, 0.0, 1.0)
-            
-            avg_fid = (pq_curr_fid + pq_last_fid) / 2.0
-            avg_coh = (pq_curr_coh + pq_last_coh) / 2.0
-            
-            self.metrics_cache[node_id] = {
-                'avg_fidelity': float(avg_fid),
-                'avg_coherence': float(avg_coh),
-                'pq_curr_fid': float(pq_curr_fid),
-                'pq_last_fid': float(pq_last_fid),
-                'pq_curr_coh': float(pq_curr_coh),
-                'pq_last_coh': float(pq_last_coh),
-                'timestamp': time.time(),
-            }
-            
-            # LRU enforcement: remove oldest entry if over cache_size
-            if len(self.metrics_cache) > self.cache_size:
-                self.metrics_cache.popitem(last=False)
-            
-            self.update_count += 1
-            return avg_fid, avg_coh
-    
-    def get_all_metrics(self) -> Dict[str, Dict[str, float]]:
-        """Return all cached node metrics"""
-        with self.lock:
-            return dict(self.metrics_cache)
-    
-    def get_lattice_summary(self) -> Dict[str, float]:
-        """Return global lattice statistics"""
-        with self.lock:
-            if not self.metrics_cache:
-                return {
-                    'global_fidelity_mean': 0.0,
-                    'global_fidelity_std': 0.0,
-                    'global_coherence_mean': 0.0,
-                    'global_coherence_std': 0.0,
-                    'nodes_measured': 0,
-                }
-            
-            fidelities = np.array([m['avg_fidelity'] for m in self.metrics_cache.values()])
-            coherences = np.array([m['avg_coherence'] for m in self.metrics_cache.values()])
-            
-            return {
-                'global_fidelity_mean': float(np.mean(fidelities)),
-                'global_fidelity_std': float(np.std(fidelities)),
-                'global_coherence_mean': float(np.mean(coherences)),
-                'global_coherence_std': float(np.std(coherences)),
-                'nodes_measured': len(self.metrics_cache),
-                'update_count': self.update_count,
-            }
-
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 # AGENT 3: FULL LATTICE NON-MARKOVIAN NOISE BATH (Museum Grade • θ Deployment Ready)
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 
-class FullLatticeNonMarkovianBath:
-    """Applies κ=0.11 non-Markovian GKSL noise to ENTIRE lattice state"""
-    
-    def __init__(self, lattice_dim: int = 64, damping: float = 0.11):
-        self.lattice_dim = lattice_dim
-        self.kappa = damping
-        self.decay_history = deque(maxlen=100)
-        self.fidelity_decay_history = deque(maxlen=100)
-        self.lock = threading.RLock()
-        self.condition_numbers = deque(maxlen=50)
-        self.apply_count = 0
-    
-    def apply_gksl_to_lattice(self, lattice_density_matrix: np.ndarray,
-                              dt: float = 0.001) -> Tuple[np.ndarray, float]:
-        """
-        Apply GKSL master equation with memory kernel to entire lattice density matrix.
-        Ensures numerical stability via condition number monitoring.
-        
-        Returns: (updated_lattice_density_matrix, fidelity_decay_rate)
-        """
-        with self.lock:
-            assert lattice_density_matrix.ndim == 2, "Lattice must be 2D density matrix"
-            n = lattice_density_matrix.shape[0]
-            
-            # Lindblad operator for damping
-            L = np.sqrt(self.kappa) * np.eye(n)
-            L_dag = L.T.conj()
-            
-            # Monitor condition number for numerical stability
-            try:
-                cond = np.linalg.cond(lattice_density_matrix)
-                self.condition_numbers.append(cond)
-                
-                if cond > 1e10:
-                    logger.warning(f"[NOISE-BATH] High condition number: {cond:.2e}. Regularizing.")
-                    # Add small regularization
-                    lattice_density_matrix = lattice_density_matrix + 1e-12 * np.eye(n)
-            except:
-                pass
-            
-            # GKSL Master equation: dρ/dt = -κ/2 [L†L, ρ] + κ(LρL† - ρ)
-            LdagL = L_dag @ L
-            
-            # Commutator: [A, B] = AB - BA
-            comm = LdagL @ lattice_density_matrix - lattice_density_matrix @ LdagL
-            
-            # Jump term: κ(LρL† - ρ)
-            jump = self.kappa * (L @ lattice_density_matrix @ L_dag - lattice_density_matrix)
-            
-            # Master equation: dρ = dt * (-κ/2 * commutator + jump)
-            rho_new = lattice_density_matrix + dt * (-self.kappa / 2 * comm + jump)
-            
-            # Enforce hermiticity and trace normalization
-            rho_new = (rho_new + rho_new.T.conj()) / 2
-            trace = np.trace(rho_new)
-            if abs(trace) > 1e-12:
-                rho_new = rho_new / trace
-            
-            # Compute decay rate (norm of evolution)
-            diff = np.linalg.norm(rho_new - lattice_density_matrix, 'fro')
-            decay_rate = diff / (dt + 1e-12)
-            
-            self.decay_history.append(float(decay_rate))
-            
-            # Compute fidelity loss
-            fidelity_new = np.real(np.trace(rho_new))
-            fidelity_old = np.real(np.trace(lattice_density_matrix))
-            fidelity_decay = fidelity_old - fidelity_new
-            self.fidelity_decay_history.append(max(0.0, float(fidelity_decay)))
-            
-            self.apply_count += 1
-            
-            return rho_new, decay_rate
-    
-    def get_noise_bath_metrics(self) -> Dict[str, float]:
-        """Return noise bath statistics"""
-        with self.lock:
-            if not self.decay_history:
-                return {
-                    'decay_rate': 0.0,
-                    'decay_std': 0.0,
-                    'fidelity_decay_rate': 0.0,
-                }
-            
-            decay_rates = list(self.decay_history)
-            fidelity_decays = list(self.fidelity_decay_history)
-            
-            return {
-                'decay_rate': float(np.mean(decay_rates)),
-                'decay_std': float(np.std(decay_rates)),
-                'decay_max': float(np.max(decay_rates)),
-                'fidelity_decay_rate': float(np.mean(fidelity_decays)) if fidelity_decays else 0.0,
-                'avg_condition_number': float(np.mean(list(self.condition_numbers))) if self.condition_numbers else 1.0,
-                'apply_count': self.apply_count,
-            }
-
-
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 # AGENT 4: NEURAL NET LATTICE REFRESH (Museum Grade • θ Deployment Ready)
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
-
-class LatticeRefreshNet:
-    """
-    REAL Neural Net Controller for 52×2048 Lattice Sequential Engagement
-    
-    Learns to apply optimal noise gate sequences to pseudoqubit batches to trigger
-    non-Markovian revivals. Each cycle:
-    1. Select next batch (0→1→...→51→0)
-    2. Infer optimal gate sequence from current density matrix state
-    3. Apply gates (Pauli rotations) to batch
-    4. Measure fidelity improvement → train network on this reward
-    
-    Architecture:
-    - Input: 64-dim lattice fidelity vector + noise state + entropy + revival phase
-    - Hidden: 256 → 128 (ReLU)
-    - Output: Gate sequence (12 gates × 8-dim = 96 dims) + predicted fidelity/coherence
-    """
-    
-    def __init__(self, lattice_dim: int = 64, num_batches: int = 52, qubits_per_batch: int = 2048, seed: int = 42):
-        self.lattice_dim = lattice_dim
-        self.num_batches = num_batches
-        self.qubits_per_batch = qubits_per_batch
-        self.current_batch_idx = 0  # Sequential engagement tracker
-        
-        np.random.seed(seed)
-        
-        # ═══════════════════════════════════════════════════════════════════════════════
-        # Network Architecture: Input → Hidden1 → Hidden2 → Output
-        # ═══════════════════════════════════════════════════════════════════════════════
-        
-        # Input: fidelity_vec (64) + noise_state (1) + entropy (1) + revival_phase (1) = 67
-        input_dim = lattice_dim + 3
-        hidden1_dim = 256
-        hidden2_dim = 128
-        
-        # Output: gate_sequence (12 gates × 8 dims = 96) + pred_fidelity + pred_coherence = 98
-        gate_sequence_dim = 96  # 12 Pauli rotations × 8-dim gate encoding
-        output_dim = gate_sequence_dim + 2
-        
-        # Xavier initialization
-        self.W1 = np.random.randn(input_dim, hidden1_dim) / np.sqrt(input_dim)
-        self.b1 = np.zeros(hidden1_dim)
-        
-        self.W2 = np.random.randn(hidden1_dim, hidden2_dim) / np.sqrt(hidden1_dim)
-        self.b2 = np.zeros(hidden2_dim)
-        
-        self.W3 = np.random.randn(hidden2_dim, output_dim) / np.sqrt(hidden2_dim)
-        self.b3 = np.zeros(output_dim)
-        
-        # ═══════════════════════════════════════════════════════════════════════════════
-        # Training State
-        # ═══════════════════════════════════════════════════════════════════════════════
-        self.learning_rate = 0.001
-        self.momentum = 0.9
-        
-        # Momentum buffers for each layer
-        self.v_W1 = np.zeros_like(self.W1)
-        self.v_b1 = np.zeros_like(self.b1)
-        self.v_W2 = np.zeros_like(self.W2)
-        self.v_b2 = np.zeros_like(self.b2)
-        self.v_W3 = np.zeros_like(self.W3)
-        self.v_b3 = np.zeros_like(self.b3)
-        
-        self.training_steps = 0
-        self.total_reward = 0.0
-        self.revival_triggers = 0  # Successful revival detections
-        
-        # ═══════════════════════════════════════════════════════════════════════════════
-        # Inference metrics
-        # ═══════════════════════════════════════════════════════════════════════════════
-        self.inference_times = deque(maxlen=100)
-        self.fidelity_history = deque(maxlen=100)
-        self.batch_engagement_history = []  # Track which batches triggered revivals
-        
-        self.lock = threading.RLock()
-    
-    def forward(self, lattice_fidelity_vec: np.ndarray, noise_state: float,
-                entropy_pool: bytes) -> Tuple[np.ndarray, float, float]:
-        """
-        Forward pass: infer optimal gate sequence and predicted fidelity
-        
-        Args:
-            lattice_fidelity_vec: Current fidelity of 64 lattice sample points [0, 1]
-            noise_state: Current non-Markovian bath state [0, 1]
-            entropy_pool: 32 bytes of QRNG entropy
-        
-        Returns:
-            (gate_sequence [96-dim], predicted_fidelity, predicted_coherence)
-        """
-        with self.lock:
-            t0 = time.time()
-            
-            # ─── Parse entropy pool to get revival phase estimate ──────────────────────
-            if isinstance(entropy_pool, bytes) and len(entropy_pool) >= 8:
-                entropy_scalar = float(int.from_bytes(entropy_pool[:8], 'big')) / (2**64)
-                # Revival phase: predict where in non-Markovian cycle we are (0→1→0)
-                revival_phase = np.sin(2 * np.pi * entropy_scalar) * 0.5 + 0.5  # [0, 1]
-            else:
-                revival_phase = 0.5
-            
-            # ─── Build input vector ───────────────────────────────────────────────────
-            lattice_fidelity_vec = np.clip(lattice_fidelity_vec, 0.0, 1.0)
-            noise_state = np.clip(float(noise_state), 0.0, 1.0)
-            
-            x = np.concatenate([
-                lattice_fidelity_vec,
-                [noise_state],
-                [entropy_scalar if isinstance(entropy_pool, bytes) else 0.5],
-                [revival_phase]
-            ])
-            
-            # ─── Layer 1: ReLU activation ─────────────────────────────────────────────
-            z1 = np.dot(x, self.W1) + self.b1
-            h1 = np.maximum(0, z1)  # ReLU
-            
-            # ─── Layer 2: ReLU activation ─────────────────────────────────────────────
-            z2 = np.dot(h1, self.W2) + self.b2
-            h2 = np.maximum(0, z2)  # ReLU
-            
-            # ─── Output layer: tanh for gates, sigmoid for metrics ────────────────────
-            z3 = np.dot(h2, self.W3) + self.b3
-            
-            # Gate sequence: map to [-1, 1] then to [0, 2π] rotation angles
-            gate_sequence_raw = np.tanh(z3[:96])  # [-1, 1]
-            gate_sequence = gate_sequence_raw * np.pi  # [-π, π] rotation angles
-            
-            # Predicted fidelity/coherence: sigmoid
-            def sigmoid(z):
-                return 1.0 / (1.0 + np.exp(-np.clip(z, -500, 500)))
-            
-            predicted_fidelity = float(sigmoid(z3[96]))
-            predicted_coherence = float(sigmoid(z3[97]))
-            
-            # Track metrics
-            elapsed = time.time() - t0
-            self.inference_times.append(elapsed)
-            self.fidelity_history.append(predicted_fidelity)
-            
-            return gate_sequence, predicted_fidelity, predicted_coherence
-    
-    def train_on_revival_reward(self, lattice_fidelity_vec: np.ndarray, noise_state: float,
-                                entropy_pool: bytes, fidelity_before: float, 
-                                fidelity_after: float) -> Dict[str, float]:
-        """
-        Backward pass: train network to maximize fidelity improvement (revival trigger reward)
-        
-        This is the KEY: network learns when and how to apply gates to trigger non-Markovian
-        revivals. Reward = fidelity improvement.
-        
-        Args:
-            lattice_fidelity_vec: State before gate application
-            noise_state: Bath state
-            entropy_pool: Entropy used
-            fidelity_before: Fidelity before applying learned gate sequence
-            fidelity_after: Fidelity after applying learned gates
-        
-        Returns:
-            Training metrics (loss, reward, gradient norm)
-        """
-        with self.lock:
-            # Compute reward: positive if revival triggered (fidelity improved)
-            reward = fidelity_after - fidelity_before
-            
-            # Trigger bonus for strong revivals (Δfidelity > 0.02)
-            revival_bonus = 0.1 if reward > 0.02 else 0.0
-            total_reward = reward + revival_bonus
-            
-            # Target: we want high fidelity (target ≈ 0.92 for W-state)
-            target_fidelity = 0.92
-            
-            # Simple MSE loss: (predicted_fidelity - actual_fidelity_after)^2
-            gate_seq, pred_fid, pred_coh = self.forward(lattice_fidelity_vec, noise_state, entropy_pool)
-            
-            fidelity_loss = (pred_fid - fidelity_after) ** 2
-            # Also reward if predicted_fidelity ≈ target
-            target_loss = (pred_fid - target_fidelity) ** 2 * 0.1
-            
-            total_loss = fidelity_loss + target_loss
-            
-            # ─── Simplified gradient descent (SGD with momentum) ──────────────────────
-            # In full backprop, we'd compute ∂loss/∂W for each layer.
-            # Here, use scalar reward to update weights directly.
-            
-            # Gradient magnitude proportional to loss and reward signal
-            grad_scale = -reward * self.learning_rate  # Negative: reward decreases loss
-            
-            # Update W3 (output layer) most aggressively
-            grad_W3 = grad_scale * np.random.randn(*self.W3.shape) * 0.1
-            grad_b3 = grad_scale * np.random.randn(*self.b3.shape) * 0.1
-            
-            self.v_W3 = self.momentum * self.v_W3 + grad_W3
-            self.v_b3 = self.momentum * self.v_b3 + grad_b3
-            self.W3 += self.v_W3
-            self.b3 += self.v_b3
-            
-            # Update W2, W1 with decaying impact
-            grad_W2 = grad_scale * np.random.randn(*self.W2.shape) * 0.05
-            grad_b2 = grad_scale * np.random.randn(*self.b2.shape) * 0.05
-            
-            self.v_W2 = self.momentum * self.v_W2 + grad_W2
-            self.v_b2 = self.momentum * self.v_b2 + grad_b2
-            self.W2 += self.v_W2
-            self.b2 += self.v_b2
-            
-            grad_W1 = grad_scale * np.random.randn(*self.W1.shape) * 0.02
-            grad_b1 = grad_scale * np.random.randn(*self.b1.shape) * 0.02
-            
-            self.v_W1 = self.momentum * self.v_W1 + grad_W1
-            self.v_b1 = self.momentum * self.v_b1 + grad_b1
-            self.W1 += self.v_W1
-            self.b1 += self.v_b1
-            
-            # Track success
-            self.training_steps += 1
-            self.total_reward += total_reward
-            if reward > 0.02:
-                self.revival_triggers += 1
-                # Record successful batch engagement
-                batch_idx = self.current_batch_idx % self.num_batches
-                self.batch_engagement_history.append({
-                    'batch_id': batch_idx,
-                    'reward': total_reward,
-                    'timestamp': time.time()
-                })
-            
-            # Advance to next batch for sequential engagement
-            self.current_batch_idx = (self.current_batch_idx + 1) % self.num_batches
-            
-            return {
-                'loss': float(total_loss),
-                'reward': float(total_reward),
-                'fidelity_improvement': float(reward),
-                'revival_bonus': float(revival_bonus),
-                'gradient_norm': float(np.linalg.norm(grad_W3)),
-                'current_batch': int(self.current_batch_idx),
-                'training_steps': self.training_steps,
-                'total_revivals_triggered': self.revival_triggers,
-            }
-    
-    def get_next_batch_to_engage(self) -> int:
-        """Return the next batch (0-51) to apply gates to"""
-        batch = self.current_batch_idx % self.num_batches
-        return batch
-    
-    def get_performance_metrics(self) -> Dict[str, Any]:
-        """Return comprehensive training and inference metrics"""
-        with self.lock:
-            mean_fid = float(np.mean(list(self.fidelity_history))) if self.fidelity_history else 0.0
-            mean_latency = float(np.mean([t * 1000 for t in self.inference_times])) if self.inference_times else 0.0
-            
-            # Revival trigger efficiency: how many batches successfully triggered revivals?
-            unique_batches_triggered = len(set(h['batch_id'] for h in self.batch_engagement_history))
-            
-            return {
-                'training_steps': self.training_steps,
-                'total_reward': float(self.total_reward),
-                'mean_fidelity': mean_fid,
-                'mean_inference_latency_ms': mean_latency,
-                'revivals_triggered': self.revival_triggers,
-                'unique_batches_triggered': unique_batches_triggered,
-                'current_batch_index': self.current_batch_idx,
-                'engagement_coverage': f"{unique_batches_triggered}/{self.num_batches}",
-                'learning_rate': self.learning_rate,
-                'momentum': self.momentum,
-            }
 
