@@ -1940,33 +1940,9 @@ class QuantumLatticeController:
                 )
 
                 # ══════════════════════════════════════════════════════════════════════════
-                # 🔬 SIGMA RESURRECTION PROTOCOL: Hahn Echo + W-State Revival (INLINE)
+                # 🔬 SIGMA RESURRECTION PROTOCOL: W-State Revival + Non-Markovian Bursts
                 # ══════════════════════════════════════════════════════════════════════════
                 sigma_mod8 = self.cycle_count % 8
-                
-                # ─── HAHN ECHO (σ ≡ 4 mod 8) ──────────────────────────────────────
-                if sigma_mod8 == 4:
-                    # Anti-W state injection: recover from fidelity dips
-                    injection_amplitude = 0.15  # Mild mixing
-                    anti_w_target = np.zeros_like(self._w8_target)
-                    _excitations = [1 << i for i in range(8)]
-                    for _i in _excitations:
-                        for _j in _excitations:
-                            if _i != _j:
-                                anti_w_target[_i, _j] = (1.0/8.0) * (-1.0 if _i > _j else 1.0)
-                    
-                    self.current_density_matrix = (
-                        (1.0 - injection_amplitude) * self.current_density_matrix
-                        + injection_amplitude * anti_w_target
-                    )
-                    fidelity_post_hahn = QuantumInformationMetrics.state_fidelity(
-                        self.current_density_matrix, self._w8_target
-                    )
-                    logger.info(
-                        f"🔬 [SIGMA-HAHN-4] Hahn echo @ cycle {self.cycle_count} | "
-                        f"F: {self.fidelity:.4f} → {fidelity_post_hahn:.4f}"
-                    )
-                    self.fidelity = fidelity_post_hahn
                 
                 # ─── W-STATE REVIVAL (σ ≡ 0 mod 8) ────────────────────────────────
                 if sigma_mod8 == 0 and self.cycle_count > 0:
