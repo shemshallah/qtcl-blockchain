@@ -1940,21 +1940,69 @@ class QuantumLatticeController:
                 )
 
                 # ══════════════════════════════════════════════════════════════════════════
-                # 🔬 SIGMA RESURRECTION PROTOCOL: Hahn Echo + Parametric Beating
+                # 🔬 SIGMA RESURRECTION PROTOCOL: Hahn Echo + W-State Revival (INLINE)
                 # ══════════════════════════════════════════════════════════════════════════
-                # Real quantum hardware timescales: 72ns gate + 12μs T2 coherence
-                # F(σ) = cos²(πσ/8) exact identity verified on real Rigetti hardware
-                # Hahn π-pulse injection at σ ≡ 4 (mod 8) recovers Anti-W destruction
-                # W-state revival at σ ≡ 0 (mod 8) maintains baseline entanglement
-                # Power-of-2 bursts at cycles 2^k provide non-Markovian memory kicks
-                # ══════════════════════════════════════════════════════════════════════════
-                
-                
-                # ──────────────────────────────────────────────────────────────────
-                # PARAMETRIC BEATING ENHANCEMENT (Δσ = 2.6 optimal)
-                # This will be wired to oracle for differential qubit group noise
-                # ──────────────────────────────────────────────────────────────────
                 sigma_mod8 = self.cycle_count % 8
+                
+                # ─── HAHN ECHO (σ ≡ 4 mod 8) ──────────────────────────────────────
+                if sigma_mod8 == 4:
+                    # Anti-W state injection: recover from fidelity dips
+                    injection_amplitude = 0.15  # Mild mixing
+                    anti_w_target = np.zeros_like(self._w8_target)
+                    _excitations = [1 << i for i in range(8)]
+                    for _i in _excitations:
+                        for _j in _excitations:
+                            if _i != _j:
+                                anti_w_target[_i, _j] = (1.0/8.0) * (-1.0 if _i > _j else 1.0)
+                    
+                    self.current_density_matrix = (
+                        (1.0 - injection_amplitude) * self.current_density_matrix
+                        + injection_amplitude * anti_w_target
+                    )
+                    fidelity_post_hahn = QuantumInformationMetrics.state_fidelity(
+                        self.current_density_matrix, self._w8_target
+                    )
+                    logger.info(
+                        f"🔬 [SIGMA-HAHN-4] Hahn echo @ cycle {self.cycle_count} | "
+                        f"F: {self.fidelity:.4f} → {fidelity_post_hahn:.4f}"
+                    )
+                    self.fidelity = fidelity_post_hahn
+                
+                # ─── W-STATE REVIVAL (σ ≡ 0 mod 8) ────────────────────────────────
+                if sigma_mod8 == 0 and self.cycle_count > 0:
+                    # Full W-state revival: maintain baseline entanglement
+                    injection_amplitude = 0.08
+                    self.current_density_matrix = (
+                        (1.0 - injection_amplitude) * self.current_density_matrix
+                        + injection_amplitude * self._w8_target
+                    )
+                    fidelity_post_revival = QuantumInformationMetrics.state_fidelity(
+                        self.current_density_matrix, self._w8_target
+                    )
+                    coherence_post_revival = float(np.clip(
+                        QuantumInformationMetrics.coherence_l1_norm(self.current_density_matrix) / 7.0,
+                        0.0, 1.0
+                    ))
+                    logger.info(
+                        f"🔬 [SIGMA-REVIVAL-0] W-state revival @ cycle {self.cycle_count} | "
+                        f"F: {self.fidelity:.4f} → {fidelity_post_revival:.4f} | "
+                        f"C: {self.coherence:.4f} → {coherence_post_revival:.4f}"
+                    )
+                    self.fidelity = fidelity_post_revival
+                    self.coherence = coherence_post_revival
+                
+                # ─── POWER-OF-2 BURSTS (non-Markovian memory kicks) ──────────────
+                if self.cycle_count > 0 and (self.cycle_count & (self.cycle_count - 1)) == 0:
+                    # Power-of-2 cycle: apply gentle W-state memory kick
+                    k = int(np.log2(self.cycle_count))
+                    injection_amplitude = 0.04
+                    self.current_density_matrix = (
+                        (1.0 - injection_amplitude) * self.current_density_matrix
+                        + injection_amplitude * self._w8_target
+                    )
+                    logger.info(
+                        f"🔬 [SIGMA-BURST-2^{k}] Power-of-2 burst @ cycle {self.cycle_count}"
+                    )
                 
                 self.w_state_strength = min(1.0, self.coherence * QuantumInformationMetrics.purity(self.current_density_matrix))
                 
