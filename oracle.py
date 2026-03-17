@@ -998,6 +998,8 @@ class OracleWStateManager:
         self._w_state_measurement_cycle: int = 0
         self._w_state_lock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=5, thread_name_prefix="OracleMeasure")
+        self._mermin_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="MerminAsync")
+        self._mermin_future: Optional[Any] = None   # in-flight async Mermin future
         self._last_mermin: Optional[dict] = None
         # Warm-start: best Mermin angles from last successful optimisation
         self._best_mermin_angles: Optional[np.ndarray] = None
@@ -1119,7 +1121,7 @@ class OracleWStateManager:
                 lambda a: -abs(OracleWStateManager._mermin_value(rho8, a)),
                 x0,
                 method="Nelder-Mead",
-                options={"maxiter": 1500, "xatol": 1e-7, "fatol": 1e-8, "adaptive": True},
+                options={"maxiter": 400, "xatol": 1e-6, "fatol": 1e-7, "adaptive": True},
             )
             total_it += result.nit
             M_cand = abs(OracleWStateManager._mermin_value(rho8, result.x))
@@ -1316,45 +1318,61 @@ class OracleWStateManager:
             logger.error(f"[ORACLE CLUSTER] ❌ Consensus DM construction failed: {exc}")
             return None
 
-        # ── Step 6: Mermin test — every cycle, adaptive restarts ─────────────
+        # ── Step 6: Mermin test — ASYNC, non-blocking ────────────────────────
         with self._state_lock:
             self.lattice_refresh_counter += 1
             current_cycle = self.lattice_refresh_counter
-
-        # Adaptive restart budget: thorough when state is entangled, cheap otherwise.
-        # F ≥ 0.80 → 18 restarts (full search for max violation)
-        # F ≥ 0.70 → 8  restarts (marginal regime)
-        # F <  0.70 → 4  restarts (mixed state, quick classical check)
-        if cons_fidelity >= 0.80:
-            _mermin_restarts = 18
-        elif cons_fidelity >= 0.70:
-            _mermin_restarts = 8
-        else:
-            _mermin_restarts = 4
 
         per_node_info = [
             {"oracle_id": r.oracle_id+1, "role": _ORACLE_ROLES[r.oracle_id], "fidelity": r.fidelity}
             for r in sorted(readings, key=lambda r: r.oracle_id)
         ]
+        # Mermin Nelder-Mead takes ~170s per call and previously blocked _stream_worker,
+        # reducing oracle refresh from 10ms to 170s.  Fix: submit to a dedicated
+        # single-thread executor.  _extract_snapshot() returns immediately using
+        # _last_mermin (from the previous completed optimisation) as the bell_test.
+        # When the async job finishes it writes back to _last_mermin so the NEXT
+        # snapshot carries the fresh result.  Lag = one oracle cluster cycle (~seconds).
+        with self._state_lock:
+            _mermin_pending = (self._mermin_future is not None and
+                               not self._mermin_future.done())
 
-        mermin_result: Optional[dict] = None
-        try:
+        if not _mermin_pending:
+            # Capture immutable locals for the async closure
+            _dm_snap   = dm_mean.copy()
+            _fid_snap  = float(cons_fidelity)
+            _pni_snap  = list(per_node_info)
             with self._state_lock:
                 _warm = self._best_mermin_angles.copy() if self._best_mermin_angles is not None else None
-            M, angles, iters = self._optimize_mermin_angles(
-                dm_mean, n_restarts=_mermin_restarts, warm_start=_warm
-            )
-            # Persist best angles for next cycle warm-start
+
+            def _async_mermin():
+                try:
+                    if _fid_snap >= 0.80:
+                        _restarts = 6   # reduced from 18: warm-start converges in 1-2 iters
+                    elif _fid_snap >= 0.70:
+                        _restarts = 3   # reduced from 8
+                    else:
+                        _restarts = 2   # reduced from 4
+                    M, angles, iters = OracleWStateManager._optimize_mermin_angles(
+                        _dm_snap, n_restarts=_restarts, warm_start=_warm
+                    )
+                    result = self._build_mermin_result(_dm_snap, M, angles, iters,
+                                                       _fid_snap, _pni_snap)
+                    with self._state_lock:
+                        self._best_mermin_angles = angles.copy()
+                        self._last_mermin = result
+                        # Patch bell_test into the live snapshot so next read sees fresh Mermin
+                        if self.current_density_matrix is not None:
+                            self.current_density_matrix.bell_test = result
+                except Exception as _exc:
+                    logger.debug(f"[ORACLE CLUSTER] Async Mermin failed: {_exc}")
+
             with self._state_lock:
-                self._best_mermin_angles = angles.copy()
-            mermin_result = self._build_mermin_result(dm_mean, M, angles, iters,
-                                                       cons_fidelity, per_node_info)
-            with self._state_lock:
-                self._last_mermin = mermin_result
-        except Exception as exc:
-            logger.warning(f"[ORACLE CLUSTER] Mermin test failed: {exc}")
-            with self._state_lock:
-                mermin_result = self._last_mermin
+                self._mermin_future = self._mermin_executor.submit(_async_mermin)
+
+        # Use last completed Mermin result immediately (zero blocking)
+        with self._state_lock:
+            mermin_result = self._last_mermin
 
         # ── Step 7: Rebuild idle nodes ────────────────────────────────────────
         measured_ids = {node_a.oracle_id, node_b.oracle_id}
@@ -1491,6 +1509,7 @@ class OracleWStateManager:
         if self.stream_thread:  self.stream_thread.join(timeout=5)
         if self.refresh_thread: self.refresh_thread.join(timeout=5)
         self._pool.shutdown(wait=False)
+        self._mermin_executor.shutdown(wait=False)
         logger.info("[ORACLE CLUSTER] ✅ Stopped")
 
     # ── Public API ────────────────────────────────────────────────────────────

@@ -10790,7 +10790,7 @@ def _start_oracle_measurement_sync_daemon():
                     try:
                         with get_db_cursor() as _pqcur:
                             _pqcur.execute(
-                                "SELECT pq_curr, pq_last FROM blocks ORDER BY block_height DESC LIMIT 1"
+                                "SELECT pq_curr, pq_last FROM blocks ORDER BY height DESC LIMIT 1"
                             )
                             _pqrow = _pqcur.fetchone()
                             if _pqrow and _pqrow[0] is not None:
@@ -10949,7 +10949,7 @@ def _start_oracle_measurement_sync_daemon():
                         # VERIFICATION PHASE: Compare with lattice + check entanglement
                         # ───────────────────────────────────────────────────────────────────────
                         threshold_f = 0.05
-                        threshold_c = 0.01
+                        threshold_c = 0.015  # widened: lattice C drifts ~0.0001/cycle; 0.01 causes false DIVERGENT
                         mermin_threshold = 2.0  # Classical bound (W-state max ≈ 3.046)
 
                         metrics_aligned = fidelity_delta < threshold_f and coherence_delta < threshold_c
