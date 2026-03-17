@@ -91,7 +91,6 @@ except Exception as e:
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 import traceback
-from typing import Dict, Any, Optional, List, Tuple, Set
 from datetime import datetime, timezone, timedelta
 from enum import Enum
 from dataclasses import dataclass, field
@@ -10570,59 +10569,64 @@ def _start_oracle_measurement_sync_daemon():
                     )
 
                     # ───────────────────────────────────────────────────────────────────────────
-                    # READ from OracleWStateManager — it is the single measurement source.
-                    # Do NOT call node.measure_block_field() here — that is OracleWStateManager's
-                    # job. Two callers hitting the same nodes simultaneously was causing all
-                    # the fidelity, barrier, and Mermin issues.
+                    # FRESH MEASUREMENT: call _extract_snapshot() directly so each window
+                    # trigger executes a live AER run — not a cache read.  The old pattern
+                    # (get_latest_density_matrix) returned the last cached snapshot, causing
+                    # identical F/C values across consecutive windows and pq0=0 forever.
                     # ───────────────────────────────────────────────────────────────────────────
                     measurement_start = time.time_ns()
-
-                    dm = ORACLE_W_STATE_MANAGER.get_latest_density_matrix()
+                    snap = ORACLE_W_STATE_MANAGER._extract_snapshot()
                     measurement_elapsed_ns = time.time_ns() - measurement_start
 
                     bf_readings = []
                     oracle_metrics = []
 
-                    if dm:
-                        bf_agg = dm.get('block_field', dm.get('aer_noise_state', {}).get('block_field', {}))
-                        per_node = bf_agg.get('per_node', [])
+                    if snap is not None:
+                        bf_agg   = snap.aer_noise_state.get("block_field", {})
+                        per_node = bf_agg.get("per_node", [])
+
+                        # Consensus Mermin comes from snap.bell_test (3-qubit optimised).
+                        # BlockFieldReading.mermin_violation is always 0.0 — Mermin is
+                        # computed once at cluster consensus level, not per-node.
+                        consensus_mermin_result = snap.bell_test or {}
+                        consensus_mermin_M = float(consensus_mermin_result.get("M_value", 0.0))
 
                         for node in per_node:
-                            node_idx = node.get('oracle_id', 1) - 1  # 1-indexed in snapshot → 0-indexed
+                            node_idx  = node.get('oracle_id', 1) - 1  # 1-indexed → 0-indexed
                             fidelity  = float(node.get('fidelity',  0.0))
                             coherence = float(node.get('coherence', 0.0))
-                            mermin    = float(node.get('mermin_violation', 0.0))
 
-                            # Reconstruct a lightweight bf-like object for the aggregation below
                             class _BF:
                                 pass
                             bf = _BF()
                             bf.fidelity             = fidelity
                             bf.coherence            = coherence
-                            bf.mermin_violation     = mermin
+                            # Use consensus Mermin for all per-oracle lines (per-node value is always 0)
+                            bf.mermin_violation     = consensus_mermin_M
                             bf.entropy              = float(node.get('entropy', 0.0))
                             bf.pq0_oracle_fidelity  = float(node.get('pq0_oracle_fidelity', 0.0))
                             bf.pq0_IV_fidelity      = float(node.get('pq0_IV_fidelity',     0.0))
                             bf.pq0_V_fidelity       = float(node.get('pq0_V_fidelity',      0.0))
-                            bf.timestamp_ns         = dm.get('timestamp_ns', time.time_ns())
+                            bf.timestamp_ns         = snap.timestamp_ns
 
                             bf_readings.append((node_idx, bf))
-                            logger.critical(
+                            # Downgraded from CRITICAL — this fires every window (several/sec)
+                            logger.info(
                                 f"[ORACLE-SYNC] ✓ Oracle-{node_idx} measured | "
                                 f"F={bf.fidelity:.4f} C={bf.coherence:.6f} | "
-                                f"Mermin={bf.mermin_violation:.4f} | "
+                                f"Mermin(consensus)={bf.mermin_violation:.4f} | "
                                 f"pq0=[oracle={bf.pq0_oracle_fidelity:.4f} "
                                 f"IV={bf.pq0_IV_fidelity:.4f} V={bf.pq0_V_fidelity:.4f}]"
                             )
                             oracle_metrics.append({
-                                'oracle_id':   node_idx,
-                                'fidelity':    bf.fidelity,
-                                'coherence':   bf.coherence,
-                                'mermin':      bf.mermin_violation,
-                                'entropy':     bf.entropy,
-                                'pq0_oracle':  bf.pq0_oracle_fidelity,
-                                'pq0_IV':      bf.pq0_IV_fidelity,
-                                'pq0_V':       bf.pq0_V_fidelity,
+                                'oracle_id':    node_idx,
+                                'fidelity':     bf.fidelity,
+                                'coherence':    bf.coherence,
+                                'mermin':       bf.mermin_violation,
+                                'entropy':      bf.entropy,
+                                'pq0_oracle':   bf.pq0_oracle_fidelity,
+                                'pq0_IV':       bf.pq0_IV_fidelity,
+                                'pq0_V':        bf.pq0_V_fidelity,
                                 'timestamp_ns': bf.timestamp_ns,
                             })
                     
@@ -10637,14 +10641,8 @@ def _start_oracle_measurement_sync_daemon():
                         avg_bf_fidelity  = sum(bf[1].fidelity  for bf in bf_readings) / len(bf_readings)
                         avg_bf_coherence = sum(bf[1].coherence for bf in bf_readings) / len(bf_readings)
 
-                        # ── MERMIN: use the 3-qubit consensus test, NOT per-node 5-qubit test ──
-                        # Research shows the 5-qubit CHSH-like test on the composite DM saturates
-                        # at S~0.5 regardless of W-state quality because the CX entanglement with
-                        # boundary qubits dilutes the oracle sub-space.
-                        # OracleWStateManager runs an optimized 3-qubit Nelder-Mead Mermin test
-                        # on the consensus oracle sub-DM every 10 cycles — that is the correct
-                        # test for W-state quantum violation (classical bound=2, W-max≈3.046).
-                        consensus_mermin_result = dm.get('mermin_test') or dm.get('bell_test') or {}
+                        # ── MERMIN: snap.bell_test holds the 3-qubit Nelder-Mead consensus result ──
+                        consensus_mermin_result = snap.bell_test or {}
                         consensus_mermin_M = float(consensus_mermin_result.get('M_value', 0.0))
                         is_quantum_consensus = bool(consensus_mermin_result.get('is_quantum', False))
 
@@ -10758,7 +10756,8 @@ def _start_oracle_measurement_sync_daemon():
                         logger.error(
                             f"[ORACLE-SYNC] ❌ ZERO measurements @ cycle {current_cycle} | "
                             f"Index=[pq_last={pq_last} pq_curr={pq_curr}] | "
-                            f"Consecutive_failures={consecutive_failures}/5"
+                            f"Consecutive_failures={consecutive_failures}/5 | "
+                            f"snap={'None (lattice DM not ready)' if snap is None else 'empty per_node'}"
                         )
                         if consecutive_failures >= 5:
                             logger.critical(

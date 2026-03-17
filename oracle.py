@@ -122,7 +122,14 @@ try:
     from qiskit_aer import AerSimulator
     from qiskit_aer.noise import NoiseModel, depolarizing_error, amplitude_damping_error, phase_damping_error
     QISKIT_AVAILABLE = True
-    logger.info("[ORACLE] ✅ Qiskit/AER available — quantum simulation enabled")
+    # ── Silence AER/Qiskit internal logging — only surface WARNING+ ──────────
+    for _qlog in (
+        'qiskit', 'qiskit_aer', 'qiskit_aer.backends',
+        'qiskit_aer.backends.aer_simulator',
+        'qiskit.compiler', 'qiskit.transpiler',
+    ):
+        logging.getLogger(_qlog).setLevel(logging.WARNING)
+    logger.info("[ORACLE] ✅ Qiskit/AER available — quantum simulation enabled (AER logs silenced)")
 except ImportError as _e:
     raise RuntimeError(
         f"[ORACLE] FATAL: Qiskit/AER required. pip install qiskit qiskit-aer. Error: {_e}"
@@ -661,6 +668,9 @@ class OracleNode:
             nm.add_all_qubit_quantum_error(phase_damping_error(p_eff),         ["id"])
             self.noise_model = nm
             self.aer = AerSimulator(method='density_matrix', noise_model=nm)
+            # Silence per-instance AER runtime logs
+            logging.getLogger('qiskit_aer').setLevel(logging.WARNING)
+            logging.getLogger('qiskit_aer.backends').setLevel(logging.WARNING)
             logger.info(
                 f"[ORACLE-NODE-{self.oracle_id+1}:{self.role}] "
                 f"AER ready (density_matrix+Kraus | κ={k_eff:.5f} T1={a_eff:.5f} "
