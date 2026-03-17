@@ -136,7 +136,7 @@ try:
             return False
     
     try:
-        from lattice_controller_production import QuantumLatticeController
+        from lattice_controller import QuantumLatticeController
         lattice_controller = QuantumLatticeController()
         
         # Spawn 5 oracles in dedicated gthreads
