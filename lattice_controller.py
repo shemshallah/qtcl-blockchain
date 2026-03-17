@@ -1942,46 +1942,29 @@ class QuantumLatticeController:
                 # ══════════════════════════════════════════════════════════════════════════
                 # 🔬 SIGMA RESURRECTION PROTOCOL: W-State Revival + Non-Markovian Bursts
                 # ══════════════════════════════════════════════════════════════════════════
-                sigma_mod8 = self.cycle_count % 8
+                # ══════════════════════════════════════════════════════════════════════════
+                # 🔬 NATURAL QUANTUM EVOLUTION — QRNG + Non-Markovian Bath ONLY
+                # ══════════════════════════════════════════════════════════════════════════
+                # NO artificial injection. Pure AER simulation with:
+                # - Stochastic QRNG channels (per-call entropy)
+                # - Non-Markovian noise bath (κ=0.35, T1/T2 realistic)
+                # - Kraus operator decoherence
+                # Natural revivals emerge from quantum memory, not tuning.
                 
-                # ─── W-STATE REVIVAL (σ ≡ 0 mod 8) ────────────────────────────────
-                if sigma_mod8 == 0 and self.cycle_count > 0:
-                    # Full W-state revival: maintain baseline entanglement
-                    injection_amplitude = 0.08
-                    self.current_density_matrix = (
-                        (1.0 - injection_amplitude) * self.current_density_matrix
-                        + injection_amplitude * self._w8_target
-                    )
-                    fidelity_post_revival = QuantumInformationMetrics.state_fidelity(
-                        self.current_density_matrix, self._w8_target
-                    )
-                    coherence_post_revival = float(np.clip(
-                        QuantumInformationMetrics.coherence_l1_norm(self.current_density_matrix) / 7.0,
-                        0.0, 1.0
-                    ))
-                    logger.info(
-                        f"🔬 [SIGMA-REVIVAL-0] W-state revival @ cycle {self.cycle_count} | "
-                        f"F: {self.fidelity:.4f} → {fidelity_post_revival:.4f} | "
-                        f"C: {self.coherence:.4f} → {coherence_post_revival:.4f}"
-                    )
-                    self.fidelity = fidelity_post_revival
-                    self.coherence = coherence_post_revival
+                fidelity_pre = self.fidelity
+                coherence_pre = self.coherence
                 
-                # ─── POWER-OF-2 BURSTS (non-Markovian memory kicks) ──────────────
-                if self.cycle_count > 0 and (self.cycle_count & (self.cycle_count - 1)) == 0:
-                    # Power-of-2 cycle: apply gentle W-state memory kick
-                    k = int(np.log2(self.cycle_count))
-                    injection_amplitude = 0.04
-                    self.current_density_matrix = (
-                        (1.0 - injection_amplitude) * self.current_density_matrix
-                        + injection_amplitude * self._w8_target
-                    )
-                    logger.info(
-                        f"🔬 [SIGMA-BURST-2^{k}] Power-of-2 burst @ cycle {self.cycle_count}"
-                    )
+                fidelity_post_evolution = QuantumInformationMetrics.state_fidelity(
+                    self.current_density_matrix, self._w8_target
+                )
+                coherence_post_evolution = float(np.clip(
+                    QuantumInformationMetrics.coherence_l1_norm(self.current_density_matrix) / 7.0,
+                    0.0, 1.0
+                ))
                 
+                self.fidelity = fidelity_post_evolution
+                self.coherence = coherence_post_evolution
                 self.w_state_strength = min(1.0, self.coherence * QuantumInformationMetrics.purity(self.current_density_matrix))
-                
                 entropy = QuantumInformationMetrics.von_neumann_entropy(self.current_density_matrix)
                 
                 # 🔍 ENTANGLEMENT REVIVAL DETECTION (Non-Markovian signature)
@@ -2161,6 +2144,10 @@ class QuantumLatticeController:
         AerSimulator — noise divergence produces the 5 different readings that
         Byzantine consensus aggregates.
 
+        ⚠️ CRITICAL: Each oracle MUST consume FRESH QRNG entropy per call.
+           Without fresh entropy, oracles will measure identical states (profiling bug).
+           The noise bath κ=0.35 requires stochastic seeding each measurement.
+
         Construction:
           rho_pq0 = F * |W₃⟩⟨W₃| + (1-F) * I/8
 
@@ -2169,6 +2156,15 @@ class QuantumLatticeController:
         Low F (e.g. after a π-pulse) → more mixed → lower Mermin, flags to daemon.
         """
         import numpy as np
+        
+        # 🔬 FORCE FRESH QRNG ENTROPY per oracle call
+        # This ensures each oracle's noise realization differs, avoiding profiling stuckness.
+        try:
+            fresh_entropy = globals.QRNG_ENSEMBLE.read(32)  # 32 bytes fresh entropy
+            qrng_seed = int.from_bytes(fresh_entropy[:8], 'little') & 0xFFFFFFFF
+        except:
+            qrng_seed = None
+        
         F = float(max(0.0, min(1.0, self.fidelity)))
         # Pure 3-qubit W-state: |W⟩⟨W| full outer product
         w3 = np.zeros((8, 8), dtype=np.complex128)
