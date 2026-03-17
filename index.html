@@ -262,8 +262,8 @@ var S={
   oracle_data:{},  // oracle_id -> {w_state_fidelity, coherence, pq0_*, in_consensus}
   lattice_fidelity:0  // direct from LATTICE.fidelity (not oracle consensus)
 };
-var blocks=[],txs=[],fidH=[],dp=0,dbk=[],wp=0,lu=0;
-for(var i=0;i<80;i++) fidH.push(.9);
+var blocks=[],txs=[],fidH=[],cohH=[],dp=0,dbk=[],wp=0,lu=0;
+for(var i=0;i<80;i++){fidH.push(.9);cohH.push(.75);}
 
 // clock
 function tick(){var d=new Date();document.getElementById('hck').textContent=d.toISOString().replace('T',' ').slice(0,19)+' UTC';}
@@ -288,95 +288,38 @@ setInterval(tick,1000);tick();
   })();
 })();
 
-// Poincare disk — renders live {8,3} hyperbolic lattice topology
+// Poincare disk
 var dc=document.getElementById('dc'),dctx=dc.getContext('2d');
 function szDisk(){dc.width=dc.parentElement.clientWidth;}
 window.addEventListener('resize',szDisk);szDisk();
-var dp=0;
-// Pre-generate {8,3} BFS vertex ring positions (Poincare disk, Schläfli {8,3})
-// r_fund = tanh(acosh(cos(π/3)/sin(π/8))/2) ≈ 0.7653
-var _r_fund=(function(){var c=Math.cos(Math.PI/3)/Math.sin(Math.PI/8);return Math.tanh(Math.acosh(c)/2);})();
-var _lattice_pts=[];
-(function(){
-  // Generate up to 200 BFS vertices of {8,3} tessellation for visual ring
-  var p=8,q=3,visited={},bfsQ=[];
-  function snap(re,im){return re.toFixed(6)+','+im.toFixed(6);}
-  function mobiusInv(zr,zi,ar,ai){// (z+a)/(1+conj(a)*z)
-    var nr=zr+ar,ni=zi+ai,dr=1+ar*zr+ai*zi,di=ar*zi-ai*zr,d2=dr*dr+di*di;
-    return d2<1e-20?{r:ar,i:ai}:{r:(nr*dr+ni*di)/d2,i:(ni*dr-nr*di)/d2};}
-  for(var k=0;k<p;k++){
-    var a=k*2*Math.PI/p,vr=_r_fund*Math.cos(a),vi=_r_fund*Math.sin(a);
-    var s=snap(vr,vi);if(!visited[s]){visited[s]=1;bfsQ.push([vr,vi,a+Math.PI]);_lattice_pts.push([vr,vi]);}
-  }
-  var qi=0;
-  while(qi<bfsQ.length&&_lattice_pts.length<300){
-    var v=bfsQ[qi++],vr=v[0],vi=v[1],inA=v[2];
-    if(vr*vr+vi*vi>0.995) continue;
-    for(var k=0;k<q;k++){
-      var ba=inA+k*2*Math.PI/q,rs=Math.tanh(_r_fund/2);
-      var dz={r:rs*Math.cos(ba),i:rs*Math.sin(ba)},nb=mobiusInv(dz.r,dz.i,vr,vi);
-      if(nb.r*nb.r+nb.i*nb.i>=0.995) continue;
-      var s=snap(nb.r,nb.i);if(visited[s]) continue;
-      visited[s]=1;bfsQ.push([nb.r,nb.i,ba+Math.PI]);_lattice_pts.push([nb.r,nb.i]);
-    }
-  }
-})();
-// Block-burst ring
-var dbk=[];
+var parts=[];
+(function(){for(var i=0;i<70;i++) parts.push({r:Math.random()*.82,a:Math.random()*Math.PI*2,dr:(Math.random()-.5)*.0008,da:(Math.random()-.5)*.003,sz:Math.random()*1.4+.3,al:Math.random()*.35+.08,tp:Math.floor(Math.random()*3)});})();
 function drawDisk(){
-  var w=dc.width,h=dc.height||w,cx=w/2,cy=h/2,R=Math.min(w,h)/2-16;
+  var w=dc.width,h=dc.height,cx=w/2,cy=h/2,R=Math.min(w,h)/2-16;
   dctx.clearRect(0,0,w,h);
-  // Background
-  var g=dctx.createRadialGradient(cx,cy,0,cx,cy,R);
-  g.addColorStop(0,'rgba(6,12,28,.98)');g.addColorStop(1,'rgba(3,6,16,.9)');
+  var g=dctx.createRadialGradient(cx,cy,0,cx,cy,R);g.addColorStop(0,'rgba(6,12,28,.98)');g.addColorStop(1,'rgba(3,6,16,.9)');
   dctx.fillStyle=g;dctx.beginPath();dctx.arc(cx,cy,R,0,Math.PI*2);dctx.fill();
-  // Concentric rings
   for(var i=1;i<=5;i++){dctx.beginPath();dctx.arc(cx,cy,R*i/5,0,Math.PI*2);dctx.strokeStyle='rgba(0,220,255,'+(0.03+i*.008)+')';dctx.lineWidth=.5;dctx.stroke();}
-  // Radial spokes (slowly rotating)
-  for(var i=0;i<8;i++){var a=i*Math.PI/4+dp*.015;dctx.beginPath();dctx.moveTo(cx,cy);dctx.lineTo(cx+R*Math.cos(a),cy+R*Math.sin(a));dctx.strokeStyle='rgba(0,220,255,.025)';dctx.lineWidth=.5;dctx.stroke();}
-  // {8,3} lattice points — color/size encode coherence proximity to pq0
-  var fid=Math.max(0,Math.min(1,S.fidelity||0.8));
-  var coh=Math.max(0,Math.min(1,S.coherence||0.75));
-  // pq_last and pq_curr mark the active block field endpoints
-  var pqc=S.pq_curr||0,pql=S.pq_last||0;
-  _lattice_pts.forEach(function(pt,idx){
-    var pr=Math.sqrt(pt[0]*pt[0]+pt[1]*pt[1]); // radial in Poincare disk [0,1)
-    var px=cx+pt[0]*R,py=cy+pt[1]*R;
-    // Coherence: nodes closer to origin (pq0) have higher coherence → brighter
-    var localCoh=coh*(1-pr*0.4);
-    // Active block field: pq_last and pq_curr nodes glow gold
-    var isActive=(idx===pql||idx===pqc);
-    // Recently active within block field range
-    var inRange=(idx>=Math.min(pql,pqc)&&idx<=Math.max(pql,pqc));
-    var sz,col,alpha;
-    if(isActive){sz=4.5;col='rgba(212,160,32,';alpha=0.95;}
-    else if(inRange){sz=2.5;col='rgba(212,160,32,';alpha=0.35+0.3*fid;}
-    else{sz=1.2+localCoh*1.8;col='rgba(0,220,255,';alpha=0.08+localCoh*0.28;}
-    dctx.beginPath();dctx.arc(px,py,sz,0,Math.PI*2);
-    dctx.fillStyle=col+alpha+')';dctx.fill();
-  });
-  // W-state tripartite triangle at pq0 (origin) — radius scales with fidelity
-  var wR=R*0.32*Math.max(0.4,fid);
-  var wN=[];
-  for(var i=0;i<3;i++){var a=i*Math.PI*2/3+dp*0.8;wN.push({x:cx+wR*Math.cos(a),y:cy+wR*Math.sin(a)});}
+  for(var i=0;i<12;i++){var a=i*Math.PI/6+dp*.04;dctx.beginPath();dctx.moveTo(cx,cy);dctx.lineTo(cx+R*Math.cos(a),cy+R*Math.sin(a));dctx.strokeStyle='rgba(0,220,255,.03)';dctx.lineWidth=.5;dctx.stroke();}
+  var wR=R*.5*Math.max(.5,S.fidelity),wN=[];
+  for(var i=0;i<3;i++){var a=i*Math.PI*2/3+dp;wN.push({x:cx+wR*Math.cos(a),y:cy+wR*Math.sin(a)});}
   dctx.beginPath();dctx.moveTo(wN[0].x,wN[0].y);dctx.lineTo(wN[1].x,wN[1].y);dctx.lineTo(wN[2].x,wN[2].y);dctx.closePath();
-  dctx.strokeStyle='rgba(128,64,255,'+(0.25+0.2*fid)+')';dctx.lineWidth=1.5;dctx.stroke();
-  dctx.fillStyle='rgba(128,64,255,.04)';dctx.fill();
-  wN.forEach(function(n,i){var p=.5+.5*Math.sin(dp*3+i*Math.PI*2/3);dctx.beginPath();dctx.arc(n.x,n.y,3+p*1.5,0,Math.PI*2);dctx.fillStyle='rgba(128,64,255,'+(0.6+0.3*p)+')';dctx.fill();});
-  // 5 oracle nodes — fixed pentagonal positions at r≈0.55, color by oracle fidelity
-  var oFids=(S.oracle_data&&S.oracle_data.per_node_fidelities)||[];
+  dctx.strokeStyle='rgba(128,64,255,'+(0.25+0.15*Math.sin(dp*2))+')';dctx.lineWidth=1.5;dctx.stroke();dctx.fillStyle='rgba(128,64,255,.04)';dctx.fill();
+  wN.forEach(function(n,i){var p=.5+.5*Math.sin(dp*3+i*Math.PI*2/3);dctx.beginPath();dctx.arc(n.x,n.y,3.5+p*2,0,Math.PI*2);dctx.fillStyle='rgba(128,64,255,'+(0.7+0.3*p)+')';dctx.fill();});
   ['#00dcff','#8040ff','#d4a020','#00ff9d','#ff3355'].forEach(function(col,i){
-    var a=i*Math.PI*2/5-Math.PI/2,r2=R*0.55;
-    var ox=cx+r2*Math.cos(a),oy=cy+r2*Math.sin(a);
-    var of=oFids[i]!=null?oFids[i]:fid;
-    var sz=3+of*3;
-    dctx.beginPath();dctx.arc(ox,oy,sz,0,Math.PI*2);
-    dctx.fillStyle=col;dctx.globalAlpha=0.15+of*0.5;dctx.fill();dctx.globalAlpha=1;
-    // geodesic line from oracle to pq0
-    dctx.beginPath();dctx.moveTo(cx,cy);dctx.lineTo(ox,oy);
-    dctx.strokeStyle=col;dctx.globalAlpha=0.06+of*0.1;dctx.lineWidth=1;dctx.stroke();dctx.globalAlpha=1;
+    var r1=R*.3,a1=i*Math.PI*2/5+dp*.25,r2=R*.7,a2=a1+Math.PI/5+Math.sin(dp+i)*.25;
+    var p1={x:cx+r1*Math.cos(a1),y:cy+r1*Math.sin(a1)},p2={x:cx+r2*Math.cos(a2),y:cy+r2*Math.sin(a2)};
+    var mp={x:(p1.x+p2.x)/2+(cy-p1.y)*.08,y:(p1.y+p2.y)/2+(p1.x-cx)*.08};
+    dctx.beginPath();dctx.moveTo(p1.x,p1.y);dctx.quadraticCurveTo(mp.x,mp.y,p2.x,p2.y);
+    dctx.strokeStyle=col;dctx.globalAlpha=.1;dctx.lineWidth=1;dctx.stroke();dctx.globalAlpha=1;
+    dctx.beginPath();dctx.arc(p2.x,p2.y,2.5,0,Math.PI*2);dctx.fillStyle=col;dctx.globalAlpha=.45;dctx.fill();dctx.globalAlpha=1;
   });
-  // Block-seal burst rings
+  var pc=['rgba(0,220,255,','rgba(128,64,255,','rgba(212,160,32,'];
+  parts.forEach(function(p){
+    p.r=Math.max(.02,Math.min(.93,p.r+p.dr));p.a+=p.da;if(p.r<.04||p.r>.91)p.dr*=-1;
+    var px=cx+p.r*R*Math.cos(p.a),py=cy+p.r*R*Math.sin(p.a);
+    dctx.beginPath();dctx.arc(px,py,p.sz,0,Math.PI*2);dctx.fillStyle=pc[p.tp]+p.al+')';dctx.fill();
+  });
   dbk=dbk.filter(function(b){
     b.age+=.025;if(b.age>=1) return false;
     var bx=cx+b.r*R*Math.cos(b.a),by=cy+b.r*R*Math.sin(b.a),sz=7*(1-b.age);
@@ -384,14 +327,11 @@ function drawDisk(){
     dctx.beginPath();dctx.arc(bx,by,sz*2.2,0,Math.PI*2);dctx.strokeStyle='rgba(212,160,32,'+((1-b.age)*.25)+')';dctx.lineWidth=1;dctx.stroke();
     return true;
   });
-  // pq0 oracle — gold center dot, pulses with coherence
-  var pulse=0.5+0.5*Math.sin(dp*6);
-  dctx.beginPath();dctx.arc(cx,cy,4+pulse*2,0,Math.PI*2);
-  var cg=dctx.createRadialGradient(cx,cy,0,cx,cy,10);cg.addColorStop(0,'rgba(212,160,32,1)');cg.addColorStop(1,'rgba(212,160,32,0)');
+  dctx.beginPath();dctx.arc(cx,cy,4,0,Math.PI*2);
+  var cg=dctx.createRadialGradient(cx,cy,0,cx,cy,8);cg.addColorStop(0,'rgba(212,160,32,1)');cg.addColorStop(1,'rgba(212,160,32,0)');
   dctx.fillStyle=cg;dctx.fill();
-  // Poincare disk boundary
   dctx.beginPath();dctx.arc(cx,cy,R,0,Math.PI*2);dctx.strokeStyle='rgba(0,220,255,.18)';dctx.lineWidth=1;dctx.stroke();
-  dp+=.004;requestAnimationFrame(drawDisk);
+  dp+=.005;requestAnimationFrame(drawDisk);
 }
 drawDisk();
 
@@ -403,21 +343,34 @@ function drawQW(){
   var w=qc.width,h=qc.height;qctx.clearRect(0,0,w,h);
   qctx.strokeStyle='rgba(0,220,255,.05)';qctx.lineWidth=.5;
   for(var y2=h*.25;y2<h;y2+=h*.25){qctx.beginPath();qctx.moveTo(0,y2);qctx.lineTo(w,y2);qctx.stroke();}
+  // Revival threshold 0.70
+  var ty70=h*(1-.70);qctx.beginPath();qctx.moveTo(0,ty70);qctx.lineTo(w,ty70);
+  qctx.strokeStyle='rgba(255,51,85,.22)';qctx.lineWidth=.8;qctx.setLineDash([4,6]);qctx.stroke();qctx.setLineDash([]);
   if(fidH.length>1){
     var step=w/(fidH.length-1);
+    // Coherence fill (purple, behind)
+    if(cohH.length>1){
+      var cgrd=qctx.createLinearGradient(0,0,0,h);cgrd.addColorStop(0,'rgba(128,64,255,.18)');cgrd.addColorStop(1,'rgba(128,64,255,0)');
+      qctx.beginPath();qctx.moveTo(0,h*(1-cohH[0]));
+      for(var i=1;i<cohH.length;i++) qctx.lineTo(i*step,h*(1-Math.max(0,Math.min(1,cohH[i]))));
+      qctx.lineTo(w,h);qctx.lineTo(0,h);qctx.closePath();qctx.fillStyle=cgrd;qctx.fill();
+      qctx.beginPath();qctx.moveTo(0,h*(1-cohH[0]));
+      for(var i=1;i<cohH.length;i++) qctx.lineTo(i*step,h*(1-Math.max(0,Math.min(1,cohH[i]))));
+      qctx.strokeStyle='rgba(128,64,255,.45)';qctx.lineWidth=1;qctx.stroke();
+    }
+    // Fidelity fill (cyan)
     var grd=qctx.createLinearGradient(0,0,0,h);grd.addColorStop(0,'rgba(0,220,255,.28)');grd.addColorStop(1,'rgba(0,220,255,0)');
     qctx.beginPath();qctx.moveTo(0,h*(1-fidH[0]));
-    for(var i=0;i<fidH.length;i++) qctx.lineTo(i*step,h*(1-Math.max(0,Math.min(1,fidH[i]))));
+    for(var i=1;i<fidH.length;i++) qctx.lineTo(i*step,h*(1-Math.max(0,Math.min(1,fidH[i]))));
     qctx.lineTo(w,h);qctx.lineTo(0,h);qctx.closePath();qctx.fillStyle=grd;qctx.fill();
     qctx.beginPath();qctx.moveTo(0,h*(1-fidH[0]));
-    for(var i=0;i<fidH.length;i++) qctx.lineTo(i*step,h*(1-Math.max(0,Math.min(1,fidH[i]))));
-    qctx.strokeStyle='rgba(0,220,255,.75)';qctx.lineWidth=1.5;qctx.stroke();
+    for(var i=1;i<fidH.length;i++) qctx.lineTo(i*step,h*(1-Math.max(0,Math.min(1,fidH[i]))));
+    qctx.strokeStyle='rgba(0,220,255,.85)';qctx.lineWidth=1.5;qctx.stroke();
   }
-  qctx.beginPath();
-  for(var x=0;x<w;x++){var t=x/w*Math.PI*5+wp,yy=h/2+h*.14*S.coherence*Math.sin(t)*Math.cos(t*.33);x===0?qctx.moveTo(x,yy):qctx.lineTo(x,yy);}
-  qctx.strokeStyle='rgba(128,64,255,'+(0.2+0.15*S.purity)+')';qctx.lineWidth=1;qctx.stroke();
-  var ty=h*(1-.7);qctx.beginPath();qctx.moveTo(0,ty);qctx.lineTo(w,ty);qctx.strokeStyle='rgba(255,51,85,.2)';qctx.lineWidth=.8;qctx.setLineDash([3,6]);qctx.stroke();qctx.setLineDash([]);
-  var cx2=w-3,cy2=h*(1-S.fidelity);qctx.beginPath();qctx.arc(cx2,cy2,3.5,0,Math.PI*2);qctx.fillStyle='#00dcff';qctx.fill();
+  // Live dots
+  var cx2=w-4,cy2=h*(1-S.fidelity),cy3=h*(1-S.coherence);
+  qctx.beginPath();qctx.arc(cx2,cy2,3.5,0,Math.PI*2);qctx.fillStyle='#00dcff';qctx.fill();
+  qctx.beginPath();qctx.arc(cx2-7,cy3,2.5,0,Math.PI*2);qctx.fillStyle='rgba(128,64,255,.8)';qctx.fill();
   wp+=.04;requestAnimationFrame(drawQW);
 }
 drawQW();
@@ -573,8 +526,9 @@ function updateDOM(){
   st('ben',S.entanglement.toFixed(4));
   st('bcn',S.concurrence.toFixed(4));
   st('bte',S.tele_fidelity.toFixed(4));
-  // oracle cycle
-  st('qcy','cycle '+S.cycle);
+  // oracle cycle — from lattice σ-REVIVAL counter
+  var sigPhase=(S.cycle%8===0)?'REVIVAL':(S.cycle%8===4)?'ANTI-REV':(S.cycle%8===2||S.cycle%8===6)?'TRANSIT':'';
+  st('qcy','cycle '+S.cycle+(sigPhase?' · '+sigPhase:''));
   st('dkb','pq_last='+S.pq_last+'→pq_curr='+S.pq_curr);
   // noise bath — exact server key names
   st('ng1',S.gamma1.toFixed(4));
@@ -650,8 +604,9 @@ async function fetchWState(){
   S.ou_mem=d.ou_mem||S.ou_mem;
   S.qrng_health=d.qrng_health!=null?d.qrng_health:S.qrng_health;
   S.n_peers=d.n_peers||S.n_peers;
-  S.cycle=d.cycle||0;
+  // NOTE: S.cycle intentionally NOT updated here — SSE chirp (lattice_quantum.cycle_count) is authoritative
   fidH.push(S.fidelity);if(fidH.length>80) fidH.shift();
+  cohH.push(S.coherence);if(cohH.length>80) cohH.shift();
   if(d.mermin_test||d.bell_test){S.mermin=d.mermin_test||d.bell_test;renderMermin(S.mermin);}
   // Per-oracle block-field data from block_field.per_node
   if(d.block_field&&d.block_field.per_node){
@@ -718,12 +673,20 @@ async function refresh(){
     if(d.consensus){
       if(d.consensus.w_state_fidelity!=null) S.fidelity=d.consensus.w_state_fidelity;
       if(d.consensus.coherence!=null) S.coherence=d.consensus.coherence;
+      if(d.consensus.purity!=null) S.purity=d.consensus.purity;
+      if(d.consensus.entropy!=null) S.entropy=d.consensus.entropy;
     }
     if(d.fidelity!=null) S.fidelity=d.fidelity;
     else if(d.w_state_fidelity!=null) S.fidelity=d.w_state_fidelity;
     if(d.coherence!=null) S.coherence=d.coherence;
     if(d.entropy!=null) S.entropy=d.entropy;
-    if(d.lattice_cycle!=null) S.cycle=d.lattice_cycle;
+    // Cycle — authoritative source is lattice_quantum.cycle_count (LATTICE.cycle_count from σ-REVIVAL)
+    if(d.lattice_quantum){
+      var lq=d.lattice_quantum;
+      if(lq.cycle_count!=null&&lq.cycle_count>0) S.cycle=lq.cycle_count;
+      else if(lq.lattice_cycle!=null&&lq.lattice_cycle>0) S.cycle=lq.lattice_cycle;
+      if(lq.fidelity!=null) S.lattice_fidelity=lq.fidelity;
+    } else if(d.lattice_cycle!=null&&d.lattice_cycle>0) S.cycle=d.lattice_cycle;
     if(d.n_peers!=null) S.n_peers=d.n_peers;
     if(d.qrng_health!=null) S.qrng_health=d.qrng_health;
     if(d.pq_curr!=null) S.pq_curr=d.pq_curr;
@@ -740,12 +703,6 @@ async function refresh(){
         S.oracle_data[key]=m;
       });
     }
-    // Lattice fidelity from lattice_quantum block (distinct from oracle consensus fidelity)
-    if(d.lattice_quantum){
-      if(d.lattice_quantum.fidelity!=null)  S.lattice_fidelity=d.lattice_quantum.fidelity;
-      if(d.lattice_quantum.cycle_count!=null) S.cycle=d.lattice_quantum.cycle_count;
-      else if(d.lattice_quantum.lattice_cycle!=null) S.cycle=d.lattice_quantum.lattice_cycle;
-    }
     // pq0 tripartite component fidelities
     if(d.pq0_oracle_fidelity!=null||d.pq0_components){
       var c=d.pq0_components||d;
@@ -755,16 +712,18 @@ async function refresh(){
         pq0_V_fidelity:      c.pq0_V_fidelity     ||d.pq0_V_fidelity     ||0,
       };
     }
-    // Mermin test
-    if(d.mermin_test||d.bell_test){S.mermin=d.mermin_test||d.bell_test;renderMermin(S.mermin);}
+    // Mermin — always render with latest known value; update S.mermin when fresh data arrives
+    if(d.mermin_test||d.bell_test) S.mermin=d.mermin_test||d.bell_test;
+    if(S.mermin) renderMermin(S.mermin);
     // Block height bump
-    var bh=d.block_height||( d.lattice_quantum&&d.lattice_quantum.block_height);
+    var bh=d.block_height||(d.lattice_quantum&&d.lattice_quantum.block_height);
     if(bh!=null&&parseInt(bh)>S.chain_height){
       S.chain_height=parseInt(bh);
       dbk.push({r:Math.random()*.72+.1,a:Math.random()*Math.PI*2,age:0});
       setTimeout(function(){Promise.allSettled([fetchChain(),fetchMempool()]).then(updateDOM);},400);
     }
     fidH.push(S.fidelity);if(fidH.length>80) fidH.shift();
+    cohH.push(S.coherence);if(cohH.length>80) cohH.shift();
     updateDOM();
     lu=Date.now();setOnline(true);
     document.getElementById('bu').textContent='Updated '+new Date().toTimeString().slice(0,8);
