@@ -227,384 +227,6 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
     </div>
   </div>
 </div>
-
-<!-- ═══════════════════════════════════════════════════════════════════════════
-     HLWE TECHNICAL WHITEPAPER
-     ═══════════════════════════════════════════════════════════════════════════ -->
-<style>
-#wp{max-width:1600px;width:100%;margin:0 auto;padding:0 20px 48px}
-.wp-head{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:20px;padding-bottom:12px;border-bottom:1px solid var(--b2)}
-.wp-title{font-family:var(--disp);font-size:11px;font-weight:900;letter-spacing:3px;text-transform:uppercase;color:var(--cy);text-shadow:0 0 20px rgba(0,220,255,.3)}
-.wp-ver{font-family:var(--mono);font-size:8px;color:var(--dim);letter-spacing:1px}
-.wp-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
-@media(max-width:1100px){.wp-grid{grid-template-columns:1fr 1fr}}
-@media(max-width:680px){.wp-grid{grid-template-columns:1fr}}
-.wp-grid.two{grid-template-columns:1fr 1fr}
-@media(max-width:680px){.wp-grid.two{grid-template-columns:1fr}}
-.wp-grid.four{grid-template-columns:1fr 1fr 1fr 1fr}
-@media(max-width:1100px){.wp-grid.four{grid-template-columns:1fr 1fr}}
-@media(max-width:680px){.wp-grid.four{grid-template-columns:1fr}}
-.wc{background:var(--card);border:1px solid var(--b);border-radius:8px;padding:18px 20px;position:relative;overflow:hidden}
-.wc::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--cy),transparent);opacity:.4}
-.wc.vi::before{background:linear-gradient(90deg,transparent,var(--vi),transparent)}
-.wc.go::before{background:linear-gradient(90deg,transparent,var(--go),transparent)}
-.wc.gr::before{background:linear-gradient(90deg,transparent,var(--gr),transparent)}
-.wc.sp{grid-column:span 2}
-@media(max-width:680px){.wc.sp{grid-column:span 1}}
-.wc.sp3{grid-column:span 3}
-@media(max-width:1100px){.wc.sp3{grid-column:span 2}}
-@media(max-width:680px){.wc.sp3{grid-column:span 1}}
-.wc-h{font-family:var(--disp);font-size:8px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--dim);margin-bottom:12px;display:flex;align-items:center;gap:8px}
-.wc-h::after{content:'';flex:1;height:1px;background:var(--b)}
-.wc-accent{width:6px;height:6px;border-radius:50%;background:var(--cy);box-shadow:0 0 6px var(--cy);flex-shrink:0}
-.wc-accent.vi{background:var(--vi);box-shadow:0 0 6px var(--vi)}
-.wc-accent.go{background:var(--go);box-shadow:0 0 6px var(--go)}
-.wc-accent.gr{background:var(--gr);box-shadow:0 0 6px var(--gr)}
-.wp-p{font-size:11px;color:var(--tx);line-height:1.7;margin-bottom:10px}
-.wp-p:last-child{margin-bottom:0}
-.wp-p strong{color:var(--br);font-weight:500}
-.wp-eq{font-family:var(--mono);font-size:10px;color:var(--cy);background:rgba(0,220,255,.06);border:1px solid rgba(0,220,255,.12);border-radius:4px;padding:8px 12px;margin:10px 0;line-height:1.6;overflow-x:auto;scrollbar-width:none}
-.wp-eq.vi{color:var(--vi);background:rgba(128,64,255,.06);border-color:rgba(128,64,255,.12)}
-.wp-eq.go{color:var(--go);background:rgba(212,160,32,.06);border-color:rgba(212,160,32,.12)}
-.wp-eq.gr{color:var(--gr);background:rgba(0,255,157,.06);border-color:rgba(0,255,157,.12)}
-.wp-kv{display:flex;flex-direction:column;gap:6px;margin-top:8px}
-.wp-row{display:flex;justify-content:space-between;align-items:baseline;padding:5px 0;border-bottom:1px solid rgba(0,220,255,.05)}
-.wp-row:last-child{border-bottom:none}
-.wp-k{font-size:9px;color:var(--dim);font-family:var(--mono);letter-spacing:.5px}
-.wp-v{font-family:var(--mono);font-size:10px;color:var(--cy);font-weight:600}
-.wp-v.vi{color:var(--vi)}.wp-v.go{color:var(--go)}.wp-v.gr{color:var(--gr)}
-.wp-tag{display:inline-block;font-family:var(--mono);font-size:8px;padding:2px 7px;border-radius:3px;margin:2px 2px 2px 0;letter-spacing:.5px}
-.wp-tag.cy{background:var(--cy2);color:var(--cy);border:1px solid rgba(0,220,255,.2)}
-.wp-tag.vi{background:var(--vi2);color:var(--vi);border:1px solid rgba(128,64,255,.2)}
-.wp-tag.go{background:var(--go2);color:var(--go);border:1px solid rgba(212,160,32,.2)}
-.wp-tag.gr{background:var(--gr2);color:var(--gr);border:1px solid rgba(0,255,157,.2)}
-.wp-cite{font-family:var(--mono);font-size:8px;color:var(--dim);margin-top:8px;padding-top:8px;border-top:1px solid var(--b);line-height:1.5}
-.wp-warn{font-family:var(--mono);font-size:9px;color:var(--go);background:var(--go2);border:1px solid rgba(212,160,32,.2);border-radius:4px;padding:7px 10px;margin-top:8px;line-height:1.5}
-.wp-matrix{font-family:var(--mono);font-size:9px;color:var(--vi);background:rgba(128,64,255,.04);border:1px solid rgba(128,64,255,.1);border-radius:4px;padding:10px 12px;margin:8px 0;line-height:1.8;white-space:pre}
-.sec-label{font-family:var(--disp);font-size:7px;letter-spacing:3px;text-transform:uppercase;color:var(--dim);padding:12px 0 8px;border-top:1px solid var(--b);margin-top:16px}
-.sec-label:first-child{border-top:none;margin-top:0;padding-top:0}
-</style>
-
-<div id="wp">
-  <div class="wp-head">
-    <span class="wp-title">HLWE-256 &mdash; Technical Specification &amp; Security Analysis</span>
-    <span class="wp-ver">v2.0 &mdash; QTCL Production Implementation</span>
-  </div>
-
-  <!-- ROW 1: Abstract + Security Model + Parameters -->
-  <div class="wp-grid" style="margin-bottom:12px">
-
-    <div class="wc sp">
-      <div class="wc-h"><span class="wc-accent"></span>Abstract</div>
-      <p class="wp-p"><strong>HLWE-256</strong> (Hypercubic Learning With Errors) is the post-quantum cryptographic engine underpinning every key operation in QTCL. It is a lattice-based construction hardened on the <strong>decisional LWE problem</strong> over ℤ_q with dimension n=256 and a discrete Gaussian error distribution. The security reduction is explicit: breaking HLWE-256 key encapsulation is computationally equivalent to solving LWE<sub>256,q,χ</sub>, which is believed to require quantum resources exceeding any foreseeable adversary.</p>
-      <p class="wp-p">Unlike ECDSA or RSA, whose hardness rests on discrete logarithm and integer factorization problems efficiently solvable by Shor's algorithm on a sufficiently large quantum computer, HLWE-256 belongs to the <strong>lattice problem family</strong> — the best known quantum attacks (BKZ-reduced lattice sieving) scale sub-exponentially in dimension but remain classically and quantum-computationally infeasible at n≥256 with the parameters deployed here.</p>
-      <p class="wp-p">The implementation is <strong>zero-dependency</strong>: pure Python stdlib (hashlib, hmac, secrets) with optional C/OpenSSL acceleration. No external cryptographic packages. No libsodium. No OpenSSL except for hash primitives when available. The lattice arithmetic itself is hand-verified modular integer algebra.</p>
-      <div style="margin-top:10px">
-        <span class="wp-tag cy">Post-Quantum</span>
-        <span class="wp-tag vi">Lattice-Based</span>
-        <span class="wp-tag go">LWE Hardness</span>
-        <span class="wp-tag gr">NIST PQC Aligned</span>
-        <span class="wp-tag cy">Zero External Deps</span>
-        <span class="wp-tag vi">BIP39/32/38 Compatible</span>
-      </div>
-    </div>
-
-    <div class="wc vi">
-      <div class="wc-h"><span class="wc-accent vi"></span>Security Model</div>
-      <p class="wp-p">The decisional LWE assumption states that for uniform <strong>A ∈ ℤ_q^{n×n}</strong>, secret <strong>s ∈ ℤ_q^n</strong>, and small error <strong>e ← χ</strong>, the distribution (A, As+e) is computationally indistinguishable from uniform — even with quantum oracle access.</p>
-      <div class="wp-eq vi">Decision-LWE_{n,q,χ}:
-  Given (A, b) — distinguish:
-    b = As + e   (LWE sample)
-    b = uniform  (random)
-  where A ∈ ℤ_q^{n×n},  s,e ← χ^n
-  
-Security: reduces to SVP_γ on n-dim lattice
-  γ ≈ O(√n · q/B)  where B = error bound</div>
-      <p class="wp-p">HLWE-256 public keys are LWE samples: <strong>b = As + e mod q</strong>. An attacker recovering s from (A,b) must solve an n=256 dimensional SVP instance — believed to require 2^128+ classical gates and at minimum 2^100 quantum gates using the best known BKZ-2.0 + quantum sieving hybrid.</p>
-      <div class="wp-kv">
-        <div class="wp-row"><span class="wp-k">Classical security estimate</span><span class="wp-v vi">≥ 128 bits</span></div>
-        <div class="wp-row"><span class="wp-k">Quantum security estimate</span><span class="wp-v vi">≥ 100 bits</span></div>
-        <div class="wp-row"><span class="wp-k">Shor's algorithm threat</span><span class="wp-v gr">None (not DLP/IFP)</span></div>
-        <div class="wp-row"><span class="wp-k">Grover speedup on signatures</span><span class="wp-v go">½ bits (negligible)</span></div>
-      </div>
-    </div>
-
-  </div>
-
-  <!-- ROW 2: Parameters + Arithmetic + Error Sampling -->
-  <div class="wp-grid" style="margin-bottom:12px">
-
-    <div class="wc go">
-      <div class="wc-h"><span class="wc-accent go"></span>System Parameters</div>
-      <div class="wp-kv">
-        <div class="wp-row"><span class="wp-k">Dimension n</span><span class="wp-v go">256</span></div>
-        <div class="wp-row"><span class="wp-k">Modulus q</span><span class="wp-v go">2³² − 5 = 4,294,967,291</span></div>
-        <div class="wp-row"><span class="wp-k">Error bound χ</span><span class="wp-v go">±256  (B=256)</span></div>
-        <div class="wp-row"><span class="wp-k">Public key size</span><span class="wp-v go">256 × 4 B = 1,024 B</span></div>
-        <div class="wp-row"><span class="wp-k">Private key size</span><span class="wp-v go">256 × 4 B = 1,024 B</span></div>
-        <div class="wp-row"><span class="wp-k">Signature size</span><span class="wp-v go">64 × 4 B + 32 B = 288 B</span></div>
-        <div class="wp-row"><span class="wp-k">Address size</span><span class="wp-v go">16 bytes = 32 hex chars</span></div>
-        <div class="wp-row"><span class="wp-k">HD derivation depth</span><span class="wp-v go">m/44'/839'/a'/c/i</span></div>
-      </div>
-      <p class="wp-p" style="margin-top:10px">q is the largest prime below 2³². This choice keeps all arithmetic in 32-bit unsigned integers (no bignum needed) while maximising the ratio q/B ≈ 16.7M, which directly controls the noise margin and security parameter.</p>
-    </div>
-
-    <div class="wc">
-      <div class="wc-h"><span class="wc-accent"></span>Core Lattice Arithmetic</div>
-      <p class="wp-p">All operations reduce to three primitives over ℤ_q. The critical path is matrix-vector multiplication, which the C acceleration layer runs using ARM NEON <code style="font-size:9px;color:var(--cy)">uint32x4_t</code> SIMD with 64-bit accumulation — 60-120× faster than the pure Python fallback on ARMv8.</p>
-      <div class="wp-eq">Keypair generation:
-  A ← SHA256-XOF(entropy)^{n×n}  mod q
-  s ← SHA256-CTR(entropy)^n       mod q  
-  e ← χ^n  (secrets.randbelow)
-  b = A·s + e                     mod q
-  pk = (A, b),   sk = s
-
-Matrix-vector multiply (NEON path):
-  out[i] = (Σ_j A[i,j]·v[j]) mod q
-  Accumulator: uint64x2_t (no overflow)</div>
-      <p class="wp-p">Basis A is derived deterministically from entropy via counter-mode SHA-256, giving a <strong>structured random oracle</strong>: each adversary query to different entropy produces a pseudorandom, independent lattice instance.</p>
-    </div>
-
-    <div class="wc vi">
-      <div class="wc-h"><span class="wc-accent vi"></span>Error Distribution χ</div>
-      <p class="wp-p">The discrete error vector e is sampled using <code style="font-size:9px;color:var(--vi)">secrets.randbelow(2B) - B</code> — a uniform distribution on [-256, +256]. This is a conservative approximation of the discrete Gaussian, which is the theoretically ideal LWE noise distribution.</p>
-      <div class="wp-eq vi">Noise margin analysis:
-  q/B = 4,294,967,291 / 256 ≈ 16.8M
-  Inner product noise bound:
-    |e·anything| ≤ B·n = 256·256 = 65,536
-  Decryption correct iff:
-    65,536 ≪ q/2 = 2,147,483,645  ✓
-
-Ratio q/(2Bn) ≈ 32,767 — enormous
-→ Decryption failure probability: ~0</div>
-      <p class="wp-p">The noise-to-signal ratio is 5 orders of magnitude better than minimum-viable LWE. This was intentional: correctness is not a concern at these parameters — security is the binding constraint.</p>
-      <div class="wp-warn">⚠ Cryptographic note: uniform[-B,B] noise gives slightly larger public keys vs Gaussian noise of equivalent security, but eliminates the Ziggurat sampler dependency and timing side-channels from rejection sampling.</div>
-    </div>
-
-  </div>
-
-  <!-- ROW 3: Signing + Verification + Address -->
-  <div class="wp-grid two" style="margin-bottom:12px">
-
-    <div class="wc">
-      <div class="wc-h"><span class="wc-accent"></span>Signature Scheme</div>
-      <p class="wp-p">HLWE signatures are <strong>hash-based Fiat-Shamir commitments</strong> over the lattice secret. The scheme is not a standard lattice signature (Dilithium/Falcon) — it is a HMAC-authenticated counter-mode hash construction that provides <strong>EUF-CMA security</strong> under the assumption that SHA-256 is a pseudorandom function.</p>
-      <div class="wp-eq">Sign(msg_hash, sk):
-  nonce = SHA256(msg_hash ‖ sk_hex)
-  sig_vec[i] = SHA256(nonce ‖ i)[:4] mod q
-               for i ∈ [0,64)
-  sig_bytes = pack_be32(sig_vec)     → 256 B
-  auth_tag  = HMAC-SHA256(
-                key = msg_hash,
-                data = sig_bytes)   → 32 B
-
-Verify(msg_hash, sig, auth_tag):
-  computed = HMAC-SHA256(msg_hash, sig)
-  return CRYPTO_memcmp(computed, auth_tag)
-  ↑ constant-time — no timing oracle</div>
-      <p class="wp-p">The nonce is deterministic (RFC 6979 style): identical inputs always produce the same signature. This prevents the catastrophic nonce-reuse attack that broke ECDSA in the Sony PS3 exploit. The HMAC authentication tag binds the signature to the specific message hash — a forger must simultaneously invert SHA-256 and produce a valid HMAC.</p>
-      <p class="wp-p"><strong>Constant-time verification</strong> is enforced via OpenSSL's <code style="font-size:9px;color:var(--cy)">CRYPTO_memcmp</code> when the C layer is active, or Python's <code style="font-size:9px;color:var(--cy)">hmac.compare_digest</code> in fallback mode — both are branch-free byte comparisons that eliminate timing side-channels.</p>
-    </div>
-
-    <div class="wc vi">
-      <div class="wc-h"><span class="wc-accent vi"></span>Address Derivation &amp; HD Wallet</div>
-      <p class="wp-p">QTCL addresses are derived from HLWE public keys using a two-stage hash: SHA-256 over the packed public key vector, truncated to 16 bytes and hex-encoded. This mirrors Bitcoin's approach but with a post-quantum public key as the input.</p>
-      <div class="wp-eq vi">Address derivation:
-  pk_bytes = pack_be32(b_vector)    → 1024 B
-  addr_raw = SHA256(pk_bytes)[:16]  → 16 B
-  address  = "qtcl1" + hex(addr_raw)
-
-BIP32 HD derivation:
-  master = HMAC-SHA512(
-    key  = "QTCL seed v1",
-    data = seed_64B)
-  child(parent, chain, idx):
-    I = HMAC-SHA512(
-      key  = chain_code,
-      data = 0x00 ‖ parent_key ‖ idx_be32)
-    → (child_key[:32], child_chain[32:])
-
-BIP39 → seed: PBKDF2-HMAC-SHA512
-  password = mnemonic (NFKD)
-  salt     = "mnemonic" + passphrase
-  rounds   = 2048,  dklen = 64</div>
-      <p class="wp-p">The BIP32 derivation tree is quantum-safe because its security relies on HMAC-SHA-512 collision resistance, not on elliptic curve discrete logarithm. The path <strong>m/44'/839'/0'/0/i</strong> uses coin type 839 (QTCL-registered). Hardened derivation (index | 0x80000000) at the account level prevents child key compromise from leaking siblings.</p>
-      <p class="wp-p">BIP38 password-protected export uses <strong>scrypt(N=16384, r=8, p=8)</strong> via OpenSSL's <code style="font-size:9px;color:var(--vi)">EVP_PBE_scrypt</code> — memory-hard by design, making brute-force attacks against encrypted key exports economically infeasible.</p>
-    </div>
-
-  </div>
-
-  <!-- ROW 4: PoW + Quantum Oracle + Comparison Table -->
-  <div class="wp-grid" style="margin-bottom:12px">
-
-    <div class="wc go">
-      <div class="wc-h"><span class="wc-accent go"></span>QTCL-PoW: Memory-Hard Mining</div>
-      <p class="wp-p">Block mining uses a <strong>memory-hard proof-of-work</strong> layered on top of SHA3-256 (Keccak). The scratchpad design is inspired by Ethash but uses a simpler SHAKE-256 expansion that is easier to audit.</p>
-      <div class="wp-eq go">QTCL-PoW v1:
-  scratchpad = SHAKE-256(seed)  → 512 KB
-  
-  header = "QTCL_POW_v1:"
-         ‖ height_be64 ‖ ts_be32
-         ‖ parent_hash[32] ‖ merkle[32]
-         ‖ diff_be32 ‖ nonce_be32
-         ‖ miner_addr[40] ‖ seed[32]
-  
-  state = SHA3-256(header)
-  for r in 0..63:
-    w = state[:4] mod (512KB/64)
-    state = SHA3-256(state
-            ‖ scratchpad[w*64:(w+1)*64]
-            ‖ r_be32)
-  
-  Valid iff: hex(state).startswith('0'*diff)</div>
-      <p class="wp-p">64 sequential memory reads from a 512KB scratchpad defeat ASIC optimisation: a chip that omits the scratchpad SRAM cannot verify its own work. The scratchpad seed is derived from the W-state oracle entropy — meaning valid blocks are cryptographically bound to the quantum state of the oracle at mining time.</p>
-    </div>
-
-    <div class="wc">
-      <div class="wc-h"><span class="wc-accent"></span>Quantum Oracle Binding</div>
-      <p class="wp-p">Each mined block is signed using the <strong>GKSL Lindblad master equation</strong> applied to the 3-qubit W-state density matrix ρ maintained by the oracle cluster. The fidelity F(ρ, |W₃⟩) appears in every block header and is verified by all nodes.</p>
-      <div class="wp-eq">W-state target:
-  |W₃⟩ = (|100⟩ + |010⟩ + |001⟩) / √3
-  F(ρ) = ⟨W₃|ρ|W₃⟩
-       = (ρ₁₁ + ρ₂₂ + ρ₄₄ + 2Re(ρ₁₂)
-          + 2Re(ρ₁₄) + 2Re(ρ₂₄)) / 3
-
-Lindblad evolution (GKSL RK4):
-  dρ/dt = -i[H,ρ]
-        + Σ_q γ₁(L_q ρ L†_q − ½{L†_qL_q,ρ})
-        + Σ_q γφ(SZ_q ρ SZ_q − ½{I,ρ})
-
-Block validity requires F(ρ) > 0.65</div>
-      <p class="wp-p">The quantum attestation is not cosmetic. The W-state entropy seed is embedded in the PoW scratchpad construction — a block mined against a fraudulent oracle state will have a scratchpad derived from wrong entropy, producing a hash that cannot satisfy the difficulty target when re-verified by honest nodes using the canonical oracle state.</p>
-    </div>
-
-    <div class="wc vi">
-      <div class="wc-h"><span class="wc-accent vi"></span>Comparison: HLWE vs Standard Schemes</div>
-      <div class="wp-kv">
-        <div class="wp-row"><span class="wp-k" style="color:var(--dim);font-size:8px">Scheme</span><span class="wp-v vi" style="font-size:8px">Quantum Safe</span></div>
-        <div class="wp-row"><span class="wp-k">HLWE-256 (QTCL)</span><span class="wp-v gr">✓  Yes</span></div>
-        <div class="wp-row"><span class="wp-k">ECDSA secp256k1</span><span class="wp-v" style="color:var(--re)">✗  Broken by Shor</span></div>
-        <div class="wp-row"><span class="wp-k">Ed25519</span><span class="wp-v" style="color:var(--re)">✗  Broken by Shor</span></div>
-        <div class="wp-row"><span class="wp-k">RSA-2048</span><span class="wp-v" style="color:var(--re)">✗  Broken by Shor</span></div>
-        <div class="wp-row"><span class="wp-k">CRYSTALS-Dilithium</span><span class="wp-v gr">✓  Yes (NIST std)</span></div>
-        <div class="wp-row"><span class="wp-k">Falcon-512</span><span class="wp-v gr">✓  Yes (NIST std)</span></div>
-      </div>
-      <div class="wp-kv" style="margin-top:10px">
-        <div class="wp-row"><span class="wp-k" style="color:var(--dim);font-size:8px">Property</span><span class="wp-v vi" style="font-size:8px">HLWE-256</span></div>
-        <div class="wp-row"><span class="wp-k">Classical security</span><span class="wp-v vi">~128 bits</span></div>
-        <div class="wp-row"><span class="wp-k">Quantum security</span><span class="wp-v vi">~100 bits</span></div>
-        <div class="wp-row"><span class="wp-k">Sig verification</span><span class="wp-v vi">~25µs (C path)</span></div>
-        <div class="wp-row"><span class="wp-k">Keypair generation</span><span class="wp-v vi">~2ms (C NEON)</span></div>
-        <div class="wp-row"><span class="wp-k">External dependencies</span><span class="wp-v gr">Zero</span></div>
-        <div class="wp-row"><span class="wp-k">Side-channel safe</span><span class="wp-v gr">Yes (CRYPTO_memcmp)</span></div>
-      </div>
-    </div>
-
-  </div>
-
-  <!-- ROW 5: QRNG + Byzantine Consensus + Implementation Notes -->
-  <div class="wp-grid" style="margin-bottom:12px">
-
-    <div class="wc gr">
-      <div class="wc-h"><span class="wc-accent gr"></span>5-Source QRNG Entropy Ensemble</div>
-      <p class="wp-p">Private key generation and oracle seeding require true randomness. QTCL aggregates <strong>five independent QRNG sources</strong> via SHAKE-256 domain-separated mixing, ensuring that compromise of any subset of sources does not degrade entropy quality below 128 bits.</p>
-      <div class="wp-eq gr">Entropy mixing:
-  sources = [Random.org, HotBits,
-             Fourmilab, ANU QRNG,
-             /dev/urandom (hardware)]
-  
-  mix(e_existing, e_new):
-    return SHAKE-256(
-      "QTCL_ENT_MIX_v1:" ‖
-      e_existing[:32] ‖ e_new[:32])
-      → 32 bytes
-
-Min-entropy lower bound:
-  H_min ≥ max(H_i) for independent sources
-  With 5 sources: H_min ≥ 128 bits
-  even if 4/5 are adversarially controlled</div>
-      <p class="wp-p">The domain separation prefix <code style="font-size:9px;color:var(--gr)">"QTCL_ENT_MIX_v1:"</code> prevents length-extension attacks and ensures the output is SHAKE-256-indistinguishable from ideal randomness regardless of source correlations.</p>
-    </div>
-
-    <div class="wc">
-      <div class="wc-h"><span class="wc-accent"></span>5-Oracle Byzantine Fault Tolerance</div>
-      <p class="wp-p">The oracle cluster runs a <strong>3-of-5 Byzantine consensus</strong> over W-state fidelity measurements. This tolerates up to 2 faulty (crashed or adversarial) oracle nodes while preserving liveness and safety — the classical Byzantine Generals threshold for n=5.</p>
-      <div class="wp-eq">BFT threshold: f < n/3
-  n=5 oracles → f ≤ 1 (crash)
-              → f ≤ 1 (Byzantine)
-  Quorum = ⌈(n+f+1)/2⌉ = 3-of-5
-
-Oracle state agreement:
-  All 5 measure ρ independently
-  Consensus = median W-fidelity
-    if |F_i - F_median| < ε=0.05
-  
-Mermin inequality test (per epoch):
-  M = ⟨A₁B₁C₁⟩ - ⟨A₁B₂C₂⟩
-    - ⟨A₂B₁C₂⟩ - ⟨A₂B₂C₁⟩
-  Quantum: M ≤ 4  (violated by GHZ)
-  Classical: M ≤ 2</div>
-      <p class="wp-p">The Mermin inequality violation is a <strong>device-independent witness</strong> of genuine 3-qubit entanglement. A classical simulator cannot reliably produce Mermin violations above 2 — so blocks attested by M>2 carry cryptographic proof that the oracle ran a real quantum measurement.</p>
-    </div>
-
-    <div class="wc vi">
-      <div class="wc-h"><span class="wc-accent vi"></span>Implementation Integrity Notes</div>
-      <p class="wp-p">Several design choices distinguish HLWE-256 from a naive LWE implementation and are worth making explicit for auditors:</p>
-      <p class="wp-p"><strong>No PBKDF2 on private keys.</strong> The secret vector s is derived via counter-mode SHA-256 directly from QRNG entropy — not from a password. PBKDF2 is used only for BIP39 mnemonic-to-seed conversion (where a human password is the input).</p>
-      <p class="wp-p"><strong>Deterministic signing.</strong> The signature nonce is <code style="font-size:9px;color:var(--vi)">SHA256(msg ‖ sk_hex)</code> — never random. This mirrors RFC 6979 and eliminates the catastrophic nonce-reuse vulnerability inherent in randomised ECDSA.</p>
-      <p class="wp-p"><strong>Basis A is public.</strong> In standard LWE, the matrix A is part of the public key. Here A is re-derived from entropy on demand (not stored), trading storage for recomputation. The entropy seed is the canonical public parameter.</p>
-      <p class="wp-p"><strong>The C layer is a pure speedup.</strong> The Python and C code paths produce bit-identical outputs — verified by the <code style="font-size:9px;color:var(--vi)">qtcl_selftest()</code> SHA3-256 vector at module load. C is never required for correctness.</p>
-      <div class="wp-cite">References: Regev (2009) "On lattices, learning with errors..." · NIST PQC Round 3 (2022) · Peikert (2016) "A decade of lattice crypto" · Lindblad (1976) GKSL master equation · Mermin (1990) "Extreme quantum entanglement"</div>
-    </div>
-
-  </div>
-
-  <!-- ROW 6: Full parameter table spanning width -->
-  <div class="wc" style="margin-bottom:0">
-    <div class="wc-h"><span class="wc-accent"></span>Complete Parameter Reference</div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:0">
-      <div class="wp-kv" style="padding-right:16px;border-right:1px solid var(--b)">
-        <div class="sec-label">Lattice Parameters</div>
-        <div class="wp-row"><span class="wp-k">n (dimension)</span><span class="wp-v">256</span></div>
-        <div class="wp-row"><span class="wp-k">q (modulus)</span><span class="wp-v">4,294,967,291</span></div>
-        <div class="wp-row"><span class="wp-k">B (error bound)</span><span class="wp-v">256</span></div>
-        <div class="wp-row"><span class="wp-k">q/B ratio</span><span class="wp-v go">16,777,216</span></div>
-        <div class="wp-row"><span class="wp-k">Noise distribution</span><span class="wp-v">Uniform[-B,B]</span></div>
-        <div class="wp-row"><span class="wp-k">Basis generation</span><span class="wp-v">SHA256-CTR XOF</span></div>
-      </div>
-      <div class="wp-kv" style="padding:0 16px;border-right:1px solid var(--b)">
-        <div class="sec-label">Key &amp; Signature Sizes</div>
-        <div class="wp-row"><span class="wp-k">Public key</span><span class="wp-v">1,024 bytes</span></div>
-        <div class="wp-row"><span class="wp-k">Private key</span><span class="wp-v">1,024 bytes</span></div>
-        <div class="wp-row"><span class="wp-k">Signature</span><span class="wp-v">288 bytes</span></div>
-        <div class="wp-row"><span class="wp-k">Auth tag</span><span class="wp-v">32 bytes (HMAC)</span></div>
-        <div class="wp-row"><span class="wp-k">Address</span><span class="wp-v">32 hex chars</span></div>
-        <div class="wp-row"><span class="wp-k">HD seed</span><span class="wp-v">64 bytes (BIP39)</span></div>
-      </div>
-      <div class="wp-kv" style="padding:0 16px;border-right:1px solid var(--b)">
-        <div class="sec-label">Hash Primitives</div>
-        <div class="wp-row"><span class="wp-k">Basis derivation</span><span class="wp-v">SHA-256</span></div>
-        <div class="wp-row"><span class="wp-k">Secret derivation</span><span class="wp-v">SHA-256-CTR</span></div>
-        <div class="wp-row"><span class="wp-k">Signature nonce</span><span class="wp-v">SHA-256</span></div>
-        <div class="wp-row"><span class="wp-k">Auth tag</span><span class="wp-v">HMAC-SHA-256</span></div>
-        <div class="wp-row"><span class="wp-k">BIP39 seed</span><span class="wp-v">PBKDF2-SHA-512</span></div>
-        <div class="wp-row"><span class="wp-k">PoW / scratchpad</span><span class="wp-v">SHA3-256 / SHAKE-256</span></div>
-      </div>
-      <div class="wp-kv" style="padding-left:16px">
-        <div class="sec-label">Performance (ARM64 C path)</div>
-        <div class="wp-row"><span class="wp-k">Keypair generation</span><span class="wp-v gr">~2ms</span></div>
-        <div class="wp-row"><span class="wp-k">Sign (per block)</span><span class="wp-v gr">~25µs</span></div>
-        <div class="wp-row"><span class="wp-k">Verify</span><span class="wp-v gr">~10µs</span></div>
-        <div class="wp-row"><span class="wp-k">BIP39 seed derive</span><span class="wp-v gr">~50ms</span></div>
-        <div class="wp-row"><span class="wp-k">PoW hash rate</span><span class="wp-v gr">500k–2M H/s</span></div>
-        <div class="wp-row"><span class="wp-k">GKSL RK4 step</span><span class="wp-v gr">~0.5ms</span></div>
-      </div>
-    </div>
-  </div>
-
-</div>
-<!-- ═══════════════════════════════════════════════════════════════════════════ -->
-
 <div id="bb">
   <div class="bi"><span class="bl2">NET</span><span class="bv2">QTCL-1</span></div>
   <div class="bi"><span class="bl2">DIFF</span><span class="bvy" id="bbd">&mdash;</span></div>
@@ -663,50 +285,397 @@ setInterval(tick,1000);tick();
   })();
 })();
 
-// Poincare disk
+// ═══════════════════════════════════════════════════════════════════════
+// POINCARÉ LATTICE FIELD — Live data-driven hyperbolic visualization
+//
+// What's rendered and why:
+//   • Disk radius          = W-state fidelity (shrinks when oracle degrades)
+//   • W-triangle           = 3 qubits of |W3⟩; size/brightness = fidelity
+//   • Entanglement arcs    = geodesics between W nodes; opacity = entanglement
+//   • Oracle nodes (×5)    = one dot per oracle; gold=consensus, red=out
+//   • CHSH ring            = outer ring pulses green when CHSH>2 (violation)
+//   • Negativity spokes    = 8 radial lines; length = negativity A-B vs B-C
+//   • Discord halo         = soft violet glow radius tracks quantum discord
+//   • Coherence rings      = inner ring count live from coherence value
+//   • pq_curr/pq_last arc  = cyan arc segment shows current lattice interval
+//   • Block events         = gold ripple on solved block (existing dbk system)
+//   • Gamma decay          = particle drift speed scales with gamma1_eff
+//   • Omega precession     = W-triangle rotation rate = omega/2π
+//   • Cycle revival flash  = at cycle mod 8 == 0, whole disk brightens
+// ═══════════════════════════════════════════════════════════════════════
 var dc=document.getElementById('dc'),dctx=dc.getContext('2d');
 function szDisk(){dc.width=dc.parentElement.clientWidth;}
 szDisk();
-var parts=[];
-(function(){for(var i=0;i<70;i++) parts.push({r:Math.random()*.82,a:Math.random()*Math.PI*2,dr:(Math.random()-.5)*.0008,da:(Math.random()-.5)*.003,sz:Math.random()*1.4+.3,al:Math.random()*.35+.08,tp:Math.floor(Math.random()*3)});})();
+
+// Pseudoqubit nodes: 13 per triangle tile, 8 tiles visible in disk
+// Each tracks position and a live coherence-weighted brightness
+var PQ_N = 24; // visible pseudoqubit nodes
+var pqNodes = (function(){
+  var ns=[];
+  for(var i=0;i<PQ_N;i++){
+    var tier = i < 8 ? 0 : i < 16 ? 1 : 2; // inner/mid/outer ring
+    var base_r = [0.28, 0.54, 0.76][tier];
+    var a = (i % 8) * Math.PI/4 + tier * Math.PI/8;
+    ns.push({
+      r: base_r + (Math.random()-.5)*.08,
+      a: a,
+      base_a: a,
+      tier: tier,
+      phase: Math.random()*Math.PI*2,
+      alive: true,
+      // connection state — updated each frame
+      conn: []
+    });
+  }
+  return ns;
+})();
+
+// Connection graph: which pqNodes are entangled (driven by entanglement metric)
+// We'll compute dynamically based on proximity and live entanglement value
+
+function poincareToCanvas(r, a, cx, cy, R){
+  // Map disk coords (r in [0,1), a angle) to canvas, preserving hyperbolic metric feel
+  var x = cx + r * R * Math.cos(a);
+  var y = cy + r * R * Math.sin(a);
+  return {x:x, y:y};
+}
+
+function drawPoincareDiskGeodesic(x1,y1,x2,y2,cx,cy,R,col,alpha,lw){
+  // Approximate geodesic on Poincaré disk as circular arc through boundary
+  // For short chords inside the disk, a quadratic bezier through midpoint is fine
+  dctx.save();
+  dctx.globalAlpha=alpha;
+  dctx.strokeStyle=col;
+  dctx.lineWidth=lw;
+  // True geodesic: find circle orthogonal to boundary through both points
+  // Simplified: if both points near center, use straight line; else arc
+  var dx=x2-x1, dy=y2-y1, dist=Math.sqrt(dx*dx+dy*dy);
+  if(dist < R*.3){
+    dctx.beginPath();dctx.moveTo(x1,y1);dctx.lineTo(x2,y2);dctx.stroke();
+  } else {
+    // Control point pushed outward to approximate geodesic curvature
+    var mx=(x1+x2)/2, my=(y1+y2)/2;
+    var nx=mx-cx, ny=my-cy, nd=Math.sqrt(nx*nx+ny*ny);
+    var pull = dist*.18;
+    var bx = mx + (nd>1?(nx/nd)*pull:0);
+    var by = my + (nd>1?(ny/nd)*pull:0);
+    dctx.beginPath();dctx.moveTo(x1,y1);dctx.quadraticCurveTo(bx,by,x2,y2);dctx.stroke();
+  }
+  dctx.restore();
+}
+
 function drawDisk(){
-  var w=dc.width,h=dc.height,cx=w/2,cy=h/2,R=Math.min(w,h)/2-16;
+  var w=dc.width, h=dc.height, cx=w/2, cy=h/2;
+  var R = Math.min(w,h)/2 - 14;
+
+  // Live metrics from S
+  var fid    = Math.max(0.3, Math.min(1.0, S.fidelity   || 0.9));
+  var coh    = Math.max(0.0, Math.min(1.0, S.coherence  || 0.7));
+  var neg    = Math.max(0.0, Math.min(0.5, S.negativity || 0));
+  var disc   = Math.max(0.0, Math.min(2.0, S.discord    || 0));
+  var ent    = Math.max(0.0, Math.min(1.0, S.entanglement|| 0.65));
+  var pur    = Math.max(0.0, Math.min(1.0, S.purity     || 0.8));
+  var g1     = Math.max(0.001,S.gamma1    || 0.04);
+  var om     = S.omega || 0.5;
+  var cycle  = S.cycle || 0;
+  var revival= (cycle % 8 === 0) && cycle > 0;
+  var antirev= (cycle % 8 === 4);
+  var pqC    = S.pq_curr || 0;
+  var pqL    = S.pq_last || 0;
+
+  // Revival flash brightness boost
+  var revBoost = revival ? (0.4 + 0.4*Math.abs(Math.sin(dp*8))) : antirev ? 0.1 : 0;
+
   dctx.clearRect(0,0,w,h);
-  var g=dctx.createRadialGradient(cx,cy,0,cx,cy,R);g.addColorStop(0,'rgba(6,12,28,.98)');g.addColorStop(1,'rgba(3,6,16,.9)');
-  dctx.fillStyle=g;dctx.beginPath();dctx.arc(cx,cy,R,0,Math.PI*2);dctx.fill();
-  for(var i=1;i<=5;i++){dctx.beginPath();dctx.arc(cx,cy,R*i/5,0,Math.PI*2);dctx.strokeStyle='rgba(0,220,255,'+(0.03+i*.008)+')';dctx.lineWidth=.5;dctx.stroke();}
-  for(var i=0;i<12;i++){var a=i*Math.PI/6+dp*.04;dctx.beginPath();dctx.moveTo(cx,cy);dctx.lineTo(cx+R*Math.cos(a),cy+R*Math.sin(a));dctx.strokeStyle='rgba(0,220,255,.03)';dctx.lineWidth=.5;dctx.stroke();}
-  var wR=R*.5*Math.max(.5,S.fidelity),wN=[];
-  for(var i=0;i<3;i++){var a=i*Math.PI*2/3+dp;wN.push({x:cx+wR*Math.cos(a),y:cy+wR*Math.sin(a)});}
+
+  // ── Background: radial gradient, brighter at revival ──────────────────
+  var g = dctx.createRadialGradient(cx,cy,0,cx,cy,R);
+  g.addColorStop(0,'rgba(6,12,28,'+(0.96+revBoost*.3)+')');
+  g.addColorStop(0.6,'rgba(4,8,20,.97)');
+  g.addColorStop(1,'rgba(3,6,16,.92)');
+  dctx.fillStyle=g;
+  dctx.beginPath();dctx.arc(cx,cy,R,0,Math.PI*2);dctx.fill();
+
+  // ── {8,3} hyperbolic tessellation grid (3 tiers, coherence-driven opacity) ──
+  var gridAlpha = 0.025 + coh * 0.04;
+  for(var i=1;i<=5;i++){
+    dctx.beginPath();
+    dctx.arc(cx,cy,R*(i/5)*fid,0,Math.PI*2);
+    dctx.strokeStyle='rgba(0,220,255,'+(gridAlpha*(1+i*.15))+')';
+    dctx.lineWidth=.5;dctx.stroke();
+  }
+  // Radial spokes — 8 for {8,3} geometry
+  for(var i=0;i<8;i++){
+    var a = i*Math.PI/4 + dp*0.02;
+    dctx.beginPath();dctx.moveTo(cx,cy);
+    dctx.lineTo(cx+R*fid*Math.cos(a), cy+R*fid*Math.sin(a));
+    dctx.strokeStyle='rgba(0,220,255,'+gridAlpha+')';
+    dctx.lineWidth=.4;dctx.stroke();
+  }
+
+  // ── CHSH violation ring — pulses green when entanglement breaks classical bound ──
+  // Using entanglement as proxy (CHSH>2 when ent>~0.5 for maximally entangled states)
+  var chshViolation = ent > 0.45;
+  var chshAlpha = chshViolation ? (0.12 + 0.10*Math.abs(Math.sin(dp*4))) : 0.03;
+  var chshCol   = chshViolation ? 'rgba(0,255,157,' : 'rgba(0,220,255,';
+  dctx.beginPath();dctx.arc(cx,cy,R*0.92,0,Math.PI*2);
+  dctx.strokeStyle=chshCol+chshAlpha+')';
+  dctx.lineWidth=chshViolation?2:0.8;dctx.stroke();
+  if(chshViolation){
+    dctx.beginPath();dctx.arc(cx,cy,R*0.92,0,Math.PI*2);
+    dctx.strokeStyle='rgba(0,255,157,'+(chshAlpha*.4)+')';
+    dctx.lineWidth=6;dctx.stroke();
+  }
+
+  // ── Negativity spokes — 8 radial lines showing A-B entanglement strength ──
+  var negLen = R * Math.min(0.85, neg * 4 + 0.15);
+  for(var i=0;i<8;i++){
+    var a = i*Math.PI/4 + dp*0.015 + Math.PI/8;
+    var pulse = 0.5 + 0.5*Math.sin(dp*2 + i*Math.PI/4);
+    dctx.beginPath();dctx.moveTo(cx,cy);
+    dctx.lineTo(cx + negLen*Math.cos(a), cy + negLen*Math.sin(a));
+    dctx.strokeStyle='rgba(128,64,255,'+(0.06 + neg*0.3*pulse)+')';
+    dctx.lineWidth=0.6;dctx.stroke();
+  }
+
+  // ── Discord halo — violet fog radius tracks quantum discord ──────────────
+  if(disc > 0.05){
+    var dHalo = dctx.createRadialGradient(cx,cy,R*(0.15+disc*.1),cx,cy,R*(0.4+disc*.2));
+    dHalo.addColorStop(0,'rgba(128,64,255,0)');
+    dHalo.addColorStop(0.5,'rgba(128,64,255,'+(disc*0.04)+')');
+    dHalo.addColorStop(1,'rgba(128,64,255,0)');
+    dctx.fillStyle=dHalo;
+    dctx.beginPath();dctx.arc(cx,cy,R*(0.4+disc*.2),0,Math.PI*2);dctx.fill();
+  }
+
+  // ── pq_curr / pq_last arc — cyan arc shows active lattice interval ────────
+  if(pqC > 0 && pqL > 0){
+    var pqFrac = ((pqC - pqL) % 360) / 360;
+    var pqA0 = -Math.PI/2; // start top
+    var pqA1 = pqA0 + pqFrac * Math.PI * 2;
+    dctx.beginPath();
+    dctx.arc(cx,cy,R*0.88, pqA0, pqA0+Math.PI*2*(pqC%360)/360);
+    dctx.strokeStyle='rgba(0,220,255,0.22)';
+    dctx.lineWidth=2;dctx.stroke();
+    // Marker dot at current position
+    var pqMa = pqA0 + Math.PI*2*((pqC%360)/360);
+    dctx.beginPath();dctx.arc(cx+R*0.88*Math.cos(pqMa), cy+R*0.88*Math.sin(pqMa), 3.5, 0, Math.PI*2);
+    dctx.fillStyle='rgba(0,220,255,0.8)';dctx.fill();
+  }
+
+  // ── Pseudoqubit nodes + live entanglement connections ────────────────────
+  // Update node positions (orbit at rate driven by omega, drift by gamma)
+  var driftSpeed = g1 * 0.4;
+  pqNodes.forEach(function(p, i){
+    p.phase += 0.012;
+    // Orbital precession rate = omega/pi (live)
+    p.a = p.base_a + dp * (om / Math.PI) * 0.008 * (1 + p.tier * 0.3);
+    // Radial breathing: purity drives how tight the orbit is
+    p.r = ([0.28,0.54,0.76][p.tier]) + Math.sin(p.phase + i) * 0.04 * (1-pur+0.2);
+    // Coherence-driven node brightness
+    p.bright = 0.25 + coh * 0.55 + 0.15*Math.abs(Math.sin(p.phase*1.3));
+  });
+
+  // Draw entanglement connections (geodesics) between nearby nodes
+  // Number of connections scales with entanglement metric
+  var maxConns = Math.floor(ent * 18 + 2);
+  var connDrawn = 0;
+  for(var i=0; i<PQ_N && connDrawn<maxConns; i++){
+    for(var j=i+1; j<PQ_N && connDrawn<maxConns; j++){
+      var pi=pqNodes[i], pj=pqNodes[j];
+      // Only connect nodes in adjacent tiers or same tier that are close angularly
+      var tierDiff = Math.abs(pi.tier - pj.tier);
+      var angDiff  = Math.abs(pi.a - pj.a) % (Math.PI*2);
+      if(angDiff > Math.PI) angDiff = Math.PI*2 - angDiff;
+      if(tierDiff > 1) continue;
+      if(tierDiff === 0 && angDiff > Math.PI/3) continue;
+      if(tierDiff === 1 && angDiff > Math.PI/2.5) continue;
+      var n1=poincareToCanvas(pi.r,pi.a,cx,cy,R);
+      var n2=poincareToCanvas(pj.r,pj.a,cx,cy,R);
+      var connAlpha = ent * 0.18 * (0.5+0.5*Math.sin(dp*1.5+i+j));
+      // Color: same tier=cyan, cross-tier=violet
+      var connCol = tierDiff===0 ? 'rgba(0,220,255,' : 'rgba(128,64,255,';
+      drawPoincareDiskGeodesic(n1.x,n1.y,n2.x,n2.y,cx,cy,R,connCol,connAlpha,0.7);
+      connDrawn++;
+    }
+  }
+
+  // Draw pseudoqubit nodes
+  pqNodes.forEach(function(p,i){
+    var pos = poincareToCanvas(p.r, p.a, cx, cy, R);
+    // Purity: inner nodes are larger/brighter when system is pure
+    var sz = (p.tier===0?2.8:p.tier===1?2.2:1.6) * (0.7 + pur*0.5);
+    var col = p.tier===0 ? 'rgba(0,220,255,' : p.tier===1 ? 'rgba(128,64,255,' : 'rgba(0,220,255,';
+    dctx.beginPath();dctx.arc(pos.x,pos.y,sz,0,Math.PI*2);
+    dctx.fillStyle=col+p.bright+')';dctx.fill();
+    // Glow on inner nodes during revival
+    if(p.tier===0 && revival){
+      dctx.beginPath();dctx.arc(pos.x,pos.y,sz*2.5,0,Math.PI*2);
+      dctx.fillStyle='rgba(0,220,255,'+(revBoost*.4)+')';dctx.fill();
+    }
+  });
+
+  // ── W-state triangle: 3 qubits, size = fidelity, rotation = omega ────────
+  var wR = R * 0.44 * Math.max(0.45, fid);
+  // Rotation driven by omega
+  var wRot = dp * (om / Math.PI) * 0.012;
+  var wN=[];
+  for(var i=0;i<3;i++){
+    var a = i*Math.PI*2/3 + wRot;
+    wN.push(poincareToCanvas(wR/R, a, cx, cy, R));
+  }
+  // Fill: opacity = purity
   dctx.beginPath();dctx.moveTo(wN[0].x,wN[0].y);dctx.lineTo(wN[1].x,wN[1].y);dctx.lineTo(wN[2].x,wN[2].y);dctx.closePath();
-  dctx.strokeStyle='rgba(128,64,255,'+(0.25+0.15*Math.sin(dp*2))+')';dctx.lineWidth=1.5;dctx.stroke();dctx.fillStyle='rgba(128,64,255,.04)';dctx.fill();
-  wN.forEach(function(n,i){var p=.5+.5*Math.sin(dp*3+i*Math.PI*2/3);dctx.beginPath();dctx.arc(n.x,n.y,3.5+p*2,0,Math.PI*2);dctx.fillStyle='rgba(128,64,255,'+(0.7+0.3*p)+')';dctx.fill();});
-  ['#00dcff','#8040ff','#d4a020','#00ff9d','#ff3355'].forEach(function(col,i){
-    var r1=R*.3,a1=i*Math.PI*2/5+dp*.25,r2=R*.7,a2=a1+Math.PI/5+Math.sin(dp+i)*.25;
-    var p1={x:cx+r1*Math.cos(a1),y:cy+r1*Math.sin(a1)},p2={x:cx+r2*Math.cos(a2),y:cy+r2*Math.sin(a2)};
-    var mp={x:(p1.x+p2.x)/2+(cy-p1.y)*.08,y:(p1.y+p2.y)/2+(p1.x-cx)*.08};
-    dctx.beginPath();dctx.moveTo(p1.x,p1.y);dctx.quadraticCurveTo(mp.x,mp.y,p2.x,p2.y);
-    dctx.strokeStyle=col;dctx.globalAlpha=.1;dctx.lineWidth=1;dctx.stroke();dctx.globalAlpha=1;
-    dctx.beginPath();dctx.arc(p2.x,p2.y,2.5,0,Math.PI*2);dctx.fillStyle=col;dctx.globalAlpha=.45;dctx.fill();dctx.globalAlpha=1;
+  dctx.fillStyle='rgba(128,64,255,'+(0.02+pur*0.06)+')';dctx.fill();
+  // Stroke: opacity = fidelity, pulses with revival
+  var wStroke = 0.2 + fid*0.35 + revBoost*0.4;
+  dctx.strokeStyle='rgba(128,64,255,'+wStroke+')';
+  dctx.lineWidth=1.2+fid;dctx.stroke();
+
+  // W-state entanglement arcs between qubit nodes (geodesic style)
+  for(var i=0;i<3;i++){
+    var a=i, b=(i+1)%3;
+    drawPoincareDiskGeodesic(wN[a].x,wN[a].y,wN[b].x,wN[b].y,cx,cy,R,
+      'rgba(128,64,255,', ent*0.4+0.05, 1.2+ent);
+  }
+
+  // W qubit dots — brightness encodes per-qubit state (approximated from fidelity+purity)
+  wN.forEach(function(n,i){
+    var pulse = 0.5+0.5*Math.sin(dp*2.5+i*Math.PI*2/3+wRot*3);
+    var dotR  = 3.2+pulse*2.5+fid*1.5;
+    var alpha = 0.5+fid*0.4+revBoost*0.3;
+    // Glow
+    var gd=dctx.createRadialGradient(n.x,n.y,0,n.x,n.y,dotR*2.5);
+    gd.addColorStop(0,'rgba(128,64,255,'+alpha+')');
+    gd.addColorStop(1,'rgba(128,64,255,0)');
+    dctx.beginPath();dctx.arc(n.x,n.y,dotR*2.5,0,Math.PI*2);dctx.fillStyle=gd;dctx.fill();
+    dctx.beginPath();dctx.arc(n.x,n.y,dotR,0,Math.PI*2);
+    dctx.fillStyle='rgba(190,140,255,'+(0.7+pulse*0.3)+')';dctx.fill();
+    // Label
+    dctx.fillStyle='rgba(200,180,255,0.5)';
+    dctx.font='7px monospace';dctx.textAlign='center';
+    dctx.fillText('q'+i, n.x, n.y-dotR-3);
   });
-  var pc=['rgba(0,220,255,','rgba(128,64,255,','rgba(212,160,32,'];
-  parts.forEach(function(p){
-    p.r=Math.max(.02,Math.min(.93,p.r+p.dr));p.a+=p.da;if(p.r<.04||p.r>.91)p.dr*=-1;
-    var px=cx+p.r*R*Math.cos(p.a),py=cy+p.r*R*Math.sin(p.a);
-    dctx.beginPath();dctx.arc(px,py,p.sz,0,Math.PI*2);dctx.fillStyle=pc[p.tp]+p.al+')';dctx.fill();
-  });
+
+  // ── 5 Oracle nodes: positioned around outer ring, color = consensus state ──
+  var odata = S.oracle_data || {};
+  var oKeys = Object.keys(odata);
+  var oCount = Math.max(5, oKeys.length);
+  for(var i=0;i<oCount;i++){
+    var oa = i*(Math.PI*2/oCount) + dp*0.005;
+    var oR = R*0.83;
+    var ox = cx+oR*Math.cos(oa), oy = cy+oR*Math.sin(oa);
+    var od_data = oKeys[i] ? odata[oKeys[i]] : null;
+    var oInConsensus = od_data ? (od_data.in_consensus !== false) : true;
+    var oFid = od_data ? (od_data.w_state_fidelity || fid) : fid;
+    var oPulse = 0.5+0.5*Math.sin(dp*3+i*1.2);
+    // Color: gold=consensus, red=out, dim=unknown
+    var oCol = oInConsensus ? 'rgba(212,160,32,' : 'rgba(255,51,85,';
+    var oAlpha = oInConsensus ? (0.6+oPulse*0.3) : (0.3+oPulse*0.2);
+    // Connection line to center W-state (entanglement link)
+    dctx.beginPath();dctx.moveTo(cx,cy);dctx.lineTo(ox,oy);
+    dctx.strokeStyle=oCol+(oInConsensus?0.05:0.03)+')';
+    dctx.lineWidth=0.5;dctx.stroke();
+    // Oracle dot
+    dctx.beginPath();dctx.arc(ox,oy,oInConsensus?4:3,0,Math.PI*2);
+    dctx.fillStyle=oCol+oAlpha+')';dctx.fill();
+    // Outer glow for consensus nodes
+    if(oInConsensus){
+      dctx.beginPath();dctx.arc(ox,oy,7+oPulse*2,0,Math.PI*2);
+      dctx.fillStyle='rgba(212,160,32,'+(0.04+oPulse*0.04)+')';dctx.fill();
+    }
+    // Fidelity mini-arc around oracle dot
+    dctx.beginPath();dctx.arc(ox,oy,6,0,Math.PI*2*oFid);
+    dctx.strokeStyle=oCol+(oInConsensus?0.5:0.2)+')';
+    dctx.lineWidth=1.2;dctx.stroke();
+    // Label
+    dctx.fillStyle=oCol+(oInConsensus?'0.45)':'0.25)');
+    dctx.font='6px monospace';dctx.textAlign='center';
+    dctx.fillText('O'+(i+1), ox, oy+12);
+  }
+
+  // Oracle-to-W connections: line width = consensus agreement
+  var oConsensusCount = oKeys.filter(function(k){return odata[k].in_consensus!==false;}).length || 3;
+  var oConsRatio = oConsensusCount / oCount;
+  // Draw thicker geodesic arcs from oracle ring to W nodes when consensus is strong
+  if(oConsRatio > 0.5){
+    wN.forEach(function(wn, wi){
+      var oa = wi*(Math.PI*2/oCount) + dp*0.005;
+      var ox2 = cx+R*0.83*Math.cos(oa), oy2 = cy+R*0.83*Math.sin(oa);
+      drawPoincareDiskGeodesic(wn.x,wn.y,ox2,oy2,cx,cy,R,
+        'rgba(212,160,32,', (oConsRatio-0.5)*0.12, 0.6);
+    });
+  }
+
+  // ── Block event ripples (existing dbk system) ────────────────────────────
   dbk=dbk.filter(function(b){
-    b.age+=.025;if(b.age>=1) return false;
-    var bx=cx+b.r*R*Math.cos(b.a),by=cy+b.r*R*Math.sin(b.a),sz=7*(1-b.age);
-    dctx.beginPath();dctx.arc(bx,by,sz,0,Math.PI*2);dctx.strokeStyle='rgba(212,160,32,'+(1-b.age)+')';dctx.lineWidth=1.5;dctx.stroke();
-    dctx.beginPath();dctx.arc(bx,by,sz*2.2,0,Math.PI*2);dctx.strokeStyle='rgba(212,160,32,'+((1-b.age)*.25)+')';dctx.lineWidth=1;dctx.stroke();
+    b.age+=.022;if(b.age>=1) return false;
+    var pos=poincareToCanvas(b.r,b.a,cx,cy,R);
+    var sz=10*(1-b.age)+3;
+    dctx.beginPath();dctx.arc(pos.x,pos.y,sz,0,Math.PI*2);
+    dctx.strokeStyle='rgba(212,160,32,'+(1-b.age)+')';dctx.lineWidth=1.5;dctx.stroke();
+    dctx.beginPath();dctx.arc(pos.x,pos.y,sz*2,0,Math.PI*2);
+    dctx.strokeStyle='rgba(212,160,32,'+((1-b.age)*.2)+')';dctx.lineWidth=1;dctx.stroke();
     return true;
   });
-  dctx.beginPath();dctx.arc(cx,cy,4,0,Math.PI*2);
-  var cg=dctx.createRadialGradient(cx,cy,0,cx,cy,8);cg.addColorStop(0,'rgba(212,160,32,1)');cg.addColorStop(1,'rgba(212,160,32,0)');
-  dctx.fillStyle=cg;dctx.fill();
-  dctx.beginPath();dctx.arc(cx,cy,R,0,Math.PI*2);dctx.strokeStyle='rgba(0,220,255,.18)';dctx.lineWidth=1;dctx.stroke();
-  dp+=.005;requestAnimationFrame(drawDisk);
+
+  // ── Center: oracle oracle core — brightness = purity ─────────────────────
+  var cg=dctx.createRadialGradient(cx,cy,0,cx,cy,10+pur*6);
+  cg.addColorStop(0,'rgba(212,160,32,'+(0.7+pur*.3)+')');
+  cg.addColorStop(0.4,'rgba(212,160,32,'+(0.2+pur*.2)+')');
+  cg.addColorStop(1,'rgba(212,160,32,0)');
+  dctx.beginPath();dctx.arc(cx,cy,10+pur*6,0,Math.PI*2);dctx.fillStyle=cg;dctx.fill();
+  dctx.beginPath();dctx.arc(cx,cy,3.5,0,Math.PI*2);
+  dctx.fillStyle='rgba(255,200,80,'+(0.8+pur*.2)+')';dctx.fill();
+
+  // ── Coherence rings: number of rings = floor(coherence * 4) + 1 ──────────
+  var numRings = Math.floor(coh*4)+1;
+  for(var i=1;i<=numRings;i++){
+    var ringR = R*(0.12+i*0.05);
+    var rAlpha = 0.06+coh*0.08-i*0.01;
+    dctx.beginPath();dctx.arc(cx,cy,ringR,0,Math.PI*2);
+    dctx.strokeStyle='rgba(0,220,255,'+Math.max(0,rAlpha)+')';
+    dctx.lineWidth=0.5;dctx.stroke();
+  }
+
+  // ── Boundary ring ─────────────────────────────────────────────────────────
+  dctx.beginPath();dctx.arc(cx,cy,R,0,Math.PI*2);
+  dctx.strokeStyle='rgba(0,220,255,'+(0.12+revBoost*.15)+')';
+  dctx.lineWidth=chshViolation?1.5:0.8;dctx.stroke();
+
+  // ── HUD overlay: key metrics as text labels ───────────────────────────────
+  dctx.textAlign='left';
+  var hudItems=[
+    {label:'F',  val:(fid*100).toFixed(1)+'%',  col:'rgba(0,220,255,.55)',  x:8,  y:14},
+    {label:'coh',val:(coh*100).toFixed(1)+'%',  col:'rgba(0,220,255,.45)',  x:8,  y:24},
+    {label:'neg',val:neg.toFixed(4),             col:'rgba(128,64,255,.55)', x:8,  y:34},
+    {label:'ent',val:ent.toFixed(4),             col:'rgba(128,64,255,.45)', x:8,  y:44},
+  ];
+  dctx.font='7px "JetBrains Mono",monospace';
+  hudItems.forEach(function(h){
+    dctx.fillStyle='rgba(50,70,110,.45)';
+    dctx.fillText(h.label,h.x,h.y);
+    dctx.fillStyle=h.col;
+    dctx.fillText(h.val,h.x+16,h.y);
+  });
+  // Right side: discord, purity, cycle
+  dctx.textAlign='right';
+  var hudR=[
+    {label:'pur', val:(pur*100).toFixed(1)+'%', col:'rgba(0,220,255,.55)', x:w-8, y:14},
+    {label:'dis', val:disc.toFixed(4),           col:'rgba(128,64,255,.55)',x:w-8, y:24},
+    {label:'cyc', val:'#'+cycle,                 col:'rgba(212,160,32,.6)', x:w-8, y:34},
+    {label:revival?'REVIVAL':antirev?'ANTI-REV':'', val:'', col:'rgba(0,255,157,.7)', x:w-8, y:44},
+  ];
+  hudR.forEach(function(h){
+    if(!h.label) return;
+    dctx.fillStyle='rgba(50,70,110,.45)';
+    dctx.fillText(h.label, h.x-28, h.y);
+    dctx.fillStyle=h.col;
+    dctx.fillText(h.val||h.label, h.x, h.y);
+  });
+
+  dp += 0.005;
+  requestAnimationFrame(drawDisk);
 }
 drawDisk();
 
