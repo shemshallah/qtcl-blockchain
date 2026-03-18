@@ -1442,103 +1442,141 @@ def get_measurement_service() -> MeasurementService:
 
 class DifficultyManager:
     """
-    Manage blockchain difficulty — N = number of leading hex zeros required.
+    Adaptive difficulty targeting for QTCL.
 
-    Difficulty scale (hex zeros, at ~20k H/s):
-        diff=4  →   3.3s  (too fast, spam risk)
-        diff=5  →  52.4s  (target sweet-spot at 20k H/s)
-        diff=6  →  ~14min (appropriate for >300k H/s)
+    Algorithm
+    ─────────
+    On every block accepted we compute the EWMA (exponentially-weighted moving
+    average) block time over the last EWMA_WINDOW blocks, then solve for the
+    difficulty integer that would produce TARGET_BLOCK_TIME_S at the implied
+    hash rate.  The result is clamped to ±MAX_STEP_PER_BLOCK per adjustment so
+    a sudden hashrate spike can't teleport difficulty past the network.
 
-    Rule: 16^diff / target_block_time_s  ≈  required_hash_rate
-    Target 60s blocks:  required_rate = 16^diff / 60
-        diff=5  needs    17k H/s  ✅ matches typical miner
-        diff=6  needs   280k H/s
-        diff=7  needs   4.5M H/s
+    Immediate (per-block) adjustment fires every block once the chain has
+    WARMUP_BLOCKS history.  The legacy `adjustment_interval` attribute is kept
+    for the DB query caller but has no effect on the algorithm.
+
+    Difficulty ↔ hash-rate relationship
+    ────────────────────────────────────
+        16^diff hashes required on average per block (hex leading zeros).
+        required_H/s = 16^diff / target_time_s
+
+        diff=3 → needs    ~273 H/s for 30s blocks   (trivial)
+        diff=4 → needs   ~4.4k H/s for 30s blocks   (slow Python miner)
+        diff=5 → needs    ~70k H/s for 30s blocks   (C miner, single thread)
+        diff=6 → needs  ~1.1M H/s for 30s blocks   (fast C / multi-thread)
+        diff=7 → needs   ~18M H/s for 30s blocks   (GPU territory)
     """
 
-    # Hard bounds — never let adjustment drift outside these
     ABS_MIN = 1
-    ABS_MAX = 7   # diff=7 needs 4.5M H/s for 60s blocks; anything higher is absurd
+    ABS_MAX = 8
 
-    def __init__(self, initial_difficulty: int = 5):
-        # Clamp initial value inside abs bounds regardless of what caller passes
+    # Tuning knobs — edit these to change test behaviour
+    TARGET_BLOCK_TIME_S  = 30    # aim for 30-second blocks during testing
+    EWMA_ALPHA           = 0.35  # EWMA weight on newest sample (higher = reacts faster)
+    MAX_STEP_PER_BLOCK   = 2     # maximum diff change in one adjustment (anti-oscillation)
+    WARMUP_BLOCKS        = 3     # don't adjust until this many blocks exist
+    FLOOR                = 3     # absolute floor (prevents diff=1 spam)
+    CEILING              = ABS_MAX
+
+    def __init__(self, initial_difficulty: int = 4):
+        import math as _m
+        self._math          = _m
         self.current_difficulty = max(self.ABS_MIN, min(self.ABS_MAX, initial_difficulty))
-        self.min_difficulty = 3        # never go below 3 (instant mining)
-        self.max_difficulty = self.ABS_MAX
-        self.target_block_time_s = 60  # target 60-second blocks
-        self.adjustment_interval = 10  # adjust every 10 blocks
+        self.min_difficulty     = self.FLOOR
+        self.max_difficulty     = self.CEILING
+        self.target_block_time_s  = self.TARGET_BLOCK_TIME_S
+        self.adjustment_interval  = 1    # kept for DB query compat — fires every block
+        self._ewma_block_time: float = float(self.TARGET_BLOCK_TIME_S)
+        self._last_ts: float = 0.0
+        self._block_count: int = 0
         logger.info(
-            f"[DIFFICULTY] Manager initialized: diff={self.current_difficulty} leading hex zeros | "
-            f"target={self.target_block_time_s}s blocks | "
-            f"range=[{self.min_difficulty}, {self.max_difficulty}]"
+            f"[DIFFICULTY] Adaptive manager ready: diff={self.current_difficulty} | "
+            f"target={self.TARGET_BLOCK_TIME_S}s | EWMA α={self.EWMA_ALPHA} | "
+            f"step≤±{self.MAX_STEP_PER_BLOCK} | range=[{self.min_difficulty},{self.max_difficulty}]"
         )
+
+    # ── Public API ──────────────────────────────────────────────────────────
 
     def get_difficulty(self) -> int:
         return self.current_difficulty
 
     def set_difficulty(self, difficulty: int) -> bool:
-        """Manually set difficulty — clamps to [min, max]."""
+        """Manual override — clamps to [floor, ceiling]."""
         clamped = max(self.min_difficulty, min(self.max_difficulty, difficulty))
         if clamped != difficulty:
             logger.warning(
-                f"[DIFFICULTY] Requested {difficulty} clamped to {clamped} "
-                f"(range [{self.min_difficulty}, {self.max_difficulty}])"
+                f"[DIFFICULTY] Requested {difficulty} clamped to {clamped}"
             )
         old = self.current_difficulty
         self.current_difficulty = clamped
-        logger.info(f"[DIFFICULTY] Set: {old} → {self.current_difficulty}")
-        return True   # always succeeds (clamped)
+        logger.info(f"[DIFFICULTY] Manual set: {old} → {self.current_difficulty}")
+        return True
+
+    def record_block(self, timestamp: float) -> int:
+        """
+        Called immediately after each accepted block with its Unix timestamp.
+        Updates the EWMA and retargets if we have enough history.
+        Returns the new difficulty (same as current if no change).
+        """
+        self._block_count += 1
+        if self._last_ts > 0:
+            gap = max(0.5, timestamp - self._last_ts)   # floor at 0.5s to ignore clock skew
+            # EWMA update
+            α = self.EWMA_ALPHA
+            self._ewma_block_time = α * gap + (1.0 - α) * self._ewma_block_time
+            if self._block_count >= self.WARMUP_BLOCKS:
+                self._retarget()
+        self._last_ts = timestamp
+        return self.current_difficulty
 
     def auto_adjust(self, blocks: list) -> int:
         """
-        Retarget difficulty so expected block time approaches target_block_time_s.
-
-        Algorithm (Bitcoin-style):
-            ratio       = actual_avg_time / target_time
-            new_diff    = solve_diff(current_diff, ratio)
-
-        Uses additive ±1 steps instead of multiplicative to avoid oscillation
-        at low difficulty integers where ×1.25 jumps unevenly.
+        Legacy batch-retarget interface (called by the existing DB-query path).
+        Feeds the last block's timestamp into record_block so both paths converge.
         """
         if len(blocks) < 2:
             return self.current_difficulty
-
-        time_span   = blocks[-1].get('timestamp', 0) - blocks[0].get('timestamp', 0)
-        block_count = len(blocks) - 1
-        actual_time = time_span / block_count if block_count > 0 else self.target_block_time_s
-
-        if actual_time <= 0:
-            return self.current_difficulty
-
-        # Expected hashes at current diff
-        expected_hashes = 16 ** self.current_difficulty
-        # Implied hash rate from observed block time
-        implied_rate = expected_hashes / actual_time
-        # New diff that would hit target at the same implied rate
-        import math as _m
-        ideal_diff = _m.log(implied_rate * self.target_block_time_s) / _m.log(16)
-        target_diff = int(round(ideal_diff))
-
-        # Clamp to ±1 change per adjustment window (anti-oscillation)
-        if target_diff > self.current_difficulty:
-            new_difficulty = self.current_difficulty + 1
-        elif target_diff < self.current_difficulty:
-            new_difficulty = self.current_difficulty - 1
-        else:
-            new_difficulty = self.current_difficulty
-
-        new_difficulty = max(self.min_difficulty, min(self.max_difficulty, new_difficulty))
-
-        if new_difficulty != self.current_difficulty:
-            old = self.current_difficulty
-            self.current_difficulty = new_difficulty
-            logger.info(
-                f"[DIFFICULTY] Auto-adjusted: {old} → {new_difficulty} "
-                f"(actual={actual_time:.1f}s target={self.target_block_time_s}s "
-                f"implied_rate={implied_rate:.0f} H/s)"
-            )
-
+        # Feed the most recent inter-block interval
+        last_ts  = float(blocks[-1].get('timestamp', 0) or 0)
+        first_ts = float(blocks[0].get('timestamp',  0) or 0)
+        n        = len(blocks) - 1
+        if n > 0 and last_ts > first_ts:
+            avg_gap = (last_ts - first_ts) / n
+            # Inject as a synthetic record_block with the average gap
+            α = self.EWMA_ALPHA
+            self._ewma_block_time = α * avg_gap + (1.0 - α) * self._ewma_block_time
+            self._retarget()
         return self.current_difficulty
+
+    # ── Internal ────────────────────────────────────────────────────────────
+
+    def _retarget(self) -> None:
+        """
+        Solve: 16^new_diff / ewma_time ≈ 16^current_diff / target_time
+        Rearranging: new_diff = log16(implied_rate × target_time)
+        where implied_rate = 16^current_diff / ewma_time
+        """
+        t   = max(0.5, self._ewma_block_time)
+        m   = self._math
+        implied_rate = (16 ** self.current_difficulty) / t
+        ideal_diff   = m.log(implied_rate * self.TARGET_BLOCK_TIME_S) / m.log(16)
+        target_diff  = int(round(ideal_diff))
+
+        # Clamp step size
+        delta       = max(-self.MAX_STEP_PER_BLOCK,
+                          min(self.MAX_STEP_PER_BLOCK, target_diff - self.current_difficulty))
+        new_diff    = self.current_difficulty + delta
+        new_diff    = max(self.min_difficulty, min(self.max_difficulty, new_diff))
+
+        if new_diff != self.current_difficulty:
+            old = self.current_difficulty
+            self.current_difficulty = new_diff
+            logger.info(
+                f"[DIFFICULTY] ⚡ Retarget: {old} → {new_diff} "
+                f"(EWMA={t:.1f}s  target={self.TARGET_BLOCK_TIME_S}s  "
+                f"implied={implied_rate:.0f} H/s  ideal_diff={ideal_diff:.2f})"
+            )
 
 
 _difficulty_manager = None
@@ -1565,8 +1603,8 @@ def get_difficulty_manager() -> DifficultyManager:
     except Exception as _de:
         logger.debug(f"[DIFFICULTY] DB bootstrap failed: {_de}")
 
-    # Use DB value if sane, otherwise default to 5 (safe for typical miners)
-    initial = db_difficulty if db_difficulty is not None else 5
+    # Use DB value if sane, otherwise start at 4 (30s blocks at ~4k H/s C miner warmup)
+    initial = db_difficulty if db_difficulty is not None else 4
     _difficulty_manager = DifficultyManager(initial_difficulty=initial)
     if db_difficulty is not None:
         logger.info(f"[DIFFICULTY] Restored from DB: diff={initial}")
@@ -8758,9 +8796,17 @@ def submit_block():
         globals()['_ORACLE_CANONICAL_HEIGHT'] = block_height
         logger.info(f"[FORK-FIX] Canonical oracle height updated: {block_height}")
 
-        # ── Auto-adjust difficulty every N blocks ────────────────────────────────
-        # Pull the last adjustment_interval blocks from DB and retarget if needed
+        # ── Auto-adjust difficulty every block (EWMA) + legacy batch retarget ──
         _mgr = get_difficulty_manager()
+        import time as _time_mod
+        # Per-block EWMA update — fires immediately on every accepted block
+        _block_ts = float(block_data.get('timestamp') or _time_mod.time())
+        _mgr.record_block(_block_ts)
+
+        # Legacy batch path — still fires every adjustment_interval blocks as a
+        # cross-check; with adjustment_interval=1 it's effectively a no-op after
+        # record_block, but kept so external tooling that reads adjustment_interval
+        # still works correctly.
         if block_height > 0 and block_height % _mgr.adjustment_interval == 0:
             try:
                 with get_db_cursor() as _dc:
@@ -8769,15 +8815,15 @@ def submit_block():
                         WHERE height > %s
                         ORDER BY height ASC
                         LIMIT %s
-                    """, (block_height - _mgr.adjustment_interval - 1, _mgr.adjustment_interval + 1))
+                    """, (block_height - max(_mgr.adjustment_interval, 5) - 1,
+                          max(_mgr.adjustment_interval, 5) + 1))
                     _adj_rows = _dc.fetchall()
                 if len(_adj_rows) >= 2:
                     _adj_blocks = [{'height': r[0], 'timestamp': float(r[1]) if r[1] else 0}
                                    for r in _adj_rows]
-                    _new_diff = _mgr.auto_adjust(_adj_blocks)
-                    logger.info(f"[DIFFICULTY] Retarget at h={block_height}: diff={_new_diff}")
+                    _mgr.auto_adjust(_adj_blocks)
             except Exception as _ae:
-                logger.debug(f"[DIFFICULTY] Auto-adjust error: {_ae}")
+                logger.debug(f"[DIFFICULTY] Batch adjust error: {_ae}")
 
         # 6️⃣ RESPONSE
         return jsonify({
