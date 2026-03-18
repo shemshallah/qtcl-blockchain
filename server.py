@@ -6383,6 +6383,104 @@ def _qrng_phase() -> float:
         return int.from_bytes(_ge(4),'big')/0xFFFFFFFF*2*_np.pi
     except Exception: return 0.0
 
+# ── Entropy API key auth helper ────────────────────────────────────────────────
+def _check_entropy_auth(request) -> bool:
+    """
+    Validate the entropy API key from the request.
+    Checks (in order):
+      1. X-Entropy-Key header
+      2. Authorization: Bearer <key>
+      3. ?api_key= query param
+    Returns True if authorised.  If ENTROPY_API_KEY env var is unset, always True (dev mode).
+    """
+    from pool_api import validate_entropy_api_key as _val
+    key = (
+        request.headers.get('X-Entropy-Key', '') or
+        request.headers.get('Authorization', '').removeprefix('Bearer ').strip() or
+        request.args.get('api_key', '')
+    )
+    return _val(key)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# /api/entropy/stream  — Hyperbolic quantum entropy endpoint
+# /api/entropy/stats   — Throughput + source health
+# ════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/entropy/stream', methods=['GET'])
+def api_entropy_stream():
+    """
+    Hyperbolic quantum entropy endpoint.  Authenticated via X-Entropy-Key header,
+    Authorization: Bearer <key>, or ?api_key= query param.
+
+    Query params:
+        height   (int)  — current chain height, used for chain-binding the output
+        pq_curr  (str)  — current pseudoqubit ID, mixed into the binding hash
+
+    Response JSON (matches client HyperbolicEntropyPool._fetch_server() schema):
+        {
+          "entropy"    : "<base64-encoded 32 bytes>",
+          "oracle_hash": "<sha3-256 hex>",
+          "height"     : <int>,
+          "pq_curr"    : "<str>",
+          "timestamp"  : <float unix>,
+          "server_id"  : "<oracle id>",
+          "pass"       : 1
+        }
+
+    The client applies a second {8,3} Möbius walk (pass 2) on receipt.
+    Each byte of the final mining seed has therefore traversed the Poincaré
+    disk geometry twice, achieving exponential tile coverage (~2^128 on 64+64 steps).
+
+    Rate: 600 req/min per key (configurable via ENTROPY_RATE_LIMIT env var).
+    Throughput: see /api/entropy/stats for live KB/s from the QRNG ensemble.
+    """
+    if not _check_entropy_auth(request):
+        return jsonify({'error': 'Unauthorized', 'hint': 'Set X-Entropy-Key header'}), 401
+
+    try:
+        from pool_api import get_hyp_engine as _eng
+        height   = int(request.args.get('height',  0))
+        pq_curr  = request.args.get('pq_curr', '')
+        result   = _eng().get_hyp_entropy(
+            height=height, pq_curr=pq_curr, server_id=ORACLE_ID
+        )
+        resp = jsonify(result)
+        resp.headers['Cache-Control'] = 'no-store'
+        resp.headers['X-Entropy-Pass'] = '1'
+        return resp
+    except Exception as e:
+        logger.error(f"[entropy/stream] {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/entropy/stats', methods=['GET'])
+def api_entropy_stats():
+    """
+    Live throughput and health stats for the hyperbolic entropy engine + QRNG pool.
+
+    Also requires entropy API key auth.
+
+    Returns:
+        hyp_engine.ring_fill      — pre-computed slots ready to serve
+        hyp_engine.throughput_bps — bytes/second produced (rolling)
+        hyp_engine.slots_served   — total served since startup
+        hyp_engine.walk_time_ms_avg — average Möbius walk latency
+        pool.*                    — per-source QRNG health from pool_api
+    """
+    if not _check_entropy_auth(request):
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    try:
+        from pool_api import get_entropy_stats as _gs
+        stats = _gs()
+        stats['server_id'] = ORACLE_ID
+        stats['walk_depth'] = 64
+        return jsonify(stats)
+    except Exception as e:
+        logger.error(f"[entropy/stats] {e}")
+        return jsonify({'error': str(e)}), 500
+
 # ── W-state sector correction ─────────────────────────────────────────────────
 def _w_sector_correct(rho3: _np.ndarray, threshold=0.80) -> _np.ndarray:
     """
