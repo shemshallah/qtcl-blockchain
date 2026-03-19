@@ -3323,6 +3323,29 @@ class UnifiedOracleMux:
             'chirp_number':     self.chirp_count,
             'oracle_count':     len(measurements),
 
+            # ── Canonical DM fields — required by client _ingest_oracle_frame ──
+            # Without density_matrix_hex the client bails immediately and
+            # snapshot_count stays 0, leaving the oracle DM as all-zeros.
+            'density_matrix_hex':    latest_dm.get('density_matrix_hex',    '') if latest_dm else '',
+            'purity':                latest_dm.get('purity',                0.0) if latest_dm else 0.0,
+            'von_neumann_entropy':   latest_dm.get('von_neumann_entropy',   0.0) if latest_dm else 0.0,
+            'coherence_l1':          latest_dm.get('coherence_l1',          0.0) if latest_dm else 0.0,
+            'coherence_renyi':       latest_dm.get('coherence_renyi',       0.0) if latest_dm else 0.0,
+            'coherence_geometric':   latest_dm.get('coherence_geometric',   0.0) if latest_dm else 0.0,
+            'quantum_discord':       latest_dm.get('quantum_discord',       0.0) if latest_dm else 0.0,
+            'w_state_fidelity':      latest_dm.get('w_state_fidelity',      0.0) if latest_dm else 0.0,
+            'w_state_strength':      latest_dm.get('w_state_strength',      0.0) if latest_dm else 0.0,
+            'phase_coherence':       latest_dm.get('phase_coherence',       0.0) if latest_dm else 0.0,
+            'entanglement_witness':  latest_dm.get('entanglement_witness',  0.0) if latest_dm else 0.0,
+            'trace_purity':          latest_dm.get('trace_purity',          0.0) if latest_dm else 0.0,
+            'measurement_counts':    latest_dm.get('measurement_counts',     {}) if latest_dm else {},
+            'aer_noise_state':       latest_dm.get('aer_noise_state',        {}) if latest_dm else {},
+            'lattice_refresh_counter': latest_dm.get('lattice_refresh_counter', 0) if latest_dm else 0,
+            'hlwe_signature':        latest_dm.get('hlwe_signature',        None) if latest_dm else None,
+            'oracle_address':        latest_dm.get('oracle_address',        None) if latest_dm else None,
+            'signature_valid':       latest_dm.get('signature_valid',      False) if latest_dm else False,
+            'block_height':          block_field.get('pq_curr', pq_curr) if block_field else pq_curr,
+
             # Per-oracle block-field readings (real AER, 5-qubit composite)
             'oracle_measurements': [
                 {
@@ -8564,7 +8587,13 @@ def submit_block():
         # 1250 base units = 12.50 QTCL  (like Bitcoin's satoshis)
         BLOCK_REWARD_BASE = 1250
         BLOCK_REWARD_QTCL = 12.5
-        
+
+        # ── Safe defaults — outer return jsonify() always has these names ──────
+        # If the with-block raises before setting them the except-handler's
+        # jsonify(coinbase_tx=coinbase_id, miner_reward=...) would NameError.
+        coinbase_id     = None
+        coinbase_amount = 0
+
         with get_db_cursor() as cur:
             # 1️⃣ INSERT BLOCK INTO DATABASE — WITH FULL VALIDATION FLAGS + pq FIELDS
             # ✅ quantum_validation_status, pq_validation_status, oracle_consensus_reached, temporal_coherence
