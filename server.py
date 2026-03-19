@@ -8898,7 +8898,7 @@ def submit_block():
         _mgr = get_difficulty_manager()
         import time as _time_mod
         # Per-block EWMA update — fires immediately on every accepted block
-        _block_ts = float(block_data.get('timestamp') or _time_mod.time())
+        _block_ts = float(timestamp_s or _time_mod.time())
         _mgr.record_block(_block_ts)
 
         # Legacy batch path — still fires every adjustment_interval blocks as a
