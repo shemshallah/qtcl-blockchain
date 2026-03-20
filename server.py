@@ -1617,6 +1617,10 @@ def get_difficulty_manager() -> DifficultyManager:
 # Server uses these only in qtcl_pow_verify() called from submit_block.
 # Algorithm: SHAKE-256 512KB scratchpad + 64 sequential SHA3-256 mix rounds.
 # Entropy TTL: oracle seed expires after 120s — prevents stale pre-mining.
+QTCL_POW_SCRATCHPAD_BYTES = 512 * 1024   # 512 KB SHAKE-256 scratchpad
+QTCL_POW_MIX_ROUNDS       = 64           # sequential read windows per hash
+QTCL_POW_WINDOW_BYTES      = 64          # bytes per window
+QTCL_POW_ENTROPY_TTL_S     = 120         # oracle seed TTL (seconds)
 
 def qtcl_pow_build_scratchpad(w_entropy_seed: bytes) -> bytes:
     """
