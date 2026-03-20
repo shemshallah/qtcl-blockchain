@@ -1445,171 +1445,208 @@ class DifficultyManager:
     """
     Adaptive difficulty targeting for QTCL.
 
-    Algorithm
-    ─────────
-    On every block accepted we compute the EWMA (exponentially-weighted moving
-    average) block time over the last EWMA_WINDOW blocks, then solve for the
-    difficulty integer that would produce TARGET_BLOCK_TIME_S at the implied
-    hash rate.  The result is clamped to ±MAX_STEP_PER_BLOCK per adjustment so
-    a sudden hashrate spike can't teleport difficulty past the network.
+    Algorithm (per-block EWMA, wall-clock based)
+    ─────────────────────────────────────────────
+    On every ACCEPTED block we measure the wall-clock elapsed time since the
+    previous accepted block (not the block header timestamp — miners control
+    that and can set it to anything).  We update a EWMA of block intervals
+    and retarget to keep actual solve time near TARGET_BLOCK_TIME_S.
 
-    Immediate (per-block) adjustment fires every block once the chain has
-    WARMUP_BLOCKS history.  The legacy `adjustment_interval` attribute is kept
-    for the DB query caller but has no effect on the algorithm.
+    Bug history — do not revert these fixes:
+      • Bug 1: used header timestamp_s, not wall time → miner controls timestamp,
+               sub-second solve appeared as TARGET_BLOCK_TIME_S gap → no retarget.
+      • Bug 2: _last_accept = 0 on restart → first gap = unix epoch ≈ 1.7 billion s
+               → EWMA blows up → _retarget logs(~0) → difficulty dropped to FLOOR.
+      • Bug 3: legacy batch retarget fired AFTER record_block on the same block,
+               corrupting the EWMA with old slow-block averages from DB.
 
-    Difficulty ↔ hash-rate relationship
-    ────────────────────────────────────
-        16^diff hashes required on average per block (hex leading zeros).
-        required_H/s = 16^diff / target_time_s
-
-        diff=3 → needs    ~273 H/s for 30s blocks   (trivial)
-        diff=4 → needs   ~4.4k H/s for 30s blocks   (slow Python miner)
-        diff=5 → needs    ~70k H/s for 30s blocks   (C miner, single thread)
-        diff=6 → needs  ~1.1M H/s for 30s blocks   (fast C / multi-thread)
-        diff=7 → needs   ~18M H/s for 30s blocks   (GPU territory)
+    Difficulty ↔ hash-rate (hex leading-zero model):
+        diff=4 →  ~4.4k H/s for 30s blocks  (Python miner)
+        diff=5 →   ~70k H/s for 30s blocks  (single-thread C)
+        diff=6 →  ~1.1M H/s for 30s blocks  (multi-thread C)
+        diff=7 →   ~18M H/s for 30s blocks  (GPU territory)
     """
 
     ABS_MIN = 1
     ABS_MAX = 8
 
-    # Tuning knobs — edit these to change test behaviour
-    TARGET_BLOCK_TIME_S  = 30    # aim for 30-second blocks during testing
-    EWMA_ALPHA           = 0.35  # EWMA weight on newest sample (higher = reacts faster)
-    MAX_STEP_PER_BLOCK   = 2     # maximum diff change in one adjustment (anti-oscillation)
-    WARMUP_BLOCKS        = 3     # don't adjust until this many blocks exist
-    FLOOR                = 3     # absolute floor (prevents diff=1 spam)
-    CEILING              = ABS_MAX
+    TARGET_BLOCK_TIME_S = 30    # target inter-block interval in seconds
+    EWMA_ALPHA          = 0.40  # weight on newest sample — higher = faster reaction
+    MAX_STEP_PER_BLOCK  = 1     # max ±1 per block — prevents oscillation
+    WARMUP_BLOCKS       = 2     # blocks before first retarget (needs 1 gap sample)
+    FLOOR               = 5     # absolute minimum — never go below 5 leading zeros
+    CEILING             = ABS_MAX
 
-    def __init__(self, initial_difficulty: int = 4):
+    def __init__(self, initial_difficulty: int = 5,
+                 seed_ewma: float = None, seed_last_wall: float = None):
         import math as _m
-        self._math          = _m
-        self.current_difficulty = max(self.ABS_MIN, min(self.ABS_MAX, initial_difficulty))
+        self._math = _m
+        self.current_difficulty = max(self.FLOOR, min(self.CEILING, initial_difficulty))
         self.min_difficulty     = self.FLOOR
         self.max_difficulty     = self.CEILING
         self.target_block_time_s  = self.TARGET_BLOCK_TIME_S
-        self.adjustment_interval  = 1    # kept for DB query compat — fires every block
-        self._ewma_block_time: float = float(self.TARGET_BLOCK_TIME_S)
-        self._last_ts: float = 0.0
+        self.adjustment_interval  = 1   # kept for legacy DB-query compat
+        # Seed from DB-measured recent block times when available.
+        # If no seed: start EWMA at TARGET so we don't retarget on the first block.
+        self._ewma_block_time: float = (
+            float(seed_ewma) if seed_ewma and seed_ewma > 0 else float(self.TARGET_BLOCK_TIME_S)
+        )
+        # Wall-clock time of the last ACCEPTED block.
+        # Must NOT be 0 — zero causes a billion-second gap on first record_block call.
+        self._last_accept_wall: float = (
+            float(seed_last_wall) if seed_last_wall and seed_last_wall > 1e9
+            else time.time()
+        )
         self._block_count: int = 0
         logger.info(
             f"[DIFFICULTY] Adaptive manager ready: diff={self.current_difficulty} | "
             f"target={self.TARGET_BLOCK_TIME_S}s | EWMA α={self.EWMA_ALPHA} | "
-            f"step≤±{self.MAX_STEP_PER_BLOCK} | range=[{self.min_difficulty},{self.max_difficulty}]"
+            f"step≤±{self.MAX_STEP_PER_BLOCK} | floor={self.FLOOR} | "
+            f"seed_ewma={self._ewma_block_time:.1f}s"
         )
-
-    # ── Public API ──────────────────────────────────────────────────────────
 
     def get_difficulty(self) -> int:
         return self.current_difficulty
 
     def set_difficulty(self, difficulty: int) -> bool:
         """Manual override — clamps to [floor, ceiling]."""
-        clamped = max(self.min_difficulty, min(self.max_difficulty, difficulty))
+        clamped = max(self.FLOOR, min(self.CEILING, difficulty))
         if clamped != difficulty:
-            logger.warning(
-                f"[DIFFICULTY] Requested {difficulty} clamped to {clamped}"
-            )
+            logger.warning(f"[DIFFICULTY] Requested {difficulty} clamped to {clamped}")
         old = self.current_difficulty
         self.current_difficulty = clamped
         logger.info(f"[DIFFICULTY] Manual set: {old} → {self.current_difficulty}")
         return True
 
-    def record_block(self, timestamp: float) -> int:
+    def record_block(self, _ignored_header_ts: float = None) -> int:
         """
-        Called immediately after each accepted block with its Unix timestamp.
-        Updates the EWMA and retargets if we have enough history.
-        Returns the new difficulty (same as current if no change).
+        Called immediately after each accepted block.
+        Measures wall-clock elapsed time since previous acceptance — NOT the
+        block header timestamp (which the miner controls and may be stale).
         """
+        now = time.time()
         self._block_count += 1
-        if self._last_ts > 0:
-            gap = max(0.5, timestamp - self._last_ts)   # floor at 0.5s to ignore clock skew
-            # EWMA update
-            α = self.EWMA_ALPHA
-            self._ewma_block_time = α * gap + (1.0 - α) * self._ewma_block_time
-            if self._block_count >= self.WARMUP_BLOCKS:
-                self._retarget()
-        self._last_ts = timestamp
+
+        gap = now - self._last_accept_wall
+        # Floor: 1s minimum to ignore clock skew / same-second double-accepts.
+        # No ceiling: genuinely slow blocks (network outage etc.) should drive diff down.
+        gap = max(1.0, gap)
+
+        α = self.EWMA_ALPHA
+        self._ewma_block_time = α * gap + (1.0 - α) * self._ewma_block_time
+        self._last_accept_wall = now
+
+        if self._block_count >= self.WARMUP_BLOCKS:
+            self._retarget()
+
         return self.current_difficulty
 
     def auto_adjust(self, blocks: list) -> int:
-        """
-        Legacy batch-retarget interface (called by the existing DB-query path).
-        Feeds the last block's timestamp into record_block so both paths converge.
-        """
-        if len(blocks) < 2:
-            return self.current_difficulty
-        # Feed the most recent inter-block interval
-        last_ts  = float(blocks[-1].get('timestamp', 0) or 0)
-        first_ts = float(blocks[0].get('timestamp',  0) or 0)
-        n        = len(blocks) - 1
-        if n > 0 and last_ts > first_ts:
-            avg_gap = (last_ts - first_ts) / n
-            # Inject as a synthetic record_block with the average gap
-            α = self.EWMA_ALPHA
-            self._ewma_block_time = α * avg_gap + (1.0 - α) * self._ewma_block_time
-            self._retarget()
+        """Legacy interface — no-op. EWMA is driven by record_block only."""
         return self.current_difficulty
-
-    # ── Internal ────────────────────────────────────────────────────────────
 
     def _retarget(self) -> None:
         """
-        Solve: 16^new_diff / ewma_time ≈ 16^current_diff / target_time
-        Rearranging: new_diff = log16(implied_rate × target_time)
-        where implied_rate = 16^current_diff / ewma_time
-        """
-        t   = max(0.5, self._ewma_block_time)
-        m   = self._math
-        implied_rate = (16 ** self.current_difficulty) / t
-        ideal_diff   = m.log(implied_rate * self.TARGET_BLOCK_TIME_S) / m.log(16)
-        target_diff  = int(round(ideal_diff))
+        Solve for the difficulty that would produce TARGET_BLOCK_TIME_S
+        given the implied hash rate from the EWMA block time.
 
-        # Clamp step size
+            implied_H/s = 16^current_diff / ewma_time
+            ideal_diff  = log16(implied_H/s × target_time)
+        """
+        t = max(1.0, self._ewma_block_time)
+        m = self._math
+        try:
+            implied_rate = (16.0 ** self.current_difficulty) / t
+            ideal        = m.log(max(1.0, implied_rate * self.TARGET_BLOCK_TIME_S)) / m.log(16.0)
+        except (ValueError, ZeroDivisionError, OverflowError):
+            return   # skip retarget on numeric edge cases
+
+        target_diff = int(round(ideal))
         delta       = max(-self.MAX_STEP_PER_BLOCK,
                           min(self.MAX_STEP_PER_BLOCK, target_diff - self.current_difficulty))
-        new_diff    = self.current_difficulty + delta
-        new_diff    = max(self.min_difficulty, min(self.max_difficulty, new_diff))
+        new_diff    = max(self.FLOOR, min(self.CEILING, self.current_difficulty + delta))
 
         if new_diff != self.current_difficulty:
             old = self.current_difficulty
             self.current_difficulty = new_diff
             logger.info(
-                f"[DIFFICULTY] ⚡ Retarget: {old} → {new_diff} "
-                f"(EWMA={t:.1f}s  target={self.TARGET_BLOCK_TIME_S}s  "
-                f"implied={implied_rate:.0f} H/s  ideal_diff={ideal_diff:.2f})"
+                f"[DIFFICULTY] ⚡ {old} → {new_diff} "
+                f"| EWMA={t:.1f}s target={self.TARGET_BLOCK_TIME_S}s "
+                f"| implied={implied_rate:.0f} H/s ideal={ideal:.2f}"
+            )
+        else:
+            logger.debug(
+                f"[DIFFICULTY] hold={self.current_difficulty} "
+                f"EWMA={t:.1f}s ideal={ideal:.2f}"
             )
 
 
 _difficulty_manager = None
 
 def get_difficulty_manager() -> DifficultyManager:
-    """Get or create the global DifficultyManager.
+    """
+    Get or create the global DifficultyManager.
 
-    Bootstraps from the DB tip block's stored difficulty so the value
-    survives server restarts without resetting to the initial default.
+    Seeds the EWMA and wall-clock anchor from DB so restarts don't corrupt
+    the adaptive algorithm with a 0-timestamp gap.
     """
     global _difficulty_manager
     if _difficulty_manager is not None:
         return _difficulty_manager
 
-    # Try to restore last-used difficulty from DB
-    db_difficulty = None
+    db_difficulty  = None
+    seed_ewma      = None
+    seed_last_wall = None
     try:
-        tip = query_latest_block()
-        if tip:
-            raw = tip.get('difficulty') or tip.get('difficulty_bits')
-            if raw is not None:
-                db_difficulty = max(DifficultyManager.ABS_MIN,
-                                    min(DifficultyManager.ABS_MAX, int(float(raw))))
-    except Exception as _de:
-        logger.debug(f"[DIFFICULTY] DB bootstrap failed: {_de}")
+        with get_db_cursor() as _bc:
+            # Restore difficulty from last accepted block
+            _bc.execute("""
+                SELECT difficulty, timestamp
+                FROM blocks
+                ORDER BY height DESC LIMIT 1
+            """)
+            tip_row = _bc.fetchone()
+            if tip_row:
+                raw = tip_row[0]
+                if raw is not None:
+                    db_difficulty = max(DifficultyManager.FLOOR,
+                                        min(DifficultyManager.CEILING, int(float(raw))))
+                # Seed last-accept wall time from the latest block's timestamp
+                if tip_row[1] is not None:
+                    seed_last_wall = float(tip_row[1])
 
-    # Use DB value if sane, otherwise start at 4 (30s blocks at ~4k H/s C miner warmup)
-    initial = db_difficulty if db_difficulty is not None else 4
-    _difficulty_manager = DifficultyManager(initial_difficulty=initial)
-    if db_difficulty is not None:
-        logger.info(f"[DIFFICULTY] Restored from DB: diff={initial}")
+            # Compute average inter-block time from last 10 blocks to seed EWMA
+            _bc.execute("""
+                SELECT timestamp FROM blocks
+                WHERE timestamp IS NOT NULL
+                ORDER BY height DESC LIMIT 10
+            """)
+            ts_rows = [float(r[0]) for r in _bc.fetchall() if r[0] is not None]
+            if len(ts_rows) >= 2:
+                # rows are newest-first
+                gaps = [ts_rows[i] - ts_rows[i+1] for i in range(len(ts_rows)-1)
+                        if ts_rows[i] > ts_rows[i+1]]
+                if gaps:
+                    seed_ewma = sum(gaps) / len(gaps)
+    except Exception as _de:
+        logger.debug(f"[DIFFICULTY] DB bootstrap: {_de}")
+
+    # Clamp to FLOOR (5) — never restore a difficulty below the floor
+    initial = max(DifficultyManager.FLOOR,
+                  db_difficulty if db_difficulty is not None else DifficultyManager.FLOOR)
+
+    _difficulty_manager = DifficultyManager(
+        initial_difficulty = initial,
+        seed_ewma          = seed_ewma,
+        seed_last_wall     = seed_last_wall,
+    )
+    logger.info(
+        f"[DIFFICULTY] Bootstrap: diff={initial} "
+        f"seed_ewma={seed_ewma:.1f}s" if seed_ewma else
+        f"[DIFFICULTY] Bootstrap: diff={initial} (no EWMA seed)"
+    )
     return _difficulty_manager
+
 
 # ═════════════════════════════════════════════════════════════════════════════════
 
@@ -8895,34 +8932,9 @@ def submit_block():
         globals()['_ORACLE_CANONICAL_HEIGHT'] = block_height
         logger.info(f"[FORK-FIX] Canonical oracle height updated: {block_height}")
 
-        # ── Auto-adjust difficulty every block (EWMA) + legacy batch retarget ──
+        # ── Difficulty retarget (wall-clock EWMA, per-block) ──────────────────
         _mgr = get_difficulty_manager()
-        import time as _time_mod
-        # Per-block EWMA update — fires immediately on every accepted block
-        _block_ts = float(timestamp_s or _time_mod.time())
-        _mgr.record_block(_block_ts)
-
-        # Legacy batch path — still fires every adjustment_interval blocks as a
-        # cross-check; with adjustment_interval=1 it's effectively a no-op after
-        # record_block, but kept so external tooling that reads adjustment_interval
-        # still works correctly.
-        if block_height > 0 and block_height % _mgr.adjustment_interval == 0:
-            try:
-                with get_db_cursor() as _dc:
-                    _dc.execute("""
-                        SELECT height, timestamp FROM blocks
-                        WHERE height > %s
-                        ORDER BY height ASC
-                        LIMIT %s
-                    """, (block_height - max(_mgr.adjustment_interval, 5) - 1,
-                          max(_mgr.adjustment_interval, 5) + 1))
-                    _adj_rows = _dc.fetchall()
-                if len(_adj_rows) >= 2:
-                    _adj_blocks = [{'height': r[0], 'timestamp': float(r[1]) if r[1] else 0}
-                                   for r in _adj_rows]
-                    _mgr.auto_adjust(_adj_blocks)
-            except Exception as _ae:
-                logger.debug(f"[DIFFICULTY] Batch adjust error: {_ae}")
+        _mgr.record_block()   # measures actual wall-clock gap — ignores header timestamp
 
         # 6️⃣ RESPONSE
         return jsonify({
