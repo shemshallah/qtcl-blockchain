@@ -960,7 +960,7 @@ function renderMiners(miners){
 
   el.innerHTML=miners.map(function(m){
     var addr=m.miner_address||'';
-    var short=addr.length>20?addr.slice(0,10)+'…'+addr.slice(-10):addr;
+    var short=addr.length>20?addr.slice(0,10)+'\u2026'+addr.slice(-10):addr;
     var bks=m.block_count||0;
     var earned=parseFloat(m.total_earned_qtcl||0).toFixed(2);
     var h=m.last_height||0;
@@ -968,22 +968,23 @@ function renderMiners(miners){
     var st=m.status||'historic';
     var pid=(m.peer_id||'').slice(0,12);
     var gurl=m.gossip_url||'';
-    return '<div class="miner-row '+st+'" onclick="this.querySelector('.miner-addr').click()">'
+    // data-addr avoids all quote-escaping inside onclick HTML attributes
+    return '<div class="miner-row '+st+'" onclick="var a=this.querySelector(\".miner-addr\");if(a)a.click();">'
       +'<div style="display:flex;align-items:flex-start;gap:8px">'
       +'<div class="miner-dot" style="margin-top:4px"></div>'
       +'<div style="flex:1;min-width:0">'
       +'<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
-      +'<span class="miner-addr" title="Click to copy: '+addr+'" '
-      +'onclick="event.stopPropagation();try{navigator.clipboard.writeText(this.title.replace('Click to copy: ',''));}catch(e){}">'+short+'</span>'
+      +'<span class="miner-addr" data-addr="'+addr+'" title="'+short+'" '
+      +'onclick="event.stopPropagation();try{navigator.clipboard.writeText(this.dataset.addr);}catch(e){}">'+short+'</span>'
       +'<span class="miner-badge '+st+'">'+st.toUpperCase()+'</span>'
-      +(gurl?'<span style="font-size:8px;color:var(--dim)">📡 P2P</span>':'')
+      +(gurl?'<span style="font-size:8px;color:var(--dim)">\uD83D\uDCE1 P2P</span>':'')
       +'</div>'
       +'<div class="miner-stats">'
-      +(bks?'<span>⛏ <span class="miner-stat-val">'+bks+'</span> blocks</span>':'')
-      +(earned>0?'<span>💰 <span class="miner-stat-val">'+earned+'</span> QTCL</span>':'')
+      +(bks?'<span>\u26CF <span class="miner-stat-val">'+bks+'</span> blocks</span>':'')
+      +(earned>0?'<span>\uD83D\uDCB0 <span class="miner-stat-val">'+earned+'</span> QTCL</span>':'')
       +(h?'<span>h=<span class="miner-stat-val">'+h+'</span></span>':'')
       +(age!=='—'?'<span class="miner-stat-val">'+age+'</span>':'')
-      +(pid?'<span style="color:var(--dim)">id:'+pid+'…</span>':'')
+      +(pid?'<span style="color:var(--dim)">id:'+pid+'\u2026</span>':'')
       +'</div>'
       +'</div>'
       +'</div>'
