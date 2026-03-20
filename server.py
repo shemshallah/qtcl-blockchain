@@ -37,6 +37,7 @@ import sys
 import json
 import time
 import socket
+import struct
 import hashlib
 import secrets
 import logging
