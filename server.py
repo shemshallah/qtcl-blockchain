@@ -2709,15 +2709,13 @@ class GossipPusherThread(threading.Thread):
     Daemon thread that periodically pushes new pending TXs and recent blocks
     to every registered peer that has a gossip_url.
 
-    This achieves guaranteed eventual delivery even when a peer was offline
-    during the original SSE push or direct BlockManager accept.
-
-    Runs every GOSSIP_PUSH_INTERVAL seconds.  Uses a per-peer cursor
-    (last_gossip_at in peer_registry) so each peer only receives NEW events.
+    DB budget per cycle: ONE cursor (peers + txs + block in a single connection).
+    Peer HTTP pushes run in a small ThreadPoolExecutor — slow peers can't block.
     """
-    GOSSIP_PUSH_INTERVAL = 4   # seconds between push cycles
-    TX_BATCH             = 50  # max TXs per push cycle per peer
-    SESSION_TIMEOUT      = 6   # HTTP POST timeout
+    GOSSIP_PUSH_INTERVAL = 15  # seconds — gossip is best-effort, not real-time
+    TX_BATCH             = 50
+    SESSION_TIMEOUT      = 4
+    _PUSH_WORKERS        = 4
 
     def __init__(self):
         super().__init__(name='GossipPusher', daemon=True)
@@ -2734,124 +2732,93 @@ class GossipPusherThread(threading.Thread):
             self._my_base_url = f"https://{self._my_base_url}"
         logger.info(f"[GOSSIP] PusherThread init | base_url={self._my_base_url}")
 
-    def _fetch_pending_txs(self) -> List[Dict[str, Any]]:
-        """Read pending TXs from DB that should be gossiped to peers."""
+    def _fetch_gossip_data(self):
+        """Single DB round-trip: fetch gossip-capable peers, pending TXs, latest block."""
+        peers, txs, block = [], [], None
         try:
             with get_db_cursor() as cur:
+                cur.execute("""
+                    SELECT peer_id, gossip_url, miner_address
+                    FROM   peer_registry
+                    WHERE  last_seen > NOW() - INTERVAL '%s seconds'
+                      AND  gossip_url IS NOT NULL AND gossip_url != ''
+                    ORDER  BY last_seen DESC LIMIT 20
+                """, (_PEER_STALE_SECS,))
+                peers = [{'peer_id': r[0], 'gossip_url': r[1], 'miner_address': r[2] or ''}
+                         for r in cur.fetchall()]
+                if not peers:
+                    return peers, txs, block
                 cur.execute("""
                     SELECT tx_hash, from_address, to_address, amount,
-                           nonce, status, quantum_state_hash, metadata
+                           nonce, quantum_state_hash, metadata
                     FROM   transactions
-                    WHERE  status   = 'pending'
-                      AND  tx_type != 'coinbase'
+                    WHERE  status='pending' AND tx_type!='coinbase'
                       AND  updated_at > NOW() - INTERVAL '60 seconds'
-                    ORDER  BY created_at ASC
-                    LIMIT  %s
+                    ORDER  BY created_at ASC LIMIT %s
                 """, (self.TX_BATCH,))
-                rows = cur.fetchall()
-            result = []
-            for r in rows:
-                meta = r[7] or {}
-                if isinstance(meta, str):
-                    try: meta = json.loads(meta)
-                    except: meta = {}
-                ab = int(r[3]) if r[3] else 0
-                result.append({
-                    'tx_hash'     : r[0], 'from_address': r[1],
-                    'to_address'  : r[2], 'amount_base' : ab,
-                    'amount'      : ab / 100, 'nonce'   : int(r[4] or 0),
-                    'status'      : r[5], 'signature'   : r[6] or '',
-                    'fee'         : float(meta.get('fee_qtcl', 0.001)),
-                    'timestamp_ns': int(meta.get('submitted_at_ns', 0)),
-                })
-            return result
-        except Exception as e:
-            logger.debug(f"[GOSSIP] fetch_pending_txs: {e}")
-            return []
-
-    def _fetch_recent_block(self) -> Optional[Dict[str, Any]]:
-        """Read the most recent confirmed block header for gossip."""
-        try:
-            with get_db_cursor() as cur:
+                for r in cur.fetchall():
+                    meta = r[6] or {}
+                    if isinstance(meta, str):
+                        try: meta = json.loads(meta)
+                        except: meta = {}
+                    ab = int(r[3]) if r[3] else 0
+                    txs.append({'tx_hash': r[0], 'from_address': r[1], 'to_address': r[2],
+                                'amount_base': ab, 'amount': ab/100, 'nonce': int(r[4] or 0),
+                                'signature': r[5] or '',
+                                'fee': float(meta.get('fee_qtcl', 0.001)),
+                                'timestamp_ns': int(meta.get('submitted_at_ns', 0))})
                 cur.execute("""
                     SELECT height, block_hash, previous_hash, timestamp,
-                           difficulty, validator_public_key,
-                           oracle_w_state_hash, entropy_score
-                    FROM   blocks
-                    WHERE  status = 'confirmed'
-                    ORDER  BY height DESC
-                    LIMIT  1
+                           difficulty, validator_public_key, oracle_w_state_hash, entropy_score
+                    FROM   blocks WHERE status='confirmed'
+                    ORDER  BY height DESC LIMIT 1
                 """)
                 row = cur.fetchone()
-            if row:
-                return {
-                    'height'         : row[0], 'block_hash'   : row[1],
-                    'parent_hash'    : row[2], 'timestamp_s'  : row[3],
-                    'difficulty_bits': row[4], 'miner_address': row[5] or '',
-                    'w_entropy_hash' : row[6] or '', 'fidelity': float(row[7] or 0),
-                }
+                if row:
+                    block = {'height': row[0], 'block_hash': row[1], 'parent_hash': row[2],
+                             'timestamp_s': row[3], 'difficulty_bits': row[4],
+                             'miner_address': row[5] or '', 'w_entropy_hash': row[6] or '',
+                             'fidelity': float(row[7] or 0)}
         except Exception as e:
-            logger.debug(f"[GOSSIP] fetch_recent_block: {e}")
-        return None
+            logger.debug(f"[GOSSIP] _fetch_gossip_data: {e}")
+        return peers, txs, block
 
-    def _push_to_peer(self, peer: Dict[str, Any],
-                       txs: List[Dict], block: Optional[Dict]) -> bool:
-        """HTTP POST gossip bundle to a single peer. Returns True on success."""
+    def _push_to_peer(self, peer, txs, block):
         url = (peer.get('gossip_url') or '').rstrip('/')
         if not url:
             return False
         try:
-            payload: Dict[str, Any] = {
-                'origin'    : self._my_base_url,
-                'sent_at'   : time.time(),
-            }
-            if txs:
-                payload['txs'] = txs
-            if block:
-                payload['block'] = block
-
-            r = self._session.post(
-                f"{url}/gossip/ingest",
-                json=payload,
-                timeout=self.SESSION_TIMEOUT,
-            )
-            return r.status_code in (200, 201, 204)
+            payload = {'origin': self._my_base_url, 'sent_at': time.time()}
+            if txs:   payload['txs']   = txs
+            if block: payload['block'] = block
+            r = self._session.post(f"{url}/gossip/ingest", json=payload,
+                                   timeout=self.SESSION_TIMEOUT)
+            if r.status_code in (200, 201, 204):
+                try:
+                    with get_db_cursor() as cur:
+                        cur.execute("UPDATE peer_registry SET last_gossip_at=NOW() WHERE peer_id=%s",
+                                    (peer['peer_id'],))
+                except Exception:
+                    pass
+                return True
         except Exception as e:
-            logger.debug(f"[GOSSIP] push_to_peer({url}): {e}")
-            return False
-
-    def _update_peer_gossip_ts(self, peer_id: str) -> None:
-        try:
-            with get_db_cursor() as cur:
-                cur.execute("""
-                    UPDATE peer_registry
-                    SET    last_gossip_at = NOW()
-                    WHERE  peer_id = %s
-                """, (peer_id,))
-        except Exception as e:
-            logger.debug(f"[GOSSIP] update_gossip_ts: {e}")
+            logger.debug(f"[GOSSIP] push({url}): {e}")
+        return False
 
     def run(self):
+        from concurrent.futures import ThreadPoolExecutor
         logger.info("[GOSSIP] PusherThread started")
+        executor = ThreadPoolExecutor(max_workers=self._PUSH_WORKERS,
+                                      thread_name_prefix='GossipPush')
         while True:
             try:
-                peers  = _get_live_peers()
-                gossip_peers = [p for p in peers if p.get('gossip_url')]
-                if gossip_peers:
-                    txs   = self._fetch_pending_txs()
-                    block = self._fetch_recent_block()
-                    if txs or block:
-                        ok_count = 0
-                        for peer in gossip_peers:
-                            if self._push_to_peer(peer, txs, block):
-                                self._update_peer_gossip_ts(peer['peer_id'])
-                                ok_count += 1
-                        if ok_count:
-                            logger.info(
-                                f"[GOSSIP] Pushed {len(txs)} TX(s) + "
-                                f"{'1 block' if block else '0 blocks'} "
-                                f"→ {ok_count}/{len(gossip_peers)} peers"
-                            )
+                peers, txs, block = self._fetch_gossip_data()
+                if peers and (txs or block):
+                    futs = [executor.submit(self._push_to_peer, p, txs, block)
+                            for p in peers]
+                    ok = sum(1 for f in futs if f.result(timeout=self.SESSION_TIMEOUT + 1))
+                    if ok:
+                        logger.info(f"[GOSSIP] Pushed {len(txs)} TX(s) → {ok}/{len(peers)} peers")
             except Exception as e:
                 logger.error(f"[GOSSIP] PusherThread error: {e}")
             time.sleep(self.GOSSIP_PUSH_INTERVAL)
@@ -3058,17 +3025,7 @@ def peer_list():
 def gossip_ingest():
     """
     Accept a gossip bundle from any peer.
-
-    Body: {
-        origin:  str            — sender base URL (informational)
-        txs:     List[tx_dict]  — pending transactions to ingest
-        block:   block_dict     — latest block header (informational, no re-processing)
-        sent_at: float          — sender timestamp
-    }
-
-    For each TX: if not in DB, insert as pending.
-    Publishes tx/block events to local SSE subscribers.
-    Returns 200 + count of new TXs ingested.
+    Single batched INSERT for all TXs — one DB round-trip regardless of batch size.
     """
     data    = request.get_json(force=True, silent=True) or {}
     origin  = data.get('origin', request.remote_addr)
@@ -3076,44 +3033,46 @@ def gossip_ingest():
     block   = data.get('block')
     new_txs = 0
 
-    # ── Ingest transactions ─────────────────────────────────────────────────
-    for tx in txs[:50]:  # cap at 50 per ingest call
+    # ── Batch-insert all TXs in one cursor ──────────────────────────────────
+    valid = []
+    for tx in txs[:50]:
         tx_hash   = str(tx.get('tx_hash') or tx.get('tx_id') or '')
         from_addr = str(tx.get('from_address') or tx.get('from_addr') or '')
-        to_addr   = str(tx.get('to_address') or tx.get('to_addr') or '')
+        to_addr   = str(tx.get('to_address')   or tx.get('to_addr')   or '')
+        if not tx_hash or not from_addr or not to_addr or len(tx_hash) != 64:
+            continue
         amount_b  = int(tx.get('amount_base') or int(float(tx.get('amount', 0)) * 100))
         nonce_v   = int(tx.get('nonce', 0))
         sig       = str(tx.get('signature') or '')
         fee_qtcl  = float(tx.get('fee', 0.001))
         ts_ns     = int(tx.get('timestamp_ns', 0))
+        valid.append((tx_hash, from_addr, to_addr, amount_b, nonce_v, sig, tx_hash,
+                      json.dumps({'fee_qtcl': fee_qtcl, 'submitted_at_ns': ts_ns,
+                                  'gossiped_from': origin})))
 
-        if not tx_hash or not from_addr or not to_addr or len(tx_hash) != 64:
-            continue
+    if valid:
         try:
             with get_db_cursor() as cur:
-                cur.execute("""
+                cur.executemany("""
                     INSERT INTO transactions
                         (tx_hash, from_address, to_address, amount,
                          nonce, tx_type, status,
                          quantum_state_hash, commitment_hash, metadata)
                     VALUES (%s,%s,%s,%s, %s,'transfer','pending', %s,%s,%s)
                     ON CONFLICT (tx_hash) DO NOTHING
-                """, (
-                    tx_hash, from_addr, to_addr, amount_b, nonce_v,
-                    sig, tx_hash,
-                    json.dumps({'fee_qtcl': fee_qtcl, 'submitted_at_ns': ts_ns,
-                                'gossiped_from': origin}),
-                ))
-            new_txs += 1
-            # Fan-out to local SSE clients
-            _gossip_sse.publish('tx', {
-                'tx_hash': tx_hash, 'from': from_addr, 'to': to_addr,
-                'amount': amount_b / 100, 'status': 'pending', 'source': 'gossip',
-            })
+                """, valid)
+                new_txs = cur.rowcount if cur.rowcount >= 0 else len(valid)
         except Exception as e:
-            logger.debug(f"[GOSSIP/ingest] TX {tx_hash[:16]}: {e}")
+            logger.debug(f"[GOSSIP/ingest] batch insert: {e}")
 
-    # ── Ingest block header (informational — do not re-process) ────────────
+        # SSE fan-out outside DB cursor
+        for v in valid:
+            _gossip_sse.publish('tx', {
+                'tx_hash': v[0], 'from': v[1], 'to': v[2],
+                'amount': v[3] / 100, 'status': 'pending', 'source': 'gossip',
+            })
+
+    # ── Ingest block header ──────────────────────────────────────────────────
     if block and isinstance(block, dict):
         bh = int(block.get('height', 0))
         if bh > 0:
@@ -3123,7 +3082,6 @@ def gossip_ingest():
                 'source'    : 'gossip',
                 'origin'    : origin,
             })
-            # Also store in gossip_store for cross-worker visibility
             gossip_store_put(f"block:{bh}", block)
 
     logger.info(f"[GOSSIP/ingest] {new_txs} new TX(s) from {origin}")
