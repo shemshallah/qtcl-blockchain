@@ -1148,9 +1148,6 @@ class Mempool:
                 # ── PERSIST TO DB ──────────────────────────────────────────
                 self._persist_tx(tx)
 
-                # ── NOTIFY PEER WORKERS (cross-worker mempool sync) ─────────
-                self._notify_peers(tx)
-
                 # ── UPSERT WALLET ROWS ─────────────────────────────────────
                 self._balances.upsert_wallet(from_addr)
                 self._balances.upsert_wallet(to_addr)
@@ -1163,11 +1160,14 @@ class Mempool:
 
                 self._stats['total_accepted'] += 1
                 result = AcceptResult.REPLACED_BY_FEE if replaced_tx else AcceptResult.ACCEPTED
-                return result, f"TX accepted: {tx_hash[:16]}…", tx
 
             except Exception as exc:
                 logger.error(f"[MEMPOOL] accept() unhandled error: {exc}\n{traceback.format_exc()}")
                 return AcceptResult.INTERNAL_ERROR, str(exc), None
+
+        # Outside lock — PG connect can block; must never hold _lock during network I/O
+        self._notify_peers(tx)
+        return result, f"TX accepted: {tx_hash[:16]}…", tx
 
     # ─── Block building ─────────────────────────────────────────────────
 

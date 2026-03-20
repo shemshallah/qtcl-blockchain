@@ -2074,7 +2074,7 @@ def oracle_push_snapshot():
         _sse_push_snapshot(snapshot)
         # Flat oracle_dm to /api/events — type at root, no data nesting
         flat = dict(snapshot); flat['type'] = 'oracle_dm'
-        _ring_push_event(json.dumps(flat, separators=(',', ':')))
+        _gossip_sse._fanout_local(json.dumps(flat, separators=(',', ':')))
         return jsonify({'status': 'received', 'sse_clients': len(_sse_clients)})
     except Exception as e:
         logger.error(f"[ORACLE] ❌ Error: {e}")
@@ -2117,8 +2117,8 @@ def oracle_push_dm():
         # Channel 1: /api/snapshot/sse — raw blob
         _sse_push_snapshot(dm)
 
-        # Channel 2: /api/events — flat, type at root
-        _ring_push_event(json.dumps(dm, separators=(',', ':')))
+        # Channel 2: /api/events — flat, type at root, no data nesting
+        _gossip_sse._fanout_local(json.dumps(dm, separators=(',', ':')))
 
         try:
             _persist_chirp_snapshot(dm)
@@ -3211,14 +3211,13 @@ def _broadcast_snapshot_to_gossip_network(snapshot: dict) -> None:
         _latest_snapshot = snapshot
         _latest_snapshot_ts = snapshot.get('timestamp_ns', 0)
     try:
-        # Channel 1: raw blob → /api/snapshot/sse ring
+        # Channel 1: raw blob → /api/snapshot/sse
         _sse_push_snapshot(snapshot)
 
-        # Channel 2: flat oracle_dm → /api/events ring
-        # Build flat payload: DM fields + type at root, no nesting under 'data'
+        # Channel 2: flat oracle_dm → /api/events (direct fanout, no 'data' wrapper)
         flat = dict(snapshot)
         flat['type'] = 'oracle_dm'
-        _ring_push_event(json.dumps(flat, separators=(',', ':')))
+        _gossip_sse._fanout_local(json.dumps(flat, separators=(',', ':')))
 
         now = time.time()
         if _verbose_p2p_logging or (now - _last_snapshot_log_time >= _snapshot_log_interval):
