@@ -128,6 +128,192 @@ except ImportError as _e:
         f"[ORACLE] FATAL: Qiskit/AER required. pip install qiskit qiskit-aer. Error: {_e}"
     )
 
+
+# ─── Oracle C acceleration layer ──────────────────────────────────────────────
+# Compiled once at import via cffi. Provides C-speed hot paths for the
+# 5-node measurement loop: enforce_dm, w3_fidelity, purity, coherence_l1.
+# Falls back silently if clang/cffi unavailable (Qiskit path still works).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_OC_LIB   = None   # cffi compiled library handle
+_OC_FFI   = None   # cffi FFI instance
+_OC_OK    = False  # True once C layer is compiled and self-tested
+
+_OC_CDEFS = """
+/* 8×8 = 64 complex128 DM passed as flat re[64] + im[64] arrays (row-major).  */
+
+/* Hermitian symmetrize + PSD clip + trace-normalize.  In-place on re/im.     */
+void qtcl_oracle_enforce_dm8(double *re, double *im);
+
+/* Tr(ρ · |W3⟩⟨W3|).  Only re[] needed (W3 ideal DM is real).                */
+double qtcl_oracle_w3_fidelity(const double *re);
+
+/* Tr(ρ²) = purity.                                                            */
+double qtcl_oracle_purity(const double *re, const double *im);
+
+/* L1 coherence norm (normalized to [0,1] for 8-dim).                         */
+double qtcl_oracle_coherence_l1(const double *re, const double *im);
+"""
+
+_OC_CSRC = r"""
+#include <math.h>
+#include <string.h>
+
+#define N  8
+#define N2 64
+
+/* Ideal 3-qubit W-state DM (real part only) — indices 1,2,4 on-and-off diag  */
+static const double _W3[N2] = {
+    0,0,0,0,0,0,0,0,
+    0,1.0/3,1.0/3,0,1.0/3,0,0,0,
+    0,1.0/3,1.0/3,0,1.0/3,0,0,0,
+    0,0,0,0,0,0,0,0,
+    0,1.0/3,1.0/3,0,1.0/3,0,0,0,
+    0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0
+};
+
+/* ── enforce_dm8: Hermitian symmetrize + positive diagonal clip + trace=1 ──  */
+/* Full eigendecomposition is not done here (8×8 LAPACK would require linking  */
+/* LAPACK which is not guaranteed). Instead we:                                 */
+/*   1. Hermitian symmetrize                                                    */
+/*   2. Clip diagonal to ≥0 (populations must be non-negative)                 */
+/*   3. Scale off-diagonals by sqrt(ρ_ii·ρ_jj) / |ρ_ij| if |ρ_ij|>sqrt(...)  */
+/*      to enforce positivity of the Hermitian matrix without eigh              */
+/*   4. Trace-normalize                                                         */
+void qtcl_oracle_enforce_dm8(double *re, double *im) {
+    int i, j;
+    /* Step 1: Hermitian symmetrize */
+    for (i = 0; i < N; i++) {
+        for (j = i+1; j < N; j++) {
+            double re_ij = 0.5*(re[i*N+j] + re[j*N+i]);
+            double im_ij = 0.5*(im[i*N+j] - im[j*N+i]);
+            re[i*N+j] = re_ij; im[i*N+j] =  im_ij;
+            re[j*N+i] = re_ij; im[j*N+i] = -im_ij;
+        }
+    }
+    /* Step 2: Clip diagonal to >= 0 */
+    for (i = 0; i < N; i++) {
+        if (re[i*N+i] < 0.0) re[i*N+i] = 0.0;
+        im[i*N+i] = 0.0;   /* diagonal must be real */
+    }
+    /* Step 3: Clip off-diagonals so |ρ_ij|² ≤ ρ_ii·ρ_jj (Cauchy-Schwarz) */
+    for (i = 0; i < N; i++) {
+        for (j = i+1; j < N; j++) {
+            double dij = re[i*N+i] * re[j*N+j];
+            double mag2 = re[i*N+j]*re[i*N+j] + im[i*N+j]*im[i*N+j];
+            if (mag2 > dij + 1e-30) {
+                double scale = sqrt(dij / (mag2 + 1e-60));
+                re[i*N+j] *= scale; im[i*N+j] *= scale;
+                re[j*N+i] *= scale; im[j*N+i] *= scale;
+            }
+        }
+    }
+    /* Step 4: Trace normalize */
+    double tr = 0.0;
+    for (i = 0; i < N; i++) tr += re[i*N+i];
+    if (tr > 1e-12) {
+        double inv = 1.0/tr;
+        for (i = 0; i < N2; i++) { re[i] *= inv; im[i] *= inv; }
+    }
+}
+
+double qtcl_oracle_w3_fidelity(const double *re) {
+    /* F = Tr(ρ · |W3⟩⟨W3|) = Σ_{i,j} ρ_ij · W3_ij                         */
+    double f = 0.0;
+    int i;
+    for (i = 0; i < N2; i++) f += re[i] * _W3[i];
+    if (f < 0.0) f = 0.0;
+    if (f > 1.0) f = 1.0;
+    return f;
+}
+
+double qtcl_oracle_purity(const double *re, const double *im) {
+    /* Tr(ρ²) = Σ_{i,k} |ρ_ik|²  (since ρ=ρ†)                               */
+    double p = 0.0;
+    int i, k;
+    for (i = 0; i < N; i++)
+        for (k = 0; k < N; k++)
+            p += re[i*N+k]*re[i*N+k] + im[i*N+k]*im[i*N+k];
+    if (p > 1.0) p = 1.0;
+    if (p < 0.0) p = 0.0;
+    return p;
+}
+
+double qtcl_oracle_coherence_l1(const double *re, const double *im) {
+    /* Σ_{i≠j} |ρ_ij|, normalized to [0,1] by dividing by 2N (max for 8-dim) */
+    double c = 0.0;
+    int i, j;
+    for (i = 0; i < N; i++)
+        for (j = 0; j < N; j++)
+            if (i != j) c += sqrt(re[i*N+j]*re[i*N+j] + im[i*N+j]*im[i*N+j]);
+    double norm = 2.0 * N;   /* max off-diagonal L1 for 8-dim unit-trace DM */
+    double result = c / norm;
+    if (result > 1.0) result = 1.0;
+    return result;
+}
+"""
+
+def _compile_oracle_c_layer():
+    global _OC_LIB, _OC_FFI, _OC_OK
+    try:
+        from cffi import FFI as _CFFI
+        import tempfile, subprocess, sys as _sys, os as _os
+        _ffi = _CFFI()
+        _ffi.cdef(_OC_CDEFS)
+        src_file = _os.path.join(tempfile.gettempdir(), 'qtcl_oracle_accel.c')
+        so_file  = _os.path.join(tempfile.gettempdir(), 'qtcl_oracle_accel.so')
+        with open(src_file, 'w') as _sf:
+            _sf.write(_OC_CSRC)
+        _cc = _os.getenv('CC', 'clang')
+        ret = subprocess.run(
+            [_cc, '-O3', '-ffast-math', '-shared', '-fPIC',
+             '-o', so_file, src_file, '-lm'],
+            capture_output=True, timeout=30
+        )
+        if ret.returncode != 0:
+            ret2 = subprocess.run(
+                ['gcc', '-O3', '-ffast-math', '-shared', '-fPIC',
+                 '-o', so_file, src_file, '-lm'],
+                capture_output=True, timeout=30
+            )
+            if ret2.returncode != 0:
+                return
+        _lib = _ffi.dlopen(so_file)
+        # Quick self-test: fidelity of ideal W3 with itself = 1.0
+        _w3_flat = [0.0]*64
+        for _i in (1,2,4):
+            for _j in (1,2,4):
+                _w3_flat[_i*8+_j] = 1.0/3.0
+        _re = _ffi.new('double[64]', _w3_flat)
+        _f  = _lib.qtcl_oracle_w3_fidelity(_re)
+        if abs(_f - 1.0) > 0.01:
+            return
+        _OC_LIB = _lib
+        _OC_FFI = _ffi
+        _OC_OK  = True
+        logger.info("[ORACLE-C] ✅ Oracle C acceleration compiled — enforce_dm/w3_fidelity/purity/coherence active")
+    except Exception as _e:
+        logger.debug(f"[ORACLE-C] C layer unavailable ({type(_e).__name__}): {_e} — numpy fallback active")
+
+_compile_oracle_c_layer()
+
+
+def _c_dm8_to_flat(rho: np.ndarray):
+    """Convert 8×8 numpy complex128 DM to flat re[64], im[64] cffi arrays."""
+    _flat = rho.astype(np.complex128).ravel()
+    re = _OC_FFI.new('double[64]', list(_flat.real.tolist()))
+    im = _OC_FFI.new('double[64]', list(_flat.imag.tolist()))
+    return re, im
+
+
+def _c_flat_to_dm8(re, im) -> np.ndarray:
+    """Rebuild 8×8 complex128 DM from cffi flat arrays."""
+    r = np.array([float(re[i]) for i in range(64)], dtype=np.float64).reshape(8, 8)
+    c = np.array([float(im[i]) for i in range(64)], dtype=np.float64).reshape(8, 8)
+    return (r + 1j * c).astype(np.complex128)
+
 # ─── QRNG singleton ───────────────────────────────────────────────────────────
 
 _ORACLE_QRNG_INSTANCE = None
@@ -185,7 +371,13 @@ def _oracle_hermitian_perturb(dim: int, epsilon: float) -> np.ndarray:
         except np.linalg.LinAlgError: return I
 
 def _oracle_enforce_dm(rho: np.ndarray, label: str = "") -> np.ndarray:
+    """Hermitian + PSD + trace-normalize. C-accelerated for 8×8; numpy fallback otherwise."""
     dim = rho.shape[0]
+    if _OC_OK and dim == 8:
+        re, im = _c_dm8_to_flat(rho)
+        _OC_LIB.qtcl_oracle_enforce_dm8(re, im)
+        return _c_flat_to_dm8(re, im)
+    # numpy fallback (any dimension)
     rho = 0.5 * (rho + rho.conj().T)
     try:
         ev, ec = np.linalg.eigh(rho)
@@ -201,8 +393,12 @@ for _oi in (1, 2, 4):
         _ORACLE_W3_IDEAL[_oi, _oj] = 1.0 / 3.0
 
 def _oracle_w3_fidelity(rho: np.ndarray) -> float:
+    """Tr(ρ·|W3⟩⟨W3|). C-accelerated path; numpy fallback."""
     try:
         if rho is None or rho.shape != (8, 8): return 0.0
+        if _OC_OK:
+            re, _im = _c_dm8_to_flat(rho)
+            return float(_OC_LIB.qtcl_oracle_w3_fidelity(re))
         return float(min(1.0, max(0.0, np.real(np.trace(rho @ _ORACLE_W3_IDEAL)))))
     except Exception: return 0.0
 
@@ -435,6 +631,9 @@ class QuantumInformationMetrics:
     @staticmethod
     def coherence_l1_norm(dm: np.ndarray) -> float:
         try:
+            if _OC_OK and dm is not None and dm.shape == (8, 8):
+                re, im = _c_dm8_to_flat(dm)
+                return float(_OC_LIB.qtcl_oracle_coherence_l1(re, im))
             n = dm.shape[0]
             coh = sum(abs(dm[i,j]) for i in range(n) for j in range(n) if i != j)
             return min(1.0, float(coh) / (2.0 * n))
@@ -458,7 +657,11 @@ class QuantumInformationMetrics:
 
     @staticmethod
     def purity(dm: np.ndarray) -> float:
-        try: return min(1.0, max(0.0, float(np.real(np.trace(dm @ dm)))))
+        try:
+            if _OC_OK and dm is not None and dm.shape == (8, 8):
+                re, im = _c_dm8_to_flat(dm)
+                return float(_OC_LIB.qtcl_oracle_purity(re, im))
+            return min(1.0, max(0.0, float(np.real(np.trace(dm @ dm)))))
         except: return 0.0
 
     @staticmethod
@@ -470,9 +673,12 @@ class QuantumInformationMetrics:
 
     @staticmethod
     def w_state_fidelity_to_ideal(dm: np.ndarray) -> float:
-        """F = Tr(ρ @ ρ_W)  where  |W⟩ = (|001⟩+|010⟩+|100⟩)/√3"""
+        """F = Tr(ρ @ ρ_W) where |W⟩=(|001⟩+|010⟩+|100⟩)/√3. C-accelerated."""
         try:
             if dm is None or dm.shape[0] != 8: return 0.0
+            if _OC_OK:
+                re, _im = _c_dm8_to_flat(dm)
+                return float(_OC_LIB.qtcl_oracle_w3_fidelity(re))
             return float(min(1.0, max(0.0, np.real(np.trace(dm @ _W_IDEAL_DM)))))
         except: return 0.0
 

@@ -83,134 +83,11 @@ if not logging.getLogger().hasHandlers():
     )
 logger = logging.getLogger(__name__)
 
-# ═════════════════════════════════════════════════════════════════════════════════════════════════
-# HLWE CRYPTOGRAPHY — LAZY IMPORT TO AVOID CIRCULAR DEPENDENCIES
-# ═════════════════════════════════════════════════════════════════════════════════════════════════
 
-HLWE_AVAILABLE = True
-_HLWE_IMPORTS_CACHE = None
-_HLWE_IMPORT_LOCK = threading.RLock()
+# HLWE signing/verification is handled by oracle.py (OracleEngine, HLWESigner).
+# For wallet operations, use hlwe_engine.py directly.
+# The lazy-import wrapper that used to live here has been removed.
 
-def _lazy_import_hlwe_functions():
-    """Lazy import HLWE functions only when first needed (avoids circular imports)"""
-    global _HLWE_IMPORTS_CACHE
-    
-    if _HLWE_IMPORTS_CACHE is not None:
-        return _HLWE_IMPORTS_CACHE
-    
-    with _HLWE_IMPORT_LOCK:
-        if _HLWE_IMPORTS_CACHE is not None:
-            return _HLWE_IMPORTS_CACHE
-        
-        try:
-            from hlwe_engine import (
-                get_hlwe_adapter, get_wallet_manager,
-                hlwe_sign_block, hlwe_verify_block,
-                hlwe_sign_transaction, hlwe_verify_transaction,
-                hlwe_derive_address, hlwe_create_wallet, hlwe_health_check,
-                HLWEIntegrationAdapter, HLWEWalletManager
-            )
-            
-            _HLWE_IMPORTS_CACHE = {
-                'get_hlwe_adapter': get_hlwe_adapter,
-                'get_wallet_manager': get_wallet_manager,
-                'hlwe_sign_block': hlwe_sign_block,
-                'hlwe_verify_block': hlwe_verify_block,
-                'hlwe_sign_transaction': hlwe_sign_transaction,
-                'hlwe_verify_transaction': hlwe_verify_transaction,
-                'hlwe_derive_address': hlwe_derive_address,
-                'hlwe_create_wallet': hlwe_create_wallet,
-                'hlwe_health_check': hlwe_health_check,
-                'HLWEIntegrationAdapter': HLWEIntegrationAdapter,
-                'HLWEWalletManager': HLWEWalletManager,
-            }
-            return _HLWE_IMPORTS_CACHE
-        
-        except ImportError as e:
-            logger.critical(f"[GLOBALS] HLWE engine import failed: {e}")
-            _HLWE_IMPORTS_CACHE = False
-            return None
-
-def get_hlwe_adapter():
-    """Get HLWE adapter (lazy import)"""
-    imports = _lazy_import_hlwe_functions()
-    if imports is None or imports is False:
-        raise RuntimeError("HLWE not available")
-    return imports['get_hlwe_adapter']()
-
-def get_wallet_manager():
-    """Get wallet manager (lazy import)"""
-    imports = _lazy_import_hlwe_functions()
-    if imports is None or imports is False:
-        raise RuntimeError("HLWE not available")
-    return imports['get_wallet_manager']()
-
-def hlwe_sign_block(block_dict: Dict[str, Any], addr: str) -> Dict[str, str]:
-    """Sign block with HLWE (lazy import)"""
-    imports = _lazy_import_hlwe_functions()
-    if imports is None or imports is False:
-        raise RuntimeError("HLWE not available")
-    return imports['hlwe_sign_block'](block_dict, addr)
-
-def hlwe_verify_block(block_dict: Dict[str, Any], sig: Dict[str, str], pubkey: str) -> Tuple[bool, str]:
-    """Verify block signature (lazy import)"""
-    imports = _lazy_import_hlwe_functions()
-    if imports is None or imports is False:
-        raise RuntimeError("HLWE not available")
-    return imports['hlwe_verify_block'](block_dict, sig, pubkey)
-
-def hlwe_sign_transaction(tx_data: Dict[str, Any], addr: str) -> Dict[str, str]:
-    """Sign transaction (lazy import)"""
-    imports = _lazy_import_hlwe_functions()
-    if imports is None or imports is False:
-        raise RuntimeError("HLWE not available")
-    return imports['hlwe_sign_transaction'](tx_data, addr)
-
-def hlwe_verify_transaction(tx_data: Dict[str, Any], sig: Dict[str, str], pubkey: str) -> Tuple[bool, str]:
-    """Verify transaction signature (lazy import)"""
-    imports = _lazy_import_hlwe_functions()
-    if imports is None or imports is False:
-        raise RuntimeError("HLWE not available")
-    return imports['hlwe_verify_transaction'](tx_data, sig, pubkey)
-
-def hlwe_derive_address(pubkey_hex: str) -> str:
-    """Derive address from public key (lazy import)"""
-    imports = _lazy_import_hlwe_functions()
-    if imports is None or imports is False:
-        raise RuntimeError("HLWE not available")
-    return imports['hlwe_derive_address'](pubkey_hex)
-
-def hlwe_create_wallet(label: Optional[str] = None, passphrase: str = '') -> Dict[str, Any]:
-    """Create wallet (lazy import)"""
-    imports = _lazy_import_hlwe_functions()
-    if imports is None or imports is False:
-        raise RuntimeError("HLWE not available")
-    return imports['hlwe_create_wallet'](label, passphrase)
-
-def hlwe_health_check() -> bool:
-    """Health check (lazy import)"""
-    imports = _lazy_import_hlwe_functions()
-    if imports is None or imports is False:
-        return False
-    return imports['hlwe_health_check']()
-
-def get_hlwe_wallet_manager():
-    """Get HLWE wallet manager"""
-    imports = _lazy_import_hlwe_functions()
-    if imports is None or imports is False:
-        return None
-    return imports['get_wallet_manager']()
-
-def get_hlwe_crypto_adapter():
-    """Get HLWE integration adapter"""
-    imports = _lazy_import_hlwe_functions()
-    if imports is None or imports is False:
-        return None
-    return imports['get_hlwe_adapter']()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# GLOBAL STATE DICTIONARY
-# ─────────────────────────────────────────────────────────────────────────────
 
 _GLOBAL_STATE = {
     'initialized': False,
@@ -313,15 +190,82 @@ def set_lattice(lattice_instance) -> None:
     set_state('lattice_controller', lattice_instance)
     logger.info(f"[GLOBALS] LATTICE singleton set: {type(lattice_instance).__name__}")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONSENSUS STATE — functions called by server.py consensus endpoints
+# These store state in _GLOBAL_STATE.  Full validator/finality implementation
+# is a separate project; these stubs make the endpoints non-crashing.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def record_quantum_witness(block_height: int, block_hash: str,
+                            w_state_fidelity: float, timestamp_ns: int) -> bool:
+    """Record a W-state quantum witness for a block."""
+    with _STATE_LOCK:
+        _GLOBAL_STATE['quantum_witnesses'][block_height] = {
+            'hash': block_hash,
+            'fidelity': float(w_state_fidelity),
+            'timestamp_ns': int(timestamp_ns),
+        }
+    logger.debug(f"[GLOBALS] Quantum witness recorded: h={block_height} F={w_state_fidelity:.4f}")
+    return True
+
+
+def register_validator(pubkey: str, balance: int,
+                        address: str = '') -> tuple:
+    """Register a validator. Returns (success, validator_index)."""
+    with _STATE_LOCK:
+        validators = _GLOBAL_STATE['validators']
+        idx = len(validators)
+        validators[idx] = {
+            'pubkey': pubkey,
+            'address': address,
+            'balance': int(balance),
+            'status': 'pending',
+            'activation_epoch': _GLOBAL_STATE.get('current_epoch', 0) + 4,
+        }
+    logger.info(f"[GLOBALS] Validator registered: idx={idx} pubkey={pubkey[:16]}…")
+    return True, idx
+
+
+def accept_attestation(validator_index: int, slot: int,
+                        beacon_block_root: str, source_epoch: int,
+                        target_epoch: int, signature: str) -> tuple:
+    """Accept a validator attestation. Returns (success, reason)."""
+    attestation = {
+        'validator_index': int(validator_index),
+        'slot': int(slot),
+        'beacon_block_root': beacon_block_root,
+        'source_epoch': int(source_epoch),
+        'target_epoch': int(target_epoch),
+        'signature': signature,
+        'received_at': time.time(),
+    }
+    with _STATE_LOCK:
+        pending = _GLOBAL_STATE.setdefault('pending_attestations', [])
+        pending.append(attestation)
+        # Cap buffer — keep last 1024
+        if len(pending) > 1024:
+            _GLOBAL_STATE['pending_attestations'] = pending[-1024:]
+    logger.debug(f"[GLOBALS] Attestation accepted: val={validator_index} slot={slot}")
+    return True, "attestation_accepted"
+
+
+def compute_finality(check_height: int) -> Optional[int]:
+    """Check if a block at check_height has reached finality (stub)."""
+    with _STATE_LOCK:
+        witnesses = _GLOBAL_STATE.get('quantum_witnesses', {})
+        if check_height in witnesses:
+            return check_height
+    return None
+
+
 # Export public symbols
 __all__ = [
     'get_state', 'set_state', 'update_state',
     'get_entropy', 'get_entropy_stats', 'get_block_field_entropy',
-    'hlwe_sign_block', 'hlwe_verify_block',
-    'hlwe_sign_transaction', 'hlwe_verify_transaction',
-    'hlwe_derive_address', 'hlwe_create_wallet', 'hlwe_health_check',
-    'get_hlwe_adapter', 'get_wallet_manager', 'get_hlwe_wallet_manager', 'get_hlwe_crypto_adapter',
-    'HLWE_AVAILABLE', 'POOL_API_AVAILABLE',
+    'POOL_API_AVAILABLE',
     'WSTATE_FIDELITY_THRESHOLD', 'ORACLE_MIN_PEERS', 'MAX_PEERS', 'MINING_COINBASE_REWARD',
     'LATTICE', 'get_lattice', 'set_lattice',
+    'record_quantum_witness', 'register_validator', 'accept_attestation',
+    'compute_finality',
 ]

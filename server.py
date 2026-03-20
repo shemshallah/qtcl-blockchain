@@ -1611,52 +1611,12 @@ def get_difficulty_manager() -> DifficultyManager:
     return _difficulty_manager
 
 # ═════════════════════════════════════════════════════════════════════════════════
-# QTCL-PoW: QUANTUM-ENTANGLED MEMORY-HARD PROOF OF WORK
-# ─────────────────────────────────────────────────────────────────────────────────
-#
-# Why plain SHA3-256 is broken for ASIC/GPU resistance:
-#   • Pure compute — parallelises trivially across 1000s of GPU cores
-#   • Stateless — no memory dependency, fits in L1 cache
-#   • Algorithm-stable — ASICs can be built once and never obsoleted
-#
-# QTCL-PoW three-layer defense:
-#
-#   LAYER 1 — Oracle binding (time-lock):
-#     The w_entropy_seed is the SHA3-256 of the server's live W-state density
-#     matrix (8×8 complex = 1024 bytes).  It rotates every ~30s as the oracle
-#     evolves.  A GPU farm mining stale entropy will produce blocks the server
-#     REJECTS because the seed is expired.  You cannot pre-mine.
-#
-#   LAYER 2 — Memory-hard scratchpad (ASIC killer):
-#     Before the nonce loop, we expand w_entropy_seed into a 512KB scratchpad
-#     via SHAKE-256 XOF.  Each nonce iteration reads 64 pseudorandom 64-byte
-#     windows from the scratchpad (chosen by the previous hash output), XORing
-#     them into the candidate.  This forces ~4KB of random-access reads per
-#     hash — bandwidth-bound, not compute-bound.  ASICs need fast SRAM for this;
-#     custom silicon offers no advantage over a CPU with L2 cache.
-#
-#   LAYER 3 — Sequential HLWE lattice mix (pipeline breaker):
-#     The scratchpad lookup indices are derived sequentially from the prior
-#     hash — you cannot compute iteration N without the result of N-1.  This
-#     kills GPU parallelism across the nonce dimension.
-#
-# Verification cost: identical algorithm, same scratchpad generation.
-# Server regenerates scratchpad from w_entropy_seed in the block header and
-# runs one hash pass to confirm.  Verification is O(1) passes regardless of
-# how long mining took.
-#
-# Entropy expiry: w_entropy_seed must be ≤ QTCL_POW_ENTROPY_TTL_S old (120s).
-# Miners fetch a fresh seed from /api/oracle/w-state every block.
-# ═════════════════════════════════════════════════════════════════════════════════
 
-import hashlib as _pow_hl
-import struct  as _pow_st
-
-QTCL_POW_SCRATCHPAD_BYTES = 512 * 1024   # 512 KB — bandwidth-bound on GPU
-QTCL_POW_MIX_ROUNDS       = 64           # 64 sequential read windows per hash
-QTCL_POW_WINDOW_BYTES      = 64          # bytes per scratchpad window
-QTCL_POW_ENTROPY_TTL_S     = 120         # oracle seed expires after 2 minutes
-
+# ─── QTCL-PoW: server-side verification constants ───────────────────────────
+# Mining is fully C-accelerated on the client (qtcl_pow_search).
+# Server uses these only in qtcl_pow_verify() called from submit_block.
+# Algorithm: SHAKE-256 512KB scratchpad + 64 sequential SHA3-256 mix rounds.
+# Entropy TTL: oracle seed expires after 120s — prevents stale pre-mining.
 
 def qtcl_pow_build_scratchpad(w_entropy_seed: bytes) -> bytes:
     """
@@ -1665,7 +1625,7 @@ def qtcl_pow_build_scratchpad(w_entropy_seed: bytes) -> bytes:
     The quantum randomness lives IN the seed (injected via QRNG at seed generation time).
     Generation cost: ~1.7ms on CPU.
     """
-    xof = _pow_hl.shake_256(b"QTCL_SCRATCHPAD_v1:" + w_entropy_seed)
+    xof = hashlib.shake_256(b"QTCL_SCRATCHPAD_v1:" + w_entropy_seed)
     return xof.digest(QTCL_POW_SCRATCHPAD_BYTES)
 
 
@@ -1697,8 +1657,8 @@ def qtcl_pow_build_seed(density_matrix_bytes: bytes) -> bytes:
     try:
         qrng_32 = QRNG_ENSEMBLE.get_random_bytes(32)
     except Exception:
-        qrng_32 = _pow_hl.sha3_256(
-            b"QRNG_FALLBACK:" + density_matrix_bytes + _pow_st.pack('>Q', _pow_time_ns())
+        qrng_32 = hashlib.sha3_256(
+            b"QRNG_FALLBACK:" + density_matrix_bytes + struct.pack('>Q', _pow_time_ns())
         ).digest()
 
     # XOR the QRNG bytes into the first 32 bytes of the density matrix
@@ -1706,8 +1666,8 @@ def qtcl_pow_build_seed(density_matrix_bytes: bytes) -> bytes:
     xored = bytes(a ^ b for a, b in zip(raw[:32], qrng_32)) + raw[32:]
 
     # Final SHA3-256 compression with nanosecond timestamp salt
-    ts_bytes = _pow_st.pack('>Q', _pow_time_ns())
-    seed = _pow_hl.sha3_256(b"QTCL_SEED_v1:" + xored + ts_bytes).digest()
+    ts_bytes = struct.pack('>Q', _pow_time_ns())
+    seed = hashlib.sha3_256(b"QTCL_SEED_v1:" + xored + ts_bytes).digest()
     return seed
 
 
@@ -1743,7 +1703,7 @@ def qtcl_pow_hash(
     The scratchpad read (random-access 512KB) prevents pure-compute ASIC advantage.
     """
     # Step 1: pack header — fixed-width, deterministic, no JSON parse overhead
-    header = _pow_st.pack(
+    header = struct.pack(
         '>Q I 32s 32s I I 40s 32s',
         height,
         timestamp_s,
@@ -1756,17 +1716,17 @@ def qtcl_pow_hash(
     )
 
     # Step 2: initial state
-    state = _pow_hl.sha3_256(b"QTCL_POW_v1:" + header).digest()
+    state = hashlib.sha3_256(b"QTCL_POW_v1:" + header).digest()
 
     # Step 3: sequential scratchpad mix
     n_windows = QTCL_POW_SCRATCHPAD_BYTES // QTCL_POW_WINDOW_BYTES
     for rnd in range(QTCL_POW_MIX_ROUNDS):
         # Derive window index from current state (sequential dependency)
-        window_idx = _pow_st.unpack_from('>I', state, 0)[0] % n_windows
+        window_idx = struct.unpack_from('>I', state, 0)[0] % n_windows
         window_start = window_idx * QTCL_POW_WINDOW_BYTES
         window = scratchpad[window_start : window_start + QTCL_POW_WINDOW_BYTES]
         # Mix: absorb window + round counter into state
-        state = _pow_hl.sha3_256(state + window + _pow_st.pack('>I', rnd)).digest()
+        state = hashlib.sha3_256(state + window + struct.pack('>I', rnd)).digest()
 
     return state.hex()
 
@@ -5829,6 +5789,13 @@ def initialize_lattice_controller():
     try:
         from lattice_controller import QuantumLatticeController
         controller = QuantumLatticeController()
+        # Inject server's shared DB cursor so lattice uses pooled connections
+        # instead of opening raw psycopg2 connections (which exhaust Supabase pooler)
+        if hasattr(controller, 'db_connector') and controller.db_connector is not None:
+            try:
+                controller.db_connector.inject_db_cursor(get_db_cursor)
+            except Exception as _dbi_err:
+                logger.debug(f"[LATTICE] db_connector cursor injection skipped: {_dbi_err}")
         controller.start()
         logger.info(
             "✨ [LATTICE] Quantum lattice controller started "
@@ -7936,7 +7903,7 @@ def oracle_w_state():
         _pow_seed = qtcl_pow_build_seed(rho3.tobytes())
     else:
         _pow_seed = qtcl_pow_build_seed(
-            _pow_hl.sha3_256(b"fallback:" + str(time.time_ns()).encode()).digest()
+            hashlib.sha3_256(b"fallback:" + str(time.time_ns()).encode()).digest()
         )
     pow_seed_hex = _pow_seed.hex()
 
@@ -9690,31 +9657,56 @@ def mining_build_transactions():
     Returns: [coinbase_tx, tx1, tx2, ...]
     """
     try:
-        from blockchain_entropy_mining import BlockSealer
-        
         data = request.get_json() or {}
-        block_height = data.get('block_height', 0)
-        miner_address = data.get('miner_address', '')
+        block_height      = data.get('block_height', 0)
+        miner_address     = data.get('miner_address', '')
         block_reward_sats = data.get('block_reward_sats', 1250)
-        limit = data.get('limit', 100)
-        
+        limit             = data.get('limit', 100)
+
         if not miner_address:
             return jsonify({'error': 'Missing miner_address'}), 400
-        
-        sealer = BlockSealer()
-        txs = sealer.build_transaction_list(
-            block_height=block_height,
-            miner_address=miner_address,
-            block_reward_sats=block_reward_sats,
-            limit=limit
-        )
-        
+
+        txs = []
+
+        # Step 1: Coinbase transaction (always index 0)
+        coinbase_id = hashlib.sha3_256(
+            f"coinbase:{block_height}:{miner_address}".encode()
+        ).hexdigest()
+        txs.append({
+            'tx_id':        coinbase_id,
+            'tx_hash':      coinbase_id,
+            'from_addr':    '0' * 64,
+            'to_addr':      miner_address,
+            'amount':       block_reward_sats,
+            'tx_type':      'coinbase',
+            'block_height': block_height,
+            'w_proof':      '',
+            'version':      1,
+        })
+        logger.info(f"[MINING-BUILD-TX] coinbase id={coinbase_id[:16]}… reward={block_reward_sats}")
+
+        # Step 2: fee-ordered pending TXs from mempool
+        try:
+            from mempool import get_mempool
+            mp  = get_mempool()
+            pending, _ = mp.select_for_block(
+                max_txs=limit - 1,
+                height=block_height,
+                miner=miner_address,
+                reward_base=block_reward_sats,
+            )
+            for ptx in pending:
+                txs.append(ptx.to_dict())
+            logger.info(f"[MINING-BUILD-TX] +{len(pending)} pending txs  total={len(txs)}")
+        except Exception as _me:
+            logger.debug(f"[MINING-BUILD-TX] mempool unavailable: {_me}")
+
         return jsonify({
             'block_height': block_height,
-            'tx_count': len(txs),
+            'tx_count':     len(txs),
             'transactions': txs,
         }), 200
-    
+
     except Exception as e:
         logger.error(f"[MINING-BUILD-TX] Error: {e}")
         traceback.print_exc()
@@ -9729,7 +9721,7 @@ def mining_build_transactions():
 def register_validator():
     """Register new validator (staking)"""
     try:
-        from globals import register_validator
+        from globals import register_validator as _reg_val
         
         data = request.get_json() or {}
         pubkey = data.get('pubkey', '')
@@ -9738,7 +9730,7 @@ def register_validator():
         if not pubkey or balance < 32 * 10**18:
             return jsonify({'error': 'Invalid pubkey or insufficient balance (min 32 QTCL)'}), 400
         
-        success, validator_index = register_validator(pubkey, balance)
+        success, validator_index = _reg_val(pubkey, balance)
         
         if success:
             return jsonify({
@@ -9784,7 +9776,7 @@ def get_validators():
 def submit_attestation():
     """Submit validator attestation"""
     try:
-        from globals import accept_attestation
+        from globals import accept_attestation as _acc_att
         
         data = request.get_json() or {}
         validator_index = int(data.get('validator_index', -1))
@@ -9797,7 +9789,7 @@ def submit_attestation():
         if validator_index < 0 or not beacon_block_root or not signature:
             return jsonify({'error': 'Missing required fields'}), 400
         
-        success, reason = accept_attestation(
+        success, reason = _acc_att(
             validator_index=validator_index,
             slot=slot,
             beacon_block_root=beacon_block_root,
@@ -9846,7 +9838,7 @@ def get_finality_status():
 def record_quantum_witness_endpoint():
     """Record quantum witness from oracle"""
     try:
-        from globals import record_quantum_witness
+        from globals import record_quantum_witness as _rec_qw
         
         data = request.get_json() or {}
         block_height = int(data.get('block_height', 0))
@@ -9856,7 +9848,7 @@ def record_quantum_witness_endpoint():
         if block_height <= 0 or not block_hash:
             return jsonify({'error': 'Invalid block_height or block_hash'}), 400
         
-        success = record_quantum_witness(
+        success = _rec_qw(
             block_height=block_height,
             block_hash=block_hash,
             w_state_fidelity=w_state_fidelity,
