@@ -36,6 +36,7 @@ import os
 import sys
 import json
 import time
+_SERVER_START_TIME = time.time()   # set once at module import — never drifts
 import socket
 import struct
 import hashlib
@@ -2814,74 +2815,9 @@ def _start_gossip_subsystem():
         _ensure_gossip_tables()
         _lazy_ensure_oracle_registry()
         GossipPusherThread().start()
-        _wire_mempool_sse()
         logger.info("[GOSSIP] Subsystem online — DB gossip store + SSE broadcaster + peer pusher")
     except Exception as e:
         logger.error(f"[GOSSIP] Subsystem start failed: {e}")
-
-
-# ── Mempool SSE bridge — publish mempool TX events to the SSE broadcaster ─────────
-_mempool_sse_wired = False
-
-
-def _mempool_tx_to_sse_payload(event: str, tx) -> Dict[str, Any]:
-    """
-    Convert a MempoolTx to an SSE-serialisable dict.
-    Includes all fields the dashboard needs: tx_hash, from/to, amount, fee,
-    nonce, tx_type (coinbase/transfer), status, timestamp, w_entropy_hash.
-    """
-    meta = getattr(tx, 'metadata', {}) or {}
-    amount_base = getattr(tx, 'amount_base', 0) or 0
-    fee_base = getattr(tx, 'fee_base', 0) or 0
-    return {
-        'event'       : event,                            # accepted | removed | confirmed | replaced
-        'tx_hash'     : getattr(tx, 'tx_hash', '') or '',
-        'tx_id'       : getattr(tx, 'tx_hash', '') or '',
-        'from_address': getattr(tx, 'from_address', '') or '',
-        'to_address'  : getattr(tx, 'to_address', '') or '',
-        'amount_base' : amount_base,
-        'amount'      : amount_base / 100.0,
-        'amount_qtcl' : amount_base / 100.0,
-        'fee_base'    : fee_base,
-        'fee_qtcl'    : fee_base / 100.0,
-        'fee_rate'    : round(getattr(tx, 'fee_rate', 0) or 0, 6),
-        'nonce'       : getattr(tx, 'nonce', 0) or 0,
-        'tx_type'     : getattr(tx, 'tx_type', 'transfer') or 'transfer',
-        'status'      : getattr(tx, 'status', event) or event,
-        'w_entropy_hash': getattr(tx, 'w_entropy_hash', '') or '',
-        'timestamp_ns' : getattr(tx, 'timestamp_ns', 0) or 0,
-        'accepted_at' : getattr(tx, 'accepted_at_s', time.time()),
-        'memo'        : getattr(tx, 'memo', '') or '',
-        'client_tx_id': getattr(tx, 'client_tx_id', '') or '',
-        'metadata'    : meta,
-        'ts'          : time.time(),
-    }
-
-
-def _on_mempool_event(event: str, tx) -> None:
-    """Callback registered with Mempool.subscribe(). Publishes TX events to SSE clients."""
-    try:
-        payload = _mempool_tx_to_sse_payload(event, tx)
-        _gossip_sse.publish('tx', payload)
-        logger.debug(f"[MEMPOOL→SSE] {event}: {payload.get('tx_hash', '')[:16]}…")
-    except Exception as e:
-        logger.debug(f"[MEMPOOL→SSE] publish error: {e}")
-
-
-def _wire_mempool_sse() -> None:
-    """Subscribe to mempool events and forward them to the SSE broadcaster. Idempotent."""
-    global _mempool_sse_wired
-    if _mempool_sse_wired:
-        return
-    _mempool_sse_wired = True
-    try:
-        from mempool import get_mempool
-        mp = get_mempool()
-        mp.subscribe(_on_mempool_event)
-        logger.info("[MEMPOOL→SSE] ✅ Wired — mempool TX events now broadcast via SSE")
-    except Exception as e:
-        logger.warning(f"[MEMPOOL→SSE] ⚠️  Could not wire mempool events: {e}")
-        _mempool_sse_wired = False
 
 
 # ── SSE events endpoint — typed blockchain events ─────────────────────────────
@@ -7392,6 +7328,114 @@ def health_check():
 
 
 
+
+@app.route('/api/transactions', methods=['GET'])
+def list_transactions():
+    """
+    Paginated transaction explorer endpoint.
+    Query params:
+        page     — 0-indexed page number (default 0)
+        per_page — results per page (default 50, max 200)
+        type     — filter: 'coinbase', 'transfer', or omit for all
+        address  — filter by from_address OR to_address
+        height   — filter by block height
+    Returns full tx data for the block explorer.
+    """
+    try:
+        page     = max(0, int(request.args.get('page',     0)))
+        per_page = min(200, max(1, int(request.args.get('per_page', 50))))
+        tx_type  = request.args.get('type',    '').strip().lower() or None
+        address  = request.args.get('address', '').strip() or None
+        height   = request.args.get('height',  '').strip() or None
+        offset   = page * per_page
+
+        conditions = []
+        params     = []
+
+        if tx_type:
+            conditions.append("tx_type = %s")
+            params.append(tx_type)
+        if address:
+            conditions.append("(from_address = %s OR to_address = %s)")
+            params.extend([address, address])
+        if height:
+            conditions.append("height = %s")
+            params.append(int(height))
+
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        count_params = list(params)
+        params.extend([per_page, offset])
+
+        with get_db_cursor() as cur:
+            cur.execute(f"""
+                SELECT COUNT(*) FROM transactions {where}
+            """, count_params)
+            total = (cur.fetchone() or [0])[0]
+
+            cur.execute(f"""
+                SELECT tx_hash, from_address, to_address, amount,
+                       height, block_hash, tx_type, status,
+                       quantum_state_hash, commitment_hash,
+                       metadata, created_at, transaction_index
+                FROM transactions {where}
+                ORDER BY height DESC, transaction_index ASC
+                LIMIT %s OFFSET %s
+            """, params)
+            rows = cur.fetchall()
+
+        txs = []
+        for r in rows:
+            amt_base = int(r[3]) if r[3] is not None else 0
+            meta = r[10]
+            if isinstance(meta, str):
+                try: meta = json.loads(meta)
+                except Exception: meta = {}
+            meta = meta or {}
+            txs.append({
+                'tx_hash':           r[0] or '',
+                'from_address':      r[1] or '',
+                'to_address':        r[2] or '',
+                'amount_base':       amt_base,
+                'amount_qtcl':       round(amt_base / 100, 4),
+                'height':            r[4],
+                'block_hash':        r[5] or '',
+                'tx_type':           r[6] or 'transfer',
+                'status':            r[7] or 'confirmed',
+                'quantum_state_hash':r[8] or '',
+                'commitment_hash':   r[9] or '',
+                'fee_qtcl':          round(int(meta.get('fee_base', 0)) / 100, 4),
+                'reward_qtcl':       meta.get('reward_qtcl', 0),
+                'w_state_fidelity':  meta.get('w_state_fidelity', 0),
+                'created_at':        r[11].isoformat() if r[11] else None,
+                'tx_index':          r[12] or 0,
+            })
+
+        return jsonify({
+            'transactions': txs,
+            'total':        total,
+            'page':         page,
+            'per_page':     per_page,
+            'pages':        max(1, (total + per_page - 1) // per_page),
+            'has_next':     (page + 1) * per_page < total,
+        }), 200
+    except Exception as e:
+        logger.error(f"[TX-LIST] Error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/sitemap.xml', methods=['GET'])
+def sitemap():
+    """Sitemap for search engine indexability."""
+    base = request.host_url.rstrip('/')
+    xml = f'''<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>{base}/</loc><changefreq>always</changefreq><priority>1.0</priority></url>
+  <url><loc>{base}/api/blocks/tip</loc><changefreq>always</changefreq><priority>0.8</priority></url>
+  <url><loc>{base}/api/transactions</loc><changefreq>always</changefreq><priority>0.7</priority></url>
+</urlset>'''
+    return Response(xml, mimetype='application/xml')
+
+
 @app.route('/robots.txt', methods=['GET'])
 def robots_txt():
     """Deny crawlers from API endpoints."""
@@ -7483,14 +7527,14 @@ def diagnostics():
         'status': 'ok' if state.is_alive else 'degraded',
         'oracle_id': ORACLE_ID,
         'oracle_role': ORACLE_ROLE,
-        'uptime_seconds': time.time() - getattr(state, '_created_at', time.time()),
+        'uptime_seconds': round(time.time() - _SERVER_START_TIME, 1),
         'database': db_info,
         'p2p': p2p_info,
         'mempool': mempool_info,
         'lattice': {
             'loaded': state.lattice_loaded,
-            'coherence': snapshot.get('quantum_metrics', {}).get('coherence'),
-            'fidelity': snapshot.get('quantum_metrics', {}).get('w_state_fidelity'),
+            'coherence': round(min(1.0, max(0.0, float(snapshot.get('quantum_metrics', {}).get('coherence') or 0))), 6),
+            'fidelity': round(min(1.0, max(0.0, float(snapshot.get('quantum_metrics', {}).get('w_state_fidelity') or 0))), 6),
         },
         'timestamp': datetime.now(timezone.utc).isoformat(),
         'version': '6.0-enhanced',
@@ -8172,135 +8216,6 @@ def get_mempool():
         logger.error(f"[MEMPOOL] DB query failed: {exc}\n{traceback.format_exc()}")
         return jsonify({'error': str(exc), 'transactions': [], 'size': 0}), 500
 
-
-# ── Dedicated mempool SSE endpoint — streams mempool TX events in real time ─────
-@app.route('/api/mempool/sse', methods=['GET'])
-def mempool_sse_stream():
-    """
-    Server-Sent Events stream delivering every mempool transaction event
-    (accepted, removed, confirmed, replaced) as it happens.
-
-    Query params:
-        client_id  — unique subscriber ID (auto-generated if absent)
-
-    SSE payload format (one `data:` frame per event):
-        {
-          "event"       : "accepted" | "removed" | "confirmed" | "replaced",
-          "tx_hash"     : "<hex>",
-          "tx_type"     : "coinbase" | "transfer" | "attestation" | ...,
-          "from_address": "<address>",
-          "to_address"  : "<address>",
-          "amount"      : <float QTCL>,
-          "amount_base" : <int base units>,
-          "fee_qtcl"   : <float QTCL>,
-          "fee_base"    : <int base units>,
-          "fee_rate"   : <float>,
-          "nonce"      : <int>,
-          "status"     : <string>,
-          "w_entropy_hash": "<hex>",
-          "timestamp_ns": <int ns epoch>,
-          "accepted_at" : <float unix>,
-          "memo"        : "<string>",
-          "ts"          : <float unix>,
-        }
-
-    All new connections receive an immediate 'hello' frame with current mempool size.
-    A `: keepalive` comment is sent every 30 s to prevent proxy timeouts.
-    """
-    client_id = request.args.get('client_id') or f"mempool_{secrets.token_hex(6)}"
-
-    def _stream():
-        q = _gossip_sse.subscribe(client_id)
-        logger.info(f"[SSE/mempool] Client connected: {client_id}")
-
-        # ── Immediate snapshot: send current mempool state ────────────────────────
-        try:
-            # Load recent pending TXs from DB as the initial burst
-            with get_db_cursor() as cur:
-                cur.execute("""
-                    SELECT tx_hash, from_address, to_address, amount, nonce,
-                           tx_type, status, quantum_state_hash, metadata, created_at
-                    FROM   transactions
-                    WHERE  status = 'pending'
-                    ORDER  BY created_at DESC
-                    LIMIT  50
-                """)
-                rows = cur.fetchall()
-
-            snapshot_txs = []
-            for row in rows:
-                tx_hash, from_a, to_a, raw_amt, nonce_v, tx_type, status_v, sig, meta_raw, created_at = row
-                meta = {}
-                if isinstance(meta_raw, str):
-                    try:    meta = json.loads(meta_raw)
-                    except: pass
-                elif isinstance(meta_raw, dict):
-                    meta = meta_raw
-                amount_b = int(raw_amt) if raw_amt else 0
-                snapshot_txs.append({
-                    'event'       : 'snapshot',
-                    'tx_hash'     : tx_hash or '',
-                    'tx_id'       : tx_hash or '',
-                    'from_address': from_a or '',
-                    'to_address'  : to_a or '',
-                    'amount_base' : amount_b,
-                    'amount'      : amount_b / 100.0,
-                    'amount_qtcl' : amount_b / 100.0,
-                    'fee_base'    : int(meta.get('fee_base', 1)),
-                    'fee_qtcl'    : float(meta.get('fee_qtcl', 0.001)),
-                    'fee_rate'    : round(float(meta.get('fee_base', 1)) / 1.0, 6),
-                    'nonce'       : int(nonce_v) if nonce_v is not None else 0,
-                    'tx_type'     : tx_type or 'transfer',
-                    'status'      : status_v or 'pending',
-                    'w_entropy_hash': sig or '',
-                    'timestamp_ns' : int(meta.get('timestamp_ns', 0)),
-                    'accepted_at'  : time.time(),
-                    'memo'         : str(meta.get('memo', '')),
-                    'ts'           : time.time(),
-                })
-
-            # Send hello + snapshot
-            yield f"data: {json.dumps({'type': 'hello', 'mempool_size': len(snapshot_txs), 'ts': time.time()})}\n\n"
-            for tx in reversed(snapshot_txs):          # oldest first
-                yield f"data: {json.dumps({'type': 'tx', **tx})}\n\n"
-
-        except Exception as e:
-            logger.debug(f"[SSE/mempool] snapshot error for {client_id}: {e}")
-
-        # ── Stream live events ───────────────────────────────────────────────────
-        try:
-            while True:
-                try:
-                    raw = q.get(timeout=30)
-                    parsed = json.loads(raw)
-                    etype = parsed.get('type', '')
-                    edata = parsed.get('data', {})
-                    if etype == 'tx':
-                        # Forward TX event directly
-                        yield f"data: {json.dumps({'type': 'tx', **edata})}\n\n"
-                    elif etype == 'mempool':
-                        # MemPool size heartbeat
-                        yield f"data: {json.dumps({'type': 'mempool', **edata})}\n\n"
-                    elif etype == 'block':
-                        # Block confirmed — emit confirmed events for matching TXs
-                        yield f"data: {json.dumps({'type': 'block', **edata})}\n\n"
-                except _queue_mod.Empty:
-                    yield ": keepalive\n\n"
-        except GeneratorExit:
-            pass
-        finally:
-            _gossip_sse.unsubscribe(client_id)
-            logger.info(f"[SSE/mempool] Client disconnected: {client_id}")
-
-    return Response(
-        stream_with_context(_stream()),
-        mimetype='text/event-stream',
-        headers={
-            'Cache-Control'    : 'no-cache',
-            'X-Accel-Buffering': 'no',
-            'Connection'       : 'keep-alive',
-        },
-    )
 
 
 @app.route('/api/blocks/height/<int:height>', methods=['GET'])

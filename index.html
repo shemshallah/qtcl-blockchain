@@ -4,6 +4,22 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>QTCL &middot; Quantum Temporal Coherence Ledger</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="QTCL is a live post-quantum proof-of-work blockchain with W-state entangled block certification, HLWE post-quantum signatures, and Mermin inequality-verified 5-node oracle consensus. Block explorer, live transactions, and quantum metrics.">
+  <meta name="keywords" content="quantum blockchain, post-quantum cryptography, W-state entanglement, Mermin inequality, HLWE, lattice cryptography, proof of work, block explorer, QRNG">
+  <meta name="author" content="Shemshallah">
+  <meta property="og:title" content="QTCL · Quantum Temporal Coherence Ledger">
+  <meta property="og:description" content="Live post-quantum PoW blockchain. W-state certified blocks. HLWE signatures. Mermin M₃≈2.8 oracle consensus.">
+  <meta property="og:url" content="https://qtcl-blockchain.koyeb.app/">
+  <meta property="og:type" content="website">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:site" content="@galacticfed638">
+  <meta name="twitter:creator" content="@galacticfed638">
+  <meta name="twitter:title" content="QTCL · Quantum Blockchain Explorer">
+  <meta name="twitter:description" content="Live post-quantum PoW blockchain. W-state certified blocks. Mermin inequality oracle.">
+  <link rel="canonical" href="https://qtcl-blockchain.koyeb.app/">
+  <link rel="sitemap" type="application/xml" href="/sitemap.xml">
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=JetBrains+Mono:wght@300;400;600&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
@@ -78,24 +94,28 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
 .bn.fr .bh{animation:bfr .6s cubic-bezier(.34,1.56,.64,1)}
 @keyframes bfr{0%{transform:scale(0);opacity:0}100%{transform:scale(1);opacity:1}}
 .tt{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11px}
-.tt th{font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--dim);padding:6px 12px;border-bottom:1px solid var(--b);text-align:left;background:rgba(0,0,0,.15);font-family:var(--disp);font-weight:700;position:sticky;top:0;z-index:2}
-.tt td{padding:6px 12px;border-bottom:1px solid rgba(0,220,255,.04);color:var(--tx);vertical-align:middle}
+.tt th{font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--dim);padding:8px 14px;border-bottom:1px solid var(--b);text-align:left;background:rgba(0,0,0,.15);font-family:var(--disp);font-weight:700}
+.tt td{padding:8px 14px;border-bottom:1px solid rgba(0,220,255,.04);color:var(--tx)}
 .tt tr:hover td{background:var(--cy2)}
-.tt tr.fr td{animation:tfr .6s ease-out}
-@keyframes tfr{0%{background:rgba(0,220,255,.18)}100%{background:transparent}}
-@keyframes txNew{0%{background:rgba(0,255,157,.25)}100%{background:transparent}}
-.tt tr.tx-new td{animation:txNew .8s ease-out}
+.tt tr.fr td{animation:tfr .5s ease-out}
+@keyframes tfr{0%{background:rgba(0,220,255,.15)}100%{background:transparent}}
 .tba{display:inline-block;font-size:8px;padding:2px 7px;border-radius:3px;letter-spacing:.5px;font-family:var(--disp)}
 .tba.pending{background:var(--go2);color:var(--go)}
 .tba.confirmed{background:var(--gr2);color:var(--gr)}
 .tba.coinbase{background:var(--vi2);color:var(--vi)}
 .tba.transfer{background:var(--cy2);color:var(--cy)}
-.tba.rejected{background:rgba(255,51,85,.15);color:var(--re)}
-.tba.replaced{background:rgba(212,160,32,.15);color:var(--go)}
-.taddr{max-width:72px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block;font-size:9px;color:var(--tx)}
-.taddr.fr{color:var(--cy)}
-.taddr.to{color:var(--gr)}
-.taddr.fee{color:var(--go)}
+.txfbtn{background:rgba(0,220,255,.06);border:1px solid rgba(0,220,255,.15);color:var(--dim);font-size:9px;
+  padding:3px 8px;border-radius:3px;cursor:pointer;font-family:var(--disp);letter-spacing:.5px;transition:all .2s}
+.txfbtn:hover,.txfbtn.active{background:rgba(0,220,255,.18);color:var(--cy);border-color:var(--cy)}
+.txfbtn.active.cb{background:rgba(255,0,200,.15);color:var(--vi);border-color:var(--vi)}
+.txfbtn.active.tr{background:rgba(0,220,255,.15);color:var(--cy);border-color:var(--cy)}
+.txpbtn{background:rgba(0,220,255,.06);border:1px solid rgba(0,220,255,.12);color:var(--dim);font-size:10px;
+  padding:3px 12px;border-radius:3px;cursor:pointer;font-family:var(--mono);transition:all .2s}
+.txpbtn:hover:not(:disabled){color:var(--cy);border-color:var(--cy)}
+.txpbtn:disabled{opacity:.3;cursor:default}
+.tx-cb td:first-child{border-left:2px solid var(--vi)}
+.tx-tr td:first-child{border-left:2px solid rgba(0,220,255,.3)}
+.tx-new{animation:tfr .8s ease}
 .or{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--b);transition:background .2s}
 .or:hover{background:var(--vi2)}
 .or:last-child{border-bottom:none}
@@ -132,15 +152,12 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
 #bts{display:inline-block;animation:tk 35s linear infinite;white-space:nowrap;color:var(--dim);padding-left:100%}
 @keyframes tk{0%{transform:translateX(0)}100%{transform:translateX(-100%)}}
 #bu{padding:0 10px;white-space:nowrap;color:var(--dim);border-left:1px solid var(--b)}
-.sy{overflow-y:auto;max-height:420px;scrollbar-width:thin;scrollbar-color:var(--b) transparent}
-.sy::-webkit-scrollbar{width:4px}
-.sy::-webkit-scrollbar-thumb{background:rgba(0,220,255,.3);border-radius:2px}
-.sy::-webkit-scrollbar-thumb:hover{background:rgba(0,220,255,.5)}
+.sy{overflow-y:auto;max-height:280px;scrollbar-width:thin;scrollbar-color:var(--b) transparent}
+.sy::-webkit-scrollbar{width:3px}
+.sy::-webkit-scrollbar-thumb{background:var(--b)}
 .fl{animation:fl .4s ease-out}
 @keyframes fl{0%{color:var(--cy);text-shadow:0 0 12px var(--cy)}100%{}}
 .es{padding:24px;text-align:center;font-size:11px;color:var(--dim)}
-@keyframes tx-peer-flash{0%{background:rgba(0,220,255,.22);box-shadow:0 0 8px rgba(0,220,255,.3)}100%{background:transparent;box-shadow:none}}
-.tt tr.tx-peer-new td{animation:tx-peer-flash .7s ease-out}
 </style>
 </head>
 <body>
@@ -221,30 +238,39 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
   </div>
   <div class="tc">
     <div class="pn">
-      <div class="ph" style="flex-wrap:wrap;gap:6px">
-        <span class="pht">Live Transaction Feed</span>
-        <span class="pb gr" id="txb">0 txs</span>
-        <span class="pb vi" id="txe"><span id="txlive" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--dim);margin-right:4px;vertical-align:middle"></span><span id="txstreamstatus">SYNCING</span></span>
-        <span class="pb" id="peer-tx-badge" style="font-size:.72em;background:var(--cy2);color:var(--cy);border-color:rgba(0,220,255,.25)"><span id="peer-tx-count">0</span> received</span>
+      <div class="ph">
+        <span class="pht">Transaction Explorer</span>
+        <span style="display:flex;gap:8px;align-items:center">
+          <span class="pb vi" id="txb">0 txs</span>
+          <button class="txfbtn active" id="txf-all" onclick="txFilter('all')">ALL</button>
+          <button class="txfbtn" id="txf-coinbase" onclick="txFilter('coinbase')">COINBASE</button>
+          <button class="txfbtn" id="txf-transfer" onclick="txFilter('transfer')">TRANSFER</button>
+        </span>
       </div>
-      <div style="padding:6px 16px;display:flex;gap:16px;font-size:8px;font-family:var(--mono);color:var(--dim);letter-spacing:1px;text-transform:uppercase;border-bottom:1px solid var(--b)">
-        <span style="color:var(--vi)">&#9632; COINBASE</span>
-        <span style="color:var(--cy)">&#9632; TRANSFER</span>
-        <span style="color:var(--go)">&#9632; FEE</span>
-        <span style="color:var(--gr)">&#9632; CONFIRMED</span>
-        <span style="color:var(--re)">&#9632; REJECTED</span>
-        <span style="color:var(--dim);margin-left:auto">SHOWING LAST 10</span>
+      <div style="padding:6px 16px 2px;display:flex;align-items:center;gap:8px">
+        <input id="txsearch" placeholder="Search address or hash…" oninput="txSearch(this.value)"
+          style="flex:1;background:rgba(0,220,255,.05);border:1px solid rgba(0,220,255,.15);color:var(--tx);
+                 font-family:var(--mono);font-size:11px;padding:5px 10px;border-radius:4px;outline:none"/>
+        <span id="tx-live" style="font-size:9px;color:var(--gr);letter-spacing:.5px">● LIVE</span>
       </div>
-      <div class="sy" id="txwrap">
-        <table class="tt"><thead><tr>
-          <th style="width:90px">Type</th>
-          <th>Hash</th>
-          <th style="width:110px">From / To</th>
-          <th style="width:80px;text-align:right">Amount</th>
-          <th style="width:65px;text-align:right">Fee</th>
-          <th style="width:75px">Status</th>
-          <th style="width:55px">Time</th>
-        </tr></thead><tbody id="ttb"><tr><td colspan="7" class="es">Connecting to mempool stream&hellip;</td></tr></tbody></table>
+      <div id="txwrap" style="height:340px;overflow-y:auto;overflow-x:hidden">
+        <table class="tt" style="width:100%;table-layout:fixed">
+          <thead><tr>
+            <th style="width:80px">Type</th>
+            <th style="width:130px">Hash</th>
+            <th style="width:90px">From</th>
+            <th style="width:90px">To</th>
+            <th style="width:80px">Amount</th>
+            <th style="width:60px">Block</th>
+            <th style="width:65px">Status</th>
+          </tr></thead>
+          <tbody id="ttb"><tr><td colspan="7" class="es">Loading&hellip;</td></tr></tbody>
+        </table>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 16px;border-top:1px solid var(--b)">
+        <button class="txpbtn" onclick="txPage(-1)" id="txprev">◀ Prev</button>
+        <span id="txpageinfo" style="font-size:10px;color:var(--dim)">Page 1</span>
+        <button class="txpbtn" onclick="txPage(1)" id="txnext">Next ▶</button>
       </div>
     </div>
     <div class="pn">
@@ -294,8 +320,7 @@ var S={
   oracle_data:{},  // oracle_id -> {w_state_fidelity, coherence, pq0_*, in_consensus}
   lattice_fidelity:0  // direct from LATTICE.fidelity (not oracle consensus)
 };
-var blocks=[],txs=[],dp=0,dbk=[],lu=0,txEs=null,txReconnMs=2500,txLive=false;
-var txTotalAccepted=0,txTotalConfirmed=0,txTotalRejected=0;
+var blocks=[],txs=[],dp=0,dbk=[],lu=0;
 
 // clock
 function tick(){var d=new Date();document.getElementById('hck').textContent=d.toISOString().replace('T',' ').slice(0,19)+' UTC';}
@@ -746,181 +771,83 @@ function renderChain(){
 }
 function fmt(v){return v==null?'--':parseFloat(v).toFixed(4);}
 function pct(v,mx){return Math.min(100,Math.max(0,v/mx*100))+'%';}
-function fmtAmt(v){var n=parseFloat(v)||0;return n.toFixed(n<1?4:2);}
-function txShort(h){var s=(h||'').replace(/^coinbase_/,'');return s.slice(0,12)+'\u2026';}
-function txShortFull(h){var s=(h||'').replace(/^coinbase_/,'');return s.slice(0,20)+'\u2026';}
-function fmtTime(ts){if(!ts)return'--:--';var d=new Date(ts>1e15?ts/1e6:ts>1e12?ts/1e3:ts);return d.toTimeString().slice(0,8);}
+// ── Transaction Explorer state ────────────────────────────────────────────
+var txs=[],txPage_n=0,txPerPage=50,txTotal=0,txPages=1,txFilterMode='all',txSearchQ='',txLoading=false;
 
-function _txTypeLabel(tx){
-  var t=(tx.tx_type||'transfer').toLowerCase();
-  if(t==='coinbase') return {label:'COINBASE',cls:'coinbase',col:'#8040ff'};
-  if(t==='attestation') return {label:'ATTEST',cls:'transfer',col:'#00dcff'};
-  return {label:'TRANSFER',cls:'transfer',col:'#00dcff'};
+function txFilter(mode){
+  txFilterMode=mode;txPage_n=0;
+  ['all','coinbase','transfer'].forEach(function(m){
+    var b=document.getElementById('txf-'+m);
+    if(b){b.className='txfbtn'+(mode===m?' active'+(m==='coinbase'?' cb':m==='transfer'?' tr':''):'');}
+  });
+  loadTxPage();
+}
+function txSearch(q){txSearchQ=q.trim();txPage_n=0;clearTimeout(txSearch._t);txSearch._t=setTimeout(loadTxPage,350);}
+function txPage(d){txPage_n=Math.max(0,Math.min(txPages-1,txPage_n+d));loadTxPage();}
+
+function _shortHash(h,n){h=h||'';return h.length>n?h.slice(0,n>>1)+'…'+h.slice(-(n>>1)):h;}
+
+function renderTxRow(tx,isNew){
+  var tp=tx.tx_type||tx.type||'transfer',cb=tp==='coinbase';
+  var hash=tx.tx_hash||tx.tx_id||tx.hash||'';
+  var from=tx.from_address||tx.sender_addr||tx.sender||'';
+  var to  =tx.to_address  ||tx.receiver_addr||tx.receiver||'';
+  var amt =parseFloat(tx.amount_qtcl||tx.amount||0);
+  var fee =parseFloat(tx.fee_qtcl||tx.fee||0);
+  var blk =tx.height||tx.block_height||'—';
+  var st  =tx.status||'confirmed';
+  var wfid=tx.w_state_fidelity?(' <span style="color:var(--gr);font-size:9px">W3='+parseFloat(tx.w_state_fidelity).toFixed(3)+'</span>'):'';
+  var qsh =tx.quantum_state_hash?('<div style="color:var(--dim);font-size:8px;word-break:break-all;margin-top:2px">Q:'+_shortHash(tx.quantum_state_hash,20)+'</div>'):'';
+  return '<tr class="'+(isNew?'tx-new ':'')+(cb?'tx-cb':'tx-tr')+'" title="'+hash+'">'
+    +'<td><span class="tba '+tp+'">'+(cb?'⛏ COINBASE':'⇄ TRANSFER')+'</span>'+wfid+'</td>'
+    +'<td style="font-family:var(--mono);font-size:10px;cursor:pointer;color:var(--cy)" onclick="navigator.clipboard&&navigator.clipboard.writeText(''+hash+'')">'+_shortHash(hash,18)+'</td>'
+    +'<td style="font-family:var(--mono);font-size:9px;color:var(--dim)" title="'+from+'">'+_shortHash(from,14)+'</td>'
+    +'<td style="font-family:var(--mono);font-size:9px;color:var(--gr)" title="'+to+'">'+_shortHash(to,14)+'</td>'
+    +'<td style="color:var(--go);font-size:11px">'+amt.toFixed(2)+' Q'+qsh+'</td>'
+    +'<td style="color:var(--dim);font-size:10px">'+blk+'</td>'
+    +'<td><span class="tba '+st+'">'+st.toUpperCase()+'</span></td>'
+    +'</tr>';
 }
 
-function _txStatusLabel(tx,ev){
-  if(ev==='confirmed'||tx.status==='confirmed') return {label:'CONFIRMED',cls:'confirmed',col:'#00ff9d'};
-  if(ev==='rejected'||tx.status==='rejected') return {label:'REJECTED',cls:'rejected',col:'#ff3355'};
-  if(ev==='replaced'||tx.status==='replaced') return {label:'REPLACED',cls:'replaced',col:'#d4a020'};
-  if(ev==='removed') return {label:'REMOVED',cls:'rejected',col:'#ff3355'};
-  return {label:'PENDING',cls:'pending',col:'#d4a020'};
-}
-
-function _txFromOrTo(tx){
-  var fa=tx.from_address||'',ta=tx.to_address||'',null64='0'.repeat(64);
-  if(fa===null64||fa==='0'.repeat(64)) return '<span class="taddr fee">&#9650; COINBASE</span>';
-  return '<span class="taddr fr" title="From: '+fa+'">'+txShort(fa)+'</span>'+
-         '<span class="taddr to" title="To: '+ta+'">&#8594; '+txShort(ta)+'</span>';
-}
-
-function _txAmount(tx,typeInfo){
-  var amt=tx.amount||tx.amount_qtcl||tx.amount_base/100||0;
-  var sign=(typeInfo.cls==='coinbase')?'+':'';
-  return '<span style="color:'+typeInfo.col+'">'+sign+fmtAmt(amt)+'</span>';
-}
-
-function _txFee(tx){
-  var f=tx.fee_qtcl||tx.fee||0;
-  return '<span style="color:var(--go);font-size:9px">'+fmtAmt(f)+'</span>';
-}
-
-function _makeTxRow(tx,isNew){
-  var typeInfo=_txTypeLabel(tx);
-  var ev=tx.event||'';
-  var statusInfo=_txStatusLabel(tx,ev);
-  var statusLabel=ev&&ev!=='snapshot'?statusInfo.label:(tx.status||'pending').toUpperCase();
-  var statusCls=ev&&ev!=='snapshot'?statusInfo.cls:(tx.status||'pending');
-
-  var rowClass=(isNew?'tx-peer-new ':'');
-  if(tx._fr) rowClass+='fr ';
-
-  return '<tr class="'+rowClass.trim()+'" data-hash="'+(tx.tx_hash||tx.tx_id||'')+'">'+
-    '<td><span class="tba '+typeInfo.cls+'" style="color:'+typeInfo.col+'">'+typeInfo.label+'</span></td>'+
-    '<td><span style="color:var(--cy);font-size:9px;letter-spacing:.3px" title="'+tx.tx_hash+'">'+txShort(tx.tx_hash)+'</span></td>'+
-    '<td>'+_txFromOrTo(tx)+'</td>'+
-    '<td style="text-align:right;font-size:10px">'+_txAmount(tx,typeInfo)+'</td>'+
-    '<td style="text-align:right">'+_txFee(tx)+'</td>'+
-    '<td><span class="tba '+statusCls+'" style="font-size:7px;padding:1px 5px">'+statusLabel+'</span></td>'+
-    '<td style="font-size:8px;color:var(--dim);text-align:right">'+fmtTime(tx.timestamp_ns||tx.timestamp)+'</td>'+
-    '</tr>';
+async function loadTxPage(){
+  if(txLoading) return; txLoading=true;
+  var params='?page='+txPage_n+'&per_page='+txPerPage;
+  if(txFilterMode&&txFilterMode!=='all') params+='&type='+txFilterMode;
+  if(txSearchQ) params+='&address='+encodeURIComponent(txSearchQ);
+  var d=await api('/api/transactions'+params);
+  txLoading=false;
+  if(!d||d.error){document.getElementById('ttb').innerHTML='<tr><td colspan="7" class="es">Error loading transactions</td></tr>';return;}
+  txs=d.transactions||[];txTotal=d.total||0;txPages=d.pages||1;txPage_n=d.page||0;
+  renderTxs();
 }
 
 function renderTxs(){
   var tb=document.getElementById('ttb');
-  var recentTxs=txs.slice(0,10);
-  if(!recentTxs.length){tb.innerHTML='<tr><td colspan="7" class="es">Awaiting transactions from mempool stream&hellip;</td></tr>';return;}
-  tb.innerHTML=recentTxs.map(function(tx,i){
-    return _makeTxRow(tx,i===0&&tx._fr);
-  }).join('');
-  document.getElementById('txb').textContent=txs.length+' tx'+(txTotalConfirmed?' · '+txTotalConfirmed+' confirmed':'');
-  document.getElementById('peer-tx-count').textContent=txTotalAccepted;
+  document.getElementById('txb').textContent=txTotal+' txs';
+  document.getElementById('txpageinfo').textContent='Page '+(txPage_n+1)+' / '+txPages+' ('+txTotal+' total)';
+  var prev=document.getElementById('txprev'),next=document.getElementById('txnext');
+  if(prev) prev.disabled=txPage_n===0;
+  if(next) next.disabled=txPage_n>=txPages-1;
+  if(!txs.length){tb.innerHTML='<tr><td colspan="7" class="es">No transactions found</td></tr>';return;}
+  tb.innerHTML=txs.map(function(tx,i){return renderTxRow(tx,tx._fresh);}).join('');
 }
 
-function _addTxLive(tx){
-  var h=tx.tx_hash||tx.tx_id;
-  if(!h) return;
-  if(txs.find(function(t){return(t.tx_hash||t.tx_id)===h;})) return;
-  tx._fr=true;
-  tx.timestamp=tx.timestamp||tx.timestamp_ns?((tx.timestamp_ns>1e15?tx.timestamp_ns/1e6:tx.timestamp_ns>1e12?tx.timestamp_ns/1e3:tx.timestamp_ns)||Date.now()):Date.now();
-  txs.unshift(tx);
-  txTotalAccepted++;
-  S.mempool_size=(S.mempool_size||0)+1;
-  st('hm',S.mempool_size+' tx');
-  if(txs.length>50) txs=txs.slice(0,50);
-  renderTxs();
-  var wrap=document.getElementById('txwrap');
-  if(wrap) wrap.scrollTop=0;
-}
-
-function _confirmTx(tx_hash){
-  var tx=txs.find(function(t){return(t.tx_hash||t.tx_id)===tx_hash;});
-  if(tx){tx.status='confirmed';tx.event='confirmed';txTotalConfirmed++;}
-  S.mempool_size=Math.max(0,(S.mempool_size||0)-1);
-  st('hm',S.mempool_size+' tx');
-  renderTxs();
-}
-
-function _removeTx(tx_hash){
-  var idx=txs.findIndex(function(t){return(t.tx_hash||t.tx_id)===tx_hash;});
-  if(idx>=0){
-    var tx=txs[idx];
-    tx.status='rejected';
-    tx.event='removed';
-    txTotalRejected++;
-    txs.splice(idx,1);
-  }
-  S.mempool_size=Math.max(0,(S.mempool_size||0)-1);
-  st('hm',S.mempool_size+' tx');
-  renderTxs();
-}
-
-function _onMempoolSSE(raw){
-  var ev=raw.event||'';
-  var h=raw.tx_hash||raw.tx_id;
-  if(!h) return;
-  if(raw.type==='hello'){
-    document.getElementById('txstreamstatus').textContent='LIVE';
-    var dot=document.getElementById('txlive');
-    if(dot){dot.style.background='var(--gr)';dot.style.boxShadow='0 0 6px var(--gr)';}
-    txLive=true;
-    return;
-  }
-  if(raw.type==='block'){
-    var bhash=raw.data&&raw.data.block_hash;
-    if(bhash) txs.forEach(function(t){if(t.status!=='confirmed'){t.status='confirmed';t.event='confirmed';txTotalConfirmed++;}});
-    S.mempool_size=Math.max(0,(S.mempool_size||0)-txTotalConfirmed);
-    renderTxs();
-    return;
-  }
-  if(raw.event==='confirmed'||raw.status==='confirmed'){
-    _confirmTx(h);return;
-  }
-  if(raw.event==='replaced'){
-    var idx=txs.findIndex(function(t){return(t.tx_hash||t.tx_id)===h;});
-    if(idx>=0) txs.splice(idx,1);
-    _addTxLive(raw);return;
-  }
-  if(raw.event==='removed'||raw.event==='rejected'||raw.event==='expired'){
-    _removeTx(h);return;
-  }
-  if(raw.event==='snapshot'){
-    delete raw.event;
-    delete raw._fr;
-    var exists=txs.find(function(t){return(t.tx_hash||t.tx_id)===h;});
-    if(!exists){txs.push(raw);txs.sort(function(a,b){return(b.timestamp_ns||0)-(a.timestamp_ns||0);});}
-    renderTxs();return;
-  }
-  if(raw.event==='accepted'||raw.type==='transaction'){
-    _addTxLive(raw);return;
-  }
-  _addTxLive(raw);
-}
-
-function connectMempoolSSE(){
-  if(txEs){txEs.close();txEs=null;}
-  txEs=new EventSource(BASE+'/api/mempool/sse?client_id=dashboard_tx_'+Date.now());
-  txEs.onopen=function(){
-    txLive=true;
-    txReconnMs=2500;
-    var dot=document.getElementById('txlive');
-    if(dot){dot.style.background='var(--go)';dot.style.boxShadow='0 0 6px var(--go)';}
-    document.getElementById('txstreamstatus').textContent='SYNCING';
-  };
-  txEs.onmessage=function(e){
-    try{_onMempoolSSE(JSON.parse(e.data));}catch(_){}
-    var dot=document.getElementById('txlive');
-    if(dot&&txLive){dot.style.background='var(--gr)';dot.style.boxShadow='0 0 6px var(--gr)';}
-    document.getElementById('txstreamstatus').textContent='LIVE';
-  };
-  txEs.onerror=function(){
-    txLive=false;
-    var dot=document.getElementById('txlive');
-    if(dot){dot.style.background='var(--re)';dot.style.boxShadow='none';}
-    document.getElementById('txstreamstatus').textContent='RECONNECTING';
-    txEs.close();txEs=null;
-    setTimeout(connectMempoolSSE,txReconnMs);
-    txReconnMs=Math.min(txReconnMs*1.5,30000);
-  };
+// Ingest a brand-new tx from SSE new_block event (no reload needed)
+function ingestNewBlockTxs(height, blockHash){
+  api('/api/blocks/height/'+height+'/transactions').then(function(d){
+    if(!d||!d.transactions) return;
+    var fresh=d.transactions;
+    fresh.forEach(function(t){t._fresh=true;});
+    // Only update in-memory if we're on page 0 and not filtering
+    if(txPage_n===0 && txFilterMode==='all' && !txSearchQ){
+      txs=fresh.concat(txs.slice(0,txPerPage-fresh.length));
+      txTotal=Math.max(txTotal,txs.length);
+      renderTxs();
+      // Flash live indicator
+      var li=document.getElementById('tx-live');
+      if(li){li.style.color='var(--go)';setTimeout(function(){li.style.color='var(--gr)';},1200);}
+    }
+  });
 }
 function renderOracles(){
   // S.oracle_data is populated from chirp oracle_measurements array
@@ -1132,17 +1059,11 @@ async function fetchWState(){
 async function fetchMempool(){
   var r=await Promise.all([api('/api/mempool/stats'),api('/api/mempool')]);
   var stats=r[0],pend=r[1];
+  // mempool.stats() returns: size, total_fee_base, min_fee_rate, max_fee_rate, avg_fee_rate, total_accepted...
   if(stats&&stats.size!=null) S.mempool_size=stats.size;
   if(pend&&pend.transactions){
-    var fresh=pend.transactions.filter(function(t){return!txs.find(function(x){return(x.tx_hash||x.tx_id)===(t.tx_hash||t.tx_id);});});
-    fresh.forEach(function(t){
-      t._fr=true;
-      t.timestamp=t.timestamp||t.timestamp_ns?((t.timestamp_ns>1e15?t.timestamp_ns/1e6:t.timestamp_ns>1e12?t.timestamp_ns/1e3:t.timestamp_ns)||Date.now()):Date.now();
-    });
-    txs=fresh.concat(txs).slice(0,50);
-    txs.sort(function(a,b){return(b.timestamp||0)-(a.timestamp||0);});
-    txTotalAccepted=txs.length;
-    renderTxs();
+    // TX explorer is loaded via /api/transactions — mempool poll kept for badge only
+    if(pend&&pend.transactions) document.getElementById('txb').textContent=(S.total_transactions||pend.transactions.length)+' txs';
   }
 }
 
@@ -1207,6 +1128,15 @@ async function refresh(){
     if(d.qrng_health!=null) S.qrng_health=d.qrng_health;
     if(d.pq_curr!=null) S.pq_curr=d.pq_curr;
     if(d.pq_last!=null) S.pq_last=d.pq_last;
+    // New block event from _gossip_publish_block — fetch its transactions immediately
+    if(d.type==='new_block'&&d.height!=null){
+      var h=parseInt(d.height);
+      if(h>0&&h!==(window._lastIngestedHeight||0)){
+        window._lastIngestedHeight=h;
+        ingestNewBlockTxs(h, d.block_hash||'');
+        if(h>S.chain_height){S.chain_height=h;document.getElementById('bh').textContent=h;}
+      }
+    }
     // Per-oracle block-field readings from chirp oracle_measurements
     if(d.oracle_measurements&&d.oracle_measurements.length){
       d.oracle_measurements.forEach(function(m,idx){
@@ -1267,8 +1197,8 @@ async function fetchLatestSnapshot(){
 }
 
 fetchLatestSnapshot();
-connectMempoolSSE();
 refresh();
+loadTxPage();
 setInterval(refresh,3000);
 setInterval(fetchPeers,12000);
 setInterval(function(){if(Date.now()-lu>12000&&lu>0) setOnline(false);},6000);
