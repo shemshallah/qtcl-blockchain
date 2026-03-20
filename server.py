@@ -2488,6 +2488,7 @@ def _persist_chirp_snapshot(snap: dict) -> None:
         logger.debug(f"[QSNAP] persist failed (non-fatal): {e}")
 
 
+def _ensure_gossip_tables() -> bool:
     """
     Create gossip_store and ensure peer_registry has gossip_url + last_gossip_at cols.
     Safe to call multiple times (IF NOT EXISTS / DO NOTHING).
