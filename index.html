@@ -78,16 +78,24 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
 .bn.fr .bh{animation:bfr .6s cubic-bezier(.34,1.56,.64,1)}
 @keyframes bfr{0%{transform:scale(0);opacity:0}100%{transform:scale(1);opacity:1}}
 .tt{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11px}
-.tt th{font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--dim);padding:8px 14px;border-bottom:1px solid var(--b);text-align:left;background:rgba(0,0,0,.15);font-family:var(--disp);font-weight:700}
-.tt td{padding:8px 14px;border-bottom:1px solid rgba(0,220,255,.04);color:var(--tx)}
+.tt th{font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--dim);padding:6px 12px;border-bottom:1px solid var(--b);text-align:left;background:rgba(0,0,0,.15);font-family:var(--disp);font-weight:700;position:sticky;top:0;z-index:2}
+.tt td{padding:6px 12px;border-bottom:1px solid rgba(0,220,255,.04);color:var(--tx);vertical-align:middle}
 .tt tr:hover td{background:var(--cy2)}
-.tt tr.fr td{animation:tfr .5s ease-out}
-@keyframes tfr{0%{background:rgba(0,220,255,.15)}100%{background:transparent}}
+.tt tr.fr td{animation:tfr .6s ease-out}
+@keyframes tfr{0%{background:rgba(0,220,255,.18)}100%{background:transparent}}
+@keyframes txNew{0%{background:rgba(0,255,157,.25)}100%{background:transparent}}
+.tt tr.tx-new td{animation:txNew .8s ease-out}
 .tba{display:inline-block;font-size:8px;padding:2px 7px;border-radius:3px;letter-spacing:.5px;font-family:var(--disp)}
 .tba.pending{background:var(--go2);color:var(--go)}
 .tba.confirmed{background:var(--gr2);color:var(--gr)}
 .tba.coinbase{background:var(--vi2);color:var(--vi)}
 .tba.transfer{background:var(--cy2);color:var(--cy)}
+.tba.rejected{background:rgba(255,51,85,.15);color:var(--re)}
+.tba.replaced{background:rgba(212,160,32,.15);color:var(--go)}
+.taddr{max-width:72px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block;font-size:9px;color:var(--tx)}
+.taddr.fr{color:var(--cy)}
+.taddr.to{color:var(--gr)}
+.taddr.fee{color:var(--go)}
 .or{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--b);transition:background .2s}
 .or:hover{background:var(--vi2)}
 .or:last-child{border-bottom:none}
@@ -210,8 +218,28 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
   </div>
   <div class="tc">
     <div class="pn">
-      <div class="ph"><span class="pht">Recent Transactions</span><span class="pb gr" id="txb">0 txs</span></div>
-      <div class="sy"><table class="tt"><thead><tr><th>Type</th><th>Hash</th><th>Amount</th><th>Fee</th><th>Status</th></tr></thead><tbody id="ttb"><tr><td colspan="5" class="es">Loading&hellip;</td></tr></tbody></table></div>
+      <div class="ph" style="flex-wrap:wrap;gap:6px">
+        <span class="pht">Recent Transactions</span>
+        <span class="pb gr" id="txb">0 txs</span>
+        <span class="pb vi" id="txe" style="font-size:.72em"><span id="txlive" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--dim);margin-right:4px;vertical-align:middle"></span><span id="txstreamstatus">SYNCING</span></span>
+      </div>
+      <div style="padding:8px 16px 4px;display:flex;gap:16px;font-size:8px;font-family:var(--mono);color:var(--dim);letter-spacing:1px;text-transform:uppercase;border-bottom:1px solid var(--b)">
+        <span style="color:var(--vi)">&#9632; COINBASE</span>
+        <span style="color:var(--cy)">&#9632; TRANSFER</span>
+        <span style="color:var(--go)">&#9632; FEE</span>
+        <span style="color:var(--gr)">&#9632; CONFIRMED</span>
+        <span style="color:var(--re)">&#9632; REJECTED</span>
+      </div>
+      <div class="sy" id="txwrap" style="max-height:280px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--b) transparent">
+        <table class="tt"><thead><tr>
+          <th style="width:90px">Type</th>
+          <th>Hash</th>
+          <th style="width:90px">From / To</th>
+          <th style="width:80px;text-align:right">Amount</th>
+          <th style="width:65px;text-align:right">Fee</th>
+          <th style="width:75px">Status</th>
+        </tr></thead><tbody id="ttb"><tr><td colspan="6" class="es">Connecting to mempool stream&hellip;</td></tr></tbody></table>
+      </div>
     </div>
     <div class="pn">
       <div class="ph"><span class="pht">Oracle Network (5 nodes)</span><span class="pb vi">3-of-5 Byzantine</span></div>
@@ -260,7 +288,8 @@ var S={
   oracle_data:{},  // oracle_id -> {w_state_fidelity, coherence, pq0_*, in_consensus}
   lattice_fidelity:0  // direct from LATTICE.fidelity (not oracle consensus)
 };
-var blocks=[],txs=[],dp=0,dbk=[],lu=0;
+var blocks=[],txs=[],dp=0,dbk=[],lu=0,txEs=null,txReconnMs=2500,txLive=false;
+var txTotalAccepted=0,txTotalConfirmed=0,txTotalRejected=0;
 
 // clock
 function tick(){var d=new Date();document.getElementById('hck').textContent=d.toISOString().replace('T',' ').slice(0,19)+' UTC';}
@@ -711,14 +740,170 @@ function renderChain(){
 }
 function fmt(v){return v==null?'--':parseFloat(v).toFixed(4);}
 function pct(v,mx){return Math.min(100,Math.max(0,v/mx*100))+'%';}
+function fmtAmt(v){var n=parseFloat(v)||0;return n.toFixed(n<1?4:2);}
+function txShort(h){var s=(h||'').replace(/^coinbase_/,'');return s.slice(0,12)+'\u2026';}
+
+function _txTypeLabel(tx){
+  var t=(tx.tx_type||'transfer').toLowerCase();
+  if(t==='coinbase') return {label:'COINBASE',cls:'coinbase',col:'#8040ff'};
+  if(t==='attestation') return {label:'ATTEST',cls:'transfer',col:'#00dcff'};
+  return {label:'TRANSFER',cls:'transfer',col:'#00dcff'};
+}
+
+function _txStatusLabel(tx,ev){
+  if(ev==='confirmed'||tx.status==='confirmed') return {label:'CONFIRMED',cls:'confirmed',col:'#00ff9d'};
+  if(ev==='rejected'||tx.status==='rejected') return {label:'REJECTED',cls:'rejected',col:'#ff3355'};
+  if(ev==='replaced'||tx.status==='replaced') return {label:'REPLACED',cls:'replaced',col:'#d4a020'};
+  if(ev==='removed') return {label:'REMOVED',cls:'rejected',col:'#ff3355'};
+  return {label:'PENDING',cls:'pending',col:'#d4a020'};
+}
+
+function _txFromOrTo(tx){
+  var fa=tx.from_address||'',ta=tx.to_address||'',null64='0'.repeat(64);
+  if(fa===null64||fa==='0'.repeat(64)) return '<span class="taddr fee">&#9650; COINBASE</span>';
+  return '<span class="taddr fr" title="From: '+fa+'">'+txShort(fa)+'</span>'+
+         '<span class="taddr to" title="To: '+ta+'">&#8594; '+txShort(ta)+'</span>';
+}
+
+function _txAmount(tx,typeInfo){
+  var amt=tx.amount||tx.amount_qtcl||tx.amount_base/100||0;
+  var sign=(typeInfo.cls==='coinbase')?'+':'';
+  return '<span style="color:'+typeInfo.col+'">'+sign+fmtAmt(amt)+'</span>';
+}
+
+function _txFee(tx){
+  var f=tx.fee_qtcl||tx.fee||0;
+  return '<span style="color:var(--go);font-size:9px">'+fmtAmt(f)+'</span>';
+}
+
+function _makeTxRow(tx,isNew){
+  var typeInfo=_txTypeLabel(tx);
+  var ev=tx.event||'';
+  var statusInfo=_txStatusLabel(tx,ev);
+  var statusLabel=ev&&ev!=='snapshot'?statusInfo.label:(tx.status||'pending').toUpperCase();
+  var statusCls=ev&&ev!=='snapshot'?statusInfo.cls:(tx.status||'pending');
+
+  var rowClass=(isNew?'tx-new ':'');
+  if(tx._fr) rowClass+='fr ';
+
+  return '<tr class="'+rowClass.trim()+'">'+
+    '<td><span class="tba '+typeInfo.cls+'" style="color:'+typeInfo.col+'">'+typeInfo.label+'</span></td>'+
+    '<td><span style="color:var(--cy);font-size:9px;letter-spacing:.3px" title="'+tx.tx_hash+'">'+txShort(tx.tx_hash)+'</span></td>'+
+    '<td>'+_txFromOrTo(tx)+'</td>'+
+    '<td style="text-align:right;font-size:10px">'+_txAmount(tx,typeInfo)+'</td>'+
+    '<td style="text-align:right">'+_txFee(tx)+'</td>'+
+    '<td><span class="tba '+statusCls+'" style="font-size:7px;padding:1px 5px">'+statusLabel+'</span></td>'+
+    '</tr>';
+}
+
 function renderTxs(){
   var tb=document.getElementById('ttb');
-  if(!txs.length){tb.innerHTML='<tr><td colspan="5" class="es">No transactions yet</td></tr>';return;}
-  tb.innerHTML=txs.slice(0,25).map(function(tx,i){
-    var tp=tx.tx_type||'transfer',cb=tp==='coinbase';
-    return '<tr class="'+(i===0&&tx._fr?'fr':'')+'"><td><span class="tba '+(cb?'coinbase':'transfer')+'">'+(tp.toUpperCase())+'</span></td><td style="color:var(--cy)">'+((tx.tx_hash||tx.tx_id||'').slice(0,16))+'...</td><td style="color:var(--gr)">'+fmt(tx.amount||tx.amount_qtcl)+' Q</td><td style="color:var(--dim)">'+fmt(tx.fee||tx.fee_qtcl||0)+' Q</td><td><span class="tba '+(tx.status||'pending')+'">'+(tx.status||'pending').toUpperCase()+'</span></td></tr>';
+  if(!txs.length){tb.innerHTML='<tr><td colspan="6" class="es">No transactions yet — waiting for mempool&hellip;</td></tr>';return;}
+  var total=txs.length;
+  tb.innerHTML=txs.slice(0,50).map(function(tx,i){
+    return _makeTxRow(tx,i===0&&tx._fr);
   }).join('');
-  document.getElementById('txb').textContent=txs.length+' txs';
+  document.getElementById('txb').textContent=total+' tx'+(txTotalConfirmed?' · '+txTotalConfirmed+' confirmed':'');
+}
+
+function _addTxLive(tx){
+  var h=tx.tx_hash||tx.tx_id;
+  if(!h) return;
+  if(txs.find(function(t){return(t.tx_hash||t.tx_id)===h;})) return;
+  tx._fr=true;
+  txs.unshift(tx);
+  txTotalAccepted++;
+  S.mempool_size=(S.mempool_size||0)+1;
+  st('hm',S.mempool_size+' tx');
+  if(txs.length>100) txs=txs.slice(0,100);
+  renderTxs();
+}
+
+function _confirmTx(tx_hash){
+  var tx=txs.find(function(t){return(t.tx_hash||t.tx_id)===tx_hash;});
+  if(tx){tx.status='confirmed';tx.event='confirmed';txTotalConfirmed++;}
+  S.mempool_size=Math.max(0,(S.mempool_size||0)-1);
+  st('hm',S.mempool_size+' tx');
+  renderTxs();
+}
+
+function _removeTx(tx_hash){
+  var idx=txs.findIndex(function(t){return(t.tx_hash||t.tx_id)===tx_hash;});
+  if(idx>=0){
+    var tx=txs[idx];
+    tx.status='rejected';
+    tx.event='removed';
+    txTotalRejected++;
+    txs.splice(idx,1);
+  }
+  S.mempool_size=Math.max(0,(S.mempool_size||0)-1);
+  st('hm',S.mempool_size+' tx');
+  renderTxs();
+}
+
+function _onMempoolSSE(raw){
+  var ev=raw.event||'';
+  var h=raw.tx_hash||raw.tx_id;
+  if(!h) return;
+  if(raw.type==='hello'){
+    document.getElementById('txstreamstatus').textContent='LIVE';
+    var dot=document.getElementById('txlive');
+    if(dot){dot.style.background='var(--gr)';dot.style.boxShadow='0 0 6px var(--gr)';}
+    txLive=true;
+    return;
+  }
+  if(raw.type==='block'){
+    var bhash=raw.data&&raw.data.block_hash;
+    if(bhash) txs.forEach(function(t){if(t.status!=='confirmed'){t.status='confirmed';t.event='confirmed';txTotalConfirmed++;}});
+    S.mempool_size=Math.max(0,(S.mempool_size||0)-txTotalConfirmed);
+    renderTxs();
+    return;
+  }
+  if(raw.event==='confirmed'||raw.status==='confirmed'){
+    _confirmTx(h);return;
+  }
+  if(raw.event==='replaced'){
+    var idx=txs.findIndex(function(t){return(t.tx_hash||t.tx_id)===h;});
+    if(idx>=0) txs.splice(idx,1);
+    _addTxLive(raw);return;
+  }
+  if(raw.event==='removed'||raw.event==='rejected'||raw.event==='expired'){
+    _removeTx(h);return;
+  }
+  if(raw.event==='snapshot'){
+    delete raw.event;
+    delete raw._fr;
+    var exists=txs.find(function(t){return(t.tx_hash||t.tx_id)===h;});
+    if(!exists){txs.push(raw);txs.sort(function(a,b){return(b.timestamp_ns||0)-(a.timestamp_ns||0);});}
+    renderTxs();return;
+  }
+  if(raw.event==='accepted'){
+    _addTxLive(raw);return;
+  }
+}
+
+function connectMempoolSSE(){
+  if(txEs){txEs.close();txEs=null;}
+  txEs=new EventSource(BASE+'/api/mempool/sse?client_id=dashboard_tx_'+Date.now());
+  txEs.onopen=function(){
+    txLive=true;
+    txReconnMs=2500;
+    var dot=document.getElementById('txlive');
+    if(dot){dot.style.background='var(--go)';dot.style.boxShadow='0 0 6px var(--go)';}
+    document.getElementById('txstreamstatus').textContent='SYNCING';
+  };
+  txEs.onmessage=function(e){
+    try{_onMempoolSSE(JSON.parse(e.data));}catch(_){}
+  };
+  txEs.onerror=function(){
+    txLive=false;
+    var dot=document.getElementById('txlive');
+    if(dot){dot.style.background='var(--re)';dot.style.boxShadow='none';}
+    document.getElementById('txstreamstatus').textContent='RECONNECTING';
+    txEs.close();txEs=null;
+    setTimeout(connectMempoolSSE,txReconnMs);
+    txReconnMs=Math.min(txReconnMs*1.5,30000);
+  };
 }
 function renderOracles(){
   // S.oracle_data is populated from chirp oracle_measurements array
@@ -1060,6 +1245,7 @@ async function fetchLatestSnapshot(){
 }
 
 fetchLatestSnapshot();
+connectMempoolSSE();
 refresh();
 setInterval(refresh,3000);
 setInterval(fetchPeers,12000);
