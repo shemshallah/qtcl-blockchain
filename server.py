@@ -7436,6 +7436,95 @@ def sitemap():
     return Response(xml, mimetype='application/xml')
 
 
+
+@app.route('/api/miners', methods=['GET'])
+def list_miners():
+    """
+    Live miner registry — all peers who have registered or mined a block.
+    Merges peer_registry (P2P registration) + blocks table (confirmed mining).
+    Returns: address, peer_id, last_seen, block_count, last_height, status (live/seen/historic)
+    """
+    try:
+        with get_db_cursor() as cur:
+            # All miners from confirmed blocks
+            cur.execute("""
+                SELECT
+                    b.miner_address,
+                    COUNT(*)              AS block_count,
+                    MAX(b.height)         AS last_height,
+                    MAX(b.timestamp)      AS last_mined_ts,
+                    SUM(COALESCE(t.amount,0)) AS total_earned_base
+                FROM blocks b
+                LEFT JOIN transactions t
+                    ON t.to_address = b.miner_address
+                   AND t.tx_type = 'coinbase'
+                WHERE b.miner_address IS NOT NULL
+                  AND b.miner_address != ''
+                GROUP BY b.miner_address
+                ORDER BY last_height DESC
+            """)
+            mined = {r[0]: {
+                'miner_address': r[0],
+                'block_count':   int(r[1]),
+                'last_height':   int(r[2]),
+                'last_mined_ts': float(r[3]) if r[3] else 0,
+                'total_earned_qtcl': round(int(r[4] or 0) / 100, 2),
+            } for r in cur.fetchall()}
+
+            # Peer registry — adds peer_id, gossip_url, last_seen, online status
+            cur.execute("""
+                SELECT peer_id, miner_address, gossip_url, block_height,
+                       last_seen, supports_sse, ip_address
+                FROM peer_registry
+                WHERE miner_address IS NOT NULL AND miner_address != ''
+                ORDER BY last_seen DESC NULLS LAST
+                LIMIT 200
+            """)
+            peer_rows = cur.fetchall()
+
+        # Merge: peer_registry enriches mined data; unknown miners added too
+        stale_secs = _PEER_STALE_SECS if '_PEER_STALE_SECS' in dir() else 300
+        now = time.time()
+        merged = dict(mined)  # start with all block-confirmed miners
+
+        for r in peer_rows:
+            pid, addr, gurl, bh, ls, sse, ip = r
+            if not addr:
+                continue
+            last_seen_ts = ls.timestamp() if ls else 0
+            age = now - last_seen_ts
+            status = 'live' if age < stale_secs else ('seen' if age < 86400 else 'historic')
+
+            if addr not in merged:
+                merged[addr] = {'miner_address': addr, 'block_count': 0,
+                                'last_height': int(bh or 0), 'total_earned_qtcl': 0,
+                                'last_mined_ts': 0}
+            merged[addr].update({
+                'peer_id':      pid or '',
+                'gossip_url':   gurl or '',
+                'last_seen_ts': last_seen_ts,
+                'last_seen_age_s': round(age),
+                'supports_sse': bool(sse),
+                'ip_address':   ip or '',
+                'status':       status,
+            })
+
+        miners = sorted(merged.values(),
+                        key=lambda m: (m.get('status','historic') == 'live',
+                                       m.get('block_count', 0)),
+                        reverse=True)
+
+        return jsonify({
+            'miners':     miners,
+            'total':      len(miners),
+            'live_count': sum(1 for m in miners if m.get('status') == 'live'),
+            'ts':         now,
+        }), 200
+
+    except Exception as e:
+        logger.error(f"[MINERS] {e}")
+        return jsonify({'error': str(e), 'miners': [], 'total': 0}), 500
+
 @app.route('/robots.txt', methods=['GET'])
 def robots_txt():
     """Deny crawlers from API endpoints."""

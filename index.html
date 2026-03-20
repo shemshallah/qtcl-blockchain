@@ -114,6 +114,20 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
   padding:3px 12px;border-radius:3px;cursor:pointer;font-family:var(--mono);transition:all .2s}
 .txpbtn:hover:not(:disabled){color:var(--cy);border-color:var(--cy)}
 .txpbtn:disabled{opacity:.3;cursor:default}
+.miner-row{display:flex;flex-direction:column;padding:8px 14px;border-bottom:1px solid rgba(0,220,255,.05);transition:background .15s}
+.miner-row:hover{background:rgba(0,220,255,.04)}
+.miner-row.live .miner-dot{background:var(--gr);box-shadow:0 0 5px var(--gr)}
+.miner-row.seen .miner-dot{background:var(--go)}
+.miner-row.historic .miner-dot{background:var(--dim)}
+.miner-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;margin-top:3px}
+.miner-addr{font-family:var(--mono);font-size:10px;color:var(--cy);cursor:pointer;user-select:all}
+.miner-addr:hover{color:#fff}
+.miner-stats{display:flex;gap:12px;font-size:9px;margin-top:3px;color:var(--dim)}
+.miner-stat-val{color:var(--tx)}
+.miner-badge{font-size:8px;padding:1px 5px;border-radius:2px;font-family:var(--disp);letter-spacing:.4px}
+.miner-badge.live{background:rgba(0,255,157,.12);color:var(--gr)}
+.miner-badge.seen{background:rgba(255,165,0,.12);color:var(--go)}
+.miner-badge.historic{background:rgba(255,255,255,.06);color:var(--dim)}
 .tx-cb td:first-child{border-left:2px solid var(--vi)}
 .tx-tr td:first-child{border-left:2px solid rgba(0,220,255,.3)}
 .tx-new{animation:tfr .8s ease}
@@ -283,8 +297,19 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
         <div style="padding:12px 14px;border-right:1px solid var(--b)"><div class="ml" style="margin-bottom:4px">PQ-Lattice</div><div class="mv dm" id="vp" style="font-size:10px">&mdash;</div></div>
         <div style="padding:12px 14px"><div class="ml" style="margin-bottom:4px">Oracle Con.</div><div class="mv dm" id="vo" style="font-size:10px">&mdash;</div></div>
       </div>
-      <div class="ph"><span class="pht">P2P Peers</span><span class="pb gr" id="pcb">0 peers</span></div>
-      <div id="pl" style="max-height:140px;overflow-y:auto"><div class="es">Loading&hellip;</div></div>
+      <div class="ph">
+        <span class="pht">⛏ Miner Network</span>
+        <span style="display:flex;gap:6px;align-items:center">
+          <span class="pb gr" id="pcb">0 miners</span>
+          <span id="p2p-live-dot" style="width:7px;height:7px;border-radius:50%;background:var(--dim);display:inline-block"></span>
+        </span>
+      </div>
+      <div id="pl" style="max-height:280px;overflow-y:auto;overflow-x:hidden"></div>
+      <div style="padding:4px 16px 6px;border-top:1px solid var(--b);display:flex;justify-content:space-between;font-size:9px;color:var(--dim)">
+        <span id="p2p-live-count">● <span id="p2plc">0</span> live</span>
+        <span id="p2p-seen-count">◎ <span id="p2psc">0</span> seen today</span>
+        <span id="p2p-total-count">◌ <span id="p2ptc">0</span> historic</span>
+      </div>
     </div>
   </div>
 </div>
@@ -900,19 +925,77 @@ function renderOracles(){
       +'</div>';
   }).join('');
 }
-function renderPeers(peers){
-  var el=document.getElementById('pl'),n=peers?peers.length:0;
-  document.getElementById('pcb').textContent=n+' peers';
-  document.getElementById('bbp').textContent=n;
-  if(!n){el.innerHTML='<div class="es">No peers connected</div>';return;}
-  el.innerHTML=peers.slice(0,8).map(function(p){
-    // p has: peer_id, address, port, uptime_s, height (last_block_height), messages_sent
-    return '<div style="display:flex;align-items:center;gap:10px;padding:8px 16px;border-bottom:1px solid var(--b);font-size:10px">'
-      +'<div style="width:6px;height:6px;border-radius:50%;background:var(--gr);flex-shrink:0"></div>'
-      +'<span style="font-family:var(--mono);color:var(--cy);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+(p.peer_id||p.address||'unknown').slice(0,22)+'</span>'
-      +'<span style="font-family:var(--mono);color:var(--dim);white-space:nowrap">#'+(p.height||p.last_block_height||'?')+'</span>'
+// ── Miner Network renderer ──────────────────────────────────────────────────
+var _miners = [];
+
+function _age(secs){
+  if(!secs&&secs!==0) return '—';
+  if(secs<60)  return secs+'s ago';
+  if(secs<3600) return Math.floor(secs/60)+'m ago';
+  if(secs<86400) return Math.floor(secs/3600)+'h ago';
+  return Math.floor(secs/86400)+'d ago';
+}
+
+function renderMiners(miners){
+  var el=document.getElementById('pl');
+  if(!miners||!miners.length){
+    el.innerHTML='<div class="es" style="padding:16px">No miners registered yet</div>';
+    document.getElementById('pcb').textContent='0 miners';
+    return;
+  }
+  _miners=miners;
+  var live=miners.filter(function(m){return m.status==='live';});
+  var seen=miners.filter(function(m){return m.status==='seen';});
+  var hist=miners.filter(function(m){return m.status==='historic';});
+
+  document.getElementById('pcb').textContent=miners.length+' miners';
+  document.getElementById('bbp').textContent=live.length;
+  document.getElementById('p2plc').textContent=live.length;
+  document.getElementById('p2psc').textContent=seen.length;
+  document.getElementById('p2ptc').textContent=hist.length;
+
+  // Live dot pulses green when miners active
+  var dot=document.getElementById('p2p-live-dot');
+  if(dot) dot.style.background=live.length?'var(--gr)':'var(--dim)';
+
+  el.innerHTML=miners.map(function(m){
+    var addr=m.miner_address||'';
+    var short=addr.length>20?addr.slice(0,10)+'…'+addr.slice(-10):addr;
+    var bks=m.block_count||0;
+    var earned=parseFloat(m.total_earned_qtcl||0).toFixed(2);
+    var h=m.last_height||0;
+    var age=_age(m.last_seen_age_s);
+    var st=m.status||'historic';
+    var pid=(m.peer_id||'').slice(0,12);
+    var gurl=m.gossip_url||'';
+    return '<div class="miner-row '+st+'" onclick="this.querySelector('.miner-addr').click()">'
+      +'<div style="display:flex;align-items:flex-start;gap:8px">'
+      +'<div class="miner-dot" style="margin-top:4px"></div>'
+      +'<div style="flex:1;min-width:0">'
+      +'<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
+      +'<span class="miner-addr" title="Click to copy: '+addr+'" '
+      +'onclick="event.stopPropagation();try{navigator.clipboard.writeText(this.title.replace('Click to copy: ',''));}catch(e){}">'+short+'</span>'
+      +'<span class="miner-badge '+st+'">'+st.toUpperCase()+'</span>'
+      +(gurl?'<span style="font-size:8px;color:var(--dim)">📡 P2P</span>':'')
+      +'</div>'
+      +'<div class="miner-stats">'
+      +(bks?'<span>⛏ <span class="miner-stat-val">'+bks+'</span> blocks</span>':'')
+      +(earned>0?'<span>💰 <span class="miner-stat-val">'+earned+'</span> QTCL</span>':'')
+      +(h?'<span>h=<span class="miner-stat-val">'+h+'</span></span>':'')
+      +(age!=='—'?'<span class="miner-stat-val">'+age+'</span>':'')
+      +(pid?'<span style="color:var(--dim)">id:'+pid+'…</span>':'')
+      +'</div>'
+      +'</div>'
+      +'</div>'
       +'</div>';
   }).join('');
+}
+
+// Keep renderPeers as alias so existing SSE + polling paths still work
+function renderPeers(peers){
+  // /api/p2p/peers returns ephemeral connections — use for live dot only
+  // Full miner data comes from fetchMiners() → /api/miners
+  if(peers&&peers.length) document.getElementById('bbp').textContent=peers.length;
 }
 function renderMermin(m){
   if(!m) return;
@@ -1087,12 +1170,18 @@ async function fetchDiff(){
 }
 
 async function fetchPeers(){
+  // Legacy in-memory P2P peers — ephemeral, often empty on single-node deploy
   var d=await api('/api/p2p/peers');
-  // Returns {peer_count, peers:[{peer_id,address,port,uptime_s,height,messages_sent,...}]}
-  // OR {error:'P2P not initialized'} with 503
+  if(d&&!d.error&&d.peers) renderPeers(d.peers);
+}
+
+async function fetchMiners(){
+  // Persistent miner registry from peer_registry + blocks tables
+  var d=await api('/api/miners');
   if(!d||d.error) return;
-  S.peer_count=d.peer_count||0;
-  renderPeers(d.peers||[]);
+  renderMiners(d.miners||[]);
+  S.peer_count=d.live_count||0;
+  document.getElementById('bbn').textContent=d.total||0;
 }
 
 function setOnline(ok){
@@ -1149,6 +1238,8 @@ async function refresh(){
         window._lastIngestedHeight=h;
         ingestNewBlockTxs(h, d.block_hash||'');
         if(h>S.chain_height){S.chain_height=h;document.getElementById('bh').textContent=h;}
+        // New block means a miner just won — refresh registry to show updated stats
+        setTimeout(fetchMiners, 2000);
       }
     }
     // Per-oracle block-field readings from chirp oracle_measurements
@@ -1215,10 +1306,12 @@ refresh();
 // Defer TX explorer load: give SSE + chain fetch time to settle first
 // Avoids competing with the critical-path oracle/chain requests at boot
 setTimeout(function(){ loadTxPage(); },800);
+setTimeout(function(){ fetchMiners(); },1200);
 setInterval(refresh,3000);
 // Reload TX explorer every 30s as background sync (SSE new_block handles real-time)
 setInterval(function(){ if(!txLoading) loadTxPage(); },30000);
 setInterval(fetchPeers,12000);
+setInterval(fetchMiners,15000);
 setInterval(function(){if(Date.now()-lu>12000&&lu>0) setOnline(false);},6000);
 </script>
 </body>
