@@ -772,7 +772,7 @@ function renderChain(){
 function fmt(v){return v==null?'--':parseFloat(v).toFixed(4);}
 function pct(v,mx){return Math.min(100,Math.max(0,v/mx*100))+'%';}
 // ── Transaction Explorer state ────────────────────────────────────────────
-var txs=[],txPage_n=0,txPerPage=50,txTotal=0,txPages=1,txFilterMode='all',txSearchQ='',txLoading=false;
+var txs=[],txPage_n=0,txPerPage=50,txTotal=0,txPages=1,txFilterMode='all',txSearchQ='',txLoading=false,_txSearchTimer=null;
 
 function txFilter(mode){
   txFilterMode=mode;txPage_n=0;
@@ -782,7 +782,7 @@ function txFilter(mode){
   });
   loadTxPage();
 }
-function txSearch(q){txSearchQ=q.trim();txPage_n=0;clearTimeout(txSearch._t);txSearch._t=setTimeout(loadTxPage,350);}
+function txSearch(q){txSearchQ=q.trim();txPage_n=0;clearTimeout(_txSearchTimer);_txSearchTimer=setTimeout(loadTxPage,350);}
 function txPage(d){txPage_n=Math.max(0,Math.min(txPages-1,txPage_n+d));loadTxPage();}
 
 function _shortHash(h,n){h=h||'';return h.length>n?h.slice(0,n>>1)+'…'+h.slice(-(n>>1)):h;}
@@ -800,7 +800,7 @@ function renderTxRow(tx,isNew){
   var qsh =tx.quantum_state_hash?('<div style="color:var(--dim);font-size:8px;word-break:break-all;margin-top:2px">Q:'+_shortHash(tx.quantum_state_hash,20)+'</div>'):'';
   return '<tr class="'+(isNew?'tx-new ':'')+(cb?'tx-cb':'tx-tr')+'" title="'+hash+'">'
     +'<td><span class="tba '+tp+'">'+(cb?'⛏ COINBASE':'⇄ TRANSFER')+'</span>'+wfid+'</td>'
-    +'<td style="font-family:var(--mono);font-size:10px;cursor:pointer;color:var(--cy)" onclick="navigator.clipboard&&navigator.clipboard.writeText(''+hash+'')">'+_shortHash(hash,18)+'</td>'
+    +'<td style="font-family:var(--mono);font-size:10px;cursor:pointer;color:var(--cy);user-select:all" title="Click to copy: '+hash+'" onclick="try{navigator.clipboard.writeText(this.title.replace(\"Click to copy: \",\"\"));}catch(e){}">'+_shortHash(hash,18)+'</td>'
     +'<td style="font-family:var(--mono);font-size:9px;color:var(--dim)" title="'+from+'">'+_shortHash(from,14)+'</td>'
     +'<td style="font-family:var(--mono);font-size:9px;color:var(--gr)" title="'+to+'">'+_shortHash(to,14)+'</td>'
     +'<td style="color:var(--go);font-size:11px">'+amt.toFixed(2)+' Q'+qsh+'</td>'
@@ -810,15 +810,28 @@ function renderTxRow(tx,isNew){
 }
 
 async function loadTxPage(){
-  if(txLoading) return; txLoading=true;
-  var params='?page='+txPage_n+'&per_page='+txPerPage;
-  if(txFilterMode&&txFilterMode!=='all') params+='&type='+txFilterMode;
-  if(txSearchQ) params+='&address='+encodeURIComponent(txSearchQ);
-  var d=await api('/api/transactions'+params);
-  txLoading=false;
-  if(!d||d.error){document.getElementById('ttb').innerHTML='<tr><td colspan="7" class="es">Error loading transactions</td></tr>';return;}
-  txs=d.transactions||[];txTotal=d.total||0;txPages=d.pages||1;txPage_n=d.page||0;
-  renderTxs();
+  // Guard: never double-load; always release lock even on error
+  if(txLoading) return;
+  txLoading=true;
+  var tb=document.getElementById('ttb');
+  if(tb) tb.innerHTML='<tr><td colspan="7" class="es" style="opacity:.5">Loading…</td></tr>';
+  try{
+    var params='?page='+txPage_n+'&per_page='+txPerPage;
+    if(txFilterMode&&txFilterMode!=='all') params+='&type='+txFilterMode;
+    if(txSearchQ) params+='&address='+encodeURIComponent(txSearchQ);
+    var d=await api('/api/transactions'+params);
+    if(!d||d.error){
+      if(tb) tb.innerHTML='<tr><td colspan="7" class="es">'+
+        (d&&d.error?d.error:'Server unavailable — retrying…')+'</td></tr>';
+      return;
+    }
+    txs=d.transactions||[];txTotal=d.total||0;txPages=d.pages||1;txPage_n=d.page||0;
+    renderTxs();
+  }catch(e){
+    if(tb) tb.innerHTML='<tr><td colspan="7" class="es">Load error: '+e.message+'</td></tr>';
+  }finally{
+    txLoading=false;  // ALWAYS release — no matter what
+  }
 }
 
 function renderTxs(){
@@ -1198,8 +1211,12 @@ async function fetchLatestSnapshot(){
 
 fetchLatestSnapshot();
 refresh();
-loadTxPage();
+// Defer TX explorer load: give SSE + chain fetch time to settle first
+// Avoids competing with the critical-path oracle/chain requests at boot
+setTimeout(function(){ loadTxPage(); },800);
 setInterval(refresh,3000);
+// Reload TX explorer every 30s as background sync (SSE new_block handles real-time)
+setInterval(function(){ if(!txLoading) loadTxPage(); },30000);
 setInterval(fetchPeers,12000);
 setInterval(function(){if(Date.now()-lu>12000&&lu>0) setOnline(false);},6000);
 </script>
