@@ -3100,20 +3100,23 @@ def _gossip_publish_tx(tx_hash: str, from_addr: str, to_addr: str,
 
 def _gossip_publish_block(height: int, block_hash: str, miner_addr: str,
                            tx_count: int, fidelity: float) -> None:
-    """Publish a new-block event to SSE channel. Called by submit_block."""
-    _gossip_sse.publish('block', {
-        'height'       : height,
-        'block_hash'   : block_hash,
-        'miner_address': miner_addr,
-        'tx_count'     : tx_count,
-        'fidelity'     : fidelity,
-        'source'       : 'submit',
-    })
-    gossip_store_put(f"block:{height}", {
-        'height': height, 'block_hash': block_hash,
-        'miner_address': miner_addr, 'tx_count': tx_count,
-        'fidelity': fidelity, 'ts': time.time(),
-    })
+    """Publish a new-block event to both SSE channels. Called by submit_block."""
+    payload = {
+        'type'          : 'new_block',   # ← miners watch for this exact key
+        'height'        : height,
+        'block_hash'    : block_hash,
+        'miner_address' : miner_addr,
+        'tx_count'      : tx_count,
+        'fidelity'      : fidelity,
+        'ts'            : time.time(),
+    }
+    # Push to the main SSE snapshot channel — this is what mining clients subscribe to.
+    # Every connected miner gets this within <1ms and can abort their stale nonce loop.
+    _sse_push_snapshot(payload)
+
+    # Also push to the gossip SSE (used by dashboard / P2P layer)
+    _gossip_sse.publish('block', payload)
+    gossip_store_put(f"block:{height}", payload)
 
 
 application = app  # WSGI entry point
