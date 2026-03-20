@@ -10970,7 +10970,7 @@ def _start_oracle_measurement_sync_daemon():
                     try:
                         with get_db_cursor() as _pqcur:
                             _pqcur.execute(
-                                "SELECT pq_curr, pq_last FROM blocks ORDER BY block_height DESC LIMIT 1"
+                                "SELECT pq_curr, pq_last FROM blocks ORDER BY height DESC LIMIT 1"
                             )
                             _pqrow = _pqcur.fetchone()
                             if _pqrow and _pqrow[0] is not None:

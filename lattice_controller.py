@@ -1168,7 +1168,9 @@ class NonMarkovianNoiseBath:
         except Exception as exc:
             logger.debug(f"[NOISE] Memory effect failed: {exc}")
             return density_matrix
-        """Return Qiskit noise model"""
+
+    def get_noise_model(self):
+        """Return Qiskit noise model."""
         return self.noise_model
 
 # Global noise bath

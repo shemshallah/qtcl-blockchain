@@ -711,6 +711,47 @@ class QuantumInformationMetrics:
     def trace_purity(dm: np.ndarray) -> float:
         return QuantumInformationMetrics.purity(dm)
 
+    @staticmethod
+    def state_fidelity(rho1: np.ndarray, rho2: np.ndarray) -> float:
+        """F(ρ₁,ρ₂) = Tr(√(√ρ₁·ρ₂·√ρ₁))² — Uhlmann–Jozsa fidelity."""
+        try:
+            if rho1 is None or rho2 is None:
+                return 0.0
+            ev, ec = np.linalg.eigh(rho1)
+            ev = np.maximum(ev, 0.0)
+            sqrt_rho1 = ec @ np.diag(np.sqrt(ev)) @ ec.conj().T
+            product = sqrt_rho1 @ rho2 @ sqrt_rho1
+            ep = np.linalg.eigvalsh(product)
+            ep = np.maximum(ep, 0.0)
+            return float(min(1.0, max(0.0, float(np.sum(np.sqrt(ep))) ** 2)))
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def mutual_information(dm: np.ndarray) -> float:
+        """I(ρ) = S(ρ_A) + S(ρ_B) − S(ρ_AB) — approximate bipartite split."""
+        try:
+            if dm is None or dm.shape[0] < 2:
+                return 0.0
+            dim  = dm.shape[0]
+            half = dim // 2
+            rho_a = np.zeros((half, half), dtype=complex)
+            rho_b = np.zeros((dim - half, dim - half), dtype=complex)
+            for i in range(half):
+                for j in range(half):
+                    for k in range(dim - half):
+                        rho_a[i, j] += dm[i * 2 + k, j * 2 + k]
+            for i in range(dim - half):
+                for j in range(dim - half):
+                    for k in range(half):
+                        rho_b[i, j] += dm[i * 2 + k, j * 2 + k]
+            s_a  = QuantumInformationMetrics.von_neumann_entropy(rho_a)
+            s_b  = QuantumInformationMetrics.von_neumann_entropy(rho_b)
+            s_ab = QuantumInformationMetrics.von_neumann_entropy(dm)
+            return float(max(0.0, s_a + s_b - s_ab))
+        except Exception:
+            return 0.0
+
 # ─── HD key derivation (BIP32-style, hash-based) ─────────────────────────────
 
 class HDKeyring:
