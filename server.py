@@ -952,13 +952,8 @@ class DatabasePool:
             # ── Native psycopg2 TCP mode (Koyeb / self-hosted) ───────────────
             try:
                 from psycopg2 import pool as psycopg2_pool
-                # DB_POOL_MIN/MAX — env-overridable.  Defaults:
-                #   min=4  — always-hot connections for API / mining / gossip
-                #   max=40 — covers 64 gthreads across workers; _PGNotifier and
-                #            _PGListenerThread use DEDICATED out-of-pool conns so
-                #            these 40 slots are purely for request handlers.
-                min_connections = int(os.getenv('DB_POOL_MIN', '4'))
-                max_connections = int(os.getenv('DB_POOL_MAX', '40'))
+                min_connections = int(os.getenv('DB_POOL_MIN', '2'))
+                max_connections = int(os.getenv('DB_POOL_MAX', '10'))
                 logger.info(f"[DB] Initializing app-level pooling: min={min_connections}, max={max_connections}")
                 logger.info(f"[DB] Connecting to Supabase pooler (aws-0-us-west-2.pooler.supabase.com)")
                 self.pool = psycopg2_pool.ThreadedConnectionPool(
@@ -1900,182 +1895,38 @@ def get_dht_manager() -> DHTManager:
 # SSE SNAPSHOT DISTRIBUTION
 # ═════════════════════════════════════════════════════════════════════════════════════════
 
-# ══════════════════════════════════════════════════════════════════════════════════════════
-# C RING BUFFER — O(1) SSE broadcast regardless of subscriber count.
-# Each SSE handler tracks its read position; no per-subscriber Queue allocation.
-# Compiled once at import; Python falls back to deque if gcc is absent.
-# ══════════════════════════════════════════════════════════════════════════════════════════
-
-import ctypes as _ctypes, tempfile as _tempfile, subprocess as _subprocess
-
-_C_RING_SRC = r"""
-#include <stdlib.h>
-#include <string.h>
-#include <stdint.h>
-#include <pthread.h>
-
-#define RING_SLOTS   4096          /* power-of-2; ~4096 * 8192 = 32 MB max */
-#define SLOT_BYTES   8192          /* max bytes per event (covers SSE payload) */
-
-typedef struct { char d[SLOT_BYTES]; int len; uint64_t seq; } Slot;
-
-typedef struct {
-    Slot            slots[RING_SLOTS];
-    volatile uint64_t head;        /* monotonically increasing write cursor  */
-    pthread_mutex_t mu;
-    pthread_cond_t  wake;
-} Ring;
-
-Ring* ring_new(void) {
-    Ring *r = (Ring*)calloc(1, sizeof(Ring));
-    pthread_mutex_init(&r->mu, NULL);
-    pthread_cond_init(&r->wake, NULL);
-    return r;
-}
-void ring_free(Ring *r) {
-    pthread_mutex_destroy(&r->mu);
-    pthread_cond_destroy(&r->wake);
-    free(r);
-}
-uint64_t ring_push(Ring *r, const char *data, int len) {
-    if (len <= 0) return r->head;
-    if (len >= SLOT_BYTES) len = SLOT_BYTES - 1;
-    pthread_mutex_lock(&r->mu);
-    uint64_t seq  = r->head++;
-    uint64_t slot = seq & (RING_SLOTS - 1);
-    memcpy(r->slots[slot].d, data, len);
-    r->slots[slot].d[len] = 0;
-    r->slots[slot].len    = len;
-    r->slots[slot].seq    = seq;
-    pthread_cond_broadcast(&r->wake);
-    pthread_mutex_unlock(&r->mu);
-    return seq;
-}
-/* Returns bytes copied, 0 = nothing new, -1 = overflowed (caller re-syncs to head) */
-int ring_read(Ring *r, uint64_t want, char *out, int out_sz) {
-    uint64_t head = r->head;
-    if (want >= head) return 0;
-    if (head - want > RING_SLOTS) return -1;
-    uint64_t slot = want & (RING_SLOTS - 1);
-    pthread_mutex_lock(&r->mu);
-    int n = r->slots[slot].len;
-    if (n >= out_sz) n = out_sz - 1;
-    memcpy(out, r->slots[slot].d, n);
-    out[n] = 0;
-    pthread_mutex_unlock(&r->mu);
-    return n;
-}
-uint64_t ring_head(Ring *r) { return r->head; }
-"""
-
-_ring_lib  = None
-_ring_ptr  = None   # Ring* — the live singleton buffer
-
-def _init_c_ring() -> None:
-    global _ring_lib, _ring_ptr
-    try:
-        import os
-        with _tempfile.NamedTemporaryFile(suffix='.c', delete=False, mode='w') as f:
-            f.write(_C_RING_SRC); cp = f.name
-        sp = cp.replace('.c', '.so')
-        r  = _subprocess.run(
-            ['gcc','-O2','-shared','-fPIC','-pthread','-o',sp,cp],
-            capture_output=True, timeout=15)
-        os.unlink(cp)
-        if r.returncode != 0:
-            logger.warning(f"[RING-C] gcc failed: {r.stderr.decode()[:150]} — SSE uses deque fallback")
-            return
-        lib = _ctypes.CDLL(sp)
-        lib.ring_new.restype   = _ctypes.c_void_p
-        lib.ring_free.argtypes = [_ctypes.c_void_p]
-        lib.ring_push.restype  = _ctypes.c_uint64
-        lib.ring_push.argtypes = [_ctypes.c_void_p, _ctypes.c_char_p, _ctypes.c_int]
-        lib.ring_read.restype  = _ctypes.c_int
-        lib.ring_read.argtypes = [_ctypes.c_void_p, _ctypes.c_uint64, _ctypes.c_char_p, _ctypes.c_int]
-        lib.ring_head.restype  = _ctypes.c_uint64
-        lib.ring_head.argtypes = [_ctypes.c_void_p]
-        _ring_lib = lib
-        _ring_ptr = lib.ring_new()
-        logger.info("[RING-C] ✅ SSE ring buffer allocated (4096 slots × 8 KB)")
-    except Exception as e:
-        logger.debug(f"[RING-C] Skipping C ring: {e}")
-
-_init_c_ring()
-
-# Python-side fallback ring (deque-of-tuples: (seq, payload_str))
-import collections as _collections
-_py_ring: _collections.deque = _collections.deque(maxlen=4096)
-_py_ring_head: int = 0
-_py_ring_lock = threading.RLock()
-
-def _ring_push_event(payload: str) -> int:
-    """Push SSE event to C ring (or Python deque). Returns new sequence number."""
-    global _py_ring_head
-    if _ring_lib and _ring_ptr:
-        b = payload.encode('utf-8')
-        return int(_ring_lib.ring_push(_ring_ptr, b, len(b)))
-    with _py_ring_lock:
-        seq = _py_ring_head
-        _py_ring.append((seq, payload))
-        _py_ring_head += 1
-        return seq
-
-def _ring_read_from(pos: int, buf_size: int = 8192) -> tuple:
-    """Read next event at position pos. Returns (payload_str | None, next_pos)."""
-    if _ring_lib and _ring_ptr:
-        head = int(_ring_lib.ring_head(_ring_ptr))
-        if pos >= head:
-            return None, pos
-        buf = _ctypes.create_string_buffer(buf_size) if _ring_lib else None
-        n = _ring_lib.ring_read(_ring_ptr, _ctypes.c_uint64(pos), buf, buf_size)
-        if n == -1:
-            return None, head   # overflowed — jump to head
-        if n == 0:
-            return None, pos
-        return buf.value.decode('utf-8', errors='replace'), pos + 1
-    # Python fallback
-    with _py_ring_lock:
-        head = _py_ring_head
-        if pos >= head:
-            return None, pos
-        # scan deque for this seq
-        for seq, payload in _py_ring:
-            if seq == pos:
-                return payload, pos + 1
-        if head - pos > len(_py_ring):
-            return None, head   # overflowed
-        return None, pos + 1
-
-def _ring_current_head() -> int:
-    if _ring_lib and _ring_ptr:
-        return int(_ring_lib.ring_head(_ring_ptr))
-    with _py_ring_lock:
-        return _py_ring_head
-
-# ── In-process SSE client registry (still needed for client count / keepalive) ─
-_sse_clients: Dict[str, int] = {}   # client_id → ring_read_pos
+_sse_clients: Dict[str, _queue_mod.Queue] = {}
 _sse_lock = threading.RLock()
 _sse_broadcast_count = 0
 
-_latest_snapshot: Optional[dict]  = None
-_latest_snapshot_ts: int          = 0
-_last_snapshot_log_time: float    = 0.0
+# ── Snapshot distribution globals (MUST be declared before any function uses them) ──
+_latest_snapshot: Optional[dict]  = None          # last broadcast snapshot for new SSE clients
+_latest_snapshot_ts: int          = 0             # timestamp_ns of latest snapshot
+_last_snapshot_log_time: float    = 0.0           # rate-limit snapshot log messages
 _verbose_p2p_logging: bool        = os.getenv('VERBOSE_P2P', '').lower() in ('1', 'true', 'yes')
-_snapshot_log_interval: float     = 60.0
-_snapshot_lock                    = threading.RLock()
+_snapshot_log_interval: float     = 60.0          # seconds between snapshot log entries
+_snapshot_lock                    = threading.RLock()   # guards _latest_snapshot / _ts
 
 def _sse_push_snapshot(snapshot: dict) -> None:
-    """Push snapshot to ring buffer — all SSE handlers read from their position."""
-    global _sse_broadcast_count, _latest_snapshot
-    with _snapshot_lock:
-        _latest_snapshot = snapshot
-    payload = f"data: {json.dumps(snapshot)}\n\n"
-    _ring_push_event(payload)
-    _sse_broadcast_count += 1
-    if _sse_broadcast_count % 1000 == 0:
-        with _sse_lock:
-            n = len(_sse_clients)
-        logger.info(f"[SSE] 📊 Broadcast #{_sse_broadcast_count} | Clients: {n} | ring={'C' if _ring_lib else 'py'}")
+    """Push snapshot to all connected SSE clients."""
+    global _sse_broadcast_count
+    with _sse_lock:
+        _sse_broadcast_count += 1
+        dead = []
+        for client_id, q in _sse_clients.items():
+            try:
+                q.put_nowait(snapshot)
+            except _queue_mod.Full:
+                try:
+                    q.get_nowait()
+                    q.put_nowait(snapshot)
+                except:
+                    dead.append(client_id)
+        for client_id in dead:
+            if client_id in _sse_clients:
+                del _sse_clients[client_id]
+        if _sse_broadcast_count % 1000 == 0:
+            logger.info(f"[SSE] 📊 Broadcast #{_sse_broadcast_count} | Clients: {len(_sse_clients)}")
 
 
 
@@ -2094,51 +1945,46 @@ def _set_app_ready():
 
 @app.route('/api/snapshot/sse', methods=['GET'])
 def sse_snapshot_stream():
-    """Server-Sent Events endpoint — ring-buffer backed, no per-client Queue."""
-    client_id     = request.args.get('client_id', f"sse_{int(time.time()*1000)}")
-    miner_address = request.args.get('miner', 'unknown')
+    """Server-Sent Events endpoint for real-time snapshot streaming."""
+    # ── Capture ALL request-context values HERE, before the generator runs ──
+    # Flask exits the request context before the generator body executes its
+    # first yield. Any request.* access inside the generator raises:
+    #   RuntimeError: Working outside of request context.
+    client_id      = request.args.get('client_id', f"sse_{int(time.time()*1000)}")
+    miner_address  = request.args.get('miner', 'unknown')
 
-    def _stream(_cid, _miner):
-        with _sse_lock:
-            # Start at current head; will read all future events
-            pos = _ring_current_head()
-            _sse_clients[_cid] = pos
-        logger.info(f"[SSE] 📡 Client connected: {_cid} | miner={_miner} | ring_pos={pos}")
+    def _stream(_client_id, _miner_address):
         try:
-            # Send latest snapshot immediately so client has a base state
-            with _snapshot_lock:
-                snap = _latest_snapshot
-            if snap:
-                yield f"data: {json.dumps(snap)}\n\n"
-            idle = 0
+            q = _queue_mod.Queue(maxsize=100)
+            with _sse_lock:
+                _sse_clients[_client_id] = q
+            logger.info(f"[SSE] 📡 Client connected: {_client_id} | Miner: {_miner_address}")
+
+            global _latest_snapshot
+            if _latest_snapshot:
+                yield f"data: {json.dumps(_latest_snapshot)}\n\n"
+
             while True:
-                payload, pos = _ring_read_from(pos)
-                if payload:
-                    idle = 0
-                    with _sse_lock:
-                        _sse_clients[_cid] = pos
-                    yield payload
-                else:
-                    idle += 1
-                    time.sleep(0.25)          # 250 ms poll — releases GIL
-                    if idle % 240 == 0:       # keepalive every ~60 s
-                        yield ": keepalive\n\n"
-        except GeneratorExit:
-            pass
+                try:
+                    snapshot = q.get(timeout=60)
+                    yield f"data: {json.dumps(snapshot)}\n\n"
+                except _queue_mod.Empty:
+                    yield ": keepalive\n\n"
         except Exception as e:
-            logger.debug(f"[SSE] Client {_cid} error: {e}")
+            logger.error(f"[SSE] ❌ Error: {e}")
         finally:
             with _sse_lock:
-                _sse_clients.pop(_cid, None)
-            logger.info(f"[SSE] 🔌 Client disconnected: {_cid}")
+                if _client_id in _sse_clients:
+                    del _sse_clients[_client_id]
+            logger.info(f"[SSE] 🔌 Client disconnected: {_client_id}")
 
     return Response(
         _stream(client_id, miner_address),
         mimetype='text/event-stream',
         headers={
-            'Cache-Control'   : 'no-cache',
+            'Cache-Control':   'no-cache',
             'X-Accel-Buffering': 'no',
-            'Connection'      : 'keep-alive',
+            'Connection':      'keep-alive',
         }
     )
 
@@ -2226,9 +2072,65 @@ def oracle_push_snapshot():
         global _latest_snapshot
         _latest_snapshot = snapshot
         _sse_push_snapshot(snapshot)
+        # Flat oracle_dm to /api/events — type at root, no data nesting
+        flat = dict(snapshot); flat['type'] = 'oracle_dm'
+        _ring_push_event(json.dumps(flat, separators=(',', ':')))
         return jsonify({'status': 'received', 'sse_clients': len(_sse_clients)})
     except Exception as e:
         logger.error(f"[ORACLE] ❌ Error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/oracle/push_dm', methods=['POST'])
+def oracle_push_dm():
+    """
+    Direct DM frame ingestion endpoint.
+
+    Oracle POSTs its density-matrix frame here; server fans it out immediately
+    to every connected SSE client on both channels.
+
+    Frame structure (all fields at root — NOT nested):
+        type                 : 'oracle_dm'   (stamped here if absent)
+        density_matrix_hex   : str           (required — empty triggers miner fallback)
+        w_state_fidelity     : float
+        pq_curr / pq_last    : int
+        oracle_measurements  : list
+        consensus            : dict
+        timestamp_ns         : int
+
+    /api/snapshot/sse  — receives the raw dict (fields at root)
+    /api/events        — receives the same dict with type='oracle_dm' at root
+                         NO 'data' wrapping — clients read fields directly
+    """
+    try:
+        dm = request.get_json(force=True, silent=True)
+        if not dm or not isinstance(dm, dict):
+            return jsonify({'error': 'expected JSON object'}), 400
+
+        dm.setdefault('type', 'oracle_dm')
+        dm.setdefault('timestamp_ns', int(time.time() * 1e9))
+
+        global _latest_snapshot
+        with _snapshot_lock:
+            _latest_snapshot = dm
+
+        # Channel 1: /api/snapshot/sse — raw blob
+        _sse_push_snapshot(dm)
+
+        # Channel 2: /api/events — flat, type at root
+        _ring_push_event(json.dumps(dm, separators=(',', ':')))
+
+        try:
+            _persist_chirp_snapshot(dm)
+        except Exception as _pe:
+            logger.debug(f"[PUSH-DM] persist skipped: {_pe}")
+
+        n = len(_sse_clients)
+        logger.debug(f"[PUSH-DM] dispatched oracle_dm | clients={n} | ts={dm['timestamp_ns']}")
+        return jsonify({'status': 'dispatched', 'sse_clients': n, 'ts': dm['timestamp_ns']})
+
+    except Exception as e:
+        logger.error(f"[PUSH-DM] ❌ {e}")
         return jsonify({'error': str(e)}), 500
 
 
@@ -2373,9 +2275,8 @@ class _SSEBroadcaster:
                 conn.set_isolation_level(0)  # autocommit required for LISTEN
                 with conn.cursor() as cur:
                     cur.execute(f"LISTEN {self._PG_CHANNEL}")
-                    cur.execute("LISTEN qtcl_mempool")   # cross-worker TX sync
                 self._pg_ok = True
-                logger.info(f"[SSE] ✅ PG LISTEN active | channel={self._PG_CHANNEL}+qtcl_mempool | worker-pid={os.getpid()}")
+                logger.info(f"[SSE] ✅ PG LISTEN active | channel={self._PG_CHANNEL} | worker-pid={os.getpid()}")
                 while True:
                     # select() with 5s timeout — lets us detect conn drops promptly
                     r, _, _ = _select.select([conn], [], [], 5.0)
@@ -2383,14 +2284,7 @@ class _SSEBroadcaster:
                         conn.poll()
                         while conn.notifies:
                             note = conn.notifies.pop(0)
-                            if note.channel == 'qtcl_mempool':
-                                # Wrap TX payload as a typed SSE event and fan-out
-                                wrapped = json.dumps(
-                                    {'type': 'tx', 'data': note.payload, 'ts': time.time()},
-                                    separators=(',', ':'))
-                                self._fanout_local(wrapped)
-                            else:
-                                self._fanout_local(note.payload)
+                            self._fanout_local(note.payload)
             except Exception as e:
                 self._pg_ok = False
                 logger.warning(f"[SSE] PG LISTEN error ({e}) — reconnecting in {self._RECONNECT_DELAY}s")
@@ -2402,18 +2296,26 @@ class _SSEBroadcaster:
     # ── Local fan-out (within this worker process) ────────────────────────────
 
     def _fanout_local(self, payload: str) -> int:
-        """
-        Push payload into C ring buffer — O(1) regardless of subscriber count.
-        All SSE handlers read from the ring at their own position; no Queue, no lock
-        contention, no per-subscriber memory allocation.
-        """
-        _ring_push_event(payload)
+        """Push payload to all in-process subscriber Queues. Evict dead subs."""
+        dead, reached = [], 0
+        with self._lock:
+            for sid, q in list(self._subs.items()):
+                try:
+                    q.put_nowait(payload)
+                    reached += 1
+                except _queue_mod.Full:
+                    try:
+                        q.get_nowait()   # drop oldest
+                        q.put_nowait(payload)
+                        reached += 1
+                    except Exception:
+                        dead.append(sid)
+            for sid in dead:
+                self._subs.pop(sid, None)
         self._count += 1
         if self._count % 500 == 0:
-            with _sse_lock:
-                n = len(_sse_clients)
-            logger.info(f"[SSE] 📡 #{self._count} | clients={n} | pg={'✅' if self._pg_ok else '⚠️'} | ring={'C' if _ring_lib else 'py'}")
-        return 1   # ring accepts all
+            logger.info(f"[SSE] 📡 #{self._count} | subs={len(self._subs)} | pg={'✅' if self._pg_ok else '⚠️ local-only'}")
+        return reached
 
     # ── PG connection factory (raw psycopg2 — bypasses pool, needs autocommit) ─
 
@@ -2978,21 +2880,26 @@ def _start_gossip_subsystem():
 @app.route('/api/events', methods=['GET'])
 def sse_events_stream():
     """
-    Ring-buffer backed SSE stream — zero per-client Queue allocation.
-    Each connection tracks its ring position; events arrive via _ring_push_event.
+    Server-Sent Events stream for real-time blockchain events.
 
     Query params:
-        client_id   — unique identifier (auto-generated if absent)
-        types       — comma-separated: tx,block,peer,mempool,all  (default: all)
+        client_id   — unique identifier for this subscriber (auto-generated if absent)
+        types       — comma-separated event types to receive: tx,block,peer,mempool,all
+                      default: all
+
+    Event format (each SSE frame):
+        data: {"type": "tx"|"block"|"peer"|"mempool", "data": {...}, "ts": <unix float>}
+
+    Clients MUST handle the keepalive comment line `: keepalive` — it is sent every
+    30 seconds to prevent proxy / load balancer timeout.
     """
     client_id  = request.args.get('client_id') or f"cli_{secrets.token_hex(6)}"
     want_types = set((request.args.get('types', 'all') or 'all').split(','))
 
     def _stream():
-        pos = _ring_current_head()
-        with _sse_lock:
-            _sse_clients[client_id] = pos
-        logger.info(f"[SSE/events] Client connected: {client_id} | want={want_types} | pos={pos}")
+        q = _gossip_sse.subscribe(client_id)
+        logger.info(f"[SSE/events] Client connected: {client_id} | want={want_types}")
+        # Send immediate hello with current chain tip and mempool size
         try:
             tip = query_latest_block() or {}
             with get_db_cursor() as cur:
@@ -3003,30 +2910,19 @@ def sse_events_stream():
             pass
 
         try:
-            idle = 0
             while True:
-                raw, pos = _ring_read_from(pos)
-                if raw:
-                    idle = 0
-                    with _sse_lock:
-                        _sse_clients[client_id] = pos
-                    try:
-                        parsed = json.loads(raw)
-                        etype  = parsed.get('type', '')
-                        if 'all' in want_types or etype in want_types:
-                            yield f"data: {raw}\n\n"
-                    except Exception:
+                try:
+                    raw = q.get(timeout=30)
+                    parsed = json.loads(raw)
+                    etype  = parsed.get('type', '')
+                    if 'all' in want_types or etype in want_types:
                         yield f"data: {raw}\n\n"
-                else:
-                    idle += 1
-                    time.sleep(0.25)
-                    if idle % 120 == 0:      # keepalive every ~30 s
-                        yield ": keepalive\n\n"
+                except _queue_mod.Empty:
+                    yield ": keepalive\n\n"
         except GeneratorExit:
             pass
         finally:
-            with _sse_lock:
-                _sse_clients.pop(client_id, None)
+            _gossip_sse.unsubscribe(client_id)
             logger.info(f"[SSE/events] Client disconnected: {client_id}")
 
     return Response(
@@ -3299,13 +3195,31 @@ except Exception as _gse:
 
 
 def _broadcast_snapshot_to_gossip_network(snapshot: dict) -> None:
-    """Push snapshot to SSE subscribers and update in-memory cache."""
+    """
+    Push snapshot to SSE subscribers and update in-memory cache.
+
+    Dispatches to BOTH SSE channels:
+      • /api/snapshot/sse  — raw chirp blob (dashboard canvas + lattice)
+      • /api/events        — flat oracle_dm event (miners + any typed subscriber)
+
+    CRITICAL: oracle_dm is pushed FLAT — DM fields at top level with 'type'
+    merged in.  _gossip_sse.publish() wraps data under a 'data' key which
+    breaks any client that reads density_matrix_hex directly off the event.
+    """
     global _latest_snapshot, _latest_snapshot_ts, _last_snapshot_log_time
     with _snapshot_lock:
         _latest_snapshot = snapshot
         _latest_snapshot_ts = snapshot.get('timestamp_ns', 0)
     try:
+        # Channel 1: raw blob → /api/snapshot/sse ring
         _sse_push_snapshot(snapshot)
+
+        # Channel 2: flat oracle_dm → /api/events ring
+        # Build flat payload: DM fields + type at root, no nesting under 'data'
+        flat = dict(snapshot)
+        flat['type'] = 'oracle_dm'
+        _ring_push_event(json.dumps(flat, separators=(',', ':')))
+
         now = time.time()
         if _verbose_p2p_logging or (now - _last_snapshot_log_time >= _snapshot_log_interval):
             logger.debug(f"[GOSSIP] 📡 Snapshot broadcast | ts={snapshot.get('timestamp_ns', 0)}")
@@ -3632,7 +3546,7 @@ def _snapshot_streaming_daemon():
 
             unified_snapshot = mux.aggregate_all_measurements()
 
-            # None means ORACLE_W_STATE_MANAGER has no real measurements yet — skip
+            # None means ORACLE_W_STATE_MANAGER has no per_node data yet — skip
             if unified_snapshot is None:
                 continue
 
@@ -10796,34 +10710,6 @@ logger.info("═" * 80)
 logger.info("[P2P] Starting P2P daemons (heartbeat, snapshot broadcast)...")
 _start_p2p_daemons()
 logger.info("[P2P] ✅ P2P daemons started")
-
-# ── Wire mempool accepted-TX events → _gossip_sse ring + SSE clients ─────────
-# Any worker that accepts a TX publishes it to the C ring (local) AND fires
-# pg_notify('qtcl_mempool') so ALL other workers' _PGListenerThreads inject it
-# into their local heaps.  Dashboard clients on any worker see it within 1–5 ms.
-try:
-    from mempool import get_mempool as _gm
-    def _mempool_sse_callback(event: str, tx) -> None:
-        """Bridge mempool events into the shared SSE ring."""
-        try:
-            if event in ('accepted', 'replaced_by_fee', 'replaced'):
-                _gossip_sse.publish('tx', tx.to_dict())
-            elif event in ('confirmed',):
-                _gossip_sse.publish('tx_confirmed', {
-                    'tx_hash': tx.tx_hash,
-                    'from': tx.from_address,
-                    'to':   tx.to_address,
-                    'amount_qtcl': tx.amount_base / 100,
-                })
-            elif event == 'expired':
-                _gossip_sse.publish('tx_expired', {'tx_hash': tx.tx_hash})
-        except Exception as _cb_e:
-            logger.debug(f"[INIT] mempool_sse_callback: {_cb_e}")
-
-    _gm().subscribe(_mempool_sse_callback)
-    logger.info("[INIT] ✅ Mempool → _gossip_sse ring callback wired")
-except Exception as _wire_e:
-    logger.warning(f"[INIT] Mempool SSE callback wire failed (non-fatal): {_wire_e}")
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # PRODUCTION DEPLOYMENT: Gunicorn with Async Workers
