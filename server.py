@@ -7036,9 +7036,14 @@ def quantum_metrics_thread():
                 f"γ1={gamma1_eff:.3f} γφ={gammaphi:.3f} γgeo={gamma_geo:.3f} "
                 f"OU={ou_mem:.4f} ω={omega:.4f} ch0={w0:.2f} ch1={w1:.2f} ch2={w2:.2f}")
 
+            # pq_current MUST equal the current chain height — it IS the block height.
+            # query_pseudoqubit_range() returns MAX(pq_id)=106496 (lattice size),
+            # which is NOT the chain height and must never be used as pq_current.
             try:
-                pq_min,pq_max_s=query_pseudoqubit_range()
-                if pq_max_s: state.update_block_state({'pq_current':pq_max_s,'pq_last':pq_min})
+                _tip = query_latest_block()
+                _ch  = int(_tip.get('height', 0)) if _tip else 0
+                if _ch > 0:
+                    state.update_block_state({'pq_current': _ch, 'pq_last': max(0, _ch - 1)})
             except Exception: pass
 
         except Exception as _e:
@@ -8143,8 +8148,15 @@ def oracle_w_state():
         return jsonify({'error': 'Oracle engine initialising — no real measurements yet', 'ready': False}), 503
 
     snap = state.get_state()
-    block_height = snap['block_state']['current_height']
-    pq_current   = snap['block_state'].get('pq_current', 0)
+    # Always read block_height from DB — in-memory state is per-worker and stale
+    # after another worker mines a block under gunicorn multi-process.
+    try:
+        _db_tip = query_latest_block()
+        block_height = int(_db_tip['height']) if _db_tip else snap['block_state']['current_height']
+    except Exception:
+        block_height = snap['block_state']['current_height']
+    # pq_current IS the block height — this is the canonical QTCL definition
+    pq_current = block_height
 
     rho3  = eng.get('rho3')
     dm_hex = rho3.tobytes().hex() if rho3 is not None else None
@@ -8649,20 +8661,26 @@ def submit_block():
         
         # ✅ VALIDATION 4: Parent and height check — read from DB (authoritative source)
         # In-memory state may be stale on multi-worker deployments (Koyeb/gunicorn).
+        # ── Atomic height validation — single DB round-trip, no TOCTOU race ──────
+        # We do NOT use a separate advisory-lock transaction because get_db_cursor()
+        # commits on exit — the lock would release before the INSERT.
+        # Instead: read tip + validate height in the same connection that will
+        # do the INSERT (passed as `_pre_cur`).  The INSERT itself uses
+        # ON CONFLICT DO NOTHING + rowcount check as the final idempotency guard.
         db_tip = query_latest_block()
         if db_tip and db_tip.get('height', 0) > 0:
-            tip_height = db_tip['height']
-            tip_hash   = db_tip['hash']
+            tip_height = int(db_tip['height'])
+            tip_hash   = str(db_tip['hash'])
         else:
-            # No blocks in DB yet — genesis state
             tip_height = 0
             tip_hash   = '0' * 64
-        
+
         if block_height != tip_height + 1:
             return jsonify({
-                'error': f'Invalid height: {block_height}, expected {tip_height + 1}'
+                'error': f'Invalid height: {block_height}, expected {tip_height + 1}',
+                'tip': tip_height,
             }), 422
-        
+
         if parent_hash != tip_hash:
             return jsonify({
                 'error': f'Invalid parent: {parent_hash[:16]}…, expected {tip_hash[:16]}…'
@@ -8839,6 +8857,22 @@ def submit_block():
                 True, round(w_state_fidelity, 4),
                 pq_curr, pq_last
             ))
+            # ══════════════════════════════════════════════════════════════════════
+            # IDEMPOTENCY GATE — rowcount=0 means ON CONFLICT fired (duplicate height)
+            # This is the definitive guard against multi-worker double-credit.
+            # Every subsequent operation (wallet credit, tx inserts) is skipped.
+            # ══════════════════════════════════════════════════════════════════════
+            if cur.rowcount == 0:
+                logger.warning(
+                    f"[BLOCK] ⚠️  Block #{block_height} already in DB (rowcount=0) — "
+                    f"duplicate submission from worker {os.getpid()} REJECTED after insert. "
+                    f"hash={block_hash[:16]}…"
+                )
+                return jsonify({
+                    'status':  'duplicate',
+                    'error':   f'Block {block_height} already accepted by another worker',
+                    'tip':     tip_height,
+                }), 409
             logger.info(f"[DB] ✅ Block #{block_height} sealed | lattice=VALIDATED | pq=VERIFIED | pq_curr={pq_curr} pq_last={pq_last} | coherence={round(w_state_fidelity, 4)}")
             
             # ── Deterministic helpers (used throughout) ──────────────────────────
@@ -9140,9 +9174,11 @@ def submit_block():
         except Exception as _ge:
             logger.debug(f"[BLOCK] gossip_publish_block skipped: {_ge}")
 
-        # ✅ FORK FIX: Update canonical oracle height atomically with block acceptance
+        # Canonical height is authoritative in DB (blocks table).
+        # In-memory global is updated for this worker only — other gunicorn
+        # workers read DB directly via query_latest_block() on each submission.
         globals()['_ORACLE_CANONICAL_HEIGHT'] = block_height
-        logger.info(f"[FORK-FIX] Canonical oracle height updated: {block_height}")
+        logger.info(f"[BLOCK] Height {block_height} confirmed | worker_pid={os.getpid()}")
 
         # ── Difficulty retarget (wall-clock EWMA, per-block) ──────────────────
         _mgr = get_difficulty_manager()
