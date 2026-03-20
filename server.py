@@ -7516,10 +7516,15 @@ def diagnostics():
     mempool_info = {
         'total_transactions': 0,
         'memory_used_kb': 0,
+        'pending_count': 0,
     }
     try:
         mp = get_mempool()
-        mempool_info['total_transactions'] = len(mp.txs) if hasattr(mp, 'txs') else 0
+        tx_count = len(mp.txs) if hasattr(mp, 'txs') else 0
+        mempool_info['total_transactions'] = tx_count
+        mempool_info['pending_count']      = tx_count
+        # Estimate memory: ~2KB per tx (JSON payload average)
+        mempool_info['memory_used_kb']     = tx_count * 2
     except Exception:
         pass
     
@@ -7532,12 +7537,17 @@ def diagnostics():
         'p2p': p2p_info,
         'mempool': mempool_info,
         'lattice': {
-            'loaded': state.lattice_loaded,
-            'coherence': round(min(1.0, max(0.0, float(snapshot.get('quantum_metrics', {}).get('coherence') or 0))), 6),
-            'fidelity': round(min(1.0, max(0.0, float(snapshot.get('quantum_metrics', {}).get('w_state_fidelity') or 0))), 6),
+            'loaded':    state.lattice_loaded,
+            'coherence': round(min(1.0, max(0.0, float(
+                snapshot.get('quantum_metrics', {}).get('coherence') or 0))), 6),
+            'fidelity':  round(min(1.0, max(0.0, float(
+                snapshot.get('quantum_metrics', {}).get('w_state_fidelity') or 0))), 6),
+            'note': 'lattice internal state — see /api/oracle/w-state for live oracle consensus',
         },
         'timestamp': datetime.now(timezone.utc).isoformat(),
-        'version': '6.0-enhanced',
+        'uptime_human': (lambda s: f"{int(s//3600)}h {int((s%3600)//60)}m {int(s%60)}s")(
+            max(0.0, time.time() - _SERVER_START_TIME)),
+        'version': '7.0-quantum',
     }), 200
 
 @app.route('/api/dht/hello', methods=['GET', 'OPTIONS'])
