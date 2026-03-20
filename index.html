@@ -132,12 +132,15 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
 #bts{display:inline-block;animation:tk 35s linear infinite;white-space:nowrap;color:var(--dim);padding-left:100%}
 @keyframes tk{0%{transform:translateX(0)}100%{transform:translateX(-100%)}}
 #bu{padding:0 10px;white-space:nowrap;color:var(--dim);border-left:1px solid var(--b)}
-.sy{overflow-y:auto;max-height:280px;scrollbar-width:thin;scrollbar-color:var(--b) transparent}
-.sy::-webkit-scrollbar{width:3px}
-.sy::-webkit-scrollbar-thumb{background:var(--b)}
+.sy{overflow-y:auto;max-height:420px;scrollbar-width:thin;scrollbar-color:var(--b) transparent}
+.sy::-webkit-scrollbar{width:4px}
+.sy::-webkit-scrollbar-thumb{background:rgba(0,220,255,.3);border-radius:2px}
+.sy::-webkit-scrollbar-thumb:hover{background:rgba(0,220,255,.5)}
 .fl{animation:fl .4s ease-out}
 @keyframes fl{0%{color:var(--cy);text-shadow:0 0 12px var(--cy)}100%{}}
 .es{padding:24px;text-align:center;font-size:11px;color:var(--dim)}
+@keyframes tx-peer-flash{0%{background:rgba(0,220,255,.22);box-shadow:0 0 8px rgba(0,220,255,.3)}100%{background:transparent;box-shadow:none}}
+.tt tr.tx-peer-new td{animation:tx-peer-flash .7s ease-out}
 </style>
 </head>
 <body>
@@ -219,26 +222,29 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
   <div class="tc">
     <div class="pn">
       <div class="ph" style="flex-wrap:wrap;gap:6px">
-        <span class="pht">Recent Transactions</span>
+        <span class="pht">Live Transaction Feed</span>
         <span class="pb gr" id="txb">0 txs</span>
-        <span class="pb vi" id="txe" style="font-size:.72em"><span id="txlive" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--dim);margin-right:4px;vertical-align:middle"></span><span id="txstreamstatus">SYNCING</span></span>
+        <span class="pb vi" id="txe"><span id="txlive" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--dim);margin-right:4px;vertical-align:middle"></span><span id="txstreamstatus">SYNCING</span></span>
+        <span class="pb" id="peer-tx-badge" style="font-size:.72em;background:var(--cy2);color:var(--cy);border-color:rgba(0,220,255,.25)"><span id="peer-tx-count">0</span> received</span>
       </div>
-      <div style="padding:8px 16px 4px;display:flex;gap:16px;font-size:8px;font-family:var(--mono);color:var(--dim);letter-spacing:1px;text-transform:uppercase;border-bottom:1px solid var(--b)">
+      <div style="padding:6px 16px;display:flex;gap:16px;font-size:8px;font-family:var(--mono);color:var(--dim);letter-spacing:1px;text-transform:uppercase;border-bottom:1px solid var(--b)">
         <span style="color:var(--vi)">&#9632; COINBASE</span>
         <span style="color:var(--cy)">&#9632; TRANSFER</span>
         <span style="color:var(--go)">&#9632; FEE</span>
         <span style="color:var(--gr)">&#9632; CONFIRMED</span>
         <span style="color:var(--re)">&#9632; REJECTED</span>
+        <span style="color:var(--dim);margin-left:auto">SHOWING LAST 10</span>
       </div>
-      <div class="sy" id="txwrap" style="max-height:280px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--b) transparent">
+      <div class="sy" id="txwrap">
         <table class="tt"><thead><tr>
           <th style="width:90px">Type</th>
           <th>Hash</th>
-          <th style="width:90px">From / To</th>
+          <th style="width:110px">From / To</th>
           <th style="width:80px;text-align:right">Amount</th>
           <th style="width:65px;text-align:right">Fee</th>
           <th style="width:75px">Status</th>
-        </tr></thead><tbody id="ttb"><tr><td colspan="6" class="es">Connecting to mempool stream&hellip;</td></tr></tbody></table>
+          <th style="width:55px">Time</th>
+        </tr></thead><tbody id="ttb"><tr><td colspan="7" class="es">Connecting to mempool stream&hellip;</td></tr></tbody></table>
       </div>
     </div>
     <div class="pn">
@@ -742,6 +748,8 @@ function fmt(v){return v==null?'--':parseFloat(v).toFixed(4);}
 function pct(v,mx){return Math.min(100,Math.max(0,v/mx*100))+'%';}
 function fmtAmt(v){var n=parseFloat(v)||0;return n.toFixed(n<1?4:2);}
 function txShort(h){var s=(h||'').replace(/^coinbase_/,'');return s.slice(0,12)+'\u2026';}
+function txShortFull(h){var s=(h||'').replace(/^coinbase_/,'');return s.slice(0,20)+'\u2026';}
+function fmtTime(ts){if(!ts)return'--:--';var d=new Date(ts>1e15?ts/1e6:ts>1e12?ts/1e3:ts);return d.toTimeString().slice(0,8);}
 
 function _txTypeLabel(tx){
   var t=(tx.tx_type||'transfer').toLowerCase();
@@ -783,27 +791,29 @@ function _makeTxRow(tx,isNew){
   var statusLabel=ev&&ev!=='snapshot'?statusInfo.label:(tx.status||'pending').toUpperCase();
   var statusCls=ev&&ev!=='snapshot'?statusInfo.cls:(tx.status||'pending');
 
-  var rowClass=(isNew?'tx-new ':'');
+  var rowClass=(isNew?'tx-peer-new ':'');
   if(tx._fr) rowClass+='fr ';
 
-  return '<tr class="'+rowClass.trim()+'">'+
+  return '<tr class="'+rowClass.trim()+'" data-hash="'+(tx.tx_hash||tx.tx_id||'')+'">'+
     '<td><span class="tba '+typeInfo.cls+'" style="color:'+typeInfo.col+'">'+typeInfo.label+'</span></td>'+
     '<td><span style="color:var(--cy);font-size:9px;letter-spacing:.3px" title="'+tx.tx_hash+'">'+txShort(tx.tx_hash)+'</span></td>'+
     '<td>'+_txFromOrTo(tx)+'</td>'+
     '<td style="text-align:right;font-size:10px">'+_txAmount(tx,typeInfo)+'</td>'+
     '<td style="text-align:right">'+_txFee(tx)+'</td>'+
     '<td><span class="tba '+statusCls+'" style="font-size:7px;padding:1px 5px">'+statusLabel+'</span></td>'+
+    '<td style="font-size:8px;color:var(--dim);text-align:right">'+fmtTime(tx.timestamp_ns||tx.timestamp)+'</td>'+
     '</tr>';
 }
 
 function renderTxs(){
   var tb=document.getElementById('ttb');
-  if(!txs.length){tb.innerHTML='<tr><td colspan="6" class="es">No transactions yet — waiting for mempool&hellip;</td></tr>';return;}
-  var total=txs.length;
-  tb.innerHTML=txs.slice(0,50).map(function(tx,i){
+  var recentTxs=txs.slice(0,10);
+  if(!recentTxs.length){tb.innerHTML='<tr><td colspan="7" class="es">Awaiting transactions from mempool stream&hellip;</td></tr>';return;}
+  tb.innerHTML=recentTxs.map(function(tx,i){
     return _makeTxRow(tx,i===0&&tx._fr);
   }).join('');
-  document.getElementById('txb').textContent=total+' tx'+(txTotalConfirmed?' · '+txTotalConfirmed+' confirmed':'');
+  document.getElementById('txb').textContent=txs.length+' tx'+(txTotalConfirmed?' · '+txTotalConfirmed+' confirmed':'');
+  document.getElementById('peer-tx-count').textContent=txTotalAccepted;
 }
 
 function _addTxLive(tx){
@@ -811,12 +821,15 @@ function _addTxLive(tx){
   if(!h) return;
   if(txs.find(function(t){return(t.tx_hash||t.tx_id)===h;})) return;
   tx._fr=true;
+  tx.timestamp=tx.timestamp||tx.timestamp_ns?((tx.timestamp_ns>1e15?tx.timestamp_ns/1e6:tx.timestamp_ns>1e12?tx.timestamp_ns/1e3:tx.timestamp_ns)||Date.now()):Date.now();
   txs.unshift(tx);
   txTotalAccepted++;
   S.mempool_size=(S.mempool_size||0)+1;
   st('hm',S.mempool_size+' tx');
-  if(txs.length>100) txs=txs.slice(0,100);
+  if(txs.length>50) txs=txs.slice(0,50);
   renderTxs();
+  var wrap=document.getElementById('txwrap');
+  if(wrap) wrap.scrollTop=0;
 }
 
 function _confirmTx(tx_hash){
@@ -877,9 +890,10 @@ function _onMempoolSSE(raw){
     if(!exists){txs.push(raw);txs.sort(function(a,b){return(b.timestamp_ns||0)-(a.timestamp_ns||0);});}
     renderTxs();return;
   }
-  if(raw.event==='accepted'){
+  if(raw.event==='accepted'||raw.type==='transaction'){
     _addTxLive(raw);return;
   }
+  _addTxLive(raw);
 }
 
 function connectMempoolSSE(){
@@ -894,6 +908,9 @@ function connectMempoolSSE(){
   };
   txEs.onmessage=function(e){
     try{_onMempoolSSE(JSON.parse(e.data));}catch(_){}
+    var dot=document.getElementById('txlive');
+    if(dot&&txLive){dot.style.background='var(--gr)';dot.style.boxShadow='0 0 6px var(--gr)';}
+    document.getElementById('txstreamstatus').textContent='LIVE';
   };
   txEs.onerror=function(){
     txLive=false;
@@ -1115,12 +1132,17 @@ async function fetchWState(){
 async function fetchMempool(){
   var r=await Promise.all([api('/api/mempool/stats'),api('/api/mempool')]);
   var stats=r[0],pend=r[1];
-  // mempool.stats() returns: size, total_fee_base, min_fee_rate, max_fee_rate, avg_fee_rate, total_accepted...
   if(stats&&stats.size!=null) S.mempool_size=stats.size;
   if(pend&&pend.transactions){
     var fresh=pend.transactions.filter(function(t){return!txs.find(function(x){return(x.tx_hash||x.tx_id)===(t.tx_hash||t.tx_id);});});
-    fresh.forEach(function(t){t._fr=true;});
-    txs=fresh.concat(txs).slice(0,100);renderTxs();
+    fresh.forEach(function(t){
+      t._fr=true;
+      t.timestamp=t.timestamp||t.timestamp_ns?((t.timestamp_ns>1e15?t.timestamp_ns/1e6:t.timestamp_ns>1e12?t.timestamp_ns/1e3:t.timestamp_ns)||Date.now()):Date.now();
+    });
+    txs=fresh.concat(txs).slice(0,50);
+    txs.sort(function(a,b){return(b.timestamp||0)-(a.timestamp||0);});
+    txTotalAccepted=txs.length;
+    renderTxs();
   }
 }
 
