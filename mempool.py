@@ -459,6 +459,215 @@ class _DBPool:
 _db = _DBPool()
 
 # ══════════════════════════════════════════════════════════════════════════════
+# C FAST TX SERIALIZER — compact JSON for PG NOTIFY (avoids json.dumps overhead
+# on the hot accept() path under load)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_C_SERIALIZE_TX: Any = None
+
+def _init_c_serializer() -> None:
+    global _C_SERIALIZE_TX
+    import ctypes, tempfile, subprocess
+    _SRC = r"""
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
+/* Compact JSON for PG NOTIFY payload. Returns bytes written or -1 on overflow. */
+int serialize_tx(
+    const char *h, const char *f, const char *t,
+    long long a, long long fee, long long n, long long ts,
+    const char *w, const char *tp, const char *memo,
+    char *out, int sz)
+{
+    /* memo: first 60 chars max, avoid PG 8000-byte NOTIFY limit */
+    char m[64]; int ml = (int)strlen(memo);
+    if (ml > 60) ml = 60;
+    memcpy(m, memo, ml); m[ml] = 0;
+    return snprintf(out, sz,
+        "{\"h\":\"%s\",\"f\":\"%s\",\"t\":\"%s\","
+        "\"a\":%lld,\"fee\":%lld,\"n\":%lld,\"ts\":%lld,"
+        "\"w\":\"%s\",\"tp\":\"%s\",\"m\":\"%s\"}",
+        h,f,t,a,fee,n,ts,w,tp,m);
+}
+"""
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.c', delete=False, mode='w') as cf:
+            cf.write(_SRC); cpath = cf.name
+        spath = cpath.replace('.c', '.so')
+        r = subprocess.run(['gcc','-O2','-shared','-fPIC','-o',spath,cpath],
+                           capture_output=True, timeout=15)
+        if r.returncode == 0:
+            lib = ctypes.CDLL(spath)
+            fn = lib.serialize_tx
+            fn.restype  = ctypes.c_int
+            fn.argtypes = [ctypes.c_char_p]*5 + [ctypes.c_longlong]*4 + \
+                          [ctypes.c_char_p]*3 + [ctypes.c_char_p, ctypes.c_int]
+            # Fix argtypes properly
+            fn.argtypes = [
+                ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,  # h,f,t
+                ctypes.c_longlong, ctypes.c_longlong,                 # a,fee
+                ctypes.c_longlong, ctypes.c_longlong,                 # n,ts
+                ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,  # w,tp,memo
+                ctypes.c_char_p, ctypes.c_int,                        # out,sz
+            ]
+            _C_SERIALIZE_TX = fn
+            logger.info("[MEMPOOL-C] ✅ Fast TX serializer loaded (gcc -O2)")
+        else:
+            logger.debug(f"[MEMPOOL-C] gcc unavailable: {r.stderr.decode()[:120]}")
+        import os; os.unlink(cpath)
+    except Exception as e:
+        logger.debug(f"[MEMPOOL-C] Skipping C serializer: {e}")
+
+_init_c_serializer()
+
+_NOTIFY_CHANNEL_MEMPOOL = 'qtcl_mempool'
+_NOTIFY_PAYLOAD_MAX     = 7800   # pg_notify hard limit 8000 bytes
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PG NOTIFIER — dedicated connection for NOTIFY (never shared with query pool)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _PGNotifier:
+    """
+    Fire pg_notify on a dedicated autocommit connection.
+    One instance per Mempool singleton.  Thread-safe via lock.
+    """
+    def __init__(self) -> None:
+        self._conn = None
+        self._lock = threading.Lock()
+
+    def _connect(self) -> None:
+        if not _PG_AVAILABLE:
+            return
+        import psycopg2 as _pg2
+        dsn = _resolve_dsn()
+        if not dsn:
+            return
+        self._conn = _pg2.connect(dsn, connect_timeout=5)
+        self._conn.autocommit = True
+
+    def notify(self, channel: str, payload: str) -> None:
+        if not _PG_AVAILABLE:
+            return
+        if len(payload) > _NOTIFY_PAYLOAD_MAX:
+            return
+        with self._lock:
+            for attempt in range(2):
+                try:
+                    if self._conn is None or self._conn.closed:
+                        self._connect()
+                    with self._conn.cursor() as cur:
+                        cur.execute(f"SELECT pg_notify(%s, %s)", (channel, payload))
+                    return
+                except Exception as exc:
+                    logger.debug(f"[NOTIFIER] pg_notify attempt {attempt}: {exc}")
+                    try:
+                        self._conn.close()
+                    except Exception:
+                        pass
+                    self._conn = None
+
+    def close(self) -> None:
+        with self._lock:
+            try:
+                if self._conn and not self._conn.closed:
+                    self._conn.close()
+            except Exception:
+                pass
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PG LISTENER THREAD — receives NOTIFY from other workers, injects TXs locally
+# Solves the per-worker mempool isolation problem under gunicorn multi-worker.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _PGListenerThread:
+    """
+    Listens on qtcl_mempool channel.  When another worker accepts a TX and
+    fires pg_notify, this thread receives the compact JSON payload and
+    fast-imports the TX into the local in-memory heap — without re-validating
+    (the originating worker already validated it and persisted to DB).
+
+    This gives every gunicorn worker a consistent view of the mempool.
+    """
+    _RECONNECT_S = 3.0
+
+    def __init__(self, mempool: 'Mempool') -> None:
+        self._mempool = mempool
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if not _PG_AVAILABLE or not _resolve_dsn():
+            logger.info("[MEMPOOL-LISTEN] PG unavailable — cross-worker sync disabled")
+            return
+        self._running = True
+        self._thread = threading.Thread(
+            target=self._loop, name="MempoolPGListener", daemon=True)
+        self._thread.start()
+        logger.info(f"[MEMPOOL-LISTEN] ✅ Listening on channel={_NOTIFY_CHANNEL_MEMPOOL} pid={os.getpid()}")
+
+    def stop(self) -> None:
+        self._running = False
+
+    def _loop(self) -> None:
+        import psycopg2 as _pg2
+        import select as _sel
+        dsn = _resolve_dsn()
+        while self._running:
+            conn = None
+            try:
+                conn = _pg2.connect(dsn, connect_timeout=5)
+                conn.autocommit = True
+                with conn.cursor() as cur:
+                    cur.execute(f"LISTEN {_NOTIFY_CHANNEL_MEMPOOL}")
+                while self._running:
+                    r, _, _ = _sel.select([conn], [], [], 5.0)
+                    if r:
+                        conn.poll()
+                        while conn.notifies:
+                            note = conn.notifies.pop(0)
+                            self._ingest(note.payload)
+            except Exception as exc:
+                logger.debug(f"[MEMPOOL-LISTEN] reconnect ({exc})")
+                try:
+                    if conn:
+                        conn.close()
+                except Exception:
+                    pass
+                time.sleep(self._RECONNECT_S)
+
+    def _ingest(self, payload: str) -> None:
+        """Parse compact JSON payload and fast-import TX into local heap."""
+        try:
+            d = json.loads(payload)
+            tx_hash = d.get('h', '')
+            if not tx_hash:
+                return
+            # Skip if already in our heap (we originated this TX)
+            if self._mempool.contains(tx_hash):
+                return
+            # Reconstruct minimal MempoolTx — skip full validation
+            tx = MempoolTx(
+                tx_hash        = tx_hash,
+                from_address   = d['f'],
+                to_address     = d['t'],
+                amount_base    = int(d['a']),
+                fee_base       = int(d['fee']),
+                nonce          = int(d['n']),
+                signature      = d.get('sig', ''),
+                w_entropy_hash = d.get('w', ''),
+                timestamp_ns   = int(d['ts']),
+                tx_type        = d.get('tp', 'transfer'),
+                memo           = d.get('m', ''),
+            )
+            with self._mempool._lock:
+                if tx.tx_hash not in self._mempool._index:
+                    self._mempool._insert(tx)
+                    logger.debug(f"[MEMPOOL-LISTEN] ← imported {tx_hash[:12]}… from peer worker")
+        except Exception as exc:
+            logger.debug(f"[MEMPOOL-LISTEN] ingest error: {exc}")
+
+# ══════════════════════════════════════════════════════════════════════════════
 # HLWE SIGNATURE VERIFIER — standalone, no oracle instance required
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -731,6 +940,8 @@ class Mempool:
         }
         self._bg_thread   : Optional[threading.Thread] = None
         self._bg_running  = False
+        self._notifier    : Optional[_PGNotifier]      = None
+        self._listener    : Optional[_PGListenerThread] = None
         logger.info("[MEMPOOL] ✅ Initialised — Bitcoin-model priority mempool ready")
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -740,6 +951,10 @@ class Mempool:
     def start(self) -> None:
         """Start background maintenance worker and recover pending TXs from DB."""
         self._recover_from_db()
+        # Cross-worker mempool sync via PG NOTIFY/LISTEN
+        self._notifier = _PGNotifier()
+        self._listener = _PGListenerThread(self)
+        self._listener.start()
         self._bg_running  = True
         self._bg_thread   = threading.Thread(
             target=self._background_worker,
@@ -753,6 +968,10 @@ class Mempool:
         self._bg_running = False
         if self._bg_thread:
             self._bg_thread.join(timeout=5)
+        if self._listener:
+            self._listener.stop()
+        if self._notifier:
+            self._notifier.close()
 
     # ─── Main entry point: accept a transaction ──────────────────────────
 
@@ -928,6 +1147,9 @@ class Mempool:
 
                 # ── PERSIST TO DB ──────────────────────────────────────────
                 self._persist_tx(tx)
+
+                # ── NOTIFY PEER WORKERS (cross-worker mempool sync) ─────────
+                self._notify_peers(tx)
 
                 # ── UPSERT WALLET ROWS ─────────────────────────────────────
                 self._balances.upsert_wallet(from_addr)
@@ -1498,6 +1720,49 @@ class Mempool:
                 pass
         except Exception as exc:
             logger.debug(f"[MEMPOOL] BlockManager feed skipped: {exc}")
+
+    def _notify_peers(self, tx: MempoolTx) -> None:
+        """
+        Broadcast accepted TX to all peer workers via pg_notify.
+        Uses C serializer for speed; falls back to json.dumps.
+        Compact key names keep payload well under PG's 8000-byte limit.
+        """
+        if self._notifier is None:
+            return
+        try:
+            buf_size = 7800
+            if _C_SERIALIZE_TX is not None:
+                import ctypes
+                buf = ctypes.create_string_buffer(buf_size)
+                n = _C_SERIALIZE_TX(
+                    tx.tx_hash.encode(),
+                    tx.from_address.encode(),
+                    tx.to_address.encode(),
+                    tx.amount_base, tx.fee_base,
+                    tx.nonce, tx.timestamp_ns,
+                    tx.w_entropy_hash.encode(),
+                    tx.tx_type.encode(),
+                    tx.memo[:60].encode(),
+                    buf, buf_size,
+                )
+                payload = buf.value.decode() if n > 0 else None
+            else:
+                payload = None
+
+            if payload is None:
+                payload = json.dumps({
+                    'h': tx.tx_hash, 'f': tx.from_address, 't': tx.to_address,
+                    'a': tx.amount_base, 'fee': tx.fee_base,
+                    'n': tx.nonce, 'ts': tx.timestamp_ns,
+                    'w': tx.w_entropy_hash, 'tp': tx.tx_type,
+                    'm': tx.memo[:60],
+                    'sig': tx.signature[:200],
+                }, separators=(',', ':'))
+
+            if len(payload) <= _NOTIFY_PAYLOAD_MAX:
+                self._notifier.notify(_NOTIFY_CHANNEL_MEMPOOL, payload)
+        except Exception as exc:
+            logger.debug(f"[MEMPOOL] _notify_peers error: {exc}")
 
     def _emit(self, event: str, tx: MempoolTx) -> None:
         """Notify all subscribers of a mempool event."""

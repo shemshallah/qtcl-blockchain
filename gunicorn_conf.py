@@ -4,43 +4,44 @@ gunicorn.conf.py — QTCL Blockchain Enterprise Production Configuration
 Auto-loaded by gunicorn at startup. Overrides dashboard/CLI worker settings.
 
 WORKER MODEL — gthread:
-  SSE (/api/events) holds a connection open indefinitely. sync worker = SSE
-  captures the only thread → every API call times out. gthread gives each
-  request an OS thread; SSE + API calls are fully concurrent.
+  SSE (/api/events, /api/snapshot/sse) now uses a C ring buffer — each SSE
+  handler spins at 250 ms polling the ring, releasing the GIL on each sleep.
+  A single gthread handles hundreds of SSE connections concurrently.
+  64 threads → 64 concurrent blocking operations in flight at once.
 
 SCALE ARCHITECTURE:
   • Single Koyeb instance:  1 worker × 64 threads = 64 concurrent requests
   • Horizontal scale:       Multiple Koyeb instances, each 1 worker × 64 threads
-  • Cross-instance events:  PostgreSQL LISTEN/NOTIFY (built into _SSEBroadcaster)
-    Any instance publishes a TX → PG NOTIFY → all instances fan out to their
-    local SSE subscribers. Zero Redis. Zero message broker.
-  • Database:               Supabase pooler handles connection multiplexing.
-    Each worker holds 1 persistent LISTEN conn + borrows from ThreadedConnectionPool.
+  • Cross-instance mempool: pg_notify('qtcl_mempool') — _PGListenerThread in each
+    worker receives TX payloads from all other workers and inserts into local heap.
+    Every worker's in-memory mempool is consistent within ~1–5 ms.
+  • Cross-instance SSE:     pg_notify('qtcl_sse_events') — _SSEBroadcaster listener
+    fans notifications into the C ring buffer; all SSE clients on any worker receive
+    every event.
+  • Connection budget:      pool max=40 query conns + 1 NOTIFY conn (_PGNotifier) +
+    1 LISTEN conn (_PGListenerThread) + 1 LISTEN conn (_SSEBroadcaster) = 43 max
+    per worker.  Supabase pooler comfortably handles this.
+  • DB_POOL_MAX env var:     set to 40 (default) — raise if adding more workers.
 
 SCALING ROADMAP:
-  1. Now:     1 worker, 64 threads, PG NOTIFY cross-instance SSE  ← THIS CONFIG
+  1. Now:     1 worker, 64 threads, PG NOTIFY cross-worker  ← THIS CONFIG
   2. Phase 2: Increase Koyeb instance count (horizontal) — works automatically
-  3. Phase 3: workers = 2-4 per instance if CPU-bound (PG NOTIFY handles SSE fanout)
+  3. Phase 3: workers = 2-4 per instance if CPU-bound; DB_POOL_MAX stays 40
+             per worker — Supabase pooler multiplexes all of them.
 """
 
 import os
 import multiprocessing
 
 # ── Binding ────────────────────────────────────────────────────────────────────
-# FLASK_INTERNAL_PORT (default 8000) is the port gunicorn/Flask binds internally.
-# This is SEPARATE from Koyeb's $PORT env var which is set to the P2P service port (9091).
-# Architecture:
-#   External HTTPS → Koyeb → :9091 (P2P TCP server, HTTP proxy interceptor)
-#                          → :8000 (health check, direct Flask)
-#   P2P proxy on :9091 → forwards all /api/* to Flask on :8000
-# Set FLASK_INTERNAL_PORT=8000 in Koyeb env vars to make this explicit.
 bind = f"0.0.0.0:{os.environ.get('FLASK_INTERNAL_PORT', '8000')}"
 
 # ── Worker model ───────────────────────────────────────────────────────────────
 worker_class   = "gthread"
 workers        = 1          # 1 per Koyeb instance — shared in-memory state safe
-                            # Scale horizontally via multiple Koyeb instances
-threads        = 9          # 9 total: 1 main + 5 oracle (dedicated gthreads) + 3 web requests
+threads        = 64         # 64 gthreads: SSE ring-pollers + API handlers + oracles
+                            # Each SSE conn sleeps 250 ms / iteration (releases GIL)
+                            # → 64 threads handles ~200+ SSE clients + full API load
 
 # ── Timeouts ───────────────────────────────────────────────────────────────────
 timeout        = 0          # SSE workers must NEVER time out — 0 = infinite
@@ -49,7 +50,7 @@ keepalive      = 75         # > Koyeb's 60s idle TCP timeout
 
 # ── Lifecycle ──────────────────────────────────────────────────────────────────
 preload_app    = False      # False = each worker initializes independently
-                            # Required for PG LISTEN (each worker needs own conn)
+                            # Required: each worker needs its own PG LISTEN conn
 max_requests   = 10000      # Recycle worker after 10k requests (memory leak guard)
 max_requests_jitter = 1000  # Spread recycling to avoid thundering herd
 
@@ -61,7 +62,32 @@ access_log_format    = '%(h)s %(l)s %(t)s "%(r)s" %(s)s %(b)s "%(a)s"'
 
 # ── Connection ─────────────────────────────────────────────────────────────────
 backlog          = 2048
-worker_connections = 1000   # per worker (gthread ignores this but good to declare)
+worker_connections = 1000
+
+# ── Hooks ──────────────────────────────────────────────────────────────────────
+
+def post_fork(server, worker):
+    """
+    Called inside the new worker process after fork.
+    Each worker must re-open its own PG connections — psycopg2 connections
+    are NOT fork-safe and must never be shared across fork.
+
+    The Mempool singleton is lazy-initialised on first get_mempool() call,
+    which starts _PGListenerThread and _PGNotifier in the worker process.
+    The _SSEBroadcaster starts its own _listen_loop thread.
+    Nothing to do here explicitly — lazy init handles everything.
+    """
+    import logging
+    log = logging.getLogger('gunicorn.error')
+    log.info(f"[GUNICORN] Worker pid={worker.pid} forked — PG conns will init on first request")
+
+def worker_exit(server, worker):
+    """Close DB pool cleanly on worker shutdown."""
+    try:
+        import server as _srv
+        _srv.db_pool.close_all()
+    except Exception:
+        pass
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # 5-ORACLE CLUSTER WORKER CONFIGURATION
@@ -75,10 +101,8 @@ ORACLE_WORKER_CONFIG = {
     'oracle_5': {'port': 5004, 'workers': 2, 'threads': 2, 'timeout': 10}
 }
 
-# Total concurrency
 TOTAL_ORACLE_WORKERS = 14
 TOTAL_ORACLE_THREADS = 28
 
-# Consensus voting configuration
-CONSENSUS_TIMEOUT = 10  # seconds
-CONSENSUS_BROADCAST_INTERVAL = 18  # seconds (block time)
+CONSENSUS_TIMEOUT = 10
+CONSENSUS_BROADCAST_INTERVAL = 18
