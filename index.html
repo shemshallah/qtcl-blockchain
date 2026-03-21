@@ -174,6 +174,35 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
 .fl{animation:fl .4s ease-out}
 @keyframes fl{0%{color:var(--cy);text-shadow:0 0 12px var(--cy)}100%{}}
 .es{padding:24px;text-align:center;font-size:11px;color:var(--dim)}
+/* ── Block detail modal ───────────────────────────────────────────────────── */
+#blk-modal-bg{display:none;position:fixed;inset:0;z-index:9100;background:rgba(0,0,0,.72);backdrop-filter:blur(3px);align-items:center;justify-content:center}
+#blk-modal-bg.open{display:flex}
+#blk-modal{background:var(--card);border:1px solid var(--b2);border-radius:10px;width:min(540px,94vw);max-height:80vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 0 60px rgba(0,220,255,.1)}
+#blk-modal::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--cy),var(--vi));border-radius:10px 10px 0 0;pointer-events:none}
+.bm-hdr{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--b);flex-shrink:0}
+.bm-title{font-family:var(--disp);font-size:11px;letter-spacing:2px;color:var(--cy)}
+.bm-meta{font-family:var(--mono);font-size:9px;color:var(--dim);margin-top:3px}
+.bm-close{width:24px;height:24px;border-radius:50%;border:1px solid var(--b2);background:transparent;color:var(--dim);cursor:pointer;font-size:14px;line-height:22px;text-align:center;transition:all .15s}
+.bm-close:hover{border-color:var(--cy);color:var(--cy)}
+.bm-body{overflow-y:auto;flex:1;padding:8px 0;scrollbar-width:thin;scrollbar-color:var(--b) transparent}
+.bm-body::-webkit-scrollbar{width:3px}.bm-body::-webkit-scrollbar-thumb{background:var(--b)}
+.bm-tx{display:flex;align-items:flex-start;gap:10px;padding:10px 16px;border-bottom:1px solid rgba(0,220,255,.05);cursor:pointer;transition:background .15s;position:relative}
+.bm-tx:last-child{border-bottom:none}
+.bm-tx:hover{background:rgba(0,220,255,.05)}
+.bm-tx:active{background:rgba(0,220,255,.1)}
+.bm-tx-icon{flex-shrink:0;width:28px;height:28px;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:12px;margin-top:1px}
+.bm-tx-icon.coinbase{background:rgba(128,64,255,.15);border:1px solid rgba(128,64,255,.25)}
+.bm-tx-icon.transfer{background:rgba(0,220,255,.08);border:1px solid rgba(0,220,255,.15)}
+.bm-tx-info{flex:1;min-width:0}
+.bm-tx-hash{font-family:var(--mono);font-size:10px;color:var(--cy);word-break:break-all;line-height:1.4}
+.bm-tx-sub{font-family:var(--mono);font-size:9px;color:var(--dim);margin-top:3px;display:flex;gap:10px;flex-wrap:wrap}
+.bm-tx-amt{font-family:var(--mono);font-size:11px;font-weight:600;flex-shrink:0;margin-top:1px}
+.bm-tx-amt.coinbase{color:var(--vi)}.bm-tx-amt.transfer{color:var(--go)}
+.bm-copy-hint{position:absolute;right:14px;bottom:8px;font-size:8px;color:var(--dim);opacity:0;transition:opacity .2s;font-family:var(--disp);letter-spacing:.5px}
+.bm-tx:hover .bm-copy-hint{opacity:1}
+.bm-copied{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,255,157,.15);border:1px solid var(--gr);color:var(--gr);font-family:var(--mono);font-size:11px;padding:8px 20px;border-radius:6px;pointer-events:none;z-index:9200;opacity:0;transition:opacity .2s}
+.bm-copied.show{opacity:1}
+.bm-loading{padding:32px;text-align:center;font-family:var(--mono);font-size:10px;color:var(--dim)}
 </style>
 </head>
 <body>
@@ -323,6 +352,19 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
   <div id="bt"><span id="bts">QTCL &middot; Post-quantum blockchain &middot; HLWE cryptography &middot; W-state entangled mining &middot; 5-oracle Byzantine consensus &middot; Mermin inequality certified &middot; Poincare disk topology &middot; Memory-hard QTCL-PoW &middot; QRNG-seeded oracles</span></div>
   <div id="bu">Updated &mdash;</div>
 </div>
+<div id="blk-modal-bg" onclick="if(event.target===this)closeBlockModal()">
+  <div id="blk-modal">
+    <div class="bm-hdr">
+      <div>
+        <div class="bm-title" id="bm-title">BLOCK #—</div>
+        <div class="bm-meta" id="bm-meta">Loading…</div>
+      </div>
+      <button class="bm-close" onclick="closeBlockModal()">✕</button>
+    </div>
+    <div class="bm-body" id="bm-body"><div class="bm-loading">Fetching transactions…</div></div>
+  </div>
+</div>
+<div class="bm-copied" id="bm-copied">✓ Copied</div>
 <script>
 'use strict';
 var BASE=window.location.origin;
@@ -795,6 +837,9 @@ function renderChain(){
     var node=document.createElement('div'),isFr=i===show.length-1&&b._fr;
     node.className='bn'+(isFr?' fr':'');
     var hex=document.createElement('div');hex.className='bh';
+    hex.style.cursor='pointer';
+    hex.title='Click to view block #'+b.height+' transactions';
+    hex.onclick=(function(blk){return function(e){e.stopPropagation();openBlockModal(blk);};})(b);
     var cv=document.createElement('canvas');cv.width=56;cv.height=56;
     drawHex(cv,b.fidelity||.9,isFr);hex.appendChild(cv);
     var num=document.createElement('div');num.className='bnum';num.textContent='#'+b.height;
@@ -806,6 +851,82 @@ function renderChain(){
   el.scrollLeft=el.scrollWidth;
   document.getElementById('bcc').textContent=blocks.length+' blocks';
 }
+
+// ── Block detail modal ────────────────────────────────────────────────────────
+var _bmCopiedTimer=null;
+
+function _bmCopy(text){
+  try{navigator.clipboard.writeText(text);}catch(e){
+    var t=document.createElement('textarea');t.value=text;
+    document.body.appendChild(t);t.select();document.execCommand('copy');document.body.removeChild(t);
+  }
+  var el=document.getElementById('bm-copied');
+  el.classList.add('show');
+  clearTimeout(_bmCopiedTimer);
+  _bmCopiedTimer=setTimeout(function(){el.classList.remove('show');},1200);
+}
+
+function openBlockModal(blk){
+  var bg=document.getElementById('blk-modal-bg');
+  var body=document.getElementById('bm-body');
+  var title=document.getElementById('bm-title');
+  var meta=document.getElementById('bm-meta');
+
+  title.textContent='BLOCK #'+blk.height;
+  meta.textContent='hash: '+(blk.hash||blk.block_hash||'').slice(0,22)+'…  ·  '+(blk.tx_count||0)+' txs  ·  fidelity: '+((blk.fidelity||0)*100).toFixed(2)+'%';
+  body.innerHTML='<div class="bm-loading">Fetching transactions…</div>';
+  bg.classList.add('open');
+  document.body.style.overflow='hidden';
+
+  // Fetch transactions for this block
+  api('/api/blocks/height/'+blk.height+'/transactions').then(function(d){
+    if(!d||d.error||!Array.isArray(d.transactions)||!d.transactions.length){
+      body.innerHTML='<div class="bm-loading" style="color:var(--re)">No transactions found for block #'+blk.height+'</div>';
+      return;
+    }
+    // Sort: coinbase first
+    var txList=d.transactions.slice().sort(function(a,b){
+      var at=a.tx_type||a.type||''; var bt=b.tx_type||b.type||'';
+      return at==='coinbase'?-1:bt==='coinbase'?1:0;
+    });
+    body.innerHTML=txList.map(function(tx){
+      var tp=tx.tx_type||tx.type||'transfer';
+      var cb=tp==='coinbase';
+      var hash=tx.tx_hash||tx.tx_id||tx.hash||'';
+      var from=tx.from_address||tx.from_addr||tx.sender||'';
+      var to=tx.to_address||tx.to_addr||tx.receiver||'';
+      var amt=parseFloat(tx.amount_qtcl||(typeof tx.amount==='number'&&tx.amount<100000?tx.amount:tx.amount/100)||0);
+      if(amt>10000) amt=amt/100; // base units guard
+      var icon=cb?'⛏':'⇄';
+      var fromShort=from.length>20?from.slice(0,10)+'…'+from.slice(-8):from||'—';
+      var toShort=to.length>20?to.slice(0,10)+'…'+to.slice(-8):to||'—';
+      return '<div class="bm-tx" onclick="_bmCopy(\''+hash+'\')" title="Click to copy TX ID">'
+        +'<div class="bm-tx-icon '+tp+'">'+icon+'</div>'
+        +'<div class="bm-tx-info">'
+        +'<div class="bm-tx-hash">'+hash+'</div>'
+        +'<div class="bm-tx-sub">'
+        +'<span style="color:var(--dim)">from:</span> <span style="color:var(--tx)">'+fromShort+'</span>'
+        +'<span style="color:var(--dim)">→</span>'
+        +'<span style="color:var(--gr)">'+toShort+'</span>'
+        +(cb?'<span style="background:var(--vi2);color:var(--vi);padding:1px 5px;border-radius:3px;font-family:var(--disp);font-size:8px;letter-spacing:.4px">COINBASE</span>':'')
+        +'</div>'
+        +'</div>'
+        +'<div class="bm-tx-amt '+tp+'">'+amt.toFixed(2)+' Q</div>'
+        +'<div class="bm-copy-hint">CLICK TO COPY</div>'
+        +'</div>';
+    }).join('');
+  }).catch(function(){
+    body.innerHTML='<div class="bm-loading" style="color:var(--re)">Failed to load transactions</div>';
+  });
+}
+
+function closeBlockModal(){
+  document.getElementById('blk-modal-bg').classList.remove('open');
+  document.body.style.overflow='';
+}
+
+// Close on Escape key
+document.addEventListener('keydown',function(e){if(e.key==='Escape')closeBlockModal();});
 function fmt(v){return v==null?'--':parseFloat(v).toFixed(4);}
 function pct(v,mx){return Math.min(100,Math.max(0,v/mx*100))+'%';}
 // ── Transaction Explorer state ────────────────────────────────────────────
