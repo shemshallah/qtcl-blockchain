@@ -7947,12 +7947,13 @@ def blocks_tip():
                 'w_entropy_hash': db_block.get('w_state_hash', ''),
             }), 200
         
-        # ── DB empty after wipe: return height=0 authoritatively ─────────────
-        # NEVER fall through to in-memory state — it holds the pre-wipe height
-        # and causes every client to believe the chain is still at that height.
-        # The blocks table is the single source of truth; empty = genesis = h=0.
+        # ── DB empty (post-wipe / pre-genesis) — return height=0 from DB truth ──
+        # NEVER fall through to in-memory state. After a DB wipe the blocks table
+        # is empty but the in-process state object still carries the pre-wipe height.
+        # Returning that stale value causes all clients to think the chain is live
+        # at the old height and mine on top of a ghost chain.
         mgr = get_difficulty_manager()
-        logger.info("[BLOCKS_TIP] DB empty — returning genesis height=0")
+        logger.info("[BLOCKS_TIP] blocks table empty — returning genesis height=0")
         return jsonify({
             'block_height':    0,
             'block_hash':      '0' * 64,
@@ -8164,19 +8165,18 @@ def oracle_pq0_bloch():
     
     if unified_snapshot and unified_snapshot.get('broadcast_type') == 'single_chirp':
         consensus = unified_snapshot.get('consensus', {})
-        # Always resolve block_height from DB — never trust stale in-memory state
-        _tip_row = query_latest_block()
-        _bh = int(_tip_row['height']) if _tip_row else 0
+        _tip_u = query_latest_block()
+        _bh_u  = int(_tip_u['height']) if _tip_u else 0
         return jsonify({
             'oracle_id': get_consensus_oracle_address(),
             'oracle_role': 'UNIFIED_MULTIPLEXER',
+            'block_height': _bh_u,
+            'height': _bh_u,
             'fidelity': round(consensus.get('w_state_fidelity', 0.93), 6),
             'w_state_fidelity': round(consensus.get('w_state_fidelity', 0.93), 6),
             'w3_fidelity': round(consensus.get('w_state_fidelity', 0.93), 6),
             'coherence': round(consensus.get('coherence', 0.89), 6),
             'purity': round(consensus.get('purity', 0.94), 6),
-            'block_height': _bh,
-            'height': _bh,
             'timestamp_ns': unified_snapshot.get('timestamp_ns', int(time.time() * 1e9)),
             'state_source': 'unified_oracle_multiplexer',
         }), 200
@@ -8192,13 +8192,13 @@ def oracle_pq0_bloch():
     
     # If metrics thread hasn't initialized yet, use cached state
     if eng.get('pq0_bloch_theta') is None:
-        _tip_row3 = query_latest_block()
-        _bh3 = int(_tip_row3['height']) if _tip_row3 else 0
+        _tip_c = query_latest_block()
+        _bh_c  = int(_tip_c['height']) if _tip_c else 0
         return jsonify({
             'oracle_id': ORACLE_ID,
             'oracle_role': ORACLE_ROLE,
-            'block_height': _bh3,
-            'height': _bh3,
+            'block_height': _bh_c,
+            'height': _bh_c,
             'theta': cache.get('theta', 1.57),
             'phi': cache.get('phi', 0.0),
             'fidelity':    cache.get('w3_fidelity', 0.90),    # canonical alias for miners
@@ -8227,14 +8227,14 @@ def oracle_pq0_bloch():
             'state_source': 'cache_fallback',
         }), 200
     
-    # Normal case: serve live state — always resolve height from DB
-    _tip_row2 = query_latest_block()
-    _bh2 = int(_tip_row2['height']) if _tip_row2 else 0
+    # Normal case: serve live state — height always from DB, never stale memory
+    _tip_l = query_latest_block()
+    _bh_l  = int(_tip_l['height']) if _tip_l else 0
     return jsonify({
         'oracle_id': ORACLE_ID,
         'oracle_role': ORACLE_ROLE,
-        'block_height': _bh2,
-        'height': _bh2,
+        'block_height': _bh_l,
+        'height': _bh_l,
         'theta': eng['pq0_bloch_theta'],
         'phi': eng['pq0_bloch_phi'],
         'fidelity':    eng['w3_fidelity'],           # canonical alias for miners
