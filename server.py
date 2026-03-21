@@ -7947,51 +7947,23 @@ def blocks_tip():
                 'w_entropy_hash': db_block.get('w_state_hash', ''),
             }), 200
         
-        # ── Fallback: in-memory state (single-worker or before first block) ──
+        # ── DB empty after wipe: return height=0 authoritatively ─────────────
+        # NEVER fall through to in-memory state — it holds the pre-wipe height
+        # and causes every client to believe the chain is still at that height.
+        # The blocks table is the single source of truth; empty = genesis = h=0.
         mgr = get_difficulty_manager()
-        if state is None:
-            return jsonify({
-                'block_height': 0, 'block_hash': '0' * 64,
-                'parent_hash': '0' * 64, 'merkle_root': '0' * 64,
-                'timestamp_s': int(time.time()), 'difficulty_bits': mgr.get_difficulty(),
-                'nonce': 0, 'miner_address': 'genesis',
-                'w_state_fidelity': 1.0, 'w_entropy_hash': 'genesis',
-            }), 200
-        
-        snapshot = state.get_state()
-        block    = snapshot.get('block_state', {})
-        qm       = snapshot.get('quantum_metrics', {})
-        
-        block_height = int(block.get('current_height') or 0)
-        block_hash   = block.get('current_hash') or ('0' * 64)
-        parent_hash  = block.get('parent_hash')  or ('0' * 64)
-        
-        mgr = get_difficulty_manager()
-        difficulty = mgr.get_difficulty()
-        try:
-            nonce = int(block.get('nonce', 0))
-        except (ValueError, TypeError):
-            nonce = 0
-        try:
-            fidelity = float(qm.get('w_state_fidelity', 0.9))
-        except (ValueError, TypeError):
-            fidelity = 0.9
-        try:
-            ts = int(float(block.get('timestamp', time.time())))
-        except (ValueError, TypeError):
-            ts = int(time.time())
-        
+        logger.info("[BLOCKS_TIP] DB empty — returning genesis height=0")
         return jsonify({
-            'block_height':    block_height,
-            'block_hash':      block_hash,
-            'parent_hash':     parent_hash,
-            'merkle_root':     block.get('merkle_root') or ('0' * 64),
-            'timestamp_s':     ts,
-            'difficulty_bits': difficulty,
-            'nonce':           nonce,
-            'miner_address':   block.get('miner_address') or 'genesis',
-            'w_state_fidelity': fidelity,
-            'w_entropy_hash':  block.get('pq_current') or '',
+            'block_height':    0,
+            'block_hash':      '0' * 64,
+            'parent_hash':     '0' * 64,
+            'merkle_root':     '0' * 64,
+            'timestamp_s':     int(time.time()),
+            'difficulty_bits': mgr.get_difficulty(),
+            'nonce':           0,
+            'miner_address':   'genesis',
+            'w_state_fidelity': 1.0,
+            'w_entropy_hash':  'genesis',
         }), 200
     
     except Exception as e:
@@ -8192,6 +8164,9 @@ def oracle_pq0_bloch():
     
     if unified_snapshot and unified_snapshot.get('broadcast_type') == 'single_chirp':
         consensus = unified_snapshot.get('consensus', {})
+        # Always resolve block_height from DB — never trust stale in-memory state
+        _tip_row = query_latest_block()
+        _bh = int(_tip_row['height']) if _tip_row else 0
         return jsonify({
             'oracle_id': get_consensus_oracle_address(),
             'oracle_role': 'UNIFIED_MULTIPLEXER',
@@ -8200,6 +8175,8 @@ def oracle_pq0_bloch():
             'w3_fidelity': round(consensus.get('w_state_fidelity', 0.93), 6),
             'coherence': round(consensus.get('coherence', 0.89), 6),
             'purity': round(consensus.get('purity', 0.94), 6),
+            'block_height': _bh,
+            'height': _bh,
             'timestamp_ns': unified_snapshot.get('timestamp_ns', int(time.time() * 1e9)),
             'state_source': 'unified_oracle_multiplexer',
         }), 200
@@ -8215,10 +8192,13 @@ def oracle_pq0_bloch():
     
     # If metrics thread hasn't initialized yet, use cached state
     if eng.get('pq0_bloch_theta') is None:
-        
+        _tip_row3 = query_latest_block()
+        _bh3 = int(_tip_row3['height']) if _tip_row3 else 0
         return jsonify({
             'oracle_id': ORACLE_ID,
             'oracle_role': ORACLE_ROLE,
+            'block_height': _bh3,
+            'height': _bh3,
             'theta': cache.get('theta', 1.57),
             'phi': cache.get('phi', 0.0),
             'fidelity':    cache.get('w3_fidelity', 0.90),    # canonical alias for miners
@@ -8247,10 +8227,14 @@ def oracle_pq0_bloch():
             'state_source': 'cache_fallback',
         }), 200
     
-    # Normal case: serve live state
+    # Normal case: serve live state — always resolve height from DB
+    _tip_row2 = query_latest_block()
+    _bh2 = int(_tip_row2['height']) if _tip_row2 else 0
     return jsonify({
         'oracle_id': ORACLE_ID,
         'oracle_role': ORACLE_ROLE,
+        'block_height': _bh2,
+        'height': _bh2,
         'theta': eng['pq0_bloch_theta'],
         'phi': eng['pq0_bloch_phi'],
         'fidelity':    eng['w3_fidelity'],           # canonical alias for miners
