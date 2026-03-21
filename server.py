@@ -3116,22 +3116,47 @@ def _gossip_publish_tx(tx_hash: str, from_addr: str, to_addr: str,
 
 
 def _gossip_publish_block(height: int, block_hash: str, miner_addr: str,
-                           tx_count: int, fidelity: float) -> None:
-    """Publish a new-block event to both SSE channels. Called by submit_block."""
-    payload = {
-        'type'          : 'new_block',   # ← miners watch for this exact key
-        'height'        : height,
-        'block_hash'    : block_hash,
-        'miner_address' : miner_addr,
-        'tx_count'      : tx_count,
-        'fidelity'      : fidelity,
-        'ts'            : time.time(),
-    }
-    # Push to the main SSE snapshot channel — this is what mining clients subscribe to.
-    # Every connected miner gets this within <1ms and can abort their stale nonce loop.
-    _sse_push_snapshot(payload)
+                           tx_count: int, fidelity: float,
+                           miner_reward_base: int = 0,
+                           treasury_reward_base: int = 0,
+                           tessellation_depth: int = 0,
+                           coinbase_tx_id: str = '',
+                           treasury_tx_id: str = '') -> None:
+    """
+    Publish a new-block event to both SSE channels.
+    Carries full tessellation reward breakdown so the dashboard can display
+    live miner/treasury splits without a round-trip to /api/chain.
+    Called by submit_block immediately after the DB commit succeeds.
+    """
+    from globals import TessellationRewardSchedule as _TRS
+    if not miner_reward_base:
+        miner_reward_base    = _TRS.get_miner_reward_base(height)
+    if not treasury_reward_base:
+        treasury_reward_base = _TRS.get_treasury_reward_base(height)
+    if not tessellation_depth:
+        tessellation_depth   = _TRS.get_depth_for_height(height)
 
-    # Also push to the gossip SSE (used by dashboard / P2P layer)
+    payload = {
+        'type'                 : 'new_block',
+        'height'               : height,
+        'block_hash'           : block_hash,
+        'miner_address'        : miner_addr,
+        'treasury_address'     : _TRS.TREASURY_ADDRESS,
+        'tx_count'             : tx_count,
+        'fidelity'             : fidelity,
+        'ts'                   : time.time(),
+        # ── 💎 Tessellation reward breakdown ──────────────────────────────
+        'tessellation_depth'   : tessellation_depth,
+        'miner_reward_base'    : miner_reward_base,
+        'treasury_reward_base' : treasury_reward_base,
+        'miner_reward_qtcl'    : miner_reward_base    / 100.0,
+        'treasury_reward_qtcl' : treasury_reward_base / 100.0,
+        'total_reward_qtcl'    : (miner_reward_base + treasury_reward_base) / 100.0,
+        'treasury_pct'         : round(treasury_reward_base / (miner_reward_base + treasury_reward_base) * 100, 4),
+        'coinbase_tx_id'       : coinbase_tx_id,
+        'treasury_tx_id'       : treasury_tx_id,
+    }
+    _sse_push_snapshot(payload)
     _gossip_sse.publish('block', payload)
     gossip_store_put(f"block:{height}", payload)
 
@@ -9097,7 +9122,20 @@ def submit_block():
             # ══════════════════════════════════════════════════════════════════════
             
             COINBASE_ADDRESS  = '0' * 64
-            BLOCK_REWARD_BASE = 1250       # 12.50 QTCL in base units
+
+            # ── 💎 Tessellation reward schedule — height-aware, integer arithmetic ──
+            from globals import TessellationRewardSchedule as _TRS
+            _depth_rewards    = _TRS.get_rewards_for_height(block_height)
+            BLOCK_REWARD_BASE = _depth_rewards['miner']      # miner-only base units
+            TREASURY_REWARD   = _depth_rewards['treasury']   # treasury base units
+            TREASURY_ADDRESS  = _TRS.TREASURY_ADDRESS
+            _depth            = _TRS.get_depth_for_height(block_height)
+            logger.info(
+                f"[REWARDS] 💎 depth={_depth} | "
+                f"miner={BLOCK_REWARD_BASE} base ({BLOCK_REWARD_BASE/100:.2f} QTCL) | "
+                f"treasury={TREASURY_REWARD} base ({TREASURY_REWARD/100:.2f} QTCL) | "
+                f"total=800 base (8.00 QTCL)"
+            )
             
             # Locate coinbase in submitted transactions (must be index 0, tx_type='coinbase')
             coinbase_tx = None
@@ -9117,15 +9155,14 @@ def submit_block():
             )
             expected_reward = BLOCK_REWARD_BASE + fee_total_base
             
-            # ── Validate or reconstruct coinbase ────────────────────────────────
+            # ── 💎 Validate or reconstruct MINER coinbase (slot 0) ──────────────
             if coinbase_tx:
-                # Verify coinbase fields match what we expect
-                cb_from   = str(coinbase_tx.get('from_addr', ''))
-                cb_to     = str(coinbase_tx.get('to_addr',   ''))
+                cb_from   = str(coinbase_tx.get('from_addr', coinbase_tx.get('from_address', '')))
+                cb_to     = str(coinbase_tx.get('to_addr',   coinbase_tx.get('to_address',   '')))
                 cb_amount = int(coinbase_tx.get('amount', 0))
-                cb_id     = str(coinbase_tx.get('tx_id', ''))
+                cb_id     = str(coinbase_tx.get('tx_id', coinbase_tx.get('tx_hash', '')))
                 cb_proof  = str(coinbase_tx.get('w_proof', w_entropy_hash))
-                
+
                 if cb_from != COINBASE_ADDRESS:
                     return jsonify({
                         'error': f'Coinbase from_addr invalid: expected {COINBASE_ADDRESS[:8]}… got {cb_from[:8]}…'
@@ -9136,48 +9173,70 @@ def submit_block():
                     }), 422
                 if cb_amount < BLOCK_REWARD_BASE:
                     return jsonify({
-                        'error': f'Coinbase amount too low: {cb_amount} < {BLOCK_REWARD_BASE}'
+                        'error': f'Coinbase amount {cb_amount} below required miner reward {BLOCK_REWARD_BASE}'
                     }), 422
 
-                # Accept client's tx_id — it is the canonical coinbase ID.
-                # We do NOT recompute expected_cb_id here: the client's formula
-                # (hash of JSON dict) differs from the old server formula
-                # (hash of f-string), producing two different hashes and two DB rows.
-                # Using cb_id as the sole canonical ID + ON CONFLICT DO UPDATE below
-                # ensures exactly one coinbase row per block.
                 coinbase_id     = cb_id
                 coinbase_amount = cb_amount
                 w_proof         = cb_proof
                 logger.info(
-                    f"[COINBASE] ✅ Validated | tx_id={coinbase_id[:16]}… | "
+                    f"[COINBASE] ✅ Miner coinbase validated | "
+                    f"tx_id={coinbase_id[:16]}… | "
                     f"amount={coinbase_amount} ({coinbase_amount/100:.2f} QTCL) | "
-                    f"w_proof={w_proof[:16]}…"
+                    f"depth={_depth} | w_proof={w_proof[:16]}…"
                 )
             else:
-                # No coinbase submitted — server constructs canonical one
-                # (handles legacy miners or empty blocks)
-                logger.warning("[COINBASE] ⚠️  No coinbase in transactions[0] — constructing server-side")
+                # Legacy miner / empty block — server constructs canonical miner coinbase
+                logger.warning("[COINBASE] ⚠️  No miner coinbase at slot 0 — constructing server-side")
                 coinbase_id = _hl.sha3_256(
-                    f"coinbase:{block_height}:{miner_address}:{w_entropy_hash}".encode()
+                    f"coinbase:miner:{block_height}:{miner_address}:{w_entropy_hash}".encode()
                 ).hexdigest()
-                coinbase_amount = expected_reward
+                coinbase_amount = BLOCK_REWARD_BASE
                 w_proof = w_entropy_hash
-            
-            # ── INSERT COINBASE into transactions table ──────────────────────────
-            _ensure_wallet(cur, miner_address, 'mining')
-            _ensure_wallet(cur, COINBASE_ADDRESS, 'coinbase')  # null address row
 
-            # DEDUP FIX: delete any existing coinbase row for this block height
-            # before inserting. Prevents double coinbase when the same block is
-            # submitted twice (e.g. after a worker restart) with a different tx_id
-            # formula — ON CONFLICT only guards the exact same tx_hash, not height.
+            # ── 💎 Locate or construct TREASURY coinbase (slot 1) ───────────────
+            # Miners must submit treasury coinbase. Server constructs it if missing —
+            # treasury is ALWAYS paid on-chain regardless of miner behaviour.
+            treasury_cb_id     = None
+            treasury_cb_amount = TREASURY_REWARD
+
+            for _t in transactions[1:]:
+                _ttype = str(_t.get('tx_type', _t.get('type', 'transfer')))
+                _tto   = str(_t.get('to_addr', _t.get('to_address', '')))
+                if _ttype == 'coinbase' and _tto == TREASURY_ADDRESS:
+                    treasury_cb_id     = str(_t.get('tx_id', _t.get('tx_hash', '')))
+                    treasury_cb_amount = int(_t.get('amount', TREASURY_REWARD))
+                    logger.info(
+                        f"[TREASURY] ✅ Treasury coinbase found | "
+                        f"tx_id={treasury_cb_id[:16]}… | "
+                        f"amount={treasury_cb_amount} ({treasury_cb_amount/100:.2f} QTCL)"
+                    )
+                    break
+
+            if not treasury_cb_id:
+                treasury_cb_id = _hl.sha3_256(
+                    f"coinbase:treasury:{block_height}:{TREASURY_ADDRESS}:{w_entropy_hash}".encode()
+                ).hexdigest()
+                logger.warning(
+                    f"[TREASURY] ⚠️  Treasury coinbase missing — server constructing | "
+                    f"tx_id={treasury_cb_id[:16]}… | "
+                    f"amount={treasury_cb_amount} ({treasury_cb_amount/100:.2f} QTCL) | "
+                    f"→{TREASURY_ADDRESS[:24]}…"
+                )
+            
+            # ── INSERT MINER COINBASE into transactions table ────────────────────
+            _ensure_wallet(cur, miner_address,    'mining')
+            _ensure_wallet(cur, COINBASE_ADDRESS, 'coinbase')
+            _ensure_wallet(cur, TREASURY_ADDRESS, 'treasury')
+
+            # Dedup: remove stale miner coinbase rows for this height
             cur.execute("""
                 DELETE FROM transactions
                 WHERE height = %s AND tx_type = 'coinbase'
-                  AND tx_hash != %s
-            """, (block_height, coinbase_id))
+                  AND to_address = %s AND tx_hash != %s
+            """, (block_height, miner_address, coinbase_id))
             if cur.rowcount > 0:
-                logger.warning(f"[COINBASE] 🧹 Removed {cur.rowcount} stale coinbase row(s) for h={block_height}")
+                logger.warning(f"[COINBASE] 🧹 Removed {cur.rowcount} stale miner coinbase(s) for h={block_height}")
 
             cur.execute("""
                 INSERT INTO transactions (
@@ -9204,33 +9263,108 @@ def submit_block():
                 w_proof,
                 block_hash,
                 json.dumps({
-                    'block_reward_base':  BLOCK_REWARD_BASE,
-                    'fee_total_base':     fee_total_base,
-                    'total_reward_base':  coinbase_amount,
-                    'reward_qtcl':        coinbase_amount / 100,
-                    'w_state_fidelity':   w_state_fidelity,
-                    'coinbase_maturity':  100,
+                    'miner_reward_base'    : coinbase_amount,
+                    'miner_reward_qtcl'    : coinbase_amount / 100.0,
+                    'tessellation_depth'   : _depth,
+                    'fee_total_base'       : fee_total_base,
+                    'w_state_fidelity'     : w_state_fidelity,
+                    'coinbase_maturity'    : 100,
+                    'reward_type'          : 'miner',
                 }),
             ))
             logger.info(
-                f"[DB] 🪙 Coinbase tx inserted | "
-                f"tx={coinbase_id[:16]}… | {COINBASE_ADDRESS[:8]}…→{miner_address[:16]}… | "
-                f"{coinbase_amount} base units ({coinbase_amount/100:.2f} QTCL)"
+                f"[DB] ⛏  Miner coinbase inserted | "
+                f"tx={coinbase_id[:16]}… | "
+                f"{COINBASE_ADDRESS[:8]}…→{miner_address[:16]}… | "
+                f"{coinbase_amount} base ({coinbase_amount/100:.2f} QTCL) | depth={_depth}"
             )
-            
-            # ── Credit miner wallet FROM coinbase (reward flows through tx ledger) ─
+
+            # ── Credit miner wallet ───────────────────────────────────────────────
             cur.execute("""
                 UPDATE wallet_addresses
-                SET balance              = balance + %s,
-                    last_used_at         = NOW(),
-                    balance_updated_at   = NOW(),
-                    balance_at_height    = %s
+                SET balance            = balance + %s,
+                    last_used_at       = NOW(),
+                    balance_updated_at = NOW(),
+                    balance_at_height  = %s
                 WHERE address = %s
             """, (coinbase_amount, block_height, miner_address))
-            
             logger.info(
-                f"[WALLET] 💰 Miner credited | {miner_address[:20]}… | "
-                f"+{coinbase_amount} base units (+{coinbase_amount/100:.2f} QTCL)"
+                f"[WALLET] ⛏  Miner credited | {miner_address[:20]}… | "
+                f"+{coinbase_amount} base (+{coinbase_amount/100:.2f} QTCL)"
+            )
+
+            # ══════════════════════════════════════════════════════════════════════
+            # 2b️⃣  TREASURY COINBASE — degressive model, always paid on-chain
+            #      Depth-5: 0.80 QTCL  Depth-6: 0.40 QTCL
+            #      Depth-7: 0.20 QTCL  Depth-8: 0.10 QTCL
+            #      → qtcl110fc58e3c441106cc1e54ae41da5d15868525a87
+            # ══════════════════════════════════════════════════════════════════════
+
+            # Dedup: remove stale treasury coinbase rows for this height
+            cur.execute("""
+                DELETE FROM transactions
+                WHERE height = %s AND tx_type = 'coinbase'
+                  AND to_address = %s AND tx_hash != %s
+            """, (block_height, TREASURY_ADDRESS, treasury_cb_id))
+            if cur.rowcount > 0:
+                logger.warning(f"[TREASURY] 🧹 Removed {cur.rowcount} stale treasury coinbase(s) for h={block_height}")
+
+            cur.execute("""
+                INSERT INTO transactions (
+                    tx_hash, from_address, to_address, amount,
+                    height, block_hash, transaction_index,
+                    tx_type, status, quantum_state_hash,
+                    commitment_hash, metadata
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (tx_hash) DO UPDATE SET
+                    height     = EXCLUDED.height,
+                    block_hash = EXCLUDED.block_hash,
+                    status     = 'confirmed',
+                    updated_at = NOW()
+            """, (
+                treasury_cb_id,
+                COINBASE_ADDRESS,
+                TREASURY_ADDRESS,
+                treasury_cb_amount,
+                block_height,
+                block_hash,
+                1,
+                'coinbase',
+                'confirmed',
+                w_proof,
+                block_hash,
+                json.dumps({
+                    'treasury_reward_base'    : treasury_cb_amount,
+                    'treasury_reward_qtcl'    : treasury_cb_amount / 100.0,
+                    'tessellation_depth'      : _depth,
+                    'miner_reward_base'       : coinbase_amount,
+                    'total_block_reward_qtcl' : (coinbase_amount + treasury_cb_amount) / 100.0,
+                    'treasury_pct'            : round(treasury_cb_amount / (coinbase_amount + treasury_cb_amount) * 100, 4),
+                    'w_state_fidelity'        : w_state_fidelity,
+                    'coinbase_maturity'       : 100,
+                    'reward_type'             : 'treasury',
+                }),
+            ))
+            logger.info(
+                f"[DB] 🏛  Treasury coinbase inserted | "
+                f"tx={treasury_cb_id[:16]}… | "
+                f"{COINBASE_ADDRESS[:8]}…→{TREASURY_ADDRESS[:20]}… | "
+                f"{treasury_cb_amount} base ({treasury_cb_amount/100:.2f} QTCL) | depth={_depth}"
+            )
+
+            # ── Credit treasury wallet ────────────────────────────────────────────
+            cur.execute("""
+                UPDATE wallet_addresses
+                SET balance            = balance + %s,
+                    last_used_at       = NOW(),
+                    balance_updated_at = NOW(),
+                    balance_at_height  = %s
+                WHERE address = %s
+            """, (treasury_cb_amount, block_height, TREASURY_ADDRESS))
+            logger.info(
+                f"[WALLET] 🏛  Treasury credited | {TREASURY_ADDRESS[:24]}… | "
+                f"+{treasury_cb_amount} base (+{treasury_cb_amount/100:.2f} QTCL) | "
+                f"depth={_depth} | block={block_height}"
             )
             
             # ══════════════════════════════════════════════════════════════════════
@@ -9374,8 +9508,18 @@ def submit_block():
 
         # Publish to SSE + gossip_store — all workers and SSE subscribers see the new block
         try:
-            _gossip_publish_block(block_height, block_hash, miner_address,
-                                   len(transactions), w_state_fidelity)
+            _gossip_publish_block(
+                height               = block_height,
+                block_hash           = block_hash,
+                miner_addr           = miner_address,
+                tx_count             = len(transactions),
+                fidelity             = w_state_fidelity,
+                miner_reward_base    = coinbase_amount,
+                treasury_reward_base = treasury_cb_amount,
+                tessellation_depth   = _depth,
+                coinbase_tx_id       = coinbase_id,
+                treasury_tx_id       = treasury_cb_id,
+            )
         except Exception as _ge:
             logger.debug(f"[BLOCK] gossip_publish_block skipped: {_ge}")
 
@@ -9413,17 +9557,25 @@ def submit_block():
 
         # 6️⃣ RESPONSE
         return jsonify({
-            'status':                'accepted',
-            'message':               'Block accepted and added to blockchain',
-            'block_height':          block_height,
-            'block_hash':            block_hash,
-            'coinbase_tx':           coinbase_id,
-            'miner_reward':          f"{coinbase_amount/100:.2f} QTCL",
-            'miner_reward_base':     coinbase_amount,
-            'transactions_included': len(transactions),
-            'w_state_fidelity':      f"{w_state_fidelity:.4f}",
-            'tip':                   block_height,
-            'next_difficulty':       get_difficulty_manager().get_difficulty(),
+            'status'                : 'accepted',
+            'message'               : 'Block accepted and added to blockchain',
+            'block_height'          : block_height,
+            'block_hash'            : block_hash,
+            # ── 💎 Tessellation reward breakdown ──────────────────────────
+            'tessellation_depth'    : _depth,
+            'coinbase_tx'           : coinbase_id,
+            'treasury_tx'           : treasury_cb_id,
+            'miner_reward'          : f"{coinbase_amount/100:.2f} QTCL",
+            'miner_reward_base'     : coinbase_amount,
+            'treasury_reward'       : f"{treasury_cb_amount/100:.2f} QTCL",
+            'treasury_reward_base'  : treasury_cb_amount,
+            'total_block_reward'    : f"{(coinbase_amount+treasury_cb_amount)/100:.2f} QTCL",
+            'treasury_address'      : TREASURY_ADDRESS,
+            'treasury_pct'          : f"{treasury_cb_amount/(coinbase_amount+treasury_cb_amount)*100:.2f}%",
+            'transactions_included' : len(transactions),
+            'w_state_fidelity'      : f"{w_state_fidelity:.4f}",
+            'tip'                   : block_height,
+            'next_difficulty'       : get_difficulty_manager().get_difficulty(),
         }), 201
     
     except Exception as e:

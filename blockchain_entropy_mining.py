@@ -899,13 +899,16 @@ DIFFICULTY_BITS_TESTING = 12  # Easy, for cellphone premine
 DIFFICULTY_BITS_RELEASE = 20  # Bitcoin-equivalent
 CURRENT_DIFFICULTY = DIFFICULTY_BITS_TESTING  # Start with testing
 
-# Halving schedule (4 epochs, ~1M QTCL per tessellation depth)
-HALVING_EPOCHS = [
-    {'epoch': 0, 'blocks_start': 0, 'blocks_end': 26623, 'reward_qtcl': 20},
-    {'epoch': 1, 'blocks_start': 26624, 'blocks_end': 53247, 'reward_qtcl': 10},
-    {'epoch': 2, 'blocks_start': 53248, 'blocks_end': 79871, 'reward_qtcl': 5},
-    {'epoch': 3, 'blocks_start': 79872, 'blocks_end': 106495, 'reward_qtcl': 2.5},
-]
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+# 💎 TESSELLATION REWARD SCHEDULE — canonical import from globals (single source of truth)
+#    Total supply: 498,401,280 QTCL over 62,300,160 blocks at 8.0 QTCL/block
+#    Treasury: qtcl110fc58e3c441106cc1e54ae41da5d15868525a87
+#    Depth-5: miner=7.20 Q / treasury=0.80 Q  (10.00%)
+#    Depth-6: miner=7.60 Q / treasury=0.40 Q  ( 5.00%)
+#    Depth-7: miner=7.80 Q / treasury=0.20 Q  ( 2.50%)
+#    Depth-8: miner=7.90 Q / treasury=0.10 Q  ( 1.25%)
+# ════════════════════════════════════════════════════════════════════════════════════════════════════════════
+from globals import TessellationRewardSchedule
 
 # Genesis block (hardcoded, mined beforehand)
 GENESIS_BLOCK_HASH = None  # Will be set after mining genesis
@@ -1090,33 +1093,44 @@ class MerkleTreeBuilder:
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 class RewardCalculator:
-    """Calculate mining rewards based on halving schedule"""
-    
+    """
+    Reward calculator — thin delegation to TessellationRewardSchedule.
+    Retained for backward compatibility with all call sites in this file.
+    All internal logic is replaced by the canonical immutable schedule.
+
+    AUTHORITATIVE METHOD: get_split_rewards_base(height) → {'miner':int,'treasury':int}
+    Use this for all DB writes. All other methods are display helpers.
+    """
+
     @staticmethod
     def get_reward_for_block(block_height: int) -> float:
+        """Total block reward in QTCL (miner + treasury = 8.0 always)."""
+        r = TessellationRewardSchedule.get_rewards_for_height(block_height)
+        return (r['miner'] + r['treasury']) / 100.0
+
+    @staticmethod
+    def get_miner_reward_for_block(block_height: int) -> float:
+        """Miner-only reward in QTCL for display purposes."""
+        return TessellationRewardSchedule.get_miner_reward_qtcl(block_height)
+
+    @staticmethod
+    def get_treasury_reward_for_block(block_height: int) -> float:
+        """Treasury reward in QTCL for display purposes."""
+        return TessellationRewardSchedule.get_treasury_reward_qtcl(block_height)
+
+    @staticmethod
+    def get_split_rewards_base(block_height: int) -> Dict[str, int]:
         """
-        Get mining reward for block height
-        
-        Halving schedule:
-          Epoch 0 (blocks 0-26,623): 20 QTCL/block
-          Epoch 1 (blocks 26,624-53,247): 10 QTCL/block
-          Epoch 2 (blocks 53,248-79,871): 5 QTCL/block
-          Epoch 3 (blocks 79,872-106,495): 2.5 QTCL/block
-        
-        Total: ≈998,400 QTCL per tessellation depth
+        PRIMARY METHOD — returns {'miner': <int>, 'treasury': <int>} in base units.
+        Use this for all DB writes and coinbase construction.
+        Integer arithmetic only — no floating point.
         """
-        for epoch_info in HALVING_EPOCHS:
-            if epoch_info['blocks_start'] <= block_height <= epoch_info['blocks_end']:
-                return epoch_info['reward_qtcl']
-        
-        # No more rewards after all halvings
-        return 0.0
-    
+        return TessellationRewardSchedule.get_rewards_for_height(block_height)
+
     @staticmethod
     def get_epoch_for_block(block_height: int) -> int:
-        """Get halving epoch for block height"""
-        epoch = block_height // 26624
-        return min(epoch, len(HALVING_EPOCHS) - 1)
+        """Tessellation depth for block height (replaces halving epoch concept)."""
+        return TessellationRewardSchedule.get_depth_for_height(block_height)
 
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1288,59 +1302,92 @@ class BlockSealer:
         limit: int = 100
     ) -> List[Dict[str, Any]]:
         """
-        Museum-Grade: Build transaction list for block (coinbase + pending TXs).
-        
-        Equivalent to Bitcoin's block building:
-        1. Create coinbase transaction (block reward)
-        2. Get pending transactions from mempool (sorted by fee)
-        3. Return [coinbase, tx1, tx2, ...] with tx hashes immutable
-        
-        Args:
-            block_height: Current block height
-            miner_address: Miner's address (recipient of reward)
-            block_reward_sats: Coinbase reward in satoshis
-            limit: Maximum transactions to include
-            
-        Returns:
-            List of transaction dicts ready for block inclusion
+        Museum-Grade: Build transaction list for block.
+
+        Slot 0: Miner coinbase    — TessellationRewardSchedule.get_miner_reward_base(height)
+        Slot 1: Treasury coinbase — TessellationRewardSchedule.get_treasury_reward_base(height)
+        Slot 2+: Pending mempool transactions (fee-rate sorted)
+
+        Total block reward invariant: 8.0 QTCL (800 base units) at every depth.
+        Treasury: qtcl110fc58e3c441106cc1e54ae41da5d15868525a87
         """
         try:
-            txs = []
-            
-            # Step 1: Create coinbase transaction
+            txs: List[Dict[str, Any]] = []
+            rewards       = TessellationRewardSchedule.get_rewards_for_height(block_height)
+            miner_base    = rewards['miner']
+            treasury_base = rewards['treasury']
+            treasury_addr = TessellationRewardSchedule.TREASURY_ADDRESS
+            depth         = TessellationRewardSchedule.get_depth_for_height(block_height)
+
             if MEMPOOL_AVAILABLE:
                 mempool = get_mempool()
-                coinbase = Transaction.create_coinbase(
+
+                # ── Slot 0: Miner coinbase ────────────────────────────────────────
+                miner_cb = Transaction.create_coinbase(
                     block_height=block_height,
                     miner_address=miner_address,
-                    reward_sats=block_reward_sats,
+                    reward_sats=miner_base,
                 )
-                txs.append(coinbase.to_dict())
-                logger.info(f"[MINING] 💰 Coinbase | reward={block_reward_sats} | hash={coinbase.tx_hash[:16]}…")
+                txs.append(miner_cb.to_dict())
+                logger.info(
+                    f"[MINING] ⛏  Miner coinbase | "
+                    f"depth={depth} | reward={miner_base} base "
+                    f"({miner_base/100:.2f} QTCL) | hash={miner_cb.tx_hash[:16]}…"
+                )
 
-                # Step 2: fee-rate-ordered pending TXs via Python mempool
+                # ── Slot 1: Treasury coinbase ─────────────────────────────────────
+                treasury_cb = Transaction.create_coinbase(
+                    block_height=block_height,
+                    miner_address=treasury_addr,
+                    reward_sats=treasury_base,
+                )
+                txs.append(treasury_cb.to_dict())
+                logger.info(
+                    f"[MINING] 🏛  Treasury coinbase | "
+                    f"depth={depth} | reward={treasury_base} base "
+                    f"({treasury_base/100:.2f} QTCL) | "
+                    f"→{treasury_addr[:22]}… | hash={treasury_cb.tx_hash[:16]}…"
+                )
+
+                # ── Slots 2+: Fee-sorted pending TXs ─────────────────────────────
                 pending, _ = mempool.select_for_block(
-                    max_txs=limit - 1,
+                    max_txs=limit - 2,
                     height=block_height,
                     miner=miner_address,
-                    reward_base=block_reward_sats,
+                    reward_base=miner_base,
                 )
                 for ptx in pending:
                     txs.append(ptx.to_dict())
 
-                logger.info(f"[MINING] 📦 coinbase + {len(pending)} pending | total={len(txs)}")
+                logger.info(
+                    f"[MINING] 📦 miner_cb + treasury_cb + {len(pending)} pending | "
+                    f"total={len(txs)} | block_total=8.00 QTCL "
+                    f"(miner={miner_base/100:.2f} + treasury={treasury_base/100:.2f})"
+                )
+
             else:
-                coinbase_tx = {
-                    'tx_hash' : f"coinbase_{block_height}_{int(time.time()*1000)}",
-                    'inputs'  : [{'previous_tx_hash': '00'*32, 'previous_output_index': 0xffffffff}],
-                    'outputs' : [{'amount': block_reward_sats, 'address': miner_address}],
-                    'fee_sats': 0,
-                }
-                txs.append(coinbase_tx)
-                logger.debug("[MINING] ⚠️  Mempool unavailable, coinbase-only block")
-            
+                # Fallback: no mempool — construct bare coinbase pair
+                ts_ms = int(time.time() * 1000)
+                txs.append({
+                    'tx_hash'  : f"coinbase_miner_{block_height}_{ts_ms}",
+                    'tx_type'  : 'coinbase',
+                    'from_addr': '0' * 64,
+                    'to_addr'  : miner_address,
+                    'amount'   : miner_base,
+                    'fee_sats' : 0,
+                })
+                txs.append({
+                    'tx_hash'  : f"coinbase_treasury_{block_height}_{ts_ms}",
+                    'tx_type'  : 'coinbase',
+                    'from_addr': '0' * 64,
+                    'to_addr'  : treasury_addr,
+                    'amount'   : treasury_base,
+                    'fee_sats' : 0,
+                })
+                logger.debug("[MINING] ⚠️  Mempool unavailable — bare coinbase pair constructed")
+
             return txs
-        
+
         except Exception as e:
             logger.error(f"[MINING] ❌ Failed to build TX list: {e}")
             traceback.print_exc()
@@ -1440,7 +1487,7 @@ class BlockSealer:
                 w_state_signature=w_state_signature,
                 timestamp_s=int(time.time()),
                 miner_address=miner_address,
-                mining_reward=RewardCalculator.get_reward_for_block(block_height),
+                mining_reward=RewardCalculator.get_miner_reward_for_block(block_height),
                 transactions=transactions,
                 tx_count=len(transactions),
                 # Museum-Grade: Temporal anchoring for quantum timestamp verification
@@ -1686,19 +1733,33 @@ class GenesisBlockInitializer:
             'miner_address': miner_address,
         }
         
-        # Genesis transaction (coinbase)
+        # Genesis transactions — dual coinbase: miner + treasury
+        _genesis_rewards = TessellationRewardSchedule.get_rewards_for_height(0)
+        _treasury_addr   = TessellationRewardSchedule.TREASURY_ADDRESS
+
         coinbase_tx = {
-            'tx_id': 'genesis_coinbase_0000000000',
-            'from_address': 'GENESIS',
-            'to_address': miner_address,
-            'amount': RewardCalculator.get_reward_for_block(0),
-            'nonce': 0,
-            'signature': 'GENESIS_SIGNATURE',
-            'timestamp_ns': int(time.time_ns()),
+            'tx_id'        : 'genesis_coinbase_miner_0000000000',
+            'tx_type'      : 'coinbase',
+            'from_address' : 'GENESIS',
+            'to_address'   : miner_address,
+            'amount'       : _genesis_rewards['miner'],
+            'nonce'        : 0,
+            'signature'    : 'GENESIS_SIGNATURE',
+            'timestamp_ns' : int(time.time_ns()),
+        }
+        treasury_coinbase_tx = {
+            'tx_id'        : 'genesis_coinbase_treasury_0000000000',
+            'tx_type'      : 'coinbase',
+            'from_address' : 'GENESIS',
+            'to_address'   : _treasury_addr,
+            'amount'       : _genesis_rewards['treasury'],
+            'nonce'        : 0,
+            'signature'    : 'GENESIS_SIGNATURE',
+            'timestamp_ns' : int(time.time_ns()),
         }
         
-        # Compute merkle root (just coinbase)
-        merkle_root = MerkleTreeBuilder.compute_merkle_root([coinbase_tx])
+        # Merkle root commits BOTH genesis coinbases
+        merkle_root = MerkleTreeBuilder.compute_merkle_root([coinbase_tx, treasury_coinbase_tx])
         genesis_header['merkle_root'] = merkle_root
         
         # Mine genesis block
@@ -1723,9 +1784,9 @@ class GenesisBlockInitializer:
             w_state_signature="GENESIS_W_STATE",
             timestamp_s=int(time.time()),
             miner_address=miner_address,
-            mining_reward=RewardCalculator.get_reward_for_block(0),
-            transactions=[coinbase_tx],
-            tx_count=1,
+            mining_reward=RewardCalculator.get_miner_reward_for_block(0),
+            transactions=[coinbase_tx, treasury_coinbase_tx],
+            tx_count=2,
         )
         
         # Compute block hash

@@ -104,6 +104,7 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
 .tba.pending{background:var(--go2);color:var(--go)}
 .tba.confirmed{background:var(--gr2);color:var(--gr)}
 .tba.coinbase{background:var(--vi2);color:var(--vi)}
+.tba.treasury{background:var(--go2);color:var(--go);border:1px solid rgba(212,160,32,.3)}
 .tba.transfer{background:var(--cy2);color:var(--cy)}
 .txfbtn{background:rgba(0,220,255,.06);border:1px solid rgba(0,220,255,.15);color:var(--dim);font-size:9px;
   padding:3px 8px;border-radius:3px;cursor:pointer;font-family:var(--disp);letter-spacing:.5px;transition:all .2s}
@@ -233,6 +234,8 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
       <div class="mc gr"><div class="ml">Avg Block Time</div><div class="mv gr dm" id="mbt">&mdash;</div><div class="ms">seconds</div></div>
       <div class="mc"><div class="ml">Total Transactions</div><div class="mv dm" id="mtx">&mdash;</div><div class="ms">on-chain</div></div>
       <div class="mc"><div class="ml">Difficulty</div><div class="mv dm" id="mdf">&mdash;</div><div class="ms">leading hex zeros</div></div>
+      <div class="mc go"><div class="ml">Block Reward</div><div class="mv go dm" id="mrew">8.00 Q</div><div class="ms" id="mrew-depth">tessellation depth &mdash;</div></div>
+      <div class="mc"><div class="ml">Treasury / Block</div><div class="mv dm" id="mtrew">&mdash;</div><div class="ms" id="mtrew-pct">&mdash;% of block</div></div>
       <div class="mc"><div class="ml">Purity</div><div class="mv vi dm" id="mpu">&mdash;</div><div class="ms" id="mng">negativity: &mdash;</div></div>
       <div class="mc"><div class="ml">QFI</div><div class="mv dm" id="mqf">&mdash;</div><div class="ms" id="mdc">discord: &mdash;</div></div>
     </div>
@@ -290,6 +293,7 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
           <button class="txfbtn active" id="txf-all" onclick="txFilter('all')">ALL</button>
           <button class="txfbtn" id="txf-coinbase" onclick="txFilter('coinbase')">COINBASE</button>
           <button class="txfbtn" id="txf-transfer" onclick="txFilter('transfer')">TRANSFER</button>
+          <button class="txfbtn" id="txf-treasury" onclick="txFilter('treasury')">🏛 TREASURY</button>
         </span>
       </div>
       <div style="padding:6px 16px 2px;display:flex;align-items:center;gap:8px">
@@ -897,21 +901,25 @@ function openBlockModal(blk){
       var to=tx.to_address||tx.to_addr||tx.receiver||'';
       var amt=parseFloat(tx.amount_qtcl||(typeof tx.amount==='number'&&tx.amount<100000?tx.amount:tx.amount/100)||0);
       if(amt>10000) amt=amt/100; // base units guard
-      var icon=cb?'⛏':'⇄';
+      var isTreasury=cb&&(to===_TREASURY_ADDR||from===_TREASURY_ADDR);
+      var icon=isTreasury?'🏛':cb?'⛏':'⇄';
       var fromShort=from.length>20?from.slice(0,10)+'…'+from.slice(-8):from||'—';
       var toShort=to.length>20?to.slice(0,10)+'…'+to.slice(-8):to||'—';
+      var badge=isTreasury
+        ?'<span style="background:var(--go2);color:var(--go);padding:1px 6px;border-radius:3px;font-family:var(--disp);font-size:8px;letter-spacing:.4px;border:1px solid rgba(212,160,32,.3)">🏛 TREASURY</span>'
+        :cb?'<span style="background:var(--vi2);color:var(--vi);padding:1px 6px;border-radius:3px;font-family:var(--disp);font-size:8px;letter-spacing:.4px">⛏ COINBASE</span>':'';
       return '<div class="bm-tx" onclick="_bmCopy(\''+hash+'\')" title="Click to copy TX ID">'
-        +'<div class="bm-tx-icon '+tp+'">'+icon+'</div>'
+        +'<div class="bm-tx-icon '+(isTreasury?'treasury':tp)+'">'+icon+'</div>'
         +'<div class="bm-tx-info">'
         +'<div class="bm-tx-hash">'+hash+'</div>'
         +'<div class="bm-tx-sub">'
         +'<span style="color:var(--dim)">from:</span> <span style="color:var(--tx)">'+fromShort+'</span>'
         +'<span style="color:var(--dim)">→</span>'
-        +'<span style="color:var(--gr)">'+toShort+'</span>'
-        +(cb?'<span style="background:var(--vi2);color:var(--vi);padding:1px 5px;border-radius:3px;font-family:var(--disp);font-size:8px;letter-spacing:.4px">COINBASE</span>':'')
+        +'<span style="color:'+(isTreasury?'var(--go)':'var(--gr)')+'">'+toShort+'</span>'
+        +badge
         +'</div>'
         +'</div>'
-        +'<div class="bm-tx-amt '+tp+'">'+amt.toFixed(2)+' Q</div>'
+        +'<div class="bm-tx-amt '+(isTreasury?'transfer':tp)+'" style="'+(isTreasury?'color:var(--go)':'')+'">'+amt.toFixed(2)+' Q</div>'
         +'<div class="bm-copy-hint">CLICK TO COPY</div>'
         +'</div>';
     }).join('');
@@ -932,11 +940,26 @@ function pct(v,mx){return Math.min(100,Math.max(0,v/mx*100))+'%';}
 // ── Transaction Explorer state ────────────────────────────────────────────
 var txs=[],txPage_n=0,txPerPage=50,txTotal=0,txPages=1,txFilterMode='all',txSearchQ='',txLoading=false,_txSearchTimer=null;
 
+var _TREASURY_ADDR='qtcl110fc58e3c441106cc1e54ae41da5d15868525a87';
+
 function txFilter(mode){
   txFilterMode=mode;txPage_n=0;
-  ['all','coinbase','transfer'].forEach(function(m){
+  // For treasury mode, inject address into search so server filters by address
+  if(mode==='treasury'){
+    txSearchQ=_TREASURY_ADDR;
+    var si=document.getElementById('txsearch');
+    if(si) si.value=_TREASURY_ADDR;
+  } else if(txSearchQ===_TREASURY_ADDR){
+    txSearchQ='';
+    var si=document.getElementById('txsearch');
+    if(si) si.value='';
+  }
+  ['all','coinbase','transfer','treasury'].forEach(function(m){
     var b=document.getElementById('txf-'+m);
-    if(b){b.className='txfbtn'+(mode===m?' active'+(m==='coinbase'?' cb':m==='transfer'?' tr':''):'');}
+    if(b){
+      var act=mode===m;
+      b.className='txfbtn'+(act?' active'+(m==='coinbase'?' cb':m==='transfer'?' tr':m==='treasury'?' go':''):'');
+    }
   });
   loadTxPage();
 }
@@ -950,18 +973,22 @@ function renderTxRow(tx,isNew){
   var hash=tx.tx_hash||tx.tx_id||tx.hash||'';
   var from=tx.from_address||tx.sender_addr||tx.sender||'';
   var to  =tx.to_address  ||tx.receiver_addr||tx.receiver||'';
+  var isTreasury=cb&&(to===_TREASURY_ADDR||from===_TREASURY_ADDR);
   var amt =parseFloat(tx.amount_qtcl||tx.amount||0);
   var fee =parseFloat(tx.fee_qtcl||tx.fee||0);
   var blk =tx.height||tx.block_height||'—';
   var st  =tx.status||'confirmed';
   var wfid=tx.w_state_fidelity?(' <span style="color:var(--gr);font-size:9px">W3='+parseFloat(tx.w_state_fidelity).toFixed(3)+'</span>'):'';
   var qsh =tx.quantum_state_hash?('<div style="color:var(--dim);font-size:8px;word-break:break-all;margin-top:2px">Q:'+_shortHash(tx.quantum_state_hash,20)+'</div>'):'';
+  var typeLabel=isTreasury?'🏛 TREASURY':cb?'⛏ COINBASE':'⇄ TRANSFER';
+  var typeClass=isTreasury?'treasury':cb?'coinbase':'transfer';
+  var amtColor =isTreasury?'color:var(--go)':'';
   return '<tr class="'+(isNew?'tx-new ':'')+(cb?'tx-cb':'tx-tr')+'" title="'+hash+'">'
-    +'<td><span class="tba '+tp+'">'+(cb?'⛏ COINBASE':'⇄ TRANSFER')+'</span>'+wfid+'</td>'
+    +'<td><span class="tba '+typeClass+'">'+typeLabel+'</span>'+wfid+'</td>'
     +'<td style="font-family:var(--mono);font-size:10px;cursor:pointer;color:var(--cy);user-select:all" title="Click to copy: '+hash+'" onclick="try{navigator.clipboard.writeText(this.title.replace(\"Click to copy: \",\"\"));}catch(e){}">'+_shortHash(hash,18)+'</td>'
     +'<td style="font-family:var(--mono);font-size:9px;color:var(--dim)" title="'+from+'">'+_shortHash(from,14)+'</td>'
-    +'<td style="font-family:var(--mono);font-size:9px;color:var(--gr)" title="'+to+'">'+_shortHash(to,14)+'</td>'
-    +'<td style="color:var(--go);font-size:11px">'+amt.toFixed(2)+' Q'+qsh+'</td>'
+    +'<td style="font-family:var(--mono);font-size:9px;color:'+(isTreasury?'var(--go)':'var(--gr)')+'" title="'+to+'">'+_shortHash(to,14)+'</td>'
+    +'<td style="font-size:11px;'+amtColor+'">'+amt.toFixed(2)+' Q'+qsh+'</td>'
     +'<td style="color:var(--dim);font-size:10px">'+blk+'</td>'
     +'<td><span class="tba '+st+'">'+st.toUpperCase()+'</span></td>'
     +'</tr>';
@@ -1475,15 +1502,40 @@ async function refresh(){
     if(d.qrng_health!=null) S.qrng_health=d.qrng_health;
     if(d.pq_curr!=null) S.pq_curr=d.pq_curr;
     if(d.pq_last!=null) S.pq_last=d.pq_last;
-    // New block event from _gossip_publish_block — fetch its transactions immediately
+    // 💎 New block — carries tessellation reward breakdown via enriched SSE payload
     if(d.type==='new_block'&&d.height!=null){
       var h=parseInt(d.height);
       if(h>0&&h!==(window._lastIngestedHeight||0)){
         window._lastIngestedHeight=h;
         ingestNewBlockTxs(h, d.block_hash||'');
         if(h>S.chain_height){S.chain_height=h;document.getElementById('bh').textContent=h;}
-        // New block means a miner just won — refresh registry to show updated stats
+        // New block = miner won — refresh registry after a beat
         setTimeout(fetchMiners, 2000);
+
+        // ── 💎 Live reward metrics from SSE payload ──────────────────────────
+        if(d.tessellation_depth){
+          var _mr  =document.getElementById('mrew');
+          var _mrd =document.getElementById('mrew-depth');
+          var _mtr =document.getElementById('mtrew');
+          var _mtrp=document.getElementById('mtrew-pct');
+          if(_mr)   _mr.textContent  =(d.total_reward_qtcl||8).toFixed(2)+' Q';
+          if(_mrd)  _mrd.textContent ='depth '+d.tessellation_depth+' tessellation';
+          if(_mtr)  _mtr.textContent =(d.treasury_reward_qtcl||0).toFixed(2)+' Q';
+          if(_mtrp) _mtrp.textContent=(d.treasury_pct||0).toFixed(2)+'% of block';
+        }
+        // Store for block stream row rendering
+        window._lastBlockReward={
+          depth           : d.tessellation_depth||5,
+          miner_qtcl      : d.miner_reward_qtcl||7.2,
+          treasury_qtcl   : d.treasury_reward_qtcl||0.8,
+          total_qtcl      : d.total_reward_qtcl||8.0,
+          treasury_addr   : d.treasury_address||_TREASURY_ADDR,
+          miner_addr      : d.miner_address||'',
+          treasury_tx     : d.treasury_tx_id||'',
+          coinbase_tx     : d.coinbase_tx_id||'',
+          block_hash      : d.block_hash||'',
+          height          : h,
+        };
       }
     }
     // Per-oracle block-field readings from chirp oracle_measurements

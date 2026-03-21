@@ -72,7 +72,152 @@ ORACLE_MIN_PEERS = int(os.getenv('ORACLE_MIN_PEERS', '3'))
 ORACLE_CONSENSUS_THRESHOLD = 2/3
 
 MAX_PEERS = int(os.getenv('MAX_PEERS', '32'))
-MINING_COINBASE_REWARD = 1250
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# 💎 TESSELLATION REWARD SCHEDULE — HARDCODED / IMMUTABLE / SINGLE SOURCE OF TRUTH
+#
+#  Total supply: 498,401,280 QTCL  (62,300,160 blocks × 8.0 QTCL/block)
+#  Degressive treasury: 10% at depth-5 → 1.25% at depth-8
+#  Treasury address: qtcl110fc58e3c441106cc1e54ae41da5d15868525a87
+#  Treasury pubkey:  627944e93fd7f406175393da145524cf73eb7b2ed12505cd81810a69b0c4d7ac
+#
+#  Base units = QTCL × 100  (integer arithmetic — no float reward math ever)
+#
+#  Depth  Blocks        Miner/blk   Treasury/blk  Total/blk
+#  ─────  ───────────   ──────────  ────────────  ─────────
+#  5      106,496       7.20 QTCL   0.80 QTCL     8.0 QTCL  (10.00% treasury)
+#  6      851,968       7.60 QTCL   0.40 QTCL     8.0 QTCL  ( 5.00% treasury)
+#  7      6,815,744     7.80 QTCL   0.20 QTCL     8.0 QTCL  ( 2.50% treasury)
+#  8      54,525,952    7.90 QTCL   0.10 QTCL     8.0 QTCL  ( 1.25% treasury)
+#
+#  Treasury totals by depth:
+#    Depth-5: 106,496  × 80  =    8,519,680 base =    85,196.80 QTCL
+#    Depth-6: 851,968  × 40  =   34,078,720 base =   340,787.20 QTCL
+#    Depth-7: 6,815,744× 20  =  136,314,880 base = 1,363,148.80 QTCL
+#    Depth-8: 54,525,952×10  =  545,259,520 base = 5,452,595.20 QTCL
+#    TOTAL:                     724,172,800 base = 7,241,728.00 QTCL (1.45%)
+#    MINER:                  48,115,955,200 base =491,159,552.00 QTCL (98.55%)
+# ═══════════════════════════════════════════════════════════════════════════════════
+
+class TessellationRewardSchedule:
+    """
+    ╔══════════════════════════════════════════════════════════════════════╗
+    ║  QTCL CANONICAL REWARD SCHEDULE — DO NOT MODIFY — CONSENSUS RULES  ║
+    ║  Changing these values constitutes a HARD FORK of the QTCL network. ║
+    ║  All nodes must agree on these constants for chain consensus.       ║
+    ╚══════════════════════════════════════════════════════════════════════╝
+
+    Depth boundaries are CUMULATIVE block counts matching the {8,3}
+    hyperbolic tessellation tile structure exactly.
+
+    All reward arithmetic uses integer base units (QTCL × 100) to prevent
+    floating-point divergence across nodes — critical for consensus.
+    """
+
+    # ── Cumulative block boundaries per tessellation depth ─────────────────
+    DEPTH_BOUNDARIES: Dict[int, int] = {
+        5: 106_496,       # Depth-5 tiles
+        6: 958_464,       # Cumulative through depth-6
+        7: 7_774_208,     # Cumulative through depth-7
+        8: 62_300_160,    # Cumulative through depth-8 — FINAL BLOCK
+    }
+
+    # ── Per-depth integer rewards (base units = QTCL × 100) ───────────────
+    # Invariant: miner + treasury = 800 (8.0 QTCL) at every depth.
+    REWARDS: Dict[int, Dict[str, int]] = {
+        5: {'miner': 720, 'treasury': 80},   # 7.20 / 0.80 QTCL
+        6: {'miner': 760, 'treasury': 40},   # 7.60 / 0.40 QTCL
+        7: {'miner': 780, 'treasury': 20},   # 7.80 / 0.20 QTCL
+        8: {'miner': 790, 'treasury': 10},   # 7.90 / 0.10 QTCL
+    }
+
+    # ── Block-level invariants ────────────────────────────────────────────
+    TOTAL_PER_BLOCK_BASE: int = 800        # 8.0 QTCL — never changes
+    TOTAL_BLOCKS:         int = 62_300_160
+    TOTAL_SUPPLY_BASE:    int = 62_300_160 * 800   # 49,840,128,000 base units
+    TOTAL_SUPPLY_QTCL:    int = 498_401_280
+
+    # ── Treasury identity (canonical — set at genesis, never changed) ─────
+    TREASURY_ADDRESS: str = 'qtcl110fc58e3c441106cc1e54ae41da5d15868525a87'
+    TREASURY_PUBKEY:  str = '627944e93fd7f406175393da145524cf73eb7b2ed12505cd81810a69b0c4d7ac'
+
+    @classmethod
+    def get_depth_for_height(cls, height: int) -> int:
+        """Return tessellation depth for a given block height."""
+        for depth, boundary in cls.DEPTH_BOUNDARIES.items():
+            if height < boundary:
+                return depth
+        return 8
+
+    @classmethod
+    def get_rewards_for_height(cls, height: int) -> Dict[str, int]:
+        """
+        Return {'miner': <base_units>, 'treasury': <base_units>}.
+        Pure integer arithmetic — safe for consensus-critical code paths.
+        """
+        return dict(cls.REWARDS[cls.get_depth_for_height(height)])
+
+    @classmethod
+    def get_miner_reward_base(cls, height: int) -> int:
+        """Miner reward in base units for block height."""
+        return cls.REWARDS[cls.get_depth_for_height(height)]['miner']
+
+    @classmethod
+    def get_treasury_reward_base(cls, height: int) -> int:
+        """Treasury reward in base units for block height."""
+        return cls.REWARDS[cls.get_depth_for_height(height)]['treasury']
+
+    @classmethod
+    def get_miner_reward_qtcl(cls, height: int) -> float:
+        """Miner reward in QTCL — display only, do not use for accounting."""
+        return cls.get_miner_reward_base(height) / 100.0
+
+    @classmethod
+    def get_treasury_reward_qtcl(cls, height: int) -> float:
+        """Treasury reward in QTCL — display only."""
+        return cls.get_treasury_reward_base(height) / 100.0
+
+    @classmethod
+    def get_supply_breakdown(cls) -> Dict[str, Any]:
+        """Full supply breakdown — exposed via /api/supply endpoint."""
+        breakdown: Dict[str, Any] = {}
+        total_miner_base = 0
+        total_treasury_base = 0
+        prev = 0
+        for depth, boundary in cls.DEPTH_BOUNDARIES.items():
+            blocks = boundary - prev
+            r = cls.REWARDS[depth]
+            m = blocks * r['miner']
+            t = blocks * r['treasury']
+            total_miner_base    += m
+            total_treasury_base += t
+            breakdown[depth] = {
+                'blocks'               : blocks,
+                'miner_reward_qtcl'    : r['miner']   / 100.0,
+                'treasury_reward_qtcl' : r['treasury'] / 100.0,
+                'total_per_block_qtcl' : (r['miner'] + r['treasury']) / 100.0,
+                'miner_total_qtcl'     : m / 100.0,
+                'treasury_total_qtcl'  : t / 100.0,
+                'depth_supply_qtcl'    : (m + t) / 100.0,
+            }
+            prev = boundary
+        total = total_miner_base + total_treasury_base
+        breakdown['totals'] = {
+            'total_supply_qtcl'    : total / 100.0,
+            'total_miner_qtcl'     : total_miner_base    / 100.0,
+            'total_treasury_qtcl'  : total_treasury_base / 100.0,
+            'treasury_pct'         : round(total_treasury_base / total * 100, 4),
+            'treasury_address'     : cls.TREASURY_ADDRESS,
+        }
+        return breakdown
+
+
+# ── Public aliases ────────────────────────────────────────────────────────────
+REWARD_SCHEDULE = TessellationRewardSchedule
+
+# Legacy constant — retained so imports don't break; deprecated for new code.
+# Use TessellationRewardSchedule.get_miner_reward_base(height) instead.
+MINING_COINBASE_REWARD = 720  # depth-5 miner base units (genesis era default)
 
 # Logging
 if not logging.getLogger().hasHandlers():
