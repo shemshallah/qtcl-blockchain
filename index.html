@@ -1229,62 +1229,60 @@ async function fetchPeers(){
 //            any miner has called /api/peers/register, even if zero blocks mined)
 // The miner panel is ONLY populated from these two endpoints — never from TCP /api/p2p/peers.
 async function fetchMiners(){
-  var now=Date.now();
-
-  // ── Primary: /api/miners ─────────────────────────────────────────────────
+  // ── Source 1: /api/miners (blocks.validator_public_key + peer_registry merge) ──
   var d=await api('/api/miners');
-
   if(d&&!d.error&&Array.isArray(d.miners)&&d.miners.length>0){
-    // Ensure every entry has a status (block-only miners miss it from server merge)
-    d.miners.forEach(function(m){
-      if(!m.status) m.status='historic';
-    });
+    d.miners.forEach(function(m){if(!m.status) m.status='historic';});
     renderMiners(d.miners);
     var live=d.live_count||d.miners.filter(function(m){return m.status==='live';}).length;
-    S.peer_count=live;
-    S.n_peers=Math.max(S.n_peers,d.total||d.miners.length);
+    S.peer_count=live;S.n_peers=Math.max(S.n_peers,d.total||d.miners.length);
     document.getElementById('bbn').textContent=d.total||d.miners.length;
     var bbp=document.getElementById('bbp');if(bbp&&live>0) bbp.textContent=live;
     return;
   }
-
-  // ── Fallback: /api/peers/list?include_stale=1 ────────────────────────────
-  // This reads directly from peer_registry which every miner writes to on /api/peers/register.
-  // Returns {peers:[{peer_id, miner_address, gossip_url, block_height, last_seen, ...}], count:N}
+  // ── Source 2: /api/peers/list?include_stale=1 (raw peer_registry) ──────────
   var pd=await api('/api/peers/list?include_stale=1');
-
-  if(pd&&!pd.error&&Array.isArray(pd.peers)){
-    // Normalise peer_registry rows into miner shape renderMiners expects
-    var stale=300; // matches server _PEER_STALE_SECS
+  if(pd&&!pd.error&&Array.isArray(pd.peers)&&pd.peers.length>0){
+    var stale=300;
     var miners=pd.peers.map(function(p){
       var ls=p.last_seen?new Date(p.last_seen).getTime()/1000:0;
       var age=ls>0?(Date.now()/1000-ls):999999;
-      var status=age<stale?'live':(age<86400?'seen':'historic');
       return {
-        miner_address   : p.miner_address||'',
-        peer_id         : p.peer_id||'',
-        gossip_url      : p.gossip_url||'',
-        block_count     : 0,
-        last_height     : p.block_height||0,
-        total_earned_qtcl: 0,
-        last_seen_age_s : Math.round(age),
-        status          : status,
-        ip_address      : p.ip_address||'',
-        supports_sse    : p.supports_sse||false,
+        miner_address:p.miner_address||p.ip_address||'',peer_id:p.peer_id||'',
+        gossip_url:p.gossip_url||'',block_count:0,last_height:p.block_height||0,
+        total_earned_qtcl:0,last_seen_age_s:Math.round(age),
+        status:age<stale?'live':(age<86400?'seen':'historic'),
+        ip_address:p.ip_address||'',supports_sse:p.supports_sse||false,
       };
-    });
+    }).filter(function(m){return m.miner_address;});
     if(miners.length>0){
       renderMiners(miners);
       var live2=miners.filter(function(m){return m.status==='live';}).length;
-      S.peer_count=live2;
-      S.n_peers=Math.max(S.n_peers,miners.length);
+      S.peer_count=live2;S.n_peers=Math.max(S.n_peers,miners.length);
       document.getElementById('bbn').textContent=miners.length;
       var bbp2=document.getElementById('bbp');if(bbp2&&live2>0) bbp2.textContent=live2;
       return;
     }
   }
-
-  // ── Both sources empty: render empty state ────────────────────────────────
+  // ── Source 3: /api/chain miners dict (uses validator_public_key — always correct) ─
+  var cd=await api('/api/chain');
+  if(cd&&!cd.error&&cd.miners&&typeof cd.miners==='object'){
+    var mkeys=Object.keys(cd.miners);
+    if(mkeys.length>0){
+      var miners3=mkeys.map(function(addr){
+        var m=cd.miners[addr];
+        return {
+          miner_address:m.wallet_address||addr,peer_id:'',gossip_url:'',
+          block_count:m.blocks_mined||0,last_height:0,total_earned_qtcl:0,
+          last_seen_age_s:null,status:'historic',ip_address:'',supports_sse:false,
+        };
+      });
+      renderMiners(miners3);
+      S.n_peers=Math.max(S.n_peers,miners3.length);
+      document.getElementById('bbn').textContent=miners3.length;
+      return;
+    }
+  }
   renderMiners([]);
 }
 
