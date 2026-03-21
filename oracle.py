@@ -256,32 +256,37 @@ double qtcl_oracle_coherence_l1(const double *re, const double *im) {
 """
 
 def _compile_oracle_c_layer():
+    """
+    Compile optional C acceleration layer.
+    KOYEB FIX: timeouts 4 s per compiler (was 30 s x2 = 60 s blocking import).
+    numpy fallback always active; C layer is performance-only.
+    """
     global _OC_LIB, _OC_FFI, _OC_OK
     try:
         from cffi import FFI as _CFFI
-        import tempfile, subprocess, sys as _sys, os as _os
+        import tempfile, subprocess, os as _os
         _ffi = _CFFI()
         _ffi.cdef(_OC_CDEFS)
         src_file = _os.path.join(tempfile.gettempdir(), 'qtcl_oracle_accel.c')
         so_file  = _os.path.join(tempfile.gettempdir(), 'qtcl_oracle_accel.so')
         with open(src_file, 'w') as _sf:
             _sf.write(_OC_CSRC)
-        _cc = _os.getenv('CC', 'clang')
-        ret = subprocess.run(
-            [_cc, '-O3', '-ffast-math', '-shared', '-fPIC',
-             '-o', so_file, src_file, '-lm'],
-            capture_output=True, timeout=30
-        )
-        if ret.returncode != 0:
-            ret2 = subprocess.run(
-                ['gcc', '-O3', '-ffast-math', '-shared', '-fPIC',
-                 '-o', so_file, src_file, '-lm'],
-                capture_output=True, timeout=30
-            )
-            if ret2.returncode != 0:
-                return
+        compiled = False
+        for _cc in [_os.getenv('CC', 'gcc'), 'gcc', 'cc']:
+            try:
+                ret = subprocess.run(
+                    [_cc, '-O2', '-shared', '-fPIC', '-o', so_file, src_file, '-lm'],
+                    capture_output=True, timeout=4
+                )
+                if ret.returncode == 0:
+                    compiled = True
+                    break
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                continue
+        if not compiled:
+            logger.debug("[ORACLE-C] No compiler — numpy fallback active")
+            return
         _lib = _ffi.dlopen(so_file)
-        # Quick self-test: fidelity of ideal W3 with itself = 1.0
         _w3_flat = [0.0]*64
         for _i in (1,2,4):
             for _j in (1,2,4):
@@ -293,11 +298,12 @@ def _compile_oracle_c_layer():
         _OC_LIB = _lib
         _OC_FFI = _ffi
         _OC_OK  = True
-        logger.info("[ORACLE-C] ✅ Oracle C acceleration compiled — enforce_dm/w3_fidelity/purity/coherence active")
+        logger.info("[ORACLE-C] ✅ C acceleration compiled — w3_fidelity/purity/coherence active")
     except Exception as _e:
         logger.debug(f"[ORACLE-C] C layer unavailable ({type(_e).__name__}): {_e} — numpy fallback active")
 
-_compile_oracle_c_layer()
+# KOYEB FIX: background thread — oracle import returns instantly, gunicorn binds port < 2 s
+threading.Thread(target=_compile_oracle_c_layer, daemon=True, name="OracleCCompile").start()
 
 
 def _c_dm8_to_flat(rho: np.ndarray):

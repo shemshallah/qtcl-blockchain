@@ -2644,10 +2644,12 @@ def _upsert_peer(peer_id: str, data: Dict[str, Any]) -> bool:
                      last_seen, last_handshake, updated_at)
                 VALUES (%s,%s,%s,%s,%s, %s,%s,%s, %s,%s,%s, NOW(),NOW(),NOW())
                 ON CONFLICT (peer_id) DO UPDATE SET
+                    ip_address      = EXCLUDED.ip_address,
                     block_height    = EXCLUDED.block_height,
                     chain_head_hash = EXCLUDED.chain_head_hash,
+                    network_version = EXCLUDED.network_version,
                     gossip_url      = COALESCE(EXCLUDED.gossip_url, peer_registry.gossip_url),
-                    miner_address   = COALESCE(EXCLUDED.miner_address, peer_registry.miner_address),
+                    miner_address   = COALESCE(NULLIF(EXCLUDED.miner_address,''), peer_registry.miner_address),
                     supports_sse    = EXCLUDED.supports_sse,
                     last_seen       = NOW(),
                     updated_at      = NOW()
@@ -7317,10 +7319,14 @@ def _wsgi_startup() -> None:
         except Exception as _e:
             logger.warning(f"[WSGI-INIT] Daemon start non-fatal: {_e}")
 
-        _set_app_ready()
         logger.info("[WSGI-INIT] ✅ All subsystems live — server fully operational")
 
     threading.Thread(target=_heavy_init, daemon=True, name="HeavyInit").start()
+    # KOYEB FIX: mark app ready NOW so health probe returns healthy immediately.
+    # Heavy subsystems (oracle, P2P, gossip) finish in background — they are
+    # non-blocking by design. _APP_READY was previously set inside _heavy_init
+    # after a 120 s oracle wait, causing Koyeb to show "starting" indefinitely.
+    _set_app_ready()
     logger.info("[WSGI-INIT] 🚀 Heavy init deferred to background — gunicorn binding port 8000 NOW")
 
 _wsgi_startup()
