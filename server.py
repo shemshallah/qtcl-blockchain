@@ -10835,23 +10835,25 @@ class GossipProtocolHandler:
                 logger.warning(f"[LAYER-6] Gossip broadcast error to {peer_url}: {e}")
 
 
-# MODULE LEVEL: Initialize P2P and startup
-PORT = 9091  # Unified port for REST + P2P + WebSocket
-DEBUG = False  # Production mode
+# ── NOTE: The block below was module-level code that ran on every gunicorn
+# worker import, calling _start_p2p_daemons() a second time and printing
+# stale startup banners. It has been moved inside if __name__ == '__main__'
+# so it only fires during local development runs.
+# Production startup is handled entirely by _wsgi_startup() above.
 
-logger.info("═" * 80)
-logger.info("QTCL SERVER STARTUP")
-logger.info("═" * 80)
-logger.info(f"Port: {PORT} (unified REST + P2P + WebSocket)")
-logger.info("Measurement Service: Thread pool (8 threads, 1000 nodes/shard)")
-logger.info("SSE Broadcaster: PostgreSQL NOTIFY + local fan-out fallback")
-logger.info("Database: SQLite + WAL mode (concurrent reads)")
-logger.info("═" * 80)
-
-# Start P2P daemons (streaming + cleanup)
-logger.info("[P2P] Starting P2P daemons (heartbeat, snapshot broadcast)...")
-_start_p2p_daemons()
-logger.info("[P2P] ✅ P2P daemons started")
+if __name__ == '__main__':
+    PORT = 9091
+    DEBUG = False
+    logger.info("═" * 80)
+    logger.info("QTCL SERVER STARTUP")
+    logger.info("═" * 80)
+    logger.info(f"Port: {PORT} (unified REST + P2P + WebSocket)")
+    logger.info("═" * 80)
+    logger.info("[P2P] Starting P2P daemons...")
+    _start_p2p_daemons()
+    logger.info("[P2P] ✅ P2P daemons started")
+    logger.info("[HTTP] Starting unified HTTP REST + P2P SSE server...")
+    logger.info(f"[HTTP] Listening on 0.0.0.0:{PORT}")
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # PRODUCTION DEPLOYMENT: Gunicorn with Async Workers
@@ -10888,11 +10890,7 @@ logger.info("[P2P] ✅ P2P daemons started")
 #
 # ═════════════════════════════════════════════════════════════════════════════════
 
-logger.info("[HTTP] Starting unified HTTP REST + P2P SSE server...")
-logger.info(f"[HTTP] Listening on 0.0.0.0:{PORT}")
-logger.info("[HTTP] Measurement service: ACTIVE")
-logger.info("[HTTP] Database: SQLite WAL mode enabled")
-logger.info("[HTTP] Routes available: /metrics, /api/metrics/*, /api/events, /health, /api/diagnostics")
+# ═════════════════════════════════════════════════════════════════════
 
 if __name__ == '__main__':
     # Local development: Flask development server
