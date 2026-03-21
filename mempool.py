@@ -1176,7 +1176,7 @@ class Mempool:
         max_txs       : int = 2_000,
         block_height  : int = 0,
         miner_address : str = "",
-        block_reward_base : int = 2_000,   # 20 QTCL default (epoch 0)
+        block_reward_base : int = 720,      # depth-5 genesis miner default — callers must pass TessellationRewardSchedule.get_miner_reward_base(height)
     ) -> Tuple[List[MempoolTx], 'MempoolTx']:
         """
         Select transactions for next block — Bitcoin fee-rate ordering.
@@ -1218,7 +1218,18 @@ class Mempool:
             selected = self._apply_cpfp(selected_raw)
 
         coinbase = self._build_coinbase(block_height, miner_address, block_reward_base)
-        return selected, coinbase
+        # Always build treasury coinbase (slot 1) from canonical schedule
+        try:
+            from globals import TessellationRewardSchedule as _TRS_mp
+            _treasury_base = _TRS_mp.get_treasury_reward_base(block_height)
+            _treasury_addr = _TRS_mp.TREASURY_ADDRESS
+        except Exception:
+            _treasury_base = 800 - block_reward_base   # fallback: remainder
+            _treasury_addr = 'qtcl110fc58e3c441106cc1e54ae41da5d15868525a87'
+        treasury_coinbase = self._build_treasury_coinbase(
+            block_height, _treasury_base, _treasury_addr
+        )
+        return selected, coinbase, treasury_coinbase
 
     def mark_included_in_block(self, tx_hashes: List[str], block_height: int) -> int:
         """
@@ -1775,6 +1786,38 @@ class Mempool:
     # ═══════════════════════════════════════════════════════════════════════
     # COINBASE TRANSACTION BUILDER
     # ═══════════════════════════════════════════════════════════════════════
+
+    def _build_treasury_coinbase(
+        self,
+        block_height      : int,
+        treasury_reward   : int,
+        treasury_address  : str = 'qtcl110fc58e3c441106cc1e54ae41da5d15868525a87',
+        w_entropy_hash    : str = '',
+    ) -> 'MempoolTx':
+        """
+        Build treasury coinbase (slot 1) — always paid on-chain regardless of miner.
+        Treasury address: qtcl110fc58e3c441106cc1e54ae41da5d15868525a87 (hardcoded)
+        """
+        import hashlib as _hl
+        raw_input = f"TREASURY_COINBASE:{block_height}:{treasury_address}:{treasury_reward}:{w_entropy_hash}".encode()
+        tx_hash   = _hl.sha3_256(raw_input).hexdigest()
+        return MempoolTx(
+            tx_hash        = tx_hash,
+            from_address   = '0' * 64,
+            to_address     = treasury_address,
+            amount_base    = treasury_reward,
+            fee_base       = 0,
+            nonce          = block_height,
+            metadata       = {
+                'treasury'          : True,
+                'reward_type'       : 'treasury',
+                'block_height'      : block_height,
+                'treasury_reward'   : treasury_reward,
+                'treasury_address'  : treasury_address,
+            },
+            tx_type        = "coinbase",
+            memo           = f"Block {block_height} treasury",
+        )
 
     def _build_coinbase(
         self,
