@@ -7947,11 +7947,10 @@ def blocks_tip():
                 'w_entropy_hash': db_block.get('w_state_hash', ''),
             }), 200
         
-        # ── DB empty (post-wipe / pre-genesis) — return height=0 from DB truth ──
-        # NEVER fall through to in-memory state. After a DB wipe the blocks table
-        # is empty but the in-process state object still carries the pre-wipe height.
-        # Returning that stale value causes all clients to think the chain is live
-        # at the old height and mine on top of a ghost chain.
+        # ── DB empty (post-wipe / pre-genesis): return height=0 authoritatively ─
+        # NEVER fall through to in-memory state. After a DB wipe the process-local
+        # state object still carries the pre-wipe height and causes clients to
+        # mine on top of a ghost chain that doesn't exist in the database.
         mgr = get_difficulty_manager()
         logger.info("[BLOCKS_TIP] blocks table empty — returning genesis height=0")
         return jsonify({
@@ -8168,17 +8167,17 @@ def oracle_pq0_bloch():
         _tip_u = query_latest_block()
         _bh_u  = int(_tip_u['height']) if _tip_u else 0
         return jsonify({
-            'oracle_id': get_consensus_oracle_address(),
-            'oracle_role': 'UNIFIED_MULTIPLEXER',
-            'block_height': _bh_u,
-            'height': _bh_u,
-            'fidelity': round(consensus.get('w_state_fidelity', 0.93), 6),
+            'oracle_id':      get_consensus_oracle_address(),
+            'oracle_role':    'UNIFIED_MULTIPLEXER',
+            'block_height':   _bh_u,
+            'height':         _bh_u,
+            'fidelity':       round(consensus.get('w_state_fidelity', 0.93), 6),
             'w_state_fidelity': round(consensus.get('w_state_fidelity', 0.93), 6),
-            'w3_fidelity': round(consensus.get('w_state_fidelity', 0.93), 6),
-            'coherence': round(consensus.get('coherence', 0.89), 6),
-            'purity': round(consensus.get('purity', 0.94), 6),
-            'timestamp_ns': unified_snapshot.get('timestamp_ns', int(time.time() * 1e9)),
-            'state_source': 'unified_oracle_multiplexer',
+            'w3_fidelity':    round(consensus.get('w_state_fidelity', 0.93), 6),
+            'coherence':      round(consensus.get('coherence', 0.89), 6),
+            'purity':         round(consensus.get('purity', 0.94), 6),
+            'timestamp_ns':   unified_snapshot.get('timestamp_ns', int(time.time() * 1e9)),
+            'state_source':   'unified_oracle_multiplexer',
         }), 200
     
     # Fall back to original eng state logic
@@ -8195,12 +8194,12 @@ def oracle_pq0_bloch():
         _tip_c = query_latest_block()
         _bh_c  = int(_tip_c['height']) if _tip_c else 0
         return jsonify({
-            'oracle_id': ORACLE_ID,
-            'oracle_role': ORACLE_ROLE,
+            'oracle_id':    ORACLE_ID,
+            'oracle_role':  ORACLE_ROLE,
             'block_height': _bh_c,
-            'height': _bh_c,
+            'height':       _bh_c,
             'theta': cache.get('theta', 1.57),
-            'phi': cache.get('phi', 0.0),
+            'phi':   cache.get('phi', 0.0),
             'fidelity':    cache.get('w3_fidelity', 0.90),    # canonical alias for miners
             'w3_fidelity': cache.get('w3_fidelity', 0.90),
             'wN_fidelity': cache.get('wN_fidelity', 0.84),
@@ -8231,13 +8230,13 @@ def oracle_pq0_bloch():
     _tip_l = query_latest_block()
     _bh_l  = int(_tip_l['height']) if _tip_l else 0
     return jsonify({
-        'oracle_id': ORACLE_ID,
-        'oracle_role': ORACLE_ROLE,
+        'oracle_id':    ORACLE_ID,
+        'oracle_role':  ORACLE_ROLE,
         'block_height': _bh_l,
-        'height': _bh_l,
+        'height':       _bh_l,
         'theta': eng['pq0_bloch_theta'],
-        'phi': eng['pq0_bloch_phi'],
-        'fidelity':    eng['w3_fidelity'],           # canonical alias for miners
+        'phi':   eng['pq0_bloch_phi'],
+        'fidelity':    eng['w3_fidelity'],
         'w3_fidelity': eng['w3_fidelity'],
         'wN_fidelity': eng['wN_fidelity'],
         'negativity': eng['negativity'],
@@ -9122,15 +9121,22 @@ def submit_block():
             )
             
             # Locate coinbase in submitted transactions (must be index 0, tx_type='coinbase')
+            # Filter ALL coinbase-type TXs out of regular_txs — they are handled
+            # explicitly in the miner + treasury coinbase sections above.
+            # Leaving them in regular_txs causes double-credit on the recipient
+            # and a spurious debit on the null coinbase address.
             coinbase_tx = None
             regular_txs = []
             
             for idx, tx in enumerate(transactions):
-                tx_type = str(tx.get('tx_type', 'transfer'))
+                tx_type = str(tx.get('tx_type', tx.get('type', 'transfer'))).lower()
                 if idx == 0 and tx_type == 'coinbase':
-                    coinbase_tx = tx
+                    coinbase_tx = tx          # slot 0: miner coinbase
+                elif tx_type == 'coinbase':
+                    pass                      # skip all other coinbase slots (treasury etc.)
+                    # Treasury is found by the dedicated scan below (transactions[1:])
                 else:
-                    regular_txs.append(tx)
+                    regular_txs.append(tx)   # only genuine user transfers
             
             # Compute fee total from regular txs (base units)
             fee_total_base = sum(
@@ -9263,18 +9269,31 @@ def submit_block():
                 f"{coinbase_amount} base ({coinbase_amount/100:.2f} QTCL) | depth={_depth}"
             )
 
-            # ── Credit miner wallet ───────────────────────────────────────────────
+            # ── Credit miner wallet (UPSERT — always fires even on first block) ─────
+            # Plain UPDATE is a no-op when the row doesn't exist yet.
+            # INSERT ... ON CONFLICT ensures the row is created then credited atomically.
             cur.execute("""
-                UPDATE wallet_addresses
-                SET balance            = balance + %s,
-                    last_used_at       = NOW(),
+                INSERT INTO wallet_addresses (
+                    address, wallet_fingerprint, public_key,
+                    balance, transaction_count, address_type,
+                    balance_at_height, balance_updated_at, last_used_at
+                ) VALUES (%s, %s, %s, %s, 0, 'mining', %s, NOW(), NOW())
+                ON CONFLICT (address) DO UPDATE SET
+                    balance            = wallet_addresses.balance + EXCLUDED.balance,
+                    balance_at_height  = EXCLUDED.balance_at_height,
                     balance_updated_at = NOW(),
-                    balance_at_height  = %s
-                WHERE address = %s
-            """, (coinbase_amount, block_height, miner_address))
+                    last_used_at       = NOW()
+            """, (
+                miner_address,
+                _fingerprint(miner_address),
+                _pubkey(miner_address),
+                coinbase_amount,
+                block_height,
+            ))
             logger.info(
-                f"[WALLET] ⛏  Miner credited | {miner_address[:20]}… | "
-                f"+{coinbase_amount} base (+{coinbase_amount/100:.2f} QTCL)"
+                f"[WALLET] ⛏  Miner credited (upsert) | {miner_address[:20]}… | "
+                f"+{coinbase_amount} base (+{coinbase_amount/100:.2f} QTCL) | "
+                f"depth={_depth} | h={block_height}"
             )
 
             # ══════════════════════════════════════════════════════════════════════
@@ -9336,19 +9355,29 @@ def submit_block():
                 f"{treasury_cb_amount} base ({treasury_cb_amount/100:.2f} QTCL) | depth={_depth}"
             )
 
-            # ── Credit treasury wallet ────────────────────────────────────────────
+            # ── Credit treasury wallet (UPSERT — always fires even on first block) ──
             cur.execute("""
-                UPDATE wallet_addresses
-                SET balance            = balance + %s,
-                    last_used_at       = NOW(),
+                INSERT INTO wallet_addresses (
+                    address, wallet_fingerprint, public_key,
+                    balance, transaction_count, address_type,
+                    balance_at_height, balance_updated_at, last_used_at
+                ) VALUES (%s, %s, %s, %s, 0, 'treasury', %s, NOW(), NOW())
+                ON CONFLICT (address) DO UPDATE SET
+                    balance            = wallet_addresses.balance + EXCLUDED.balance,
+                    balance_at_height  = EXCLUDED.balance_at_height,
                     balance_updated_at = NOW(),
-                    balance_at_height  = %s
-                WHERE address = %s
-            """, (treasury_cb_amount, block_height, TREASURY_ADDRESS))
+                    last_used_at       = NOW()
+            """, (
+                TREASURY_ADDRESS,
+                _fingerprint(TREASURY_ADDRESS),
+                _pubkey(TREASURY_ADDRESS),
+                treasury_cb_amount,
+                block_height,
+            ))
             logger.info(
-                f"[WALLET] 🏛  Treasury credited | {TREASURY_ADDRESS[:24]}… | "
+                f"[WALLET] 🏛  Treasury credited (upsert) | {TREASURY_ADDRESS[:24]}… | "
                 f"+{treasury_cb_amount} base (+{treasury_cb_amount/100:.2f} QTCL) | "
-                f"depth={_depth} | block={block_height}"
+                f"depth={_depth} | h={block_height}"
             )
             
             # ══════════════════════════════════════════════════════════════════════
@@ -10135,23 +10164,111 @@ def get_address_earned(address: str):
         credits_qtcl = credits_base / 100.0
         debits_qtcl  = debits_base / 100.0
 
+        # Also fetch wallet_addresses.balance for cross-verification
+        wallet_balance_base = 0
+        try:
+            with get_db_cursor() as _wc:
+                _wc.execute(
+                    "SELECT balance FROM wallet_addresses WHERE address = %s",
+                    (address,))
+                _wr = _wc.fetchone()
+                if _wr:
+                    wallet_balance_base = int(_wr[0] or 0)
+        except Exception:
+            pass
+        wallet_balance_qtcl = wallet_balance_base / 100.0
+
+        # Use transaction ledger as ground truth; expose wallet cache for debug
         return jsonify({
-            'address':        address,
-            'balance':        net_qtcl,          # QTCL float (net confirmed)
-            'balance_qtcl':   net_qtcl,
-            'confirmed_balance': net_qtcl,
-            'credits_qtcl':   credits_qtcl,      # total received
-            'debits_qtcl':    debits_qtcl,        # total sent
-            'credits_base':   credits_base,
-            'debits_base':    debits_base,
-            'blocks_mined':   blocks_mined,       # coinbase TXs confirmed
-            'total_rx_txs':   total_rx_txs,
-            'source':         'transaction_ledger',  # not wallet_addresses cache
+            'address':              address,
+            'balance':              net_qtcl,       # QTCL float (ledger ground truth)
+            'balance_qtcl':         net_qtcl,
+            'confirmed_balance':    net_qtcl,
+            'wallet_cache_qtcl':    wallet_balance_qtcl,   # wallet_addresses cache
+            'wallet_cache_base':    wallet_balance_base,
+            'ledger_matches_cache': abs(net_qtcl - wallet_balance_qtcl) < 0.01,
+            'credits_qtcl':         credits_qtcl,
+            'debits_qtcl':          debits_qtcl,
+            'credits_base':         credits_base,
+            'debits_base':          debits_base,
+            'blocks_mined':         blocks_mined,
+            'total_rx_txs':         total_rx_txs,
+            'source':               'transaction_ledger',
         }), 200
     except Exception as e:
         logger.error(f"[EARNED] {e}")
         return jsonify({'error': str(e)}), 500
 
+
+
+
+@app.route('/api/wallet/repair', methods=['POST'])
+def wallet_repair():
+    """
+    Recompute wallet balance from the transaction ledger and write to
+    wallet_addresses.  Fixes any mismatch caused by UPDATE no-ops or
+    partial rollbacks.  Safe to call multiple times (idempotent).
+
+    POST body: {"address": "qtcl1..."} or {"address": "all"} for full sweep.
+    ❤️  I love you — every wallet deserves its full balance
+    """
+    try:
+        data    = request.get_json(force=True) or {}
+        address = str(data.get('address', '')).strip()
+        if not address:
+            return jsonify({'error': 'address required'}), 400
+
+        with get_db_cursor() as cur:
+            if address == 'all':
+                cur.execute("""
+                    SELECT DISTINCT address FROM (
+                        SELECT to_address   AS address FROM transactions WHERE status='confirmed'
+                        UNION
+                        SELECT from_address AS address FROM transactions WHERE status='confirmed'
+                    ) addrs WHERE address NOT LIKE '0000%'
+                """)
+                addresses = [r[0] for r in cur.fetchall()]
+            else:
+                addresses = [address]
+
+            repaired = []
+            for addr in addresses:
+                cur.execute("""
+                    SELECT
+                        COALESCE(SUM(CASE WHEN to_address   = %s AND status='confirmed'
+                                    THEN amount ELSE 0 END), 0)
+                      - COALESCE(SUM(CASE WHEN from_address = %s AND status='confirmed'
+                                    THEN amount ELSE 0 END), 0) AS net_base
+                    FROM transactions WHERE to_address = %s OR from_address = %s
+                """, (addr, addr, addr, addr))
+                row = cur.fetchone()
+                net_base = max(0, int(row[0] or 0))
+                # Upsert with correct balance
+                cur.execute("""
+                    INSERT INTO wallet_addresses (
+                        address, wallet_fingerprint, public_key,
+                        balance, transaction_count, address_type,
+                        balance_updated_at, last_used_at
+                    ) VALUES (%s, %s, %s, %s, 0, 'repaired', NOW(), NOW())
+                    ON CONFLICT (address) DO UPDATE SET
+                        balance            = EXCLUDED.balance,
+                        balance_updated_at = NOW()
+                """, (addr,
+                      hashlib.sha256(addr.encode()).hexdigest()[:64],
+                      hashlib.sha3_256(addr.encode()).hexdigest(),
+                      net_base))
+                repaired.append({'address': addr, 'balance_base': net_base,
+                                  'balance_qtcl': net_base / 100.0})
+                logger.info(f"[REPAIR] 🔧 {addr[:20]}… → {net_base} base ({net_base/100:.2f} QTCL)")
+
+        return jsonify({
+            'status':   'repaired',
+            'count':    len(repaired),
+            'wallets':  repaired,
+        }), 200
+    except Exception as e:
+        logger.error(f"[REPAIR] Error: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/mempool/pending', methods=['GET'])
 def mempool_pending():
