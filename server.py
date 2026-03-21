@@ -9138,17 +9138,13 @@ def submit_block():
                     return jsonify({
                         'error': f'Coinbase amount too low: {cb_amount} < {BLOCK_REWARD_BASE}'
                     }), 422
-                
-                # Verify deterministic tx_id
-                expected_cb_id = _hl.sha3_256(                    f"coinbase:{block_height}:{miner_address}:{w_entropy_hash}".encode()
-                ).hexdigest()
-                if cb_id != expected_cb_id:
-                    # Accept but warn — miner may have used different entropy hash
-                    logger.warning(
-                        f"[COINBASE] ⚠️  tx_id mismatch | "
-                        f"got={cb_id[:16]}… expected={expected_cb_id[:16]}… — accepting"
-                    )
-                
+
+                # Accept client's tx_id — it is the canonical coinbase ID.
+                # We do NOT recompute expected_cb_id here: the client's formula
+                # (hash of JSON dict) differs from the old server formula
+                # (hash of f-string), producing two different hashes and two DB rows.
+                # Using cb_id as the sole canonical ID + ON CONFLICT DO UPDATE below
+                # ensures exactly one coinbase row per block.
                 coinbase_id     = cb_id
                 coinbase_amount = cb_amount
                 w_proof         = cb_proof
@@ -9170,7 +9166,19 @@ def submit_block():
             # ── INSERT COINBASE into transactions table ──────────────────────────
             _ensure_wallet(cur, miner_address, 'mining')
             _ensure_wallet(cur, COINBASE_ADDRESS, 'coinbase')  # null address row
-            
+
+            # DEDUP FIX: delete any existing coinbase row for this block height
+            # before inserting. Prevents double coinbase when the same block is
+            # submitted twice (e.g. after a worker restart) with a different tx_id
+            # formula — ON CONFLICT only guards the exact same tx_hash, not height.
+            cur.execute("""
+                DELETE FROM transactions
+                WHERE height = %s AND tx_type = 'coinbase'
+                  AND tx_hash != %s
+            """, (block_height, coinbase_id))
+            if cur.rowcount > 0:
+                logger.warning(f"[COINBASE] 🧹 Removed {cur.rowcount} stale coinbase row(s) for h={block_height}")
+
             cur.execute("""
                 INSERT INTO transactions (
                     tx_hash, from_address, to_address, amount,
@@ -9178,19 +9186,23 @@ def submit_block():
                     tx_type, status, quantum_state_hash,
                     commitment_hash, metadata
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (tx_hash) DO NOTHING
+                ON CONFLICT (tx_hash) DO UPDATE SET
+                    height     = EXCLUDED.height,
+                    block_hash = EXCLUDED.block_hash,
+                    status     = 'confirmed',
+                    updated_at = NOW()
             """, (
                 coinbase_id,
-                COINBASE_ADDRESS,   # null input — no sender
-                miner_address,      # miner receives reward
-                coinbase_amount,    # base units (NUMERIC(30,0) integer)
+                COINBASE_ADDRESS,
+                miner_address,
+                coinbase_amount,
                 block_height,
                 block_hash,
-                0,                  # ALWAYS index 0 — Bitcoin convention
+                0,
                 'coinbase',
                 'confirmed',
-                w_proof,            # quantum_state_hash — W-state entropy witness
-                block_hash,         # commitment_hash
+                w_proof,
+                block_hash,
                 json.dumps({
                     'block_reward_base':  BLOCK_REWARD_BASE,
                     'fee_total_base':     fee_total_base,
@@ -9282,17 +9294,19 @@ def submit_block():
         
         # 3.5️⃣ CONFIRM PENDING TRANSACTIONS — update status for any pre-submitted mempool TXs
         # Any TX submitted via /api/submit_transaction that was pending in DB now becomes confirmed.
-        # This is the Bitcoin model: pending → confirmed when block seals.
+        # COINBASE EXCLUDED: coinbase was already inserted as 'confirmed' in step 2 above.
+        # Including coinbase tx_id here causes double-coinbase when a retry with a different
+        # winning_seed produces a new hash — the old pending coinbase gets confirmed too.
         try:
             with get_db_cursor() as cur:
-                # Collect all tx_ids from the block (regular + any that were pre-submitted)
+                # Only collect REGULAR (non-coinbase) tx hashes
                 all_block_tx_hashes = []
                 for tx in transactions:
+                    if str(tx.get('tx_type', 'transfer')).lower() == 'coinbase':
+                        continue  # NEVER include coinbase here
                     tid = str(tx.get('tx_id', '') or tx.get('tx_hash', '') or tx.get('hash', ''))
                     if tid and len(tid) == 64:
                         all_block_tx_hashes.append(tid)
-                if coinbase_id:
-                    all_block_tx_hashes.append(coinbase_id)
 
                 if all_block_tx_hashes:
                     cur.execute("""
@@ -9304,19 +9318,16 @@ def submit_block():
                             updated_at = NOW()
                         WHERE tx_hash = ANY(%s) AND status = 'pending'
                     """, (block_height, block_hash, all_block_tx_hashes))
-                    logger.info(
-                        f"[BLOCK] ✅ Confirmed {len(all_block_tx_hashes)} pending TXs "
-                        f"→ status=confirmed | block=#{block_height}"
-                    )
 
-                # Also update any TXs that from_address + to_address match (catches alias hash mismatches)
+                # By address match — regular TXs only, never coinbase address
                 if regular_txs:
                     for tx in regular_txs:
                         fa = str(tx.get('from_addr', tx.get('from_address', tx.get('from', ''))))
                         ta = str(tx.get('to_addr',   tx.get('to_address',   tx.get('to', ''))))
                         raw_a = tx.get('amount', 0)
                         ab = int(round(float(raw_a) * 100)) if isinstance(raw_a, float) and float(raw_a) < 10000 else int(raw_a or 0)
-                        if fa and ta and ab > 0:
+                        # Never match coinbase null address
+                        if fa and ta and ab > 0 and fa != COINBASE_ADDRESS:
                             cur.execute("""
                                 UPDATE transactions
                                 SET status = 'confirmed', height = %s, block_hash = %s,
@@ -9546,6 +9557,7 @@ def block_transactions(height: int):
     """
     Get all transactions in a block by height.
     tx[0] is always the coinbase. Includes full coinbase metadata.
+    Falls back to block_hash lookup for old rows where height was not stamped.
     """
     try:
         with get_db_cursor() as cur:
@@ -9555,15 +9567,43 @@ def block_transactions(height: int):
                        quantum_state_hash, metadata, created_at
                 FROM transactions
                 WHERE height = %s
-                ORDER BY transaction_index ASC
+                ORDER BY transaction_index ASC, tx_type DESC
             """, (height,))
             rows = cur.fetchall()
-        
+
+            # ── Fallback: look up by block_hash for old rows missing height ──
+            if not rows:
+                cur.execute("""
+                    SELECT block_hash FROM blocks WHERE height = %s LIMIT 1
+                """, (height,))
+                brow = cur.fetchone()
+                if brow and brow[0]:
+                    cur.execute("""
+                        SELECT tx_hash, from_address, to_address, amount,
+                               transaction_index, tx_type, status,
+                               quantum_state_hash, metadata, created_at
+                        FROM transactions
+                        WHERE block_hash = %s
+                        ORDER BY transaction_index ASC, tx_type DESC
+                    """, (brow[0],))
+                    rows = cur.fetchall()
+                    # Backfill height on these rows so future queries work
+                    if rows:
+                        cur.execute("""
+                            UPDATE transactions SET height = %s
+                            WHERE block_hash = %s AND (height IS NULL OR height = 0)
+                        """, (height, brow[0]))
+
         if not rows:
             return jsonify({'height': height, 'transactions': [], 'count': 0}), 200
-        
+
         txs = []
+        seen_hashes = set()
         for row in rows:
+            h = row[0]
+            if h in seen_hashes:
+                continue  # dedup in case of double coinbase still in DB
+            seen_hashes.add(h)
             raw_amount = int(row[3]) if row[3] is not None else 0
             metadata = row[8]
             if isinstance(metadata, str):
@@ -9584,7 +9624,7 @@ def block_transactions(height: int):
                 'metadata':          metadata,
                 'created_at':        str(row[9]) if row[9] else None,
             })
-        
+
         coinbase = next((t for t in txs if t['tx_type'] == 'coinbase'), None)
         return jsonify({
             'height':       height,
