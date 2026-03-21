@@ -955,23 +955,38 @@ function _age(secs){
 
 function renderMiners(miners){
   var el=document.getElementById('pl');
+  if(!el) return;
+
   if(!miners||!miners.length){
-    el.innerHTML='<div class="es" style="padding:16px">No miners registered yet</div>';
+    el.innerHTML='<div class="es" style="padding:20px;line-height:1.8">'
+      +'<div style="color:var(--dim);margin-bottom:6px">No miners in registry yet</div>'
+      +'<div style="font-size:9px;color:var(--dim);font-family:var(--mono)">'
+      +'Checked: /api/miners · /api/peers/list<br>'
+      +'Mine a block or call <span style="color:var(--cy)">POST /api/peers/register</span> to appear here'
+      +'</div></div>';
     document.getElementById('pcb').textContent='0 miners';
+    document.getElementById('p2plc').textContent='0';
+    document.getElementById('p2psc').textContent='0';
+    document.getElementById('p2ptc').textContent='0';
+    var dot=document.getElementById('p2p-live-dot');
+    if(dot){dot.style.background='var(--dim)';dot.style.animation='none';}
     return;
   }
+
   _miners=miners;
+  // Ensure status on every entry (block-only miners from /api/miners may lack it)
+  miners.forEach(function(m){if(!m.status) m.status='historic';});
+
   var live=miners.filter(function(m){return m.status==='live';});
   var seen=miners.filter(function(m){return m.status==='seen';});
   var hist=miners.filter(function(m){return m.status==='historic';});
 
   document.getElementById('pcb').textContent=miners.length+' miners';
-  document.getElementById('bbp').textContent=live.length;
+  document.getElementById('bbp').textContent=live.length||miners.length;
   document.getElementById('p2plc').textContent=live.length;
   document.getElementById('p2psc').textContent=seen.length;
   document.getElementById('p2ptc').textContent=hist.length;
 
-  // Live dot pulses green when miners active
   var dot=document.getElementById('p2p-live-dot');
   if(dot){
     dot.style.background=live.length?'var(--gr)':'var(--dim)';
@@ -981,7 +996,7 @@ function renderMiners(miners){
 
   el.innerHTML=miners.map(function(m){
     var addr=m.miner_address||'';
-    var short=addr.length>20?addr.slice(0,10)+'\u2026'+addr.slice(-10):addr;
+    var short=addr.length>20?addr.slice(0,10)+'\u2026'+addr.slice(-10):addr||'(no address)';
     var bks=m.block_count||0;
     var earned=parseFloat(m.total_earned_qtcl||0).toFixed(2);
     var h=m.last_height||0;
@@ -989,20 +1004,19 @@ function renderMiners(miners){
     var st=m.status||'historic';
     var pid=(m.peer_id||'').slice(0,12);
     var gurl=m.gossip_url||'';
-    // data-addr avoids all quote-escaping inside onclick HTML attributes
     return '<div class="miner-row '+st+'" onclick="var a=this.querySelector(\".miner-addr\");if(a)a.click();">'
       +'<div style="display:flex;align-items:flex-start;gap:8px">'
       +'<div class="miner-dot" style="margin-top:4px"></div>'
       +'<div style="flex:1;min-width:0">'
       +'<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
-      +'<span class="miner-addr" data-addr="'+addr+'" title="'+short+'" '
+      +'<span class="miner-addr" data-addr="'+addr+'" title="'+addr+'" '
       +'onclick="event.stopPropagation();try{navigator.clipboard.writeText(this.dataset.addr);}catch(e){}">'+short+'</span>'
       +'<span class="miner-badge '+st+'">'+st.toUpperCase()+'</span>'
       +(gurl?'<span style="font-size:8px;color:var(--dim)">\uD83D\uDCE1 P2P</span>':'')
       +'</div>'
       +'<div class="miner-stats">'
       +(bks?'<span>\u26CF <span class="miner-stat-val">'+bks+'</span> blocks</span>':'')
-      +(earned>0?'<span>\uD83D\uDCB0 <span class="miner-stat-val">'+earned+'</span> QTCL</span>':'')
+      +(parseFloat(earned)>0?'<span>\uD83D\uDCB0 <span class="miner-stat-val">'+earned+'</span> QTCL</span>':'')
       +(h?'<span>h=<span class="miner-stat-val">'+h+'</span></span>':'')
       +(age!=='—'?'<span class="miner-stat-val">'+age+'</span>':'')
       +(pid?'<span style="color:var(--dim)">id:'+pid+'\u2026</span>':'')
@@ -1013,41 +1027,12 @@ function renderMiners(miners){
   }).join('');
 }
 
-// renderPeers: processes ephemeral /api/p2p/peers connections
-// Separate from renderMiners (persistent registry); both contribute to P2P display
+// renderPeers: TCP socket connections only (bottom-bar PEERS count)
+// The miner panel is driven entirely by fetchMiners() → /api/miners + /api/peers/list
 function renderPeers(peers){
   if(!peers||!peers.length) return;
-  // Update n_peers from live ephemeral count — SSE chirp also updates this
   S.n_peers=Math.max(S.n_peers,peers.length);
-  var bbp=document.getElementById('bbp');
-  if(bbp) bbp.textContent=peers.length;
-  // If miners panel is empty (no /api/miners data yet), seed it from p2p peers
-  var pl=document.getElementById('pl');
-  if(pl&&!pl.children.length){
-    pl.innerHTML=peers.map(function(p){
-      var id=(p.peer_id||p.id||'').slice(0,16);
-      var url=p.gossip_url||p.url||'';
-      var lat=p.latency_ms!=null?p.latency_ms+'ms':'';
-      return '<div class="miner-row live">'
-        +'<div style="display:flex;align-items:flex-start;gap:8px">'
-        +'<div class="miner-dot" style="margin-top:4px"></div>'
-        +'<div style="flex:1;min-width:0">'
-        +'<div style="display:flex;align-items:center;gap:6px">'
-        +'<span class="miner-addr" style="font-family:var(--mono);font-size:10px;color:var(--cy)">'+id+(id.length>=16?'…':'')+'</span>'
-        +'<span class="miner-badge live">LIVE</span>'
-        +(url?'<span style="font-size:8px;color:var(--dim)">📡 P2P</span>':'')
-        +'</div>'
-        +'<div class="miner-stats">'
-        +(lat?'<span>⚡ <span class="miner-stat-val">'+lat+'</span></span>':'')
-        +(url?'<span style="color:var(--dim)">'+url.replace(/^https?:\/\//,'').slice(0,32)+'</span>':'')
-        +'</div></div></div></div>';
-    }).join('');
-    // Update live counts
-    var lc=document.getElementById('p2plc');if(lc) lc.textContent=peers.length;
-    document.getElementById('pcb').textContent=peers.length+' miners';
-    var dot=document.getElementById('p2p-live-dot');
-    if(dot){dot.style.background='var(--gr)';dot.style.animation='p2ppulse 1.6s infinite';}
-  }
+  var bbp=document.getElementById('bbp');if(bbp) bbp.textContent=peers.length;
 }
 function renderMermin(m){
   if(!m) return;
@@ -1226,35 +1211,84 @@ async function fetchDiff(){
   S.difficulty_bits=d.difficulty_bits||S.difficulty_bits;
 }
 
+// ── P2P TCP socket peers (bottom-bar only — ephemeral, 503 on single-node Koyeb) ──────────
 async function fetchPeers(){
-  // /api/p2p/peers is ephemeral on single-node Koyeb — may return {error} or {peers:[]} or {peers:[...]}
-  // Guard: never let a 503/{error} response zero-out the miner panel counts.
   var d=await api('/api/p2p/peers');
+  // 503 / {error} is normal on Koyeb single-node — never corrupt miner panel
   if(!d||d.error) return;
-  // Normalise: server may send array directly or wrapped in {peers:[...]}
-  var peers=Array.isArray(d)?d:(Array.isArray(d.peers)?d.peers:null);
-  if(!peers) return;
-  // Merge live peer count into canonical S.n_peers (SSE chirp also sets this)
-  if(peers.length>0) S.n_peers=Math.max(S.n_peers,peers.length);
-  // Update bottom bar PEERS count from p2p ephemeral connections
-  var bbp=document.getElementById('bbp');
-  if(bbp&&peers.length>0) bbp.textContent=peers.length;
-  renderPeers(peers);
+  var cnt=typeof d.peer_count==='number'?d.peer_count:(Array.isArray(d.peers)?d.peers.length:0);
+  if(cnt>0){
+    S.n_peers=Math.max(S.n_peers,cnt);
+    var bbp=document.getElementById('bbp');if(bbp) bbp.textContent=cnt;
+  }
 }
 
+// ── Miner / peer registry — dual-source with graceful fallback ────────────────────────────
+// Primary  : /api/miners  (merges peer_registry + blocks, has block_count + earned)
+// Fallback : /api/peers/list?include_stale=1  (raw peer_registry, always populated when
+//            any miner has called /api/peers/register, even if zero blocks mined)
+// The miner panel is ONLY populated from these two endpoints — never from TCP /api/p2p/peers.
 async function fetchMiners(){
-  // Persistent miner registry from peer_registry + blocks tables
+  var now=Date.now();
+
+  // ── Primary: /api/miners ─────────────────────────────────────────────────
   var d=await api('/api/miners');
-  if(!d||d.error) return;
-  renderMiners(d.miners||[]);
-  // live_count = actively submitting miners; update n_peers canonical state
-  var live=d.live_count||0;
-  S.peer_count=live;
-  if(live>0) S.n_peers=Math.max(S.n_peers,live);
-  document.getElementById('bbn').textContent=d.total||0;
-  // Keep bottom-bar PEERS in sync with live miner count
-  var bbp=document.getElementById('bbp');
-  if(bbp&&live>0) bbp.textContent=live;
+  console.log('[MINERS] /api/miners →', d);
+
+  if(d&&!d.error&&Array.isArray(d.miners)&&d.miners.length>0){
+    // Ensure every entry has a status (block-only miners miss it from server merge)
+    d.miners.forEach(function(m){
+      if(!m.status) m.status='historic';
+    });
+    renderMiners(d.miners);
+    var live=d.live_count||d.miners.filter(function(m){return m.status==='live';}).length;
+    S.peer_count=live;
+    S.n_peers=Math.max(S.n_peers,d.total||d.miners.length);
+    document.getElementById('bbn').textContent=d.total||d.miners.length;
+    var bbp=document.getElementById('bbp');if(bbp&&live>0) bbp.textContent=live;
+    return;
+  }
+
+  // ── Fallback: /api/peers/list?include_stale=1 ────────────────────────────
+  // This reads directly from peer_registry which every miner writes to on /api/peers/register.
+  // Returns {peers:[{peer_id, miner_address, gossip_url, block_height, last_seen, ...}], count:N}
+  console.log('[MINERS] /api/miners empty/error — trying /api/peers/list?include_stale=1');
+  var pd=await api('/api/peers/list?include_stale=1');
+  console.log('[MINERS] /api/peers/list →', pd);
+
+  if(pd&&!pd.error&&Array.isArray(pd.peers)){
+    // Normalise peer_registry rows into miner shape renderMiners expects
+    var stale=300; // matches server _PEER_STALE_SECS
+    var miners=pd.peers.map(function(p){
+      var ls=p.last_seen?new Date(p.last_seen).getTime()/1000:0;
+      var age=ls>0?(Date.now()/1000-ls):999999;
+      var status=age<stale?'live':(age<86400?'seen':'historic');
+      return {
+        miner_address   : p.miner_address||'',
+        peer_id         : p.peer_id||'',
+        gossip_url      : p.gossip_url||'',
+        block_count     : 0,
+        last_height     : p.block_height||0,
+        total_earned_qtcl: 0,
+        last_seen_age_s : Math.round(age),
+        status          : status,
+        ip_address      : p.ip_address||'',
+        supports_sse    : p.supports_sse||false,
+      };
+    });
+    if(miners.length>0){
+      renderMiners(miners);
+      var live2=miners.filter(function(m){return m.status==='live';}).length;
+      S.peer_count=live2;
+      S.n_peers=Math.max(S.n_peers,miners.length);
+      document.getElementById('bbn').textContent=miners.length;
+      var bbp2=document.getElementById('bbp');if(bbp2&&live2>0) bbp2.textContent=live2;
+      return;
+    }
+  }
+
+  // ── Both sources empty: render empty state ────────────────────────────────
+  renderMiners([]);
 }
 
 function setOnline(ok){
@@ -1397,12 +1431,11 @@ async function fetchLatestSnapshot(){
 
 fetchLatestSnapshot();
 refresh();
-// Defer TX explorer load: give SSE + chain fetch time to settle first
-// Avoids competing with the critical-path oracle/chain requests at boot
+// Staggered boot — critical path first, miners/peers after SSE settles
 setTimeout(function(){ loadTxPage(); },800);
-// Stagger miner + peer boot fetches: 1.2s / 2.5s so they don't all fire together
-setTimeout(function(){ fetchMiners(); },1200);
-setTimeout(function(){ fetchPeers(); },2500);
+setTimeout(function(){ fetchMiners(); },500);   // early — before TX load
+setTimeout(function(){ fetchMiners(); },4000);  // retry after DB/SSE warm-up
+setTimeout(function(){ fetchPeers();  },3000);  // TCP socket peers — bottom bar only
 setInterval(refresh,3000);
 // Reload TX explorer every 30s as background sync (SSE new_block handles real-time)
 setInterval(function(){ if(!txLoading) loadTxPage(); },30000);
