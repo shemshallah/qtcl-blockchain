@@ -839,6 +839,9 @@ async function loadTxPage(){
   // Guard: never double-load; always release lock even on error
   if(txLoading) return;
   txLoading=true;
+  // FIX: Safety watchdog — if loadTxPage somehow hangs past 10s, force-release the lock
+  // so the 30s background sync and SSE new_block ingestor are never permanently blocked.
+  var _txWatchdog=setTimeout(function(){txLoading=false;},10000);
   var tb=document.getElementById('ttb');
   if(tb) tb.innerHTML='<tr><td colspan="7" class="es" style="opacity:.5">Loading…</td></tr>';
   try{
@@ -849,6 +852,8 @@ async function loadTxPage(){
     if(!d||d.error){
       if(tb) tb.innerHTML='<tr><td colspan="7" class="es">'+
         (d&&d.error?d.error:'Server unavailable — retrying…')+'</td></tr>';
+      // FIX: was bare 'return' — bypassed finally, leaving txLoading=true permanently.
+      // Now falls through to finally so lock always releases.
       return;
     }
     txs=d.transactions||[];txTotal=d.total||0;txPages=d.pages||1;txPage_n=d.page||0;
@@ -856,6 +861,7 @@ async function loadTxPage(){
   }catch(e){
     if(tb) tb.innerHTML='<tr><td colspan="7" class="es">Load error: '+e.message+'</td></tr>';
   }finally{
+    clearTimeout(_txWatchdog);
     txLoading=false;  // ALWAYS release — no matter what
   }
 }
@@ -1155,13 +1161,16 @@ async function fetchWState(){
 }
 
 async function fetchMempool(){
-  var r=await Promise.all([api('/api/mempool/stats'),api('/api/mempool')]);
-  var stats=r[0],pend=r[1];
+  // FIX: Promise.allSettled — never short-circuits; both fetches always complete independently.
+  // Promise.all was causing rfg to get permanently stuck true when either endpoint threw during P2P init.
+  var r=await Promise.allSettled([api('/api/mempool/stats'),api('/api/mempool')]);
+  var stats=r[0].status==='fulfilled'?r[0].value:null;
+  var pend =r[1].status==='fulfilled'?r[1].value:null;
   // mempool.stats() returns: size, total_fee_base, min_fee_rate, max_fee_rate, avg_fee_rate, total_accepted...
   if(stats&&stats.size!=null) S.mempool_size=stats.size;
   if(pend&&pend.transactions){
     // TX explorer is loaded via /api/transactions — mempool poll kept for badge only
-    if(pend&&pend.transactions) document.getElementById('txb').textContent=(S.total_transactions||pend.transactions.length)+' txs';
+    document.getElementById('txb').textContent=(S.total_transactions||pend.transactions.length)+' txs';
   }
 }
 
@@ -1171,9 +1180,11 @@ async function fetchDiff(){
 }
 
 async function fetchPeers(){
-  // Legacy in-memory P2P peers — ephemeral, often empty on single-node deploy
+  // FIX: Guard against {error:'P2P not initialized'} 503 response — P2P is ephemeral on Koyeb
+  // single-node. The 503 body is non-null so the old d&&!d.error check was the only guard,
+  // but a network-level null still fell through to renderPeers(undefined). Explicit null-safe.
   var d=await api('/api/p2p/peers');
-  if(d&&!d.error&&d.peers) renderPeers(d.peers);
+  if(d&&!d.error&&Array.isArray(d.peers)) renderPeers(d.peers);
 }
 
 async function fetchMiners(){
@@ -1192,10 +1203,21 @@ function setOnline(ok){
 
 var rfg=false;
 async function refresh(){
-  if(rfg) return;rfg=true;
+  if(rfg) return;
+  rfg=true;
+  // FIX: Single allSettled covers ALL 5 fetches in parallel.
+  // Old pattern used two sequential awaits — if the first batch stalled (e.g. oracle not ready,
+  // P2P init blocking /api/chain), the second batch (fetchMempool, fetchPeers) was never reached,
+  // causing transactions to stop loading entirely. Max wall-time: 6s (one timeout) not 12s (two).
+  // rfg=false is guaranteed by finally — no code path can leave it permanently true.
   try{
-    await Promise.allSettled([fetchChain(),fetchWState(),fetchDiff()]);
-    await Promise.allSettled([fetchMempool(),fetchPeers()]);
+    await Promise.allSettled([
+      fetchChain(),
+      fetchWState(),
+      fetchDiff(),
+      fetchMempool(),
+      fetchPeers()
+    ]);
     updateDOM();lu=Date.now();setOnline(true);
     document.getElementById('bu').textContent='Updated '+new Date().toTimeString().slice(0,8);
   }catch(e){setOnline(false);}
