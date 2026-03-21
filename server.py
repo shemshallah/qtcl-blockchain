@@ -7520,38 +7520,62 @@ def list_miners():
     Live miner registry — all peers who have registered or mined a block.
     Merges peer_registry (P2P registration) + blocks table (confirmed mining).
     Returns: address, peer_id, last_seen, block_count, last_height, status (live/seen/historic)
+
+    QUERY FIX: The old LEFT JOIN multiplied block rows by coinbase tx rows,
+    causing COUNT(*) to return tx count not block count, and SUM(amount) to
+    be inflated by duplicate joins. Now uses separate subqueries so each
+    metric comes from exactly one source of truth.
     """
     try:
         with get_db_cursor() as cur:
-            # All miners from confirmed blocks
-            # NOTE: blocks table has no miner_address column — address is stored
-            # as validator_public_key (see schema in qtcl_db_builder_colab.py)
+            # ── Block stats: count and height from blocks table only ──────────
+            # validator_public_key holds the miner address (no miner_address col)
             cur.execute("""
                 SELECT
                     b.validator_public_key          AS miner_address,
-                    COUNT(*)                        AS block_count,
+                    COUNT(b.height)                 AS block_count,
                     MAX(b.height)                   AS last_height,
-                    MAX(b.timestamp)                AS last_mined_ts,
-                    SUM(COALESCE(t.amount,0))       AS total_earned_base
+                    MAX(b.timestamp)                AS last_mined_ts
                 FROM blocks b
-                LEFT JOIN transactions t
-                    ON t.to_address = b.validator_public_key
-                   AND t.tx_type = 'coinbase'
                 WHERE b.validator_public_key IS NOT NULL
                   AND b.validator_public_key != ''
                   AND LENGTH(b.validator_public_key) > 8
                 GROUP BY b.validator_public_key
                 ORDER BY last_height DESC
             """)
-            mined = {r[0]: {
-                'miner_address': r[0],
-                'block_count':   int(r[1]),
-                'last_height':   int(r[2]),
-                'last_mined_ts': float(r[3]) if r[3] else 0,
-                'total_earned_qtcl': round(int(r[4] or 0) / 100, 2),
-            } for r in cur.fetchall()}
+            block_rows = cur.fetchall()
 
-            # Peer registry — adds peer_id, gossip_url, last_seen, online status
+            # ── Earnings: sum coinbase amounts from transactions table only ───
+            # Separate query avoids the JOIN multiplication bug entirely.
+            cur.execute("""
+                SELECT
+                    to_address,
+                    SUM(amount)     AS total_earned_base,
+                    COUNT(*)        AS coinbase_count
+                FROM transactions
+                WHERE tx_type = 'coinbase'
+                  AND to_address IS NOT NULL
+                  AND to_address != ''
+                  AND LENGTH(to_address) > 8
+                GROUP BY to_address
+            """)
+            earnings = {r[0]: {'total_base': int(r[1] or 0), 'cb_count': int(r[2] or 0)}
+                        for r in cur.fetchall()}
+
+            mined = {}
+            for r in block_rows:
+                addr = r[0]
+                earned = earnings.get(addr, {})
+                mined[addr] = {
+                    'miner_address':      addr,
+                    'block_count':        int(r[1]),   # real block count from blocks table
+                    'last_height':        int(r[2]),
+                    'last_mined_ts':      float(r[3]) if r[3] else 0,
+                    'total_earned_qtcl':  round(earned.get('total_base', 0) / 100, 2),
+                    'coinbase_tx_count':  earned.get('cb_count', 0),
+                }
+
+            # ── Peer registry — adds peer_id, gossip_url, last_seen, status ──
             cur.execute("""
                 SELECT peer_id, miner_address, gossip_url, block_height,
                        last_seen, supports_sse, ip_address
@@ -7612,6 +7636,60 @@ def list_miners():
     except Exception as e:
         logger.error(f"[MINERS] {e}")
         return jsonify({'error': str(e), 'miners': [], 'total': 0}), 500
+
+
+@app.route('/api/miners/debug', methods=['GET'])
+def miners_debug():
+    """
+    Raw DB truth for miner balances — shows exactly what is in the database.
+    Hit /api/miners/debug in browser to see real block counts and QTCL earned.
+    No joins, no merges — just the numbers.
+    """
+    try:
+        with get_db_cursor() as cur:
+            # Real block counts per address from blocks table
+            cur.execute("""
+                SELECT validator_public_key, COUNT(*) AS blocks, MAX(height) AS tip
+                FROM blocks
+                WHERE validator_public_key IS NOT NULL AND validator_public_key != ''
+                GROUP BY validator_public_key
+                ORDER BY blocks DESC
+            """)
+            block_counts = [{'address': r[0], 'blocks_in_db': r[1], 'max_height': r[2]}
+                            for r in cur.fetchall()]
+
+            # Real coinbase earnings per address from transactions table
+            cur.execute("""
+                SELECT to_address, COUNT(*) AS cb_txs,
+                       SUM(amount) AS total_base, SUM(amount)/100.0 AS total_qtcl
+                FROM transactions
+                WHERE tx_type = 'coinbase'
+                GROUP BY to_address
+                ORDER BY total_base DESC
+            """)
+            earnings = [{'address': r[0], 'coinbase_txs': r[1],
+                         'total_base_units': r[2], 'total_qtcl': float(r[3] or 0)}
+                        for r in cur.fetchall()]
+
+            # Wallet balances
+            cur.execute("""
+                SELECT address, balance, balance/100.0 AS qtcl
+                FROM wallet_addresses
+                WHERE address != '0000000000000000000000000000000000000000000000000000000000000000'
+                ORDER BY balance DESC
+                LIMIT 20
+            """)
+            wallets = [{'address': r[0], 'balance_base': r[1], 'balance_qtcl': float(r[2] or 0)}
+                       for r in cur.fetchall()]
+
+        return jsonify({
+            'blocks_by_address': block_counts,
+            'earnings_by_address': earnings,
+            'wallet_balances': wallets,
+            'ts': time.time(),
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/miners/heartbeat', methods=['POST'])
