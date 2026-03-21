@@ -1233,7 +1233,6 @@ async function fetchMiners(){
 
   // ── Primary: /api/miners ─────────────────────────────────────────────────
   var d=await api('/api/miners');
-  console.log('[MINERS] /api/miners →', d);
 
   if(d&&!d.error&&Array.isArray(d.miners)&&d.miners.length>0){
     // Ensure every entry has a status (block-only miners miss it from server merge)
@@ -1252,9 +1251,7 @@ async function fetchMiners(){
   // ── Fallback: /api/peers/list?include_stale=1 ────────────────────────────
   // This reads directly from peer_registry which every miner writes to on /api/peers/register.
   // Returns {peers:[{peer_id, miner_address, gossip_url, block_height, last_seen, ...}], count:N}
-  console.log('[MINERS] /api/miners empty/error — trying /api/peers/list?include_stale=1');
   var pd=await api('/api/peers/list?include_stale=1');
-  console.log('[MINERS] /api/peers/list →', pd);
 
   if(pd&&!pd.error&&Array.isArray(pd.peers)){
     // Normalise peer_registry rows into miner shape renderMiners expects

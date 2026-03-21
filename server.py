@@ -7519,7 +7519,7 @@ def list_miners():
             peer_rows = cur.fetchall()
 
         # Merge: peer_registry enriches mined data; unknown miners added too
-        stale_secs = _PEER_STALE_SECS if '_PEER_STALE_SECS' in dir() else 300
+        stale_secs = _PEER_STALE_SECS
         now = time.time()
         merged = dict(mined)  # start with all block-confirmed miners
 
@@ -7550,6 +7550,14 @@ def list_miners():
                                        m.get('block_count', 0)),
                         reverse=True)
 
+        # Ensure every miner has a status — block-only miners (in blocks table but
+        # not yet in peer_registry) get status derived from last_mined_ts.
+        for m in miners:
+            if 'status' not in m:
+                age = now - m.get('last_mined_ts', 0)
+                m['status'] = 'live' if age < stale_secs else ('seen' if age < 86400 else 'historic')
+                m['last_seen_age_s'] = round(age)
+
         return jsonify({
             'miners':     miners,
             'total':      len(miners),
@@ -7560,6 +7568,39 @@ def list_miners():
     except Exception as e:
         logger.error(f"[MINERS] {e}")
         return jsonify({'error': str(e), 'miners': [], 'total': 0}), 500
+
+
+@app.route('/api/miners/heartbeat', methods=['POST'])
+def miners_heartbeat():
+    """
+    Lightweight keepalive for miners — refreshes last_seen in peer_registry.
+    Body: { miner_address, block_height?, peer_id?, gossip_url? }
+    Called by the mobile miner every ~30s to stay 'live' in the registry.
+    Falls back to auto-registering if the peer doesn't exist yet.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    addr = (data.get('miner_address') or '').strip()
+    if not addr:
+        return jsonify({'error': 'miner_address required'}), 400
+
+    pid = data.get('peer_id') or hashlib.sha256(addr.encode()).hexdigest()[:32]
+
+    try:
+        _upsert_peer(pid, {
+            'peer_id':        pid,
+            'miner_address':  addr,
+            'ip_address':     request.remote_addr,
+            'block_height':   int(data.get('block_height', 0)),
+            'gossip_url':     data.get('gossip_url', ''),
+            'supports_sse':   bool(data.get('supports_sse', False)),
+            'peer_type':      'miner',
+            'network_version': data.get('network_version', '1.0'),
+        })
+        return jsonify({'ok': True, 'peer_id': pid, 'ts': time.time()}), 200
+    except Exception as e:
+        logger.error(f"[MINERS/HB] {e}")
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route('/robots.txt', methods=['GET'])
 def robots_txt():
@@ -9214,6 +9255,28 @@ def submit_block():
         # ── Difficulty retarget (wall-clock EWMA, per-block) ──────────────────
         _mgr = get_difficulty_manager()
         _mgr.record_block()   # measures actual wall-clock gap — ignores header timestamp
+
+        # ── Auto-register miner into peer_registry ────────────────────────────
+        # Miners that only call /api/submit_block (never POST /api/peers/register)
+        # were invisible to /api/miners because the blocks query requires peer_registry
+        # rows for status assignment. We upsert here so every submitting miner is
+        # immediately discoverable regardless of whether they call register separately.
+        # peer_id = deterministic sha256(miner_address)[:32] — stable across blocks.
+        try:
+            _auto_peer_id = hashlib.sha256(miner_address.encode()).hexdigest()[:32]
+            _upsert_peer(_auto_peer_id, {
+                'peer_id':        _auto_peer_id,
+                'miner_address':  miner_address,
+                'ip_address':     request.remote_addr,
+                'block_height':   block_height,
+                'gossip_url':     data.get('gossip_url', ''),
+                'supports_sse':   bool(data.get('supports_sse', False)),
+                'peer_type':      'miner',
+                'network_version': data.get('network_version', '1.0'),
+            })
+            logger.info(f"[MINERS] ✅ Auto-registered miner {miner_address[:20]}… → peer_registry (peer_id={_auto_peer_id[:12]}…)")
+        except Exception as _reg_err:
+            logger.warning(f"[MINERS] ⚠️ Auto-register failed (non-fatal): {_reg_err}")
 
         # 6️⃣ RESPONSE
         return jsonify({
