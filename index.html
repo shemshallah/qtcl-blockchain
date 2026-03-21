@@ -116,9 +116,10 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
 .txpbtn:disabled{opacity:.3;cursor:default}
 .miner-row{display:flex;flex-direction:column;padding:8px 14px;border-bottom:1px solid rgba(0,220,255,.05);transition:background .15s}
 .miner-row:hover{background:rgba(0,220,255,.04)}
-.miner-row.live .miner-dot{background:var(--gr);box-shadow:0 0 5px var(--gr)}
+.miner-row.live .miner-dot{background:var(--gr);box-shadow:0 0 5px var(--gr);animation:pl 1.8s infinite}
 .miner-row.seen .miner-dot{background:var(--go)}
 .miner-row.historic .miner-dot{background:var(--dim)}
+@keyframes p2ppulse{0%,100%{opacity:1;box-shadow:0 0 8px var(--gr),0 0 16px rgba(0,255,157,.3)}50%{opacity:.5;box-shadow:none}}
 .miner-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;margin-top:3px}
 .miner-addr{font-family:var(--mono);font-size:10px;color:var(--cy);cursor:pointer;user-select:all}
 .miner-addr:hover{color:#fff}
@@ -450,7 +451,17 @@ function drawPoincareDiskGeodesic(x1,y1,x2,y2,cx,cy,R,col,alpha,lw){
   dctx.restore();
 }
 
+// ── Frame-rate throttle: 24fps cap prevents canvas from starving fetch callbacks ──
+// At 60fps with 50+ draw ops + trig, the main thread was saturated leaving <1ms
+// for Promise resolution callbacks → perceived "hang" on fetch + P2P updates.
+var _diskFPS=24, _diskLastT=0, _diskRAF=null;
 function drawDisk(){
+  var now=performance.now();
+  if(now-_diskLastT < 1000/_diskFPS){
+    _diskRAF=requestAnimationFrame(drawDisk);
+    return;
+  }
+  _diskLastT=now;
   var w=dc.width, h=dc.height, cx=w/2, cy=h/2;
   var R = Math.min(w,h)/2 - 14;
 
@@ -760,8 +771,8 @@ function drawDisk(){
     dctx.fillText(h.val||h.label, h.x, h.y);
   });
 
-  dp += 0.005;
-  requestAnimationFrame(drawDisk);
+  dp += 0.012; // Adjusted for 24fps (was 0.005@60fps → same visual speed)
+  _diskRAF=requestAnimationFrame(drawDisk);
 }
 drawDisk();
 
@@ -962,7 +973,11 @@ function renderMiners(miners){
 
   // Live dot pulses green when miners active
   var dot=document.getElementById('p2p-live-dot');
-  if(dot) dot.style.background=live.length?'var(--gr)':'var(--dim)';
+  if(dot){
+    dot.style.background=live.length?'var(--gr)':'var(--dim)';
+    dot.style.animation=live.length?'p2ppulse 1.6s infinite':'none';
+    dot.style.boxShadow=live.length?'0 0 6px var(--gr)':'none';
+  }
 
   el.innerHTML=miners.map(function(m){
     var addr=m.miner_address||'';
@@ -998,11 +1013,41 @@ function renderMiners(miners){
   }).join('');
 }
 
-// Keep renderPeers as alias so existing SSE + polling paths still work
+// renderPeers: processes ephemeral /api/p2p/peers connections
+// Separate from renderMiners (persistent registry); both contribute to P2P display
 function renderPeers(peers){
-  // /api/p2p/peers returns ephemeral connections — use for live dot only
-  // Full miner data comes from fetchMiners() → /api/miners
-  if(peers&&peers.length) document.getElementById('bbp').textContent=peers.length;
+  if(!peers||!peers.length) return;
+  // Update n_peers from live ephemeral count — SSE chirp also updates this
+  S.n_peers=Math.max(S.n_peers,peers.length);
+  var bbp=document.getElementById('bbp');
+  if(bbp) bbp.textContent=peers.length;
+  // If miners panel is empty (no /api/miners data yet), seed it from p2p peers
+  var pl=document.getElementById('pl');
+  if(pl&&!pl.children.length){
+    pl.innerHTML=peers.map(function(p){
+      var id=(p.peer_id||p.id||'').slice(0,16);
+      var url=p.gossip_url||p.url||'';
+      var lat=p.latency_ms!=null?p.latency_ms+'ms':'';
+      return '<div class="miner-row live">'
+        +'<div style="display:flex;align-items:flex-start;gap:8px">'
+        +'<div class="miner-dot" style="margin-top:4px"></div>'
+        +'<div style="flex:1;min-width:0">'
+        +'<div style="display:flex;align-items:center;gap:6px">'
+        +'<span class="miner-addr" style="font-family:var(--mono);font-size:10px;color:var(--cy)">'+id+(id.length>=16?'…':'')+'</span>'
+        +'<span class="miner-badge live">LIVE</span>'
+        +(url?'<span style="font-size:8px;color:var(--dim)">📡 P2P</span>':'')
+        +'</div>'
+        +'<div class="miner-stats">'
+        +(lat?'<span>⚡ <span class="miner-stat-val">'+lat+'</span></span>':'')
+        +(url?'<span style="color:var(--dim)">'+url.replace(/^https?:\/\//,'').slice(0,32)+'</span>':'')
+        +'</div></div></div></div>';
+    }).join('');
+    // Update live counts
+    var lc=document.getElementById('p2plc');if(lc) lc.textContent=peers.length;
+    document.getElementById('pcb').textContent=peers.length+' miners';
+    var dot=document.getElementById('p2p-live-dot');
+    if(dot){dot.style.background='var(--gr)';dot.style.animation='p2ppulse 1.6s infinite';}
+  }
 }
 function renderMermin(m){
   if(!m) return;
@@ -1088,7 +1133,9 @@ function updateDOM(){
   document.getElementById('vb').textContent=S.oracle_consensus_reached?'CONSENSUS':'PENDING';
   // bottom bar
   st('bbd',S.difficulty_bits);
-  st('bbn',S.n_peers);
+  // N_PEERS = total discovered peers (SSE-authoritative); PEERS = live mining connections
+  st('bbn',S.n_peers||'—');
+  if(S.n_peers>0){var _bbp=document.getElementById('bbp');if(_bbp&&_bbp.textContent==='—') _bbp.textContent=S.n_peers;}
   st('bbq',S.qrng_health.toFixed(3));
   renderOracles();
 }
@@ -1180,11 +1227,19 @@ async function fetchDiff(){
 }
 
 async function fetchPeers(){
-  // FIX: Guard against {error:'P2P not initialized'} 503 response — P2P is ephemeral on Koyeb
-  // single-node. The 503 body is non-null so the old d&&!d.error check was the only guard,
-  // but a network-level null still fell through to renderPeers(undefined). Explicit null-safe.
+  // /api/p2p/peers is ephemeral on single-node Koyeb — may return {error} or {peers:[]} or {peers:[...]}
+  // Guard: never let a 503/{error} response zero-out the miner panel counts.
   var d=await api('/api/p2p/peers');
-  if(d&&!d.error&&Array.isArray(d.peers)) renderPeers(d.peers);
+  if(!d||d.error) return;
+  // Normalise: server may send array directly or wrapped in {peers:[...]}
+  var peers=Array.isArray(d)?d:(Array.isArray(d.peers)?d.peers:null);
+  if(!peers) return;
+  // Merge live peer count into canonical S.n_peers (SSE chirp also sets this)
+  if(peers.length>0) S.n_peers=Math.max(S.n_peers,peers.length);
+  // Update bottom bar PEERS count from p2p ephemeral connections
+  var bbp=document.getElementById('bbp');
+  if(bbp&&peers.length>0) bbp.textContent=peers.length;
+  renderPeers(peers);
 }
 
 async function fetchMiners(){
@@ -1192,13 +1247,23 @@ async function fetchMiners(){
   var d=await api('/api/miners');
   if(!d||d.error) return;
   renderMiners(d.miners||[]);
-  S.peer_count=d.live_count||0;
+  // live_count = actively submitting miners; update n_peers canonical state
+  var live=d.live_count||0;
+  S.peer_count=live;
+  if(live>0) S.n_peers=Math.max(S.n_peers,live);
   document.getElementById('bbn').textContent=d.total||0;
+  // Keep bottom-bar PEERS in sync with live miner count
+  var bbp=document.getElementById('bbp');
+  if(bbp&&live>0) bbp.textContent=live;
 }
 
 function setOnline(ok){
   var p=document.getElementById('cp'),t=document.getElementById('ct');
-  p.className='cp'+(ok?'':' off');t.textContent=ok?'LIVE':'OFFLINE';
+  if(!p||!t) return;
+  // #cp is an id — toggle only the 'off' class, never overwrite with 'cp' string
+  if(ok){ p.classList.remove('off'); } else { p.classList.add('off'); }
+  t.textContent=ok?'LIVE':'OFFLINE';
+  if(ok) document.getElementById('bbn').textContent=S.n_peers||'—';
 }
 
 var rfg=false;
@@ -1250,7 +1315,13 @@ async function refresh(){
       else if(lq.lattice_cycle!=null&&lq.lattice_cycle>0) S.cycle=lq.lattice_cycle;
       if(lq.fidelity!=null) S.lattice_fidelity=lq.fidelity;
     } else if(d.lattice_cycle!=null&&d.lattice_cycle>0) S.cycle=d.lattice_cycle;
-    if(d.n_peers!=null) S.n_peers=d.n_peers;
+    if(d.n_peers!=null){
+      S.n_peers=d.n_peers;
+      // Immediately reflect in bottom bar so PEERS updates even when /api/miners hasn't fired
+      var _bbp=document.getElementById('bbp');
+      if(_bbp&&S.n_peers>0&&_bbp.textContent==='—') _bbp.textContent=S.n_peers;
+      document.getElementById('bbn').textContent=S.n_peers;
+    }
     if(d.qrng_health!=null) S.qrng_health=d.qrng_health;
     if(d.pq_curr!=null) S.pq_curr=d.pq_curr;
     if(d.pq_last!=null) S.pq_last=d.pq_last;
@@ -1329,12 +1400,16 @@ refresh();
 // Defer TX explorer load: give SSE + chain fetch time to settle first
 // Avoids competing with the critical-path oracle/chain requests at boot
 setTimeout(function(){ loadTxPage(); },800);
+// Stagger miner + peer boot fetches: 1.2s / 2.5s so they don't all fire together
 setTimeout(function(){ fetchMiners(); },1200);
+setTimeout(function(){ fetchPeers(); },2500);
 setInterval(refresh,3000);
 // Reload TX explorer every 30s as background sync (SSE new_block handles real-time)
 setInterval(function(){ if(!txLoading) loadTxPage(); },30000);
-setInterval(fetchPeers,12000);
-setInterval(fetchMiners,15000);
+// P2P peers: poll frequently on startup, back off to 10s once stable
+setInterval(fetchPeers,8000);
+// Miner registry: 8s poll — important for P2P panel freshness
+setInterval(fetchMiners,8000);
 setInterval(function(){if(Date.now()-lu>12000&&lu>0) setOnline(false);},6000);
 </script>
 </body>
