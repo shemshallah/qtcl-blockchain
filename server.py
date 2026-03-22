@@ -2211,7 +2211,13 @@ class _SSEBroadcaster:
         Publish via PG NOTIFY (cross-worker) + local fan-out (this worker).
         Falls back to local-only if PG is unavailable.
         """
-        payload = json.dumps({'type': event_type, 'data': data, 'ts': time.time()}, separators=(',', ':'))
+        # Flatten peer events to root so ip_address/port are top-level for C P2P wiring
+        if event_type in ('peer',):
+            flat = {'type': event_type, 'ts': time.time()}
+            flat.update(data)
+            payload = json.dumps(flat, separators=(',', ':'))
+        else:
+            payload = json.dumps({'type': event_type, 'data': data, 'ts': time.time()}, separators=(',', ':'))
         # PG NOTIFY (cross-worker delivery — non-blocking best-effort)
         if len(payload) <= self._NOTIFY_PAYLOAD_MAX:
             self._pg_notify(payload)
@@ -2890,7 +2896,12 @@ def sse_events_stream():
                     parsed = json.loads(raw)
                     etype  = parsed.get('type', '')
                     if 'all' in want_types or etype in want_types:
-                        yield f"data: {raw}\n\n"
+                        # Emit `event:` line so clients can route by type without
+                        # parsing JSON — both formats supported for compat
+                        if etype:
+                            yield f"event: {etype}\ndata: {raw}\n\n"
+                        else:
+                            yield f"data: {raw}\n\n"
                 except _queue_mod.Empty:
                     yield ": keepalive\n\n"
         except GeneratorExit:
