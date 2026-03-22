@@ -426,6 +426,16 @@ if not POOLER_URL:
         raise ValueError("Supabase pooler connection variables not set")
 
 DB_URL = POOLER_URL
+
+# PATCH-10: Auto-correct session-mode port 5432 → transaction-mode port 6543.
+# Supabase session mode (5432) limits concurrent clients to pool_size — under
+# a retry storm this immediately hits MaxClientsInSessionMode.
+# Transaction mode (6543) is stateless per-query and has no per-client limit.
+# If POOLER_URL or POOLER_PORT was set to 5432, correct it silently.
+if DB_URL and ':5432/' in DB_URL and not _USE_HTTP_DB:
+    DB_URL = DB_URL.replace(':5432/', ':6543/')
+    logger.warning("[DB] ⚡ PATCH-10: Auto-corrected port 5432→6543 (transaction mode) — "
+                   "set POOLER_PORT=6543 in Koyeb env to suppress this warning")
 if not _USE_HTTP_DB:
     logger.info(f"[DB] ✨ Using Supabase Pooler: {os.getenv('POOLER_HOST') or 'configured'}")
 else:
@@ -922,6 +932,8 @@ class DatabasePool:
                     cls._instance.pool = None
                     cls._instance.use_pooling = True
                     cls._instance._http_mode = False
+                    cls._instance._next_retry_at = 0.0   # PATCH-9: retry backoff timestamp
+                    cls._instance._retry_interval = 5.0  # PATCH-9: seconds between init attempts
         return cls._instance
 
     def _initialize_pool(self):
@@ -931,6 +943,18 @@ class DatabasePool:
             if self._initialized:
                 return
 
+            # ── PATCH-9: Retry backoff gate ───────────────────────────────────
+            # Every failed init leaves _initialized=False.  Without this gate,
+            # each db_ready() / get_db_connection() call in every background
+            # thread immediately retries → thundering herd of psycopg2
+            # ThreadedConnectionPool() calls each opening min_connections TCP
+            # sessions against Supabase → MaxClientsInSessionMode exhaustion.
+            # Gate enforces a minimum _retry_interval between attempts,
+            # doubling on each failure up to 60 s.
+            _now = time.monotonic()
+            if _now < self._next_retry_at:
+                return   # too soon — let the backoff expire
+            # ─────────────────────────────────────────────────────────────────
             # ── HTTP mode (PythonAnywhere) ────────────────────────────────────
             if _USE_HTTP_DB:
                 try:
@@ -950,16 +974,22 @@ class DatabasePool:
                     logger.info("[DB] ✨ Connected to Supabase via HTTPS PostgREST RPC (HTTP-DB mode)")
                 except EnvironmentError as e:
                     logger.error(f"[DB] ❌ HTTP-DB config error: {e}")
-                    self._initialized = False
+                    self._initialized    = False
+                    self._retry_interval = min(self._retry_interval * 2, 60.0)
+                    self._next_retry_at  = time.monotonic() + self._retry_interval
                 except Exception as e:
                     logger.error(f"[DB] ❌ HTTP-DB init error: {e}")
-                    self._initialized = False
+                    self._initialized    = False
+                    self._retry_interval = min(self._retry_interval * 2, 60.0)
+                    self._next_retry_at  = time.monotonic() + self._retry_interval
                 return
 
             # ── Native psycopg2 TCP mode (Koyeb / self-hosted) ───────────────
             try:
                 from psycopg2 import pool as psycopg2_pool
-                min_connections = int(os.getenv('DB_POOL_MIN', '2'))
+                # min=1: open only ONE connection on pool creation — avoids
+                # exhausting Supabase session-mode slots during retry storms.
+                min_connections = 1
                 max_connections = int(os.getenv('DB_POOL_MAX', '10'))
                 logger.info(f"[DB] Initializing app-level pooling: min={min_connections}, max={max_connections}")
                 logger.info(f"[DB] Connecting to Supabase pooler (aws-0-us-west-2.pooler.supabase.com)")
@@ -967,6 +997,8 @@ class DatabasePool:
                     min_connections, max_connections, DB_URL, connect_timeout=10)
                 self._initialized = True
                 self.use_pooling  = True
+                self._next_retry_at   = 0.0         # reset backoff on success
+                self._retry_interval  = 5.0
                 logger.info("[DB] ✨ Connected to Supabase pooler successfully")
             except (ImportError, AttributeError):
                 logger.info("[DB] App-level pooling unavailable, using direct connections")
@@ -974,16 +1006,24 @@ class DatabasePool:
                 self._initialized = True
                 self.use_pooling  = False
                 self.pool         = None
+                self._next_retry_at  = 0.0
+                self._retry_interval = 5.0
             except (psycopg2.OperationalError if psycopg2 else Exception) as e:
                 logger.error(f"[DB] ❌ Cannot connect to Supabase pooler: {e}")
                 logger.error("[DB] Check POOLER_* environment variables are set correctly")
                 self._initialized = False
                 self.use_pooling  = False
+                # Advance backoff: double interval up to 60 s
+                self._retry_interval = min(self._retry_interval * 2, 60.0)
+                self._next_retry_at  = time.monotonic() + self._retry_interval
+                logger.warning(f"[DB] ⏳ Next init retry in {self._retry_interval:.0f}s")
             except Exception as e:
                 logger.error(f"[DB] Error initializing pool: {e}")
                 self._initialized = True
                 self.use_pooling  = False
                 self.pool         = None
+                self._next_retry_at  = 0.0
+                self._retry_interval = 5.0
 
     def get_connection(self):
         if not self._initialized:
