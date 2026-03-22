@@ -263,8 +263,24 @@ def _compile_oracle_c_layer():
     """
     global _OC_LIB, _OC_FFI, _OC_OK
     try:
+        import tempfile, subprocess, os as _os, glob as _glob
+
+        # ── Purge stale cffi C artifacts before import ────────────────────────
+        # cffi 2.0.0 leaves _cffi__*.c files in __pycache__ that try to include
+        # openssl/evp.h at compile time → fatal error on Koyeb (no libssl-dev).
+        # Wipe them here so cffi import doesn't trigger a doomed recompile.
+        for _pattern in [
+            _os.path.join(_os.getcwd(), '__pycache__', '_cffi__*.c'),
+            _os.path.join(_os.getcwd(), '__pycache__', '_cffi__*.so'),
+            '/workspace/__pycache__/_cffi__*.c',
+            '/workspace/__pycache__/_cffi__*.so',
+        ]:
+            for _f in _glob.glob(_pattern):
+                try: _os.remove(_f)
+                except OSError: pass
+        # ─────────────────────────────────────────────────────────────────────
+
         from cffi import FFI as _CFFI
-        import tempfile, subprocess, os as _os
         _ffi = _CFFI()
         _ffi.cdef(_OC_CDEFS)
         src_file = _os.path.join(tempfile.gettempdir(), 'qtcl_oracle_accel.c')
