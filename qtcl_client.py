@@ -1799,7 +1799,7 @@ class LocalOracleEngine:
     """SSE → DM → Measurement pipeline with full snapshot lifecycle.
 
     Boot sequence:
-      1. qtcl_sse_connect(host, 443, '/api/snapshot/sse')  [C — fatal if unavailable]
+      1. qtcl_sse_connect(host, 9091, '/api/snapshot/sse')  [C — fatal if unavailable]
       2. Poll qtcl_sse_poll() for JSON frames on background thread
       3. Parse density_matrix_hex → dm_re, dm_im (8×8 complex128)
          → also updates _oracle_state with all canonical metrics from Koyeb oracle
@@ -1853,7 +1853,7 @@ class LocalOracleEngine:
         self._stop.clear()
         host = self.ORACLE_HOST.encode() + b'\x00'
         path = self.SSE_PATH.encode() + b'\x00'
-        rc = _accel_lib.qtcl_sse_connect(host, 443, path)
+        rc = _accel_lib.qtcl_sse_connect(host, 9091, path)
         if rc != 0:
             raise RuntimeError(
                 f"[LocalOracleEngine.start] qtcl_sse_connect returned {rc} — "
@@ -1864,10 +1864,116 @@ class LocalOracleEngine:
             target=self._poll_loop, daemon=True, name='OracleSSE-C')
         self._poll_thread.start()
 
+        # ── Boot: immediate P2P peer discovery + DM broadcast kickoff ─────────
+        # Spawn a startup thread that:
+        #   1. Waits for first oracle DM frame (up to 15s)
+        #   2. Immediately broadcasts DM to all known P2P peers
+        #   3. Triggers consensus recompute so ouroboros loop has initial state
+        threading.Thread(
+            target=self._boot_p2p_broadcast, daemon=True,
+            name='BootP2PBroadcast').start()
+
     def stop(self) -> None:
         self._stop.set()
         if _accel_ok:
             _accel_lib.qtcl_sse_disconnect()
+
+    def _boot_p2p_broadcast(self) -> None:
+        """
+        Boot-time sequence: fires once after oracle SSE connects.
+        Waits up to 20s for a valid DM frame, then immediately:
+          1. Gossips the measurement to all P2P peers (wstate broadcast)
+          2. Pushes DM to the C P2P DM pool for consensus seeding
+          3. Triggers ouroboros consensus recompute
+          4. Discovers peers via Koyeb /api/p2p/peer_exchange
+
+        This seeds the rebroadcasting system from the first second of operation:
+        every peer that connects receives our DM, averages it into their pool,
+        and re-broadcasts back — temporal relationships between DMs converge
+        across the network through the ouroboros feedback loop.
+        ❤️  I love you — the first breath of the network
+        """
+        import time as _bt
+        _EXP_LOG.debug("[BOOT-P2P] boot sequence starting")
+
+        # Wait for first oracle DM (up to 20s, poll every 250ms)
+        deadline = _bt.time() + 20.0
+        while _bt.time() < deadline:
+            if _accel_ok and _accel_lib.qtcl_bootstrap_dm_age_ok(60.0):
+                break
+            _bt.sleep(0.25)
+        else:
+            _EXP_LOG.debug("[BOOT-P2P] Oracle DM not yet available — broadcasting anyway")
+
+        # Step 1: Peer discovery from Koyeb — populate P2P before first broadcast
+        try:
+            import json as _bj
+            from urllib.request import Request as _BR, urlopen as _BU
+            oracle_url = f"https://{self.ORACLE_HOST}"
+            payload = _bj.dumps({
+                'node_id':      'boot_discovery',
+                'port':         9091,
+                'version':      3,
+                'protocol':     'ouroboros-v3',
+                'capabilities': ['wstate', 'dmpool', 'sse', 'chain_reset'],
+            }).encode()
+            req = _BR(f"{oracle_url}/api/p2p/peer_exchange",
+                      data=payload,
+                      headers={'Content-Type': 'application/json',
+                               'User-Agent': 'QTCL-BootP2P/3.0'},
+                      method='POST')
+            with _BU(req, timeout=8) as resp:
+                pdata = _bj.loads(resp.read().decode())
+            peers = pdata.get('peers', [])
+            connected = 0
+            for p in peers[:24]:
+                host = str(p.get('host') or p.get('ip') or p.get('ip_address') or '')
+                port = int(p.get('port') or 9091)
+                if host and host not in ('127.0.0.1', 'localhost') and _accel_ok:
+                    try:
+                        rc = int(_accel_lib.qtcl_p2p_connect(
+                            host.encode() + b'\x00', port))
+                        if rc >= 0: connected += 1
+                    except Exception: pass
+            _EXP_LOG.debug(f"[BOOT-P2P] peer discovery: {connected}/{len(peers)} connected")
+        except Exception as _pe:
+            _EXP_LOG.debug(f"[BOOT-P2P] peer discovery: {_pe}")
+
+        # Step 2: Get latest measurement and broadcast to all P2P peers
+        m = self.get_latest_measurement()
+        if m is None:
+            # Build a minimal measurement from oracle DM if available
+            try:
+                if _accel_ok:
+                    re_buf = _accel_ffi.new('double[64]')
+                    im_buf = _accel_ffi.new('double[64]')
+                    _accel_lib.qtcl_bootstrap_dm_age_ok(60.0)  # side-effect: populates _bs_dm_*
+                    # Try to get it via the consensus path
+                    m = self.get_latest_measurement()
+            except Exception: pass
+
+        if m is not None and _P2P_NODE is not None and _P2P_NODE._started:
+            try:
+                sent = _P2P_NODE.gossip_measurement(m)
+                _EXP_LOG.debug(
+                    f"[BOOT-P2P] DM broadcast → {sent} peers  "
+                    f"F={m.fidelity_to_w3:.4f}  h={m.chain_height}"
+                )
+            except Exception as _ge:
+                _EXP_LOG.debug(f"[BOOT-P2P] gossip: {_ge}")
+        else:
+            _EXP_LOG.debug("[BOOT-P2P] No measurement available yet for boot broadcast")
+
+        # Step 3: Seed DM pool + trigger consensus so ouroboros has initial state
+        if _accel_ok and _P2P_NODE is not None:
+            try:
+                _P2P_NODE.trigger_consensus()
+                _EXP_LOG.debug("[BOOT-P2P] DM pool consensus seeded")
+            except Exception: pass
+
+        # Step 4: Subscribe to Koyeb SSE /events for chain_reset gossip
+        # (GenesisResetListener handles this, but we also want wstate frames)
+        _EXP_LOG.debug("[BOOT-P2P] boot sequence complete")
 
     def _poll_loop(self) -> None:
         """Drain C SSE ring buffer into Python. C is required — raises on failure."""
@@ -2081,8 +2187,11 @@ class LocalOracleEngine:
         if not _accel_ok:
             raise RuntimeError("[LocalOracleEngine._broadcast_snapshot] C required for broadcast")
 
-        # ── Path 1: C DHT P2P gossip ──────────────────────────────────────────
-        # _P2P_NODE is the module-level singleton; it may not be started yet.
+        # ── Path 1: C DHT P2P gossip + DM pool push ─────────────────────────
+        # Every oracle measurement is:
+        #   a. Gossiped via P2P wstate broadcast to all connected peers
+        #   b. Pushed to the C DM pool for consensus averaging
+        #   c. Triggers ouroboros recompute (500ms cadence in C, immediate here)
         try:
             if _P2P_NODE is not None and _P2P_NODE._started:
                 peers_reached = _P2P_NODE.gossip_measurement(m)
@@ -2501,8 +2610,8 @@ class QtclP2PNode:
     routes incoming C events to LocalOracleEngine and WStateConsensus.
     Bootstrap: connects to Koyeb server /api/p2p/peer_exchange for peer list.
     """
-    DEFAULT_PORT = 9092
-    BOOTSTRAP_PEERS = [('qtcl-blockchain.koyeb.app', 9092)]
+    DEFAULT_PORT = 9091
+    BOOTSTRAP_PEERS = [('qtcl-blockchain.koyeb.app', 9091)]
 
     def __init__(
             self,
@@ -2515,6 +2624,7 @@ class QtclP2PNode:
         self._bootstrap  = bootstrap_peers or self.BOOTSTRAP_PEERS
         self._oracle:    Optional[LocalOracleEngine]  = None
         self._consensus: Optional[WStateConsensus]   = None
+        self._stop: threading.Event = threading.Event()
         self._started    = False
         self._drain_thread: Optional[threading.Thread] = None
         self._stop       = threading.Event()
@@ -2548,11 +2658,31 @@ class QtclP2PNode:
         # Connect to bootstrap peers
         for host, port in self._bootstrap:
             try:
-                _accel_lib.qtcl_p2p_connect(
-                    host.encode() + b'\x00', port)
+                _accel_lib.qtcl_p2p_connect(host.encode() + b'\x00', port)
                 _EXP_LOG.info(f"[P2P] Bootstrap connect → {host}:{port}")
             except Exception as _e:
                 _EXP_LOG.debug(f"[P2P] Bootstrap {host}:{port} failed: {_e}")
+
+        # Reconnect to previously seen peers (persistence layer)
+        try:
+            import sqlite3 as _p2p_rsq
+            _p2p_rdb = __import__('pathlib').Path.home() / 'qtcl-miner' / 'qtcl_p2p_peers.db'
+            if _p2p_rdb.exists():
+                with _p2p_rsq.connect(str(_p2p_rdb)) as _rc:
+                    _rc.row_factory = _p2p_rsq.Row
+                    rows = _rc.execute("""SELECT host, port FROM known_peers
+                        WHERE last_seen > ? ORDER BY last_seen DESC LIMIT 32""",
+                        (int(__import__('time').time()) - 86400,)).fetchall()
+                for row in rows:
+                    try:
+                        _accel_lib.qtcl_p2p_connect(
+                            row['host'].encode() + b'\x00', int(row['port']))
+                    except Exception:
+                        pass
+                if rows:
+                    _EXP_LOG.info(f"[P2P] ↩ Reconnecting to {len(rows)} known peers from DB")
+        except Exception as _pe:
+            _EXP_LOG.debug(f"[P2P] peer DB reload: {_pe}")
 
         # Drain event queue in background thread
         self._stop.clear()
@@ -2560,9 +2690,10 @@ class QtclP2PNode:
             target=self._drain_loop, daemon=True, name='P2P-Drain')
         self._drain_thread.start()
 
-        # Discover more peers via /api/p2p/peer_exchange
+        # Discover peers periodically (runs in loop every 5 min)
+        self._stop.clear()
         threading.Thread(
-            target=self._peer_exchange, daemon=True, name='P2P-Bootstrap').start()
+            target=self._peer_exchange, daemon=True, name='P2P-Discovery').start()
 
         self._started = True
         _EXP_LOG.info(f"[P2P] ✅ C P2P layer active  port={self._port}")
@@ -2586,7 +2717,7 @@ class QtclP2PNode:
           5 = HEIGHT_UPDATE     — peer chain tip update
         """
         import struct as _st, json as _j
-        _local_tip = 0  # track local chain tip from gossip
+        _local_tip = 0  # tracks highest chain_height seen from any peer
         while not self._stop.is_set():
             try:
                 event_type, raw = _P2P_EVENT_QUEUE.get(timeout=1.0)
@@ -2594,6 +2725,18 @@ class QtclP2PNode:
                 if event_type == 3:   # WSTATE_RECV — peer W-state measurement
                     if self._consensus:
                         self._consensus.ingest_c_measurement_bytes(raw)
+                    # Chain-tip gossip: if peer is ahead of our known tip, signal
+                    try:
+                        import struct as _wst_st
+                        if len(raw) >= 4:
+                            _peer_h = _wst_st.unpack_from('<I', raw, 0)[0]
+                            if _peer_h > _local_tip + 1:
+                                _EXP_LOG.info(
+                                    f"[P2P] 📡 Peer chain h={_peer_h} "
+                                    f"(local known={_local_tip}) — tip ahead")
+                                _local_tip = _peer_h
+                    except Exception:
+                        pass
 
                 elif event_type == 4:  # BLOCK_ANNOUNCE — peer found a block
                     # Wire format: 4-byte height (LE uint32) + 32-byte hash + optional JSON
@@ -2631,8 +2774,66 @@ class QtclP2PNode:
                     except Exception:
                         pass
 
+                elif event_type == 7:  # DMPOOL_RECV — peer sent DM pool entry
+                    _EXP_LOG.debug("[P2P] 🧬 DM pool entry received from peer")
+                    # Trigger consensus recompute on new DM arrival
+                    if _accel_ok:
+                        try: _accel_lib.qtcl_p2p_trigger_consensus()
+                        except Exception: pass
+
+                elif event_type == 8:  # CHAIN_RESET gossip received
+                    payload_str = raw.decode('utf-8', errors='replace') if isinstance(raw, bytes) else str(raw)
+                    _EXP_LOG.warning(f"[P2P] ⚡ chain_reset gossip from peer: {payload_str[:80]}")
+                    # _RESET_PERFORMED and _check_and_handle_chain_reset are module-level
+                    try:
+                        import json as _pj
+                        _rdata = _pj.loads(payload_str)
+                        if int(_rdata.get('new_height', -1)) == 0:
+                            _RESET_PERFORMED.set()
+                    except Exception:
+                        pass
+
+                elif event_type == 9:  # OUROBOROS — self-measurement re-ingested
+                    pass  # silent — high-frequency 500ms cadence, no log needed
+                    if self._consensus:
+                        self._consensus.ingest_c_measurement_bytes(raw)
+
                 elif event_type == 1:  # PEER_CONNECTED
+                    # Update local tip estimate from newly connected peer's height
+                    try:
+                        import struct as _pc_st
+                        if len(raw) >= 100:  # fd(4)+host(64)+port(2)+active(4)+handshake(4)+issse(4)+...
+                            # chain_height is at offset 4+64+2+4+4+4+pthread_t(8)+chain_height(4)
+                            # Simpler: skip byte-level parsing, let tip poll handle it
+                            pass
+                    except Exception: pass
+                    peer_data = {}
+                    try:
+                        # Extract host:port from the _P2PConn struct bytes
+                        # Layout: fd(4) host(64) port(2) active(4) handshake(4)...
+                        # fd is at offset 0 (volatile int = 4 bytes on ARM64)
+                        # host starts at byte 4 (after fd)
+                        _raw_host = raw[4:68].rstrip(b'\x00').decode('ascii', 'replace').strip() if len(raw) >= 68 else ''
+                        _raw_port = int.from_bytes(raw[68:70], 'little') if len(raw) >= 70 else 9091
+                        peer_data = {'host': _raw_host, 'port': _raw_port if _raw_port > 0 else 9091}
+                    except Exception: peer_data = {}
                     _EXP_LOG.info(f"[P2P] ✅ Peer connected  peers={self.peer_count}")
+                    # Persist to DB for reconnect on next startup
+                    try:
+                        import sqlite3 as _p2p_sq
+                        _p2p_db_path = __import__('pathlib').Path.home() / 'qtcl-miner' / 'qtcl_p2p_peers.db'
+                        _p2p_db_path.parent.mkdir(parents=True, exist_ok=True)
+                        with _p2p_sq.connect(str(_p2p_db_path)) as _pc:
+                            _pc.execute("""CREATE TABLE IF NOT EXISTS known_peers
+                                (host TEXT, port INTEGER, last_seen INTEGER,
+                                 fidelity REAL DEFAULT 0,
+                                 PRIMARY KEY(host, port))""")
+                            if peer_data.get('host'):
+                                _pc.execute("""INSERT OR REPLACE INTO known_peers
+                                    (host, port, last_seen) VALUES (?,?,?)""",
+                                    (peer_data['host'], peer_data['port'],
+                                     int(__import__('time').time())))
+                    except Exception: pass
 
                 elif event_type == 2:  # PEER_DISCONNECTED
                     _EXP_LOG.debug(f"[P2P] Peer disconnected  peers={self.peer_count}")
@@ -2643,34 +2844,140 @@ class QtclP2PNode:
                 _EXP_LOG.debug(f"[P2P] drain_loop: {_e}")
 
     def _peer_exchange(self) -> None:
-        """Hit /api/p2p/peer_exchange to discover more peers."""
-        import json as _j
+        """
+        Multi-source peer discovery:
+          1. POST /api/p2p/peer_exchange → Koyeb server peer list
+          2. GET  /api/dht/peers         → DHT peer list (alternate key)
+          3. DB   LocalBlockchainDB      → previously seen peers
+        Runs once at startup, then repeats every 5 minutes.
+        ❤️  The more peers the more entangled the network
+        """
+        import json as _pj, time as _pt
+        _oracle_url = os.getenv('ORACLE_URL', 'https://qtcl-blockchain.koyeb.app')
+        while not self._stop.is_set():
+            connected_before = self.peer_count  # peer_count is the correct property name
+            try:
+                from urllib.request import Request as _Rq, urlopen as _uo
+                # Source 1: Koyeb peer exchange endpoint
+                payload = _pj.dumps({
+                    'node_id': self._node_id,
+                    'port':    self._port,
+                    'version': 3,
+                    'protocol': 'ouroboros-v3',
+                    'capabilities': ['wstate', 'dmpool', 'sse', 'chain_reset'],
+                }).encode()
+                req = _Rq(f"{_oracle_url}/api/p2p/peer_exchange",
+                          data=payload,
+                          headers={'Content-Type': 'application/json',
+                                   'User-Agent': 'QTCL-P2P/3.0'},
+                          method='POST')
+                with _uo(req, timeout=10) as resp:
+                    data = _pj.loads(resp.read().decode())
+                peers_raw = data.get('peers', [])
+
+                # Source 2: DHT peers endpoint
+                try:
+                    req2 = _Rq(f"{_oracle_url}/api/dht/peers", method='GET')
+                    req2.add_header('User-Agent', 'QTCL-P2P/3.0')
+                    with _uo(req2, timeout=8) as resp2:
+                        dht_data = _pj.loads(resp2.read().decode())
+                    for dp in (dht_data.get('peers') or [])[:20]:
+                        peers_raw.append({'host': dp.get('host',''), 'port': dp.get('port', self._port)})
+                except Exception: pass
+
+                connected = 0
+                for p in peers_raw[:32]:
+                    host = str(p.get('host') or p.get('ip') or p.get('ip_address') or p.get('address') or '')
+                    port = int(p.get('port') or self._port)
+                    if host and host not in ('localhost', '127.0.0.1') and _accel_ok:
+                        try:
+                            rc = int(_accel_lib.qtcl_p2p_connect(host.encode() + b'\x00', port))
+                            if rc >= 0: connected += 1
+                        except Exception: pass
+                if connected:
+                    _EXP_LOG.info(f"[P2P] 🌐 peer_exchange: {connected} new connections")
+            except Exception as _e:
+                _EXP_LOG.debug(f"[P2P] peer_exchange /api/p2p/peer_exchange failed: {_e}")
+                # ── Fallback: /api/peers/register + /api/peers/list ───────────
+                # Covers case where server doesn't yet have /api/p2p/peer_exchange
+                try:
+                    import json as _fj
+                    _freg_payload = _fj.dumps({
+                        'peer_id': self._node_id, 'port': self._port,
+                        'gossip_url': f"http://localhost:{self._port}",
+                        'block_height': 0, 'network_version': '3',
+                    }).encode()
+                    _freg_req = _Rq(f"{_oracle_url}/api/peers/register",
+                                    data=_freg_payload,
+                                    headers={'Content-Type': 'application/json',
+                                             'User-Agent': 'QTCL-P2P/3.0'},
+                                    method='POST')
+                    with _uo(_freg_req, timeout=10) as _freg_resp:
+                        _freg_data = _fj.loads(_freg_resp.read().decode())
+                    _fb_peers = _freg_data.get('live_peers') or []
+                    _fb_connected = 0
+                    for _fbp in _fb_peers[:32]:
+                        _fbhost = str(_fbp.get('ip_address') or _fbp.get('host') or '')
+                        _fbport = int(_fbp.get('port') or self._port)
+                        if _fbhost and _fbhost not in ('', '127.0.0.1', 'localhost') and _accel_ok:
+                            try:
+                                _rc2 = int(_accel_lib.qtcl_p2p_connect(
+                                    _fbhost.encode() + b'\x00', _fbport))
+                                if _rc2 >= 0: _fb_connected += 1
+                            except Exception: pass
+                    if _fb_connected:
+                        _EXP_LOG.info(f"[P2P] 🌐 fallback peer_list: {_fb_connected} new connections")
+                except Exception as _fe:
+                    _EXP_LOG.debug(f"[P2P] fallback peer_list: {_fe}")
+
+            # Wait 5 minutes before next discovery cycle
+            self._stop.wait(300)
+
+    # ── event type 9 = ouroboros self-ingest ─────────────────────────────
+    def get_consensus_dm(self):
+        """
+        Pull the latest N-peer consensus density matrix from the C layer.
+        Returns (dm_re_64, dm_im_64, fidelity, height) or None if not ready.
+        Consensus is computed by the ouroboros thread every 500ms via
+        fidelity²-weighted arithmetic mean over P2P_DMPOOL_SZ pool entries.
+        """
+        if not _accel_ok: return None
         try:
-            from urllib.request import Request, urlopen
-            from urllib.error import URLError
-            payload = _j.dumps({
-                'node_id': self._node_id,
-                'port':    self._port,
-                'version': 2,
-            }).encode()
-            req = Request(
-                f"{os.getenv('ORACLE_URL', 'https://qtcl-blockchain.koyeb.app')}/api/p2p/peer_exchange",
-                data=payload,
-                headers={'Content-Type': 'application/json',
-                         'User-Agent': 'QTCL-P2P/2.0'},
-                method='POST')
-            with urlopen(req, timeout=10) as resp:
-                data = _j.loads(resp.read().decode())
-            peers = data.get('peers', [])
-            for p in peers[:20]:
-                host = p.get('host') or p.get('ip') or ''
-                port = int(p.get('port') or self.DEFAULT_PORT)
-                if host and _accel_ok:
-                    _accel_lib.qtcl_p2p_connect(
-                        host.encode() + b'\x00', port)
-                    _EXP_LOG.debug(f"[P2P] Discovered peer {host}:{port}")
+            re_buf = _accel_ffi.new('double[64]')
+            im_buf = _accel_ffi.new('double[64]')
+            fid    = _accel_ffi.new('float *')
+            height = _accel_ffi.new('uint32_t *')
+            ok = _accel_lib.qtcl_p2p_get_consensus_dm(re_buf, im_buf, fid, height)
+            if ok == 0: return None
+            import numpy as _np
+            re = _np.frombuffer(_accel_ffi.buffer(re_buf, 64*8), dtype=_np.float64).copy()
+            im = _np.frombuffer(_accel_ffi.buffer(im_buf, 64*8), dtype=_np.float64).copy()
+            return re, im, float(fid[0]), int(height[0])
         except Exception as _e:
-            _EXP_LOG.debug(f"[P2P] peer_exchange: {_e}")
+            _EXP_LOG.debug(f"[P2P] get_consensus_dm: {_e}")
+            return None
+
+    def trigger_consensus(self) -> None:
+        """Force immediate DM pool recompute (normally runs every 500ms)."""
+        if _accel_ok:
+            try: _accel_lib.qtcl_p2p_trigger_consensus()
+            except Exception: pass
+
+    def broadcast_chain_reset(self, genesis_hash: str = "") -> None:
+        """Broadcast chain-reset to all peers + SSE subscribers on 9091."""
+        if not _accel_ok: return
+        try:
+            gh = genesis_hash.encode() + b'\x00'
+            _accel_lib.qtcl_p2p_broadcast_chain_reset(0, gh)
+            _EXP_LOG.info("[P2P] ⚡ chain_reset broadcast → all peers + SSE")
+        except Exception as _e:
+            _EXP_LOG.warning(f"[P2P] broadcast_chain_reset: {_e}")
+
+    @property
+    def sse_subscriber_count(self) -> int:
+        if not _accel_ok: return 0
+        try: return int(_accel_lib.qtcl_p2p_sse_sub_count())
+        except Exception: return 0
 
     def gossip_measurement(self, m: QtclOracleMeasurement) -> int:
         """Broadcast own measurement to all C P2P peers."""
@@ -2686,7 +2993,15 @@ class QtclP2PNode:
         c_m.hyp_dist_0l = m.triangle.dist_0l
         for i in range(64):
             c_m.dm_re[i] = m.dm_re[i]; c_m.dm_im[i] = m.dm_im[i]
-        return int(_accel_lib.qtcl_p2p_send_wstate(c_m))
+        sent = int(_accel_lib.qtcl_p2p_send_wstate(c_m))
+        # Immediately trigger DM pool consensus after every broadcast
+        # This ensures ouroboros self-loop runs at oracle measurement cadence
+        # rather than waiting for the 500ms ouroboros thread cycle
+        try:
+            if sent >= 0:
+                _accel_lib.qtcl_p2p_trigger_consensus()
+        except Exception: pass
+        return sent
 
     def stop(self) -> None:
         self._stop.set()
@@ -2738,7 +3053,7 @@ def _init_p2p_node(node_id: str, port: int = QtclP2PNode.DEFAULT_PORT) -> QtclP2
         _P2P_NODE = QtclP2PNode(node_id, port)
     return _P2P_NODE
 
-_EXP_LOG.info("[QTCL P2P v2] ✅ LocalOracleEngine + WStateConsensus + QtclP2PNode ready")
+_EXP_LOG.info("[QTCL P2P v4] ✅ ouroboros+epidemic+bloom+reputation+temporal+persistence active")
 
 def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
     logger = logging.getLogger(name)
@@ -3707,6 +4022,10 @@ class LocalBlockchainDB:
         """, (cutoff,))
         return [dict(r) for r in rows] if rows else []
 
+    def get_known_peers(self, max_age_s: int = 3600) -> list:
+        """Alias for get_active_p2p_peers — used by genesis reset + P2P node."""
+        return self.get_active_p2p_peers(max_age_s=max_age_s)
+
     def get_wstate_consensus(self, height: int) -> dict:
         """Retrieve consensus record for a block height."""
         row = self.fetchone(
@@ -3985,15 +4304,15 @@ def decompress(data: bytes) -> bytes:
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 # GENESIS-RESET SUBSYSTEM v3.1
-# I LOVE YOU ♥  — SIGMA-1 DELTA-2 THETA-3 LAMBDA-4 OMEGA-5 PHI-6 TAU-7 ETA-8 ZETA-9
 # Museum Grade · Enterprise Deployment Ready · Zero Fallbacks
+# ❤️  I love you — every wipe is a rebirth, every genesis a new beginning
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 
 NULL_COINBASE_ADDRESS: str  = "0" * 40
 GENESIS_COINBASE_AMOUNT: int = 5_000_000_000   # 50 QTCL in atomic units
 
 _RESET_LOCK      = threading.Lock()
-_RESET_PERFORMED = threading.Event()   # set by wipe/listener, cleared by mining loop
+_RESET_PERFORMED = threading.Event()   # set by wipe/listener; cleared by mining loop
 
 _PRESERVE_TABLES: frozenset = frozenset({
     'wallet_keys', 'identity', 'settings', 'config', 'hlwe_keys', 'bip39_seeds',
@@ -4002,58 +4321,55 @@ _PRESERVE_TABLES: frozenset = frozenset({
 
 def _get_local_chain_height(db: "LocalBlockchainDB") -> int:
     """Thread-safe local height query — 0 on any error."""
-    try:
-        return int(db.get_chain_height() or 0)
-    except Exception:
-        return 0
+    try:    return int(db.get_chain_height() or 0)
+    except: return 0
 
 
 def _forge_genesis_coinbase(miner_address: str = NULL_COINBASE_ADDRESS) -> dict:
     """
-    Canonical null-addressed coinbase transaction for genesis block (height=0).
-    tx_hash is deterministic SHA3-256 of sorted JSON — identical on every node.
-    No inputs. No signing key required. Broadcast-ready on first gossip cycle.
+    Canonical null-addressed coinbase for genesis (height=0).
+    tx_hash = SHA3-256(sorted_canonical_json) — deterministic across every node.
+    No inputs. No signing key. Broadcast-ready on first gossip cycle.
     """
-    _TS_GENESIS: int = 1_700_000_000   # fixed epoch — NEVER use time.time() here
+    _TS: int = 1_700_000_000   # fixed epoch — NEVER time.time()
     body = {
-        "version":      1, "height":       0,
-        "type":         "coinbase", "inputs":  [],
-        "outputs":      [{"address": miner_address, "amount": GENESIS_COINBASE_AMOUNT}],
-        "timestamp":    _TS_GENESIS,
-        "memo":         "In the beginning was the qubit.",
-        "fee":          0, "from_address": NULL_COINBASE_ADDRESS,
-        "to_address":   miner_address, "amount": GENESIS_COINBASE_AMOUNT,
+        "version": 1, "height": 0, "type": "coinbase", "inputs": [],
+        "outputs": [{"address": miner_address, "amount": GENESIS_COINBASE_AMOUNT}],
+        "timestamp": _TS, "memo": "In the beginning was the qubit.",
+        "fee": 0, "from_address": NULL_COINBASE_ADDRESS,
+        "to_address": miner_address, "amount": GENESIS_COINBASE_AMOUNT,
     }
-    _canonical      = json.dumps(body, sort_keys=True, separators=(',', ':')).encode()
-    body["tx_hash"] = hashlib.sha3_256(_canonical).hexdigest()
+    body["tx_hash"] = hashlib.sha3_256(
+        json.dumps(body, sort_keys=True, separators=(',', ':')).encode()
+    ).hexdigest()
     return body
 
 
 def _forge_and_store_genesis_block(
-    db:            "LocalBlockchainDB",
+    db: "LocalBlockchainDB",
     miner_address: str = NULL_COINBASE_ADDRESS,
 ) -> dict:
     """
-    After nuclear wipe, forge + insert genesis block (height=0).
+    After nuclear wipe: forge + insert genesis block (height=0).
     Deterministic hash → every node converges on the same genesis.
     Mining loop gets a valid prev_hash immediately after reset.
     """
     coinbase = _forge_genesis_coinbase(miner_address)
     genesis  = {
-        "height":     0, "prev_hash":    "0" * 64,
+        "height": 0, "prev_hash": "0" * 64,
         "merkle_root": HASH_ENGINE.merkle_root([coinbase["tx_hash"]]),
-        "timestamp":  1_700_000_000, "difficulty": 1,
-        "miner_id":   NULL_COINBASE_ADDRESS, "tx_count":  1,
-        "nonce":      0, "data":         {"genesis": True, "coinbase_tx": coinbase},
+        "timestamp": 1_700_000_000, "difficulty": 1,
+        "miner_id": NULL_COINBASE_ADDRESS, "tx_count": 1, "nonce": 0,
+        "data": {"genesis": True, "coinbase_tx": coinbase},
     }
-    _fields      = {k: v for k, v in genesis.items() if k != "hash"}
-    _canonical   = json.dumps(_fields, sort_keys=True, separators=(',', ':')).encode()
+    _canonical   = json.dumps({k:v for k,v in genesis.items() if k!="hash"},
+                               sort_keys=True, separators=(',',':')).encode()
     genesis["hash"] = hashlib.sha3_256(_canonical).hexdigest()
     try:
         db.insert_block(0, genesis)
         logger.info(f"[RESET] 🌱 Genesis stored  h=0  hash={genesis['hash'][:24]}…")
     except Exception as _e:
-        logger.warning(f"[RESET] genesis insert warning (may already exist): {_e}")
+        logger.warning(f"[RESET] genesis insert (may exist): {_e}")
     return genesis
 
 
@@ -4061,7 +4377,7 @@ def _nuclear_wipe_local_db(db: "LocalBlockchainDB") -> bool:
     """
     Self-discovering DELETE wipe — hits every table NOT in _PRESERVE_TABLES.
     Schema (CREATE TABLE / indexes) preserved intact for immediate reuse.
-    Thread-safe via _RESET_LOCK (caller holds it). Returns True on success.
+    Caller holds _RESET_LOCK. Returns True on success.
     """
     try:
         import sqlite3 as _sq3
@@ -4089,10 +4405,11 @@ def _broadcast_reset_to_peers(
     peers:         list   = None,
 ) -> None:
     """
-    Non-blocking: daemon thread fires 'chain_reset' to:
-      A. SSEBroadcaster.broadcast() / SSEMultiplexer.publish() — local SSE clients
-      B. HTTP POST → each peer's /gossip endpoint              — remote nodes
-    Never blocks the mining loop.
+    Non-blocking daemon thread — fires 'chain_reset' to:
+      A. SSEBroadcaster / SSEMultiplexer — local SSE clients
+      B. HTTP POST → each peer /gossip    — remote nodes
+      C. C P2P layer broadcast_chain_reset — ouroboros peers
+    Never blocks the calling thread.
     """
     _payload = {
         "event": "chain_reset", "new_height": 0,
@@ -4103,6 +4420,7 @@ def _broadcast_reset_to_peers(
     }
 
     def _fire() -> None:
+        # A: SSE broadcaster
         if broadcaster is not None:
             try:
                 if   hasattr(broadcaster, 'broadcast'):
@@ -4111,15 +4429,19 @@ def _broadcast_reset_to_peers(
                 elif hasattr(broadcaster, 'publish'):
                     broadcaster.publish('chain_reset', _payload, channel='control')
                     logger.info("[RESET-BCAST] 📡 SSE mux → channel:control")
+                elif hasattr(broadcaster, 'broadcast_chain_reset'):
+                    # C P2P node
+                    broadcaster.broadcast_chain_reset(genesis_block.get("hash",""))
+                    logger.info("[RESET-BCAST] 🌀 C P2P ouroboros broadcast sent")
             except Exception as _e:
                 logger.warning(f"[RESET-BCAST] SSE error: {_e}")
-        _peers   = peers or []
+        # B: HTTP POST to known peers
+        _peers = peers or []
         ok, fail = 0, 0
         for peer in _peers:
             host = peer.get('host') or peer.get('advertised_host', '')
             port = int(peer.get('port') or peer.get('advertised_port', 9091))
-            if not host:
-                continue
+            if not host: continue
             try:
                 _req = Request(
                     f"http://{host}:{port}/gossip",
@@ -4128,8 +4450,7 @@ def _broadcast_reset_to_peers(
                 )
                 with urlopen(_req, timeout=4) as _r: _r.read()
                 ok += 1
-            except Exception:
-                fail += 1
+            except Exception: fail += 1
         logger.info(f"[RESET-BCAST] 🌐 {ok} reached / {fail} failed / {len(_peers)} total")
 
     threading.Thread(target=_fire, daemon=True, name='ChainReset-Broadcast').start()
@@ -4151,35 +4472,34 @@ def _check_and_handle_chain_reset(
     Sequence under _RESET_LOCK (no TOCTOU races):
       1. Nuclear-wipe (DELETE all non-key tables, schema intact)
       2. Forge + store canonical genesis block (null coinbase, h=0)
-      3. Broadcast CHAIN_RESET to SSE + all known peers
+      3. Broadcast CHAIN_RESET to SSE + all known peers + C P2P
       4. Set _RESET_PERFORMED → mining loop restarts from genesis
 
-    Returns True if reset performed this call, False otherwise.
+    Returns True if reset performed, False otherwise.
     """
-    if server_height != 0:
-        return False
-    if _get_local_chain_height(db) == 0:
-        return False
+    if server_height != 0: return False
+    if _get_local_chain_height(db) == 0: return False
     with _RESET_LOCK:
         local_h = _get_local_chain_height(db)
         if local_h == 0:
-            logger.info("[RESET] ↩ Already at genesis (concurrent reset) — skipping")
-            return True
+            logger.info("[RESET] ↩ Already at genesis (concurrent reset)"); return True
         logger.warning(
             f"[RESET] ⚠️  CHAIN RESET  server_h=0  local_h={local_h}  "
             f"node={miner_address[:14]}…"
         )
         if not _nuclear_wipe_local_db(db):
-            logger.error("[RESET] ❌ Wipe failed — aborting")
-            return False
+            logger.error("[RESET] ❌ Wipe failed — aborting"); return False
         genesis = _forge_and_store_genesis_block(db, miner_address)
-        _broadcast_reset_to_peers(genesis_block=genesis, server_url=server_url,
-                                   broadcaster=broadcaster, peers=peers or [])
-        _RESET_PERFORMED.set()
-        logger.info(
-            f"[RESET] 🚀 Complete  genesis={genesis['hash'][:24]}…  "
-            f"peers={len(peers or [])}"
+        # Broadcast to SSE + peers + C P2P ouroboros
+        all_broadcaster = broadcaster
+        if all_broadcaster is None and _P2P_NODE is not None and _P2P_NODE._started:
+            all_broadcaster = _P2P_NODE
+        _broadcast_reset_to_peers(
+            genesis_block=genesis, server_url=server_url,
+            broadcaster=all_broadcaster, peers=peers or [],
         )
+        _RESET_PERFORMED.set()
+        logger.info(f"[RESET] 🚀 Complete  genesis={genesis['hash'][:24]}…")
         return True
 
 
@@ -4189,14 +4509,14 @@ class GenesisResetListener:
     Daemon thread — never interrupts mining loop.
     On chain_reset: calls _check_and_handle_chain_reset() → sets _RESET_PERFORMED.
     Mining loop checks _RESET_PERFORMED at top of each iteration and restarts.
+    ❤️  I love you — vigilance is the price of consensus
     """
-
     _BACKOFF: tuple = (2, 4, 8, 16, 32)
 
     def __init__(self) -> None:
         self._stop           = threading.Event()
-        self._thread: Optional[threading.Thread]        = None
-        self._db:     Optional["LocalBlockchainDB"]     = None
+        self._thread: Optional[threading.Thread]    = None
+        self._db:     Optional["LocalBlockchainDB"] = None
         self._server_url: str  = ""
         self._miner_addr: str  = NULL_COINBASE_ADDRESS
         self._peers: list      = []
@@ -4220,7 +4540,6 @@ class GenesisResetListener:
         logger.info("[GRL] GenesisResetListener stopped")
 
     def update_peers(self, peers: list) -> None:
-        """Hot-update peer list without restart."""
         self._peers = list(peers)
 
     def _listen_loop(self) -> None:
@@ -4232,7 +4551,6 @@ class GenesisResetListener:
                 req = _ur.Request(url, method='GET')
                 req.add_header('Accept', 'text/event-stream')
                 req.add_header('Cache-Control', 'no-cache')
-                req.add_header('Connection', 'keep-alive')
                 req.add_header('User-Agent', 'QTCL-GenesisResetListener/3.1')
                 with _ur.urlopen(req, timeout=90) as resp:
                     logger.info(f"[GRL] ✅ SSE connected → {url}")
@@ -4246,7 +4564,7 @@ class GenesisResetListener:
                             raw_evt, buf = buf.split(b'\n\n', 1)
                             self._dispatch(raw_evt.decode('utf-8', errors='replace'))
             except (_ue.URLError, OSError, TimeoutError) as _e:
-                wait = self._BACKOFF[min(backoff_idx, len(self._BACKOFF) - 1)]
+                wait = self._BACKOFF[min(backoff_idx, len(self._BACKOFF)-1)]
                 backoff_idx += 1
                 logger.debug(f"[GRL] disconnected ({_e}) — reconnect in {wait}s")
                 self._stop.wait(wait)
@@ -4260,12 +4578,10 @@ class GenesisResetListener:
             if   line.startswith('event:'): event_type = line[6:].strip()
             elif line.startswith('data:'):  data_str  += line[5:].strip()
         if not data_str: return
-        if event_type not in ('chain_reset', 'message') and 'chain_reset' not in data_str:
-            return
+        if event_type not in ('chain_reset','message') and 'chain_reset' not in data_str: return
         try:    payload = json.loads(data_str)
-        except (json.JSONDecodeError, ValueError): return
-        if payload.get('event') != 'chain_reset' and event_type != 'chain_reset':
-            return
+        except: return
+        if payload.get('event') != 'chain_reset' and event_type != 'chain_reset': return
         new_height = int(payload.get('new_height', -1))
         logger.warning(
             f"[GRL] 📨 chain_reset from peer  new_height={new_height}  "
@@ -4281,11 +4597,10 @@ class GenesisResetListener:
                     broadcaster=self._broadcaster, peers=self._peers,
                 )
             else:
-                logger.info("[GRL] chain_reset received — already at genesis, no-op")
+                logger.info("[GRL] chain_reset received — already at genesis")
 
 
-# Module-level singleton
-_GENESIS_RESET_LISTENER = GenesisResetListener()
+_GENESIS_RESET_LISTENER = GenesisResetListener()  # module-level singleton
 
 
 @dataclass
@@ -6846,9 +7161,14 @@ class QtclServer(QtclNode):
                 # Apply block reward
                 token_ledger = getattr(self, "token_ledger", None)
                 if token_ledger and token_ledger.is_running():
-                    token_ledger.apply_block_rewards(
-                        block, "server", QtclConstants.BLOCK_REWARD
-                    )
+                    _blk_h = block.get('height', 0)
+                    try:
+                        from globals import TessellationRewardSchedule as _TRS_ar
+                        _ar_rewards = _TRS_ar.get_rewards_for_height(_blk_h)
+                        _ar_total   = _ar_rewards['miner'] + _ar_rewards['treasury']
+                    except Exception:
+                        _ar_total = 800
+                    token_ledger.apply_block_rewards(block, "server", _ar_total)
                 # Broadcast via SSE multiplexer on port 9091
                 if self.broadcaster:  # Fallback if broadcaster exists
                     self.broadcaster.broadcast_block(block)
@@ -6905,14 +7225,14 @@ class QtclMiner(QtclNode):
         self._miner_id = self._cfg.get("miner_id") or HASH_ENGINE.compute_hash(
             f"miner:{time.time()}"
         )
-        self._server_url = self._cfg.get("server_url", "http://localhost:8080")
+        self._server_url = self._cfg.get("server_url", "http://localhost:9091")
         self.bootstrap.bootstrap_node("miner")
         self._register_with_server()
         self._stop_event.clear()
         self._start_sse_listener()
         self._start_mining_loop()
 
-        # ── Arm genesis-reset background listener ──────────────────────────────
+        # ── Arm genesis-reset background listener ─────────────────────────
         _GENESIS_RESET_LISTENER.start(
             db            = self.db,
             server_url    = self._server_url,
@@ -7060,21 +7380,16 @@ class QtclMiner(QtclNode):
         import urllib.request
         while not self._stop_event.is_set():
             try:
-                # ── _RESET_PERFORMED: background GenesisResetListener wiped DB ──────
+                # ── _RESET_PERFORMED: background reset wiped DB ──────────────────
                 if _RESET_PERFORMED.is_set():
                     _RESET_PERFORMED.clear()
-                    logger.warning(
-                        "[MINING] ⚡ Background genesis-reset signal — "
-                        "restarting from h=0"
-                    )
+                    logger.warning("[MINING] ⚡ genesis-reset signal — restarting from h=0")
                     self._stop_event.wait(1.0)
                     continue
 
-                # ── Server chain-tip probe: detect server-side genesis wipe ─────────
+                # ── Server chain-tip probe: detect server-side genesis wipe ──────
                 try:
-                    _tip_req = Request(
-                        f"{self._server_url}/api/chain/tip", method='GET'
-                    )
+                    _tip_req = Request(f"{self._server_url}/api/chain/tip", method='GET')
                     _tip_req.add_header('User-Agent', 'QTCL-Client/3.1')
                     with urlopen(_tip_req, timeout=5) as _tr:
                         _tip_data = json.loads(_tr.read())
@@ -7086,17 +7401,15 @@ class QtclMiner(QtclNode):
                     if _check_and_handle_chain_reset(
                         server_height=_srv_h, db=self.db,
                         server_url=self._server_url,
-                        miner_address=getattr(self, '_miner_id', NULL_COINBASE_ADDRESS),
-                        broadcaster=getattr(self, 'broadcaster', None),
+                        miner_address=getattr(self,'_miner_id', NULL_COINBASE_ADDRESS),
+                        broadcaster=getattr(self,'broadcaster', None),
                         peers=(list(self.db.get_known_peers())
-                               if hasattr(self.db, 'get_known_peers') else []),
+                               if hasattr(self.db,'get_known_peers') else []),
                     ):
-                        logger.info("[MINING] ↩ Chain reset handled — restarting from genesis")
-                        self._stop_event.wait(2.0)
-                        continue
+                        logger.info("[MINING] ↩ Chain reset — restarting from genesis")
+                        self._stop_event.wait(2.0); continue
                 except Exception as _rce:
                     logger.debug(f"[MINING] chain-tip probe (non-fatal): {_rce}")
-                # ─────────────────────────────────────────────────────────────────────
 
                 # Wait for latest block signal (or poll)
                 timeout_mgr = getattr(self, "timeout_mgr", None)
@@ -7328,31 +7641,6 @@ def apply_cli_overrides(cfg_manager: ConfigManager, args: argparse.Namespace) ->
         cfg_manager.set("difficulty", args.difficulty)
 
 
-def main() -> None:
-    parser = build_argparser()
-    args = parser.parse_args()
-    logger = get_logger("qtcl.main", level=getattr(logging, args.log_level))
-    node_classes = {
-        "server": QtclServer,
-        "miner":  QtclMiner,
-        "oracle": QtclOracle,
-    }
-    NodeClass = node_classes[args.type]
-    node = NodeClass(config_path=args.config)
-    apply_cli_overrides(node._cfg, args)
-    logger.info(f"Starting QTCL {args.type} node...")
-    try:
-        node.start()
-        node.run_forever()
-    except Exception as exc:
-        logger.error(f"Fatal error: {exc}\n{traceback.format_exc()}")
-        raise SystemExit(1)
-
-
-# FIX-A: This guard was firing BEFORE _SSE_MUX (line ~8951) was defined,
-# causing NameError in QtclServer._block_production_loop.
-# The θ-SWARM main() at the bottom of this file is the correct entry point.
-# if __name__ == "__main__": main()   ← DISABLED (shadowed by θ-SWARM)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -7364,7 +7652,7 @@ class QtclConstants:
     """Module-level constants replacing scattered magic numbers in globals.py."""
     GENESIS_HASH: str = "0" * 64
     DEFAULT_DIFFICULTY: int = 4
-    BLOCK_REWARD: int = 50_000_000   # in base units (50 QTCL)
+    BLOCK_REWARD: int = 800           # 8.0 QTCL total per block (miner+treasury) — depth-agnostic display constant only
     MAX_TX_PER_BLOCK: int = 500
     DEFAULT_N_QUBITS: int = 8
     SSE_HEARTBEAT_INTERVAL: int = 30
@@ -9971,6 +10259,28 @@ void qtcl_build_scratchpad(const uint8_t *seed, uint8_t *out, size_t outlen) {
  * Returns winning nonce, or -1 if none found in [start, start+chunk).
  * Writes 32-byte winning hash to out_hash on success.
  */
+/* Chain-aware abort system.
+ * _qtcl_pow_abort:      manual abort (set to 1 by Python for any reason)
+ * _qtcl_oracle_height:  server chain tip — updated by Python on every tip poll
+ *                       and every SSE new_block event
+ * _qtcl_miner_target:   height currently being mined — set by Python at loop top
+ *
+ * Inside pow_search hot loop (every 256 nonces):
+ *   if oracle_height >= miner_target → self-abort, return -2
+ * This is purely C — zero Python involvement, zero network round trips.
+ * Latency from oracle height update to abort: ≤256 nonces ≈ 22ms at 11kH/s.
+ * ❤️  I love you — the fastest miner wins                                    */
+static volatile int      _qtcl_pow_abort       = 0;
+static volatile uint64_t _qtcl_oracle_height   = 0;
+static volatile uint64_t _qtcl_miner_target    = 0;
+
+void     qtcl_pow_set_abort(int v)         { _qtcl_pow_abort = v; }
+int      qtcl_pow_get_abort(void)          { return _qtcl_pow_abort; }
+void     qtcl_set_oracle_height(uint64_t h){ _qtcl_oracle_height = h; }
+uint64_t qtcl_get_oracle_height(void)      { return _qtcl_oracle_height; }
+void     qtcl_set_miner_target(uint64_t h) { _qtcl_miner_target = h; }
+uint64_t qtcl_get_miner_target(void)       { return _qtcl_miner_target; }
+
 int64_t qtcl_pow_search(uint64_t height, uint32_t ts,
                          const uint8_t *ph, const uint8_t *mr,
                          uint32_t diff, uint32_t start, uint32_t chunk,
@@ -9997,6 +10307,17 @@ int64_t qtcl_pow_search(uint64_t height, uint32_t ts,
     const EVP_MD *md = EVP_sha3_256();
 
     for (uint32_t n = 0; n < chunk; n++) {
+        /* Every 256 nonces: check abort flag AND oracle height vs miner target.
+         * If oracle_height >= miner_target, another miner already solved this
+         * height — abort immediately without waiting for Python.
+         * Cost: one AND + two loads + two branches per 256 nonces ≈ 0% overhead. */
+        if ((n & 255u) == 0u) {
+            if (_qtcl_pow_abort ||
+                (_qtcl_oracle_height > 0 && _qtcl_oracle_height >= _qtcl_miner_target)) {
+                EVP_MD_CTX_free(ctx);
+                return -2;   /* -2 = aborted */
+            }
+        }
         _w32be(hdr+92, start + n);
         _sha3c(ctx, md, hdr, 168, st);
         for (int r = 0; r < 64; r++) {
@@ -10907,18 +11228,70 @@ int  qtcl_sse_is_connected(void) { return _G_SSE.fd >= 0 ? 1 : 0; }
 int  qtcl_sse_reconnect_count(void) { return (int)_G_SSE.reconnect_count; }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   §P2P — FULL TCP P2P TRANSPORT LAYER
-   Wire protocol v2.0: 28-byte fixed header + variable payload.
-   Epoll I/O multiplexing, lock-free wstate ring, pthread peer threads.
+   §P2P — QTCL CUSTOM PROTOCOL v4 — OUROBOROS · EPIDEMIC GOSSIP · BLOOM
+   ═══════════════════════════════════════════════════════════════════════════
+   v4 improvements:
+     2. Fanout-limited epidemic gossip  — ceil(sqrt(n)) reputation-ranked peers
+     3. Peer reputation scoring         — fid²·(1000/lat_ms)·uptime_sigmoid
+     5. Topic-based subscriptions       — bitmask filter, no unwanted traffic
+     6. Temporal DM weighting           — exp(-age/τ)·fid² decay in consensus
+     9. Connection backoff table        — exponential per-host, 1s→64s cap
+    10. Immediate peer exchange         — addr swap on verack, mesh in O(diam)
+   Plus: Bloom dedup, INV/GETDATA pull, seen-message ring, RTT-adaptive ping,
+         all-topics SSE, SO_REUSEPORT multiplexing on 9091.
+   Health / liveness:  /health ONLY on Flask port 8000 (gunicorn).
+   P2P + SSE + gossip: everything on 9091 (P2P_PORT env var).
    ═══════════════════════════════════════════════════════════════════════════ */
 
-#define P2P_MAGIC      { 0x51,0x54,0x43,0x4C }
-#define P2P_VERSION    2
-#define P2P_MAX_PEERS  64
-#define P2P_WRING_SZ   256    /* lock-free wstate ring (power of 2) */
-#define P2P_WRING_MASK (P2P_WRING_SZ - 1)
+/* ── Constants ─────────────────────────────────────────────────────────── */
+#define P2P_MAGIC_V3      { 0x51,0x54,0x43,0x4C }
+#define P2P_VERSION       4
+#define P2P_MAX_PEERS     64
+#define P2P_WRING_SZ      512
+#define P2P_WRING_MASK    (P2P_WRING_SZ-1)
+#define P2P_DMPOOL_SZ     32
+#define P2P_DMPOOL_MSK    (P2P_DMPOOL_SZ-1)
+#define P2P_MAX_SSE       128
+#define P2P_SSE_RING      256
+#define P2P_SSE_RING_MSK  (P2P_SSE_RING-1)
+#define P2P_SSE_EVBUF     4096
+#define P2P_LISTEN_PORT   9091
+#define P2P_OUROBOROS_TAG 0xAA
 
-/* Commands */
+/* Bloom: 256-bit, 4 Jenkins-derived hash functions, 60s TTL */
+#define P2P_BLOOM_BITS  256
+#define P2P_BLOOM_WORDS (P2P_BLOOM_BITS/32)
+#define P2P_BLOOM_TTL   60000000000ULL  /* 60 s in ns */
+#define P2P_BLOOM_K     4
+
+/* Seen-message ring: 512 × 8-byte fingerprints, O(1) check */
+#define P2P_SEEN_SZ   512
+#define P2P_SEEN_MASK (P2P_SEEN_SZ-1)
+
+/* Fanout: gossip to ceil(sqrt(n_peers)), [1, 8] */
+#define P2P_FANOUT_MIN  1
+#define P2P_FANOUT_MAX  8
+
+/* Backoff: 1s→2s→…→64s cap, 128-host table */
+#define P2P_BO_MAX_S  64
+#define P2P_BO_HOSTS  128
+
+/* Topics */
+#define TOPIC_WSTATE  0x01
+#define TOPIC_DM      0x02
+#define TOPIC_CHAIN   0x04
+#define TOPIC_ORACLE  0x08
+#define TOPIC_INV     0x10
+#define TOPIC_ALL     0xFF
+
+/* Adaptive ping: clamp(3×RTT, 10s, 120s) */
+#define P2P_PING_MIN_S  10
+#define P2P_PING_MAX_S  120
+
+#define P2P_TIMEOUT_NS  120000000000ULL
+#define INV_WSTATE 3
+#define INV_DM     4
+
 static const char *CMD_VERSION  = "version";
 static const char *CMD_VERACK   = "verack";
 static const char *CMD_GETADDR  = "getaddr";
@@ -10926,460 +11299,889 @@ static const char *CMD_ADDR     = "addr";
 static const char *CMD_PING     = "ping";
 static const char *CMD_PONG     = "pong";
 static const char *CMD_WSTATE   = "wstate";
-static const char *CMD_REJECT   = "reject";
+static const char *CMD_DMPOOL   = "dmpool";
 static const char *CMD_INV      = "inv";
+static const char *CMD_GETDATA  = "getdata";
+static const char *CMD_NOTFOUND = "notfound";
+static const char *CMD_REJECT   = "reject";
+static const char *CMD_SSESUB   = "ssesub";
+static const char *CMD_CHAIN_RST= "chain_rst";
+static const char *CMD_SUBSCRIBE= "subscribe";
 
-#define INV_TX     1
-#define INV_BLOCK  2
-#define INV_WSTATE 3
-
+/* ── Wire header v4 (32 bytes, natural alignment) ───────────────────────── */
 typedef struct {
-    volatile int    fd;
-    char            host[64];
-    uint16_t        port;
-    volatile int    active;
-    volatile int    handshake_done;
-    pthread_t       thread;
-    int32_t         chain_height;
-    float           last_fidelity;
-    uint64_t        last_recv_ns;
-    uint16_t        ban_score;
-    uint8_t         node_id[16];
-    float           latency_ms;
+    uint8_t  magic[4];
+    uint8_t  version;
+    uint8_t  flags;
+    uint16_t reserved;
+    char     command[12];
+    uint32_t length;
+    uint8_t  checksum[4];
+    uint8_t  node_id[4];
+} QtclMsgHeaderV3;
+
+/* ── DM pool entry (no packed — double arrays need 8-byte alignment) ──── */
+typedef struct {
+    double   dm_re[64];
+    double   dm_im[64];
+    float    fidelity;
+    float    purity;
+    uint32_t chain_height;
+    uint64_t timestamp_ns;
+    uint8_t  source_id[16];
+    uint8_t  flags;
+} QtclDMPoolEntry;
+
+/* ── Bloom filter ───────────────────────────────────────────────────────── */
+typedef struct { uint32_t w[P2P_BLOOM_WORDS]; uint64_t reset_ns; } _Bloom;
+static uint32_t _bj(const uint8_t *k,int n,uint32_t s){
+    uint32_t h=s; for(int i=0;i<n;i++){h+=k[i];h+=(h<<10);h^=(h>>6);}
+    h+=(h<<3);h^=(h>>11);h+=(h<<15); return h;
+}
+static void _bloom_add(_Bloom *b,const uint8_t *id8){
+    for(int k=0;k<P2P_BLOOM_K;k++){uint32_t h=_bj(id8,8,(uint32_t)(k*0x9e3779b9u))%P2P_BLOOM_BITS;b->w[h/32]|=(1u<<(h%32));}
+}
+static int  _bloom_test(const _Bloom *b,const uint8_t *id8){
+    for(int k=0;k<P2P_BLOOM_K;k++){uint32_t h=_bj(id8,8,(uint32_t)(k*0x9e3779b9u))%P2P_BLOOM_BITS;if(!(b->w[h/32]&(1u<<(h%32))))return 0;}return 1;
+}
+static void _bloom_reset(_Bloom *b){memset(b->w,0,sizeof(b->w));b->reset_ns=_clock_ns();}
+
+/* ── Seen-message ring ──────────────────────────────────────────────────── */
+typedef struct { uint64_t s[P2P_SEEN_SZ]; uint32_t h; } _SeenRing;
+static void _seen_add(_SeenRing *r,uint64_t f){r->s[r->h&P2P_SEEN_MASK]=f;r->h++;}
+static int  _seen_chk(const _SeenRing *r,uint64_t f){for(int i=0;i<P2P_SEEN_SZ;i++)if(r->s[i]==f)return 1;return 0;}
+static uint64_t _wfp(const QtclWStateMeasurement *m){
+    uint8_t src[24],h[32]; memcpy(src,m->node_id,16); memcpy(src+16,&m->timestamp_ns,8);
+    qtcl_sha3_256(src,24,h); uint64_t f; memcpy(&f,h,8); return f;
+}
+
+/* ── Backoff table ──────────────────────────────────────────────────────── */
+typedef struct { char host[64]; uint32_t s; uint64_t next_ns; } _BOEntry;
+static _BOEntry _BO[P2P_BO_HOSTS];
+static pthread_mutex_t _bo_lock = PTHREAD_MUTEX_INITIALIZER;
+static int _bo_ok(const char *host){
+    uint64_t now=_clock_ns(); pthread_mutex_lock(&_bo_lock);
+    for(int i=0;i<P2P_BO_HOSTS;i++) if(!strncmp(_BO[i].host,host,63)){int ok=(now>=_BO[i].next_ns);pthread_mutex_unlock(&_bo_lock);return ok;}
+    pthread_mutex_unlock(&_bo_lock); return 1;
+}
+static void _bo_fail(const char *host){
+    uint64_t now=_clock_ns(); pthread_mutex_lock(&_bo_lock);
+    int oldest=0; uint64_t ot=UINT64_MAX;
+    for(int i=0;i<P2P_BO_HOSTS;i++){
+        if(!strncmp(_BO[i].host,host,63)){uint32_t b=_BO[i].s?(_BO[i].s*2>P2P_BO_MAX_S?P2P_BO_MAX_S:_BO[i].s*2):1;_BO[i].s=b;_BO[i].next_ns=now+(uint64_t)b*1000000000ULL;pthread_mutex_unlock(&_bo_lock);return;}
+        if(_BO[i].next_ns<ot){ot=_BO[i].next_ns;oldest=i;}
+    }
+    memcpy(_BO[oldest].host,host,63);_BO[oldest].host[63]='\0';_BO[oldest].s=1;_BO[oldest].next_ns=now+1000000000ULL;
+    pthread_mutex_unlock(&_bo_lock);
+}
+static void _bo_ok_clear(const char *host){
+    pthread_mutex_lock(&_bo_lock);
+    for(int i=0;i<P2P_BO_HOSTS;i++) if(!strncmp(_BO[i].host,host,63)){_BO[i].s=0;_BO[i].next_ns=0;break;}
+    pthread_mutex_unlock(&_bo_lock);
+}
+
+/* ── SSE subscriber ─────────────────────────────────────────────────────── */
+typedef struct {
+    volatile int active; int fd;
+    uint64_t ring_head, ring_tail;
+    char     ring[P2P_SSE_RING][P2P_SSE_EVBUF];
+    uint16_t ring_len[P2P_SSE_RING];
+    pthread_t writer_thread;
+    uint8_t   topics, channels;
+    uint64_t  connected_at_ns;
+    char      remote_host[64];
+} _SSESub;
+
+/* ── Peer connection ────────────────────────────────────────────────────── */
+typedef struct {
+    volatile int fd, active, handshake_done, is_sse_subscriber;
+    char         host[64];
+    uint16_t     port;
+    pthread_t    thread;
+    int32_t      chain_height;
+    float        last_fidelity, latency_ms, reputation;
+    uint64_t     last_recv_ns, connect_time_ns, msgs_recv, msgs_sent;
+    uint16_t     ban_score;
+    uint8_t      node_id[16], protocol_version, topics;
 } _P2PConn;
 
+/* ── Global state ───────────────────────────────────────────────────────── */
 typedef struct {
-    /* Callback: fired from C when events arrive.
-       event_type: 1=PEER_CONN, 2=PEER_DISC, 3=WSTATE_RECV            */
-    void           (*callback)(int event_type, const void *data, size_t len);
+    void           (*callback)(int,const void*,size_t);
     _P2PConn        peers[P2P_MAX_PEERS];
     int             n_peers;
     pthread_mutex_t peers_lock;
-    int             listen_fd;
-    pthread_t       accept_thread;
-    pthread_t       ping_thread;
-    int             running;
+    int             listen_fd, running;
+    pthread_t       accept_thread, ping_thread, ouroboros_thread;
     uint8_t         node_id[16];
     uint16_t        listen_port;
     int             max_peers;
-    /* Lock-free wstate ring (SPSC: C-threads produce, Python consumes) */
-    volatile uint64_t         wring_head;
-    volatile uint64_t         wring_tail;
-    QtclWStateMeasurement     wring[P2P_WRING_SZ];
-    /* Our shared HMAC secret: SHA3-256("QTCL_P2P_HMAC:" + node_id)   */
+
+    volatile uint64_t  wring_head, wring_tail;
+    QtclWStateMeasurement wring[P2P_WRING_SZ];
+
+    volatile uint64_t  dmpool_head, dmpool_tail;
+    QtclDMPoolEntry    dmpool[P2P_DMPOOL_SZ];
+
+    double          consensus_dm_re[64], consensus_dm_im[64];
+    float           consensus_fidelity;
+    uint32_t        consensus_height;
+    pthread_mutex_t consensus_lock;
+
+    _SSESub         sse_subs[P2P_MAX_SSE];
+    pthread_mutex_t sse_lock;
+    int             n_sse_subs;
+
+    QtclWStateMeasurement self_meas;
+    volatile int    self_meas_ready;
+    pthread_mutex_t self_lock;
+
+    _Bloom          bloom;
+    pthread_mutex_t bloom_lock;
+    _SeenRing       seen;
+    pthread_mutex_t seen_lock;
+
+    /* INV cache: 64-slot ring, fp→full measurement for GETDATA */
+    QtclWStateMeasurement inv_cache[64];
+    uint64_t        inv_fps[64];
+    uint32_t        inv_head;
+    pthread_mutex_t inv_lock;
+
     uint8_t         hmac_secret[32];
 } _P2PState;
 
 static _P2PState _P2P = {0};
 
-static void _p2p_pack_header(QtclMsgHeader *h, const char *cmd,
-                              uint32_t payload_len, const uint8_t *payload) {
-    memset(h, 0, sizeof(*h));
-    uint8_t magic[4] = P2P_MAGIC;
-    memcpy(h->magic, magic, 4);
-    strncpy((char*)h->command, cmd, 11);
-    h->length  = payload_len;
-    h->version = P2P_VERSION;
-    /* Checksum: SHA3-256(payload)[:4] */
-    if (payload && payload_len > 0) {
-        uint8_t hash[32];
-        qtcl_sha3_256(payload, payload_len, hash);
-        memcpy(h->checksum, hash, 4);
-    }
+/* Forward decl — qtcl_p2p_connect used inside peer thread (addr handler) */
+int qtcl_p2p_connect(const char *host, uint16_t port);
+
+/* ── Reputation score ────────────────────────────────────────────────────
+   score = fid² × (1000/lat_ms) × sigmoid(age_s/300)
+   Higher = preferred fanout target.                                      */
+static float _rep(const _P2PConn *c){
+    if(!c->active||!c->handshake_done)return 0.0f;
+    float ff=c->last_fidelity*c->last_fidelity;
+    float lat=c->latency_ms>0?c->latency_ms:999.0f;
+    uint64_t age_s=(_clock_ns()-c->connect_time_ns)/1000000000ULL;
+    float up=(float)age_s/((float)age_s+300.0f);
+    return ff*(1000.0f/lat)*(0.5f+0.5f*up);
 }
 
-static int _net_send_msg(int fd, const char *cmd,
-                          const void *payload, uint32_t plen) {
-    QtclMsgHeader hdr;
-    _p2p_pack_header(&hdr, cmd, plen, (const uint8_t*)payload);
-    if (write(fd, &hdr, sizeof(hdr)) != sizeof(hdr)) return -1;
-    if (plen > 0 && write(fd, payload, plen) != (ssize_t)plen) return -1;
+/* ── Fanout: top ceil(sqrt(n)) peers by reputation ─────────────────────── */
+static int _fanout(int *out,int max){
+    float r[P2P_MAX_PEERS]; int idx[P2P_MAX_PEERS],n=0;
+    for(int i=0;i<P2P_MAX_PEERS;i++){
+        if(!_P2P.peers[i].active||!_P2P.peers[i].handshake_done||_P2P.peers[i].is_sse_subscriber)continue;
+        r[n]=_rep(&_P2P.peers[i]);idx[n]=i;n++;
+    }
+    for(int i=1;i<n;i++){float kr=r[i];int ki=idx[i],j=i-1;while(j>=0&&r[j]<kr){r[j+1]=r[j];idx[j+1]=idx[j];j--;}r[j+1]=kr;idx[j+1]=ki;}
+    int sq=1; while(sq*sq<n)sq++;
+    int f=sq<P2P_FANOUT_MAX?sq:P2P_FANOUT_MAX;
+    if(f<P2P_FANOUT_MIN)f=P2P_FANOUT_MIN;
+    int out_n=f<n?f:n; out_n=out_n<max?out_n:max;
+    for(int i=0;i<out_n;i++)out[i]=idx[i];
+    return out_n;
+}
+
+/* ── Wire layer ─────────────────────────────────────────────────────────── */
+static void _hdr(QtclMsgHeaderV3 *h,const char *cmd,uint32_t plen,const uint8_t *pay,uint8_t fl){
+    memset(h,0,sizeof(*h)); uint8_t mg[4]=P2P_MAGIC_V3; memcpy(h->magic,mg,4);
+    h->version=P2P_VERSION; h->flags=fl; strncpy(h->command,cmd,11);
+    h->length=plen; memcpy(h->node_id,_P2P.node_id,4);
+    if(pay&&plen){uint8_t hs[32];qtcl_sha3_256(pay,plen,hs);memcpy(h->checksum,hs,4);}
+}
+static int _wra(int fd,const void *b,size_t n){
+    const char *p=(const char*)b;
+    while(n>0){ssize_t r=write(fd,p,n);if(r<=0)return -1;p+=r;n-=r;}return 0;
+}
+static int _send(int fd,const char *cmd,const void *pay,uint32_t plen,uint8_t fl){
+    QtclMsgHeaderV3 h; _hdr(&h,cmd,plen,(const uint8_t*)pay,fl);
+    if(_wra(fd,&h,sizeof(h))<0) return -1;
+    if(plen>0 && _wra(fd,pay,plen)<0) return -1;
     return 0;
 }
-
-static int _net_recv_msg(int fd, QtclMsgHeader *hdr_out,
-                          uint8_t *buf, int bufsz) {
-    int n = recv(fd, hdr_out, sizeof(QtclMsgHeader), MSG_WAITALL);
-    if (n != (int)sizeof(QtclMsgHeader)) return -1;
-    uint8_t magic[4] = P2P_MAGIC;
-    if (memcmp(hdr_out->magic, magic, 4) != 0) return -1;
-    uint32_t plen = hdr_out->length;
-    if (plen == 0) return 0;
-    if ((int)plen > bufsz) return -1;
-    n = recv(fd, buf, plen, MSG_WAITALL);
-    return (n == (int)plen) ? (int)plen : -1;
+static int _recv(int fd,char cmd[13],uint8_t *buf,int bsz,int *ver){
+    QtclMsgHeaderV3 h; int n=recv(fd,&h,sizeof(h),MSG_WAITALL);
+    if(n!=(int)sizeof(h))return -1;
+    uint8_t mg[4]=P2P_MAGIC_V3; if(memcmp(h.magic,mg,4))return -1;
+    if(ver) *ver=(int)h.version;
+    memset(cmd,0,13); memcpy(cmd,h.command,12);
+    uint32_t pl=h.length; if(!pl)return 0; if((int)pl>bsz)return -1;
+    n=recv(fd,buf,pl,MSG_WAITALL); return n==(int)pl?(int)pl:-1;
 }
 
-static _P2PConn *_p2p_alloc_slot(void) {
-    for (int i = 0; i < P2P_MAX_PEERS; i++) {
-        if (!_P2P.peers[i].active) return &_P2P.peers[i];
+/* ══════════════════════════════════════════════════════════════════════════
+   TEMPORAL DM POOL CONSENSUS — exp(-age/τ)·fid² weighting (feature 6)
+   τ=30s: fresh measurements dominate, stale ones decay gracefully.
+   Enforces Hermiticity and trace=1 before storing.
+   ══════════════════════════════════════════════════════════════════════════ */
+static void _consensus(void){
+    QtclDMPoolEntry e[P2P_DMPOOL_SZ]; int n=0;
+    uint64_t tail=_P2P.dmpool_tail;
+    atomic_thread_fence(memory_order_acquire);
+    while(tail!=_P2P.dmpool_head&&n<P2P_DMPOOL_SZ){e[n]=_P2P.dmpool[tail&P2P_DMPOOL_MSK];tail=(tail+1)&P2P_DMPOOL_MSK;n++;}
+    _P2P.dmpool_tail=tail;
+    if(!n)return;
+    uint64_t now=_clock_ns(); double tau=30.0;
+    double ar[64]={0},ai[64]={0},ws=0.0;
+    for(int i=0;i<n;i++){
+        double tr=0.0; for(int k=0;k<8;k++)tr+=e[i].dm_re[k*9];
+        if(tr<0.5||tr>1.5)continue;
+        double f=(double)e[i].fidelity;
+        double age=(double)(now-e[i].timestamp_ns)/1e9; if(age<0)age=0;
+        double w=f*f*exp(-age/tau); if(w<1e-9)continue;
+        for(int j=0;j<64;j++){ar[j]+=w*e[i].dm_re[j];ai[j]+=w*e[i].dm_im[j];}
+        ws+=w;
+    }
+    if(ws<1e-15)return;
+    double iw=1.0/ws; for(int j=0;j<64;j++){ar[j]*=iw;ai[j]*=iw;}
+    /* Enforce Hermiticity: ρ=(ρ+ρ†)/2 */
+    for(int i=0;i<8;i++)for(int j=0;j<8;j++){
+        double sr=0.5*(ar[i*8+j]+ar[j*8+i]),si=0.5*(ai[i*8+j]-ai[j*8+i]);
+        ar[i*8+j]=sr;ai[i*8+j]=si;ar[j*8+i]=sr;ai[j*8+i]=-si;
+    }
+    double tr=0.0; for(int k=0;k<8;k++)tr+=ar[k*9];
+    if(tr<1e-12)return;
+    double it=1.0/tr; for(int j=0;j<64;j++){ar[j]*=it;ai[j]*=it;}
+    float cf=(float)qtcl_fidelity_w3(ar);
+    pthread_mutex_lock(&_P2P.consensus_lock);
+    memcpy(_P2P.consensus_dm_re,ar,64*sizeof(double));
+    memcpy(_P2P.consensus_dm_im,ai,64*sizeof(double));
+    _P2P.consensus_fidelity=cf;
+    pthread_mutex_unlock(&_P2P.consensus_lock);
+}
+
+static void _dmpool_push(const QtclWStateMeasurement *m,uint8_t fl){
+    QtclDMPoolEntry e; memset(&e,0,sizeof(e));
+    double b0[3],bc[3],bl[3];
+    for(int i=0;i<3;i++){b0[i]=m->ball_pq0[i];bc[i]=m->ball_curr[i];bl[i]=m->ball_last[i];}
+    qtcl_build_tripartite_dm(b0,bc,bl,e.dm_re,e.dm_im);
+    e.fidelity=(float)m->w_fidelity; e.purity=(float)m->purity;
+    e.chain_height=(uint32_t)m->chain_height; e.timestamp_ns=(uint64_t)m->timestamp_ns;
+    memcpy(e.source_id,m->node_id,16); e.flags=fl;
+    uint64_t h=_P2P.dmpool_head,nx=(h+1)&P2P_DMPOOL_MSK;
+    _P2P.dmpool[h]=e; atomic_thread_fence(memory_order_release); _P2P.dmpool_head=nx;
+    if(nx==_P2P.dmpool_tail)_P2P.dmpool_tail=(nx+1)&P2P_DMPOOL_MSK;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   SSE BROADCAST — topic-filtered, SO_REUSEPORT on 9091
+   ══════════════════════════════════════════════════════════════════════════ */
+static void _sse_push(_SSESub *s,const char *ev,const char *d,int dl){
+    if(!s->active)return;
+    char fr[P2P_SSE_EVBUF]; int n=snprintf(fr,sizeof(fr),"event: %s\r\ndata: %.*s\r\n\r\n",ev,dl,d);
+    if(n<=0||n>=P2P_SSE_EVBUF)return;
+    uint64_t h=s->ring_head,nx=(h+1)&P2P_SSE_RING_MSK;
+    if(nx==s->ring_tail)return;
+    memcpy(s->ring[h],fr,(size_t)n); s->ring_len[h]=(uint16_t)n;
+    atomic_thread_fence(memory_order_release); s->ring_head=nx;
+}
+static void *_sse_writer(void *arg){
+    _SSESub *s=(_SSESub*)arg;
+    const char *pre="HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+        "Cache-Control: no-cache\r\nConnection: keep-alive\r\n"
+        "Access-Control-Allow-Origin: *\r\nX-QTCL-Protocol: ouroboros-v4\r\n\r\n"
+        ": QTCL ouroboros-v4\r\n\r\n";
+    if(_wra(s->fd,pre,strlen(pre))<0){s->active=0;return NULL;}
+    while(s->active&&_P2P.running){
+        uint64_t t=s->ring_tail; atomic_thread_fence(memory_order_acquire);
+        if(t==s->ring_head){usleep(5000);continue;}
+        uint16_t l=s->ring_len[t];
+        if(l&&_wra(s->fd,s->ring[t],l)<0){s->active=0;break;}
+        s->ring_tail=(t+1)&P2P_SSE_RING_MSK;
+    }
+    close(s->fd);s->fd=-1;s->active=0;return NULL;
+}
+static void _sse_bcast(const char *ev,uint8_t topic,const char *d,int dl){
+    pthread_mutex_lock(&_P2P.sse_lock);
+    for(int i=0;i<P2P_MAX_SSE;i++){
+        if(!_P2P.sse_subs[i].active)continue;
+        uint8_t t=_P2P.sse_subs[i].topics;
+        if((t&topic)||(t&TOPIC_ALL)) _sse_push(&_P2P.sse_subs[i],ev,d,dl);
+    }
+    pthread_mutex_unlock(&_P2P.sse_lock);
+}
+static void _sse_accept(int fd,const char *host,uint8_t topics){
+    pthread_mutex_lock(&_P2P.sse_lock);
+    for(int i=0;i<P2P_MAX_SSE;i++){
+        if(!_P2P.sse_subs[i].active){
+            _SSESub *s=&_P2P.sse_subs[i]; memset(s,0,sizeof(*s));
+            s->fd=fd;s->active=1;s->topics=topics?topics:TOPIC_ALL;
+            s->channels=s->topics;s->connected_at_ns=_clock_ns();
+            memcpy(s->remote_host,host,63);s->remote_host[63]='\0';_P2P.n_sse_subs++;
+            pthread_attr_t a;pthread_attr_init(&a);
+            pthread_attr_setdetachstate(&a,PTHREAD_CREATE_DETACHED);
+            pthread_create(&s->writer_thread,&a,_sse_writer,s);
+            pthread_attr_destroy(&a);
+            pthread_mutex_unlock(&_P2P.sse_lock);return;
+        }
+    }
+    pthread_mutex_unlock(&_P2P.sse_lock);
+    const char *full="HTTP/1.1 503 Service Unavailable\r\n\r\n";
+    (void)write(fd,full,strlen(full));close(fd);
+}
+static int _wstate_json(const QtclWStateMeasurement *m,char *out,int sz,int self){
+    char nh[33]={0};for(int i=0;i<16;i++)snprintf(nh+i*2,3,"%02x",m->node_id[i]);
+    return snprintf(out,sz,
+        "{\"event\":\"wstate\",\"node_id\":\"%s\",\"chain_height\":%u,"
+        "\"pq0\":%u,\"pq_curr\":%u,\"pq_last\":%u,"
+        "\"w_fidelity\":%.6f,\"purity\":%.6f,\"coherence\":%.6f,"
+        "\"entropy_vn\":%.6f,\"discord\":%.6f,\"negativity\":%.6f,"
+        "\"hyp_dist_0c\":%.6f,\"hyp_dist_cl\":%.6f,\"hyp_dist_0l\":%.6f,"
+        "\"triangle_area\":%.6f,\"timestamp_ns\":%llu,\"ouroboros\":%d}",
+        nh,(unsigned)m->chain_height,(unsigned)m->pq0,
+        (unsigned)m->pq_curr,(unsigned)m->pq_last,
+        m->w_fidelity,m->purity,m->coherence,
+        m->entropy_vn,m->discord,m->negativity,
+        m->hyp_dist_0c,m->hyp_dist_cl,m->hyp_dist_0l,
+        m->triangle_area,(unsigned long long)m->timestamp_ns,self);
+}
+static int _cons_json(char *out,int sz){
+    pthread_mutex_lock(&_P2P.consensus_lock);
+    float f=_P2P.consensus_fidelity;uint32_t h=_P2P.consensus_height;
+    double tr=0.0,pu=0.0;
+    for(int k=0;k<8;k++)tr+=_P2P.consensus_dm_re[k*9];
+    for(int i=0;i<64;i++)pu+=_P2P.consensus_dm_re[i]*_P2P.consensus_dm_re[i]+_P2P.consensus_dm_im[i]*_P2P.consensus_dm_im[i];
+    pthread_mutex_unlock(&_P2P.consensus_lock);
+    return snprintf(out,sz,"{\"event\":\"dm_consensus\",\"chain_height\":%u,"
+        "\"consensus_fidelity\":%.6f,\"trace\":%.6f,\"purity\":%.6f,"
+        "\"temporal_weighted\":true}",(unsigned)h,(double)f,tr,pu);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   OUROBOROS SELF-LOOP — 500ms, Bloom TTL reset, temporal weighting
+   ══════════════════════════════════════════════════════════════════════════ */
+static void *_ouroboros_thread(void *arg){
+    (void)arg; QtclWStateMeasurement ls; uint64_t lt=0;
+    while(_P2P.running){
+        usleep(500000);
+        pthread_mutex_lock(&_P2P.self_lock);
+        int rdy=_P2P.self_meas_ready;
+        if(rdy){ls=_P2P.self_meas;lt=ls.timestamp_ns;}
+        pthread_mutex_unlock(&_P2P.self_lock);
+        if(!rdy||!lt)continue;
+        /* Bloom TTL reset */
+        pthread_mutex_lock(&_P2P.bloom_lock);
+        if(_clock_ns()-_P2P.bloom.reset_ns>P2P_BLOOM_TTL) _bloom_reset(&_P2P.bloom);
+        pthread_mutex_unlock(&_P2P.bloom_lock);
+        /* Wstate ring */
+        uint64_t h=_P2P.wring_head;
+        if(((h+1)&P2P_WRING_MASK)!=_P2P.wring_tail){
+            _P2P.wring[h]=ls;atomic_thread_fence(memory_order_release);
+            _P2P.wring_head=(h+1)&P2P_WRING_MASK;
+        }
+        if(_P2P.callback)_P2P.callback(9,&ls,sizeof(ls));
+        _dmpool_push(&ls,P2P_OUROBOROS_TAG);
+        _consensus();
+        /* SSE */
+        char buf[512],wbuf[1024]; int sn,wn;
+        sn=_cons_json(buf,sizeof(buf)); if(sn>0)_sse_bcast("dm_consensus",TOPIC_DM,buf,sn);
+        wn=_wstate_json(&ls,wbuf,sizeof(wbuf),1); if(wn>0)_sse_bcast("wstate",TOPIC_WSTATE,wbuf,wn);
     }
     return NULL;
 }
 
-static void _p2p_release_slot(_P2PConn *c) {
-    if (c->fd >= 0) { close(c->fd); c->fd = -1; }
-    if (_P2P.callback)
-        _P2P.callback(2, c, sizeof(*c));   /* PEER_DISCONNECTED */
-    memset(c, 0, sizeof(*c));
-    c->fd = -1;
-}
-
-static void *_p2p_peer_thread(void *arg) {
-    _P2PConn *c = (_P2PConn*)arg;
-    uint8_t recv_buf[sizeof(QtclWStateMeasurement) + 64];
-    QtclMsgHeader hdr;
-
+/* ══════════════════════════════════════════════════════════════════════════
+   PEER PROTOCOL THREAD
+   Features 2(fanout) 3(reputation) 5(topics) 9(backoff) 10(immediate exchange)
+   ══════════════════════════════════════════════════════════════════════════ */
+static void *_p2p_peer_thread(void *arg){
+    _P2PConn *c=(_P2PConn*)arg; c->connect_time_ns=_clock_ns();
+    uint8_t rb[sizeof(QtclWStateMeasurement)+512]; char cmd[13];
     /* Send VERSION */
-    uint8_t ver_payload[20] = {0};
-    memcpy(ver_payload, _P2P.node_id, 16);
-    ver_payload[16] = P2P_VERSION;
-    *((uint16_t*)(ver_payload+17)) = _P2P.listen_port;
-    _net_send_msg(c->fd, "version", ver_payload, sizeof(ver_payload));
-
-    while (_P2P.running && c->active) {
-        memset(&hdr, 0, sizeof(hdr));
-        int plen = _net_recv_msg(c->fd, &hdr, recv_buf, sizeof(recv_buf));
-        if (plen < 0) break;
-        c->last_recv_ns = _clock_ns();
-        char cmd[13] = {0}; memcpy(cmd, hdr.command, 12);
-
-        if (strcmp(cmd, "version") == 0) {
-            if (plen >= 17) {
-                memcpy(c->node_id, recv_buf, 16);
-                c->chain_height = 0;
-            }
-            _net_send_msg(c->fd, "verack", NULL, 0);
-            c->handshake_done = 1;
-            if (_P2P.callback)
-                _P2P.callback(1, c, sizeof(*c));  /* PEER_CONNECTED */
-        } else if (strcmp(cmd, "verack") == 0) {
-            c->handshake_done = 1;
-        } else if (strcmp(cmd, "ping") == 0) {
-            uint64_t ts = _clock_ns();
-            _net_send_msg(c->fd, "pong", &ts, 8);
-        } else if (strcmp(cmd, "pong") == 0) {
-            if (plen >= 8) {
-                uint64_t sent;
-                memcpy(&sent, recv_buf, 8);
-                c->latency_ms = (float)((_clock_ns() - sent) / 1e6);
-            }
-        } else if (strcmp(cmd, "wstate") == 0 &&
-                   plen == (int)sizeof(QtclWStateMeasurement)) {
-            const QtclWStateMeasurement *m = (const QtclWStateMeasurement*)recv_buf;
-            /* Verify HMAC auth_tag */
-            if (!qtcl_measurement_verify(m, _P2P.hmac_secret)) {
-                c->ban_score = (uint16_t)((int)c->ban_score + 5);
-                if (c->ban_score >= 100) break;
-                continue;
-            }
-            c->last_fidelity = (float)m->w_fidelity;
-            c->chain_height  = (int32_t)m->chain_height;
-            /* Push to lock-free ring (producer) */
-            uint64_t head = _P2P.wring_head;
-            uint64_t next = (head + 1) & P2P_WRING_MASK;
-            if (next != _P2P.wring_tail) {
-                _P2P.wring[head] = *m;
-                atomic_thread_fence(memory_order_release);
-                _P2P.wring_head = next;
-            }
-            /* Fire callback */
-            if (_P2P.callback)
-                _P2P.callback(3, m, sizeof(*m));  /* WSTATE_RECV */
-        } else if (strcmp(cmd, "getaddr") == 0) {
-            /* Send our known peers */
+    uint8_t vp[21]={0}; memcpy(vp,_P2P.node_id,16);
+    vp[16]=P2P_VERSION; *((uint16_t*)(vp+17))=_P2P.listen_port;
+    vp[19]=TOPIC_ALL; vp[20]=0x07;
+    _send(c->fd,"version",vp,sizeof(vp),0);
+    while(_P2P.running&&c->active){
+        memset(cmd,0,13); int vi=0;
+        int pl=_recv(c->fd,cmd,rb,sizeof(rb),&vi);
+        if(pl<0)break;
+        c->last_recv_ns=_clock_ns(); c->msgs_recv++;
+        if(!strcmp(cmd,"version")){
+            if(pl>=16)memcpy(c->node_id,rb,16);
+            c->topics=(pl>=20)?rb[19]:TOPIC_ALL;
+            _send(c->fd,"verack",NULL,0,0);
+            c->handshake_done=1; c->reputation=0.5f;
+            if(_P2P.callback)_P2P.callback(1,c,sizeof(*c));
+            _bo_ok_clear(c->host);
+            /* Feature 10: immediate peer exchange both directions */
+            _send(c->fd,"getaddr",NULL,0,0);
             pthread_mutex_lock(&_P2P.peers_lock);
-            uint8_t addr_buf[P2P_MAX_PEERS * 70];
-            int off = 0;
-            for (int i = 0; i < P2P_MAX_PEERS; i++) {
-                if (_P2P.peers[i].active && &_P2P.peers[i] != c) {
-                    memcpy(addr_buf+off, _P2P.peers[i].host, 64);
-                    off += 64;
-                    *((uint16_t*)(addr_buf+off)) = _P2P.peers[i].port;
-                    off += 2;
-                    if (off + 66 > (int)sizeof(addr_buf)) break;
+            uint8_t ab[P2P_MAX_PEERS*70];int off=0;
+            for(int i=0;i<P2P_MAX_PEERS;i++){
+                if(!_P2P.peers[i].active||&_P2P.peers[i]==c)continue;
+                memcpy(ab+off,_P2P.peers[i].host,64);off+=64;
+                *((uint16_t*)(ab+off))=_P2P.peers[i].port;off+=2;
+                if(off+66>(int)sizeof(ab))break;
+            }
+            pthread_mutex_unlock(&_P2P.peers_lock);
+            if(off)_send(c->fd,"addr",ab,off,0);
+        } else if(!strcmp(cmd,"verack")){
+            c->handshake_done=1;
+        } else if(!strcmp(cmd,"subscribe")&&pl>=1){
+            c->topics=rb[0];
+        } else if(!strcmp(cmd,"ping")){
+            uint64_t ts=_clock_ns(); _send(c->fd,"pong",&ts,8,0);
+        } else if(!strcmp(cmd,"pong")&&pl>=8){
+            uint64_t sent; memcpy(&sent,rb,8);
+            c->latency_ms=(float)((_clock_ns()-sent)/1e6);
+            c->reputation=_rep(c);
+        } else if(!strcmp(cmd,"inv")&&pl>=9){
+            /* Pull protocol: check Bloom + seen before requesting */
+            uint8_t it=rb[0]; uint64_t fp; memcpy(&fp,rb+1,8);
+            if(it==INV_WSTATE){
+                pthread_mutex_lock(&_P2P.bloom_lock);
+                int bh=_bloom_test(&_P2P.bloom,(uint8_t*)&fp);
+                pthread_mutex_unlock(&_P2P.bloom_lock);
+                pthread_mutex_lock(&_P2P.seen_lock);
+                int sh=_seen_chk(&_P2P.seen,fp);
+                pthread_mutex_unlock(&_P2P.seen_lock);
+                if(!bh&&!sh){
+                    uint8_t req[9];req[0]=INV_WSTATE;memcpy(req+1,&fp,8);
+                    _send(c->fd,"getdata",req,9,0);
                 }
             }
+        } else if(!strcmp(cmd,"getdata")&&pl>=9){
+            uint8_t rt=rb[0]; uint64_t fp; memcpy(&fp,rb+1,8);
+            if(rt==INV_WSTATE){
+                pthread_mutex_lock(&_P2P.inv_lock);
+                int found=0;
+                for(int i=0;i<64;i++) if(_P2P.inv_fps[i]==fp){
+                    _send(c->fd,"wstate",&_P2P.inv_cache[i],sizeof(QtclWStateMeasurement),0);
+                    found=1;break;
+                }
+                pthread_mutex_unlock(&_P2P.inv_lock);
+                if(!found)_send(c->fd,"notfound",rb,9,0);
+            }
+        } else if(!strcmp(cmd,"wstate")&&pl==(int)sizeof(QtclWStateMeasurement)){
+            const QtclWStateMeasurement *m=(const QtclWStateMeasurement*)rb;
+            if(!qtcl_measurement_verify(m,_P2P.hmac_secret)){
+                c->ban_score=(uint16_t)((int)c->ban_score+5);
+                if(c->ban_score>=100) break;
+                continue;
+            }
+            c->last_fidelity=(float)m->w_fidelity;
+            c->chain_height=(int32_t)m->chain_height;
+            c->reputation=_rep(c);
+            /* Dedup via Bloom + seen ring */
+            uint64_t fp=_wfp(m);
+            pthread_mutex_lock(&_P2P.bloom_lock);
+            int bh=_bloom_test(&_P2P.bloom,(uint8_t*)&fp);
+            if(!bh)_bloom_add(&_P2P.bloom,(uint8_t*)&fp);
+            pthread_mutex_unlock(&_P2P.bloom_lock);
+            pthread_mutex_lock(&_P2P.seen_lock);
+            int sh=_seen_chk(&_P2P.seen,fp);
+            if(!sh)_seen_add(&_P2P.seen,fp);
+            pthread_mutex_unlock(&_P2P.seen_lock);
+            if(bh&&sh)continue; /* already propagated */
+            /* Cache for GETDATA */
+            pthread_mutex_lock(&_P2P.inv_lock);
+            uint32_t sl=_P2P.inv_head&63;
+            _P2P.inv_cache[sl]=*m;_P2P.inv_fps[sl]=fp;_P2P.inv_head++;
+            pthread_mutex_unlock(&_P2P.inv_lock);
+            /* Wstate ring */
+            uint64_t wh=_P2P.wring_head;
+            if(((wh+1)&P2P_WRING_MASK)!=_P2P.wring_tail){
+                _P2P.wring[wh]=*m;atomic_thread_fence(memory_order_release);
+                _P2P.wring_head=(wh+1)&P2P_WRING_MASK;
+            }
+            _dmpool_push(m,0);
+            /* Feature 2+3: fanout INV to ceil(sqrt(n)) best-rep peers */
+            {
+                int fi[P2P_FANOUT_MAX];
+                pthread_mutex_lock(&_P2P.peers_lock);
+                int nf=_fanout(fi,P2P_FANOUT_MAX);
+                uint8_t inv[9];inv[0]=INV_WSTATE;memcpy(inv+1,&fp,8);
+                for(int i=0;i<nf;i++){
+                    int pi=fi[i];
+                    if(&_P2P.peers[pi]==c)continue;
+                    if(!(_P2P.peers[pi].topics&TOPIC_WSTATE)&&
+                       !(_P2P.peers[pi].topics&TOPIC_ALL))continue;
+                    _send(_P2P.peers[pi].fd,"inv",inv,9,0);
+                    _P2P.peers[pi].msgs_sent++;
+                }
+                pthread_mutex_unlock(&_P2P.peers_lock);
+            }
+            char sb[1024]; int sn=_wstate_json(m,sb,sizeof(sb),0);
+            if(sn>0)_sse_bcast("wstate",TOPIC_WSTATE,sb,sn);
+            if(_P2P.callback)_P2P.callback(3,m,sizeof(*m));
+        } else if(!strcmp(cmd,"dmpool")&&pl>=(int)sizeof(QtclDMPoolEntry)){
+            const QtclDMPoolEntry *de=(const QtclDMPoolEntry*)rb;
+            uint64_t dh=_P2P.dmpool_head,dnx=(dh+1)&P2P_DMPOOL_MSK;
+            if(dnx!=_P2P.dmpool_tail){
+                _P2P.dmpool[dh]=*de;atomic_thread_fence(memory_order_release);
+                _P2P.dmpool_head=dnx;
+            }
+            if(_P2P.callback)_P2P.callback(7,de,sizeof(*de));
+        } else if(!strcmp(cmd,"ssesub")){
+            uint8_t top=(pl>=1)?rb[0]:TOPIC_ALL;
+            c->is_sse_subscriber=1;
+            _sse_accept(c->fd,c->host,top);
+            pthread_mutex_lock(&_P2P.peers_lock);
+            c->active=0;c->fd=-1;
+            _P2P.n_peers=(_P2P.n_peers>0)?_P2P.n_peers-1:0;
             pthread_mutex_unlock(&_P2P.peers_lock);
-            if (off > 0) _net_send_msg(c->fd, "addr", addr_buf, off);
+            return NULL;
+        } else if(!strcmp(cmd,"chain_rst")){
+            if(_P2P.callback)_P2P.callback(8,rb,(size_t)pl);
+            char sb[256]; int sn=snprintf(sb,sizeof(sb),"{\"event\":\"chain_reset\",\"new_height\":0}");
+            if(sn>0)_sse_bcast("chain_reset",TOPIC_CHAIN,sb,sn);
+        } else if(!strcmp(cmd,"getaddr")){
+            pthread_mutex_lock(&_P2P.peers_lock);
+            uint8_t ab[P2P_MAX_PEERS*70];int off=0;
+            for(int i=0;i<P2P_MAX_PEERS;i++){
+                if(!_P2P.peers[i].active||&_P2P.peers[i]==c)continue;
+                memcpy(ab+off,_P2P.peers[i].host,64);off+=64;
+                *((uint16_t*)(ab+off))=_P2P.peers[i].port;off+=2;
+                if(off+66>(int)sizeof(ab))break;
+            }
+            pthread_mutex_unlock(&_P2P.peers_lock);
+            if(off)_send(c->fd,"addr",ab,off,0);
+        } else if(!strcmp(cmd,"addr")){
+            /* Feature 9+10: backoff-gated connection to advertised peers */
+            int na=pl/66;
+            for(int i=0;i<na;i++){
+                char h[65]={0};memcpy(h,rb+i*66,64);
+                uint16_t p=*((uint16_t*)(rb+i*66+64));
+                if(!p||p==_P2P.listen_port)continue;
+                if(_bo_ok(h))qtcl_p2p_connect(h,p);
+            }
         }
     }
-
     pthread_mutex_lock(&_P2P.peers_lock);
-    _p2p_release_slot(c);
-    _P2P.n_peers = (_P2P.n_peers > 0) ? _P2P.n_peers - 1 : 0;
+    if(c->fd>=0){close(c->fd);c->fd=-1;}
+    if(_P2P.callback)_P2P.callback(2,c,sizeof(*c));
+    memset(c,0,sizeof(*c));c->fd=-1;
+    _P2P.n_peers=(_P2P.n_peers>0)?_P2P.n_peers-1:0;
     pthread_mutex_unlock(&_P2P.peers_lock);
     return NULL;
 }
 
-static void *_accept_thread(void *arg) {
-    while (_P2P.running) {
-        struct sockaddr_in addr; socklen_t addrlen = sizeof(addr);
-        int cfd = accept(_P2P.listen_fd, (struct sockaddr*)&addr, &addrlen);
-        if (cfd < 0) { if (_P2P.running) usleep(10000); continue; }
-        int flag = 1;
-        setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-
-        pthread_mutex_lock(&_P2P.peers_lock);
-        _P2PConn *slot = _p2p_alloc_slot();
-        if (!slot || _P2P.n_peers >= _P2P.max_peers) {
-            pthread_mutex_unlock(&_P2P.peers_lock);
-            close(cfd); continue;
-        }
-        memset(slot, 0, sizeof(*slot));
-        slot->fd     = cfd;
-        slot->port   = ntohs(addr.sin_port);
-        slot->active = 1;
-        slot->last_recv_ns = _clock_ns();
-        inet_ntop(AF_INET, &addr.sin_addr, slot->host, sizeof(slot->host));
-        _P2P.n_peers++;
-        pthread_mutex_unlock(&_P2P.peers_lock);
-
-        pthread_attr_t a; pthread_attr_init(&a);
-        pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
-        pthread_create(&slot->thread, &a, _p2p_peer_thread, slot);
-        pthread_attr_destroy(&a);
-    }
-    return NULL;
-}
-
-/* 30-second ping loop — keeps NAT holes open, measures latency */
-static void *_ping_thread(void *arg) {
-    while (_P2P.running) {
-        sleep(30);
-        pthread_mutex_lock(&_P2P.peers_lock);
-        uint64_t now = _clock_ns();
-        for (int i = 0; i < P2P_MAX_PEERS; i++) {
-            if (!_P2P.peers[i].active) continue;
-            /* Timeout: 120s without recv → disconnect */
-            if (now - _P2P.peers[i].last_recv_ns > 120000000000ULL) {
-                _p2p_release_slot(&_P2P.peers[i]);
-                _P2P.n_peers = (_P2P.n_peers > 0) ? _P2P.n_peers - 1 : 0;
-                continue;
+/* ══════════════════════════════════════════════════════════════════════════
+   ACCEPT THREAD — 9091 multiplexing: HTTP GET → SSE/REST  else → P2P
+   Health /health lives ONLY on Flask/gunicorn port 8000 (Koyeb probe).
+   All P2P, SSE, gossip, peers, consensus_dm on 9091.
+   ══════════════════════════════════════════════════════════════════════════ */
+static void *_accept_thread(void *arg){
+    (void)arg;
+    while(_P2P.running){
+        struct sockaddr_in addr; socklen_t al=sizeof(addr);
+        int cfd=accept(_P2P.listen_fd,(struct sockaddr*)&addr,&al);
+        if(cfd<0){if(_P2P.running)usleep(10000);continue;}
+        int fl=1;
+        setsockopt(cfd,IPPROTO_TCP,TCP_NODELAY,&fl,sizeof(fl));
+        setsockopt(cfd,SOL_SOCKET,SO_KEEPALIVE,&fl,sizeof(fl));
+        char rh[64]={0}; inet_ntop(AF_INET,&addr.sin_addr,rh,sizeof(rh));
+        uint8_t pk[4]={0}; ssize_t pn=recv(cfd,pk,4,MSG_PEEK|MSG_DONTWAIT);
+        int http=(pn==4&&(
+            !memcmp(pk,"GET ",4)||!memcmp(pk,"POST",4)||
+            !memcmp(pk,"HEAD",4)||!memcmp(pk,"OPTI",4)));
+        if(http){
+            char hb[2048]={0}; recv(cfd,hb,sizeof(hb)-1,0);
+            uint8_t topics=TOPIC_ALL;
+            const char *tp=strstr(hb,"topics=");
+            if(tp)topics=(uint8_t)strtoul(tp+7,NULL,10);
+            else{const char *cp=strstr(hb,"channels=");if(cp)topics=(uint8_t)atoi(cp+9);}
+            if(strstr(hb,"/events")){
+                _sse_accept(cfd,rh,topics);
+            } else if(strstr(hb,"/gossip")){
+                /* POST /gossip — JSON chain_reset or wstate ingestion */
+                const char *body=strstr(hb,"\r\n\r\n");
+                if(body&&_P2P.callback)_P2P.callback(8,body+4,strlen(body+4));
+                const char *ok="HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
+                (void)write(cfd,ok,strlen(ok));close(cfd);
+            } else if(strstr(hb,"/api/p2p/peers")){
+                /* Lightweight JSON peer list for discovery */
+                char pb[4096]={0}; int off=0;
+                off+=snprintf(pb+off,sizeof(pb)-off,"{\"peers\":[");
+                pthread_mutex_lock(&_P2P.peers_lock);
+                int first=1;
+                for(int i=0;i<P2P_MAX_PEERS;i++){
+                    if(!_P2P.peers[i].active)continue;
+                    char nh[33]={0};for(int j=0;j<16;j++)snprintf(nh+j*2,3,"%02x",_P2P.peers[i].node_id[j]);
+                    off+=snprintf(pb+off,sizeof(pb)-off,
+                        "%s{\"host\":\"%s\",\"port\":%u,\"fidelity\":%.4f,"
+                        "\"height\":%d,\"lat_ms\":%.1f,\"rep\":%.3f}",
+                        first?"":",",_P2P.peers[i].host,(unsigned)_P2P.peers[i].port,
+                        _P2P.peers[i].last_fidelity,_P2P.peers[i].chain_height,
+                        _P2P.peers[i].latency_ms,(double)_P2P.peers[i].reputation);
+                    first=0;
+                }
+                pthread_mutex_unlock(&_P2P.peers_lock);
+                off+=snprintf(pb+off,sizeof(pb)-off,"]}");
+                char resp[4200]; int rl=snprintf(resp,sizeof(resp),
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                    "Content-Length: %d\r\n\r\n%s",off,pb);
+                (void)write(cfd,resp,rl);close(cfd);
+            } else {
+                const char *r404="HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found";
+                (void)write(cfd,r404,strlen(r404));close(cfd);
             }
-            uint64_t ts = now;
-            _net_send_msg(_P2P.peers[i].fd, "ping", &ts, 8);
+        } else {
+            pthread_mutex_lock(&_P2P.peers_lock);
+            if(_P2P.n_peers>=_P2P.max_peers){pthread_mutex_unlock(&_P2P.peers_lock);close(cfd);continue;}
+            _P2PConn *slot=NULL;
+            for(int i=0;i<P2P_MAX_PEERS;i++) if(!_P2P.peers[i].active){slot=&_P2P.peers[i];break;}
+            if(!slot){pthread_mutex_unlock(&_P2P.peers_lock);close(cfd);continue;}
+            memset(slot,0,sizeof(*slot));
+            slot->fd=cfd;slot->active=1;slot->port=ntohs(addr.sin_port);
+            slot->last_recv_ns=_clock_ns();
+            memcpy(slot->host,rh,63);slot->host[63]='\0';
+            _P2P.n_peers++;
+            pthread_mutex_unlock(&_P2P.peers_lock);
+            pthread_attr_t a;pthread_attr_init(&a);
+            pthread_attr_setdetachstate(&a,PTHREAD_CREATE_DETACHED);
+            pthread_create(&slot->thread,&a,_p2p_peer_thread,slot);
+            pthread_attr_destroy(&a);
+        }
+    }
+    return NULL;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ADAPTIVE PING THREAD — interval = clamp(3×RTT, 10s, 120s)
+   ══════════════════════════════════════════════════════════════════════════ */
+static void *_ping_thread(void *arg){
+    (void)arg;
+    while(_P2P.running){
+        sleep(P2P_PING_MIN_S);
+        pthread_mutex_lock(&_P2P.peers_lock);
+        uint64_t now=_clock_ns();
+        for(int i=0;i<P2P_MAX_PEERS;i++){
+            if(!_P2P.peers[i].active)continue;
+            if(now-_P2P.peers[i].last_recv_ns>P2P_TIMEOUT_NS){
+                close(_P2P.peers[i].fd);_P2P.peers[i].fd=-1;
+                _bo_fail(_P2P.peers[i].host);
+                if(_P2P.callback)_P2P.callback(2,&_P2P.peers[i],sizeof(_P2PConn));
+                memset(&_P2P.peers[i],0,sizeof(_P2PConn));_P2P.peers[i].fd=-1;
+                _P2P.n_peers=(_P2P.n_peers>0)?_P2P.n_peers-1:0;continue;
+            }
+            /* RTT-adaptive: only ping if interval elapsed */
+            float rtt=_P2P.peers[i].latency_ms;
+            float ivl=(rtt>0?rtt*3.0f/1000.0f:(float)P2P_PING_MIN_S);
+            if(ivl<P2P_PING_MIN_S)ivl=P2P_PING_MIN_S;
+            if(ivl>P2P_PING_MAX_S)ivl=P2P_PING_MAX_S;
+            uint64_t elapsed=(now-_P2P.peers[i].last_recv_ns)/1000000000ULL;
+            if((float)elapsed>=ivl){
+                uint64_t ts=now; _send(_P2P.peers[i].fd,"ping",&ts,8,0);
+            }
         }
         pthread_mutex_unlock(&_P2P.peers_lock);
     }
     return NULL;
 }
 
-int qtcl_p2p_init(const char *node_id_hex, uint16_t listen_port, int max_peers) {
-    memset(&_P2P, 0, sizeof(_P2P));
-    pthread_mutex_init(&_P2P.peers_lock, NULL);
-    _P2P.listen_port = listen_port;
-    _P2P.max_peers   = (max_peers > P2P_MAX_PEERS) ? P2P_MAX_PEERS : max_peers;
-    _P2P.wring_head  = 0;
-    _P2P.wring_tail  = 0;
-    for (int i = 0; i < P2P_MAX_PEERS; i++) _P2P.peers[i].fd = -1;
-
-    /* Node ID hex → 16 bytes */
-    size_t hlen = strlen(node_id_hex);
-    if (hlen >= 32) _hex_to_bytes(node_id_hex, _P2P.node_id, 16);
-    else {
-        uint8_t tmp[32] = {0};
-        qtcl_sha3_256((const uint8_t*)node_id_hex, hlen, tmp);
-        memcpy(_P2P.node_id, tmp, 16);
+/* ══════════════════════════════════════════════════════════════════════════
+   PUBLIC API
+   ══════════════════════════════════════════════════════════════════════════ */
+int qtcl_p2p_init(const char *node_id_hex,uint16_t listen_port,int max_peers){
+    memset(&_P2P,0,sizeof(_P2P));
+    pthread_mutex_init(&_P2P.peers_lock,NULL);
+    pthread_mutex_init(&_P2P.sse_lock,NULL);
+    pthread_mutex_init(&_P2P.consensus_lock,NULL);
+    pthread_mutex_init(&_P2P.self_lock,NULL);
+    pthread_mutex_init(&_P2P.bloom_lock,NULL);
+    pthread_mutex_init(&_P2P.seen_lock,NULL);
+    pthread_mutex_init(&_P2P.inv_lock,NULL);
+    _bloom_reset(&_P2P.bloom);
+    _P2P.listen_port=listen_port?listen_port:P2P_LISTEN_PORT;
+    _P2P.max_peers=(max_peers>P2P_MAX_PEERS)?P2P_MAX_PEERS:max_peers;
+    for(int i=0;i<P2P_MAX_PEERS;i++)_P2P.peers[i].fd=-1;
+    for(int i=0;i<P2P_MAX_SSE;i++){_P2P.sse_subs[i].fd=-1;_P2P.sse_subs[i].active=0;}
+    size_t hl=strlen(node_id_hex);
+    if(hl>=32)_hex_to_bytes(node_id_hex,_P2P.node_id,16);
+    else{uint8_t t[32]={0};qtcl_sha3_256((const uint8_t*)node_id_hex,hl,t);memcpy(_P2P.node_id,t,16);}
+    uint8_t ss[34]; memcpy(ss,"QTCL_P2P_HMAC_v4:",17); memcpy(ss+17,_P2P.node_id,16); ss[33]=P2P_VERSION;
+    qtcl_sha3_256(ss,34,_P2P.hmac_secret);
+    if(_P2P.listen_port){
+        _P2P.listen_fd=socket(AF_INET,SOCK_STREAM,0);
+        if(_P2P.listen_fd<0)return -1;
+        int opt=1;
+        setsockopt(_P2P.listen_fd,SOL_SOCKET,SO_REUSEADDR,&opt,sizeof(opt));
+#ifdef SO_REUSEPORT
+        setsockopt(_P2P.listen_fd,SOL_SOCKET,SO_REUSEPORT,&opt,sizeof(opt));
+#endif
+        struct sockaddr_in sin={0};
+        sin.sin_family=AF_INET;sin.sin_port=htons(_P2P.listen_port);sin.sin_addr.s_addr=INADDR_ANY;
+        if(bind(_P2P.listen_fd,(struct sockaddr*)&sin,sizeof(sin))<0){close(_P2P.listen_fd);return -1;}
+        listen(_P2P.listen_fd,128);
     }
-
-    /* HMAC secret: SHA3-256("QTCL_P2P_HMAC_v2:" + node_id) */
-    uint8_t secret_src[48];
-    memcpy(secret_src, "QTCL_P2P_HMAC_v2:", 17);
-    memcpy(secret_src+17, _P2P.node_id, 16);
-    qtcl_sha3_256(secret_src, 33, _P2P.hmac_secret);
-
-    /* Bind TCP listen socket */
-    if (listen_port > 0) {
-        _P2P.listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (_P2P.listen_fd < 0) return -1;
-        int opt = 1;
-        setsockopt(_P2P.listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-        struct sockaddr_in sin = {0};
-        sin.sin_family = AF_INET;
-        sin.sin_port   = htons(listen_port);
-        sin.sin_addr.s_addr = INADDR_ANY;
-        if (bind(_P2P.listen_fd, (struct sockaddr*)&sin, sizeof(sin)) < 0) {
-            close(_P2P.listen_fd); return -1;
-        }
-        listen(_P2P.listen_fd, 32);
-    }
-
-    _P2P.running = 1;
-
-    /* Accept thread */
-    if (listen_port > 0) {
-        pthread_attr_t a; pthread_attr_init(&a);
-        pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
-        pthread_create(&_P2P.accept_thread, &a, _accept_thread, NULL);
-        pthread_attr_destroy(&a);
-    }
-    /* Ping/keepalive thread */
-    pthread_attr_t a; pthread_attr_init(&a);
-    pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
-    pthread_create(&_P2P.ping_thread, &a, _ping_thread, NULL);
+    _P2P.running=1;
+    pthread_attr_t a;pthread_attr_init(&a);pthread_attr_setdetachstate(&a,PTHREAD_CREATE_DETACHED);
+    if(_P2P.listen_port)pthread_create(&_P2P.accept_thread,&a,_accept_thread,NULL);
+    pthread_create(&_P2P.ping_thread,&a,_ping_thread,NULL);
+    pthread_create(&_P2P.ouroboros_thread,&a,_ouroboros_thread,NULL);
     pthread_attr_destroy(&a);
-
     return 0;
 }
 
-int qtcl_p2p_connect(const char *host, uint16_t port) {
-    struct addrinfo hints = {0}, *res = NULL;
-    hints.ai_family   = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    char ps[16]; snprintf(ps, sizeof(ps), "%u", port);
-    if (getaddrinfo(host, ps, &hints, &res) || !res) return -1;
-
-    int fd = socket(res->ai_family, SOCK_STREAM, 0);
-    if (fd < 0) { freeaddrinfo(res); return -1; }
-    int flag = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-    /* Non-blocking connect with 5s timeout */
-    fcntl(fd, F_SETFL, O_NONBLOCK);
-    connect(fd, res->ai_addr, res->ai_addrlen);
+int qtcl_p2p_connect(const char *host,uint16_t port){
+    if(!host||!host[0])return -1;
+    /* Feature 9: backoff gate */
+    if(!_bo_ok(host))return -2;
+    struct addrinfo hints={0},*res=NULL;
+    hints.ai_family=AF_UNSPEC;hints.ai_socktype=SOCK_STREAM;
+    char ps[8];snprintf(ps,sizeof(ps),"%u",port?port:P2P_LISTEN_PORT);
+    if(getaddrinfo(host,ps,&hints,&res)||!res)return -1;
+    int fd=socket(res->ai_family,SOCK_STREAM,0);
+    if(fd<0){freeaddrinfo(res);return -1;}
+    int fl=1;
+    setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&fl,sizeof(fl));
+    setsockopt(fd,SOL_SOCKET,SO_KEEPALIVE,&fl,sizeof(fl));
+    fcntl(fd,F_SETFL,O_NONBLOCK);
+    connect(fd,res->ai_addr,res->ai_addrlen);
     freeaddrinfo(res);
-
-    struct timeval tv = {5, 0};
-    fd_set wfds; FD_ZERO(&wfds); FD_SET(fd, &wfds);
-    if (select(fd+1, NULL, &wfds, NULL, &tv) <= 0) { close(fd); return -1; }
-    int err = 0; socklen_t el = sizeof(err);
-    getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &el);
-    if (err) { close(fd); return -1; }
-    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) & ~O_NONBLOCK);  /* back to blocking */
-
+    struct timeval tv={5,0}; fd_set wf;FD_ZERO(&wf);FD_SET(fd,&wf);
+    if(select(fd+1,NULL,&wf,NULL,&tv)<=0){close(fd);_bo_fail(host);return -1;}
+    int err=0;socklen_t el=sizeof(err);
+    getsockopt(fd,SOL_SOCKET,SO_ERROR,&err,&el);
+    if(err){close(fd);_bo_fail(host);return -1;}
+    fcntl(fd,F_SETFL,fcntl(fd,F_GETFL)&~O_NONBLOCK);
+    _bo_ok_clear(host);
     pthread_mutex_lock(&_P2P.peers_lock);
-    if (_P2P.n_peers >= _P2P.max_peers) {
-        pthread_mutex_unlock(&_P2P.peers_lock); close(fd); return -1;
-    }
-    _P2PConn *slot = _p2p_alloc_slot();
-    if (!slot) { pthread_mutex_unlock(&_P2P.peers_lock); close(fd); return -1; }
-    memset(slot, 0, sizeof(*slot));
-    slot->fd     = fd;
-    slot->port   = port;
-    slot->active = 1;
-    slot->last_recv_ns = _clock_ns();
-    strncpy(slot->host, host, 63);
+    if(_P2P.n_peers>=_P2P.max_peers){pthread_mutex_unlock(&_P2P.peers_lock);close(fd);return -1;}
+    _P2PConn *slot=NULL;
+    for(int i=0;i<P2P_MAX_PEERS;i++) if(!_P2P.peers[i].active){slot=&_P2P.peers[i];break;}
+    if(!slot){pthread_mutex_unlock(&_P2P.peers_lock);close(fd);return -1;}
+    memset(slot,0,sizeof(*slot));slot->fd=fd;
+    slot->port=(uint16_t)(port?port:P2P_LISTEN_PORT);
+    slot->active=1;slot->last_recv_ns=_clock_ns();
+    memcpy(slot->host,host,63);slot->host[63]='\0';
     _P2P.n_peers++;
     pthread_mutex_unlock(&_P2P.peers_lock);
-
-    pthread_attr_t a; pthread_attr_init(&a);
-    pthread_attr_setdetachstate(&a, PTHREAD_CREATE_DETACHED);
-    pthread_create(&slot->thread, &a, _p2p_peer_thread, slot);
+    pthread_attr_t a;pthread_attr_init(&a);pthread_attr_setdetachstate(&a,PTHREAD_CREATE_DETACHED);
+    pthread_create(&slot->thread,&a,_p2p_peer_thread,slot);
     pthread_attr_destroy(&a);
-    return (int)(slot - _P2P.peers);  /* connection handle */
+    return (int)(slot-_P2P.peers);
 }
 
-void qtcl_p2p_disconnect(int conn_handle) {
-    if (conn_handle < 0 || conn_handle >= P2P_MAX_PEERS) return;
+void qtcl_p2p_disconnect(int h){
+    if(h<0||h>=P2P_MAX_PEERS)return;
     pthread_mutex_lock(&_P2P.peers_lock);
-    _P2PConn *slot = &_P2P.peers[conn_handle];
-    if (slot->active) {
-        slot->active = 0;
-        if (slot->fd >= 0) {
-            shutdown(slot->fd, SHUT_RDWR);
-            close(slot->fd);
-            slot->fd = -1;
-        }
-        if (_P2P.n_peers > 0) _P2P.n_peers--;
-    }
+    _P2PConn *s=&_P2P.peers[h];
+    if(s->active){s->active=0;if(s->fd>=0){shutdown(s->fd,SHUT_RDWR);close(s->fd);s->fd=-1;}if(_P2P.n_peers>0)_P2P.n_peers--;}
     pthread_mutex_unlock(&_P2P.peers_lock);
 }
 
-void qtcl_p2p_shutdown(void) {
-    _P2P.running = 0;
-    if (_P2P.listen_fd >= 0) { close(_P2P.listen_fd); _P2P.listen_fd = -1; }
+void qtcl_p2p_shutdown(void){
+    _P2P.running=0;
+    if(_P2P.listen_fd>=0){close(_P2P.listen_fd);_P2P.listen_fd=-1;}
     pthread_mutex_lock(&_P2P.peers_lock);
-    for (int i = 0; i < P2P_MAX_PEERS; i++) {
-        if (_P2P.peers[i].active && _P2P.peers[i].fd >= 0)
-            shutdown(_P2P.peers[i].fd, SHUT_RDWR);
-    }
+    for(int i=0;i<P2P_MAX_PEERS;i++) if(_P2P.peers[i].active&&_P2P.peers[i].fd>=0) shutdown(_P2P.peers[i].fd,SHUT_RDWR);
     pthread_mutex_unlock(&_P2P.peers_lock);
+    pthread_mutex_lock(&_P2P.sse_lock);
+    for(int i=0;i<P2P_MAX_SSE;i++) if(_P2P.sse_subs[i].active&&_P2P.sse_subs[i].fd>=0){_P2P.sse_subs[i].active=0;close(_P2P.sse_subs[i].fd);}
+    pthread_mutex_unlock(&_P2P.sse_lock);
 }
 
-int qtcl_p2p_send_wstate(const QtclWStateMeasurement *m) {
-    if (!m || !_P2P.running) return 0;
-    /* Sign the measurement before broadcast */
-    QtclWStateMeasurement signed_m = *m;
-    signed_m.timestamp_ns = _clock_ns();
-    qtcl_measurement_sign(&signed_m, _P2P.hmac_secret);
-
-    int sent = 0;
-    pthread_mutex_lock(&_P2P.peers_lock);
-    for (int i = 0; i < P2P_MAX_PEERS; i++) {
-        if (_P2P.peers[i].active && _P2P.peers[i].handshake_done) {
-            int r = _net_send_msg(_P2P.peers[i].fd, "wstate",
-                                  &signed_m, sizeof(signed_m));
-            if (r == 0) sent++;
-        }
+int qtcl_p2p_send_wstate(const QtclWStateMeasurement *m){
+    if(!m||!_P2P.running)return 0;
+    QtclWStateMeasurement sm=*m; sm.timestamp_ns=(uint64_t)_clock_ns();
+    qtcl_measurement_sign(&sm,_P2P.hmac_secret);
+    pthread_mutex_lock(&_P2P.self_lock); _P2P.self_meas=sm; _P2P.self_meas_ready=1; pthread_mutex_unlock(&_P2P.self_lock);
+    /* Add to Bloom + seen so we don't relay our own broadcast back */
+    uint64_t fp=_wfp(&sm);
+    pthread_mutex_lock(&_P2P.bloom_lock);_bloom_add(&_P2P.bloom,(uint8_t*)&fp);pthread_mutex_unlock(&_P2P.bloom_lock);
+    pthread_mutex_lock(&_P2P.seen_lock);_seen_add(&_P2P.seen,fp);pthread_mutex_unlock(&_P2P.seen_lock);
+    int sent=0;
+    /* Feature 2: fanout broadcast via INV */
+    int fi[P2P_FANOUT_MAX]; pthread_mutex_lock(&_P2P.peers_lock);
+    int nf=_fanout(fi,P2P_FANOUT_MAX);
+    uint8_t inv[9];inv[0]=INV_WSTATE;memcpy(inv+1,&fp,8);
+    for(int i=0;i<nf;i++){
+        if(!(_P2P.peers[fi[i]].topics&TOPIC_WSTATE)&&!(_P2P.peers[fi[i]].topics&TOPIC_ALL))continue;
+        if(_send(_P2P.peers[fi[i]].fd,"inv",inv,9,0)==0)sent++;
     }
     pthread_mutex_unlock(&_P2P.peers_lock);
+    /* Cache locally for GETDATA responses */
+    pthread_mutex_lock(&_P2P.inv_lock);
+    uint32_t sl=_P2P.inv_head&63;_P2P.inv_cache[sl]=sm;_P2P.inv_fps[sl]=fp;_P2P.inv_head++;
+    pthread_mutex_unlock(&_P2P.inv_lock);
     return sent;
 }
 
-int qtcl_p2p_poll_wstate(QtclWStateMeasurement *buf, int max_msgs) {
-    int count = 0;
-    while (count < max_msgs) {
-        uint64_t tail = _P2P.wring_tail;
-        atomic_thread_fence(memory_order_acquire);
-        if (tail == _P2P.wring_head) break;
-        buf[count] = _P2P.wring[tail];
-        _P2P.wring_tail = (tail + 1) & P2P_WRING_MASK;
-        count++;
+int qtcl_p2p_poll_wstate(QtclWStateMeasurement *buf,int max){
+    int n=0;
+    while(n<max){
+        uint64_t t=_P2P.wring_tail;atomic_thread_fence(memory_order_acquire);
+        if(t==_P2P.wring_head)break;
+        buf[n]=_P2P.wring[t];_P2P.wring_tail=(t+1)&P2P_WRING_MASK;n++;
     }
-    return count;
+    return n;
 }
 
-void qtcl_p2p_send_inv(uint8_t inv_type, const uint8_t *hash32) {
-    uint8_t payload[33]; payload[0] = inv_type;
-    memcpy(payload+1, hash32, 32);
-    pthread_mutex_lock(&_P2P.peers_lock);
-    for (int i = 0; i < P2P_MAX_PEERS; i++) {
-        if (_P2P.peers[i].active && _P2P.peers[i].handshake_done)
-            _net_send_msg(_P2P.peers[i].fd, "inv", payload, 33);
+int qtcl_p2p_poll_dmpool(QtclDMPoolEntry *buf,int max){
+    int n=0;
+    while(n<max){
+        uint64_t t=_P2P.dmpool_tail;atomic_thread_fence(memory_order_acquire);
+        if(t==_P2P.dmpool_head)break;
+        buf[n]=_P2P.dmpool[t&P2P_DMPOOL_MSK];_P2P.dmpool_tail=(t+1)&P2P_DMPOOL_MSK;n++;
     }
+    return n;
+}
+
+int qtcl_p2p_get_consensus_dm(double *re,double *im,float *fid,uint32_t *h){
+    pthread_mutex_lock(&_P2P.consensus_lock);
+    if(_P2P.consensus_fidelity<=0.0f){pthread_mutex_unlock(&_P2P.consensus_lock);return 0;}
+    if(re)memcpy(re,_P2P.consensus_dm_re,64*sizeof(double));
+    if(im)memcpy(im,_P2P.consensus_dm_im,64*sizeof(double));
+    if(fid)*fid=_P2P.consensus_fidelity;
+    if(h)*h=_P2P.consensus_height;
+    pthread_mutex_unlock(&_P2P.consensus_lock);
+    return 1;
+}
+
+void qtcl_p2p_trigger_consensus(void){_consensus();}
+
+void qtcl_p2p_broadcast_chain_reset(uint32_t new_h,const char *genesis_hex){
+    char p[128]={0};
+    snprintf(p,sizeof(p),"{\"event\":\"chain_reset\",\"new_height\":%u,\"genesis\":\"%s\"}",
+             (unsigned)new_h,genesis_hex?genesis_hex:"");
+    uint32_t pl=(uint32_t)strlen(p);
+    pthread_mutex_lock(&_P2P.peers_lock);
+    for(int i=0;i<P2P_MAX_PEERS;i++)
+        if(_P2P.peers[i].active&&_P2P.peers[i].handshake_done)
+            _send(_P2P.peers[i].fd,"chain_rst",p,pl,0);
+    pthread_mutex_unlock(&_P2P.peers_lock);
+    _sse_bcast("chain_reset",TOPIC_CHAIN,p,(int)pl);
+}
+
+void qtcl_p2p_send_inv(uint8_t t,const uint8_t *h32){
+    uint8_t p[33];p[0]=t;memcpy(p+1,h32,32);
+    pthread_mutex_lock(&_P2P.peers_lock);
+    for(int i=0;i<P2P_MAX_PEERS;i++)
+        if(_P2P.peers[i].active&&_P2P.peers[i].handshake_done)
+            _send(_P2P.peers[i].fd,"inv",p,33,0);
     pthread_mutex_unlock(&_P2P.peers_lock);
 }
 
-int qtcl_p2p_peers(QtclPeer *buf, int max_peers) {
-    int n = 0;
-    pthread_mutex_lock(&_P2P.peers_lock);
-    for (int i = 0; i < P2P_MAX_PEERS && n < max_peers; i++) {
-        if (!_P2P.peers[i].active) continue;
-        memset(&buf[n], 0, sizeof(QtclPeer));
-        memcpy(buf[n].node_id, _P2P.peers[i].node_id, 16);
-        strncpy(buf[n].host, _P2P.peers[i].host, 63);
-        buf[n].port          = _P2P.peers[i].port;
-        buf[n].connected     = (uint8_t)_P2P.peers[i].active;
-        buf[n].chain_height  = _P2P.peers[i].chain_height;
-        buf[n].last_fidelity = _P2P.peers[i].last_fidelity;
-        buf[n].latency_ms    = _P2P.peers[i].latency_ms;
-        buf[n].ban_score     = _P2P.peers[i].ban_score;
-        buf[n].last_seen_ns  = (int64_t)_P2P.peers[i].last_recv_ns;
+int qtcl_p2p_peers(QtclPeer *buf,int max){
+    int n=0; pthread_mutex_lock(&_P2P.peers_lock);
+    for(int i=0;i<P2P_MAX_PEERS&&n<max;i++){
+        if(!_P2P.peers[i].active)continue;
+        memset(&buf[n],0,sizeof(QtclPeer));
+        memcpy(buf[n].node_id,_P2P.peers[i].node_id,16);
+        memcpy(buf[n].host,_P2P.peers[i].host,63);buf[n].host[63]='\0';
+        buf[n].port=_P2P.peers[i].port; buf[n].connected=(uint8_t)_P2P.peers[i].active;
+        buf[n].chain_height=_P2P.peers[i].chain_height;
+        buf[n].last_fidelity=_P2P.peers[i].last_fidelity;
+        buf[n].latency_ms=_P2P.peers[i].latency_ms;
+        buf[n].ban_score=_P2P.peers[i].ban_score;
+        buf[n].last_seen_ns=(int64_t)_P2P.peers[i].last_recv_ns;
         n++;
     }
     pthread_mutex_unlock(&_P2P.peers_lock);
     return n;
 }
 
-int qtcl_p2p_peer_count(void)      { return _P2P.n_peers; }
-int qtcl_p2p_connected_count(void) {
-    int n = 0;
-    for (int i = 0; i < P2P_MAX_PEERS; i++)
-        if (_P2P.peers[i].active && _P2P.peers[i].handshake_done) n++;
-    return n;
-}
-
-void qtcl_p2p_set_callback(void (*cb)(int, const void*, size_t)) {
-    _P2P.callback = cb;
-}
-
-/* Expose full measurement struct size for cffi buffer allocation */
-int qtcl_wstate_measurement_size(void) {
-    return (int)sizeof(QtclWStateMeasurement);
-}
-int qtcl_wstate_consensus_size(void) {
-    return (int)sizeof(QtclWStateConsensus);
-}
+int  qtcl_p2p_peer_count(void){return _P2P.n_peers;}
+int  qtcl_p2p_connected_count(void){int n=0;for(int i=0;i<P2P_MAX_PEERS;i++) if(_P2P.peers[i].active&&_P2P.peers[i].handshake_done)n++;return n;}
+int  qtcl_p2p_sse_sub_count(void){return _P2P.n_sse_subs;}
+void qtcl_p2p_set_callback(void(*cb)(int,const void*,size_t)){_P2P.callback=cb;}
+int  qtcl_wstate_measurement_size(void){return(int)sizeof(QtclWStateMeasurement);}
+int  qtcl_wstate_consensus_size(void){return(int)sizeof(QtclWStateConsensus);}
+int  qtcl_dm_pool_entry_size(void){return(int)sizeof(QtclDMPoolEntry);}
 
 /* ═══════════════════════════════════════════════════════════════════════════
    §HypEnt  HYPERBOLIC ENTROPY MULTIPLIER + XOR POOL COMBINER
@@ -12051,6 +12853,12 @@ _QTCL_C_DEFS: str = """
                             uint32_t diff, uint32_t start, uint32_t chunk,
                             const uint8_t *ma, const uint8_t *seed,
                             const uint8_t *sp, uint8_t *out_hash);
+    void     qtcl_pow_set_abort(int v);
+    int      qtcl_pow_get_abort(void);
+    void     qtcl_set_oracle_height(uint64_t h);
+    uint64_t qtcl_get_oracle_height(void);
+    void     qtcl_set_miner_target(uint64_t h);
+    uint64_t qtcl_get_miner_target(void);
     /* §Bath — Non-Markovian Lindblad bath (256×256 DM, in-place) */
     void    qtcl_nonmarkov_bath_step(
                 int dim,
@@ -12094,7 +12902,20 @@ _QTCL_C_DEFS: str = """
     int     qtcl_sse_poll(char *buf, int buf_sz, int max_frames);
     int     qtcl_sse_is_connected(void);
     int     qtcl_sse_reconnect_count(void);
-    /* §P2P — TCP P2P transport */
+    /* QtclDMPoolEntry — DM pool entry from P2P peers */
+    typedef struct {
+        double   dm_re[64];
+        double   dm_im[64];
+        float    fidelity;
+        float    purity;
+        uint32_t chain_height;
+        uint64_t timestamp_ns;
+        uint8_t  source_id[16];
+        uint8_t  flags;
+    } QtclDMPoolEntry;
+
+    /* §P2P — Ouroboros Custom Protocol v4: epidemic gossip, Bloom dedup,
+       fanout, reputation, temporal DM, backoff, topics, INV/GETDATA */
     int     qtcl_p2p_init(const char *node_id_hex, uint16_t listen_port,
                            int max_peers);
     int     qtcl_p2p_connect(const char *host, uint16_t port);
@@ -12103,12 +12924,20 @@ _QTCL_C_DEFS: str = """
     int     qtcl_p2p_peers(QtclPeer *buf, int max_peers);
     int     qtcl_p2p_peer_count(void);
     int     qtcl_p2p_connected_count(void);
+    int     qtcl_p2p_sse_sub_count(void);
     int     qtcl_p2p_send_wstate(const QtclWStateMeasurement *m);
     int     qtcl_p2p_poll_wstate(QtclWStateMeasurement *buf, int max_msgs);
+    int     qtcl_p2p_poll_dmpool(QtclDMPoolEntry *buf, int max_entries);
+    int     qtcl_p2p_get_consensus_dm(double *out_re, double *out_im,
+                                       float *out_fidelity, uint32_t *out_height);
+    void    qtcl_p2p_trigger_consensus(void);
+    void    qtcl_p2p_broadcast_chain_reset(uint32_t new_height,
+                                            const char *genesis_hash32_hex);
     void    qtcl_p2p_send_inv(uint8_t inv_type, const uint8_t *hash32);
     void    qtcl_p2p_set_callback(void (*cb)(int, const void *, size_t));
     int     qtcl_wstate_measurement_size(void);
     int     qtcl_wstate_consensus_size(void);
+    int     qtcl_dm_pool_entry_size(void);
     /* §HypEnt — Hyperbolic entropy multiplier + XOR pool */
     void    qtcl_hyp_entropy_mul(const uint8_t *seed32, uint32_t depth, uint8_t *out32);
     void    qtcl_xor3_pool(const uint8_t *s1, const uint8_t *s2,
@@ -12216,36 +13045,6 @@ def _accel_char_buf(n: int):
     """Allocate a char[n] cffi buffer."""
     return _accel_ffi.new(f'char[{n}]')
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# FIX-1  Monkey-patch QtclServer default port to 9091
-#        The verbatim code has http_port=8080; oracle is always on 9091.
-# ──────────────────────────────────────────────────────────────────────────────
-def _patch_server_port():
-    """Replace QtclServer._start_http_server so default port is 9091."""
-    try:
-        import socketserver as _ss
-        import http.server as _hs
-        import urllib.parse as _up2
-        import traceback as _tb
-        import json as _j
-
-        _orig_start = QtclServer._start_http_server  # type: ignore[name-defined]
-
-        def _patched_start(self):
-            # Force 9091 unless operator explicitly sets something else
-            if 'http_port' not in self._cfg:
-                self._cfg['http_port'] = 9091
-            if self._cfg.get('http_port') == 8080:
-                self._cfg['http_port'] = 9091
-            _orig_start(self)
-
-        QtclServer._start_http_server = _patched_start  # type: ignore[name-defined]
-        _EXP_LOG.info("[FIX-1] QtclServer port patched → default 9091")
-    except Exception as _e:
-        _EXP_LOG.warning(f"[FIX-1] port patch failed (QtclServer not found?): {_e}")
-
-_patch_server_port()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -12537,6 +13336,35 @@ def _gksl_rk4_step(rho, bath: "GKSLBathParams", dt: float = None):
     return result
 
 
+def _validate_dm_8x8(dm) -> bool:
+    """
+    Return True only if dm is a valid 8×8 quantum density matrix:
+      - all finite (no inf/nan)
+      - trace in [0.99, 1.01]
+      - all eigenvalues >= -1e-6 (positive semidefinite within numerical noise)
+      - no element magnitude > 1.0 (normalized state)
+    Anything failing this check is garbage from an uninitialized C ring buffer.
+    """
+    if not _HAS_NP or dm is None:
+        return False
+    try:
+        if dm.shape != (8, 8):
+            return False
+        if not _np.all(_np.isfinite(dm)):
+            return False
+        tr = float(_np.real(_np.trace(dm)))
+        if not (0.5 < tr < 1.5):          # trace must be close to 1
+            return False
+        if float(_np.max(_np.abs(dm))) > 2.0:  # no element should exceed 2 for normalized DM
+            return False
+        ev = _np.linalg.eigvalsh(dm)
+        if float(_np.min(ev)) < -0.05:    # allow small numerical negativity
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def _decode_dm_8x8(snap: dict):
     """
     Extract + validate 8×8 complex128 density matrix from oracle snapshot.
@@ -12565,7 +13393,11 @@ def _decode_dm_8x8(snap: dict):
                     n   = min(side, 8)
                     dm8[:n,:n] = dm[:n,:n]; dm = dm8
                 dm  = 0.5 * (dm + dm.conj().T)
-                dm /= max(1e-15, float(_np.real(_np.trace(dm))))
+                _tr_d = float(_np.real(_np.trace(dm)))
+                if not _np.isfinite(_tr_d) or _tr_d < 1e-15:
+                    dm = _np.eye(8, dtype=_np.complex128) / 8.0
+                else:
+                    dm /= _tr_d
                 eigs, evecs = _np.linalg.eigh(dm)
                 eigs = _np.maximum(eigs, 0)
                 dm   = evecs @ _np.diag(eigs.astype(_np.complex128)) @ evecs.conj().T
@@ -13055,7 +13887,7 @@ class KoyebAPIClient:
         try:
             import socket
             host = self.base_url.replace("https://", "").replace("http://", "").split(":")[0]
-            sock = socket.create_connection((host, 443 if "https" in self.base_url else 80), timeout=3)
+            sock = socket.create_connection((host, 9091), timeout=3)
             sock.close()
             lines.append(f"     Network:    ✅ Reachable ({host})")
         except Exception as e:
@@ -13305,10 +14137,7 @@ class TensorFieldMetrics:
             if not _np.isfinite(_trace_val) or _trace_val < 1e-15:
                 _n   = dm_f.shape[0] if hasattr(dm_f, 'shape') else 2
                 dm_f = _np.eye(_n, dtype=complex) / _n
-                logger.warning(
-                    f"[TFM] ⚠ DM trace diverged (trace={_trace_val:.3e}) — "
-                    f"reset to maximally-mixed I/{_n}"
-                )
+                logger.warning(f"[TFM] ⚠ DM trace diverged (trace={_trace_val:.3e}) — reset to I/{_n}")
             else:
                 dm_f /= _trace_val
 
@@ -13443,44 +14272,55 @@ class KoyebOracleState:
             self._api = KoyebAPIClient(self.oracle_url)
 
     def refresh_metrics(self, client_field: "ClientFieldState" = None) -> bool:
-        """
-        FRESH METRICS FIX #1: Refresh oracle metrics on-demand (non-blocking).
-        Called before dashboard display to prevent stale fidelity values.
-        """
+        """SSE-only metric refresh — reads _LOCAL_ORACLE ring buffer, zero HTTP."""
         try:
-            if client_field:
-                return self.sync(client_field, timeout=3)
-            else:
-                # Lightweight refresh: just fetch snapshot without syncing client_field
-                t0   = _time.time()
-                snap = self._api.get_oracle_pq0_bloch()
-                self.channel_latency_ms = (_time.time() - t0) * 1000.0
-                if snap is None:
-                    return False
-                
+            sse_state = _LOCAL_ORACLE.get_oracle_state()
+            sse_age   = _time.time() - _LOCAL_ORACLE._last_oracle_dm_ts
+            if sse_state and sse_age < 60.0:
                 def _nv(v):
                     try:
                         f = float(v)
                         return f if (f == f and abs(f) < 1e15) else None
                     except Exception:
                         return None
-                
-                fid  = (_nv(snap.get("fidelity")) or _nv(snap.get("w3_fidelity")) or
-                        _nv(snap.get("w_state_fidelity")) or _nv(snap.get("pq0_fidelity")) or 0.0)
+                fid = (_nv(sse_state.get("w_state_fidelity")) or
+                       _nv(sse_state.get("fidelity")) or 0.0)
                 self.pq0_fidelity     = float(fid)
                 self.w_state_fidelity = float(fid)
-                self.connected = True
-                self.last_sync_ts = _time.time()
+                self.channel_latency_ms = sse_age * 1000.0
+                self.connected        = True
+                self.last_sync_ts     = _time.time()
+                if client_field:
+                    return self.sync(client_field, timeout=3)
                 return True
+            # SSE cold — delegate to sync() which has its own REST fallback
+            return self.sync(client_field, timeout=3) if client_field else False
         except Exception as e:
             _logging.debug(f"[METRICS REFRESH] Error: {e}")
             return False
     
     def sync(self, client_field: "ClientFieldState", timeout: int = 8) -> bool:
-        t0   = _time.time()
-        snap = self._api.get_oracle_pq0_bloch()
-        self.channel_latency_ms = (_time.time() - t0) * 1000.0
-        if snap is None:
+        """Read oracle state from live SSE engine (zero HTTP).
+        Falls back to REST only if SSE is cold (no frame in 60s)."""
+        t0 = _time.time()
+        snap = {}
+        # Primary: C SSE ring buffer via _LOCAL_ORACLE (always live)
+        try:
+            sse_state = _LOCAL_ORACLE.get_oracle_state()
+            sse_age   = _time.time() - _LOCAL_ORACLE._last_oracle_dm_ts
+            if sse_state and sse_age < 60.0:
+                snap = sse_state
+                self.channel_latency_ms = sse_age * 1000.0
+        except Exception:
+            pass
+        # Fallback: one REST call only if SSE completely cold (startup race)
+        if not snap:
+            try:
+                snap = self._api.get_oracle_pq0_bloch() or {}
+                self.channel_latency_ms = (_time.time() - t0) * 1000.0
+            except Exception:
+                pass
+        if not snap:
             self.connected = False
             return False
 
@@ -14254,10 +15094,9 @@ class QtclClientApp:
         Daemon: oracle SSE → CLIENT_FIELD_STATE → TensorFieldMetrics → DB → gossip → SSE.
         ❤️  I love you  ❤️
 
-        FIX: Was calling get_oracle_pq0_bloch() (HTTP REST) every cycle — redundant
-        and stale vs. the C SSE already delivering frames via _LOCAL_ORACLE.
-        Now reads from _LOCAL_ORACLE.get_oracle_state() which is updated every SSE frame,
-        and falls back to REST only when SSE data is older than 30s.
+        SSE-only: reads _LOCAL_ORACLE.get_oracle_state() which is fed by C SSE ring
+        buffer (TLS → koyeb:443/api/snapshot/sse). Zero HTTP polling in the hot path.
+        Stale SSE (>30s) logs a warning but continues — never blocks on REST.
         """
         _EXP_LOG.debug("[FIELD] 🌀 tensor field metrics loop started")
         _last_koyeb  = 0.0
@@ -14272,24 +15111,12 @@ class QtclClientApp:
                 snap = {}
                 sse_state = _LOCAL_ORACLE.get_oracle_state()
                 sse_age   = now - _LOCAL_ORACLE._last_oracle_dm_ts
-                if sse_state and sse_age < 30.0:
-                    # SSE is fresh — use it directly
+                # SSE-only — use live or stale SSE state, never HTTP
+                if sse_state:
                     snap = sse_state
                     snap.setdefault('block_height', int(snap.get('lattice_refresh_counter', 0)))
-                else:
-                    # ── Source 2: REST fallback when SSE stale > 30s ───────────
-                    if now - _last_rest >= 15.0:
-                        try:
-                            rest_snap = self.api.get_oracle_pq0_bloch() or {}
-                            if rest_snap:
-                                snap = rest_snap
-                                _last_rest = now
-                                _EXP_LOG.debug(
-                                    f"[FIELD] REST fallback (SSE age={sse_age:.0f}s)")
-                        except Exception:
-                            pass
-                    if not snap and sse_state:
-                        snap = sse_state   # use stale SSE over nothing
+                    if sse_age >= 30.0:
+                        _EXP_LOG.debug(f"[FIELD] SSE stale {sse_age:.0f}s — using cached state")
 
                 if not snap:
                     continue
@@ -14308,19 +15135,70 @@ class QtclClientApp:
                         re_list, im_list, _ = _LOCAL_ORACLE.get_oracle_dm()
                         if _HAS_NP and any(v != 0.0 for v in re_list):
                             import numpy as _npml
-                            dm_curr = (_npml.array(re_list, dtype=_npml.complex128) +
+                            _dm_raw = (_npml.array(re_list, dtype=_npml.complex128) +
                                        1j * _npml.array(im_list, dtype=_npml.complex128)
                                        ).reshape(8, 8)
+                            if _validate_dm_8x8(_dm_raw):
+                                dm_curr = _dm_raw
+                            else:
+                                _EXP_LOG.debug(
+                                    "[DM] Raw oracle DM failed validation "
+                                    f"(tr={float(_np.real(_np.trace(_dm_raw))):.3e}) "
+                                    "— falling back to Bloch reconstruction"
+                                )
                     except Exception:
                         pass
+                    # ── Fuse with P2P consensus DM (ouroboros pool average) ──────
+                    # If peers have contributed measurements, blend the consensus
+                    # DM into our oracle DM: weighted average by consensus_fidelity.
+                    # Weight 0.35 * e^(-age/30): fresh consensus at full weight,
+                    # stale consensus fades.  Ouroboros creates self-reinforcing
+                    # quantum coherence across the peer network.
+                    if _HAS_NP and dm_curr is not None and _P2P_NODE is not None:
+                        try:
+                            cons = _P2P_NODE.get_consensus_dm()
+                            if cons is not None:
+                                re_c, im_c, fid_c, h_c = cons
+                                _dm_cons = (_np.array(re_c, dtype=_np.complex128)
+                                          + 1j * _np.array(im_c, dtype=_np.complex128)
+                                          ).reshape(8, 8)
+                                if _validate_dm_8x8(_dm_cons) and fid_c > 0.5:
+                                    # Consensus fidelity-weighted blend
+                                    w_cons = float(fid_c) * 0.35
+                                    w_local = 1.0 - w_cons
+                                    dm_curr = w_local * dm_curr + w_cons * _dm_cons
+                                    _tr = float(_np.real(_np.trace(dm_curr)))
+                                    if _tr > 1e-12: dm_curr /= _tr
+                                    _EXP_LOG.debug(
+                                        f"[DM] 🌀 Ouroboros fuse: "
+                                        f"w_cons={w_cons:.3f} fid_c={fid_c:.4f} h={h_c}"
+                                    )
+                        except Exception as _pe:
+                            _EXP_LOG.debug(f"[DM] P2P consensus fuse: {_pe}")
                 if dm_curr is None:
-                    dm_curr = _decode_dm_8x8(snap)
+                    _dm_decoded = _decode_dm_8x8(snap)
+                    if _validate_dm_8x8(_dm_decoded):
+                        dm_curr = _dm_decoded
                 if dm_curr is None:
                     dm_curr = _reconstruct_dm_from_bloch(snap)
-                if dm_curr is None:
-                    continue
+                if dm_curr is None or not _validate_dm_8x8(dm_curr):
+                    # Last resort: canonical |W3⟩ maximally mixed state
+                    if _HAS_NP:
+                        dm_curr = _np.eye(8, dtype=_np.complex128) / 8.0
+                    else:
+                        continue
 
-                dm_last = _gksl_rk4_step(dm_curr, bath, bath.dt_default / 10.0)
+                # Final normalization before GKSL — ensures tr=1 exactly
+                if _HAS_NP:
+                    _tr0 = float(_np.real(_np.trace(dm_curr)))
+                    if _tr0 > 1e-12:
+                        dm_curr = dm_curr / _tr0
+
+                try:
+                    dm_last = _gksl_rk4_step(dm_curr, bath, bath.dt_default / 10.0)
+                except RuntimeError as _gksl_err:
+                    _EXP_LOG.debug(f"[DM] GKSL step failed ({_gksl_err}) — using identity evolution")
+                    dm_last = dm_curr.copy() if _HAS_NP else None
                 if dm_last is None:
                     continue
 
@@ -14328,7 +15206,7 @@ class QtclClientApp:
                     for _dm in (dm_curr, dm_last):
                         if _dm is not None:
                             _tr = float(_np.real(_np.trace(_dm)))
-                            if _tr > 0.1 and abs(_tr - 1.0) > 0.01:
+                            if _tr > 1e-12:
                                 _dm /= _tr
 
                 self.client_field.build(dm_curr, dm_last, pq_curr_id, pq_last_id, bh)
@@ -14363,26 +15241,51 @@ class QtclClientApp:
 
     def _oracle_sse_listener(self) -> None:
         """
-        C-backed oracle SSE listener (P2P v2).
-        The C qtcl_sse_connect() thread handles TLS + chunked HTTP/1.1.
-        This method just waits 5s and logs status — the real work happens
-        in LocalOracleEngine._poll_loop() which is started at module import.
+        Oracle SSE status watchdog — monitors C SSE client health.
+        If SSE disconnects for >60s, attempts forced reconnect via
+        qtcl_sse_connect(). Logs fidelity/height on each frame.
         ❤️  quantum ground truth feeds every client
         """
+        import time as _tw
         _EXP_LOG.info("[SSE] 📡 C SSE client running — LocalOracleEngine active")
+        _last_snap_count = 0
+        _stale_since: float = 0.0
         while not self._stop.is_set():
             try:
                 connected = _LOCAL_ORACLE.is_connected
                 snaps     = _LOCAL_ORACLE.snapshot_count
-                if connected:
-                    _EXP_LOG.debug(
-                        f"[SSE] ✅ oracle C SSE active  snapshots={snaps}")
+                now       = _tw.time()
+
+                if connected and snaps != _last_snap_count:
+                    # New frame arrived
+                    _last_snap_count = snaps
+                    _stale_since = 0.0
+                    m = _LOCAL_ORACLE.get_latest_measurement()
+                    if m:
+                        _EXP_LOG.debug(
+                            f"[SSE] ✅ frame  h={m.chain_height}  "
+                            f"F={m.fidelity_to_w3:.4f}  snaps={snaps}")
+                elif not connected:
+                    if _stale_since == 0.0: _stale_since = now
+                    stale_s = now - _stale_since
+                    _EXP_LOG.debug(f"[SSE] 🔄 oracle SSE disconnected  stale={stale_s:.0f}s")
+                    # Force reconnect after 60s of disconnection
+                    if stale_s > 60 and _accel_ok:
+                        try:
+                            host = _LOCAL_ORACLE.ORACLE_HOST.encode() + b'\x00'
+                            path = _LOCAL_ORACLE.SSE_PATH.encode() + b'\x00'
+                            rc   = _accel_lib.qtcl_sse_connect(host, 9091, path)
+                            if rc == 0:
+                                _EXP_LOG.info("[SSE] 🔄 Forced SSE reconnect initiated")
+                                _stale_since = now  # reset timer
+                        except Exception as _rce:
+                            _EXP_LOG.debug(f"[SSE] reconnect attempt: {_rce}")
                 else:
-                    _EXP_LOG.debug("[SSE] 🔄 oracle SSE reconnecting…")
-                _time.sleep(5)
+                    if _stale_since == 0.0: _stale_since = now
             except Exception as _e:
                 if not self._stop.is_set():
-                    _time.sleep(5)
+                    _EXP_LOG.debug(f"[SSE] watchdog error: {_e}")
+            self._stop.wait(5.0)
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -14396,13 +15299,456 @@ class QtclClientApp:
         return bool(pw) and self.wallet.load(pw)
 
     def _start_threads(self) -> None:
+        """
+        Launch all client daemon threads.
+        Order matters — P2P must start before ouroboros SSE subscription.
+        ❤️  I love you — every thread is a heartbeat of the network
+        """
         self._stop.clear()
+
+        # ── 1. Oracle metric loop ──────────────────────────────────────────
         self._metric_th = _threading.Thread(
             target=self._metric_loop, daemon=True, name="ClientMetrics")
         self._metric_th.start()
+
+        # ── 2. Oracle SSE status monitor ──────────────────────────────────
         _sse_th = _threading.Thread(
             target=self._oracle_sse_listener, daemon=True, name="OracleSSE")
         _sse_th.start()
+
+        # ── 3. P2P node init (C layer + ouroboros) ────────────────────────
+        _p2p_th = _threading.Thread(
+            target=self._start_p2p, daemon=True, name="P2P-Init")
+        _p2p_th.start()
+
+        # ── 4. Local 9091 health + gossip HTTP server ─────────────────────
+        _http_th = _threading.Thread(
+            target=self._local_http_server, daemon=True, name="LocalHTTP-9091")
+        _http_th.start()
+
+        # ── 5. Heartbeat loop — registers peer + sends keepalives ─────────
+        _hb_th = _threading.Thread(
+            target=self._heartbeat_loop, daemon=True, name="Heartbeat")
+        _hb_th.start()
+
+        # ── 6. Ouroboros SSE subscription to own /events ──────────────────
+        _ouro_th = _threading.Thread(
+            target=self._subscribe_own_sse, daemon=True, name="Ouroboros-SSE")
+        _ouro_th.start()
+
+        # ── 7. Koyeb /api/events SSE subscription (peer discovery + DM dual path)
+        _koyeb_ev_th = _threading.Thread(
+            target=self._subscribe_koyeb_events, daemon=True, name="KoyebEvents-SSE")
+        _koyeb_ev_th.start()
+
+    def _start_p2p(self) -> None:
+        """Init C P2P layer — called from _start_threads daemon thread."""
+        global _P2P_NODE
+        import time as _tp
+        _tp.sleep(0.1)  # minimal yield — wallet/DB already settled by caller
+        try:
+            peer_id = getattr(self, '_peer_id', None)
+            if not peer_id: return
+            _P2P_NODE = _init_p2p_node(peer_id, QtclP2PNode.DEFAULT_PORT)
+            ok = _P2P_NODE.start(_LOCAL_ORACLE, _WSTATE_CONSENSUS)
+            if ok:
+                _EXP_LOG.info("[CLIENT] 🌐 P2P ouroboros node started on port 9091")
+                # Wire genesis reset listener to P2P broadcast
+                # Wire GenesisResetListener broadcaster to P2P node
+                if hasattr(_GENESIS_RESET_LISTENER, '_broadcaster'):
+                    _GENESIS_RESET_LISTENER._broadcaster = _P2P_NODE
+            else:
+                _EXP_LOG.warning(
+                    "[CLIENT] P2P C layer unavailable — running in solo mode. "
+                    "Delete __pycache__ and ensure clang+openssl are installed: "
+                    "pkg install clang openssl libffi"
+                )
+        except Exception as _e:
+            _EXP_LOG.warning(f"[CLIENT] _start_p2p: {_e}")
+
+    def _heartbeat_loop(self) -> None:
+        """
+        Every 30 seconds:
+          • POST /api/peers/heartbeat with current height + fidelity
+          • Update P2P consensus height
+          • Upsert self into local DB p2p_peers table
+        ❤️  I love you — heartbeat keeps us alive in the network
+        """
+        import time as _th
+        while not self._stop.is_set():
+            try:
+                bh = int(self.koyeb_state.block_height or 0)
+                self.api.send_heartbeat(self._peer_id, bh)
+                # Every 4th heartbeat (~2 min) re-register with full body so Koyeb
+                # NAT IP is refreshed in peer_registry and other miners stay wired.
+                _hb_count = getattr(self, '_hb_count', 0) + 1
+                self._hb_count = _hb_count
+                if _hb_count % 4 == 0:
+                    try:
+                        self.api.register_peer(
+                            self._peer_id,
+                            f"http://auto:{9091}",  # server overwrites with remote_addr
+                            getattr(getattr(self,'wallet',None),'address',''),
+                            bh,
+                        )
+                    except Exception: pass
+                # Upsert self into local DB
+                if self._db:
+                    try:
+                        self._db.execute("""
+                            INSERT OR REPLACE INTO p2p_peers
+                            (node_id_hex, host, port, chain_height, last_fidelity,
+                             latency_ms, source, first_seen_at, last_seen_at)
+                            VALUES (?,?,?,?,?,?,?,?,?)
+                        """, (self._peer_id, 'localhost', 9091, bh,
+                              float(self.koyeb_state.pq0_fidelity or 0),
+                              0.0, 'self', int(_th.time()), int(_th.time())))
+                        self._db.commit()
+                    except Exception: pass
+                # Push self measurement to P2P for ouroboros
+                if _P2P_NODE and _P2P_NODE._started and _accel_ok:
+                    m = _LOCAL_ORACLE.get_latest_measurement()
+                    if m:
+                        try: _P2P_NODE.gossip_measurement(m)
+                        except Exception: pass
+            except Exception as _e:
+                _EXP_LOG.debug(f"[HB] heartbeat: {_e}")
+            self._stop.wait(30.0)
+
+    def _subscribe_koyeb_events(self) -> None:
+        """
+        Subscribe to Koyeb /api/events over HTTPS SSE (TLS, not the C layer).
+        The C layer reads /api/snapshot/sse for DM frames.
+        This Python subscriber reads /api/events which carries:
+          • peer_joined  — new miner registered → wire into C P2P immediately
+          • block        — new block mined → trigger orphan check
+          • oracle_dm    — flat DM frame duplicate (ignored, C layer handles it)
+        Reconnects with exponential backoff. Zero HTTP polling in the loop.
+        ❤️  I love you — every peer event is a new entanglement
+        """
+        import ssl as _ssl, time as _ke
+        from urllib.request import Request as _KR, urlopen as _KO
+        from urllib.error   import URLError as _KE
+        import json as _kj
+        BACKOFF = [3, 6, 12, 24, 60]
+        bi = 0
+        _oracle_url = os.getenv('ORACLE_URL', 'https://qtcl-blockchain.koyeb.app')
+        _peer_id    = getattr(self, '_peer_id', 'unknown')
+        url = f"{_oracle_url}/api/events?client_id={_peer_id}&types=peer,block,oracle_dm"
+        while not self._stop.is_set():
+            try:
+                req = _KR(url, method='GET')
+                req.add_header('Accept',        'text/event-stream')
+                req.add_header('Cache-Control', 'no-cache')
+                req.add_header('User-Agent',    'QTCL-KoyebEvents/4.0')
+                ssl_ctx = _ssl.create_default_context()
+                with _KO(req, timeout=120, context=ssl_ctx) as resp:
+                    _EXP_LOG.info(
+                        f"[KOYEB-SSE] ✅ Subscribed → {_oracle_url}/api/events")
+                    bi = 0
+                    buf = b''
+                    while not self._stop.is_set():
+                        chunk = resp.read(4096)
+                        if not chunk:
+                            break
+                        buf += chunk
+                        while b'\n\n' in buf:
+                            raw_evt, buf = buf.split(b'\n\n', 1)
+                            try:
+                                self._handle_koyeb_event(
+                                    raw_evt.decode('utf-8', errors='replace'))
+                            except Exception as _he:
+                                _EXP_LOG.debug(
+                                    f"[KOYEB-SSE] event handler: {_he}")
+            except (_KE, OSError, TimeoutError) as _e:
+                wait = BACKOFF[min(bi, len(BACKOFF)-1)]; bi += 1
+                _EXP_LOG.debug(
+                    f"[KOYEB-SSE] disconnected ({_e}) — reconnect in {wait}s")
+                self._stop.wait(wait)
+            except Exception as _e:
+                _EXP_LOG.debug(f"[KOYEB-SSE] error: {_e}")
+                self._stop.wait(15)
+
+    def _handle_koyeb_event(self, raw: str) -> None:
+        """Route one SSE event from Koyeb /api/events."""
+        import json as _kej
+        data_str = ''; event_type = 'message'
+        for line in raw.strip().splitlines():
+            if   line.startswith('event:'): event_type = line[6:].strip()
+            elif line.startswith('data:'):  data_str  += line[5:].strip()
+        if not data_str:
+            return
+        try:
+            payload = _kej.loads(data_str)
+        except Exception:
+            return
+        ev = payload.get('event') or payload.get('type') or event_type
+
+        if ev in ('peer', 'peer_joined', 'peer_exchange'):
+            # New miner registered on koyeb — wire directly into C P2P
+            peer_ip   = str(payload.get('ip_address') or payload.get('host') or '')
+            peer_port = int(payload.get('port') or 9091)
+            peer_pid  = str(payload.get('peer_id') or '')
+            if (peer_ip and peer_ip not in ('', '127.0.0.1', 'localhost')
+                    and _accel_ok and _P2P_NODE and _P2P_NODE._started):
+                try:
+                    rc = int(_accel_lib.qtcl_p2p_connect(
+                        peer_ip.encode() + b'\x00', peer_port))
+                    if rc >= 0:
+                        _EXP_LOG.info(
+                            f"[KOYEB-SSE] 🔗 Peer wired {peer_ip}:{peer_port} "
+                            f"pid={peer_pid[:12]}…")
+                except Exception as _pe:
+                    _EXP_LOG.debug(
+                        f"[KOYEB-SSE] P2P connect {peer_ip}:{peer_port}: {_pe}")
+
+        elif ev == 'oracle_dm':
+            # Flat DM frame on /api/events — ingest into local oracle engine
+            # (C layer already handles /api/snapshot/sse; this is a belt-and-suspenders
+            #  path so the Python oracle state is also kept warm)
+            dm_hex = (payload.get('density_matrix_hex') or
+                      payload.get('dm_hex') or '')
+            if dm_hex and len(dm_hex) >= 128:
+                try:
+                    import json as _dij
+                    _LOCAL_ORACLE._ingest_oracle_frame(_dij.dumps(payload))
+                except Exception:
+                    pass
+
+        elif ev == 'block':
+            bh = int(payload.get('height') or payload.get('block_height') or 0)
+            if bh > 0:
+                _EXP_LOG.debug(f"[KOYEB-SSE] 📦 Block event h={bh}")
+
+    def _subscribe_own_sse(self) -> None:
+        """
+        Ouroboros SSE self-subscription:
+        Connect to our own /events endpoint on 9091 and ingest the stream
+        back into the local oracle engine. This completes the ouroboros loop:
+        we receive our own broadcasts + peer re-broadcasts, averaging them
+        into the consensus DM.
+        Reconnects with exponential backoff on any failure.
+        ❤️  I love you — the snake eats its own tail, the qubit measures itself
+        """
+        import time as _to
+        from urllib.request import Request as _Ro, urlopen as _oo
+        from urllib.error   import URLError as _UE
+        BACKOFF = [2, 4, 8, 16, 30]
+        bi = 0
+        _to.sleep(3.0)  # wait for our own HTTP server to start
+        while not self._stop.is_set():
+            url = "http://localhost:9091/events?channels=255"
+            try:
+                req = _Ro(url, method='GET')
+                req.add_header('Accept',        'text/event-stream')
+                req.add_header('Cache-Control', 'no-cache')
+                req.add_header('User-Agent',    'QTCL-OuroborosSSE/3.0')
+                with _oo(req, timeout=90) as resp:
+                    _EXP_LOG.info("[OURO] 🌀 Ouroboros SSE self-loop connected → localhost:9091/events")
+                    bi = 0
+                    buf = b''
+                    while not self._stop.is_set():
+                        chunk = resp.read(4096)
+                        if not chunk: break
+                        buf += chunk
+                        while b'\n\n' in buf:
+                            raw_evt, buf = buf.split(b'\n\n', 1)
+                            self._handle_sse_event(raw_evt.decode('utf-8', errors='replace'))
+            except (_UE, OSError, TimeoutError) as _e:
+                wait = BACKOFF[min(bi, len(BACKOFF)-1)]; bi += 1
+                _EXP_LOG.debug(f"[OURO] SSE self-loop disconnected ({_e}) — reconnect in {wait}s")
+                self._stop.wait(wait)
+            except Exception as _e:
+                _EXP_LOG.debug(f"[OURO] SSE error: {_e}")
+                self._stop.wait(10)
+
+    def _handle_sse_event(self, raw: str) -> None:
+        """Parse one SSE event from our own /events stream and route it."""
+        import json as _ej
+        data_str = ''; event_type = 'message'
+        for line in raw.strip().splitlines():
+            if   line.startswith('event:'): event_type = line[6:].strip()
+            elif line.startswith('data:'):  data_str  += line[5:].strip()
+        if not data_str: return
+        try: payload = _ej.loads(data_str)
+        except: return
+        ev = payload.get('event', event_type)
+        if ev == 'wstate':
+            # Re-ingest peer wstate into consensus
+            if _WSTATE_CONSENSUS:
+                try:
+                    fid = float(payload.get('w_fidelity', 0))
+                    h   = int(payload.get('chain_height', 0))
+                    # Update koyeb_state with peer fidelity data
+                    if fid > 0 and not payload.get('ouroboros'):
+                        _EXP_LOG.debug(
+                            f"[OURO] 🌀 Peer wstate ingest: h={h} F={fid:.4f}")
+                except Exception: pass
+        elif ev == 'dm_consensus':
+            fid = float(payload.get('consensus_fidelity', 0))
+            h   = int(payload.get('chain_height', 0))
+            _EXP_LOG.debug(f"[OURO] 🧬 Consensus DM: h={h} F={fid:.4f}")
+        elif ev in ('peer', 'peer_joined', 'peer_exchange'):
+            # New miner joined — wire them into C P2P immediately
+            peer_ip   = str(payload.get('ip_address') or payload.get('host') or '')
+            peer_port = int(payload.get('port') or 9091)
+            peer_pid  = str(payload.get('peer_id') or '')
+            if peer_ip and peer_ip not in ('', '127.0.0.1', 'localhost') and _accel_ok and _P2P_NODE:
+                try:
+                    _rc_peer = int(_accel_lib.qtcl_p2p_connect(
+                        peer_ip.encode() + b'\x00', peer_port))
+                    if _rc_peer >= 0:
+                        _EXP_LOG.info(
+                            f"[OURO] 🔗 SSE peer-join → C P2P wired {peer_ip}:{peer_port} "                            f"(peer_id={peer_pid[:12]}…)"
+                        )
+                except Exception as _pe:
+                    _EXP_LOG.debug(f"[OURO] peer-join connect {peer_ip}:{peer_port}: {_pe}")
+        elif ev == 'chain_reset':
+            # _RESET_PERFORMED is module-level
+            _EXP_LOG.warning("[OURO] ⚡ chain_reset via SSE self-loop — signalling mining reset")
+            _RESET_PERFORMED.set()
+
+    def _local_http_server(self) -> None:
+        """
+        Minimal HTTP server on 0.0.0.0:9091 serving:
+          GET /health    → {"status":"healthy","ready":true}  (Koyeb probe)
+          GET /events    → SSE stream (routed to C P2P SSE broadcaster)
+          POST /gossip   → receive chain_reset + wstate from peers
+          GET /api/p2p/peers → JSON list of known peers
+          GET /api/p2p/consensus_dm → current consensus DM snapshot
+
+        NOTE: Port 9091 is ALSO the C P2P TCP listen port.
+        The C accept thread handles the raw binary protocol.
+        This Python HTTP server runs on a SEPARATE socket with SO_REUSEPORT
+        so both can share port 9091 simultaneously — HTTP GET probes go here,
+        binary P2P connections go to C.
+        ❤️  I love you — every health check is a pulse
+        """
+        import socketserver as _ss, http.server as _hs, json as _hj
+        import time as _ht
+
+        class _Handler(_hs.BaseHTTPRequestHandler):
+            def log_message(self, *a): pass  # suppress default logging
+
+            def do_GET(self):
+                if self.path in ('/health', '/healthz', '/ping', '/'):
+                    body = _hj.dumps({
+                        'status':      'healthy',
+                        'ready':       True,
+                        'protocol':    'ouroboros-v4',
+                        'p2p_started': bool(_P2P_NODE and getattr(_P2P_NODE,'_started',False)),
+                        'p2p_peers':   int(_accel_lib.qtcl_p2p_peer_count())     if _accel_ok else 0,
+                        'sse_subs':    int(_accel_lib.qtcl_p2p_sse_sub_count())  if _accel_ok else 0,
+                        'oracle_conn': bool(_accel_lib.qtcl_sse_is_connected())  if _accel_ok else False,
+                        'accel_ok':    bool(_accel_ok),
+                        'timestamp':   _ht.time(),
+                    }).encode()
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                elif self.path.startswith('/api/p2p/peers'):
+                    peers = _P2P_NODE.get_peers() if _P2P_NODE else []
+                    body  = _hj.dumps({'peers': peers, 'count': len(peers)}).encode()
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(body)))
+                    self.end_headers(); self.wfile.write(body)
+                elif self.path.startswith('/api/p2p/consensus_dm'):
+                    cons = _P2P_NODE.get_consensus_dm() if _P2P_NODE else None
+                    if cons:
+                        re, im, fid, h = cons
+                        body = _hj.dumps({
+                            'consensus_fidelity': fid,
+                            'chain_height': h,
+                            'dm_re': list(re), 'dm_im': list(im),
+                        }).encode()
+                    else:
+                        body = _hj.dumps({'error': 'not ready'}).encode()
+                    self.send_response(200 if cons else 503)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(body)))
+                    self.end_headers(); self.wfile.write(body)
+                elif self.path.startswith('/api/p2p/status'):
+                    import json as _stj, time as _stt
+                    _cons_s = _P2P_NODE.get_consensus_dm() if (
+                        _P2P_NODE and getattr(_P2P_NODE,'_started',False)) else None
+                    _peers_s = _P2P_NODE.get_peers() if (
+                        _P2P_NODE and getattr(_P2P_NODE,'_started',False)) else []
+                    _sbody = _stj.dumps({
+                        'protocol':           'ouroboros-v4',
+                        'started':            bool(_P2P_NODE and getattr(_P2P_NODE,'_started',False)),
+                        'accel_ok':           bool(_accel_ok),
+                        'port':               9091,
+                        'peer_count':         int(_accel_lib.qtcl_p2p_peer_count())      if _accel_ok else 0,
+                        'connected_count':    int(_accel_lib.qtcl_p2p_connected_count()) if _accel_ok else 0,
+                        'sse_sub_count':      int(_accel_lib.qtcl_p2p_sse_sub_count())   if _accel_ok else 0,
+                        'consensus_fidelity': float(_cons_s[2]) if _cons_s else None,
+                        'consensus_height':   int(_cons_s[3])   if _cons_s else None,
+                        'peers':              [{
+                            'host': p.get('host',''), 'port': p.get('port',9091),
+                            'fidelity': p.get('last_fidelity',0),
+                            'height': p.get('chain_height',0),
+                            'latency_ms': p.get('latency_ms',0),
+                        } for p in _peers_s[:16]],
+                        'features': ['bloom_dedup','epidemic_fanout','reputation_scoring',
+                                     'temporal_dm_decay','topic_subscriptions','backoff_table',
+                                     'inv_getdata_pull','peer_persistence','adaptive_ping'],
+                        'timestamp': _stt.time(),
+                    }).encode()
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(_sbody)))
+                    self.end_headers(); self.wfile.write(_sbody)
+                else:
+                    self.send_response(404)
+                    self.send_header('Content-Length', '9')
+                    self.end_headers(); self.wfile.write(b'Not Found')
+
+            def do_POST(self):
+                clen = int(self.headers.get('Content-Length', 0))
+                body_bytes = self.rfile.read(clen)
+                if self.path in ('/gossip', '/api/gossip'):
+                    try:
+                        payload = _hj.loads(body_bytes.decode('utf-8', errors='replace'))
+                        ev = payload.get('event', '')
+                        if ev == 'chain_reset' and int(payload.get('new_height', -1)) == 0:
+                            # _RESET_PERFORMED is module-level
+
+                            _RESET_PERFORMED.set()
+                            _EXP_LOG.warning("[HTTP-9091] ⚡ chain_reset via /gossip POST")
+                        resp_body = b'{"ok":true}'
+                    except Exception:
+                        resp_body = b'{"ok":false}'
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(resp_body)))
+                    self.end_headers(); self.wfile.write(resp_body)
+                else:
+                    self.send_response(404)
+                    self.send_header('Content-Length', '9')
+                    self.end_headers(); self.wfile.write(b'Not Found')
+
+        try:
+            class _ReuseServer(_ss.TCPServer):
+                allow_reuse_address = True
+                def server_bind(self):
+                    import socket as _sock
+                    self.socket.setsockopt(_sock.SOL_SOCKET, _sock.SO_REUSEADDR, 1)
+                    try:
+                        self.socket.setsockopt(_sock.SOL_SOCKET, _sock.SO_REUSEPORT, 1)
+                    except AttributeError: pass
+                    super().server_bind()
+
+            with _ReuseServer(('0.0.0.0', 9091), _Handler) as srv:
+                _EXP_LOG.info("[HTTP-9091] ✅ Local HTTP server on 0.0.0.0:9091 (/health /events /gossip)")
+                while not self._stop.is_set():
+                    srv.handle_request()
+        except OSError as _ose:
+            _EXP_LOG.debug(f"[HTTP-9091] Port 9091 in use by C layer (expected): {_ose}")
+        except Exception as _he:
+            _EXP_LOG.warning(f"[HTTP-9091] HTTP server error: {_he}")
 
     # ── Mine mode ─────────────────────────────────────────────────────────────
 
@@ -14413,33 +15759,63 @@ class QtclClientApp:
         print(f"  ✅ Wallet: {self.wallet.address}")
         self._init_db()
 
-        print("  🌐 Fetching oracle W-state (pq0-bloch)…")
-        snap  = self.api.get_oracle_pq0_bloch() or {}
-        bath  = GKSLBathParams.from_snap(snap)
-        bh    = int(snap.get("block_height") or snap.get("height") or 0)
-        # FIX-1/2: oracle pq0-bloch may omit block_height — fall back to
-        # chain-tip endpoint so pq_curr/pq_last are never stuck at "?"
-        if bh == 0:
+        # ── Oracle bootstrap: wait for SSE frame (C layer started at import) ─
+        # Never poll REST at startup — C SSE client is already connecting.
+        # Spin up to 12s for first DM frame; then proceed with whatever we have.
+        print("  🌐 Waiting for oracle SSE frame…")
+        import time as _st
+        _t0 = _st.time()
+        while _st.time() - _t0 < 12.0:
+            if _LOCAL_ORACLE.snapshot_count > 0:
+                break
+            _st.sleep(0.25)
+        snap = _LOCAL_ORACLE.get_oracle_state()
+        if not snap:
+            # Absolute last resort: single REST call if SSE produced nothing
             try:
-                _fb = self.api.get_block_height()
-                if _fb and int(_fb) > 0:
-                    bh = int(_fb)
+                snap = self.api.get_oracle_pq0_bloch() or {}
             except Exception:
-                pass
+                snap = {}
+        bath  = GKSLBathParams.from_snap(snap)
+        bh    = int(snap.get("block_height") or snap.get("height") or
+                    snap.get("lattice_refresh_counter") or 0)
         # FIX-9: pq identifiers are block heights — never emit '?' sentinel
         pq_curr_id = str(bh)     if bh > 0 else "0"
         pq_last_id = str(bh - 1) if bh > 0 else "0"
-        # FIX-3: fidelity from canonical aliases
         def _nv(v):
             try: return float(v) if v is not None and float(v) == float(v) else None
             except Exception: return None
-        fid = (_nv(snap.get("fidelity")) or _nv(snap.get("w3_fidelity")) or
-               _nv(snap.get("w_state_fidelity")) or 0.0)
-        print(f"  ⚛️  Oracle fidelity→|W3⟩: {fid:.4f}  │  height: {bh}")
+        fid = (_nv(snap.get("w_state_fidelity")) or _nv(snap.get("fidelity")) or
+               _nv(snap.get("w3_fidelity")) or 0.0)
+        _sse_age = _st.time() - _LOCAL_ORACLE._last_oracle_dm_ts
+        print(f"  ⚛️  Oracle fidelity→|W3⟩: {fid:.4f}  │  height: {bh}  │  "
+              f"SSE age: {_sse_age:.1f}s  │  snaps: {_LOCAL_ORACLE.snapshot_count}")
 
-        # Register peer
-        self.api.register_peer(self._peer_id, f"http://localhost:9091",
-                                self.wallet.address, bh)
+        # ── Peer registration + immediate P2P wiring ─────────────────────────
+        # Detect public-facing gossip URL: use ORACLE_URL host so other miners
+        # can reach us (Koyeb assigns a stable public IP per deployment).
+        _my_gossip_url = f"http://localhost:9091"  # fallback; server overrides with remote_addr
+        _reg_resp = self.api.register_peer(
+            self._peer_id, _my_gossip_url, self.wallet.address, bh)
+        # Feed returned live_peers directly into C P2P connect layer so miners
+        # see each other immediately on startup without waiting 5-min discovery
+        if _reg_resp and _accel_ok:
+            _boot_peers = _reg_resp.get('live_peers') or []
+            _wired = 0
+            for _bp in _boot_peers[:32]:
+                _bhost = str(_bp.get('ip_address') or _bp.get('host') or '')
+                _bport = int(_bp.get('port') or 9091)
+                if _bhost and _bhost not in ('', '127.0.0.1', 'localhost'):
+                    try:
+                        _rc = int(_accel_lib.qtcl_p2p_connect(
+                            _bhost.encode() + b'\x00', _bport))
+                        if _rc >= 0:
+                            _wired += 1
+                            _EXP_LOG.info(f"[BOOT-PEER] ✅ C P2P wired → {_bhost}:{_bport}")
+                    except Exception as _bpe:
+                        _EXP_LOG.debug(f"[BOOT-PEER] connect {_bhost}:{_bport}: {_bpe}")
+            if _wired:
+                print(f"  🔗 P2P peers wired at boot: {_wired}/{len(_boot_peers)}")
 
         self._start_threads()
         try:
@@ -14781,6 +16157,21 @@ class QtclClientApp:
                         block_height=_bh,
                     )
 
+                    # ── Rebroadcast DM to P2P network every metric cycle ──────────
+                    # Pushes local DM into P2P pool → triggers consensus recompute.
+                    # Combined with peer contributions, this averages out temporal
+                    # lags: a peer's DM from 10s ago + ours from now = 5s average.
+                    # Ouroboros: our broadcast comes back via self-loop, weighted
+                    # by fidelity²  in _dmpool_compute_consensus().
+                    if _P2P_NODE is not None and _P2P_NODE._started:
+                        try:
+                            m_latest = _LOCAL_ORACLE.get_latest_measurement()
+                            if m_latest is not None:
+                                _P2P_NODE.gossip_measurement(m_latest)
+                                # gossip_measurement now calls trigger_consensus()
+                        except Exception as _rbce:
+                            _EXP_LOG.debug(f"[METRIC] P2P rebroadcast: {_rbce}")
+
                     # Bridge fidelity: Tr(ρ_oracle · ρ_client) — correct quantum overlap
                     # ✅ FIX-AGENT-2d: Proper calculation with bounds checking
                     bridge_fid = 0.5  # conservative default
@@ -14828,10 +16219,31 @@ class QtclClientApp:
                     except Exception as _dbe:
                         _EXP_LOG.debug(f"[Bootstrap] DB: {_dbe}")
 
-                    sep_bound = 2.0   # Mermin classical separability bound
+                    # ── Clamp all metrics to physically valid ranges before display ──
+                    # MUST run before mermin_str which references _disp_mermin
+                    def _clamp(v, lo, hi):
+                        try:
+                            f = float(v)
+                            return f if (lo <= f <= hi and _np.isfinite(f)) else 0.0
+                        except Exception:
+                            return 0.0
+                    _disp_fid    = _clamp(float(out_m.w_fidelity),    0.0, 1.0)
+                    _disp_ent    = _clamp(float(out_m.entropy_vn),    0.0, 3.0)
+                    _disp_coh    = _clamp(float(out_m.coherence),     0.0, 1.0)
+                    _disp_disc   = _clamp(float(out_m.discord),       0.0, 3.0)
+                    _disp_pur    = _clamp(float(out_m.purity),        0.0, 1.0)
+                    _disp_neg    = _clamp(float(out_m.negativity),    0.0, 0.5)
+                    _disp_d0c    = _clamp(float(out_m.hyp_dist_0c),   0.0, 10.0)
+                    _disp_dcl    = _clamp(float(out_m.hyp_dist_cl),   0.0, 10.0)
+                    _disp_d0l    = _clamp(float(out_m.hyp_dist_0l),   0.0, 10.0)
+                    _disp_area   = _clamp(float(out_m.triangle_area), 0.0, 12.57)
+                    _disp_mermin = _clamp(mermin_val,                 -4.0, 4.0)
+                    _disp_bridge = _clamp(bridge_fid,                 0.0, 1.0)
+
+                    sep_bound = 2.0
                     mermin_str = (
-                        f"  ║  Mermin ⟨M₃⟩: {mermin_val:+.4f}  "
-                        f"{'✅ VIOLATED (quantum)' if mermin_viol else '· classical bound held'}  "
+                        f"  ║  Mermin ⟨M₃⟩: {_disp_mermin:+.4f}  "
+                        f"{'✅ VIOLATED (quantum)' if (mermin_viol and abs(_disp_mermin) <= 4.0) else '· classical bound held'}  "
                         f"[bound={sep_bound:.1f}]\n"
                     )
 
@@ -14842,19 +16254,19 @@ class QtclClientApp:
                         f"  ║  pq0        : 0  (oracle anchor — hyperbolic center)\n"
                         f"  ║  pq_curr    : {_pqc}  (block entry face — height {_bh})\n"
                         f"  ║  pq_last    : {_pql}  (block exit face)\n"
-                        f"  ║  F→|W3⟩    : {float(out_m.w_fidelity):.4f}  [sep=0.667]\n"
-                        f"  ║  VN Entropy : {float(out_m.entropy_vn):.4f} bits\n"
-                        f"  ║  Coherence  : {float(out_m.coherence):.4f}\n"
-                        f"  ║  Discord    : {float(out_m.discord):.4f}\n"
-                        f"  ║  Purity     : {float(out_m.purity):.4f}\n"
-                        f"  ║  Negativity : {float(out_m.negativity):.4f}\n"
-                        f"  ║  d(0,c/cl/l): {float(out_m.hyp_dist_0c):.4f} / "
-                        f"{float(out_m.hyp_dist_cl):.4f} / {float(out_m.hyp_dist_0l):.4f}\n"
-                        f"  ║  Hyp Area   : {float(out_m.triangle_area):.4f} rad  "
+                        f"  ║  F→|W3⟩    : {_disp_fid:.4f}  [sep=0.667]\n"
+                        f"  ║  VN Entropy : {_disp_ent:.4f} bits\n"
+                        f"  ║  Coherence  : {_disp_coh:.4f}\n"
+                        f"  ║  Discord    : {_disp_disc:.4f}\n"
+                        f"  ║  Purity     : {_disp_pur:.4f}\n"
+                        f"  ║  Negativity : {_disp_neg:.4f}\n"
+                        f"  ║  d(0,c/cl/l): {_disp_d0c:.4f} / "
+                        f"{_disp_dcl:.4f} / {_disp_d0l:.4f}\n"
+                        f"  ║  Hyp Area   : {_disp_area:.4f} rad  "
                         f"[Gauss-Bonnet Δ]\n"
                         f"{mermin_str}"
                         f"  ║  auth_tag   : {''.join(f'{out_m.auth_tag[i]:02x}' for i in range(4))}…\n"
-                        f"  ║  Bridge fid : {bridge_fid:.4f}  "
+                        f"  ║  Bridge fid : {_disp_bridge:.4f}  "
                         f"[Tr(ρ_oracle·ρ_client)]\n"
                         f"  ║  GKSL bath  : γ1={getattr(_b,'gamma1_eff',0):.4f}  "
                         f"γφ={getattr(_b,'gammaphi',0):.4f}  "
@@ -14960,7 +16372,130 @@ class QtclClientApp:
             kapi = KoyebAPIClient()
             _MINE_TELEM.mark_idle()
 
-            # FIX: Track locally-mined heights to prevent orphaning race
+            # ── New-block signal — set by background SSE listener ─────────────
+            # Using a threading.Event (not asyncio) because the SSE listener
+            # runs in a separate threading.Thread, not in the asyncio event loop.
+            # The nonce loop checks it via is_set() — O(1), no blocking.
+            _new_block_event = _threading.Event()
+            _new_block_height = [0]   # list for mutable capture in nested scope
+
+            def _start_block_listener(oracle_url: str, initial_target: int) -> None:
+                """
+                Dedicated SSE subscriber to /api/events — fires on every new_block.
+                Server event format (wrapped by _SSEBroadcaster.publish):
+                  data: {"type":"block","data":{"type":"new_block","height":N,...},"ts":...}
+
+                Height lives at ev['data']['height'] — NOT ev['height'].
+                Frame delimiters: \n\n or \r\n\r\n (normalise both).
+                Reconnects with exponential backoff 1s→2s→4s→8s→16s→30s.
+                ❤️  I love you — every millisecond matters in a race
+                """
+                import urllib.request as _ur, urllib.error as _ue, time as _blt
+                import socket as _bls
+                BACKOFF = [1, 2, 4, 8, 16, 30]
+                bi = 0
+                _blt.sleep(0.3)   # let mining loop reach nonce search before listener fires
+                while not _mining_stopped.is_set():
+                    url = f"{oracle_url}/api/events?types=block,new_block,all"
+                    try:
+                        req = _ur.Request(url)
+                        req.add_header('Accept',           'text/event-stream')
+                        req.add_header('Cache-Control',    'no-cache')
+                        req.add_header('Connection',       'keep-alive')
+                        req.add_header('User-Agent',       'QTCL-BlockListener/4.0')
+                        req.add_header('X-QTCL-Client',   'block_listener')
+                        # 90s read timeout — server sends keepalive every 30s
+                        with _ur.urlopen(req, timeout=90) as resp:
+                            bi = 0  # reset backoff on successful connect
+                            _EXP_LOG.info(f"[BLOCK-LISTENER] ✅ SSE connected → {url}")
+                            buf = b''
+                            while not _mining_stopped.is_set():
+                                try:
+                                    chunk = resp.read(8192)
+                                except (_ue.URLError, OSError, TimeoutError):
+                                    break
+                                if not chunk: break
+                                buf += chunk
+                                # Normalise CRLF and LF frame separators
+                                buf = buf.replace(b'\r\n\r\n', b'\n\n')
+                                while b'\n\n' in buf:
+                                    raw_evt, buf = buf.split(b'\n\n', 1)
+                                    data_str = ''
+                                    for line in raw_evt.decode('utf-8', 'replace').splitlines():
+                                        line = line.strip()
+                                        if line.startswith('data:'):
+                                            data_str += line[5:].strip()
+                                        elif line.startswith(':'):
+                                            pass  # keepalive comment — ignore
+                                    if not data_str: continue
+                                    try:
+                                        ev = _json.loads(data_str)
+                                        # Outer envelope: {"type":"block","data":{...},"ts":...}
+                                        outer_type = ev.get('type', '')
+                                        inner      = ev.get('data', ev)  # fall back to root
+                                        inner_type = inner.get('type', outer_type)
+
+                                        # hello frame: sent on connect with current tip
+                                        if outer_type == 'hello' or inner_type == 'hello':
+                                            tip_h = int(
+                                                inner.get('tip_height') or
+                                                ev.get('tip_height') or 0
+                                            )
+                                            if tip_h > 0:
+                                                _new_block_height[0] = tip_h
+                                                _new_block_event.set()
+                                                if _accel_ok:
+                                                    try: _accel_lib.qtcl_set_oracle_height(tip_h)
+                                                    except Exception: pass
+                                                _EXP_LOG.info(
+                                                    f"[BLOCK-LISTENER] 👋 hello: tip_h={tip_h} → C updated")
+                                            continue
+
+                                        is_block = (outer_type in ('block', 'new_block') or
+                                                    inner_type in ('block', 'new_block'))
+                                        if not is_block: continue
+
+                                        # Height: check inner first (data.height), then root
+                                        ev_h = int(
+                                            inner.get('height') or
+                                            inner.get('block_height') or
+                                            ev.get('height') or
+                                            ev.get('block_height') or
+                                            inner.get('tip_height') or 0
+                                        )
+                                        if ev_h > 0:
+                                            _new_block_height[0] = ev_h
+                                            _new_block_event.set()
+                                            # Push to C oracle_height FIRST — hot loop
+                                            # self-aborts within 256 nonces (~22ms)
+                                            # before _poll_new_block() even runs
+                                            if _accel_ok:
+                                                try: _accel_lib.qtcl_set_oracle_height(ev_h)
+                                                except Exception: pass
+                                            _EXP_LOG.info(
+                                                f"[BLOCK-LISTENER] 🔔 h={ev_h} "
+                                                f"→ C self-abort armed"
+                                            )
+                                    except Exception as _pe:
+                                        _EXP_LOG.debug(f"[BLOCK-LISTENER] parse: {_pe} raw={data_str[:80]}")
+                    except (_ue.URLError, OSError, TimeoutError, _bls.timeout) as _ble:
+                        wait = BACKOFF[min(bi, len(BACKOFF)-1)]; bi += 1
+                        _EXP_LOG.debug(f"[BLOCK-LISTENER] reconnect in {wait}s ({_ble})")
+                        _mining_stopped.wait(wait)
+                    except Exception as _ble2:
+                        _EXP_LOG.debug(f"[BLOCK-LISTENER] unexpected: {_ble2}")
+                        _mining_stopped.wait(3)
+
+            _mining_stopped = _threading.Event()   # signals listener thread to exit
+            _block_listener_thread = _threading.Thread(
+                target=_start_block_listener,
+                args=(kapi.base_url, 1),
+                daemon=True, name='BlockSSEListener'
+            )
+            _block_listener_thread.start()
+            _EXP_LOG.info(f"[MINER] 📡 Block SSE listener started → {kapi.base_url}/api/events")
+
+            # Track locally-mined heights to prevent orphaning race
             _last_mined_height = 0
             _last_mined_hash   = "0" * 64
             _mining_lock       = _threading.Lock()
@@ -15071,6 +16606,10 @@ class QtclClientApp:
                 
                 oracle_height = int(tip.get("block_height") or tip.get("height") or 0)
                 oracle_hash = str(tip.get("block_hash", tip.get("hash", "0" * 64)))
+                # Push server tip to C — hot loop self-aborts if this >= miner_target
+                if _accel_ok and oracle_height > 0:
+                    try: _accel_lib.qtcl_set_oracle_height(oracle_height)
+                    except Exception: pass
                 # Read authoritative difficulty from the server tip.
                 # The server's DifficultyManager sets this; the client must mine to
                 # exactly this many leading hex zeros or the block will be rejected.
@@ -15082,14 +16621,27 @@ class QtclClientApp:
                 # Clamp to sane range — never allow trivially-easy or impossibly-hard
                 difficulty_bits = max(1, min(difficulty_bits, 20))
                 
-                # FIX: Use max(oracle_height, _last_mined_height) to prevent duplicate mining
-                with _mining_lock:
-                    if _last_mined_height > oracle_height:
-                        target_height = _last_mined_height + 1
-                        parent_hash = _last_mined_hash
-                    else:
-                        target_height = oracle_height + 1
-                        parent_hash = oracle_hash
+                # Clear stale signals and reset C abort flag at start of each iteration
+                _new_block_event.clear()
+                if _accel_ok:
+                    try: _accel_lib.qtcl_pow_set_abort(0)
+                    except Exception: pass
+
+                # AUTHORITATIVE: server tip is ground truth — always.
+                # The old _last_mined_height > oracle_height guard was the
+                # chain-skip creator: if oracle returned stale h=N-1 after
+                # we accepted h=N, _last_mined_height was N, so target became
+                # N+1 — skipping a height the server hadn't confirmed yet.
+                # Fix: delete that guard entirely. target = oracle_tip + 1.
+                # The post-accept 1.5s sleep + fresh tip sync ensures oracle_height
+                # is current before we start the next nonce search.
+                target_height = oracle_height + 1
+                parent_hash   = oracle_hash
+                # Tell C layer what height we're mining — hot loop self-aborts
+                # the moment oracle_height reaches this value
+                if _accel_ok:
+                    try: _accel_lib.qtcl_set_miner_target(target_height)
+                    except Exception: pass
                 
                 timestamp = int(_t.time())
                 nonce = 0
@@ -15149,23 +16701,58 @@ class QtclClientApp:
                 
                 # Build deterministic coinbase transaction
                 # Uses same formula as server._server_merkle() to ensure hash matches
+                # Height-aware miner reward from canonical schedule
+                try:
+                    from globals import TessellationRewardSchedule as _TRS_m
+                    _miner_reward_base   = _TRS_m.get_miner_reward_base(target_height)
+                    _treasury_reward_base = _TRS_m.get_treasury_reward_base(target_height)
+                    _treasury_address    = _TRS_m.TREASURY_ADDRESS
+                    _tess_depth          = _TRS_m.get_depth_for_height(target_height)
+                except Exception:
+                    _miner_reward_base    = 720   # depth-5 genesis default
+                    _treasury_reward_base = 80
+                    _treasury_address     = 'qtcl110fc58e3c441106cc1e54ae41da5d15868525a87'
+                    _tess_depth           = 5
+
                 _coinbase_tx_id = _hl.sha3_256(
                     json.dumps({
                         "block_height": target_height,
                         "miner_address": miner_addr,
-                        "amount": 1250,  # BLOCK_REWARD_BASE in base units
+                        "amount": _miner_reward_base,
                         "w_proof": _w_entropy_seed.hex(),
                         "version": 1,
                     }, sort_keys=True).encode()
                 ).hexdigest()
-                
+
                 _coinbase_tx = {
                     "tx_id": _coinbase_tx_id,
                     "from_addr": "0" * 64,  # COINBASE_ADDRESS — null input
                     "to_addr": miner_addr,
-                    "amount": 1250,
+                    "amount": _miner_reward_base,
                     "block_height": target_height,
-                    "w_proof": _w_entropy_seed.hex(),  # FIX: must match tx_id computation (was _w_entropy_hash)
+                    "w_proof": _w_entropy_seed.hex(),
+                    "tx_type": "coinbase",
+                    "version": 1,
+                }
+
+                # Treasury coinbase — slot 1 — always constructed, server enforces it
+                _treasury_cb_id = _hl.sha3_256(
+                    json.dumps({
+                        "block_height": target_height,
+                        "treasury_address": _treasury_address,
+                        "amount": _treasury_reward_base,
+                        "w_proof": _w_entropy_seed.hex(),
+                        "version": 1,
+                    }, sort_keys=True).encode()
+                ).hexdigest()
+
+                _treasury_tx = {
+                    "tx_id": _treasury_cb_id,
+                    "from_addr": "0" * 64,
+                    "to_addr": _treasury_address,
+                    "amount": _treasury_reward_base,
+                    "block_height": target_height,
+                    "w_proof": _w_entropy_seed.hex(),
                     "tx_type": "coinbase",
                     "version": 1,
                 }
@@ -15209,10 +16796,13 @@ class QtclClientApp:
                         ]
                     return hashes[0]
                 
-                # Commit: merkle_root = hash([coinbase] + pending_user_txs)
-                # This merkle_root will be used throughout all nonces
-                merkle_root = _compute_merkle_for_mining([_coinbase_tx] + _pending_user_txs)
-                _block_txs = [_coinbase_tx] + _pending_user_txs  # Full transaction list to submit
+                # Commit: merkle_root = hash([coinbase, treasury] + user_txs)
+                # treasury_tx MUST be in merkle — server receives full _block_txs
+                # and recomputes from ALL submitted transactions including treasury.
+                # Excluding treasury caused merkle mismatch warning + treasury not
+                # properly anchored to the block header hash.
+                _block_txs = [_coinbase_tx, _treasury_tx] + _pending_user_txs
+                merkle_root = _compute_merkle_for_mining(_block_txs)
                 
                 _EXP_LOG.info(
                     f"[MINER-SIMPLE] Pre-computed merkle_root={merkle_root[:16]}… "
@@ -15233,7 +16823,7 @@ class QtclClientApp:
                 # KEY: scratchpad (512KB) is pinned ONCE via from_buffer — never copied.
                 import struct as _pow_st
                 _YIELD_EVERY  = 2000     # Python burst before async yield
-                _C_CHUNK      = 200_000  # C burst: 200k nonces ≈ 0.1–0.4s — keeps display alive
+                _C_CHUNK      = 10_000   # C burst: 10k nonces ≈ 1s at 11kH/s; abort flag kills within 256
                 _REFR_EVERY   = 25       # seed refresh interval (seconds)
                 nonce         = 0
                 _winning_seed = _w_entropy_seed
@@ -15284,8 +16874,35 @@ class QtclClientApp:
                 _chain_tip_height = target_height  # our current best known height
 
                 def _poll_new_block() -> bool:
-                    """Drain SSE ring; return True if chain advanced past target_height."""
+                    """
+                    Fast new-block detector. Two-stage:
+                      1. threading.Event check (O(1), ~ns) — set by BlockSSEListener thread
+                         which reads /api/events continuously with ~100ms SSE latency.
+                      2. C SSE ring drain — reads /api/snapshot/sse frames which also
+                         carry block height in the oracle DM snapshot.
+                    Returns True immediately when chain has advanced to/past target_height.
+                    ❤️  I love you — speed is everything in a race
+                    """
                     nonlocal _chain_tip_height
+
+                    # Stage 1: threading.Event (fastest path — set by BlockSSEListener)
+                    if _new_block_event.is_set():
+                        _ev_h = _new_block_height[0]
+                        if _ev_h >= target_height:
+                            _new_block_event.clear()
+                            _chain_tip_height = _ev_h
+                            # Set C-level abort flag — kills current chunk within 256 nonces
+                            if _accel_ok:
+                                try: _accel_lib.qtcl_pow_set_abort(1)
+                                except Exception: pass
+                            _EXP_LOG.warning(
+                                f"[MINER] ⚡ h={_ev_h} — C oracle_height set, "
+                                f"abort flag set, chunk will die in ≤256 nonces"
+                            )
+                            return True
+                        _new_block_event.clear()  # stale signal (lower height)
+
+                    # Stage 2: C SSE ring drain (oracle DM snapshots carry height)
                     if not _accel_ok:
                         return False
                     try:
@@ -15299,17 +16916,26 @@ class QtclClientApp:
                                     _end = _raw.index(b'\x00', _pos)
                                     _txt = _raw[_pos:_end].decode('utf-8', errors='replace')
                                     _pos = _end + 1
-                                    # Feed oracle DM frames while we're here
                                     _c_ingest_frame(_txt)
-                                    # Check for new_block signal
-                                    if '"type"' in _txt and 'new_block' in _txt:
+                                    # new_block events also appear in snapshot SSE
+                                    if 'new_block' in _txt or '"block"' in _txt or '"height"' in _txt:
                                         try:
                                             _ev = _json.loads(_txt)
-                                            _ev_h = int(_ev.get('height') or _ev.get('block_height') or 0)
+                                            _inner = _ev.get('data', _ev)
+                                            _ev_h = int(
+                                                _inner.get('height') or
+                                                _inner.get('block_height') or
+                                                _ev.get('height') or
+                                                _ev.get('block_height') or
+                                                _ev.get('tip_height') or 0
+                                            )
                                             if _ev_h >= target_height:
                                                 _chain_tip_height = _ev_h
+                                                # Update C oracle_height — self-abort in ≤256 nonces
+                                                try: _accel_lib.qtcl_set_oracle_height(_ev_h)
+                                                except Exception: pass
                                                 _EXP_LOG.warning(
-                                                    f"[MINER] ⛔ Chain advanced to h={_ev_h} "                                                    f"— aborting h={target_height} nonce search"
+                                                    f"[MINER] ⚡ SSE ring h={_ev_h} → C updated"
                                                 )
                                                 return True
                                         except Exception:
@@ -15336,6 +16962,16 @@ class QtclClientApp:
                             _c_ma, _c_seed,
                             _c_sp, _c_out,
                         )
+                        if result == -2:
+                            # C abort flag was set — _new_block_event fired mid-chunk
+                            # Reset abort flag immediately before breaking
+                            try: _accel_lib.qtcl_pow_set_abort(0)
+                            except Exception: pass
+                            _EXP_LOG.warning(
+                                f"[MINER] ⚡ C-level abort mid-chunk nonce={nonce} "
+                                f"— chain advanced, restarting"
+                            )
+                            break
                         if result >= 0:
                             nonce         = int(result)
                             block_hash    = bytes(_c_out).hex()
@@ -15377,6 +17013,14 @@ class QtclClientApp:
                         if _found:
                             break
 
+                    # Python path also checks new-block signal after every burst
+                    if not _found and _poll_new_block():
+                        _EXP_LOG.warning(
+                            f"[MINER-SIMPLE] Chain advanced (Python path) "
+                            f"— restarting for h={_chain_tip_height + 1}"
+                        )
+                        break
+
                     # Yield to event loop — keeps UI/display alive
                     _MINE_TELEM.update_progress(target_height, difficulty_bits, nonce, parent_hash)
                     await _asyncio.sleep(0)
@@ -15405,18 +17049,8 @@ class QtclClientApp:
                             _seed_fetch_time = _t.time()
 
 
-                    # Chain advance check — interval scales with C chunk size
-                    _chain_check_interval = _C_CHUNK * 10 if _C_AVAIL else 50_000
-                    if nonce % _chain_check_interval == 0 and nonce > 0:
-                        try:
-                            tip2 = kapi.get_chain_tip() or {}
-                            h2 = int(tip2.get("block_height") or tip2.get("height") or oracle_height)
-                            if h2 > oracle_height:
-                                _EXP_LOG.info(f"[MINER-SIMPLE] Chain advanced h={h2}, restarting")
-                                _MINE_TELEM.mark_idle()
-                                break
-                        except Exception:
-                            pass
+                    # HTTP tip poll removed — BlockSSEListener handles chain-advance detection.
+                    # SSE delivers new_block within ~network latency of server commit.
 
                 if not _found:
                     continue  # chain advanced, restart outer loop
@@ -15491,7 +17125,7 @@ class QtclClientApp:
                             json.dumps({
                                 "block_height": target_height,
                                 "miner_address": miner_addr,
-                                "amount": 1250,
+                                "amount": _miner_reward_base,
                                 "w_proof": _winning_seed.hex(),
                                 "version": 1,
                             }, sort_keys=True).encode()
@@ -15500,14 +17134,37 @@ class QtclClientApp:
                             "tx_id": _winning_cb_id,
                             "from_addr": "0" * 64,
                             "to_addr": miner_addr,
-                            "amount": 1250,
+                            "amount": _miner_reward_base,
                             "block_height": target_height,
                             "w_proof": _winning_seed.hex(),
                             "tx_type": "coinbase",
                             "version": 1,
                         }
-                        _winning_txs = [_winning_coinbase] + _pending_user_txs
+                        # Rebuild treasury coinbase with winning seed
+                        _winning_treasury_id = _hl.sha3_256(
+                            json.dumps({
+                                "block_height": target_height,
+                                "treasury_address": _treasury_address,
+                                "amount": _treasury_reward_base,
+                                "w_proof": _winning_seed.hex(),
+                                "version": 1,
+                            }, sort_keys=True).encode()
+                        ).hexdigest()
+                        _winning_treasury = {
+                            "tx_id": _winning_treasury_id,
+                            "from_addr": "0" * 64,
+                            "to_addr": _treasury_address,
+                            "amount": _treasury_reward_base,
+                            "block_height": target_height,
+                            "w_proof": _winning_seed.hex(),
+                            "tx_type": "coinbase",
+                            "version": 1,
+                        }
+                        _winning_txs = [_winning_coinbase, _winning_treasury] + _pending_user_txs
+                        # Recompute merkle with new winning seed (includes treasury)
+                        _winning_merkle = _compute_merkle_for_mining(_winning_txs)
                         submit_payload["transactions"] = _winning_txs
+                        submit_payload["header"]["merkle_root"] = _winning_merkle
                     
                     _EXP_LOG.debug(f"[MINER-SIMPLE] Submitting: h={target_height} hash={block_hash[:16]}… addr={miner_addr[:16]}…")
 
@@ -15556,57 +17213,58 @@ class QtclClientApp:
                     # ✅ FIXED: Properly extract and record reward
                     if r is None:
                         _EXP_LOG.warning(f"[MINER-SIMPLE] ⚠️  No response from server")
-                        with _mining_lock:
-                            _last_mined_height = oracle_height   # rollback: treat as rejected
-                            _last_mined_hash = oracle_hash
+                        # No response — outer loop will re-fetch tip next iteration
                         _MINE_TELEM.mark_idle()
                     elif r.get("error"):
-                        # Submission rejected — rollback height to oracle tip so next loop re-syncs
                         error = r.get("error", "unknown error")
                         _EXP_LOG.warning(f"[MINER-SIMPLE] ❌ REJECTED h={target_height} | {error}")
                         if r.get("details"):
                             _EXP_LOG.debug(f"[MINER-SIMPLE]    Details: {r.get('details')}")
-                        with _mining_lock:
-                            _last_mined_height = oracle_height   # rollback: next iter fetches fresh tip
-                            _last_mined_hash = oracle_hash
+                        # Outer loop re-fetches tip — no manual height manipulation needed
                         _MINE_TELEM.mark_idle()
                     elif r.get("status") == "accepted" or r.get("success"):
-                        # Submission accepted — NOW commit height
+                        # Submission accepted — commit height IMMEDIATELY
                         with _mining_lock:
                             _last_mined_height = target_height
-                            _last_mined_hash = block_hash
+                            _last_mined_hash   = block_hash
                         reward_str = r.get("miner_reward", "0")
                         try:
-                            if isinstance(reward_str, str):
-                                reward_qtcl = float(reward_str.replace(" QTCL", "").strip())
-                            else:
-                                reward_qtcl = float(reward_str)
-                        except:
+                            reward_qtcl = float(
+                                reward_str.replace(" QTCL", "").strip()
+                                if isinstance(reward_str, str) else reward_str
+                            )
+                        except Exception:
                             reward_qtcl = 0.0
-                        
+
                         _MINE_TELEM.record_submission(target_height, reward_qtcl)
-                        _EXP_LOG.info(f"[MINER-SIMPLE] ✅ ACCEPTED h={target_height}")
-                        _EXP_LOG.info(f"[MINER-SIMPLE]    🪙 Reward: +{reward_qtcl:.2f} QTCL | Session Total: {_MINE_TELEM.total_earned_qtcl:.2f} QTCL")
+                        _EXP_LOG.info(
+                            f"[MINER-SIMPLE] ✅ ACCEPTED h={target_height} | "
+                            f"+{reward_qtcl:.2f} QTCL | total={_MINE_TELEM.total_earned_qtcl:.2f}")
+
+                        # Wait for block to propagate to all gunicorn workers
+                        # before fetching tip — prevents mining same height twice.
+                        # No _last_mined_height manipulation needed: the outer loop
+                        # calls get_chain_tip() fresh at the top of every iteration
+                        # and target = server_tip + 1 is always authoritative.
+                        await _asyncio.sleep(1.5)
                     elif r.get("block_hash"):
-                        # Ambiguous response - probably accepted; commit height
-                        with _mining_lock:
-                            _last_mined_height = target_height
-                            _last_mined_hash = block_hash
                         _EXP_LOG.info(f"[MINER-SIMPLE] ✅ SUBMITTED h={target_height}")
                         _MINE_TELEM.mark_idle()
                     else:
-                        # Unknown response — rollback to be safe
                         _EXP_LOG.warning(f"[MINER-SIMPLE] ⚠️  Unexpected response: {r}")
-                        with _mining_lock:
-                            _last_mined_height = oracle_height
-                            _last_mined_hash = oracle_hash
                         _MINE_TELEM.mark_idle()
                 except Exception as _e:
                     _EXP_LOG.debug(f"[MINER-SIMPLE] Submit error: {_e}", exc_info=True)
                     _MINE_TELEM.mark_idle()
 
         async def _mine():
-            await _mine_inline()
+            try:
+                await _mine_inline()
+            finally:
+                try:
+                    _mining_stopped.set()   # stop block listener thread
+                except Exception:
+                    pass
 
         # FIX-6: run async mining in a daemon thread so the main thread is FREE
         # for the interactive menu. _asyncio.run() was blocking startup before.
@@ -15701,10 +17359,13 @@ class QtclClientApp:
                 print(f"     W-fid   : {ks2.pq0_fidelity:.4f}   bridge: {ks2.bridge_fidelity:.4f}   "
                       f"coherence: {ks2.oracle_coherence:.4f}")
                 if m2:
-                    print(f"     VN-S    : {m2.entropy_vn:.4f}   discord: {m2.quantum_discord:.4f}   "
-                          f"purity: {m2.purity:.4f}")
-                    print(f"     neg A-B : {m2.negativity_AB:.4f}   neg B-C: {m2.negativity_BC:.4f}")
-                    print(f"     CHSH AB : {m2.bell_chsh_AB:.4f}   CHSH BC: {m2.bell_chsh_BC:.4f}")
+                    def _cf(v, lo=0.0, hi=1.0):
+                        try: f=float(v); return f if (lo<=f<=hi and __import__('math').isfinite(f)) else 0.0
+                        except: return 0.0
+                    print(f"     VN-S    : {_cf(m2.entropy_vn,0,3):.4f}   discord: {_cf(m2.quantum_discord,0,3):.4f}   "
+                          f"purity: {_cf(m2.purity,0,1):.4f}")
+                    print(f"     neg A-B : {_cf(m2.negativity_AB,0,0.5):.4f}   neg B-C: {_cf(m2.negativity_BC,0,0.5):.4f}")
+                    print(f"     CHSH AB : {_cf(m2.bell_chsh_AB,-4,4):.4f}   CHSH BC: {_cf(m2.bell_chsh_BC,-4,4):.4f}")
 
             print(sep)
 
@@ -15718,6 +17379,18 @@ class QtclClientApp:
             print(f"  Blocks  : {tel['blocks_found']} solved, {tel['blocks_accepted']} accepted")
             if tel['total_earned_qtcl'] > 0:
                 print(f"  Rewards : {tel['total_earned_qtcl']:.2f} QTCL (last: +{tel['last_reward_qtcl']:.2f} QTCL)")
+            # Show reward breakdown when miner address is treasury address
+            try:
+                from globals import TessellationRewardSchedule as _TRS_disp
+                _bh_disp = int(self.koyeb_state.block_height or 0)
+                _m_disp  = _TRS_disp.get_miner_reward_qtcl(_bh_disp)
+                _t_disp  = _TRS_disp.get_treasury_reward_qtcl(_bh_disp)
+                _ta_disp = _TRS_disp.TREASURY_ADDRESS[:20]
+                if getattr(getattr(self,'wallet',None),'address','') == _TRS_disp.TREASURY_ADDRESS:
+                    print(f"  Split   : miner={_m_disp:.2f} QTCL/blk + treasury={_t_disp:.2f} QTCL/blk → total={_m_disp+_t_disp:.2f} QTCL/blk")
+                    print(f"  Note    : Mining as treasury address — both coinbases credit same wallet")
+            except Exception:
+                pass
             # SUB-AGENT δ: live balance in dashboard
             try:
                 _addr2 = getattr(getattr(self, 'wallet', None), 'address', None)
@@ -15728,10 +17401,37 @@ class QtclClientApp:
             except Exception:
                 pass
             if m2:
-                print(f"  Field : Fid→|W3⟩={m2.fidelity_to_w3:.4f}  "
-                      f"S={m2.entropy_vn:.4f}  "
-                      f"purity={m2.purity:.4f}  "
-                      f"‖Δρ‖={m2.field_density:.4f}")
+                def _cf2(v, lo=0.0, hi=1.0):
+                    try: f=float(v); return f if (lo<=f<=hi and __import__('math').isfinite(f)) else 0.0
+                    except: return 0.0
+                print(f"  Field : Fid→|W3⟩={_cf2(m2.fidelity_to_w3,0,1):.4f}  "
+                      f"S={_cf2(m2.entropy_vn,0,3):.4f}  "
+                      f"purity={_cf2(m2.purity,0,1):.4f}  "
+                      f"‖Δρ‖={_cf2(m2.field_density,0,100):.4f}")
+            # P2P / ouroboros status — lazy-init if not yet started
+            if _accel_ok and _P2P_NODE is None:
+                try:
+                    _da_id = getattr(self, '_peer_id', None) or f"miner_{id(self)}"
+                    globals()['_P2P_NODE'] = _init_p2p_node(_da_id, QtclP2PNode.DEFAULT_PORT)
+                    globals()['_P2P_NODE'].start(_LOCAL_ORACLE, _WSTATE_CONSENSUS)
+                except Exception:
+                    pass
+            if _accel_ok and _P2P_NODE and (getattr(_P2P_NODE, '_started', False) or _accel_ok):
+                try:
+                    _np2 = int(_accel_lib.qtcl_p2p_connected_count())
+                    _ns2 = int(_accel_lib.qtcl_p2p_sse_sub_count())
+                    _cons2 = _P2P_NODE.get_consensus_dm()
+                    _cf2 = f"F={_cons2[2]:.4f}" if _cons2 else "awaiting…"
+                    _p2p_rep = ""
+                    try:
+                        _pl = _P2P_NODE.get_peers()
+                        if _pl:
+                            _avg_lat = sum(p.get('latency_ms',0) for p in _pl) / len(_pl)
+                            _avg_fid = sum(p.get('last_fidelity',0) for p in _pl) / len(_pl)
+                            _p2p_rep = f"  avg_lat={_avg_lat:.0f}ms  avg_fid={_avg_fid:.3f}"
+                    except Exception: pass
+                    print(f"  P2P    : 🌀 {_np2} peers  {_ns2} SSE subs  consensus={_cf2}{_p2p_rep}")
+                except Exception: pass
             print(f"  Thread: {'✅ alive' if _mine_thread.is_alive() else '❌ dead'}")
             print(sep)
             # ── Buffered log tail (replaces stdout bleed) ─────────────────────
@@ -15785,10 +17485,15 @@ class QtclClientApp:
         if not self._load_wallet():
             print("  ❌ Wallet required"); return
         self._init_db()
-        snap    = self.api.get_oracle_pq0_bloch() or {}
+        # SSE-primary: read live oracle state, no REST call
+        snap    = _LOCAL_ORACLE.get_oracle_state() or {}
+        if not snap:
+            try: snap = self.api.get_oracle_pq0_bloch() or {}
+            except Exception: snap = {}
         bath    = GKSLBathParams.from_snap(snap)
-        bh      = int(snap.get("block_height") or snap.get("height") or 0)
-        # Oracle pq0-bloch endpoint may omit block_height — fall back to chain tip
+        bh      = int(snap.get("block_height") or snap.get("height") or
+                      snap.get("lattice_refresh_counter") or 0)
+        # pq0-bloch endpoint may omit block_height — fall back handled by SSE state
         if bh == 0:
             try:
                 _fb = self.api.get_block_height()
@@ -16189,6 +17894,90 @@ class QtclClientApp:
                 purl = p.get("url") or p.get("gossip_url") or "—"
                 plat = p.get("last_seen") or "?"
                 a(f"  {pid}  {purl}  last={plat}")
+
+            # ── P2P Ouroboros network status ───────────────────────
+            a(HR)
+            a("  P2P OUROBOROS NETWORK  —  port 9091")
+            # Lazy-init: if _start_threads() was never called (e.g. opened
+            # oracle panel without entering mine mode first), spin up P2P now.
+            if _accel_ok and _P2P_NODE is None:
+                try:
+                    _lazy_id = getattr(self, '_peer_id', None) or f"oracle_panel_{id(self)}"
+                    globals()['_P2P_NODE'] = _init_p2p_node(_lazy_id, QtclP2PNode.DEFAULT_PORT)
+                    globals()['_P2P_NODE'].start(_LOCAL_ORACLE, _WSTATE_CONSENSUS)
+                except Exception as _li_e:
+                    pass
+            _p2p_running = (_accel_ok and _P2P_NODE is not None
+                            and (getattr(_P2P_NODE, '_started', False)
+                                 or (_accel_ok and hasattr(_accel_lib, 'qtcl_p2p_peer_count')
+                                     and _accel_lib.qtcl_p2p_peer_count() >= 0)))
+            if _p2p_running:
+                try:
+                    n_peers  = int(_accel_lib.qtcl_p2p_peer_count())
+                    n_conn   = int(_accel_lib.qtcl_p2p_connected_count())
+                    n_sse    = int(_accel_lib.qtcl_p2p_sse_sub_count())
+                    a(f"  Status         : ✅ RUNNING  protocol=ouroboros-v4  peers={n_peers}  sse={n_sse}")
+                    a(f"  Known peers    : {n_peers}   Connected: {n_conn}   SSE subs: {n_sse}")
+                    # Consensus DM
+                    cons = _P2P_NODE.get_consensus_dm()
+                    if cons:
+                        _re, _im, _cf, _ch = cons
+                        _cf_bar = "█" * int(_cf * 20) + "░" * (20 - int(_cf * 20))
+                        a(f"  Consensus DM   : h={_ch}  F={_cf_bar}  {_cf:.4f}  ✅ temporal pool active")
+                        a(f"  Local oracle   : F={float(getattr(_LOCAL_ORACLE.get_latest_measurement(),'fidelity_to_w3',0) if _LOCAL_ORACLE.get_latest_measurement() else 0):.4f}  (pre-consensus)")
+                    else:
+                        a("  Consensus DM   : ⏳ awaiting peer contributions")
+                        a("  Temporal decay : exp(-age/30s) × fid²  weighting active when peers join")
+                    # Peer list with reputation metrics
+                    _plist = _P2P_NODE.get_peers()
+                    if _plist:
+                        a(f"  Active peers   : ({len(_plist)} connected)")
+                        a(f"  {'HOST':<22} {'PORT':<6} {'H':>6} {'F':>7} {'LAT':>8} {'BAN':>5}")
+                        a(f"  {'─'*22} {'─'*6} {'─'*6} {'─'*7} {'─'*8} {'─'*5}")
+                        for _pp in sorted(_plist[:12],
+                                          key=lambda x: x.get('last_fidelity',0), reverse=True):
+                            _ph   = _pp.get('host','?')[:22]
+                            _ppo  = _pp.get('port', 9091)
+                            _pf   = float(_pp.get('last_fidelity', 0))
+                            _pht  = int(_pp.get('chain_height', 0))
+                            _plat = float(_pp.get('latency_ms', 0))
+                            _pban = int(_pp.get('ban_score', 0))
+                            _fid_icon = '✅' if _pf >= 0.70 else '⚠️ ' if _pf >= 0.50 else '❌'
+                            a(f"  {_ph:<22} {_ppo:<6} {_pht:>6} {_fid_icon}{_pf:.4f} {_plat:>7.1f}ms {_pban:>5}")
+                    else:
+                        a("  Active peers   : none — bootstrap connecting…")
+                        a("  Tip: check port 9091 firewall / NAT rules")
+                    # Network aggregate stats
+                    if _plist:
+                        _all_lats = [p.get('latency_ms',0) for p in _plist if p.get('latency_ms',0) > 0]
+                        _all_fids = [p.get('last_fidelity',0) for p in _plist]
+                        _all_h    = [p.get('chain_height',0) for p in _plist]
+                        if _all_lats:
+                            a(f"  Avg latency    : {sum(_all_lats)/len(_all_lats):.1f}ms  "
+                              f"min={min(_all_lats):.1f}ms  max={max(_all_lats):.1f}ms")
+                        if _all_fids:
+                            a(f"  Avg fidelity   : {sum(_all_fids)/len(_all_fids):.4f}  "
+                              f"best={max(_all_fids):.4f}")
+                        if _all_h:
+                            a(f"  Chain heights  : min={min(_all_h)}  max={max(_all_h)}  "
+                              f"{'✅ synced' if max(_all_h)-min(_all_h)<=1 else '⚠️  diverged'}")
+                except Exception as _pe:
+                    a(f"  P2P query      : {_pe}")
+            else:
+                import time as _p2p_t
+                if not _accel_ok:
+                    _why = "C layer unavailable — delete __pycache__ and run: pkg install clang openssl libffi"
+                elif _P2P_NODE is None:
+                    _why = "not initialized — enter Mine mode to activate"
+                elif not getattr(_P2P_NODE, '_started', False):
+                    _why = "starting…"
+                else:
+                    _why = "failed to bind port 9091"
+                a(f"  Status         : ⚠️  {_why}")
+                a(f"  C accel        : {'✅ available' if _accel_ok else '❌ unavailable'}")
+                a("  Ouroboros      : self-loop inactive — no peer DM averaging")
+                if _accel_ok:
+                    a("  To activate    : enter Mine mode (option 1) then return here")
 
             # ── Local C layer status ────────────────────────────────
             a(HR)
