@@ -2211,7 +2211,6 @@ class _SSEBroadcaster:
         Publish via PG NOTIFY (cross-worker) + local fan-out (this worker).
         Falls back to local-only if PG is unavailable.
         """
-        # Flatten peer events to root so ip_address/port are top-level for C P2P wiring
         if event_type in ('peer',):
             flat = {'type': event_type, 'ts': time.time()}
             flat.update(data)
@@ -2654,9 +2653,7 @@ def _upsert_peer(peer_id: str, data: Dict[str, Any]) -> bool:
                     block_height    = EXCLUDED.block_height,
                     chain_head_hash = EXCLUDED.chain_head_hash,
                     network_version = EXCLUDED.network_version,
-                    port            = CASE WHEN EXCLUDED.port > 0
-                                          THEN EXCLUDED.port
-                                          ELSE peer_registry.port END,
+                    port            = CASE WHEN EXCLUDED.port > 0 THEN EXCLUDED.port ELSE peer_registry.port END,
                     gossip_url      = COALESCE(EXCLUDED.gossip_url, peer_registry.gossip_url),
                     miner_address   = COALESCE(NULLIF(EXCLUDED.miner_address,''), peer_registry.miner_address),
                     supports_sse    = EXCLUDED.supports_sse,
@@ -2700,7 +2697,7 @@ def _get_live_peers(exclude_peer_id: str = '') -> List[Dict[str, Any]]:
                 {
                     'peer_id'       : r[0],
                     'ip_address'    : r[1],
-                    'host'          : r[1],   # alias so C P2P connect works directly
+                    'host'          : r[1],
                     'port'          : int(r[2] or 9091),
                     'gossip_url'    : r[3] or '',
                     'block_height'  : int(r[4] or 0),
@@ -2896,8 +2893,6 @@ def sse_events_stream():
                     parsed = json.loads(raw)
                     etype  = parsed.get('type', '')
                     if 'all' in want_types or etype in want_types:
-                        # Emit `event:` line so clients can route by type without
-                        # parsing JSON — both formats supported for compat
                         if etype:
                             yield f"event: {etype}\ndata: {raw}\n\n"
                         else:
@@ -2947,16 +2942,24 @@ def peer_register():
     data.setdefault('ip_address', request.remote_addr)
     data['peer_id'] = peer_id
 
+    # ALWAYS override ip_address with the public IP seen at the Koyeb edge.
+    # Miners behind NAT send their LAN IP — remote_addr is their true public IP.
+    data['ip_address'] = request.remote_addr
+    # Resolve "auto" gossip_url sentinel (miner sends port, server fills in public IP)
+    gurl = data.get('gossip_url', '')
+    if 'auto' in gurl or not gurl or 'localhost' in gurl:
+        _port = int(data.get('port') or 9091)
+        data['gossip_url'] = f"http://{request.remote_addr}:{_port}"
+
     ok = _upsert_peer(peer_id, data)
     live_peers = _get_live_peers(exclude_peer_id=peer_id)
 
-    # Announce to SSE subscribers — include ip_address + port so miners can
-    # immediately wire the new peer into their C P2P layer via SSE event handler
+    # Announce — ip_address included so live miners can immediately wire C P2P
     _gossip_sse.publish('peer', {
         'event'       : 'peer_joined',
         'peer_id'     : peer_id,
-        'ip_address'  : data.get('ip_address', request.remote_addr),
-        'host'        : data.get('ip_address', request.remote_addr),
+        'ip_address'  : request.remote_addr,
+        'host'        : request.remote_addr,
         'port'        : int(data.get('port') or 9091),
         'gossip_url'  : data.get('gossip_url', ''),
         'block_height': int(data.get('block_height') or 0),
@@ -3019,10 +3022,11 @@ def peer_heartbeat():
             found = cur.fetchone()
         if not found:
             _upsert_peer(peer_id, {
-                'peer_id'     : peer_id,
-                'ip_address'  : request.remote_addr,
-                'port'        : int(data.get('port') or 9091),
+                'peer_id'    : peer_id,
+                'ip_address' : request.remote_addr,
+                'port'       : int(data.get('port') or 9091),
                 'block_height': int(data.get('block_height') or 0),
+                'gossip_url' : f"http://{request.remote_addr}:{int(data.get('port') or 9091)}",
             })
         return jsonify({'ok': True, 'ts': time.time()}), 200
     except Exception as e:
@@ -9898,85 +9902,58 @@ def p2p_peers():
 
 @app.route('/api/p2p/peer_exchange', methods=['POST', 'GET'])
 def p2p_peer_exchange():
-    """
-    Unified peer-exchange endpoint consumed by QtclP2PNode._peer_exchange()
-    and _boot_p2p_broadcast() on every miner.
-
-    POST body (optional JSON):
-        node_id      str  — caller's stable node-id
-        port         int  — caller's P2P listen port (default 9091)
-        version      int  — protocol version
-        capabilities list — e.g. ['wstate','dmpool','sse']
-
-    Behaviour:
-        1. Upserts caller into peer_registry (same as /api/peers/register)
-           using request.remote_addr as the canonical routable ip_address.
-        2. Returns ALL live peers (excluding caller) with host/port fields
-           so the C P2P layer can immediately qtcl_p2p_connect to them.
-        3. Also returns current oracle chain tip for miner sync.
-
-    Response: { peers: [{host, port, peer_id, block_height},...],
-                peer_count, oracle_tip, sse_url }
-    """
-    data     = request.get_json(force=True, silent=True) or {}
-    node_id  = (data.get('node_id') or '').strip()
-    caller_ip = request.remote_addr or '127.0.0.1'
+    """Peer exchange: upsert caller using remote_addr as public IP, return live peers."""
+    data        = request.get_json(force=True, silent=True) or {}
+    caller_ip   = request.remote_addr or '127.0.0.1'
     caller_port = int(data.get('port') or 9091)
-
+    node_id     = (data.get('node_id') or '').strip()
     if not node_id:
         node_id = hashlib.sha256(f"{caller_ip}:{caller_port}:{time.time_ns()}".encode()).hexdigest()[:32]
 
-    # Upsert caller so other peers can find them
     _upsert_peer(node_id, {
         'peer_id'        : node_id,
         'ip_address'     : caller_ip,
         'port'           : caller_port,
         'gossip_url'     : f"http://{caller_ip}:{caller_port}",
         'block_height'   : int(data.get('block_height') or 0),
-        'network_version': str(data.get('version') or data.get('network_version') or '3'),
+        'network_version': str(data.get('version') or '3'),
         'supports_sse'   : True,
     })
 
     live = _get_live_peers(exclude_peer_id=node_id)
-
-    # Shape peers as {host, port, peer_id, block_height} for C P2P connect
-    peers_out = [
-        {
-            'host'         : p.get('ip_address') or p.get('gossip_url','').split('://')[-1].split(':')[0],
-            'port'         : int(p.get('port') or 9091),
-            'peer_id'      : p.get('peer_id',''),
-            'block_height' : int(p.get('block_height') or 0),
-            'gossip_url'   : p.get('gossip_url',''),
-            'miner_address': p.get('miner_address',''),
-        }
-        for p in live
-        if (p.get('ip_address') or '').strip() not in ('', '127.0.0.1', 'localhost')
-    ]
+    peers_out = [{
+        'host'         : p.get('ip_address', ''),
+        'ip_address'   : p.get('ip_address', ''),
+        'port'         : int(p.get('port') or 9091),
+        'peer_id'      : p.get('peer_id', ''),
+        'block_height' : int(p.get('block_height') or 0),
+        'gossip_url'   : p.get('gossip_url', ''),
+    } for p in live if p.get('ip_address','') not in ('','127.0.0.1','localhost')]
 
     tip = query_latest_block() or {}
-    server_base = (
-        os.getenv('KOYEB_PUBLIC_DOMAIN') or
-        os.getenv('RAILWAY_PUBLIC_DOMAIN') or
-        f"http://localhost:{os.getenv('PORT', 8000)}"
-    )
+    server_base = (os.getenv('KOYEB_PUBLIC_DOMAIN') or
+                   os.getenv('RAILWAY_PUBLIC_DOMAIN') or
+                   f"http://localhost:{os.getenv('PORT', 8000)}")
     if server_base and not server_base.startswith('http'):
         server_base = f"https://{server_base}"
 
     _gossip_sse.publish('peer', {
-        'event'       : 'exchange',
+        'event'       : 'peer_joined',
         'peer_id'     : node_id,
         'ip_address'  : caller_ip,
+        'host'        : caller_ip,
         'port'        : caller_port,
+        'gossip_url'  : f"http://{caller_ip}:{caller_port}",
         'block_height': int(data.get('block_height') or 0),
     })
 
     return jsonify({
-        'node_id'    : node_id,
-        'peers'      : peers_out,
-        'peer_count' : len(peers_out),
-        'oracle_tip' : int(tip.get('height') or 0),
-        'sse_url'    : f"{server_base}/api/events?client_id={node_id}",
-        'ts'         : time.time(),
+        'node_id'   : node_id,
+        'peers'     : peers_out,
+        'peer_count': len(peers_out),
+        'oracle_tip': int(tip.get('height') or 0),
+        'sse_url'   : f"{server_base}/api/events?client_id={node_id}",
+        'ts'        : time.time(),
     }), 200
 
 
