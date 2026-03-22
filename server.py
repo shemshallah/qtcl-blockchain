@@ -7587,9 +7587,10 @@ def dashboard():
     # Try multiple paths in priority order — handles Koyeb CWD vs __file__ differences
     import pathlib
     candidates = [
-        pathlib.Path(__file__).parent / 'index.html',   # same dir as server.py
+        pathlib.Path(__file__).parent / 'index.html',   # same dir as server.py (primary)
+        pathlib.Path('/workspace/index.html'),           # Koyeb deploy path (confirmed by gunicorn.ctl)
         pathlib.Path.cwd() / 'index.html',              # process working directory
-        pathlib.Path('/app/index.html'),                 # common Koyeb deploy path
+        pathlib.Path('/app/index.html'),                 # common container deploy path
         pathlib.Path('/home/app/index.html'),
     ]
     for path in candidates:

@@ -1192,14 +1192,14 @@ function renderMermin(m){
   if(!m) return;
   var M=parseFloat(m.M_value||m.M||0),isQ=m.is_quantum||M>2;
   var el=document.getElementById('mM');el.textContent=M.toFixed(3);el.className='mb2 '+(isQ?'q':'c');
-  document.getElementById('mvd').textContent=m.verdict||'--';
-  document.getElementById('mb3').textContent='M='+M.toFixed(3);
-  document.getElementById('mbar').style.width=Math.min(100,M/4*100)+'%';
+  var _mvd=document.getElementById('mvd');if(_mvd) _mvd.textContent=m.verdict||'--';
+  var _mb3=document.getElementById('mb3');if(_mb3) _mb3.textContent='M='+M.toFixed(3);
+  var _mbar=document.getElementById('mbar');if(_mbar) _mbar.style.width=Math.min(100,M/4*100)+'%';
   // Show current lattice cycle in mermin header
   var mcy=document.getElementById('mcy');
   if(mcy){var sig=(S.cycle%8===0)?'· REVIVAL':(S.cycle%8===4)?'· ANTI-REV':'';mcy.textContent='cycle '+S.cycle+' '+sig;}
   var angles=m.angle_degrees||[],labels=m.angle_labels||['θA1','φA1','θA2','φA2','θA3','φA3','θB1','φB1','θB2','φB2','θB3','φB3'];
-  document.getElementById('mac').innerHTML=angles.map(function(a,i){return '<span class="ac">'+(labels[i]||i)+'='+a+'°</span>';}).join('');
+  var _mac=document.getElementById('mac');if(_mac) _mac.innerHTML=angles.map(function(a,i){return '<span class="ac">'+(labels[i]||i)+'='+a+'°</span>';}).join('');
   // Console output — full Mermin result every time it updates
   console.group('%c[MERMIN-TEST] Optimized-angle Mermin inequality result','color:#00dcff;font-weight:bold');
   console.log('M_value    :', M.toFixed(6),'(classical bound: 2.0 | W-max: 3.046 | GHZ-max: 4.0)');
@@ -1238,10 +1238,10 @@ function updateDOM(){
   st('mh',S.chain_height);
   st('mhs','hash: '+S.latest_block_hash.slice(0,14)+'...');
   st('mf',(S.fidelity*100).toFixed(2)+'%');
-  document.getElementById('mfb').style.width=pct(S.fidelity,1);
+  var _mfb=document.getElementById('mfb');if(_mfb) _mfb.style.width=pct(S.fidelity,1);
   st('mfs',S.fidelity>=.9?'excellent':S.fidelity>=.75?'good':S.fidelity>=.7?'marginal':'degraded');
   st('mc2',(S.coherence*100).toFixed(2)+'%');
-  document.getElementById('mcb').style.width=pct(S.coherence,1);
+  var _mcb=document.getElementById('mcb');if(_mcb) _mcb.style.width=pct(S.coherence,1);
   st('mbt',S.avg_block_seal_time_s>0?S.avg_block_seal_time_s.toFixed(1)+'s':'--');
   st('mtx',S.total_transactions);
   st('mdf',S.difficulty_bits);
@@ -1530,7 +1530,7 @@ async function refresh(){
       if(h>0&&h!==(window._lastIngestedHeight||0)){
         window._lastIngestedHeight=h;
         ingestNewBlockTxs(h, d.block_hash||'');
-        if(h>S.chain_height){S.chain_height=h;document.getElementById('bh').textContent=h;}
+        if(h>S.chain_height){S.chain_height=h;var _bh=document.getElementById('bh');if(_bh) _bh.textContent=h;}
         // New block = miner won — refresh registry after a beat
         setTimeout(fetchMiners, 2000);
 
