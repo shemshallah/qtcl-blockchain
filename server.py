@@ -306,6 +306,13 @@ class DHTManager:
 
 from decimal import Decimal
 from concurrent.futures import ThreadPoolExecutor  # H2: Thread pooling for DoS prevention
+import random  # required by P2P broadcast loop
+try:
+    import psycopg2
+    import psycopg2.pool as psycopg2_pool_mod
+except ImportError:
+    psycopg2 = None  # type: ignore
+    psycopg2_pool_mod = None
 
 from flask import Flask, jsonify, request, render_template_string, send_file, Response, stream_with_context
 import requests
@@ -967,7 +974,7 @@ class DatabasePool:
                 self._initialized = True
                 self.use_pooling  = False
                 self.pool         = None
-            except psycopg2.OperationalError as e:
+            except (psycopg2.OperationalError if psycopg2 else Exception) as e:
                 logger.error(f"[DB] ❌ Cannot connect to Supabase pooler: {e}")
                 logger.error("[DB] Check POOLER_* environment variables are set correctly")
                 self._initialized = False
@@ -2942,19 +2949,14 @@ def peer_register():
     data.setdefault('ip_address', request.remote_addr)
     data['peer_id'] = peer_id
 
-    # ALWAYS override ip_address with the public IP seen at the Koyeb edge.
-    # Miners behind NAT send their LAN IP — remote_addr is their true public IP.
     data['ip_address'] = request.remote_addr
-    # Resolve "auto" gossip_url sentinel (miner sends port, server fills in public IP)
     gurl = data.get('gossip_url', '')
     if 'auto' in gurl or not gurl or 'localhost' in gurl:
         _port = int(data.get('port') or 9091)
         data['gossip_url'] = f"http://{request.remote_addr}:{_port}"
-
     ok = _upsert_peer(peer_id, data)
     live_peers = _get_live_peers(exclude_peer_id=peer_id)
 
-    # Announce — ip_address included so live miners can immediately wire C P2P
     _gossip_sse.publish('peer', {
         'event'       : 'peer_joined',
         'peer_id'     : peer_id,
@@ -9902,14 +9904,13 @@ def p2p_peers():
 
 @app.route('/api/p2p/peer_exchange', methods=['POST', 'GET'])
 def p2p_peer_exchange():
-    """Peer exchange: upsert caller using remote_addr as public IP, return live peers."""
+    """Peer exchange using request.remote_addr as authoritative public IP."""
     data        = request.get_json(force=True, silent=True) or {}
     caller_ip   = request.remote_addr or '127.0.0.1'
     caller_port = int(data.get('port') or 9091)
     node_id     = (data.get('node_id') or '').strip()
     if not node_id:
         node_id = hashlib.sha256(f"{caller_ip}:{caller_port}:{time.time_ns()}".encode()).hexdigest()[:32]
-
     _upsert_peer(node_id, {
         'peer_id'        : node_id,
         'ip_address'     : caller_ip,
@@ -9919,7 +9920,6 @@ def p2p_peer_exchange():
         'network_version': str(data.get('version') or '3'),
         'supports_sse'   : True,
     })
-
     live = _get_live_peers(exclude_peer_id=node_id)
     peers_out = [{
         'host'         : p.get('ip_address', ''),
@@ -9929,14 +9929,12 @@ def p2p_peer_exchange():
         'block_height' : int(p.get('block_height') or 0),
         'gossip_url'   : p.get('gossip_url', ''),
     } for p in live if p.get('ip_address','') not in ('','127.0.0.1','localhost')]
-
     tip = query_latest_block() or {}
     server_base = (os.getenv('KOYEB_PUBLIC_DOMAIN') or
                    os.getenv('RAILWAY_PUBLIC_DOMAIN') or
                    f"http://localhost:{os.getenv('PORT', 8000)}")
     if server_base and not server_base.startswith('http'):
         server_base = f"https://{server_base}"
-
     _gossip_sse.publish('peer', {
         'event'       : 'peer_joined',
         'peer_id'     : node_id,
@@ -9946,7 +9944,6 @@ def p2p_peer_exchange():
         'gossip_url'  : f"http://{caller_ip}:{caller_port}",
         'block_height': int(data.get('block_height') or 0),
     })
-
     return jsonify({
         'node_id'   : node_id,
         'peers'     : peers_out,

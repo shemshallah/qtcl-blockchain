@@ -1591,7 +1591,17 @@ class OracleWStateManager:
                     logger.debug(f"[ORACLE CLUSTER] Async Mermin failed: {_exc}")
 
             with self._state_lock:
-                self._mermin_future = self._mermin_executor.submit(_async_mermin)
+                # Recreate executor if it was shut down (gunicorn worker recycle)
+                try:
+                    if self._mermin_executor._shutdown:
+                        self._mermin_executor = ThreadPoolExecutor(
+                            max_workers=1, thread_name_prefix="MerminAsync")
+                except Exception:
+                    pass
+                try:
+                    self._mermin_future = self._mermin_executor.submit(_async_mermin)
+                except RuntimeError:
+                    pass  # executor shut down — skip this Mermin computation
 
         with self._state_lock:
             mermin_result = self._last_mermin
@@ -1725,8 +1735,21 @@ class OracleWStateManager:
                         )
                 time.sleep(W_STATE_STREAM_INTERVAL_MS / 1000.0)
             except Exception as exc:
-                logger.error(f"[ORACLE CLUSTER] Stream error: {exc}")
-                time.sleep(0.1)
+                _exc_str = str(exc)
+                if 'cannot schedule new futures after shutdown' in _exc_str:
+                    # Executor shut down by gunicorn — recreate and continue
+                    try:
+                        self._pool = ThreadPoolExecutor(
+                            max_workers=5, thread_name_prefix="OracleMeasure")
+                        self._mermin_executor = ThreadPoolExecutor(
+                            max_workers=1, thread_name_prefix="MerminAsync")
+                        logger.info("[ORACLE CLUSTER] 🔄 Executors resurrected after shutdown")
+                    except Exception as _re:
+                        logger.debug(f"[ORACLE CLUSTER] executor resurrect: {_re}")
+                    time.sleep(1.0)
+                else:
+                    logger.error(f"[ORACLE CLUSTER] Stream error: {exc}")
+                    time.sleep(0.1)
 
     def _refresh_worker(self):
         logger.info("[ORACLE CLUSTER] 🔄 Housekeeping worker started")
