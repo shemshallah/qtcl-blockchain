@@ -31,6 +31,47 @@ import sys
 import logging
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════
+# PHASE 0: CFFI VERSION GUARD (MUST BE ABSOLUTE FIRST — before any import touches cffi)
+# ═════════════════════════════════════════════════════════════════════════════════════════════
+# cffi >= 2.0.0 has no pre-built manylinux wheel on Koyeb's runtime image.
+# Without a wheel, importing cffi triggers _cffi_backend.so source compilation
+# which requires libssl-dev (OpenSSL headers) — absent on Koyeb → 90s hang → SIGTERM.
+# Force-downgrade here before HLWE, server, or oracle can import cffi.
+
+def _patch12_cffi_guard():
+    import subprocess as _sp, glob as _gl, os as _os
+    # 1. Purge stale cffi C artifacts that trigger re-compilation on import
+    for _pat in [
+        '__pycache__/_cffi__*.c', '__pycache__/_cffi__*.so',
+        '/workspace/__pycache__/_cffi__*.c', '/workspace/__pycache__/_cffi__*.so',
+        '/tmp/_cffi__*.c', '/tmp/qtcl_oracle_accel*',
+    ]:
+        for _f in _gl.glob(_pat):
+            try: _os.remove(_f)
+            except OSError: pass
+    # 2. Check installed version — downgrade only if needed
+    try:
+        import cffi as _cffi_mod
+        _maj = int(_cffi_mod.__version__.split('.')[0])
+        if _maj >= 2:
+            print(f"[WSGI-PHASE0] cffi {_cffi_mod.__version__} >= 2.0.0 detected — "
+                  f"force-downgrading to <2.0.0 (no OpenSSL headers on Koyeb runtime)",
+                  flush=True)
+            _sp.run(
+                [sys.executable, '-m', 'pip', 'install', '--force-reinstall',
+                 '--no-cache-dir', '--quiet', 'cffi>=1.15.1,<2.0.0'],
+                timeout=120, check=False
+            )
+            print("[WSGI-PHASE0] cffi downgrade complete", flush=True)
+        else:
+            print(f"[WSGI-PHASE0] cffi {_cffi_mod.__version__} OK (< 2.0.0)", flush=True)
+    except ImportError:
+        print("[WSGI-PHASE0] cffi not installed — will be installed via requirements.txt", flush=True)
+
+_patch12_cffi_guard()
+del _patch12_cffi_guard
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════
 # PHASE 0: LOGGING SETUP (MUST BE FIRST - everything depends on this)
 # ═════════════════════════════════════════════════════════════════════════════════════════════
 

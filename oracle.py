@@ -319,7 +319,27 @@ def _compile_oracle_c_layer():
         logger.debug(f"[ORACLE-C] C layer unavailable ({type(_e).__name__}): {_e} — numpy fallback active")
 
 # KOYEB FIX: background thread — oracle import returns instantly, gunicorn binds port < 2 s
-threading.Thread(target=_compile_oracle_c_layer, daemon=True, name="OracleCCompile").start()
+# PATCH-11: Gate cffi thread on version check.  cffi >= 2.0.0 has no manylinux wheel on
+# Koyeb — importing it triggers a blocking _cffi_backend.so source compile that needs
+# OpenSSL headers (absent on Koyeb runtime) and hangs the worker for 90 s → SIGTERM.
+# numpy fallback (_OC_OK=False path) is 100% functionally equivalent — C layer is perf-only.
+def _safe_start_oracle_c_thread():
+    try:
+        import cffi as _cffi_check
+        _ver = tuple(int(x) for x in _cffi_check.__version__.split('.')[:2])
+        if _ver >= (2, 0):
+            logger.warning(
+                f"[ORACLE-C] cffi {_cffi_check.__version__} detected — skipping C acceleration "
+                f"(no manylinux wheel, source compile requires OpenSSL headers absent on Koyeb). "
+                f"numpy fallback active. Pin cffi<2.0.0 in requirements.txt to enable C layer."
+            )
+            return
+    except ImportError:
+        logger.debug("[ORACLE-C] cffi not installed — numpy fallback active")
+        return
+    threading.Thread(target=_compile_oracle_c_layer, daemon=True, name="OracleCCompile").start()
+
+_safe_start_oracle_c_thread()
 
 
 def _c_dm8_to_flat(rho: np.ndarray):
