@@ -1,15 +1,44 @@
-flask==3.0.0
-flask-cors==4.0.0
-requests==2.32.0
-urllib3==2.2.0
-numpy==1.23.5
-scipy==1.11.4
-Werkzeug==3.0.0
-gunicorn==21.2.0
-gevent==24.2.1
-gevent-websocket==0.10.1
-psycopg2-binary==2.9.9
-msgpack==1.0.7
-Qiskit==0.43.0
-qiskit-aer==0.12.0
-pydantic==2.5.0
+# ══════════════════════════════════════════════════════════════════════════════
+# QTCL SERVER — requirements.txt
+# Koyeb deployment (Python 3.12, linux/amd64)
+#
+# CRITICAL PIN: cffi must stay < 2.0.0
+#   cffi 2.0.0 has no pre-built wheel for all Koyeb runtime images.
+#   Without a wheel, pip compiles from source and needs libssl-dev headers
+#   which are absent in Koyeb's runtime container → fatal build crash:
+#     openssl/evp.h: No such file or directory
+#   cffi 1.x has guaranteed manylinux wheels — no compilation needed.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Build tools ───────────────────────────────────────────────────────────────
+setuptools>=68.0.0
+wheel>=0.41.0
+
+# ── CRITICAL: cffi pinned below 2.0.0 ────────────────────────────────────────
+cffi>=1.15.1,<2.0.0
+
+# ── Web framework + WSGI ──────────────────────────────────────────────────────
+flask>=3.0.0
+gunicorn>=21.2.0
+
+# ── Database ──────────────────────────────────────────────────────────────────
+psycopg2-binary>=2.9.9
+
+# ── Quantum simulation ────────────────────────────────────────────────────────
+qiskit>=1.0.0
+qiskit-aer>=0.14.0
+
+# ── Scientific stack ──────────────────────────────────────────────────────────
+numpy>=1.24.0
+scipy>=1.11.0
+
+# ── Networking + serialisation ────────────────────────────────────────────────
+requests>=2.31.0
+urllib3>=2.0.0
+msgpack>=1.0.7
+
+# ── Data validation ───────────────────────────────────────────────────────────
+pydantic>=2.0.0
+
+# NOTE: 'cryptography' package intentionally excluded — requires libssl-dev
+# at build time (absent on Koyeb runtime). Not used in server stack.
