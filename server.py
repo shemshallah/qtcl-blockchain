@@ -1030,14 +1030,52 @@ class DatabasePool:
 db_pool = DatabasePool()
 
 
+# ─── PATCH-2: db_ready() ─────────────────────────────────────────────────────
+# Called at ~line 459/483 inside get_oracle_address() / get_consensus_oracle_address()
+# but was NEVER DEFINED anywhere — NameError on every call, silently swallowed
+# by those functions' broad except blocks → silent fallback values forever.
+def db_ready() -> bool:
+    """Return True if the DB pool is usable; triggers lazy init if needed."""
+    try:
+        if not db_pool._initialized:
+            db_pool._initialize_pool()
+        return db_pool._initialized
+    except Exception as _e:
+        logger.debug(f"[DB] db_ready() check failed: {_e}")
+        return False
+
+
+# ─── PATCH-3: get_db_connection() ────────────────────────────────────────────
+# Called at ~line 462/486 inside get_oracle_address() / get_consensus_oracle_address()
+# but was NEVER DEFINED anywhere — same silent-NameError failure path as above.
+# Caller owns the connection: must call db_pool.put_connection(conn) when done.
+def get_db_connection():
+    """Return a raw psycopg2 connection from the pool (lazy init on first call)."""
+    if not db_pool._initialized:
+        db_pool._initialize_pool()
+    return db_pool.get_connection()
+
+
 @contextmanager
 def get_db_cursor():
-    """Context manager for database cursor with connection pooling"""
+    """Context manager for database cursor with connection pooling.
+
+    PATCH-1: Removed the early-exit guard on ``_initialized == False`` that
+    caused a circular deadlock.  Previously the guard fired the instant the
+    module loaded (because ``_initialized`` starts as ``False``) and raised
+    *before* ``get_connection()`` could call ``_initialize_pool()``, trapping
+    the pool in permanent "not initialized" state for the lifetime of the
+    process.
+
+    The *only* legitimate early exit is when the pool has been **explicitly
+    shut down** (gunicorn SIGTERM path) — we detect that via the ``closed``
+    flag on the underlying psycopg2 pool object, which is only set by
+    ``DatabasePool.close_all()`` / ``_SupHTTPPool.closeall()``.
+    """
     conn = None
     try:
-        # Skip if pool is closed (gunicorn shutdown in progress)
-        if hasattr(db_pool, '_initialized') and not db_pool._initialized:
-            raise RuntimeError("DB pool not initialized")
+        # Guard ONLY against explicit shutdown (pool.closed=True), never against
+        # "not yet initialized" — that is handled lazily inside get_connection().
         if hasattr(db_pool, 'pool') and db_pool.pool is not None:
             if hasattr(db_pool.pool, 'closed') and db_pool.pool.closed:
                 raise RuntimeError("DB pool closed")
