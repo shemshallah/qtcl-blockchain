@@ -326,7 +326,9 @@ _ORACLE_QRNG_INSTANCE = None
 _ORACLE_QRNG_LOCK     = threading.Lock()
 
 def _oracle_qrng_bytes(n: int) -> bytes:
+    """Get QRNG bytes with fast os.urandom fallback when ensemble is degraded."""
     global _ORACLE_QRNG_INSTANCE
+    import os as _qos
     if _ORACLE_QRNG_INSTANCE is None:
         with _ORACLE_QRNG_LOCK:
             if _ORACLE_QRNG_INSTANCE is None:
@@ -335,11 +337,18 @@ def _oracle_qrng_bytes(n: int) -> bytes:
                     _ORACLE_QRNG_INSTANCE = QuantumEntropyEnsemble()
                     logger.info("[ORACLE] ✅ QRNG ensemble wired — per-call stochastic channels active")
                 except Exception as _e:
-                    raise RuntimeError(f"[ORACLE] FATAL: QRNG init failed ({_e})")
+                    logger.warning(f"[ORACLE] QRNG init failed ({_e}) — using os.urandom")
+                    return _qos.urandom(n)
     try:
+        # Check if all circuit breakers are open — if so skip network wait
+        if hasattr(_ORACLE_QRNG_INSTANCE, '_sources'):
+            live = [s for s in _ORACLE_QRNG_INSTANCE._sources
+                    if not getattr(s, '_cb_open', False)]
+            if not live:
+                return _qos.urandom(n)   # all CBs open — instant fallback
         return _ORACLE_QRNG_INSTANCE.get_random_bytes(n)
-    except Exception as _e:
-        raise RuntimeError(f"[ORACLE] FATAL: QRNG.get_random_bytes({n}) failed: {_e}")
+    except Exception:
+        return _qos.urandom(n)   # any error → instant os.urandom fallback
 
 def _oracle_qrng_gaussian_pair() -> tuple:
     import struct as _s, math as _m
@@ -1736,8 +1745,13 @@ class OracleWStateManager:
                 time.sleep(W_STATE_STREAM_INTERVAL_MS / 1000.0)
             except Exception as exc:
                 _exc_str = str(exc)
-                if 'cannot schedule new futures after shutdown' in _exc_str:
-                    # Executor shut down by gunicorn — recreate and continue
+                if 'cannot schedule new futures' in _exc_str:
+                    # Check if Python interpreter is shutting down — if so, exit cleanly
+                    import sys as _sys
+                    if getattr(_sys, 'is_finalizing', lambda: False)() or                        'interpreter shutdown' in _exc_str:
+                        logger.debug("[ORACLE CLUSTER] Interpreter shutdown — stream worker exiting")
+                        return   # clean exit during process teardown
+                    # Worker recycle (not interpreter shutdown) — recreate executors
                     try:
                         self._pool = ThreadPoolExecutor(
                             max_workers=5, thread_name_prefix="OracleMeasure")

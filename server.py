@@ -1035,6 +1035,12 @@ def get_db_cursor():
     """Context manager for database cursor with connection pooling"""
     conn = None
     try:
+        # Skip if pool is closed (gunicorn shutdown in progress)
+        if hasattr(db_pool, '_initialized') and not db_pool._initialized:
+            raise RuntimeError("DB pool not initialized")
+        if hasattr(db_pool, 'pool') and db_pool.pool is not None:
+            if hasattr(db_pool.pool, 'closed') and db_pool.pool.closed:
+                raise RuntimeError("DB pool closed")
         conn = db_pool.get_connection()
         cur = conn.cursor()
         yield cur
@@ -1045,7 +1051,11 @@ def get_db_cursor():
                 conn.rollback()
             except:
                 pass
-        logger.error(f"[DB] Query error: {e}")
+        _e_str = str(e)
+        if 'pool is closed' in _e_str or 'connection pool is closed' in _e_str:
+            logger.debug(f"[DB] Pool closed (shutdown): {e}")
+        else:
+            logger.error(f"[DB] Query error: {e}")
         raise
     finally:
         if conn:
@@ -4478,6 +4488,9 @@ class PeerDiscoveryEngine:
             except Exception as e:
                 logger.debug(f"[DISCOVERY] Invalid bootstrap node {bootstrap}: {e}")
         
+        # Filter loopback/self addresses from candidates
+        candidates = {(h, p) for h, p in candidates
+                      if h not in ('', '127.0.0.1', 'localhost', '0.0.0.0')}
         with self.lock:
             self.peer_candidates.update(candidates)
             logger.info(f"[DISCOVERY] Total candidate peers: {len(self.peer_candidates)}")
