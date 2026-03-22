@@ -1090,7 +1090,13 @@ def get_db_cursor():
             except:
                 pass
         _e_str = str(e)
-        if 'pool is closed' in _e_str or 'connection pool is closed' in _e_str:
+        # PATCH-6: 'DB pool closed' is our own sentinel from the guard above;
+        # 'pool is closed' / 'connection pool is closed' come from psycopg2 itself.
+        # All three are expected after gunicorn SIGTERM — log at DEBUG, not ERROR.
+        _is_shutdown = ('pool is closed' in _e_str or
+                        'connection pool is closed' in _e_str or
+                        'DB pool closed' in _e_str)
+        if _is_shutdown:
             logger.debug(f"[DB] Pool closed (shutdown): {e}")
         else:
             logger.error(f"[DB] Query error: {e}")
@@ -2396,6 +2402,17 @@ class _SSEBroadcaster:
 
 _gossip_sse = _SSEBroadcaster()  # module-level singleton — one per worker, cross-worker via PG NOTIFY
 
+# PATCH-4a: Public alias used by oracle sync daemon at ~line 12121.
+# _gossip_sse is the correct singleton but oracle sync references SSE_BROADCASTER
+# (undefined) — wire it here so hasattr() guard succeeds and events actually flow.
+SSE_BROADCASTER = _gossip_sse
+
+# PATCH-4b: Oracle sync calls SSE_BROADCASTER.push(event_type, payload) but
+# _SSEBroadcaster exposes publish(event_type, data) — add push() as a direct
+# alias so the call succeeds without changing the oracle sync callsite.
+if not hasattr(_SSEBroadcaster, 'push'):
+    _SSEBroadcaster.push = _SSEBroadcaster.publish
+
 # ── DB-backed gossip store — replaces per-process in-memory DHTManager ───────
 def _ensure_oracle_registry() -> bool:
     """CREATE TABLE IF NOT EXISTS oracle_registry — idempotent, safe every deploy."""
@@ -3345,7 +3362,7 @@ class UnifiedOracleMux:
         self.oracle_order    = list(self._ORACLE_ROLES.keys())
         self.chirp_count     = 0
         self._lock           = threading.RLock()
-        logger.info(f"[ORACLE-MUX] Initialized unified multiplexer on port 9091")
+        logger.info(f"[ORACLE-MUX] Initialized unified multiplexer → SSE on port 443 (/api/events, /api/snapshot/sse), P2P on port 9091")
         logger.info(f"[ORACLE-MUX] Round-robin order: {' → '.join(self.oracle_order)} → repeat")
 
     def aggregate_all_measurements(self) -> Optional[dict]:
@@ -3601,9 +3618,10 @@ def _snapshot_streaming_daemon():
     flood clients faster than meaningful quantum state evolution.
     """
     logger.info(
-        "[ORACLE-MUX-DAEMON] 🚀 Unified port 9091 daemon STARTED\n"
+        "[ORACLE-MUX-DAEMON] 🚀 Unified oracle MUX daemon STARTED\n"
         "    Source: ORACLE_W_STATE_MANAGER (real 5-qubit AER block-field measurements)\n"
         "    Broadcast: Single chirp every 250ms (oracle consensus + Mermin + lattice)\n"
+        "    SSE: port 443 (/api/events + /api/snapshot/sse) — NOT port 9091 (P2P only)\n"
         "    Dashboard: All metrics from live quantum measurements — zero synthetic values"
     )
 
@@ -5470,6 +5488,42 @@ class P2PServer:
                                     # Force uncompressed response — proxy can't transparently
                                     # decompress gzip before rewriting Content-Length
                                     _fwd['Accept-Encoding'] = 'identity'
+
+                                    # ── PATCH-7: SSE-on-9091 REDIRECT ────────────────────────────
+                                    # SSE endpoints must ONLY be served on port 443 (HTTPS/Koyeb).
+                                    # Proxying an infinite text/event-stream through the raw TCP
+                                    # P2P socket holds one gthread per connected miner forever and
+                                    # causes port confusion — miners may cache 9091 as their SSE
+                                    # endpoint. Non-loopback SSE requests on 9091 get a 301 to the
+                                    # canonical 443 HTTPS URL so the client self-heals immediately.
+                                    # Loopback (127.0.0.1) keeps the proxy path for internal calls.
+                                    _SSE_PATHS  = ('/api/events', '/api/snapshot/sse')
+                                    _path_base  = _path_s.split('?')[0]
+                                    _is_sse_req = (any(_path_base == sp or _path_base.startswith(sp)
+                                                       for sp in _SSE_PATHS) or
+                                                   _headers_lc.get('accept','').find('text/event-stream') != -1)
+                                    _from_local = addr[0] in ('127.0.0.1', '::1', 'localhost')
+                                    if _is_sse_req and not _from_local:
+                                        _kd = (os.getenv('KOYEB_PUBLIC_DOMAIN') or
+                                               os.getenv('RAILWAY_PUBLIC_DOMAIN') or '')
+                                        _qs = ('?' + _path_s.split('?',1)[1]) if '?' in _path_s else ''
+                                        if _kd:
+                                            _redirect_target = f"https://{_kd}{_path_base}{_qs}"
+                                        else:
+                                            _redirect_target = f"http://localhost:{_FLASK_PORT}{_path_base}{_qs}"
+                                        _redir_body = (f'<html><body>SSE is only available on port 443. '
+                                                       f'<a href="{_redirect_target}">Redirect</a></body></html>').encode()
+                                        sock.sendall(
+                                            b'HTTP/1.1 301 Moved Permanently\r\n'
+                                            b'Location: ' + _redirect_target.encode() + b'\r\n'
+                                            b'Content-Type: text/html\r\n'
+                                            b'Content-Length: ' + str(len(_redir_body)).encode() + b'\r\n'
+                                            b'Connection: close\r\n\r\n' + _redir_body
+                                        )
+                                        logger.debug(f"[P2P] SSE on 9091 redirected {addr[0]} → {_redirect_target}")
+                                        return
+                                    # ── END PATCH-7 ──────────────────────────────────────────────
+
                                     # FIX: use truthiness-safe body — b'' should pass as None, not zero-length body
                                     _send_body = _body_buf if _body_buf else None
                                     _conn.request(_method, _path_s, body=_send_body, headers=_fwd)
@@ -12031,27 +12085,26 @@ def _start_oracle_measurement_sync_daemon():
                         
                         # ───────────────────────────────────────────────────────────────────────
                         # PERSISTENCE PHASE: Write to DB
+                        # PATCH-5: DB_POOL was undefined and DB_POOL.getconn() is not a valid
+                        # context manager — replaced with canonical get_db_cursor() so oracle
+                        # measurements are actually persisted to the oracle_measurements table.
                         # ───────────────────────────────────────────────────────────────────────
                         try:
-                            if DB_POOL:
-                                with DB_POOL.getconn() as conn:
-                                    cursor = conn.cursor()
-                                    cursor.execute("""
-                                        INSERT INTO oracle_measurements (
-                                            cycle, timestamp_ns, lattice_fidelity, block_field_fidelity,
-                                            block_field_coherence, pq_curr, pq_last, oracle_count,
-                                            fidelity_delta, window_type, mermin_violation
-                                        ) VALUES (
-                                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                                        )
-                                    """, (
-                                        current_cycle, timestamp_ns, float(lattice_f), float(avg_bf_fidelity),
-                                        float(avg_bf_coherence), pq_curr, pq_last, len(bf_readings),
-                                        float(fidelity_delta), 'REVIVAL' if is_revival else 'POWER-2',
-                                        float(avg_mermin)
-                                    ))
-                                    conn.commit()
-                                    cursor.close()
+                            with get_db_cursor() as cursor:
+                                cursor.execute("""
+                                    INSERT INTO oracle_measurements (
+                                        cycle, timestamp_ns, lattice_fidelity, block_field_fidelity,
+                                        block_field_coherence, pq_curr, pq_last, oracle_count,
+                                        fidelity_delta, window_type, mermin_violation
+                                    ) VALUES (
+                                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                                    )
+                                """, (
+                                    current_cycle, timestamp_ns, float(lattice_f), float(avg_bf_fidelity),
+                                    float(avg_bf_coherence), pq_curr, pq_last, len(bf_readings),
+                                    float(fidelity_delta), 'REVIVAL' if is_revival else 'POWER-2',
+                                    float(avg_mermin)
+                                ))
                         except Exception as db_err:
                             logger.debug(f"[ORACLE-SYNC] DB write warning: {db_err}")
                         
