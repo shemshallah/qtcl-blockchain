@@ -2648,6 +2648,9 @@ def _upsert_peer(peer_id: str, data: Dict[str, Any]) -> bool:
                     block_height    = EXCLUDED.block_height,
                     chain_head_hash = EXCLUDED.chain_head_hash,
                     network_version = EXCLUDED.network_version,
+                    port            = CASE WHEN EXCLUDED.port > 0
+                                          THEN EXCLUDED.port
+                                          ELSE peer_registry.port END,
                     gossip_url      = COALESCE(EXCLUDED.gossip_url, peer_registry.gossip_url),
                     miner_address   = COALESCE(NULLIF(EXCLUDED.miner_address,''), peer_registry.miner_address),
                     supports_sse    = EXCLUDED.supports_sse,
@@ -2657,7 +2660,7 @@ def _upsert_peer(peer_id: str, data: Dict[str, Any]) -> bool:
                 peer_id,
                 data.get('public_key', peer_id),
                 data.get('ip_address', data.get('host', '')),
-                int(data.get('port', 0)),
+                int(data.get('port') or 9091),
                 data.get('peer_type', 'miner'),
                 int(data.get('block_height', 0)),
                 data.get('chain_head_hash', ''),
@@ -2691,14 +2694,16 @@ def _get_live_peers(exclude_peer_id: str = '') -> List[Dict[str, Any]]:
                 {
                     'peer_id'       : r[0],
                     'ip_address'    : r[1],
-                    'port'          : r[2],
+                    'host'          : r[1],   # alias so C P2P connect works directly
+                    'port'          : int(r[2] or 9091),
                     'gossip_url'    : r[3] or '',
-                    'block_height'  : r[4],
+                    'block_height'  : int(r[4] or 0),
                     'miner_address' : r[5] or '',
                     'supports_sse'  : bool(r[6]),
                     'last_seen'     : r[7].isoformat() if r[7] else '',
                 }
                 for r in rows
+                if r[1] and r[1] not in ('127.0.0.1', 'localhost', '')
             ]
     except Exception as e:
         logger.error(f"[GOSSIP] _get_live_peers: {e}")
@@ -2934,12 +2939,17 @@ def peer_register():
     ok = _upsert_peer(peer_id, data)
     live_peers = _get_live_peers(exclude_peer_id=peer_id)
 
-    # Announce to SSE subscribers
+    # Announce to SSE subscribers — include ip_address + port so miners can
+    # immediately wire the new peer into their C P2P layer via SSE event handler
     _gossip_sse.publish('peer', {
-        'event'       : 'joined',
+        'event'       : 'peer_joined',
         'peer_id'     : peer_id,
+        'ip_address'  : data.get('ip_address', request.remote_addr),
+        'host'        : data.get('ip_address', request.remote_addr),
+        'port'        : int(data.get('port') or 9091),
         'gossip_url'  : data.get('gossip_url', ''),
-        'block_height': int(data.get('block_height', 0)),
+        'block_height': int(data.get('block_height') or 0),
+        'miner_address': data.get('miner_address', ''),
     })
 
     tip = query_latest_block() or {}
@@ -2982,14 +2992,27 @@ def peer_heartbeat():
         with get_db_cursor() as cur:
             cur.execute("""
                 UPDATE peer_registry
-                SET    last_seen      = NOW(),
-                       block_height   = COALESCE(%s, block_height),
-                       chain_head_hash= COALESCE(%s, chain_head_hash),
-                       updated_at     = NOW()
+                SET    last_seen        = NOW(),
+                       ip_address       = COALESCE(NULLIF(%s,''), ip_address),
+                       port             = CASE WHEN %s > 0 THEN %s ELSE port END,
+                       block_height     = COALESCE(%s, block_height),
+                       chain_head_hash  = COALESCE(%s, chain_head_hash),
+                       updated_at       = NOW()
                 WHERE  peer_id = %s
+                RETURNING peer_id
             """, (
+                request.remote_addr,
+                int(data.get('port') or 0), int(data.get('port') or 0),
                 data.get('block_height'), data.get('chain_head_hash'), peer_id,
             ))
+            found = cur.fetchone()
+        if not found:
+            _upsert_peer(peer_id, {
+                'peer_id'     : peer_id,
+                'ip_address'  : request.remote_addr,
+                'port'        : int(data.get('port') or 9091),
+                'block_height': int(data.get('block_height') or 0),
+            })
         return jsonify({'ok': True, 'ts': time.time()}), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -9859,6 +9882,90 @@ def p2p_peers():
     return jsonify({
         'peer_count': P2P.get_peer_count(),
         'peers': P2P.get_peer_info(),
+    }), 200
+
+
+@app.route('/api/p2p/peer_exchange', methods=['POST', 'GET'])
+def p2p_peer_exchange():
+    """
+    Unified peer-exchange endpoint consumed by QtclP2PNode._peer_exchange()
+    and _boot_p2p_broadcast() on every miner.
+
+    POST body (optional JSON):
+        node_id      str  — caller's stable node-id
+        port         int  — caller's P2P listen port (default 9091)
+        version      int  — protocol version
+        capabilities list — e.g. ['wstate','dmpool','sse']
+
+    Behaviour:
+        1. Upserts caller into peer_registry (same as /api/peers/register)
+           using request.remote_addr as the canonical routable ip_address.
+        2. Returns ALL live peers (excluding caller) with host/port fields
+           so the C P2P layer can immediately qtcl_p2p_connect to them.
+        3. Also returns current oracle chain tip for miner sync.
+
+    Response: { peers: [{host, port, peer_id, block_height},...],
+                peer_count, oracle_tip, sse_url }
+    """
+    data     = request.get_json(force=True, silent=True) or {}
+    node_id  = (data.get('node_id') or '').strip()
+    caller_ip = request.remote_addr or '127.0.0.1'
+    caller_port = int(data.get('port') or 9091)
+
+    if not node_id:
+        node_id = hashlib.sha256(f"{caller_ip}:{caller_port}:{time.time_ns()}".encode()).hexdigest()[:32]
+
+    # Upsert caller so other peers can find them
+    _upsert_peer(node_id, {
+        'peer_id'        : node_id,
+        'ip_address'     : caller_ip,
+        'port'           : caller_port,
+        'gossip_url'     : f"http://{caller_ip}:{caller_port}",
+        'block_height'   : int(data.get('block_height') or 0),
+        'network_version': str(data.get('version') or data.get('network_version') or '3'),
+        'supports_sse'   : True,
+    })
+
+    live = _get_live_peers(exclude_peer_id=node_id)
+
+    # Shape peers as {host, port, peer_id, block_height} for C P2P connect
+    peers_out = [
+        {
+            'host'         : p.get('ip_address') or p.get('gossip_url','').split('://')[-1].split(':')[0],
+            'port'         : int(p.get('port') or 9091),
+            'peer_id'      : p.get('peer_id',''),
+            'block_height' : int(p.get('block_height') or 0),
+            'gossip_url'   : p.get('gossip_url',''),
+            'miner_address': p.get('miner_address',''),
+        }
+        for p in live
+        if (p.get('ip_address') or '').strip() not in ('', '127.0.0.1', 'localhost')
+    ]
+
+    tip = query_latest_block() or {}
+    server_base = (
+        os.getenv('KOYEB_PUBLIC_DOMAIN') or
+        os.getenv('RAILWAY_PUBLIC_DOMAIN') or
+        f"http://localhost:{os.getenv('PORT', 8000)}"
+    )
+    if server_base and not server_base.startswith('http'):
+        server_base = f"https://{server_base}"
+
+    _gossip_sse.publish('peer', {
+        'event'       : 'exchange',
+        'peer_id'     : node_id,
+        'ip_address'  : caller_ip,
+        'port'        : caller_port,
+        'block_height': int(data.get('block_height') or 0),
+    })
+
+    return jsonify({
+        'node_id'    : node_id,
+        'peers'      : peers_out,
+        'peer_count' : len(peers_out),
+        'oracle_tip' : int(tip.get('height') or 0),
+        'sse_url'    : f"{server_base}/api/events?client_id={node_id}",
+        'ts'         : time.time(),
     }), 200
 
 
