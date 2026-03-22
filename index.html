@@ -1000,14 +1000,14 @@ async function loadTxPage(){
   txLoading=true;
   // FIX: Safety watchdog — if loadTxPage somehow hangs past 10s, force-release the lock
   // so the 30s background sync and SSE new_block ingestor are never permanently blocked.
-  var _txWatchdog=setTimeout(function(){txLoading=false;},10000);
+  var _txWatchdog=setTimeout(function(){txLoading=false;},5000);
   var tb=document.getElementById('ttb');
   if(tb) tb.innerHTML='<tr><td colspan="7" class="es" style="opacity:.5">Loading…</td></tr>';
   try{
     var params='?page='+txPage_n+'&per_page='+txPerPage;
     if(txFilterMode&&txFilterMode!=='all') params+='&type='+txFilterMode;
     if(txSearchQ) params+='&address='+encodeURIComponent(txSearchQ);
-    var d=await api('/api/transactions'+params);
+    var d=await apiTx('/api/transactions'+params);
     if(!d||d.error){
       if(tb) tb.innerHTML='<tr><td colspan="7" class="es">'+
         (d&&d.error?d.error:'Server unavailable — retrying…')+'</td></tr>';
@@ -1037,21 +1037,27 @@ function renderTxs(){
 }
 
 // Ingest a brand-new tx from SSE new_block event (no reload needed)
+var _ingestDebounce=null;
 function ingestNewBlockTxs(height, blockHash){
-  api('/api/blocks/height/'+height+'/transactions').then(function(d){
-    if(!d||!d.transactions) return;
-    var fresh=d.transactions;
-    fresh.forEach(function(t){t._fresh=true;});
-    // Only update in-memory if we're on page 0 and not filtering
-    if(txPage_n===0 && txFilterMode==='all' && !txSearchQ){
-      txs=fresh.concat(txs.slice(0,txPerPage-fresh.length));
-      txTotal=Math.max(txTotal,txs.length);
-      renderTxs();
-      // Flash live indicator
-      var li=document.getElementById('tx-live');
-      if(li){li.style.color='var(--go)';setTimeout(function(){li.style.color='var(--gr)';},1200);}
-    }
-  });
+  // Debounce: rapid new_block SSE bursts (e.g. fork resolution) would pile up
+  // multiple in-flight api calls. Collapse to one call 300ms after last event.
+  clearTimeout(_ingestDebounce);
+  _ingestDebounce=setTimeout(function(){
+    apiTx('/api/blocks/height/'+height+'/transactions').then(function(d){
+      if(!d||!d.transactions) return;
+      var fresh=d.transactions;
+      fresh.forEach(function(t){t._fresh=true;});
+      // Only update in-memory if we're on page 0 and not filtering
+      if(txPage_n===0 && txFilterMode==='all' && !txSearchQ){
+        txs=fresh.concat(txs.slice(0,txPerPage-fresh.length));
+        txTotal=Math.max(txTotal,txs.length);
+        renderTxs();
+        // Flash live indicator
+        var li=document.getElementById('tx-live');
+        if(li){li.style.color='var(--go)';setTimeout(function(){li.style.color='var(--gr)';},1200);}
+      }
+    });
+  },300);
 }
 function renderOracles(){
   // S.oracle_data is populated from chirp oracle_measurements array
@@ -1276,9 +1282,16 @@ function updateDOM(){
 async function api(path){
   try{var r=await fetch(BASE+path,{signal:AbortSignal.timeout(6000)});if(!r.ok) return null;return await r.json();}catch(e){return null;}
 }
+// Tiered API: fast=2s for metrics-critical, tx=4s for history (never blocks metrics)
+async function apiF(path){
+  try{var r=await fetch(BASE+path,{signal:AbortSignal.timeout(2000)});if(!r.ok)return null;return await r.json();}catch(e){return null;}
+}
+async function apiTx(path){
+  try{var r=await fetch(BASE+path,{signal:AbortSignal.timeout(4000)});if(!r.ok)return null;return await r.json();}catch(e){return null;}
+}
 
 async function fetchChain(){
-  var d=await api('/api/chain');if(!d||d.error) return;
+  var d=await apiF('/api/chain');if(!d||d.error) return;
   // Copy exact keys
   S.chain_height=d.chain_height||0;
   S.total_transactions=d.total_transactions||0;
@@ -1308,7 +1321,7 @@ async function fetchChain(){
 }
 
 async function fetchWState(){
-  var d=await api('/api/oracle/w-state');if(!d||d.error) return;
+  var d=await apiF('/api/oracle/w-state');if(!d||d.error) return;
   S.fidelity=d.fidelity||d.w3_fidelity||S.fidelity;
   S.coherence=d.coherence||S.coherence;
   S.purity=d.purity||S.purity;
@@ -1341,21 +1354,17 @@ async function fetchWState(){
 }
 
 async function fetchMempool(){
-  // FIX: Promise.allSettled — never short-circuits; both fetches always complete independently.
-  // Promise.all was causing rfg to get permanently stuck true when either endpoint threw during P2P init.
-  var r=await Promise.allSettled([api('/api/mempool/stats'),api('/api/mempool')]);
+  var r=await Promise.allSettled([apiF('/api/mempool/stats'),apiF('/api/mempool')]);
   var stats=r[0].status==='fulfilled'?r[0].value:null;
   var pend =r[1].status==='fulfilled'?r[1].value:null;
-  // mempool.stats() returns: size, total_fee_base, min_fee_rate, max_fee_rate, avg_fee_rate, total_accepted...
   if(stats&&stats.size!=null) S.mempool_size=stats.size;
   if(pend&&pend.transactions){
-    // TX explorer is loaded via /api/transactions — mempool poll kept for badge only
     document.getElementById('txb').textContent=(S.total_transactions||pend.transactions.length)+' txs';
   }
 }
 
 async function fetchDiff(){
-  var d=await api('/api/difficulty');if(!d||d.error) return;
+  var d=await apiF('/api/difficulty');if(!d||d.error) return;
   S.difficulty_bits=d.difficulty_bits||S.difficulty_bits;
 }
 
@@ -1381,8 +1390,19 @@ async function fetchPeers(){
 //            any miner has called /api/peers/register, even if zero blocks mined)
 // The miner panel is ONLY populated from these two endpoints — never from TCP /api/p2p/peers.
 async function fetchMiners(){
+  // All three sources fired IN PARALLEL with 2s timeout each — max wall time 2s not 18s.
+  // Sequential api() (6s each) was the primary cause of thread exhaustion → SSE starvation
+  // → online/offline cycling. Sources evaluated in priority order from parallel results.
+  var _r=await Promise.allSettled([
+    apiF('/api/miners'),
+    apiF('/api/peers/list?include_stale=1'),
+    apiF('/api/chain')
+  ]);
+  var d  = _r[0].status==='fulfilled'?_r[0].value:null;
+  var pd = _r[1].status==='fulfilled'?_r[1].value:null;
+  var cd = _r[2].status==='fulfilled'?_r[2].value:null;
+
   // ── Source 1: /api/miners (blocks.validator_public_key + peer_registry merge) ──
-  var d=await api('/api/miners');
   if(d&&!d.error&&Array.isArray(d.miners)&&d.miners.length>0){
     d.miners.forEach(function(m){if(!m.status) m.status='historic';});
     renderMiners(d.miners);
@@ -1393,7 +1413,6 @@ async function fetchMiners(){
     return;
   }
   // ── Source 2: /api/peers/list?include_stale=1 (raw peer_registry) ──────────
-  var pd=await api('/api/peers/list?include_stale=1');
   if(pd&&!pd.error&&Array.isArray(pd.peers)&&pd.peers.length>0){
     var stale=300;
     var miners=pd.peers.map(function(p){
@@ -1417,7 +1436,6 @@ async function fetchMiners(){
     }
   }
   // ── Source 3: /api/chain miners dict (uses validator_public_key — always correct) ─
-  var cd=await api('/api/chain');
   if(cd&&!cd.error&&cd.miners&&typeof cd.miners==='object'){
     var mkeys=Object.keys(cd.miners);
     if(mkeys.length>0){
@@ -1596,7 +1614,7 @@ async function refresh(){
 
 // On page load: seed state from DB snapshot before first SSE chirp arrives
 async function fetchLatestSnapshot(){
-  var d=await api('/api/snapshots/latest');
+  var d=await apiF('/api/snapshots/latest');
   if(!d||!d.ready) return;
   _ingestChirp(d);  // same path as SSE — normalises oracle_data, pq_curr/last, mermin, lattice
 }
