@@ -9219,14 +9219,24 @@ def submit_block():
             _ensure_wallet(cur, COINBASE_ADDRESS, 'coinbase')
             _ensure_wallet(cur, TREASURY_ADDRESS, 'treasury')
 
-            # Dedup: remove stale miner coinbase rows for this height
+            # Dedup: remove ONLY stale MINER coinbase rows (transaction_index=0).
+            # CRITICAL: must scope to transaction_index=0 so we never accidentally
+            # delete the treasury coinbase when miner_address == TREASURY_ADDRESS
+            # (both have the same to_address; without this scope the treasury dedup
+            # would wipe the miner coinbase and vice-versa).
             cur.execute("""
                 DELETE FROM transactions
-                WHERE height = %s AND tx_type = 'coinbase'
-                  AND to_address = %s AND tx_hash != %s
+                WHERE height = %s
+                  AND tx_type = 'coinbase'
+                  AND transaction_index = 0
+                  AND to_address = %s
+                  AND tx_hash != %s
             """, (block_height, miner_address, coinbase_id))
             if cur.rowcount > 0:
-                logger.warning(f"[COINBASE] 🧹 Removed {cur.rowcount} stale miner coinbase(s) for h={block_height}")
+                logger.warning(
+                    f"[COINBASE] 🧹 Removed {cur.rowcount} stale miner coinbase(s) "
+                    f"(index=0) for h={block_height}"
+                )
 
             cur.execute("""
                 INSERT INTO transactions (
@@ -9303,14 +9313,22 @@ def submit_block():
             #      → qtcl110fc58e3c441106cc1e54ae41da5d15868525a87
             # ══════════════════════════════════════════════════════════════════════
 
-            # Dedup: remove stale treasury coinbase rows for this height
+            # Dedup: remove ONLY stale TREASURY coinbase rows (transaction_index=1).
+            # CRITICAL: scoped to transaction_index=1 — never touches miner coinbase
+            # even when TREASURY_ADDRESS == miner_address.
             cur.execute("""
                 DELETE FROM transactions
-                WHERE height = %s AND tx_type = 'coinbase'
-                  AND to_address = %s AND tx_hash != %s
+                WHERE height = %s
+                  AND tx_type = 'coinbase'
+                  AND transaction_index = 1
+                  AND to_address = %s
+                  AND tx_hash != %s
             """, (block_height, TREASURY_ADDRESS, treasury_cb_id))
             if cur.rowcount > 0:
-                logger.warning(f"[TREASURY] 🧹 Removed {cur.rowcount} stale treasury coinbase(s) for h={block_height}")
+                logger.warning(
+                    f"[TREASURY] 🧹 Removed {cur.rowcount} stale treasury coinbase(s) "
+                    f"(index=1) for h={block_height}"
+                )
 
             cur.execute("""
                 INSERT INTO transactions (
