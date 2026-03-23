@@ -1705,14 +1705,14 @@ class DifficultyManager:
     EWMA_ALPHA          = 0.40  # weight on newest sample — higher = faster reaction
     MAX_STEP_PER_BLOCK  = 1     # max ±1 per block — prevents oscillation
     WARMUP_BLOCKS       = 2     # blocks before first retarget (needs 1 gap sample)
-    FLOOR               = 6     # absolute minimum — never go below 6 leading zeros
+    FLOOR               = 5     # floor at 5 — fractional target 5.25 sits above this
     CEILING             = ABS_MAX
 
-    def __init__(self, initial_difficulty: int = 6,
+    def __init__(self, initial_difficulty: float = 5.25,
                  seed_ewma: float = None, seed_last_wall: float = None):
         import math as _m
         self._math = _m
-        self.current_difficulty = max(self.FLOOR, min(self.CEILING, initial_difficulty))
+        self.current_difficulty = max(float(self.FLOOR), min(float(self.CEILING), float(initial_difficulty)))
         self.min_difficulty     = self.FLOOR
         self.max_difficulty     = self.CEILING
         self.target_block_time_s  = self.TARGET_BLOCK_TIME_S
@@ -1736,12 +1736,12 @@ class DifficultyManager:
             f"seed_ewma={self._ewma_block_time:.1f}s"
         )
 
-    def get_difficulty(self) -> int:
+    def get_difficulty(self) -> float:
         return self.current_difficulty
 
-    def set_difficulty(self, difficulty: int) -> bool:
+    def set_difficulty(self, difficulty: float) -> bool:
         """Manual override — clamps to [floor, ceiling]."""
-        clamped = max(self.FLOOR, min(self.CEILING, difficulty))
+        clamped = max(float(self.FLOOR), min(float(self.CEILING), float(difficulty)))
         if clamped != difficulty:
             logger.warning(f"[DIFFICULTY] Requested {difficulty} clamped to {clamped}")
         old = self.current_difficulty
@@ -1783,6 +1783,8 @@ class DifficultyManager:
 
             implied_H/s = 16^current_diff / ewma_time
             ideal_diff  = log16(implied_H/s × target_time)
+
+        Steps in 0.25 increments to support fractional difficulty (e.g. 5.25, 5.50).
         """
         t = max(1.0, self._ewma_block_time)
         m = self._math
@@ -1792,23 +1794,30 @@ class DifficultyManager:
         except (ValueError, ZeroDivisionError, OverflowError):
             return   # skip retarget on numeric edge cases
 
-        target_diff = int(round(ideal))
-        delta       = max(-self.MAX_STEP_PER_BLOCK,
-                          min(self.MAX_STEP_PER_BLOCK, target_diff - self.current_difficulty))
-        new_diff    = max(self.FLOOR, min(self.CEILING, self.current_difficulty + delta))
+        # Round ideal to nearest 0.25 step for smooth fractional targeting
+        ideal_q     = round(ideal * 4) / 4.0
+        # Cap step size at ±MAX_STEP_PER_BLOCK but allow fractional steps
+        raw_delta   = ideal_q - self.current_difficulty
+        delta       = max(-float(self.MAX_STEP_PER_BLOCK),
+                          min(float(self.MAX_STEP_PER_BLOCK), raw_delta))
+        # Snap to nearest 0.25
+        delta       = round(delta * 4) / 4.0
+        new_diff    = max(float(self.FLOOR), min(float(self.CEILING), self.current_difficulty + delta))
+        # Snap result to 0.25 grid
+        new_diff    = round(new_diff * 4) / 4.0
 
-        if new_diff != self.current_difficulty:
+        if abs(new_diff - self.current_difficulty) >= 0.01:
             old = self.current_difficulty
             self.current_difficulty = new_diff
             logger.info(
-                f"[DIFFICULTY] ⚡ {old} → {new_diff} "
+                f"[DIFFICULTY] ⚡ {old:.2f} → {new_diff:.2f} "
                 f"| EWMA={t:.1f}s target={self.TARGET_BLOCK_TIME_S}s "
-                f"| implied={implied_rate:.0f} H/s ideal={ideal:.2f}"
+                f"| implied={implied_rate:.0f} H/s ideal={ideal:.3f}"
             )
         else:
             logger.debug(
-                f"[DIFFICULTY] hold={self.current_difficulty} "
-                f"EWMA={t:.1f}s ideal={ideal:.2f}"
+                f"[DIFFICULTY] hold={self.current_difficulty:.2f} "
+                f"EWMA={t:.1f}s ideal={ideal:.3f}"
             )
 
 
