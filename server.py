@@ -12561,3 +12561,583 @@ def _start_comprehensive_feed_when_ready():
 
 threading.Thread(target=_start_comprehensive_feed_when_ready, daemon=True,
                  name="ComprehensiveFeedWaiter").start()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# JSON-RPC 2.0 ENGINE — Enterprise-Grade, RFC-Compliant
+# ══════════════════════════════════════════════════════════════════════════════
+#
+#  Spec:   https://www.jsonrpc.org/specification
+#  Routes: POST /rpc          — dispatch (single + batch)
+#          GET  /rpc/methods  — introspection
+#          GET  /rpc/health   — engine health
+#
+#  Methods:
+#    qtcl_getBlockHeight    — current block height
+#    qtcl_getBalance        — address balance
+#    qtcl_getTransaction    — tx lookup by hash
+#    qtcl_getBlock          — block by height
+#    qtcl_getQuantumMetrics — live W-state oracle metrics
+#    qtcl_getPythPrice      — Pyth Network price feed (atomic snapshot)
+#    qtcl_getMempoolStats   — mempool depth, fee distribution
+#    qtcl_getPeers          — active peer list
+#    qtcl_getHealth         — full system health vector
+#
+#  Error codes (extends JSON-RPC 2.0 base):
+#    -32700  Parse error
+#    -32600  Invalid Request
+#    -32601  Method not found
+#    -32602  Invalid params
+#    -32603  Internal error
+#    -32000  Server error (QTCL-specific)
+#    -32001  Oracle unavailable
+#    -32002  Pyth oracle unreachable
+#    -32003  Node not synced
+#
+# ══════════════════════════════════════════════════════════════════════════════
+
+_JSONRPC_VERSION = "2.0"
+
+# ─── Lazy Pyth singleton import ───────────────────────────────────────────────
+_PYTH_ORACLE_INSTANCE = None
+_PYTH_ORACLE_LOCK     = threading.RLock()
+
+def _get_pyth() -> "PythPriceOracle":  # noqa: F821
+    global _PYTH_ORACLE_INSTANCE
+    if _PYTH_ORACLE_INSTANCE is not None:
+        return _PYTH_ORACLE_INSTANCE
+    with _PYTH_ORACLE_LOCK:
+        if _PYTH_ORACLE_INSTANCE is None:
+            try:
+                from oracle import PYTH_ORACLE as _po
+                _PYTH_ORACLE_INSTANCE = _po
+                logger.info("[RPC] ✅ Pyth oracle bound to JSON-RPC engine")
+            except Exception as e:
+                logger.warning(f"[RPC] Pyth oracle not available: {e}")
+        return _PYTH_ORACLE_INSTANCE
+
+
+# ─── JSON-RPC error constructors ──────────────────────────────────────────────
+
+def _rpc_error(code: int, message: str, rpc_id: Any = None, data: Any = None) -> dict:
+    err: dict = {"code": code, "message": message}
+    if data is not None:
+        err["data"] = data
+    return {"jsonrpc": _JSONRPC_VERSION, "error": err, "id": rpc_id}
+
+
+def _rpc_ok(result: Any, rpc_id: Any) -> dict:
+    return {"jsonrpc": _JSONRPC_VERSION, "result": result, "id": rpc_id}
+
+
+# ─── RPC Method Implementations ───────────────────────────────────────────────
+
+def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getBlockHeight — current chain tip height."""
+    try:
+        node = _get_canonical_node()
+        if node is None:
+            return _rpc_error(-32003, "Node not synced", rpc_id)
+        height = node.get("block_height", 0)
+        tip_hash = node.get("tip_hash", "")
+        return _rpc_ok({
+            "height":   height,
+            "tip_hash": tip_hash,
+            "ts":       time.time(),
+        }, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Internal error: {e}", rpc_id)
+
+
+def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getBalance — address QTCL balance."""
+    if not isinstance(params, (list, dict)):
+        return _rpc_error(-32602, "params must be list or object", rpc_id)
+    address = (params[0] if isinstance(params, list) else params.get("address", "")) if params else ""
+    if not address:
+        return _rpc_error(-32602, "address required", rpc_id)
+    try:
+        from globals import get_blockchain
+        bc = get_blockchain()
+        balance = bc.get_balance(address) if bc else 0.0
+        return _rpc_ok({
+            "address": address,
+            "balance": float(balance),
+            "symbol":  "QTCL",
+        }, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Balance lookup failed: {e}", rpc_id)
+
+
+def _rpc_getTransaction(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getTransaction — tx details by hash."""
+    tx_hash = (params[0] if isinstance(params, list) else params.get("tx_hash", "")) if params else ""
+    if not tx_hash:
+        return _rpc_error(-32602, "tx_hash required", rpc_id)
+    try:
+        from globals import get_blockchain
+        bc  = get_blockchain()
+        tx  = bc.get_transaction(tx_hash) if bc else None
+        if tx is None:
+            return _rpc_error(-32000, "Transaction not found", rpc_id, {"tx_hash": tx_hash})
+        return _rpc_ok(tx, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"TX lookup failed: {e}", rpc_id)
+
+
+def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getBlock — block by height or hash."""
+    height = (params[0] if isinstance(params, list) else params.get("height")) if params else None
+    tx_hash = (None if isinstance(params, list) else params.get("hash")) if params else None
+    try:
+        from globals import get_blockchain
+        bc = get_blockchain()
+        if bc is None:
+            return _rpc_error(-32003, "Node not synced", rpc_id)
+        block = None
+        if height is not None:
+            block = bc.get_block_by_height(int(height))
+        elif tx_hash:
+            block = bc.get_block_by_hash(tx_hash)
+        if block is None:
+            return _rpc_error(-32000, "Block not found", rpc_id)
+        return _rpc_ok(block, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Block lookup failed: {e}", rpc_id)
+
+
+def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getQuantumMetrics — live W-state oracle + lattice metrics."""
+    try:
+        result: dict = {"oracle_available": ORACLE_AVAILABLE, "ts": time.time()}
+
+        if ORACLE_AVAILABLE and ORACLE is not None:
+            try:
+                w_snap = ORACLE_W_STATE_MANAGER.get_latest_snapshot() if ORACLE_W_STATE_MANAGER else None
+                if w_snap:
+                    result["w_state"] = {
+                        "purity":     getattr(w_snap, "purity",     None),
+                        "entropy":    getattr(w_snap, "entropy",    None),
+                        "coherence":  getattr(w_snap, "coherence",  None),
+                        "fidelity":   getattr(w_snap, "fidelity",   None),
+                        "snapshot_id": getattr(w_snap, "snapshot_id", None),
+                    }
+            except Exception as we:
+                result["w_state_error"] = str(we)
+
+        if LATTICE is not None:
+            try:
+                ls = LATTICE.get_state()
+                lm = LATTICE.get_metrics()
+                result["lattice"] = {
+                    "fidelity":         ls.get("fidelity"),
+                    "coherence":        ls.get("coherence"),
+                    "w_state_strength": ls.get("w_state_strength"),
+                    "cycle":            ls.get("cycle"),
+                    "avg_fidelity_100": lm.get("avg_fidelity_100"),
+                    "avg_coherence_100":lm.get("avg_coherence_100"),
+                }
+            except Exception as le:
+                result["lattice_error"] = str(le)
+
+        return _rpc_ok(result, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Quantum metrics failed: {e}", rpc_id)
+
+
+def _rpc_getPythPrice(params: Any, rpc_id: Any) -> dict:
+    """
+    qtcl_getPythPrice — atomic Pyth Network price snapshot.
+
+    Params:
+      list:   ["BTC", "ETH"]          — symbol list
+      object: {"symbols": ["BTC"]}    — named
+      null:   all feeds
+
+    Returns:
+      snapshot_id, fetch_time_ns, hermes_ok, hlwe_sig, feeds{price,conf,age_seconds,...}
+    """
+    symbols: Optional[list] = None
+    if isinstance(params, list):
+        if params and isinstance(params[0], list):
+            symbols = params[0]
+        elif params and isinstance(params[0], str):
+            symbols = params
+    elif isinstance(params, dict):
+        symbols = params.get("symbols")
+
+    po = _get_pyth()
+    if po is None:
+        return _rpc_error(-32002, "Pyth oracle not initialized", rpc_id)
+
+    try:
+        snap = po.get_snapshot(symbols)
+        return _rpc_ok(snap.to_dict(), rpc_id)
+    except Exception as e:
+        return _rpc_error(-32002, f"Pyth fetch failed: {e}", rpc_id)
+
+
+def _rpc_getMempoolStats(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getMempoolStats — mempool depth and fee percentiles."""
+    try:
+        from mempool import MempoolManager
+        # Attempt to get mempool singleton
+        mp = globals().get("MEMPOOL") or globals().get("_MEMPOOL")
+        if mp is None:
+            from globals import get_mempool
+            mp = get_mempool() if callable(globals().get("get_mempool", None)) else None
+        if mp is None:
+            return _rpc_ok({"depth": 0, "note": "mempool not accessible via RPC"}, rpc_id)
+        stats = mp.get_stats() if hasattr(mp, "get_stats") else {}
+        return _rpc_ok(stats, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Mempool stats failed: {e}", rpc_id)
+
+
+def _rpc_getPeers(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getPeers — active P2P peer list."""
+    try:
+        limit = 50
+        if isinstance(params, list) and params:
+            limit = int(params[0])
+        elif isinstance(params, dict):
+            limit = int(params.get("limit", 50))
+        from globals import get_peer_registry
+        reg = get_peer_registry() if callable(globals().get("get_peer_registry")) else None
+        if reg is None:
+            return _rpc_ok({"peers": [], "count": 0}, rpc_id)
+        peers = reg.get_peers(limit=limit) if hasattr(reg, "get_peers") else []
+        return _rpc_ok({"peers": peers, "count": len(peers)}, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Peer list failed: {e}", rpc_id)
+
+
+def _rpc_getHealth(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getHealth — full system health vector."""
+    try:
+        po     = _get_pyth()
+        result = {
+            "status":           "ok",
+            "ts":               time.time(),
+            "uptime_s":         round(time.time() - _SERVER_START_TIME, 1),
+            "oracle_ready":     ORACLE_AVAILABLE,
+            "lattice_ready":    LATTICE is not None,
+            "pyth_ready":       po is not None,
+            "pyth_stats":       po.stats() if po else {},
+            "jsonrpc_version":  _JSONRPC_VERSION,
+            "qtcl_server":      "v6",
+        }
+        return _rpc_ok(result, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Health check failed: {e}", rpc_id)
+
+
+# ─── Method registry (O(1) dispatch) ─────────────────────────────────────────
+
+_RPC_METHODS: Dict[str, Any] = {
+    "qtcl_getBlockHeight":    _rpc_getBlockHeight,
+    "qtcl_getBalance":        _rpc_getBalance,
+    "qtcl_getTransaction":    _rpc_getTransaction,
+    "qtcl_getBlock":          _rpc_getBlock,
+    "qtcl_getQuantumMetrics": _rpc_getQuantumMetrics,
+    "qtcl_getPythPrice":      _rpc_getPythPrice,
+    "qtcl_getMempoolStats":   _rpc_getMempoolStats,
+    "qtcl_getPeers":          _rpc_getPeers,
+    "qtcl_getHealth":         _rpc_getHealth,
+}
+
+_RPC_METHOD_META: Dict[str, Dict] = {
+    "qtcl_getBlockHeight": {
+        "description": "Current chain tip height and hash",
+        "params": [],
+        "returns": "object{height, tip_hash, ts}",
+    },
+    "qtcl_getBalance": {
+        "description": "QTCL balance for an address",
+        "params": [{"name": "address", "type": "string", "required": True}],
+        "returns": "object{address, balance, symbol}",
+    },
+    "qtcl_getTransaction": {
+        "description": "Transaction details by hash",
+        "params": [{"name": "tx_hash", "type": "string", "required": True}],
+        "returns": "object (transaction)",
+    },
+    "qtcl_getBlock": {
+        "description": "Block by height or hash",
+        "params": [
+            {"name": "height", "type": "integer", "required": False},
+            {"name": "hash",   "type": "string",  "required": False},
+        ],
+        "returns": "object (block)",
+    },
+    "qtcl_getQuantumMetrics": {
+        "description": "Live W-state oracle and lattice metrics",
+        "params": [],
+        "returns": "object{oracle_available, w_state, lattice, ts}",
+    },
+    "qtcl_getPythPrice": {
+        "description": "Atomic Pyth Network price snapshot (BTC/ETH/SOL/BNB/AVAX/MATIC/LINK/ADA/DOT/ATOM)",
+        "params": [{"name": "symbols", "type": "array<string>", "required": False,
+                    "note": "Default: all feeds"}],
+        "returns": "object{snapshot_id, fetch_time_ns, hermes_ok, hlwe_sig, feeds{}}",
+    },
+    "qtcl_getMempoolStats": {
+        "description": "Mempool depth and fee statistics",
+        "params": [],
+        "returns": "object (mempool stats)",
+    },
+    "qtcl_getPeers": {
+        "description": "Active P2P peer list",
+        "params": [{"name": "limit", "type": "integer", "required": False, "default": 50}],
+        "returns": "object{peers[], count}",
+    },
+    "qtcl_getHealth": {
+        "description": "Full system health vector (oracle, lattice, Pyth, uptime)",
+        "params": [],
+        "returns": "object{status, ts, uptime_s, oracle_ready, lattice_ready, pyth_ready, ...}",
+    },
+}
+
+
+# ─── Core dispatch ────────────────────────────────────────────────────────────
+
+def _dispatch_single(payload: dict) -> dict:
+    """Dispatch one JSON-RPC 2.0 call. Always returns a response dict."""
+    rpc_id  = payload.get("id")     # None = notification (we still respond for safety)
+    version = payload.get("jsonrpc")
+    method  = payload.get("method")
+    params  = payload.get("params")
+
+    if version != _JSONRPC_VERSION:
+        return _rpc_error(-32600, f"Invalid JSON-RPC version: {version!r}", rpc_id)
+    if not isinstance(method, str) or not method:
+        return _rpc_error(-32600, "method must be a non-empty string", rpc_id)
+
+    handler = _RPC_METHODS.get(method)
+    if handler is None:
+        return _rpc_error(-32601, f"Method not found: {method}", rpc_id,
+                          {"available": list(_RPC_METHODS.keys())})
+
+    try:
+        return handler(params, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC] Unhandled error in {method}: {e}")
+        return _rpc_error(-32603, "Internal error", rpc_id, {"exception": str(e)})
+
+
+def _dispatch(body: bytes) -> Tuple[Any, int]:
+    """
+    Parse and dispatch JSON-RPC 2.0 body (single or batch).
+    Returns (response_obj, http_status_code).
+    """
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, ValueError) as e:
+        return _rpc_error(-32700, f"Parse error: {e}"), 400
+
+    if isinstance(payload, list):
+        # Batch request — RFC §6
+        if not payload:
+            return _rpc_error(-32600, "Empty batch array"), 400
+        responses = [_dispatch_single(p) if isinstance(p, dict)
+                     else _rpc_error(-32600, "Batch item must be object")
+                     for p in payload]
+        return responses, 200
+
+    if isinstance(payload, dict):
+        return _dispatch_single(payload), 200
+
+    return _rpc_error(-32600, "Request must be object or array"), 400
+
+
+# ─── Helper: canonical node state ────────────────────────────────────────────
+
+def _get_canonical_node() -> Optional[dict]:
+    """Pull canonical node state from globals / metrics agents."""
+    try:
+        if _METRICS_AGENTS.get("oracle_collector"):
+            m = _METRICS_AGENTS["oracle_collector"].get_metrics()
+            if m:
+                return m
+    except Exception:
+        pass
+    try:
+        from globals import get_blockchain
+        bc = get_blockchain()
+        if bc:
+            return {"block_height": bc.get_height(), "tip_hash": bc.get_tip_hash()}
+    except Exception:
+        pass
+    return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# JSON-RPC 2.0 FLASK ROUTES
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/rpc", methods=["POST", "OPTIONS"])
+def rpc_dispatch():
+    """
+    POST /rpc — JSON-RPC 2.0 dispatch endpoint.
+
+    Accepts single requests and batches.
+    Content-Type: application/json
+    """
+    if request.method == "OPTIONS":
+        resp = jsonify({"status": "ok"})
+        resp.headers.add("Access-Control-Allow-Origin", "*")
+        resp.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
+        resp.headers.add("Access-Control-Allow-Headers", "Content-Type")
+        return resp, 200
+
+    body = request.get_data()
+    if not body:
+        return jsonify(_rpc_error(-32700, "Empty request body")), 400
+
+    result, status = _dispatch(body)
+    resp = jsonify(result)
+    resp.headers["Content-Type"] = "application/json"
+    resp.headers["X-QTCL-JSONRPC"] = _JSONRPC_VERSION
+    return resp, status
+
+
+@app.route("/rpc/methods", methods=["GET"])
+def rpc_methods():
+    """GET /rpc/methods — introspection: list all available RPC methods."""
+    return jsonify({
+        "jsonrpc":  _JSONRPC_VERSION,
+        "endpoint": "/rpc",
+        "methods":  _RPC_METHOD_META,
+        "count":    len(_RPC_METHOD_META),
+        "batch":    True,
+        "ts":       time.time(),
+    }), 200
+
+
+@app.route("/rpc/health", methods=["GET"])
+def rpc_health():
+    """GET /rpc/health — JSON-RPC engine and Pyth oracle health."""
+    po = _get_pyth()
+    return jsonify({
+        "rpc_engine":       "ok",
+        "jsonrpc_version":  _JSONRPC_VERSION,
+        "method_count":     len(_RPC_METHODS),
+        "pyth_ready":       po is not None,
+        "pyth_stats":       po.stats() if po else {},
+        "oracle_ready":     ORACLE_AVAILABLE,
+        "lattice_ready":    LATTICE is not None,
+        "uptime_s":         round(time.time() - _SERVER_START_TIME, 1),
+        "ts":               time.time(),
+    }), 200
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PYTH PRICE ORACLE REST ROUTES
+# (Complement to JSON-RPC — for REST-native integrations)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/pyth/prices", methods=["GET"])
+def pyth_prices_rest():
+    """
+    GET /api/pyth/prices?symbols=BTC,ETH,SOL
+
+    Returns an atomic Pyth snapshot for the requested symbols.
+    Query params:
+      symbols  — comma-separated list (default: all)
+      refresh  — "true" to force bypass cache
+    """
+    po = _get_pyth()
+    if po is None:
+        return jsonify({"error": "Pyth oracle not initialized"}), 503
+
+    symbols_raw = request.args.get("symbols", "")
+    symbols: Optional[list] = [s.strip().upper() for s in symbols_raw.split(",") if s.strip()] or None
+    force   = request.args.get("refresh", "false").lower() == "true"
+
+    try:
+        snap = po.get_snapshot(symbols, force_refresh=force)
+        resp = jsonify(snap.to_dict())
+        resp.headers["Cache-Control"] = "public, max-age=5"
+        resp.headers["X-Pyth-Snapshot"] = snap.snapshot_id[:16]
+        resp.headers["X-Hermes-OK"]     = str(snap.hermes_ok).lower()
+        return resp, 200
+    except Exception as e:
+        logger.error(f"[PYTH-REST] /api/pyth/prices error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pyth/price/<symbol>", methods=["GET"])
+def pyth_single_price_rest(symbol: str):
+    """
+    GET /api/pyth/price/BTC
+
+    Single-symbol price convenience endpoint.
+    Returns price_usd, confidence, age_seconds, publish_time.
+    """
+    po = _get_pyth()
+    if po is None:
+        return jsonify({"error": "Pyth oracle not initialized"}), 503
+
+    sym = symbol.upper()
+    try:
+        snap = po.get_snapshot([sym])
+        feed = snap.feeds.get(sym)
+        if feed is None:
+            return jsonify({
+                "error":      f"Symbol {sym} not found",
+                "available":  list(snap.feeds.keys()),
+                "hermes_ok":  snap.hermes_ok,
+            }), 404
+        return jsonify({
+            **feed.to_dict(),
+            "snapshot_id": snap.snapshot_id,
+            "hermes_ok":   snap.hermes_ok,
+        }), 200
+    except Exception as e:
+        logger.error(f"[PYTH-REST] /api/pyth/price/{sym} error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pyth/feeds", methods=["GET"])
+def pyth_feed_catalog():
+    """GET /api/pyth/feeds — full Pyth feed ID catalog (symbol → feed_id)."""
+    return jsonify({
+        "feeds":   {k: v for k, v in __import__("oracle").PYTH_FEED_IDS.items()},
+        "count":   len(__import__("oracle").PYTH_FEED_IDS),
+        "hermes":  "https://hermes.pyth.network",
+        "ts":      time.time(),
+    }), 200
+
+
+@app.route("/api/pyth/snapshot", methods=["GET"])
+def pyth_full_snapshot():
+    """
+    GET /api/pyth/snapshot — full HLWE-signed atomic price snapshot (all feeds).
+
+    Returns the complete PythAtomicSnapshot including HLWE oracle signature,
+    Byzantine outlier report, and raw attestation metadata.
+    """
+    po = _get_pyth()
+    if po is None:
+        return jsonify({"error": "Pyth oracle not initialized"}), 503
+    try:
+        snap = po.get_snapshot()   # all feeds
+        return jsonify({
+            **snap.to_dict(),
+            "feed_count": len(snap.feeds),
+            "outlier_count": len(snap.outliers),
+        }), 200
+    except Exception as e:
+        logger.error(f"[PYTH-REST] /api/pyth/snapshot error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/pyth/stats", methods=["GET"])
+def pyth_oracle_stats():
+    """GET /api/pyth/stats — Pyth oracle runtime statistics."""
+    po = _get_pyth()
+    if po is None:
+        return jsonify({"error": "Pyth oracle not initialized"}), 503
+    return jsonify(po.stats()), 200
+
+logger.info("[JSONRPC] ✅ JSON-RPC 2.0 engine mounted — /rpc, /rpc/methods, /rpc/health")
+logger.info("[PYTH]    ✅ Pyth REST routes mounted — /api/pyth/{prices,price/<sym>,feeds,snapshot,stats}")

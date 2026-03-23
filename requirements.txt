@@ -42,3 +42,10 @@ pydantic>=2.0.0
 
 # NOTE: 'cryptography' package intentionally excluded — requires libssl-dev
 # at build time (absent on Koyeb runtime). Not used in server stack.
+
+# ── JSON-RPC 2.0 + Pyth Network oracle ───────────────────────────────────────
+# No additional dependencies required:
+#   • JSON-RPC 2.0 engine: pure Python (json, threading, dataclasses)
+#   • Pyth Hermes API:     urllib.request (stdlib) — zero external deps
+#   • Byzantine filter:    statistics (stdlib)
+# All integrations are self-contained within oracle.py + server.py.
