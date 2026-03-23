@@ -880,16 +880,19 @@ function drawHex(canvas,fid,fresh){
   if(fid>0){ctx.beginPath();ctx.arc(cx,cy,r*.35,0,Math.PI*2*fid);ctx.strokeStyle='rgba(128,64,255,.6)';ctx.lineWidth=2;ctx.stroke();}
 }
 function renderChain(){
-  var el=document.getElementById('cs'),show=blocks.slice(-18);
-  if(!show.length){
-    el.innerHTML='<div style="color:var(--dim);font-family:var(--mono);font-size:10px;padding:8px 0;opacity:.6">Awaiting blocks…</div>';
-    document.getElementById('bcc').textContent='0 blocks';
+  var el=document.getElementById('cs');
+  if(!el) return;
+  if(!blocks.length){
+    el.innerHTML='<div style="color:var(--dim);font-family:var(--mono);font-size:10px;padding:8px 0;opacity:.6">Awaiting blocks\u2026</div>';
+    var bcc=document.getElementById('bcc');if(bcc) bcc.textContent='0 blocks';
     return;
   }
   el.innerHTML='';
-  show.forEach(function(b,i){
+  var freshThresh=blocks.length-3;
+  blocks.forEach(function(b,i){
     if(i>0){var c=document.createElement('div');c.className='bco';el.appendChild(c);}
-    var node=document.createElement('div'),isFr=i===show.length-1&&b._fr;
+    var node=document.createElement('div');
+    var isFr=i>=freshThresh||b._fr;
     node.className='bn'+(isFr?' fr':'');
     var hex=document.createElement('div');hex.className='bh';
     hex.style.cursor='pointer';
@@ -904,7 +907,7 @@ function renderChain(){
     node.appendChild(hex);node.appendChild(lbl);el.appendChild(node);
   });
   el.scrollLeft=el.scrollWidth;
-  document.getElementById('bcc').textContent=blocks.length+' blocks';
+  var bcc=document.getElementById('bcc');if(bcc) bcc.textContent=blocks.length+' blocks';
 }
 
 // ── Block detail modal ────────────────────────────────────────────────────────
@@ -1374,15 +1377,71 @@ async function fetchChain(){
   if(d.entropy!=null) S.entropy=d.entropy;
   if(d.lattice_cycle!=null) S.cycle=d.lattice_cycle;
   if(d.lattice_sigma_mod8!=null) S.sigma_mod8=d.lattice_sigma_mod8;
-  // recent_blocks: [{height,hash,tx_count,fidelity,coherence}]
+  // recent_blocks from /api/chain seeds latest slice while full history loads async
   if(d.recent_blocks&&d.recent_blocks.length){
     d.recent_blocks.forEach(function(b){
       if(!blocks.find(function(x){return x.height===b.height;})){
-        b._fr=true;blocks.push(b);dbk.push({r:Math.random()*.72+.1,a:Math.random()*Math.PI*2,age:0});
+        b._fr=false; blocks.push(b);
       }
     });
-    blocks=blocks.sort(function(a,b){return a.height-b.height;}).slice(-60);
+    blocks=blocks.sort(function(a,b){return a.height-b.height;});
     renderChain();
+  }
+}
+
+// ── Block history backfill — loads ALL blocks from genesis to tip ─────────────
+// Runs once on startup. Fetches /api/blocks in parallel page batches (4 pages
+// at a time) using apiTx so it never touches the shared pool. Progress shown in
+// the block stream header. SSE new_block keeps the stream live after load.
+var _blocksLoaded=false, _blocksLoading=false;
+async function loadAllBlocks(){
+  if(_blocksLoaded||_blocksLoading) return;
+  _blocksLoading=true;
+  var bcc=document.getElementById('bcc');
+  try{
+    // Page 0 to discover total
+    var PER=100;
+    var first=await apiTx('/api/blocks?page=0&per_page='+PER);
+    if(!first||first.error||!Array.isArray(first.blocks)){
+      if(bcc) bcc.textContent='blocks unavailable';
+      return;
+    }
+    var total=first.total||0, pages=first.pages||1;
+    // Merge page 0
+    first.blocks.forEach(function(b){
+      if(!blocks.find(function(x){return x.height===b.height;})) blocks.push(b);
+    });
+    blocks.sort(function(a,b){return a.height-b.height;});
+    renderChain();
+    if(bcc) bcc.textContent='loading '+total+' blocks…';
+
+    // Fetch remaining pages in batches of 4 concurrently
+    var pageNums=[];
+    for(var p=1;p<pages;p++) pageNums.push(p);
+    var BATCH=4;
+    for(var bi=0;bi<pageNums.length;bi+=BATCH){
+      var batch=pageNums.slice(bi,bi+BATCH);
+      var results=await Promise.allSettled(
+        batch.map(function(p){return apiTx('/api/blocks?page='+p+'&per_page='+PER);})
+      );
+      results.forEach(function(r){
+        if(r.status==='fulfilled'&&r.value&&Array.isArray(r.value.blocks)){
+          r.value.blocks.forEach(function(b){
+            if(!blocks.find(function(x){return x.height===b.height;})) blocks.push(b);
+          });
+        }
+      });
+      blocks.sort(function(a,b){return a.height-b.height;});
+      renderChain();
+      if(bcc) bcc.textContent=blocks.length+' / '+total+' blocks';
+    }
+    _blocksLoaded=true;
+    if(bcc) bcc.textContent=blocks.length+' blocks';
+    renderChain();
+  }catch(e){
+    if(bcc) bcc.textContent=blocks.length+' blocks';
+  }finally{
+    _blocksLoading=false;
   }
 }
 
@@ -1606,7 +1665,7 @@ async function refresh(){
             _fr:      true
           };
           blocks.push(nb);
-          blocks=blocks.sort(function(a,b){return a.height-b.height;}).slice(-60);
+          blocks=blocks.sort(function(a,b){return a.height-b.height;});
           dbk.push({r:Math.random()*.72+.1,a:Math.random()*Math.PI*2,age:0});
           renderChain();
         }
@@ -1702,6 +1761,7 @@ async function fetchLatestSnapshot(){
 
 fetchLatestSnapshot();
 refresh();
+loadAllBlocks();  // full genesis→tip backfill, all pages, parallel batches
 // Staggered boot — critical path first, miners/peers after SSE settles
 setTimeout(function(){ loadTxPage(); },800);
 setTimeout(function(){ fetchMiners(); },500);   // early — before TX load

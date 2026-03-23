@@ -8208,6 +8208,71 @@ def dht_hello():
     }), 200
 
 
+@app.route('/api/blocks', methods=['GET'])
+def list_blocks():
+    """Paginated block list — ascending height, runs on TxQueryWorker (port 6543).
+    Query params: page (0-indexed), per_page (default 50, max 200)
+    Returns blocks with tx_count via LEFT JOIN — never touches shared pool.
+    """
+    try:
+        page     = max(0, int(request.args.get('page',     0)))
+        per_page = min(200, max(1, int(request.args.get('per_page', 50))))
+        offset   = page * per_page
+
+        result = _tx_query([
+            # Fast capped total count
+            ("SELECT COUNT(*) FROM (SELECT 1 FROM blocks LIMIT 100000) _c",
+             ()),
+            # Page of blocks with real tx_count via LEFT JOIN
+            ("""SELECT b.height, b.block_hash, b.timestamp,
+                       b.validator_public_key,
+                       COALESCE(b.entropy_score, 0.9) AS fidelity,
+                       COALESCE(b.temporal_coherence, 0.0) AS coherence,
+                       COALESCE(t.tx_count, 0) AS tx_count
+                FROM blocks b
+                LEFT JOIN (
+                    SELECT height, COUNT(*) AS tx_count
+                    FROM transactions
+                    WHERE height IS NOT NULL
+                    GROUP BY height
+                ) t ON t.height = b.height
+                ORDER BY b.height ASC
+                LIMIT %s OFFSET %s""",
+             (per_page, offset)),
+        ], timeout=9.0)
+
+        if 'error' in result:
+            return jsonify({'error': result['error'], 'blocks': [], 'total': 0}), 503
+
+        count_rows, block_rows = result['results']
+        total = count_rows[0][0] if count_rows else 0
+
+        blks = []
+        for r in block_rows:
+            blks.append({
+                'height':    r[0],
+                'hash':      r[1] or '',
+                'timestamp': int(r[2]) if r[2] else 0,
+                'miner':     r[3] or '',
+                'fidelity':  float(r[4]) if r[4] else 0.9,
+                'coherence': float(r[5]) if r[5] else 0.0,
+                'tx_count':  int(r[6] or 0),
+            })
+
+        return jsonify({
+            'blocks':    blks,
+            'total':     total,
+            'page':      page,
+            'per_page':  per_page,
+            'pages':     max(1, (total + per_page - 1) // per_page),
+            'has_more':  (page + 1) * per_page < total,
+        }), 200
+
+    except Exception as e:
+        logger.error(f"[BLOCKS-LIST] {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/blocks/tip', methods=['GET'])
 def blocks_tip():
     """Get the latest (tip) block — single DB call, statement_timeout guard."""
