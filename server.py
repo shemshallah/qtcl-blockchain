@@ -1705,10 +1705,10 @@ class DifficultyManager:
     EWMA_ALPHA          = 0.40  # weight on newest sample — higher = faster reaction
     MAX_STEP_PER_BLOCK  = 1     # max ±1 per block — prevents oscillation
     WARMUP_BLOCKS       = 2     # blocks before first retarget (needs 1 gap sample)
-    FLOOR               = 5     # absolute minimum — never go below 5 leading zeros
+    FLOOR               = 6     # absolute minimum — never go below 6 leading zeros
     CEILING             = ABS_MAX
 
-    def __init__(self, initial_difficulty: int = 5,
+    def __init__(self, initial_difficulty: int = 6,
                  seed_ewma: float = None, seed_last_wall: float = None):
         import math as _m
         self._math = _m
@@ -1862,9 +1862,9 @@ def get_difficulty_manager() -> DifficultyManager:
     except Exception as _de:
         logger.debug(f"[DIFFICULTY] DB bootstrap: {_de}")
 
-    # Clamp to FLOOR (5) — never restore a difficulty below the floor
+    # Clamp to FLOOR (6) — never restore a difficulty below the floor
     initial = max(DifficultyManager.FLOOR,
-                  db_difficulty if db_difficulty is not None else DifficultyManager.FLOOR)
+                  db_difficulty if db_difficulty is not None else 6)
 
     _difficulty_manager = DifficultyManager(
         initial_difficulty = initial,
