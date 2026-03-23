@@ -441,6 +441,135 @@ if not _USE_HTTP_DB:
 else:
     logger.info(f"[DB] ✨ HTTP-DB mode: {os.getenv('SUPABASE_URL', '(SUPABASE_URL not set)')}")
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# TX QUERY WORKER — dedicated direct connection on port 6543 (transaction mode)
+# ═══════════════════════════════════════════════════════════════════════════════
+# /api/transactions runs heavyweight COUNT + page queries that can take 1-3s.
+# Running them through the shared 10-connection pool starves background threads
+# (oracle sync, lattice, P2P heartbeats) and causes cascading timeouts.
+#
+# This worker owns a single private psycopg2 connection to port 6543 — completely
+# independent of DatabasePool. It processes one query at a time from _TX_JOB_Q.
+# The Flask handler submits a job dict and blocks on a per-job result queue with
+# a hard 9s timeout — if the worker is busy or the DB is slow the route returns
+# a fast 503 so the client retries rather than holding a gthread indefinitely.
+# ───────────────────────────────────────────────────────────────────────────────
+
+import queue as _queue_mod2
+
+_TX_JOB_Q: '_queue_mod2.Queue' = _queue_mod2.Queue(maxsize=8)
+
+def _build_tx_dsn() -> str:
+    """Always return a DSN pointed at port 6543 (Supabase transaction mode)."""
+    dsn = DB_URL or ''
+    if not dsn or _USE_HTTP_DB:
+        return ''
+    # Force transaction-mode port
+    if ':5432/' in dsn:
+        dsn = dsn.replace(':5432/', ':6543/')
+    if ':6543/' not in dsn and dsn.startswith('postgresql://'):
+        # No port in URL — inject 6543 before the DB path
+        import re as _re
+        dsn = _re.sub(r'(@[^/]+)(/.+)', r'\g<1>:6543\g<2>', dsn)
+    return dsn
+
+def _tx_worker_thread():
+    """Dedicated TX query thread — owns one private psycopg2 connection."""
+    import psycopg2 as _pg
+    _tx_log = logging.getLogger('tx_worker')
+    dsn = _build_tx_dsn()
+    if not dsn:
+        _tx_log.warning("[TX-WORKER] No DSN — thread idle (USE_HTTP_DB mode)")
+        while True:
+            try:
+                job = _TX_JOB_Q.get(timeout=5)
+                job['result_q'].put({'error': 'TX worker unavailable (HTTP-DB mode)'})
+            except _queue_mod2.Empty:
+                pass
+        return
+
+    conn = None
+
+    def _connect():
+        nonlocal conn
+        try:
+            if conn:
+                try: conn.close()
+                except Exception: pass
+            conn = _pg.connect(dsn, connect_timeout=10,
+                               options='-c statement_timeout=9000')
+            conn.autocommit = True
+            _tx_log.info("[TX-WORKER] ✅ Connected to Supabase :6543 (transaction mode)")
+        except Exception as _ce:
+            conn = None
+            _tx_log.error(f"[TX-WORKER] Connect failed: {_ce}")
+
+    _connect()
+
+    while True:
+        try:
+            job = _TX_JOB_Q.get(timeout=30)
+        except _queue_mod2.Empty:
+            # Keepalive ping on idle
+            if conn:
+                try: conn.cursor().execute("SELECT 1")
+                except Exception: _connect()
+            continue
+
+        result_q = job.get('result_q')
+        try:
+            # Reconnect if connection dropped
+            if conn is None or conn.closed:
+                _connect()
+            if conn is None:
+                if result_q: result_q.put({'error': 'DB connection unavailable'})
+                continue
+
+            cur = conn.cursor()
+            queries = job['queries']  # list of (sql, params) tuples
+            results = []
+            for sql, params in queries:
+                cur.execute(sql, params)
+                results.append(cur.fetchall())
+            cur.close()
+            if result_q: result_q.put({'results': results})
+
+        except _pg.OperationalError as _oe:
+            _tx_log.warning(f"[TX-WORKER] OperationalError — reconnecting: {_oe}")
+            _connect()
+            if result_q: result_q.put({'error': str(_oe)})
+        except Exception as _e:
+            _tx_log.error(f"[TX-WORKER] Query error: {_e}")
+            if result_q: result_q.put({'error': str(_e)})
+
+
+def _tx_query(queries: list, timeout: float = 9.0) -> dict:
+    """Submit queries to the TX worker and wait for results.
+
+    Args:
+        queries: list of (sql_string, params_tuple) to execute in sequence.
+        timeout: max seconds to wait before returning {'error': 'timeout'}.
+    Returns:
+        {'results': [[rows], [rows], ...]} or {'error': str}.
+    """
+    rq: '_queue_mod2.Queue' = _queue_mod2.Queue(maxsize=1)
+    job = {'queries': queries, 'result_q': rq}
+    try:
+        _TX_JOB_Q.put_nowait(job)
+    except _queue_mod2.Full:
+        return {'error': 'TX worker busy — retry in a moment'}
+    try:
+        return rq.get(timeout=timeout)
+    except _queue_mod2.Empty:
+        return {'error': 'DB query timed out — retry in a moment'}
+
+
+# Launch TX worker daemon at module load
+_tx_worker_daemon = threading.Thread(
+    target=_tx_worker_thread, daemon=True, name="TxQueryWorker")
+_tx_worker_daemon.start()
+logger.info("[TX-WORKER] Dedicated transaction query thread started (port 6543)")
+
 # ── Oracle identity — unique per deployed instance ────────────────────────────
 # Set ORACLE_ID in env to distinguish instances:
 #   primary   → Koyeb main       (ORACLE_ID=koyeb-primary)
@@ -7620,14 +7749,9 @@ def health_check():
 @app.route('/api/transactions', methods=['GET'])
 def list_transactions():
     """
-    Paginated transaction explorer endpoint.
-    Query params:
-        page     — 0-indexed page number (default 0)
-        per_page — results per page (default 50, max 200)
-        type     — filter: 'coinbase', 'transfer', or omit for all
-        address  — filter by from_address OR to_address
-        height   — filter by block height
-    Returns full tx data for the block explorer.
+    Paginated transaction explorer — runs on dedicated TxQueryWorker thread
+    (private psycopg2 connection on port 6543, bypasses shared pool entirely).
+    Returns fast 503 on timeout so the client retries rather than hanging.
     """
     try:
         page     = max(0, int(request.args.get('page',     0)))
@@ -7637,42 +7761,47 @@ def list_transactions():
         height   = request.args.get('height',  '').strip() or None
         offset   = page * per_page
 
-        conditions = []
-        params     = []
-
+        conditions, params = [], []
         if tx_type:
             conditions.append("tx_type = %s")
             params.append(tx_type)
         if address:
+            # UNION path avoids OR full-table-scan — each branch uses its index
             conditions.append("(from_address = %s OR to_address = %s)")
             params.extend([address, address])
         if height:
             conditions.append("height = %s")
             params.append(int(height))
 
-        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        where        = ("WHERE " + " AND ".join(conditions)) if conditions else ""
         count_params = list(params)
-        params.extend([per_page, offset])
+        page_params  = list(params) + [per_page, offset]
 
-        with get_db_cursor() as cur:
-            cur.execute(f"""
-                SELECT COUNT(*) FROM transactions {where}
-            """, count_params)
-            total = (cur.fetchone() or [0])[0]
+        result = _tx_query([
+            # Fast capped COUNT — never scans more than 10k rows
+            (f"SELECT COUNT(*) FROM (SELECT 1 FROM transactions {where} LIMIT 10000) _c",
+             count_params),
+            # Page data
+            (f"""SELECT tx_hash, from_address, to_address, amount,
+                        height, block_hash, tx_type, status,
+                        quantum_state_hash, commitment_hash,
+                        metadata, created_at, transaction_index
+                 FROM transactions {where}
+                 ORDER BY height DESC, transaction_index ASC
+                 LIMIT %s OFFSET %s""",
+             page_params),
+        ], timeout=9.0)
 
-            cur.execute(f"""
-                SELECT tx_hash, from_address, to_address, amount,
-                       height, block_hash, tx_type, status,
-                       quantum_state_hash, commitment_hash,
-                       metadata, created_at, transaction_index
-                FROM transactions {where}
-                ORDER BY height DESC, transaction_index ASC
-                LIMIT %s OFFSET %s
-            """, params)
-            rows = cur.fetchall()
+        if 'error' in result:
+            return jsonify({'error': result['error'], 'transactions': [],
+                            'total': 0, 'page': page, 'per_page': per_page,
+                            'pages': 1, 'has_next': False}), 503
+
+        count_rows, tx_rows = result['results']
+        total = (count_rows[0][0] if count_rows else 0)
 
         txs = []
-        for r in rows:
+        for r in tx_rows:
             amt_base = int(r[3]) if r[3] is not None else 0
             meta = r[10]
             if isinstance(meta, str):
@@ -7680,22 +7809,22 @@ def list_transactions():
                 except Exception: meta = {}
             meta = meta or {}
             txs.append({
-                'tx_hash':           r[0] or '',
-                'from_address':      r[1] or '',
-                'to_address':        r[2] or '',
-                'amount_base':       amt_base,
-                'amount_qtcl':       round(amt_base / 100, 4),
-                'height':            r[4],
-                'block_hash':        r[5] or '',
-                'tx_type':           r[6] or 'transfer',
-                'status':            r[7] or 'confirmed',
-                'quantum_state_hash':r[8] or '',
-                'commitment_hash':   r[9] or '',
-                'fee_qtcl':          round(int(meta.get('fee_base', 0)) / 100, 4),
-                'reward_qtcl':       meta.get('reward_qtcl', 0),
-                'w_state_fidelity':  meta.get('w_state_fidelity', 0),
-                'created_at':        r[11].isoformat() if r[11] else None,
-                'tx_index':          r[12] or 0,
+                'tx_hash':            r[0] or '',
+                'from_address':       r[1] or '',
+                'to_address':         r[2] or '',
+                'amount_base':        amt_base,
+                'amount_qtcl':        round(amt_base / 100, 4),
+                'height':             r[4],
+                'block_hash':         r[5] or '',
+                'tx_type':            r[6] or 'transfer',
+                'status':             r[7] or 'confirmed',
+                'quantum_state_hash': r[8] or '',
+                'commitment_hash':    r[9] or '',
+                'fee_qtcl':           round(int(meta.get('fee_base', 0)) / 100, 4),
+                'reward_qtcl':        meta.get('reward_qtcl', 0),
+                'w_state_fidelity':   meta.get('w_state_fidelity', 0),
+                'created_at':         r[11].isoformat() if r[11] else None,
+                'tx_index':           r[12] or 0,
             })
 
         return jsonify({
@@ -7706,6 +7835,7 @@ def list_transactions():
             'pages':        max(1, (total + per_page - 1) // per_page),
             'has_next':     (page + 1) * per_page < total,
         }), 200
+
     except Exception as e:
         logger.error(f"[TX-LIST] Error: {e}")
         return jsonify({'error': str(e)}), 500
@@ -7739,8 +7869,9 @@ def list_miners():
     """
     try:
         with get_db_cursor() as cur:
-            # ── Block stats: count and height from blocks table only ──────────
-            # validator_public_key holds the miner address (no miner_address col)
+            cur.execute("SET LOCAL statement_timeout = '8000'")
+
+            # ── Block stats ──────────────────────────────────────────────────
             cur.execute("""
                 SELECT
                     b.validator_public_key          AS miner_address,
@@ -7756,8 +7887,7 @@ def list_miners():
             """)
             block_rows = cur.fetchall()
 
-            # ── Earnings: sum coinbase amounts from transactions table only ───
-            # Separate query avoids the JOIN multiplication bug entirely.
+            # ── Earnings ─────────────────────────────────────────────────────
             cur.execute("""
                 SELECT
                     to_address,
@@ -7773,20 +7903,7 @@ def list_miners():
             earnings = {r[0]: {'total_base': int(r[1] or 0), 'cb_count': int(r[2] or 0)}
                         for r in cur.fetchall()}
 
-            mined = {}
-            for r in block_rows:
-                addr = r[0]
-                earned = earnings.get(addr, {})
-                mined[addr] = {
-                    'miner_address':      addr,
-                    'block_count':        int(r[1]),   # real block count from blocks table
-                    'last_height':        int(r[2]),
-                    'last_mined_ts':      float(r[3]) if r[3] else 0,
-                    'total_earned_qtcl':  round(earned.get('total_base', 0) / 100, 2),
-                    'coinbase_tx_count':  earned.get('cb_count', 0),
-                }
-
-            # ── Peer registry — adds peer_id, gossip_url, last_seen, status ──
+            # ── Peer registry ────────────────────────────────────────────────
             cur.execute("""
                 SELECT peer_id, miner_address, gossip_url, block_height,
                        last_seen, supports_sse, ip_address
@@ -7796,6 +7913,19 @@ def list_miners():
                 LIMIT 200
             """)
             peer_rows = cur.fetchall()
+
+        mined = {}
+        for r in block_rows:
+            addr = r[0]
+            earned = earnings.get(addr, {})
+            mined[addr] = {
+                'miner_address':      addr,
+                'block_count':        int(r[1]),
+                'last_height':        int(r[2]),
+                'last_mined_ts':      float(r[3]) if r[3] else 0,
+                'total_earned_qtcl':  round(earned.get('total_base', 0) / 100, 2),
+                'coinbase_tx_count':  earned.get('cb_count', 0),
+            }
 
         # Merge: peer_registry enriches mined data; unknown miners added too
         stale_secs = _PEER_STALE_SECS
@@ -8080,81 +8210,43 @@ def dht_hello():
 
 @app.route('/api/blocks/tip', methods=['GET'])
 def blocks_tip():
-    """Get the latest (tip) block — BlockHeader compatible format.
-    
-    CRITICAL: Reads from DB first (source of truth), falls back to in-memory state.
-    This handles multi-worker deployments (Koyeb/gunicorn) where each worker has
-    independent in-memory state but all share the same DB.
-    """
+    """Get the latest (tip) block — single DB call, statement_timeout guard."""
     try:
-        # ── Primary: query DB directly ──
-        db_block = query_latest_block()
-        
-        if db_block and db_block.get('height', 0) > 0:
-            # Get full block details for the tip height
-            tip_height = db_block['height']
-            try:
-                with get_db_cursor() as cur:
-                    cur.execute("""
-                        SELECT height, block_hash, timestamp, oracle_w_state_hash,
-                               previous_hash, validator_public_key, nonce, difficulty, entropy_score,
-                               transactions_root
-                        FROM blocks WHERE height = %s LIMIT 1
-                    """, (tip_height,))
-                    row = cur.fetchone()
-                if row:
-                    mgr = get_difficulty_manager()
-                    return jsonify({
-                        'block_height': row[0],
-                        'block_hash':   row[1],                        'parent_hash':  row[4] or ('0' * 64),
-                        'merkle_root':  row[9] or ('0' * 64),
-                        'timestamp_s':  int(row[2]) if row[2] else int(time.time()),
-                        'difficulty_bits': mgr.get_difficulty(),
-                        'nonce':        int(row[6]) if row[6] else 0,
-                        'miner_address': row[5] or '',
-                        'w_state_fidelity': float(row[8]) if row[8] is not None else 0.9,
-                        'w_entropy_hash': row[3] or '',
-                    }), 200
-            except Exception as db_err:
-                logger.warning(f"[BLOCKS_TIP] DB detail query failed: {db_err}")
-            
-            # DB row fetch failed but we have height/hash — return minimal valid response
-            mgr = get_difficulty_manager()
-            return jsonify({
-                'block_height':   db_block['height'],
-                'block_hash':     db_block['hash'],
-                'parent_hash':    '0' * 64,
-                'merkle_root':    '0' * 64,
-                'timestamp_s':    int(db_block.get('timestamp', time.time())),
-                'difficulty_bits': mgr.get_difficulty(),
-                'nonce':          0,
-                'miner_address':  '',
-                'w_state_fidelity': 0.9,
-                'w_entropy_hash': db_block.get('w_state_hash', ''),
-            }), 200
-        
-        # ── DB empty (post-wipe / pre-genesis): return height=0 authoritatively ─
-        # NEVER fall through to in-memory state. After a DB wipe the process-local
-        # state object still carries the pre-wipe height and causes clients to
-        # mine on top of a ghost chain that doesn't exist in the database.
         mgr = get_difficulty_manager()
-        logger.info("[BLOCKS_TIP] blocks table empty — returning genesis height=0")
+        with get_db_cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = '8000'")  # 8s hard limit
+            cur.execute("""
+                SELECT height, block_hash, timestamp, oracle_w_state_hash,
+                       previous_hash, validator_public_key, nonce, difficulty,
+                       entropy_score, transactions_root
+                FROM blocks
+                ORDER BY height DESC
+                LIMIT 1
+            """)
+            row = cur.fetchone()
+        if row and row[0]:
+            return jsonify({
+                'block_height':     row[0],
+                'block_hash':       row[1] or '',
+                'parent_hash':      row[4] or ('0' * 64),
+                'merkle_root':      row[9] or ('0' * 64),
+                'timestamp_s':      int(row[2]) if row[2] else int(time.time()),
+                'difficulty_bits':  mgr.get_difficulty(),
+                'nonce':            int(row[6]) if row[6] else 0,
+                'miner_address':    row[5] or '',
+                'w_state_fidelity': float(row[8]) if row[8] is not None else 0.9,
+                'w_entropy_hash':   row[3] or '',
+            }), 200
+        # DB empty — return height=0 so clients don't mine on a ghost chain
         return jsonify({
-            'block_height':    0,
-            'block_hash':      '0' * 64,
-            'parent_hash':     '0' * 64,
-            'merkle_root':     '0' * 64,
-            'timestamp_s':     int(time.time()),
-            'difficulty_bits': mgr.get_difficulty(),
-            'nonce':           0,
-            'miner_address':   'genesis',
-            'w_state_fidelity': 1.0,
-            'w_entropy_hash':  'genesis',
+            'block_height': 0, 'block_hash': '0' * 64,
+            'parent_hash': '0' * 64, 'merkle_root': '0' * 64,
+            'timestamp_s': int(time.time()), 'difficulty_bits': mgr.get_difficulty(),
+            'nonce': 0, 'miner_address': '', 'w_state_fidelity': 0.9, 'w_entropy_hash': '',
         }), 200
-    
     except Exception as e:
-        logger.error(f"[BLOCKS_TIP] Unhandled exception: {e}\n{traceback.format_exc()}")
-        return jsonify({'error': 'Internal server error', 'message': str(e)}), 500
+        logger.error(f"[BLOCKS_TIP] {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/wallet', methods=['GET'])
@@ -10395,43 +10487,45 @@ def get_address_earned(address: str):
     """
     try:
         with get_db_cursor() as cur:
-            # Sum all confirmed incoming TXs (coinbase + transfers)
+            cur.execute("SET LOCAL statement_timeout = '8000'")
+            # UNION ALL avoids the OR full-table-scan — each half uses its own index
             cur.execute("""
                 SELECT
-                    COALESCE(SUM(CASE WHEN to_address = %s AND status='confirmed'
-                                THEN amount ELSE 0 END), 0) AS total_credits_base,
-                    COALESCE(SUM(CASE WHEN from_address = %s AND status='confirmed'
-                                THEN amount ELSE 0 END), 0) AS total_debits_base,
-                    COUNT(CASE WHEN to_address = %s AND tx_type='coinbase'
-                               AND status='confirmed' THEN 1 END) AS blocks_mined,
-                    COUNT(CASE WHEN to_address = %s AND status='confirmed'
-                               THEN 1 END) AS total_received_txs
-                FROM transactions
-                WHERE to_address = %s OR from_address = %s
-            """, (address, address, address, address, address, address))
+                    COALESCE(SUM(credits),0)     AS total_credits_base,
+                    COALESCE(SUM(debits),0)      AS total_debits_base,
+                    COALESCE(SUM(coinbases),0)   AS blocks_mined,
+                    COALESCE(SUM(rx_txs),0)      AS total_received_txs,
+                    COALESCE(SUM(wallet_bal),0)  AS wallet_bal
+                FROM (
+                    SELECT
+                        CASE WHEN to_address=%s AND status='confirmed' THEN amount ELSE 0 END AS credits,
+                        0 AS debits,
+                        CASE WHEN to_address=%s AND tx_type='coinbase' AND status='confirmed' THEN 1 ELSE 0 END AS coinbases,
+                        CASE WHEN to_address=%s AND status='confirmed' THEN 1 ELSE 0 END AS rx_txs,
+                        0 AS wallet_bal
+                    FROM transactions WHERE to_address=%s
+                    UNION ALL
+                    SELECT
+                        0 AS credits,
+                        CASE WHEN from_address=%s AND status='confirmed' THEN amount ELSE 0 END AS debits,
+                        0 AS coinbases, 0 AS rx_txs, 0 AS wallet_bal
+                    FROM transactions WHERE from_address=%s AND from_address != to_address
+                    UNION ALL
+                    SELECT 0,0,0,0, COALESCE(balance,0)
+                    FROM wallet_addresses WHERE address=%s
+                ) _agg
+            """, (address, address, address, address, address, address, address))
             row = cur.fetchone()
 
-        credits_base = int(row[0] or 0)
-        debits_base  = int(row[1] or 0)
-        blocks_mined = int(row[2] or 0)
-        total_rx_txs = int(row[3] or 0)
-        net_base     = max(0, credits_base - debits_base)
-        net_qtcl     = net_base / 100.0
-        credits_qtcl = credits_base / 100.0
-        debits_qtcl  = debits_base / 100.0
-
-        # Also fetch wallet_addresses.balance for cross-verification
-        wallet_balance_base = 0
-        try:
-            with get_db_cursor() as _wc:
-                _wc.execute(
-                    "SELECT balance FROM wallet_addresses WHERE address = %s",
-                    (address,))
-                _wr = _wc.fetchone()
-                if _wr:
-                    wallet_balance_base = int(_wr[0] or 0)
-        except Exception:
-            pass
+        credits_base        = int(row[0] or 0) if row else 0
+        debits_base         = int(row[1] or 0) if row else 0
+        blocks_mined        = int(row[2] or 0) if row else 0
+        total_rx_txs        = int(row[3] or 0) if row else 0
+        wallet_balance_base = int(row[4] or 0) if row else 0
+        net_base            = max(0, credits_base - debits_base)
+        net_qtcl            = net_base / 100.0
+        credits_qtcl        = credits_base / 100.0
+        debits_qtcl         = debits_base / 100.0
         wallet_balance_qtcl = wallet_balance_base / 100.0
 
         # Use transaction ledger as ground truth; expose wallet cache for debug
