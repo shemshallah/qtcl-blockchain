@@ -80,7 +80,7 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
 .pb.vi{background:var(--vi2);color:var(--vi);border-color:rgba(128,64,255,.2)}
 .pb.gr{background:var(--gr2);color:var(--gr);border-color:rgba(0,255,157,.2)}
 #dc,#qc{display:block;width:100%}
-#cs{overflow-x:auto;padding:12px 16px;display:flex;align-items:center;gap:0;scrollbar-width:thin;scrollbar-color:var(--b) transparent}
+#cs{overflow-x:auto;padding:12px 16px;display:flex;align-items:center;gap:0;min-height:96px;scrollbar-width:thin;scrollbar-color:var(--b) transparent}
 #cs::-webkit-scrollbar{height:3px}
 #cs::-webkit-scrollbar-thumb{background:var(--b)}
 .bn{flex-shrink:0;display:flex;flex-direction:column;align-items:center}
@@ -880,7 +880,13 @@ function drawHex(canvas,fid,fresh){
   if(fid>0){ctx.beginPath();ctx.arc(cx,cy,r*.35,0,Math.PI*2*fid);ctx.strokeStyle='rgba(128,64,255,.6)';ctx.lineWidth=2;ctx.stroke();}
 }
 function renderChain(){
-  var el=document.getElementById('cs'),show=blocks.slice(-18);el.innerHTML='';
+  var el=document.getElementById('cs'),show=blocks.slice(-18);
+  if(!show.length){
+    el.innerHTML='<div style="color:var(--dim);font-family:var(--mono);font-size:10px;padding:8px 0;opacity:.6">Awaiting blocks…</div>';
+    document.getElementById('bcc').textContent='0 blocks';
+    return;
+  }
+  el.innerHTML='';
   show.forEach(function(b,i){
     if(i>0){var c=document.createElement('div');c.className='bco';el.appendChild(c);}
     var node=document.createElement('div'),isFr=i===show.length-1&&b._fr;
@@ -1589,6 +1595,21 @@ async function refresh(){
       var h=parseInt(d.height);
       if(h>0&&h!==(window._lastIngestedHeight||0)){
         window._lastIngestedHeight=h;
+        // Push new block into stream immediately from SSE payload
+        if(!blocks.find(function(x){return x.height===h;})){
+          var nb={
+            height:   h,
+            hash:     d.block_hash||'',
+            tx_count: d.tx_count||0,
+            fidelity: d.w_state_fidelity||S.fidelity||0.9,
+            coherence:d.coherence||S.coherence||0.7,
+            _fr:      true
+          };
+          blocks.push(nb);
+          blocks=blocks.sort(function(a,b){return a.height-b.height;}).slice(-60);
+          dbk.push({r:Math.random()*.72+.1,a:Math.random()*Math.PI*2,age:0});
+          renderChain();
+        }
         ingestNewBlockTxs(h, d.block_hash||''); if(typeof _H!=='undefined') _H.onBlock();
         if(h>S.chain_height){S.chain_height=h;var _bh=document.getElementById('bh');if(_bh) _bh.textContent=h;}
         // New block = miner won — refresh registry after a beat

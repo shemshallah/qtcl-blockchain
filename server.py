@@ -8927,22 +8927,32 @@ def chain_status():
             oracle_consensus = val_row[2] if val_row else False
             temporal_coherence = float(val_row[3]) if val_row and val_row[3] else 0.0
             
-            # Get recent blocks
-            cur.execute("""                SELECT height, block_hash, timestamp, transactions,
-                       temporal_coherence, temporal_coherence
-                FROM blocks
-                ORDER BY height DESC
-                LIMIT 5
+            # Get recent blocks — LIMIT 18 fills the block stream (shows -18 slice)
+            cur.execute("SET LOCAL statement_timeout = '5000'")
+            cur.execute("""
+                SELECT b.height, b.block_hash, b.timestamp,
+                       COALESCE(t.tx_count, 0)        AS tx_count,
+                       COALESCE(b.entropy_score, 0.9) AS fidelity,
+                       COALESCE(b.temporal_coherence, 0.0) AS coherence
+                FROM blocks b
+                LEFT JOIN (
+                    SELECT height, COUNT(*) AS tx_count
+                    FROM transactions
+                    WHERE height IS NOT NULL
+                    GROUP BY height
+                ) t ON t.height = b.height
+                ORDER BY b.height DESC
+                LIMIT 18
             """)
             recent = []
             for row in cur.fetchall():
                 recent.append({
-                    'height': row[0],
-                    'hash': row[1],
+                    'height':    row[0],
+                    'hash':      row[1],
                     'timestamp': row[2],
-                    'tx_count': row[3] or 0,
-                    'coherence': float(row[4]) if row[4] else 0.0,
-                    'fidelity': float(row[5]) if row[5] else 0.0,
+                    'tx_count':  int(row[3] or 0),
+                    'fidelity':  float(row[4]) if row[4] else 0.9,
+                    'coherence': float(row[5]) if row[5] else 0.0,
                 })
             recent = list(reversed(recent))
             
@@ -10015,63 +10025,67 @@ def submit_transaction():
 
 @app.route('/api/blocks/height/<int:height>/transactions', methods=['GET'])
 def block_transactions(height: int):
-    """
-    Get all transactions in a block by height.
-    tx[0] is always the coinbase. Includes full coinbase metadata.
-    Falls back to block_hash lookup for old rows where height was not stamped.
-    """
+    """Get all transactions in a block by height — runs on TxQueryWorker (port 6543)."""
     try:
-        with get_db_cursor() as cur:
-            cur.execute("""
-                SELECT tx_hash, from_address, to_address, amount,
+        # Primary: fetch by height
+        result = _tx_query([
+            ("""SELECT tx_hash, from_address, to_address, amount,
                        transaction_index, tx_type, status,
                        quantum_state_hash, metadata, created_at
                 FROM transactions
                 WHERE height = %s
-                ORDER BY transaction_index ASC, tx_type DESC
-            """, (height,))
-            rows = cur.fetchall()
+                ORDER BY transaction_index ASC, tx_type DESC""",
+             (height,)),
+            # Fallback hash lookup in same job
+            ("""SELECT block_hash FROM blocks WHERE height = %s LIMIT 1""",
+             (height,)),
+        ], timeout=9.0)
 
-            # ── Fallback: look up by block_hash for old rows missing height ──
-            if not rows:
-                cur.execute("""
-                    SELECT block_hash FROM blocks WHERE height = %s LIMIT 1
-                """, (height,))
-                brow = cur.fetchone()
-                if brow and brow[0]:
-                    cur.execute("""
-                        SELECT tx_hash, from_address, to_address, amount,
-                               transaction_index, tx_type, status,
-                               quantum_state_hash, metadata, created_at
-                        FROM transactions
-                        WHERE block_hash = %s
-                        ORDER BY transaction_index ASC, tx_type DESC
-                    """, (brow[0],))
-                    rows = cur.fetchall()
-                    # Backfill height on these rows so future queries work
-                    if rows:
-                        cur.execute("""
-                            UPDATE transactions SET height = %s
-                            WHERE block_hash = %s AND (height IS NULL OR height = 0)
-                        """, (height, brow[0]))
+        if 'error' in result:
+            return jsonify({'height': height, 'transactions': [], 'count': 0,
+                            'error': result['error']}), 503
+
+        rows, hash_rows = result['results']
+
+        # Fallback: look up by block_hash for old rows missing height stamp
+        if not rows and hash_rows and hash_rows[0][0]:
+            bhash = hash_rows[0][0]
+            r2 = _tx_query([
+                ("""SELECT tx_hash, from_address, to_address, amount,
+                           transaction_index, tx_type, status,
+                           quantum_state_hash, metadata, created_at
+                    FROM transactions
+                    WHERE block_hash = %s
+                    ORDER BY transaction_index ASC, tx_type DESC""",
+                 (bhash,)),
+            ], timeout=9.0)
+            if 'results' in r2:
+                rows = r2['results'][0]
+                # Backfill height in background — don't block response
+                if rows:
+                    def _backfill(h=height, bh=bhash):
+                        try:
+                            with get_db_cursor() as _c:
+                                _c.execute(
+                                    "UPDATE transactions SET height=%s "
+                                    "WHERE block_hash=%s AND (height IS NULL OR height=0)",
+                                    (h, bh))
+                        except Exception: pass
+                    threading.Thread(target=_backfill, daemon=True).start()
 
         if not rows:
             return jsonify({'height': height, 'transactions': [], 'count': 0}), 200
 
-        txs = []
-        seen_hashes = set()
+        txs, seen = [], set()
         for row in rows:
             h = row[0]
-            if h in seen_hashes:
-                continue  # dedup in case of double coinbase still in DB
-            seen_hashes.add(h)
+            if h in seen: continue
+            seen.add(h)
             raw_amount = int(row[3]) if row[3] is not None else 0
             metadata = row[8]
             if isinstance(metadata, str):
-                try:
-                    metadata = json.loads(metadata)
-                except Exception:
-                    pass
+                try: metadata = json.loads(metadata)
+                except Exception: pass
             txs.append({
                 'tx_hash':           row[0],
                 'from_address':      row[1],
@@ -10087,14 +10101,10 @@ def block_transactions(height: int):
             })
 
         coinbase = next((t for t in txs if t['tx_type'] == 'coinbase'), None)
-        return jsonify({
-            'height':       height,
-            'count':        len(txs),
-            'coinbase':     coinbase,
-            'transactions': txs,
-        }), 200
+        return jsonify({'height': height, 'count': len(txs),
+                        'coinbase': coinbase, 'transactions': txs}), 200
     except Exception as e:
-        logger.error(f"[BLOCK_TXS] Error: {e}")
+        logger.error(f"[BLOCK_TXS] height={height}: {e}")
         return jsonify({'error': str(e)}), 500
 
 
