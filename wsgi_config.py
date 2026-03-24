@@ -100,7 +100,7 @@ try:
     # DIRECT IMPORT OF HLWE (avoids circular dependency with globals)
     from hlwe_engine import (
         get_hlwe_adapter, get_wallet_manager,
-        hlwe_health_check, hlwe_system_info
+        hlwe_health_check, get_hlwe_system_info
     )
     
     logger.info("[WSGI] [HLWE] Import successful, initializing system...")
@@ -113,7 +113,7 @@ try:
     
     # Health check
     is_healthy = hlwe_health_check()
-    system_info = hlwe_system_info()
+    system_info = get_hlwe_system_info()
     
     if is_healthy:
         logger.info("[WSGI] ✅ HLWE system initialized and healthy")
