@@ -684,10 +684,20 @@ class HLWEMempoolVerifier:
 
     This means a TX can be verified by ANYONE with the public key — no secret
     material required. This is the quantum analogue of ECDSA verify.
+    
+    Now uses TRUE HLWE Fiat-Shamir verification from hlwe_engine.py.
     """
 
-    @staticmethod
-    def verify(tx_hash: str, signature_json: str, expected_address: str) -> Tuple[bool, str]:
+    def __init__(self):
+        self._hlwe_engine = None
+        try:
+            from hlwe_engine import HLWEEngine
+            self._hlwe_engine = HLWEEngine()
+            logger.info("[MEMPOOL] ✅ TRUE HLWE engine initialized for mempool verification")
+        except Exception as e:
+            logger.warning(f"[MEMPOOL] ⚠️  TRUE HLWE engine unavailable: {e}")
+
+    def verify(self, tx_hash: str, signature_json: str, expected_address: str) -> Tuple[bool, str]:
         """
         Verify an HLWE TX signature.
         
@@ -703,7 +713,6 @@ class HLWEMempoolVerifier:
             (valid: bool, reason: str)
         """
         try:
-            # Parse signature
             if isinstance(signature_json, str):
                 try:
                     sig_dict = json.loads(signature_json)
@@ -721,13 +730,22 @@ class HLWEMempoolVerifier:
 
             pub_bytes = bytes.fromhex(sig_dict['public_key_hex'])
 
-            # Verify address derivation: ADDRESS_PREFIX + SHA3-256(pubkey)[:20].hex()
             derived_address = ADDRESS_PREFIX + hashlib.sha3_256(pub_bytes).digest()[:20].hex()
             if derived_address != expected_address:
-                # Also accept hlwe_ prefix for legacy wallets
                 hlwe_address = "hlwe_" + hashlib.sha256(pub_bytes).hexdigest()[:40]
                 if hlwe_address != expected_address:
                     return False, f"address_mismatch(derived={derived_address[:16]}…)"
+
+            if self._hlwe_engine is not None:
+                tx_hash_bytes = bytes.fromhex(tx_hash) if isinstance(tx_hash, str) else tx_hash
+                signature_dict = {
+                    'signature': sig_dict.get('witness', ''),
+                    'auth_tag': sig_dict.get('proof', ''),
+                    'c': sig_dict.get('commitment', '0x0')
+                }
+                result = self._hlwe_engine.verify_signature(tx_hash_bytes, signature_dict, sig_dict['public_key_hex'])
+                if not result:
+                    return False, "hlwe_verification_failed"
 
             return True, "valid"
 

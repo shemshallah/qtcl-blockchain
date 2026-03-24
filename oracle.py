@@ -874,6 +874,15 @@ class HLWESigner:
 
 
 class HLWEVerifier:
+    def __init__(self):
+        self._hlwe_engine = None
+        try:
+            from hlwe_engine import HLWEEngine
+            self._hlwe_engine = HLWEEngine()
+            logger.info("[HLWE] ✅ TRUE HLWE verifier initialized")
+        except Exception as e:
+            logger.warning(f"[HLWE] ⚠️  TRUE HLWE engine unavailable: {e}")
+    
     def verify_signature(self, msg_hash: str, sig: HLWESignature,
                          expected_address: Optional[str] = None) -> Tuple[bool, str]:
         try:
@@ -882,6 +891,18 @@ class HLWEVerifier:
                 derived = ADDRESS_PREFIX + hashlib.sha3_256(pubkey).digest()[:20].hex()
                 if derived != expected_address:
                     return False, "address_mismatch"
+            
+            if self._hlwe_engine is not None:
+                msg_bytes = msg_hash.encode() if isinstance(msg_hash, str) else msg_hash
+                signature_dict = {
+                    'signature': sig.witness.hex() if hasattr(sig, 'witness') else '',
+                    'auth_tag': sig.proof.hex() if hasattr(sig, 'proof') else '',
+                    'c': sig.commitment.hex() if hasattr(sig, 'commitment') else '0x0'
+                }
+                result = self._hlwe_engine.verify_signature(msg_bytes, signature_dict, sig.public_key_hex)
+                if not result:
+                    return False, "hlwe_verification_failed"
+            
             return True, "valid"
         except Exception as e:
             return False, f"verification_exception: {e}"
