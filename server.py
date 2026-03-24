@@ -661,6 +661,10 @@ MESSAGE_MAX_SIZE = 1_000_000
 PEER_HANDSHAKE_TIMEOUT = 5
 PEER_KEEPALIVE_INTERVAL = 30
 
+# RPC-only mode: disable HTTP proxy in P2P server, use RPC exclusively
+# Set RPC_ONLY=1 to disable HTTP route proxying (all traffic via RPC/SSE)
+RPC_ONLY = os.getenv('RPC_ONLY', '').lower() in ('1', 'true', 'yes')
+
 
 # ── Block policy ──────────────────────────────────────────────────────────────
 # Max USER transactions per block (coinbase not counted).
@@ -2873,6 +2877,52 @@ def _ensure_gossip_tables() -> bool:
     return True
 
 
+def _ensure_oracle_measurements_table() -> bool:
+    """CREATE TABLE IF NOT EXISTS oracle_measurements — stores quantum oracle readings.
+    Idempotent, safe to call on every deploy."""
+    ddl_statements = [
+        """CREATE TABLE IF NOT EXISTS oracle_measurements (
+            id              SERIAL PRIMARY KEY,
+            cycle           BIGINT        NOT NULL,
+            timestamp_ns    BIGINT        NOT NULL,
+            lattice_fidelity      DOUBLE PRECISION NOT NULL,
+            block_field_fidelity DOUBLE PRECISION NOT NULL,
+            block_field_coherence DOUBLE PRECISION NOT NULL,
+            pq_curr         BIGINT        NOT NULL DEFAULT 0,
+            pq_last         BIGINT        NOT NULL DEFAULT 0,
+            oracle_count    INTEGER       NOT NULL DEFAULT 0,
+            fidelity_delta  DOUBLE PRECISION NOT NULL,
+            window_type     VARCHAR(32)   NOT NULL DEFAULT '',
+            mermin_violation DOUBLE PRECISION NOT NULL,
+            created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_oracle_measurements_cycle
+            ON oracle_measurements (cycle DESC)""",
+        """CREATE INDEX IF NOT EXISTS idx_oracle_measurements_timestamp
+            ON oracle_measurements (timestamp_ns DESC)""",
+    ]
+    ok = True
+    for ddl in ddl_statements:
+        try:
+            with get_db_cursor() as cur: cur.execute(ddl)
+        except Exception as e:
+            logger.debug(f"[ORACLE_MEASUREMENTS] DDL skipped ({ddl[:50]}...): {e}")
+            ok = False
+    if ok: logger.info("[ORACLE_MEASUREMENTS] ✅ Table verified/created")
+    return ok
+
+
+_oracle_measurements_ensured = False
+
+def _lazy_ensure_oracle_measurements():
+    global _oracle_measurements_ensured
+    if _oracle_measurements_ensured: return
+    with _oracle_registry_lock:
+        if _oracle_measurements_ensured: return
+        _ensure_oracle_measurements_table()
+        _oracle_measurements_ensured = True
+
+
 def gossip_store_put(key: str, value: Dict[str, Any]) -> bool:
     """Upsert a key-value pair into gossip_store (PostgreSQL-backed DHT)."""
     try:
@@ -3138,6 +3188,7 @@ def _start_gossip_subsystem():
     try:
         _ensure_gossip_tables()
         _lazy_ensure_oracle_registry()
+        _lazy_ensure_oracle_measurements()
         GossipPusherThread().start()
         logger.info("[GOSSIP] Subsystem online — DB gossip store + SSE broadcaster + peer pusher")
     except Exception as e:
@@ -5688,12 +5739,22 @@ class P2PServer:
                     # Flask/Gunicorn on localhost:$PORT, pipe the real JSON response back.
                     # Health probes (/ /health /healthz /ping) get a fast-path JSON 200
                     # without touching Flask.
+                    #
+                    # RPC_ONLY mode: skip HTTP proxy, only allow RPC/SSE connections
                     # ─────────────────────────────────────────────────────────────────
                     try:
                         client_sock.settimeout(0.5)
                         peek = client_sock.recv(4, socket.MSG_PEEK)
                         client_sock.settimeout(None)
                         _HTTP_PREFIXES = (b'GET ', b'POST', b'HEAD', b'PUT ', b'DELE', b'OPTI', b'PATC', b'HTTP')
+                        if RPC_ONLY and peek and peek[:4] in _HTTP_PREFIXES:
+                            # RPC_ONLY mode: reject HTTP, only allow RPC/SSE
+                            try:
+                                sock.sendall(b'HTTP/1.1 405 Method Not Allowed\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nRPC-only mode - use JSON-RPC 2.0 at /rpc endpoint')
+                            except Exception:
+                                pass
+                            client_sock.close()
+                            continue
                         if peek and peek[:4] in _HTTP_PREFIXES:
                             _csock, _addr = client_sock, address
                             def _proxy_http(sock=_csock, addr=_addr):
@@ -13508,6 +13569,246 @@ def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"Oracle reg submission failed: {e}", rpc_id)
 
 
+def _rpc_getChainTip(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getChainTip — current chain tip block."""
+    try:
+        mgr = get_difficulty_manager()
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT height, block_hash, timestamp, oracle_w_state_hash,
+                       previous_hash, validator_public_key, nonce, difficulty,
+                       entropy_score, transactions_root
+                FROM blocks
+                ORDER BY height DESC
+                LIMIT 1
+            """)
+            row = cur.fetchone()
+        if row and row[0]:
+            return _rpc_ok({
+                'block_height':     row[0],
+                'block_hash':       row[1] or '',
+                'parent_hash':      row[4] or ('0' * 64),
+                'merkle_root':      row[9] or ('0' * 64),
+                'timestamp_s':      int(row[2]) if row[2] else int(time.time()),
+                'difficulty_bits':  mgr.get_difficulty(),
+                'nonce':            int(row[6]) if row[6] else 0,
+                'miner_address':    row[5] or '',
+                'w_state_fidelity': float(row[8]) if row[8] is not None else 0.9,
+                'w_entropy_hash':   row[3] or '',
+            }, rpc_id)
+        return _rpc_ok({
+            'block_height': 0, 'block_hash': '0' * 64,
+            'parent_hash': '0' * 64, 'merkle_root': '0' * 64,
+            'timestamp_s': int(time.time()), 'difficulty_bits': mgr.get_difficulty(),
+            'nonce': 0, 'miner_address': '', 'w_state_fidelity': 0.9, 'w_entropy_hash': '',
+        }, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Chain tip failed: {e}", rpc_id)
+
+
+def _rpc_getMempool(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getMempool — pending transactions in mempool."""
+    try:
+        from mempool import MempoolManager
+        mp = MempoolManager.get_instance()
+        if mp:
+            txs = mp.get_pending_transactions(limit=100)
+            return _rpc_ok({
+                'transactions': [tx.to_dict() for tx in txs],
+                'count': len(txs),
+            }, rpc_id)
+        return _rpc_ok({'transactions': [], 'count': 0}, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Mempool failed: {e}", rpc_id)
+
+
+def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
+    """qtcl_submitBlock — submit a mined block."""
+    if not isinstance(params, dict):
+        return _rpc_error(-32602, "params must be object", rpc_id)
+    try:
+        from flask import current_app
+        with current_app.test_request_context(
+            '/api/submit_block',
+            method='POST',
+            json=params,
+            headers={'Content-Type': 'application/json'}
+        ):
+            from flask import request
+            from server import submit_block as _submit_block
+            resp, status = _submit_block()
+            if status == 200:
+                return _rpc_ok(resp.get_json() if hasattr(resp, 'get_json') else {}, rpc_id)
+            else:
+                return _rpc_error(-32000, f"Submit failed: {status}", rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Submit block failed: {e}", rpc_id)
+
+
+def _rpc_getOracleState(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getOracleState — current oracle W-state."""
+    try:
+        from oracle import ORACLE
+        if ORACLE is None:
+            return _rpc_error(-32001, "Oracle not initialized", rpc_id)
+        state = ORACLE.get_status()
+        return _rpc_ok(state, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Oracle state failed: {e}", rpc_id)
+
+
+def _rpc_getAddressBalance(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getAddressBalance — QTCL balance for an address."""
+    if not isinstance(params, dict):
+        return _rpc_error(-32602, "params must be object", rpc_id)
+    address = params.get("address", "")
+    if not address:
+        return _rpc_error(-32602, "address required", rpc_id)
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("SELECT balance FROM wallet_addresses WHERE address = %s", (address,))
+            row = cur.fetchone()
+            balance = int(row[0]) if row and row[0] else 0
+            return _rpc_ok({
+                "address": address,
+                "balance": balance / 100.0,
+                "balance_base_units": balance,
+                "currency": "QTCL",
+            }, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Balance lookup failed: {e}", rpc_id)
+
+
+def _rpc_getAddressHistory(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getAddressHistory — transaction history for an address."""
+    if not isinstance(params, dict):
+        return _rpc_error(-32602, "params must be object", rpc_id)
+    address = params.get("address", "")
+    limit = min(int(params.get("limit", 50)), 200)
+    if not address:
+        return _rpc_error(-32602, "address required", rpc_id)
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT tx_hash, from_address, to_address, amount, height, tx_type, status, timestamp_ns
+                FROM transactions
+                WHERE from_address = %s OR to_address = %s
+                ORDER BY height DESC LIMIT %s
+            """, (address, address, limit))
+            rows = cur.fetchall()
+            txs = [{
+                "tx_hash": r[0],
+                "from_address": r[1],
+                "to_address": r[2],
+                "amount": r[3],
+                "height": r[4],
+                "tx_type": r[5],
+                "status": r[6],
+                "timestamp_ns": r[7],
+            } for r in rows]
+            return _rpc_ok({"transactions": txs, "count": len(txs)}, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"History lookup failed: {e}", rpc_id)
+
+
+def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
+    """qtcl_registerPeer — register a peer in the P2P network."""
+    if not isinstance(params, dict):
+        return _rpc_error(-32602, "params must be object", rpc_id)
+    peer_id = params.get("peer_id", "")
+    host = params.get("host", "")
+    port = int(params.get("port", 9091))
+    if not peer_id or not host:
+        return _rpc_error(-32602, "peer_id and host required", rpc_id)
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                INSERT INTO peer_registry (peer_id, ip_address, port, supports_sse, last_seen)
+                VALUES (%s, %s, %s, TRUE, NOW())
+                ON CONFLICT (peer_id) DO UPDATE SET
+                    ip_address = EXCLUDED.ip_address,
+                    port = EXCLUDED.port,
+                    last_seen = NOW()
+            """, (peer_id, host, port))
+        return _rpc_ok({"status": "registered", "peer_id": peer_id}, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Peer registration failed: {e}", rpc_id)
+
+
+def _rpc_peerHeartbeat(params: Any, rpc_id: Any) -> dict:
+    """qtcl_peerHeartbeat — update peer last_seen timestamp."""
+    if not isinstance(params, dict):
+        return _rpc_error(-32602, "params must be object", rpc_id)
+    peer_id = params.get("peer_id", "")
+    if not peer_id:
+        return _rpc_error(-32602, "peer_id required", rpc_id)
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("UPDATE peer_registry SET last_seen = NOW() WHERE peer_id = %s", (peer_id,))
+        return _rpc_ok({"status": "ok", "peer_id": peer_id}, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Heartbeat failed: {e}", rpc_id)
+
+
+def _rpc_submitTransaction(params: Any, rpc_id: Any) -> dict:
+    """qtcl_submitTransaction — submit a transaction to the mempool."""
+    if not isinstance(params, dict):
+        return _rpc_error(-32602, "params must be object", rpc_id)
+    try:
+        from flask import current_app
+        with current_app.test_request_context(
+            '/api/submit_transaction',
+            method='POST',
+            json=params,
+            headers={'Content-Type': 'application/json'}
+        ):
+            from server import submit_transaction as _submit_tx
+            resp, status = _submit_tx()
+            if status in (200, 201, 202):
+                return _rpc_ok(resp.get_json() if hasattr(resp, 'get_json') else {}, rpc_id)
+            else:
+                return _rpc_error(-32000, f"Submit failed: {status}", rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Submit transaction failed: {e}", rpc_id)
+
+
+def _rpc_gossipIngest(params: Any, rpc_id: Any) -> dict:
+    """qtcl_gossipIngest — ingest gossip data into the network."""
+    if not isinstance(params, dict):
+        return _rpc_error(-32602, "params must be object", rpc_id)
+    try:
+        from server import gossip_store_put
+        key = params.get("key", "")
+        value = params.get("value", {})
+        if not key:
+            return _rpc_error(-32602, "key required", rpc_id)
+        ok = gossip_store_put(key, value)
+        return _rpc_ok({"status": "ok" if ok else "failed"}, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Gossip ingest failed: {e}", rpc_id)
+
+
+def _rpc_oracleRegister(params: Any, rpc_id: Any) -> dict:
+    """qtcl_oracleRegister — register this node as an oracle."""
+    if not isinstance(params, dict):
+        return _rpc_error(-32602, "params must be object", rpc_id)
+    miner_id = params.get("miner_id", "")
+    address = params.get("address", "")
+    if not miner_id or not address:
+        return _rpc_error(-32602, "miner_id and address required", rpc_id)
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                INSERT INTO oracle_registry (oracle_id, oracle_address, last_seen, mode)
+                VALUES (%s, %s, %s, 'full')
+                ON CONFLICT (oracle_id) DO UPDATE SET
+                    last_seen = NOW(), oracle_address = EXCLUDED.oracle_address
+            """, (miner_id, address))
+        return _rpc_ok({"status": "registered", "oracle_id": miner_id}, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Oracle registration failed: {e}", rpc_id)
+
+
 # ─── Method registry (O(1) dispatch) ─────────────────────────────────────────
 
 _RPC_METHODS: Dict[str, Any] = {
@@ -13520,6 +13821,18 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getMempoolStats":   _rpc_getMempoolStats,
     "qtcl_getPeers":          _rpc_getPeers,
     "qtcl_getHealth":         _rpc_getHealth,
+    # ── RPC-native endpoints (replace HTTP) ────────────────────────────────────
+    "qtcl_getChainTip":       _rpc_getChainTip,
+    "qtcl_getMempool":        _rpc_getMempool,
+    "qtcl_submitBlock":       _rpc_submitBlock,
+    "qtcl_getOracleState":    _rpc_getOracleState,
+    "qtcl_getAddressBalance": _rpc_getAddressBalance,
+    "qtcl_getAddressHistory": _rpc_getAddressHistory,
+    "qtcl_registerPeer":     _rpc_registerPeer,
+    "qtcl_peerHeartbeat":     _rpc_peerHeartbeat,
+    "qtcl_submitTransaction": _rpc_submitTransaction,
+    "qtcl_gossipIngest":      _rpc_gossipIngest,
+    "qtcl_oracleRegister":    _rpc_oracleRegister,
     # ── On-chain oracle registry ──────────────────────────────────────────────
     "qtcl_getOracleRegistry": _rpc_getOracleRegistry,
     "qtcl_getOracleRecord":   _rpc_getOracleRecord,
@@ -13575,6 +13888,60 @@ _RPC_METHOD_META: Dict[str, Dict] = {
         "description": "Full system health vector (oracle, lattice, Pyth, uptime)",
         "params": [],
         "returns": "object{status, ts, uptime_s, oracle_ready, lattice_ready, pyth_ready, ...}",
+    },
+    # ── RPC-native endpoints (replace HTTP) ────────────────────────────────────
+    "qtcl_getChainTip": {
+        "description": "Current chain tip block (replaces /api/blocks/tip)",
+        "params": [],
+        "returns": "object{block_height, block_hash, parent_hash, merkle_root, difficulty_bits, ...}",
+    },
+    "qtcl_getMempool": {
+        "description": "Pending transactions in mempool (replaces /api/mempool)",
+        "params": [{"name": "limit", "type": "integer", "required": False, "default": 100}],
+        "returns": "object{transactions[], count}",
+    },
+    "qtcl_submitBlock": {
+        "description": "Submit a mined block (replaces /api/submit_block)",
+        "params": [{"name": "block", "type": "object", "required": True}],
+        "returns": "object{accepted, block_height, block_hash, ...}",
+    },
+    "qtcl_getOracleState": {
+        "description": "Current oracle W-state (replaces /api/oracle/*)",
+        "params": [],
+        "returns": "object{w_state, fidelity, coherence, ts}",
+    },
+    # ── RPC-native address/peer methods ────────────────────────────────────────
+    "qtcl_getAddressBalance": {
+        "description": "QTCL balance for an address (replaces /api/address/{addr}/balance)",
+        "params": [{"name": "address", "type": "string", "required": True}],
+        "returns": "object{address, balance, balance_base_units, currency}",
+    },
+    "qtcl_getAddressHistory": {
+        "description": "Transaction history for an address (replaces /api/address/{addr}/history)",
+        "params": [
+            {"name": "address", "type": "string", "required": True},
+            {"name": "limit", "type": "integer", "required": False, "default": 50},
+        ],
+        "returns": "object{transactions[], count}",
+    },
+    "qtcl_registerPeer": {
+        "description": "Register a peer in the P2P network (replaces /api/peers/register)",
+        "params": [
+            {"name": "peer_id", "type": "string", "required": True},
+            {"name": "host", "type": "string", "required": True},
+            {"name": "port", "type": "integer", "required": False, "default": 9091},
+        ],
+        "returns": "object{status, peer_id}",
+    },
+    "qtcl_peerHeartbeat": {
+        "description": "Update peer last_seen timestamp (replaces /api/peers/heartbeat)",
+        "params": [{"name": "peer_id", "type": "string", "required": True}],
+        "returns": "object{status, peer_id}",
+    },
+    "qtcl_submitTransaction": {
+        "description": "Submit a transaction to the mempool (replaces /api/submit_transaction)",
+        "params": [{"name": "transaction", "type": "object", "required": True}],
+        "returns": "object{accepted, tx_hash, ...}",
     },
     # ── On-chain oracle registry ──────────────────────────────────────────────
     "qtcl_getOracleRegistry": {
