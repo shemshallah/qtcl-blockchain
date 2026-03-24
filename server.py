@@ -314,7 +314,7 @@ except ImportError:
     psycopg2 = None  # type: ignore
     psycopg2_pool_mod = None
 
-from flask import Flask, jsonify, request, render_template_string, send_file, Response, stream_with_context
+from flask import Flask, jsonify, request, render_template_string, send_file, Response
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -325,13 +325,8 @@ import queue as _queue_mod
 import uuid
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
-# SSE provides:
-#   ✓ Real-time snapshot broadcasting
-#   ✓ Automatic connection management
-#   ✓ PostgreSQL LISTEN/NOTIFY cross-instance fanout
-#   ✓ Simplified client integration (HTTP + WebSocket)
-
-# ═════════════════════════════════════════════════════════════════════════════════
+# RPC SNAPSHOT DISTRIBUTION (replaces SSE)
+# ═════════════════════════════════════════════════════════════════════════════════════════
 # ENTROPY POOL INTEGRATION
 # ═════════════════════════════════════════════════════════════════════════════════
 
@@ -406,7 +401,7 @@ if not POOLER_URL:
     POOLER_HOST     = os.getenv('POOLER_HOST')
     POOLER_USER     = os.getenv('POOLER_USER')
     POOLER_PASSWORD = os.getenv('POOLER_PASSWORD')
-    POOLER_DB       = os.getenv('POOLER_DB', 'postgres')  # Default is 'postgres'
+    POOLER_DB       = os.getenv('POOLER_DB', 'postgres')
     POOLER_PORT     = os.getenv('POOLER_PORT', '6543')
 
     if POOLER_HOST and POOLER_USER and POOLER_PASSWORD:
@@ -660,10 +655,6 @@ PEER_TIMEOUT = 30
 MESSAGE_MAX_SIZE = 1_000_000
 PEER_HANDSHAKE_TIMEOUT = 5
 PEER_KEEPALIVE_INTERVAL = 30
-
-# RPC-only mode: disable HTTP proxy in P2P server, use RPC exclusively
-# Set RPC_ONLY=1 to disable HTTP route proxying (all traffic via RPC/SSE)
-RPC_ONLY = os.getenv('RPC_ONLY', '').lower() in ('1', 'true', 'yes')
 
 
 # ── Block policy ──────────────────────────────────────────────────────────────
@@ -1120,14 +1111,6 @@ class DatabasePool:
             # ── Native psycopg2 TCP mode (Koyeb / self-hosted) ───────────────
             try:
                 from psycopg2 import pool as psycopg2_pool
-                
-                # Log connection info for debugging
-                logger.info(f"[DB] Connection config:")
-                logger.info(f"  Host: {POOLER_HOST or 'from POOLER_URL'}")
-                logger.info(f"  Port: {POOLER_PORT}")
-                logger.info(f"  DB: {POOLER_DB}")
-                logger.info(f"  User: {POOLER_USER}")
-                
                 # min=1: open only ONE connection on pool creation — avoids
                 # exhausting Supabase session-mode slots during retry storms.
                 min_connections = 1
@@ -1167,14 +1150,8 @@ class DatabasePool:
                 self._retry_interval = 5.0
 
     def get_connection(self):
-        # Always ensure pool is initialized before getting connection
         if not self._initialized:
             self._initialize_pool()
-        
-        # If still not initialized after retry, raise clear error
-        if not self._initialized:
-            raise RuntimeError("[DB] Pool initialization failed - check POOLER_* environment variables")
-        
         try:
             if self._http_mode and self.pool:
                 return self.pool.getconn()
@@ -1188,12 +1165,9 @@ class DatabasePool:
         except psycopg2.OperationalError as e:
             logger.error(f"[DB] ❌ Cannot connect to Supabase pooler: {e}")
             logger.error(f"[DB] Check POOLER_URL: {DB_URL[:50]}...")
-            # Mark as not initialized to trigger retry on next call
-            self._initialized = False
             raise
         except Exception as e:
             logger.error(f"[DB] Connection error: {e}")
-            self._initialized = False
             raise
 
     def put_connection(self, conn):
@@ -2152,41 +2126,25 @@ def get_dht_manager() -> DHTManager:
 
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
-# SSE SNAPSHOT DISTRIBUTION
+# RPC SNAPSHOT DISTRIBUTION (JSON polling — no SSE)
 # ═════════════════════════════════════════════════════════════════════════════════════════
 
-_sse_clients: Dict[str, _queue_mod.Queue] = {}
-_sse_lock = threading.RLock()
-_sse_broadcast_count = 0
+# RPC snapshot cache + event log (no SSE infrastructure)
+_rpc_event_log: Deque = Deque(maxlen=1000)           # Ring buffer of recent RPC events
+_rpc_event_lock = threading.RLock()                  # Guards _rpc_event_log writes
+_latest_snapshot: Optional[dict] = None              # Last cached snapshot (poll endpoint)
+_snapshot_lock = threading.RLock()                   # Guards _latest_snapshot updates
 
-# ── Snapshot distribution globals (MUST be declared before any function uses them) ──
-_latest_snapshot: Optional[dict]  = None          # last broadcast snapshot for new SSE clients
-_latest_snapshot_ts: int          = 0             # timestamp_ns of latest snapshot
-_last_snapshot_log_time: float    = 0.0           # rate-limit snapshot log messages
-_verbose_p2p_logging: bool        = os.getenv('VERBOSE_P2P', '').lower() in ('1', 'true', 'yes')
-_snapshot_log_interval: float     = 60.0          # seconds between snapshot log entries
-_snapshot_lock                    = threading.RLock()   # guards _latest_snapshot / _ts
+def _cache_snapshot(snapshot: dict) -> None:
+    """Cache snapshot for RPC polling (no SSE push)."""
+    global _latest_snapshot
+    with _snapshot_lock:
+        _latest_snapshot = snapshot
 
-def _sse_push_snapshot(snapshot: dict) -> None:
-    """Push snapshot to all connected SSE clients."""
-    global _sse_broadcast_count
-    with _sse_lock:
-        _sse_broadcast_count += 1
-        dead = []
-        for client_id, q in _sse_clients.items():
-            try:
-                q.put_nowait(snapshot)
-            except _queue_mod.Full:
-                try:
-                    q.get_nowait()
-                    q.put_nowait(snapshot)
-                except:
-                    dead.append(client_id)
-        for client_id in dead:
-            if client_id in _sse_clients:
-                del _sse_clients[client_id]
-        if _sse_broadcast_count % 1000 == 0:
-            logger.info(f"[SSE] 📊 Broadcast #{_sse_broadcast_count} | Clients: {len(_sse_clients)}")
+def _log_rpc_event(event_type: str, data: Any) -> None:
+    """Log event for /api/events RPC polling endpoint."""
+    with _rpc_event_lock:
+        _rpc_event_log.append({'ts': time.time(), 'type': event_type, 'data': data})
 
 
 
@@ -2203,50 +2161,40 @@ def _set_app_ready():
 # API Endpoints
 # ═════════════════════════════════════════════════════════════════════════════════════════
 
-@app.route('/api/snapshot/sse', methods=['GET'])
-def sse_snapshot_stream():
-    """Server-Sent Events endpoint for real-time snapshot streaming."""
-    # ── Capture ALL request-context values HERE, before the generator runs ──
-    # Flask exits the request context before the generator body executes its
-    # first yield. Any request.* access inside the generator raises:
-    #   RuntimeError: Working outside of request context.
-    client_id      = request.args.get('client_id', f"sse_{int(time.time()*1000)}")
-    miner_address  = request.args.get('miner', 'unknown')
-
-    def _stream(_client_id, _miner_address):
-        try:
-            q = _queue_mod.Queue(maxsize=100)
-            with _sse_lock:
-                _sse_clients[_client_id] = q
-            logger.info(f"[SSE] 📡 Client connected: {_client_id} | Miner: {_miner_address}")
-
-            global _latest_snapshot
-            if _latest_snapshot:
-                yield f"data: {json.dumps(_latest_snapshot)}\n\n"
-
-            while True:
-                try:
-                    snapshot = q.get(timeout=60)
-                    yield f"data: {json.dumps(snapshot)}\n\n"
-                except _queue_mod.Empty:
-                    yield ": keepalive\n\n"
-        except Exception as e:
-            logger.error(f"[SSE] ❌ Error: {e}")
-        finally:
-            with _sse_lock:
-                if _client_id in _sse_clients:
-                    del _sse_clients[_client_id]
-            logger.info(f"[SSE] 🔌 Client disconnected: {_client_id}")
-
-    return Response(
-        _stream(client_id, miner_address),
-        mimetype='text/event-stream',
-        headers={
-            'Cache-Control':   'no-cache',
-            'X-Accel-Buffering': 'no',
-            'Connection':      'keep-alive',
-        }
-    )
+@app.route('/api/oracle/snapshot', methods=['GET'])
+def oracle_snapshot_json():
+    """Return latest oracle snapshot as JSON (replaces SSE stream)."""
+    with _snapshot_lock:
+        if _latest_snapshot:
+            return jsonify(_latest_snapshot), 200
+    # Fallback to database
+    try:
+        _lazy_ensure_quantum_snapshots()
+        with get_db_cursor() as cur:
+            cur.execute("SELECT bucket_ts, timestamp_ns, chirp_number, lattice_fidelity, lattice_coherence, "
+                       "lattice_cycle, lattice_sigma_mod8, consensus_fidelity, consensus_coherence, consensus_purity, "
+                       "mermin_M, mermin_is_quantum, mermin_verdict, pq0_oracle, pq0_IV, pq0_V, pq_curr, pq_last, "
+                       "oracle_measurements, phase_name FROM quantum_snapshots ORDER BY timestamp_ns DESC LIMIT 1")
+            row = cur.fetchone()
+        if not row:
+            return jsonify({'ready': False, 'error': 'no snapshots yet'}), 503
+        oracles = row[18] if isinstance(row[18], list) else []
+        mermin_result = {'M_value': float(row[10]), 'M': float(row[10]), 'is_quantum': bool(row[11]), 
+                        'verdict': str(row[12])} if row[10] else None
+        return jsonify({
+            'timestamp_ns': int(row[1]), 'chirp_number': int(row[2]),
+            'lattice_quantum': {'fidelity': float(row[3]), 'coherence': float(row[4]), 'cycle_count': int(row[5]),
+                               'lattice_sigma_mod8': int(row[6]), 'phase_name': str(row[19]), 'lattice_status': 'online'},
+            'consensus': {'w_state_fidelity': float(row[7]), 'coherence': float(row[8]), 'purity': float(row[9])},
+            'mermin_test': mermin_result, 'bell_test': mermin_result,
+            'pq0_components': {'pq0_oracle_fidelity': float(row[13]), 'pq0_IV_fidelity': float(row[14]),
+                              'pq0_V_fidelity': float(row[15])},
+            'pq_curr': int(row[16]), 'pq_last': int(row[17]), 'oracle_measurements': oracles,
+            'fidelity': float(row[7]), 'coherence': float(row[8]), 'lattice_cycle': int(row[5]),
+            'source': 'db_snapshot', 'ready': True}), 200
+    except Exception as e:
+        logger.error(f"[RPC] oracle_snapshot error: {e}")
+        return jsonify({'error': str(e), 'ready': False}), 500
 
 @app.route('/api/snapshots/latest', methods=['GET'])
 def snapshots_latest():
@@ -2324,73 +2272,39 @@ def snapshots_latest():
 
 @app.route('/api/oracle/push_snapshot', methods=['POST'])
 def oracle_push_snapshot():
-    """Oracle pushes snapshots here for SSE distribution."""
+    """Oracle pushes snapshots for RPC polling (replaces SSE)."""
     try:
         snapshot = request.get_json()
         if not snapshot:
             return jsonify({'error': 'No JSON body'}), 400
-        global _latest_snapshot
-        _latest_snapshot = snapshot
-        _sse_push_snapshot(snapshot)
-        # Flat oracle_dm to /api/events — type at root, no data nesting
-        flat = dict(snapshot); flat['type'] = 'oracle_dm'
-        _gossip_sse._fanout_local(json.dumps(flat, separators=(',', ':')))
-        return jsonify({'status': 'received', 'sse_clients': len(_sse_clients)})
+        _cache_snapshot(snapshot)
+        _log_rpc_event('oracle_snapshot', snapshot)
+        return jsonify({'status': 'cached', 'timestamp_ns': snapshot.get('timestamp_ns')})
     except Exception as e:
-        logger.error(f"[ORACLE] ❌ Error: {e}")
+        logger.error(f"[ORACLE] push_snapshot error: {e}")
         return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/oracle/push_dm', methods=['POST'])
 def oracle_push_dm():
-    """
-    Direct DM frame ingestion endpoint.
-
-    Oracle POSTs its density-matrix frame here; server fans it out immediately
-    to every connected SSE client on both channels.
-
-    Frame structure (all fields at root — NOT nested):
-        type                 : 'oracle_dm'   (stamped here if absent)
-        density_matrix_hex   : str           (required — empty triggers miner fallback)
-        w_state_fidelity     : float
-        pq_curr / pq_last    : int
-        oracle_measurements  : list
-        consensus            : dict
-        timestamp_ns         : int
-
-    /api/snapshot/sse  — receives the raw dict (fields at root)
-    /api/events        — receives the same dict with type='oracle_dm' at root
-                         NO 'data' wrapping — clients read fields directly
-    """
+    """Density-matrix frame ingestion for RPC polling (replaces SSE fanout)."""
     try:
         dm = request.get_json(force=True, silent=True)
         if not dm or not isinstance(dm, dict):
             return jsonify({'error': 'expected JSON object'}), 400
-
         dm.setdefault('type', 'oracle_dm')
         dm.setdefault('timestamp_ns', int(time.time() * 1e9))
-
-        global _latest_snapshot
         with _snapshot_lock:
             _latest_snapshot = dm
-
-        # Channel 1: /api/snapshot/sse — raw blob
-        _sse_push_snapshot(dm)
-
-        # Channel 2: /api/events — flat, type at root, no data nesting
-        _gossip_sse._fanout_local(json.dumps(dm, separators=(',', ':')))
-
+        _log_rpc_event('oracle_dm', dm)
         try:
             _persist_chirp_snapshot(dm)
         except Exception as _pe:
             logger.debug(f"[PUSH-DM] persist skipped: {_pe}")
-
-        n = len(_sse_clients)
-        logger.debug(f"[PUSH-DM] dispatched oracle_dm | clients={n} | ts={dm['timestamp_ns']}")
-        return jsonify({'status': 'dispatched', 'sse_clients': n, 'ts': dm['timestamp_ns']})
-
+        logger.debug(f"[PUSH-DM] cached oracle_dm | ts={dm['timestamp_ns']}")
+        return jsonify({'status': 'cached', 'ts': dm['timestamp_ns']})
     except Exception as e:
-        logger.error(f"[PUSH-DM] ❌ {e}")
+        logger.error(f"[PUSH-DM] error: {e}")
         return jsonify({'error': str(e)}), 500
 
 
@@ -2400,217 +2314,47 @@ def oracle_push_dm():
 #
 # Architecture:
 #   • PostgreSQL is the ONLY shared state across gunicorn workers / Koyeb instances.
-#   • SSE channel `GET /api/events` streams typed events (tx, block, peer) to all clients.
+#   • RPC endpoint `GET /api/events` returns recent events (tx, block, peer) via polling.
 #   • `POST /api/gossip/tx` and `POST /api/gossip/block` accept inbound peer gossip.
 #   • `POST /api/peers/register` + `GET /api/peers/list` + `POST /api/peers/heartbeat`
 #     maintain a live peer registry stored in `peer_registry` PostgreSQL table.
 #   • Background GossipPusherThread reads DB for new TXs/blocks every 3s and
-#     HTTP-POSTs them to every registered peer that has a gossip_url — achieving
-#     guaranteed eventual consistency even when a peer misses the SSE event.
-#   • DHTManager is kept for same-process fallback but all cross-process/cross-worker
-#     state flows through PostgreSQL exclusively.
+#     HTTP-POSTs them to every registered peer with a gossip_url.
+#   • DHTManager fallback; all cross-process/cross-worker state via PostgreSQL.
 #
-# Event types over SSE:
-#   tx       — new pending transaction
-#   block    — new confirmed block
-#   peer     — peer joined / left
-#   mempool  — mempool size update (heartbeat every 30s)
+# Event types in /api/events:
+#   tx                   — new pending transaction
+#   block                — new confirmed block
+#   peer_joined          — peer joined registry
+#   oracle_snapshot      — oracle snapshot push
+#   oracle_dm            — density matrix update
+#   oracle_measurements  — oracle measurements batch
 # ═════════════════════════════════════════════════════════════════════════════════════════
 
-# ── SSE event broadcaster — PostgreSQL LISTEN/NOTIFY backed, enterprise-scale ─
-class _SSEBroadcaster:
-    """
-    Enterprise-grade SSE fan-out using PostgreSQL LISTEN/NOTIFY as the pub/sub bus.
-
-    ARCHITECTURE:
-      • publish()  → pg NOTIFY 'qtcl_events', '<json>'       (any worker, any process)
-      • A single dedicated listener thread per worker process runs pg LISTEN and fans
-        out incoming notifications to all in-process subscriber Queues.
-      • Result: N gunicorn workers × M gthread threads = fully concurrent, fully
-        cross-worker event delivery with ZERO Redis dependency — Supabase Postgres
-        is the backbone we already have.
-
-    SCALE PROFILE:
-      • Supabase NOTIFY throughput: ~10,000 notifies/sec
-      • Per-worker queue fanout: O(subscribers) in-memory, microsecond latency
-      • Cross-worker latency: ~1-5ms (PG notify round-trip)
-      • Horizontal scale: add Koyeb instances freely — all share the same PG channel
-
-    FALLBACK:
-      If the PG LISTEN connection fails (network blip, pooler restart), the broadcaster
-      degrades gracefully to in-process-only delivery and reconnects in the background.
-    """
-    _PG_CHANNEL = 'qtcl_sse_events'
-    _RECONNECT_DELAY = 2.0
-    _NOTIFY_PAYLOAD_MAX = 7900  # PG NOTIFY payload limit is 8000 bytes
-
-    def __init__(self):
-        self._subs: Dict[str, _queue_mod.Queue] = {}
-        self._lock  = threading.RLock()
-        self._count = 0
-        self._pg_ok = False
-        self._listener_thread: Optional[threading.Thread] = None
-        self._notify_conn = None   # dedicated NOTIFY connection (write path)
-        self._notify_lock = threading.Lock()
-        self._start_listener()
-
-    # ── Public API ────────────────────────────────────────────────────────────
-
-    def subscribe(self, sub_id: str) -> _queue_mod.Queue:
-        q = _queue_mod.Queue(maxsize=512)
-        with self._lock:
-            self._subs[sub_id] = q
-        return q
-
-    def unsubscribe(self, sub_id: str) -> None:
-        with self._lock:
-            self._subs.pop(sub_id, None)
-
+# ── RPC event publisher — logs to in-memory ring buffer for polling ──
+class _RPCEventPublisher:
+    """Stub replacing _SSEBroadcaster — logs to _rpc_event_log instead of PG NOTIFY."""
     def publish(self, event_type: str, data: Dict[str, Any]) -> int:
-        """
-        Publish via PG NOTIFY (cross-worker) + local fan-out (this worker).
-        Falls back to local-only if PG is unavailable.
-        """
-        if event_type in ('peer',):
-            flat = {'type': event_type, 'ts': time.time()}
-            flat.update(data)
-            payload = json.dumps(flat, separators=(',', ':'))
-        else:
-            payload = json.dumps({'type': event_type, 'data': data, 'ts': time.time()}, separators=(',', ':'))
-        # PG NOTIFY (cross-worker delivery — non-blocking best-effort)
-        if len(payload) <= self._NOTIFY_PAYLOAD_MAX:
-            self._pg_notify(payload)
-        else:
-            # Payload too large for NOTIFY — fan out locally only and log
-            logger.warning(f"[SSE] NOTIFY payload {len(payload)}b exceeds limit — local fanout only")
-            self._fanout_local(payload)
-            return self.subscriber_count()
-        return self.subscriber_count()
-
+        _log_rpc_event(event_type, data)
+        return 0
+    def subscribe(self, sub_id: str) -> _queue_mod.Queue:
+        return _queue_mod.Queue()
+    def unsubscribe(self, sub_id: str) -> None:
+        pass
     def subscriber_count(self) -> int:
-        with self._lock:
-            return len(self._subs)
-
-    # ── PostgreSQL NOTIFY (write path) ────────────────────────────────────────
-
-    def _pg_notify(self, payload: str) -> None:
-        """Fire-and-forget NOTIFY on dedicated connection.
-        In HTTP mode, TCP NOTIFY is unavailable — fall through directly to local fan-out."""
-        if _USE_HTTP_DB:
-            self._fanout_local(payload)
-            return
-        try:
-            with self._notify_lock:
-                if self._notify_conn is None or self._notify_conn.closed:
-                    self._notify_conn = self._make_pg_conn()
-                with self._notify_conn.cursor() as cur:
-                    cur.execute(f"NOTIFY {self._PG_CHANNEL}, %s", (payload,))
-                self._notify_conn.commit()
-        except Exception as e:
-            logger.debug(f"[SSE] NOTIFY failed ({e}) — falling back to local fanout")
-            try:
-                if self._notify_conn: self._notify_conn.close()
-            except Exception: pass
-            self._notify_conn = None
-            self._fanout_local(payload)  # graceful degradation
-
-    # ── PostgreSQL LISTEN (read path — dedicated thread per worker) ───────────
-
-    def _start_listener(self) -> None:
-        t = threading.Thread(target=self._listen_loop, name='SSE-PGListener', daemon=True)
-        t.start()
-        self._listener_thread = t
-
-    def _listen_loop(self) -> None:
-        """Persistent LISTEN loop — reconnects on any failure.
-        In HTTP mode (USE_HTTP_DB=1) PythonAnywhere blocks raw TCP so LISTEN/NOTIFY
-        is unavailable; the loop parks immediately and SSE runs local-only fan-out."""
-        if _USE_HTTP_DB:
-            logger.info("[SSE] HTTP mode — PG LISTEN disabled (local fan-out only, no cross-worker NOTIFY)")
-            self._pg_ok = False
-            while True:          # keep thread alive but do nothing
-                time.sleep(3600)
-            return
-
-        import select as _select
-        while True:
-            conn = None
-            try:
-                conn = self._make_pg_conn()
-                conn.set_isolation_level(0)  # autocommit required for LISTEN
-                with conn.cursor() as cur:
-                    cur.execute(f"LISTEN {self._PG_CHANNEL}")
-                self._pg_ok = True
-                logger.info(f"[SSE] ✅ PG LISTEN active | channel={self._PG_CHANNEL} | worker-pid={os.getpid()}")
-                while True:
-                    # select() with 5s timeout — lets us detect conn drops promptly
-                    r, _, _ = _select.select([conn], [], [], 5.0)
-                    if r:
-                        conn.poll()
-                        while conn.notifies:
-                            note = conn.notifies.pop(0)
-                            self._fanout_local(note.payload)
-            except Exception as e:
-                self._pg_ok = False
-                logger.warning(f"[SSE] PG LISTEN error ({e}) — reconnecting in {self._RECONNECT_DELAY}s")
-                try:
-                    if conn: conn.close()
-                except Exception: pass
-                time.sleep(self._RECONNECT_DELAY)
-
-    # ── Local fan-out (within this worker process) ────────────────────────────
-
+        return 0
     def _fanout_local(self, payload: str) -> int:
-        """Push payload to all in-process subscriber Queues. Evict dead subs."""
-        dead, reached = [], 0
-        with self._lock:
-            for sid, q in list(self._subs.items()):
-                try:
-                    q.put_nowait(payload)
-                    reached += 1
-                except _queue_mod.Full:
-                    try:
-                        q.get_nowait()   # drop oldest
-                        q.put_nowait(payload)
-                        reached += 1
-                    except Exception:
-                        dead.append(sid)
-            for sid in dead:
-                self._subs.pop(sid, None)
-        self._count += 1
-        if self._count % 500 == 0:
-            logger.info(f"[SSE] 📡 #{self._count} | subs={len(self._subs)} | pg={'✅' if self._pg_ok else '⚠️ local-only'}")
-        return reached
+        try:
+            data = json.loads(payload)
+            _log_rpc_event(data.get('type', 'unknown'), data)
+        except:
+            pass
+        return 0
 
-    # ── PG connection factory (raw psycopg2 — bypasses pool, needs autocommit) ─
+_gossip_sse = _RPCEventPublisher()
 
-    @staticmethod
-    def _make_pg_conn():
-        if _USE_HTTP_DB:
-            # PythonAnywhere: no raw TCP — return an HTTP conn; LISTEN/NOTIFY
-            # will silently no-op (SSE falls back to local-only broadcast mode).
-            logger.debug("[SSE] _make_pg_conn: HTTP mode — returning _SupHTTPConn (no LISTEN/NOTIFY)")
-            return _SupHTTPConn()
-        import psycopg2 as _pg2
-        url = (os.getenv('DATABASE_URL') or os.getenv('POOLER_URL') or
-               POOLER_URL)  # module-level Supabase pooler URL
-        conn = _pg2.connect(url, connect_timeout=5,
-                            options='-c statement_timeout=0 -c idle_in_transaction_session_timeout=0')
-        return conn
-
-
-_gossip_sse = _SSEBroadcaster()  # module-level singleton — one per worker, cross-worker via PG NOTIFY
-
-# PATCH-4a: Public alias used by oracle sync daemon at ~line 12121.
-# _gossip_sse is the correct singleton but oracle sync references SSE_BROADCASTER
-# (undefined) — wire it here so hasattr() guard succeeds and events actually flow.
 SSE_BROADCASTER = _gossip_sse
-
-# PATCH-4b: Oracle sync calls SSE_BROADCASTER.push(event_type, payload) but
-# _SSEBroadcaster exposes publish(event_type, data) — add push() as a direct
-# alias so the call succeeds without changing the oracle sync callsite.
-if not hasattr(_SSEBroadcaster, 'push'):
-    _SSEBroadcaster.push = _SSEBroadcaster.publish
+_RPCEventPublisher.push = _RPCEventPublisher.publish
 
 # ── DB-backed gossip store — replaces per-process in-memory DHTManager ───────
 def _ensure_oracle_registry() -> bool:
@@ -2875,52 +2619,6 @@ def _ensure_gossip_tables() -> bool:
         except Exception as e:
             logger.debug(f"[GOSSIP] DDL skipped ({ddl[:40]}...): {e}")
     return True
-
-
-def _ensure_oracle_measurements_table() -> bool:
-    """CREATE TABLE IF NOT EXISTS oracle_measurements — stores quantum oracle readings.
-    Idempotent, safe to call on every deploy."""
-    ddl_statements = [
-        """CREATE TABLE IF NOT EXISTS oracle_measurements (
-            id              SERIAL PRIMARY KEY,
-            cycle           BIGINT        NOT NULL,
-            timestamp_ns    BIGINT        NOT NULL,
-            lattice_fidelity      DOUBLE PRECISION NOT NULL,
-            block_field_fidelity DOUBLE PRECISION NOT NULL,
-            block_field_coherence DOUBLE PRECISION NOT NULL,
-            pq_curr         BIGINT        NOT NULL DEFAULT 0,
-            pq_last         BIGINT        NOT NULL DEFAULT 0,
-            oracle_count    INTEGER       NOT NULL DEFAULT 0,
-            fidelity_delta  DOUBLE PRECISION NOT NULL,
-            window_type     VARCHAR(32)   NOT NULL DEFAULT '',
-            mermin_violation DOUBLE PRECISION NOT NULL,
-            created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-        )""",
-        """CREATE INDEX IF NOT EXISTS idx_oracle_measurements_cycle
-            ON oracle_measurements (cycle DESC)""",
-        """CREATE INDEX IF NOT EXISTS idx_oracle_measurements_timestamp
-            ON oracle_measurements (timestamp_ns DESC)""",
-    ]
-    ok = True
-    for ddl in ddl_statements:
-        try:
-            with get_db_cursor() as cur: cur.execute(ddl)
-        except Exception as e:
-            logger.debug(f"[ORACLE_MEASUREMENTS] DDL skipped ({ddl[:50]}...): {e}")
-            ok = False
-    if ok: logger.info("[ORACLE_MEASUREMENTS] ✅ Table verified/created")
-    return ok
-
-
-_oracle_measurements_ensured = False
-
-def _lazy_ensure_oracle_measurements():
-    global _oracle_measurements_ensured
-    if _oracle_measurements_ensured: return
-    with _oracle_registry_lock:
-        if _oracle_measurements_ensured: return
-        _ensure_oracle_measurements_table()
-        _oracle_measurements_ensured = True
 
 
 def gossip_store_put(key: str, value: Dict[str, Any]) -> bool:
@@ -3188,7 +2886,6 @@ def _start_gossip_subsystem():
     try:
         _ensure_gossip_tables()
         _lazy_ensure_oracle_registry()
-        _lazy_ensure_oracle_measurements()
         GossipPusherThread().start()
         logger.info("[GOSSIP] Subsystem online — DB gossip store + SSE broadcaster + peer pusher")
     except Exception as e:
@@ -3197,65 +2894,20 @@ def _start_gossip_subsystem():
 
 # ── SSE events endpoint — typed blockchain events ─────────────────────────────
 @app.route('/api/events', methods=['GET'])
-def sse_events_stream():
-    """
-    Server-Sent Events stream for real-time blockchain events.
-
-    Query params:
-        client_id   — unique identifier for this subscriber (auto-generated if absent)
-        types       — comma-separated event types to receive: tx,block,peer,mempool,all
-                      default: all
-
-    Event format (each SSE frame):
-        data: {"type": "tx"|"block"|"peer"|"mempool", "data": {...}, "ts": <unix float>}
-
-    Clients MUST handle the keepalive comment line `: keepalive` — it is sent every
-    30 seconds to prevent proxy / load balancer timeout.
-    """
-    client_id  = request.args.get('client_id') or f"cli_{secrets.token_hex(6)}"
-    want_types = set((request.args.get('types', 'all') or 'all').split(','))
-
-    def _stream():
-        q = _gossip_sse.subscribe(client_id)
-        logger.info(f"[SSE/events] Client connected: {client_id} | want={want_types}")
-        # Send immediate hello with current chain tip and mempool size
-        try:
-            tip = query_latest_block() or {}
-            with get_db_cursor() as cur:
-                cur.execute("SELECT COUNT(*) FROM transactions WHERE status='pending' AND tx_type!='coinbase'")
-                mp_size = (cur.fetchone() or [0])[0]
-            yield f"data: {json.dumps({'type':'hello','data':{'tip_height':tip.get('height',0),'mempool':mp_size},'ts':time.time()})}\n\n"
-        except Exception:
-            pass
-
-        try:
-            while True:
-                try:
-                    raw = q.get(timeout=30)
-                    parsed = json.loads(raw)
-                    etype  = parsed.get('type', '')
-                    if 'all' in want_types or etype in want_types:
-                        if etype:
-                            yield f"event: {etype}\ndata: {raw}\n\n"
-                        else:
-                            yield f"data: {raw}\n\n"
-                except _queue_mod.Empty:
-                    yield ": keepalive\n\n"
-        except GeneratorExit:
-            pass
-        finally:
-            _gossip_sse.unsubscribe(client_id)
-            logger.info(f"[SSE/events] Client disconnected: {client_id}")
-
-    return Response(
-        stream_with_context(_stream()),
-        mimetype='text/event-stream',
-        headers={
-            'Cache-Control'      : 'no-cache',
-            'X-Accel-Buffering'  : 'no',
-            'Connection'         : 'keep-alive',
-        },
-    )
+def rpc_events_poll():
+    """Poll recent events (replaces SSE stream). Query params: since (timestamp), types (comma-sep), limit (default 100)."""
+    since = float(request.args.get('since', time.time() - 3600))
+    want_types_str = request.args.get('types', 'all')
+    limit = int(request.args.get('limit', 100))
+    want_types = set(want_types_str.split(',')) if want_types_str != 'all' else {'all'}
+    events = []
+    with _rpc_event_lock:
+        for e in list(_rpc_event_log):
+            if e['ts'] >= since and ('all' in want_types or e['type'] in want_types):
+                events.append(e)
+                if len(events) >= limit:
+                    break
+    return jsonify({'events': events, 'count': len(events)}), 200
 
 
 # ── Peer management endpoints ─────────────────────────────────────────────────
@@ -3273,7 +2925,7 @@ def peer_register():
         network_version: str  — e.g. "1.0"
         supports_sse:   bool  — peer can receive SSE (informational)
     }
-    Response: { peer_id, live_peers: [...], sse_url: str, oracle_tip: int }
+    Response: { peer_id, live_peers: [...], rpc_url: str, events_url: str, oracle_tip: int }
     """
     data      = request.get_json(force=True, silent=True) or {}
     peer_id   = (data.get('peer_id') or '').strip()
@@ -3292,14 +2944,9 @@ def peer_register():
     ok = _upsert_peer(peer_id, data)
     live_peers = _get_live_peers(exclude_peer_id=peer_id)
 
-    _gossip_sse.publish('peer', {
-        'event'       : 'peer_joined',
-        'peer_id'     : peer_id,
-        'ip_address'  : request.remote_addr,
-        'host'        : request.remote_addr,
-        'port'        : int(data.get('port') or 9091),
-        'gossip_url'  : data.get('gossip_url', ''),
-        'block_height': int(data.get('block_height') or 0),
+    _log_rpc_event('peer_joined', {
+        'peer_id': peer_id, 'ip_address': request.remote_addr, 'port': int(data.get('port') or 9091),
+        'gossip_url': data.get('gossip_url', ''), 'block_height': int(data.get('block_height') or 0),
         'miner_address': data.get('miner_address', ''),
     })
 
@@ -3312,20 +2959,15 @@ def peer_register():
     if server_base and not server_base.startswith('http'):
         server_base = f"https://{server_base}"
 
-    # ✅ FORK FIX: Use canonical oracle height (immutable during validation round)
-    # NOT the live tip, which races when multiple miners submit blocks simultaneously.
-    # This prevents fork where Miner A mines h+1, Miner B also mines h+1 with stale oracle_tip.
     canonical_height = globals().get('_ORACLE_CANONICAL_HEIGHT', tip.get('height', 0))
     
     return jsonify({
-        'peer_id'     : peer_id,
-        'registered'  : ok,
-        'live_peers'  : live_peers,
-        'peer_count'  : len(live_peers) + 1,
-        'oracle_tip'  : canonical_height,
-        'sse_url'     : f"{server_base}/api/events?client_id={peer_id}",
+        'peer_id': peer_id, 'registered': ok, 'live_peers': live_peers, 'peer_count': len(live_peers) + 1,
+        'oracle_tip': canonical_height,
+        'rpc_url': f"{server_base}/api/oracle/snapshot",
+        'events_url': f"{server_base}/api/events",
         'gossip_ingest': f"{server_base}/api/gossip/ingest",
-        'mempool_url' : f"{server_base}/api/mempool",
+        'mempool_url': f"{server_base}/api/mempool",
     }), 201
 
 
@@ -3442,9 +3084,9 @@ def gossip_ingest():
         except Exception as e:
             logger.debug(f"[GOSSIP/ingest] batch insert: {e}")
 
-        # SSE fan-out outside DB cursor
+        # RPC event logging (replaces SSE fan-out)
         for v in valid:
-            _gossip_sse.publish('tx', {
+            _log_rpc_event('tx', {
                 'tx_hash': v[0], 'from': v[1], 'to': v[2],
                 'amount': v[3] / 100, 'status': 'pending', 'source': 'gossip',
             })
@@ -3453,7 +3095,7 @@ def gossip_ingest():
     if block and isinstance(block, dict):
         bh = int(block.get('height', 0))
         if bh > 0:
-            _gossip_sse.publish('block', {
+            _log_rpc_event('block', {
                 'height'    : bh,
                 'block_hash': block.get('block_hash', ''),
                 'source'    : 'gossip',
@@ -3525,8 +3167,8 @@ def gossip_ingest():
 
 def _gossip_publish_tx(tx_hash: str, from_addr: str, to_addr: str,
                         amount_base: int, nonce: int, signed: bool) -> None:
-    """Publish a new-TX event to SSE channel. Called by submit_transaction."""
-    _gossip_sse.publish('tx', {
+    """Log new-TX event to RPC event log (replaces SSE channel)."""
+    _log_rpc_event('tx', {
         'tx_hash'   : tx_hash,
         'from'      : from_addr,
         'to'        : to_addr,
@@ -3575,7 +3217,6 @@ def _gossip_publish_block(height: int, block_hash: str, miner_addr: str,
         'tx_count'             : tx_count,
         'fidelity'             : fidelity,
         'ts'                   : time.time(),
-        # ── 💎 Tessellation reward breakdown ──────────────────────────────
         'tessellation_depth'   : tessellation_depth,
         'miner_reward_base'    : miner_reward_base,
         'treasury_reward_base' : treasury_reward_base,
@@ -3586,8 +3227,8 @@ def _gossip_publish_block(height: int, block_hash: str, miner_addr: str,
         'coinbase_tx_id'       : coinbase_tx_id,
         'treasury_tx_id'       : treasury_tx_id,
     }
-    _sse_push_snapshot(payload)
-    _gossip_sse.publish('block', payload)
+    _cache_snapshot(payload)
+    _log_rpc_event('block', payload)
     gossip_store_put(f"block:{height}", payload)
 
 
@@ -4458,47 +4099,26 @@ def rest_metrics_batch():
 
 @app.route('/api/metrics/stream', methods=['GET'])
 def metrics_stream():
-    """SSE stream of real-time node metrics from measurement service"""
+    """JSON polling endpoint for real-time node metrics (replaces SSE)."""
     try:
         measure_svc = get_measurement_service()
-        sub_id = f"metrics-{uuid.uuid4()}"
-        
-        def generate():
-            """Stream metrics from measurement broadcast queue"""
-            client_queue = _queue_mod.Queue(maxsize=100)
-            client_id = f"metrics-{uuid.uuid4()}"
-            
-            while True:
+        since = float(request.args.get('since', time.time() - 60))
+        limit = int(request.args.get('limit', 50))
+        metrics = []
+        try:
+            while len(metrics) < limit:
                 try:
-                    # Non-blocking drain from measurement service broadcast queue
-                    metrics_batch = []
-                    while len(metrics_batch) < 10:
-                        try:
-                            metric = measure_svc.broadcast_queue.get_nowait()
-                            metrics_batch.append(metric)
-                        except _measurement_queue_mod.Empty:
-                            break
-                    
-                    if metrics_batch:
-                        for metric in metrics_batch:
-                            yield f"data: {json.dumps(metric)}\n\n"
-                    else:
-                        # No metrics, wait before retry
-                        yield f": keepalive\n\n"
-                        time.sleep(0.5)
-                
-                except Exception as e:
-                    logger.debug(f"[METRICS-STREAM] Client {client_id}: {e}")
+                    metric = measure_svc.broadcast_queue.get_nowait()
+                    if metric.get('timestamp', 0) >= since:
+                        metrics.append(metric)
+                except _measurement_queue_mod.Empty:
                     break
-        
-        return Response(generate(), mimetype='text/event-stream', headers={
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-            'X-Accel-Buffering': 'no',
-        })
+        except Exception as e:
+            logger.debug(f"[METRICS] queue drain: {e}")
+        return jsonify({'metrics': metrics, 'count': len(metrics)}), 200
     except Exception as e:
-        logger.error(f"[METRICS-STREAM] Error: {e}", exc_info=True)
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"[METRICS] error: {e}")
+        return jsonify({'error': str(e), 'metrics': []}), 500
 
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -5739,22 +5359,12 @@ class P2PServer:
                     # Flask/Gunicorn on localhost:$PORT, pipe the real JSON response back.
                     # Health probes (/ /health /healthz /ping) get a fast-path JSON 200
                     # without touching Flask.
-                    #
-                    # RPC_ONLY mode: skip HTTP proxy, only allow RPC/SSE connections
                     # ─────────────────────────────────────────────────────────────────
                     try:
                         client_sock.settimeout(0.5)
                         peek = client_sock.recv(4, socket.MSG_PEEK)
                         client_sock.settimeout(None)
                         _HTTP_PREFIXES = (b'GET ', b'POST', b'HEAD', b'PUT ', b'DELE', b'OPTI', b'PATC', b'HTTP')
-                        if RPC_ONLY and peek and peek[:4] in _HTTP_PREFIXES:
-                            # RPC_ONLY mode: reject HTTP, only allow RPC/SSE
-                            try:
-                                sock.sendall(b'HTTP/1.1 405 Method Not Allowed\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nRPC-only mode - use JSON-RPC 2.0 at /rpc endpoint')
-                            except Exception:
-                                pass
-                            client_sock.close()
-                            continue
                         if peek and peek[:4] in _HTTP_PREFIXES:
                             _csock, _addr = client_sock, address
                             def _proxy_http(sock=_csock, addr=_addr):
@@ -10788,8 +10398,7 @@ def p2p_peer_exchange():
                    f"http://localhost:{os.getenv('PORT', 8000)}")
     if server_base and not server_base.startswith('http'):
         server_base = f"https://{server_base}"
-    _gossip_sse.publish('peer', {
-        'event'       : 'peer_joined',
+    _log_rpc_event('peer_joined', {
         'peer_id'     : node_id,
         'ip_address'  : caller_ip,
         'host'        : caller_ip,
@@ -10802,7 +10411,8 @@ def p2p_peer_exchange():
         'peers'     : peers_out,
         'peer_count': len(peers_out),
         'oracle_tip': int(tip.get('height') or 0),
-        'sse_url'   : f"{server_base}/api/events?client_id={node_id}",
+        'rpc_url'   : f"{server_base}/api/oracle/snapshot",
+        'events_url': f"{server_base}/api/events",
         'ts'        : time.time(),
     }), 200
 
@@ -11982,7 +11592,7 @@ if __name__ == '__main__':
 # ════════════════════════════════════════════════════════════════════════════════
 
 class GossipProtocolHandler:
-    """SSE-based gossip protocol with inventory sync: HELLOACK→COMPARE→REQUEST→LIST→RECEIVE→CLOSEACK"""
+    """P2P gossip protocol with inventory sync: HELLOACK→COMPARE→REQUEST→LIST→RECEIVE→CLOSEACK"""
 
     def __init__(self, peer_id: str = None):
         self.peer_id = peer_id or str(uuid.uuid4())[:8]
@@ -12920,9 +12530,8 @@ def _start_oracle_measurement_sync_daemon():
                                 'unified': metrics_aligned,
                                 'entangled': entangled,
                             }
-                            # SSE push (if broadcaster available)
-                            if hasattr(SSE_BROADCASTER, 'push'):
-                                SSE_BROADCASTER.push('oracle_measurements', event_payload)
+                            # RPC event log (replaces SSE broadcast)
+                            _log_rpc_event('oracle_measurements', event_payload)
                         except Exception as bcast_err:
                             logger.debug(f"[ORACLE-SYNC] Broadcast warning: {bcast_err}")
                     
@@ -13569,244 +13178,20 @@ def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"Oracle reg submission failed: {e}", rpc_id)
 
 
-def _rpc_getChainTip(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getChainTip — current chain tip block."""
-    try:
-        mgr = get_difficulty_manager()
-        with get_db_cursor() as cur:
-            cur.execute("""
-                SELECT height, block_hash, timestamp, oracle_w_state_hash,
-                       previous_hash, validator_public_key, nonce, difficulty,
-                       entropy_score, transactions_root
-                FROM blocks
-                ORDER BY height DESC
-                LIMIT 1
-            """)
-            row = cur.fetchone()
-        if row and row[0]:
-            return _rpc_ok({
-                'block_height':     row[0],
-                'block_hash':       row[1] or '',
-                'parent_hash':      row[4] or ('0' * 64),
-                'merkle_root':      row[9] or ('0' * 64),
-                'timestamp_s':      int(row[2]) if row[2] else int(time.time()),
-                'difficulty_bits':  mgr.get_difficulty(),
-                'nonce':            int(row[6]) if row[6] else 0,
-                'miner_address':    row[5] or '',
-                'w_state_fidelity': float(row[8]) if row[8] is not None else 0.9,
-                'w_entropy_hash':   row[3] or '',
-            }, rpc_id)
-        return _rpc_ok({
-            'block_height': 0, 'block_hash': '0' * 64,
-            'parent_hash': '0' * 64, 'merkle_root': '0' * 64,
-            'timestamp_s': int(time.time()), 'difficulty_bits': mgr.get_difficulty(),
-            'nonce': 0, 'miner_address': '', 'w_state_fidelity': 0.9, 'w_entropy_hash': '',
-        }, rpc_id)
-    except Exception as e:
-        return _rpc_error(-32603, f"Chain tip failed: {e}", rpc_id)
-
-
-def _rpc_getMempool(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getMempool — pending transactions in mempool."""
-    try:
-        from mempool import MempoolManager
-        mp = MempoolManager.get_instance()
-        if mp:
-            txs = mp.get_pending_transactions(limit=100)
-            return _rpc_ok({
-                'transactions': [tx.to_dict() for tx in txs],
-                'count': len(txs),
-            }, rpc_id)
-        return _rpc_ok({'transactions': [], 'count': 0}, rpc_id)
-    except Exception as e:
-        return _rpc_error(-32603, f"Mempool failed: {e}", rpc_id)
-
-
-def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
-    """qtcl_submitBlock — submit a mined block."""
-    if not isinstance(params, dict):
-        return _rpc_error(-32602, "params must be object", rpc_id)
-    try:
-        from flask import current_app
-        with current_app.test_request_context(
-            '/api/submit_block',
-            method='POST',
-            json=params,
-            headers={'Content-Type': 'application/json'}
-        ):
-            from flask import request
-            from server import submit_block as _submit_block
-            resp, status = _submit_block()
-            if status == 200:
-                return _rpc_ok(resp.get_json() if hasattr(resp, 'get_json') else {}, rpc_id)
-            else:
-                return _rpc_error(-32000, f"Submit failed: {status}", rpc_id)
-    except Exception as e:
-        return _rpc_error(-32603, f"Submit block failed: {e}", rpc_id)
-
-
-def _rpc_getOracleState(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getOracleState — current oracle W-state."""
-    try:
-        from oracle import ORACLE
-        if ORACLE is None:
-            return _rpc_error(-32001, "Oracle not initialized", rpc_id)
-        state = ORACLE.get_status()
-        return _rpc_ok(state, rpc_id)
-    except Exception as e:
-        return _rpc_error(-32603, f"Oracle state failed: {e}", rpc_id)
-
-
-def _rpc_getAddressBalance(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getAddressBalance — QTCL balance for an address."""
-    if not isinstance(params, dict):
-        return _rpc_error(-32602, "params must be object", rpc_id)
-    address = params.get("address", "")
-    if not address:
-        return _rpc_error(-32602, "address required", rpc_id)
-    try:
-        with get_db_cursor() as cur:
-            cur.execute("SELECT balance FROM wallet_addresses WHERE address = %s", (address,))
-            row = cur.fetchone()
-            balance = int(row[0]) if row and row[0] else 0
-            return _rpc_ok({
-                "address": address,
-                "balance": balance / 100.0,
-                "balance_base_units": balance,
-                "currency": "QTCL",
-            }, rpc_id)
-    except Exception as e:
-        return _rpc_error(-32603, f"Balance lookup failed: {e}", rpc_id)
-
-
-def _rpc_getAddressHistory(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getAddressHistory — transaction history for an address."""
-    if not isinstance(params, dict):
-        return _rpc_error(-32602, "params must be object", rpc_id)
-    address = params.get("address", "")
-    limit = min(int(params.get("limit", 50)), 200)
-    if not address:
-        return _rpc_error(-32602, "address required", rpc_id)
-    try:
-        with get_db_cursor() as cur:
-            cur.execute("""
-                SELECT tx_hash, from_address, to_address, amount, height, tx_type, status, timestamp_ns
-                FROM transactions
-                WHERE from_address = %s OR to_address = %s
-                ORDER BY height DESC LIMIT %s
-            """, (address, address, limit))
-            rows = cur.fetchall()
-            txs = [{
-                "tx_hash": r[0],
-                "from_address": r[1],
-                "to_address": r[2],
-                "amount": r[3],
-                "height": r[4],
-                "tx_type": r[5],
-                "status": r[6],
-                "timestamp_ns": r[7],
-            } for r in rows]
-            return _rpc_ok({"transactions": txs, "count": len(txs)}, rpc_id)
-    except Exception as e:
-        return _rpc_error(-32603, f"History lookup failed: {e}", rpc_id)
-
-
-def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
-    """qtcl_registerPeer — register a peer in the P2P network."""
-    if not isinstance(params, dict):
-        return _rpc_error(-32602, "params must be object", rpc_id)
-    peer_id = params.get("peer_id", "")
-    host = params.get("host", "")
-    port = int(params.get("port", 9091))
-    if not peer_id or not host:
-        return _rpc_error(-32602, "peer_id and host required", rpc_id)
-    try:
-        with get_db_cursor() as cur:
-            cur.execute("""
-                INSERT INTO peer_registry (peer_id, ip_address, port, supports_sse, last_seen)
-                VALUES (%s, %s, %s, TRUE, NOW())
-                ON CONFLICT (peer_id) DO UPDATE SET
-                    ip_address = EXCLUDED.ip_address,
-                    port = EXCLUDED.port,
-                    last_seen = NOW()
-            """, (peer_id, host, port))
-        return _rpc_ok({"status": "registered", "peer_id": peer_id}, rpc_id)
-    except Exception as e:
-        return _rpc_error(-32603, f"Peer registration failed: {e}", rpc_id)
-
-
-def _rpc_peerHeartbeat(params: Any, rpc_id: Any) -> dict:
-    """qtcl_peerHeartbeat — update peer last_seen timestamp."""
-    if not isinstance(params, dict):
-        return _rpc_error(-32602, "params must be object", rpc_id)
-    peer_id = params.get("peer_id", "")
-    if not peer_id:
-        return _rpc_error(-32602, "peer_id required", rpc_id)
-    try:
-        with get_db_cursor() as cur:
-            cur.execute("UPDATE peer_registry SET last_seen = NOW() WHERE peer_id = %s", (peer_id,))
-        return _rpc_ok({"status": "ok", "peer_id": peer_id}, rpc_id)
-    except Exception as e:
-        return _rpc_error(-32603, f"Heartbeat failed: {e}", rpc_id)
-
-
-def _rpc_submitTransaction(params: Any, rpc_id: Any) -> dict:
-    """qtcl_submitTransaction — submit a transaction to the mempool."""
-    if not isinstance(params, dict):
-        return _rpc_error(-32602, "params must be object", rpc_id)
-    try:
-        from flask import current_app
-        with current_app.test_request_context(
-            '/api/submit_transaction',
-            method='POST',
-            json=params,
-            headers={'Content-Type': 'application/json'}
-        ):
-            from server import submit_transaction as _submit_tx
-            resp, status = _submit_tx()
-            if status in (200, 201, 202):
-                return _rpc_ok(resp.get_json() if hasattr(resp, 'get_json') else {}, rpc_id)
-            else:
-                return _rpc_error(-32000, f"Submit failed: {status}", rpc_id)
-    except Exception as e:
-        return _rpc_error(-32603, f"Submit transaction failed: {e}", rpc_id)
-
-
-def _rpc_gossipIngest(params: Any, rpc_id: Any) -> dict:
-    """qtcl_gossipIngest — ingest gossip data into the network."""
-    if not isinstance(params, dict):
-        return _rpc_error(-32602, "params must be object", rpc_id)
-    try:
-        from server import gossip_store_put
-        key = params.get("key", "")
-        value = params.get("value", {})
-        if not key:
-            return _rpc_error(-32602, "key required", rpc_id)
-        ok = gossip_store_put(key, value)
-        return _rpc_ok({"status": "ok" if ok else "failed"}, rpc_id)
-    except Exception as e:
-        return _rpc_error(-32603, f"Gossip ingest failed: {e}", rpc_id)
-
-
-def _rpc_oracleRegister(params: Any, rpc_id: Any) -> dict:
-    """qtcl_oracleRegister — register this node as an oracle."""
-    if not isinstance(params, dict):
-        return _rpc_error(-32602, "params must be object", rpc_id)
-    miner_id = params.get("miner_id", "")
-    address = params.get("address", "")
-    if not miner_id or not address:
-        return _rpc_error(-32602, "miner_id and address required", rpc_id)
-    try:
-        with get_db_cursor() as cur:
-            cur.execute("""
-                INSERT INTO oracle_registry (oracle_id, oracle_address, last_seen, mode)
-                VALUES (%s, %s, %s, 'full')
-                ON CONFLICT (oracle_id) DO UPDATE SET
-                    last_seen = NOW(), oracle_address = EXCLUDED.oracle_address
-            """, (miner_id, address))
-        return _rpc_ok({"status": "registered", "oracle_id": miner_id}, rpc_id)
-    except Exception as e:
-        return _rpc_error(-32603, f"Oracle registration failed: {e}", rpc_id)
+def _rpc_getEvents(params: Dict[str, Any], rpc_id: str) -> dict:
+    """qtcl_getEvents — poll recent RPC events (tx, block, oracle_snapshot, oracle_dm, oracle_measurements)."""
+    since = float(params.get('since', time.time() - 3600))
+    event_types = params.get('types', 'all')
+    limit = int(params.get('limit', 100))
+    want_types = set(event_types.split(',')) if event_types != 'all' else {'all'}
+    events = []
+    with _rpc_event_lock:
+        for e in list(_rpc_event_log):
+            if e['ts'] >= since and ('all' in want_types or e['type'] in want_types):
+                events.append(e)
+                if len(events) >= limit:
+                    break
+    return _rpc_ok({'events': events, 'count': len(events)}, rpc_id)
 
 
 # ─── Method registry (O(1) dispatch) ─────────────────────────────────────────
@@ -13821,18 +13206,7 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getMempoolStats":   _rpc_getMempoolStats,
     "qtcl_getPeers":          _rpc_getPeers,
     "qtcl_getHealth":         _rpc_getHealth,
-    # ── RPC-native endpoints (replace HTTP) ────────────────────────────────────
-    "qtcl_getChainTip":       _rpc_getChainTip,
-    "qtcl_getMempool":        _rpc_getMempool,
-    "qtcl_submitBlock":       _rpc_submitBlock,
-    "qtcl_getOracleState":    _rpc_getOracleState,
-    "qtcl_getAddressBalance": _rpc_getAddressBalance,
-    "qtcl_getAddressHistory": _rpc_getAddressHistory,
-    "qtcl_registerPeer":     _rpc_registerPeer,
-    "qtcl_peerHeartbeat":     _rpc_peerHeartbeat,
-    "qtcl_submitTransaction": _rpc_submitTransaction,
-    "qtcl_gossipIngest":      _rpc_gossipIngest,
-    "qtcl_oracleRegister":    _rpc_oracleRegister,
+    "qtcl_getEvents":         _rpc_getEvents,
     # ── On-chain oracle registry ──────────────────────────────────────────────
     "qtcl_getOracleRegistry": _rpc_getOracleRegistry,
     "qtcl_getOracleRecord":   _rpc_getOracleRecord,
@@ -13889,59 +13263,14 @@ _RPC_METHOD_META: Dict[str, Dict] = {
         "params": [],
         "returns": "object{status, ts, uptime_s, oracle_ready, lattice_ready, pyth_ready, ...}",
     },
-    # ── RPC-native endpoints (replace HTTP) ────────────────────────────────────
-    "qtcl_getChainTip": {
-        "description": "Current chain tip block (replaces /api/blocks/tip)",
-        "params": [],
-        "returns": "object{block_height, block_hash, parent_hash, merkle_root, difficulty_bits, ...}",
-    },
-    "qtcl_getMempool": {
-        "description": "Pending transactions in mempool (replaces /api/mempool)",
-        "params": [{"name": "limit", "type": "integer", "required": False, "default": 100}],
-        "returns": "object{transactions[], count}",
-    },
-    "qtcl_submitBlock": {
-        "description": "Submit a mined block (replaces /api/submit_block)",
-        "params": [{"name": "block", "type": "object", "required": True}],
-        "returns": "object{accepted, block_height, block_hash, ...}",
-    },
-    "qtcl_getOracleState": {
-        "description": "Current oracle W-state (replaces /api/oracle/*)",
-        "params": [],
-        "returns": "object{w_state, fidelity, coherence, ts}",
-    },
-    # ── RPC-native address/peer methods ────────────────────────────────────────
-    "qtcl_getAddressBalance": {
-        "description": "QTCL balance for an address (replaces /api/address/{addr}/balance)",
-        "params": [{"name": "address", "type": "string", "required": True}],
-        "returns": "object{address, balance, balance_base_units, currency}",
-    },
-    "qtcl_getAddressHistory": {
-        "description": "Transaction history for an address (replaces /api/address/{addr}/history)",
+    "qtcl_getEvents": {
+        "description": "Poll recent RPC events (tx, block, oracle_snapshot, oracle_dm, oracle_measurements)",
         "params": [
-            {"name": "address", "type": "string", "required": True},
-            {"name": "limit", "type": "integer", "required": False, "default": 50},
+            {"name": "since", "type": "number", "required": False, "default": "now - 3600", "note": "Unix timestamp"},
+            {"name": "types", "type": "string", "required": False, "default": "all", "note": "Comma-sep event types"},
+            {"name": "limit", "type": "integer", "required": False, "default": 100},
         ],
-        "returns": "object{transactions[], count}",
-    },
-    "qtcl_registerPeer": {
-        "description": "Register a peer in the P2P network (replaces /api/peers/register)",
-        "params": [
-            {"name": "peer_id", "type": "string", "required": True},
-            {"name": "host", "type": "string", "required": True},
-            {"name": "port", "type": "integer", "required": False, "default": 9091},
-        ],
-        "returns": "object{status, peer_id}",
-    },
-    "qtcl_peerHeartbeat": {
-        "description": "Update peer last_seen timestamp (replaces /api/peers/heartbeat)",
-        "params": [{"name": "peer_id", "type": "string", "required": True}],
-        "returns": "object{status, peer_id}",
-    },
-    "qtcl_submitTransaction": {
-        "description": "Submit a transaction to the mempool (replaces /api/submit_transaction)",
-        "params": [{"name": "transaction", "type": "object", "required": True}],
-        "returns": "object{accepted, tx_hash, ...}",
+        "returns": "object{events[], count}",
     },
     # ── On-chain oracle registry ──────────────────────────────────────────────
     "qtcl_getOracleRegistry": {
