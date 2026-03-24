@@ -76,7 +76,8 @@ if not logging.getLogger().hasHandlers():
     )
 logger = logging.getLogger(__name__)
 
-SERVER_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'hlwe_server.db')
+# Server uses Supabase for key storage, not local SQLite
+# (Client uses qtcl_blockchain.db via qtcl_client.py)
 
 ENTROPY_AVAILABLE = False
 try:
@@ -1062,16 +1063,62 @@ class SupabaseServerStore:
         if not self._connected:
             return False
         return self._rpc_call('health_check') is not None
+    
+    def store_bip32_key(self, path: str, private_key: bytes, chain_code: bytes,
+                        parent_path: Optional[str], depth: int, 
+                        public_key: Optional[bytes], address: str) -> bool:
+        if not self._connected:
+            return False
+        
+        try:
+            key_data = {
+                'path': path,
+                'private_key': private_key.hex(),
+                'chain_code': chain_code.hex(),
+                'parent_path': parent_path,
+                'depth': depth,
+                'public_key': public_key.hex() if public_key else None,
+                'address': address
+            }
+            response = self._session.post(
+                f"{self.url}/rest/v1/bip32_keys",
+                json=key_data,
+                timeout=30
+            )
+            return response.status_code in (200, 201)
+        except Exception as e:
+            logger.debug(f"[HLWE] Failed to store BIP32 key: {e}")
+            return False
+    
+    def get_bip32_key(self, path: str) -> Optional[Dict]:
+        if not self._connected:
+            return None
+        
+        try:
+            response = self._session.get(
+                f"{self.url}/rest/v1/bip32_keys?path=eq.{path}",
+                timeout=30
+            )
+            if response.status_code == 200:
+                data = response.json()
+                return data[0] if data else None
+            return None
+        except Exception as e:
+            logger.debug(f"[HLWE] Failed to get BIP32 key: {e}")
+            return None
 
 class HLWEWalletManager:
     def __init__(self):
         self.hlwe = HLWEEngine()
         self.bip32 = BIP32KeyDerivation(self.hlwe)
         self.bip39 = BIP39Mnemonics()
-        self.keystore = HLWEKeyStore()
+        
+        # Server uses Supabase, not local SQLite
+        self.supabase_store = SupabaseServerStore()
+        
         self.lock = threading.RLock()
         
-        logger.info("[WalletManager] Initialized (TRUE HLWE-256 + BIP32/39)")
+        logger.info("[WalletManager] Initialized (TRUE HLWE-256 + BIP32/39 + Supabase)")
     
     def create_wallet(
         self,
@@ -1085,7 +1132,8 @@ class HLWEWalletManager:
                 master_key, master_chain_code = self.bip32.derive_master_key(seed)
                 fingerprint = hashlib.sha256(master_key).hexdigest()[:16]
                 
-                self.keystore.store_bip32_key(
+                # Store master key in Supabase
+                self.supabase_store.store_bip32_key(
                     "m", master_key, master_chain_code, None, 0, None, fingerprint
                 )
                 
@@ -1265,7 +1313,7 @@ class HLWEIntegrationAdapter:
             'error_sigma': 2.0,
             'signature_scheme': 'TRUE_HLWE_FIAT_SHAMIR',
             'security_bits': 256,
-            'keystore': self.wallet_manager.keystore.db_path if SQLITE_AVAILABLE else 'disabled'
+            'keystore': 'Supabase (server)' if self.wallet_manager.supabase_store._connected else 'disconnected'
         }
 
 _ADAPTER: Optional[HLWEIntegrationAdapter] = None
