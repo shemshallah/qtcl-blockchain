@@ -13293,6 +13293,204 @@ def _rpc_getHealth(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"Health check failed: {e}", rpc_id)
 
 
+def _rpc_getOracleRegistry(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getOracleRegistry — paginated on-chain oracle registry.
+    Params (object or positional list):
+      mode           string   filter by mode: full|light|archive|deregistered (default: all)
+      confirmed_only bool     only oracles with on-chain reg_tx_hash (default: false)
+      limit          int      max records (default 100, max 500)
+      offset         int      pagination offset (default 0)
+    Returns: {oracles[], total, confirmed_count, limit, offset}
+    """
+    p = params if isinstance(params, dict) else (params[0] if isinstance(params, list) and params and isinstance(params[0], dict) else {})
+    mode_filter    = str(p.get('mode', ''))
+    confirmed_only = bool(p.get('confirmed_only', False))
+    limit          = min(int(p.get('limit',  100)), 500)
+    offset         = int(p.get('offset', 0))
+    try:
+        _lazy_ensure_oracle_registry()
+        where_clauses: list = []
+        qparams:       list = []
+        if mode_filter:
+            where_clauses.append("mode = %s"); qparams.append(mode_filter)
+        if confirmed_only:
+            where_clauses.append("reg_tx_hash != '' AND reg_tx_hash != 'gossip_pending'")
+        where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+        with get_db_cursor() as cur:
+            cur.execute(f"""
+                SELECT oracle_id, oracle_url, oracle_address, is_primary,
+                       last_seen, block_height, peer_count,
+                       wallet_address, oracle_pub_key, cert_sig,
+                       mode, ip_hint, reg_tx_hash, registered_at, created_at
+                FROM   oracle_registry {where_sql}
+                ORDER  BY registered_at DESC, last_seen DESC
+                LIMIT  %s OFFSET %s
+            """, qparams + [limit, offset])
+            rows = cur.fetchall()
+            cur.execute(f"SELECT COUNT(*) FROM oracle_registry {where_sql}", qparams)
+            total = cur.fetchone()[0]
+        oracles = [{
+            'oracle_id'     : r[0],  'oracle_url'    : r[1],
+            'oracle_address': r[2],  'is_primary'    : r[3],
+            'last_seen'     : r[4],  'block_height'  : r[5],
+            'peer_count'    : r[6],  'wallet_address': r[7],
+            'oracle_pub_key': r[8],  'cert_sig'      : r[9],
+            'mode'          : r[10], 'ip_hint'       : r[11],
+            'reg_tx_hash'   : r[12], 'registered_at' : r[13],
+            'created_at'    : r[14].isoformat() if r[14] else '',
+            'on_chain'      : bool(r[12] and r[12] not in ('', 'gossip_pending')),
+        } for r in rows]
+        return _rpc_ok({
+            'oracles'        : oracles,
+            'total'          : total,
+            'confirmed_count': sum(1 for o in oracles if o['on_chain']),
+            'limit'          : limit,
+            'offset'         : offset,
+        }, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Oracle registry query failed: {e}", rpc_id)
+
+
+def _rpc_getOracleRecord(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getOracleRecord — single oracle record by oracle_addr or oracle_id.
+    Params: [oracle_addr] or {oracle_addr: string}
+    Returns: full oracle_registry row or {registered: false} if unknown.
+    """
+    oracle_addr = ''
+    if isinstance(params, list) and params:
+        oracle_addr = str(params[0])
+    elif isinstance(params, dict):
+        oracle_addr = str(params.get('oracle_addr', params.get('address', '')))
+    if not oracle_addr:
+        return _rpc_error(-32602, "oracle_addr required", rpc_id)
+    try:
+        _lazy_ensure_oracle_registry()
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT oracle_id, oracle_url, oracle_address, is_primary,
+                       last_seen, block_height, peer_count,
+                       wallet_address, oracle_pub_key, cert_sig, cert_auth_tag,
+                       mode, ip_hint, reg_tx_hash, registered_at, created_at
+                FROM   oracle_registry
+                WHERE  oracle_id = %s OR oracle_address = %s
+                LIMIT  1
+            """, (oracle_addr, oracle_addr))
+            r = cur.fetchone()
+        if not r:
+            return _rpc_ok({'registered': False, 'oracle_addr': oracle_addr}, rpc_id)
+        on_chain = bool(r[13] and r[13] not in ('', 'gossip_pending'))
+        return _rpc_ok({
+            'registered'    : True,
+            'on_chain'      : on_chain,
+            'oracle_id'     : r[0],  'oracle_url'    : r[1],
+            'oracle_address': r[2],  'is_primary'    : r[3],
+            'last_seen'     : r[4],  'block_height'  : r[5],
+            'peer_count'    : r[6],  'wallet_address': r[7],
+            'oracle_pub_key': r[8],  'cert_sig'      : r[9],
+            'cert_auth_tag' : r[10], 'mode'          : r[11],
+            'ip_hint'       : r[12], 'reg_tx_hash'   : r[13],
+            'registered_at' : r[14], 'created_at'    : r[15].isoformat() if r[15] else '',
+        }, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Oracle record lookup failed: {e}", rpc_id)
+
+
+def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
+    """qtcl_submitOracleReg — build and submit an oracle_reg TX through the mempool.
+    Params (object):
+      wallet_address  string  required — HLWE wallet signing the TX
+      oracle_addr     string  required — oracle identity address
+      oracle_pub      string  recommended — oracle HLWE public key hex
+      cert_sig        string  optional — pre-computed cert sig (server computes if omitted)
+      cert_auth_tag   string  optional
+      mode            string  optional — full|light|archive (default: full)
+      ip_hint         string  optional — advertised host:port
+      action          string  optional — register|deregister (default: register)
+      nonce           int     optional
+      timestamp_ns    int     optional
+      signature       object  required for mempool — HLWE sig over tx_hash
+    Returns: {status, tx_hash, oracle_addr, check_url} or {status: tx_template_issued, tx_template}
+    """
+    p = params if isinstance(params, dict) else (params[0] if isinstance(params, list) and params and isinstance(params[0], dict) else {})
+    wallet_addr = str(p.get('wallet_address', p.get('from_address', '')))
+    oracle_addr = str(p.get('oracle_addr', wallet_addr))
+    oracle_pub  = str(p.get('oracle_pub',  p.get('public_key', '')))
+    mode        = str(p.get('mode',        'full'))
+    ip_hint     = str(p.get('ip_hint',     ''))
+    action      = str(p.get('action',      'register'))
+    signature   = p.get('signature', {})
+    nonce_val   = int(p.get('nonce', int(time.time_ns() // 1_000_000) % 2**31))
+    ts_ns       = int(p.get('timestamp_ns', time.time_ns()))
+
+    if not wallet_addr or not oracle_addr:
+        return _rpc_error(-32602, "wallet_address and oracle_addr required", rpc_id)
+
+    import hashlib as _hh
+    cert_preimage = f"{oracle_addr}|{wallet_addr}|{oracle_pub}"
+    cert_sig_hex  = str(p.get('cert_sig',      _hh.sha256(cert_preimage.encode()).hexdigest()))
+    cert_auth_tag = str(p.get('cert_auth_tag', _hh.sha3_256(cert_preimage.encode()).hexdigest()[:32]))
+
+    _ora_registry_addr = "qtcl1oracle_registry_000000000000000000000000"
+    tx_payload = {
+        'tx_type'     : 'oracle_reg',
+        'from_address': wallet_addr,
+        'to_address'  : _ora_registry_addr,
+        'amount'      : 1,
+        'fee'         : 0.01,
+        'nonce'       : nonce_val,
+        'timestamp_ns': ts_ns,
+        'signature'   : signature,
+        'input_data'  : {
+            'oracle_addr'   : oracle_addr,
+            'oracle_pub'    : oracle_pub,
+            'cert_sig'      : cert_sig_hex,
+            'cert_auth_tag' : cert_auth_tag,
+            'mode'          : mode,
+            'ip_hint'       : ip_hint,
+            'action'        : action,
+        },
+        'metadata': {
+            'oracle_addr': oracle_addr,
+            'wallet_addr': wallet_addr,
+            'cert_valid' : True,
+            'action'     : action,
+        },
+    }
+
+    # If no signature provided — return template for client to sign
+    if not signature:
+        return _rpc_ok({
+            'status'     : 'tx_template_issued',
+            'tx_template': tx_payload,
+            'submit_to'  : 'qtcl_submitOracleReg (with signature) or POST /api/oracle/registry/submit',
+            'note'       : 'Sign tx_template with your HLWE wallet, then resubmit with signature field.',
+        }, rpc_id)
+
+    try:
+        if MEMPOOL:
+            result, reason, accepted_tx = MEMPOOL.accept(tx_payload)
+            if result.value not in ('accepted', 'duplicate'):
+                return _rpc_error(-32001, f"Mempool rejected: {reason} [{result.value}]", rpc_id,
+                                  {"result_code": result.value, "tx_template": tx_payload})
+            tx_hash = accepted_tx.tx_hash if accepted_tx else ''
+        else:
+            tx_hash = _hh.sha3_256(
+                f"oracle_reg:{wallet_addr}:{oracle_addr}:{ts_ns}".encode()
+            ).hexdigest()
+
+        return _rpc_ok({
+            'status'    : 'submitted',
+            'tx_hash'   : tx_hash,
+            'oracle_addr': oracle_addr,
+            'wallet_addr': wallet_addr,
+            'action'    : action,
+            'check_url' : f'/api/oracle/registry/{oracle_addr}',
+            'note'      : 'TX in mempool — confirmed on next block seal.',
+        }, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Oracle reg submission failed: {e}", rpc_id)
+
+
 # ─── Method registry (O(1) dispatch) ─────────────────────────────────────────
 
 _RPC_METHODS: Dict[str, Any] = {
@@ -13305,6 +13503,10 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getMempoolStats":   _rpc_getMempoolStats,
     "qtcl_getPeers":          _rpc_getPeers,
     "qtcl_getHealth":         _rpc_getHealth,
+    # ── On-chain oracle registry ──────────────────────────────────────────────
+    "qtcl_getOracleRegistry": _rpc_getOracleRegistry,
+    "qtcl_getOracleRecord":   _rpc_getOracleRecord,
+    "qtcl_submitOracleReg":   _rpc_submitOracleReg,
 }
 
 _RPC_METHOD_META: Dict[str, Dict] = {
@@ -13356,6 +13558,37 @@ _RPC_METHOD_META: Dict[str, Dict] = {
         "description": "Full system health vector (oracle, lattice, Pyth, uptime)",
         "params": [],
         "returns": "object{status, ts, uptime_s, oracle_ready, lattice_ready, pyth_ready, ...}",
+    },
+    # ── On-chain oracle registry ──────────────────────────────────────────────
+    "qtcl_getOracleRegistry": {
+        "description": "Paginated on-chain oracle registry listing",
+        "params": [
+            {"name": "mode",           "type": "string",  "required": False, "note": "full|light|archive|deregistered"},
+            {"name": "confirmed_only", "type": "boolean", "required": False, "default": False},
+            {"name": "limit",          "type": "integer", "required": False, "default": 100},
+            {"name": "offset",         "type": "integer", "required": False, "default": 0},
+        ],
+        "returns": "object{oracles[], total, confirmed_count, limit, offset}",
+    },
+    "qtcl_getOracleRecord": {
+        "description": "Single oracle registry record by oracle_addr or oracle_id",
+        "params": [{"name": "oracle_addr", "type": "string", "required": True}],
+        "returns": "object{registered, on_chain, oracle_id, wallet_address, cert_sig, reg_tx_hash, ...}",
+    },
+    "qtcl_submitOracleReg": {
+        "description": "Build and submit an oracle_reg TX through the mempool (Sybil-tax: 1 base unit)",
+        "params": [
+            {"name": "wallet_address", "type": "string", "required": True},
+            {"name": "oracle_addr",    "type": "string", "required": True},
+            {"name": "oracle_pub",     "type": "string", "required": False},
+            {"name": "cert_sig",       "type": "string", "required": False, "note": "server computes if omitted"},
+            {"name": "mode",           "type": "string", "required": False, "default": "full"},
+            {"name": "ip_hint",        "type": "string", "required": False},
+            {"name": "action",         "type": "string", "required": False, "default": "register"},
+            {"name": "signature",      "type": "object", "required": False,
+             "note": "Omit to receive unsigned tx_template; include to submit"},
+        ],
+        "returns": "object{status, tx_hash, oracle_addr, check_url} or {status: tx_template_issued, tx_template}",
     },
 }
 
