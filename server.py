@@ -406,7 +406,7 @@ if not POOLER_URL:
     POOLER_HOST     = os.getenv('POOLER_HOST')
     POOLER_USER     = os.getenv('POOLER_USER')
     POOLER_PASSWORD = os.getenv('POOLER_PASSWORD')
-    POOLER_DB       = os.getenv('POOLER_DB', 'postgres')
+    POOLER_DB       = os.getenv('POOLER_DB', 'postgres')  # Default is 'postgres'
     POOLER_PORT     = os.getenv('POOLER_PORT', '6543')
 
     if POOLER_HOST and POOLER_USER and POOLER_PASSWORD:
@@ -1116,6 +1116,14 @@ class DatabasePool:
             # ── Native psycopg2 TCP mode (Koyeb / self-hosted) ───────────────
             try:
                 from psycopg2 import pool as psycopg2_pool
+                
+                # Log connection info for debugging
+                logger.info(f"[DB] Connection config:")
+                logger.info(f"  Host: {POOLER_HOST or 'from POOLER_URL'}")
+                logger.info(f"  Port: {POOLER_PORT}")
+                logger.info(f"  DB: {POOLER_DB}")
+                logger.info(f"  User: {POOLER_USER}")
+                
                 # min=1: open only ONE connection on pool creation — avoids
                 # exhausting Supabase session-mode slots during retry storms.
                 min_connections = 1
@@ -1155,8 +1163,14 @@ class DatabasePool:
                 self._retry_interval = 5.0
 
     def get_connection(self):
+        # Always ensure pool is initialized before getting connection
         if not self._initialized:
             self._initialize_pool()
+        
+        # If still not initialized after retry, raise clear error
+        if not self._initialized:
+            raise RuntimeError("[DB] Pool initialization failed - check POOLER_* environment variables")
+        
         try:
             if self._http_mode and self.pool:
                 return self.pool.getconn()
@@ -1170,9 +1184,12 @@ class DatabasePool:
         except psycopg2.OperationalError as e:
             logger.error(f"[DB] ❌ Cannot connect to Supabase pooler: {e}")
             logger.error(f"[DB] Check POOLER_URL: {DB_URL[:50]}...")
+            # Mark as not initialized to trigger retry on next call
+            self._initialized = False
             raise
         except Exception as e:
             logger.error(f"[DB] Connection error: {e}")
+            self._initialized = False
             raise
 
     def put_connection(self, conn):
