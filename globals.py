@@ -138,7 +138,8 @@ class TessellationRewardSchedule:
     TOTAL_SUPPLY_QTCL:    int = 498_401_280
 
     # ── Treasury identity (canonical — set at genesis, never changed) ─────
-    TREASURY_ADDRESS: str = 'qtcl110fc58e3c441106cc1e54ae41da5d15868525a87'
+    # Override from environment variable for Koyeb deployment
+    TREASURY_ADDRESS: str = os.getenv('TREASURY_ADDRESS', 'qtcl110fc58e3c441106cc1e54ae41da5d15868525a87')
     TREASURY_PUBKEY:  str = '627944e93fd7f406175393da145524cf73eb7b2ed12505cd81810a69b0c4d7ac'
 
     @classmethod

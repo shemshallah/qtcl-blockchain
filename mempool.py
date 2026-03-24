@@ -1293,8 +1293,9 @@ class Mempool:
             _treasury_base = _TRS_mp.get_treasury_reward_base(block_height)
             _treasury_addr = _TRS_mp.TREASURY_ADDRESS
         except Exception:
+            import os as _os
             _treasury_base = 800 - block_reward_base   # fallback: remainder
-            _treasury_addr = 'qtcl110fc58e3c441106cc1e54ae41da5d15868525a87'
+            _treasury_addr = _os.getenv('TREASURY_ADDRESS', 'qtcl110fc58e3c441106cc1e54ae41da5d15868525a87')
         treasury_coinbase = self._build_treasury_coinbase(
             block_height, _treasury_base, _treasury_addr
         )
@@ -1860,13 +1861,19 @@ class Mempool:
         self,
         block_height      : int,
         treasury_reward   : int,
-        treasury_address  : str = 'qtcl110fc58e3c441106cc1e54ae41da5d15868525a87',
+        treasury_address  : str = None,
         w_entropy_hash    : str = '',
     ) -> 'MempoolTx':
         """
         Build treasury coinbase (slot 1) — always paid on-chain regardless of miner.
-        Treasury address: qtcl110fc58e3c441106cc1e54ae41da5d15868525a87 (hardcoded)
         """
+        import os as _os
+        if treasury_address is None:
+            try:
+                from globals import TessellationRewardSchedule as _TRS
+                treasury_address = _TRS.TREASURY_ADDRESS
+            except Exception:
+                treasury_address = _os.getenv('TREASURY_ADDRESS', 'qtcl110fc58e3c441106cc1e54ae41da5d15868525a87')
         import hashlib as _hl
         raw_input = f"TREASURY_COINBASE:{block_height}:{treasury_address}:{treasury_reward}:{w_entropy_hash}".encode()
         tx_hash   = _hl.sha3_256(raw_input).hexdigest()
