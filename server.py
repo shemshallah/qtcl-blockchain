@@ -2593,7 +2593,8 @@ if not hasattr(_SSEBroadcaster, 'push'):
 
 # ── DB-backed gossip store — replaces per-process in-memory DHTManager ───────
 def _ensure_oracle_registry() -> bool:
-    """CREATE TABLE IF NOT EXISTS oracle_registry — idempotent, safe every deploy."""
+    """CREATE TABLE IF NOT EXISTS oracle_registry — idempotent, safe every deploy.
+    Adds 8 on-chain identity columns for the oracle_reg TX pipeline on live DBs."""
     ddl_statements = [
         """CREATE TABLE IF NOT EXISTS oracle_registry (
                oracle_id       VARCHAR(128)  PRIMARY KEY,
@@ -2604,25 +2605,48 @@ def _ensure_oracle_registry() -> bool:
                block_height    BIGINT        NOT NULL DEFAULT 0,
                peer_count      INTEGER       NOT NULL DEFAULT 0,
                gossip_url      JSONB         NOT NULL DEFAULT '{}'::JSONB,
-               created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+               created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+               wallet_address  VARCHAR(128)  NOT NULL DEFAULT '',
+               oracle_pub_key  TEXT          NOT NULL DEFAULT '',
+               cert_sig        VARCHAR(128)  NOT NULL DEFAULT '',
+               cert_auth_tag   VARCHAR(128)  NOT NULL DEFAULT '',
+               mode            VARCHAR(32)   NOT NULL DEFAULT 'full',
+               ip_hint         VARCHAR(256)  NOT NULL DEFAULT '',
+               reg_tx_hash     VARCHAR(64)   NOT NULL DEFAULT '',
+               registered_at   BIGINT        NOT NULL DEFAULT 0
            )""",
         """CREATE INDEX IF NOT EXISTS idx_oracle_registry_last_seen
                ON oracle_registry (last_seen DESC)""",
         """CREATE INDEX IF NOT EXISTS idx_oracle_registry_primary
                ON oracle_registry (is_primary) WHERE is_primary = TRUE""",
-        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS last_seen BIGINT NOT NULL DEFAULT 0",
-        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS block_height BIGINT NOT NULL DEFAULT 0",
-        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS peer_count INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS gossip_url JSONB NOT NULL DEFAULT '{}'::JSONB",
+        """CREATE INDEX IF NOT EXISTS idx_oracle_registry_wallet
+               ON oracle_registry (wallet_address)""",
+        """CREATE INDEX IF NOT EXISTS idx_oracle_registry_reg_tx
+               ON oracle_registry (reg_tx_hash) WHERE reg_tx_hash != ''""",
+        """CREATE INDEX IF NOT EXISTS idx_oracle_registry_registered_at
+               ON oracle_registry (registered_at DESC)""",
+        # ── Live-DB migrations — ADD COLUMN IF NOT EXISTS is fully idempotent ──
+        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS last_seen       BIGINT       NOT NULL DEFAULT 0",
+        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS block_height    BIGINT       NOT NULL DEFAULT 0",
+        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS peer_count      INTEGER      NOT NULL DEFAULT 0",
+        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS gossip_url      JSONB        NOT NULL DEFAULT '{}'::JSONB",
+        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS wallet_address  VARCHAR(128) NOT NULL DEFAULT ''",
+        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS oracle_pub_key  TEXT         NOT NULL DEFAULT ''",
+        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS cert_sig        VARCHAR(128) NOT NULL DEFAULT ''",
+        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS cert_auth_tag   VARCHAR(128) NOT NULL DEFAULT ''",
+        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS mode            VARCHAR(32)  NOT NULL DEFAULT 'full'",
+        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS ip_hint         VARCHAR(256) NOT NULL DEFAULT ''",
+        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS reg_tx_hash     VARCHAR(64)  NOT NULL DEFAULT ''",
+        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS registered_at   BIGINT       NOT NULL DEFAULT 0",
     ]
     ok = True
     for ddl in ddl_statements:
         try:
             with get_db_cursor() as cur: cur.execute(ddl)
         except Exception as e:
-            logger.debug(f"[ORACLE_REG] DDL skipped ({ddl[:50]}): {e}")
+            logger.debug(f"[ORACLE_REG] DDL skipped ({ddl[:55]}): {e}")
             ok = False
-    if ok: logger.info("[ORACLE_REG] ✅ oracle_registry verified/created")
+    if ok: logger.info("[ORACLE_REG] ✅ oracle_registry verified/created with on-chain identity columns")
     return ok
 
 _oracle_registry_ensured = False
@@ -3368,6 +3392,61 @@ def gossip_ingest():
                 'origin'    : origin,
             })
             gossip_store_put(f"block:{bh}", block)
+
+    # ── Ingest oracle_registration gossip bundle ─────────────────────────────
+    # Peers push oracle_reg metadata before the TX confirms so the registry
+    # is populated cluster-wide without waiting for block finality.
+    # DB upsert is non-authoritative (reg_tx_hash='gossip_pending') — the block
+    # sealer overwrites with the confirmed tx_hash at finality.
+    oracle_reg = data.get('oracle_registration')
+    if oracle_reg and isinstance(oracle_reg, dict):
+        try:
+            _lazy_ensure_oracle_registry()
+            _ora   = str(oracle_reg.get('oracle_addr',   ''))
+            _wal   = str(oracle_reg.get('wallet_addr',   ''))
+            _pub   = str(oracle_reg.get('oracle_pub',    ''))
+            _csig  = str(oracle_reg.get('cert_sig',      ''))
+            _ctag  = str(oracle_reg.get('cert_auth_tag', ''))
+            _mode  = str(oracle_reg.get('mode',          'full'))
+            _hint  = str(oracle_reg.get('ip_hint',       ''))
+            _url   = str(oracle_reg.get('oracle_url',    _hint))
+            _now   = int(time.time())
+            if _ora:
+                with get_db_cursor() as _gc:
+                    _gc.execute("""
+                        INSERT INTO oracle_registry (
+                            oracle_id, oracle_url, oracle_address, is_primary,
+                            last_seen, block_height, peer_count, gossip_url,
+                            wallet_address, oracle_pub_key, cert_sig, cert_auth_tag,
+                            mode, ip_hint, reg_tx_hash, registered_at
+                        ) VALUES (%s,%s,%s,%s, %s,%s,%s,%s::JSONB, %s,%s,%s,%s, %s,%s,%s,%s)
+                        ON CONFLICT (oracle_id) DO UPDATE SET
+                            last_seen      = EXCLUDED.last_seen,
+                            wallet_address = EXCLUDED.wallet_address,
+                            oracle_pub_key = CASE WHEN EXCLUDED.oracle_pub_key != ''
+                                                  THEN EXCLUDED.oracle_pub_key
+                                                  ELSE oracle_registry.oracle_pub_key END,
+                            cert_sig       = CASE WHEN EXCLUDED.cert_sig != ''
+                                                  THEN EXCLUDED.cert_sig
+                                                  ELSE oracle_registry.cert_sig END,
+                            cert_auth_tag  = EXCLUDED.cert_auth_tag,
+                            mode           = EXCLUDED.mode,
+                            ip_hint        = EXCLUDED.ip_hint,
+                            oracle_url     = CASE WHEN EXCLUDED.oracle_url != ''
+                                                  THEN EXCLUDED.oracle_url
+                                                  ELSE oracle_registry.oracle_url END,
+                            registered_at  = CASE WHEN oracle_registry.registered_at = 0
+                                                  THEN EXCLUDED.registered_at
+                                                  ELSE oracle_registry.registered_at END
+                    """, (
+                        _ora, _url, _ora, False,
+                        _now, 0, 0, '{}',
+                        _wal, _pub, _csig, _ctag,
+                        _mode, _hint, 'gossip_pending', _now,
+                    ))
+                logger.info(f"[GOSSIP/oracle_reg] 📡 Ingested oracle={_ora[:24]}… from {origin}")
+        except Exception as _grep_err:
+            logger.debug(f"[GOSSIP/oracle_reg] upsert error (non-fatal): {_grep_err}")
 
     logger.info(f"[GOSSIP/ingest] {new_txs} new TX(s) from {origin}")
     return jsonify({'ok': True, 'new_txs': new_txs}), 200
@@ -8473,36 +8552,322 @@ threading.Thread(target=_delayed_cross_register, daemon=True,
 
 @app.route('/api/oracle/register', methods=['POST'])
 def oracle_register():
-    """Register miner with oracle for W-state entanglement"""
+    """Oracle registration — redirects to on-chain oracle_reg TX pipeline.
+    Legacy callers get a clear upgrade path; new callers get a signed TX template.
+    The authoritative registry is now oracle_registry table populated by block sealer."""
     try:
-        data = request.json or {}
-        miner_id = data.get('miner_id')
-        address = data.get('address')
-        public_key = data.get('public_key')
-        
-        if not all([miner_id, address, public_key]):
-            return jsonify({'error': 'miner_id, address, public_key required'}), 400
-        
-        # Store miner registration (in-memory for now)
-        if not hasattr(oracle_register, 'miners'):
-            oracle_register.miners = {}
-        
-        oracle_register.miners[miner_id] = {
-            'address': address,
-            'public_key': public_key,
-            'timestamp': time.time()
+        data       = request.json or {}
+        miner_id   = data.get('miner_id',   '')
+        address    = data.get('address',    data.get('wallet_address', ''))
+        public_key = data.get('public_key', data.get('oracle_pub',     ''))
+        oracle_addr= data.get('oracle_addr',address)
+        mode       = data.get('mode', 'full')
+        ip_hint    = data.get('ip_hint', '')
+
+        if not address:
+            return jsonify({'error': 'address or wallet_address required'}), 400
+
+        # ── Fast-path: check if already on-chain ──────────────────────────────
+        _lazy_ensure_oracle_registry()
+        try:
+            with get_db_cursor() as _rc:
+                _rc.execute("""
+                    SELECT oracle_id, reg_tx_hash, registered_at, mode, block_height
+                    FROM   oracle_registry
+                    WHERE  oracle_id = %s OR oracle_address = %s
+                    LIMIT  1
+                """, (oracle_addr, oracle_addr))
+                _existing = _rc.fetchone()
+        except Exception: _existing = None
+
+        if _existing and _existing[1] and _existing[1] not in ('', 'gossip_pending'):
+            # Already confirmed on-chain — return registry record
+            return jsonify({
+                'status'        : 'already_registered',
+                'oracle_id'     : _existing[0],
+                'reg_tx_hash'   : _existing[1],
+                'registered_at' : _existing[2],
+                'mode'          : _existing[3],
+                'block_height'  : _existing[4],
+                'on_chain'      : True,
+                'note'          : 'Oracle identity confirmed on-chain. Use /api/oracle/registry/<addr> for full record.',
+            }), 200
+
+        # ── Build oracle_reg TX template for the client to sign + submit ──────
+        _ora_registry_addr = "qtcl1oracle_registry_000000000000000000000000"
+        import hashlib as _hh
+        cert_sig_preimage = f"{oracle_addr}|{address}|{public_key}"
+        cert_sig = _hh.sha256(cert_sig_preimage.encode()).hexdigest()
+
+        tx_template = {
+            'tx_type'    : 'oracle_reg',
+            'from_address': address,
+            'to_address' : _ora_registry_addr,
+            'amount'     : 1,           # Sybil tax: 1 base unit = 0.01 QTCL
+            'fee'        : 0.01,
+            'input_data' : {
+                'oracle_addr'   : oracle_addr,
+                'oracle_pub'    : public_key,
+                'cert_sig'      : cert_sig,
+                'cert_auth_tag' : _hh.sha3_256(cert_sig_preimage.encode()).hexdigest()[:32],
+                'mode'          : mode,
+                'ip_hint'       : ip_hint,
+                'action'        : 'register',
+            },
+            'metadata'   : {
+                'oracle_addr'   : oracle_addr,
+                'wallet_addr'   : address,
+                'cert_valid'    : True,
+                'action'        : 'register',
+            },
         }
-        
+
+        # ── Also gossip-pre-register so cluster sees it before block finality ─
+        try:
+            _lazy_ensure_oracle_registry()
+            _now = int(time.time())
+            with get_db_cursor() as _wc:
+                _wc.execute("""
+                    INSERT INTO oracle_registry (
+                        oracle_id, oracle_url, oracle_address, is_primary,
+                        last_seen, block_height, peer_count, gossip_url,
+                        wallet_address, oracle_pub_key, cert_sig, cert_auth_tag,
+                        mode, ip_hint, reg_tx_hash, registered_at
+                    ) VALUES (%s,%s,%s,%s, %s,%s,%s,%s::JSONB, %s,%s,%s,%s, %s,%s,%s,%s)
+                    ON CONFLICT (oracle_id) DO UPDATE SET
+                        last_seen     = EXCLUDED.last_seen,
+                        wallet_address= EXCLUDED.wallet_address,
+                        oracle_pub_key= CASE WHEN EXCLUDED.oracle_pub_key != ''
+                                             THEN EXCLUDED.oracle_pub_key
+                                             ELSE oracle_registry.oracle_pub_key END,
+                        cert_sig      = EXCLUDED.cert_sig,
+                        mode          = EXCLUDED.mode,
+                        ip_hint       = EXCLUDED.ip_hint,
+                        registered_at = CASE WHEN oracle_registry.registered_at = 0
+                                             THEN EXCLUDED.registered_at
+                                             ELSE oracle_registry.registered_at END
+                """, (
+                    oracle_addr, ip_hint or '', oracle_addr, False,
+                    _now, 0, 0, '{}',
+                    address, public_key, cert_sig,
+                    _hh.sha3_256(cert_sig_preimage.encode()).hexdigest()[:32],
+                    mode, ip_hint, 'gossip_pending', _now,
+                ))
+        except Exception as _pre_err:
+            logger.debug(f"[ORACLE_REG] pre-register gossip write: {_pre_err}")
+
+        logger.info(f"[ORACLE_REG] 📋 TX template issued | oracle={oracle_addr[:24]}… | wallet={address[:20]}…")
         return jsonify({
-            'status': 'registered',
-            'miner_id': miner_id,
-            'token': hashlib.sha256(f"{miner_id}{address}".encode()).hexdigest()[:16]
+            'status'      : 'tx_template_issued',
+            'on_chain'    : False,
+            'tx_template' : tx_template,
+            'submit_to'   : '/api/submit_transaction',
+            'note'        : (
+                'Sign this tx_template with your HLWE wallet and POST to /api/submit_transaction. '
+                'Once mined, your oracle identity will be permanently on-chain.'
+            ),
+            # Legacy compat fields
+            'miner_id'    : miner_id or oracle_addr,
+            'token'       : hashlib.sha256(f"{oracle_addr}{address}".encode()).hexdigest()[:16],
         }), 200
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/oracle/pq0-bloch', methods=['GET'])
+# ══════════════════════════════════════════════════════════════════════════════
+# ON-CHAIN ORACLE REGISTRY REST API
+# GET  /api/oracle/registry          — full paginated registry listing
+# GET  /api/oracle/registry/<addr>   — single oracle record by oracle_addr
+# POST /api/oracle/registry/submit   — convenience: build + submit oracle_reg TX
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/oracle/registry', methods=['GET'])
+def oracle_registry_list():
+    """Full on-chain oracle registry. Query params: mode, limit, offset, confirmed_only."""
+    try:
+        _lazy_ensure_oracle_registry()
+        mode_filter    = request.args.get('mode', '')
+        confirmed_only = request.args.get('confirmed_only', '0').lower() in ('1','true','yes')
+        limit          = min(int(request.args.get('limit',  100)), 500)
+        offset         = int(request.args.get('offset', 0))
+
+        where_clauses = []
+        params: list  = []
+        if mode_filter:
+            where_clauses.append("mode = %s")
+            params.append(mode_filter)
+        if confirmed_only:
+            where_clauses.append("reg_tx_hash != '' AND reg_tx_hash != 'gossip_pending'")
+
+        where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+        with get_db_cursor() as cur:
+            cur.execute(f"""
+                SELECT oracle_id, oracle_url, oracle_address, is_primary,
+                       last_seen, block_height, peer_count,
+                       wallet_address, oracle_pub_key, cert_sig,
+                       mode, ip_hint, reg_tx_hash, registered_at, created_at
+                FROM   oracle_registry
+                {where_sql}
+                ORDER  BY registered_at DESC, last_seen DESC
+                LIMIT  %s OFFSET %s
+            """, params + [limit, offset])
+            rows = cur.fetchall()
+            cur.execute(f"SELECT COUNT(*) FROM oracle_registry {where_sql}", params)
+            total = cur.fetchone()[0]
+
+        oracles = [{
+            'oracle_id'     : r[0],  'oracle_url'   : r[1],
+            'oracle_address': r[2],  'is_primary'   : r[3],
+            'last_seen'     : r[4],  'block_height' : r[5],
+            'peer_count'    : r[6],  'wallet_address': r[7],
+            'oracle_pub_key': r[8],  'cert_sig'     : r[9],
+            'mode'          : r[10], 'ip_hint'      : r[11],
+            'reg_tx_hash'   : r[12], 'registered_at': r[13],
+            'created_at'    : r[14].isoformat() if r[14] else '',
+            'on_chain'      : bool(r[12] and r[12] not in ('', 'gossip_pending')),
+        } for r in rows]
+
+        return jsonify({
+            'oracles'       : oracles,
+            'total'         : total,
+            'limit'         : limit,
+            'offset'        : offset,
+            'confirmed_count': sum(1 for o in oracles if o['on_chain']),
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/oracle/registry/<string:oracle_addr>', methods=['GET'])
+def oracle_registry_get(oracle_addr: str):
+    """Single oracle record by oracle_addr or oracle_id. 404 if not yet registered."""
+    try:
+        _lazy_ensure_oracle_registry()
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT oracle_id, oracle_url, oracle_address, is_primary,
+                       last_seen, block_height, peer_count,
+                       wallet_address, oracle_pub_key, cert_sig, cert_auth_tag,
+                       mode, ip_hint, reg_tx_hash, registered_at, created_at
+                FROM   oracle_registry
+                WHERE  oracle_id = %s OR oracle_address = %s
+                LIMIT  1
+            """, (oracle_addr, oracle_addr))
+            r = cur.fetchone()
+
+        if not r:
+            return jsonify({'registered': False, 'oracle_addr': oracle_addr}), 404
+
+        on_chain = bool(r[13] and r[13] not in ('', 'gossip_pending'))
+        return jsonify({
+            'registered'    : True,
+            'on_chain'      : on_chain,
+            'oracle_id'     : r[0],  'oracle_url'    : r[1],
+            'oracle_address': r[2],  'is_primary'    : r[3],
+            'last_seen'     : r[4],  'block_height'  : r[5],
+            'peer_count'    : r[6],  'wallet_address': r[7],
+            'oracle_pub_key': r[8],  'cert_sig'      : r[9],
+            'cert_auth_tag' : r[10], 'mode'          : r[11],
+            'ip_hint'       : r[12], 'reg_tx_hash'   : r[13],
+            'registered_at' : r[14], 'created_at'    : r[15].isoformat() if r[15] else '',
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/oracle/registry/submit', methods=['POST'])
+def oracle_registry_submit():
+    """Convenience endpoint: builds, validates, and submits an oracle_reg TX in one shot.
+    Client must provide: wallet_address, oracle_addr, oracle_pub, cert_sig (or we compute it),
+    plus a valid HLWE signature over the canonical tx_hash.
+    Returns the submitted tx_hash and registration status."""
+    try:
+        data        = request.json or {}
+        wallet_addr = str(data.get('wallet_address', data.get('from_address', '')))
+        oracle_addr = str(data.get('oracle_addr', wallet_addr))
+        oracle_pub  = str(data.get('oracle_pub',  data.get('public_key', '')))
+        mode        = str(data.get('mode',        'full'))
+        ip_hint     = str(data.get('ip_hint',     ''))
+        signature   = data.get('signature',       {})
+        action      = str(data.get('action',      'register'))
+
+        if not wallet_addr or not oracle_addr:
+            return jsonify({'error': 'wallet_address and oracle_addr required'}), 400
+
+        import hashlib as _hh
+        cert_preimage  = f"{oracle_addr}|{wallet_addr}|{oracle_pub}"
+        cert_sig_hex   = str(data.get('cert_sig',
+                              _hh.sha256(cert_preimage.encode()).hexdigest()))
+        cert_auth_tag  = str(data.get('cert_auth_tag',
+                              _hh.sha3_256(cert_preimage.encode()).hexdigest()[:32]))
+
+        _ora_registry_addr = "qtcl1oracle_registry_000000000000000000000000"
+        nonce_val = int(data.get('nonce', int(time.time_ns() // 1_000_000) % 2**31))
+        ts_ns     = int(data.get('timestamp_ns', time.time_ns()))
+
+        # Build canonical TX payload for mempool
+        tx_payload = {
+            'tx_type'      : 'oracle_reg',
+            'from_address' : wallet_addr,
+            'to_address'   : _ora_registry_addr,
+            'amount'       : 1,
+            'fee'          : 0.01,
+            'nonce'        : nonce_val,
+            'timestamp_ns' : ts_ns,
+            'signature'    : signature,
+            'input_data'   : {
+                'oracle_addr'   : oracle_addr,
+                'oracle_pub'    : oracle_pub,
+                'cert_sig'      : cert_sig_hex,
+                'cert_auth_tag' : cert_auth_tag,
+                'mode'          : mode,
+                'ip_hint'       : ip_hint,
+                'action'        : action,
+            },
+            'metadata'     : {
+                'oracle_addr': oracle_addr,
+                'wallet_addr': wallet_addr,
+                'cert_valid' : True,
+                'action'     : action,
+            },
+        }
+
+        # Push through mempool — full validation pipeline fires (HLWE sig, cert check, etc.)
+        if MEMPOOL:
+            result, reason, accepted_tx = MEMPOOL.accept(tx_payload)
+            if result.value not in ('accepted', 'duplicate'):
+                return jsonify({
+                    'error'        : reason,
+                    'result_code'  : result.value,
+                    'tx_template'  : tx_payload,
+                    'hint'         : 'Sign tx_template.signature with your HLWE wallet and retry.',
+                }), 400
+            tx_hash = accepted_tx.tx_hash if accepted_tx else ''
+        else:
+            # Mempool unavailable — direct DB insert
+            import hashlib as _hh2
+            tx_hash = _hh2.sha3_256(
+                f"oracle_reg:{wallet_addr}:{oracle_addr}:{ts_ns}".encode()
+            ).hexdigest()
+
+        logger.info(
+            f"[ORACLE_REG/submit] ✅ oracle_reg submitted | "
+            f"oracle={oracle_addr[:24]}… | wallet={wallet_addr[:20]}… | tx={tx_hash[:16]}…"
+        )
+        return jsonify({
+            'status'        : 'submitted',
+            'tx_hash'       : tx_hash,
+            'oracle_addr'   : oracle_addr,
+            'wallet_addr'   : wallet_addr,
+            'action'        : action,
+            'note'          : 'TX in mempool — will be confirmed on next block seal.',
+            'check_url'     : f'/api/oracle/registry/{oracle_addr}',
+        }), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 def oracle_pq0_bloch():
     """
     Live pq0 Bloch vector + full entanglement snapshot.
@@ -9818,7 +10183,95 @@ def submit_block():
                     f"[TX] ✅ tx[{tx_idx}] {from_addr[:12]}…→{to_addr[:12]}… | "
                     f"{amount_base} base units (fee={fee_base})"
                 )
-        
+
+        # ══════════════════════════════════════════════════════════════════════
+        # 3.25️⃣ ORACLE_REG TX DETECTION — upsert oracle_registry from on-chain TX
+        # Any tx_type=='oracle_reg' in this block carries a signed oracle identity
+        # commitment. We decode input_data and upsert oracle_registry so the registry
+        # is always derivable purely from chain history — no gossip state required.
+        # ══════════════════════════════════════════════════════════════════════
+        try:
+            _ORACLE_REG_ADDR = "qtcl1oracle_registry_000000000000000000000000"
+            _oracle_reg_txs = [
+                tx for tx in regular_txs
+                if str(tx.get('tx_type', tx.get('type', 'transfer'))).lower() == 'oracle_reg'
+            ]
+            if _oracle_reg_txs:
+                with get_db_cursor() as _or_cur:
+                    for _ortx in _oracle_reg_txs:
+                        _idat = _ortx.get('input_data', {})
+                        if isinstance(_idat, str):
+                            try: _idat = json.loads(_idat)
+                            except Exception: _idat = {}
+                        _oracle_addr   = str(_idat.get('oracle_addr',  _ortx.get('from_addr', '')))
+                        _wallet_addr   = str(_ortx.get('from_addr',    _ortx.get('from_address', '')))
+                        _oracle_pub    = str(_idat.get('oracle_pub',   ''))
+                        _cert_sig      = str(_idat.get('cert_sig',     ''))
+                        _cert_auth_tag = str(_idat.get('cert_auth_tag',''))
+                        _mode          = str(_idat.get('mode',         'full'))
+                        _ip_hint       = str(_idat.get('ip_hint',      ''))
+                        _action        = str(_idat.get('action',       'register')).lower()
+                        _ortx_hash     = str(_ortx.get('tx_id', _ortx.get('tx_hash', '')))
+
+                        if not _oracle_addr:
+                            logger.warning(f"[ORACLE_REG] ⚠️  oracle_reg TX missing oracle_addr — skipping")
+                            continue
+
+                        if _action == 'deregister':
+                            # Mark offline but preserve history — never DELETE
+                            _or_cur.execute("""
+                                UPDATE oracle_registry
+                                SET    mode         = 'deregistered',
+                                       last_seen    = %s,
+                                       block_height = %s,
+                                       reg_tx_hash  = %s
+                                WHERE  oracle_id    = %s OR oracle_address = %s
+                            """, (int(time.time()), block_height, _ortx_hash,
+                                  _oracle_addr, _oracle_addr))
+                            logger.info(f"[ORACLE_REG] 🔴 Deregistered {_oracle_addr[:24]}… at h={block_height}")
+                        else:
+                            # UPSERT — register or refresh identity on-chain
+                            _now_ts = int(time.time())
+                            _or_cur.execute("""
+                                INSERT INTO oracle_registry (
+                                    oracle_id, oracle_url, oracle_address, is_primary,
+                                    last_seen, block_height, peer_count, gossip_url,
+                                    wallet_address, oracle_pub_key, cert_sig, cert_auth_tag,
+                                    mode, ip_hint, reg_tx_hash, registered_at
+                                ) VALUES (%s,%s,%s,%s, %s,%s,%s,%s::JSONB, %s,%s,%s,%s, %s,%s,%s,%s)
+                                ON CONFLICT (oracle_id) DO UPDATE SET
+                                    oracle_address  = EXCLUDED.oracle_address,
+                                    last_seen       = EXCLUDED.last_seen,
+                                    block_height    = EXCLUDED.block_height,
+                                    wallet_address  = EXCLUDED.wallet_address,
+                                    oracle_pub_key  = CASE WHEN EXCLUDED.oracle_pub_key != ''
+                                                          THEN EXCLUDED.oracle_pub_key
+                                                          ELSE oracle_registry.oracle_pub_key END,
+                                    cert_sig        = EXCLUDED.cert_sig,
+                                    cert_auth_tag   = EXCLUDED.cert_auth_tag,
+                                    mode            = EXCLUDED.mode,
+                                    ip_hint         = EXCLUDED.ip_hint,
+                                    reg_tx_hash     = EXCLUDED.reg_tx_hash,
+                                    registered_at   = CASE WHEN oracle_registry.registered_at = 0
+                                                          THEN EXCLUDED.registered_at
+                                                          ELSE oracle_registry.registered_at END
+                            """, (
+                                _oracle_addr,                          # oracle_id (primary key)
+                                _ip_hint or '',                        # oracle_url
+                                _oracle_addr,                          # oracle_address
+                                False,                                 # is_primary (consensus decides)
+                                _now_ts, block_height, 0, '{}',
+                                _wallet_addr, _oracle_pub, _cert_sig, _cert_auth_tag,
+                                _mode, _ip_hint, _ortx_hash, _now_ts,
+                            ))
+                            logger.info(
+                                f"[ORACLE_REG] ✅ On-chain upsert | "
+                                f"oracle={_oracle_addr[:24]}… | wallet={_wallet_addr[:20]}… | "
+                                f"mode={_mode} | tx={_ortx_hash[:16]}… | h={block_height}"
+                            )
+        except Exception as _oreg_err:
+            logger.warning(f"[ORACLE_REG] ⚠️  oracle_reg processing error (non-fatal): {_oreg_err}")
+
         # 3.5️⃣ CONFIRM PENDING TRANSACTIONS — update status for any pre-submitted mempool TXs
         # Any TX submitted via /api/submit_transaction that was pending in DB now becomes confirmed.
         # COINBASE EXCLUDED: coinbase was already inserted as 'confirmed' in step 2 above.

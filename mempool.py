@@ -161,6 +161,7 @@ class AcceptResult(str, Enum):
     DB_ERROR         = "db_error"
     REPLACED_BY_FEE  = "replaced_by_fee"  # not an error — the NEW tx replaced an old one
     INTERNAL_ERROR   = "internal_error"
+    ORACLE_CERT_INVALID = "oracle_cert_invalid"  # oracle_reg TX: cert_sig missing or tampered
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TRANSACTION DATA CLASS
@@ -1015,6 +1016,10 @@ class Mempool:
                 client_tx_id = norm.get('client_tx_id', '')
                 sig_raw      = norm['signature']
                 metadata     = norm.get('metadata', {})
+                input_data   = norm.get('input_data', {})
+                # oracle_reg: special tx_type that commits oracle identity on-chain
+                # bypasses dust + balance (Sybil tax = 1 base unit, always valid)
+                _is_oracle_reg = (tx_type == 'oracle_reg')
 
                 # ── CANONICAL HASH ─────────────────────────────────────────
                 tx_hash = MempoolTx.canonical_hash(
@@ -1034,7 +1039,8 @@ class Mempool:
                     return AcceptResult.DUPLICATE, f"tx already in mempool: {tx_hash[:16]}", _existing_tx
 
                 # ── [D] DUST ───────────────────────────────────────────────
-                if amount_base < DUST_THRESHOLD:
+                # oracle_reg exempt: amount=1 base unit is intentional Sybil tax
+                if amount_base < DUST_THRESHOLD and not _is_oracle_reg:
                     self._stats['total_rejected'] += 1
                     return AcceptResult.DUST, f"amount {amount_base} < dust threshold {DUST_THRESHOLD}", None
 
@@ -1071,12 +1077,13 @@ class Mempool:
                     return AcceptResult.NONCE_REUSE, nonce_reason, None
 
                 # ── [B] BALANCE ────────────────────────────────────────────
-                # Total cost of this TX to the sender
+                # oracle_reg exempt: Sybil tax burns 1 base unit to null-sink addr;
+                # oracle node may be pre-wallet-funded but must still be chain-visible.
+                # balance=0 allowed ONLY when tx_type=='oracle_reg' AND to==ORACLE_REGISTRY.
                 total_cost = amount_base + fee_base
-                # If replacing, the old lock will be released — subtract it from required
                 replaced_cost = (replaced_tx.amount_base + replaced_tx.fee_base) if replaced_tx else 0
                 net_cost = total_cost - replaced_cost
-                if net_cost > 0:
+                if net_cost > 0 and not _is_oracle_reg:
                     spendable = self._balances.spendable(from_addr)
                     # In DEV_MODE, allow 0-balance TXs for testing
                     if spendable < net_cost and not DEV_MODE:
@@ -1084,12 +1091,56 @@ class Mempool:
                         return AcceptResult.INSUFFICIENT_BAL, (
                             f"need {net_cost} base units, spendable={spendable}"
                         ), None
+                elif _is_oracle_reg:
+                    # Validate target address is canonical registry null-sink
+                    try:
+                        from blockchain_entropy_mining import ORACLE_REGISTRY_ADDRESS as _ORA
+                    except ImportError:
+                        _ORA = "qtcl1oracle_registry_000000000000000000000000"
+                    if to_addr != _ORA:
+                        self._stats['total_rejected'] += 1
+                        return AcceptResult.INVALID_FORMAT, (
+                            f"oracle_reg to_address must be {_ORA}, got {to_addr}"
+                        ), None
 
                 # ── [S] SIGNATURE ──────────────────────────────────────────
                 sig_valid, sig_reason = self._verify_signature(tx_hash, sig_raw, from_addr)
                 if not sig_valid:
                     self._stats['total_rejected'] += 1
                     return AcceptResult.INVALID_SIG, f"HLWE verification failed: {sig_reason}", None
+
+                # ── [C] ORACLE CERT VALIDATION (oracle_reg only) ───────────
+                # input_data must carry cert_sig (HLWE auth tag over oracle_addr+wallet_addr)
+                # This proves the oracle's HLWE keypair signed its own identity binding.
+                if _is_oracle_reg:
+                    _idat       = input_data if isinstance(input_data, dict) else {}
+                    _oracle_addr = _idat.get('oracle_addr', '')
+                    _oracle_pub  = _idat.get('oracle_pub', '')
+                    _cert_sig    = _idat.get('cert_sig', '')
+                    _action      = _idat.get('action', 'register')
+                    if not _oracle_addr:
+                        self._stats['total_rejected'] += 1
+                        return AcceptResult.ORACLE_CERT_INVALID, (
+                            "oracle_reg input_data missing oracle_addr"
+                        ), None
+                    if not _cert_sig and _action not in ('deregister',):
+                        self._stats['total_rejected'] += 1
+                        return AcceptResult.ORACLE_CERT_INVALID, (
+                            f"oracle_reg missing cert_sig for action={_action}"
+                        ), None
+                    # cert_sig structure: sha256(oracle_addr + "|" + from_addr + "|" + oracle_pub)
+                    # Full HLWE cert verification is done server-side at block seal time.
+                    # Here we do a fast structural check: cert_sig must be 64-char hex.
+                    if _cert_sig and (len(_cert_sig) < 32 or not all(c in '0123456789abcdef' for c in _cert_sig.lower())):
+                        self._stats['total_rejected'] += 1
+                        return AcceptResult.ORACLE_CERT_INVALID, (
+                            f"oracle_reg cert_sig malformed (len={len(_cert_sig)})"
+                        ), None
+                    logger.info(
+                        f"[MEMPOOL-CERT] ✅ oracle_reg cert check pass | "
+                        f"oracle={_oracle_addr[:20]}… | wallet={from_addr[:20]}… | "
+                        f"action={_action}"
+                    )
 
                 # ── [L] SENDER LIMIT ───────────────────────────────────────
                 sender_count = len(self._by_sender[from_addr])

@@ -740,10 +740,22 @@ CREATE TABLE oracle_registry (
     block_height    BIGINT        NOT NULL DEFAULT 0,
     peer_count      INTEGER       NOT NULL DEFAULT 0,
     gossip_url      JSONB         NOT NULL DEFAULT '{}'::JSONB,
-    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    -- ── ON-CHAIN IDENTITY COLUMNS (oracle_reg TX pipeline) ─────────────────
+    wallet_address  VARCHAR(128)  NOT NULL DEFAULT '',
+    oracle_pub_key  TEXT          NOT NULL DEFAULT '',
+    cert_sig        VARCHAR(128)  NOT NULL DEFAULT '',
+    cert_auth_tag   VARCHAR(128)  NOT NULL DEFAULT '',
+    mode            VARCHAR(32)   NOT NULL DEFAULT 'full',
+    ip_hint         VARCHAR(256)  NOT NULL DEFAULT '',
+    reg_tx_hash     VARCHAR(64)   NOT NULL DEFAULT '',
+    registered_at   BIGINT        NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_oracle_registry_last_seen  ON oracle_registry (last_seen DESC);
-CREATE INDEX IF NOT EXISTS idx_oracle_registry_primary    ON oracle_registry (is_primary) WHERE is_primary = TRUE;
+CREATE INDEX IF NOT EXISTS idx_oracle_registry_last_seen     ON oracle_registry (last_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_oracle_registry_primary       ON oracle_registry (is_primary) WHERE is_primary = TRUE;
+CREATE INDEX IF NOT EXISTS idx_oracle_registry_wallet        ON oracle_registry (wallet_address);
+CREATE INDEX IF NOT EXISTS idx_oracle_registry_reg_tx        ON oracle_registry (reg_tx_hash) WHERE reg_tx_hash != '';
+CREATE INDEX IF NOT EXISTS idx_oracle_registry_registered_at ON oracle_registry (registered_at DESC);
 
 -- TABLE: oracle_coherence_metrics
 CREATE TABLE oracle_coherence_metrics (
@@ -1394,7 +1406,35 @@ class QuantumTemporalCoherenceLedgerServer:
             logger.error(f"{CLR.ERROR}[SCHEMA] Schema creation failed: {e}{CLR.E}")
             self.conn.rollback()
             raise
-    
+
+    def _migrate_oracle_registry_onchain(self):
+        """Idempotent migration — adds 8 on-chain identity columns to oracle_registry.
+        Safe to run on existing DBs: ADD COLUMN IF NOT EXISTS never fails on re-run.
+        Also ensures the 3 new indexes land on both fresh builds and live migrations."""
+        migrations = [
+            "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS wallet_address  VARCHAR(128) NOT NULL DEFAULT ''",
+            "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS oracle_pub_key  TEXT         NOT NULL DEFAULT ''",
+            "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS cert_sig        VARCHAR(128) NOT NULL DEFAULT ''",
+            "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS cert_auth_tag   VARCHAR(128) NOT NULL DEFAULT ''",
+            "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS mode            VARCHAR(32)  NOT NULL DEFAULT 'full'",
+            "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS ip_hint         VARCHAR(256) NOT NULL DEFAULT ''",
+            "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS reg_tx_hash     VARCHAR(64)  NOT NULL DEFAULT ''",
+            "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS registered_at   BIGINT       NOT NULL DEFAULT 0",
+            "CREATE INDEX IF NOT EXISTS idx_oracle_registry_wallet        ON oracle_registry (wallet_address)",
+            "CREATE INDEX IF NOT EXISTS idx_oracle_registry_reg_tx        ON oracle_registry (reg_tx_hash) WHERE reg_tx_hash != ''",
+            "CREATE INDEX IF NOT EXISTS idx_oracle_registry_registered_at ON oracle_registry (registered_at DESC)",
+        ]
+        ok_count = 0
+        for ddl in migrations:
+            try:
+                self.cursor.execute(ddl)
+                self.conn.commit()
+                ok_count += 1
+            except Exception as e:
+                self.conn.rollback()
+                logger.debug(f"{CLR.WARNING}[MIGRATE] oracle_registry DDL skipped ({ddl[:55]}…): {e}{CLR.E}")
+        logger.info(f"{CLR.OK}[MIGRATE] oracle_registry on-chain identity migration: {ok_count}/{len(migrations)} OK{CLR.E}")
+
     def _insert_triangles_batched(self, triangles: Dict[int, HyperbolicTriangle]):
         logger.info(f"{CLR.C}[TRI] Inserting {len(triangles)} triangles in batches...{CLR.E}")
         triangle_list = list(triangles.values())
@@ -1639,6 +1679,7 @@ class QuantumTemporalCoherenceLedgerServer:
             self.connect()
             self.drop_all_tables()
             self.create_schema()
+            self._migrate_oracle_registry_onchain()
             self.populate_tessellation()
             
             total_elapsed = time.time() - total_start

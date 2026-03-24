@@ -913,6 +913,12 @@ from globals import TessellationRewardSchedule
 # Genesis block (hardcoded, mined beforehand)
 GENESIS_BLOCK_HASH = None  # Will be set after mining genesis
 
+# ── ON-CHAIN ORACLE REGISTRY — canonical null-sink burn address ────────────────
+# No private key exists for this address. oracle_reg TXs target it as commitment
+# proof of identity. Sybil tax: 1 base unit (0.01 QTCL) burned per registration.
+# Structure mirrors Bitcoin's OP_RETURN: spendable=False, pure chain commitment.
+ORACLE_REGISTRY_ADDRESS = "qtcl1oracle_registry_000000000000000000000000"
+
 
 @dataclass
 class QuantumBlock:
