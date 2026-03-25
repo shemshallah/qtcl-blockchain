@@ -1476,10 +1476,8 @@ def load_known_peers() -> List[Tuple[str, int]]:
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # MEASUREMENT SERVICE: Enterprise-Grade Async Metric Aggregation (Thread Pool + Queue)
-# Sharded node measurement with RLock-protected shared state + SSE broadcasting
+# Sharded node measurement with RLock-protected shared state
 # ═════════════════════════════════════════════════════════════════════════════════
-
-import queue as _measurement_queue_mod
 
 class MeasurementService:
     """
@@ -1489,7 +1487,6 @@ class MeasurementService:
     Features:
     - Sharded thread pool (N threads, each measures independent shard)
     - RLock-protected metrics dict (thread-safe read/write)
-    - Queue-based metric broadcasting (decouples measurement from SSE)
     - Graceful shutdown with cleanup
     - Museum-grade error handling
     
@@ -1500,9 +1497,7 @@ class MeasurementService:
       Thread N: Measure nodes N*1000...
       
       All threads write to: metrics_dict (RLock-protected)
-      All threads push to: broadcast_queue (thread-safe)
       HTTP handlers read from: metrics_dict (instant, no contention)
-      SSE multiplexer drains: broadcast_queue (non-blocking)
     """
     
     def __init__(self, num_threads: int = 8, nodes_per_shard: int = 1000):
@@ -1514,9 +1509,6 @@ class MeasurementService:
         # Thread-safe shared state
         self.metrics_lock = threading.RLock()
         self.metrics_dict = {}  # node_id -> {fidelity, coherence, entropy, timestamp}
-        
-        # Broadcast queue (thread-safe, non-blocking)
-        self.broadcast_queue = _measurement_queue_mod.Queue(maxsize=10000)
         
         # Thread management
         self.threads = []
@@ -1565,12 +1557,6 @@ class MeasurementService:
                         # Write to shared dict (with lock)
                         with self.metrics_lock:
                             self.metrics_dict[node_id] = metric
-                        
-                        # Broadcast to SSE queue (non-blocking)
-                        try:
-                            self.broadcast_queue.put_nowait(metric)
-                        except _measurement_queue_mod.Full:
-                            pass  # Drop if queue full (SSE lagging)
                         
                         # Yield to other threads
                         time.sleep(0.001)  # 1ms per node
@@ -1669,12 +1655,6 @@ class MeasurementService:
         # Clear state
         with self.metrics_lock:
             self.metrics_dict.clear()
-        
-        try:
-            while True:
-                self.broadcast_queue.get_nowait()
-        except _measurement_queue_mod.Empty:
-            pass
         
         self.threads.clear()
         logger.info("[MEASURE] ✓ Shutdown complete")
@@ -3304,45 +3284,29 @@ except Exception as _gse:
 # socketio removed - SSE only
 
 
-def _sse_push_snapshot(snapshot: dict) -> None:
-    """Cache and broadcast snapshot to RPC event log (replaces SSE push)."""
-    try:
-        _log_rpc_event('oracle_snapshot', snapshot)
-    except Exception as e:
-        logger.error(f"[SSE] Snapshot broadcast error: {e}")
-
-
-def _broadcast_snapshot_to_gossip_network(snapshot: dict) -> None:
+def _broadcast_snapshot_to_rpc_event_log(snapshot: dict) -> None:
     """
-    Push snapshot to SSE subscribers and update in-memory cache.
+    Broadcast snapshot to RPC event log (enterprise-grade, RPC-only).
 
-    Dispatches to BOTH SSE channels:
-      • /api/snapshot/sse  — raw chirp blob (dashboard canvas + lattice)
-      • /api/events        — flat oracle_dm event (miners + any typed subscriber)
-
-    CRITICAL: oracle_dm is pushed FLAT — DM fields at top level with 'type'
-    merged in.  _gossip_sse.publish() wraps data under a 'data' key which
-    breaks any client that reads density_matrix_hex directly off the event.
+    Logs oracle_dm as a queryable event via /api/events endpoint.
+    Clients poll for new snapshots at their own pace — no SSE push required.
+    
+    This is the SOLE broadcast mechanism — no SSE, no WebSocket fanout.
     """
     global _latest_snapshot, _latest_snapshot_ts, _last_snapshot_log_time
     with _snapshot_lock:
         _latest_snapshot = snapshot
         _latest_snapshot_ts = snapshot.get('timestamp_ns', 0)
     try:
-        # Channel 1: raw blob → /api/snapshot/sse
-        _sse_push_snapshot(snapshot)
-
-        # Channel 2: flat oracle_dm → /api/events (direct fanout, no 'data' wrapper)
-        flat = dict(snapshot)
-        flat['type'] = 'oracle_dm'
-        _gossip_sse._fanout_local(json.dumps(flat, separators=(',', ':')))
+        # Log to RPC event store (queryable via GET /api/events)
+        _log_rpc_event('oracle_dm', snapshot)
 
         now = time.time()
         if _verbose_p2p_logging or (now - _last_snapshot_log_time >= _snapshot_log_interval):
-            logger.debug(f"[GOSSIP] 📡 Snapshot broadcast | ts={snapshot.get('timestamp_ns', 0)}")
+            logger.debug(f"[RPC-EVENTS] 📡 Oracle snapshot logged | ts={snapshot.get('timestamp_ns', 0)}")
             _last_snapshot_log_time = now
     except Exception as e:
-        logger.error(f"[GOSSIP] Broadcast error: {e}")
+        logger.error(f"[RPC-EVENTS] Snapshot logging error: {e}")
 
 
 
@@ -3670,7 +3634,7 @@ def _snapshot_streaming_daemon():
 
             ts = unified_snapshot.get('timestamp_ns', 0)
             if ts > last_chirp_ts:
-                _broadcast_snapshot_to_gossip_network(unified_snapshot)
+                _broadcast_snapshot_to_rpc_event_log(unified_snapshot)
                 broadcast_count += 1
                 last_chirp_ts = ts
                 mux.log_chirp(unified_snapshot)
@@ -3799,8 +3763,8 @@ class MetricsCollector:
         while self.running:
             try:
                 metrics = self._gather_metrics()
-                # SSE only - broadcast to connected clients via _sse_push_snapshot
-                _sse_push_snapshot(metrics)
+                # Log metrics to RPC event store (replaces SSE push)
+                _log_rpc_event('blockchain_metrics', metrics)
                 time.sleep(2)  # Update every 2 seconds
             except Exception as e:
                 logger.error(f"[METRICS] Collection error: {e}")
@@ -4168,19 +4132,15 @@ def metrics_stream():
         limit = int(request.args.get('limit', 50))
         metrics = []
         try:
-            while len(metrics) < limit:
-                try:
-                    metric = measure_svc.broadcast_queue.get_nowait()
-                    if metric.get('timestamp', 0) >= since:
-                        metrics.append(metric)
-                except _measurement_queue_mod.Empty:
-                    break
+            # Get all metrics directly from MeasurementService (no SSE queue)
+            all_metrics = measure_svc.get_metrics()
+            for node_id in sorted(all_metrics.keys())[:limit]:
+                metric = all_metrics[node_id]
+                if metric.get('timestamp', 0) >= since:
+                    metrics.append(metric)
         except Exception as e:
-            logger.debug(f"[METRICS] queue drain: {e}")
+            logger.debug(f"[METRICS] query error: {e}")
         return jsonify({'metrics': metrics, 'count': len(metrics)}), 200
-    except Exception as e:
-        logger.error(f"[METRICS] error: {e}")
-        return jsonify({'error': str(e), 'metrics': []}), 500
 
 
 # ═════════════════════════════════════════════════════════════════════════════════
