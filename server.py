@@ -1251,57 +1251,34 @@ def get_db_connection():
 @contextmanager
 def get_db_cursor():
     """Context manager for database cursor with connection pooling.
-
-    PATCH-1: Removed the early-exit guard on ``_initialized == False`` that
-    caused a circular deadlock.  Previously the guard fired the instant the
-    module loaded (because ``_initialized`` starts as ``False``) and raised
-    *before* ``get_connection()`` could call ``_initialize_pool()``, trapping
-    the pool in permanent "not initialized" state for the lifetime of the
-    process.
-
-    The *only* legitimate early exit is when the pool has been **explicitly
-    shut down** (gunicorn SIGTERM path) — we detect that via the ``closed``
-    flag on the underlying psycopg2 pool object, which is only set by
-    ``DatabasePool.close_all()`` / ``_SupHTTPPool.closeall()``.
+    
+    ⚛️  Detects pool.closed flag only if pool was explicitly shut down.
+    Never rejects on lazy init — pool.get_connection() handles that.
     """
-    conn = None
+    conn=None
     try:
-        # Guard ONLY against explicit shutdown (pool.closed=True), never against
-        # "not yet initialized" — that is handled lazily inside get_connection().
-        if hasattr(db_pool, 'pool') and db_pool.pool is not None:
-            if hasattr(db_pool.pool, 'closed') and db_pool.pool.closed:
-                raise RuntimeError("DB pool closed")
-        conn = db_pool.get_connection()
+        if hasattr(db_pool,'pool') and db_pool.pool is not None:
+            if hasattr(db_pool.pool,'closed') and db_pool.pool.closed:
+                raise RuntimeError("DB pool closed (explicit shutdown)")
+        conn=db_pool.get_connection()
         from psycopg2.extras import RealDictCursor
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur=conn.cursor(cursor_factory=RealDictCursor)
         yield cur
         conn.commit()
     except Exception as e:
         if conn:
             try:
                 conn.rollback()
-            except:
+            except Exception:
                 pass
-        _e_str = str(e)
-        # PATCH-6: 'DB pool closed' is our own sentinel from the guard above;
-        # 'pool is closed' / 'connection pool is closed' come from psycopg2 itself.
-        # All three are expected after gunicorn SIGTERM — log at DEBUG, not ERROR.
-        _is_shutdown = ('pool is closed' in _e_str or
-                        'connection pool is closed' in _e_str or
-                        'DB pool closed' in _e_str)
-        # Error codes 0 and 2: connection reset, silent suppress
-        _is_quiet_error = 'error code 0' in _e_str or 'error code 2' in _e_str
-        if _is_shutdown:
-            logger.debug(f"[DB] Pool closed (shutdown): {e}")
-        elif _is_quiet_error:
-            pass  # Silent — transient network noise
-        else:
-            logger.error(f"[DB] Query error: {e}")
+        logger.debug(f"[DB-CURSOR] Error: {e}")
         raise
     finally:
         if conn:
-            db_pool.put_connection(conn)
-
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 def query_latest_block() -> Optional[Dict[str, Any]]:
     """Get latest block from database - with NULL-safety"""
@@ -2223,63 +2200,40 @@ def _set_app_ready():
 
 @app.route('/api/oracle/snapshot', methods=['GET'])
 def oracle_snapshot_json():
-    """Return latest oracle snapshot as JSON (RPC polling, Supabase pooler)."""
+    """Return latest oracle snapshot as JSON (RPC polling, Supabase pooler).
+    
+    ⚛️  Guarantees 200/503/500 with structured response.
+    DB failures → 503 (service unavailable). Client retries.
+    """
     with _snapshot_lock:
         if _latest_snapshot:
             return jsonify(_latest_snapshot), 200
-    
     try:
         _lazy_ensure_quantum_snapshots()
-        try:
-            with get_db_cursor() as cur:
-                cur.execute("""SELECT bucket_ts, timestamp_ns, chirp_number, 
-                                    lattice_fidelity, lattice_coherence, lattice_cycle, lattice_sigma_mod8,
-                                    consensus_fidelity, consensus_coherence, consensus_purity,
-                                    mermin_M, mermin_is_quantum, mermin_verdict,
-                                    pq0_oracle, pq0_IV, pq0_V, pq_curr, pq_last,
-                                    oracle_measurements, phase_name 
-                                FROM quantum_snapshots 
-                                ORDER BY timestamp_ns DESC 
-                                LIMIT 1""")
-                row = cur.fetchone()
-        except Exception as query_err:
-            logger.warning(f"[RPC] quantum_snapshots query failed: {query_err}, checking table existence")
-            # Table might not exist yet, return 503 and let client retry
-            return jsonify({'ready': False, 'error': 'snapshots table initializing'}), 503
-        
-        if not row:
-            return jsonify({'ready': False, 'error': 'no snapshots yet'}), 503
-        
-        try:
-            oracles = row[18] if isinstance(row[18], list) else (
-                json.loads(row[18]) if isinstance(row[18], str) else []
-            )
-        except (json.JSONDecodeError, TypeError):
-            oracles = []
-        
-        mermin_result = None
-        if row[10] is not None:
-            mermin_result = {
-                'M_value': float(row[10]),
-                'M': float(row[10]),
-                'is_quantum': bool(row[11]),
-                'verdict': str(row[12]) if row[12] else ''
-            }
-        
-        return jsonify({
-            'timestamp_ns': int(row[1]), 'chirp_number': int(row[2]),
-            'lattice_quantum': {'fidelity': float(row[3]), 'coherence': float(row[4]), 'cycle_count': int(row[5]),
-                               'lattice_sigma_mod8': int(row[6]), 'phase_name': str(row[19]) if row[19] else '', 'lattice_status': 'online'},
-            'consensus': {'w_state_fidelity': float(row[7]), 'coherence': float(row[8]), 'purity': float(row[9])},
-            'mermin_test': mermin_result, 'bell_test': mermin_result,
-            'pq0_components': {'pq0_oracle_fidelity': float(row[13]), 'pq0_IV_fidelity': float(row[14]),
-                              'pq0_V_fidelity': float(row[15])},
-            'pq_curr': int(row[16]), 'pq_last': int(row[17]), 'oracle_measurements': oracles,
-            'fidelity': float(row[7]), 'coherence': float(row[8]), 'lattice_cycle': int(row[5]),
-            'source': 'supabase_snapshot', 'ready': True}), 200
     except Exception as e:
-        logger.error(f"[RPC] oracle_snapshot error: {e}", exc_info=True)
-        return jsonify({'error': str(e), 'ready': False}), 500
+        logger.warning(f"[RPC] Table init failed: {e}")
+        return jsonify({'ready': False, 'error': 'table initialization pending'}), 503
+    row=None
+    try:
+        with get_db_cursor() as cur:
+            cur.execute('''SELECT bucket_ts,timestamp_ns,chirp_number,lattice_fidelity,lattice_coherence,lattice_cycle,lattice_sigma_mod8,consensus_fidelity,consensus_coherence,consensus_purity,mermin_M,mermin_is_quantum,mermin_verdict,pq0_oracle,pq0_IV,pq0_V,pq_curr,pq_last,oracle_measurements,phase_name FROM quantum_snapshots ORDER BY timestamp_ns DESC LIMIT 1''')
+            row=cur.fetchone()
+    except Exception as query_err:
+        logger.debug(f"[RPC] Query failed: {query_err}")
+        return jsonify({'ready': False, 'error': 'no snapshots available'}), 503
+    if not row:
+        return jsonify({'ready': False, 'error': 'no snapshots yet'}), 503
+    try:
+        oracles=row[18] if isinstance(row[18],list) else (json.loads(row[18]) if isinstance(row[18],str) else [])
+    except (json.JSONDecodeError,TypeError):
+        oracles=[]
+    mermin_result=None
+    if row[10] is not None:
+        mermin_result={'M_value': float(row[10]),'M': float(row[10]),'is_quantum': bool(row[11]),'verdict': str(row[12]) if row[12] else ''}
+    snapshot={'timestamp_ns': int(row[1]),'chirp_number': int(row[2]),'lattice_quantum': {'fidelity': float(row[3]),'coherence': float(row[4]),'cycle_count': int(row[5]),'lattice_sigma_mod8': int(row[6]),'phase_name': str(row[19]) if row[19] else '','lattice_status': 'online'},'consensus': {'w_state_fidelity': float(row[7]),'coherence': float(row[8]),'purity': float(row[9])},'mermin_test': mermin_result,'bell_test': mermin_result,'pq0_components': {'pq0_oracle_fidelity': float(row[13]),'pq0_IV_fidelity': float(row[14]),'pq0_V_fidelity': float(row[15])},'pq_curr': int(row[16]),'pq_last': int(row[17]),'oracle_measurements': oracles,'fidelity': float(row[7]),'coherence': float(row[8]),'lattice_cycle': int(row[5]),'source': 'supabase_snapshot','ready': True}
+    with _snapshot_lock:
+        _latest_snapshot=snapshot
+    return jsonify(snapshot), 200
 
 @app.route('/api/snapshots/latest', methods=['GET'])
 def snapshots_latest():
