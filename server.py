@@ -3249,6 +3249,13 @@ except Exception as _gse:
 # socketio removed - SSE only
 
 
+def _sse_push_snapshot(snapshot: dict) -> None:
+    """Cache and broadcast snapshot to RPC event log (replaces SSE push)."""
+    try:
+        _log_rpc_event('oracle_snapshot', snapshot)
+    except Exception as e:
+        logger.error(f"[SSE] Snapshot broadcast error: {e}")
+
 
 def _broadcast_snapshot_to_gossip_network(snapshot: dict) -> None:
     """
@@ -13309,8 +13316,13 @@ _RPC_METHOD_META: Dict[str, Dict] = {
 # ─── Core dispatch ────────────────────────────────────────────────────────────
 
 def _dispatch_single(payload: dict) -> dict:
-    """Dispatch one JSON-RPC 2.0 call. Always returns a response dict."""
-    rpc_id  = payload.get("id")     # None = notification (we still respond for safety)
+    """Dispatch one JSON-RPC 2.0 call. Always returns a response dict.
+    
+    DUAL-MODE BROADCAST:
+    - HTTP response to caller (primary)
+    - P2P broadcast to peers via gossip_store (so other clients can cache + reuse)
+    """
+    rpc_id  = payload.get("id")
     version = payload.get("jsonrpc")
     method  = payload.get("method")
     params  = payload.get("params")
@@ -13326,10 +13338,54 @@ def _dispatch_single(payload: dict) -> dict:
                           {"available": list(_RPC_METHODS.keys())})
 
     try:
-        return handler(params, rpc_id)
+        response = handler(params, rpc_id)
+        
+        # ── BROADCAST TO P2P: Share RPC response with all peers ────────────────
+        _broadcast_rpc_to_peers(method, params, response, rpc_id)
+        
+        return response
     except Exception as e:
         logger.exception(f"[RPC] Unhandled error in {method}: {e}")
         return _rpc_error(-32603, "Internal error", rpc_id, {"exception": str(e)})
+
+
+def _broadcast_rpc_to_peers(method: str, params: Any, response: dict, rpc_id: Any) -> None:
+    """Broadcast successful RPC response to P2P peers via gossip_store.
+    
+    Other clients will query gossip_store to find cached RPC responses,
+    reducing load on primary server and enabling true P2P RPC redundancy.
+    """
+    try:
+        if 'error' in response:
+            return  # Don't broadcast errors (keep cache clean)
+        
+        import sqlite3 as _sql3
+        
+        # Construct gossip payload: RPC method + result (not the full request, too verbose)
+        rpc_payload = {
+            'method': method,
+            'result': response.get('result'),
+            'timestamp': time.time(),
+            'ttl_seconds': 300,  # Cache for 5 minutes
+            'source_node': 'server',
+            'broadcast': True,
+        }
+        
+        # Store in gossip_store for peer replication
+        with get_db_cursor() as cur:
+            cur.execute("""
+                INSERT INTO gossip_store(event_id, event_type, payload, timestamp)
+                VALUES(?, ?, ?, datetime('now'))
+            """, (
+                f"rpc_{method}_{rpc_id}_{int(time.time()*1000)}",
+                "rpc_response",
+                json.dumps(rpc_payload, separators=(',', ':'))
+            ))
+        
+        logger.debug(f"[RPC-P2P] Broadcasted {method} to gossip_store for peer cache")
+    
+    except Exception as e:
+        logger.debug(f"[RPC-P2P] Broadcast failed (non-fatal): {e}")
 
 
 def _dispatch(body: bytes) -> Tuple[Any, int]:
