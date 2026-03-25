@@ -90,58 +90,50 @@ logger.info("║" + " " * 90 + "║")
 logger.info("╚" + "═" * 90 + "╝")
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════
-# PHASE 1A: HLWE CRYPTOGRAPHY INITIALIZATION (DIRECT IMPORT, BEFORE SERVER)
+# PHASE 1A: HLWE DEFERRED TO BACKGROUND (NON-BLOCKING GUNICORN BOOT)
 # ═════════════════════════════════════════════════════════════════════════════════════════════
 
-logger.info("[WSGI] Phase 1A/3: Initializing HLWE post-quantum cryptography...")
+logger.info("[WSGI] Phase 1A/3: Deferring HLWE initialization to background thread...")
+logger.info("[WSGI] ⏳ Gunicorn will bind port 8000 IMMEDIATELY (HLWE initializes in background)...")
 
 _HLWE_READY = False
-try:
-    # DIRECT IMPORT OF HLWE (avoids circular dependency with globals)
-    from hlwe_engine import (
-        get_hlwe_adapter, get_wallet_manager,
-        hlwe_health_check, get_hlwe_system_info
-    )
-    
-    logger.info("[WSGI] [HLWE] Import successful, initializing system...")
-    
-    # Initialize HLWE adapter
-    adapter = get_hlwe_adapter()
-    wallet_mgr = get_wallet_manager()
-    
-    logger.info("[WSGI] [HLWE] Wallet manager initialized")
-    
-    # Health check
-    is_healthy = hlwe_health_check()
-    system_info = get_hlwe_system_info()
-    
-    if is_healthy:
-        logger.info("[WSGI] ✅ HLWE system initialized and healthy")
-        logger.info(f"[WSGI]    • Engine: {system_info.get('engine', 'unknown')}")
-        logger.info(f"[WSGI]    • Cryptography: {system_info.get('cryptography', 'unknown')}")
-        logger.info(f"[WSGI]    • Entropy source: {'QRNG' if system_info.get('entropy') else 'os.urandom'}")
-        logger.info(f"[WSGI]    • Database: {system_info.get('database', 'unknown')}")
-        logger.info(f"[WSGI]    • Status: READY FOR PRODUCTION")
-        _HLWE_READY = True
-    else:
-        logger.critical("[WSGI] ❌ HLWE health check FAILED — cryptographic system unavailable")
-        logger.critical("[WSGI] All block signing, transaction signing, and wallet operations will FAIL")
-        raise RuntimeError("HLWE health check failed")
-        
-except ImportError as e:
-    logger.critical(f"[WSGI] ❌ CRITICAL: HLWE engine import failed: {e}")
-    logger.critical("[WSGI] HLWE is mandatory for all cryptographic operations")
-    logger.critical("[WSGI] Ensure hlwe_engine.py is installed and in Python path")
-    raise RuntimeError("HLWE engine not available")
-except Exception as e:
-    logger.critical(f"[WSGI] ❌ CRITICAL: HLWE initialization failed: {e}")
-    import traceback
-    traceback.print_exc()
-    raise
+_hlwe_error = None
 
-if not _HLWE_READY:
-    logger.critical("[WSGI] HLWE not ready — cannot proceed with server initialization")
-    raise RuntimeError("HLWE initialization failed")
+def _init_hlwe_background():
+    """Initialize HLWE in background thread (non-blocking)."""
+    global _HLWE_READY, _hlwe_error
+    try:
+        from hlwe_engine import (
+            get_hlwe_adapter, get_wallet_manager,
+            hlwe_health_check, hlwe_system_info
+        )
+        
+        logger.info("[WSGI-BG] HLWE import successful, initializing...")
+        
+        adapter = get_hlwe_adapter()
+        wallet_mgr = get_wallet_manager()
+        logger.info("[WSGI-BG] HLWE wallet manager initialized")
+        
+        is_healthy = hlwe_health_check()
+        system_info = hlwe_system_info()
+        
+        if is_healthy:
+            logger.info("[WSGI-BG] ✅ HLWE system ready")
+            logger.info(f"[WSGI-BG]    • Engine: {system_info.get('engine', 'unknown')}")
+            logger.info(f"[WSGI-BG]    • Entropy: {'QRNG' if system_info.get('entropy') else 'os.urandom'}")
+            _HLWE_READY = True
+        else:
+            _hlwe_error = "Health check failed"
+            logger.error("[WSGI-BG] ❌ HLWE health check FAILED")
+        
+    except Exception as e:
+        _hlwe_error = str(e)
+        logger.error(f"[WSGI-BG] ❌ HLWE init failed: {e}", exc_info=True)
+
+import threading
+_hlwe_thread = threading.Thread(target=_init_hlwe_background, daemon=True, name='HLWE-Init')
+_hlwe_thread.start()
+logger.info("[WSGI] HLWE background initialization STARTED (port binding proceeds immediately)")
 
 logger.info("[WSGI] ═════════════════════════════════════════════════════════════════════")
 
