@@ -405,6 +405,98 @@ def compute_finality(check_height: int) -> Optional[int]:
     return None
 
 
+# ═════════════════════════════════════════════════════════════════════════════════
+# RPC SUBMISSION WRAPPERS (for JSON-RPC 2.0 endpoint)
+# ═════════════════════════════════════════════════════════════════════════════════
+
+def register_peer_from_rpc(peer_payload: dict) -> dict:
+    """
+    Register P2P peer via JSON-RPC endpoint.
+    
+    Wrapper that validates and registers peer.
+    Returns: {status, peer_id, gossip_url, timestamp}
+    """
+    try:
+        import time as _t
+        
+        # Extract peer data
+        peer_id = str(peer_payload.get('peer_id', ''))
+        gossip_url = str(peer_payload.get('gossip_url', ''))
+        miner_address = str(peer_payload.get('miner_address', ''))
+        
+        # Validate required fields
+        if not peer_id or not gossip_url or not miner_address:
+            raise ValueError("Missing peer_id, gossip_url, or miner_address")
+        
+        # Store in global peer registry
+        with _STATE_LOCK:
+            peers = _GLOBAL_STATE.setdefault('peer_registry', {})
+            peers[peer_id] = {
+                'peer_id': peer_id,
+                'gossip_url': gossip_url,
+                'miner_address': miner_address,
+                'registered_at': _t.time(),
+                'last_seen': _t.time(),
+            }
+        
+        result = {
+            'status': 'registered',
+            'peer_id': peer_id,
+            'gossip_url': gossip_url,
+            'timestamp': _t.time(),
+        }
+        
+        logger.info(f"[RPC-PEER] ✓ Peer registered: {peer_id[:16]}")
+        return result
+    
+    except Exception as e:
+        logger.error(f"[RPC-PEER] Peer registration error: {e}")
+        raise RuntimeError(f"Peer registration failed: {str(e)}")
+
+
+def process_heartbeat_from_rpc(heartbeat_payload: dict) -> dict:
+    """
+    Process P2P peer heartbeat via JSON-RPC endpoint.
+    
+    Wrapper that validates and updates peer health.
+    Returns: {status, peer_id, server_height, timestamp}
+    """
+    try:
+        import time as _t
+        
+        # Extract heartbeat data
+        peer_id = str(heartbeat_payload.get('peer_id', ''))
+        block_height = int(heartbeat_payload.get('block_height', 0))
+        
+        # Validate required fields
+        if not peer_id:
+            raise ValueError("Missing peer_id")
+        
+        # Update peer last_seen
+        with _STATE_LOCK:
+            peers = _GLOBAL_STATE.setdefault('peer_registry', {})
+            if peer_id in peers:
+                peers[peer_id]['last_seen'] = _t.time()
+                peers[peer_id]['remote_height'] = block_height
+            
+            # Get server height
+            server_height = _GLOBAL_STATE.get('chain_height', 0)
+        
+        result = {
+            'status': 'ack',
+            'peer_id': peer_id,
+            'server_height': server_height,
+            'timestamp': _t.time(),
+        }
+        
+        logger.debug(f"[RPC-HB] ✓ Heartbeat from {peer_id[:16]}: height={block_height}")
+        return result
+    
+    except Exception as e:
+        logger.error(f"[RPC-HB] Heartbeat processing error: {e}")
+        raise RuntimeError(f"Heartbeat processing failed: {str(e)}")
+
+
 # Export public symbols
 __all__ = [
     'get_state', 'set_state', 'update_state',
