@@ -622,16 +622,21 @@ def get_oracle_address(oracle_id: str, fallback: str = '') -> str:
             return fallback
         
         conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT oracle_address FROM oracle_registry WHERE oracle_id = %s",
-            (oracle_id,)
-        )
-        result = cursor.fetchone()
-        cursor.close()
-        conn.close()
-        
-        return result[0] if result else fallback
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT oracle_address FROM oracle_registry WHERE oracle_id = %s",
+                (oracle_id,)
+            )
+            result = cursor.fetchone()
+            cursor.close()
+            conn.commit()
+            return result[0] if result else fallback
+        finally:
+            if db_pool.use_pooling and db_pool.pool:
+                db_pool.pool.putconn(conn)
+            else:
+                conn.close()
     except Exception as e:
         logger.debug(f"[ORACLE-ADDRESS] Lookup failed for {oracle_id}: {e}")
         return fallback
@@ -646,24 +651,30 @@ def get_consensus_oracle_address() -> str:
             return 'qtcl1consensus_all_oracles_xor'
         
         conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT oracle_address FROM oracle_registry WHERE role IN "
-            "('PRIMARY_LATTICE', 'SECONDARY_LATTICE', 'VALIDATION', 'ARBITER', 'METRICS') "
-            "ORDER BY oracle_id"
-        )
-        addresses = [row[0] for row in cursor.fetchall()]
-        cursor.close()
-        conn.close()
-        
-        if len(addresses) != 5:
-            logger.warning(f"[ORACLE-ADDRESS] Expected 5 oracles, got {len(addresses)}")
-        
-        # XOR all addresses together for deterministic consensus address
-        import hashlib
-        consensus_seed = '|'.join(addresses).encode()
-        consensus_hash = hashlib.sha256(consensus_seed).hexdigest()[:24]
-        return f"qtcl1consensus_{consensus_hash}"
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT oracle_address FROM oracle_registry WHERE role IN "
+                "('PRIMARY_LATTICE', 'SECONDARY_LATTICE', 'VALIDATION', 'ARBITER', 'METRICS') "
+                "ORDER BY oracle_id"
+            )
+            addresses = [row[0] for row in cursor.fetchall()]
+            cursor.close()
+            conn.commit()
+            
+            if len(addresses) != 5:
+                logger.warning(f"[ORACLE-ADDRESS] Expected 5 oracles, got {len(addresses)}")
+            
+            # XOR all addresses together for deterministic consensus address
+            import hashlib
+            consensus_seed = '|'.join(addresses).encode()
+            consensus_hash = hashlib.sha256(consensus_seed).hexdigest()[:24]
+            return f"qtcl1consensus_{consensus_hash}"
+        finally:
+            if db_pool.use_pooling and db_pool.pool:
+                db_pool.pool.putconn(conn)
+            else:
+                conn.close()
     except Exception as e:
         logger.debug(f"[ORACLE-ADDRESS] Consensus lookup failed: {e}")
         return 'qtcl1consensus_all_oracles_xor'
@@ -1252,14 +1263,11 @@ def get_db_connection():
 def get_db_cursor():
     """Context manager for database cursor with connection pooling.
     
-    ⚛️  Detects pool.closed flag only if pool was explicitly shut down.
-    Never rejects on lazy init — pool.get_connection() handles that.
+    ⚛️  CRITICAL: Return connections to pool, never close them directly.
+    Closing breaks the pool. Must use db_pool.putconn() to return.
     """
     conn=None
     try:
-        if hasattr(db_pool,'pool') and db_pool.pool is not None:
-            if hasattr(db_pool.pool,'closed') and db_pool.pool.closed:
-                raise RuntimeError("DB pool closed (explicit shutdown)")
         conn=db_pool.get_connection()
         from psycopg2.extras import RealDictCursor
         cur=conn.cursor(cursor_factory=RealDictCursor)
@@ -1276,9 +1284,16 @@ def get_db_cursor():
     finally:
         if conn:
             try:
-                conn.close()
-            except Exception:
-                pass
+                if db_pool.use_pooling and db_pool.pool:
+                    db_pool.pool.putconn(conn)
+                else:
+                    conn.close()
+            except Exception as e:
+                logger.debug(f"[DB-CURSOR] putconn error: {e}")
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
 def query_latest_block() -> Optional[Dict[str, Any]]:
     """Get latest block from database - with NULL-safety"""
