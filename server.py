@@ -1295,6 +1295,98 @@ def get_db_cursor():
                 except Exception:
                     pass
 
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# GENESIS BOOTSTRAP: Ensure canonical genesis block exists on fresh deploy
+# ═══════════════════════════════════════════════════════════════════════════════════════
+def _ensure_genesis_block_in_db() -> bool:
+    """
+    CRITICAL BOOTSTRAP FIX: Auto-create genesis block if missing from DB.
+    
+    On fresh server deploy, the blocks table is empty.  /api/blocks/tip returns
+    a fallback {height: 0} but no actual genesis record exists.  Clients then
+    try to mine h=1 on a non-existent h=0 parent, causing mining to fail silently.
+    
+    Solution: Check if genesis (height=0) exists; create it deterministically if missing.
+    Returns True if genesis exists OR was created successfully.
+    """
+    try:
+        with get_db_cursor() as cur:
+            # Check if height=0 exists
+            cur.execute("SELECT height, block_hash FROM blocks WHERE height = 0 LIMIT 1")
+            genesis_row = cur.fetchone()
+            
+            if genesis_row:
+                logger.info(
+                    f"[GENESIS-BOOTSTRAP] ✅ Genesis already exists: "
+                    f"h=0 hash={genesis_row['block_hash'][:24] if genesis_row['block_hash'] else '?'}…"
+                )
+                return True
+            
+            # Genesis missing — create deterministically
+            logger.warning(
+                "[GENESIS-BOOTSTRAP] ⚠️  Genesis missing from DB! Creating canonical genesis block…"
+            )
+            
+            # Deterministic canonical coinbase (matches client-side forge)
+            _GENESIS_TS = 1_700_000_000  # Fixed epoch
+            _COINBASE_ADDR = "0" * 64    # NULL address
+            _COINBASE_AMOUNT = 5_000_000_000  # 50 QTCL
+            
+            coinbase_body = {
+                "version": 1, "height": 0, "type": "coinbase", "inputs": [],
+                "outputs": [{"address": _COINBASE_ADDR, "amount": _COINBASE_AMOUNT}],
+                "timestamp": _GENESIS_TS, "memo": "In the beginning was the qubit.",
+                "fee": 0, "from_address": _COINBASE_ADDR,
+                "to_address": _COINBASE_ADDR, "amount": _COINBASE_AMOUNT,
+            }
+            coinbase_body["tx_hash"] = hashlib.sha3_256(
+                json.dumps(coinbase_body, sort_keys=True, separators=(',', ':')).encode()
+            ).hexdigest()
+            
+            # Build genesis block with all required fields
+            genesis_canonical = {
+                "height": 0,
+                "previous_hash": "0" * 64,
+                "timestamp": _GENESIS_TS,
+                "oracle_w_state_hash": "0" * 64,
+                "validator_public_key": _COINBASE_ADDR,
+                "nonce": 0,
+                "difficulty": 1,
+                "entropy_score": 0.9,
+                "transactions_root": "0" * 64,
+            }
+            
+            # Canonical deterministic hash
+            genesis_hash = hashlib.sha3_256(
+                json.dumps(genesis_canonical, sort_keys=True, separators=(',', ':')).encode()
+            ).hexdigest()
+            
+            # Insert into blocks table
+            try:
+                cur.execute("""
+                    INSERT INTO blocks
+                    (height, block_hash, previous_hash, timestamp,
+                     oracle_w_state_hash, validator_public_key, nonce,
+                     difficulty, entropy_score, transactions_root)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (height) DO NOTHING
+                """, (
+                    0, genesis_hash, "0" * 64, _GENESIS_TS,
+                    "0" * 64, _COINBASE_ADDR, 0,
+                    1, 0.9, "0" * 64
+                ))
+                logger.info(
+                    f"[GENESIS-BOOTSTRAP] ✅ Genesis created in DB: h=0 hash={genesis_hash[:24]}…"
+                )
+                return True
+            except Exception as _insert_err:
+                logger.warning(f"[GENESIS-BOOTSTRAP] Genesis insert error: {_insert_err} (may exist already)")
+                return True  # Continue anyway
+                
+    except Exception as _ex:
+        logger.warning(f"[GENESIS-BOOTSTRAP] Non-fatal error: {_ex}")
+        return True  # Continue even if bootstrap fails
+
 def query_latest_block() -> Optional[Dict[str, Any]]:
     """Get latest block from database - with NULL-safety"""
     try:
@@ -7717,6 +7809,18 @@ def _wsgi_startup() -> None:
                 logger.info(f"[WSGI-INIT] ✅ Oracle registered as DHT peer | {oracle_node_id[:16]}…")
             except Exception as _dht_err:
                 logger.warning(f"[WSGI-INIT] Oracle DHT registration non-fatal: {_dht_err}")
+
+        # ═══════════════════════════════════════════════════════════════════════════
+        # GENESIS BOOTSTRAP: Ensure blockchain has a genesis block before RPC goes live
+        # ═══════════════════════════════════════════════════════════════════════════
+        try:
+            logger.info("[WSGI-INIT] 🌱 Checking genesis block…")
+            if db_ready() and _ensure_genesis_block_in_db():
+                logger.info("[WSGI-INIT] ✅ Genesis bootstrap complete")
+            else:
+                logger.warning("[WSGI-INIT] ⚠️  Genesis bootstrap returned False (continuing anyway)")
+        except Exception as _genesis_err:
+            logger.warning(f"[WSGI-INIT] Genesis bootstrap error: {_genesis_err} (non-fatal, continuing)")
 
         try:
             initialize_p2p()
