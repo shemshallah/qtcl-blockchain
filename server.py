@@ -2496,10 +2496,6 @@ def snapshots_latest():
     except Exception as e:
         logger.error(f"[SNAP-LATEST] Unhandled error: {e}")
         return jsonify({'error': 'snapshot retrieval failed', 'ready': False}), 503
-        }), 200
-    except Exception as e:
-        logger.error(f"[QSNAP] /api/snapshots/latest error: {e}")
-        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/oracle/push_snapshot', methods=['POST'])
