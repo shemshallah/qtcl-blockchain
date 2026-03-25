@@ -2089,6 +2089,32 @@ def qtcl_pow_verify(
 # ═════════════════════════════════════════════════════════════════════════════════
 
 app = Flask(__name__)
+
+# ── Bulletproof JSON encoder: kills every numpy/datetime/Decimal/bytes 500 ────
+import json as _json_mod
+class _QTCLJSONEncoder(_json_mod.JSONEncoder):
+    """Handles numpy scalars, datetime, Decimal, bytes, sets — anything jsonify touches."""
+    def default(self, o):
+        # numpy scalars (float32/float64/int64/bool_ etc.)
+        try:
+            import numpy as _np
+            if isinstance(o, _np.integer):  return int(o)
+            if isinstance(o, _np.floating): return float(o)
+            if isinstance(o, _np.bool_):    return bool(o)
+            if isinstance(o, _np.ndarray):  return o.tolist()
+        except ImportError:
+            pass
+        if isinstance(o, datetime):         return o.isoformat()
+        if isinstance(o, _decimal.Decimal): return float(o)
+        if isinstance(o, (bytes, bytearray)):return o.hex()
+        if isinstance(o, set):              return sorted(o)
+        # Fallback: stringify rather than explode with 500
+        try:
+            return super().default(o)
+        except TypeError:
+            return str(o)
+
+app.json_encoder = _QTCLJSONEncoder
 app.config['JSON_SORT_KEYS'] = False
 
 # ─── Lazy Metrics Initialization (after all classes defined) ──────────────────
@@ -11746,17 +11772,16 @@ class GossipProtocolHandler:
 # Production startup is handled entirely by _wsgi_startup() above.
 
 if __name__ == '__main__':
-    PORT = 9091
-    DEBUG = False
+    PORT = int(os.getenv('PORT', 8000))
+    DEBUG = os.getenv('FLASK_ENV') == 'development'
     logger.info("═" * 80)
     logger.info("QTCL SERVER STARTUP")
     logger.info("═" * 80)
-    logger.info(f"Port: {PORT} (unified REST + P2P + WebSocket)")
+    logger.info(f"Port: {PORT} (REST/RPC on :{PORT}, P2P on :{P2P_PORT})")
     logger.info("═" * 80)
     logger.info("[P2P] Starting P2P daemons...")
     _start_p2p_daemons()
     logger.info("[P2P] ✅ P2P daemons started")
-    logger.info("[HTTP] Starting unified HTTP REST + P2P SSE server...")
     logger.info(f"[HTTP] Listening on 0.0.0.0:{PORT}")
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -12745,6 +12770,15 @@ threading.Thread(target=_start_comprehensive_feed_when_ready, daemon=True,
                  name="ComprehensiveFeedWaiter").start()
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ── Safe datetime → ISO string coercion (handles str, datetime, None, numpy) ──
+def _iso(v) -> str:
+    """Return ISO-8601 string for v regardless of whether it arrived as a
+    datetime object (psycopg2 direct) or a plain string (PostgREST HTTP mode)."""
+    if v is None:           return ''
+    if hasattr(v, 'isoformat'): return v.isoformat()
+    return str(v)
+
+
 # JSON-RPC 2.0 ENGINE — Enterprise-Grade, RFC-Compliant
 # ══════════════════════════════════════════════════════════════════════════════
 #
@@ -13032,26 +13066,34 @@ def _rpc_getMempoolStats(params: Any, rpc_id: Any) -> dict:
     """qtcl_getMempoolStats — mempool depth and fee percentiles."""
     try:
         logger.debug(f"[RPC-METHOD] qtcl_getMempoolStats called with params={params}, id={rpc_id}")
+        # Walk resolution chain: module-level MEMPOOL → globals.get_mempool() → mempool module singleton
+        mp = None
+        _srv_globals = sys.modules[__name__].__dict__
+        mp = _srv_globals.get("MEMPOOL") or _srv_globals.get("_MEMPOOL")
+        if mp is None:
+            try:
+                import globals as _g
+                _gf = getattr(_g, "get_mempool", None)
+                if callable(_gf): mp = _gf()
+            except Exception: pass
+        if mp is None:
+            try:
+                import mempool as _mp_mod
+                mp = getattr(_mp_mod, "MEMPOOL", None) or getattr(_mp_mod, "_MEMPOOL_INSTANCE", None)
+            except Exception: pass
+        if mp is None:
+            logger.warning("[RPC-METHOD] qtcl_getMempoolStats: mempool not available")
+            return _rpc_ok({"depth": 0, "pending": 0, "note": "mempool initializing"}, rpc_id)
         try:
-            from mempool import MempoolManager
-            logger.debug(f"[RPC-METHOD] qtcl_getMempoolStats: MempoolManager imported")
-            # Attempt to get mempool singleton
-            mp = globals().get("MEMPOOL") or globals().get("_MEMPOOL")
-            if mp is None:
-                from globals import get_mempool
-                mp = get_mempool() if callable(globals().get("get_mempool", None)) else None
-            if mp is None:
-                logger.warning(f"[RPC-METHOD] qtcl_getMempoolStats: mempool not available")
-                return _rpc_ok({"depth": 0, "note": "mempool not accessible via RPC"}, rpc_id)
-            stats = mp.get_stats() if hasattr(mp, "get_stats") else {}
-            logger.debug(f"[RPC-METHOD] qtcl_getMempoolStats success: {len(stats)} stats")
+            stats = mp.get_stats() if hasattr(mp, "get_stats") else {"depth": getattr(mp, "size", lambda: 0)()}
+            logger.debug(f"[RPC-METHOD] qtcl_getMempoolStats success")
             return _rpc_ok(stats, rpc_id)
         except Exception as me:
-            logger.exception(f"[RPC-METHOD] qtcl_getMempoolStats: mempool error: {me}")
-            return _rpc_error(-32603, f"Mempool stats failed: {str(me)}", rpc_id, {"exception": str(me).__class__.__name__})
+            logger.exception(f"[RPC-METHOD] qtcl_getMempoolStats: get_stats error: {me}")
+            return _rpc_error(-32603, f"Mempool stats failed: {str(me)}", rpc_id, {"exception": type(me).__name__})
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getMempoolStats outer exception: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": type(e).__name__})
 
 
 def _rpc_getPeers(params: Any, rpc_id: Any) -> dict:
@@ -13060,32 +13102,41 @@ def _rpc_getPeers(params: Any, rpc_id: Any) -> dict:
         logger.debug(f"[RPC-METHOD] qtcl_getPeers called with params={params}, id={rpc_id}")
         limit = 50
         if isinstance(params, list) and params:
-            try:
-                limit = int(params[0])
-            except (ValueError, TypeError) as ve:
-                logger.debug(f"[RPC-METHOD] qtcl_getPeers: invalid limit param, using default")
-                limit = 50
+            try: limit = int(params[0])
+            except (ValueError, TypeError): limit = 50
         elif isinstance(params, dict):
-            try:
-                limit = int(params.get("limit", 50))
-            except (ValueError, TypeError):
-                limit = 50
+            try: limit = int(params.get("limit", 50))
+            except (ValueError, TypeError): limit = 50
         logger.debug(f"[RPC-METHOD] qtcl_getPeers: limit={limit}")
+        peers: list = []
         try:
-            from globals import get_peer_registry
-            reg = get_peer_registry() if callable(globals().get("get_peer_registry")) else None
-            if reg is None:
-                logger.warning(f"[RPC-METHOD] qtcl_getPeers: peer registry not available")
-                return _rpc_ok({"peers": [], "count": 0}, rpc_id)
-            peers = reg.get_peers(limit=limit) if hasattr(reg, "get_peers") else []
-            logger.debug(f"[RPC-METHOD] qtcl_getPeers success: {len(peers)} peers")
-            return _rpc_ok({"peers": peers, "count": len(peers)}, rpc_id)
-        except Exception as pe:
-            logger.exception(f"[RPC-METHOD] qtcl_getPeers: registry error: {pe}")
-            return _rpc_error(-32603, f"Peer list failed: {str(pe)}", rpc_id, {"exception": str(pe).__class__.__name__})
+            # Resolution: globals.get_peer_registry() → module-level LIVE_PEERS → DHT manager
+            import globals as _g
+            _gf = getattr(_g, "get_peer_registry", None)
+            if callable(_gf):
+                reg = _gf()
+                if reg is not None and hasattr(reg, "get_peers"):
+                    peers = reg.get_peers(limit=limit) or []
+        except Exception: pass
+        if not peers:
+            _srv = sys.modules[__name__].__dict__
+            _lp = _srv.get("LIVE_PEERS") or _srv.get("_live_peers") or _srv.get("live_peers")
+            if isinstance(_lp, dict):
+                peers = [{"peer_id": k, **v} for k, v in list(_lp.items())[:limit]]
+            elif isinstance(_lp, (list, set)):
+                peers = list(_lp)[:limit]
+        if not peers:
+            try:
+                dht = _get_dht_manager()
+                if dht:
+                    peers = [{"node_id": n.node_id, "address": n.address, "port": n.port}
+                             for n in list(dht.local_node.routing_table if hasattr(dht.local_node, "routing_table") else [])[:limit]]
+            except Exception: pass
+        logger.debug(f"[RPC-METHOD] qtcl_getPeers success: {len(peers)} peers")
+        return _rpc_ok({"peers": peers, "count": len(peers)}, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getPeers outer exception: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": type(e).__name__})
 
 
 def _rpc_getHealth(params: Any, rpc_id: Any) -> dict:
@@ -13156,12 +13207,12 @@ def _rpc_getOracleRegistry(params: Any, rpc_id: Any) -> dict:
             oracles = [{
                 'oracle_id'     : r[0],  'oracle_url'    : r[1],
                 'oracle_address': r[2],  'is_primary'    : r[3],
-                'last_seen'     : r[4],  'block_height'  : r[5],
+                'last_seen'     : _iso(r[4]),  'block_height'  : r[5],
                 'peer_count'    : r[6],  'wallet_address': r[7],
                 'oracle_pub_key': r[8],  'cert_sig'      : r[9],
                 'mode'          : r[10], 'ip_hint'       : r[11],
-                'reg_tx_hash'   : r[12], 'registered_at' : r[13],
-                'created_at'    : r[14].isoformat() if r[14] else '',
+                'reg_tx_hash'   : r[12], 'registered_at' : _iso(r[13]),
+                'created_at'    : _iso(r[14]),
                 'on_chain'      : bool(r[12] and r[12] not in ('', 'gossip_pending')),
             } for r in rows]
             result = {
@@ -13214,12 +13265,12 @@ def _rpc_getOracleRecord(params: Any, rpc_id: Any) -> dict:
             'on_chain'      : on_chain,
             'oracle_id'     : r[0],  'oracle_url'    : r[1],
             'oracle_address': r[2],  'is_primary'    : r[3],
-            'last_seen'     : r[4],  'block_height'  : r[5],
+            'last_seen'     : _iso(r[4]),  'block_height'  : r[5],
             'peer_count'    : r[6],  'wallet_address': r[7],
             'oracle_pub_key': r[8],  'cert_sig'      : r[9],
             'cert_auth_tag' : r[10], 'mode'          : r[11],
             'ip_hint'       : r[12], 'reg_tx_hash'   : r[13],
-            'registered_at' : r[14], 'created_at'    : r[15].isoformat() if r[15] else '',
+            'registered_at' : _iso(r[14]), 'created_at': _iso(r[15]),
         }, rpc_id)
     except Exception as e:
         return _rpc_error(-32603, f"Oracle record lookup failed: {e}", rpc_id)
@@ -13321,20 +13372,31 @@ def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"Oracle reg submission failed: {e}", rpc_id)
 
 
-def _rpc_getEvents(params: Dict[str, Any], rpc_id: str) -> dict:
+def _rpc_getEvents(params: Any, rpc_id: Any) -> dict:
     """qtcl_getEvents — poll recent RPC events (tx, block, oracle_snapshot, oracle_dm, oracle_measurements)."""
-    since = float(params.get('since', time.time() - 3600))
-    event_types = params.get('types', 'all')
-    limit = int(params.get('limit', 100))
-    want_types = set(event_types.split(',')) if event_types != 'all' else {'all'}
-    events = []
-    with _rpc_event_lock:
-        for e in list(_rpc_event_log):
-            if e['ts'] >= since and ('all' in want_types or e['type'] in want_types):
-                events.append(e)
-                if len(events) >= limit:
-                    break
-    return _rpc_ok({'events': events, 'count': len(events)}, rpc_id)
+    try:
+        # Normalise params → always a dict regardless of what the client sent
+        if isinstance(params, dict):
+            p = params
+        elif isinstance(params, list) and params and isinstance(params[0], dict):
+            p = params[0]
+        else:
+            p = {}
+        since       = float(p.get('since', time.time() - 3600))
+        event_types = str(p.get('types', 'all'))
+        limit       = int(p.get('limit', 100))
+        want_types  = set(event_types.split(',')) if event_types != 'all' else {'all'}
+        events = []
+        with _rpc_event_lock:
+            for e in list(_rpc_event_log):
+                if e['ts'] >= since and ('all' in want_types or e['type'] in want_types):
+                    events.append(e)
+                    if len(events) >= limit:
+                        break
+        return _rpc_ok({'events': events, 'count': len(events)}, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_getEvents exception: {e}")
+        return _rpc_error(-32603, f"Events fetch failed: {str(e)}", rpc_id)
 
 
 # ─── Method registry (O(1) dispatch) ─────────────────────────────────────────
@@ -13591,12 +13653,15 @@ def rpc_dispatch():
 
     body = request.get_data()
     if not body:
-        return jsonify(_rpc_error(-32700, "Empty request body")), 400
+        r = jsonify(_rpc_error(-32700, "Empty request body"))
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r, 400
 
     result, status = _dispatch(body)
     resp = jsonify(result)
-    resp.headers["Content-Type"] = "application/json"
-    resp.headers["X-QTCL-JSONRPC"] = _JSONRPC_VERSION
+    resp.headers["Content-Type"]             = "application/json"
+    resp.headers["X-QTCL-JSONRPC"]          = _JSONRPC_VERSION
+    resp.headers["Access-Control-Allow-Origin"] = "*"
     return resp, status
 
 
