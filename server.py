@@ -13707,6 +13707,30 @@ def rpc_health():
     }), 200
 
 
+@app.route("/rpc/hlwe/system-info", methods=["GET"])
+def rpc_hlwe_system_info():
+    """GET /rpc/hlwe/system-info — HLWE cryptographic system information.
+    
+    This endpoint is called by wsgi_config.py to verify HLWE is available
+    without requiring direct imports at module load time.
+    """
+    try:
+        from hlwe_engine import hlwe_system_info
+        info = hlwe_system_info()
+        return jsonify({
+            "status": "ok",
+            "hlwe_info": info,
+            "timestamp": time.time(),
+        }), 200
+    except Exception as e:
+        logger.error(f"[RPC-HLWE] Failed to get system info: {e}", exc_info=True)
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "timestamp": time.time(),
+        }), 500
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # PYTH PRICE ORACLE REST ROUTES
 # (Complement to JSON-RPC — for REST-native integrations)
