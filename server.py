@@ -2334,7 +2334,7 @@ def oracle_push_dm():
 
 # ── RPC event publisher — logs to in-memory ring buffer for polling ──
 class _RPCEventPublisher:
-    """Stub replacing _SSEBroadcaster — logs to _rpc_event_log instead of PG NOTIFY."""
+    """RPC event log only — no SSE broadcasting."""
     def publish(self, event_type: str, data: Dict[str, Any]) -> int:
         _log_rpc_event(event_type, data)
         return 0
@@ -2353,7 +2353,6 @@ class _RPCEventPublisher:
         return 0
 
 _gossip_sse = _RPCEventPublisher()
-
 SSE_BROADCASTER = _gossip_sse
 _RPCEventPublisher.push = _RPCEventPublisher.publish
 
