@@ -1244,7 +1244,8 @@ def get_db_cursor():
             if hasattr(db_pool.pool, 'closed') and db_pool.pool.closed:
                 raise RuntimeError("DB pool closed")
         conn = db_pool.get_connection()
-        cur = conn.cursor()
+        from psycopg2.extras import RealDictCursor
+        cur = conn.cursor(cursor_factory=RealDictCursor)
         yield cur
         conn.commit()
     except Exception as e:
