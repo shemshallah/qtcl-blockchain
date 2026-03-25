@@ -1476,8 +1476,10 @@ def load_known_peers() -> List[Tuple[str, int]]:
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # MEASUREMENT SERVICE: Enterprise-Grade Async Metric Aggregation (Thread Pool + Queue)
-# Sharded node measurement with RLock-protected shared state
+# Sharded node measurement with RLock-protected shared state + SSE broadcasting
 # ═════════════════════════════════════════════════════════════════════════════════
+
+import queue as _measurement_queue_mod
 
 class MeasurementService:
     """
@@ -1487,6 +1489,7 @@ class MeasurementService:
     Features:
     - Sharded thread pool (N threads, each measures independent shard)
     - RLock-protected metrics dict (thread-safe read/write)
+    - Queue-based metric broadcasting (decouples measurement from SSE)
     - Graceful shutdown with cleanup
     - Museum-grade error handling
     
@@ -1497,7 +1500,9 @@ class MeasurementService:
       Thread N: Measure nodes N*1000...
       
       All threads write to: metrics_dict (RLock-protected)
+      All threads push to: broadcast_queue (thread-safe)
       HTTP handlers read from: metrics_dict (instant, no contention)
+      SSE multiplexer drains: broadcast_queue (non-blocking)
     """
     
     def __init__(self, num_threads: int = 8, nodes_per_shard: int = 1000):
@@ -1509,6 +1514,9 @@ class MeasurementService:
         # Thread-safe shared state
         self.metrics_lock = threading.RLock()
         self.metrics_dict = {}  # node_id -> {fidelity, coherence, entropy, timestamp}
+        
+        # Broadcast queue (thread-safe, non-blocking)
+        self.broadcast_queue = _measurement_queue_mod.Queue(maxsize=10000)
         
         # Thread management
         self.threads = []
@@ -1557,6 +1565,12 @@ class MeasurementService:
                         # Write to shared dict (with lock)
                         with self.metrics_lock:
                             self.metrics_dict[node_id] = metric
+                        
+                        # Broadcast to SSE queue (non-blocking)
+                        try:
+                            self.broadcast_queue.put_nowait(metric)
+                        except _measurement_queue_mod.Full:
+                            pass  # Drop if queue full (SSE lagging)
                         
                         # Yield to other threads
                         time.sleep(0.001)  # 1ms per node
@@ -1655,6 +1669,12 @@ class MeasurementService:
         # Clear state
         with self.metrics_lock:
             self.metrics_dict.clear()
+        
+        try:
+            while True:
+                self.broadcast_queue.get_nowait()
+        except _measurement_queue_mod.Empty:
+            pass
         
         self.threads.clear()
         logger.info("[MEASURE] ✓ Shutdown complete")
@@ -3284,29 +3304,45 @@ except Exception as _gse:
 # socketio removed - SSE only
 
 
-def _broadcast_snapshot_to_rpc_event_log(snapshot: dict) -> None:
-    """
-    Broadcast snapshot to RPC event log (enterprise-grade, RPC-only).
+def _sse_push_snapshot(snapshot: dict) -> None:
+    """Cache and broadcast snapshot to RPC event log (replaces SSE push)."""
+    try:
+        _log_rpc_event('oracle_snapshot', snapshot)
+    except Exception as e:
+        logger.error(f"[SSE] Snapshot broadcast error: {e}")
 
-    Logs oracle_dm as a queryable event via /api/events endpoint.
-    Clients poll for new snapshots at their own pace — no SSE push required.
-    
-    This is the SOLE broadcast mechanism — no SSE, no WebSocket fanout.
+
+def _broadcast_snapshot_to_gossip_network(snapshot: dict) -> None:
+    """
+    Push snapshot to SSE subscribers and update in-memory cache.
+
+    Dispatches to BOTH SSE channels:
+      • /api/snapshot/sse  — raw chirp blob (dashboard canvas + lattice)
+      • /api/events        — flat oracle_dm event (miners + any typed subscriber)
+
+    CRITICAL: oracle_dm is pushed FLAT — DM fields at top level with 'type'
+    merged in.  _gossip_sse.publish() wraps data under a 'data' key which
+    breaks any client that reads density_matrix_hex directly off the event.
     """
     global _latest_snapshot, _latest_snapshot_ts, _last_snapshot_log_time
     with _snapshot_lock:
         _latest_snapshot = snapshot
         _latest_snapshot_ts = snapshot.get('timestamp_ns', 0)
     try:
-        # Log to RPC event store (queryable via GET /api/events)
-        _log_rpc_event('oracle_dm', snapshot)
+        # Channel 1: raw blob → /api/snapshot/sse
+        _sse_push_snapshot(snapshot)
+
+        # Channel 2: flat oracle_dm → /api/events (direct fanout, no 'data' wrapper)
+        flat = dict(snapshot)
+        flat['type'] = 'oracle_dm'
+        _gossip_sse._fanout_local(json.dumps(flat, separators=(',', ':')))
 
         now = time.time()
         if _verbose_p2p_logging or (now - _last_snapshot_log_time >= _snapshot_log_interval):
-            logger.debug(f"[RPC-EVENTS] 📡 Oracle snapshot logged | ts={snapshot.get('timestamp_ns', 0)}")
+            logger.debug(f"[GOSSIP] 📡 Snapshot broadcast | ts={snapshot.get('timestamp_ns', 0)}")
             _last_snapshot_log_time = now
     except Exception as e:
-        logger.error(f"[RPC-EVENTS] Snapshot logging error: {e}")
+        logger.error(f"[GOSSIP] Broadcast error: {e}")
 
 
 
@@ -3634,7 +3670,7 @@ def _snapshot_streaming_daemon():
 
             ts = unified_snapshot.get('timestamp_ns', 0)
             if ts > last_chirp_ts:
-                _broadcast_snapshot_to_rpc_event_log(unified_snapshot)
+                _broadcast_snapshot_to_gossip_network(unified_snapshot)
                 broadcast_count += 1
                 last_chirp_ts = ts
                 mux.log_chirp(unified_snapshot)
@@ -3763,8 +3799,8 @@ class MetricsCollector:
         while self.running:
             try:
                 metrics = self._gather_metrics()
-                # Log metrics to RPC event store (replaces SSE push)
-                _log_rpc_event('blockchain_metrics', metrics)
+                # SSE only - broadcast to connected clients via _sse_push_snapshot
+                _sse_push_snapshot(metrics)
                 time.sleep(2)  # Update every 2 seconds
             except Exception as e:
                 logger.error(f"[METRICS] Collection error: {e}")
@@ -4132,15 +4168,19 @@ def metrics_stream():
         limit = int(request.args.get('limit', 50))
         metrics = []
         try:
-            # Get all metrics directly from MeasurementService (no SSE queue)
-            all_metrics = measure_svc.get_metrics()
-            for node_id in sorted(all_metrics.keys())[:limit]:
-                metric = all_metrics[node_id]
-                if metric.get('timestamp', 0) >= since:
-                    metrics.append(metric)
+            while len(metrics) < limit:
+                try:
+                    metric = measure_svc.broadcast_queue.get_nowait()
+                    if metric.get('timestamp', 0) >= since:
+                        metrics.append(metric)
+                except _measurement_queue_mod.Empty:
+                    break
         except Exception as e:
-            logger.debug(f"[METRICS] query error: {e}")
+            logger.debug(f"[METRICS] queue drain: {e}")
         return jsonify({'metrics': metrics, 'count': len(metrics)}), 200
+    except Exception as e:
+        logger.error(f"[METRICS] error: {e}")
+        return jsonify({'error': str(e), 'metrics': []}), 500
 
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -13371,237 +13411,6 @@ def _rpc_getEvents(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"Events fetch failed: {str(e)}", rpc_id)
 
 
-def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
-    """qtcl_submitBlock — submit mined block to mempool + validation."""
-    try:
-        if isinstance(params, list) and params:
-            block_payload = params[0]
-        elif isinstance(params, dict):
-            block_payload = params
-        else:
-            return _rpc_error(-32602, "Invalid params: expected block object", rpc_id)
-        
-        if not isinstance(block_payload, dict):
-            return _rpc_error(-32602, "Block must be object", rpc_id)
-        
-        # Validate block structure
-        required = ['height', 'nonce', 'miner_addr']
-        for field in required:
-            if field not in block_payload:
-                return _rpc_error(-32602, f"Missing required field: {field}", rpc_id)
-        
-        # Submit to blockchain (non-blocking)
-        try:
-            from blockchain_entropy_mining import submit_block_from_rpc
-            result = submit_block_from_rpc(block_payload)
-            return _rpc_ok({
-                'status': 'accepted',
-                'block_hash': result.get('block_hash'),
-                'height': block_payload.get('height'),
-                'miner': block_payload.get('miner_addr'),
-                'timestamp': time.time()
-            }, rpc_id)
-        except Exception as submit_err:
-            logger.warning(f"[RPC-submitBlock] Submission failed: {submit_err}")
-            return _rpc_error(-32603, f"Block submission failed: {str(submit_err)}", rpc_id)
-    
-    except Exception as e:
-        logger.exception(f"[RPC-METHOD] qtcl_submitBlock exception: {e}")
-        return _rpc_error(-32603, f"Block submit error: {str(e)}", rpc_id)
-
-
-def _rpc_submitTransaction(params: Any, rpc_id: Any) -> dict:
-    """qtcl_submitTransaction — submit raw transaction to mempool."""
-    try:
-        if isinstance(params, list) and params:
-            tx_payload = params[0]
-        elif isinstance(params, dict):
-            tx_payload = params
-        else:
-            return _rpc_error(-32602, "Invalid params: expected tx object", rpc_id)
-        
-        if not isinstance(tx_payload, dict):
-            return _rpc_error(-32602, "TX must be object", rpc_id)
-        
-        # Validate TX structure
-        required = ['from', 'to', 'amount']
-        for field in required:
-            if field not in tx_payload:
-                return _rpc_error(-32602, f"Missing required field: {field}", rpc_id)
-        
-        # Submit to mempool (non-blocking)
-        try:
-            from blockchain_entropy_mining import submit_tx_from_rpc
-            result = submit_tx_from_rpc(tx_payload)
-            return _rpc_ok({
-                'status': 'accepted',
-                'tx_hash': result.get('tx_hash'),
-                'from': tx_payload.get('from'),
-                'to': tx_payload.get('to'),
-                'amount': tx_payload.get('amount'),
-                'timestamp': time.time()
-            }, rpc_id)
-        except Exception as submit_err:
-            logger.warning(f"[RPC-submitTransaction] Submission failed: {submit_err}")
-            return _rpc_error(-32603, f"TX submission failed: {str(submit_err)}", rpc_id)
-    
-    except Exception as e:
-        logger.exception(f"[RPC-METHOD] qtcl_submitTransaction exception: {e}")
-        return _rpc_error(-32603, f"TX submit error: {str(e)}", rpc_id)
-
-
-def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
-    """qtcl_registerPeer — register P2P peer in network."""
-    try:
-        if isinstance(params, list) and params:
-            peer_payload = params[0]
-        elif isinstance(params, dict):
-            peer_payload = params
-        else:
-            return _rpc_error(-32602, "Invalid params: expected peer object", rpc_id)
-        
-        if not isinstance(peer_payload, dict):
-            return _rpc_error(-32602, "Peer must be object", rpc_id)
-        
-        # Validate peer structure
-        required = ['peer_id', 'gossip_url', 'miner_address']
-        for field in required:
-            if field not in peer_payload:
-                return _rpc_error(-32602, f"Missing required field: {field}", rpc_id)
-        
-        # Register peer (non-blocking)
-        try:
-            from globals import register_peer_from_rpc
-            result = register_peer_from_rpc(peer_payload)
-            return _rpc_ok({
-                'status': 'registered',
-                'peer_id': peer_payload.get('peer_id'),
-                'gossip_url': peer_payload.get('gossip_url'),
-                'timestamp': time.time()
-            }, rpc_id)
-        except Exception as reg_err:
-            logger.warning(f"[RPC-registerPeer] Registration failed: {reg_err}")
-            return _rpc_error(-32603, f"Peer registration failed: {str(reg_err)}", rpc_id)
-    
-    except Exception as e:
-        logger.exception(f"[RPC-METHOD] qtcl_registerPeer exception: {e}")
-        return _rpc_error(-32603, f"Peer register error: {str(e)}", rpc_id)
-
-
-def _rpc_sendHeartbeat(params: Any, rpc_id: Any) -> dict:
-    """qtcl_sendHeartbeat — P2P peer heartbeat ping."""
-    try:
-        if isinstance(params, list) and params:
-            heartbeat_payload = params[0]
-        elif isinstance(params, dict):
-            heartbeat_payload = params
-        else:
-            return _rpc_error(-32602, "Invalid params: expected heartbeat object", rpc_id)
-        
-        if not isinstance(heartbeat_payload, dict):
-            return _rpc_error(-32602, "Heartbeat must be object", rpc_id)
-        
-        # Validate heartbeat structure
-        required = ['peer_id', 'block_height']
-        for field in required:
-            if field not in heartbeat_payload:
-                return _rpc_error(-32602, f"Missing required field: {field}", rpc_id)
-        
-        # Process heartbeat (non-blocking)
-        try:
-            from globals import process_heartbeat_from_rpc
-            result = process_heartbeat_from_rpc(heartbeat_payload)
-            return _rpc_ok({
-                'status': 'ack',
-                'peer_id': heartbeat_payload.get('peer_id'),
-                'server_height': result.get('server_height'),
-                'timestamp': time.time()
-            }, rpc_id)
-        except Exception as hb_err:
-            logger.warning(f"[RPC-sendHeartbeat] Processing failed: {hb_err}")
-            return _rpc_error(-32603, f"Heartbeat processing failed: {str(hb_err)}", rpc_id)
-    
-    except Exception as e:
-        logger.exception(f"[RPC-METHOD] qtcl_sendHeartbeat exception: {e}")
-        return _rpc_error(-32603, f"Heartbeat error: {str(e)}", rpc_id)
-
-
-def _rpc_registerOracle(params: Any, rpc_id: Any) -> dict:
-    """qtcl_registerOracle — register oracle node."""
-    try:
-        if isinstance(params, list) and params:
-            oracle_payload = params[0]
-        elif isinstance(params, dict):
-            oracle_payload = params
-        else:
-            return _rpc_error(-32602, "Invalid params: expected oracle object", rpc_id)
-        
-        if not isinstance(oracle_payload, dict):
-            return _rpc_error(-32602, "Oracle must be object", rpc_id)
-        
-        # Validate oracle structure
-        required = ['oracle_addr']
-        for field in required:
-            if field not in oracle_payload:
-                return _rpc_error(-32602, f"Missing required field: {field}", rpc_id)
-        
-        # Register oracle (non-blocking)
-        try:
-            from oracle import register_oracle_from_rpc
-            result = register_oracle_from_rpc(oracle_payload)
-            return _rpc_ok({
-                'status': 'registered',
-                'oracle_addr': oracle_payload.get('oracle_addr'),
-                'oracle_id': result.get('oracle_id'),
-                'timestamp': time.time()
-            }, rpc_id)
-        except Exception as oracle_err:
-            logger.warning(f"[RPC-registerOracle] Registration failed: {oracle_err}")
-            return _rpc_error(-32603, f"Oracle registration failed: {str(oracle_err)}", rpc_id)
-    
-    except Exception as e:
-        logger.exception(f"[RPC-METHOD] qtcl_registerOracle exception: {e}")
-        return _rpc_error(-32603, f"Oracle register error: {str(e)}", rpc_id)
-
-
-def _rpc_gossipIngest(params: Any, rpc_id: Any) -> dict:
-    """qtcl_gossipIngest — ingest P2P gossip payload."""
-    try:
-        if isinstance(params, list) and params:
-            gossip_payload = params[0]
-        elif isinstance(params, dict):
-            gossip_payload = params
-        else:
-            return _rpc_error(-32602, "Invalid params: expected gossip object", rpc_id)
-        
-        if not isinstance(gossip_payload, dict):
-            return _rpc_error(-32602, "Gossip must be object", rpc_id)
-        
-        # Validate gossip structure
-        required = ['event_type', 'payload']
-        for field in required:
-            if field not in gossip_payload:
-                return _rpc_error(-32602, f"Missing required field: {field}", rpc_id)
-        
-        # Ingest gossip (non-blocking)
-        try:
-            from globals import ingest_gossip_from_rpc
-            result = ingest_gossip_from_rpc(gossip_payload)
-            return _rpc_ok({
-                'status': 'ingested',
-                'event_type': gossip_payload.get('event_type'),
-                'replicated': result.get('replicated', False),
-                'timestamp': time.time()
-            }, rpc_id)
-        except Exception as gossip_err:
-            logger.warning(f"[RPC-gossipIngest] Ingest failed: {gossip_err}")
-            return _rpc_error(-32603, f"Gossip ingest failed: {str(gossip_err)}", rpc_id)
-    
-    except Exception as e:
-        logger.exception(f"[RPC-METHOD] qtcl_gossipIngest exception: {e}")
-        return _rpc_error(-32603, f"Gossip ingest error: {str(e)}", rpc_id)
-
-
 # ─── Method registry (O(1) dispatch) ─────────────────────────────────────────
 
 _RPC_METHODS: Dict[str, Any] = {
@@ -13619,14 +13428,6 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getOracleRegistry": _rpc_getOracleRegistry,
     "qtcl_getOracleRecord":   _rpc_getOracleRecord,
     "qtcl_submitOracleReg":   _rpc_submitOracleReg,
-    # ── Submit operations (new handlers) ──────────────────────────────────────
-    "qtcl_submitBlock":       _rpc_submitBlock,
-    "qtcl_submitTransaction": _rpc_submitTransaction,
-    # ── P2P registration & gossip (new handlers) ─────────────────────────────
-    "qtcl_registerPeer":      _rpc_registerPeer,
-    "qtcl_sendHeartbeat":     _rpc_sendHeartbeat,
-    "qtcl_registerOracle":    _rpc_registerOracle,
-    "qtcl_gossipIngest":      _rpc_gossipIngest,
 }
 
 _RPC_METHOD_META: Dict[str, Dict] = {
@@ -13718,44 +13519,6 @@ _RPC_METHOD_META: Dict[str, Dict] = {
              "note": "Omit to receive unsigned tx_template; include to submit"},
         ],
         "returns": "object{status, tx_hash, oracle_addr, check_url} or {status: tx_template_issued, tx_template}",
-    },
-    # ── Submit operations (new) ───────────────────────────────────────────────
-    "qtcl_submitBlock": {
-        "description": "Submit mined block to mempool for validation and inclusion",
-        "params": [{"name": "block", "type": "object", "required": True,
-                    "fields": {"height", "nonce", "miner_addr"}}],
-        "returns": "object{status, block_hash, height, miner, timestamp}",
-    },
-    "qtcl_submitTransaction": {
-        "description": "Submit raw transaction to mempool",
-        "params": [{"name": "tx", "type": "object", "required": True,
-                    "fields": {"from", "to", "amount"}}],
-        "returns": "object{status, tx_hash, from, to, amount, timestamp}",
-    },
-    # ── P2P registration & gossip (new) ───────────────────────────────────────
-    "qtcl_registerPeer": {
-        "description": "Register P2P peer in network",
-        "params": [{"name": "peer", "type": "object", "required": True,
-                    "fields": {"peer_id", "gossip_url", "miner_address"}}],
-        "returns": "object{status, peer_id, gossip_url, timestamp}",
-    },
-    "qtcl_sendHeartbeat": {
-        "description": "P2P peer heartbeat ping",
-        "params": [{"name": "heartbeat", "type": "object", "required": True,
-                    "fields": {"peer_id", "block_height"}}],
-        "returns": "object{status, peer_id, server_height, timestamp}",
-    },
-    "qtcl_registerOracle": {
-        "description": "Register oracle node",
-        "params": [{"name": "oracle", "type": "object", "required": True,
-                    "fields": {"oracle_addr"}}],
-        "returns": "object{status, oracle_addr, oracle_id, timestamp}",
-    },
-    "qtcl_gossipIngest": {
-        "description": "Ingest P2P gossip payload",
-        "params": [{"name": "gossip", "type": "object", "required": True,
-                    "fields": {"event_type", "payload"}}],
-        "returns": "object{status, event_type, replicated, timestamp}",
     },
 }
 

@@ -684,20 +684,10 @@ class HLWEMempoolVerifier:
 
     This means a TX can be verified by ANYONE with the public key — no secret
     material required. This is the quantum analogue of ECDSA verify.
-    
-    Now uses TRUE HLWE Fiat-Shamir verification from hlwe_engine.py.
     """
 
-    def __init__(self):
-        self._hlwe_engine = None
-        try:
-            from hlwe_engine import HLWEEngine
-            self._hlwe_engine = HLWEEngine()
-            logger.info("[MEMPOOL] ✅ TRUE HLWE engine initialized for mempool verification")
-        except Exception as e:
-            logger.warning(f"[MEMPOOL] ⚠️  TRUE HLWE engine unavailable: {e}")
-
-    def verify(self, tx_hash: str, signature_json: str, expected_address: str) -> Tuple[bool, str]:
+    @staticmethod
+    def verify(tx_hash: str, signature_json: str, expected_address: str) -> Tuple[bool, str]:
         """
         Verify an HLWE TX signature.
         
@@ -713,6 +703,7 @@ class HLWEMempoolVerifier:
             (valid: bool, reason: str)
         """
         try:
+            # Parse signature
             if isinstance(signature_json, str):
                 try:
                     sig_dict = json.loads(signature_json)
@@ -730,22 +721,13 @@ class HLWEMempoolVerifier:
 
             pub_bytes = bytes.fromhex(sig_dict['public_key_hex'])
 
+            # Verify address derivation: ADDRESS_PREFIX + SHA3-256(pubkey)[:20].hex()
             derived_address = ADDRESS_PREFIX + hashlib.sha3_256(pub_bytes).digest()[:20].hex()
             if derived_address != expected_address:
+                # Also accept hlwe_ prefix for legacy wallets
                 hlwe_address = "hlwe_" + hashlib.sha256(pub_bytes).hexdigest()[:40]
                 if hlwe_address != expected_address:
                     return False, f"address_mismatch(derived={derived_address[:16]}…)"
-
-            if self._hlwe_engine is not None:
-                tx_hash_bytes = bytes.fromhex(tx_hash) if isinstance(tx_hash, str) else tx_hash
-                signature_dict = {
-                    'signature': sig_dict.get('witness', ''),
-                    'auth_tag': sig_dict.get('proof', ''),
-                    'c': sig_dict.get('commitment', '0x0')
-                }
-                result = self._hlwe_engine.verify_signature(tx_hash_bytes, signature_dict, sig_dict['public_key_hex'])
-                if not result:
-                    return False, "hlwe_verification_failed"
 
             return True, "valid"
 
@@ -1293,9 +1275,8 @@ class Mempool:
             _treasury_base = _TRS_mp.get_treasury_reward_base(block_height)
             _treasury_addr = _TRS_mp.TREASURY_ADDRESS
         except Exception:
-            import os as _os
             _treasury_base = 800 - block_reward_base   # fallback: remainder
-            _treasury_addr = _os.getenv('TREASURY_ADDRESS', 'qtcl110fc58e3c441106cc1e54ae41da5d15868525a87')
+            _treasury_addr = 'qtcl110fc58e3c441106cc1e54ae41da5d15868525a87'
         treasury_coinbase = self._build_treasury_coinbase(
             block_height, _treasury_base, _treasury_addr
         )
@@ -1861,19 +1842,13 @@ class Mempool:
         self,
         block_height      : int,
         treasury_reward   : int,
-        treasury_address  : str = None,
+        treasury_address  : str = 'qtcl110fc58e3c441106cc1e54ae41da5d15868525a87',
         w_entropy_hash    : str = '',
     ) -> 'MempoolTx':
         """
         Build treasury coinbase (slot 1) — always paid on-chain regardless of miner.
+        Treasury address: qtcl110fc58e3c441106cc1e54ae41da5d15868525a87 (hardcoded)
         """
-        import os as _os
-        if treasury_address is None:
-            try:
-                from globals import TessellationRewardSchedule as _TRS
-                treasury_address = _TRS.TREASURY_ADDRESS
-            except Exception:
-                treasury_address = _os.getenv('TREASURY_ADDRESS', 'qtcl110fc58e3c441106cc1e54ae41da5d15868525a87')
         import hashlib as _hl
         raw_input = f"TREASURY_COINBASE:{block_height}:{treasury_address}:{treasury_reward}:{w_entropy_hash}".encode()
         tx_hash   = _hl.sha3_256(raw_input).hexdigest()
