@@ -2213,41 +2213,244 @@ def _set_app_ready():
 # API Endpoints
 # ═════════════════════════════════════════════════════════════════════════════════════════
 
+class SafeFieldConverter:
+    """⚛️  Autonomous diagnostic field converter with fallback recovery."""
+    
+    _errors = {}  # Track which fields fail across requests for autonomous healing
+    
+    @staticmethod
+    def safe_int(value, field_name='unknown', default=0):
+        """Convert to int with diagnostic logging."""
+        try:
+            if value is None: return default
+            return int(value)
+        except (ValueError, TypeError) as e:
+            SafeFieldConverter._errors[f'int_{field_name}'] = str(e)
+            logger.warning(f"[CONVERTER] int({field_name})={value} failed: {e}")
+            return default
+    
+    @staticmethod
+    def safe_float(value, field_name='unknown', default=0.0):
+        """Convert to float with diagnostic logging."""
+        try:
+            if value is None: return default
+            return float(value)
+        except (ValueError, TypeError) as e:
+            SafeFieldConverter._errors[f'float_{field_name}'] = str(e)
+            logger.warning(f"[CONVERTER] float({field_name})={value} failed: {e}")
+            return default
+    
+    @staticmethod
+    def safe_str(value, field_name='unknown', default=''):
+        """Convert to str with diagnostic logging."""
+        try:
+            if value is None: return default
+            return str(value)
+        except (ValueError, TypeError) as e:
+            SafeFieldConverter._errors[f'str_{field_name}'] = str(e)
+            logger.warning(f"[CONVERTER] str({field_name})={value} failed: {e}")
+            return default
+    
+    @staticmethod
+    def safe_bool(value, field_name='unknown', default=False):
+        """Convert to bool with diagnostic logging."""
+        try:
+            if value is None: return default
+            return bool(value)
+        except (ValueError, TypeError) as e:
+            SafeFieldConverter._errors[f'bool_{field_name}'] = str(e)
+            logger.warning(f"[CONVERTER] bool({field_name})={value} failed: {e}")
+            return default
+    
+    @staticmethod
+    def get_error_report():
+        """Return accumulated conversion errors for autonomous healing."""
+        return dict(SafeFieldConverter._errors)
+    
+    @staticmethod
+    def clear_errors():
+        """Clear error history for next diagnostic cycle."""
+        SafeFieldConverter._errors.clear()
+
+
+class SnapshotAutonomousHealer:
+    """⚛️  Autonomous diagnostic & healing loop for snapshot failures."""
+    
+    _last_valid_snapshot = {}  # Cache last valid state for fallback
+    _healing_cycles = 0
+    _healing_lock = threading.Lock()
+    
+    @staticmethod
+    def build_from_row(row, diag_label='oracle_snapshot_json'):
+        """Build snapshot with autonomous error detection & recovery."""
+        if not row:
+            return None, {'error': 'row_is_none', 'ready': False}
+        
+        diag = {'cycles': 0, 'errors': [], 'recovered': []}
+        SafeFieldConverter.clear_errors()
+        
+        try:
+            # ⚛️  Phase 1: Parse oracle measurements (most failure-prone)
+            oracles = []
+            try:
+                if isinstance(row[18], list):
+                    oracles = row[18]
+                elif isinstance(row[18], str):
+                    oracles = json.loads(row[18])
+                else:
+                    oracles = []
+            except (json.JSONDecodeError, TypeError) as e:
+                diag['errors'].append(f'oracle_measurements: {str(e)[:50]}')
+                logger.warning(f"[HEALER] Oracle measurements parse failed: {e}")
+                oracles = []
+            
+            # ⚛️  Phase 2: Parse mermin result (nullable)
+            mermin_result = None
+            if row[10] is not None:
+                try:
+                    m_val = SafeFieldConverter.safe_float(row[10], 'mermin_M')
+                    mermin_result = {
+                        'M_value': m_val,
+                        'M': m_val,
+                        'is_quantum': SafeFieldConverter.safe_bool(row[11], 'mermin_is_quantum'),
+                        'verdict': SafeFieldConverter.safe_str(row[12], 'mermin_verdict')
+                    }
+                except Exception as e:
+                    diag['errors'].append(f'mermin_result: {str(e)[:50]}')
+                    logger.warning(f"[HEALER] Mermin result construction failed: {e}")
+                    mermin_result = None
+            
+            # ⚛️  Phase 3: Safe numeric conversions with field-level diagnostics
+            ts_ns = SafeFieldConverter.safe_int(row[1], 'timestamp_ns')
+            chirp = SafeFieldConverter.safe_int(row[2], 'chirp_number')
+            lat_f = SafeFieldConverter.safe_float(row[3], 'lattice_fidelity')
+            lat_c = SafeFieldConverter.safe_float(row[4], 'lattice_coherence')
+            lat_cy = SafeFieldConverter.safe_int(row[5], 'lattice_cycle')
+            lat_s8 = SafeFieldConverter.safe_int(row[6], 'lattice_sigma_mod8')
+            cons_f = SafeFieldConverter.safe_float(row[7], 'consensus_fidelity')
+            cons_c = SafeFieldConverter.safe_float(row[8], 'consensus_coherence')
+            cons_p = SafeFieldConverter.safe_float(row[9], 'consensus_purity')
+            pq0_o = SafeFieldConverter.safe_float(row[13], 'pq0_oracle_fidelity')
+            pq0_i = SafeFieldConverter.safe_float(row[14], 'pq0_IV_fidelity')
+            pq0_v = SafeFieldConverter.safe_float(row[15], 'pq0_V_fidelity')
+            pq_c = SafeFieldConverter.safe_int(row[16], 'pq_curr')
+            pq_l = SafeFieldConverter.safe_int(row[17], 'pq_last')
+            phase = SafeFieldConverter.safe_str(row[19], 'phase_name')
+            
+            # ⚛️  Collect conversion errors for autonomous healing
+            conv_errors = SafeFieldConverter.get_error_report()
+            if conv_errors:
+                diag['errors'].extend([f'{k}' for k in conv_errors.keys()])
+                logger.warning(f"[HEALER] Conversion errors detected: {len(conv_errors)}")
+            
+            # ⚛️  Phase 4: Construct snapshot with all safe values
+            snapshot = {
+                'timestamp_ns': ts_ns,
+                'chirp_number': chirp,
+                'lattice_quantum': {
+                    'fidelity': lat_f,
+                    'coherence': lat_c,
+                    'cycle_count': lat_cy,
+                    'lattice_sigma_mod8': lat_s8,
+                    'phase_name': phase,
+                    'lattice_status': 'online'
+                },
+                'consensus': {
+                    'w_state_fidelity': cons_f,
+                    'coherence': cons_c,
+                    'purity': cons_p
+                },
+                'mermin_test': mermin_result,
+                'bell_test': mermin_result,
+                'pq0_components': {
+                    'pq0_oracle_fidelity': pq0_o,
+                    'pq0_IV_fidelity': pq0_i,
+                    'pq0_V_fidelity': pq0_v
+                },
+                'pq_curr': pq_c,
+                'pq_last': pq_l,
+                'oracle_measurements': oracles,
+                'fidelity': cons_f,
+                'coherence': cons_c,
+                'lattice_cycle': lat_cy,
+                'source': 'supabase_snapshot_healed',
+                'ready': True,
+                '_diagnostics': {
+                    'errors': diag['errors'],
+                    'recovered_with_defaults': bool(conv_errors),
+                    'conversion_errors': conv_errors
+                }
+            }
+            
+            # ⚛️  Cache this as last valid state for future fallback
+            with SnapshotAutonomousHealer._healing_lock:
+                SnapshotAutonomousHealer._last_valid_snapshot = snapshot.copy()
+                SnapshotAutonomousHealer._healing_cycles += 1
+            
+            if not diag['errors']:
+                logger.debug(f"[HEALER] Snapshot built clean (cycle {SnapshotAutonomousHealer._healing_cycles})")
+            else:
+                logger.info(f"[HEALER] Snapshot built with {len(diag['errors'])} recovered fields (cycle {SnapshotAutonomousHealer._healing_cycles})")
+            
+            return snapshot, diag
+        
+        except Exception as e:
+            # ⚛️  Catastrophic failure — fall back to cached state
+            logger.error(f"[HEALER] Snapshot construction catastrophically failed: {e}")
+            with SnapshotAutonomousHealer._healing_lock:
+                if SnapshotAutonomousHealer._last_valid_snapshot:
+                    logger.warning(f"[HEALER] Falling back to last valid cached snapshot")
+                    return SnapshotAutonomousHealer._last_valid_snapshot.copy(), {
+                        'error': 'catastrophic_fallback',
+                        'fallback_source': 'cache',
+                        'ready': True
+                    }
+            return None, {'error': 'catastrophic_failure', 'details': str(e), 'ready': False}
+
+
 @app.route('/api/oracle/snapshot', methods=['GET'])
 def oracle_snapshot_json():
     """Return latest oracle snapshot as JSON (RPC polling, Supabase pooler).
     
-    ⚛️  Guarantees 200/503/500 with structured response.
-    DB failures → 503 (service unavailable). Client retries.
+    ⚛️  Guarantees 200/503/500 with structured response via autonomous healing.
+    DB failures → 503. Conversion errors → recovery with safe defaults.
     """
     with _snapshot_lock:
         if _latest_snapshot:
             return jsonify(_latest_snapshot), 200
+    
     try:
         _lazy_ensure_quantum_snapshots()
     except Exception as e:
         logger.warning(f"[RPC] Table init failed: {e}")
         return jsonify({'ready': False, 'error': 'table initialization pending'}), 503
-    row=None
+    
+    row = None
     try:
         with get_db_cursor() as cur:
             cur.execute('''SELECT bucket_ts,timestamp_ns,chirp_number,lattice_fidelity,lattice_coherence,lattice_cycle,lattice_sigma_mod8,consensus_fidelity,consensus_coherence,consensus_purity,mermin_M,mermin_is_quantum,mermin_verdict,pq0_oracle,pq0_IV,pq0_V,pq_curr,pq_last,oracle_measurements,phase_name FROM quantum_snapshots ORDER BY timestamp_ns DESC LIMIT 1''')
-            row=cur.fetchone()
+            row = cur.fetchone()
     except Exception as query_err:
         logger.debug(f"[RPC] Query failed: {query_err}")
         return jsonify({'ready': False, 'error': 'no snapshots available'}), 503
+    
     if not row:
         return jsonify({'ready': False, 'error': 'no snapshots yet'}), 503
-    try:
-        oracles=row[18] if isinstance(row[18],list) else (json.loads(row[18]) if isinstance(row[18],str) else [])
-    except (json.JSONDecodeError,TypeError):
-        oracles=[]
-    mermin_result=None
-    if row[10] is not None:
-        mermin_result={'M_value': float(row[10]),'M': float(row[10]),'is_quantum': bool(row[11]),'verdict': str(row[12]) if row[12] else ''}
-    snapshot={'timestamp_ns': int(row[1]),'chirp_number': int(row[2]),'lattice_quantum': {'fidelity': float(row[3]),'coherence': float(row[4]),'cycle_count': int(row[5]),'lattice_sigma_mod8': int(row[6]),'phase_name': str(row[19]) if row[19] else '','lattice_status': 'online'},'consensus': {'w_state_fidelity': float(row[7]),'coherence': float(row[8]),'purity': float(row[9])},'mermin_test': mermin_result,'bell_test': mermin_result,'pq0_components': {'pq0_oracle_fidelity': float(row[13]),'pq0_IV_fidelity': float(row[14]),'pq0_V_fidelity': float(row[15])},'pq_curr': int(row[16]),'pq_last': int(row[17]),'oracle_measurements': oracles,'fidelity': float(row[7]),'coherence': float(row[8]),'lattice_cycle': int(row[5]),'source': 'supabase_snapshot','ready': True}
+    
+    # ⚛️  Use autonomous healer for safe snapshot construction
+    snapshot, diag = SnapshotAutonomousHealer.build_from_row(row, 'oracle_snapshot_json')
+    
+    if snapshot is None:
+        logger.error(f"[RPC] Snapshot healing failed: {diag}")
+        return jsonify({'ready': False, 'error': diag.get('error', 'healing_failed')}), 503
+    
+    # Remove diagnostics from public API response (keep in logs)
+    if '_diagnostics' in snapshot:
+        del snapshot['_diagnostics']
+    
     with _snapshot_lock:
-        _latest_snapshot=snapshot
+        _latest_snapshot = snapshot
+    
     return jsonify(snapshot), 200
 
 @app.route('/api/snapshots/latest', methods=['GET'])
@@ -2278,46 +2481,21 @@ def snapshots_latest():
         if not row:
             return jsonify({'error': 'no snapshots persisted yet', 'ready': False}), 503
 
-        oracles = row[18] if isinstance(row[18], list) else []
-
-        mermin_result = {
-            'M_value':    float(row[10]),
-            'M':          float(row[10]),
-            'is_quantum': bool(row[11]),
-            'verdict':    str(row[12]),
-        } if row[10] else None
-
-        return jsonify({
-            'timestamp_ns':   int(row[1]),
-            'chirp_number':   int(row[2]),
-            'lattice_quantum': {
-                'fidelity':        float(row[3]),
-                'coherence':       float(row[4]),
-                'cycle_count':     int(row[5]),
-                'lattice_sigma_mod8': int(row[6]),
-                'phase_name':      str(row[19]),
-                'lattice_status':  'online',
-            },
-            'consensus': {
-                'w_state_fidelity': float(row[7]),
-                'coherence':        float(row[8]),
-                'purity':           float(row[9]),
-            },
-            'mermin_test': mermin_result,
-            'bell_test':   mermin_result,
-            'pq0_components': {
-                'pq0_oracle_fidelity': float(row[13]),
-                'pq0_IV_fidelity':     float(row[14]),
-                'pq0_V_fidelity':      float(row[15]),
-            },
-            'pq_curr':             int(row[16]),
-            'pq_last':             int(row[17]),
-            'oracle_measurements': oracles,
-            'fidelity':            float(row[7]),   # consensus alias for _ingestChirp
-            'coherence':           float(row[8]),
-            'lattice_cycle':       int(row[5]),
-            'source':              'db_snapshot',
-            'ready':               True,
+        # ⚛️  Use autonomous healer for safe snapshot construction
+        snapshot, diag = SnapshotAutonomousHealer.build_from_row(row, 'snapshots_latest')
+        
+        if snapshot is None:
+            logger.error(f"[SNAP-LATEST] Snapshot healing failed: {diag}")
+            return jsonify({'error': diag.get('error', 'healing_failed'), 'ready': False}), 503
+        
+        # Remove diagnostics from public API response (keep in logs)
+        if '_diagnostics' in snapshot:
+            del snapshot['_diagnostics']
+        
+        return jsonify(snapshot), 200
+    except Exception as e:
+        logger.error(f"[SNAP-LATEST] Unhandled error: {e}")
+        return jsonify({'error': 'snapshot retrieval failed', 'ready': False}), 503
         }), 200
     except Exception as e:
         logger.error(f"[QSNAP] /api/snapshots/latest error: {e}")
