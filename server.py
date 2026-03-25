@@ -2219,37 +2219,57 @@ def _set_app_ready():
 
 @app.route('/api/oracle/snapshot', methods=['GET'])
 def oracle_snapshot_json():
-    """Return latest oracle snapshot as JSON (replaces SSE stream)."""
+    """Return latest oracle snapshot as JSON (RPC polling, Supabase pooler)."""
     with _snapshot_lock:
         if _latest_snapshot:
             return jsonify(_latest_snapshot), 200
-    # Fallback to database
+    
     try:
         _lazy_ensure_quantum_snapshots()
         with get_db_cursor() as cur:
-            cur.execute("SELECT bucket_ts, timestamp_ns, chirp_number, lattice_fidelity, lattice_coherence, "
-                       "lattice_cycle, lattice_sigma_mod8, consensus_fidelity, consensus_coherence, consensus_purity, "
-                       "mermin_M, mermin_is_quantum, mermin_verdict, pq0_oracle, pq0_IV, pq0_V, pq_curr, pq_last, "
-                       "oracle_measurements, phase_name FROM quantum_snapshots ORDER BY timestamp_ns DESC LIMIT 1")
+            cur.execute("""SELECT bucket_ts, timestamp_ns, chirp_number, 
+                                lattice_fidelity, lattice_coherence, lattice_cycle, lattice_sigma_mod8,
+                                consensus_fidelity, consensus_coherence, consensus_purity,
+                                mermin_M, mermin_is_quantum, mermin_verdict,
+                                pq0_oracle, pq0_IV, pq0_V, pq_curr, pq_last,
+                                oracle_measurements, phase_name 
+                            FROM quantum_snapshots 
+                            ORDER BY timestamp_ns DESC 
+                            LIMIT 1""")
             row = cur.fetchone()
+        
         if not row:
             return jsonify({'ready': False, 'error': 'no snapshots yet'}), 503
-        oracles = row[18] if isinstance(row[18], list) else []
-        mermin_result = {'M_value': float(row[10]), 'M': float(row[10]), 'is_quantum': bool(row[11]), 
-                        'verdict': str(row[12])} if row[10] else None
+        
+        try:
+            oracles = row[18] if isinstance(row[18], list) else (
+                json.loads(row[18]) if isinstance(row[18], str) else []
+            )
+        except (json.JSONDecodeError, TypeError):
+            oracles = []
+        
+        mermin_result = None
+        if row[10] is not None:
+            mermin_result = {
+                'M_value': float(row[10]),
+                'M': float(row[10]),
+                'is_quantum': bool(row[11]),
+                'verdict': str(row[12]) if row[12] else ''
+            }
+        
         return jsonify({
             'timestamp_ns': int(row[1]), 'chirp_number': int(row[2]),
             'lattice_quantum': {'fidelity': float(row[3]), 'coherence': float(row[4]), 'cycle_count': int(row[5]),
-                               'lattice_sigma_mod8': int(row[6]), 'phase_name': str(row[19]), 'lattice_status': 'online'},
+                               'lattice_sigma_mod8': int(row[6]), 'phase_name': str(row[19]) if row[19] else '', 'lattice_status': 'online'},
             'consensus': {'w_state_fidelity': float(row[7]), 'coherence': float(row[8]), 'purity': float(row[9])},
             'mermin_test': mermin_result, 'bell_test': mermin_result,
             'pq0_components': {'pq0_oracle_fidelity': float(row[13]), 'pq0_IV_fidelity': float(row[14]),
                               'pq0_V_fidelity': float(row[15])},
             'pq_curr': int(row[16]), 'pq_last': int(row[17]), 'oracle_measurements': oracles,
             'fidelity': float(row[7]), 'coherence': float(row[8]), 'lattice_cycle': int(row[5]),
-            'source': 'db_snapshot', 'ready': True}), 200
+            'source': 'supabase_snapshot', 'ready': True}), 200
     except Exception as e:
-        logger.error(f"[RPC] oracle_snapshot error: {e}")
+        logger.error(f"[RPC] oracle_snapshot error: {e}", exc_info=True)
         return jsonify({'error': str(e), 'ready': False}), 500
 
 @app.route('/api/snapshots/latest', methods=['GET'])
