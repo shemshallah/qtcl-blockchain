@@ -12816,84 +12816,135 @@ def _rpc_ok(result: Any, rpc_id: Any) -> dict:
 def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
     """qtcl_getBlockHeight — current chain tip height."""
     try:
+        logger.debug(f"[RPC-METHOD] qtcl_getBlockHeight called with params={params}, id={rpc_id}")
         node = _get_canonical_node()
         if node is None:
+            logger.warning(f"[RPC-METHOD] qtcl_getBlockHeight: Node not synced (canonical_node is None)")
             return _rpc_error(-32003, "Node not synced", rpc_id)
         height = node.get("block_height", 0)
         tip_hash = node.get("tip_hash", "")
-        return _rpc_ok({
+        result = {
             "height":   height,
             "tip_hash": tip_hash,
             "ts":       time.time(),
-        }, rpc_id)
+        }
+        logger.debug(f"[RPC-METHOD] qtcl_getBlockHeight success: height={height}")
+        return _rpc_ok(result, rpc_id)
     except Exception as e:
-        return _rpc_error(-32603, f"Internal error: {e}", rpc_id)
+        logger.exception(f"[RPC-METHOD] qtcl_getBlockHeight exception: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
 
 
 def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
     """qtcl_getBalance — address QTCL balance."""
-    if not isinstance(params, (list, dict)):
-        return _rpc_error(-32602, "params must be list or object", rpc_id)
-    address = (params[0] if isinstance(params, list) else params.get("address", "")) if params else ""
-    if not address:
-        return _rpc_error(-32602, "address required", rpc_id)
     try:
-        from globals import get_blockchain
-        bc = get_blockchain()
-        balance = bc.get_balance(address) if bc else 0.0
-        return _rpc_ok({
-            "address": address,
-            "balance": float(balance),
-            "symbol":  "QTCL",
-        }, rpc_id)
+        logger.debug(f"[RPC-METHOD] qtcl_getBalance called with params={params}, id={rpc_id}")
+        if not isinstance(params, (list, dict)):
+            logger.debug(f"[RPC-METHOD] qtcl_getBalance: params type invalid (got {type(params).__name__})")
+            return _rpc_error(-32602, "params must be list or object", rpc_id)
+        address = (params[0] if isinstance(params, list) else params.get("address", "")) if params else ""
+        if not address:
+            logger.debug(f"[RPC-METHOD] qtcl_getBalance: address missing or empty")
+            return _rpc_error(-32602, "address required", rpc_id)
+        try:
+            from globals import get_blockchain
+            bc = get_blockchain()
+            if bc is None:
+                logger.warning(f"[RPC-METHOD] qtcl_getBalance: blockchain not initialized")
+                return _rpc_error(-32003, "Blockchain not synced", rpc_id)
+            balance = bc.get_balance(address)
+            result = {
+                "address": address,
+                "balance": float(balance),
+                "symbol":  "QTCL",
+            }
+            logger.debug(f"[RPC-METHOD] qtcl_getBalance success: address={address}, balance={balance}")
+            return _rpc_ok(result, rpc_id)
+        except Exception as be:
+            logger.exception(f"[RPC-METHOD] qtcl_getBalance: blockchain error: {be}")
+            return _rpc_error(-32603, f"Balance lookup failed: {str(be)}", rpc_id, {"exception": str(be).__class__.__name__})
     except Exception as e:
-        return _rpc_error(-32603, f"Balance lookup failed: {e}", rpc_id)
+        logger.exception(f"[RPC-METHOD] qtcl_getBalance outer exception: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
 
 
 def _rpc_getTransaction(params: Any, rpc_id: Any) -> dict:
     """qtcl_getTransaction — tx details by hash."""
-    tx_hash = (params[0] if isinstance(params, list) else params.get("tx_hash", "")) if params else ""
-    if not tx_hash:
-        return _rpc_error(-32602, "tx_hash required", rpc_id)
     try:
-        from globals import get_blockchain
-        bc  = get_blockchain()
-        tx  = bc.get_transaction(tx_hash) if bc else None
-        if tx is None:
-            return _rpc_error(-32000, "Transaction not found", rpc_id, {"tx_hash": tx_hash})
-        return _rpc_ok(tx, rpc_id)
+        logger.debug(f"[RPC-METHOD] qtcl_getTransaction called with params={params}, id={rpc_id}")
+        tx_hash = (params[0] if isinstance(params, list) else params.get("tx_hash", "")) if params else ""
+        if not tx_hash:
+            logger.debug(f"[RPC-METHOD] qtcl_getTransaction: tx_hash missing or empty")
+            return _rpc_error(-32602, "tx_hash required", rpc_id)
+        try:
+            from globals import get_blockchain
+            bc = get_blockchain()
+            if bc is None:
+                logger.warning(f"[RPC-METHOD] qtcl_getTransaction: blockchain not initialized")
+                return _rpc_error(-32003, "Blockchain not synced", rpc_id)
+            tx = bc.get_transaction(tx_hash)
+            if tx is None:
+                logger.debug(f"[RPC-METHOD] qtcl_getTransaction: tx not found (hash={tx_hash})")
+                return _rpc_error(-32000, "Transaction not found", rpc_id, {"tx_hash": tx_hash})
+            logger.debug(f"[RPC-METHOD] qtcl_getTransaction success: tx_hash={tx_hash}")
+            return _rpc_ok(tx, rpc_id)
+        except Exception as be:
+            logger.exception(f"[RPC-METHOD] qtcl_getTransaction: blockchain error: {be}")
+            return _rpc_error(-32603, f"TX lookup failed: {str(be)}", rpc_id, {"exception": str(be).__class__.__name__})
     except Exception as e:
-        return _rpc_error(-32603, f"TX lookup failed: {e}", rpc_id)
+        logger.exception(f"[RPC-METHOD] qtcl_getTransaction outer exception: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
 
 
 def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
     """qtcl_getBlock — block by height or hash."""
-    height = (params[0] if isinstance(params, list) else params.get("height")) if params else None
-    tx_hash = (None if isinstance(params, list) else params.get("hash")) if params else None
     try:
-        from globals import get_blockchain
-        bc = get_blockchain()
-        if bc is None:
-            return _rpc_error(-32003, "Node not synced", rpc_id)
-        block = None
-        if height is not None:
-            block = bc.get_block_by_height(int(height))
-        elif tx_hash:
-            block = bc.get_block_by_hash(tx_hash)
-        if block is None:
-            return _rpc_error(-32000, "Block not found", rpc_id)
-        return _rpc_ok(block, rpc_id)
+        logger.debug(f"[RPC-METHOD] qtcl_getBlock called with params={params}, id={rpc_id}")
+        height = (params[0] if isinstance(params, list) else params.get("height")) if params else None
+        tx_hash = (None if isinstance(params, list) else params.get("hash")) if params else None
+        logger.debug(f"[RPC-METHOD] qtcl_getBlock: height={height}, hash={tx_hash}")
+        try:
+            from globals import get_blockchain
+            bc = get_blockchain()
+            if bc is None:
+                logger.warning(f"[RPC-METHOD] qtcl_getBlock: blockchain not initialized")
+                return _rpc_error(-32003, "Node not synced", rpc_id)
+            block = None
+            if height is not None:
+                try:
+                    block = bc.get_block_by_height(int(height))
+                    logger.debug(f"[RPC-METHOD] qtcl_getBlock: looked up by height={height}")
+                except Exception as he:
+                    logger.exception(f"[RPC-METHOD] qtcl_getBlock: height lookup failed: {he}")
+            elif tx_hash:
+                try:
+                    block = bc.get_block_by_hash(tx_hash)
+                    logger.debug(f"[RPC-METHOD] qtcl_getBlock: looked up by hash={tx_hash}")
+                except Exception as he:
+                    logger.exception(f"[RPC-METHOD] qtcl_getBlock: hash lookup failed: {he}")
+            if block is None:
+                logger.debug(f"[RPC-METHOD] qtcl_getBlock: block not found")
+                return _rpc_error(-32000, "Block not found", rpc_id)
+            logger.debug(f"[RPC-METHOD] qtcl_getBlock success")
+            return _rpc_ok(block, rpc_id)
+        except Exception as be:
+            logger.exception(f"[RPC-METHOD] qtcl_getBlock: blockchain error: {be}")
+            return _rpc_error(-32603, f"Block lookup failed: {str(be)}", rpc_id, {"exception": str(be).__class__.__name__})
     except Exception as e:
-        return _rpc_error(-32603, f"Block lookup failed: {e}", rpc_id)
+        logger.exception(f"[RPC-METHOD] qtcl_getBlock outer exception: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
 
 
 def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
     """qtcl_getQuantumMetrics — live W-state oracle + lattice metrics."""
     try:
+        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics called with params={params}, id={rpc_id}")
         result: dict = {"oracle_available": ORACLE_AVAILABLE, "ts": time.time()}
+        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: oracle_available={ORACLE_AVAILABLE}")
 
         if ORACLE_AVAILABLE and ORACLE is not None:
             try:
+                logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: fetching W-state snapshot")
                 w_snap = ORACLE_W_STATE_MANAGER.get_latest_snapshot() if ORACLE_W_STATE_MANAGER else None
                 if w_snap:
                     result["w_state"] = {
@@ -12903,11 +12954,16 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
                         "fidelity":   getattr(w_snap, "fidelity",   None),
                         "snapshot_id": getattr(w_snap, "snapshot_id", None),
                     }
+                    logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state snapshot obtained")
+                else:
+                    logger.warning(f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state snapshot is None")
             except Exception as we:
+                logger.exception(f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state error: {we}")
                 result["w_state_error"] = str(we)
 
         if LATTICE is not None:
             try:
+                logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: fetching lattice state")
                 ls = LATTICE.get_state()
                 lm = LATTICE.get_metrics()
                 result["lattice"] = {
@@ -12918,12 +12974,16 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
                     "avg_fidelity_100": lm.get("avg_fidelity_100"),
                     "avg_coherence_100":lm.get("avg_coherence_100"),
                 }
+                logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: lattice metrics obtained")
             except Exception as le:
+                logger.exception(f"[RPC-METHOD] qtcl_getQuantumMetrics: lattice error: {le}")
                 result["lattice_error"] = str(le)
 
+        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics success")
         return _rpc_ok(result, rpc_id)
     except Exception as e:
-        return _rpc_error(-32603, f"Quantum metrics failed: {e}", rpc_id)
+        logger.exception(f"[RPC-METHOD] qtcl_getQuantumMetrics outer exception: {e}")
+        return _rpc_error(-32603, f"Quantum metrics failed: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
 
 
 def _rpc_getPythPrice(params: Any, rpc_id: Any) -> dict:
@@ -12938,65 +12998,102 @@ def _rpc_getPythPrice(params: Any, rpc_id: Any) -> dict:
     Returns:
       snapshot_id, fetch_time_ns, hermes_ok, hlwe_sig, feeds{price,conf,age_seconds,...}
     """
-    symbols: Optional[list] = None
-    if isinstance(params, list):
-        if params and isinstance(params[0], list):
-            symbols = params[0]
-        elif params and isinstance(params[0], str):
-            symbols = params
-    elif isinstance(params, dict):
-        symbols = params.get("symbols")
-
-    po = _get_pyth()
-    if po is None:
-        return _rpc_error(-32002, "Pyth oracle not initialized", rpc_id)
-
     try:
-        snap = po.get_snapshot(symbols)
-        return _rpc_ok(snap.to_dict(), rpc_id)
+        logger.debug(f"[RPC-METHOD] qtcl_getPythPrice called with params={params}, id={rpc_id}")
+        symbols: Optional[list] = None
+        if isinstance(params, list):
+            if params and isinstance(params[0], list):
+                symbols = params[0]
+            elif params and isinstance(params[0], str):
+                symbols = params
+        elif isinstance(params, dict):
+            symbols = params.get("symbols")
+        logger.debug(f"[RPC-METHOD] qtcl_getPythPrice: extracted symbols={symbols}")
+
+        po = _get_pyth()
+        if po is None:
+            logger.warning(f"[RPC-METHOD] qtcl_getPythPrice: Pyth oracle not initialized")
+            return _rpc_error(-32002, "Pyth oracle not initialized", rpc_id)
+
+        try:
+            logger.debug(f"[RPC-METHOD] qtcl_getPythPrice: fetching snapshot for symbols={symbols}")
+            snap = po.get_snapshot(symbols)
+            logger.debug(f"[RPC-METHOD] qtcl_getPythPrice: snapshot obtained successfully")
+            return _rpc_ok(snap.to_dict(), rpc_id)
+        except Exception as pe:
+            logger.exception(f"[RPC-METHOD] qtcl_getPythPrice: Pyth fetch error: {pe}")
+            return _rpc_error(-32002, f"Pyth fetch failed: {str(pe)}", rpc_id, {"exception": str(pe).__class__.__name__})
     except Exception as e:
-        return _rpc_error(-32002, f"Pyth fetch failed: {e}", rpc_id)
+        logger.exception(f"[RPC-METHOD] qtcl_getPythPrice outer exception: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
 
 
 def _rpc_getMempoolStats(params: Any, rpc_id: Any) -> dict:
     """qtcl_getMempoolStats — mempool depth and fee percentiles."""
     try:
-        from mempool import MempoolManager
-        # Attempt to get mempool singleton
-        mp = globals().get("MEMPOOL") or globals().get("_MEMPOOL")
-        if mp is None:
-            from globals import get_mempool
-            mp = get_mempool() if callable(globals().get("get_mempool", None)) else None
-        if mp is None:
-            return _rpc_ok({"depth": 0, "note": "mempool not accessible via RPC"}, rpc_id)
-        stats = mp.get_stats() if hasattr(mp, "get_stats") else {}
-        return _rpc_ok(stats, rpc_id)
+        logger.debug(f"[RPC-METHOD] qtcl_getMempoolStats called with params={params}, id={rpc_id}")
+        try:
+            from mempool import MempoolManager
+            logger.debug(f"[RPC-METHOD] qtcl_getMempoolStats: MempoolManager imported")
+            # Attempt to get mempool singleton
+            mp = globals().get("MEMPOOL") or globals().get("_MEMPOOL")
+            if mp is None:
+                from globals import get_mempool
+                mp = get_mempool() if callable(globals().get("get_mempool", None)) else None
+            if mp is None:
+                logger.warning(f"[RPC-METHOD] qtcl_getMempoolStats: mempool not available")
+                return _rpc_ok({"depth": 0, "note": "mempool not accessible via RPC"}, rpc_id)
+            stats = mp.get_stats() if hasattr(mp, "get_stats") else {}
+            logger.debug(f"[RPC-METHOD] qtcl_getMempoolStats success: {len(stats)} stats")
+            return _rpc_ok(stats, rpc_id)
+        except Exception as me:
+            logger.exception(f"[RPC-METHOD] qtcl_getMempoolStats: mempool error: {me}")
+            return _rpc_error(-32603, f"Mempool stats failed: {str(me)}", rpc_id, {"exception": str(me).__class__.__name__})
     except Exception as e:
-        return _rpc_error(-32603, f"Mempool stats failed: {e}", rpc_id)
+        logger.exception(f"[RPC-METHOD] qtcl_getMempoolStats outer exception: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
 
 
 def _rpc_getPeers(params: Any, rpc_id: Any) -> dict:
     """qtcl_getPeers — active P2P peer list."""
     try:
+        logger.debug(f"[RPC-METHOD] qtcl_getPeers called with params={params}, id={rpc_id}")
         limit = 50
         if isinstance(params, list) and params:
-            limit = int(params[0])
+            try:
+                limit = int(params[0])
+            except (ValueError, TypeError) as ve:
+                logger.debug(f"[RPC-METHOD] qtcl_getPeers: invalid limit param, using default")
+                limit = 50
         elif isinstance(params, dict):
-            limit = int(params.get("limit", 50))
-        from globals import get_peer_registry
-        reg = get_peer_registry() if callable(globals().get("get_peer_registry")) else None
-        if reg is None:
-            return _rpc_ok({"peers": [], "count": 0}, rpc_id)
-        peers = reg.get_peers(limit=limit) if hasattr(reg, "get_peers") else []
-        return _rpc_ok({"peers": peers, "count": len(peers)}, rpc_id)
+            try:
+                limit = int(params.get("limit", 50))
+            except (ValueError, TypeError):
+                limit = 50
+        logger.debug(f"[RPC-METHOD] qtcl_getPeers: limit={limit}")
+        try:
+            from globals import get_peer_registry
+            reg = get_peer_registry() if callable(globals().get("get_peer_registry")) else None
+            if reg is None:
+                logger.warning(f"[RPC-METHOD] qtcl_getPeers: peer registry not available")
+                return _rpc_ok({"peers": [], "count": 0}, rpc_id)
+            peers = reg.get_peers(limit=limit) if hasattr(reg, "get_peers") else []
+            logger.debug(f"[RPC-METHOD] qtcl_getPeers success: {len(peers)} peers")
+            return _rpc_ok({"peers": peers, "count": len(peers)}, rpc_id)
+        except Exception as pe:
+            logger.exception(f"[RPC-METHOD] qtcl_getPeers: registry error: {pe}")
+            return _rpc_error(-32603, f"Peer list failed: {str(pe)}", rpc_id, {"exception": str(pe).__class__.__name__})
     except Exception as e:
-        return _rpc_error(-32603, f"Peer list failed: {e}", rpc_id)
+        logger.exception(f"[RPC-METHOD] qtcl_getPeers outer exception: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
 
 
 def _rpc_getHealth(params: Any, rpc_id: Any) -> dict:
     """qtcl_getHealth — full system health vector."""
     try:
-        po     = _get_pyth()
+        logger.debug(f"[RPC-METHOD] qtcl_getHealth called with params={params}, id={rpc_id}")
+        po = _get_pyth()
+        logger.debug(f"[RPC-METHOD] qtcl_getHealth: oracle_ready={ORACLE_AVAILABLE}, lattice_ready={LATTICE is not None}, pyth_ready={po is not None}")
         result = {
             "status":           "ok",
             "ts":               time.time(),
@@ -13008,9 +13105,11 @@ def _rpc_getHealth(params: Any, rpc_id: Any) -> dict:
             "jsonrpc_version":  _JSONRPC_VERSION,
             "qtcl_server":      "v6",
         }
+        logger.debug(f"[RPC-METHOD] qtcl_getHealth success")
         return _rpc_ok(result, rpc_id)
     except Exception as e:
-        return _rpc_error(-32603, f"Health check failed: {e}", rpc_id)
+        logger.exception(f"[RPC-METHOD] qtcl_getHealth exception: {e}")
+        return _rpc_error(-32603, f"Health check failed: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
 
 
 def _rpc_getOracleRegistry(params: Any, rpc_id: Any) -> dict:
@@ -13022,53 +13121,64 @@ def _rpc_getOracleRegistry(params: Any, rpc_id: Any) -> dict:
       offset         int      pagination offset (default 0)
     Returns: {oracles[], total, confirmed_count, limit, offset}
     """
-    p = params if isinstance(params, dict) else (params[0] if isinstance(params, list) and params and isinstance(params[0], dict) else {})
-    mode_filter    = str(p.get('mode', ''))
-    confirmed_only = bool(p.get('confirmed_only', False))
-    limit          = min(int(p.get('limit',  100)), 500)
-    offset         = int(p.get('offset', 0))
     try:
-        _lazy_ensure_oracle_registry()
-        where_clauses: list = []
-        qparams:       list = []
-        if mode_filter:
-            where_clauses.append("mode = %s"); qparams.append(mode_filter)
-        if confirmed_only:
-            where_clauses.append("reg_tx_hash != '' AND reg_tx_hash != 'gossip_pending'")
-        where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
-        with get_db_cursor() as cur:
-            cur.execute(f"""
-                SELECT oracle_id, oracle_url, oracle_address, is_primary,
-                       last_seen, block_height, peer_count,
-                       wallet_address, oracle_pub_key, cert_sig,
-                       mode, ip_hint, reg_tx_hash, registered_at, created_at
-                FROM   oracle_registry {where_sql}
-                ORDER  BY registered_at DESC, last_seen DESC
-                LIMIT  %s OFFSET %s
-            """, qparams + [limit, offset])
-            rows = cur.fetchall()
-            cur.execute(f"SELECT COUNT(*) FROM oracle_registry {where_sql}", qparams)
-            total = cur.fetchone()[0]
-        oracles = [{
-            'oracle_id'     : r[0],  'oracle_url'    : r[1],
-            'oracle_address': r[2],  'is_primary'    : r[3],
-            'last_seen'     : r[4],  'block_height'  : r[5],
-            'peer_count'    : r[6],  'wallet_address': r[7],
-            'oracle_pub_key': r[8],  'cert_sig'      : r[9],
-            'mode'          : r[10], 'ip_hint'       : r[11],
-            'reg_tx_hash'   : r[12], 'registered_at' : r[13],
-            'created_at'    : r[14].isoformat() if r[14] else '',
-            'on_chain'      : bool(r[12] and r[12] not in ('', 'gossip_pending')),
-        } for r in rows]
-        return _rpc_ok({
-            'oracles'        : oracles,
-            'total'          : total,
-            'confirmed_count': sum(1 for o in oracles if o['on_chain']),
-            'limit'          : limit,
-            'offset'         : offset,
-        }, rpc_id)
+        logger.debug(f"[RPC-METHOD] qtcl_getOracleRegistry called with params={params}, id={rpc_id}")
+        p = params if isinstance(params, dict) else (params[0] if isinstance(params, list) and params and isinstance(params[0], dict) else {})
+        mode_filter    = str(p.get('mode', ''))
+        confirmed_only = bool(p.get('confirmed_only', False))
+        limit          = min(int(p.get('limit',  100)), 500)
+        offset         = int(p.get('offset', 0))
+        logger.debug(f"[RPC-METHOD] qtcl_getOracleRegistry: mode={mode_filter}, confirmed_only={confirmed_only}, limit={limit}, offset={offset}")
+        try:
+            _lazy_ensure_oracle_registry()
+            where_clauses: list = []
+            qparams:       list = []
+            if mode_filter:
+                where_clauses.append("mode = %s"); qparams.append(mode_filter)
+            if confirmed_only:
+                where_clauses.append("reg_tx_hash != '' AND reg_tx_hash != 'gossip_pending'")
+            where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+            logger.debug(f"[RPC-METHOD] qtcl_getOracleRegistry: executing query with where_sql={where_sql}")
+            with get_db_cursor() as cur:
+                cur.execute(f"""
+                    SELECT oracle_id, oracle_url, oracle_address, is_primary,
+                           last_seen, block_height, peer_count,
+                           wallet_address, oracle_pub_key, cert_sig,
+                           mode, ip_hint, reg_tx_hash, registered_at, created_at
+                    FROM   oracle_registry {where_sql}
+                    ORDER  BY registered_at DESC, last_seen DESC
+                    LIMIT  %s OFFSET %s
+                """, qparams + [limit, offset])
+                rows = cur.fetchall()
+                cur.execute(f"SELECT COUNT(*) FROM oracle_registry {where_sql}", qparams)
+                total = cur.fetchone()[0]
+                logger.debug(f"[RPC-METHOD] qtcl_getOracleRegistry: fetched {len(rows)} rows, total={total}")
+            oracles = [{
+                'oracle_id'     : r[0],  'oracle_url'    : r[1],
+                'oracle_address': r[2],  'is_primary'    : r[3],
+                'last_seen'     : r[4],  'block_height'  : r[5],
+                'peer_count'    : r[6],  'wallet_address': r[7],
+                'oracle_pub_key': r[8],  'cert_sig'      : r[9],
+                'mode'          : r[10], 'ip_hint'       : r[11],
+                'reg_tx_hash'   : r[12], 'registered_at' : r[13],
+                'created_at'    : r[14].isoformat() if r[14] else '',
+                'on_chain'      : bool(r[12] and r[12] not in ('', 'gossip_pending')),
+            } for r in rows]
+            result = {
+                'oracles'        : oracles,
+                'total'          : total,
+                'confirmed_count': sum(1 for o in oracles if o['on_chain']),
+                'limit'          : limit,
+                'offset'         : offset,
+            }
+            logger.debug(f"[RPC-METHOD] qtcl_getOracleRegistry success: {len(oracles)} oracles returned")
+            return _rpc_ok(result, rpc_id)
+        except Exception as re:
+            logger.exception(f"[RPC-METHOD] qtcl_getOracleRegistry: registry error: {re}")
+            return _rpc_error(-32603, f"Oracle registry query failed: {str(re)}", rpc_id, {"exception": str(re).__class__.__name__})
     except Exception as e:
-        return _rpc_error(-32603, f"Oracle registry query failed: {e}", rpc_id)
+        logger.exception(f"[RPC-METHOD] qtcl_getOracleRegistry outer exception: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
 
 
 def _rpc_getOracleRecord(params: Any, rpc_id: Any) -> dict:
