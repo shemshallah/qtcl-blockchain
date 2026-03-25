@@ -70,6 +70,11 @@ def _should_log_shard(shard_id: int) -> bool:
     _SHARD_CYCLE_COUNTERS[shard_id] = counter + 1
     return (counter % _METRICS_SAMPLE_SHARD) == 0
 
+# ═══ SNAPSHOT BROADCAST THROTTLING ═══
+_verbose_p2p_logging = False
+_last_snapshot_log_time = 0
+_snapshot_log_interval = 10
+
 # Initialize QRNG_ENSEMBLE at MODULE LOAD TIME (NO FALLBACKS)
 try:
     from qrng_ensemble import get_qrng_ensemble
@@ -2134,6 +2139,7 @@ def get_dht_manager() -> DHTManager:
 _rpc_event_log: Deque = Deque(maxlen=1000)           # Ring buffer of recent RPC events
 _rpc_event_lock = threading.RLock()                  # Guards _rpc_event_log writes
 _latest_snapshot: Optional[dict] = None              # Last cached snapshot (poll endpoint)
+_latest_snapshot_ts: int = 0                         # Timestamp of latest snapshot
 _snapshot_lock = threading.RLock()                   # Guards _latest_snapshot updates
 
 def _cache_snapshot(snapshot: dict) -> None:
@@ -13352,37 +13358,37 @@ def _dispatch_single(payload: dict) -> dict:
 def _broadcast_rpc_to_peers(method: str, params: Any, response: dict, rpc_id: Any) -> None:
     """Broadcast successful RPC response to P2P peers via gossip_store.
     
-    Other clients will query gossip_store to find cached RPC responses,
-    reducing load on primary server and enabling true P2P RPC redundancy.
+    Non-blocking, non-fatal if broadcast fails (RPC already returned to caller).
+    Uses PostgreSQL via proper connection pool.
     """
     try:
         if 'error' in response:
             return  # Don't broadcast errors (keep cache clean)
         
-        import sqlite3 as _sql3
-        
-        # Construct gossip payload: RPC method + result (not the full request, too verbose)
+        # Construct gossip payload
         rpc_payload = {
             'method': method,
             'result': response.get('result'),
             'timestamp': time.time(),
             'ttl_seconds': 300,  # Cache for 5 minutes
             'source_node': 'server',
-            'broadcast': True,
         }
         
-        # Store in gossip_store for peer replication
-        with get_db_cursor() as cur:
-            cur.execute("""
-                INSERT INTO gossip_store(event_id, event_type, payload, timestamp)
-                VALUES(?, ?, ?, datetime('now'))
-            """, (
-                f"rpc_{method}_{rpc_id}_{int(time.time()*1000)}",
-                "rpc_response",
-                json.dumps(rpc_payload, separators=(',', ':'))
-            ))
+        # Store in gossip_store via PostgreSQL (non-blocking)
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    INSERT INTO gossip_store(event_id, event_type, payload, timestamp)
+                    VALUES(%s, %s, %s, NOW())
+                """, (
+                    f"rpc_{method}_{rpc_id}_{int(time.time()*1000)}",
+                    'rpc_response',
+                    json.dumps(rpc_payload, separators=(',', ':'))
+                ))
+        except Exception as db_err:
+            logger.debug(f"[RPC-P2P] DB broadcast failed (non-fatal): {db_err}")
         
-        logger.debug(f"[RPC-P2P] Broadcasted {method} to gossip_store for peer cache")
+        logger.debug(f"[RPC-P2P] Broadcasted {method} to peers via gossip_store")
     
     except Exception as e:
         logger.debug(f"[RPC-P2P] Broadcast failed (non-fatal): {e}")
