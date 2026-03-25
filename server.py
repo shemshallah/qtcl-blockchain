@@ -1289,8 +1289,12 @@ def get_db_cursor():
         _is_shutdown = ('pool is closed' in _e_str or
                         'connection pool is closed' in _e_str or
                         'DB pool closed' in _e_str)
+        # Error codes 0 and 2: connection reset, silent suppress
+        _is_quiet_error = 'error code 0' in _e_str or 'error code 2' in _e_str
         if _is_shutdown:
             logger.debug(f"[DB] Pool closed (shutdown): {e}")
+        elif _is_quiet_error:
+            pass  # Silent — transient network noise
         else:
             logger.error(f"[DB] Query error: {e}")
         raise
@@ -2226,17 +2230,22 @@ def oracle_snapshot_json():
     
     try:
         _lazy_ensure_quantum_snapshots()
-        with get_db_cursor() as cur:
-            cur.execute("""SELECT bucket_ts, timestamp_ns, chirp_number, 
-                                lattice_fidelity, lattice_coherence, lattice_cycle, lattice_sigma_mod8,
-                                consensus_fidelity, consensus_coherence, consensus_purity,
-                                mermin_M, mermin_is_quantum, mermin_verdict,
-                                pq0_oracle, pq0_IV, pq0_V, pq_curr, pq_last,
-                                oracle_measurements, phase_name 
-                            FROM quantum_snapshots 
-                            ORDER BY timestamp_ns DESC 
-                            LIMIT 1""")
-            row = cur.fetchone()
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""SELECT bucket_ts, timestamp_ns, chirp_number, 
+                                    lattice_fidelity, lattice_coherence, lattice_cycle, lattice_sigma_mod8,
+                                    consensus_fidelity, consensus_coherence, consensus_purity,
+                                    mermin_M, mermin_is_quantum, mermin_verdict,
+                                    pq0_oracle, pq0_IV, pq0_V, pq_curr, pq_last,
+                                    oracle_measurements, phase_name 
+                                FROM quantum_snapshots 
+                                ORDER BY timestamp_ns DESC 
+                                LIMIT 1""")
+                row = cur.fetchone()
+        except Exception as query_err:
+            logger.warning(f"[RPC] quantum_snapshots query failed: {query_err}, checking table existence")
+            # Table might not exist yet, return 503 and let client retry
+            return jsonify({'ready': False, 'error': 'snapshots table initializing'}), 503
         
         if not row:
             return jsonify({'ready': False, 'error': 'no snapshots yet'}), 503
