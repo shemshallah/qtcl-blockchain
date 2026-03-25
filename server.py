@@ -2416,6 +2416,7 @@ def oracle_snapshot_json():
     DB failures → 503. Conversion errors → recovery with safe defaults.
     BULLETPROOF: ALL exceptions caught and logged with detailed diagnostics.
     """
+    global _latest_snapshot  # ⚛️  Access module-level cache variable
     try:
         # ⚛️  OUTER SAFEGUARD: Catch absolutely everything
         try:
