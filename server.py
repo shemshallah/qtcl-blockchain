@@ -2414,44 +2414,74 @@ def oracle_snapshot_json():
     
     ⚛️  Guarantees 200/503/500 with structured response via autonomous healing.
     DB failures → 503. Conversion errors → recovery with safe defaults.
+    BULLETPROOF: ALL exceptions caught and logged with detailed diagnostics.
     """
-    with _snapshot_lock:
-        if _latest_snapshot:
-            return jsonify(_latest_snapshot), 200
-    
     try:
-        _lazy_ensure_quantum_snapshots()
-    except Exception as e:
-        logger.warning(f"[RPC] Table init failed: {e}")
-        return jsonify({'ready': False, 'error': 'table initialization pending'}), 503
+        # ⚛️  OUTER SAFEGUARD: Catch absolutely everything
+        try:
+            with _snapshot_lock:
+                if _latest_snapshot:
+                    return jsonify(_latest_snapshot), 200
+        except Exception as lock_err:
+            logger.error(f"[RPC-SNAPSHOT] Lock error: {lock_err}")
+            return jsonify({'ready': False, 'error': 'lock_failed', 'details': str(lock_err)[:50]}), 500
+        
+        try:
+            _lazy_ensure_quantum_snapshots()
+        except Exception as e:
+            logger.warning(f"[RPC-SNAPSHOT] Table init failed: {e}")
+            return jsonify({'ready': False, 'error': 'table initialization pending'}), 503
+        
+        row = None
+        try:
+            with get_db_cursor() as cur:
+                cur.execute('''SELECT bucket_ts,timestamp_ns,chirp_number,lattice_fidelity,lattice_coherence,lattice_cycle,lattice_sigma_mod8,consensus_fidelity,consensus_coherence,consensus_purity,mermin_M,mermin_is_quantum,mermin_verdict,pq0_oracle,pq0_IV,pq0_V,pq_curr,pq_last,oracle_measurements,phase_name FROM quantum_snapshots ORDER BY timestamp_ns DESC LIMIT 1''')
+                row = cur.fetchone()
+        except Exception as query_err:
+            logger.error(f"[RPC-SNAPSHOT] Query failed: {type(query_err).__name__}: {query_err}")
+            return jsonify({'ready': False, 'error': 'query_failed', 'db_error': str(query_err)[:50]}), 503
+        
+        if not row:
+            logger.debug(f"[RPC-SNAPSHOT] No snapshots in database yet")
+            return jsonify({'ready': False, 'error': 'no snapshots yet', 'genesis_ready': True}), 503
+        
+        # ⚛️  Use autonomous healer for safe snapshot construction
+        try:
+            snapshot, diag = SnapshotAutonomousHealer.build_from_row(row, 'oracle_snapshot_json')
+        except Exception as heal_err:
+            logger.error(f"[RPC-SNAPSHOT] Healer exception: {type(heal_err).__name__}: {heal_err}")
+            return jsonify({'ready': False, 'error': 'healer_failed', 'reason': str(heal_err)[:50]}), 503
+        
+        if snapshot is None:
+            logger.error(f"[RPC-SNAPSHOT] Snapshot healing returned None: {diag}")
+            return jsonify({'ready': False, 'error': diag.get('error', 'healing_failed'), 'details': str(diag)[:100]}), 503
+        
+        # Remove diagnostics from public API response (keep in logs)
+        try:
+            if '_diagnostics' in snapshot:
+                del snapshot['_diagnostics']
+        except Exception as cleanup_err:
+            logger.debug(f"[RPC-SNAPSHOT] Cleanup error: {cleanup_err}")
+        
+        try:
+            with _snapshot_lock:
+                _latest_snapshot = snapshot
+        except Exception as cache_err:
+            logger.debug(f"[RPC-SNAPSHOT] Cache update error: {cache_err}")
+        
+        return jsonify(snapshot), 200
     
-    row = None
-    try:
-        with get_db_cursor() as cur:
-            cur.execute('''SELECT bucket_ts,timestamp_ns,chirp_number,lattice_fidelity,lattice_coherence,lattice_cycle,lattice_sigma_mod8,consensus_fidelity,consensus_coherence,consensus_purity,mermin_M,mermin_is_quantum,mermin_verdict,pq0_oracle,pq0_IV,pq0_V,pq_curr,pq_last,oracle_measurements,phase_name FROM quantum_snapshots ORDER BY timestamp_ns DESC LIMIT 1''')
-            row = cur.fetchone()
-    except Exception as query_err:
-        logger.debug(f"[RPC] Query failed: {query_err}")
-        return jsonify({'ready': False, 'error': 'no snapshots available'}), 503
-    
-    if not row:
-        return jsonify({'ready': False, 'error': 'no snapshots yet'}), 503
-    
-    # ⚛️  Use autonomous healer for safe snapshot construction
-    snapshot, diag = SnapshotAutonomousHealer.build_from_row(row, 'oracle_snapshot_json')
-    
-    if snapshot is None:
-        logger.error(f"[RPC] Snapshot healing failed: {diag}")
-        return jsonify({'ready': False, 'error': diag.get('error', 'healing_failed')}), 503
-    
-    # Remove diagnostics from public API response (keep in logs)
-    if '_diagnostics' in snapshot:
-        del snapshot['_diagnostics']
-    
-    with _snapshot_lock:
-        _latest_snapshot = snapshot
-    
-    return jsonify(snapshot), 200
+    except Exception as outer_err:
+        # ⚛️  FINAL SAFEGUARD: Catch anything that escaped
+        logger.error(f"[RPC-SNAPSHOT] OUTER EXCEPTION (should never reach here): {type(outer_err).__name__}: {outer_err}")
+        import traceback
+        logger.error(f"[RPC-SNAPSHOT] Traceback: {traceback.format_exc()[:300]}")
+        return jsonify({
+            'ready': False, 
+            'error': 'internal_exception',
+            'exception_type': type(outer_err).__name__,
+            'exception_msg': str(outer_err)[:100]
+        }), 500
 
 @app.route('/api/snapshots/latest', methods=['GET'])
 def snapshots_latest():
@@ -2479,7 +2509,7 @@ def snapshots_latest():
             """)
             row = cur.fetchone()
         if not row:
-            return jsonify({'error': 'no snapshots persisted yet', 'ready': False}), 503
+            return jsonify({'error': 'no snapshots persisted yet', 'ready': False, 'genesis_ready': True}), 503
 
         # ⚛️  Use autonomous healer for safe snapshot construction
         snapshot, diag = SnapshotAutonomousHealer.build_from_row(row, 'snapshots_latest')
@@ -2494,8 +2524,8 @@ def snapshots_latest():
         
         return jsonify(snapshot), 200
     except Exception as e:
-        logger.error(f"[SNAP-LATEST] Unhandled error: {e}")
-        return jsonify({'error': 'snapshot retrieval failed', 'ready': False}), 503
+        logger.error(f"[SNAP-LATEST] Error: {type(e).__name__}: {e}")
+        return jsonify({'error': 'snapshot retrieval failed', 'ready': False, 'exception': str(e)[:50]}), 503
 
 
 @app.route('/api/oracle/push_snapshot', methods=['POST'])
