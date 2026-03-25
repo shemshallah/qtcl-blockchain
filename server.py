@@ -75,23 +75,46 @@ _verbose_p2p_logging = False
 _last_snapshot_log_time = 0
 _snapshot_log_interval = 10
 
-# Initialize QRNG_ENSEMBLE at MODULE LOAD TIME (NO FALLBACKS)
-try:
-    from qrng_ensemble import get_qrng_ensemble
-    QRNG_ENSEMBLE = get_qrng_ensemble()
-    logger.info("[INIT-QRNG] ✅ Quantum RNG Ensemble initialized at module load")
-except Exception as e:
-    logger.critical(f"[INIT-QRNG] ❌ FATAL: Cannot initialize QRNG_ENSEMBLE: {e}")
-    raise RuntimeError(f"[INIT-QRNG] Cannot initialize Quantum RNG. System requires enterprise-grade entropy. Error: {e}")
+# ═══ LAZY INITIALIZATION (deferred until first use) ═══
+# This allows Flask to bind port 8000 before heavy crypto/quantum init
+QRNG_ENSEMBLE = None
+HLWE_ENGINE = None
+_QRNG_INIT_LOCK = threading.Lock()
+_HLWE_INIT_LOCK = threading.Lock()
 
-# Initialize HLWE_ENGINE at MODULE LOAD TIME (NO FALLBACKS)
-try:
-    from hlwe_engine import HLWEEngine
-    HLWE_ENGINE = HLWEEngine()
-    logger.info("[INIT-HLWE] ✅ HLWE Post-Quantum Cryptography initialized at module load")
-except Exception as e:
-    logger.critical(f"[INIT-HLWE] ❌ FATAL: Cannot initialize HLWE_ENGINE: {e}")
-    raise RuntimeError(f"[INIT-HLWE] Cannot initialize HLWE cryptography. System requires post-quantum security. Error: {e}")
+def _init_qrng_ensemble():
+    """Lazy init QRNG_ENSEMBLE on first demand."""
+    global QRNG_ENSEMBLE
+    if QRNG_ENSEMBLE is not None:
+        return QRNG_ENSEMBLE
+    with _QRNG_INIT_LOCK:
+        if QRNG_ENSEMBLE is not None:  # double-check
+            return QRNG_ENSEMBLE
+        try:
+            from qrng_ensemble import get_qrng_ensemble
+            QRNG_ENSEMBLE = get_qrng_ensemble()
+            logger.info("[INIT-QRNG] ✅ Quantum RNG Ensemble initialized on first use")
+            return QRNG_ENSEMBLE
+        except Exception as e:
+            logger.critical(f"[INIT-QRNG] ❌ FATAL: Cannot initialize QRNG_ENSEMBLE: {e}")
+            raise RuntimeError(f"[INIT-QRNG] Cannot initialize Quantum RNG. Error: {e}")
+
+def _init_hlwe_engine():
+    """Lazy init HLWE_ENGINE on first demand."""
+    global HLWE_ENGINE
+    if HLWE_ENGINE is not None:
+        return HLWE_ENGINE
+    with _HLWE_INIT_LOCK:
+        if HLWE_ENGINE is not None:  # double-check
+            return HLWE_ENGINE
+        try:
+            from hlwe_engine import HLWEEngine
+            HLWE_ENGINE = HLWEEngine()
+            logger.info("[INIT-HLWE] ✅ HLWE Post-Quantum Cryptography initialized on first use")
+            return HLWE_ENGINE
+        except Exception as e:
+            logger.critical(f"[INIT-HLWE] ❌ FATAL: Cannot initialize HLWE_ENGINE: {e}")
+            raise RuntimeError(f"[INIT-HLWE] Cannot initialize HLWE cryptography. Error: {e}")
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # 5-ORACLE BYZANTINE CONSENSUS INTEGRATION
@@ -1938,7 +1961,7 @@ def qtcl_pow_build_seed(density_matrix_bytes: bytes) -> bytes:
 
     # Pull 32 bytes from the 5-source QRNG ensemble (XOR-hedged, system fallback)
     try:
-        qrng_32 = QRNG_ENSEMBLE.get_random_bytes(32)
+        qrng_32 = _init_qrng_ensemble().get_random_bytes(32)
     except Exception:
         qrng_32 = hashlib.sha3_256(
             b"QRNG_FALLBACK:" + density_matrix_bytes + struct.pack('>Q', _pow_time_ns())
@@ -12080,7 +12103,6 @@ def _start_measurement_feed_daemon():
     
     def _measurement_feed_loop():
         """Continuously feed REAL oracle and lattice measurements into agents"""
-        from qrng_ensemble import QRNG_ENSEMBLE
         global _measurement_feed_running
         _measurement_feed_running = True
         
@@ -12149,15 +12171,13 @@ def _start_measurement_feed_daemon():
                 # Learn to apply gates that trigger non-Markovian revivals
                 if _METRICS_AGENTS['refresh_net'] is not None:
                     try:
-                        from qrng_ensemble import QRNG_ENSEMBLE
-                        
                         # Generate 64-dim fidelity vector using QRNG
                         lattice_fid_vec = _np.array([
                             0.90 + (get_random_float() * 0.1 - 0.05)
                             for _ in range(64)
                         ])
                         noise_state = 0.1
-                        entropy_pool = QRNG_ENSEMBLE.get_random_bytes(32)
+                        entropy_pool = _init_qrng_ensemble().get_random_bytes(32)
                         
                         # Fidelity before applying learned gates
                         fidelity_before = _np.mean(lattice_fid_vec)
