@@ -1219,6 +1219,11 @@ def hlwe_system_info() -> Dict[str, Any]:
         logger.error(f"[HLWE-API] System info failed: {e}")
         return {'error': str(e), 'status': 'unavailable'}
 
+
+def get_hlwe_system_info():
+    """Wrapper for hlwe_system_info() — used by wsgi_config.py"""
+    return hlwe_system_info()
+
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # PUBLIC API
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1254,6 +1259,7 @@ __all__ = [
     'hlwe_get_wallet_status',
     'hlwe_health_check',
     'hlwe_system_info',
+    'get_hlwe_system_info',
     # BIP39 wordlist
     'BIP39_WORDLIST',
     'BIP39_ENGLISH',
