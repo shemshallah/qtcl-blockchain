@@ -8618,6 +8618,7 @@ def oracle_registry_submit():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/oracle/pq0/bloch', methods=['GET'])
 def oracle_pq0_bloch():
     """
     Live pq0 Bloch vector + full entanglement snapshot.
@@ -8665,30 +8666,31 @@ def oracle_pq0_bloch():
             'oracle_role':  ORACLE_ROLE,
             'block_height': _bh_c,
             'height':       _bh_c,
-            'theta': cache.get('theta', 1.57),
-            'phi':   cache.get('phi', 0.0),
-            'fidelity':    cache.get('w3_fidelity', 0.90),    # canonical alias for miners
-            'w3_fidelity': cache.get('w3_fidelity', 0.90),
-            'wN_fidelity': cache.get('wN_fidelity', 0.84),
-            'negativity': cache.get('negativity', 0.43),
-            'concurrence': cache.get('concurrence', 0.30),
-            'qfi': cache.get('qfi', 6.5),
-            'discord': cache.get('discord', 1.50),
-            'coherence': cache.get('coherence', 0.68),
-            'purity': cache.get('purity', 0.80),
-            'sector_occ': cache.get('sector_occ', 0.90),
-            'tele_fidelity': cache.get('tele_fidelity', 0.60),
-            'gamma1': cache.get('gamma1', 0.04),
-            'gammaphi': cache.get('gammaphi', 0.12),
-            'gammadep': cache.get('gammadep', 0.01),
-            'gamma_geo': cache.get('gamma_geo', 0.01),
-            'omega': cache.get('omega', 0.5),
-            'ou_mem': cache.get('ou_mem', 0.03),
-            'ch0_weight': cache.get('ch0_weight', 0.50),
-            'ch1_weight': cache.get('ch1_weight', 0.30),
-            'ch2_weight': cache.get('ch2_weight', 0.20),
-            'n_peers': cache.get('n_peers', 0),
-            'cycle': cache.get('cycle', 0),
+            'theta': eng.get('pq0_bloch_theta', 1.57),
+            'phi':   eng.get('pq0_bloch_phi', 0.0),
+            'fidelity':    eng.get('w3_fidelity', 0.90),    # canonical alias for miners
+            'w3_fidelity': eng.get('w3_fidelity', 0.90),
+            'wN_fidelity': eng.get('wN_fidelity', 0.84),
+            'negativity': eng.get('negativity', 0.43),
+            'concurrence': eng.get('concurrence', 0.30),
+            'qfi': eng.get('qfi', 6.5),
+            'discord': eng.get('discord', 1.50),
+            'coherence': eng.get('coherence', 0.68),
+            'purity': eng.get('purity', 0.80),
+            'sector_occ': eng.get('sector_occ', 0.90),
+            'tele_fidelity': eng.get('tele_fidelity', 0.60),
+            'gamma1': eng.get('gamma1', 0.04),
+            'gammaphi': eng.get('gammaphi', 0.12),
+            'gammadep': eng.get('gammadep', 0.01),
+            'gamma_geo': eng.get('gamma_geo', 0.01),
+            'omega': eng.get('omega', 0.5),
+            'ou_mem': eng.get('ou_mem', 0.03),
+            'ch0_weight': eng.get('ch0_weight', 0.50),
+            'ch1_weight': eng.get('ch1_weight', 0.30),
+            'ch2_weight': eng.get('ch2_weight', 0.20),
+            'n_peers': eng.get('n_peers', 0),
+            'cycle': eng.get('cycle', 0),
+            'density_matrix_hex': eng.get('density_matrix_hex', ''),
             'timestamp_ns': time.time_ns(),
             'state_source': 'cache_fallback',
         }), 200
@@ -12970,7 +12972,7 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
 
 
 def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getQuantumMetrics — live W-state oracle + lattice metrics."""
+    """qtcl_getQuantumMetrics — live W-state oracle + lattice metrics + density matrix snapshot."""
     try:
         logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics called with params={params}, id={rpc_id}")
         result: dict = {"oracle_available": ORACLE_AVAILABLE, "ts": time.time()}
@@ -13012,6 +13014,16 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
             except Exception as le:
                 logger.exception(f"[RPC-METHOD] qtcl_getQuantumMetrics: lattice error: {le}")
                 result["lattice_error"] = str(le)
+
+        # ── WIRE DENSITY_MATRIX_HEX ──────────────────────────────────────────────
+        try:
+            with _ENG_LOCK:
+                dm_hex = _ENG_STATE.get('density_matrix_hex', '')
+            if dm_hex:
+                result["density_matrix_hex"] = dm_hex
+                logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix_hex included ({len(dm_hex)} chars)")
+        except Exception as dme:
+            logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix_hex fetch failed (non-fatal): {dme}")
 
         logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics success")
         return _rpc_ok(result, rpc_id)
