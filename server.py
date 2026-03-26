@@ -1388,31 +1388,40 @@ def _ensure_genesis_block_in_db() -> bool:
         return True  # Continue even if bootstrap fails
 
 def query_latest_block() -> Optional[Dict[str, Any]]:
-    """Get latest block from database - with NULL-safety"""
-    try:
-        with get_db_cursor() as cur:
-            cur.execute("""
-                SELECT height, block_hash, 
-                       COALESCE(timestamp, EXTRACT(EPOCH FROM NOW())::bigint) as timestamp,
-                       oracle_w_state_hash
-                FROM blocks
-                ORDER BY height DESC
-                LIMIT 1
-            """)
-            row = cur.fetchone()
-            if row:
-                timestamp = row[2]
-                if timestamp is None:
-                    timestamp = int(time.time())
-                
-                return {
-                    'height': row[0],
-                    'hash': row[1],
-                    'timestamp': timestamp,
-                    'w_state_hash': row[3],
-                }
-    except Exception as e:
-        logger.error(f"[DB] Failed to query blocks: {e}")
+    """Get latest block from database with retry logic for pool timeouts"""
+    max_retries = 3
+    retry_delay = 0.1
+    
+    for attempt in range(max_retries):
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    SELECT height, block_hash, 
+                           COALESCE(timestamp, EXTRACT(EPOCH FROM NOW())::bigint) as timestamp,
+                           oracle_w_state_hash
+                    FROM blocks
+                    ORDER BY height DESC
+                    LIMIT 1
+                """)
+                row = cur.fetchone()
+                if row:
+                    timestamp = row[2]
+                    if timestamp is None:
+                        timestamp = int(time.time())
+                    
+                    return {
+                        'height': row[0],
+                        'hash': row[1],
+                        'timestamp': timestamp,
+                        'w_state_hash': row[3],
+                    }
+                return None  # No blocks found
+        except Exception as e:
+            if attempt < max_retries - 1:
+                logger.debug(f"[DB] query_latest_block retry {attempt+1}/{max_retries-1}: {e}")
+                time.sleep(retry_delay * (2 ** attempt))  # Exponential backoff: 0.1s, 0.2s, 0.4s
+            else:
+                logger.error(f"[DB] Failed to query blocks after {max_retries} retries: {e}")
     return None
 
 
@@ -13408,15 +13417,16 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
         if LATTICE is not None:
             try:
                 logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: fetching lattice state")
-                ls = LATTICE.get_state()
+                # Use available LATTICE methods instead of non-existent get_state()
                 lm = LATTICE.get_metrics()
+                ls = LATTICE.get_stats()
                 result["lattice"] = {
-                    "fidelity":         ls.get("fidelity"),
-                    "coherence":        ls.get("coherence"),
-                    "w_state_strength": ls.get("w_state_strength"),
-                    "cycle":            ls.get("cycle"),
-                    "avg_fidelity_100": lm.get("avg_fidelity_100"),
-                    "avg_coherence_100":lm.get("avg_coherence_100"),
+                    "fidelity":         lm.get("avg_fidelity_100", ls.get("fidelity", 0.0)),
+                    "coherence":        lm.get("avg_coherence_100", ls.get("coherence", 0.0)),
+                    "w_state_strength": ls.get("w_state_strength", 0.0),
+                    "cycle":            ls.get("cycle", 0),
+                    "avg_fidelity_100": lm.get("avg_fidelity_100", 0.0),
+                    "avg_coherence_100":lm.get("avg_coherence_100", 0.0),
                 }
                 logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: lattice metrics obtained")
             except Exception as le:
