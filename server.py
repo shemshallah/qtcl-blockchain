@@ -9743,42 +9743,164 @@ def _rpc_getTransaction(params: Any, rpc_id: Any) -> dict:
 
 
 def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getBlock — block by height or hash."""
+    """qtcl_getBlock — block by height or hash.
+
+    DB-AUTHORITATIVE: queries PostgreSQL blocks table directly.
+    params: [height] (list) or {height: int} or {hash: str}
+    Returns full block header + transaction list for chain sync.
+    """
     try:
-        logger.debug(f"[RPC-METHOD] qtcl_getBlock called with params={params}, id={rpc_id}")
-        height = (params[0] if isinstance(params, list) else params.get("height")) if params else None
-        tx_hash = (None if isinstance(params, list) else params.get("hash")) if params else None
-        logger.debug(f"[RPC-METHOD] qtcl_getBlock: height={height}, hash={tx_hash}")
-        try:
-            from globals import get_blockchain
-            bc = get_blockchain()
-            if bc is None:
-                logger.warning(f"[RPC-METHOD] qtcl_getBlock: blockchain not initialized")
-                return _rpc_error(-32003, "Node not synced", rpc_id)
-            block = None
+        height = None
+        block_hash = None
+        if isinstance(params, list) and len(params) >= 1:
+            height = int(params[0])
+        elif isinstance(params, dict):
+            height = params.get("height")
+            block_hash = params.get("hash")
             if height is not None:
-                try:
-                    block = bc.get_block_by_height(int(height))
-                    logger.debug(f"[RPC-METHOD] qtcl_getBlock: looked up by height={height}")
-                except Exception as he:
-                    logger.exception(f"[RPC-METHOD] qtcl_getBlock: height lookup failed: {he}")
-            elif tx_hash:
-                try:
-                    block = bc.get_block_by_hash(tx_hash)
-                    logger.debug(f"[RPC-METHOD] qtcl_getBlock: looked up by hash={tx_hash}")
-                except Exception as he:
-                    logger.exception(f"[RPC-METHOD] qtcl_getBlock: hash lookup failed: {he}")
-            if block is None:
-                logger.debug(f"[RPC-METHOD] qtcl_getBlock: block not found")
-                return _rpc_error(-32000, "Block not found", rpc_id)
-            logger.debug(f"[RPC-METHOD] qtcl_getBlock success")
-            return _rpc_ok(block, rpc_id)
-        except Exception as be:
-            logger.exception(f"[RPC-METHOD] qtcl_getBlock: blockchain error: {be}")
-            return _rpc_error(-32603, f"Block lookup failed: {str(be)}", rpc_id, {"exception": str(be).__class__.__name__})
+                height = int(height)
+
+        def _query_block_at_height(h: int) -> Optional[dict]:
+            """Full block query from DB — mirrors /api/blocks/height/<int>."""
+            try:
+                with get_db_cursor() as cur:
+                    cur.execute("""
+                        SELECT height, block_hash, timestamp, oracle_w_state_hash,
+                               previous_hash, validator_public_key, nonce, difficulty,
+                               entropy_score, transactions_root, pq_curr, pq_last
+                        FROM blocks WHERE height = %s LIMIT 1
+                    """, (h,))
+                    row = cur.fetchone()
+                    if not row:
+                        return None
+                    block = {
+                        'height':           row[0],
+                        'block_height':     row[0],
+                        'block_hash':       row[1],
+                        'hash':             row[1],
+                        'parent_hash':      row[4] or ('0' * 64),
+                        'previous_hash':    row[4] or ('0' * 64),
+                        'merkle_root':      row[9] or ('0' * 64),
+                        'timestamp_s':      int(row[2]) if row[2] else 0,
+                        'timestamp':        int(row[2]) if row[2] else 0,
+                        'difficulty_bits':  int(float(row[7])) if row[7] else 5,
+                        'difficulty':       int(float(row[7])) if row[7] else 5,
+                        'nonce':            int(row[6]) if row[6] else 0,
+                        'miner_address':    row[5] or '',
+                        'w_state_fidelity': float(row[8]) if row[8] is not None else 0.0,
+                        'w_entropy_hash':   row[3] or '',
+                        'pq_curr':          int(row[10]) if row[10] is not None else h,
+                        'pq_last':          int(row[11]) if row[11] is not None else max(0, h - 1),
+                    }
+                    # Fetch transactions for this block
+                    cur.execute("""
+                        SELECT tx_hash, from_address, to_address, amount,
+                               transaction_index, tx_type, status,
+                               quantum_state_hash, metadata
+                        FROM transactions
+                        WHERE height = %s
+                        ORDER BY transaction_index ASC
+                    """, (h,))
+                    tx_rows = cur.fetchall()
+                    txs = []
+                    for tr in tx_rows:
+                        txs.append({
+                            'tx_id':        tr[0],
+                            'from_addr':    tr[1] or '',
+                            'to_addr':      tr[2] or '',
+                            'amount':       int(tr[3]) if tr[3] is not None else 0,
+                            'tx_index':     int(tr[4]) if tr[4] is not None else 0,
+                            'tx_type':      tr[5] or 'transfer',
+                            'status':       tr[6] or 'confirmed',
+                            'w_proof':      tr[7] or '',
+                            'metadata':     tr[8] if tr[8] else None,
+                        })
+                    block['transactions'] = txs
+                    block['tx_count'] = len(txs)
+                    return block
+            except Exception as e:
+                logger.exception(f"[RPC] _query_block_at_height({h}): {e}")
+                return None
+
+        block = None
+        if height is not None:
+            block = _query_block_at_height(height)
+        elif block_hash:
+            row = query_block_by_hash(block_hash)
+            if row:
+                block = _query_block_at_height(row['height'])
+
+        if block is None:
+            return _rpc_error(-32000, "Block not found", rpc_id)
+
+        return _rpc_ok(block, rpc_id)
+
     except Exception as e:
-        logger.exception(f"[RPC-METHOD] qtcl_getBlock outer exception: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
+        logger.exception(f"[RPC] _rpc_getBlock exception: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
+
+def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getBlockRange — batch fetch blocks by height range.
+
+    params: [from_height, to_height] — inclusive, max 100 blocks per call.
+    Returns list of block headers (no transactions for efficiency).
+    Used by miners for Initial Block Download (IBD) chain sync.
+    """
+    try:
+        if not isinstance(params, (list, tuple)) or len(params) < 2:
+            return _rpc_error(-32602, "params: [from_height, to_height]", rpc_id)
+        from_h = int(params[0])
+        to_h = int(params[1])
+        # Cap at 100 blocks per request
+        if to_h - from_h > 99:
+            to_h = from_h + 99
+        if from_h < 0:
+            from_h = 0
+
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT height, block_hash, timestamp, oracle_w_state_hash,
+                       previous_hash, validator_public_key, nonce, difficulty,
+                       entropy_score, transactions_root, pq_curr, pq_last
+                FROM blocks
+                WHERE height BETWEEN %s AND %s
+                ORDER BY height ASC
+            """, (from_h, to_h))
+            rows = cur.fetchall()
+
+        blocks = []
+        for row in rows:
+            blocks.append({
+                'height':           row[0],
+                'block_height':     row[0],
+                'block_hash':       row[1],
+                'hash':             row[1],
+                'parent_hash':      row[4] or ('0' * 64),
+                'previous_hash':    row[4] or ('0' * 64),
+                'merkle_root':      row[9] or ('0' * 64),
+                'timestamp_s':      int(row[2]) if row[2] else 0,
+                'timestamp':        int(row[2]) if row[2] else 0,
+                'difficulty_bits':  int(float(row[7])) if row[7] else 5,
+                'difficulty':       int(float(row[7])) if row[7] else 5,
+                'nonce':            int(row[6]) if row[6] else 0,
+                'miner_address':    row[5] or '',
+                'w_state_fidelity': float(row[8]) if row[8] is not None else 0.0,
+                'w_entropy_hash':   row[3] or '',
+                'pq_curr':          int(row[10]) if row[10] is not None else row[0],
+                'pq_last':          int(row[11]) if row[11] is not None else max(0, row[0] - 1),
+            })
+
+        return _rpc_ok({
+            'blocks': blocks,
+            'count':  len(blocks),
+            'from':   from_h,
+            'to':     to_h,
+        }, rpc_id)
+
+    except Exception as e:
+        logger.exception(f"[RPC] _rpc_getBlockRange exception: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
 def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
@@ -10386,6 +10508,7 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getBalance":        _rpc_getBalance,
     "qtcl_getTransaction":    _rpc_getTransaction,
     "qtcl_getBlock":          _rpc_getBlock,
+    "qtcl_getBlockRange":     _rpc_getBlockRange,
     "qtcl_getQuantumMetrics": _rpc_getQuantumMetrics,
     "qtcl_getPythPrice":      _rpc_getPythPrice,
     "qtcl_getMempoolStats":   _rpc_getMempoolStats,
@@ -10427,12 +10550,20 @@ _RPC_METHOD_META: Dict[str, Dict] = {
         "returns": "object (transaction)",
     },
     "qtcl_getBlock": {
-        "description": "Block by height or hash",
+        "description": "Block by height or hash (DB-authoritative, includes transactions)",
         "params": [
             {"name": "height", "type": "integer", "required": False},
             {"name": "hash",   "type": "string",  "required": False},
         ],
-        "returns": "object (block)",
+        "returns": "object{height, block_hash, parent_hash, miner_address, transactions[], ...}",
+    },
+    "qtcl_getBlockRange": {
+        "description": "Batch fetch blocks by height range for IBD chain sync (max 100)",
+        "params": [
+            {"name": "from_height", "type": "integer", "required": True},
+            {"name": "to_height",   "type": "integer", "required": True},
+        ],
+        "returns": "object{blocks[], count, from, to}",
     },
     "qtcl_getQuantumMetrics": {
         "description": "Live W-state oracle and lattice metrics",
