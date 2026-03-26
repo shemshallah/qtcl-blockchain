@@ -10370,6 +10370,116 @@ def _rpc_getEvents(params: Any, rpc_id: Any) -> dict:
 
 # ─── Method registry (O(1) dispatch) ─────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# RPC Methods: Oracle Measurement Broadcast (NEW)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _rpc_registerMeasurementSubscriber(params: Any, rpc_id: Any) -> dict:
+    """
+    Subscribe to oracle measurement broadcasts via RPC push (WebSocket-ready).
+    
+    Request:
+        {
+            "jsonrpc": "2.0",
+            "method": "qtcl_registerMeasurementSubscriber",
+            "params": {
+                "client_id": "miner_abc123",
+                "callback_url": "http://localhost:9999/quantum/measurement",
+                "burst_mode": true
+            },
+            "id": 1
+        }
+    
+    Response (success):
+        {
+            "jsonrpc": "2.0",
+            "result": {
+                "registered": true,
+                "subscriber_id": "miner_abc123",
+                "measurement_frequency": "burst" | "throttled",
+                "broadcast_url": "https://qtcl-blockchain.koyeb.app/rpc/_internal/measurement"
+            },
+            "id": 1
+        }
+    """
+    try:
+        if not isinstance(params, dict):
+            return _rpc_error(-32602, "params must be object", rpc_id)
+        
+        client_id = params.get('client_id')
+        callback_url = params.get('callback_url')
+        burst_mode = params.get('burst_mode', False)
+        
+        if not client_id or not callback_url:
+            return _rpc_error(-32602, "client_id and callback_url required", rpc_id)
+        
+        try:
+            from oracle import get_oracle_measurement_broadcaster
+            broadcaster = get_oracle_measurement_broadcaster()
+            success = broadcaster.register_subscriber(client_id, callback_url, burst_mode)
+            
+            if success:
+                return _rpc_ok({
+                    'registered': True,
+                    'subscriber_id': client_id,
+                    'measurement_frequency': 'burst' if burst_mode else 'throttled',
+                    'broadcast_url': "https://qtcl-blockchain.koyeb.app/rpc/_internal/measurement",
+                }, rpc_id)
+            else:
+                return _rpc_error(-32000, "client already subscribed", rpc_id)
+        except ImportError:
+            return _rpc_error(-32603, "broadcast system not initialized", rpc_id)
+    
+    except Exception as e:
+        return _rpc_error(-32603, f"Subscription failed: {str(e)}", rpc_id)
+
+
+def _rpc_unregisterMeasurementSubscriber(params: Any, rpc_id: Any) -> dict:
+    """Unsubscribe from oracle measurement broadcasts."""
+    try:
+        if not isinstance(params, dict):
+            return _rpc_error(-32602, "params must be object", rpc_id)
+        
+        client_id = params.get('client_id')
+        if not client_id:
+            return _rpc_error(-32602, "client_id required", rpc_id)
+        
+        try:
+            from oracle import get_oracle_measurement_broadcaster
+            broadcaster = get_oracle_measurement_broadcaster()
+            success = broadcaster.unregister_subscriber(client_id)
+            
+            return _rpc_ok({'unregistered': success}, rpc_id)
+        except ImportError:
+            return _rpc_error(-32603, "broadcast system not initialized", rpc_id)
+    
+    except Exception as e:
+        return _rpc_error(-32603, f"Unsubscribe failed: {str(e)}", rpc_id)
+
+
+def _rpc_listMeasurementSubscribers(params: Any, rpc_id: Any) -> dict:
+    """
+    List all active measurement subscribers (operator introspection).
+    Returns active subscriber count, per-subscriber metrics, and broadcast controller status.
+    """
+    try:
+        from oracle import get_oracle_measurement_broadcaster
+        broadcaster = get_oracle_measurement_broadcaster()
+        status = broadcaster.get_status()
+        
+        return _rpc_ok({
+            'active_count': status.get('active_subscribers', 0),
+            'is_running': status.get('is_running', False),
+            'metrics': status.get('metrics', {}),
+            'subscribers': status.get('subscribers', []),
+        }, rpc_id)
+    
+    except ImportError:
+        return _rpc_error(-32603, "broadcast system not initialized", rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"List failed: {str(e)}", rpc_id)
+
+
 _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getBlockHeight":    _rpc_getBlockHeight,
     "qtcl_getBalance":        _rpc_getBalance,
@@ -10385,6 +10495,10 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getOracleRegistry": _rpc_getOracleRegistry,
     "qtcl_getOracleRecord":   _rpc_getOracleRecord,
     "qtcl_submitOracleReg":   _rpc_submitOracleReg,
+    # ── Oracle Measurement Broadcast (NEW) ────────────────────────────────────
+    "qtcl_registerMeasurementSubscriber": _rpc_registerMeasurementSubscriber,
+    "qtcl_unregisterMeasurementSubscriber": _rpc_unregisterMeasurementSubscriber,
+    "qtcl_listMeasurementSubscribers": _rpc_listMeasurementSubscribers,
 }
 
 _RPC_METHOD_META: Dict[str, Dict] = {
@@ -10476,6 +10590,28 @@ _RPC_METHOD_META: Dict[str, Dict] = {
              "note": "Omit to receive unsigned tx_template; include to submit"},
         ],
         "returns": "object{status, tx_hash, oracle_addr, check_url} or {status: tx_template_issued, tx_template}",
+    },
+    # ── Oracle Measurement Broadcast Methods (NEW) ────────────────────────────
+    "qtcl_registerMeasurementSubscriber": {
+        "description": "Subscribe to oracle measurement broadcasts via RPC push (WebSocket-ready)",
+        "params": [
+            {"name": "client_id",    "type": "string",  "required": True,  "note": "Unique identifier (peer_id, miner_id)"},
+            {"name": "callback_url", "type": "string",  "required": True,  "note": "Target URL to POST /rpc/_internal/measurement"},
+            {"name": "burst_mode",   "type": "boolean", "required": False, "default": False, "note": "True=every snapshot, False=throttled to 1/sec"},
+        ],
+        "returns": "object{registered, subscriber_id, measurement_frequency, broadcast_url}",
+    },
+    "qtcl_unregisterMeasurementSubscriber": {
+        "description": "Unsubscribe from oracle measurement broadcasts",
+        "params": [
+            {"name": "client_id", "type": "string", "required": True},
+        ],
+        "returns": "object{unregistered}",
+    },
+    "qtcl_listMeasurementSubscribers": {
+        "description": "List all active measurement subscribers (operator introspection)",
+        "params": [],
+        "returns": "object{active_count, is_running, metrics, subscribers[]}",
     },
 }
 
@@ -10687,6 +10823,97 @@ def rpc_hlwe_system_info():
             "timestamp": time.time(),
         }), 500
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Oracle Measurement Broadcast Routes (NEW)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@app.route("/api/broadcast/status", methods=["GET"])
+def api_broadcast_status():
+    """
+    GET /api/broadcast/status — Oracle measurement broadcast controller status.
+    Operator dashboard: inspect active subscribers, queue depth, metrics.
+    
+    Response:
+        {
+            "active_subscribers": 5,
+            "is_running": true,
+            "persist_queue_size": 42,
+            "ring_buffer_size": 100,
+            "metrics": {
+                "broadcasts_sent": 12345,
+                "broadcasts_failed": 23,
+                ...
+            },
+            "subscribers": [
+                {
+                    "client_id": "miner_abc",
+                    "burst_mode": true,
+                    "send_count": 456,
+                    "error_count": 1,
+                    ...
+                },
+                ...
+            ]
+        }
+    """
+    try:
+        from oracle import get_oracle_measurement_broadcaster
+        broadcaster = get_oracle_measurement_broadcaster()
+        status = broadcaster.get_status()
+        return jsonify(status), 200
+    except ImportError:
+        return jsonify({
+            'error': 'broadcast system not initialized',
+            'status': 'unavailable'
+        }), 503
+    except Exception as e:
+        logger.error(f"[BROADCAST-STATUS] Error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route("/rpc/_internal/measurement", methods=["POST"])
+def rpc_measurement_broadcast_endpoint():
+    """
+    POST /rpc/_internal/measurement — Receive oracle measurement broadcast from controller.
+    
+    This endpoint is called by the RPC broadcast controller to distribute oracle 
+    snapshots to subscribed clients. In normal operation, external callers should 
+    use qtcl_registerMeasurementSubscriber RPC method to subscribe.
+    
+    Request (from broadcast controller):
+        {
+            "timestamp_ns": 1234567890000000,
+            "cycle": 42,
+            "w_state": {
+                "fidelity": 0.7542,
+                "coherence": 0.7605,
+                ...
+            },
+            ...
+        }
+    
+    Response:
+        { "status": "processed" }
+    """
+    try:
+        snap = request.get_json()
+        if not snap:
+            return jsonify({'status': 'invalid', 'error': 'no JSON payload'}), 400
+        
+        # Log broadcast receipt (optional, for debugging)
+        cycle = snap.get('cycle', '?')
+        fidelity = snap.get('w_state', {}).get('fidelity', 0)
+        logger.debug(
+            f"[BROADCAST-ENDPOINT] Received measurement | cycle={cycle} | "
+            f"fidelity={fidelity:.4f}"
+        )
+        
+        return jsonify({'status': 'processed'}), 200
+    
+    except Exception as e:
+        logger.error(f"[BROADCAST-ENDPOINT] Error: {e}")
+        return jsonify({'status': 'error', 'error': str(e)}), 500
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PYTH PRICE ORACLE REST ROUTES
