@@ -429,6 +429,13 @@ def _deferred_oracle_init() -> None:
         ORACLE_W_STATE_MANAGER = _owsm
         ORACLE_AVAILABLE = True
         logger.info("[ORACLE] ✅ Oracle engine initialised (deferred background thread)")
+        # ── START THE 5-NODE MEASUREMENT STREAM ──────────────────────────────────
+        if ORACLE_W_STATE_MANAGER is not None:
+            _ok = ORACLE_W_STATE_MANAGER.start()
+            if _ok:
+                logger.info("[ORACLE] ✅ Measurement stream started — 5-node snapshot acquisition active")
+            else:
+                logger.error("[ORACLE] ❌ Measurement stream failed to start")
     except ImportError as _ie:
         logger.warning(f"[ORACLE] ⚠️  Oracle not available (ImportError): {_ie}")
     except Exception as _ex:
