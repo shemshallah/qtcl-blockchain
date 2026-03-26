@@ -393,6 +393,8 @@ def _deferred_lattice_init() -> None:
     QuantumLatticeController initializes the spatial-temporal field, quantum execution engine,
     W-state constructor, and non-Markovian noise bath.  This runs in a daemon thread to let
     gunicorn bind port 8000 immediately; lattice becomes available within ~2-5s.
+    
+    CRITICAL: Also starts the oracle measurement stream AFTER wiring lattice.
     """
     global LATTICE
     try:
@@ -401,10 +403,22 @@ def _deferred_lattice_init() -> None:
         logger.info("[LATTICE-INIT] ✅ QuantumLatticeController instantiated")
         LATTICE.start()
         logger.info("[LATTICE-INIT] ✅ Lattice daemon started — spatial-temporal field active, coherence maintenance loop running")
+        
         # ── WIRE LATTICE INTO ORACLE ──────────────────────────────────────────────
         from globals import set_lattice
         set_lattice(LATTICE)
-        logger.info("[LATTICE-INIT] ✅ Lattice registered with oracle — measurement stream unpaused")
+        logger.info("[LATTICE-INIT] ✅ Lattice registered with oracle — ready for measurement")
+        
+        # ── NOW START ORACLE MEASUREMENT STREAM (after lattice is wired) ──────────
+        global ORACLE_W_STATE_MANAGER
+        if ORACLE_W_STATE_MANAGER is not None:
+            _ok = ORACLE_W_STATE_MANAGER.start()
+            if _ok:
+                logger.info("[LATTICE-INIT] ✅ Oracle measurement stream started — 5-node snapshot acquisition active")
+            else:
+                logger.error("[LATTICE-INIT] ❌ Oracle measurement stream failed to start")
+        else:
+            logger.warning("[LATTICE-INIT] ⚠️  ORACLE_W_STATE_MANAGER not ready yet")
     except ImportError as _ie:
         logger.error(f"[LATTICE-INIT] ❌ QuantumLatticeController import failed: {_ie}")
     except Exception as _ex:
@@ -425,6 +439,8 @@ def _deferred_oracle_init() -> None:
     oracle.py spends 16-28 s at module-level waiting for QRNG network sources
     to respond (or time out).  Running this in a daemon thread lets gunicorn
     bind port 8000 and start answering /health checks in < 2 s.
+    
+    NOTE: Do NOT start the measurement stream here — wait for LATTICE initialization.
     """
     global ORACLE, ORACLE_W_STATE_MANAGER, ORACLE_AVAILABLE
     try:
@@ -433,13 +449,8 @@ def _deferred_oracle_init() -> None:
         ORACLE_W_STATE_MANAGER = _owsm
         ORACLE_AVAILABLE = True
         logger.info("[ORACLE] ✅ Oracle engine initialised (deferred background thread)")
-        # ── START THE 5-NODE MEASUREMENT STREAM ──────────────────────────────────
-        if ORACLE_W_STATE_MANAGER is not None:
-            _ok = ORACLE_W_STATE_MANAGER.start()
-            if _ok:
-                logger.info("[ORACLE] ✅ Measurement stream started — 5-node snapshot acquisition active")
-            else:
-                logger.error("[ORACLE] ❌ Measurement stream failed to start")
+        # ⚠️  WAIT for LATTICE before starting measurement stream
+        # _deferred_lattice_init will call ORACLE_W_STATE_MANAGER.start() after set_lattice()
     except ImportError as _ie:
         logger.warning(f"[ORACLE] ⚠️  Oracle not available (ImportError): {_ie}")
     except Exception as _ex:
