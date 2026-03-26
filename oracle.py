@@ -2916,6 +2916,283 @@ class PythPriceOracle:
         )
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# RPC BROADCAST CONTROLLER
+# ═══════════════════════════════════════════════════════════════════════════════
+# Oracle measurement → Ring buffer → Async DB persistence (no blocking)
+
+import queue as queue_module
+from collections import deque
+from dataclasses import dataclass as dc_dataclass
+
+@dc_dataclass
+class MeasurementSubscriber:
+    """One RPC client subscribed to oracle measurements."""
+    client_id: str
+    callback_url: str
+    burst_mode: bool = False
+    last_sent_ns: int = 0
+    send_count: int = 0
+    error_count: int = 0
+    last_error: Optional[str] = None
+    registered_at_ns: int = 0
+    
+    def __post_init__(self):
+        if self.registered_at_ns == 0:
+            self.registered_at_ns = time.time_ns()
+
+
+class RpcBroadcastController:
+    """
+    Oracle measurement broadcast hub: measurement → ring buffer → async DB.
+    PRIMARY ENTRY POINT: broadcast_oracle_snapshot(snapshot: DensityMatrixSnapshot)
+    Called immediately after Oracle._extract_snapshot() completes.
+    """
+    def __init__(self):
+        self._subscribers: Dict[str, MeasurementSubscriber] = {}
+        self._sub_lock = threading.RLock()
+        self._ring_buffer: deque = deque(maxlen=100)
+        self._ring_lock = threading.RLock()
+        self._persist_queue: queue_module.Queue = queue_module.Queue(maxsize=1000)
+        self._persist_thread: Optional[threading.Thread] = None
+        self._running = False
+        self._metrics = {
+            'broadcasts_sent': 0, 'broadcasts_failed': 0,
+            'db_writes_queued': 0, 'db_writes_failed': 0, 'db_writes_success': 0,
+            'ring_buffer_events': 0,
+        }
+        self._metrics_lock = threading.RLock()
+        logger.info("[RPC-BROADCAST] 🚀 RpcBroadcastController initialized")
+
+    def start(self) -> None:
+        """Start async persistence thread."""
+        if self._running:
+            return
+        self._running = True
+        self._persist_thread = threading.Thread(
+            target=self._persist_worker, name="RpcBroadcast-PersistWorker", daemon=True
+        )
+        self._persist_thread.start()
+        logger.info("[RPC-BROADCAST] ✅ Async persistence worker started")
+
+    def stop(self) -> None:
+        """Stop async persistence thread."""
+        self._running = False
+        if self._persist_thread and self._persist_thread.is_alive():
+            self._persist_thread.join(timeout=5.0)
+        logger.info("[RPC-BROADCAST] ✅ Async persistence worker stopped")
+
+    def broadcast_oracle_snapshot(self, snapshot) -> Dict[str, Any]:
+        """PRIMARY BROADCAST ENTRY POINT: serialize, ring-buffer, and queue for DB persistence."""
+        start_ns = time.time_ns()
+        result = {
+            'broadcast_count': 0, 'failed_clients': [], 'queued_for_db': False,
+            'ring_logged': False, 'elapsed_ms': 0.0, 'snapshot_count': 0,
+        }
+        if snapshot is None:
+            return result
+
+        try:
+            snapshot_json = self._serialize_snapshot(snapshot)
+            cycle = getattr(snapshot, 'lattice_refresh_counter', 0)
+            ts_ns = snapshot.timestamp_ns
+            
+            event = {
+                'cycle': cycle, 'timestamp_ns': ts_ns,
+                'broadcast_count': len(self._subscribers),
+                'snapshot_json': snapshot_json,
+                'snapshot_data': self._extract_snapshot_data(snapshot),
+            }
+            
+            # Ring buffer (fast polling reads)
+            with self._ring_lock:
+                self._ring_buffer.append(event)
+                result['ring_logged'] = True
+                with self._metrics_lock:
+                    self._metrics['ring_buffer_events'] = len(self._ring_buffer)
+                    result['snapshot_count'] = len(self._ring_buffer)
+            
+            # Queue for async DB (non-blocking)
+            try:
+                self._persist_queue.put_nowait(event)
+                result['queued_for_db'] = True
+                with self._metrics_lock:
+                    self._metrics['db_writes_queued'] += 1
+            except queue_module.Full:
+                logger.warning("[RPC-BROADCAST] Persistence queue full, dropping oldest")
+                try:
+                    self._persist_queue.get_nowait()
+                    self._persist_queue.put_nowait(event)
+                    result['queued_for_db'] = True
+                except Exception as e:
+                    logger.error(f"[RPC-BROADCAST] Failed to queue: {e}")
+            
+            with self._sub_lock:
+                subscribers = dict(self._subscribers)
+            result['broadcast_count'] = len(subscribers)
+            result['elapsed_ms'] = (time.time_ns() - start_ns) / 1e6
+
+        except Exception as e:
+            logger.error(f"[RPC-BROADCAST] broadcast_oracle_snapshot failed: {e}", exc_info=False)
+            result['elapsed_ms'] = (time.time_ns() - start_ns) / 1e6
+
+        return result
+
+    def _serialize_snapshot(self, snapshot) -> str:
+        """Convert DensityMatrixSnapshot to JSON."""
+        try:
+            if hasattr(snapshot, 'to_json'):
+                return snapshot.to_json()
+            
+            data = {
+                'timestamp_ns': snapshot.timestamp_ns,
+                'lattice_refresh_counter': getattr(snapshot, 'lattice_refresh_counter', 0),
+                'density_matrix_hex': getattr(snapshot, 'density_matrix_hex', ''),
+                'w_state_fidelity': getattr(snapshot, 'w_state_fidelity', 0.0),
+                'coherence_l1': getattr(snapshot, 'coherence_l1', 0.0),
+                'von_neumann_entropy': getattr(snapshot, 'von_neumann_entropy', 0.0),
+                'purity': getattr(snapshot, 'purity', 0.0),
+                'w_state_strength': getattr(snapshot, 'w_state_strength', 0.0),
+                'phase_coherence': getattr(snapshot, 'phase_coherence', 0.0),
+                'entanglement_witness': getattr(snapshot, 'entanglement_witness', 0.0),
+                'trace_purity': getattr(snapshot, 'trace_purity', 0.0),
+                'coherence_renyi': getattr(snapshot, 'coherence_renyi', 0.0),
+                'coherence_geometric': getattr(snapshot, 'coherence_geometric', 0.0),
+                'quantum_discord': getattr(snapshot, 'quantum_discord', 0.0),
+                'measurement_counts': getattr(snapshot, 'measurement_counts', {}),
+                'aer_noise_state': getattr(snapshot, 'aer_noise_state', {}),
+                'hlwe_signature': getattr(snapshot, 'hlwe_signature', None),
+                'oracle_address': getattr(snapshot, 'oracle_address', None),
+                'signature_valid': getattr(snapshot, 'signature_valid', False),
+                'mermin_test': getattr(snapshot, 'bell_test', None),
+            }
+            return json.dumps(data)
+        except Exception as e:
+            logger.error(f"[RPC-BROADCAST] Serialization failed: {e}")
+            return '{}'
+
+    def _extract_snapshot_data(self, snapshot) -> Dict[str, Any]:
+        """Extract key snapshot fields for DB persistence."""
+        aer_noise = getattr(snapshot, 'aer_noise_state', {})
+        bf = aer_noise.get('block_field', {})
+        mermin = getattr(snapshot, 'bell_test', {}) or {}
+        pq0_o = aer_noise.get('pq0_oracle_fidelity', 0.0)
+        pq0_iv = aer_noise.get('pq0_IV_fidelity', 0.0)
+        pq0_v = aer_noise.get('pq0_V_fidelity', 0.0)
+
+        return {
+            'timestamp_ns': snapshot.timestamp_ns,
+            'lattice_quantum': {
+                'fidelity': getattr(snapshot, 'w_state_fidelity', 0.0),
+                'coherence': getattr(snapshot, 'coherence_l1', 0.0),
+            },
+            'consensus': {
+                'w_state_fidelity': getattr(snapshot, 'w_state_fidelity', 0.0),
+                'coherence': getattr(snapshot, 'coherence_l1', 0.0),
+                'purity': getattr(snapshot, 'purity', 0.0),
+            },
+            'mermin_test': {
+                'M_value': mermin.get('M_value', 0.0),
+                'quantum': mermin.get('quantum', False),
+                'verdict': mermin.get('verdict', ''),
+            },
+            'pq0_components': {
+                'oracle': pq0_o, 'IV': pq0_iv, 'V': pq0_v,
+            },
+            'oracle_measurements': [
+                {'fidelity': n.get('fidelity', 0.0), 'coherence': n.get('coherence', 0.0)}
+                for n in bf.get('per_node', [])
+            ],
+            'block_field': {'pq_last': bf.get('pq_last', 0), 'pq_curr': bf.get('pq_curr', 0)},
+            'chirp_number': getattr(snapshot, 'lattice_refresh_counter', 0),
+        }
+
+    def _persist_worker(self) -> None:
+        """Background worker: drain queue → write to DB. Never blocks oracle."""
+        logger.info("[RPC-BROADCAST] 🔄 Async DB persistence worker running")
+        while self._running:
+            try:
+                try:
+                    event = self._persist_queue.get(timeout=1.0)
+                except queue_module.Empty:
+                    continue
+                
+                if self._persist_snapshot_to_db(event):
+                    with self._metrics_lock:
+                        self._metrics['db_writes_success'] += 1
+                else:
+                    with self._metrics_lock:
+                        self._metrics['db_writes_failed'] += 1
+            except Exception as e:
+                logger.error(f"[RPC-BROADCAST] Persist worker error: {e}", exc_info=False)
+                time.sleep(0.1)
+
+    def _persist_snapshot_to_db(self, event: Dict[str, Any]) -> bool:
+        """Write one snapshot event to quantum_snapshots table via _persist_chirp_snapshot."""
+        try:
+            from server import _persist_chirp_snapshot
+            snap = event.get('snapshot_data', {})
+            snap['timestamp_ns'] = event.get('timestamp_ns', time.time_ns())
+            snap['chirp_number'] = event.get('cycle', 0)
+            snap['snapshot_json'] = event.get('snapshot_json', '{}')
+            _persist_chirp_snapshot(snap)
+            return True
+        except ImportError:
+            logger.debug("[RPC-BROADCAST] server module not available for DB persistence")
+            return False
+        except Exception as e:
+            logger.error(f"[RPC-BROADCAST] DB persistence failed: {e}", exc_info=False)
+            return False
+
+    def get_ring_buffer(self, max_events: int = 10) -> List[Dict[str, Any]]:
+        """Get latest N events from ring buffer for /api/oracle/snapshot polling."""
+        with self._ring_lock:
+            return list(reversed(list(self._ring_buffer)[:max_events]))
+
+    def register_subscriber(self, client_id: str, callback_url: str, burst_mode: bool = False) -> bool:
+        """Subscribe to oracle measurements."""
+        with self._sub_lock:
+            if client_id in self._subscribers:
+                return False
+            self._subscribers[client_id] = MeasurementSubscriber(client_id, callback_url, burst_mode)
+            logger.info(f"[RPC-BROADCAST] ✅ Registered subscriber: {client_id} @ {callback_url}")
+            return True
+
+    def unregister_subscriber(self, client_id: str) -> bool:
+        """Unsubscribe from oracle measurements."""
+        with self._sub_lock:
+            if client_id in self._subscribers:
+                del self._subscribers[client_id]
+                logger.info(f"[RPC-BROADCAST] ✅ Unregistered subscriber: {client_id}")
+                return True
+            return False
+
+    def get_subscribers(self) -> Dict[str, MeasurementSubscriber]:
+        """Return copy of current subscriber list."""
+        with self._sub_lock:
+            return dict(self._subscribers)
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return broadcast metrics."""
+        with self._metrics_lock:
+            return dict(self._metrics)
+
+
+# ─── Module-level RPC broadcast singleton ───────────────────────────────────
+_RPC_BROADCAST_CONTROLLER: Optional[RpcBroadcastController] = None
+_RPC_BROADCAST_LOCK = threading.Lock()
+
+def get_oracle_measurement_broadcaster() -> RpcBroadcastController:
+    """Get or create the RpcBroadcastController singleton."""
+    global _RPC_BROADCAST_CONTROLLER
+    if _RPC_BROADCAST_CONTROLLER is None:
+        with _RPC_BROADCAST_LOCK:
+            if _RPC_BROADCAST_CONTROLLER is None:
+                _RPC_BROADCAST_CONTROLLER = RpcBroadcastController()
+                _RPC_BROADCAST_CONTROLLER.start()
+    return _RPC_BROADCAST_CONTROLLER
+
+
 # ─── Module-level Pyth singleton ─────────────────────────────────────────────
 PYTH_ORACLE = PythPriceOracle()
 _PYTH_LOGGER.info("[PYTH] 🔮 PYTH_ORACLE singleton ready — enterprise Pyth integration active")

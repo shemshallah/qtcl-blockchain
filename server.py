@@ -2559,14 +2559,25 @@ class SnapshotAutonomousHealer:
 
 @app.route('/api/oracle/snapshot', methods=['GET'])
 def oracle_snapshot_json():
-    """GET /api/oracle/snapshot — Returns latest broadcast snapshot with density_matrix_hex."""
+    """GET /api/oracle/snapshot — Returns latest broadcast snapshot with density_matrix_hex and snapshot count."""
     try:
         from oracle import get_oracle_measurement_broadcaster
         broadcaster = get_oracle_measurement_broadcaster()
         ring = broadcaster.get_ring_buffer(max_events=1)
         
+        snapshot_count = 0
+        try:
+            full_ring = broadcaster.get_ring_buffer(max_events=100)
+            snapshot_count = len(full_ring)
+        except:
+            pass
+        
         if not ring:
-            return jsonify({'error': 'No measurements yet', 'ready': False}), 503
+            return jsonify({
+                'error': 'No measurements yet', 
+                'ready': False,
+                'snapshots_available': snapshot_count,
+            }), 503
         
         latest_event = ring[0]
         
@@ -2583,6 +2594,7 @@ def oracle_snapshot_json():
             'timestamp_ns': latest_event['timestamp_ns'],
             'broadcast_count': latest_event['broadcast_count'],
             'broadcast_status': 'active',
+            'snapshots_available': snapshot_count,
         }
         
         # Merge snapshot data
@@ -2590,7 +2602,7 @@ def oracle_snapshot_json():
             response.update(snapshot_data)
         
         # Ensure density_matrix_hex for client
-        if 'density_matrix_hex' not in response:
+        if 'density_matrix_hex' not in response or not response['density_matrix_hex']:
             snap_str = json.dumps(snapshot_data, sort_keys=True)
             response['density_matrix_hex'] = hashlib.sha3_256(snap_str.encode()).hexdigest() * 4
         
@@ -2598,7 +2610,39 @@ def oracle_snapshot_json():
     
     except Exception as e:
         logger.error(f"[ORACLE-SNAPSHOT] {e}")
-        return jsonify({'error': str(e), 'ready': False}), 503
+        return jsonify({'error': str(e), 'ready': False, 'snapshots_available': 0}), 503
+
+
+@app.route('/api/broadcast/metrics', methods=['GET'])
+def broadcast_metrics():
+    """GET /api/broadcast/metrics — Returns RPC broadcaster metrics and status."""
+    try:
+        from oracle import get_oracle_measurement_broadcaster
+        broadcaster = get_oracle_measurement_broadcaster()
+        
+        metrics = broadcaster.get_metrics()
+        subscribers = broadcaster.get_subscribers()
+        ring_size = len(broadcaster.get_ring_buffer(max_events=100))
+        
+        return jsonify({
+            'status': 'running',
+            'metrics': metrics,
+            'subscriber_count': len(subscribers),
+            'subscribers': [
+                {
+                    'client_id': sub.client_id,
+                    'burst_mode': sub.burst_mode,
+                    'send_count': sub.send_count,
+                    'error_count': sub.error_count,
+                    'registered_ago_s': (time.time_ns() - sub.registered_at_ns) / 1e9,
+                }
+                for sub in subscribers.values()
+            ],
+            'ring_buffer_size': ring_size,
+        }), 200
+    except Exception as e:
+        logger.error(f"[BROADCAST-METRICS] {e}")
+        return jsonify({'error': str(e), 'status': 'error'}), 503
 
 
 def _ensure_quantum_snapshots_table() -> bool:
