@@ -1863,7 +1863,7 @@ class DifficultyManager:
     FLOOR               = 5     # floor at 5 — fractional target 5.25 sits above this
     CEILING             = ABS_MAX
 
-    def __init__(self, initial_difficulty: float = 5.25,
+    def __init__(self, initial_difficulty: float = 5,
                  seed_ewma: float = None, seed_last_wall: float = None):
         import math as _m
         self._math = _m
@@ -2026,9 +2026,9 @@ def get_difficulty_manager() -> DifficultyManager:
     except Exception as _de:
         logger.debug(f"[DIFFICULTY] DB bootstrap: {_de}")
 
-    # Clamp to FLOOR (6) — never restore a difficulty below the floor
+    # Clamp to FLOOR (5) — never restore a difficulty below the floor
     initial = max(DifficultyManager.FLOOR,
-                  db_difficulty if db_difficulty is not None else 6)
+                  db_difficulty if db_difficulty is not None else 5)
 
     _difficulty_manager = DifficultyManager(
         initial_difficulty = initial,
