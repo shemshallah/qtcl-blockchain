@@ -42,8 +42,9 @@ import secrets
 import logging
 import threading
 from typing import Dict, Any, Optional, List, Tuple, Set, Callable, Union, Deque
+from collections import deque, OrderedDict
 import numpy as np
-from collections import deque
+
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # ENTERPRISE GRADE INITIALIZATION: QUANTUM ENTROPY + HLWE CRYPTOGRAPHY
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -3615,6 +3616,12 @@ def rpc_health():
         "uptime_s":         round(time.time() - _SERVER_START_TIME, 1),
         "ts":               time.time(),
     }), 200
+
+
+@app.route("/health", methods=["GET"])
+def health_bare():
+    """GET /health — bare 200 OK for Koyeb health check (no JSON, fast)."""
+    return "", 200
 
 
 @app.route("/rpc/hlwe/system-info", methods=["GET"])
