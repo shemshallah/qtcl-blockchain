@@ -43,7 +43,7 @@ import logging
 import threading
 from typing import Dict, Any, Optional, List, Tuple, Set, Callable, Union, Deque
 import numpy as np
-
+from collections import deque
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # ENTERPRISE GRADE INITIALIZATION: QUANTUM ENTROPY + HLWE CRYPTOGRAPHY
 # ═══════════════════════════════════════════════════════════════════════════════════════
