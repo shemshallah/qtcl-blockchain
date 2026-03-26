@@ -1203,7 +1203,7 @@ class DatabasePool:
                 # min=1: open only ONE connection on pool creation — avoids
                 # exhausting Supabase session-mode slots during retry storms.
                 min_connections = 1
-                max_connections = int(os.getenv('DB_POOL_MAX', '10'))
+                max_connections = int(os.getenv('DB_POOL_MAX', '40'))  # ← Increased from 10 to 40
                 logger.info(f"[DB] Initializing app-level pooling: min={min_connections}, max={max_connections}")
                 logger.info(f"[DB] Connecting to Supabase pooler (aws-0-us-west-2.pooler.supabase.com)")
                 self.pool = psycopg2_pool.ThreadedConnectionPool(
@@ -5758,6 +5758,7 @@ def block_by_height(height: int):
 
 
 @app.route('/api/chain', methods=['GET'])
+@app.route('/api/chain/status', methods=['GET'])  # ← Alias: clients hammer this, prevent 404 drain
 def chain_status():
     """Full chain state from database with validation status"""
     try:
@@ -5909,6 +5910,42 @@ def chain_status():
             '_genesis_ready': True,
             '_error_recovery': str(e)[:50]
         }), 200  # Return 200 with genesis-ready indicator, not 500
+
+
+@app.route('/api/pool/status', methods=['GET'])
+def pool_status():
+    """🔬 Diagnostics: Return live database connection pool state"""
+    try:
+        pool_info = {
+            'initialized': db_pool._initialized,
+            'use_pooling': db_pool.use_pooling,
+            'http_mode': db_pool._http_mode,
+            'pool_exists': db_pool.pool is not None,
+        }
+        
+        # Try to get live pool stats if available
+        if db_pool.pool and hasattr(db_pool.pool, '_pool'):
+            # psycopg2.pool.ThreadedConnectionPool
+            try:
+                pool_info['available_connections'] = db_pool.pool._available.qsize()
+                pool_info['closed_connections'] = db_pool.pool._closed.qsize() if hasattr(db_pool.pool, '_closed') else 'N/A'
+                pool_info['min_cached'] = db_pool.pool.minconn
+                pool_info['max_cached'] = db_pool.pool.maxconn
+            except Exception:
+                pass
+        elif db_pool.pool and isinstance(db_pool.pool, _SupHTTPPool):
+            # HTTP pool stats
+            try:
+                pool_info['available_http'] = db_pool.pool._available.qsize()
+                pool_info['min_cached'] = db_pool.pool._min
+                pool_info['max_cached'] = db_pool.pool._max
+            except Exception:
+                pass
+        
+        return jsonify(pool_info), 200
+    except Exception as e:
+        logger.error(f"[POOL-STATUS] Error: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/submit_block', methods=['POST'])
@@ -7428,7 +7465,7 @@ def get_address_balance(address: str):
     """Get address balance and transaction count from PostgreSQL wallet"""
     try:
         # Get wallet data directly from PostgreSQL (no UTXO set needed)
-        with _db_pool.cursor() as cur:
+        with get_db_cursor() as cur:
             cur.execute("""
                 SELECT balance, transaction_count, address_type
                 FROM wallet_addresses
