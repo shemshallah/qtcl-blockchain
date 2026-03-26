@@ -2617,6 +2617,25 @@ class SnapshotAutonomousHealer:
 # ══════════════════════════════════════════════════════════════════════════════
 # JSON-RPC 2.0 FLASK ROUTES
 # ══════════════════════════════════════════════════════════════════════════════
+def _get_canonical_node() -> Optional[dict]:
+    """Fallback: fetch canonical node state from module or globals (in-memory)."""
+    try:
+        import globals as _g
+        gn = getattr(_g, "get_canonical_node", None)
+        if callable(gn):
+            return gn()
+    except Exception:
+        pass
+    
+    # Last resort: check module-level state
+    try:
+        _srv = sys.modules[__name__].__dict__
+        cn = _srv.get("_canonical_node") or _srv.get("canonical_node")
+        return cn if isinstance(cn, dict) else None
+    except Exception:
+        return None
+
+
 def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
     """qtcl_getBlockHeight — current chain tip height.
     
@@ -2918,16 +2937,42 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
         if LATTICE is not None:
             try:
                 logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: fetching lattice state")
-                # Use available LATTICE methods instead of non-existent get_state()
-                lm = LATTICE.get_metrics()
-                ls = LATTICE.get_stats()
+                # Safe access to LATTICE methods with fallback
+                lm = {}
+                ls = {}
+                if hasattr(LATTICE, 'get_metrics') and callable(LATTICE.get_metrics):
+                    try:
+                        lm = LATTICE.get_metrics()
+                    except Exception as me:
+                        logger.debug(f"get_metrics() failed: {me}")
+                
+                if hasattr(LATTICE, 'get_stats') and callable(LATTICE.get_stats):
+                    try:
+                        ls = LATTICE.get_stats()
+                    except Exception as se:
+                        logger.debug(f"get_stats() failed: {se}")
+                
+                # Fallback: use LATTICE attributes directly
+                if not lm:
+                    lm = {
+                        "avg_fidelity_100": getattr(LATTICE, 'avg_fidelity_100', 0.0),
+                        "avg_coherence_100": getattr(LATTICE, 'avg_coherence_100', 0.0),
+                    }
+                if not ls:
+                    ls = {
+                        "fidelity": getattr(LATTICE, 'fidelity', 0.0),
+                        "coherence": getattr(LATTICE, 'coherence', 0.0),
+                        "w_state_strength": getattr(LATTICE, 'w_state_strength', 0.0),
+                        "cycle": getattr(LATTICE, 'cycle', 0),
+                    }
+                
                 result["lattice"] = {
                     "fidelity":         lm.get("avg_fidelity_100", ls.get("fidelity", 0.0)),
                     "coherence":        lm.get("avg_coherence_100", ls.get("coherence", 0.0)),
                     "w_state_strength": ls.get("w_state_strength", 0.0),
                     "cycle":            ls.get("cycle", 0),
                     "avg_fidelity_100": lm.get("avg_fidelity_100", 0.0),
-                    "avg_coherence_100":lm.get("avg_coherence_100", 0.0),
+                    "avg_coherence_100": lm.get("avg_coherence_100", 0.0),
                 }
                 logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: lattice metrics obtained")
             except Exception as le:
@@ -3649,51 +3694,8 @@ def rpc_hlwe_system_info():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Oracle Measurement Broadcast Routes (NEW)
+# RPC-only Architecture (no legacy REST endpoints)
 # ──────────────────────────────────────────────────────────────────────────────
-
-def api_broadcast_status():
-    """
-    GET /api/broadcast/status — Oracle measurement broadcast controller status.
-    Operator dashboard: inspect active subscribers, queue depth, metrics.
-    
-    Response:
-        {
-            "active_subscribers": 5,
-            "is_running": true,
-            "persist_queue_size": 42,
-            "ring_buffer_size": 100,
-            "metrics": {
-                "broadcasts_sent": 12345,
-                "broadcasts_failed": 23,
-                ...
-            },
-            "subscribers": [
-                {
-                    "client_id": "miner_abc",
-                    "burst_mode": true,
-                    "send_count": 456,
-                    "error_count": 1,
-                    ...
-                },
-                ...
-            ]
-        }
-    """
-    try:
-        from oracle import get_oracle_measurement_broadcaster
-        broadcaster = get_oracle_measurement_broadcaster()
-        status = broadcaster.get_status()
-        return jsonify(status), 200
-    except ImportError:
-        return jsonify({
-            'error': 'broadcast system not initialized',
-            'status': 'unavailable'
-        }), 503
-    except Exception as e:
-        logger.error(f"[BROADCAST-STATUS] Error: {e}")
-        return jsonify({'error': str(e)}), 500
-
 
 @app.route("/rpc/_internal/measurement", methods=["POST"])
 def rpc_measurement_broadcast_endpoint():
