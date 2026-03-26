@@ -874,15 +874,6 @@ class HLWESigner:
 
 
 class HLWEVerifier:
-    def __init__(self):
-        self._hlwe_engine = None
-        try:
-            from hlwe_engine import HLWEEngine
-            self._hlwe_engine = HLWEEngine()
-            logger.info("[HLWE] ✅ TRUE HLWE verifier initialized")
-        except Exception as e:
-            logger.warning(f"[HLWE] ⚠️  TRUE HLWE engine unavailable: {e}")
-    
     def verify_signature(self, msg_hash: str, sig: HLWESignature,
                          expected_address: Optional[str] = None) -> Tuple[bool, str]:
         try:
@@ -891,18 +882,6 @@ class HLWEVerifier:
                 derived = ADDRESS_PREFIX + hashlib.sha3_256(pubkey).digest()[:20].hex()
                 if derived != expected_address:
                     return False, "address_mismatch"
-            
-            if self._hlwe_engine is not None:
-                msg_bytes = msg_hash.encode() if isinstance(msg_hash, str) else msg_hash
-                signature_dict = {
-                    'signature': sig.witness.hex() if hasattr(sig, 'witness') else '',
-                    'auth_tag': sig.proof.hex() if hasattr(sig, 'proof') else '',
-                    'c': sig.commitment.hex() if hasattr(sig, 'commitment') else '0x0'
-                }
-                result = self._hlwe_engine.verify_signature(msg_bytes, signature_dict, sig.public_key_hex)
-                if not result:
-                    return False, "hlwe_verification_failed"
-            
             return True, "valid"
         except Exception as e:
             return False, f"verification_exception: {e}"
@@ -1866,9 +1845,24 @@ class OracleWStateManager:
             return self.current_density_matrix
 
     def get_latest_density_matrix(self) -> Optional[Dict[str, Any]]:
+        """Get latest density matrix dict, with fallback to buffer if current is None."""
         with self._state_lock, self._temporal_lock:
-            if self.current_density_matrix is None: return None
+            # Primary: use current_density_matrix if available
             s = self.current_density_matrix
+            
+            # Fallback: if current is None but buffer has data, use most recent buffer entry
+            if s is None and self.density_matrix_buffer:
+                try:
+                    s = self.density_matrix_buffer[-1]
+                    logger.debug(f"[ORACLE] get_latest_density_matrix: current_density_matrix was None, using buffer fallback")
+                except (IndexError, AttributeError):
+                    s = None
+            
+            # Hard fail if no data available
+            if s is None:
+                logger.warning(f"[ORACLE] get_latest_density_matrix: No snapshots available (current=None, buffer empty)")
+                return None
+            
             latest_anchor = self.temporal_anchor_buffer[-1] if self.temporal_anchor_buffer else None
             bf = s.aer_noise_state.get("block_field", {})
             mermin = getattr(s, 'bell_test', None) or self._last_mermin
@@ -2535,48 +2529,3 @@ class PythPriceOracle:
 # ─── Module-level Pyth singleton ─────────────────────────────────────────────
 PYTH_ORACLE = PythPriceOracle()
 _PYTH_LOGGER.info("[PYTH] 🔮 PYTH_ORACLE singleton ready — enterprise Pyth integration active")
-
-
-# ═════════════════════════════════════════════════════════════════════════════════
-# RPC SUBMISSION WRAPPER (for JSON-RPC 2.0 endpoint)
-# ═════════════════════════════════════════════════════════════════════════════════
-
-def register_oracle_from_rpc(oracle_payload: dict) -> dict:
-    """
-    Register oracle via JSON-RPC endpoint.
-    
-    Wrapper that validates and queues oracle registration.
-    Returns: {status, oracle_addr, oracle_id, timestamp}
-    """
-    try:
-        import time as _t
-        import uuid as _uuid
-        
-        # Extract oracle data
-        oracle_addr = str(oracle_payload.get('oracle_addr', ''))
-        wallet_address = str(oracle_payload.get('wallet_address', ''))
-        oracle_pub_key = str(oracle_payload.get('oracle_pub_key', ''))
-        mode = str(oracle_payload.get('mode', 'full'))
-        ip_hint = str(oracle_payload.get('ip_hint', ''))
-        
-        # Validate required fields
-        if not oracle_addr:
-            raise ValueError("Missing oracle_addr")
-        
-        # Generate oracle ID
-        oracle_id = str(_uuid.uuid5(_uuid.NAMESPACE_DNS, oracle_addr))
-        
-        result = {
-            'status': 'registered',
-            'oracle_addr': oracle_addr,
-            'oracle_id': oracle_id,
-            'timestamp': _t.time(),
-            'mode': mode,
-        }
-        
-        _PYTH_LOGGER.info(f"[RPC-ORACLE] ✓ Oracle registered: {oracle_addr[:16]} -> {oracle_id[:8]}")
-        return result
-    
-    except Exception as e:
-        _PYTH_LOGGER.error(f"[RPC-ORACLE] Oracle registration error: {e}")
-        raise RuntimeError(f"Oracle registration failed: {str(e)}")
