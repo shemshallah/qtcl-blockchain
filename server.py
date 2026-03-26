@@ -383,6 +383,7 @@ except ImportError:
 ORACLE_AVAILABLE = False
 ORACLE = None
 ORACLE_W_STATE_MANAGER = None
+LATTICE = None
 _ORACLE_INIT_EVENT = threading.Event()   # set once oracle is ready (or failed)
 
 def _deferred_oracle_init() -> None:
@@ -2213,6 +2214,16 @@ app.config['JSON_SORT_KEYS'] = False
 # ─── Lazy Metrics Initialization (after all classes defined) ──────────────────
 _metrics_initialized = False
 _metrics_init_lock = threading.RLock()
+
+def _lazy_initialize_metrics_agents():
+    """Stub for lazy metrics initialization (actual init deferred to daemon threads)
+    
+    The real metrics agents (oracle_collector, lattice_metrics, etc.) are initialized
+    in background daemons to avoid blocking WSGI startup. This function exists to
+    prevent NameError if called during early WSGI phase, but does nothing since the
+    agents are already initialized to None in _METRICS_AGENTS dict.
+    """
+    pass
 
 @app.before_request
 def _init_metrics_on_first_request():
@@ -4720,6 +4731,7 @@ def robots_txt():
         mimetype='text/plain'
     )
 
+@app.route('/health', methods=['GET'])
 @app.route('/api/health', methods=['GET'])
 def health():
     """Detailed health check endpoint — real values only, null when unavailable."""
@@ -9518,11 +9530,18 @@ def _deferred_start_oracle_measurement_sync():
         time.sleep(poll_interval)
         waited += poll_interval
     
-    logger.critical(
-        f"[ORACLE-SYNC-DEFERRED] ❌ TIMEOUT @ {max_wait}s | "
-        f"LATTICE={LATTICE is not None} ORACLE_MGR={ORACLE_W_STATE_MANAGER is not None} | "
-        f"Daemon NOT started — check initialization order"
-    )
+    try:
+        logger.critical(
+            f"[ORACLE-SYNC-DEFERRED] ❌ TIMEOUT @ {max_wait}s | "
+            f"LATTICE={LATTICE is not None} ORACLE_MGR={ORACLE_W_STATE_MANAGER is not None} | "
+            f"Daemon NOT started — check initialization order"
+        )
+    except NameError:
+        logger.critical(
+            f"[ORACLE-SYNC-DEFERRED] ❌ TIMEOUT @ {max_wait}s | "
+            f"LATTICE undefined | ORACLE_MGR={ORACLE_W_STATE_MANAGER is not None} | "
+            f"Daemon NOT started — check initialization order"
+        )
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 # DAEMON STARTUP ENTRY POINT (module level)
@@ -9611,12 +9630,15 @@ def _start_comprehensive_measurement_feed():
 # Start comprehensive feed daemon — deferred until LATTICE is ready
 def _start_comprehensive_feed_when_ready():
     import time as _t
-    for _ in range(90):  # wait up to 90s
-        if LATTICE is not None:
-            _start_comprehensive_measurement_feed()
-            return
-        _t.sleep(1)
-    logger.warning("[COMPREHENSIVE-FEED] LATTICE never became ready — feed not started")
+    try:
+        for _ in range(90):  # wait up to 90s
+            if LATTICE is not None:
+                _start_comprehensive_measurement_feed()
+                return
+            _t.sleep(1)
+        logger.warning("[COMPREHENSIVE-FEED] LATTICE never became ready — feed not started")
+    except NameError:
+        logger.warning("[COMPREHENSIVE-FEED] LATTICE undefined during initialization")
 
 threading.Thread(target=_start_comprehensive_feed_when_ready, daemon=True,
                  name="ComprehensiveFeedWaiter").start()
