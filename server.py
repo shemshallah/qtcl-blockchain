@@ -1612,8 +1612,7 @@ class MeasurementService:
         self.metrics_lock = threading.RLock()
         self.metrics_dict = {}  # node_id -> {fidelity, coherence, entropy, timestamp}
         
-        # Broadcast queue (thread-safe, non-blocking)
-        self.broadcast_queue = _measurement_queue_mod.Queue(maxsize=10000)
+        # ⚛️  REMOVED: broadcast_queue (measurements now sync via RPC /api/oracle/snapshot cache)
         
         # Thread management
         self.threads = []
@@ -1663,11 +1662,7 @@ class MeasurementService:
                         with self.metrics_lock:
                             self.metrics_dict[node_id] = metric
                         
-                        # Broadcast to SSE queue (non-blocking)
-                        try:
-                            self.broadcast_queue.put_nowait(metric)
-                        except _measurement_queue_mod.Full:
-                            pass  # Drop if queue full (SSE lagging)
+                        # ⚛️  REMOVED: broadcast_queue (RPC cache sync happens in oracle layer)
                         
                         # Yield to other threads
                         time.sleep(0.001)  # 1ms per node
@@ -1767,11 +1762,7 @@ class MeasurementService:
         with self.metrics_lock:
             self.metrics_dict.clear()
         
-        try:
-            while True:
-                self.broadcast_queue.get_nowait()
-        except _measurement_queue_mod.Empty:
-            pass
+        # ⚛️  REMOVED: broadcast_queue flush (no SSE queue anymore)
         
         self.threads.clear()
         logger.info("[MEASURE] ✓ Shutdown complete")
@@ -3325,30 +3316,30 @@ def _start_gossip_subsystem():
         _ensure_gossip_tables()
         _lazy_ensure_oracle_registry()
         GossipPusherThread().start()
-        logger.info("[GOSSIP] Subsystem online — DB gossip store + SSE broadcaster + peer pusher")
+        logger.info("[GOSSIP] Subsystem online — P2P block/TX pusher (measurements via RPC polling)")
     except Exception as e:
         logger.error(f"[GOSSIP] Subsystem start failed: {e}")
 
 
 # ── SSE events endpoint — typed blockchain events ─────────────────────────────
-@app.route('/api/events', methods=['GET'])
-def rpc_events_poll():
-    """Poll recent events (replaces SSE stream). Query params: since (timestamp), types (comma-sep), limit (default 100)."""
-    since = float(request.args.get('since', time.time() - 3600))
-    want_types_str = request.args.get('types', 'all')
-    limit = int(request.args.get('limit', 100))
-    want_types = set(want_types_str.split(',')) if want_types_str != 'all' else {'all'}
-    events = []
-    with _rpc_event_lock:
-        for e in list(_rpc_event_log):
-            if e['ts'] >= since and ('all' in want_types or e['type'] in want_types):
-                events.append(e)
-                if len(events) >= limit:
-                    break
-    return jsonify({'events': events, 'count': len(events)}), 200
-
-
-# ── Peer management endpoints ─────────────────────────────────────────────────
+# @app.route('/api/events', methods=['GET'])
+# def rpc_events_poll():
+#     """Poll recent events (replaces SSE stream). Query params: since (timestamp), types (comma-sep), limit (default 100)."""
+#     since = float(request.args.get('since', time.time() - 3600))
+#     want_types_str = request.args.get('types', 'all')
+#     limit = int(request.args.get('limit', 100))
+#     want_types = set(want_types_str.split(',')) if want_types_str != 'all' else {'all'}
+#     events = []
+#     with _rpc_event_lock:
+#         for e in list(_rpc_event_log):
+#             if e['ts'] >= since and ('all' in want_types or e['type'] in want_types):
+#                 events.append(e)
+#                 if len(events) >= limit:
+#                     break
+#     return jsonify({'events': events, 'count': len(events)}), 200
+# 
+# 
+# # ── Peer management endpoints ─────────────────────────────────────────────────
 @app.route('/api/peers/register', methods=['POST'])
 def peer_register():
     """
@@ -4012,88 +4003,72 @@ def get_oracle_mux() -> UnifiedOracleMux:
 
 # ═════════════════════════════════════════════════════════════════════════════════
 
-def _snapshot_streaming_daemon():
+def _lightweight_snapshot_cache_updater():
     """
-    Unified port 9091 chirp daemon.
-
-    ORACLE_W_STATE_MANAGER runs its own measurement loop (OracleWStateManager._stream_worker)
-    which calls _extract_snapshot() every W_STATE_STREAM_INTERVAL_MS, performs the
-    5-qubit block-field AER measurements, Byzantine 3-of-5 consensus, and Mermin test,
-    then pushes the result to the server via _push_snapshot_to_server().
-
-    This daemon's only job is to pull the latest aggregated snapshot from the mux
-    (which reads ORACLE_W_STATE_MANAGER.get_latest_density_matrix()) and broadcast
-    it as a single SSE chirp to all connected dashboard clients.
-
-    Interval: 250ms — fast enough for live dashboard updates, slow enough to not
-    flood clients faster than meaningful quantum state evolution.
+    Lightweight snapshot cache updater (REPLACES the 250ms broadcast daemon).
+    
+    ⚛️  CRITICAL FIX: Instead of pushing snapshots to 1000s of clients via SSE,
+    we now update a simple in-memory cache every 1 second. Clients poll this
+    cache via GET /api/oracle/snapshot (RPC style), eliminating connection pool
+    starvation.
+    
+    Benefits:
+    - Single DB connection per update (not per broadcast)
+    - No SSE queue bottlenecks
+    - Clients get fresh data within 1 second
+    - Density matrix persisted to DB asynchronously, not on every measurement
     """
-    logger.info(
-        "[ORACLE-MUX-DAEMON] 🚀 Unified oracle MUX daemon STARTED\n"
-        "    Source: ORACLE_W_STATE_MANAGER (real 5-qubit AER block-field measurements)\n"
-        "    Broadcast: Single chirp every 250ms (oracle consensus + Mermin + lattice)\n"
-        "    SSE: port 443 (/api/events + /api/snapshot/sse) — NOT port 9091 (P2P only)\n"
-        "    Dashboard: All metrics from live quantum measurements — zero synthetic values"
-    )
-
-    mux             = get_oracle_mux()
-    last_chirp_ts   = 0
-    broadcast_count = 0
-    _first_real_chirp_logged = False
-
+    logger.info("[ORACLE-CACHE] 🚀 Lightweight snapshot cache updater started")
+    logger.info("  • Updates every 1 second (vs 250ms broadcast daemon)")
+    logger.info("  • Clients poll /api/oracle/snapshot (no SSE)")
+    logger.info("  • Connection pool reserved for queries, not broadcasts")
+    
+    mux = get_oracle_mux()
+    last_cached_ts = 0
+    persist_count = 0
+    
     while True:
         try:
-            time.sleep(0.25)   # 250ms — meaningful quantum evolution timescale
-
+            time.sleep(1.0)  # ← Lightweight: only 1 update/sec, not 4/sec
+            
             unified_snapshot = mux.aggregate_all_measurements()
-
-            # None means ORACLE_W_STATE_MANAGER has no per_node data yet — skip
+            
+            # None means ORACLE_W_STATE_MANAGER has no data yet — skip
             if unified_snapshot is None:
                 continue
-
+            
             ts = unified_snapshot.get('timestamp_ns', 0)
-            if ts > last_chirp_ts:
-                _broadcast_snapshot_to_gossip_network(unified_snapshot)
-                broadcast_count += 1
-                last_chirp_ts = ts
-                mux.log_chirp(unified_snapshot)
-
-                # Persist every 5th chirp (~1.25s cadence) — avoids DB flood
-                if broadcast_count % 5 == 0:
-                    _persist_chirp_snapshot(unified_snapshot)
-
-                if not _first_real_chirp_logged:
-                    cons = unified_snapshot.get('consensus', {})
-                    logger.info(
-                        f"[ORACLE-MUX-DAEMON] 🌌 First real chirp! "
-                        f"fidelity={cons.get('w_state_fidelity',0):.6f} "
-                        f"oracles={unified_snapshot.get('oracle_count',0)}/5"
-                    )
-                    _first_real_chirp_logged = True
-
-                if broadcast_count % 500 == 0:
-                    cons = unified_snapshot.get('consensus', {})
-                    logger.info(
-                        f"[ORACLE-MUX-DAEMON] 📡 Single-chirp broadcasts: {broadcast_count} "
-                        f"(consensus_fidelity={cons.get('w_state_fidelity', 0):.6f})"
-                    )
-
+            if ts > last_cached_ts:
+                # Update RPC cache (in-memory, atomic)
+                _cache_snapshot(unified_snapshot)
+                last_cached_ts = ts
+                
+                # Persist to DB every 5th cache update (~5 seconds)
+                # This decouples measurement frequency from DB write frequency
+                persist_count += 1
+                if persist_count % 5 == 0:
+                    try:
+                        _persist_chirp_snapshot(unified_snapshot)
+                        persist_count = 0
+                    except Exception as e:
+                        logger.debug(f"[ORACLE-CACHE] persist error (non-fatal): {e}")
+        
         except Exception as e:
-            logger.error(f"[ORACLE-MUX-DAEMON] Error: {e}", exc_info=True)
-            time.sleep(1.0)
+            logger.error(f"[ORACLE-CACHE] Error: {e}", exc_info=True)
+            time.sleep(5.0)  # Back off on error
 
 # Start daemon threads on server startup
 _streaming_thread = None
 
 
 def _start_p2p_daemons() -> None:
-    """Start snapshot streaming daemon. Called once at WSGI import."""
+    """Start lightweight oracle cache updater (replaces SSE daemon). Called once at WSGI import."""
     global _streaming_thread
     if _streaming_thread is None or not _streaming_thread.is_alive():
         _streaming_thread = threading.Thread(
-            target=_snapshot_streaming_daemon, daemon=True, name="SnapshotStreaming")
+            target=_lightweight_snapshot_cache_updater, daemon=True, name="OracleSnapshotCache")
         _streaming_thread.start()
-        logger.info("[GOSSIP] ✅ Snapshot streaming daemon started")
+        logger.info("[P2P] ✅ Oracle snapshot cache updater started (1s cadence, no SSE)")
 
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -4544,22 +4519,24 @@ def rest_metrics_batch():
 
 @app.route('/api/metrics/stream', methods=['GET'])
 def metrics_stream():
-    """JSON polling endpoint for real-time node metrics (replaces SSE)."""
+    """JSON polling endpoint for real-time node metrics (RPC cache, no SSE queue)."""
     try:
         measure_svc = get_measurement_service()
         since = float(request.args.get('since', time.time() - 60))
         limit = int(request.args.get('limit', 50))
         metrics = []
+        
+        # Read directly from metrics_dict (no queue)
         try:
-            while len(metrics) < limit:
-                try:
-                    metric = measure_svc.broadcast_queue.get_nowait()
+            with measure_svc.metrics_lock:
+                for node_id, metric in sorted(measure_svc.metrics_dict.items()):
                     if metric.get('timestamp', 0) >= since:
                         metrics.append(metric)
-                except _measurement_queue_mod.Empty:
-                    break
+                        if len(metrics) >= limit:
+                            break
         except Exception as e:
-            logger.debug(f"[METRICS] queue drain: {e}")
+            logger.debug(f"[METRICS] dict read: {e}")
+        
         return jsonify({'metrics': metrics, 'count': len(metrics)}), 200
     except Exception as e:
         logger.error(f"[METRICS] error: {e}")
