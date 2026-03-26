@@ -2116,15 +2116,18 @@ class OracleWStateManager:
                     try:
                         broadcaster = get_oracle_measurement_broadcaster()
                         bcast_result = broadcaster.broadcast_oracle_snapshot(snapshot)
-                        if bcast_result.get('broadcast_count', 0) > 0:
-                            logger.debug(
-                                f"[ORACLE CLUSTER] 📡 RPC broadcast: subscribers={bcast_result['broadcast_count']} | "
-                                f"failed={len(bcast_result.get('failed_clients', []))} | "
-                                f"DB_queued={bcast_result.get('queued_for_db', False)} | "
-                                f"elapsed={bcast_result.get('elapsed_ms', 0):.1f}ms"
-                            )
+                        # Log every broadcast (even if no subscribers) at INFO level
+                        subs_count = bcast_result.get('broadcast_count', 0)
+                        db_queued = bcast_result.get('queued_for_db', False)
+                        elapsed_ms = bcast_result.get('elapsed_ms', 0)
+                        failed_count = len(bcast_result.get('failed_clients', []))
+                        logger.info(
+                            f"[ORACLE CLUSTER] 📡 RPC broadcast @ cycle {snapshot.lattice_refresh_counter}: "
+                            f"subscribers={subs_count} | failed={failed_count} | DB_queued={db_queued} | "
+                            f"elapsed={elapsed_ms:.2f}ms"
+                        )
                     except Exception as bcast_e:
-                        logger.debug(f"[ORACLE CLUSTER] RPC broadcast error (non-blocking): {bcast_e}")
+                        logger.error(f"[ORACLE CLUSTER] RPC broadcast error (non-blocking): {bcast_e}", exc_info=False)
                     # ─────────────────────────────────────────────────────────────────────────────
                     
                     self._broadcast_to_clients(snapshot)
