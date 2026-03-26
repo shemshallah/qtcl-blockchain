@@ -9088,8 +9088,11 @@ def _start_measurement_feed_daemon():
     logger.info("[MEASUREMENT-FEED] Daemon started (100ms cadence)")
 
 # Start measurement feed daemon after agents are initialized
-if _METRICS_AGENTS['mux_daemon'] is not None:
-    _start_measurement_feed_daemon()
+try:
+    if _METRICS_AGENTS['mux_daemon'] is not None:
+        _start_measurement_feed_daemon()
+except (NameError, KeyError):
+    pass  # Deferred initialization — agents not yet ready on module load
 
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
@@ -9134,8 +9137,11 @@ def _start_lattice_measurement_feed():
     logger.info("[LATTICE-FEED] Measurement feed daemon started (200ms cadence)")
 
 # Start lattice measurement feed if agents are ready
-if LATTICE is not None and _METRICS_AGENTS.get('lattice_metrics') is not None:
-    _start_lattice_measurement_feed()
+try:
+    if LATTICE is not None and _METRICS_AGENTS.get('lattice_metrics') is not None:
+        _start_lattice_measurement_feed()
+except NameError:
+    pass  # Deferred initialization — LATTICE not yet defined on module load
 
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
