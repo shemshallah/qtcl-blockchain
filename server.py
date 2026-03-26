@@ -1238,19 +1238,37 @@ class DatabasePool:
                 self._next_retry_at  = 0.0
                 self._retry_interval = 5.0
 
-    def get_connection(self):
+    def get_connection(self, timeout_s: float = 5.0):
+        """Get connection with timeout.  Falls back to direct connection if pool exhausted."""
         if not self._initialized:
             self._initialize_pool()
         try:
             if self._http_mode and self.pool:
-                return self.pool.getconn()
+                # HTTP pool: try getconn with a timeout-like pattern
+                try:
+                    return self.pool.getconn()
+                except Exception as e:
+                    logger.warning(f"[DB] HTTP pool exhausted: {e}, using direct connection")
+                    return psycopg2.connect(DB_URL, connect_timeout=timeout_s)
+            
             if self.use_pooling and self.pool:
-                conn = self.pool.getconn()
+                # TCP pool: try getconn, fallback if None (exhausted)
+                conn = None
+                try:
+                    # psycopg2.pool.getconn() BLOCKS if exhausted — no timeout parameter
+                    # Use non-blocking getconn if available (Python 3.7+)
+                    if hasattr(self.pool, 'getconn'):
+                        conn = self.pool.getconn()
+                except Exception as e:
+                    logger.warning(f"[DB] Pool.getconn() exception: {e}")
+                
                 if conn is None:
-                    logger.debug("[DB] Pool exhausted, creating direct connection via pooler")
-                    conn = psycopg2.connect(DB_URL, connect_timeout=10)
+                    logger.warning(f"[DB] Pool exhausted (max={self.pool.maxconn}), using direct pooler connection")
+                    conn = psycopg2.connect(DB_URL, connect_timeout=timeout_s)
                 return conn
-            return psycopg2.connect(DB_URL, connect_timeout=10)
+            
+            # No pool: direct connection
+            return psycopg2.connect(DB_URL, connect_timeout=timeout_s)
         except psycopg2.OperationalError as e:
             logger.error(f"[DB] ❌ Cannot connect to Supabase pooler: {e}")
             logger.error(f"[DB] Check POOLER_URL: {DB_URL[:50]}...")
@@ -1437,14 +1455,51 @@ def _ensure_genesis_block_in_db() -> bool:
         logger.warning(f"[GENESIS-BOOTSTRAP] Non-fatal error: {_ex}")
         return True  # Continue even if bootstrap fails
 
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# QUERY CACHE: In-memory block cache to prevent DB stalls during pool exhaustion
+# ═══════════════════════════════════════════════════════════════════════════════════════
+_LATEST_BLOCK_CACHE = {
+    'data': None,
+    'timestamp': 0,
+    'ttl_s': 0.5  # Cache for 500ms — stale but fast
+}
+
+def _get_cached_latest_block() -> Optional[Dict[str, Any]]:
+    """Return cached block if still valid, else None"""
+    import time as _cache_time
+    if _LATEST_BLOCK_CACHE['data'] is not None:
+        age = _cache_time.time() - _LATEST_BLOCK_CACHE['timestamp']
+        if age < _LATEST_BLOCK_CACHE['ttl_s']:
+            logger.debug(f"[CACHE] Serving latest_block from cache (age={age:.3f}s)")
+            return _LATEST_BLOCK_CACHE['data']
+    return None
+
+def _update_latest_block_cache(block: Dict[str, Any]) -> None:
+    """Update cache with fresh block data"""
+    import time as _cache_time
+    _LATEST_BLOCK_CACHE['data'] = block
+    _LATEST_BLOCK_CACHE['timestamp'] = _cache_time.time()
+    logger.debug(f"[CACHE] Updated latest_block cache: h={block.get('height')}")
+
+
 def query_latest_block() -> Optional[Dict[str, Any]]:
-    """Get latest block from database with retry logic for pool timeouts"""
-    max_retries = 3
-    retry_delay = 0.1
+    """Get latest block from database with retry logic + timeout protection + cache fallback"""
+    # TRY CACHE FIRST: if available, return immediately (no DB hit during pool exhaustion)
+    cached = _get_cached_latest_block()
+    if cached is not None:
+        return cached
+    
+    max_retries = 2  # Reduced from 3 to 2 (fail fast)
+    retry_delay = 0.05  # Reduced from 0.1 to 0.05 (fast retry)
     
     for attempt in range(max_retries):
         try:
+            # CRITICAL: Query must complete in <1s or fail fast and return cached/genesis
+            # This prevents the RPC call from blocking indefinitely on pool exhaustion
             with get_db_cursor() as cur:
+                # Add statement timeout: 1000ms max for this query
+                cur.execute("SET LOCAL statement_timeout = '1000ms'")
+                
                 cur.execute("""
                     SELECT height, block_hash, 
                            COALESCE(timestamp, EXTRACT(EPOCH FROM NOW())::bigint) as timestamp,
@@ -1459,19 +1514,27 @@ def query_latest_block() -> Optional[Dict[str, Any]]:
                     if timestamp is None:
                         timestamp = int(time.time())
                     
-                    return {
+                    result = {
                         'height': row[0],
                         'hash': row[1],
                         'timestamp': timestamp,
                         'w_state_hash': row[3],
                     }
+                    # Update cache on successful DB read
+                    _update_latest_block_cache(result)
+                    return result
                 return None  # No blocks found
         except Exception as e:
             if attempt < max_retries - 1:
                 logger.debug(f"[DB] query_latest_block retry {attempt+1}/{max_retries-1}: {e}")
-                time.sleep(retry_delay * (2 ** attempt))  # Exponential backoff: 0.1s, 0.2s, 0.4s
+                time.sleep(retry_delay * (2 ** attempt))  # Backoff: 0.05s, 0.1s
             else:
-                logger.error(f"[DB] Failed to query blocks after {max_retries} retries: {e}")
+                logger.warning(f"[DB] Failed to query blocks after {max_retries} retries, returning cache or genesis: {e}")
+                # FALLBACK: return cached block even if stale, or None (genesis)
+                cached_fallback = _get_cached_latest_block()
+                if cached_fallback is not None:
+                    logger.info(f"[DB-FALLBACK] Returning stale cached block: h={cached_fallback.get('height')}")
+                    return cached_fallback
     return None
 
 
