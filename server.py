@@ -9632,21 +9632,48 @@ def _rpc_ok(result: Any, rpc_id: Any) -> dict:
 # ─── RPC Method Implementations ───────────────────────────────────────────────
 
 def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getBlockHeight — current chain tip height."""
+    """qtcl_getBlockHeight — current chain tip height.
+    
+    DB-AUTHORITATIVE: reads from PostgreSQL blocks table via query_latest_block().
+    In-memory _get_canonical_node() is stale across gunicorn workers.
+    Falls back to in-memory only if DB query fails.
+    """
     try:
         logger.debug(f"[RPC-METHOD] qtcl_getBlockHeight called with params={params}, id={rpc_id}")
+        
+        # PRIMARY: DB is authoritative (survives worker restarts, multi-worker consistent)
+        db_tip = query_latest_block()
+        if db_tip is not None:
+            height   = int(db_tip['height'])
+            tip_hash = str(db_tip.get('hash', ''))
+            result = {
+                "height":   height,
+                "tip_hash": tip_hash,
+                "ts":       time.time(),
+            }
+            logger.debug(f"[RPC-METHOD] qtcl_getBlockHeight (DB) success: height={height}")
+            return _rpc_ok(result, rpc_id)
+        
+        # FALLBACK: in-memory canonical node (cold start before first block)
         node = _get_canonical_node()
-        if node is None:
-            logger.warning(f"[RPC-METHOD] qtcl_getBlockHeight: Node not synced (canonical_node is None)")
-            return _rpc_error(-32003, "Node not synced", rpc_id)
-        height = node.get("block_height", 0)
-        tip_hash = node.get("tip_hash", "")
+        if node is not None:
+            height   = node.get("block_height", 0)
+            tip_hash = node.get("tip_hash", "")
+            result = {
+                "height":   height,
+                "tip_hash": tip_hash,
+                "ts":       time.time(),
+            }
+            logger.debug(f"[RPC-METHOD] qtcl_getBlockHeight (in-memory) success: height={height}")
+            return _rpc_ok(result, rpc_id)
+        
+        # Genesis state — no blocks yet, height=0
         result = {
-            "height":   height,
-            "tip_hash": tip_hash,
+            "height":   0,
+            "tip_hash": "0" * 64,
             "ts":       time.time(),
         }
-        logger.debug(f"[RPC-METHOD] qtcl_getBlockHeight success: height={height}")
+        logger.debug(f"[RPC-METHOD] qtcl_getBlockHeight: no blocks yet, returning genesis")
         return _rpc_ok(result, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getBlockHeight exception: {e}")
@@ -10307,7 +10334,54 @@ def _rpc_listMeasurementSubscribers(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"List failed: {str(e)}", rpc_id)
 
 
+# ─── qtcl_submitBlock — RPC wrapper around submit_block() REST handler ─────────
+# Reuses ALL validation/persistence logic (PoW, height, parent, coinbase, treasury,
+# lattice, difficulty retarget, P2P broadcast) via Flask test_request_context.
+# Zero duplication — the REST handler is the single source of truth.
+def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
+    """qtcl_submitBlock — submit a mined block via JSON-RPC 2.0."""
+    try:
+        if not params or not isinstance(params, (list, tuple)) or len(params) < 1:
+            return _rpc_error(-32602, "params[0] must be block payload {header, transactions}", rpc_id)
+
+        data = params[0]
+        if not isinstance(data, dict):
+            return _rpc_error(-32602, "params[0] must be a JSON object", rpc_id)
+
+        # Invoke the REST handler inside a synthetic Flask request context.
+        # test_request_context is in-process — no network round-trip.
+        with app.test_request_context(
+            '/api/submit_block',
+            method='POST',
+            json=data,
+            environ_base={'REMOTE_ADDR': '127.0.0.1'},
+        ):
+            response = submit_block()
+
+            # submit_block() returns (Response, status_code) tuples
+            if isinstance(response, tuple):
+                resp_obj, status_code = response
+            else:
+                resp_obj = response
+                status_code = 200
+
+            result = resp_obj.get_json()
+
+            if status_code >= 400:
+                error_msg = result.get('error', 'Block rejected') if isinstance(result, dict) else str(result)
+                # Map HTTP status to JSON-RPC error codes
+                rpc_code = {400: -32602, 409: -32001, 422: -32003, 500: -32603}.get(status_code, -32603)
+                return _rpc_error(rpc_code, error_msg, rpc_id, result)
+
+            return _rpc_ok(result, rpc_id)
+
+    except Exception as e:
+        logger.exception(f"[RPC] _rpc_submitBlock unhandled error: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
+
 _RPC_METHODS: Dict[str, Any] = {
+    "qtcl_submitBlock":       _rpc_submitBlock,
     "qtcl_getBlockHeight":    _rpc_getBlockHeight,
     "qtcl_getBalance":        _rpc_getBalance,
     "qtcl_getTransaction":    _rpc_getTransaction,
@@ -10329,6 +10403,14 @@ _RPC_METHODS: Dict[str, Any] = {
 }
 
 _RPC_METHOD_META: Dict[str, Dict] = {
+    "qtcl_submitBlock": {
+        "description": "Submit a mined block for validation and chain persistence",
+        "params": [{
+            "name": "block", "type": "object", "required": True,
+            "note": "{header: {height, block_hash, parent_hash, timestamp_s, nonce, miner_address, difficulty_bits, merkle_root, w_entropy_hash, w_state_fidelity, pq_curr, pq_last}, transactions: [...]}"
+        }],
+        "returns": "object{status, block_height, block_hash, miner_reward, treasury_reward, ...}",
+    },
     "qtcl_getBlockHeight": {
         "description": "Current chain tip height and hash",
         "params": [],
