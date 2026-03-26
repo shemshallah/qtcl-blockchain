@@ -9461,10 +9461,53 @@ def _start_oracle_measurement_sync_daemon():
                             )
                         
                         # ───────────────────────────────────────────────────────────────────────
-                        # BROADCAST PHASE: Send to dashboard via SSE/WebSocket
+                        # BROADCAST PHASE: Publish to RPC /api/oracle/snapshot
                         # ───────────────────────────────────────────────────────────────────────
                         try:
-                            # Broadcast via gossip/SSE
+                            # Build RPC snapshot for client polling
+                            rpc_snapshot = {
+                                'ready': True,
+                                'timestamp_ns': timestamp_ns,
+                                'chirp_number': current_cycle,
+                                'cycle': current_cycle,
+                                'density_matrix_hex': snap.density_matrix_hex if snap and hasattr(snap, 'density_matrix_hex') else '',
+                                'dm_hex_source': 'oracle_sync_daemon',
+                                
+                                # Oracle consensus (PRIMARY — client-facing fidelity)
+                                'consensus_fidelity': avg_bf_fidelity,
+                                'consensus_coherence': avg_coherence if 'avg_coherence' in locals() else 0.0,
+                                'consensus_purity': avg_purity if 'avg_purity' in locals() else 0.0,
+                                
+                                # Lattice state (reference only)
+                                'lattice_fidelity': lattice_f,
+                                'lattice_coherence': lattice_c,
+                                'lattice_cycle': current_cycle,
+                                
+                                # Block field
+                                'pq_curr': pq_curr,
+                                'pq_last': pq_last,
+                                
+                                # Entanglement witness
+                                'mermin_M': avg_mermin,
+                                'mermin_is_quantum': avg_mermin > 2.0,
+                                'mermin_verdict': 'quantum' if avg_mermin > 2.0 else 'classical',
+                                
+                                # Per-oracle readings
+                                'oracle_measurements': oracle_metrics,
+                                'window_type': 'REVIVAL' if is_revival else 'POWER-2',
+                                'phase_name': lattice_phase,
+                            }
+                            
+                            # Publish to RPC cache (thread-safe)
+                            global _latest_snapshot
+                            try:
+                                with _snapshot_lock:
+                                    _latest_snapshot = rpc_snapshot
+                                    logger.debug(f"[ORACLE-SYNC] 📡 RPC snapshot published (fid={avg_bf_fidelity:.4f})")
+                            except Exception as lock_err:
+                                logger.debug(f"[ORACLE-SYNC] RPC cache update failed: {lock_err}")
+                            
+                            # Event log (for history)
                             event_payload = {
                                 'type': 'oracle_sync_cycle',
                                 'cycle': current_cycle,
@@ -9475,10 +9518,7 @@ def _start_oracle_measurement_sync_daemon():
                                 'per_oracle_metrics': oracle_metrics,
                                 'window_type': 'REVIVAL' if is_revival else 'POWER-2',
                                 'index': {'pq_last': pq_last, 'pq_curr': pq_curr},
-                                'unified': metrics_aligned,
-                                'entangled': entangled,
                             }
-                            # RPC event log (replaces SSE broadcast)
                             _log_rpc_event('oracle_measurements', event_payload)
                         except Exception as bcast_err:
                             logger.debug(f"[ORACLE-SYNC] Broadcast warning: {bcast_err}")
