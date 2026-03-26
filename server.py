@@ -2600,66 +2600,6 @@ def oracle_snapshot_json():
         logger.error(f"[ORACLE-SNAPSHOT] {e}")
         return jsonify({'error': str(e), 'ready': False}), 503
 
-               is_primary      BOOLEAN       NOT NULL DEFAULT FALSE,
-               last_seen       BIGINT        NOT NULL DEFAULT 0,
-               block_height    BIGINT        NOT NULL DEFAULT 0,
-               peer_count      INTEGER       NOT NULL DEFAULT 0,
-               gossip_url      JSONB         NOT NULL DEFAULT '{}'::JSONB,
-               created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-               wallet_address  VARCHAR(128)  NOT NULL DEFAULT '',
-               oracle_pub_key  TEXT          NOT NULL DEFAULT '',
-               cert_sig        VARCHAR(128)  NOT NULL DEFAULT '',
-               cert_auth_tag   VARCHAR(128)  NOT NULL DEFAULT '',
-               mode            VARCHAR(32)   NOT NULL DEFAULT 'full',
-               ip_hint         VARCHAR(256)  NOT NULL DEFAULT '',
-               reg_tx_hash     VARCHAR(64)   NOT NULL DEFAULT '',
-               registered_at   BIGINT        NOT NULL DEFAULT 0
-           )""",
-        """CREATE INDEX IF NOT EXISTS idx_oracle_registry_last_seen
-               ON oracle_registry (last_seen DESC)""",
-        """CREATE INDEX IF NOT EXISTS idx_oracle_registry_primary
-               ON oracle_registry (is_primary) WHERE is_primary = TRUE""",
-        """CREATE INDEX IF NOT EXISTS idx_oracle_registry_wallet
-               ON oracle_registry (wallet_address)""",
-        """CREATE INDEX IF NOT EXISTS idx_oracle_registry_reg_tx
-               ON oracle_registry (reg_tx_hash) WHERE reg_tx_hash != ''""",
-        """CREATE INDEX IF NOT EXISTS idx_oracle_registry_registered_at
-               ON oracle_registry (registered_at DESC)""",
-        # ── Live-DB migrations — ADD COLUMN IF NOT EXISTS is fully idempotent ──
-        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS last_seen       BIGINT       NOT NULL DEFAULT 0",
-        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS block_height    BIGINT       NOT NULL DEFAULT 0",
-        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS peer_count      INTEGER      NOT NULL DEFAULT 0",
-        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS gossip_url      JSONB        NOT NULL DEFAULT '{}'::JSONB",
-        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS wallet_address  VARCHAR(128) NOT NULL DEFAULT ''",
-        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS oracle_pub_key  TEXT         NOT NULL DEFAULT ''",
-        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS cert_sig        VARCHAR(128) NOT NULL DEFAULT ''",
-        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS cert_auth_tag   VARCHAR(128) NOT NULL DEFAULT ''",
-        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS mode            VARCHAR(32)  NOT NULL DEFAULT 'full'",
-        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS ip_hint         VARCHAR(256) NOT NULL DEFAULT ''",
-        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS reg_tx_hash     VARCHAR(64)  NOT NULL DEFAULT ''",
-        "ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS registered_at   BIGINT       NOT NULL DEFAULT 0",
-    ]
-    ok = True
-    for ddl in ddl_statements:
-        try:
-            with get_db_cursor() as cur: cur.execute(ddl)
-        except Exception as e:
-            logger.debug(f"[ORACLE_REG] DDL skipped ({ddl[:55]}): {e}")
-            ok = False
-    if ok: logger.info("[ORACLE_REG] ✅ oracle_registry verified/created with on-chain identity columns")
-    return ok
-
-_oracle_registry_ensured = False
-_oracle_registry_lock    = threading.Lock()
-
-def _lazy_ensure_oracle_registry():
-    global _oracle_registry_ensured
-    if _oracle_registry_ensured: return
-    with _oracle_registry_lock:
-        if _oracle_registry_ensured: return
-        _ensure_oracle_registry()
-        _oracle_registry_ensured = True
-
 
 def _ensure_quantum_snapshots_table() -> bool:
     """CREATE TABLE IF NOT EXISTS quantum_snapshots — idempotent chirp persistence store.
