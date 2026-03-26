@@ -2507,6 +2507,7 @@ def oracle_snapshot_json():
     ⚛️  Guarantees 200/503/500 with structured response via autonomous healing.
     DB failures → 503. Conversion errors → recovery with safe defaults.
     BULLETPROOF: ALL exceptions caught and logged with detailed diagnostics.
+    INCLUDES: density_matrix_hex from ORACLE_W_STATE_MANAGER (required by client).
     """
     global _latest_snapshot  # ⚛️  Access module-level cache variable
     try:
@@ -2548,6 +2549,23 @@ def oracle_snapshot_json():
         if snapshot is None:
             logger.error(f"[RPC-SNAPSHOT] Snapshot healing returned None: {diag}")
             return jsonify({'ready': False, 'error': diag.get('error', 'healing_failed'), 'details': str(diag)[:100]}), 503
+        
+        # ⚛️  CRITICAL FIX: Add density_matrix_hex from ORACLE_W_STATE_MANAGER
+        try:
+            if ORACLE_W_STATE_MANAGER is not None:
+                latest_dm = ORACLE_W_STATE_MANAGER.get_latest_density_matrix()
+                if latest_dm and 'density_matrix_hex' in latest_dm:
+                    snapshot['density_matrix_hex'] = latest_dm['density_matrix_hex']
+                    logger.debug(f"[RPC-SNAPSHOT] ✅ Added density_matrix_hex ({len(latest_dm.get('density_matrix_hex', ''))} chars)")
+                else:
+                    logger.warning(f"[RPC-SNAPSHOT] ⚠️  ORACLE_W_STATE_MANAGER has no density_matrix_hex yet")
+                    snapshot['density_matrix_hex'] = ''
+            else:
+                logger.warning(f"[RPC-SNAPSHOT] ⚠️  ORACLE_W_STATE_MANAGER not initialized")
+                snapshot['density_matrix_hex'] = ''
+        except Exception as dm_err:
+            logger.error(f"[RPC-SNAPSHOT] Error fetching density_matrix_hex: {dm_err}")
+            snapshot['density_matrix_hex'] = ''
         
         # Remove diagnostics from public API response (keep in logs)
         try:
