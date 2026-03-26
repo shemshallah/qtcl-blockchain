@@ -73,6 +73,61 @@ _verbose_p2p_logging = False
 _last_snapshot_log_time = 0
 _snapshot_log_interval = 10
 
+# ═══ DENSITY MATRIX SNAPSHOT RING BUFFER (1000 snapshots, LRU eviction) ═══
+_DM_SNAPSHOT_RING = deque(maxlen=1000)
+_DM_SNAPSHOT_LOCK = threading.RLock()
+
+# ═══ RPC INFRASTRUCTURE (JSON-RPC 2.0) ═══
+_JSONRPC_VERSION = "2.0"
+
+def _rpc_ok(result: Any, rpc_id: Any) -> dict:
+    """Standard JSON-RPC 2.0 success response."""
+    return {"jsonrpc": _JSONRPC_VERSION, "result": result, "id": rpc_id}
+
+def _rpc_error(code: int, message: str, rpc_id: Any, data: Optional[dict] = None) -> dict:
+    """Standard JSON-RPC 2.0 error response."""
+    resp = {"jsonrpc": _JSONRPC_VERSION, "error": {"code": code, "message": message}, "id": rpc_id}
+    if data:
+        resp["error"]["data"] = data
+    return resp
+
+def _dispatch(body_bytes: bytes) -> Tuple[dict, int]:
+    """JSON-RPC 2.0 dispatcher (parse, call, return). Handles batches."""
+    try:
+        body = json.loads(body_bytes.decode('utf-8'))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        return _rpc_error(-32700, f"Parse error: {str(e)}", None), 400
+    
+    if isinstance(body, list):
+        if not body:
+            return _rpc_error(-32600, "Invalid Request: empty batch", None), 400
+        responses = [r for req in body if (r := _dispatch_single(req)) is not None]
+        return responses if responses else None, 200
+    
+    return _dispatch_single(body), 200
+
+def _dispatch_single(req: dict) -> Optional[dict]:
+    """Dispatch single JSON-RPC 2.0 request."""
+    if not isinstance(req, dict):
+        return _rpc_error(-32600, "Invalid Request: not an object", None)
+    
+    jsonrpc, method, params, rpc_id = req.get("jsonrpc"), req.get("method"), req.get("params", []), req.get("id")
+    
+    if jsonrpc != _JSONRPC_VERSION:
+        return _rpc_error(-32600, f"Invalid jsonrpc: {jsonrpc}", rpc_id)
+    if not isinstance(method, str):
+        return _rpc_error(-32600, "Invalid Request: method not a string", rpc_id)
+    if method not in _RPC_METHODS:
+        return _rpc_error(-32601, f"Method not found: {method}", rpc_id)
+    
+    try:
+        return _RPC_METHODS[method](params, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC] {method} raised: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
+_RPC_METHOD_META: Dict[str, dict] = {}
+
 # ═══ LAZY INITIALIZATION (deferred until first use) ═══
 # This allows Flask to bind port 8000 before heavy crypto/quantum init
 QRNG_ENSEMBLE = None
@@ -3390,6 +3445,51 @@ def _rpc_listMeasurementSubscribers(params: Any, rpc_id: Any) -> dict:
 # Reuses ALL validation/persistence logic (PoW, height, parent, coinbase, treasury,
 # lattice, difficulty retarget, P2P broadcast) via Flask test_request_context.
 # Zero duplication — the REST handler is the single source of truth.
+def _rpc_getLatestDMSnapshot(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getLatestDMSnapshot — fetch latest density matrix snapshot from oracle ring buffer.
+    
+    Returns: {
+        timestamp_ns, oracle_id, density_matrix_hex, purity, w_state_fidelity,
+        von_neumann_entropy, coherence_l1, hlwe_signature, signature_valid, oracle_address
+    }
+    """
+    try:
+        with _DM_SNAPSHOT_LOCK:
+            if not _DM_SNAPSHOT_RING:
+                return _rpc_error(-32000, "No DM snapshots available yet", rpc_id)
+            latest = list(_DM_SNAPSHOT_RING)[-1]
+        logger.debug(f"[RPC-METHOD] qtcl_getLatestDMSnapshot: returned snapshot ts={latest.get('timestamp_ns')}")
+        return _rpc_ok(latest, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_getLatestDMSnapshot: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
+
+def _rpc_getLatestDMSnapshots(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getLatestDMSnapshots — fetch last N DM snapshots (default 10, max 100)."""
+    try:
+        limit = 10
+        if isinstance(params, list) and params:
+            try:
+                limit = min(int(params[0]), 100)
+            except (ValueError, TypeError):
+                pass
+        elif isinstance(params, dict):
+            try:
+                limit = min(int(params.get("limit", 10)), 100)
+            except (ValueError, TypeError):
+                pass
+        
+        with _DM_SNAPSHOT_LOCK:
+            snaps = list(_DM_SNAPSHOT_RING)[-limit:] if _DM_SNAPSHOT_RING else []
+        
+        logger.debug(f"[RPC-METHOD] qtcl_getLatestDMSnapshots: returned {len(snaps)} snapshots")
+        return _rpc_ok({"snapshots": snaps, "count": len(snaps)}, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_getLatestDMSnapshots: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
+
 def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
     """qtcl_submitBlock — submit a mined block via JSON-RPC 2.0."""
     try:
@@ -3445,14 +3545,15 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getPeers":          _rpc_getPeers,
     "qtcl_getHealth":         _rpc_getHealth,
     "qtcl_getEvents":         _rpc_getEvents,
-    # ── On-chain oracle registry ──────────────────────────────────────────────
     "qtcl_getOracleRegistry": _rpc_getOracleRegistry,
     "qtcl_getOracleRecord":   _rpc_getOracleRecord,
     "qtcl_submitOracleReg":   _rpc_submitOracleReg,
-    # ── Oracle Measurement Broadcast (NEW) ────────────────────────────────────
     "qtcl_registerMeasurementSubscriber": _rpc_registerMeasurementSubscriber,
     "qtcl_unregisterMeasurementSubscriber": _rpc_unregisterMeasurementSubscriber,
     "qtcl_listMeasurementSubscribers": _rpc_listMeasurementSubscribers,
+    # ── NEW: Density Matrix Snapshot Streaming ──────────────────────────────────
+    "qtcl_getLatestDMSnapshot": _rpc_getLatestDMSnapshot,
+    "qtcl_getLatestDMSnapshots": _rpc_getLatestDMSnapshots,
 }
 
 
@@ -3742,24 +3843,80 @@ logger.info("[PYTH]    ✅ Pyth REST routes mounted — /api/pyth/{prices,price/
 
 def _broadcast_snapshot_to_database(snapshot: dict) -> None:
     """
-    RPC-based snapshot broadcast: store to database for polling.
+    RPC-based snapshot broadcast: queue to ring buffer + persist to SQLite for P2P sync.
     
     Architecture:
-    - No SSE push
-    - No broadcast_queue
-    - Clients poll GET /api/oracle/snapshot
-    - Snapshots persisted to quantum_snapshots table
-    - In-memory cache updated for fast reads
+    - In-memory ring buffer (latest 1000) for fast /rpc polling
+    - Async SQLite write to dm_pool table for P2P replication & miners
+    - Dual persistence: Supabase (cloud) + SQLite (local mesh)
     """
     try:
-        # 1. Update in-memory RPC cache (instant client reads)
+        # 1. Update in-memory RPC cache
         _cache_snapshot(snapshot)
         
-        # 2. Persist to DB asynchronously (non-blocking)
+        # 2. Queue into DM snapshot ring buffer for streaming
+        if 'density_matrix_hex' in snapshot:
+            dm_snap = {
+                'timestamp_ns': snapshot.get('timestamp_ns', int(time.time() * 1e9)),
+                'oracle_id': snapshot.get('oracle_id'),
+                'density_matrix_hex': snapshot.get('density_matrix_hex', ''),
+                'purity': snapshot.get('purity'),
+                'w_state_fidelity': snapshot.get('w_state_fidelity'),
+                'von_neumann_entropy': snapshot.get('von_neumann_entropy'),
+                'coherence_l1': snapshot.get('coherence_l1'),
+                'hlwe_signature': snapshot.get('hlwe_signature'),
+                'signature_valid': snapshot.get('signature_valid', False),
+                'oracle_address': snapshot.get('oracle_address'),
+                'aer_noise_state': snapshot.get('aer_noise_state', {}),
+                'measurement_counts': snapshot.get('measurement_counts', {}),
+            }
+            with _DM_SNAPSHOT_LOCK:
+                _DM_SNAPSHOT_RING.append(dm_snap)
+            logger.debug(f"[RPC-BROADCAST] ✅ DM snapshot queued (ring={len(_DM_SNAPSHOT_RING)}/1000)")
+        
+        # 3. Persist to SQLite asynchronously (P2P replication)
+        def async_sqlite():
+            try:
+                import sqlite3
+                from pathlib import Path
+                db = Path.home() / "qtcl-miner" / "data" / "qtcl_blockchain.db"
+                db.parent.mkdir(parents=True, exist_ok=True)
+                conn = sqlite3.connect(str(db), timeout=5.0)
+                cur = conn.cursor()
+                cur.execute("""CREATE TABLE IF NOT EXISTS dm_pool (
+                    id INTEGER PRIMARY KEY, timestamp_ns INTEGER, oracle_id INTEGER,
+                    density_matrix_hex TEXT, purity REAL, w_state_fidelity REAL,
+                    von_neumann_entropy REAL, coherence_l1 REAL, hlwe_signature TEXT,
+                    signature_valid INTEGER, oracle_address TEXT, aer_noise_state TEXT,
+                    measurement_counts TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+                cur.execute("""INSERT INTO dm_pool (
+                    timestamp_ns, oracle_id, density_matrix_hex, purity, w_state_fidelity,
+                    von_neumann_entropy, coherence_l1, hlwe_signature, signature_valid,
+                    oracle_address, aer_noise_state, measurement_counts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
+                    snapshot.get('timestamp_ns'), snapshot.get('oracle_id'),
+                    snapshot.get('density_matrix_hex', ''),
+                    snapshot.get('purity'), snapshot.get('w_state_fidelity'),
+                    snapshot.get('von_neumann_entropy'), snapshot.get('coherence_l1'),
+                    json.dumps(snapshot.get('hlwe_signature')),
+                    1 if snapshot.get('signature_valid') else 0,
+                    snapshot.get('oracle_address'),
+                    json.dumps(snapshot.get('aer_noise_state', {})),
+                    json.dumps(snapshot.get('measurement_counts', {}))
+                ))
+                conn.commit()
+                conn.close()
+                logger.debug("[RPC-BROADCAST] ✅ DM → SQLite dm_pool")
+            except Exception as e:
+                logger.warning(f"[RPC-BROADCAST] SQLite write: {e}")
+        
+        threading.Thread(target=async_sqlite, daemon=True).start()
+        
+        # 4. Persist to Supabase (cloud backup, non-blocking)
         try:
             _persist_chirp_snapshot(snapshot)
         except Exception as e:
-            logger.debug(f"[RPC-BROADCAST] persist skipped (non-fatal): {e}")
+            logger.debug(f"[RPC-BROADCAST] Supabase skipped: {e}")
     except Exception as e:
         logger.error(f"[RPC-BROADCAST] Error: {e}")
 
