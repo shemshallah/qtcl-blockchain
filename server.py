@@ -401,6 +401,10 @@ def _deferred_lattice_init() -> None:
         logger.info("[LATTICE-INIT] ✅ QuantumLatticeController instantiated")
         LATTICE.start()
         logger.info("[LATTICE-INIT] ✅ Lattice daemon started — spatial-temporal field active, coherence maintenance loop running")
+        # ── WIRE LATTICE INTO ORACLE ──────────────────────────────────────────────
+        from globals import set_lattice
+        set_lattice(LATTICE)
+        logger.info("[LATTICE-INIT] ✅ Lattice registered with oracle — measurement stream unpaused")
     except ImportError as _ie:
         logger.error(f"[LATTICE-INIT] ❌ QuantumLatticeController import failed: {_ie}")
     except Exception as _ex:
