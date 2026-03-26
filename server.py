@@ -8946,6 +8946,19 @@ def get_agents_status():
 
 
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
+# METRICS AGENTS REGISTRY — Module-level dict required by all agent access patterns
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
+
+_METRICS_AGENTS = {
+    'oracle_collector': None,
+    'lattice_metrics': None,
+    'noise_bath': None,
+    'refresh_net': None,
+    'mux_daemon': None
+}
+
+
+# ═════════════════════════════════════════════════════════════════════════════════════════════════
 # CONTINUOUS MEASUREMENT FEED DAEMON: Feed oracle/lattice measurements into agents
 # ═════════════════════════════════════════════════════════════════════════════════════════════════
 
