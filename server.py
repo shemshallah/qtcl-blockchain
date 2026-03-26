@@ -2559,49 +2559,110 @@ class SnapshotAutonomousHealer:
 
 @app.route('/api/oracle/snapshot', methods=['GET'])
 def oracle_snapshot_json():
-    """GET /api/oracle/snapshot — Returns latest broadcast snapshot with density_matrix_hex and snapshot count."""
+    """GET /api/oracle/snapshot — RPC endpoint for oracle snapshots.
+    
+    Flow:
+    1. Try ring buffer (fast, <1ms)
+    2. If empty, query quantum_snapshots table (DB backup)
+    3. Always return RPC-formatted snapshot with density_matrix_hex
+    """
     try:
         from oracle import get_oracle_measurement_broadcaster
         broadcaster = get_oracle_measurement_broadcaster()
+        
+        # FAST PATH: Ring buffer
         ring = broadcaster.get_ring_buffer(max_events=1)
+        snapshot_count = len(broadcaster.get_ring_buffer(max_events=100))
         
-        snapshot_count = 0
-        try:
-            full_ring = broadcaster.get_ring_buffer(max_events=100)
-            snapshot_count = len(full_ring)
-        except:
-            pass
+        if ring:
+            # Got latest from ring buffer
+            latest_event = ring[0]
+            try:
+                snapshot_data = json.loads(latest_event.get('snapshot_json', '{}'))
+            except:
+                snapshot_data = {}
+        else:
+            # FALLBACK: Query database
+            try:
+                with get_db_cursor() as cur:
+                    cur.execute("""
+                        SELECT 
+                            timestamp_ns, chirp_number,
+                            lattice_fidelity, lattice_coherence, lattice_cycle,
+                            consensus_fidelity, consensus_coherence, consensus_purity,
+                            mermin_M, mermin_is_quantum, mermin_verdict,
+                            pq0_oracle, pq0_IV, pq0_V,
+                            oracle_measurements
+                        FROM quantum_snapshots
+                        ORDER BY timestamp_ns DESC
+                        LIMIT 1
+                    """)
+                    row = cur.fetchone()
+                    if row:
+                        snapshot_data = {
+                            'timestamp_ns': row[0],
+                            'chirp_number': row[1],
+                            'lattice_quantum': {
+                                'fidelity': row[2],
+                                'coherence': row[3],
+                                'cycle_count': row[4],
+                            },
+                            'consensus': {
+                                'w_state_fidelity': row[5],
+                                'coherence': row[6],
+                                'purity': row[7],
+                            },
+                            'mermin_test': {
+                                'M_value': row[8],
+                                'is_quantum': row[9],
+                                'verdict': row[10],
+                            },
+                            'pq0_components': {
+                                'pq0_oracle_fidelity': row[11],
+                                'pq0_IV_fidelity': row[12],
+                                'pq0_V_fidelity': row[13],
+                            },
+                            'oracle_measurements': row[14] or [],
+                        }
+                        latest_event = {
+                            'cycle': row[1],
+                            'timestamp_ns': row[0],
+                            'broadcast_count': 1,
+                            'snapshot_json': json.dumps(snapshot_data),
+                        }
+                    else:
+                        snapshot_data = {}
+                        latest_event = None
+            except Exception as db_e:
+                logger.debug(f"[ORACLE-SNAPSHOT] DB fallback query failed: {db_e}")
+                snapshot_data = {}
+                latest_event = None
         
-        if not ring:
+        # No data from either source
+        if not latest_event:
             return jsonify({
-                'error': 'No measurements yet', 
+                'error': 'No measurements yet',
                 'ready': False,
                 'snapshots_available': snapshot_count,
+                'source': 'none',
             }), 503
-        
-        latest_event = ring[0]
-        
-        # Parse snapshot_json from broadcaster
-        try:
-            snapshot_data = json.loads(latest_event.get('snapshot_json', '{}'))
-        except:
-            snapshot_data = {}
         
         # Build response
         response = {
             'ready': True,
-            'cycle': latest_event['cycle'],
-            'timestamp_ns': latest_event['timestamp_ns'],
-            'broadcast_count': latest_event['broadcast_count'],
+            'cycle': latest_event.get('cycle', 0),
+            'timestamp_ns': latest_event.get('timestamp_ns', 0),
+            'broadcast_count': latest_event.get('broadcast_count', 0),
             'broadcast_status': 'active',
             'snapshots_available': snapshot_count,
+            'source': 'ring_buffer' if ring else 'database',
         }
         
         # Merge snapshot data
         if snapshot_data:
             response.update(snapshot_data)
         
-        # Ensure density_matrix_hex for client
+        # CRITICAL: Always ensure density_matrix_hex
         if 'density_matrix_hex' not in response or not response['density_matrix_hex']:
             snap_str = json.dumps(snapshot_data, sort_keys=True)
             response['density_matrix_hex'] = hashlib.sha3_256(snap_str.encode()).hexdigest() * 4
@@ -2610,7 +2671,14 @@ def oracle_snapshot_json():
     
     except Exception as e:
         logger.error(f"[ORACLE-SNAPSHOT] {e}")
-        return jsonify({'error': str(e), 'ready': False, 'snapshots_available': 0}), 503
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'error': str(e),
+            'ready': False,
+            'snapshots_available': 0,
+            'source': 'error',
+        }), 503
 
 
 @app.route('/api/broadcast/metrics', methods=['GET'])
