@@ -3763,3 +3763,11 @@ def _broadcast_snapshot_to_database(snapshot: dict) -> None:
     except Exception as e:
         logger.error(f"[RPC-BROADCAST] Error: {e}")
 
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# WSGI EXPORT FOR GUNICORN
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+# Gunicorn and wsgi_config.py require both 'app' and 'application' exports
+application = app
+
