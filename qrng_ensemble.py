@@ -354,29 +354,40 @@ class QuantumEntropyEnsemble:
             self.stats[source] = SourceStatistics()
     
     def _worker_loop(self):
-        """Background thread to keep entropy pool filled"""
+        """Background thread to keep entropy pool filled (non-aggressive)"""
+        last_refill = time.time()
         while self._running:
             try:
+                current_time = time.time()
                 with self._pool_lock:
                     pool_size = len(self._pool)
                 
-                # If pool is low, refill
-                if pool_size < self.pool_min_size:
+                # Only refill if pool is genuinely low AND enough time has passed
+                # This prevents hammering all sources simultaneously
+                time_since_refill = current_time - last_refill
+                min_refill_interval = 3.0 if pool_size < (self.pool_min_size * 0.25) else 5.0
+                
+                if pool_size < (self.pool_min_size * 0.5) and time_since_refill > min_refill_interval:
                     bytes_needed = min(
                         self.pool_max_size - pool_size,
-                        self.pool_min_size
+                        512  # Smaller refill per cycle (not the full min)
                     )
                     self._refill_pool(bytes_needed)
+                    last_refill = current_time
                 
-                time.sleep(1.0)
+                # Sleep longer when pool is healthy
+                sleep_time = 2.0 if pool_size < self.pool_min_size else 5.0
+                time.sleep(sleep_time)
             except Exception as e:
                 logger.debug(f"Worker error: {e}")
-                time.sleep(5.0)
+                time.sleep(10.0)  # Longer sleep on error
     
     def _refill_pool(self, num_bytes: int):
-        """Refill entropy pool by fetching from multiple sources"""
+        """Refill entropy pool by fetching from available sources (smart, non-hammering)"""
         # Determine which sources are available (circuit closed, API key present)
         available_sources = []
+        healthy_sources = []
+        
         for source, config in self.source_configs.items():
             # Check circuit breaker
             cb = self.circuit_breakers[source]
@@ -392,8 +403,15 @@ class QuantumEntropyEnsemble:
                     continue
             
             available_sources.append(source)
+            # Prefer sources with low failure rates
+            stats = self.source_stats[source]
+            if stats.consecutive_failures == 0:
+                healthy_sources.append(source)
         
-        if not available_sources:
+        # Prefer healthy sources; fall back to all available if needed
+        sources_to_try = healthy_sources if healthy_sources else available_sources
+        
+        if not sources_to_try:
             # All external sources unavailable — fall back to system CSPRNG silently.
             # This is fine: system entropy XORed with itself is still CSPRNG-quality,
             # and the pool will recover when external sources come back online.
@@ -405,13 +423,17 @@ class QuantumEntropyEnsemble:
                 self._pool.extend(os.urandom(num_bytes))
             return
         
-        # Fetch from multiple sources in parallel
-        bytes_per_source = max(32, num_bytes // len(available_sources))
+        # Only fetch from 1-2 sources per refill cycle (not all 5 at once)
+        # This prevents cascading failures when multiple sources are slow
+        import random
+        sources_to_try = random.sample(sources_to_try, min(2, len(sources_to_try)))
+        bytes_per_source = max(16, num_bytes // len(sources_to_try))
         samples = []
         
-        with ThreadPoolExecutor(max_workers=len(available_sources)) as executor:
+        # Fetch from selected sources only (not all available)
+        with ThreadPoolExecutor(max_workers=min(2, len(sources_to_try))) as executor:
             future_to_source = {}
-            for source in available_sources:
+            for source in sources_to_try:
                 future = executor.submit(
                     self._fetch_from_source,
                     source,
@@ -544,13 +566,13 @@ class QuantumEntropyEnsemble:
                 cb["failure_count"] += 1
                 cb["total_failures"] += 1
                 
-                # Open circuit after 5 consecutive failures
-                if stats.consecutive_failures >= 5:
+                # Open circuit after 3 consecutive failures (lower threshold for faster recovery)
+                if stats.consecutive_failures >= 3:
                     already_open = cb["state"] == CircuitBreakerState.OPEN
                     cb["state"] = CircuitBreakerState.OPEN
-                    # Exponential backoff: 30s → 60s → 120s … capped at 300s
-                    prev_open_duration = max(30, getattr(cb, '_last_open_duration', 30))
-                    next_open_duration = min(300, int(prev_open_duration * 1.5))
+                    # Shorter backoff: 20s → 30s → 45s … capped at 120s (not 300s)
+                    prev_open_duration = max(20, getattr(cb, '_last_open_duration', 20))
+                    next_open_duration = min(120, int(prev_open_duration * 1.5))
                     cb['_last_open_duration'] = next_open_duration
                     cb["open_until"] = time.time() + next_open_duration
                     if not already_open:
