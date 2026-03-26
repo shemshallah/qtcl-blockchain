@@ -918,6 +918,7 @@ class RpcBroadcastEvent:
     failed_clients: List[str]
     queued_for_db: bool
     elapsed_ms: float
+    snapshot_json: str = ""  # NEW: Store the serialized snapshot
 
 class RpcMeasurementBroadcaster:
     """
@@ -1072,6 +1073,7 @@ class RpcMeasurementBroadcaster:
                 failed_clients=failed_clients,
                 queued_for_db=result['queued_for_db'],
                 elapsed_ms=(time.time_ns() - start_ns) / 1e6,
+                snapshot_json=snapshot_json,  # Store the serialized snapshot
             )
             with self._ring_lock:
                 self._ring_buffer.append(event)

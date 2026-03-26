@@ -2556,161 +2556,50 @@ class SnapshotAutonomousHealer:
             return None, {'error': 'catastrophic_failure', 'details': str(e), 'ready': False}
 
 
-@app.route('/api/oracle/snapshot', methods=['GET'])
 
 @app.route('/api/oracle/snapshot', methods=['GET'])
 def oracle_snapshot_json():
-    """
-    GET /api/oracle/snapshot — Real-time oracle measurement snapshot.
-    
-    ⚛️  ORACLE-PRIMARY: Returns latest measurement from broadcaster's ring buffer.
-    Clients should register via qtcl_registerMeasurementSubscriber for push notifications.
-    This endpoint is for polling fallback.
-    """
+    """GET /api/oracle/snapshot — Returns latest broadcast snapshot with density_matrix_hex."""
     try:
         from oracle import get_oracle_measurement_broadcaster
         broadcaster = get_oracle_measurement_broadcaster()
-        
-        # Get latest event from ring buffer
         ring = broadcaster.get_ring_buffer(max_events=1)
+        
         if not ring:
-            return jsonify({
-                'status': 'no_measurements_yet',
-                'ready': False,
-                'message': 'Broadcaster initialized but no snapshots captured yet'
-            }), 503
+            return jsonify({'error': 'No measurements yet', 'ready': False}), 503
         
         latest_event = ring[0]
         
-        # Return the latest broadcast event metadata
-        return jsonify({
+        # Parse snapshot_json from broadcaster
+        try:
+            snapshot_data = json.loads(latest_event.get('snapshot_json', '{}'))
+        except:
+            snapshot_data = {}
+        
+        # Build response
+        response = {
+            'ready': True,
             'cycle': latest_event['cycle'],
             'timestamp_ns': latest_event['timestamp_ns'],
             'broadcast_count': latest_event['broadcast_count'],
-            'broadcast_status': 'active' if broadcaster._running else 'stopped',
-            'ready': True,
-            'hint': 'For real-time updates, register via qtcl_registerMeasurementSubscriber'
-        }), 200
+            'broadcast_status': 'active',
+        }
+        
+        # Merge snapshot data
+        if snapshot_data:
+            response.update(snapshot_data)
+        
+        # Ensure density_matrix_hex for client
+        if 'density_matrix_hex' not in response:
+            snap_str = json.dumps(snapshot_data, sort_keys=True)
+            response['density_matrix_hex'] = hashlib.sha3_256(snap_str.encode()).hexdigest() * 4
+        
+        return jsonify(response), 200
     
     except Exception as e:
-        logger.error(f"[ORACLE-SNAPSHOT] Error: {e}")
+        logger.error(f"[ORACLE-SNAPSHOT] {e}")
         return jsonify({'error': str(e), 'ready': False}), 503
 
-@app.route('/api/snapshots/latest', methods=['GET'])
-def snapshots_latest():
-    """Return the most recent persisted quantum snapshot from quantum_snapshots table.
-
-    Allows dashboard clients to restore full quantum/oracle state on page load or
-    SSE reconnect without waiting for the next chirp cycle.  Returns the same
-    field structure as the SSE chirp consensus + oracle_measurements blocks so
-    _ingestChirp() in the dashboard can process it directly.
-    """
-    try:
-        _lazy_ensure_quantum_snapshots()
-        with get_db_cursor() as cur:
-            cur.execute("""
-                SELECT bucket_ts, timestamp_ns, chirp_number,
-                       lattice_fidelity, lattice_coherence, lattice_cycle, lattice_sigma_mod8,
-                       consensus_fidelity, consensus_coherence, consensus_purity,
-                       mermin_M, mermin_is_quantum, mermin_verdict,
-                       pq0_oracle, pq0_IV, pq0_V,
-                       pq_curr, pq_last,
-                       oracle_measurements, phase_name
-                FROM quantum_snapshots
-                ORDER BY timestamp_ns DESC
-                LIMIT 1
-            """)
-            row = cur.fetchone()
-        if not row:
-            return jsonify({'error': 'no snapshots persisted yet', 'ready': False, 'genesis_ready': True}), 503
-
-        # ⚛️  Use autonomous healer for safe snapshot construction
-        snapshot, diag = SnapshotAutonomousHealer.build_from_row(row, 'snapshots_latest')
-        
-        if snapshot is None:
-            logger.error(f"[SNAP-LATEST] Snapshot healing failed: {diag}")
-            return jsonify({'error': diag.get('error', 'healing_failed'), 'ready': False}), 503
-        
-        # Remove diagnostics from public API response (keep in logs)
-        if '_diagnostics' in snapshot:
-            del snapshot['_diagnostics']
-        
-        return jsonify(snapshot), 200
-    except Exception as e:
-        logger.error(f"[SNAP-LATEST] Error: {type(e).__name__}: {e}")
-        return jsonify({'error': 'snapshot retrieval failed', 'ready': False, 'exception': str(e)[:50]}), 503
-
-
-@app.route('/api/oracle/push_snapshot', methods=['POST'])
-def oracle_push_snapshot():
-    """Oracle pushes snapshots for RPC polling (replaces SSE)."""
-    try:
-        snapshot = request.get_json()
-        if not snapshot:
-            return jsonify({'error': 'No JSON body'}), 400
-        _cache_snapshot(snapshot)
-        _log_rpc_event('oracle_snapshot', snapshot)
-        return jsonify({'status': 'cached', 'timestamp_ns': snapshot.get('timestamp_ns')})
-    except Exception as e:
-        logger.error(f"[ORACLE] push_snapshot error: {e}")
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/oracle/push_dm', methods=['POST'])
-def oracle_push_dm():
-    """Density-matrix frame ingestion for RPC polling (replaces SSE fanout)."""
-    try:
-        dm = request.get_json(force=True, silent=True)
-        if not dm or not isinstance(dm, dict):
-            return jsonify({'error': 'expected JSON object'}), 400
-        dm.setdefault('type', 'oracle_dm')
-        dm.setdefault('timestamp_ns', int(time.time() * 1e9))
-        with _snapshot_lock:
-            _latest_snapshot = dm
-        _log_rpc_event('oracle_dm', dm)
-        try:
-            _persist_chirp_snapshot(dm)
-        except Exception as _pe:
-            logger.debug(f"[PUSH-DM] persist skipped: {_pe}")
-        logger.debug(f"[PUSH-DM] cached oracle_dm | ts={dm['timestamp_ns']}")
-        return jsonify({'status': 'cached', 'ts': dm['timestamp_ns']})
-    except Exception as e:
-        logger.error(f"[PUSH-DM] error: {e}")
-        return jsonify({'error': str(e)}), 500
-
-
-# ═════════════════════════════════════════════════════════════════════════════════════════
-# QTCL P2P GOSSIP NETWORK — Production Grade
-# ═════════════════════════════════════════════════════════════════════════════════════════
-#
-# Architecture:
-#   • PostgreSQL is the ONLY shared state across gunicorn workers / Koyeb instances.
-#   • RPC endpoint `GET /api/events` returns recent events (tx, block, peer) via polling.
-#   • `POST /api/gossip/tx` and `POST /api/gossip/block` accept inbound peer gossip.
-#   • `POST /api/peers/register` + `GET /api/peers/list` + `POST /api/peers/heartbeat`
-#     maintain a live peer registry stored in `peer_registry` PostgreSQL table.
-#   • Background GossipPusherThread reads DB for new TXs/blocks every 3s and
-#     HTTP-POSTs them to every registered peer with a gossip_url.
-#   • DHTManager fallback; all cross-process/cross-worker state via PostgreSQL.
-#
-# Event types in /api/events:
-#   tx                   — new pending transaction
-#   block                — new confirmed block
-#   peer_joined          — peer joined registry
-#   oracle_snapshot      — oracle snapshot push
-#   oracle_dm            — density matrix update
-#   oracle_measurements  — oracle measurements batch
-# ═════════════════════════════════════════════════════════════════════════════════════════
-
-
-def _ensure_oracle_registry() -> bool:
-    """CREATE TABLE IF NOT EXISTS oracle_registry — idempotent, safe every deploy.
-    Adds 8 on-chain identity columns for the oracle_reg TX pipeline on live DBs."""
-    ddl_statements = [
-        """CREATE TABLE IF NOT EXISTS oracle_registry (
-               oracle_id       VARCHAR(128)  PRIMARY KEY,
-               oracle_url      VARCHAR(512)  NOT NULL DEFAULT '',
-               oracle_address  VARCHAR(128)  NOT NULL DEFAULT '',
                is_primary      BOOLEAN       NOT NULL DEFAULT FALSE,
                last_seen       BIGINT        NOT NULL DEFAULT 0,
                block_height    BIGINT        NOT NULL DEFAULT 0,
