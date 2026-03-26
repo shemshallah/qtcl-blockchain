@@ -385,6 +385,35 @@ ORACLE = None
 ORACLE_W_STATE_MANAGER = None
 LATTICE = None
 _ORACLE_INIT_EVENT = threading.Event()   # set once oracle is ready (or failed)
+_LATTICE_INIT_EVENT = threading.Event()  # set once lattice is ready (or failed)
+
+def _deferred_lattice_init() -> None:
+    """Import and initialise lattice_controller.py in a background thread.
+    
+    QuantumLatticeController initializes the spatial-temporal field, quantum execution engine,
+    W-state constructor, and non-Markovian noise bath.  This runs in a daemon thread to let
+    gunicorn bind port 8000 immediately; lattice becomes available within ~2-5s.
+    """
+    global LATTICE
+    try:
+        from lattice_controller import QuantumLatticeController
+        LATTICE = QuantumLatticeController()
+        logger.info("[LATTICE-INIT] ✅ QuantumLatticeController instantiated")
+        LATTICE.start()
+        logger.info("[LATTICE-INIT] ✅ Lattice daemon started — spatial-temporal field active, coherence maintenance loop running")
+    except ImportError as _ie:
+        logger.error(f"[LATTICE-INIT] ❌ QuantumLatticeController import failed: {_ie}")
+    except Exception as _ex:
+        logger.error(f"[LATTICE-INIT] ❌ Lattice deferred init error: {_ex}", exc_info=True)
+    finally:
+        _LATTICE_INIT_EVENT.set()  # unblock oracle sync daemon even if lattice failed
+
+threading.Thread(
+    target=_deferred_lattice_init,
+    daemon=True,
+    name="LatticeDeferred",
+).start()
+logger.info("[LATTICE] 🔄 Lattice init deferred to background thread — gunicorn will serve /health immediately")
 
 def _deferred_oracle_init() -> None:
     """Import and initialise oracle.py in a background thread.
@@ -1572,7 +1601,7 @@ def load_known_peers() -> List[Tuple[str, int]]:
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # MEASUREMENT SERVICE: Enterprise-Grade Async Metric Aggregation (Thread Pool + Queue)
-# Sharded node measurement with RLock-protected shared state + SSE broadcasting
+# Sharded node measurement with RLock-protected shared state
 # ═════════════════════════════════════════════════════════════════════════════════
 
 import queue as _measurement_queue_mod
@@ -1596,7 +1625,6 @@ class MeasurementService:
       Thread N: Measure nodes N*1000...
       
       All threads write to: metrics_dict (RLock-protected)
-      All threads push to: broadcast_queue (thread-safe)
       HTTP handlers read from: metrics_dict (instant, no contention)
       RPC polling
     """
@@ -1611,7 +1639,6 @@ class MeasurementService:
         self.metrics_lock = threading.RLock()
         self.metrics_dict = {}  # node_id -> {fidelity, coherence, entropy, timestamp}
         
-        # Broadcast queue (thread-safe, non-blocking)        
         # Thread management
         self.threads = []
         self.running = False
@@ -1659,12 +1686,6 @@ class MeasurementService:
                         # Write to shared dict (with lock)
                         with self.metrics_lock:
                             self.metrics_dict[node_id] = metric
-                        
-                        # Broadcast to SSE queue (non-blocking)
-                        try:
-                            self.broadcast_queue.put_nowait(metric)
-                        except _measurement_queue_mod.Full:
-                            pass  # Drop if queue full (SSE lagging)
                         
                         # Yield to other threads
                         time.sleep(0.001)  # 1ms per node
@@ -1763,12 +1784,6 @@ class MeasurementService:
         # Clear state
         with self.metrics_lock:
             self.metrics_dict.clear()
-        
-        try:
-            while True:
-                self.broadcast_queue.get_nowait()
-        except _measurement_queue_mod.Empty:
-            pass
         
         self.threads.clear()
         logger.info("[MEASURE] ✓ Shutdown complete")
@@ -2780,31 +2795,7 @@ def oracle_push_dm():
 #   oracle_measurements  — oracle measurements batch
 # ═════════════════════════════════════════════════════════════════════════════════════════
 
-# ── RPC event publisher — logs to in-memory ring buffer for polling ──
-class _RPCEventPublisher:
-    """RPC event log only — no SSE broadcasting."""
-    def publish(self, event_type: str, data: Dict[str, Any]) -> int:
-        _log_rpc_event(event_type, data)
-        return 0
-    def subscribe(self, sub_id: str) -> _queue_mod.Queue:
-        return _queue_mod.Queue()
-    def unsubscribe(self, sub_id: str) -> None:
-        pass
-    def subscriber_count(self) -> int:
-        return 0
-    def _fanout_local(self, payload: str) -> int:
-        try:
-            data = json.loads(payload)
-            _log_rpc_event(data.get('type', 'unknown'), data)
-        except:
-            pass
-        return 0
 
-_gossip_sse = _RPCEventPublisher()
-SSE_BROADCASTER = _gossip_sse
-_RPCEventPublisher.push = _RPCEventPublisher.publish
-
-# ── DB-backed gossip store — replaces per-process in-memory DHTManager ───────
 def _ensure_oracle_registry() -> bool:
     """CREATE TABLE IF NOT EXISTS oracle_registry — idempotent, safe every deploy.
     Adds 8 on-chain identity columns for the oracle_reg TX pipeline on live DBs."""
@@ -3335,27 +3326,9 @@ def _start_gossip_subsystem():
         _ensure_gossip_tables()
         _lazy_ensure_oracle_registry()
         GossipPusherThread().start()
-        logger.info("[GOSSIP] Subsystem online — DB gossip store + SSE broadcaster + peer pusher")
+        logger.info("[GOSSIP] Subsystem online — DB gossip store + peer pusher")
     except Exception as e:
         logger.error(f"[GOSSIP] Subsystem start failed: {e}")
-
-
-# ── SSE events endpoint — typed blockchain events ─────────────────────────────
-@app.route('/api/events', methods=['GET'])
-def rpc_events_poll():
-    """Poll recent events (replaces SSE stream). Query params: since (timestamp), types (comma-sep), limit (default 100)."""
-    since = float(request.args.get('since', time.time() - 3600))
-    want_types_str = request.args.get('types', 'all')
-    limit = int(request.args.get('limit', 100))
-    want_types = set(want_types_str.split(',')) if want_types_str != 'all' else {'all'}
-    events = []
-    with _rpc_event_lock:
-        for e in list(_rpc_event_log):
-            if e['ts'] >= since and ('all' in want_types or e['type'] in want_types):
-                events.append(e)
-                if len(events) >= limit:
-                    break
-    return jsonify({'events': events, 'count': len(events)}), 200
 
 
 # ── Peer management endpoints ─────────────────────────────────────────────────
@@ -3685,7 +3658,7 @@ application = app  # WSGI entry point
 # ── Auto-start gossip subsystem when imported by gunicorn ────────────────────
 # Under gunicorn each worker imports this module; we must start the gossip
 # subsystem here (not just in __main__) so every worker has the DB-backed
-# DHT + SSE broadcaster + GossipPusherThread running.
+# DHT + GossipPusherThread running.
 try:
     _start_gossip_subsystem()
 except Exception as _gse:
@@ -3721,7 +3694,7 @@ except Exception as _gse:
 class UnifiedOracleMux:
     """
     Unified oracle multiplexer — aggregates the live ORACLE_W_STATE_MANAGER cluster
-    into a single chirp snapshot for SSE broadcast on port 9091.
+    into a single chirp snapshot for RPC polling.
 
     Architecture
     ────────────
@@ -4137,8 +4110,6 @@ class MetricsCollector:
         while self.running:
             try:
                 metrics = self._gather_metrics()
-                # SSE only - broadcast to connected clients via _sse_push_snapshot
-                _sse_push_snapshot(metrics)
                 time.sleep(2)  # Update every 2 seconds
             except Exception as e:
                 logger.error(f"[METRICS] Collection error: {e}")
@@ -8463,7 +8434,7 @@ if __name__ == '__main__':
     if not initialize_p2p():
         logger.warning("[STARTUP] Failed to initialize P2P server (may retry)")
 
-    # Start P2P Gossip Subsystem — DB-backed DHT, SSE broadcaster, peer pusher
+    # Start P2P Gossip Subsystem — DB-backed DHT + peer pusher
     logger.info("[STARTUP] Phase 2b: Starting P2P gossip subsystem...")
     _start_gossip_subsystem()
     
@@ -9211,12 +9182,12 @@ def _start_oracle_measurement_sync_daemon():
     
     Triggers on: LATTICE.get_oracle_measurement_window() = measurement_window=True
     Frequency: ~1-2 per second (aligned with SIGMA-REVIVAL cycles)
-    Output: Per-oracle logs + DB records + SSE broadcasts
+    Output: Per-oracle logs + DB records
     """
     
     def _oracle_measurement_sync_loop():
         logger.critical("[ORACLE-SYNC] 🚀 ENTERPRISE DAEMON STARTED — Monitoring measurement windows")
-        logger.critical("[ORACLE-SYNC] Configuration: 5 oracles | Per-cycle metrics + Mermin | SSE broadcast enabled")
+        logger.critical("[ORACLE-SYNC] Configuration: 5 oracles | Per-cycle metrics + Mermin | RPC polling enabled")
         
         last_measured_cycle = -1
         consecutive_failures = 0
