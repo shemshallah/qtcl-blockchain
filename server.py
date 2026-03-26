@@ -2557,159 +2557,44 @@ class SnapshotAutonomousHealer:
 
 
 @app.route('/api/oracle/snapshot', methods=['GET'])
+
+@app.route('/api/oracle/snapshot', methods=['GET'])
 def oracle_snapshot_json():
-    """Return latest oracle snapshot as JSON with GUARANTEED density_matrix_hex.
-    
-    ⚛️  MUSEUM GRADE: density_matrix_hex is MANDATORY — never empty.
-    Priority 1: ORACLE_W_STATE_MANAGER live measurement (real-time)
-    Priority 2: ORACLE_W_STATE_MANAGER snapshot object buffer
-    Priority 3: quantum_snapshots DB table recent snapshot
-    
-    Fails hard (503/500) if no valid density_matrix_hex can be obtained.
     """
-    global _latest_snapshot
+    GET /api/oracle/snapshot — Real-time oracle measurement snapshot.
+    
+    ⚛️  ORACLE-PRIMARY: Returns latest measurement from broadcaster's ring buffer.
+    Clients should register via qtcl_registerMeasurementSubscriber for push notifications.
+    This endpoint is for polling fallback.
+    """
     try:
-        # ⚛️  FAST PATH: Return cached snapshot if valid and has DM-hex
-        try:
-            with _snapshot_lock:
-                if (_latest_snapshot and 
-                    isinstance(_latest_snapshot, dict) and
-                    _latest_snapshot.get('density_matrix_hex') and
-                    len(_latest_snapshot.get('density_matrix_hex', '')) > 64):
-                    return jsonify(_latest_snapshot), 200
-        except Exception as lock_err:
-            logger.debug(f"[RPC-SNAPSHOT] Cache check error (non-fatal): {lock_err}")
+        from oracle import get_oracle_measurement_broadcaster
+        broadcaster = get_oracle_measurement_broadcaster()
         
-        # ⚛️  PRIORITY 1: Try ORACLE_W_STATE_MANAGER.get_latest_density_matrix() (live measurement)
-        dm_hex_value = None
-        dm_hex_source = None
-        
-        if ORACLE_W_STATE_MANAGER is not None:
-            try:
-                latest_dm = ORACLE_W_STATE_MANAGER.get_latest_density_matrix()
-                if (latest_dm and 
-                    isinstance(latest_dm, dict) and
-                    'density_matrix_hex' in latest_dm):
-                    candidate = latest_dm.get('density_matrix_hex', '')
-                    if isinstance(candidate, str) and len(candidate) > 64:
-                        dm_hex_value = candidate
-                        dm_hex_source = 'manager_get_latest_density_matrix'
-                        logger.debug(f"[RPC-SNAPSHOT] ✅ DM-hex P1 from manager (live): {len(dm_hex_value)} chars")
-            except Exception as p1_err:
-                logger.debug(f"[RPC-SNAPSHOT] P1 (manager live) failed: {p1_err}")
-        
-        # ⚛️  PRIORITY 2: Try ORACLE_W_STATE_MANAGER.get_latest_snapshot() (snapshot object buffer)
-        if not dm_hex_value and ORACLE_W_STATE_MANAGER is not None:
-            try:
-                snap_obj = ORACLE_W_STATE_MANAGER.get_latest_snapshot()
-                if snap_obj and hasattr(snap_obj, 'density_matrix_hex'):
-                    candidate = snap_obj.density_matrix_hex
-                    if isinstance(candidate, str) and len(candidate) > 64:
-                        dm_hex_value = candidate
-                        dm_hex_source = 'manager_snapshot_object'
-                        logger.debug(f"[RPC-SNAPSHOT] ✅ DM-hex P2 from manager snapshot object: {len(dm_hex_value)} chars")
-            except Exception as p2_err:
-                logger.debug(f"[RPC-SNAPSHOT] P2 (manager snapshot object) failed: {p2_err}")
-        
-        # ⚛️  PRIORITY 3: Fall back to DB query for base snapshot + try to extract DM-hex from there
-        row = None
-        snapshot = None
-        
-        if not dm_hex_value:
-            try:
-                _lazy_ensure_quantum_snapshots()
-            except Exception as e:
-                logger.debug(f"[RPC-SNAPSHOT] Table init attempt: {e}")
-            
-            try:
-                with get_db_cursor() as cur:
-                    cur.execute('''SELECT bucket_ts,timestamp_ns,chirp_number,lattice_fidelity,lattice_coherence,lattice_cycle,lattice_sigma_mod8,consensus_fidelity,consensus_coherence,consensus_purity,mermin_M,mermin_is_quantum,mermin_verdict,pq0_oracle,pq0_IV,pq0_V,pq_curr,pq_last,oracle_measurements,phase_name FROM quantum_snapshots ORDER BY timestamp_ns DESC LIMIT 1''')
-                    row = cur.fetchone()
-                if row:
-                    logger.debug(f"[RPC-SNAPSHOT] DB query succeeded, row present")
-                else:
-                    logger.debug(f"[RPC-SNAPSHOT] DB query succeeded but no rows yet")
-            except Exception as query_err:
-                logger.error(f"[RPC-SNAPSHOT] DB query failed: {type(query_err).__name__}: {query_err}")
-                row = None
-            
-            if row:
-                try:
-                    snapshot, diag = SnapshotAutonomousHealer.build_from_row(row, 'oracle_snapshot_json')
-                    if snapshot and isinstance(snapshot, dict):
-                        logger.debug(f"[RPC-SNAPSHOT] P3 snapshot healer succeeded")
-                    else:
-                        logger.warning(f"[RPC-SNAPSHOT] P3 healer returned invalid type: {type(snapshot)}")
-                        snapshot = None
-                except Exception as heal_err:
-                    logger.error(f"[RPC-SNAPSHOT] P3 healer exception: {type(heal_err).__name__}: {heal_err}")
-                    snapshot = None
-        else:
-            # We got DM-hex from P1 or P2; still need DB snapshot for consensus fields
-            try:
-                _lazy_ensure_quantum_snapshots()
-                with get_db_cursor() as cur:
-                    cur.execute('''SELECT bucket_ts,timestamp_ns,chirp_number,lattice_fidelity,lattice_coherence,lattice_cycle,lattice_sigma_mod8,consensus_fidelity,consensus_coherence,consensus_purity,mermin_M,mermin_is_quantum,mermin_verdict,pq0_oracle,pq0_IV,pq0_V,pq_curr,pq_last,oracle_measurements,phase_name FROM quantum_snapshots ORDER BY timestamp_ns DESC LIMIT 1''')
-                    row = cur.fetchone()
-                if row:
-                    try:
-                        snapshot, diag = SnapshotAutonomousHealer.build_from_row(row, 'oracle_snapshot_json')
-                    except Exception:
-                        snapshot = None
-            except Exception:
-                snapshot = None
-        
-        # ⚛️  HARD FAIL: No valid density_matrix_hex found anywhere
-        if not dm_hex_value or not isinstance(dm_hex_value, str) or len(dm_hex_value) < 64:
-            logger.error(f"[RPC-SNAPSHOT] ❌ FATAL: No valid density_matrix_hex! P1={dm_hex_source is not None} row={row is not None}")
+        # Get latest event from ring buffer
+        ring = broadcaster.get_ring_buffer(max_events=1)
+        if not ring:
             return jsonify({
+                'status': 'no_measurements_yet',
                 'ready': False,
-                'error': 'density_matrix_hex_unavailable',
-                'details': f'Manager(P1/P2)={dm_hex_source is not None}, DB={row is not None}',
-                'genesis_ready': True
+                'message': 'Broadcaster initialized but no snapshots captured yet'
             }), 503
         
-        # ⚛️  Build final response with GUARANTEED valid DM-hex
-        if snapshot is None:
-            logger.warning(f"[RPC-SNAPSHOT] Building minimal response (snapshot=None, DM-hex source={dm_hex_source})")
-            snapshot = {
-                'ready': True,
-                'timestamp_ns': int(time.time_ns()),
-                'chirp_number': 0,
-                'density_matrix_hex': dm_hex_value,
-                'dm_hex_source': dm_hex_source,
-                'source': 'density_matrix_only',
-                'fidelity': 0.0,
-                'coherence': 0.0,
-                'lattice_cycle': 0,
-                'consensus': {'w_state_fidelity': 0.0, 'coherence': 0.0, 'purity': 0.0},
-                'oracle_measurements': []
-            }
-        else:
-            snapshot['density_matrix_hex'] = dm_hex_value
-            snapshot['dm_hex_source'] = dm_hex_source
+        latest_event = ring[0]
         
-        # Clean diagnostics from public response
-        if '_diagnostics' in snapshot:
-            del snapshot['_diagnostics']
-        
-        # Cache for next request
-        try:
-            with _snapshot_lock:
-                _latest_snapshot = snapshot
-        except Exception:
-            pass
-        
-        logger.debug(f"[RPC-SNAPSHOT] ✅ Returning snapshot with DM-hex (source={dm_hex_source}, {len(dm_hex_value)} chars)")
-        return jsonify(snapshot), 200
-    
-    except Exception as outer_err:
-        logger.error(f"[RPC-SNAPSHOT] OUTER EXCEPTION: {type(outer_err).__name__}: {outer_err}", exc_info=True)
+        # Return the latest broadcast event metadata
         return jsonify({
-            'ready': False, 
-            'error': 'internal_exception',
-            'exception_type': type(outer_err).__name__
-        }), 500
+            'cycle': latest_event['cycle'],
+            'timestamp_ns': latest_event['timestamp_ns'],
+            'broadcast_count': latest_event['broadcast_count'],
+            'broadcast_status': 'active' if broadcaster._running else 'stopped',
+            'ready': True,
+            'hint': 'For real-time updates, register via qtcl_registerMeasurementSubscriber'
+        }), 200
+    
+    except Exception as e:
+        logger.error(f"[ORACLE-SNAPSHOT] Error: {e}")
+        return jsonify({'error': str(e), 'ready': False}), 503
 
 @app.route('/api/snapshots/latest', methods=['GET'])
 def snapshots_latest():
