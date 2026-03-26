@@ -2235,8 +2235,11 @@ def _init_metrics_on_first_request():
                 try:
                     _lazy_initialize_metrics_agents()
                     _metrics_initialized = True
+                except NameError:
+                    # Expected: agents not yet available during early WSGI phase
+                    pass
                 except Exception as e:
-                    logger.warning(f"[METRICS] Delayed initialization failed: {e}")
+                    logger.debug(f"[METRICS] Delayed initialization deferred: {e}")
 
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
@@ -4732,18 +4735,37 @@ def robots_txt():
     )
 
 @app.route('/health', methods=['GET'])
+def health_check():
+    """Minimal health check for Koyeb — fast, no dependencies on undefined globals.
+    Just confirms the app is running and can respond."""
+    try:
+        return jsonify({
+            'status': 'ok',
+            'oracle_available': ORACLE_AVAILABLE,
+            'oracle_manager_ready': ORACLE_W_STATE_MANAGER is not None,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }), 200
+    except Exception as e:
+        logger.error(f"[HEALTH] Check failed: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 @app.route('/api/health', methods=['GET'])
 def health():
     """Detailed health check endpoint — real values only, null when unavailable."""
-    snapshot = state.get_state()
-    qm = snapshot['quantum_metrics']
+    try:
+        snapshot = state.get_state()
+    except (NameError, AttributeError):
+        snapshot = {'quantum_metrics': {}, 'block_state': {'current_height': 0}}
+    
+    qm = snapshot.get('quantum_metrics', {})
     # Fetch real block height from DB (source of truth) rather than in-memory state
     db_block = None
     try:
         db_block = query_latest_block()
     except Exception:
         pass
-    block_height = db_block['height'] if db_block else snapshot['block_state']['current_height']
+    block_height = db_block['height'] if db_block else snapshot.get('block_state', {}).get('current_height', 0)
     # Fetch latest real oracle snapshot from DB for quantum metrics
     real_qm = {'coherence': None, 'entanglement': None, 'phase_drift': None, 'w_state_fidelity': None}
     try:
@@ -4763,12 +4785,23 @@ def health():
     for k in real_qm:
         if real_qm[k] is None and qm.get(k) is not None:
             real_qm[k] = qm[k]
+    
+    try:
+        is_alive = state.is_alive
+    except (NameError, AttributeError):
+        is_alive = False
+    
+    try:
+        lattice_loaded = state.lattice_loaded
+    except (NameError, AttributeError):
+        lattice_loaded = LATTICE is not None
+    
     return jsonify({
-        'status': 'ok' if state.is_alive else 'degraded',
+        'status': 'ok' if is_alive else 'degraded',
         'oracle_id':      ORACLE_ID,
         'oracle_role':    ORACLE_ROLE,
-        'lattice_loaded': state.lattice_loaded,
-        'p2p_enabled':    P2P is not None and P2P.is_running,
+        'lattice_loaded': lattice_loaded,
+        'p2p_enabled':    P2P is not None and P2P.is_running if P2P else False,
         'p2p_peers':      P2P.get_peer_count() if P2P else 0,
         'quantum_metrics': real_qm,
         'block_height':   block_height,
@@ -9502,9 +9535,20 @@ def _deferred_start_oracle_measurement_sync():
     
     while waited < max_wait:
         try:
-            lattice_ok = LATTICE is not None
-            oracle_ok = ORACLE_W_STATE_MANAGER is not None
-            nodes_ok = oracle_ok and hasattr(ORACLE_W_STATE_MANAGER, 'nodes') and len(ORACLE_W_STATE_MANAGER.nodes) == 5
+            try:
+                lattice_ok = LATTICE is not None
+            except NameError:
+                lattice_ok = False
+            
+            try:
+                oracle_ok = ORACLE_W_STATE_MANAGER is not None
+            except NameError:
+                oracle_ok = False
+            
+            try:
+                nodes_ok = oracle_ok and hasattr(ORACLE_W_STATE_MANAGER, 'nodes') and len(ORACLE_W_STATE_MANAGER.nodes) == 5
+            except (NameError, AttributeError, TypeError):
+                nodes_ok = False
             
             if waited % 10 == 0:  # Log every 10 seconds
                 logger.info(
@@ -9531,17 +9575,20 @@ def _deferred_start_oracle_measurement_sync():
         waited += poll_interval
     
     try:
-        logger.critical(
-            f"[ORACLE-SYNC-DEFERRED] ❌ TIMEOUT @ {max_wait}s | "
-            f"LATTICE={LATTICE is not None} ORACLE_MGR={ORACLE_W_STATE_MANAGER is not None} | "
-            f"Daemon NOT started — check initialization order"
-        )
+        lattice_status = LATTICE is not None
     except NameError:
-        logger.critical(
-            f"[ORACLE-SYNC-DEFERRED] ❌ TIMEOUT @ {max_wait}s | "
-            f"LATTICE undefined | ORACLE_MGR={ORACLE_W_STATE_MANAGER is not None} | "
-            f"Daemon NOT started — check initialization order"
-        )
+        lattice_status = False
+    
+    try:
+        oracle_status = ORACLE_W_STATE_MANAGER is not None
+    except NameError:
+        oracle_status = False
+    
+    logger.critical(
+        f"[ORACLE-SYNC-DEFERRED] ❌ TIMEOUT @ {max_wait}s | "
+        f"LATTICE={lattice_status} ORACLE_MGR={oracle_status} | "
+        f"Daemon NOT started — check initialization order"
+    )
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════
 # DAEMON STARTUP ENTRY POINT (module level)
@@ -9630,15 +9677,19 @@ def _start_comprehensive_measurement_feed():
 # Start comprehensive feed daemon — deferred until LATTICE is ready
 def _start_comprehensive_feed_when_ready():
     import time as _t
+    global LATTICE
     try:
         for _ in range(90):  # wait up to 90s
-            if LATTICE is not None:
-                _start_comprehensive_measurement_feed()
-                return
+            try:
+                if LATTICE is not None:
+                    _start_comprehensive_measurement_feed()
+                    return
+            except NameError:
+                pass
             _t.sleep(1)
         logger.warning("[COMPREHENSIVE-FEED] LATTICE never became ready — feed not started")
-    except NameError:
-        logger.warning("[COMPREHENSIVE-FEED] LATTICE undefined during initialization")
+    except Exception as e:
+        logger.debug(f"[COMPREHENSIVE-FEED] Initialization deferred: {e}")
 
 threading.Thread(target=_start_comprehensive_feed_when_ready, daemon=True,
                  name="ComprehensiveFeedWaiter").start()
