@@ -9654,36 +9654,37 @@ def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
 
 
 def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getBalance — address QTCL balance."""
+    """qtcl_getBalance — address QTCL balance via direct DB query."""
     try:
-        logger.debug(f"[RPC-METHOD] qtcl_getBalance called with params={params}, id={rpc_id}")
         if not isinstance(params, (list, dict)):
-            logger.debug(f"[RPC-METHOD] qtcl_getBalance: params type invalid (got {type(params).__name__})")
             return _rpc_error(-32602, "params must be list or object", rpc_id)
         address = (params[0] if isinstance(params, list) else params.get("address", "")) if params else ""
         if not address:
-            logger.debug(f"[RPC-METHOD] qtcl_getBalance: address missing or empty")
             return _rpc_error(-32602, "address required", rpc_id)
         try:
-            from globals import get_blockchain
-            bc = get_blockchain()
-            if bc is None:
-                logger.warning(f"[RPC-METHOD] qtcl_getBalance: blockchain not initialized")
-                return _rpc_error(-32003, "Blockchain not synced", rpc_id)
-            balance = bc.get_balance(address)
-            result = {
-                "address": address,
-                "balance": float(balance),
-                "symbol":  "QTCL",
-            }
-            logger.debug(f"[RPC-METHOD] qtcl_getBalance success: address={address}, balance={balance}")
+            wallet = query_wallet_info(address)
+            if wallet is None:
+                # Address not yet in DB — return 0 balance, not an error
+                result = {
+                    "address": address,
+                    "balance": 0.0,
+                    "symbol":  "QTCL",
+                }
+            else:
+                raw_balance = int(wallet.get('balance') or 0)
+                result = {
+                    "address": address,
+                    "balance": raw_balance / 100.0,
+                    "symbol":  "QTCL",
+                }
+            logger.debug(f"[RPC-METHOD] qtcl_getBalance success: address={address}, balance={result['balance']}")
             return _rpc_ok(result, rpc_id)
         except Exception as be:
-            logger.exception(f"[RPC-METHOD] qtcl_getBalance: blockchain error: {be}")
-            return _rpc_error(-32603, f"Balance lookup failed: {str(be)}", rpc_id, {"exception": str(be).__class__.__name__})
+            logger.exception(f"[RPC-METHOD] qtcl_getBalance: DB error: {be}")
+            return _rpc_error(-32603, f"Balance lookup failed: {str(be)}", rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getBalance outer exception: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
 def _rpc_getTransaction(params: Any, rpc_id: Any) -> dict:
