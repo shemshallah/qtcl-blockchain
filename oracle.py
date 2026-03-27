@@ -596,7 +596,6 @@ class DensityMatrixSnapshot:
     phase_coherence       : float
     entanglement_witness  : float
     trace_purity          : float
-    block_height          : int                      = 0
     w_entropy_hash        : str                      = ""
     hlwe_signature        : Optional[Dict[str, Any]] = None
     oracle_address        : Optional[str]            = None
@@ -613,7 +612,6 @@ class DensityMatrixSnapshot:
             "aer_noise_state": self.aer_noise_state, "lattice_refresh_counter": self.lattice_refresh_counter,
             "w_state_strength": self.w_state_strength, "phase_coherence": self.phase_coherence,
             "entanglement_witness": self.entanglement_witness, "trace_purity": self.trace_purity,
-            "block_height": self.block_height, "w_entropy_hash": self.w_entropy_hash,
             "hlwe_signature": self.hlwe_signature, "oracle_address": self.oracle_address,
             "signature_valid": self.signature_valid, "mermin_test": self.bell_test,
         })
@@ -1099,7 +1097,6 @@ class OracleNode:
                 phase_coherence         = QIM.phase_coherence(dm_array),
                 entanglement_witness    = QIM.entanglement_witness(dm_array),
                 trace_purity            = QIM.trace_purity(dm_array),
-                block_height            = 0,
             )
             snap.oracle_address = self.oracle_address
             with self._lock:
@@ -1744,7 +1741,6 @@ class OracleWStateManager:
             phase_coherence         = QIM.phase_coherence(dm_mean),
             entanglement_witness    = QIM.entanglement_witness(dm_mean),
             trace_purity            = QIM.trace_purity(dm_mean),
-            block_height            = self.current_block_height,
         )
         if mermin_result:
             snapshot.bell_test = mermin_result
@@ -2639,7 +2635,7 @@ class RpcBroadcastController:
     def __init__(self):
         self._subscribers: Dict[str, MeasurementSubscriber] = {}
         self._sub_lock = threading.RLock()
-        self._ring_buffer: deque = deque(maxlen=1)  # Keep only latest snapshot
+        self._ring_buffer: deque = deque(maxlen=100)
         self._ring_lock = threading.RLock()
         self._persist_queue: queue_module.Queue = queue_module.Queue(maxsize=1000)
         self._persist_thread: Optional[threading.Thread] = None
@@ -2715,18 +2711,6 @@ class RpcBroadcastController:
                 except Exception as e:
                     logger.error(f"[RPC-BROADCAST] Failed to queue: {e}")
             
-            # Also update server.py's RPC cache for /rpc/oracle/snapshots endpoint
-            try:
-                from server import _cache_snapshot
-                snapshot_dict = self._extract_snapshot_data(snapshot)
-                snapshot_dict['timestamp_ns'] = ts_ns
-                snapshot_dict['lattice_refresh_counter'] = cycle
-                _cache_snapshot(snapshot_dict)
-            except ImportError:
-                pass  # Server may not be imported yet
-            except Exception as e:
-                logger.debug(f"[RPC-BROADCAST] Server cache update failed: {e}")
-            
             with self._sub_lock:
                 subscribers = dict(self._subscribers)
             result['broadcast_count'] = len(subscribers)
@@ -2772,60 +2756,16 @@ class RpcBroadcastController:
             return '{}'
 
     def _extract_snapshot_data(self, snapshot) -> Dict[str, Any]:
-        """Extract key snapshot fields for DB persistence and W-state reconstruction."""
+        """Extract key snapshot fields for DB persistence."""
         aer_noise = getattr(snapshot, 'aer_noise_state', {})
         bf = aer_noise.get('block_field', {})
         mermin = getattr(snapshot, 'bell_test', {}) or {}
         pq0_o = aer_noise.get('pq0_oracle_fidelity', 0.0)
         pq0_iv = aer_noise.get('pq0_IV_fidelity', 0.0)
         pq0_v = aer_noise.get('pq0_V_fidelity', 0.0)
-        pq_curr = bf.get('pq_curr', 0)
-        pq_last = bf.get('pq_last', 0)
 
         return {
             'timestamp_ns': snapshot.timestamp_ns,
-            'block_height': getattr(snapshot, 'block_height', 0),
-            'lattice_refresh_counter': getattr(snapshot, 'lattice_refresh_counter', 0),
-            
-            # Full density matrix for W-state reconstruction
-            'density_matrix_hex': getattr(snapshot, 'density_matrix_hex', ''),
-            'density_matrix_dims': [8, 8],
-            
-            # Quantum metrics
-            'w_state_fidelity': getattr(snapshot, 'w_state_fidelity', 0.0),
-            'purity': getattr(snapshot, 'purity', 0.0),
-            'von_neumann_entropy': getattr(snapshot, 'von_neumann_entropy', 0.0),
-            'coherence_l1': getattr(snapshot, 'coherence_l1', 0.0),
-            'coherence_renyi': getattr(snapshot, 'coherence_renyi', 0.0),
-            'coherence_geometric': getattr(snapshot, 'coherence_geometric', 0.0),
-            'quantum_discord': getattr(snapshot, 'quantum_discord', 0.0),
-            'w_state_strength': getattr(snapshot, 'w_state_strength', 0.0),
-            'phase_coherence': getattr(snapshot, 'phase_coherence', 0.0),
-            'entanglement_witness': getattr(snapshot, 'entanglement_witness', 0.0),
-            'trace_purity': getattr(snapshot, 'trace_purity', 0.0),
-            
-            # Block field (for W-state + PQ0 + PQ_curr + PQ_last 4-way model)
-            'block_field': {
-                'pq_curr': pq_curr,
-                'pq_last': pq_last,
-            },
-            
-            # Tripartite W state: pq0 (oracle + IV + V components)
-            'pq0': {
-                'oracle': pq0_o,
-                'IV': pq0_iv,
-                'V': pq0_v,
-            },
-            'pq_curr': pq_curr,
-            'pq_last': pq_last,
-            
-            # For client-side HyperbolicTriangle.compute(pq0, pq_curr, pq_last)
-            'tripartite_params': {
-                'pq0': pq0_o,
-                'pq_curr': pq_curr,
-                'pq_last': pq_last,
-            },
-            
             'lattice_quantum': {
                 'fidelity': getattr(snapshot, 'w_state_fidelity', 0.0),
                 'coherence': getattr(snapshot, 'coherence_l1', 0.0),
@@ -2840,16 +2780,15 @@ class RpcBroadcastController:
                 'quantum': mermin.get('quantum', False),
                 'verdict': mermin.get('verdict', ''),
             },
+            'pq0_components': {
+                'oracle': pq0_o, 'IV': pq0_iv, 'V': pq0_v,
+            },
             'oracle_measurements': [
                 {'fidelity': n.get('fidelity', 0.0), 'coherence': n.get('coherence', 0.0)}
                 for n in bf.get('per_node', [])
             ],
+            'block_field': {'pq_last': bf.get('pq_last', 0), 'pq_curr': bf.get('pq_curr', 0)},
             'chirp_number': getattr(snapshot, 'lattice_refresh_counter', 0),
-            
-            # HLWE signature for cryptographic verification
-            'hlwe_signature': getattr(snapshot, 'hlwe_signature', None),
-            'oracle_address': getattr(snapshot, 'oracle_address', None),
-            'signature_valid': getattr(snapshot, 'signature_valid', False),
         }
 
     def _persist_worker(self) -> None:
