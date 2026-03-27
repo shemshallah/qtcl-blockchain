@@ -127,8 +127,6 @@ def _dispatch_single(req: dict) -> Optional[dict]:
         logger.exception(f"[RPC] {method} raised: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
-_RPC_METHOD_META: Dict[str, dict] = {}
-
 # ═══ LAZY INITIALIZATION (deferred until first use) ═══
 # This allows Flask to bind port 8000 before heavy crypto/quantum init
 QRNG_ENSEMBLE = None
@@ -4395,6 +4393,134 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_registerPeer": _rpc_registerPeer,
     "qtcl_gossipIngest": _rpc_gossipIngest,
     "qtcl_sendHeartbeat": _rpc_sendHeartbeat,
+}
+
+_RPC_METHOD_META: Dict[str, dict] = {
+    "qtcl_submitBlock": {
+        "description": "Submit a mined block to the network",
+        "params": [{"name": "block", "type": "object", "description": "Complete block with header and transactions"}],
+        "returns": {"tx_hash": "str", "status": "str"},
+    },
+    "qtcl_submitTransaction": {
+        "description": "Submit a signed transaction to mempool",
+        "params": [{"name": "transaction", "type": "object", "description": "Transaction with from, to, amount, signature"}],
+        "returns": {"tx_hash": "str", "status": "str"},
+    },
+    "qtcl_getBlockHeight": {
+        "description": "Get current blockchain tip height and hash",
+        "params": [],
+        "returns": {"height": "int", "tip_hash": "str", "timestamp_s": "int", "difficulty": "int", "w_state_fidelity": "float"},
+    },
+    "qtcl_getBalance": {
+        "description": "Query address QTCL balance with full accounting breakdown",
+        "params": [{"name": "address", "type": "string", "description": "64-char hex address"}],
+        "returns": {"address": "str", "balance": "float", "balance_total_sats": "int"},
+    },
+    "qtcl_getTransaction": {
+        "description": "Query transaction details by hash",
+        "params": [{"name": "tx_hash", "type": "string", "description": "64-char hex transaction hash"}],
+        "returns": {"tx_hash": "str", "from_address": "str", "to_address": "str", "amount": "float", "status": "str"},
+    },
+    "qtcl_getBlock": {
+        "description": "Fetch complete block by height or hash",
+        "params": [{"name": "height", "type": "int"}, {"name": "hash", "type": "str"}],
+        "returns": {"height": "int", "block_hash": "str", "transactions": "array"},
+    },
+    "qtcl_getBlockRange": {
+        "description": "Batch fetch blocks for chain sync (max 100 blocks)",
+        "params": [{"name": "from_height", "type": "int"}, {"name": "to_height", "type": "int"}],
+        "returns": {"blocks": "array", "count": "int", "from": "int", "to": "int"},
+    },
+    "qtcl_getQuantumMetrics": {
+        "description": "Live W-state oracle and lattice metrics",
+        "params": [],
+        "returns": {"lattice": "dict", "w_state": "dict", "oracle_available": "bool"},
+    },
+    "qtcl_getPythPrice": {
+        "description": "Get Pyth oracle price for symbol",
+        "params": [{"name": "symbol", "type": "string", "description": "e.g., BTC, ETH, SOL"}],
+        "returns": {"price": "float", "confidence": "float", "timestamp": "int"},
+    },
+    "qtcl_getMempoolStats": {
+        "description": "Mempool depth and fee statistics",
+        "params": [],
+        "returns": {"depth": "int", "pending": "int", "total_fees": "float"},
+    },
+    "qtcl_getPeers": {
+        "description": "Get list of known P2P peers",
+        "params": [],
+        "returns": {"peers": "array", "count": "int"},
+    },
+    "qtcl_getHealth": {
+        "description": "Get server health status",
+        "params": [],
+        "returns": {"status": "str", "oracle_ready": "bool", "lattice_ready": "bool", "pyth_ready": "bool"},
+    },
+    "qtcl_getEvents": {
+        "description": "Poll recent RPC events",
+        "params": [{"name": "event_type", "type": "string"}, {"name": "limit", "type": "int"}],
+        "returns": {"events": "array", "count": "int"},
+    },
+    "qtcl_getOracleRegistry": {
+        "description": "Get all registered oracles",
+        "params": [],
+        "returns": {"oracles": "array", "count": "int"},
+    },
+    "qtcl_getOracleRecord": {
+        "description": "Get specific oracle by address",
+        "params": [{"name": "oracle_address", "type": "string"}],
+        "returns": {"oracle_address": "str", "fidelity": "float", "coherence": "float"},
+    },
+    "qtcl_submitOracleReg": {
+        "description": "Submit oracle registration",
+        "params": [{"name": "registration", "type": "object"}],
+        "returns": {"success": "bool", "oracle_address": "str"},
+    },
+    "qtcl_getOracleSnapshot": {
+        "description": "Fetch latest oracle W-state snapshot with density matrix",
+        "params": [],
+        "returns": {"snapshot": "dict", "block_height": "int"},
+    },
+    "qtcl_registerMeasurementSubscriber": {
+        "description": "Subscribe to measurement updates",
+        "params": [{"name": "callback_url", "type": "string"}],
+        "returns": {"subscriber_id": "str"},
+    },
+    "qtcl_unregisterMeasurementSubscriber": {
+        "description": "Unsubscribe from measurements",
+        "params": [{"name": "subscriber_id", "type": "string"}],
+        "returns": {"success": "bool"},
+    },
+    "qtcl_listMeasurementSubscribers": {
+        "description": "List all active subscribers",
+        "params": [],
+        "returns": {"subscribers": "array", "count": "int"},
+    },
+    "qtcl_getLatestDMSnapshot": {
+        "description": "Get latest density matrix snapshot",
+        "params": [],
+        "returns": {"density_matrix_hex": "str", "timestamp_ns": "int"},
+    },
+    "qtcl_getLatestDMSnapshots": {
+        "description": "Get ring buffer of recent DM snapshots",
+        "params": [{"name": "limit", "type": "int"}],
+        "returns": {"snapshots": "array", "count": "int"},
+    },
+    "qtcl_registerPeer": {
+        "description": "Register/announce a peer node",
+        "params": [{"name": "peer", "type": "object"}],
+        "returns": {"success": "bool"},
+    },
+    "qtcl_gossipIngest": {
+        "description": "Ingest gossip message from peer",
+        "params": [{"name": "message", "type": "object"}],
+        "returns": {"success": "bool"},
+    },
+    "qtcl_sendHeartbeat": {
+        "description": "Send peer heartbeat",
+        "params": [{"name": "peer_id", "type": "string"}],
+        "returns": {"success": "bool"},
+    },
 }
 
 
