@@ -2639,7 +2639,7 @@ class RpcBroadcastController:
     def __init__(self):
         self._subscribers: Dict[str, MeasurementSubscriber] = {}
         self._sub_lock = threading.RLock()
-        self._ring_buffer: deque = deque(maxlen=100)
+        self._ring_buffer: deque = deque(maxlen=1)  # Keep only latest snapshot
         self._ring_lock = threading.RLock()
         self._persist_queue: queue_module.Queue = queue_module.Queue(maxsize=1000)
         self._persist_thread: Optional[threading.Thread] = None
