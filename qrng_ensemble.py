@@ -152,17 +152,17 @@ SOURCE_CONFIGS = {
     
     QRNGSourceType.ANU: QRNGSourceConfig(
         name="ANU QRNG",
-        url_template="https://api.quantumnumbers.anu.edu.au",
-        api_key_env="ANU_API_KEY",
-        rate_limit_seconds=0.5,       # 2 requests per second
+        url_template="https://api.quantumnumbers.anu.edu.au/API/jsonI.php",
+        api_key_env=None,  # ANU QRNG is public, no API key required
+        rate_limit_seconds=0.5,
         timeout_seconds=10,
         max_bytes_per_request=1024,
-        headers={"x-api-key": None},
         params_template={
             "length": 32,
             "type": "uint8"
         },
-        response_parser="anu"
+        response_parser="anu",
+        is_public=True
     ),
     
     QRNGSourceType.QBICK: QRNGSourceConfig(
@@ -183,15 +183,17 @@ SOURCE_CONFIGS = {
     
     QRNGSourceType.OUTSHIFT: QRNGSourceConfig(
         name="Outshift",
-        url_template="https://api.outshift.io/quantum/entropy",
+        url_template="https://api.qrng.outshift.com/api/v1/random_numbers",
         api_key_env="OUTSHIFT_API_KEY",
-        rate_limit_seconds=1.0,       # 60 requests per minute
+        rate_limit_seconds=1.0,
         timeout_seconds=10,
         max_bytes_per_request=512,
-        headers={"Authorization": "Bearer {api_key}"},
+        headers={"x-id-api-key": None},
         params_template={
-            "bytes": 64,
-            "format": "hex"
+            "encoding": "raw",
+            "format": "all",
+            "bits_per_block": 8,
+            "number_of_blocks": 64
         },
         response_parser="outshift"
     ),
@@ -296,7 +298,7 @@ class QuantumEntropyEnsemble:
 ║                                                                              ║
 ║   Sources configured:                                                        ║
 ║   ├─ Random.org     → {random_org}                                          ║
-║   ├─ ANU QRNG       → {anu}                                                 ║
+║   ├─ ANU QRNG       → {anu} (public)                                        ║
 ║   ├─ QBICK          → {qbck}                                                ║
 ║   ├─ Outshift       → {outshift}                                            ║
 ║   └─ HU Berlin      → {hu_berlin} (public)                                  ║
@@ -307,10 +309,10 @@ class QuantumEntropyEnsemble:
 ╚══════════════════════════════════════════════════════════════════════════════╝
         """.format(
             random_org="✓" if os.getenv("RANDOM_ORG_KEY") else "❌",
-            anu="✓" if os.getenv("ANU_API_KEY") else "❌",
+            anu="✓",
             qbck="✓" if os.getenv("QRNG_API_KEY") else "❌",
             outshift="✓" if os.getenv("OUTSHIFT_API_KEY") else "❌",
-            hu_berlin="✓ (public)"
+            hu_berlin="✓"
         ))
     
     def _init_circuit_breakers(self):
@@ -652,19 +654,13 @@ class QuantumEntropyEnsemble:
         return decoded[:num_bytes]
     
     def _fetch_anu(self, config: QRNGSourceConfig, num_bytes: int) -> bytes:
-        """Fetch from ANU QRNG API with comprehensive validation"""
-        api_key: Optional[str] = os.getenv(config.api_key_env)
-        if not api_key:
-            raise ValueError(f"Missing API key: {config.api_key_env}")
-        
-        headers: Dict[str, str] = {"x-api-key": api_key}
+        """Fetch from ANU QRNG API (public, no API key required)"""
         params: Dict[str, Any] = config.params_template.copy()
         params["length"] = min(num_bytes, config.max_bytes_per_request)
         
         response = requests.get(
             config.url_template,
             params=params,
-            headers=headers,
             timeout=config.timeout_seconds
         )
         
@@ -676,7 +672,6 @@ class QuantumEntropyEnsemble:
         except json.JSONDecodeError as e:
             raise ValueError(f"ANU response is not valid JSON: {e}. Content: {response.text[:100]}")
         
-        # Validate response structure: either {"success": true, "data": [...]} or just {"data": [...]}
         if "data" not in data:
             raise ValueError(f"ANU response missing 'data' field. Keys: {list(data.keys())}")
         
@@ -688,7 +683,6 @@ class QuantumEntropyEnsemble:
             raise ValueError(f"ANU returned {len(byte_data)} bytes, requested {num_bytes}")
         
         try:
-            # Validate and convert each byte
             result = bytearray()
             for i, val in enumerate(byte_data[:num_bytes]):
                 if not isinstance(val, (int, float)):
@@ -761,15 +755,16 @@ class QuantumEntropyEnsemble:
         
         headers: Dict[str, str] = {}
         for key, value in config.headers.items():
-            headers[key] = value.format(api_key=api_key)
+            headers[key] = value
+        headers["x-id-api-key"] = api_key
         
         params: Dict[str, Any] = config.params_template.copy()
-        params["bytes"] = min(num_bytes, config.max_bytes_per_request)
+        params["number_of_blocks"] = min(num_bytes, config.max_bytes_per_request)
         
-        response = requests.get(
+        response = requests.post(
             config.url_template,
-            params=params,
             headers=headers,
+            json=params,
             timeout=config.timeout_seconds
         )
         
@@ -781,20 +776,26 @@ class QuantumEntropyEnsemble:
         except json.JSONDecodeError as e:
             raise ValueError(f"Outshift response is not valid JSON: {e}")
         
-        if "entropy" not in data:
-            raise ValueError(f"Outshift response missing 'entropy' field. Keys: {list(data.keys())}")
+        if "data" not in data:
+            raise ValueError(f"Outshift response missing 'data' field. Keys: {list(data.keys())}")
         
-        entropy_hex: str = str(data["entropy"])
+        data_value: Any = data["data"]
+        if not isinstance(data_value, list):
+            raise ValueError(f"Outshift 'data' is {type(data_value).__name__}, expected list")
         
         try:
-            entropy_bytes: bytes = bytes.fromhex(entropy_hex)
-        except ValueError as e:
-            raise ValueError(f"Outshift hex conversion failed: {e}")
-        
-        if len(entropy_bytes) < num_bytes:
-            return hashlib.shake_256(entropy_bytes).digest(num_bytes)
-        
-        return entropy_bytes[:num_bytes]
+            result: bytearray = bytearray()
+            for val in data_value:
+                if isinstance(val, int):
+                    result.append(val & 0xFF)
+                elif isinstance(val, str):
+                    result.extend(bytes.fromhex(val))
+            
+            if len(result) < num_bytes:
+                return hashlib.shake_256(bytes(result)).digest(num_bytes)
+            return bytes(result[:num_bytes])
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"Outshift byte conversion failed: {e}")
     
     def _fetch_hu_berlin(self, config: QRNGSourceConfig, num_bytes: int) -> bytes:
         """Fetch from HU Berlin public QRNG with comprehensive validation"""
