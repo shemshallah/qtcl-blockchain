@@ -2464,25 +2464,25 @@ def _start_snapshot_refresh_daemon():
         logger.info("[SNAPSHOT-REFRESH] Daemon started - continuously refreshing snapshot cache")
         while _SNAPSHOT_REFRESH_THREAD_RUNNING:
             try:
-                # Try to get fresh snapshot from oracle
-                if ORACLE_W_STATE_MANAGER is not None:
-                    with ORACLE_W_STATE_MANAGER._state_lock:
-                        current = ORACLE_W_STATE_MANAGER.current_density_matrix
-                    if current is not None:
-                        # Extract data and update cache
-                        try:
+                # Force oracle to extract a new snapshot if it's running
+                if ORACLE_W_STATE_MANAGER is not None and ORACLE_W_STATE_MANAGER.running:
+                    # Explicitly trigger snapshot extraction to keep it fresh
+                    try:
+                        fresh_snap = ORACLE_W_STATE_MANAGER._extract_snapshot()
+                        if fresh_snap:
                             from oracle import RpcBroadcastController
                             broadcaster = RpcBroadcastController()
-                            snapshot_dict = broadcaster._extract_snapshot_data(current)
-                            snapshot_dict['timestamp_ns'] = current.timestamp_ns
-                            snapshot_dict['lattice_refresh_counter'] = getattr(current, 'lattice_refresh_counter', 0)
-                            snapshot_dict['block_height'] = getattr(current, 'block_height', 0)
+                            snapshot_dict = broadcaster._extract_snapshot_data(fresh_snap)
+                            snapshot_dict['timestamp_ns'] = fresh_snap.timestamp_ns
+                            snapshot_dict['lattice_refresh_counter'] = getattr(fresh_snap, 'lattice_refresh_counter', 0)
+                            snapshot_dict['block_height'] = getattr(fresh_snap, 'block_height', 0)
                             _cache_snapshot(snapshot_dict)
-                        except Exception:
-                            pass
-                time.sleep(0.1)  # Refresh every 100ms
+                    except Exception as ex:
+                        logger.debug(f"[SNAPSHOT-REFRESH] Extraction error: {ex}")
+                
+                time.sleep(0.5)  # Refresh every 500ms
             except Exception as e:
-                logger.debug(f"[SNAPSHOT-REFRESH] Error: {e}")
+                logger.debug(f"[SNAPSHOT-REFRESH] Loop error: {e}")
                 time.sleep(1)
     
     threading.Thread(target=_refresh_loop, daemon=True, name="SnapshotRefresh").start()
