@@ -2711,6 +2711,18 @@ class RpcBroadcastController:
                 except Exception as e:
                     logger.error(f"[RPC-BROADCAST] Failed to queue: {e}")
             
+            # ─── UPDATE SERVER CACHE ──────────────────────────────────────────────
+            try:
+                # Direct injection into server's cache to resolve "No snapshot yet"
+                import server
+                if hasattr(server, '_cache_snapshot'):
+                    server._cache_snapshot(event['snapshot_data'])
+            except ImportError:
+                pass # server not fully loaded
+            except Exception as e:
+                logger.debug(f"[RPC-BROADCAST] Cache update error: {e}")
+            # ──────────────────────────────────────────────────────────────────────
+            
             with self._sub_lock:
                 subscribers = dict(self._subscribers)
             result['broadcast_count'] = len(subscribers)

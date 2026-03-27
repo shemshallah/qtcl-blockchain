@@ -4009,34 +4009,66 @@ def pyth_oracle_stats():
         return jsonify({"error": "Pyth oracle not initialized"}), 503
     return jsonify(po.stats()), 200
 
-@app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
-def rpc_oracle_snapshot():
-    """GET/POST /rpc/oracle/snapshot — Latest W-state snapshot (thread-safe RPC cache)."""
-    if request.method == "OPTIONS":
-        return "", 204
-    try:
-        with _snapshot_lock:
-            if _latest_snapshot is None:
-                return jsonify({"jsonrpc":"2.0","error":{"code":-32000,"message":"No snapshot yet"},"id":None}), 202
-            snap=dict(_latest_snapshot)
-        return jsonify({"jsonrpc":"2.0","result":snap,"id":request.args.get('id',1)}), 200
-    except Exception as e:
-        logger.error(f"[RPC-ORACLE] /rpc/oracle/snapshot error: {e}", exc_info=False)
-        return jsonify({"jsonrpc":"2.0","error":{"code":-32603,"message":str(e)},"id":None}), 500
-
 @app.route("/rpc/oracle/snapshots", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshots():
-    """GET/POST /rpc/oracle/snapshots — Ring buffer of last N snapshots."""
+    """
+    GET/POST /rpc/oracle/snapshots — Latest W-state snapshot with history and height.
+    Consolidated logic for single-path access.
+    """
     if request.method == "OPTIONS":
         return "", 204
     try:
-        limit=int(request.args.get('limit',10))
-        with _rpc_event_lock:
-            snaps=[e for e in list(_rpc_event_log) if e.get('type')=='snapshot'][-limit:]
-        return jsonify({"jsonrpc":"2.0","result":{"snapshots":snaps,"count":len(snaps)},"id":request.args.get('id',1)}), 200
+        # 1. Parameter extraction
+        try:
+            body = request.get_json(silent=True) or {}
+            params = body.get('params', [])
+            limit = int(request.args.get('limit', 10))
+            show_history = request.args.get('history', '1') == '1'
+        except:
+            limit = 10
+            show_history = True
+
+        # 2. Get latest from cache (updated directly by oracle.py)
+        with _snapshot_lock:
+            snap = dict(_latest_snapshot) if _latest_snapshot else None
+            ts = _latest_snapshot_ts
+
+        # 3. Handle "No snapshot" case with explicit fallback to manager
+        if snap is None:
+            try:
+                from oracle import ORACLE_W_STATE_MANAGER as owsm
+                if owsm and owsm.current_density_matrix:
+                    from oracle import RpcBroadcastController
+                    broadcaster = RpcBroadcastController()
+                    snap = broadcaster._extract_snapshot_data(owsm.current_density_matrix)
+                    _cache_snapshot(snap) # populate cache
+            except: pass
+
+        if snap is None:
+            return jsonify({"jsonrpc":"2.0","error":{"code":-32000,"message":"No snapshot yet"},"id":1}), 202
+
+        # 4. Assemble result
+        result = {
+            "snapshot": snap,
+            "block_height": snap.get('block_height', 0),
+            "timestamp_ms": ts or int(time.time() * 1000)
+        }
+
+        if show_history:
+            with _rpc_event_lock:
+                snaps = [e.get('data') for e in list(_rpc_event_log) if e.get('type') == 'snapshot'][-limit:]
+            result["snapshots"] = snaps
+            result["count"] = len(snaps)
+
+        return jsonify({"jsonrpc":"2.0","result":result,"id":1}), 200
     except Exception as e:
-        logger.error(f"[RPC-ORACLE] /rpc/oracle/snapshots error: {e}", exc_info=False)
-        return jsonify({"jsonrpc":"2.0","error":{"code":-32603,"message":str(e)},"id":None}), 500
+        logger.error(f"[RPC-ORACLE] Snapshots error: {e}")
+        return jsonify({"jsonrpc":"2.0","error":{"code":-32603,"message":str(e)},"id":1}), 500
+
+@app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
+def rpc_oracle_snapshot():
+    """Forward to consolidated snapshots logic."""
+    return rpc_oracle_snapshots()
 
 logger.info("[JSONRPC] ✅ JSON-RPC 2.0 engine mounted — /rpc, /rpc/methods, /rpc/health")
 logger.info("[RPC-ORACLE] ✅ Oracle RPC routes mounted — /rpc/oracle/{snapshot,snapshots}")
