@@ -2383,23 +2383,6 @@ class QuantumLatticeController:
             f"[LATTICE-ORACLE-SYNC] ✅ Measurement alignment verified at cycle {self.cycle_count}"
         )
         return True
-        """Get comprehensive lattice state"""
-        try:
-            return {
-                'coherence': self.coherence,
-                'fidelity': self.fidelity,
-                'w_state_strength': self.w_state_strength,
-                'cycle': self.cycle_count,
-                'spatial_field': {
-                    'pseudoqubits_registered': len(self.field.locations),
-                    'blocks_created': len(self.field.blocks),
-                    'routes_active': len(self.field.routes),
-                },
-                'timestamp': time.time(),
-            }
-        except Exception as e:
-            logger.error(f"Get state failed: {e}")
-            return {'error': str(e)}
     
     def get_state(self) -> Dict[str, Any]:
         """Get current lattice state."""
