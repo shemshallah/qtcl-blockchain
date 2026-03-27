@@ -3041,14 +3041,9 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
                 result["lattice_error"] = str(le)
 
         # ── WIRE DENSITY_MATRIX_HEX ──────────────────────────────────────────────
-        try:
-            with _ENG_LOCK:
-                dm_hex = _ENG_STATE.get('density_matrix_hex', '')
-            if dm_hex:
-                result["density_matrix_hex"] = dm_hex
-                logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix_hex included ({len(dm_hex)} chars)")
-        except Exception as dme:
-            logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix_hex fetch failed (non-fatal): {dme}")
+        # NOTE: _ENG_STATE is undefined in this scope. DM retrieval removed until fixed.
+        # Mining continues in degraded mode without DM.
+        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix_hex unavailable (will be fixed)")
 
         logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics success")
         return _rpc_ok(result, rpc_id)
