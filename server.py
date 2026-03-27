@@ -2288,7 +2288,8 @@ def _shutdown_components():
     if ORACLE is not None:
         try:
             logger.info("[SHUTDOWN] Stopping Oracle cluster...")
-            ORACLE.stop()
+            if hasattr(ORACLE, 'stop') and callable(ORACLE.stop):
+                ORACLE.stop()
         except Exception as e:
             logger.warning(f"[SHUTDOWN] Oracle stop error: {e}")
     

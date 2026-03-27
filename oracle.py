@@ -2128,6 +2128,16 @@ class OracleEngine:
                 f"         Oracle address: {self._keyring.master.address()}"
             )
 
+    def stop(self) -> None:
+        """Gracefully shut down oracle — stop RPC broadcast controller."""
+        try:
+            broadcaster = get_oracle_measurement_broadcaster()
+            if broadcaster and hasattr(broadcaster, 'stop') and callable(broadcaster.stop):
+                broadcaster.stop()
+                logger.info("[ORACLE] ✅ RPC broadcast controller stopped")
+        except Exception as e:
+            logger.warning(f"[ORACLE] Could not stop broadcaster: {e}")
+
     def set_lattice_ref(self, lattice_controller):
         self._lattice_ref = lattice_controller
         logger.info("[ORACLE] Lattice reference wired — W-state entropy active")
