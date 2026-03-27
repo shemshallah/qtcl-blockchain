@@ -9802,8 +9802,25 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
     """qtcl_getQuantumMetrics — live W-state oracle + lattice metrics + density matrix snapshot."""
     try:
         logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics called with params={params}, id={rpc_id}")
-        result: dict = {"oracle_available": ORACLE_AVAILABLE, "ts": time.time()}
-        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: oracle_available={ORACLE_AVAILABLE}")
+        
+        # Get chain tip FIRST - include in every response
+        chain_height = 0
+        chain_hash = "0" * 64
+        try:
+            db_tip = query_latest_block()
+            if db_tip:
+                chain_height = int(db_tip.get('height', 0))
+                chain_hash = str(db_tip.get('block_hash', '') or db_tip.get('hash', '') or "0" * 64)
+        except Exception:
+            pass
+        
+        result: dict = {
+            "oracle_available": ORACLE_AVAILABLE, 
+            "ts": time.time(),
+            "block_height": chain_height,
+            "tip_hash": chain_hash,
+        }
+        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: oracle_available={ORACLE_AVAILABLE}, block_height={chain_height}")
 
         if ORACLE_AVAILABLE and ORACLE is not None:
             try:
