@@ -2401,6 +2401,26 @@ class QuantumLatticeController:
             logger.error(f"Get state failed: {e}")
             return {'error': str(e)}
     
+    def get_state(self) -> Dict[str, Any]:
+        """Get current lattice state."""
+        return {
+            'cycle': self.cycle_count,
+            'fidelity': float(self.fidelity),
+            'coherence': float(self.coherence),
+            'purity': float(getattr(self, 'purity', 0.0)),
+            'w_state_strength': float(getattr(self, 'w_state_strength', 0.0)),
+            'timestamp': time.time(),
+        }
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get lattice statistics."""
+        return {
+            'cycle': self.cycle_count,
+            'fidelity': float(self.fidelity),
+            'coherence': float(self.coherence),
+            'w_state_strength': float(getattr(self, 'w_state_strength', 0.0)),
+        }
+    
     def get_metrics(self) -> Dict[str, Any]:
         """Get latest quantum metrics"""
         try:
