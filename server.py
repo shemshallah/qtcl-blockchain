@@ -2769,6 +2769,40 @@ def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
 
 
+def _rpc_getDifficulty(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getDifficulty — current mining difficulty from adaptive engine.
+    
+    Returns: {
+        "difficulty": <float>,  # e.g. 5.25 (hex leading zeros + fractional nibble)
+        "bits": <int>,          # equivalent bit difficulty (16-24 typical)
+        "ts": <float>,          # server timestamp
+    }
+    
+    This is the AUTHORITATIVE difficulty for mining clients to use.
+    Replaces hardcoded config values.
+    """
+    try:
+        logger.debug(f"[RPC-METHOD] qtcl_getDifficulty called, id={rpc_id}")
+        dm = get_difficulty_manager()
+        current_diff = dm.get_difficulty()
+        
+        # Convert fractional hex difficulty to equivalent bits
+        # difficulty 5.25 = 5 hex zeros + 25% of next nibble = ~21.0 bits
+        # bits ≈ difficulty * 4 (rough mapping, fine for estimation)
+        bits_est = int(current_diff * 4.0)
+        
+        result = {
+            "difficulty": float(current_diff),
+            "bits": bits_est,
+            "ts": time.time(),
+        }
+        logger.debug(f"[RPC-METHOD] qtcl_getDifficulty: diff={current_diff} bits={bits_est}")
+        return _rpc_ok(result, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_getDifficulty exception: {e}")
+        return _rpc_error(-32603, f"Difficulty lookup failed: {str(e)}", rpc_id)
+
+
 def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
     """qtcl_getBalance — address QTCL balance via direct DB query."""
     try:
@@ -3860,6 +3894,7 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_submitBlock":       _rpc_submitBlock,
     "qtcl_submitTransaction": _rpc_submitTransaction,
     "qtcl_getBlockHeight":    _rpc_getBlockHeight,
+    "qtcl_getDifficulty":     _rpc_getDifficulty,
     "qtcl_getBalance":        _rpc_getBalance,
     "qtcl_getTransaction":    _rpc_getTransaction,
     "qtcl_getBlock":          _rpc_getBlock,
