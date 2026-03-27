@@ -3475,12 +3475,6 @@ def rpc_dispatch():
         resp.headers.add("Access-Control-Allow-Headers", "Content-Type")
         return resp, 200
 
-
-@app.route("/health", methods=["GET"])
-def health():
-    """GET /health — Simple liveness probe for Koyeb."""
-    return jsonify({"status": "ok", "ts": time.time()}), 200
-
     body = request.get_data()
     if not body:
         r = jsonify(_rpc_error(-32700, "Empty request body"))
@@ -3493,6 +3487,12 @@ def health():
     resp.headers["X-QTCL-JSONRPC"]          = _JSONRPC_VERSION
     resp.headers["Access-Control-Allow-Origin"] = "*"
     return resp, status
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    """GET /health — Simple liveness probe for Koyeb."""
+    return jsonify({"status": "ok", "ts": time.time()}), 200
 
 
 @app.route("/rpc/methods", methods=["GET"])
