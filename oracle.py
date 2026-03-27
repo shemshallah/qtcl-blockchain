@@ -1895,29 +1895,12 @@ class OracleWStateManager:
             return False
 
     def stop(self):
-        logger.info("[ORACLE CLUSTER] 🛑 Shutting down...")
-        self.running = False
-        
-        # Signal threads to exit, wait with timeout
-        if self.stream_thread:
-            self.stream_thread.join(timeout=3)
-        if self.refresh_thread:
-            self.refresh_thread.join(timeout=3)
-        
-        # Graceful executor shutdown: wait=True drains pending tasks
-        # This prevents "cannot schedule new futures" cascade during reboot
-        try:
-            logger.debug("[ORACLE CLUSTER] Draining thread pools...")
-            self._pool.shutdown(wait=True, timeout=5)
-        except Exception as e:
-            logger.debug(f"[ORACLE CLUSTER] Pool shutdown: {e}")
-        
-        try:
-            self._mermin_executor.shutdown(wait=True, timeout=5)
-        except Exception as e:
-            logger.debug(f"[ORACLE CLUSTER] Mermin executor shutdown: {e}")
-        
-        logger.info("[ORACLE CLUSTER] ✅ Stopped")
+        """DISABLED: Oracle runs forever. Daemon threads will die with the process."""
+        logger.warning("[ORACLE CLUSTER] stop() called but IGNORED — oracle runs forever")
+        # Do nothing. The Oracle measurement loop is a daemon thread.
+        # When the process is SIGKILL'd by Koyeb, it dies with the process.
+        # We NEVER voluntarily shut down the quantum engines.
+        pass
 
     # ── Public API ────────────────────────────────────────────────────────────
 

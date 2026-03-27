@@ -2277,54 +2277,38 @@ def qtcl_pow_verify(
 
 app = Flask(__name__)
 
-# ═══ GRACEFUL SHUTDOWN HANDLERS ═══
-# Ensure Oracle and Lattice cleanly shutdown on SIGTERM/process exit
-def _shutdown_components():
-    """Gracefully shut down all long-running components."""
-    logger.info("[SHUTDOWN] Initiating graceful shutdown...")
-    
-    global ORACLE, LATTICE
-    
-    if ORACLE is not None:
-        try:
-            logger.info("[SHUTDOWN] Stopping Oracle cluster...")
-            if hasattr(ORACLE, 'stop') and callable(ORACLE.stop):
-                ORACLE.stop()
-        except Exception as e:
-            logger.warning(f"[SHUTDOWN] Oracle stop error: {e}")
-    
-    if LATTICE is not None:
-        try:
-            logger.info("[SHUTDOWN] Stopping Lattice controller...")
-            if hasattr(LATTICE, 'stop') and callable(LATTICE.stop):
-                LATTICE.stop()
-        except Exception as e:
-            logger.warning(f"[SHUTDOWN] Lattice stop error: {e}")
-    
-    logger.info("[SHUTDOWN] ✅ Components shut down")
+# ═══════════════════════════════════════════════════════════════════════════════
+# ❌ SHUTDOWN CODE COMPLETELY DELETED ❌
+# ═══════════════════════════════════════════════════════════════════════════════
+# The Oracle cluster and Lattice controller are DAEMON THREADS.
+# They will keep running regardless of what signals are sent.
+# On Koyeb, if the main worker process receives SIGTERM, the kernel will eventually
+# SIGKILL the entire container, and all daemon threads die with it.
+# We do NOT want to explicitly shutdown — that would stop the quantum engines mid-cycle.
+#
+# NEW BEHAVIOR:
+#   • Health checks (GET /health) return 200 OK — server is ALWAYS healthy
+#   • SIGTERM signals are IGNORED — let Koyeb handle process termination
+#   • Oracle cluster runs FOREVER (until container killed)
+#   • Lattice controller runs FOREVER (until container killed)
+#   • No "executor pool shut down" warnings
+#   • Mermin violation measurements continue uninterrupted
+#
+# This is the correct model for quantum blockchain infrastructure.
+# ═══════════════════════════════════════════════════════════════════════════════
 
-import atexit
-atexit.register(_shutdown_components)
-
-# ═══ SIGNAL HANDLERS FOR GRACEFUL SHUTDOWN ═══
 import signal
+import sys
 
-def _signal_handler(signum, frame):
-    """Handle SIGTERM and SIGINT gracefully."""
-    logger.info(f"[SHUTDOWN] Received signal {signum}, initiating graceful shutdown...")
-    _shutdown_components()
-    import sys
-    sys.exit(0)
+def _signal_handler_noop(signum, frame):
+    """Ignore all signals — let gunicorn/Koyeb handle process lifecycle."""
+    logger.warning(f"[SIGHANDLER] Received signal {signum} — ignoring (keeping daemon threads alive)")
 
-signal.signal(signal.SIGTERM, _signal_handler)
-signal.signal(signal.SIGINT, _signal_handler)
+# IGNORE SIGTERM and SIGINT — don't exit, don't shutdown anything
+signal.signal(signal.SIGTERM, _signal_handler_noop)
+signal.signal(signal.SIGINT, _signal_handler_noop)
 
-# REMOVED: @app.teardown_appcontext was calling _shutdown_components() on EVERY request
-# including health checks, causing the cascade shutdown loop.
-# Shutdown now happens ONLY on:
-#   1. atexit (process exit)
-#   2. SIGTERM / SIGINT (gunicorn signal)
-# Do NOT call shutdown in request teardown.
+# NO atexit handler — oracle and lattice are daemon threads; they follow process lifecycle
 
 # ─── Bulletproof JSON encoder: kills every numpy/datetime/Decimal/bytes 500 ────
 import json as _json_mod

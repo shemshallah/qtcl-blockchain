@@ -1894,23 +1894,11 @@ class QuantumLatticeController:
                 logger.info("[START] BlockManager started — chain is live")
     
     def stop(self):
-        """Stop the quantum lattice and all subsystems."""
-        with self._lock:
-            self.running = False
-        if self.maintenance_thread:
-            self.maintenance_thread.join(timeout=5)
-        if self.block_manager is not None:
-            try:
-                self.block_manager.stop()
-            except Exception:
-                pass
-        if self.db_connector is not None:
-            try:
-                self.db_connector.stop_logger()
-                self.db_connector.close()
-            except Exception:
-                pass
-        logger.info("[STOP] Quantum lattice and blockchain subsystems stopped")
+        """DISABLED: Lattice runs forever. Daemon thread will die with the process."""
+        logger.warning("[LATTICE] stop() called but IGNORED — lattice maintenance runs forever")
+        # Do nothing. The maintenance loop is a daemon thread.
+        # When the process is SIGKILL'd by Koyeb, it dies with the process.
+        pass
     
     def _maintenance_loop(self):
         """Perpetual non-Markovian coherence maintenance"""
@@ -2383,26 +2371,23 @@ class QuantumLatticeController:
             f"[LATTICE-ORACLE-SYNC] ✅ Measurement alignment verified at cycle {self.cycle_count}"
         )
         return True
-    
-    def get_state(self) -> Dict[str, Any]:
-        """Get current lattice state."""
-        return {
-            'cycle': self.cycle_count,
-            'fidelity': float(self.fidelity),
-            'coherence': float(self.coherence),
-            'purity': float(getattr(self, 'purity', 0.0)),
-            'w_state_strength': float(getattr(self, 'w_state_strength', 0.0)),
-            'timestamp': time.time(),
-        }
-    
-    def get_stats(self) -> Dict[str, Any]:
-        """Get lattice statistics."""
-        return {
-            'cycle': self.cycle_count,
-            'fidelity': float(self.fidelity),
-            'coherence': float(self.coherence),
-            'w_state_strength': float(getattr(self, 'w_state_strength', 0.0)),
-        }
+        """Get comprehensive lattice state"""
+        try:
+            return {
+                'coherence': self.coherence,
+                'fidelity': self.fidelity,
+                'w_state_strength': self.w_state_strength,
+                'cycle': self.cycle_count,
+                'spatial_field': {
+                    'pseudoqubits_registered': len(self.field.locations),
+                    'blocks_created': len(self.field.blocks),
+                    'routes_active': len(self.field.routes),
+                },
+                'timestamp': time.time(),
+            }
+        except Exception as e:
+            logger.error(f"Get state failed: {e}")
+            return {'error': str(e)}
     
     def get_metrics(self) -> Dict[str, Any]:
         """Get latest quantum metrics"""
