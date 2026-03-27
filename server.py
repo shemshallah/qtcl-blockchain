@@ -2426,50 +2426,24 @@ _snapshot_lock = threading.RLock()                   # Guards _latest_snapshot u
 
 def _cache_snapshot(snapshot: dict) -> None:
     """Cache snapshot for RPC polling (no SSE push)."""
-    global _latest_snapshot, _latest_snapshot_ts
+    global _latest_snapshot
     with _snapshot_lock:
         _latest_snapshot = snapshot
-        _latest_snapshot_ts = int(time.time() * 1000)
+
+def _log_rpc_event(event_type: str, data: Any) -> None:
+    """Log event for /api/events RPC polling endpoint."""
     with _rpc_event_lock:
-        _rpc_event_log.append({'ts': time.time(), 'type': 'snapshot', 'data': snapshot})
+        _rpc_event_log.append({'ts': time.time(), 'type': event_type, 'data': data})
 
-_SNAPSHOT_REFRESH_THREAD_RUNNING = False
 
-def _start_snapshot_refresh_daemon():
-    """Background daemon that continuously refreshes snapshot cache from oracle."""
-    global _SNAPSHOT_REFRESH_THREAD_RUNNING
-    if _SNAPSHOT_REFRESH_THREAD_RUNNING:
-        return
-    _SNAPSHOT_REFRESH_THREAD_RUNNING = True
-    
-    def _refresh_loop():
-        logger.info("[SNAPSHOT-REFRESH] Daemon started - continuously refreshing snapshot cache")
-        while _SNAPSHOT_REFRESH_THREAD_RUNNING:
-            try:
-                # Force oracle to extract a new snapshot if it's running
-                from oracle import ORACLE_W_STATE_MANAGER as owsm
-                if owsm and owsm.running:
-                    try:
-                        fresh_snap = owsm._extract_snapshot()
-                        if fresh_snap:
-                            from oracle import RpcBroadcastController
-                            broadcaster = RpcBroadcastController()
-                            snapshot_dict = broadcaster._extract_snapshot_data(fresh_snap)
-                            _cache_snapshot(snapshot_dict)
-                    except Exception as ex:
-                        logger.debug(f"[SNAPSHOT-REFRESH] Extraction error: {ex}")
-                
-                time.sleep(0.5)  # Refresh every 500ms
-            except Exception as e:
-                logger.debug(f"[SNAPSHOT-REFRESH] Loop error: {e}")
-                time.sleep(1)
-    
-    threading.Thread(target=_refresh_loop, daemon=True, name="SnapshotRefresh").start()
+
+
+# Application startup flag
+_APP_READY=False
 
 def _set_app_ready():
     global _APP_READY
     _APP_READY=True
-    _start_snapshot_refresh_daemon()
     logger.info("[APP] ✅ Application ready for Koyeb health checks")
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
@@ -4035,66 +4009,34 @@ def pyth_oracle_stats():
         return jsonify({"error": "Pyth oracle not initialized"}), 503
     return jsonify(po.stats()), 200
 
-@app.route("/rpc/oracle/snapshots", methods=["GET", "POST", "OPTIONS"])
-def rpc_oracle_snapshots():
-    """
-    GET/POST /rpc/oracle/snapshots — Latest W-state snapshot with history and height.
-    Consolidated logic for single-path access.
-    """
+@app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
+def rpc_oracle_snapshot():
+    """GET/POST /rpc/oracle/snapshot — Latest W-state snapshot (thread-safe RPC cache)."""
     if request.method == "OPTIONS":
         return "", 204
     try:
-        # 1. Parameter extraction
-        try:
-            body = request.get_json(silent=True) or {}
-            params = body.get('params', [])
-            limit = int(request.args.get('limit', 10))
-            show_history = request.args.get('history', '1') == '1'
-        except:
-            limit = 10
-            show_history = True
-
-        # 2. Get latest from cache (updated directly by oracle.py)
         with _snapshot_lock:
-            snap = dict(_latest_snapshot) if _latest_snapshot else None
-            ts = _latest_snapshot_ts
-
-        # 3. Handle "No snapshot" case with explicit fallback to manager
-        if snap is None:
-            try:
-                from oracle import ORACLE_W_STATE_MANAGER as owsm
-                if owsm and owsm.current_density_matrix:
-                    from oracle import RpcBroadcastController
-                    broadcaster = RpcBroadcastController()
-                    snap = broadcaster._extract_snapshot_data(owsm.current_density_matrix)
-                    _cache_snapshot(snap) # populate cache
-            except: pass
-
-        if snap is None:
-            return jsonify({"jsonrpc":"2.0","error":{"code":-32000,"message":"No snapshot yet"},"id":1}), 202
-
-        # 4. Assemble result
-        result = {
-            "snapshot": snap,
-            "block_height": snap.get('block_height', 0),
-            "timestamp_ms": ts or int(time.time() * 1000)
-        }
-
-        if show_history:
-            with _rpc_event_lock:
-                snaps = [e.get('data') for e in list(_rpc_event_log) if e.get('type') == 'snapshot'][-limit:]
-            result["snapshots"] = snaps
-            result["count"] = len(snaps)
-
-        return jsonify({"jsonrpc":"2.0","result":result,"id":1}), 200
+            if _latest_snapshot is None:
+                return jsonify({"jsonrpc":"2.0","error":{"code":-32000,"message":"No snapshot yet"},"id":None}), 202
+            snap=dict(_latest_snapshot)
+        return jsonify({"jsonrpc":"2.0","result":snap,"id":request.args.get('id',1)}), 200
     except Exception as e:
-        logger.error(f"[RPC-ORACLE] Snapshots error: {e}")
-        return jsonify({"jsonrpc":"2.0","error":{"code":-32603,"message":str(e)},"id":1}), 500
+        logger.error(f"[RPC-ORACLE] /rpc/oracle/snapshot error: {e}", exc_info=False)
+        return jsonify({"jsonrpc":"2.0","error":{"code":-32603,"message":str(e)},"id":None}), 500
 
-@app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
-def rpc_oracle_snapshot():
-    """Forward to consolidated snapshots logic."""
-    return rpc_oracle_snapshots()
+@app.route("/rpc/oracle/snapshots", methods=["GET", "POST", "OPTIONS"])
+def rpc_oracle_snapshots():
+    """GET/POST /rpc/oracle/snapshots — Ring buffer of last N snapshots."""
+    if request.method == "OPTIONS":
+        return "", 204
+    try:
+        limit=int(request.args.get('limit',10))
+        with _rpc_event_lock:
+            snaps=[e for e in list(_rpc_event_log) if e.get('type')=='snapshot'][-limit:]
+        return jsonify({"jsonrpc":"2.0","result":{"snapshots":snaps,"count":len(snaps)},"id":request.args.get('id',1)}), 200
+    except Exception as e:
+        logger.error(f"[RPC-ORACLE] /rpc/oracle/snapshots error: {e}", exc_info=False)
+        return jsonify({"jsonrpc":"2.0","error":{"code":-32603,"message":str(e)},"id":None}), 500
 
 logger.info("[JSONRPC] ✅ JSON-RPC 2.0 engine mounted — /rpc, /rpc/methods, /rpc/health")
 logger.info("[RPC-ORACLE] ✅ Oracle RPC routes mounted — /rpc/oracle/{snapshot,snapshots}")
