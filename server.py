@@ -4009,7 +4009,37 @@ def pyth_oracle_stats():
         return jsonify({"error": "Pyth oracle not initialized"}), 503
     return jsonify(po.stats()), 200
 
+@app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
+def rpc_oracle_snapshot():
+    """GET/POST /rpc/oracle/snapshot — Latest W-state snapshot (thread-safe RPC cache)."""
+    if request.method == "OPTIONS":
+        return "", 204
+    try:
+        with _snapshot_lock:
+            if _latest_snapshot is None:
+                return jsonify({"jsonrpc":"2.0","error":{"code":-32000,"message":"No snapshot yet"},"id":None}), 202
+            snap=dict(_latest_snapshot)
+        return jsonify({"jsonrpc":"2.0","result":snap,"id":request.args.get('id',1)}), 200
+    except Exception as e:
+        logger.error(f"[RPC-ORACLE] /rpc/oracle/snapshot error: {e}", exc_info=False)
+        return jsonify({"jsonrpc":"2.0","error":{"code":-32603,"message":str(e)},"id":None}), 500
+
+@app.route("/rpc/oracle/snapshots", methods=["GET", "POST", "OPTIONS"])
+def rpc_oracle_snapshots():
+    """GET/POST /rpc/oracle/snapshots — Ring buffer of last N snapshots."""
+    if request.method == "OPTIONS":
+        return "", 204
+    try:
+        limit=int(request.args.get('limit',10))
+        with _rpc_event_lock:
+            snaps=[e for e in list(_rpc_event_log) if e.get('type')=='snapshot'][-limit:]
+        return jsonify({"jsonrpc":"2.0","result":{"snapshots":snaps,"count":len(snaps)},"id":request.args.get('id',1)}), 200
+    except Exception as e:
+        logger.error(f"[RPC-ORACLE] /rpc/oracle/snapshots error: {e}", exc_info=False)
+        return jsonify({"jsonrpc":"2.0","error":{"code":-32603,"message":str(e)},"id":None}), 500
+
 logger.info("[JSONRPC] ✅ JSON-RPC 2.0 engine mounted — /rpc, /rpc/methods, /rpc/health")
+logger.info("[RPC-ORACLE] ✅ Oracle RPC routes mounted — /rpc/oracle/{snapshot,snapshots}")
 logger.info("[PYTH]    ✅ Pyth REST routes mounted — /api/pyth/{prices,price/<sym>,feeds,snapshot,stats}")
 
 # ⚛️ RPC SNAPSHOT BROADCAST SYSTEM (No SSE, Pure Database + HTTP Polling)
