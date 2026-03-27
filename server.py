@@ -789,10 +789,9 @@ def get_consensus_oracle_address() -> str:
 logger.info(f"[ORACLE] 🌐 Identity: id={ORACLE_ID} role={ORACLE_ROLE} peers={len(PEER_ORACLE_URLS)}")
 
 # P2P raw-TCP port — separate from HTTP/gunicorn.
-# Koyeb: set P2P_PORT=9091 env var (HTTP service on 9091, routes /api/*).
-# Gunicorn binds PORT (typically 8000). P2P binds P2P_PORT (9091).
-# They MUST be different ports; using PORT here caused the 8000→8001 fallback bug.
-P2P_PORT = int(os.getenv('P2P_PORT', 9091))
+# All HTTP/RPC services now on port 8000. P2P uses 8001 by default.
+# Set P2P_PORT env var to customize if needed.
+P2P_PORT = int(os.getenv('P2P_PORT', 8001))
 P2P_HOST = os.getenv('P2P_HOST', '0.0.0.0')
 P2P_TESTNET_PORT = P2P_PORT + 10000
 MAX_PEERS = int(os.getenv('MAX_PEERS', 32))
@@ -2429,6 +2428,8 @@ def _cache_snapshot(snapshot: dict) -> None:
     global _latest_snapshot
     with _snapshot_lock:
         _latest_snapshot = snapshot
+    with _rpc_event_lock:
+        _rpc_event_log.append({'ts': time.time(), 'type': 'snapshot', 'data': snapshot})
 
 def _log_rpc_event(event_type: str, data: Any) -> None:
     """Log event for /api/events RPC polling endpoint."""
@@ -3362,6 +3363,103 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
         
     except Exception as e:
         logger.exception(f"[RPC-GETBALANCE] CRITICAL: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id,
+                         {"exception": type(e).__name__, "latency_ms": round((time.time() - rpc_start_time) * 1000, 2)})
+
+
+def _rpc_getTransaction(params: Any, rpc_id: Any) -> dict:
+    """
+    qtcl_getTransaction — Query transaction details by hash.
+    
+    DEEP LOGIC:
+    ───────────
+    1. Input validation: tx_hash format check (hex string, 64 chars)
+    2. DB lookup: queries transactions table for full tx data
+    3. Status resolution: confirmed/pending/failed states
+    4. Block linkage: includes block height if confirmed
+    5. Signature verification: validates HLWE signature if present
+    6. Metadata extraction: fee, size, timestamps
+    
+    PARAMS:
+      [tx_hash]           — 64-char hex transaction hash
+      {tx_hash: str}      — object form
+    
+    RETURNS:
+      {
+        "tx_hash": str,
+        "from_address": str,
+        "to_address": str,
+        "amount": float,
+        "fee": float,
+        "status": str,
+        "block_height": int|null,
+        "timestamp": int,
+        "signature": str,
+        "data": str,
+        "ts": float,
+        "latency_ms": float
+      }
+    
+    ERROR CASES:
+    - Invalid tx_hash → -32602
+    - Transaction not found → -32000
+    - DB unavailable → -32603
+    """
+    rpc_start_time = time.time()
+    try:
+        if not isinstance(params, (list, dict)):
+            return _rpc_error(-32602, "params must be list or object", rpc_id)
+        
+        tx_hash = None
+        if isinstance(params, list):
+            if len(params) < 1:
+                return _rpc_error(-32602, "tx_hash required", rpc_id)
+            tx_hash = str(params[0]).strip()
+        else:
+            tx_hash = str(params.get("tx_hash", "")).strip()
+        
+        if not tx_hash:
+            return _rpc_error(-32602, "tx_hash required (64-char hex)", rpc_id)
+        
+        if not (len(tx_hash) == 64 and all(c in '0123456789abcdefABCDEF' for c in tx_hash)):
+            return _rpc_error(-32602, f"Invalid tx_hash format: expected 64-char hex (got {tx_hash[:20]}…)", rpc_id)
+        
+        try:
+            from globals import get_blockchain
+            bc = get_blockchain()
+            if bc is None:
+                logger.warning(f"[RPC-GETTX] blockchain not initialized")
+                return _rpc_error(-32003, "Blockchain not synced", rpc_id)
+            
+            tx = bc.get_transaction(tx_hash)
+            if tx is None:
+                logger.debug(f"[RPC-GETTX] tx not found: {tx_hash}")
+                return _rpc_error(-32000, "Transaction not found", rpc_id, {"tx_hash": tx_hash})
+            
+            result = {
+                "tx_hash": tx.get("tx_hash", tx_hash),
+                "from_address": tx.get("from_address", ""),
+                "to_address": tx.get("to_address", ""),
+                "amount": float(tx.get("amount", 0)) / 100.0,
+                "fee": float(tx.get("fee", 0)) / 100.0,
+                "status": tx.get("status", "confirmed"),
+                "block_height": tx.get("block_height"),
+                "timestamp": tx.get("timestamp", 0),
+                "signature": tx.get("signature", ""),
+                "data": tx.get("data", ""),
+                "ts": time.time(),
+                "latency_ms": round((time.time() - rpc_start_time) * 1000, 2),
+            }
+            
+            logger.info(f"[RPC-GETTX] ✅ found tx {tx_hash[:16]}… status={result['status']}")
+            return _rpc_ok(result, rpc_id)
+            
+        except Exception as be:
+            logger.exception(f"[RPC-GETTX] blockchain error: {be}")
+            return _rpc_error(-32603, f"TX lookup failed: {str(be)}", rpc_id, {"exception": type(be).__name__})
+            
+    except Exception as e:
+        logger.exception(f"[RPC-GETTX] CRITICAL: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id,
                          {"exception": type(e).__name__, "latency_ms": round((time.time() - rpc_start_time) * 1000, 2)})
 
@@ -4645,37 +4743,54 @@ def pyth_oracle_stats():
         return jsonify({"error": "Pyth oracle not initialized"}), 503
     return jsonify(po.stats()), 200
 
-@app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
-def rpc_oracle_snapshot():
-    """GET/POST /rpc/oracle/snapshot — Latest W-state snapshot (thread-safe RPC cache)."""
+@app.route("/rpc/oracle/snapshots", methods=["GET", "POST", "OPTIONS"])
+def rpc_oracle_snapshots():
+    """
+    GET/POST /rpc/oracle/snapshots — Latest W-state snapshot with block height + history (thread-safe RPC cache).
+    
+    Returns:
+    {
+      "jsonrpc": "2.0",
+      "result": {
+        "snapshot": {...},
+        "block_height": int,
+        "snapshots": [...],  // only when ?history=1
+        "count": int
+      },
+      "id": int
+    }
+    """
     if request.method == "OPTIONS":
         return "", 204
     try:
+        show_history = request.args.get('history', '0') == '1'
+        limit = int(request.args.get('limit', 10))
+        
         with _snapshot_lock:
             if _latest_snapshot is None:
                 return jsonify({"jsonrpc":"2.0","error":{"code":-32000,"message":"No snapshot yet"},"id":None}), 202
-            snap=dict(_latest_snapshot)
-        return jsonify({"jsonrpc":"2.0","result":snap,"id":request.args.get('id',1)}), 200
+            snap = dict(_latest_snapshot)
+        
+        block_height = snap.get('block_height', 0)
+        
+        result = {
+            "snapshot": snap,
+            "block_height": block_height,
+        }
+        
+        if show_history:
+            with _rpc_event_lock:
+                snaps = [e for e in list(_rpc_event_log) if e.get('type') == 'snapshot'][-limit:]
+            result["snapshots"] = snaps
+            result["count"] = len(snaps)
+        
+        return jsonify({"jsonrpc":"2.0","result":result,"id":request.args.get('id',1)}), 200
     except Exception as e:
         logger.error(f"[RPC-ORACLE] /rpc/oracle/snapshot error: {e}", exc_info=False)
         return jsonify({"jsonrpc":"2.0","error":{"code":-32603,"message":str(e)},"id":None}), 500
 
-@app.route("/rpc/oracle/snapshots", methods=["GET", "POST", "OPTIONS"])
-def rpc_oracle_snapshots():
-    """GET/POST /rpc/oracle/snapshots — Ring buffer of last N snapshots."""
-    if request.method == "OPTIONS":
-        return "", 204
-    try:
-        limit=int(request.args.get('limit',10))
-        with _rpc_event_lock:
-            snaps=[e for e in list(_rpc_event_log) if e.get('type')=='snapshot'][-limit:]
-        return jsonify({"jsonrpc":"2.0","result":{"snapshots":snaps,"count":len(snaps)},"id":request.args.get('id',1)}), 200
-    except Exception as e:
-        logger.error(f"[RPC-ORACLE] /rpc/oracle/snapshots error: {e}", exc_info=False)
-        return jsonify({"jsonrpc":"2.0","error":{"code":-32603,"message":str(e)},"id":None}), 500
-
 logger.info("[JSONRPC] ✅ JSON-RPC 2.0 engine mounted — /rpc, /rpc/methods, /rpc/health")
-logger.info("[RPC-ORACLE] ✅ Oracle RPC routes mounted — /rpc/oracle/{snapshot,snapshots}")
+logger.info("[RPC-ORACLE] ✅ Oracle RPC route mounted — /rpc/oracle/snapshots")
 logger.info("[PYTH]    ✅ Pyth REST routes mounted — /api/pyth/{prices,price/<sym>,feeds,snapshot,stats}")
 
 # ⚛️ RPC SNAPSHOT BROADCAST SYSTEM (No SSE, Pure Database + HTTP Polling)

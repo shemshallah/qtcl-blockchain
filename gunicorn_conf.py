@@ -34,7 +34,7 @@ import os
 import multiprocessing
 
 # ── Binding ────────────────────────────────────────────────────────────────────
-bind = f"0.0.0.0:{os.environ.get('FLASK_INTERNAL_PORT', '8500')}"
+bind = f"0.0.0.0:{os.environ.get('PORT', '8000')}"
 
 # ── Worker model ───────────────────────────────────────────────────────────────
 worker_class   = "gthread"

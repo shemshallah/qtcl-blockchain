@@ -596,6 +596,7 @@ class DensityMatrixSnapshot:
     phase_coherence       : float
     entanglement_witness  : float
     trace_purity          : float
+    block_height          : int                      = 0
     w_entropy_hash        : str                      = ""
     hlwe_signature        : Optional[Dict[str, Any]] = None
     oracle_address        : Optional[str]            = None
@@ -612,6 +613,7 @@ class DensityMatrixSnapshot:
             "aer_noise_state": self.aer_noise_state, "lattice_refresh_counter": self.lattice_refresh_counter,
             "w_state_strength": self.w_state_strength, "phase_coherence": self.phase_coherence,
             "entanglement_witness": self.entanglement_witness, "trace_purity": self.trace_purity,
+            "block_height": self.block_height, "w_entropy_hash": self.w_entropy_hash,
             "hlwe_signature": self.hlwe_signature, "oracle_address": self.oracle_address,
             "signature_valid": self.signature_valid, "mermin_test": self.bell_test,
         })
@@ -1097,6 +1099,7 @@ class OracleNode:
                 phase_coherence         = QIM.phase_coherence(dm_array),
                 entanglement_witness    = QIM.entanglement_witness(dm_array),
                 trace_purity            = QIM.trace_purity(dm_array),
+                block_height            = 0,
             )
             snap.oracle_address = self.oracle_address
             with self._lock:
@@ -1741,6 +1744,7 @@ class OracleWStateManager:
             phase_coherence         = QIM.phase_coherence(dm_mean),
             entanglement_witness    = QIM.entanglement_witness(dm_mean),
             trace_purity            = QIM.trace_purity(dm_mean),
+            block_height            = self.current_block_height,
         )
         if mermin_result:
             snapshot.bell_test = mermin_result
@@ -2710,6 +2714,18 @@ class RpcBroadcastController:
                     result['queued_for_db'] = True
                 except Exception as e:
                     logger.error(f"[RPC-BROADCAST] Failed to queue: {e}")
+            
+            # Also update server.py's RPC cache for /rpc/oracle/snapshots endpoint
+            try:
+                from server import _cache_snapshot
+                snapshot_dict = self._extract_snapshot_data(snapshot)
+                snapshot_dict['timestamp_ns'] = ts_ns
+                snapshot_dict['lattice_refresh_counter'] = cycle
+                _cache_snapshot(snapshot_dict)
+            except ImportError:
+                pass  # Server may not be imported yet
+            except Exception as e:
+                logger.debug(f"[RPC-BROADCAST] Server cache update failed: {e}")
             
             with self._sub_lock:
                 subscribers = dict(self._subscribers)
