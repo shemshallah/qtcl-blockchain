@@ -3041,9 +3041,27 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
                 result["lattice_error"] = str(le)
 
         # ── WIRE DENSITY_MATRIX_HEX ──────────────────────────────────────────────
-        # NOTE: _ENG_STATE is undefined in this scope. DM retrieval removed until fixed.
-        # Mining continues in degraded mode without DM.
-        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix_hex unavailable (will be fixed)")
+        # Extract DM from oracle snapshot if available
+        try:
+            if ORACLE_W_STATE_MANAGER is not None:
+                w_snap = _call_with_timeout(
+                    lambda: ORACLE_W_STATE_MANAGER.get_latest_snapshot() if ORACLE_W_STATE_MANAGER else None,
+                    timeout_sec=2.0
+                )
+                if w_snap and hasattr(w_snap, 'density_matrix_hex'):
+                    dm_hex = getattr(w_snap, 'density_matrix_hex', '')
+                    if dm_hex:
+                        result["density_matrix_hex"] = dm_hex
+                        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix_hex from oracle ({len(dm_hex)} chars)")
+                elif w_snap and hasattr(w_snap, 'density_matrix'):
+                    # Extract DM as hex if it's raw bytes
+                    dm = getattr(w_snap, 'density_matrix', b'')
+                    if dm:
+                        dm_hex = dm.hex() if isinstance(dm, bytes) else str(dm)
+                        result["density_matrix_hex"] = dm_hex
+                        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix extracted ({len(dm_hex)} chars)")
+        except Exception as dme:
+            logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix extraction (non-fatal): {dme}")
 
         logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics success")
         return _rpc_ok(result, rpc_id)
