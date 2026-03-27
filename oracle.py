@@ -1575,10 +1575,22 @@ class OracleWStateManager:
 
         # ── Step 3: All-5 simultaneous block-field measurement ───────────────
         bf_start_ns = time.time_ns()
-        bf_futures = {
-            self._pool.submit(node.measure_block_field, pq_curr, pq_last, shared_pq0, LATTICE): node
-            for node in self.nodes
-        }
+        
+        # Guard: check executor state before submitting (prevents hang on shutdown)
+        if self._pool._shutdown:
+            logger.warning("[ORACLE CLUSTER] Executor pool is shut down, skipping block-field measurement")
+            return None
+        
+        try:
+            bf_futures = {
+                self._pool.submit(node.measure_block_field, pq_curr, pq_last, shared_pq0, LATTICE): node
+                for node in self.nodes
+            }
+        except RuntimeError as e:
+            if 'cannot schedule new futures' in str(e):
+                logger.debug(f"[ORACLE CLUSTER] Executor shutdown detected: {e}")
+                return None
+            raise
         readings: List[BlockFieldReading] = []
         for fut in as_completed(bf_futures, timeout=MEASUREMENT_TIMEOUT):
             try:
@@ -1885,10 +1897,26 @@ class OracleWStateManager:
     def stop(self):
         logger.info("[ORACLE CLUSTER] 🛑 Shutting down...")
         self.running = False
-        if self.stream_thread:  self.stream_thread.join(timeout=5)
-        if self.refresh_thread: self.refresh_thread.join(timeout=5)
-        self._pool.shutdown(wait=False)
-        self._mermin_executor.shutdown(wait=False)
+        
+        # Signal threads to exit, wait with timeout
+        if self.stream_thread:
+            self.stream_thread.join(timeout=3)
+        if self.refresh_thread:
+            self.refresh_thread.join(timeout=3)
+        
+        # Graceful executor shutdown: wait=True drains pending tasks
+        # This prevents "cannot schedule new futures" cascade during reboot
+        try:
+            logger.debug("[ORACLE CLUSTER] Draining thread pools...")
+            self._pool.shutdown(wait=True, timeout=5)
+        except Exception as e:
+            logger.debug(f"[ORACLE CLUSTER] Pool shutdown: {e}")
+        
+        try:
+            self._mermin_executor.shutdown(wait=True, timeout=5)
+        except Exception as e:
+            logger.debug(f"[ORACLE CLUSTER] Mermin executor shutdown: {e}")
+        
         logger.info("[ORACLE CLUSTER] ✅ Stopped")
 
     # ── Public API ────────────────────────────────────────────────────────────
