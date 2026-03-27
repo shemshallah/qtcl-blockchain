@@ -3561,6 +3561,28 @@ def _rpc_listMeasurementSubscribers(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"List failed: {str(e)}", rpc_id)
 
 
+def _rpc_getMempool(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getMempool — pending transactions list for block building."""
+    try:
+        from mempool import get_pending_transactions as _get_pending
+        max_count = 500
+        if isinstance(params, list) and params:
+            try: max_count = min(int(params[0]), 2000)
+            except (ValueError, TypeError): pass
+        txs = _get_pending(max_count=max_count)
+        serialized = []
+        for tx in txs:
+            if hasattr(tx, '__dict__'):
+                serialized.append({k: v for k, v in tx.__dict__.items() if not k.startswith('_')})
+            elif isinstance(tx, dict):
+                serialized.append(tx)
+        logger.debug(f"[RPC-METHOD] qtcl_getMempool: returning {len(serialized)} txs")
+        return _rpc_ok(serialized, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_getMempool: {e}")
+        return _rpc_ok([], rpc_id)
+
+
 # ─── qtcl_submitBlock — RPC wrapper around submit_block() REST handler ─────────
 # Reuses ALL validation/persistence logic (PoW, height, parent, coinbase, treasury,
 # lattice, difficulty retarget, P2P broadcast) via Flask test_request_context.
@@ -3662,6 +3684,7 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getQuantumMetrics": _rpc_getQuantumMetrics,
     "qtcl_getPythPrice":      _rpc_getPythPrice,
     "qtcl_getMempoolStats":   _rpc_getMempoolStats,
+    "qtcl_getMempool":        _rpc_getMempool,
     "qtcl_getPeers":          _rpc_getPeers,
     "qtcl_getHealth":         _rpc_getHealth,
     "qtcl_getEvents":         _rpc_getEvents,
