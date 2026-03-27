@@ -42,7 +42,6 @@ import secrets
 import logging
 import threading
 from typing import Dict, Any, Optional, List, Tuple, Set, Callable, Union, Deque
-from collections import deque, OrderedDict
 import numpy as np
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
@@ -73,61 +72,6 @@ def _should_log_shard(shard_id: int) -> bool:
 _verbose_p2p_logging = False
 _last_snapshot_log_time = 0
 _snapshot_log_interval = 10
-
-# ═══ DENSITY MATRIX SNAPSHOT RING BUFFER (1000 snapshots, LRU eviction) ═══
-_DM_SNAPSHOT_RING = deque(maxlen=1000)
-_DM_SNAPSHOT_LOCK = threading.RLock()
-
-# ═══ RPC INFRASTRUCTURE (JSON-RPC 2.0) ═══
-_JSONRPC_VERSION = "2.0"
-
-def _rpc_ok(result: Any, rpc_id: Any) -> dict:
-    """Standard JSON-RPC 2.0 success response."""
-    return {"jsonrpc": _JSONRPC_VERSION, "result": result, "id": rpc_id}
-
-def _rpc_error(code: int, message: str, rpc_id: Any, data: Optional[dict] = None) -> dict:
-    """Standard JSON-RPC 2.0 error response."""
-    resp = {"jsonrpc": _JSONRPC_VERSION, "error": {"code": code, "message": message}, "id": rpc_id}
-    if data:
-        resp["error"]["data"] = data
-    return resp
-
-def _dispatch(body_bytes: bytes) -> Tuple[dict, int]:
-    """JSON-RPC 2.0 dispatcher (parse, call, return). Handles batches."""
-    try:
-        body = json.loads(body_bytes.decode('utf-8'))
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        return _rpc_error(-32700, f"Parse error: {str(e)}", None), 400
-    
-    if isinstance(body, list):
-        if not body:
-            return _rpc_error(-32600, "Invalid Request: empty batch", None), 400
-        responses = [r for req in body if (r := _dispatch_single(req)) is not None]
-        return responses if responses else None, 200
-    
-    return _dispatch_single(body), 200
-
-def _dispatch_single(req: dict) -> Optional[dict]:
-    """Dispatch single JSON-RPC 2.0 request."""
-    if not isinstance(req, dict):
-        return _rpc_error(-32600, "Invalid Request: not an object", None)
-    
-    jsonrpc, method, params, rpc_id = req.get("jsonrpc"), req.get("method"), req.get("params", []), req.get("id")
-    
-    if jsonrpc != _JSONRPC_VERSION:
-        return _rpc_error(-32600, f"Invalid jsonrpc: {jsonrpc}", rpc_id)
-    if not isinstance(method, str):
-        return _rpc_error(-32600, "Invalid Request: method not a string", rpc_id)
-    if method not in _RPC_METHODS:
-        return _rpc_error(-32601, f"Method not found: {method}", rpc_id)
-    
-    try:
-        return _RPC_METHODS[method](params, rpc_id)
-    except Exception as e:
-        logger.exception(f"[RPC] {method} raised: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
-
-_RPC_METHOD_META: Dict[str, dict] = {}
 
 # ═══ LAZY INITIALIZATION (deferred until first use) ═══
 # This allows Flask to bind port 8000 before heavy crypto/quantum init
@@ -2617,25 +2561,6 @@ class SnapshotAutonomousHealer:
 # ══════════════════════════════════════════════════════════════════════════════
 # JSON-RPC 2.0 FLASK ROUTES
 # ══════════════════════════════════════════════════════════════════════════════
-def _get_canonical_node() -> Optional[dict]:
-    """Fallback: fetch canonical node state from module or globals (in-memory)."""
-    try:
-        import globals as _g
-        gn = getattr(_g, "get_canonical_node", None)
-        if callable(gn):
-            return gn()
-    except Exception:
-        pass
-    
-    # Last resort: check module-level state
-    try:
-        _srv = sys.modules[__name__].__dict__
-        cn = _srv.get("_canonical_node") or _srv.get("canonical_node")
-        return cn if isinstance(cn, dict) else None
-    except Exception:
-        return None
-
-
 def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
     """qtcl_getBlockHeight — current chain tip height.
     
@@ -2937,42 +2862,16 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
         if LATTICE is not None:
             try:
                 logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: fetching lattice state")
-                # Safe access to LATTICE methods with fallback
-                lm = {}
-                ls = {}
-                if hasattr(LATTICE, 'get_metrics') and callable(LATTICE.get_metrics):
-                    try:
-                        lm = LATTICE.get_metrics()
-                    except Exception as me:
-                        logger.debug(f"get_metrics() failed: {me}")
-                
-                if hasattr(LATTICE, 'get_stats') and callable(LATTICE.get_stats):
-                    try:
-                        ls = LATTICE.get_stats()
-                    except Exception as se:
-                        logger.debug(f"get_stats() failed: {se}")
-                
-                # Fallback: use LATTICE attributes directly
-                if not lm:
-                    lm = {
-                        "avg_fidelity_100": getattr(LATTICE, 'avg_fidelity_100', 0.0),
-                        "avg_coherence_100": getattr(LATTICE, 'avg_coherence_100', 0.0),
-                    }
-                if not ls:
-                    ls = {
-                        "fidelity": getattr(LATTICE, 'fidelity', 0.0),
-                        "coherence": getattr(LATTICE, 'coherence', 0.0),
-                        "w_state_strength": getattr(LATTICE, 'w_state_strength', 0.0),
-                        "cycle": getattr(LATTICE, 'cycle', 0),
-                    }
-                
+                # Use available LATTICE methods instead of non-existent get_state()
+                lm = LATTICE.get_metrics()
+                ls = LATTICE.get_stats()
                 result["lattice"] = {
                     "fidelity":         lm.get("avg_fidelity_100", ls.get("fidelity", 0.0)),
                     "coherence":        lm.get("avg_coherence_100", ls.get("coherence", 0.0)),
                     "w_state_strength": ls.get("w_state_strength", 0.0),
                     "cycle":            ls.get("cycle", 0),
                     "avg_fidelity_100": lm.get("avg_fidelity_100", 0.0),
-                    "avg_coherence_100": lm.get("avg_coherence_100", 0.0),
+                    "avg_coherence_100":lm.get("avg_coherence_100", 0.0),
                 }
                 logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: lattice metrics obtained")
             except Exception as le:
@@ -2981,8 +2880,11 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
 
         # ── WIRE DENSITY_MATRIX_HEX ──────────────────────────────────────────────
         try:
-            with _ENG_LOCK:
-                dm_hex = _ENG_STATE.get('density_matrix_hex', '')
+            if LATTICE is not None:
+                lat_state = LATTICE.get_w_state_measurement_sync()
+                dm_hex = lat_state.get('density_matrix_hex', '')
+            else:
+                dm_hex = ''
             if dm_hex:
                 result["density_matrix_hex"] = dm_hex
                 logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix_hex included ({len(dm_hex)} chars)")
@@ -3491,51 +3393,6 @@ def _rpc_listMeasurementSubscribers(params: Any, rpc_id: Any) -> dict:
 # Reuses ALL validation/persistence logic (PoW, height, parent, coinbase, treasury,
 # lattice, difficulty retarget, P2P broadcast) via Flask test_request_context.
 # Zero duplication — the REST handler is the single source of truth.
-def _rpc_getLatestDMSnapshot(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getLatestDMSnapshot — fetch latest density matrix snapshot from oracle ring buffer.
-    
-    Returns: {
-        timestamp_ns, oracle_id, density_matrix_hex, purity, w_state_fidelity,
-        von_neumann_entropy, coherence_l1, hlwe_signature, signature_valid, oracle_address
-    }
-    """
-    try:
-        with _DM_SNAPSHOT_LOCK:
-            if not _DM_SNAPSHOT_RING:
-                return _rpc_error(-32000, "No DM snapshots available yet", rpc_id)
-            latest = list(_DM_SNAPSHOT_RING)[-1]
-        logger.debug(f"[RPC-METHOD] qtcl_getLatestDMSnapshot: returned snapshot ts={latest.get('timestamp_ns')}")
-        return _rpc_ok(latest, rpc_id)
-    except Exception as e:
-        logger.exception(f"[RPC-METHOD] qtcl_getLatestDMSnapshot: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
-
-
-def _rpc_getLatestDMSnapshots(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getLatestDMSnapshots — fetch last N DM snapshots (default 10, max 100)."""
-    try:
-        limit = 10
-        if isinstance(params, list) and params:
-            try:
-                limit = min(int(params[0]), 100)
-            except (ValueError, TypeError):
-                pass
-        elif isinstance(params, dict):
-            try:
-                limit = min(int(params.get("limit", 10)), 100)
-            except (ValueError, TypeError):
-                pass
-        
-        with _DM_SNAPSHOT_LOCK:
-            snaps = list(_DM_SNAPSHOT_RING)[-limit:] if _DM_SNAPSHOT_RING else []
-        
-        logger.debug(f"[RPC-METHOD] qtcl_getLatestDMSnapshots: returned {len(snaps)} snapshots")
-        return _rpc_ok({"snapshots": snaps, "count": len(snaps)}, rpc_id)
-    except Exception as e:
-        logger.exception(f"[RPC-METHOD] qtcl_getLatestDMSnapshots: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
-
-
 def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
     """qtcl_submitBlock — submit a mined block via JSON-RPC 2.0."""
     try:
@@ -3591,15 +3448,14 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getPeers":          _rpc_getPeers,
     "qtcl_getHealth":         _rpc_getHealth,
     "qtcl_getEvents":         _rpc_getEvents,
+    # ── On-chain oracle registry ──────────────────────────────────────────────
     "qtcl_getOracleRegistry": _rpc_getOracleRegistry,
     "qtcl_getOracleRecord":   _rpc_getOracleRecord,
     "qtcl_submitOracleReg":   _rpc_submitOracleReg,
+    # ── Oracle Measurement Broadcast (NEW) ────────────────────────────────────
     "qtcl_registerMeasurementSubscriber": _rpc_registerMeasurementSubscriber,
     "qtcl_unregisterMeasurementSubscriber": _rpc_unregisterMeasurementSubscriber,
     "qtcl_listMeasurementSubscribers": _rpc_listMeasurementSubscribers,
-    # ── NEW: Density Matrix Snapshot Streaming ──────────────────────────────────
-    "qtcl_getLatestDMSnapshot": _rpc_getLatestDMSnapshot,
-    "qtcl_getLatestDMSnapshots": _rpc_getLatestDMSnapshots,
 }
 
 
@@ -3663,12 +3519,6 @@ def rpc_health():
     }), 200
 
 
-@app.route("/health", methods=["GET"])
-def health_bare():
-    """GET /health — bare 200 OK for Koyeb health check (no JSON, fast)."""
-    return "", 200
-
-
 @app.route("/rpc/hlwe/system-info", methods=["GET"])
 def rpc_hlwe_system_info():
     """GET /rpc/hlwe/system-info — HLWE cryptographic system information.
@@ -3694,8 +3544,51 @@ def rpc_hlwe_system_info():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# RPC-only Architecture (no legacy REST endpoints)
+# Oracle Measurement Broadcast Routes (NEW)
 # ──────────────────────────────────────────────────────────────────────────────
+
+def api_broadcast_status():
+    """
+    GET /api/broadcast/status — Oracle measurement broadcast controller status.
+    Operator dashboard: inspect active subscribers, queue depth, metrics.
+    
+    Response:
+        {
+            "active_subscribers": 5,
+            "is_running": true,
+            "persist_queue_size": 42,
+            "ring_buffer_size": 100,
+            "metrics": {
+                "broadcasts_sent": 12345,
+                "broadcasts_failed": 23,
+                ...
+            },
+            "subscribers": [
+                {
+                    "client_id": "miner_abc",
+                    "burst_mode": true,
+                    "send_count": 456,
+                    "error_count": 1,
+                    ...
+                },
+                ...
+            ]
+        }
+    """
+    try:
+        from oracle import get_oracle_measurement_broadcaster
+        broadcaster = get_oracle_measurement_broadcaster()
+        status = broadcaster.get_status()
+        return jsonify(status), 200
+    except ImportError:
+        return jsonify({
+            'error': 'broadcast system not initialized',
+            'status': 'unavailable'
+        }), 503
+    except Exception as e:
+        logger.error(f"[BROADCAST-STATUS] Error: {e}")
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route("/rpc/_internal/measurement", methods=["POST"])
 def rpc_measurement_broadcast_endpoint():
@@ -3852,80 +3745,24 @@ logger.info("[PYTH]    ✅ Pyth REST routes mounted — /api/pyth/{prices,price/
 
 def _broadcast_snapshot_to_database(snapshot: dict) -> None:
     """
-    RPC-based snapshot broadcast: queue to ring buffer + persist to SQLite for P2P sync.
+    RPC-based snapshot broadcast: store to database for polling.
     
     Architecture:
-    - In-memory ring buffer (latest 1000) for fast /rpc polling
-    - Async SQLite write to dm_pool table for P2P replication & miners
-    - Dual persistence: Supabase (cloud) + SQLite (local mesh)
+    - No SSE push
+    - No broadcast_queue
+    - Clients poll GET /api/oracle/snapshot
+    - Snapshots persisted to quantum_snapshots table
+    - In-memory cache updated for fast reads
     """
     try:
-        # 1. Update in-memory RPC cache
+        # 1. Update in-memory RPC cache (instant client reads)
         _cache_snapshot(snapshot)
         
-        # 2. Queue into DM snapshot ring buffer for streaming
-        if 'density_matrix_hex' in snapshot:
-            dm_snap = {
-                'timestamp_ns': snapshot.get('timestamp_ns', int(time.time() * 1e9)),
-                'oracle_id': snapshot.get('oracle_id'),
-                'density_matrix_hex': snapshot.get('density_matrix_hex', ''),
-                'purity': snapshot.get('purity'),
-                'w_state_fidelity': snapshot.get('w_state_fidelity'),
-                'von_neumann_entropy': snapshot.get('von_neumann_entropy'),
-                'coherence_l1': snapshot.get('coherence_l1'),
-                'hlwe_signature': snapshot.get('hlwe_signature'),
-                'signature_valid': snapshot.get('signature_valid', False),
-                'oracle_address': snapshot.get('oracle_address'),
-                'aer_noise_state': snapshot.get('aer_noise_state', {}),
-                'measurement_counts': snapshot.get('measurement_counts', {}),
-            }
-            with _DM_SNAPSHOT_LOCK:
-                _DM_SNAPSHOT_RING.append(dm_snap)
-            logger.debug(f"[RPC-BROADCAST] ✅ DM snapshot queued (ring={len(_DM_SNAPSHOT_RING)}/1000)")
-        
-        # 3. Persist to SQLite asynchronously (P2P replication)
-        def async_sqlite():
-            try:
-                import sqlite3
-                from pathlib import Path
-                db = Path.home() / "qtcl-miner" / "data" / "qtcl_blockchain.db"
-                db.parent.mkdir(parents=True, exist_ok=True)
-                conn = sqlite3.connect(str(db), timeout=5.0)
-                cur = conn.cursor()
-                cur.execute("""CREATE TABLE IF NOT EXISTS dm_pool (
-                    id INTEGER PRIMARY KEY, timestamp_ns INTEGER, oracle_id INTEGER,
-                    density_matrix_hex TEXT, purity REAL, w_state_fidelity REAL,
-                    von_neumann_entropy REAL, coherence_l1 REAL, hlwe_signature TEXT,
-                    signature_valid INTEGER, oracle_address TEXT, aer_noise_state TEXT,
-                    measurement_counts TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
-                cur.execute("""INSERT INTO dm_pool (
-                    timestamp_ns, oracle_id, density_matrix_hex, purity, w_state_fidelity,
-                    von_neumann_entropy, coherence_l1, hlwe_signature, signature_valid,
-                    oracle_address, aer_noise_state, measurement_counts
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
-                    snapshot.get('timestamp_ns'), snapshot.get('oracle_id'),
-                    snapshot.get('density_matrix_hex', ''),
-                    snapshot.get('purity'), snapshot.get('w_state_fidelity'),
-                    snapshot.get('von_neumann_entropy'), snapshot.get('coherence_l1'),
-                    json.dumps(snapshot.get('hlwe_signature')),
-                    1 if snapshot.get('signature_valid') else 0,
-                    snapshot.get('oracle_address'),
-                    json.dumps(snapshot.get('aer_noise_state', {})),
-                    json.dumps(snapshot.get('measurement_counts', {}))
-                ))
-                conn.commit()
-                conn.close()
-                logger.debug("[RPC-BROADCAST] ✅ DM → SQLite dm_pool")
-            except Exception as e:
-                logger.warning(f"[RPC-BROADCAST] SQLite write: {e}")
-        
-        threading.Thread(target=async_sqlite, daemon=True).start()
-        
-        # 4. Persist to Supabase (cloud backup, non-blocking)
+        # 2. Persist to DB asynchronously (non-blocking)
         try:
             _persist_chirp_snapshot(snapshot)
         except Exception as e:
-            logger.debug(f"[RPC-BROADCAST] Supabase skipped: {e}")
+            logger.debug(f"[RPC-BROADCAST] persist skipped (non-fatal): {e}")
     except Exception as e:
         logger.error(f"[RPC-BROADCAST] Error: {e}")
 
