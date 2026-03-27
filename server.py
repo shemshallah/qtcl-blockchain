@@ -2426,24 +2426,50 @@ _snapshot_lock = threading.RLock()                   # Guards _latest_snapshot u
 
 def _cache_snapshot(snapshot: dict) -> None:
     """Cache snapshot for RPC polling (no SSE push)."""
-    global _latest_snapshot
+    global _latest_snapshot, _latest_snapshot_ts
     with _snapshot_lock:
         _latest_snapshot = snapshot
-
-def _log_rpc_event(event_type: str, data: Any) -> None:
-    """Log event for /api/events RPC polling endpoint."""
+        _latest_snapshot_ts = int(time.time() * 1000)
     with _rpc_event_lock:
-        _rpc_event_log.append({'ts': time.time(), 'type': event_type, 'data': data})
+        _rpc_event_log.append({'ts': time.time(), 'type': 'snapshot', 'data': snapshot})
 
+_SNAPSHOT_REFRESH_THREAD_RUNNING = False
 
-
-
-# Application startup flag
-_APP_READY=False
+def _start_snapshot_refresh_daemon():
+    """Background daemon that continuously refreshes snapshot cache from oracle."""
+    global _SNAPSHOT_REFRESH_THREAD_RUNNING
+    if _SNAPSHOT_REFRESH_THREAD_RUNNING:
+        return
+    _SNAPSHOT_REFRESH_THREAD_RUNNING = True
+    
+    def _refresh_loop():
+        logger.info("[SNAPSHOT-REFRESH] Daemon started - continuously refreshing snapshot cache")
+        while _SNAPSHOT_REFRESH_THREAD_RUNNING:
+            try:
+                # Force oracle to extract a new snapshot if it's running
+                from oracle import ORACLE_W_STATE_MANAGER as owsm
+                if owsm and owsm.running:
+                    try:
+                        fresh_snap = owsm._extract_snapshot()
+                        if fresh_snap:
+                            from oracle import RpcBroadcastController
+                            broadcaster = RpcBroadcastController()
+                            snapshot_dict = broadcaster._extract_snapshot_data(fresh_snap)
+                            _cache_snapshot(snapshot_dict)
+                    except Exception as ex:
+                        logger.debug(f"[SNAPSHOT-REFRESH] Extraction error: {ex}")
+                
+                time.sleep(0.5)  # Refresh every 500ms
+            except Exception as e:
+                logger.debug(f"[SNAPSHOT-REFRESH] Loop error: {e}")
+                time.sleep(1)
+    
+    threading.Thread(target=_refresh_loop, daemon=True, name="SnapshotRefresh").start()
 
 def _set_app_ready():
     global _APP_READY
     _APP_READY=True
+    _start_snapshot_refresh_daemon()
     logger.info("[APP] ✅ Application ready for Koyeb health checks")
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
