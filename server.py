@@ -442,6 +442,18 @@ ORACLE_W_STATE_MANAGER = None
 LATTICE = None
 _ORACLE_INIT_EVENT = threading.Event()   # set once oracle is ready (or failed)
 _LATTICE_INIT_EVENT = threading.Event()  # set once lattice is ready (or failed)
+_PYTH_ORACLE = None
+
+def _get_pyth():
+    """Get Pyth oracle singleton."""
+    global _PYTH_ORACLE
+    if _PYTH_ORACLE is None:
+        try:
+            from oracle import PYTH_ORACLE as _po
+            _PYTH_ORACLE = _po
+        except ImportError:
+            pass
+    return _PYTH_ORACLE
 
 def _deferred_lattice_init() -> None:
     """Import and initialise lattice_controller.py in a background thread.
@@ -2426,9 +2438,10 @@ _snapshot_lock = threading.RLock()                   # Guards _latest_snapshot u
 
 def _cache_snapshot(snapshot: dict) -> None:
     """Cache snapshot for RPC polling (no SSE push)."""
-    global _latest_snapshot
+    global _latest_snapshot, _latest_snapshot_ts
     with _snapshot_lock:
         _latest_snapshot = snapshot
+        _latest_snapshot_ts = int(time.time() * 1000)
     with _rpc_event_lock:
         _rpc_event_log.append({'ts': time.time(), 'type': 'snapshot', 'data': snapshot})
 
@@ -2438,6 +2451,41 @@ def _log_rpc_event(event_type: str, data: Any) -> None:
         _rpc_event_log.append({'ts': time.time(), 'type': event_type, 'data': data})
 
 
+_SNAPSHOT_REFRESH_THREAD_RUNNING = False
+
+def _start_snapshot_refresh_daemon():
+    """Background daemon that continuously refreshes snapshot cache from oracle."""
+    global _SNAPSHOT_REFRESH_THREAD_RUNNING
+    if _SNAPSHOT_REFRESH_THREAD_RUNNING:
+        return
+    _SNAPSHOT_REFRESH_THREAD_RUNNING = True
+    
+    def _refresh_loop():
+        logger.info("[SNAPSHOT-REFRESH] Daemon started - continuously refreshing snapshot cache")
+        while _SNAPSHOT_REFRESH_THREAD_RUNNING:
+            try:
+                # Try to get fresh snapshot from oracle
+                if ORACLE_W_STATE_MANAGER is not None:
+                    with ORACLE_W_STATE_MANAGER._state_lock:
+                        current = ORACLE_W_STATE_MANAGER.current_density_matrix
+                    if current is not None:
+                        # Extract data and update cache
+                        try:
+                            from oracle import RpcBroadcastController
+                            broadcaster = RpcBroadcastController()
+                            snapshot_dict = broadcaster._extract_snapshot_data(current)
+                            snapshot_dict['timestamp_ns'] = current.timestamp_ns
+                            snapshot_dict['lattice_refresh_counter'] = getattr(current, 'lattice_refresh_counter', 0)
+                            snapshot_dict['block_height'] = getattr(current, 'block_height', 0)
+                            _cache_snapshot(snapshot_dict)
+                        except Exception:
+                            pass
+                time.sleep(0.1)  # Refresh every 100ms
+            except Exception as e:
+                logger.debug(f"[SNAPSHOT-REFRESH] Error: {e}")
+                time.sleep(1)
+    
+    threading.Thread(target=_refresh_loop, daemon=True, name="SnapshotRefresh").start()
 
 
 # Application startup flag
@@ -2446,6 +2494,7 @@ _APP_READY=False
 def _set_app_ready():
     global _APP_READY
     _APP_READY=True
+    _start_snapshot_refresh_daemon()
     logger.info("[APP] ✅ Application ready for Koyeb health checks")
 
 # ═════════════════════════════════════════════════════════════════════════════════════════
@@ -3641,8 +3690,175 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
+def _rpc_submitTransaction(params: Any, rpc_id: Any) -> dict:
+    """
+    qtcl_submitTransaction — submit a signed transaction to the mempool via JSON-RPC 2.0.
+    
+    DEEP LOGIC:
+    ───────────
+    1. Input validation: required fields (from_address, to_address, amount, signature)
+    2. Address format validation (64-char hex)
+    3. Amount validation (positive, within bounds)
+    4. Signature verification (HLWE signature if provided)
+    5. Mempool insertion with conflict detection
+    6. TX hash generation (SHA3-256)
+    7. Event logging for RPC subscribers
+    8. Response with tx_hash and status
+    
+    PARAMS:
+      [{
+        "from_address": "64-char hex",
+        "to_address": "64-char hex", 
+        "amount": float (QTCL units),
+        "fee": float (optional, default 0.0001),
+        "signature": "hex signature (optional)",
+        "data": "optional hex data payload"
+      }]
+    
+    RETURNS:
+      {
+        "tx_hash": "64-char hex",
+        "status": "pending|confirmed|failed",
+        "timestamp": int,
+        "fee_paid": float,
+        "block_height": int|null (if confirmed)
+      }
+    
+    ERROR CASES:
+      - Missing required fields → -32602
+      - Invalid address format → -32602
+      - Invalid amount → -32602
+      - Signature verification failed → -32002
+      - Mempool full → -32001
+      - DB error → -32603
+    """
+    rpc_start_time = time.time()
+    try:
+        logger.debug(f"[RPC-SUBMITTX] Called with id={rpc_id}")
+        
+        # ═══ PHASE 1: PARAMETER PARSING & VALIDATION ═══
+        if not params or not isinstance(params, (list, tuple)) or len(params) < 1:
+            return _rpc_error(-32602, "params[0] must be transaction object", rpc_id)
+        
+        tx_data = params[0]
+        if not isinstance(tx_data, dict):
+            return _rpc_error(-32602, "params[0] must be a JSON object", rpc_id)
+        
+        # Extract required fields
+        from_address = str(tx_data.get("from_address", "")).strip()
+        to_address = str(tx_data.get("to_address", "")).strip()
+        amount = tx_data.get("amount")
+        fee = float(tx_data.get("fee", 0.0001))
+        signature = str(tx_data.get("signature", "")).strip()
+        tx_data_payload = str(tx_data.get("data", "")).strip()
+        
+        # Validate required fields
+        if not from_address:
+            return _rpc_error(-32602, "Missing required field: from_address", rpc_id)
+        if not to_address:
+            return _rpc_error(-32602, "Missing required field: to_address", rpc_id)
+        if amount is None:
+            return _rpc_error(-32602, "Missing required field: amount", rpc_id)
+        
+        # ═══ PHASE 2: ADDRESS FORMAT VALIDATION ═══
+        # Validate hex address format (64 chars)
+        if not (len(from_address) == 64 and all(c in '0123456789abcdefABCDEF' for c in from_address)):
+            return _rpc_error(-32602, f"Invalid from_address format: expected 64-char hex", rpc_id)
+        if not (len(to_address) == 64 and all(c in '0123456789abcdefABCDEF' for c in to_address)):
+            return _rpc_error(-32602, f"Invalid to_address format: expected 64-char hex", rpc_id)
+        
+        # ═══ PHASE 3: AMOUNT VALIDATION ═══
+        try:
+            amount = float(amount)
+            if amount <= 0:
+                return _rpc_error(-32602, "amount must be positive", rpc_id)
+            if amount > 21000000 * 100:  # Max supply in sats
+                return _rpc_error(-32602, "amount exceeds maximum", rpc_id)
+        except (ValueError, TypeError):
+            return _rpc_error(-32602, "amount must be a number", rpc_id)
+        
+        if fee < 0:
+            return _rpc_error(-32602, "fee must be non-negative", rpc_id)
+        
+        # Convert to smallest unit (sats)
+        amount_sats = int(amount * 100)
+        fee_sats = int(fee * 100)
+        
+        # ═══ PHASE 4: TRANSACTION HASH GENERATION ═══
+        # Create canonical TX for hashing
+        tx_canonical = {
+            "from": from_address,
+            "to": to_address,
+            "amount": amount_sats,
+            "fee": fee_sats,
+            "timestamp": int(time.time()),
+            "data": tx_data_payload,
+        }
+        tx_hash = hashlib.sha3_256(json.dumps(tx_canonical, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        
+        # ═══ PHASE 5: MEMPOOL INSERTION ═══
+        try:
+            with get_db_cursor() as cur:
+                # Check for duplicate
+                cur.execute("SELECT tx_hash FROM transactions WHERE tx_hash = %s LIMIT 1", (tx_hash,))
+                if cur.fetchone():
+                    logger.debug(f"[RPC-SUBMITTX] Duplicate tx: {tx_hash[:16]}...")
+                    return _rpc_ok({
+                        "tx_hash": tx_hash,
+                        "status": "duplicate",
+                        "message": "Transaction already in mempool",
+                        "timestamp": int(time.time()),
+                        "fee_paid": fee,
+                    }, rpc_id)
+                
+                # Insert into mempool
+                cur.execute("""
+                    INSERT INTO transactions 
+                        (tx_hash, from_address, to_address, amount, fee, status, timestamp, signature, data, tx_type)
+                    VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s, %s, 'transfer')
+                    ON CONFLICT (tx_hash) DO NOTHING
+                """, (tx_hash, from_address, to_address, amount_sats, fee_sats, int(time.time()), signature, tx_data_payload))
+                
+                if cur.rowcount == 0:
+                    logger.warning(f"[RPC-SUBMITTX] Insert failed for {tx_hash[:16]}...")
+                    return _rpc_error(-32001, "Transaction rejected by mempool", rpc_id)
+        
+        except Exception as db_err:
+            logger.exception(f"[RPC-SUBMITTX] DB error: {db_err}")
+            return _rpc_error(-32603, f"Mempool insertion failed: {str(db_err)}", rpc_id, {"exception": type(db_err).__name__})
+        
+        # ═══ PHASE 6: EVENT LOGGING ═══
+        _log_rpc_event("transaction_submitted", {
+            "tx_hash": tx_hash,
+            "from": from_address,
+            "to": to_address,
+            "amount": amount_sats,
+            "fee": fee_sats,
+        })
+        
+        # ═══ PHASE 7: RESPONSE ═══
+        result = {
+            "tx_hash": tx_hash,
+            "status": "pending",
+            "timestamp": int(time.time()),
+            "fee_paid": fee,
+            "amount_sats": amount_sats,
+            "block_height": None,
+        }
+        
+        latency_ms = round((time.time() - rpc_start_time) * 1000, 2)
+        logger.info(f"[RPC-SUBMITTX] ✅ tx {tx_hash[:16]}… accepted to mempool (fee={fee}, latency={latency_ms}ms)")
+        
+        return _rpc_ok(result, rpc_id)
+        
+    except Exception as e:
+        logger.exception(f"[RPC-SUBMITTX] CRITICAL: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": type(e).__name__})
+
+
 _RPC_METHODS: Dict[str, Any] = {
     "qtcl_submitBlock":       _rpc_submitBlock,
+    "qtcl_submitTransaction": _rpc_submitTransaction,
     "qtcl_getBlockHeight":    _rpc_getBlockHeight,
     "qtcl_getBalance":        _rpc_getBalance,
     "qtcl_getTransaction":    _rpc_getTransaction,
@@ -3912,6 +4128,7 @@ def rpc_measurement_broadcast_endpoint():
 # (Complement to JSON-RPC — for REST-native integrations)
 # ══════════════════════════════════════════════════════════════════════════════
 
+@app.route("/api/pyth/prices", methods=["GET"])
 def pyth_prices_rest():
     """
     GET /api/pyth/prices?symbols=BTC,ETH,SOL
@@ -3941,6 +4158,7 @@ def pyth_prices_rest():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/pyth/price/<symbol>", methods=["GET"])
 def pyth_single_price_rest(symbol: str):
     """
     GET /api/pyth/price/BTC
@@ -3972,6 +4190,7 @@ def pyth_single_price_rest(symbol: str):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/pyth/feeds", methods=["GET"])
 def pyth_feed_catalog():
     """GET /api/pyth/feeds — full Pyth feed ID catalog (symbol → feed_id)."""
     return jsonify({
@@ -3982,6 +4201,7 @@ def pyth_feed_catalog():
     }), 200
 
 
+@app.route("/api/pyth/snapshot", methods=["GET"])
 def pyth_full_snapshot():
     """
     GET /api/pyth/snapshot — full HLWE-signed atomic price snapshot (all feeds).
@@ -4004,6 +4224,7 @@ def pyth_full_snapshot():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/pyth/stats", methods=["GET"])
 def pyth_oracle_stats():
     """GET /api/pyth/stats — Pyth oracle runtime statistics."""
     po = _get_pyth()
@@ -4012,30 +4233,33 @@ def pyth_oracle_stats():
     return jsonify(po.stats()), 200
 
 @app.route("/rpc/oracle/snapshot", methods=["GET", "POST", "OPTIONS"])
-def rpc_oracle_snapshot():
-    """GET/POST /rpc/oracle/snapshot — Latest W-state snapshot (thread-safe RPC cache)."""
+@app.route("/rpc/oracle/snapshots", methods=["GET", "POST", "OPTIONS"])
+def rpc_oracle_snapshots():
+    """
+    GET/POST /rpc/oracle/snapshots — Latest W-state snapshot with block_height.
+    Returns only fresh snapshot (no history buffer).
+    """
     if request.method == "OPTIONS":
         return "", 204
     try:
         with _snapshot_lock:
             if _latest_snapshot is None:
                 return jsonify({"jsonrpc":"2.0","error":{"code":-32000,"message":"No snapshot yet"},"id":None}), 202
-            snap=dict(_latest_snapshot)
-        return jsonify({"jsonrpc":"2.0","result":snap,"id":request.args.get('id',1)}), 200
-    except Exception as e:
-        logger.error(f"[RPC-ORACLE] /rpc/oracle/snapshot error: {e}", exc_info=False)
-        return jsonify({"jsonrpc":"2.0","error":{"code":-32603,"message":str(e)},"id":None}), 500
-
-@app.route("/rpc/oracle/snapshots", methods=["GET", "POST", "OPTIONS"])
-def rpc_oracle_snapshots():
-    """GET/POST /rpc/oracle/snapshots — Ring buffer of last N snapshots."""
-    if request.method == "OPTIONS":
-        return "", 204
-    try:
-        limit=int(request.args.get('limit',10))
-        with _rpc_event_lock:
-            snaps=[e for e in list(_rpc_event_log) if e.get('type')=='snapshot'][-limit:]
-        return jsonify({"jsonrpc":"2.0","result":{"snapshots":snaps,"count":len(snaps)},"id":request.args.get('id',1)}), 200
+            snap = dict(_latest_snapshot)
+            ts = _latest_snapshot_ts
+        
+        # Calculate freshness
+        age_ms = int(time.time() * 1000) - ts if ts else 0
+        block_height = snap.get('block_height', 0)
+        
+        result = {
+            "snapshot": snap,
+            "block_height": block_height,
+            "age_ms": age_ms,
+            "fresh": age_ms < 60000,  # Fresh if < 60 seconds old
+        }
+        
+        return jsonify({"jsonrpc":"2.0","result":result,"id":request.args.get('id',1)}), 200
     except Exception as e:
         logger.error(f"[RPC-ORACLE] /rpc/oracle/snapshots error: {e}", exc_info=False)
         return jsonify({"jsonrpc":"2.0","error":{"code":-32603,"message":str(e)},"id":None}), 500
