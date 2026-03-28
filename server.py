@@ -1519,7 +1519,7 @@ def query_latest_block() -> Optional[Dict[str, Any]]:
                     return {
                         'height':     row[0],
                         'hash':       row[1],
-                        'block_hash': row[1],   # ❤️  alias — submitBlock reads block_hash key
+                        'block_hash': row[1],   # ❤️  alias
                         'timestamp':  timestamp,
                         'w_state_hash': row[3],
                     }
@@ -1918,10 +1918,10 @@ class DifficultyManager:
     EWMA_ALPHA          = 0.40  # weight on newest sample — higher = faster reaction
     MAX_STEP_PER_BLOCK  = 1     # max ±1 per block — prevents oscillation
     WARMUP_BLOCKS       = 2     # blocks before first retarget (needs 1 gap sample)
-    FLOOR               = 5     # floor at 5 — fractional target 5.25 sits above this
+    FLOOR               = 4     # ❤️  floor=4 ARM64 ~15s blocks
     CEILING             = ABS_MAX
 
-    def __init__(self, initial_difficulty: float = 5,
+    def __init__(self, initial_difficulty: float = 4,
                  seed_ewma: float = None, seed_last_wall: float = None):
         import math as _m
         self._math = _m
@@ -3766,19 +3766,10 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         except Exception:
             pass
 
-        # Compute reward for response (so client can display accurate reward)
-        try:
-            _resp_reward = TessellationRewardSchedule.get_miner_reward_qtcl(height) if TessellationRewardSchedule else 7.20
-        except Exception:
-            _resp_reward = 7.20
+        try: _resp_reward = TessellationRewardSchedule.get_miner_reward_qtcl(height) if TessellationRewardSchedule else 7.20
+        except Exception: _resp_reward = 7.20
         logger.info(f"[RPC-submitBlock] ✅ h={height} hash={block_hash[:16]}… miner={miner_address[:16]}… reward={_resp_reward} QTCL")
-        return _rpc_ok({
-            "status":          "accepted",
-            "height":          height,
-            "block_hash":      block_hash,
-            "difficulty_bits": difficulty_bits,
-            "miner_reward_qtcl": _resp_reward,   # ❤️  instant reward in response
-        }, rpc_id)
+        return _rpc_ok({"status":"accepted","height":height,"block_hash":block_hash,"difficulty_bits":difficulty_bits,"miner_reward_qtcl":_resp_reward}, rpc_id)
 
     except Exception as e:
         logger.exception(f"[RPC] _rpc_submitBlock unhandled: {e}")
