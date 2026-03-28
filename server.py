@@ -417,11 +417,13 @@ try:
         initialize_block_field_entropy,
         set_current_block_field,
         get_block_field_entropy,
-        initialize_system as init_entropy_system
+        initialize_system as init_entropy_system,
+        TessellationRewardSchedule,
     )
     ENTROPY_AVAILABLE = True
 except ImportError:
     ENTROPY_AVAILABLE = False
+    TessellationRewardSchedule = None
     logger.warning("[ENTROPY] Block field entropy not available - will use fallback")
 
 # ═════════════════════════════════════════════════════════════════════════════════
@@ -3674,6 +3676,60 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         ))
                     except Exception as txe:
                         logger.debug(f"[RPC-submitBlock] tx insert: {txe}")
+
+                # ── Credit miner and treasury coinbase rewards ───────────────────────
+                if TessellationRewardSchedule and (txs or []):
+                    try:
+                        rewards = TessellationRewardSchedule.get_rewards_for_height(height)
+                        miner_reward_base = rewards.get('miner', 720)
+                        treasury_reward_base = rewards.get('treasury', 80)
+                        treasury_address = TessellationRewardSchedule.TREASURY_ADDRESS
+
+                        miner_credited = False
+                        treasury_credited = False
+
+                        for tx in txs:
+                            tx_type = tx.get('tx_type', '')
+                            to_addr = tx.get('to_addr', '') or tx.get('to_address', '')
+                            amount = int(tx.get('amount', 0))
+
+                            if tx_type == 'coinbase':
+                                if to_addr == treasury_address:
+                                    cur.execute("""
+                                        INSERT INTO wallet_addresses (address, wallet_fingerprint, balance, transaction_count, updated_at)
+                                        VALUES (%s, %s, %s, 1, NOW())
+                                        ON CONFLICT (address) DO UPDATE SET
+                                            balance = wallet_addresses.balance + EXCLUDED.balance,
+                                            transaction_count = wallet_addresses.transaction_count + 1,
+                                            updated_at = NOW()
+                                    """, (to_addr, 'treasury', treasury_reward_base))
+                                    treasury_credited = True
+                                    logger.info(f"[RPC-submitBlock] 💰 Treasury credited: {treasury_reward_base} base units → {to_addr[:22]}…")
+                                elif to_addr == miner_address:
+                                    cur.execute("""
+                                        INSERT INTO wallet_addresses (address, wallet_fingerprint, balance, transaction_count, updated_at)
+                                        VALUES (%s, %s, %s, 1, NOW())
+                                        ON CONFLICT (address) DO UPDATE SET
+                                            balance = wallet_addresses.balance + EXCLUDED.balance,
+                                            transaction_count = wallet_addresses.transaction_count + 1,
+                                            updated_at = NOW()
+                                    """, (to_addr, 'miner', amount))
+                                    miner_credited = True
+                                    logger.info(f"[RPC-submitBlock] ⛏  Miner credited: {amount} base units → {to_addr[:22]}…")
+
+                        if not miner_credited and miner_reward_base > 0:
+                            cur.execute("""
+                                INSERT INTO wallet_addresses (address, wallet_fingerprint, balance, transaction_count, updated_at)
+                                VALUES (%s, %s, %s, 1, NOW())
+                                ON CONFLICT (address) DO UPDATE SET
+                                    balance = wallet_addresses.balance + EXCLUDED.balance,
+                                    transaction_count = wallet_addresses.transaction_count + 1,
+                                    updated_at = NOW()
+                            """, (miner_address, 'miner', miner_reward_base))
+                            logger.info(f"[RPC-submitBlock] ⛏  Miner credited (fallback): {miner_reward_base} base units → {miner_address[:22]}…")
+
+                    except Exception as credit_err:
+                        logger.error(f"[RPC-submitBlock] Failed to credit coinbase rewards: {credit_err}")
         except Exception as dbe:
             logger.exception(f"[RPC-submitBlock] DB error: {dbe}")
             return _rpc_error(-32603, f"DB persist failed: {str(dbe)}", rpc_id)
@@ -3685,7 +3741,22 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         except Exception:
             pass
 
-        # ── In-memory blockchain index — populate for O(1) tx lookup ─────────
+        # ── Update chain state ──────────────────────────────────────────────
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    INSERT INTO chain_state (state_id, chain_height, head_block_hash, latest_coherence, updated_at)
+                    VALUES (1, %s, %s, %s, NOW())
+                    ON CONFLICT (state_id) DO UPDATE SET
+                        chain_height = EXCLUDED.chain_height,
+                        head_block_hash = EXCLUDED.head_block_hash,
+                        latest_coherence = EXCLUDED.latest_coherence,
+                        updated_at = NOW()
+                """, (height, block_hash, w_state_fidelity))
+        except Exception as cs_err:
+            logger.warning(f"[RPC-submitBlock] Chain state update failed (non-fatal): {cs_err}")
+
+        # ── In-memory blockchain index ────────────────────────────────────────
         try:
             from globals import get_blockchain
             get_blockchain().index_block(height, txs or [])
