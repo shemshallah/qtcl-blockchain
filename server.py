@@ -2084,9 +2084,9 @@ def get_difficulty_manager() -> DifficultyManager:
     except Exception as _de:
         logger.debug(f"[DIFFICULTY] DB bootstrap: {_de}")
 
-    # Clamp to FLOOR (5) — never restore a difficulty below the floor
+    # Clamp to FLOOR (4) — never restore a difficulty below the floor
     initial = max(DifficultyManager.FLOOR,
-                  db_difficulty if db_difficulty is not None else 5)
+                  db_difficulty if db_difficulty is not None else 4)
 
     _difficulty_manager = DifficultyManager(
         initial_difficulty = initial,
@@ -2825,8 +2825,8 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                         'merkle_root':      row[9] or ('0' * 64),
                         'timestamp_s':      int(row[2]) if row[2] else 0,
                         'timestamp':        int(row[2]) if row[2] else 0,
-                        'difficulty_bits':  int(float(row[7])) if row[7] else 5,
-                        'difficulty':       int(float(row[7])) if row[7] else 5,
+                        'difficulty_bits':  int(float(row[7])) if row[7] else 4,
+                        'difficulty':       int(float(row[7])) if row[7] else 4,
                         'nonce':            int(row[6]) if row[6] else 0,
                         'miner_address':    row[5] or '',
                         'w_state_fidelity': float(row[8]) if row[8] is not None else 0.0,
@@ -2923,8 +2923,8 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
                 'merkle_root':      row[9] or ('0' * 64),
                 'timestamp_s':      int(row[2]) if row[2] else 0,
                 'timestamp':        int(row[2]) if row[2] else 0,
-                'difficulty_bits':  int(float(row[7])) if row[7] else 5,
-                'difficulty':       int(float(row[7])) if row[7] else 5,
+                'difficulty_bits':  int(float(row[7])) if row[7] else 4,
+                'difficulty':       int(float(row[7])) if row[7] else 4,
                 'nonce':            int(row[6]) if row[6] else 0,
                 'miner_address':    row[5] or '',
                 'w_state_fidelity': float(row[8]) if row[8] is not None else 0.0,
@@ -3592,7 +3592,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         timestamp_s     = int(hdr.get("timestamp_s", hdr.get("timestamp", 0)))
         nonce           = int(hdr.get("nonce", 0))
         miner_address   = str(hdr.get("miner_address", ""))
-        difficulty_bits = int(hdr.get("difficulty_bits", hdr.get("difficulty", 5)))
+        difficulty_bits = int(hdr.get("difficulty_bits", hdr.get("difficulty", 4)))
         w_entropy_hex   = str(hdr.get("w_entropy_hash", hdr.get("w_entropy_seed", "")))
         w_state_fidelity = float(hdr.get("w_state_fidelity", 0.0) or 0.0)
 
