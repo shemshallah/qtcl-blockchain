@@ -3062,7 +3062,15 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
         except Exception as dme:
             logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix extraction (non-fatal): {dme}")
 
-        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics success")
+        # ── INJECT block_height from DB so client oracle display shows correct chain tip ──
+        try:
+            _db_tip = query_latest_block()
+            _bh = int(_db_tip['height']) if _db_tip else 0
+        except Exception:
+            _bh = 0
+        result['block_height'] = _bh
+        result['height']       = _bh
+        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics success  block_height={_bh}")
         return _rpc_ok(result, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getQuantumMetrics outer exception: {e}")
