@@ -3674,7 +3674,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 # ── Credit miner and treasury coinbase rewards ───────────────────────
                 _block_rowcount = cur.rowcount
                 _block_newly_inserted = _block_rowcount > 0
-                if _block_newly_inserted and TessellationRewardSchedule and (txs or []):
+                if _block_newly_inserted and TessellationRewardSchedule:
                     try:
                         rewards = TessellationRewardSchedule.get_rewards_for_height(height)
                         miner_reward_base = rewards.get('miner', 720)
@@ -3723,6 +3723,17 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                                     updated_at = NOW()
                             """, (miner_address, 'miner', miner_reward_base))
                             logger.info(f"[RPC-submitBlock] ⛏  Miner credited (fallback): {miner_reward_base} base units → {miner_address[:22]}…")
+
+                        if not treasury_credited and treasury_address and treasury_reward_base > 0:
+                            cur.execute("""
+                                INSERT INTO wallet_addresses (address, wallet_fingerprint, balance, transaction_count, updated_at)
+                                VALUES (%s, %s, %s, 1, NOW())
+                                ON CONFLICT (address) DO UPDATE SET
+                                    balance = wallet_addresses.balance + EXCLUDED.balance,
+                                    transaction_count = wallet_addresses.transaction_count + 1,
+                                    updated_at = NOW()
+                            """, (treasury_address, 'treasury', treasury_reward_base))
+                            logger.info(f"[RPC-submitBlock] 💰 Treasury credited (fallback): {treasury_reward_base} base units → {treasury_address[:22]}…")
 
                     except Exception as credit_err:
                         logger.error(f"[RPC-submitBlock] Failed to credit coinbase rewards: {credit_err}")
