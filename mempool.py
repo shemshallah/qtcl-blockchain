@@ -1859,6 +1859,9 @@ class Mempool:
             amount_base    = treasury_reward,
             fee_base       = 0,
             nonce          = block_height,
+            signature      = '',
+            w_entropy_hash = w_entropy_hash,
+            timestamp_ns   = time.time_ns(),
             metadata       = {
                 'treasury'          : True,
                 'reward_type'       : 'treasury',

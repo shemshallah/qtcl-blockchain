@@ -1375,8 +1375,7 @@ def get_db_cursor():
     conn=None
     try:
         conn=db_pool.get_connection()
-        from psycopg2.extras import RealDictCursor
-        cur=conn.cursor(cursor_factory=RealDictCursor)
+        cur=conn.cursor()
         yield cur
         conn.commit()
     except Exception as e:
@@ -1424,7 +1423,7 @@ def _ensure_genesis_block_in_db() -> bool:
             if genesis_row:
                 logger.info(
                     f"[GENESIS-BOOTSTRAP] ✅ Genesis already exists: "
-                    f"h=0 hash={genesis_row['block_hash'][:24] if genesis_row['block_hash'] else '?'}…"
+                    f"h=0 hash={genesis_row[1][:24] if genesis_row[1] else '?'}…"
                 )
                 return True
             
