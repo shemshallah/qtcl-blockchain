@@ -3630,8 +3630,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
         # ── Persist block ────────────────────────────────────────────────────
         try:
-            with get_db_conn() as conn:
-                cur = conn.cursor()
+            with get_db_cursor() as cur:
                 cur.execute("""
                     INSERT INTO blocks
                     (height, block_number, block_hash, previous_hash, timestamp,
@@ -3667,7 +3666,6 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         ))
                     except Exception as txe:
                         logger.debug(f"[RPC-submitBlock] tx insert: {txe}")
-                conn.commit()
         except Exception as dbe:
             logger.exception(f"[RPC-submitBlock] DB error: {dbe}")
             return _rpc_error(-32603, f"DB persist failed: {str(dbe)}", rpc_id)
