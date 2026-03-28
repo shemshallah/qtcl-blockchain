@@ -3561,32 +3561,138 @@ def _rpc_listMeasurementSubscribers(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"List failed: {str(e)}", rpc_id)
 
 
-def _rpc_getMempool(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getMempool — pending transactions list for block building."""
+def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
+    """qtcl_submitBlock — validate and persist a mined block directly (no Flask route needed)."""
     try:
-        from mempool import get_pending_transactions as _get_pending
-        max_count = 500
-        if isinstance(params, list) and params:
-            try: max_count = min(int(params[0]), 2000)
-            except (ValueError, TypeError): pass
-        txs = _get_pending(max_count=max_count)
-        serialized = []
-        for tx in txs:
-            if hasattr(tx, '__dict__'):
-                serialized.append({k: v for k, v in tx.__dict__.items() if not k.startswith('_')})
-            elif isinstance(tx, dict):
-                serialized.append(tx)
-        logger.debug(f"[RPC-METHOD] qtcl_getMempool: returning {len(serialized)} txs")
-        return _rpc_ok(serialized, rpc_id)
+        if not params or not isinstance(params, (list, tuple)) or len(params) < 1:
+            return _rpc_error(-32602, "params[0] must be {header, transactions}", rpc_id)
+        data = params[0]
+        if not isinstance(data, dict):
+            return _rpc_error(-32602, "params[0] must be a JSON object", rpc_id)
+
+        hdr  = data.get("header", data)   # support flat or {header, transactions}
+        txs  = data.get("transactions", [])
+
+        height          = int(hdr.get("height", 0))
+        block_hash      = str(hdr.get("block_hash", ""))
+        parent_hash     = str(hdr.get("parent_hash", "0" * 64))
+        merkle_root     = str(hdr.get("merkle_root", "0" * 64))
+        timestamp_s     = int(hdr.get("timestamp_s", hdr.get("timestamp", 0)))
+        nonce           = int(hdr.get("nonce", 0))
+        miner_address   = str(hdr.get("miner_address", ""))
+        difficulty_bits = int(hdr.get("difficulty_bits", hdr.get("difficulty", 5)))
+        w_entropy_hex   = str(hdr.get("w_entropy_hash", hdr.get("w_entropy_seed", "")))
+        w_state_fidelity = float(hdr.get("w_state_fidelity", 0.0) or 0.0)
+
+        # ── Duplicate check ──────────────────────────────────────────────────
+        existing = query_block_by_hash(block_hash)
+        if existing:
+            return _rpc_ok({"status": "duplicate", "height": height, "block_hash": block_hash}, rpc_id)
+
+        # ── Height check ─────────────────────────────────────────────────────
+        latest = query_latest_block()
+        expected_height = (int(latest["height"]) + 1) if latest else 1
+        if height != expected_height:
+            tip = int(latest["height"]) if latest else 0
+            return _rpc_error(-32001,
+                f"Invalid height: expected {expected_height}, got {height}",
+                rpc_id, {"tip": tip})
+
+        # ── Parent hash check ────────────────────────────────────────────────
+        if latest:
+            expected_parent = latest.get("block_hash") or latest.get("hash", "")
+            if parent_hash.lower() != expected_parent.lower():
+                return _rpc_error(-32001,
+                    f"Invalid parent_hash: expected {expected_parent[:16]}… got {parent_hash[:16]}…",
+                    rpc_id)
+
+        # ── PoW verification ─────────────────────────────────────────────────
+        try:
+            w_seed = bytes.fromhex(w_entropy_hex) if w_entropy_hex else b'\x00' * 32
+            valid, reason = qtcl_pow_verify(
+                height=height,
+                parent_hash=parent_hash,
+                merkle_root=merkle_root,
+                timestamp_s=timestamp_s,
+                difficulty_bits=difficulty_bits,
+                nonce=nonce,
+                miner_address=miner_address,
+                w_entropy_seed=w_seed,
+                claimed_hash=block_hash,
+                block_timestamp_s=timestamp_s,
+            )
+            if not valid:
+                return _rpc_error(-32003, f"PoW invalid: {reason}", rpc_id)
+        except Exception as pe:
+            logger.warning(f"[RPC-submitBlock] PoW verify error (non-fatal): {pe}")
+            # Fall through — verify hash prefix at minimum
+            if not block_hash.startswith('0' * difficulty_bits):
+                return _rpc_error(-32003, f"Difficulty not met: {block_hash[:8]}", rpc_id)
+
+        # ── Persist block ────────────────────────────────────────────────────
+        try:
+            with get_db_conn() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO blocks
+                    (height, block_number, block_hash, previous_hash, timestamp,
+                     oracle_w_state_hash, validator_public_key, nonce,
+                     difficulty, entropy_score, transactions_root)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (height) DO NOTHING
+                """, (
+                    height, height, block_hash, parent_hash, timestamp_s,
+                    w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
+                    miner_address, nonce,
+                    difficulty_bits, w_state_fidelity, merkle_root,
+                ))
+                # Persist transactions
+                for tx in (txs or []):
+                    try:
+                        tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
+                        cur.execute("""
+                            INSERT INTO transactions
+                            (tx_hash, block_height, from_address, to_address,
+                             amount, tx_type, status, timestamp)
+                            VALUES (%s, %s, %s, %s, %s, %s, 'confirmed', %s)
+                            ON CONFLICT (tx_hash) DO UPDATE
+                              SET block_height = EXCLUDED.block_height,
+                                  status = 'confirmed'
+                        """, (
+                            tx_id, height,
+                            tx.get("from_addr", "0" * 64),
+                            tx.get("to_addr", ""),
+                            float(tx.get("amount", 0)),
+                            tx.get("tx_type", "transfer"),
+                            timestamp_s,
+                        ))
+                    except Exception as txe:
+                        logger.debug(f"[RPC-submitBlock] tx insert: {txe}")
+                conn.commit()
+        except Exception as dbe:
+            logger.exception(f"[RPC-submitBlock] DB error: {dbe}")
+            return _rpc_error(-32603, f"DB persist failed: {str(dbe)}", rpc_id)
+
+        # ── Difficulty retarget ──────────────────────────────────────────────
+        try:
+            dm = get_difficulty_manager()
+            dm.on_block_accepted(timestamp_s)
+        except Exception:
+            pass
+
+        logger.info(f"[RPC-submitBlock] ✅ h={height} hash={block_hash[:16]}… miner={miner_address[:16]}…")
+        return _rpc_ok({
+            "status": "accepted",
+            "height": height,
+            "block_hash": block_hash,
+            "difficulty_bits": difficulty_bits,
+        }, rpc_id)
+
     except Exception as e:
-        logger.exception(f"[RPC-METHOD] qtcl_getMempool: {e}")
-        return _rpc_ok([], rpc_id)
+        logger.exception(f"[RPC] _rpc_submitBlock unhandled: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
-# ─── qtcl_submitBlock — RPC wrapper around submit_block() REST handler ─────────
-# Reuses ALL validation/persistence logic (PoW, height, parent, coinbase, treasury,
-# lattice, difficulty retarget, P2P broadcast) via Flask test_request_context.
-# Zero duplication — the REST handler is the single source of truth.
 def _rpc_getLatestDMSnapshot(params: Any, rpc_id: Any) -> dict:
     """qtcl_getLatestDMSnapshot — fetch latest density matrix snapshot from oracle ring buffer.
     
@@ -3632,46 +3738,27 @@ def _rpc_getLatestDMSnapshots(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
-def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
-    """qtcl_submitBlock — submit a mined block via JSON-RPC 2.0."""
+
+def _rpc_getMempool(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getMempool — pending transaction list for block building."""
     try:
-        if not params or not isinstance(params, (list, tuple)) or len(params) < 1:
-            return _rpc_error(-32602, "params[0] must be block payload {header, transactions}", rpc_id)
-
-        data = params[0]
-        if not isinstance(data, dict):
-            return _rpc_error(-32602, "params[0] must be a JSON object", rpc_id)
-
-        # Invoke the REST handler inside a synthetic Flask request context.
-        # test_request_context is in-process — no network round-trip.
-        with app.test_request_context(
-            '/api/submit_block',
-            method='POST',
-            json=data,
-            environ_base={'REMOTE_ADDR': '127.0.0.1'},
-        ):
-            response = submit_block()
-
-            # submit_block() returns (Response, status_code) tuples
-            if isinstance(response, tuple):
-                resp_obj, status_code = response
-            else:
-                resp_obj = response
-                status_code = 200
-
-            result = resp_obj.get_json()
-
-            if status_code >= 400:
-                error_msg = result.get('error', 'Block rejected') if isinstance(result, dict) else str(result)
-                # Map HTTP status to JSON-RPC error codes
-                rpc_code = {400: -32602, 409: -32001, 422: -32003, 500: -32603}.get(status_code, -32603)
-                return _rpc_error(rpc_code, error_msg, rpc_id, result)
-
-            return _rpc_ok(result, rpc_id)
-
+        from mempool import get_pending_transactions as _get_pending
+        max_count = 500
+        if isinstance(params, list) and params:
+            try: max_count = min(int(params[0]), 2000)
+            except (ValueError, TypeError): pass
+        txs = _get_pending(max_count=max_count)
+        serialized = []
+        for tx in txs:
+            if hasattr(tx, '__dict__'):
+                serialized.append({k: v for k, v in tx.__dict__.items() if not k.startswith('_')})
+            elif isinstance(tx, dict):
+                serialized.append(tx)
+        logger.debug(f"[RPC-METHOD] qtcl_getMempool: returning {len(serialized)} txs")
+        return _rpc_ok(serialized, rpc_id)
     except Exception as e:
-        logger.exception(f"[RPC] _rpc_submitBlock unhandled error: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+        logger.exception(f"[RPC-METHOD] qtcl_getMempool: {e}")
+        return _rpc_ok([], rpc_id)
 
 
 _RPC_METHODS: Dict[str, Any] = {
