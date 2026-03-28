@@ -2220,7 +2220,7 @@ def add_transaction(raw: Dict[str, Any]) -> Tuple[bool, str]:
 
 def get_pending_transactions(max_count: int = 2_000) -> List[MempoolTx]:
     """Get pending TXs sorted by fee_rate DESC (for mining)."""
-    txs, _ = get_mempool().get_block_transactions(max_txs=max_count)
+    txs, _coinbase, _treasury = get_mempool().get_block_transactions(max_txs=max_count)
     return txs
 
 def get_transaction_by_hash(tx_hash: str) -> Optional[MempoolTx]:

@@ -2111,7 +2111,7 @@ def get_difficulty_manager() -> DifficultyManager:
 QTCL_POW_SCRATCHPAD_BYTES = 512 * 1024   # 512 KB SHAKE-256 scratchpad
 QTCL_POW_MIX_ROUNDS       = 64           # sequential read windows per hash
 QTCL_POW_WINDOW_BYTES      = 64          # bytes per window
-QTCL_POW_ENTROPY_TTL_S     = 120         # oracle seed TTL (seconds)
+QTCL_POW_ENTROPY_TTL_S     = 300         # oracle seed TTL (seconds) — 5min covers mining+submit+tip-wait
 
 def qtcl_pow_build_scratchpad(w_entropy_seed: bytes) -> bytes:
     """
@@ -3642,6 +3642,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 return _rpc_error(-32003, f"Difficulty not met: {block_hash[:8]}", rpc_id)
 
         # ── Persist block ────────────────────────────────────────────────────
+        _block_rowcount = 0   # set after insert, used at final return
         try:
             with get_db_cursor() as cur:
                 cur.execute("""
@@ -3681,7 +3682,12 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         logger.debug(f"[RPC-submitBlock] tx insert: {txe}")
 
                 # ── Credit miner and treasury coinbase rewards ───────────────────────
-                if TessellationRewardSchedule and (txs or []):
+                # GUARD: only credit when block was freshly inserted (rowcount=1).
+                # ON CONFLICT (height) DO NOTHING silently skips duplicate heights —
+                # without this guard a re-submitted block would double-credit the wallet.
+                _block_rowcount = cur.rowcount    # propagate out for final return
+                _block_newly_inserted = _block_rowcount > 0
+                if _block_newly_inserted and TessellationRewardSchedule and (txs or []):
                     try:
                         rewards = TessellationRewardSchedule.get_rewards_for_height(height)
                         miner_reward_base = rewards.get('miner', 720)
@@ -3768,7 +3774,12 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
         try: _resp_reward = TessellationRewardSchedule.get_miner_reward_qtcl(height) if TessellationRewardSchedule else 7.20
         except Exception: _resp_reward = 7.20
-        logger.info(f"[RPC-submitBlock] ✅ h={height} hash={block_hash[:16]}… miner={miner_address[:16]}… reward={_resp_reward} QTCL")
+        if _block_rowcount == 0:
+            # Block at this height already existed — ON CONFLICT (height) DO NOTHING fired.
+            # Return duplicate so the client knows to advance without re-crediting.
+            logger.info(f"[RPC-submitBlock] 🔁 DUPLICATE h={height} hash={block_hash[:16]}… (height slot occupied)")
+            return _rpc_ok({"status":"duplicate","height":height,"block_hash":block_hash}, rpc_id)
+        logger.info(f"[RPC-submitBlock] ✅ ACCEPTED h={height} hash={block_hash[:16]}… miner={miner_address[:16]}… reward={_resp_reward} QTCL")
         return _rpc_ok({"status":"accepted","height":height,"block_hash":block_hash,"difficulty_bits":difficulty_bits,"miner_reward_qtcl":_resp_reward}, rpc_id)
 
     except Exception as e:
