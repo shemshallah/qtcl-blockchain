@@ -3677,6 +3677,13 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         except Exception:
             pass
 
+        # ── In-memory blockchain index — populate for O(1) tx lookup ─────────
+        try:
+            from globals import get_blockchain
+            get_blockchain().index_block(height, txs or [])
+        except Exception:
+            pass
+
         logger.info(f"[RPC-submitBlock] ✅ h={height} hash={block_hash[:16]}… miner={miner_address[:16]}…")
         return _rpc_ok({
             "status": "accepted",
