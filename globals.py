@@ -192,6 +192,11 @@ class TessellationRewardSchedule:
 
 MINING_COINBASE_REWARD = 720  # depth-5 miner base units
 
+# Canonical null-sink burn address for oracle registration TXs.
+# No private key exists for this address — it is a pure chain commitment.
+# Mirrors the value previously defined in blockchain_entropy_mining.py.
+ORACLE_REGISTRY_ADDRESS = "qtcl1oracle_registry_000000000000000000000000"
+
 # ═════════════════════════════════════════════════════════════════════════════════════
 # GLOBAL STATE
 # ═════════════════════════════════════════════════════════════════════════════════════
@@ -564,7 +569,7 @@ __all__ = [
     'initialize_block_field_entropy', 'initialize_system',
     'get_blockchain',
     'POOL_API_AVAILABLE',
-    'WSTATE_FIDELITY_THRESHOLD', 'ORACLE_MIN_PEERS', 'MAX_PEERS', 'MINING_COINBASE_REWARD',
+    'WSTATE_FIDELITY_THRESHOLD', 'ORACLE_MIN_PEERS', 'MAX_PEERS', 'MINING_COINBASE_REWARD', 'ORACLE_REGISTRY_ADDRESS',
     'LATTICE', 'get_lattice', 'set_lattice',
     'record_quantum_witness', 'register_validator', 'accept_attestation',
     'compute_finality',

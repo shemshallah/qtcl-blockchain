@@ -1094,7 +1094,7 @@ class Mempool:
                 elif _is_oracle_reg:
                     # Validate target address is canonical registry null-sink
                     try:
-                        from blockchain_entropy_mining import ORACLE_REGISTRY_ADDRESS as _ORA
+                        from globals import ORACLE_REGISTRY_ADDRESS as _ORA
                     except ImportError:
                         _ORA = "qtcl1oracle_registry_000000000000000000000000"
                     if to_addr != _ORA:
