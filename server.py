@@ -3603,7 +3603,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         # ── Parent hash check ────────────────────────────────────────────────
         if latest:
             expected_parent = latest.get("block_hash") or latest.get("hash", "")
+            logger.critical(f"[RPC-submitBlock] 🔍 PARENT HASH CHECK h={height}: expected={expected_parent[:32] if expected_parent else 'NONE'}… got={parent_hash[:32] if parent_hash else 'NONE'}…")
             if parent_hash.lower() != expected_parent.lower():
+                logger.error(f"[RPC-submitBlock] ❌ PARENT MISMATCH h={height} (expected {expected_parent[:16]}… got {parent_hash[:16]}…)")
                 return _rpc_error(-32001,
                     f"Invalid parent_hash: expected {expected_parent[:16]}… got {parent_hash[:16]}…",
                     rpc_id)
