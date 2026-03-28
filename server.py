@@ -2039,36 +2039,31 @@ _difficulty_manager = None
 def get_difficulty_manager() -> DifficultyManager:
     """
     Get or create the global DifficultyManager.
-
-    Seeds the EWMA and wall-clock anchor from DB so restarts don't corrupt
-    the adaptive algorithm with a 0-timestamp gap.
+    SINGLE AUTHORITY: always starts at FLOOR=4. No DB difficulty restore —
+    stored block difficulty values are historical records only, never used to
+    seed current difficulty. EWMA block-time is seeded from DB for smooth
+    restart continuity without affecting the starting difficulty level.
     """
     global _difficulty_manager
     if _difficulty_manager is not None:
         return _difficulty_manager
 
-    db_difficulty  = None
     seed_ewma      = None
     seed_last_wall = None
     try:
         with get_db_cursor() as _bc:
-            # Restore difficulty from last accepted block
+            # Seed wall-clock anchor from latest block timestamp (prevents
+            # billion-second gap on first record_block call after restart).
             _bc.execute("""
-                SELECT difficulty, timestamp
-                FROM blocks
+                SELECT timestamp FROM blocks
+                WHERE timestamp IS NOT NULL
                 ORDER BY height DESC LIMIT 1
             """)
             tip_row = _bc.fetchone()
-            if tip_row:
-                raw = tip_row[0]
-                if raw is not None:
-                    db_difficulty = max(DifficultyManager.FLOOR,
-                                        min(DifficultyManager.CEILING, int(float(raw))))
-                # Seed last-accept wall time from the latest block's timestamp
-                if tip_row[1] is not None:
-                    seed_last_wall = float(tip_row[1])
+            if tip_row and tip_row[0] is not None:
+                seed_last_wall = float(tip_row[0])
 
-            # Compute average inter-block time from last 10 blocks to seed EWMA
+            # Seed EWMA from average inter-block time of last 10 blocks.
             _bc.execute("""
                 SELECT timestamp FROM blocks
                 WHERE timestamp IS NOT NULL
@@ -2076,7 +2071,6 @@ def get_difficulty_manager() -> DifficultyManager:
             """)
             ts_rows = [float(r[0]) for r in _bc.fetchall() if r[0] is not None]
             if len(ts_rows) >= 2:
-                # rows are newest-first
                 gaps = [ts_rows[i] - ts_rows[i+1] for i in range(len(ts_rows)-1)
                         if ts_rows[i] > ts_rows[i+1]]
                 if gaps:
@@ -2084,19 +2078,15 @@ def get_difficulty_manager() -> DifficultyManager:
     except Exception as _de:
         logger.debug(f"[DIFFICULTY] DB bootstrap: {_de}")
 
-    # Clamp to FLOOR (4) — never restore a difficulty below the floor
-    initial = max(DifficultyManager.FLOOR,
-                  db_difficulty if db_difficulty is not None else 4)
-
+    # ALWAYS start at FLOOR=4. No DB difficulty restore. Single pathway.
     _difficulty_manager = DifficultyManager(
-        initial_difficulty = initial,
+        initial_difficulty = DifficultyManager.FLOOR,
         seed_ewma          = seed_ewma,
         seed_last_wall     = seed_last_wall,
     )
     logger.info(
-        f"[DIFFICULTY] Bootstrap: diff={initial} "
-        f"seed_ewma={seed_ewma:.1f}s" if seed_ewma else
-        f"[DIFFICULTY] Bootstrap: diff={initial} (no EWMA seed)"
+        f"[DIFFICULTY] Bootstrap: diff={DifficultyManager.FLOOR} (FLOOR — authoritative) "
+        + (f"seed_ewma={seed_ewma:.1f}s" if seed_ewma else "no EWMA seed")
     )
     return _difficulty_manager
 
@@ -2111,7 +2101,7 @@ def get_difficulty_manager() -> DifficultyManager:
 QTCL_POW_SCRATCHPAD_BYTES = 512 * 1024   # 512 KB SHAKE-256 scratchpad
 QTCL_POW_MIX_ROUNDS       = 64           # sequential read windows per hash
 QTCL_POW_WINDOW_BYTES      = 64          # bytes per window
-QTCL_POW_ENTROPY_TTL_S     = 300         # oracle seed TTL (seconds) — 5min covers mining+submit+tip-wait
+QTCL_POW_ENTROPY_TTL_S     = 300         # oracle seed TTL (seconds)
 
 def qtcl_pow_build_scratchpad(w_entropy_seed: bytes) -> bytes:
     """
@@ -3642,7 +3632,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 return _rpc_error(-32003, f"Difficulty not met: {block_hash[:8]}", rpc_id)
 
         # ── Persist block ────────────────────────────────────────────────────
-        _block_rowcount = 0   # set after insert, used at final return
+        _block_rowcount = 0
         try:
             with get_db_cursor() as cur:
                 cur.execute("""
@@ -3682,10 +3672,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         logger.debug(f"[RPC-submitBlock] tx insert: {txe}")
 
                 # ── Credit miner and treasury coinbase rewards ───────────────────────
-                # GUARD: only credit when block was freshly inserted (rowcount=1).
-                # ON CONFLICT (height) DO NOTHING silently skips duplicate heights —
-                # without this guard a re-submitted block would double-credit the wallet.
-                _block_rowcount = cur.rowcount    # propagate out for final return
+                _block_rowcount = cur.rowcount
                 _block_newly_inserted = _block_rowcount > 0
                 if _block_newly_inserted and TessellationRewardSchedule and (txs or []):
                     try:
@@ -3775,9 +3762,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         try: _resp_reward = TessellationRewardSchedule.get_miner_reward_qtcl(height) if TessellationRewardSchedule else 7.20
         except Exception: _resp_reward = 7.20
         if _block_rowcount == 0:
-            # Block at this height already existed — ON CONFLICT (height) DO NOTHING fired.
-            # Return duplicate so the client knows to advance without re-crediting.
-            logger.info(f"[RPC-submitBlock] 🔁 DUPLICATE h={height} hash={block_hash[:16]}… (height slot occupied)")
+            logger.info(f"[RPC-submitBlock] 🔁 DUPLICATE h={height} hash={block_hash[:16]}…")
             return _rpc_ok({"status":"duplicate","height":height,"block_hash":block_hash}, rpc_id)
         logger.info(f"[RPC-submitBlock] ✅ ACCEPTED h={height} hash={block_hash[:16]}… miner={miner_address[:16]}… reward={_resp_reward} QTCL")
         return _rpc_ok({"status":"accepted","height":height,"block_hash":block_hash,"difficulty_bits":difficulty_bits,"miner_reward_qtcl":_resp_reward}, rpc_id)
