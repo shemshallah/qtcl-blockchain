@@ -1517,9 +1517,10 @@ def query_latest_block() -> Optional[Dict[str, Any]]:
                         timestamp = int(time.time())
                     
                     return {
-                        'height': row[0],
-                        'hash': row[1],
-                        'timestamp': timestamp,
+                        'height':     row[0],
+                        'hash':       row[1],
+                        'block_hash': row[1],   # ❤️  alias — submitBlock reads block_hash key
+                        'timestamp':  timestamp,
                         'w_state_hash': row[3],
                     }
                 return None  # No blocks found
@@ -2313,8 +2314,10 @@ signal.signal(signal.SIGINT, _signal_handler_noop)
 
 # ─── Bulletproof JSON encoder: kills every numpy/datetime/Decimal/bytes 500 ────
 import json as _json_mod
-class _QTCLJSONEncoder(_json_mod.JSONEncoder):
-    """Handles numpy scalars, datetime, Decimal, bytes, sets — anything jsonify touches."""
+from flask.json.provider import DefaultJSONProvider
+
+class _QTCLJSONProvider(DefaultJSONProvider):
+    """Flask 3.0+ JSON provider that handles numpy scalars, datetime, Decimal, bytes, sets."""
     def default(self, o):
         # numpy scalars (float32/float64/int64/bool_ etc.)
         try:
@@ -2335,7 +2338,7 @@ class _QTCLJSONEncoder(_json_mod.JSONEncoder):
         except TypeError:
             return str(o)
 
-app.json_encoder = _QTCLJSONEncoder
+app.json = _QTCLJSONProvider(app)
 app.config['JSON_SORT_KEYS'] = False
 
 # ─── Lazy Metrics Initialization (after all classes defined) ──────────────────
@@ -3763,12 +3766,18 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         except Exception:
             pass
 
-        logger.info(f"[RPC-submitBlock] ✅ h={height} hash={block_hash[:16]}… miner={miner_address[:16]}…")
+        # Compute reward for response (so client can display accurate reward)
+        try:
+            _resp_reward = TessellationRewardSchedule.get_miner_reward_qtcl(height) if TessellationRewardSchedule else 7.20
+        except Exception:
+            _resp_reward = 7.20
+        logger.info(f"[RPC-submitBlock] ✅ h={height} hash={block_hash[:16]}… miner={miner_address[:16]}… reward={_resp_reward} QTCL")
         return _rpc_ok({
-            "status": "accepted",
-            "height": height,
-            "block_hash": block_hash,
+            "status":          "accepted",
+            "height":          height,
+            "block_hash":      block_hash,
             "difficulty_bits": difficulty_bits,
+            "miner_reward_qtcl": _resp_reward,   # ❤️  instant reward in response
         }, rpc_id)
 
     except Exception as e:
