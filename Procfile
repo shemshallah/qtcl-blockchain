@@ -1,1 +1,1 @@
-web: gunicorn wsgi_config:app --bind 0.0.0.0:$PORT --config gunicorn_conf.py --timeout 120 --worker-tmp-dir /dev/shm
+web: find /workspace -name '_cffi__*.c' -delete 2>/dev/null; find /workspace -name '_cffi__*.so' -delete 2>/dev/null; find . -name '_cffi__*.c' -delete 2>/dev/null; find . -name '_cffi__*.so' -delete 2>/dev/null; gunicorn wsgi_config:app --bind 0.0.0.0:${FLASK_INTERNAL_PORT:-8000} --config gunicorn_conf.py --timeout 120
