@@ -1543,7 +1543,7 @@ def query_latest_block() -> Optional[Dict[str, Any]]:
                 cur.execute("""
                     SELECT height, block_hash, 
                            COALESCE(timestamp, EXTRACT(EPOCH FROM NOW())::bigint) as timestamp,
-                           oracle_w_state_hash
+                           oracle_w_state_hash, pq0, pq_curr, pq_last
                     FROM blocks
                     ORDER BY height DESC
                     LIMIT 1
@@ -1557,9 +1557,12 @@ def query_latest_block() -> Optional[Dict[str, Any]]:
                     return {
                         'height':     row[0],
                         'hash':       row[1],
-                        'block_hash': row[1],   # ❤️  alias
+                        'block_hash': row[1],
                         'timestamp':  timestamp,
                         'w_state_hash': row[3],
+                        'pq0':        int(row[4]) if row[4] is not None else 0,
+                        'pq_curr':    int(row[5]) if row[5] is not None else 0,
+                        'pq_last':    int(row[6]) if row[6] is not None else 0,
                     }
                 return None  # No blocks found
         except Exception as e:
@@ -2837,7 +2840,7 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                     cur.execute("""
                         SELECT height, block_hash, timestamp, oracle_w_state_hash,
                                previous_hash, validator_public_key, nonce, difficulty,
-                               entropy_score, transactions_root, pq_curr, pq_last
+                               entropy_score, transactions_root, pq_curr, pq_last, pq0
                         FROM blocks WHERE height = %s LIMIT 1
                     """, (h,))
                     row = cur.fetchone()
@@ -2859,8 +2862,9 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                         'miner_address':    row[5] or '',
                         'w_state_fidelity': float(row[8]) if row[8] is not None else 0.0,
                         'w_entropy_hash':   row[3] or '',
-                        'pq_curr':          int(row[10]) if row[10] is not None else h,
-                        'pq_last':          int(row[11]) if row[11] is not None else max(0, h - 1),
+                        'pq0':              int(row[12]) if row[12] is not None else 0,
+                        'pq_curr':          int(row[10]) if row[10] is not None else 0,
+                        'pq_last':          int(row[11]) if row[11] is not None else 0,
                     }
                     # Fetch transactions for this block
                     cur.execute("""
@@ -2933,13 +2937,13 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
                 SELECT b.height, b.block_hash, b.timestamp, b.oracle_w_state_hash,
                        b.previous_hash, b.validator_public_key, b.nonce, b.difficulty,
                        b.entropy_score, b.transactions_root, b.pq_curr, b.pq_last,
-                       COUNT(t.tx_hash) AS tx_count
+                       COUNT(t.tx_hash) AS tx_count, b.pq0
                 FROM blocks b
                 LEFT JOIN transactions t ON t.height = b.height
                 WHERE b.height BETWEEN %s AND %s
                 GROUP BY b.height, b.block_hash, b.timestamp, b.oracle_w_state_hash,
                          b.previous_hash, b.validator_public_key, b.nonce, b.difficulty,
-                         b.entropy_score, b.transactions_root, b.pq_curr, b.pq_last
+                         b.entropy_score, b.transactions_root, b.pq_curr, b.pq_last, b.pq0
                 ORDER BY b.height ASC
             """, (from_h, to_h))
             rows = cur.fetchall()
@@ -2962,8 +2966,9 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
                 'miner_address':    row[5] or '',
                 'w_state_fidelity': float(row[8]) if row[8] is not None else 0.0,
                 'w_entropy_hash':   row[3] or '',
-                'pq_curr':          int(row[10]) if row[10] is not None else row[0],
-                'pq_last':          int(row[11]) if row[11] is not None else max(0, row[0] - 1),
+                'pq0':              int(row[13]) if row[13] is not None else 0,
+                'pq_curr':          int(row[10]) if row[10] is not None else 0,
+                'pq_last':          int(row[11]) if row[11] is not None else 0,
                 'tx_count':         int(row[12]) if row[12] is not None else 0,
             })
 
@@ -3141,17 +3146,15 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
             _bh = 0
         result['block_height'] = _bh
         result['height']       = _bh
-        # pq_curr / pq_last from tip block — needed by visualization overlay
+        # pq0/pq_curr/pq_last — actual blockfield boundaries from tip block
         if _db_tip:
-            _pq_c = _db_tip.get('pq_curr')
-            _pq_l = _db_tip.get('pq_last')
-            result['pq_curr'] = int(_pq_c) if _pq_c is not None else (_bh % 8)
-            result['pq_last'] = int(_pq_l) if _pq_l is not None else ((_bh - 1) % 8)
+            result['pq0']    = _db_tip.get('pq0',    0)
+            result['pq_curr'] = _db_tip.get('pq_curr', 0)
+            result['pq_last'] = _db_tip.get('pq_last', 0)
         else:
-            result['pq_curr'] = _bh % 8
-            result['pq_last'] = max(0, (_bh - 1)) % 8
+            result['pq0'] = 0; result['pq_curr'] = 0; result['pq_last'] = 0
 
-        logger.debug(f"[RPC-QM] ✅ h={_bh} pq_curr={result['pq_curr']} pq_last={result['pq_last']} oracle={'up' if w_snap else 'down'}")
+        logger.debug(f"[RPC-QM] ✅ h={_bh} pq0={result['pq0']} pq_curr={result['pq_curr']} pq_last={result['pq_last']} oracle={'up' if w_snap else 'down'}")
         return _rpc_ok(result, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-QM] outer exception: {e}")

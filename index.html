@@ -468,7 +468,7 @@ var S = {
   // block chain metrics (computed from getBlockRange)
   total_transactions: 0, avg_block_time_s: 0, difficulty_bits: 4,
   // pq plane
-  pq_curr: 0, pq_last: 0,
+  pq_curr: 0, pq_last: 0, pq0: 0,
   // oracle network (per-node from DM snapshots)
   oracle_data: {}, // oracle_N → {w_state_fidelity, coherence, purity, pq0_*}
   // mermin (from DM snapshots)
@@ -978,7 +978,6 @@ function _drawPqOverlay(t, fid, isQ, isStrong, blkPulse){
 
 function onBlock(){
   blockFlashT=performance.now()*0.001;
-  // Snap pq anim state to current values so overlay moves immediately
   _pqCurrAnim = S.pq_curr || 0;
   _pqLastAnim = S.pq_last || 0;
 }
@@ -1381,7 +1380,7 @@ function updateDOM() {
   st('ben',S.pq_curr);
   st('bcn',S.pq_last);
   st('bte',fmt4(S.tele_fidelity));
-  st('dkb','pq_last='+S.pq_last+' → pq_curr='+S.pq_curr+(S.pq_curr!==S.pq_last?' Δ='+(S.pq_curr-S.pq_last):''));
+  st('dkb','pq0='+S.pq0+' pq_last='+S.pq_last+' → pq_curr='+S.pq_curr+(S.pq_curr!==S.pq_last?' Δ='+(S.pq_curr-S.pq_last):''));
   // ── GKSL noise bath ──
   st('ng1',fmt4(S.gamma1));
   st('ngp',fmt4(S.gammaphi));
@@ -1449,6 +1448,7 @@ function stamp() {
       if (la.w_state_strength != null) S.w_state_strength = la.w_state_strength;
       if (la.cycle     != null && la.cycle > 0) S.cycle = la.cycle;
       // pq plane
+      if (qm.pq0    != null) S.pq0    = qm.pq0;
       if (qm.pq_curr != null) S.pq_curr = qm.pq_curr;
       if (qm.pq_last != null) S.pq_last = qm.pq_last;
       // block height from metrics (supplemental — loop2 is authoritative)
@@ -1580,10 +1580,9 @@ function stamp() {
           // Always update from tip block regardless of range size
           if (tipBlock) {
             if (tipBlock.difficulty_bits) S.difficulty_bits = tipBlock.difficulty_bits;
-            // pq values: use modulo 8 if server returned raw height as fallback
-            var _pqc = tipBlock.pq_curr, _pql = tipBlock.pq_last;
-            if (_pqc != null) S.pq_curr = (_pqc > 7) ? (_pqc % 8) : _pqc;
-            if (_pql != null) S.pq_last = (_pql > 7) ? (_pql % 8) : _pql;
+            if (tipBlock.pq0    != null) S.pq0    = tipBlock.pq0;
+            if (tipBlock.pq_curr != null) S.pq_curr = tipBlock.pq_curr;
+            if (tipBlock.pq_last != null) S.pq_last = tipBlock.pq_last;
             if (tipBlock.w_state_fidelity) S.fidelity = Math.max(S.fidelity, tipBlock.w_state_fidelity);
           }
           S.total_transactions = blocks.reduce(function(acc,b){return acc+(b.tx_count||0);},0);
@@ -1635,9 +1634,9 @@ function stamp() {
     if (blocks.length) {
       var last = blocks[blocks.length-1];
       if (last.difficulty_bits) S.difficulty_bits = last.difficulty_bits;
-      var _pqc = last.pq_curr, _pql = last.pq_last;
-      if (_pqc != null) S.pq_curr = (_pqc > 7) ? (_pqc % 8) : _pqc;
-      if (_pql != null) S.pq_last = (_pql > 7) ? (_pql % 8) : _pql;
+      if (last.pq0    != null) S.pq0    = last.pq0;
+      if (last.pq_curr != null) S.pq_curr = last.pq_curr;
+      if (last.pq_last != null) S.pq_last = last.pq_last;
       S.total_transactions = blocks.reduce(function(acc,b){return acc+(b.tx_count||0);},0);
     }
     _lastFetchedHeight = tip;
