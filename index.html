@@ -362,7 +362,7 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
       </div>
       <div>
         <div class="ml" style="color:var(--gr);margin-bottom:8px;font-size:9px;letter-spacing:2px">CRYPTOGRAPHIC BACKBONE</div>
-        <p style="font-size:11.5px;line-height:1.75;color:var(--tx)">All signatures use <span style="color:var(--gr)">HLWE — Hyperbolic Learning With Errors</span> post-quantum cryptography, hardened over PSL(2,ℝ) lattices. Block entropy is seeded by a <span style="color:var(--cy)">QRNG ensemble</span> (IBMQ + Rigetti + local Qiskit-AER simulation) and mixed via RFC 5869 HKDF. Mining is memory-hard (4 MB SHA3-256 matrix) defeating ASICs while the tessellation depth parameter scales block reward with network-proven work.</p>
+        <p style="font-size:11.5px;line-height:1.75;color:var(--tx)">All signatures use <span style="color:var(--gr)">HLWE — Hyperbolic Learning With Errors</span> post-quantum cryptography, hardened over PSL(2,ℝ) lattices. Block entropy is seeded by a <span style="color:var(--cy)">QRNG ensemble</span> — four independent quantum sources XOR-hedged for information-theoretic security: <span style="color:var(--cy)">ANU QRNG</span> (quantum vacuum fluctuations, Australian National University), <span style="color:var(--cy)">QBICK</span> (ID Quantique Quantis hardware, Quantum Blockchains Inc.), <span style="color:var(--cy)">Outshift</span> (PaloAlto), and <span style="color:var(--cy)">Random.org</span> (atmospheric noise) — then mixed via RFC 5869 HKDF. Mining is memory-hard (4 MB SHA3-256 matrix) defeating ASICs while the tessellation depth parameter scales block reward with network-proven work.</p>
       </div>
     </div>
   </div>
