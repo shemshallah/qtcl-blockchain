@@ -1487,15 +1487,15 @@ def _ensure_genesis_block_in_db() -> bool:
                     _genesis_inserted = _gcur.rowcount > 0
                     _gcur.execute("""
                         INSERT INTO transactions
-                        (tx_hash, block_height, from_address, to_address,
-                         amount, tx_type, status, timestamp)
-                        VALUES (%s, %s, %s, %s, %s, %s, 'confirmed', %s)
+                        (tx_hash, from_address, to_address,
+                         amount, tx_type, status, height, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, 'confirmed', %s, NOW())
                         ON CONFLICT (tx_hash) DO NOTHING
                     """, (
-                        coinbase_body["tx_hash"], 0,
+                        coinbase_body["tx_hash"],
                         _COINBASE_ADDR, _COINBASE_ADDR,
                         float(_COINBASE_AMOUNT), "coinbase",
-                        _GENESIS_TS,
+                        0,
                     ))
                 logger.info(
                     f"[GENESIS-BOOTSTRAP] ✅ Genesis block+tx committed: h=0 hash={genesis_hash[:24]}… "
@@ -3697,19 +3697,20 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         continue
                     cur.execute("""
                         INSERT INTO transactions
-                        (tx_hash, block_height, from_address, to_address,
-                         amount, tx_type, status, timestamp)
-                        VALUES (%s, %s, %s, %s, %s, %s, 'confirmed', %s)
+                        (tx_hash, from_address, to_address, amount,
+                         tx_type, status, height, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, 'confirmed', %s, NOW())
                         ON CONFLICT (tx_hash) DO UPDATE
-                          SET block_height = EXCLUDED.block_height,
-                              status = 'confirmed'
+                          SET height     = EXCLUDED.height,
+                              status     = 'confirmed',
+                              updated_at = NOW()
                     """, (
-                        tx_id, height,
+                        tx_id,
                         tx.get("from_addr", "0" * 64),
                         tx.get("to_addr", ""),
                         float(tx.get("amount", 0)),
                         tx.get("tx_type", "transfer"),
-                        timestamp_s,
+                        height,
                     ))
         except Exception as dbe:
             logger.exception(f"[RPC-submitBlock] DB error: {dbe}")
@@ -3772,22 +3773,22 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     # ── Canonical coinbase transaction rows ──────────────────────
                     cur.execute("""
                         INSERT INTO transactions
-                            (tx_hash, block_height, from_address, to_address,
-                             amount, tx_type, status, timestamp)
-                        VALUES (%s, %s, %s, %s, %s, 'coinbase', 'confirmed', %s)
+                            (tx_hash, from_address, to_address,
+                             amount, tx_type, status, height, updated_at)
+                        VALUES (%s, %s, %s, %s, 'coinbase', 'confirmed', %s, NOW())
                         ON CONFLICT (tx_hash) DO NOTHING
-                    """, (_cb_miner_hash, height, "0" * 64, miner_address,
-                          float(miner_reward), timestamp_s))
+                    """, (_cb_miner_hash, "0" * 64, miner_address,
+                          float(miner_reward), height))
 
                     if treasury_address and treasury_reward > 0:
                         cur.execute("""
                             INSERT INTO transactions
-                                (tx_hash, block_height, from_address, to_address,
-                                 amount, tx_type, status, timestamp)
-                            VALUES (%s, %s, %s, %s, %s, 'coinbase', 'confirmed', %s)
+                                (tx_hash, from_address, to_address,
+                                 amount, tx_type, status, height, updated_at)
+                            VALUES (%s, %s, %s, %s, 'coinbase', 'confirmed', %s, NOW())
                             ON CONFLICT (tx_hash) DO NOTHING
-                        """, (_cb_treasury_hash, height, "0" * 64, treasury_address,
-                              float(treasury_reward), timestamp_s))
+                        """, (_cb_treasury_hash, "0" * 64, treasury_address,
+                              float(treasury_reward), height))
 
             except Exception as credit_err:
                 logger.error(
