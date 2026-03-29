@@ -23,7 +23,7 @@
   <meta name="google-site-verification" content="TCf7Ywazq-Y0iMZJj51d6L-AgbPgp-4h2ayXQmVIDMo">
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=JetBrains+Mono:wght@300;400;600&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
@@ -162,13 +162,13 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
 .bv:last-child{border-right:none}
 .bvl{font-size:8px;color:var(--dim);letter-spacing:1px;text-transform:uppercase;margin-bottom:4px}
 .bvn{font-family:var(--mono);font-size:13px;color:var(--vi)}
-#bb{position:sticky;bottom:0;display:flex;align-items:center;height:26px;background:rgba(3,6,16,.98);border-top:1px solid var(--b2);font-family:var(--mono);font-size:9px;overflow:hidden;flex-shrink:0}
-.bi{display:flex;align-items:center;gap:5px;padding:0 12px;white-space:nowrap;border-right:1px solid var(--b)}
-.bl2{color:var(--dim)}.bv2{color:var(--cy)}.bvg{color:var(--gr)}.bvy{color:var(--go)}
+#bb{position:sticky;bottom:0;display:flex;align-items:center;height:30px;background:rgba(3,6,16,.99);border-top:1px solid rgba(0,220,255,.22);font-family:var(--mono);font-size:10px;overflow:hidden;flex-shrink:0;gap:0}
+.bi{display:flex;align-items:center;gap:6px;padding:0 14px;white-space:nowrap;border-right:1px solid rgba(0,220,255,.12);height:100%}
+.bl2{color:rgba(90,120,160,.9);font-size:8.5px;letter-spacing:.8px;text-transform:uppercase}.bv2{color:var(--cy);font-size:10.5px}.bvg{color:var(--gr);font-size:10.5px}.bvy{color:var(--go);font-size:10.5px}
 #bt{flex:1;overflow:hidden}
-#bts{display:inline-block;animation:tk 35s linear infinite;white-space:nowrap;color:var(--dim);padding-left:100%}
+#bts{display:inline-block;animation:tk 42s linear infinite;white-space:nowrap;color:rgba(150,180,220,.7);font-size:9.5px;letter-spacing:.3px;padding-left:100%}
 @keyframes tk{0%{transform:translateX(0)}100%{transform:translateX(-100%)}}
-#bu{padding:0 10px;white-space:nowrap;color:var(--dim);border-left:1px solid var(--b)}
+#bu{padding:0 14px;white-space:nowrap;color:rgba(140,170,210,.85);border-left:1px solid rgba(0,220,255,.12);font-size:9.5px}
 .sy{overflow-y:auto;max-height:280px;scrollbar-width:thin;scrollbar-color:var(--b) transparent}
 .sy::-webkit-scrollbar{width:3px}
 .sy::-webkit-scrollbar-thumb{background:var(--b)}
@@ -347,6 +347,54 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
       </div>
     </div>
   </div>
+
+  <!-- ── System Description ─────────────────────────────────────── -->
+  <div class="pn" style="border:1px solid rgba(0,220,255,.12);border-radius:8px;overflow:hidden">
+    <div class="ph" style="background:rgba(128,64,255,.07)"><span class="pht" style="color:var(--vi)">⬡ System Architecture</span><span class="pb vi">QTCL-1 Production</span></div>
+    <div style="padding:18px 20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px">
+      <div>
+        <div class="ml" style="color:var(--cy);margin-bottom:8px;font-size:9px;letter-spacing:2px">CONSENSUS LAYER</div>
+        <p style="font-size:11.5px;line-height:1.75;color:var(--tx)">QTCL deploys a <span style="color:var(--cy)">five-node Byzantine-fault-tolerant oracle network</span> whose consensus is certified by the <span style="color:var(--vi)">Mermin M₃ inequality</span> — a tripartite extension of Bell's theorem with classical bound 2.0 and W-state maximum ≈ 3.046. Block finality requires M₃ &gt; 2.0, providing information-theoretic proof of genuine quantum entanglement at the consensus layer rather than classical simulation.</p>
+      </div>
+      <div>
+        <div class="ml" style="color:var(--go);margin-bottom:8px;font-size:9px;letter-spacing:2px">SPATIAL STRUCTURE</div>
+        <p style="font-size:11.5px;line-height:1.75;color:var(--tx)">Blocks tile a <span style="color:var(--go)">{8,3} hyperbolic tessellation</span> (Poincaré ball model, H³) — 8 octagons meeting at every vertex, curvature κ = −1. Exponential volume growth V(R) ~ e^R supports a node density that scales with network participation without topology collapse. Each spatial tile is a block; the chain is a geodesic path through hyperbolic space, not a linear sequence.</p>
+      </div>
+      <div>
+        <div class="ml" style="color:var(--gr);margin-bottom:8px;font-size:9px;letter-spacing:2px">CRYPTOGRAPHIC BACKBONE</div>
+        <p style="font-size:11.5px;line-height:1.75;color:var(--tx)">All signatures use <span style="color:var(--gr)">HLWE — Hyperbolic Learning With Errors</span> post-quantum cryptography, hardened over PSL(2,ℝ) lattices. Block entropy is seeded by a <span style="color:var(--cy)">QRNG ensemble</span> (IBMQ + Rigetti + local Qiskit-AER simulation) and mixed via RFC 5869 HKDF. Mining is memory-hard (4 MB SHA3-256 matrix) defeating ASICs while the tessellation depth parameter scales block reward with network-proven work.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── HLWE Micro-Whitepaper ────────────────────────────────────── -->
+  <div class="pn" style="border:1px solid rgba(212,160,32,.15);border-radius:8px;overflow:hidden">
+    <div class="ph" style="background:rgba(212,160,32,.06)"><span class="pht" style="color:var(--go)">◈ HLWE · Hyperbolic Learning With Errors</span><span class="pb go">Micro-Whitepaper</span></div>
+    <div style="padding:18px 20px;display:grid;grid-template-columns:1fr 1fr;gap:24px">
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <div>
+          <div style="font-family:var(--mono);font-size:9px;color:var(--go);letter-spacing:2px;margin-bottom:6px;text-transform:uppercase">§1 · Hardness Foundation</div>
+          <p style="font-size:11px;line-height:1.8;color:var(--tx)">HLWE is a post-quantum lattice scheme whose security reduces to the hardness of the <em style="color:var(--cy)">Learning With Errors (LWE)</em> problem instantiated over the isometry group PSL(2,ℝ) acting on the hyperbolic plane H². Standard LWE asks: given (A, b = As + e) over Z_q^n, recover secret vector <strong style="color:var(--go)">s</strong>, where <strong>e</strong> is Gaussian noise. HLWE replaces the Euclidean lattice Z^n with a <span style="color:var(--vi)">hyperbolic lattice Λ_H</span> whose shortest-vector problem (SVP) is strictly harder due to the exponential volume growth of H² balls: |B(r)| ~ sinh(r) ≫ e^{n/2} for large r, collapsing the approximation ratio that lattice sieving algorithms exploit.</p>
+        </div>
+        <div>
+          <div style="font-family:var(--mono);font-size:9px;color:var(--go);letter-spacing:2px;margin-bottom:6px;text-transform:uppercase">§2 · Key Generation</div>
+          <p style="font-size:11px;line-height:1.8;color:var(--tx)">A keypair is a pair (pk, sk) = (A·s + e mod q, s) where <strong style="color:var(--go)">A ∈ Λ_H^{n×m}</strong> is a public H²-lattice basis sampled from the <span style="color:var(--cy)">QRNG ensemble</span>, <strong>s</strong> is the secret drawn from a hyperbolic Gaussian centered at the Poincaré origin, and <strong>e</strong> is sub-Gaussian noise with variance bounded by the injectivity radius of the tessellation tile. In QTCL, oracle keypairs are delegated from wallet keys via <code style="color:var(--vi);font-family:var(--mono);font-size:10px">oracle_priv = SHA3-256(wallet_priv ‖ "QTCL_ORACLE_DELEGATE_v1")</code>, chaining on-chain accountability without exposing the root key.</p>
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <div>
+          <div style="font-family:var(--mono);font-size:9px;color:var(--go);letter-spacing:2px;margin-bottom:6px;text-transform:uppercase">§3 · Sign &amp; Verify</div>
+          <p style="font-size:11px;line-height:1.8;color:var(--tx)">Signing a message <em>m</em>: sample a masking vector <strong>y</strong> ~ D_Λ (discrete Gaussian over Λ_H), compute commitment <strong>c</strong> = H(A·y mod q, m) ∈ {0,1}^κ, then release <strong>z</strong> = y + c·s if z passes a <span style="color:var(--gr)">rejection-sampling gate</span> that guarantees z is statistically independent of s (Lyubashevsky's technique, adapted to H² geometry). Verification checks A·z − c·pk mod q is short in the hyperbolic metric. No random oracle strength is lost; security tightness is O(1/q) under HLWE assumption.</p>
+        </div>
+        <div>
+          <div style="font-family:var(--mono);font-size:9px;color:var(--go);letter-spacing:2px;margin-bottom:6px;text-transform:uppercase">§4 · Quantum Resistance &amp; NIST Alignment</div>
+          <p style="font-size:11px;line-height:1.8;color:var(--tx)">Shor's algorithm provides no advantage against LWE variants — no hidden subgroup structure exists to exploit. Grover's search applies only to the pre-image search over H², which the hyperbolic SVP hardness elevates to <span style="color:var(--re)">superpolynomial</span> even for a fault-tolerant quantum computer. HLWE targets NIST security category III (≥ 2^192 classical / 2^128 quantum). The PSL(2,ℝ) symmetry further provides <em style="color:var(--cy)">algebraic noise amplification</em>: small errors grow exponentially under the group action, making lattice-reduction attacks require exponentially many oracle queries as the hyperbolic radius increases.</p>
+        </div>
+      </div>
+    </div>
+    <div style="padding:10px 20px 14px;border-top:1px solid rgba(212,160,32,.1);font-family:var(--mono);font-size:9px;color:var(--dim);letter-spacing:.5px">HLWE is original research by Justin Howard-Stanley. Implementation: <span style="color:var(--cy)">hlwe_engine.py</span> · Pure stdlib, no external crypto deps · BIP32/BIP38/BIP39 wallet infrastructure · In-database HLWE verification via Supabase triggers</div>
+  </div>
+
 </div>
 <div id="bb">
   <div class="bi"><span class="bl2">NET</span><span class="bv2">QTCL-1</span></div>
@@ -1495,18 +1543,17 @@ async function fetchDiff(){
 
 // ── P2P TCP socket peers (bottom-bar only — ephemeral, 503 on single-node Koyeb) ──────────
 async function fetchPeers(){
-  // 2s timeout — bottom bar only, never blocks metrics refresh path
-  var d=await Promise.race([
-    api('/api/p2p/peers'),
-    new Promise(function(r){setTimeout(function(){r(null);},2000);})
-  ]);
-  // 503 / {error} is normal on Koyeb single-node — never corrupt miner panel
+  // Primary: qtcl_getPeers RPC; fallback to REST /api/p2p/peers (503 normal on single-node Koyeb)
+  var rd=await rpc('qtcl_getPeers');
+  if(rd&&!rd.error){
+    var cnt=typeof rd.peer_count==='number'?rd.peer_count:(Array.isArray(rd.peers)?rd.peers.length:0);
+    if(cnt>0){ S.n_peers=Math.max(S.n_peers,cnt); var _bp=document.getElementById('bbp');if(_bp) _bp.textContent=cnt; }
+    return;
+  }
+  var d=await Promise.race([api('/api/p2p/peers'),new Promise(function(r){setTimeout(function(){r(null);},2000);})]);
   if(!d||d.error) return;
   var cnt=typeof d.peer_count==='number'?d.peer_count:(Array.isArray(d.peers)?d.peers.length:0);
-  if(cnt>0){
-    S.n_peers=Math.max(S.n_peers,cnt);
-    var bbp=document.getElementById('bbp');if(bbp) bbp.textContent=cnt;
-  }
+  if(cnt>0){ S.n_peers=Math.max(S.n_peers,cnt); var bbp=document.getElementById('bbp');if(bbp) bbp.textContent=cnt; }
 }
 
 // ── Miner / peer registry — dual-source with graceful fallback ────────────────────────────
@@ -1515,19 +1562,41 @@ async function fetchPeers(){
 //            any miner has called /api/peers/register, even if zero blocks mined)
 // The miner panel is ONLY populated from these two endpoints — never from TCP /api/p2p/peers.
 async function fetchMiners(){
-  // All three sources fired IN PARALLEL with 2s timeout each — max wall time 2s not 18s.
-  // Sequential api() (6s each) was the primary cause of thread exhaustion → SSE starvation
-  // → online/offline cycling. Sources evaluated in priority order from parallel results.
+  // RPC + REST fired in parallel — RPC evaluated first as it bypasses pool
   var _r=await Promise.allSettled([
+    rpc('qtcl_getPeers'),          // RPC primary — no pool contention
     apiF('/api/miners'),
     apiF('/api/peers/list?include_stale=1'),
     apiF('/api/chain')
   ]);
-  var d  = _r[0].status==='fulfilled'?_r[0].value:null;
-  var pd = _r[1].status==='fulfilled'?_r[1].value:null;
-  var cd = _r[2].status==='fulfilled'?_r[2].value:null;
+  // Shift: _r[0]=RPC, _r[1]=miners, _r[2]=peers/list, _r[3]=chain
+  var rpcPeers=_r[0].status==='fulfilled'?_r[0].value:null;
+  var _r2=[_r[1],_r[2],_r[3]]; // re-index REST results
+  var d  = _r2[0].status==='fulfilled'?_r2[0].value:null;
+  var pd = _r2[1].status==='fulfilled'?_r2[1].value:null;
+  var cd = _r2[2].status==='fulfilled'?_r2[2].value:null;
 
-  // ── Source 1: /api/miners (blocks.validator_public_key + peer_registry merge) ──
+  // ── Source 0: qtcl_getPeers RPC (fastest, bypasses DB pool) ──────────────
+  if(rpcPeers&&!rpcPeers.error&&Array.isArray(rpcPeers.peers)&&rpcPeers.peers.length>0){
+    var stale2=300;
+    var rpcMiners=rpcPeers.peers.map(function(p){
+      var ls=p.last_seen?new Date(p.last_seen).getTime()/1000:0;
+      var age=ls>0?(Date.now()/1000-ls):999999;
+      return {miner_address:p.miner_address||p.address||'',peer_id:p.peer_id||'',
+        gossip_url:p.gossip_url||'',block_count:p.block_count||0,
+        last_height:p.block_height||p.last_height||0,
+        total_earned_qtcl:p.total_earned_qtcl||0,last_seen_age_s:Math.round(age),
+        status:age<stale2?'live':(age<86400?'seen':'historic'),ip_address:p.ip_address||''};
+    }).filter(function(m){return m.miner_address;});
+    if(rpcMiners.length>0){
+      renderMiners(rpcMiners);
+      var rl=rpcMiners.filter(function(m){return m.status==='live';}).length;
+      S.peer_count=rl;S.n_peers=Math.max(S.n_peers,rpcMiners.length);
+      document.getElementById('bbn').textContent=rpcMiners.length;
+      var _rbbp=document.getElementById('bbp');if(_rbbp&&rl>0) _rbbp.textContent=rl;
+      return;
+    }
+  }
   if(d&&!d.error&&Array.isArray(d.miners)&&d.miners.length>0){
     d.miners.forEach(function(m){if(!m.status) m.status='historic';});
     renderMiners(d.miners);
@@ -1613,12 +1682,48 @@ async function refresh(){
   finally{rfg=false;}
 }
 
-// ── Live SSE stream from /api/snapshot/sse ───────────────────────────────────
-// This is the direct endpoint that _snapshot_streaming_daemon broadcasts to.
-// The chirp payload includes oracle_measurements, mermin_test, consensus,
-// pq0_components, pq_curr, pq_last, lattice_quantum.
+// ── Pure JSON-RPC 2.0 polling — SSE removed, all data via /rpc ───────────────
+// RPC methods used:
+//   qtcl_getBlockHeight  → chain height, fidelity, coherence, pq_curr/last, cycle
+//   qtcl_getQuantumMetrics → full oracle snapshot (mermin, per-node, noise bath)
+//   qtcl_getPeers        → miner registry
+//   qtcl_getEvents       → new-block events ingested from ring buffer
+// _ingestChirp is preserved verbatim — fed from RPC responses instead of SSE.
+var _rpcId=1;
+async function rpc(method,params){
+  try{
+    var body=JSON.stringify({jsonrpc:'2.0',id:_rpcId++,method:method,params:params||[]});
+    var r=await fetch(BASE+'/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:body,signal:AbortSignal.timeout(5000)});
+    if(!r.ok) return null;
+    var j=await r.json();
+    if(j.error){console.warn('[RPC]',method,'→',j.error.message);return null;}
+    return j.result;
+  }catch(e){return null;}
+}
+// Batch RPC: fire multiple methods in one HTTP round-trip (JSON-RPC 2.0 batch)
+async function rpcBatch(calls){
+  try{
+    var base=_rpcId;
+    var batch=calls.map(function(c,i){return {jsonrpc:'2.0',id:base+i,method:c[0],params:c[1]||[]};});
+    _rpcId+=calls.length;
+    var r=await fetch(BASE+'/rpc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(batch),signal:AbortSignal.timeout(6000)});
+    if(!r.ok) return calls.map(function(){return null;});
+    var arr=await r.json();
+    if(!Array.isArray(arr)){
+      // Server returned single object — treat as first result
+      return calls.map(function(_,i){return i===0&&arr&&!arr.error?arr.result:null;});
+    }
+    return calls.map(function(_,i){
+      var res=arr.find(function(a){return a&&a.id===(base+i);});
+      return (res&&!res.error)?res.result:null;
+    });
+  }catch(e){return calls.map(function(){return null;});}
+}
+
+// ── Live quantum snapshot via qtcl_getQuantumMetrics ─────────────────────────
+// Replaces SSE _ingestChirp feed — same normalisation logic, different source.
+// Preserves identical chirp-ingestion pipeline so all DOM updates fire cleanly.
 (function(){
-  var _es=null,_reconnMs=2500;
   function _ingestChirp(d){
     if(!d) return;
     // Consensus fidelity/coherence from oracle block-field Byzantine median
@@ -1734,45 +1839,48 @@ async function refresh(){
     lu=Date.now();setOnline(true);
     document.getElementById('bu').textContent='Updated '+new Date().toTimeString().slice(0,8);
   }
-  function connect(){
-    if(_es){_es.close();_es=null;}
-    _es=new EventSource(BASE+'/api/snapshot/sse?client_id=dashboard_'+Date.now());
-    _es.onopen=function(){setOnline(true);};
-    _es.onmessage=function(e){
-      try{_ingestChirp(JSON.parse(e.data));}catch(_){}
-    };
-    _es.onerror=function(){
-      setOnline(false);
-      _es.close();_es=null;
-      setTimeout(connect,_reconnMs);
-      _reconnMs=Math.min(_reconnMs*1.5,30000);
-    };
-    _es.onopen=function(){setOnline(true);_reconnMs=2500;};
+  // ── RPC quantum metrics poll — replaces SSE connection entirely ──
+  // qtcl_getQuantumMetrics returns same chirp-shaped payload: consensus,
+  // oracle_measurements, mermin_test, pq0_*, lattice_quantum. 2.5s cadence.
+  var _qmTimer=null;
+  async function pollQuantumMetrics(){
+    clearTimeout(_qmTimer);
+    var results=await rpcBatch([
+      ['qtcl_getBlockHeight',[]],
+      ['qtcl_getQuantumMetrics',[]],
+    ]);
+    var hr=results[0], mr=results[1];
+    if(hr){
+      _ingestChirp({type:'rpc_height',block_height:hr.height||hr.block_height||0,
+        w_state_fidelity:hr.w_state_fidelity||hr.fidelity,coherence:hr.coherence,
+        pq_curr:hr.pq_curr,pq_last:hr.pq_last,
+        lattice_cycle:hr.lattice_cycle||hr.cycle,
+        n_peers:hr.n_peers,qrng_health:hr.qrng_health});
+    }
+    if(mr) _ingestChirp(mr);
+    setOnline(!!(hr||mr));
+    _qmTimer=setTimeout(pollQuantumMetrics,2500);
   }
-  connect();
+  // Seed from REST snapshot for instant first paint, then pure RPC
+  (async function _boot(){
+    var snap=await apiF('/api/snapshots/latest');
+    if(snap&&snap.ready) _ingestChirp(snap);
+    var snap2=await rpc('qtcl_getQuantumMetrics');
+    if(snap2) _ingestChirp(snap2);
+    setOnline(true);
+    pollQuantumMetrics();
+  })();
 })();
 
-// On page load: seed state from DB snapshot before first SSE chirp arrives
-async function fetchLatestSnapshot(){
-  var d=await apiF('/api/snapshots/latest');
-  if(!d||!d.ready) return;
-  _ingestChirp(d);  // same path as SSE — normalises oracle_data, pq_curr/last, mermin, lattice
-}
-
-fetchLatestSnapshot();
 refresh();
-loadAllBlocks();  // full genesis→tip backfill, all pages, parallel batches
-// Staggered boot — critical path first, miners/peers after SSE settles
+loadAllBlocks();
 setTimeout(function(){ loadTxPage(); },800);
-setTimeout(function(){ fetchMiners(); },500);   // early — before TX load
-setTimeout(function(){ fetchMiners(); },4000);  // retry after DB/SSE warm-up
-setTimeout(function(){ fetchPeers();  },3000);  // TCP socket peers — bottom bar only
+setTimeout(function(){ fetchMiners(); },500);
+setTimeout(function(){ fetchMiners(); },4000);
+setTimeout(function(){ fetchPeers();  },3000);
 setInterval(refresh,3000);
-// Reload TX explorer every 30s as background sync (SSE new_block handles real-time)
 setInterval(function(){ if(!txLoading) loadTxPage(); },30000);
-// P2P peers: poll frequently on startup, back off to 10s once stable
 setInterval(fetchPeers,8000);
-// Miner registry: 8s poll — important for P2P panel freshness
 setInterval(fetchMiners,8000);
 setInterval(function(){if(Date.now()-lu>12000&&lu>0) setOnline(false);},6000);
 </script>
