@@ -840,7 +840,7 @@ function update(t){
   var hl=document.getElementById('pqh-last');   if(hl) hl.textContent=pqL;
   var hc=document.getElementById('pqh-curr');   if(hc) hc.textContent=pqC;
   var hd=document.getElementById('pqh-delta');  if(hd) hd.textContent=(pqC-pqL>=0?'+':'')+(pqC-pqL);
-  var hcy=document.getElementById('pqh-cycle'); if(hcy) hcy.textContent='ψ cyc='+cyc+(cyc%8===0?' ↑REVIVAL':cyc%8===4?' ↓ANTI':'');
+  var hcy=document.getElementById('pqh-cycle'); if(hcy) hcy.textContent='ψ cyc='+cyc+(cyc>0&&cyc%8===0?' ↑REVIVAL':cyc>0&&cyc%8===4?' ↓ANTI':'');
 }
 
 
@@ -1446,11 +1446,14 @@ function stamp() {
       if (la.fidelity  != null) S.lattice_fidelity  = la.fidelity;
       if (la.coherence != null) S.lattice_coherence = la.coherence;
       if (la.w_state_strength != null) S.w_state_strength = la.w_state_strength;
-      if (la.cycle     != null && la.cycle > 0) S.cycle = la.cycle;
+      if (la.cycle != null && la.cycle > 0) S.cycle = la.cycle;
+      // lattice_refresh_counter from oracle snapshot is also the cycle count
+      var _lrc = (qm.w_state && qm.w_state.lattice_refresh_counter) || qm.lattice_refresh_counter || 0;
+      if (_lrc > S.cycle) S.cycle = _lrc;
       // pq plane
-      if (qm.pq0    != null) S.pq0    = qm.pq0;
-      if (qm.pq_curr != null) S.pq_curr = qm.pq_curr;
-      if (qm.pq_last != null) S.pq_last = qm.pq_last;
+      if (qm.pq0    != null && S.pq0    === 0) S.pq0    = qm.pq0;
+      if (qm.pq_curr != null && S.pq_curr === 0) S.pq_curr = qm.pq_curr;
+      if (qm.pq_last != null && S.pq_last === 0) S.pq_last = qm.pq_last;
       // block height from metrics (supplemental — loop2 is authoritative)
       if (qm.height != null && qm.height > S.height) {
         S.height = qm.height;
@@ -1580,9 +1583,13 @@ function stamp() {
           // Always update from tip block regardless of range size
           if (tipBlock) {
             if (tipBlock.difficulty_bits) S.difficulty_bits = tipBlock.difficulty_bits;
-            if (tipBlock.pq0    != null) S.pq0    = tipBlock.pq0;
-            if (tipBlock.pq_curr != null) S.pq_curr = tipBlock.pq_curr;
-            if (tipBlock.pq_last != null) S.pq_last = tipBlock.pq_last;
+            // pq0 is the oracle ground anchor — take directly from tip
+            if (tipBlock.pq0 != null) S.pq0 = tipBlock.pq0;
+            // Project the NEXT block's boundaries from tip's pq_curr
+            // so the visualization shows the live evolving blockfield, not stale stored state
+            var _tipPqC = tipBlock.pq_curr != null ? tipBlock.pq_curr : 0;
+            S.pq_last = _tipPqC % 8;                 // rear boundary = tip's forward boundary
+            S.pq_curr = (_tipPqC + 1) % 8;           // forward boundary = next face on {8,3}
             if (tipBlock.w_state_fidelity) S.fidelity = Math.max(S.fidelity, tipBlock.w_state_fidelity);
           }
           S.total_transactions = blocks.reduce(function(acc,b){return acc+(b.tx_count||0);},0);
@@ -1634,9 +1641,10 @@ function stamp() {
     if (blocks.length) {
       var last = blocks[blocks.length-1];
       if (last.difficulty_bits) S.difficulty_bits = last.difficulty_bits;
-      if (last.pq0    != null) S.pq0    = last.pq0;
-      if (last.pq_curr != null) S.pq_curr = last.pq_curr;
-      if (last.pq_last != null) S.pq_last = last.pq_last;
+      if (last.pq0 != null) S.pq0 = last.pq0;
+      var _lastPqC = last.pq_curr != null ? last.pq_curr : 0;
+      S.pq_last = _lastPqC % 8;
+      S.pq_curr = (_lastPqC + 1) % 8;
       S.total_transactions = blocks.reduce(function(acc,b){return acc+(b.tx_count||0);},0);
     }
     _lastFetchedHeight = tip;
