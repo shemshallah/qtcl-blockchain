@@ -967,8 +967,7 @@ function renderTxRow(tx,isNew){
     +'</tr>';
 }
 
-// TX loading via REST /api/transactions (still fastest for paginated history)
-// Falls back to iterating qtcl_getBlock for recent blocks if REST unavailable
+// TX loading — pure RPC, qtcl_getTransactions, no REST, no fallback
 async function loadTxPage(){
   if(txLoading) return;
   txLoading=true;
@@ -976,34 +975,16 @@ async function loadTxPage(){
   var tb=document.getElementById('ttb');
   if(tb) tb.innerHTML='<tr><td colspan="7" class="es" style="opacity:.5">Loading…</td></tr>';
   try{
-    // Primary: REST /api/transactions (paginated, DB-backed, fast)
-    var params='?page='+txPage_n+'&per_page='+txPerPage;
-    if(txFilterMode&&txFilterMode!=='all') params+='&type='+txFilterMode;
-    if(txSearchQ) params+='&address='+encodeURIComponent(txSearchQ);
-    var r=await fetch(BASE+'/api/transactions'+params,{signal:AbortSignal.timeout(5000)});
-    if(r.ok){
-      var d=await r.json();
-      if(d&&!d.error){
-        txs=d.transactions||[];txTotal=d.total||0;txPages=d.pages||1;txPage_n=d.page||0;
-        renderTxs();return;
-      }
+    var req={page:txPage_n,per_page:txPerPage};
+    if(txFilterMode&&txFilterMode!=='all') req.type=txFilterMode;
+    if(txSearchQ) req.address=txSearchQ;
+    var d=await rpc('qtcl_getTransactions',[req]);
+    if(d&&Array.isArray(d.transactions)){
+      txs=d.transactions;txTotal=d.total||0;txPages=d.pages||1;txPage_n=d.page||0;
+      renderTxs();
+    }else{
+      if(tb) tb.innerHTML='<tr><td colspan="7" class="es">No transactions found</td></tr>';
     }
-    // Fallback: build tx list from recent blocks via RPC
-    var blkSlice=blocks.slice(-20);
-    var txArr=[];
-    for(var i=blkSlice.length-1;i>=0;i--){
-      var bd=await rpc('qtcl_getBlock',[blkSlice[i].height]);
-      if(bd&&Array.isArray(bd.transactions)){
-        bd.transactions.forEach(function(tx){
-          tx.height=blkSlice[i].height;
-          tx.block_height=blkSlice[i].height;
-          txArr.push(tx);
-        });
-      }
-      if(txArr.length>=txPerPage) break;
-    }
-    txs=txArr.slice(0,txPerPage);txTotal=txArr.length;txPages=1;
-    renderTxs();
   }catch(e){
     if(tb) tb.innerHTML='<tr><td colspan="7" class="es">Error: '+e.message+'</td></tr>';
   }finally{
@@ -1258,6 +1239,18 @@ function stamp() {
       }
       // oracle consensus
       if (qm.oracle_available != null) S.oracle_consensus_reached = qm.oracle_available;
+      // ── Mermin from getQuantumMetrics (primary path — always-on oracle object) ──
+      // getQuantumMetrics now injects mermin_test directly from DensityMatrixSnapshot.bell_test
+      if (qm.mermin_test) { S.mermin = qm.mermin_test; renderMermin(S.mermin); }
+      else if (qm.bell_test) { S.mermin = qm.bell_test; renderMermin(S.mermin); }
+      // ── Flat DM fields from getQuantumMetrics → oracle_1 state ──────────────
+      var _oid1 = 'oracle_1';
+      if (!S.oracle_data[_oid1]) S.oracle_data[_oid1] = {};
+      if (qm.w_state_fidelity   != null) { S.oracle_data[_oid1].w_state_fidelity = qm.w_state_fidelity; S.fidelity = qm.w_state_fidelity; }
+      if (qm.coherence_l1       != null) { S.oracle_data[_oid1].coherence        = qm.coherence_l1;     S.coherence = qm.coherence_l1; }
+      if (qm.purity             != null) { S.oracle_data[_oid1].purity           = qm.purity;            S.purity = qm.purity; }
+      if (qm.von_neumann_entropy!= null) { S.oracle_data[_oid1].entropy          = qm.von_neumann_entropy; S.entropy = qm.von_neumann_entropy; }
+      S.oracle_data[_oid1].in_consensus = (qm.w_state_fidelity || 0) > 0.5;
     }
 
     // DM Snapshots → per-oracle state + Mermin extraction
@@ -1532,26 +1525,27 @@ function stamp() {
     clearTimeout(_t);
     var d = await rpc('qtcl_getLatestDMSnapshot');
     if (d) {
-      // Hydrate oracle_1 (primary lattice) from latest DM
+      // Hydrate oracle node from latest DM snapshot
       var oid = d.oracle_id != null ? ('oracle_'+(d.oracle_id||1)) : 'oracle_1';
       if (!S.oracle_data[oid]) S.oracle_data[oid] = {};
       var od = S.oracle_data[oid];
-      if (d.w_state_fidelity != null) { od.w_state_fidelity = d.w_state_fidelity; S.fidelity = Math.max(S.fidelity, d.w_state_fidelity); }
-      if (d.purity           != null) { od.purity    = d.purity; S.purity = d.purity; }
-      if (d.coherence_l1     != null) { od.coherence = d.coherence_l1; S.coherence = d.coherence_l1; }
+      if (d.w_state_fidelity    != null) { od.w_state_fidelity = d.w_state_fidelity; S.fidelity  = d.w_state_fidelity; }
+      if (d.purity              != null) { od.purity            = d.purity;           S.purity    = d.purity; }
+      if (d.coherence_l1        != null) { od.coherence         = d.coherence_l1;     S.coherence = d.coherence_l1; }
+      if (d.von_neumann_entropy != null) { od.entropy           = d.von_neumann_entropy; S.entropy = d.von_neumann_entropy; }
       od.in_consensus = (d.w_state_fidelity || 0) > 0.5;
-      // Mermin embedded in DM snapshot
+      // ── Derived quantum bath from DM ──────────────────────────────────────
+      var _p = d.purity || S.purity || 0.8;
+      var _f = d.w_state_fidelity || S.fidelity || 0;
+      S.negativity    = Math.max(0, (_p - 0.5) * 0.8);
+      S.concurrence   = Math.max(0, (_p - 0.333) * 1.2);
+      S.entanglement  = Math.max(0, _f * 0.9);
+      S.qfi           = Math.max(0, _f * 8.0);
+      S.discord       = Math.max(0, (1 - _p) * 2.0);
+      S.tele_fidelity = Math.max(0, _f * 0.95);
+      // ── Mermin — real data only, no synthesis ─────────────────────────────
       if (d.mermin_test) { S.mermin = d.mermin_test; renderMermin(S.mermin); }
-      else if (d.mermin)  { S.mermin = d.mermin;      renderMermin(S.mermin); }
-      // If no mermin in DM, synthesize a display value from fidelity
-      else if (!S.mermin && d.w_state_fidelity != null) {
-        // Approximate M from fidelity: W-state gives M = 2 + fidelity * (3.046-2)
-        var Mval = 2.0 + (d.w_state_fidelity || 0) * 1.046;
-        S.mermin = {M_value: Mval, M: Mval,
-          verdict: Mval > 2.8 ? 'STRONG_QUANTUM' : Mval > 2.0 ? 'QUANTUM' : 'CLASSICAL',
-          is_quantum: Mval > 2.0, angle_degrees: [], angle_labels: []};
-        renderMermin(S.mermin);
-      }
+      else if (d.mermin) { S.mermin = d.mermin;      renderMermin(S.mermin); }
       updateDOM();
     }
     _t = setTimeout(poll, 6000);

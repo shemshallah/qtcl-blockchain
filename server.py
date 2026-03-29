@@ -2930,12 +2930,17 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
 
         with get_db_cursor() as cur:
             cur.execute("""
-                SELECT height, block_hash, timestamp, oracle_w_state_hash,
-                       previous_hash, validator_public_key, nonce, difficulty,
-                       entropy_score, transactions_root, pq_curr, pq_last
-                FROM blocks
-                WHERE height BETWEEN %s AND %s
-                ORDER BY height ASC
+                SELECT b.height, b.block_hash, b.timestamp, b.oracle_w_state_hash,
+                       b.previous_hash, b.validator_public_key, b.nonce, b.difficulty,
+                       b.entropy_score, b.transactions_root, b.pq_curr, b.pq_last,
+                       COUNT(t.tx_hash) AS tx_count
+                FROM blocks b
+                LEFT JOIN transactions t ON t.height = b.height
+                WHERE b.height BETWEEN %s AND %s
+                GROUP BY b.height, b.block_hash, b.timestamp, b.oracle_w_state_hash,
+                         b.previous_hash, b.validator_public_key, b.nonce, b.difficulty,
+                         b.entropy_score, b.transactions_root, b.pq_curr, b.pq_last
+                ORDER BY b.height ASC
             """, (from_h, to_h))
             rows = cur.fetchall()
 
@@ -2959,6 +2964,7 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
                 'w_entropy_hash':   row[3] or '',
                 'pq_curr':          int(row[10]) if row[10] is not None else row[0],
                 'pq_last':          int(row[11]) if row[11] is not None else max(0, row[0] - 1),
+                'tx_count':         int(row[12]) if row[12] is not None else 0,
             })
 
         return _rpc_ok({
@@ -2999,66 +3005,121 @@ def _call_with_timeout(func, timeout_sec=_RPC_TIMEOUT_SEC, default=None):
 
 
 def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getQuantumMetrics — live W-state oracle + lattice metrics + density matrix snapshot.
-    
-    All reads protected with 5s timeouts to prevent RPC hangs.
+    """qtcl_getQuantumMetrics — live W-state oracle + lattice metrics + Mermin + DM snapshot.
+
+    Field contract (consumed by index.html loops 1 & 6):
+      w_state.{fidelity, coherence, purity, entropy}   ← mapped from DensityMatrixSnapshot
+      lattice.{fidelity, coherence, w_state_strength, cycle}
+      mermin_test.{M_value, M, is_quantum, verdict, angle_degrees}
+      density_matrix_hex, w_state_fidelity, coherence_l1, von_neumann_entropy
+      oracle_id, oracle_address, hlwe_signature, signature_valid
+      measurement_counts, purity, block_height, height
     """
     try:
-        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics called with params={params}, id={rpc_id}")
         result: dict = {"oracle_available": ORACLE_AVAILABLE, "ts": time.time()}
-        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: oracle_available={ORACLE_AVAILABLE}")
 
-        if ORACLE_AVAILABLE and ORACLE is not None:
+        # ── Single snapshot fetch — reused across all subsections ─────────────
+        w_snap = None
+        if ORACLE_W_STATE_MANAGER is not None:
             try:
-                logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: fetching W-state snapshot (timeout=5s)")
                 w_snap = _call_with_timeout(
-                    lambda: ORACLE_W_STATE_MANAGER.get_latest_snapshot() if ORACLE_W_STATE_MANAGER else None,
+                    lambda: ORACLE_W_STATE_MANAGER.get_latest_snapshot(),
                     timeout_sec=5.0
                 )
-                if w_snap:
-                    result["w_state"] = {
-                        "purity":     getattr(w_snap, "purity",     None),
-                        "entropy":    getattr(w_snap, "entropy",    None),
-                        "coherence":  getattr(w_snap, "coherence",  None),
-                        "fidelity":   getattr(w_snap, "fidelity",   None),
-                        "snapshot_id": getattr(w_snap, "snapshot_id", None),
-                    }
-                    logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state snapshot obtained")
-                else:
-                    logger.warning(f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state snapshot is None")
-            except Exception as we:
-                logger.exception(f"[RPC-METHOD] qtcl_getQuantumMetrics: W-state error: {we}")
-                result["w_state_error"] = str(we)
+            except Exception as _se:
+                logger.debug(f"[RPC-QM] oracle snapshot fetch: {_se}")
 
+        # ── W-state layer — DensityMatrixSnapshot field names ─────────────────
+        # DensityMatrixSnapshot uses w_state_fidelity/coherence_l1/von_neumann_entropy
+        # NOT fidelity/coherence/entropy — previous code had all wrong names → all None
+        if w_snap is not None:
+            _fid  = getattr(w_snap, 'w_state_fidelity',   None)
+            _coh  = getattr(w_snap, 'coherence_l1',       None)
+            _pur  = getattr(w_snap, 'purity',             None)
+            _ent  = getattr(w_snap, 'von_neumann_entropy',None)
+            _str  = getattr(w_snap, 'w_state_strength',   None)
+            _dmh  = getattr(w_snap, 'density_matrix_hex', None)
+            _mc   = getattr(w_snap, 'measurement_counts', {})
+            _hlwe = getattr(w_snap, 'hlwe_signature',     None)
+            _oa   = getattr(w_snap, 'oracle_address',     None)
+            _sv   = getattr(w_snap, 'signature_valid',    False)
+            _bt   = getattr(w_snap, 'bell_test',          None)   # mermin_test lives here
+            _ts   = getattr(w_snap, 'timestamp_ns',       None)
+            _lrc  = getattr(w_snap, 'lattice_refresh_counter', 0)
+
+            result["w_state"] = {
+                "fidelity":  _fid,
+                "coherence": _coh,
+                "purity":    _pur,
+                "entropy":   _ent,
+                "w_state_strength": _str,
+                "lattice_refresh_counter": _lrc,
+            }
+            # Flat top-level fields consumed by DM ring consumers (Loop 1 / Loop 6)
+            result["w_state_fidelity"]    = _fid
+            result["coherence_l1"]        = _coh
+            result["purity"]              = _pur
+            result["von_neumann_entropy"] = _ent
+            result["timestamp_ns"]        = _ts
+            result["oracle_address"]      = _oa
+            result["hlwe_signature"]      = _hlwe
+            result["signature_valid"]     = _sv
+            result["measurement_counts"]  = _mc
+            if _dmh:
+                result["density_matrix_hex"] = _dmh
+
+            # ── Mermin / Bell test — the critical path that was missing ───────
+            # DensityMatrixSnapshot.bell_test IS the mermin_test dict produced by
+            # OracleWStateManager._build_mermin_result() which contains:
+            # {M_value, M, is_quantum, verdict, angle_degrees, angle_labels, ...}
+            if _bt:
+                result["mermin_test"] = _bt
+                result["bell_test"]   = _bt
+                # Also push into the DM ring so getLatestDMSnapshot serves it
+                try:
+                    _ring_entry = {
+                        "timestamp_ns":      _ts,
+                        "oracle_id":         getattr(w_snap, 'oracle_id', 1),
+                        "density_matrix_hex": _dmh or "",
+                        "purity":            _pur,
+                        "w_state_fidelity":  _fid,
+                        "von_neumann_entropy": _ent,
+                        "coherence_l1":      _coh,
+                        "hlwe_signature":    _hlwe,
+                        "signature_valid":   _sv,
+                        "oracle_address":    _oa,
+                        "aer_noise_state":   getattr(w_snap, 'aer_noise_state', {}),
+                        "measurement_counts": _mc,
+                        "mermin_test":       _bt,
+                        "bell_test":         _bt,
+                    }
+                    with _DM_SNAPSHOT_LOCK:
+                        _DM_SNAPSHOT_RING.append(_ring_entry)
+                except Exception:
+                    pass
+            logger.debug(f"[RPC-QM] oracle snap: fid={_fid} coh={_coh} mermin={'YES' if _bt else 'NO'}")
+        else:
+            logger.warning("[RPC-QM] ORACLE_W_STATE_MANAGER returned None — oracle not yet warmed up")
+
+        # ── Lattice layer ──────────────────────────────────────────────────────
         if LATTICE is not None:
             try:
-                logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: fetching lattice state (timeout=5s)")
-                # Safe access to LATTICE methods with fallback
                 lm = _call_with_timeout(
-                    lambda: LATTICE.get_metrics() if hasattr(LATTICE, 'get_metrics') and callable(LATTICE.get_metrics) else {},
-                    timeout_sec=5.0,
-                    default={}
+                    lambda: LATTICE.get_metrics() if callable(getattr(LATTICE, 'get_metrics', None)) else {},
+                    timeout_sec=5.0, default={}
                 ) or {}
                 ls = _call_with_timeout(
-                    lambda: LATTICE.get_stats() if hasattr(LATTICE, 'get_stats') and callable(LATTICE.get_stats) else {},
-                    timeout_sec=5.0,
-                    default={}
+                    lambda: LATTICE.get_stats() if callable(getattr(LATTICE, 'get_stats', None)) else {},
+                    timeout_sec=5.0, default={}
                 ) or {}
-                
-                # Fallback: use LATTICE attributes directly
                 if not lm:
-                    lm = {
-                        "avg_fidelity_100": getattr(LATTICE, 'avg_fidelity_100', 0.0),
-                        "avg_coherence_100": getattr(LATTICE, 'avg_coherence_100', 0.0),
-                    }
+                    lm = {"avg_fidelity_100": getattr(LATTICE, 'avg_fidelity_100', 0.0),
+                          "avg_coherence_100": getattr(LATTICE, 'avg_coherence_100', 0.0)}
                 if not ls:
-                    ls = {
-                        "fidelity": getattr(LATTICE, 'fidelity', 0.0),
-                        "coherence": getattr(LATTICE, 'coherence', 0.0),
-                        "w_state_strength": getattr(LATTICE, 'w_state_strength', 0.0),
-                        "cycle": getattr(LATTICE, 'cycle', 0),
-                    }
-                
+                    ls = {"fidelity": getattr(LATTICE, 'fidelity', 0.0),
+                          "coherence": getattr(LATTICE, 'coherence', 0.0),
+                          "w_state_strength": getattr(LATTICE, 'w_state_strength', 0.0),
+                          "cycle": getattr(LATTICE, 'cycle', 0)}
                 result["lattice"] = {
                     "fidelity":         lm.get("avg_fidelity_100", ls.get("fidelity", 0.0)),
                     "coherence":        lm.get("avg_coherence_100", ls.get("coherence", 0.0)),
@@ -3067,35 +3128,12 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
                     "avg_fidelity_100": lm.get("avg_fidelity_100", 0.0),
                     "avg_coherence_100": lm.get("avg_coherence_100", 0.0),
                 }
-                logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: lattice metrics obtained")
+                if ls.get("cycle", 0) > 0:
+                    result["cycle"] = ls["cycle"]
             except Exception as le:
-                logger.exception(f"[RPC-METHOD] qtcl_getQuantumMetrics: lattice error: {le}")
-                result["lattice_error"] = str(le)
+                logger.debug(f"[RPC-QM] lattice layer: {le}")
 
-        # ── WIRE DENSITY_MATRIX_HEX ──────────────────────────────────────────────
-        # Extract DM from oracle snapshot if available
-        try:
-            if ORACLE_W_STATE_MANAGER is not None:
-                w_snap = _call_with_timeout(
-                    lambda: ORACLE_W_STATE_MANAGER.get_latest_snapshot() if ORACLE_W_STATE_MANAGER else None,
-                    timeout_sec=2.0
-                )
-                if w_snap and hasattr(w_snap, 'density_matrix_hex'):
-                    dm_hex = getattr(w_snap, 'density_matrix_hex', '')
-                    if dm_hex:
-                        result["density_matrix_hex"] = dm_hex
-                        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix_hex from oracle ({len(dm_hex)} chars)")
-                elif w_snap and hasattr(w_snap, 'density_matrix'):
-                    # Extract DM as hex if it's raw bytes
-                    dm = getattr(w_snap, 'density_matrix', b'')
-                    if dm:
-                        dm_hex = dm.hex() if isinstance(dm, bytes) else str(dm)
-                        result["density_matrix_hex"] = dm_hex
-                        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix extracted ({len(dm_hex)} chars)")
-        except Exception as dme:
-            logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix extraction (non-fatal): {dme}")
-
-        # ── INJECT block_height from DB so client oracle display shows correct chain tip ──
+        # ── Block height — DB authoritative ───────────────────────────────────
         try:
             _db_tip = query_latest_block()
             _bh = int(_db_tip['height']) if _db_tip else 0
@@ -3103,11 +3141,12 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
             _bh = 0
         result['block_height'] = _bh
         result['height']       = _bh
-        logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics success  block_height={_bh}")
+
+        logger.debug(f"[RPC-QM] ✅ h={_bh} oracle={'up' if w_snap else 'down'}")
         return _rpc_ok(result, rpc_id)
     except Exception as e:
-        logger.exception(f"[RPC-METHOD] qtcl_getQuantumMetrics outer exception: {e}")
-        return _rpc_error(-32603, f"Quantum metrics failed: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
+        logger.exception(f"[RPC-QM] outer exception: {e}")
+        return _rpc_error(-32603, f"Quantum metrics failed: {str(e)}", rpc_id)
 
 
 def _rpc_getPythPrice(params: Any, rpc_id: Any) -> dict:
@@ -3917,22 +3956,57 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
 
 def _rpc_getLatestDMSnapshot(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getLatestDMSnapshot — fetch latest density matrix snapshot from oracle ring buffer.
-    
-    Returns: {
-        timestamp_ns, oracle_id, density_matrix_hex, purity, w_state_fidelity,
-        von_neumann_entropy, coherence_l1, hlwe_signature, signature_valid, oracle_address
-    }
+    """qtcl_getLatestDMSnapshot — latest DM snapshot with Mermin test.
+
+    Priority:
+      1. In-memory ring buffer (populated by _internal/measurement broadcasts)
+      2. Live ORACLE_W_STATE_MANAGER.get_latest_snapshot() — always available
+    Never returns an error while the oracle is running.
     """
     try:
+        # ── 1. Ring buffer (fast path — populated by oracle broadcasts) ───────
         with _DM_SNAPSHOT_LOCK:
-            if not _DM_SNAPSHOT_RING:
-                return _rpc_error(-32000, "No DM snapshots available yet", rpc_id)
-            latest = list(_DM_SNAPSHOT_RING)[-1]
-        logger.debug(f"[RPC-METHOD] qtcl_getLatestDMSnapshot: returned snapshot ts={latest.get('timestamp_ns')}")
-        return _rpc_ok(latest, rpc_id)
+            if _DM_SNAPSHOT_RING:
+                latest = dict(list(_DM_SNAPSHOT_RING)[-1])
+                logger.debug(f"[RPC-DM] ring hit ts={latest.get('timestamp_ns')}")
+                return _rpc_ok(latest, rpc_id)
+
+        # ── 2. Live oracle object (always-on fallback) ────────────────────────
+        if ORACLE_W_STATE_MANAGER is not None:
+            w_snap = _call_with_timeout(
+                lambda: ORACLE_W_STATE_MANAGER.get_latest_snapshot(),
+                timeout_sec=5.0
+            )
+            if w_snap is not None:
+                _bt = getattr(w_snap, 'bell_test', None)
+                snap_dict = {
+                    "timestamp_ns":       getattr(w_snap, 'timestamp_ns',        int(time.time() * 1e9)),
+                    "oracle_id":          getattr(w_snap, 'oracle_id',           1),
+                    "density_matrix_hex": getattr(w_snap, 'density_matrix_hex',  ""),
+                    "purity":             getattr(w_snap, 'purity',              None),
+                    "w_state_fidelity":   getattr(w_snap, 'w_state_fidelity',   None),
+                    "von_neumann_entropy":getattr(w_snap, 'von_neumann_entropy', None),
+                    "coherence_l1":       getattr(w_snap, 'coherence_l1',       None),
+                    "hlwe_signature":     getattr(w_snap, 'hlwe_signature',      None),
+                    "signature_valid":    getattr(w_snap, 'signature_valid',     False),
+                    "oracle_address":     getattr(w_snap, 'oracle_address',      None),
+                    "aer_noise_state":    getattr(w_snap, 'aer_noise_state',     {}),
+                    "measurement_counts": getattr(w_snap, 'measurement_counts',  {}),
+                    "mermin_test":        _bt,
+                    "bell_test":          _bt,
+                    "w_state_strength":   getattr(w_snap, 'w_state_strength',    None),
+                    "phase_coherence":    getattr(w_snap, 'phase_coherence',     None),
+                    "entanglement_witness": getattr(w_snap, 'entanglement_witness', None),
+                }
+                # Cache into ring so next poll hits fast path
+                with _DM_SNAPSHOT_LOCK:
+                    _DM_SNAPSHOT_RING.append(snap_dict)
+                logger.debug(f"[RPC-DM] live oracle: fid={snap_dict['w_state_fidelity']} mermin={'YES' if _bt else 'NO'}")
+                return _rpc_ok(snap_dict, rpc_id)
+
+        return _rpc_error(-32000, "Oracle not yet initialised — no DM snapshot available", rpc_id)
     except Exception as e:
-        logger.exception(f"[RPC-METHOD] qtcl_getLatestDMSnapshot: {e}")
+        logger.exception(f"[RPC-DM] getLatestDMSnapshot: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
@@ -3984,11 +4058,109 @@ def _rpc_getMempool(params: Any, rpc_id: Any) -> dict:
         return _rpc_ok([], rpc_id)
 
 
+
+def _rpc_getTransactions(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getTransactions — paginated transaction feed, pure RPC.
+
+    params[0]: {
+      page       int    0-based                       (default 0)
+      per_page   int    max 200                       (default 50)
+      type       str    coinbase|transfer|treasury    (default all)
+      address    str    filter from_address OR to_address
+      height     int    exact block height filter
+      status     str    confirmed|pending             (default all)
+    }
+    Returns: {transactions[], total, page, pages, per_page}
+    """
+    try:
+        p        = (params[0] if isinstance(params, (list, tuple)) and params else params) or {}
+        page     = max(0, int(p.get('page', 0)))
+        per_page = min(200, max(1, int(p.get('per_page', 50))))
+        tx_type  = str(p.get('type', '')).strip().lower()
+        address  = str(p.get('address', '')).strip()
+        height_f = p.get('height')
+        status_f = str(p.get('status', '')).strip().lower()
+
+        conditions, qparams = [], []
+
+        if tx_type == 'treasury':
+            _ta = TessellationRewardSchedule.TREASURY_ADDRESS if TessellationRewardSchedule else ''
+            conditions.append("tx_type = 'coinbase'")
+            conditions.append("(to_address = %s OR from_address = %s)")
+            qparams += [_ta, _ta]
+        elif tx_type in ('coinbase', 'transfer', 'oracle_reg'):
+            conditions.append("tx_type = %s")
+            qparams.append(tx_type)
+
+        if address:
+            conditions.append("(from_address = %s OR to_address = %s)")
+            qparams += [address, address]
+
+        if height_f is not None:
+            try:
+                conditions.append("height = %s")
+                qparams.append(int(height_f))
+            except (ValueError, TypeError):
+                pass
+
+        if status_f in ('confirmed', 'pending'):
+            conditions.append("status = %s")
+            qparams.append(status_f)
+
+        where  = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        offset = page * per_page
+
+        with get_db_cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM transactions {where}", qparams)
+            total = cur.fetchone()[0] or 0
+
+            cur.execute(f"""
+                SELECT tx_hash, from_address, to_address, amount,
+                       tx_type, status, height, created_at, updated_at,
+                       transaction_index, quantum_state_hash
+                FROM transactions {where}
+                ORDER BY height DESC NULLS LAST,
+                         transaction_index ASC,
+                         created_at DESC
+                LIMIT %s OFFSET %s
+            """, qparams + [per_page, offset])
+            rows = cur.fetchall()
+
+        txs = []
+        for r in rows:
+            txs.append({
+                'tx_hash':      r[0] or '',
+                'tx_id':        r[0] or '',
+                'from_address': r[1] or '',
+                'from_addr':    r[1] or '',
+                'to_address':   r[2] or '',
+                'to_addr':      r[2] or '',
+                'amount':       float(r[3]) if r[3] is not None else 0.0,
+                'tx_type':      r[4] or 'transfer',
+                'status':       r[5] or 'confirmed',
+                'height':       int(r[6]) if r[6] is not None else 0,
+                'block_height': int(r[6]) if r[6] is not None else 0,
+                'created_at':   r[7].isoformat() if r[7] else None,
+                'updated_at':   r[8].isoformat() if r[8] else None,
+                'tx_index':     int(r[9]) if r[9] is not None else 0,
+                'w_proof':      r[10] or '',
+            })
+
+        pages = max(1, (total + per_page - 1) // per_page)
+        logger.debug(f"[RPC] qtcl_getTransactions type={tx_type or 'all'} total={total} page={page}/{pages}")
+        return _rpc_ok({'transactions': txs, 'total': total,
+                        'page': page, 'pages': pages, 'per_page': per_page}, rpc_id)
+
+    except Exception as e:
+        logger.exception(f"[RPC] qtcl_getTransactions: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
 _RPC_METHODS: Dict[str, Any] = {
     "qtcl_submitBlock":       _rpc_submitBlock,
     "qtcl_getBlockHeight":    _rpc_getBlockHeight,
     "qtcl_getBalance":        _rpc_getBalance,
     "qtcl_getTransaction":    _rpc_getTransaction,
+    "qtcl_getTransactions":   _rpc_getTransactions,
     "qtcl_getBlock":          _rpc_getBlock,
     "qtcl_getBlockRange":     _rpc_getBlockRange,
     "qtcl_getQuantumMetrics": _rpc_getQuantumMetrics,
@@ -4210,45 +4382,72 @@ def rpc_hlwe_system_info():
 
 @app.route("/rpc/_internal/measurement", methods=["POST"])
 def rpc_measurement_broadcast_endpoint():
-    """
-    POST /rpc/_internal/measurement — Receive oracle measurement broadcast from controller.
-    
-    This endpoint is called by the RPC broadcast controller to distribute oracle 
-    snapshots to subscribed clients. In normal operation, external callers should 
-    use qtcl_registerMeasurementSubscriber RPC method to subscribe.
-    
-    Request (from broadcast controller):
-        {
-            "timestamp_ns": 1234567890000000,
-            "cycle": 42,
-            "w_state": {
-                "fidelity": 0.7542,
-                "coherence": 0.7605,
-                ...
-            },
-            ...
-        }
-    
-    Response:
-        { "status": "processed" }
+    """POST /rpc/_internal/measurement — ingest oracle broadcast into DM ring + cache.
+
+    Normalises incoming payload to the DensityMatrixSnapshot key contract so
+    _broadcast_snapshot_to_database (which populates _DM_SNAPSHOT_RING) always
+    receives a consistent dict regardless of which oracle controller POSTed it.
     """
     try:
-        snap = request.get_json()
-        if not snap:
+        raw = request.get_json(force=True, silent=True)
+        if not raw:
             return jsonify({'status': 'invalid', 'error': 'no JSON payload'}), 400
-        
-        # Log broadcast receipt (optional, for debugging)
-        cycle = snap.get('cycle', '?')
-        fidelity = snap.get('w_state', {}).get('fidelity', 0)
+
+        # ── Normalise: handle both flat and nested oracle payloads ────────────
+        # Oracle controller may POST with nested w_state/lattice dicts
+        # or flat DensityMatrixSnapshot keys — normalise to flat.
+        ws  = raw.get('w_state', {}) or {}
+        lat = raw.get('lattice', {}) or {}
+
+        snap = {
+            'timestamp_ns':       raw.get('timestamp_ns', int(time.time() * 1e9)),
+            'oracle_id':          raw.get('oracle_id', 1),
+            'density_matrix_hex': raw.get('density_matrix_hex', ''),
+            # w_state_fidelity — check flat key first, then nested w_state
+            'w_state_fidelity':   raw.get('w_state_fidelity',
+                                    ws.get('fidelity',
+                                      ws.get('w_state_fidelity', None))),
+            'purity':             raw.get('purity', ws.get('purity', None)),
+            'von_neumann_entropy':raw.get('von_neumann_entropy',
+                                    ws.get('entropy',
+                                      ws.get('von_neumann_entropy', None))),
+            'coherence_l1':       raw.get('coherence_l1',
+                                    ws.get('coherence',
+                                      ws.get('coherence_l1', None))),
+            'hlwe_signature':     raw.get('hlwe_signature', None),
+            'signature_valid':    raw.get('signature_valid', False),
+            'oracle_address':     raw.get('oracle_address', None),
+            'aer_noise_state':    raw.get('aer_noise_state', {}),
+            'measurement_counts': raw.get('measurement_counts', {}),
+            # mermin_test / bell_test — check all spellings
+            'mermin_test':        raw.get('mermin_test',
+                                    raw.get('bell_test',
+                                      raw.get('mermin', None))),
+            'bell_test':          raw.get('bell_test',
+                                    raw.get('mermin_test',
+                                      raw.get('mermin', None))),
+            'w_state_strength':   raw.get('w_state_strength',
+                                    ws.get('w_state_strength', None)),
+            'phase_coherence':    raw.get('phase_coherence', None),
+            'entanglement_witness': raw.get('entanglement_witness', None),
+            'lattice_refresh_counter': raw.get('lattice_refresh_counter',
+                                          lat.get('cycle', 0)),
+        }
+
+        # Feed into ring buffer + _latest_snapshot cache
+        _broadcast_snapshot_to_database(snap)
+
+        _fid = snap.get('w_state_fidelity', 0) or 0
+        _has_mermin = snap.get('mermin_test') is not None
         logger.debug(
-            f"[BROADCAST-ENDPOINT] Received measurement | cycle={cycle} | "
-            f"fidelity={fidelity:.4f}"
+            f"[BROADCAST] ingested oracle snap | "
+            f"fid={_fid:.4f} mermin={'YES' if _has_mermin else 'NO'} "
+            f"ring={len(_DM_SNAPSHOT_RING)}"
         )
-        
-        return jsonify({'status': 'processed'}), 200
-    
+        return jsonify({'status': 'processed', 'ring_size': len(_DM_SNAPSHOT_RING)}), 200
+
     except Exception as e:
-        logger.error(f"[BROADCAST-ENDPOINT] Error: {e}")
+        logger.error(f"[BROADCAST] endpoint error: {e}")
         return jsonify({'status': 'error', 'error': str(e)}), 500
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -4419,6 +4618,9 @@ def _broadcast_snapshot_to_database(snapshot: dict) -> None:
                 'oracle_address': snapshot.get('oracle_address'),
                 'aer_noise_state': snapshot.get('aer_noise_state', {}),
                 'measurement_counts': snapshot.get('measurement_counts', {}),
+                # ── Mermin / Bell test — forwarded so qtcl_getLatestDMSnapshot carries them ──
+                'mermin_test': snapshot.get('mermin_test'),
+                'bell_test': snapshot.get('bell_test'),
             }
             with _DM_SNAPSHOT_LOCK:
                 _DM_SNAPSHOT_RING.append(dm_snap)
