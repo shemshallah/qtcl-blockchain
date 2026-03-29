@@ -243,12 +243,33 @@ body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;
   <div class="tc">
     <div class="pn">
       <div class="ph"><span class="pht">H³ Hyperbolic Lattice · {8,3}</span><span class="pb vi" id="dkb">pq &mdash;</span></div>
-      <div id="dc3d" style="width:100%;height:290px;position:relative;overflow:hidden;background:#000508;border-radius:0;"></div>
+      <div id="dc3d" style="width:100%;height:340px;position:relative;overflow:hidden;background:#000508;border-radius:0;">
+        <!-- pq Bloch overlay — rendered by _PQ canvas system -->
+        <canvas id="pq-overlay" style="position:absolute;right:0;top:0;pointer-events:none;z-index:10;opacity:0.97"></canvas>
+        <!-- node type legend -->
+        <div style="position:absolute;left:8px;top:8px;pointer-events:none;z-index:10;display:flex;flex-direction:column;gap:4px">
+          <div style="font-family:'JetBrains Mono',monospace;font-size:7.5px;color:rgba(0,220,255,0.45);letter-spacing:1.5px;margin-bottom:2px">LEGEND</div>
+          <div style="display:flex;align-items:center;gap:5px"><span style="width:7px;height:7px;background:#d4a020;border-radius:1px;display:inline-block;flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(212,160,32,0.8)">Oracle node (×5)</span></div>
+          <div style="display:flex;align-items:center;gap:5px"><span style="width:7px;height:7px;background:#00dcff;border-radius:50%;display:inline-block;flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(0,200,235,0.7)">Lattice pseudoqubit</span></div>
+          <div style="display:flex;align-items:center;gap:5px"><span style="width:18px;height:2px;background:#00dcff;display:inline-block;flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(0,200,235,0.7)">W-state entanglement arc</span></div>
+          <div style="display:flex;align-items:center;gap:5px"><span style="width:7px;height:7px;background:#ffd040;border-radius:50%;display:inline-block;flex-shrink:0"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(255,208,64,0.9)">Current block ⬡</span></div>
+          <div style="display:flex;align-items:center;gap:5px"><span style="width:18px;height:1px;background:rgba(128,64,255,0.6);display:inline-block;flex-shrink:0;border-top:1px dashed rgba(128,64,255,0.6)"></span><span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(128,64,255,0.75)">Oracle entanglement</span></div>
+        </div>
+        <!-- field-fidelity HUD strip -->
+        <div id="pq-hud" style="position:absolute;left:0;bottom:0;right:0;height:28px;pointer-events:none;z-index:11;display:flex;align-items:center;padding:0 10px;gap:14px;background:linear-gradient(0deg,rgba(0,5,8,.92) 0%,transparent 100%)">
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.55);letter-spacing:1.5px">BLOCK FIELD</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.4)">pq_last=<span id="pqh-last" style="color:#8040ff">—</span></span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.4)">pq_curr=<span id="pqh-curr" style="color:#d4a020">—</span></span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:9px;color:rgba(0,220,255,.4)">Δ=<span id="pqh-delta" style="color:#00ff9d">—</span></span>
+          <span style="flex:1"></span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:8px;color:rgba(128,64,255,.6);letter-spacing:1px" id="pqh-cycle">ψ —</span>
+        </div>
+      </div>
       <div class="bs">
-        <div class="bv"><div class="bvl">|W3| Fidelity</div><div class="bvn" id="bfi">&mdash;</div></div>
-        <div class="bv"><div class="bvl">Entanglement</div><div class="bvn" id="ben">&mdash;</div></div>
-        <div class="bv"><div class="bvl">Concurrence</div><div class="bvn" id="bcn">&mdash;</div></div>
-        <div class="bv"><div class="bvl">Tele-Fidelity</div><div class="bvn" id="bte">&mdash;</div></div>
+        <div class="bv"><div class="bvl">|W₃| Fidelity</div><div class="bvn" id="bfi">&mdash;</div></div>
+        <div class="bv"><div class="bvl">pq_curr</div><div class="bvn" id="ben" style="color:var(--go)">&mdash;</div></div>
+        <div class="bv"><div class="bvl">pq_last</div><div class="bvn" id="bcn">&mdash;</div></div>
+        <div class="bv"><div class="bvl">Field Fidelity</div><div class="bvn" id="bte">&mdash;</div></div>
       </div>
     </div>
     <div class="pn">
@@ -565,13 +586,14 @@ setInterval(tick, 1000); tick();
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // H³ HYPERBOLIC LATTICE — {8,3} Poincaré Ball (Three.js)
-// Wired directly to S.* — no intermediate layer
+// Wired directly to S.* — pq_curr / pq_last / pq0 fully rendered
 // ═══════════════════════════════════════════════════════════════════════════════
 var _H = (function() {
 var renderer=null,scene=null,camera=null;
 var nodeMesh=null,oracleMeshes=[],wArcObjs=[],entangleObjs=[];
-var edgeLines=[],boundSphere=null,pqPlane=null,pqPlaneWire=null;
-var rafId=null,lastT=0,fps=24;
+var edgeLines=[],boundSphere=null;
+var blockCoreMesh=null,blockCoreWire=null; // current block — glowing octahedron at origin
+var rafId=null,lastT=0,fps=30;
 var revivalT=-999,blockFlashT=-999;
 var nodePositions=[],nodeDepths=[],nodeCount=0;
 var oracleIdx=[],wTriple=[];
@@ -583,6 +605,9 @@ var C={
   wStrong:new THREE.Color(0xd4a020),entangle:new THREE.Color(0x6028c8),
   entangleQ:new THREE.Color(0x00dcff),boundary:new THREE.Color(0x00dcff),
   revival:new THREE.Color(0xd4a020),
+  pqCurr:new THREE.Color(0xd4a020),   // gold — current block pq state
+  pqLast:new THREE.Color(0x8040ff),   // violet — last block pq state
+  pqDelta:new THREE.Color(0x00ff9d),  // green — field transition arc
 };
 function geodArc(p1,p2,n){
   var cross=new THREE.Vector3().crossVectors(p1,p2);
@@ -604,6 +629,7 @@ function makeTube(pts,radius,segs,matProps){
   var geo=new THREE.TubeGeometry(curve,Math.max(4,pts.length-1),radius,segs,false);
   return new THREE.Mesh(geo,new THREE.MeshBasicMaterial(matProps));
 }
+
 function genNodes(){
   nodePositions=[];nodeDepths=[];oracleIdx=[];wTriple=[];
   var rings=[[0.00,1],[0.779,8],[1.50,24],[2.20,56],[2.90,96]];
@@ -642,6 +668,7 @@ function buildScene(){
   var pl0=new THREE.PointLight(0x00dcff,3.0,4);scene.add(pl0);
   var pl1=new THREE.PointLight(0x6028c8,2.0,3);pl1.position.set(0.8,0.6,0.2);scene.add(pl1);
   var pl2=new THREE.PointLight(0xd4a020,1.5,2);pl2.position.set(-0.5,0,0.7);scene.add(pl2);
+  // ── Nodes ─────────────────────────────────────────────────────────────────
   var nGeo=new THREE.SphereGeometry(0.016,6,5);
   var nMat=new THREE.MeshPhongMaterial({color:0x00dcff,emissive:0x000820,transparent:true,opacity:0.9,shininess:60});
   nodeMesh=new THREE.InstancedMesh(nGeo,nMat,nodeCount);
@@ -655,17 +682,20 @@ function buildScene(){
   }
   nodeMesh.instanceMatrix.needsUpdate=true;nodeMesh.instanceColor.needsUpdate=true;
   scene.add(nodeMesh);
+  // ── Oracle icosahedra ──────────────────────────────────────────────────────
   var oGeo=new THREE.IcosahedronGeometry(0.044,1);
   for(var k=0;k<5;k++){
     var oMat=new THREE.MeshPhongMaterial({color:0xd4a020,emissive:0x3a1000,transparent:true,opacity:0.92,shininess:120});
     var m=new THREE.Mesh(oGeo,oMat);m.position.copy(nodePositions[oracleIdx[k]]);
     scene.add(m);oracleMeshes.push(m);
   }
+  // ── W-state arcs ──────────────────────────────────────────────────────────
   for(var i=0;i<3;i++){
     var pts=geodArc(nodePositions[wTriple[i]],nodePositions[wTriple[(i+1)%3]],40);
     var tube=makeTube(pts,0.008,5,{color:0x00dcff,transparent:true,opacity:0.75});
     scene.add(tube);wArcObjs.push(tube);
   }
+  // ── Oracle entanglement tubes ─────────────────────────────────────────────
   for(var i=0;i<5;i++){
     for(var j=i+1;j<5;j++){
       var pts=geodArc(nodePositions[oracleIdx[i]],nodePositions[oracleIdx[j]],32);
@@ -673,6 +703,7 @@ function buildScene(){
       scene.add(tube);entangleObjs.push({mesh:tube,i:i,j:j});
     }
   }
+  // ── Lattice edges ─────────────────────────────────────────────────────────
   var edgeSub=edges.filter(function(e){return nodeDepths[e[0]]<=2&&nodeDepths[e[1]]<=2;});
   for(var ei=0;ei<Math.min(100,edgeSub.length);ei++){
     var pts=geodArc(nodePositions[edgeSub[ei][0]],nodePositions[edgeSub[ei][1]],14);
@@ -680,20 +711,37 @@ function buildScene(){
     var ln=new THREE.Line(geo,new THREE.LineBasicMaterial({color:0x002030,transparent:true,opacity:0.35}));
     scene.add(ln);edgeLines.push(ln);
   }
+  // ── Boundary sphere ───────────────────────────────────────────────────────
   var bGeo=new THREE.SphereGeometry(0.99,48,24);
   boundSphere=new THREE.Mesh(bGeo,new THREE.MeshBasicMaterial({color:0x00dcff,transparent:true,opacity:0.04,side:THREE.BackSide}));
   scene.add(boundSphere);
   scene.add(new THREE.Mesh(new THREE.SphereGeometry(0.99,20,10),new THREE.MeshBasicMaterial({color:0x001228,wireframe:true,transparent:true,opacity:0.18})));
+  // ── Latitude rings (hyperbolic tessellation grid) ─────────────────────────
   var hRings=12,hSegs=48;
   for(var ri2=0;ri2<hRings;ri2++){
     var z0=-0.4+ri2/hRings*0.8,rho2=Math.sqrt(Math.max(0,1-z0*z0))*0.95,ringPts=[];
     for(var si2=0;si2<=hSegs;si2++){var th=si2/hSegs*Math.PI*2;ringPts.push(new THREE.Vector3(rho2*Math.cos(th),rho2*Math.sin(th),z0));}
     scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(ringPts),new THREE.LineBasicMaterial({color:0x001a28,transparent:true,opacity:0.22})));
   }
-  var pgGeo=new THREE.CircleGeometry(0.97,64);
-  pqPlane=new THREE.Mesh(pgGeo,new THREE.MeshBasicMaterial({color:0x00dcff,transparent:true,opacity:0.0,side:THREE.DoubleSide}));scene.add(pqPlane);
-  pqPlaneWire=new THREE.Mesh(new THREE.RingGeometry(0.93,0.99,64),new THREE.MeshBasicMaterial({color:0x00dcff,transparent:true,opacity:0.0,side:THREE.DoubleSide}));scene.add(pqPlaneWire);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // CURRENT BLOCK OBJECT — glowing octahedron at the lattice origin
+  // This IS the block. pq_curr/pq_last are shown in the 2D overlay.
+  // ══════════════════════════════════════════════════════════════════════════
+  var bcGeo=new THREE.OctahedronGeometry(0.09,1);
+  blockCoreMesh=new THREE.Mesh(bcGeo,new THREE.MeshPhongMaterial({
+    color:0xd4a020,emissive:0xd4a020,emissiveIntensity:0.6,
+    transparent:true,opacity:0.85,shininess:200,wireframe:false
+  }));
+  scene.add(blockCoreMesh);
+  var bcWGeo=new THREE.OctahedronGeometry(0.093,1);
+  blockCoreWire=new THREE.Mesh(bcWGeo,new THREE.MeshBasicMaterial({
+    color:0xffd040,wireframe:true,transparent:true,opacity:0.5
+  }));
+  scene.add(blockCoreWire);
 }
+
+
 function update(t){
   if(!scene||!nodeMesh) return;
   var fid=Math.max(0.3,Math.min(1.0,S.lattice_fidelity||S.fidelity||0.9));
@@ -707,12 +755,16 @@ function update(t){
   var odata=S.oracle_data||{};
   var M=S.mermin?parseFloat(S.mermin.M_value||S.mermin.M||0):0;
   var isQ=M>2.0,isStrong=M>2.8;
+
   if(cyc>0&&cyc%8===0&&(t-revivalT)>2) revivalT=t;
   var revAge=t-revivalT,revPulse=(revAge<2.0)?Math.exp(-revAge*2.5):0;
   var blkAge=t-blockFlashT,blkPulse=(blkAge<1.0)?Math.exp(-blkAge*4):0;
+
   var yaw=om*0.06*t,tilt=0.32+0.06*Math.sin(t*0.05);
   camera.position.set(2.8*Math.sin(yaw)*Math.cos(tilt),2.8*Math.sin(tilt),2.8*Math.cos(yaw)*Math.cos(tilt));
   camera.lookAt(0,0,0);
+
+  // ── Node colours + scales ─────────────────────────────────────────────────
   var tmpCol=new THREE.Color();
   for(var i=0;i<nodeCount;i++){
     var dep=nodeDepths[i],isOracle=oracleIdx.indexOf(i)>=0,isW=wTriple.indexOf(i)>=0;
@@ -732,6 +784,8 @@ function update(t){
     dummy.updateMatrix();nodeMesh.setMatrixAt(i,dummy.matrix);
   }
   nodeMesh.instanceMatrix.needsUpdate=true;nodeMesh.instanceColor.needsUpdate=true;
+
+  // ── Oracle icosahedra ─────────────────────────────────────────────────────
   for(var k=0;k<5;k++){
     var m=oracleMeshes[k],ok='oracle_'+(k+1),od=odata[ok]||{};
     var oFid=od.w_state_fidelity!=null?od.w_state_fidelity:(od.fidelity||fid);
@@ -741,27 +795,190 @@ function update(t){
     m.material.color.set(oCons===false?0x3a1800:isStrong?0xffe040:0xd4a020);
     m.material.emissive.set(oCons===false?0x1a0800:isStrong?0x604000:0x3a1000);
   }
+
+  // ── W-arcs ────────────────────────────────────────────────────────────────
   var wCol=isStrong?C.wStrong:isQ?C.wArc:new THREE.Color(0x3010a0);
   var wOp=Math.min(0.9,0.35+fid*0.5+revPulse*0.4+blkPulse*0.2);
   var wPulse=1+0.18*Math.sin(t*4.2)*(isQ?1:0.15);
   for(var i=0;i<wArcObjs.length;i++){wArcObjs[i].material.color.copy(wCol);wArcObjs[i].material.opacity=wOp*wPulse;}
+
+  // ── Entanglement tubes ────────────────────────────────────────────────────
   for(var ei=0;ei<entangleObjs.length;ei++){
     var eo=entangleObjs[ei],pairFactor=0.5+0.5*Math.sin(t*1.8+eo.i*2.3+eo.j*1.1);
     var op=Math.min(0.72,ent*neg*4*pairFactor+revPulse*0.25);
     eo.mesh.material.opacity=op;
     eo.mesh.material.color.lerpColors(C.entangle,C.entangleQ,Math.min(1,disc/2));
   }
+
+  // ── Lattice edges ─────────────────────────────────────────────────────────
   for(var li=0;li<edgeLines.length;li++){edgeLines[li].material.opacity=0.08+coh*0.28;edgeLines[li].material.color.setHex(isQ?0x002840:0x001020);}
+
+  // ── Boundary sphere ───────────────────────────────────────────────────────
   if(boundSphere){boundSphere.material.opacity=0.015+fid*0.065+revPulse*0.10;boundSphere.material.color.set(isStrong?C.wStrong:C.boundary);}
-  if(pqPlane&&pqPlaneWire){
-    var pqAngle=(S.pq_curr||0)*Math.PI/4+t*0.04;
-    pqPlane.rotation.y=pqAngle;pqPlaneWire.rotation.y=pqAngle;
-    var pqOp=0.012+0.018*Math.abs(Math.sin(t*0.25));
-    pqPlane.material.opacity=pqOp;pqPlane.material.color.setHex((S.pq_curr||0)%2===0?0x00dcff:0x8040ff);
-    pqPlaneWire.material.opacity=pqOp*2.5;pqPlaneWire.material.color.setHex((S.pq_curr||0)%2===0?0x00dcff:0x8040ff);
+
+  // ── CURRENT BLOCK — glowing octahedron at origin ──────────────────────────
+  // Spins slowly; flashes bright gold on each new block; size breathes with fidelity
+  if(blockCoreMesh&&blockCoreWire){
+    blockCoreMesh.rotation.y=t*0.4;
+    blockCoreMesh.rotation.x=t*0.17;
+    blockCoreWire.rotation.y=t*0.4;
+    blockCoreWire.rotation.x=t*0.17;
+    var bsc=1.0+0.12*Math.sin(t*1.8)*fid+blkPulse*0.9+revPulse*0.4;
+    blockCoreMesh.scale.setScalar(bsc);
+    blockCoreWire.scale.setScalar(bsc*1.04);
+    blockCoreMesh.material.emissiveIntensity=0.4+0.3*Math.sin(t*2.2)+blkPulse*1.2+revPulse*0.6;
+    blockCoreMesh.material.color.setHex(isStrong?0xffe060:blkPulse>0.1?0xffffff:0xd4a020);
+    blockCoreMesh.material.emissive.setHex(isStrong?0xd4a020:blkPulse>0.1?0xffd040:0xc09010);
+    blockCoreWire.material.opacity=0.3+0.2*Math.sin(t*3.1)+blkPulse*0.5;
   }
+
+  // ── 2D overlay — Bloch-disk + pq state + legend ───────────────────────────
+  _drawPqOverlay(t, fid, isQ, isStrong, blkPulse);
+
+  // ── HUD strip ─────────────────────────────────────────────────────────────
+  var pqC=S.pq_curr||0, pqL=S.pq_last||0;
+  var hl=document.getElementById('pqh-last');   if(hl) hl.textContent=pqL;
+  var hc=document.getElementById('pqh-curr');   if(hc) hc.textContent=pqC;
+  var hd=document.getElementById('pqh-delta');  if(hd) hd.textContent=(pqC-pqL>=0?'+':'')+(pqC-pqL);
+  var hcy=document.getElementById('pqh-cycle'); if(hcy) hcy.textContent='ψ cyc='+cyc+(cyc%8===0?' ↑REVIVAL':cyc%8===4?' ↓ANTI':'');
 }
-function onBlock(){blockFlashT=performance.now()*0.001;}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 2D PQ OVERLAY — Poincaré disk showing pq_curr and pq_last as labeled points
+// Drawn into the #pq-overlay canvas, top-right corner of dc3d
+// ═══════════════════════════════════════════════════════════════════════════════
+var _pqOvCanvas=null,_pqOvCtx=null;
+var _pqCurrAnim=0,_pqLastAnim=0; // smoothed for animation
+
+function _drawPqOverlay(t, fid, isQ, isStrong, blkPulse){
+  if(!_pqOvCanvas){
+    _pqOvCanvas=document.getElementById('pq-overlay');
+    if(!_pqOvCanvas) return;
+    // Size it: 148×148 in top-right
+    _pqOvCanvas.width=148; _pqOvCanvas.height=148;
+    _pqOvCanvas.style.width='148px'; _pqOvCanvas.style.height='148px';
+    _pqOvCanvas.style.top='8px'; _pqOvCanvas.style.right='8px';
+    _pqOvCtx=_pqOvCanvas.getContext('2d');
+  }
+  var ctx=_pqOvCtx, W=148, cx=74, cy=74, R=52;
+  ctx.clearRect(0,0,W,W);
+
+  var pqC=S.pq_curr||0, pqL=S.pq_last||0;
+  // Smooth toward real values
+  _pqCurrAnim += (pqC - _pqCurrAnim)*0.08;
+  _pqLastAnim += (pqL - _pqLastAnim)*0.08;
+
+  // pq states map to 8 positions on the unit circle (0–7 → 0°–315° in 45° steps)
+  // This is the Poincaré disk projection of the pseudoqubit Bloch equator
+  function pqAngle(v){ return v * Math.PI/4 - Math.PI/2; } // 0→top, clockwise
+  var angC=pqAngle(_pqCurrAnim), angL=pqAngle(_pqLastAnim);
+  var xC=cx+Math.cos(angC)*R, yC=cy+Math.sin(angC)*R;
+  var xL=cx+Math.cos(angL)*R, yL=cy+Math.sin(angL)*R;
+
+  // ── Background disk ───────────────────────────────────────────────────────
+  var bgGrad=ctx.createRadialGradient(cx,cy,0,cx,cy,R);
+  bgGrad.addColorStop(0,'rgba(0,18,32,0.92)');
+  bgGrad.addColorStop(1,'rgba(0,5,12,0.96)');
+  ctx.beginPath(); ctx.arc(cx,cy,R,0,Math.PI*2);
+  ctx.fillStyle=bgGrad; ctx.fill();
+
+  // ── Boundary ring ─────────────────────────────────────────────────────────
+  ctx.beginPath(); ctx.arc(cx,cy,R,0,Math.PI*2);
+  ctx.strokeStyle='rgba(0,220,255,0.22)'; ctx.lineWidth=1; ctx.stroke();
+
+  // ── 8 pq state positions as tick marks ───────────────────────────────────
+  for(var i=0;i<8;i++){
+    var a=pqAngle(i);
+    var ox=cx+Math.cos(a)*R, oy=cy+Math.sin(a)*R;
+    var ix=cx+Math.cos(a)*(R-7), iy=cy+Math.sin(a)*(R-7);
+    ctx.beginPath(); ctx.moveTo(ox,oy); ctx.lineTo(ix,iy);
+    ctx.strokeStyle='rgba(0,220,255,0.30)'; ctx.lineWidth=1; ctx.stroke();
+    // Label
+    ctx.font='bold 8px JetBrains Mono,monospace';
+    ctx.fillStyle='rgba(0,180,220,0.45)';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    var lx=cx+Math.cos(a)*(R+11), ly=cy+Math.sin(a)*(R+11);
+    ctx.fillText(i, lx, ly);
+  }
+
+  // ── Cross hairs ───────────────────────────────────────────────────────────
+  ctx.strokeStyle='rgba(0,220,255,0.08)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(cx-R,cy); ctx.lineTo(cx+R,cy); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx,cy-R); ctx.lineTo(cx,cy+R); ctx.stroke();
+
+  // ── Arc from pq_last → pq_curr ────────────────────────────────────────────
+  if(pqC!==pqL){
+    var dA=angC-angL;
+    while(dA>Math.PI) dA-=Math.PI*2;
+    while(dA<-Math.PI) dA+=Math.PI*2;
+    ctx.beginPath();
+    ctx.arc(cx,cy,R*0.82,angL,angL+dA,dA<0);
+    ctx.strokeStyle='rgba(0,255,157,0.55)'; ctx.lineWidth=1.5;
+    ctx.setLineDash([3,3]); ctx.stroke(); ctx.setLineDash([]);
+    // Arrow tip
+    var tipA=angL+dA, perp=tipA+(dA>0?-0.25:0.25);
+    var tx2=cx+Math.cos(tipA)*R*0.82, ty2=cy+Math.sin(tipA)*R*0.82;
+    var tx1=cx+Math.cos(perp)*R*0.82*0.92, ty1=cy+Math.sin(perp)*R*0.82*0.92;
+    ctx.beginPath(); ctx.moveTo(tx2,ty2); ctx.lineTo(tx1,ty1);
+    ctx.strokeStyle='rgba(0,255,157,0.7)'; ctx.lineWidth=1.5; ctx.stroke();
+  }
+
+  // ── Line from center to pq_last (ghost violet) ───────────────────────────
+  ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(xL,yL);
+  ctx.strokeStyle='rgba(128,64,255,0.35)'; ctx.lineWidth=1.5;
+  ctx.setLineDash([4,4]); ctx.stroke(); ctx.setLineDash([]);
+
+  // ── Line from center to pq_curr (gold, solid) ────────────────────────────
+  var glow=0.65+0.2*Math.sin(t*2.8)+blkPulse*0.35;
+  ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(xC,yC);
+  ctx.strokeStyle='rgba(212,160,32,'+Math.min(1,glow)+')'; ctx.lineWidth=2; ctx.stroke();
+
+  // ── pq_last dot + label ───────────────────────────────────────────────────
+  ctx.beginPath(); ctx.arc(xL,yL,4,0,Math.PI*2);
+  ctx.fillStyle='rgba(128,64,255,0.7)'; ctx.fill();
+  ctx.font='bold 8px JetBrains Mono,monospace';
+  ctx.fillStyle='rgba(170,120,255,0.9)';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText('LAST·'+pqL, xL+(xL>cx?14:-14), yL+(yL>cy?-10:10));
+
+  // ── pq_curr dot + label (brighter, larger) ───────────────────────────────
+  var cPulse=1+blkPulse*0.8;
+  // Glow ring
+  var glowGrad=ctx.createRadialGradient(xC,yC,0,xC,yC,10*cPulse);
+  glowGrad.addColorStop(0,'rgba(255,200,40,0.5)');
+  glowGrad.addColorStop(1,'rgba(255,200,40,0)');
+  ctx.beginPath(); ctx.arc(xC,yC,10*cPulse,0,Math.PI*2);
+  ctx.fillStyle=glowGrad; ctx.fill();
+  // Dot
+  ctx.beginPath(); ctx.arc(xC,yC,5*cPulse,0,Math.PI*2);
+  ctx.fillStyle=isStrong?'rgba(255,240,100,1)':'rgba(212,160,32,1)'; ctx.fill();
+  // Label
+  ctx.font='bold 9px JetBrains Mono,monospace';
+  ctx.fillStyle='rgba(255,210,60,1)';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText('CURR·'+pqC, xC+(xC>cx?16:-16), yC+(yC>cy?-12:12));
+
+  // ── Center dot (lattice origin = current block) ───────────────────────────
+  ctx.beginPath(); ctx.arc(cx,cy,3,0,Math.PI*2);
+  ctx.fillStyle='rgba(255,200,40,0.8)'; ctx.fill();
+
+  // ── Title ─────────────────────────────────────────────────────────────────
+  ctx.font='7px JetBrains Mono,monospace';
+  ctx.fillStyle='rgba(0,180,220,0.5)';
+  ctx.textAlign='center'; ctx.textBaseline='top';
+  ctx.fillText('PQ STATE DISK · fid='+fid.toFixed(2), cx, 2);
+
+  // ── Fidelity arc inside disk ──────────────────────────────────────────────
+  ctx.beginPath();
+  ctx.arc(cx,cy,R*0.22,0,Math.PI*2*fid);
+  ctx.strokeStyle=isQ?'rgba(0,255,157,0.5)':'rgba(0,180,220,0.35)';
+  ctx.lineWidth=2; ctx.stroke();
+}
+
+function onBlock(){
+  blockFlashT=performance.now()*0.001;
+}
 function animate(){
   rafId=requestAnimationFrame(animate);
   var now=performance.now();
@@ -771,7 +988,7 @@ function animate(){
 function init(){
   var container=document.getElementById('dc3d');
   if(!container||typeof THREE==='undefined') return;
-  var w=container.clientWidth||container.parentElement.clientWidth||400,h=290;
+  var w=container.clientWidth||container.parentElement.clientWidth||400,h=340;
   renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
   renderer.setSize(w,h);renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
   renderer.setClearColor(0x000000,0);container.appendChild(renderer.domElement);
@@ -781,7 +998,7 @@ function init(){
   genNodes();buildScene();animate();
   window.addEventListener('resize',function(){
     var cont=document.getElementById('dc3d');if(!cont||!renderer||!camera) return;
-    var nw=cont.clientWidth;camera.aspect=nw/290;camera.updateProjectionMatrix();renderer.setSize(nw,290);
+    var nw=cont.clientWidth;camera.aspect=nw/340;camera.updateProjectionMatrix();renderer.setSize(nw,340);
   });
 }
 return {init:init,onBlock:onBlock};
@@ -1158,10 +1375,10 @@ function updateDOM() {
   st('mtrew-pct',S.treasury_pct.toFixed(1)+'% of block');
   // ── Lattice bloch strip ──
   st('bfi',fmt4(S.fidelity));
-  st('ben',fmt4(S.entanglement));
-  st('bcn',fmt4(S.concurrence));
+  st('ben',S.pq_curr);
+  st('bcn',S.pq_last);
   st('bte',fmt4(S.tele_fidelity));
-  st('dkb','pq_last='+S.pq_last+'→pq_curr='+S.pq_curr);
+  st('dkb','pq_last='+S.pq_last+' → pq_curr='+S.pq_curr+(S.pq_curr!==S.pq_last?' Δ='+(S.pq_curr-S.pq_last):''));
   // ── GKSL noise bath ──
   st('ng1',fmt4(S.gamma1));
   st('ngp',fmt4(S.gammaphi));
