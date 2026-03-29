@@ -152,64 +152,63 @@ SOURCE_CONFIGS = {
     
     QRNGSourceType.ANU: QRNGSourceConfig(
         name="ANU QRNG",
-        url_template="https://api.quantumnumbers.anu.edu.au/API/jsonI.php",
-        api_key_env=None,  # ANU QRNG is public, no API key required
-        rate_limit_seconds=0.5,
+        url_template="https://api.quantumnumbers.anu.edu.au",
+        api_key_env="ANU_API_KEY",
+        rate_limit_seconds=0.5,       # 2 requests per second
         timeout_seconds=10,
         max_bytes_per_request=1024,
+        headers={"x-api-key": None},
         params_template={
             "length": 32,
             "type": "uint8"
         },
-        response_parser="anu",
-        is_public=True
+        response_parser="anu"
     ),
     
     QRNGSourceType.QBICK: QRNGSourceConfig(
         name="QBICK (Quantum Blockchains)",
-        url_template="https://qrng.qbck.io/{api_key}/{provider}/block/{format}",
+        # URL already bakes in /qbck/block/hex — the byte_types endpoint.
+        # size=N&length=1 → N hex strings each 1 byte → N raw bytes.
+        url_template="https://qrng.qbck.io/{api_key}/qbck/block/hex",
         api_key_env="QRNG_API_KEY",
         rate_limit_seconds=0.2,       # 5 requests per second
-        timeout_seconds=10,
-        max_bytes_per_request=2048,
-        requires_ssl_cert=True,
-        ssl_cert_path=os.getenv("QBICK_SSL_CERT", ""),
-        params_template={
-            "provider": "qbck",
-            "format": "hex"
-        },
+        timeout_seconds=15,
+        max_bytes_per_request=1024,
+        requires_ssl_cert=False,       # skip cert — avoids missing-file failures
+        ssl_cert_path="",
+        params_template={},
         response_parser="qbck"
     ),
     
     QRNGSourceType.OUTSHIFT: QRNGSourceConfig(
-        name="Outshift",
+        name="Outshift (Cisco)",
+        # Real endpoint: POST https://api.qrng.outshift.com/api/v1/random_numbers
         url_template="https://api.qrng.outshift.com/api/v1/random_numbers",
         api_key_env="OUTSHIFT_API_KEY",
-        rate_limit_seconds=1.0,
-        timeout_seconds=10,
+        rate_limit_seconds=1.0,       # 60 requests per minute
+        timeout_seconds=15,
         max_bytes_per_request=512,
-        headers={"x-id-api-key": None},
-        params_template={
-            "encoding": "raw",
-            "format": "all",
-            "bits_per_block": 8,
-            "number_of_blocks": 64
-        },
+        headers={"x-id-api-key": None},   # filled at fetch time
+        params_template={},
         response_parser="outshift"
     ),
     
     QRNGSourceType.HU_BERLIN: QRNGSourceConfig(
-        name="HU Berlin (Public)",
-        url_template="https://qrng.physik.hu-berlin.de/api/json",
+        name="LFDR.de QRNG (ID Quantique, public)",
+        # HU Berlin's qrng.physik.hu-berlin.de is a raw TCP socket service
+        # (libQRNG port 4499) — it has no REST API. lfdr.de wraps the same
+        # ID Quantique hardware with an actual HTTP endpoint.
+        # GET /QRNG/qrng?length=N&format=HEX → {"result": "AABBCC...", "length": N}
+        url_template="https://www.lfdr.de/QRNG/qrng",
         api_key_env=None,
-        rate_limit_seconds=0.1,       # 10 requests per second (public limit)
-        timeout_seconds=8,
-        max_bytes_per_request=1024,
+        rate_limit_seconds=0.5,
+        timeout_seconds=10,
+        max_bytes_per_request=512,
         params_template={
             "length": 32,
-            "format": "hex"
+            "format": "HEX"
         },
-        response_parser="hu_berlin",
+        response_parser="lfdr",
         is_public=True
     )
 }
@@ -298,10 +297,10 @@ class QuantumEntropyEnsemble:
 ║                                                                              ║
 ║   Sources configured:                                                        ║
 ║   ├─ Random.org     → {random_org}                                          ║
-║   ├─ ANU QRNG       → {anu} (public)                                        ║
+║   ├─ ANU QRNG       → {anu}                                                 ║
 ║   ├─ QBICK          → {qbck}                                                ║
 ║   ├─ Outshift       → {outshift}                                            ║
-║   └─ HU Berlin      → {hu_berlin} (public)                                  ║
+║   └─ LFDR.de QRNG   → {hu_berlin} (public, ID Quantique hardware)           ║
 ║                                                                              ║
 ║   Pool size: 64KB | Min sources required: 2                                 ║
 ║   XOR hedging: ACTIVE | Background refill: ENABLED                          ║
@@ -309,10 +308,10 @@ class QuantumEntropyEnsemble:
 ╚══════════════════════════════════════════════════════════════════════════════╝
         """.format(
             random_org="✓" if os.getenv("RANDOM_ORG_KEY") else "❌",
-            anu="✓",
+            anu="✓" if os.getenv("ANU_API_KEY") else "❌",
             qbck="✓" if os.getenv("QRNG_API_KEY") else "❌",
             outshift="✓" if os.getenv("OUTSHIFT_API_KEY") else "❌",
-            hu_berlin="✓"
+            hu_berlin="✓ (public)"
         ))
     
     def _init_circuit_breakers(self):
@@ -356,40 +355,29 @@ class QuantumEntropyEnsemble:
             self.stats[source] = SourceStatistics()
     
     def _worker_loop(self):
-        """Background thread to keep entropy pool filled (non-aggressive)"""
-        last_refill = time.time()
+        """Background thread to keep entropy pool filled"""
         while self._running:
             try:
-                current_time = time.time()
                 with self._pool_lock:
                     pool_size = len(self._pool)
                 
-                # Only refill if pool is genuinely low AND enough time has passed
-                # This prevents hammering all sources simultaneously
-                time_since_refill = current_time - last_refill
-                min_refill_interval = 3.0 if pool_size < (self.pool_min_size * 0.25) else 5.0
-                
-                if pool_size < (self.pool_min_size * 0.5) and time_since_refill > min_refill_interval:
+                # If pool is low, refill
+                if pool_size < self.pool_min_size:
                     bytes_needed = min(
                         self.pool_max_size - pool_size,
-                        512  # Smaller refill per cycle (not the full min)
+                        self.pool_min_size
                     )
                     self._refill_pool(bytes_needed)
-                    last_refill = current_time
                 
-                # Sleep longer when pool is healthy
-                sleep_time = 2.0 if pool_size < self.pool_min_size else 5.0
-                time.sleep(sleep_time)
+                time.sleep(1.0)
             except Exception as e:
                 logger.debug(f"Worker error: {e}")
-                time.sleep(10.0)  # Longer sleep on error
+                time.sleep(5.0)
     
     def _refill_pool(self, num_bytes: int):
-        """Refill entropy pool by fetching from available sources (smart, non-hammering)"""
+        """Refill entropy pool by fetching from multiple sources"""
         # Determine which sources are available (circuit closed, API key present)
         available_sources = []
-        healthy_sources = []
-        
         for source, config in self.source_configs.items():
             # Check circuit breaker
             cb = self.circuit_breakers[source]
@@ -405,15 +393,8 @@ class QuantumEntropyEnsemble:
                     continue
             
             available_sources.append(source)
-            # Prefer sources with low failure rates
-            stats = self.source_stats[source]
-            if stats.consecutive_failures == 0:
-                healthy_sources.append(source)
         
-        # Prefer healthy sources; fall back to all available if needed
-        sources_to_try = healthy_sources if healthy_sources else available_sources
-        
-        if not sources_to_try:
+        if not available_sources:
             # All external sources unavailable — fall back to system CSPRNG silently.
             # This is fine: system entropy XORed with itself is still CSPRNG-quality,
             # and the pool will recover when external sources come back online.
@@ -425,17 +406,13 @@ class QuantumEntropyEnsemble:
                 self._pool.extend(os.urandom(num_bytes))
             return
         
-        # Only fetch from 1-2 sources per refill cycle (not all 5 at once)
-        # This prevents cascading failures when multiple sources are slow
-        import random
-        sources_to_try = random.sample(sources_to_try, min(2, len(sources_to_try)))
-        bytes_per_source = max(16, num_bytes // len(sources_to_try))
+        # Fetch from multiple sources in parallel
+        bytes_per_source = max(32, num_bytes // len(available_sources))
         samples = []
         
-        # Fetch from selected sources only (not all available)
-        with ThreadPoolExecutor(max_workers=min(2, len(sources_to_try))) as executor:
+        with ThreadPoolExecutor(max_workers=len(available_sources)) as executor:
             future_to_source = {}
-            for source in sources_to_try:
+            for source in available_sources:
                 future = executor.submit(
                     self._fetch_from_source,
                     source,
@@ -568,13 +545,13 @@ class QuantumEntropyEnsemble:
                 cb["failure_count"] += 1
                 cb["total_failures"] += 1
                 
-                # Open circuit after 3 consecutive failures (lower threshold for faster recovery)
-                if stats.consecutive_failures >= 3:
+                # Open circuit after 5 consecutive failures
+                if stats.consecutive_failures >= 5:
                     already_open = cb["state"] == CircuitBreakerState.OPEN
                     cb["state"] = CircuitBreakerState.OPEN
-                    # Shorter backoff: 20s → 30s → 45s … capped at 120s (not 300s)
-                    prev_open_duration = max(20, getattr(cb, '_last_open_duration', 20))
-                    next_open_duration = min(120, int(prev_open_duration * 1.5))
+                    # Exponential backoff: 30s → 60s → 120s … capped at 300s
+                    prev_open_duration = max(30, getattr(cb, '_last_open_duration', 30))
+                    next_open_duration = min(300, int(prev_open_duration * 1.5))
                     cb['_last_open_duration'] = next_open_duration
                     cb["open_until"] = time.time() + next_open_duration
                     if not already_open:
@@ -608,10 +585,12 @@ class QuantumEntropyEnsemble:
         # Calculate base64 size needed (4/3 of byte size)
         base64_size: int = ((num_bytes + 2) // 3) * 4
         
-        params: Dict[str, Any] = config.params_template.copy()
+        # Deep-copy the nested params dict so we never mutate the shared template
+        import copy
+        params: Dict[str, Any] = copy.deepcopy(config.params_template)
         params["params"]["apiKey"] = api_key
-        params["params"]["size"] = min(base64_size, 64)  # Random.org max 64
-        params["id"] = int(time.time() * 1000)
+        params["params"]["size"] = min(base64_size, 64)  # Random.org max 64 base64 chars
+        params["id"] = int(time.time() * 1000) % (2**31)  # positive int32 safe for JSON-RPC
         
         response = requests.post(
             config.url_template,
@@ -654,153 +633,182 @@ class QuantumEntropyEnsemble:
         return decoded[:num_bytes]
     
     def _fetch_anu(self, config: QRNGSourceConfig, num_bytes: int) -> bytes:
-        """Fetch from ANU QRNG API (public, no API key required)"""
-        params: Dict[str, Any] = config.params_template.copy()
-        params["length"] = min(num_bytes, config.max_bytes_per_request)
-        
-        response = requests.get(
-            config.url_template,
-            params=params,
-            timeout=config.timeout_seconds
-        )
-        
-        if response.status_code != 200:
-            raise ValueError(f"ANU returned {response.status_code}: {response.text[:100]}")
-        
-        try:
-            data: Dict[str, Any] = response.json()
-        except json.JSONDecodeError as e:
-            raise ValueError(f"ANU response is not valid JSON: {e}. Content: {response.text[:100]}")
-        
-        if "data" not in data:
-            raise ValueError(f"ANU response missing 'data' field. Keys: {list(data.keys())}")
-        
-        byte_data: Any = data["data"]
-        if not isinstance(byte_data, list):
-            raise ValueError(f"ANU 'data' field is {type(byte_data).__name__}, expected list")
-        
-        if len(byte_data) < num_bytes:
-            raise ValueError(f"ANU returned {len(byte_data)} bytes, requested {num_bytes}")
-        
-        try:
-            result = bytearray()
-            for i, val in enumerate(byte_data[:num_bytes]):
-                if not isinstance(val, (int, float)):
-                    raise TypeError(f"Value at index {i} is {type(val).__name__}, expected int")
-                byte_val: int = int(val) & 0xFF
-                result.append(byte_val)
-            
-            return bytes(result)
-        except (TypeError, ValueError, OverflowError) as e:
-            raise ValueError(f"ANU byte validation failed: {e}. First 3 values: {byte_data[:3]}")
-    
-    def _fetch_qbck(self, config: QRNGSourceConfig, num_bytes: int) -> bytes:
-        """Fetch from QBICK (Quantum Blockchains) API with comprehensive validation"""
+        """Fetch from ANU QRNG API — new AWS endpoint returns hex strings."""
         api_key: Optional[str] = os.getenv(config.api_key_env)
         if not api_key:
             raise ValueError(f"Missing API key: {config.api_key_env}")
         
-        url: str = config.url_template.format(
-            api_key=api_key,
-            provider="qbck",
-            format="hex"
+        # hex8 type: each element is a 2-char hex string representing 1 byte.
+        # size=2 means 2 bytes per element; length=N requests N elements.
+        # Total bytes delivered = length * 2.  We ask for ceil(num_bytes/2) elements.
+        n_elements: int = max(1, (num_bytes + 1) // 2)
+        n_elements = min(n_elements, 1024)   # API hard limit
+        
+        headers: Dict[str, str] = {"x-api-key": api_key}
+        params: Dict[str, Any] = {
+            "length": n_elements,
+            "type": "hex8",
+            "size": 2
+        }
+        
+        response = requests.get(
+            config.url_template,
+            params=params,
+            headers=headers,
+            timeout=config.timeout_seconds
         )
         
-        params: Dict[str, Any] = {"size": num_bytes}
-        verify: Union[bool, str] = config.ssl_cert_path if config.requires_ssl_cert else True
+        if response.status_code == 403:
+            raise ValueError("ANU returned 403 — check ANU_API_KEY validity")
+        if response.status_code != 200:
+            raise ValueError(f"ANU returned {response.status_code}: {response.text[:120]}")
+        
+        try:
+            data: Dict[str, Any] = response.json()
+        except json.JSONDecodeError as e:
+            raise ValueError(f"ANU response is not valid JSON: {e}. Content: {response.text[:120]}")
+        
+        if not data.get("success", True):
+            raise ValueError(f"ANU reported failure: {data}")
+        
+        if "data" not in data:
+            raise ValueError(f"ANU response missing 'data'. Keys: {list(data.keys())}")
+        
+        hex_list: Any = data["data"]
+        if not isinstance(hex_list, list) or len(hex_list) == 0:
+            raise ValueError(f"ANU 'data' is not a non-empty list: {type(hex_list).__name__}")
+        
+        try:
+            raw: bytes = bytes.fromhex("".join(str(h) for h in hex_list))
+        except ValueError as e:
+            raise ValueError(f"ANU hex decode failed: {e}. First 3: {hex_list[:3]}")
+        
+        if len(raw) < num_bytes:
+            return hashlib.shake_256(raw).digest(num_bytes)
+        
+        return raw[:num_bytes]
+    
+    def _fetch_qbck(self, config: QRNGSourceConfig, num_bytes: int) -> bytes:
+        """Fetch from QBICK (Quantum Blockchains) byte_types endpoint.
+
+        API: GET https://qrng.qbck.io/{key}/qbck/block/hex?size=N&length=1
+        Returns: {"data": {"result": ["aa", "bb", ...], ...}, "error": "OK"}
+        Each element in result[] is a 1-byte hex string (length=1 means 1 byte).
+        """
+        api_key: Optional[str] = os.getenv(config.api_key_env)
+        if not api_key:
+            raise ValueError(f"Missing API key: {config.api_key_env}")
+        
+        url: str = config.url_template.format(api_key=api_key.strip())
+        n: int = min(num_bytes, config.max_bytes_per_request)
+        params: Dict[str, Any] = {"size": n, "length": 1}
         
         response = requests.get(
             url,
             params=params,
             timeout=config.timeout_seconds,
-            verify=verify
+            verify=False    # qbck.io uses self-signed cert; we skip verify
         )
         
         if response.status_code != 200:
-            raise ValueError(f"QBICK returned {response.status_code}: {response.text[:100]}")
+            raise ValueError(f"QBICK returned {response.status_code}: {response.text[:120]}")
         
         try:
             data: Dict[str, Any] = response.json()
         except json.JSONDecodeError as e:
-            raise ValueError(f"QBICK response is not valid JSON: {e}")
+            raise ValueError(f"QBICK response not valid JSON: {e}")
+        
+        if data.get("error", "OK") != "OK":
+            raise ValueError(f"QBICK error field: {data.get('error')}")
         
         if "data" not in data:
-            raise ValueError(f"QBICK response missing 'data' field. Keys: {list(data.keys())}")
+            raise ValueError(f"QBICK response missing 'data'. Keys: {list(data.keys())}")
         
         data_obj: Any = data["data"]
         if not isinstance(data_obj, dict) or "result" not in data_obj:
-            raise ValueError(f"QBICK 'data' missing 'result' field or is not a dict")
+            raise ValueError(f"QBICK 'data' missing 'result': {data_obj}")
         
-        hex_strings: Any = data_obj["result"]
-        if not isinstance(hex_strings, list):
-            raise ValueError(f"QBICK 'result' is {type(hex_strings).__name__}, expected list")
+        hex_list: Any = data_obj["result"]
+        if not isinstance(hex_list, list) or len(hex_list) == 0:
+            raise ValueError(f"QBICK result is not a non-empty list: {type(hex_list).__name__}")
         
         try:
-            combined: str = "".join(str(h) for h in hex_strings)
-            combined_bytes: bytes = bytes.fromhex(combined)
+            combined_bytes: bytes = bytes.fromhex("".join(str(h) for h in hex_list))
         except ValueError as e:
-            raise ValueError(f"QBICK hex conversion failed: {e}")
+            raise ValueError(f"QBICK hex conversion failed: {e}. First 3: {hex_list[:3]}")
         
         if len(combined_bytes) < num_bytes:
-            # Expand using SHAKE
             return hashlib.shake_256(combined_bytes).digest(num_bytes)
         
         return combined_bytes[:num_bytes]
     
     def _fetch_outshift(self, config: QRNGSourceConfig, num_bytes: int) -> bytes:
-        """Fetch from Outshift API with comprehensive validation"""
+        """Fetch from Outshift (Cisco) QRNG API.
+
+        API: POST https://api.qrng.outshift.com/api/v1/random_numbers
+        Headers: x-id-api-key: <key>
+        Body: {"encoding": "raw", "format": "hex",
+               "bits_per_block": 8, "number_of_blocks": N}
+        Response: {"random_numbers": [{"hexadecimal": "aabb..."}, ...]}
+        """
         api_key: Optional[str] = os.getenv(config.api_key_env)
         if not api_key:
             raise ValueError(f"Missing API key: {config.api_key_env}")
         
-        headers: Dict[str, str] = {}
-        for key, value in config.headers.items():
-            headers[key] = value
-        headers["x-id-api-key"] = api_key
-        
-        params: Dict[str, Any] = config.params_template.copy()
-        params["number_of_blocks"] = min(num_bytes, config.max_bytes_per_request)
+        n_blocks: int = min(num_bytes, config.max_bytes_per_request)
+        headers: Dict[str, str] = {
+            "x-id-api-key": api_key.strip(),
+            "Content-Type": "application/json"
+        }
+        body: Dict[str, Any] = {
+            "encoding": "raw",
+            "format": "hex",
+            "bits_per_block": 8,
+            "number_of_blocks": n_blocks
+        }
         
         response = requests.post(
             config.url_template,
+            json=body,
             headers=headers,
-            json=params,
             timeout=config.timeout_seconds
         )
         
+        if response.status_code == 401:
+            raise ValueError("Outshift returned 401 — check OUTSHIFT_API_KEY")
         if response.status_code != 200:
-            raise ValueError(f"Outshift returned {response.status_code}: {response.text[:100]}")
+            raise ValueError(f"Outshift returned {response.status_code}: {response.text[:120]}")
         
         try:
             data: Dict[str, Any] = response.json()
         except json.JSONDecodeError as e:
-            raise ValueError(f"Outshift response is not valid JSON: {e}")
+            raise ValueError(f"Outshift response not valid JSON: {e}")
         
-        if "data" not in data:
-            raise ValueError(f"Outshift response missing 'data' field. Keys: {list(data.keys())}")
-        
-        data_value: Any = data["data"]
-        if not isinstance(data_value, list):
-            raise ValueError(f"Outshift 'data' is {type(data_value).__name__}, expected list")
+        # Response schema: {"random_numbers": [{"hexadecimal": "..."}, ...]}
+        rn: Any = data.get("random_numbers")
+        if not isinstance(rn, list) or len(rn) == 0:
+            raise ValueError(f"Outshift: unexpected response structure. Keys: {list(data.keys())}")
         
         try:
-            result: bytearray = bytearray()
-            for val in data_value:
-                if isinstance(val, int):
-                    result.append(val & 0xFF)
-                elif isinstance(val, str):
-                    result.extend(bytes.fromhex(val))
-            
-            if len(result) < num_bytes:
-                return hashlib.shake_256(bytes(result)).digest(num_bytes)
-            return bytes(result[:num_bytes])
-        except (TypeError, ValueError) as e:
-            raise ValueError(f"Outshift byte conversion failed: {e}")
+            hex_str: str = "".join(str(item.get("hexadecimal", "")) for item in rn)
+            raw_bytes: bytes = bytes.fromhex(hex_str)
+        except (ValueError, AttributeError) as e:
+            raise ValueError(f"Outshift hex decode failed: {e}")
+        
+        if len(raw_bytes) < num_bytes:
+            return hashlib.shake_256(raw_bytes).digest(num_bytes)
+        
+        return raw_bytes[:num_bytes]
     
     def _fetch_hu_berlin(self, config: QRNGSourceConfig, num_bytes: int) -> bytes:
-        """Fetch from HU Berlin public QRNG with comprehensive validation"""
-        params: Dict[str, Any] = config.params_template.copy()
-        params["length"] = min(num_bytes, config.max_bytes_per_request)
+        """Fetch from lfdr.de public QRNG (ID Quantique hardware, no auth needed).
+
+        API: GET https://www.lfdr.de/QRNG/qrng?length=N&format=HEX
+        Response: {"result": "AABBCC...", "length": N} or plain hex string
+        Note: length param is number of bytes (not characters).
+        """
+        n: int = min(num_bytes, config.max_bytes_per_request)
+        params: Dict[str, Any] = {"length": n, "format": "HEX"}
         
         response = requests.get(
             config.url_template,
@@ -809,36 +817,34 @@ class QuantumEntropyEnsemble:
         )
         
         if response.status_code != 200:
-            raise ValueError(f"HU Berlin returned {response.status_code}: {response.text[:100]}")
+            raise ValueError(f"lfdr.de QRNG returned {response.status_code}: {response.text[:120]}")
+        
+        text: str = response.text.strip()
+        
+        # Try JSON first: {"result": "AABB...", "length": N}
+        try:
+            data: Any = response.json()
+            if isinstance(data, dict):
+                hex_str: str = str(data.get("result", data.get("data", "")))
+            else:
+                hex_str = str(data)
+        except (json.JSONDecodeError, ValueError):
+            # Plain hex text response
+            hex_str = text
+        
+        hex_str = hex_str.strip()
+        if not hex_str:
+            raise ValueError("lfdr.de returned empty response")
         
         try:
-            data: Dict[str, Any] = response.json()
-        except json.JSONDecodeError as e:
-            raise ValueError(f"HU Berlin response is not valid JSON: {e}")
+            raw_bytes: bytes = bytes.fromhex(hex_str)
+        except ValueError as e:
+            raise ValueError(f"lfdr.de hex decode failed: {e}. Response prefix: {hex_str[:40]}")
         
-        if "data" not in data:
-            raise ValueError(f"HU Berlin response missing 'data' field. Keys: {list(data.keys())}")
+        if len(raw_bytes) < num_bytes:
+            return hashlib.shake_256(raw_bytes).digest(num_bytes)
         
-        byte_array: Any = data["data"]
-        
-        if not isinstance(byte_array, list):
-            raise ValueError(f"HU Berlin 'data' is {type(byte_array).__name__}, expected list")
-        
-        if len(byte_array) < num_bytes:
-            raise ValueError(f"HU Berlin returned {len(byte_array)} bytes, requested {num_bytes}")
-        
-        try:
-            # Validate and convert each byte
-            result: bytearray = bytearray()
-            for i, val in enumerate(byte_array[:num_bytes]):
-                if not isinstance(val, (int, float)):
-                    raise TypeError(f"Value at index {i} is {type(val).__name__}, expected int")
-                byte_val: int = int(val) & 0xFF
-                result.append(byte_val)
-            
-            return bytes(result)
-        except (TypeError, ValueError, OverflowError) as e:
-            raise ValueError(f"HU Berlin byte validation failed: {e}. First 3 values: {byte_array[:3]}")
+        return raw_bytes[:num_bytes]
     
     # =========================================================================
     # PUBLIC API METHODS
