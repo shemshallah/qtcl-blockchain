@@ -3691,10 +3691,21 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 # Capture rowcount IMMEDIATELY after block INSERT
                 _block_rowcount = cur.rowcount
 
-                # Persist user-supplied transactions
+                # Persist user-supplied transactions — coinbase/treasury EXCLUDED.
+                # Coinbase rows are written below by the canonical server-side crediting
+                # logic which uses block_hash in its hash inputs.  Client-side coinbase
+                # TXs in the transactions array use a different determinism (oracle seed
+                # instead of block_hash) → different tx_hash → ON CONFLICT does NOT
+                # deduplicate them → two coinbase + two treasury rows per block in the
+                # explorer.  Server is the single source of truth for coinbase writes.
+                _COINBASE_TYPES = frozenset(("coinbase", "treasury"))
+                _user_tx_count = 0
                 for tx in (txs or []):
                     tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
                     if not tx_id:
+                        continue
+                    # ── Drop client coinbase/treasury rows — server owns this lane ──
+                    if tx.get("tx_type", "transfer") in _COINBASE_TYPES:
                         continue
                     cur.execute("""
                         INSERT INTO transactions
@@ -3713,13 +3724,34 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         tx.get("tx_type", "transfer"),
                         height,
                     ))
+                    _user_tx_count += 1
+                if _user_tx_count:
+                    logger.debug(f"[RPC-submitBlock] Persisted {_user_tx_count} user TX(s) h={height}")
         except Exception as dbe:
             logger.exception(f"[RPC-submitBlock] DB error: {dbe}")
             return _rpc_error(-32603, f"DB persist failed: {str(dbe)}", rpc_id)
 
-        # ── Credit coinbase rewards (transaction 2 — isolated from block persist) ──
-        # Separate get_db_cursor so a wallet schema error cannot roll back the block.
-        # Deterministic from header: never scan txs (breaks when miner == treasury).
+        # ══════════════════════════════════════════════════════════════════════
+        # QTCL 1-BLOCK SETTLEMENT PROTOCOL
+        # ══════════════════════════════════════════════════════════════════════
+        # Per-block coinbase structure (single canonical path, no fallbacks):
+        #
+        #   Block N accepted:
+        #     [1] CONFIRM treasury TX from block N-1 (status pending → confirmed,
+        #         wallet credited NOW — chain advancement is the release signal)
+        #     [2] WRITE miner TX for block N → status 'confirmed' immediately
+        #         (PoW complete: miner earned it, credit is instant)
+        #     [3] WRITE treasury TX for block N → status 'pending'
+        #         (released when block N+1 is accepted, i.e. step [1] above)
+        #
+        # Canonical tx_hash determinism (server-only, never from client):
+        #   miner:    SHA3-256("MINER"   || height || miner_addr   || reward || block_hash)
+        #   treasury: SHA3-256("TREASURY"|| height || treas_addr   || reward || block_hash)
+        #
+        # The treasury hash for block N is computable by any node from the
+        # block header alone — used in step [1] of block N+1 to locate and
+        # confirm it without a table scan.
+        # ══════════════════════════════════════════════════════════════════════
         if _block_rowcount > 0 and TessellationRewardSchedule:
             try:
                 rewards          = TessellationRewardSchedule.get_rewards_for_height(height)
@@ -3727,20 +3759,75 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 treasury_reward  = rewards.get('treasury', 80)
                 treasury_address = TessellationRewardSchedule.TREASURY_ADDRESS
 
-                # Canonical deterministic coinbase tx hashes for ledger
-                _cb_miner_hash = hashlib.sha3_256(
-                    json.dumps({"height": height, "to": miner_address,
-                                "amount": miner_reward, "block_hash": block_hash,
-                                "role": "miner"}, sort_keys=True, separators=(',', ':')).encode()
-                ).hexdigest()
-                _cb_treasury_hash = hashlib.sha3_256(
-                    json.dumps({"height": height, "to": treasury_address,
-                                "amount": treasury_reward, "block_hash": block_hash,
-                                "role": "treasury"}, sort_keys=True, separators=(',', ':')).encode()
-                ).hexdigest()
+                def _cb_hash(role: str, h: int, addr: str, amt: int, bhash: str) -> str:
+                    """Deterministic coinbase tx_hash — server canonical, block_hash-bound."""
+                    return hashlib.sha3_256(
+                        json.dumps(
+                            {"role": role, "height": h, "to": addr,
+                             "amount": amt, "block_hash": bhash},
+                            sort_keys=True, separators=(',', ':')
+                        ).encode()
+                    ).hexdigest()
+
+                _cb_miner_hash    = _cb_hash("MINER",    height,   miner_address,    miner_reward,    block_hash)
+                _cb_treasury_hash = _cb_hash("TREASURY", height,   treasury_address, treasury_reward, block_hash)
 
                 with get_db_cursor() as cur:
-                    # ── Miner wallet balance ─────────────────────────────────────
+                    # ── STEP 1: Confirm treasury TX from block N-1 ───────────────
+                    # Reconstruct its hash from the parent block header we already hold.
+                    if height > 1 and treasury_address and treasury_reward > 0:
+                        try:
+                            # Fetch parent block to reconstruct its treasury hash exactly
+                            cur.execute(
+                                "SELECT block_hash, difficulty FROM blocks WHERE height = %s LIMIT 1",
+                                (height - 1,)
+                            )
+                            _prev = cur.fetchone()
+                            if _prev:
+                                _prev_block_hash   = _prev[0]
+                                _prev_rewards      = TessellationRewardSchedule.get_rewards_for_height(height - 1)
+                                _prev_treas_reward = _prev_rewards.get('treasury', 80)
+                                _prev_treas_hash   = _cb_hash(
+                                    "TREASURY", height - 1,
+                                    treasury_address, _prev_treas_reward, _prev_block_hash
+                                )
+                                # Flip status pending → confirmed and credit wallet atomically
+                                cur.execute("""
+                                    UPDATE transactions
+                                    SET    status     = 'confirmed',
+                                           updated_at = NOW()
+                                    WHERE  tx_hash    = %s
+                                      AND  status     = 'pending'
+                                """, (_prev_treas_hash,))
+                                _confirmed_rows = cur.rowcount
+                                if _confirmed_rows > 0:
+                                    # Credit treasury wallet only on actual status flip
+                                    _treas_fp = hashlib.sha256(treasury_address.encode()).hexdigest()[:64]
+                                    cur.execute("""
+                                        INSERT INTO wallet_addresses
+                                            (address, wallet_fingerprint, public_key,
+                                             balance, transaction_count, address_type)
+                                        VALUES (%s, %s, %s, %s, 1, 'treasury')
+                                        ON CONFLICT (address) DO UPDATE SET
+                                            balance           = wallet_addresses.balance + EXCLUDED.balance,
+                                            transaction_count = wallet_addresses.transaction_count + 1
+                                    """, (treasury_address, _treas_fp, _treas_fp, _prev_treas_reward))
+                                    logger.info(
+                                        f"[RPC-submitBlock] 🏛  Treasury CONFIRMED h={height-1}: "
+                                        f"{_prev_treas_reward/100:.2f} QTCL → {treasury_address[:22]}… "
+                                        f"(released by block {height})"
+                                    )
+                                else:
+                                    logger.debug(
+                                        f"[RPC-submitBlock] Treasury h={height-1} already confirmed or missing"
+                                    )
+                        except Exception as _confirm_err:
+                            # Non-fatal: treasury confirmation lag is recoverable on next block
+                            logger.warning(
+                                f"[RPC-submitBlock] ⚠️  Treasury confirm h={height-1} skipped: {_confirm_err}"
+                            )
+
+                    # ── STEP 2: Miner TX for block N — confirmed immediately ───────
                     _miner_fp = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
                     cur.execute("""
                         INSERT INTO wallet_addresses
@@ -3751,29 +3838,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                             balance           = wallet_addresses.balance + EXCLUDED.balance,
                             transaction_count = wallet_addresses.transaction_count + 1
                     """, (miner_address, _miner_fp, _miner_fp, miner_reward))
-                    logger.info(
-                        f"[RPC-submitBlock] ⛏  Miner credited: {miner_reward} base units "
-                        f"({miner_reward/100:.2f} QTCL) → {miner_address[:22]}…"
-                    )
 
-                    # ── Treasury wallet balance ──────────────────────────────────
-                    if treasury_address and treasury_reward > 0:
-                        _treas_fp = hashlib.sha256(treasury_address.encode()).hexdigest()[:64]
-                        cur.execute("""
-                            INSERT INTO wallet_addresses
-                                (address, wallet_fingerprint, public_key,
-                                 balance, transaction_count, address_type)
-                            VALUES (%s, %s, %s, %s, 1, 'treasury')
-                            ON CONFLICT (address) DO UPDATE SET
-                                balance           = wallet_addresses.balance + EXCLUDED.balance,
-                                transaction_count = wallet_addresses.transaction_count + 1
-                        """, (treasury_address, _treas_fp, _treas_fp, treasury_reward))
-                        logger.info(
-                            f"[RPC-submitBlock] 💰 Treasury credited: {treasury_reward} base units "
-                            f"({treasury_reward/100:.2f} QTCL) → {treasury_address[:22]}…"
-                        )
-
-                    # ── Canonical coinbase transaction rows ──────────────────────
                     cur.execute("""
                         INSERT INTO transactions
                             (tx_hash, from_address, to_address,
@@ -3782,16 +3847,26 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         ON CONFLICT (tx_hash) DO NOTHING
                     """, (_cb_miner_hash, "0" * 64, miner_address,
                           float(miner_reward), height))
+                    logger.info(
+                        f"[RPC-submitBlock] ⛏  Miner CONFIRMED h={height}: "
+                        f"{miner_reward/100:.2f} QTCL → {miner_address[:22]}…"
+                    )
 
+                    # ── STEP 3: Treasury TX for block N — pending until N+1 ────────
                     if treasury_address and treasury_reward > 0:
                         cur.execute("""
                             INSERT INTO transactions
                                 (tx_hash, from_address, to_address,
                                  amount, tx_type, status, height, updated_at)
-                            VALUES (%s, %s, %s, %s, 'coinbase', 'confirmed', %s, NOW())
+                            VALUES (%s, %s, %s, %s, 'coinbase', 'pending', %s, NOW())
                             ON CONFLICT (tx_hash) DO NOTHING
                         """, (_cb_treasury_hash, "0" * 64, treasury_address,
                               float(treasury_reward), height))
+                        logger.info(
+                            f"[RPC-submitBlock] 🏛  Treasury PENDING h={height}: "
+                            f"{treasury_reward/100:.2f} QTCL → {treasury_address[:22]}… "
+                            f"(confirms at block {height+1})"
+                        )
 
             except Exception as credit_err:
                 logger.error(

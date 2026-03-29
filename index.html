@@ -882,19 +882,29 @@ function openBlockModal(blk) {
       var from=tx.from_addr||tx.from_address||tx.sender||'';
       var to=tx.to_addr||tx.to_address||tx.receiver||'';
       var amt=parseFloat(tx.amount||0)/100; // base units → QTCL
+      var txStatus=tx.status||'confirmed';
       var isTreasury=cb&&(to===_TREASURY_ADDR||from===_TREASURY_ADDR);
-      var icon=isTreasury?'🏛':cb?'⛏':'⇄';
+      var isPending=isTreasury&&txStatus==='pending';
+      // pending treasury: clock icon, dimmed, striped bg — confirmed on next block
+      var icon=isPending?'⏳':isTreasury?'🏛':cb?'⛏':'⇄';
       var fromShort=from.length>20?from.slice(0,10)+'…'+from.slice(-8):from||'—';
       var toShort=to.length>20?to.slice(0,10)+'…'+to.slice(-8):to||'—';
-      var badge=isTreasury?'<span style="background:var(--go2);color:var(--go);padding:1px 6px;border-radius:3px;font-family:var(--disp);font-size:8px;border:1px solid rgba(212,160,32,.3)">🏛 TREASURY</span>':cb?'<span style="background:var(--vi2);color:var(--vi);padding:1px 6px;border-radius:3px;font-family:var(--disp);font-size:8px">⛏ COINBASE</span>':'';
-      return '<div class="bm-tx" onclick="_bmCopy(\''+hash+'\')" title="Click to copy TX ID">'
-        +'<div class="bm-tx-icon '+(isTreasury?'treasury':tp)+'">'+icon+'</div>'
+      var pendingTag=isPending
+        ?'<span style="background:rgba(212,160,32,.08);color:rgba(212,160,32,.55);padding:1px 6px;border-radius:3px;font-family:var(--disp);font-size:8px;border:1px solid rgba(212,160,32,.18);letter-spacing:.4px">⏳ NEXT BLOCK</span>'
+        :'';
+      var badge=isTreasury
+        ?'<span style="background:var(--go2);color:'+(isPending?'rgba(212,160,32,.45)':'var(--go)')+';padding:1px 6px;border-radius:3px;font-family:var(--disp);font-size:8px;border:1px solid rgba(212,160,32,.3)">🏛 TREASURY</span>'
+        :cb?'<span style="background:var(--vi2);color:var(--vi);padding:1px 6px;border-radius:3px;font-family:var(--disp);font-size:8px">⛏ COINBASE</span>':'';
+      var rowStyle=isPending?'opacity:.62;background:repeating-linear-gradient(135deg,transparent,transparent 4px,rgba(212,160,32,.03) 4px,rgba(212,160,32,.03) 8px);':'';
+      var amtColor=isPending?'color:rgba(212,160,32,.45)':isTreasury?'color:var(--go)':'';
+      return '<div class="bm-tx" onclick="_bmCopy(\''+hash+'\')" title="'+(isPending?'Treasury pending — confirms when next block is mined':'Click to copy TX ID')+'" style="'+rowStyle+'">'
+        +'<div class="bm-tx-icon '+(isTreasury?'treasury':tp)+'" style="'+(isPending?'opacity:.5':'')+'">'+icon+'</div>'
         +'<div class="bm-tx-info">'
-        +'<div class="bm-tx-hash">'+hash+'</div>'
+        +'<div class="bm-tx-hash" style="'+(isPending?'color:rgba(0,220,255,.4)':'')+'">'+hash+'</div>'
         +'<div class="bm-tx-sub"><span style="color:var(--dim)">from:</span> <span style="color:var(--tx)">'+fromShort+'</span>'
-        +'<span style="color:var(--dim)">→</span><span style="color:'+(isTreasury?'var(--go)':'var(--gr)')+'">'+toShort+'</span>'+badge+'</div>'
+        +'<span style="color:var(--dim)">→</span><span style="color:'+(isTreasury?'var(--go)':'var(--gr)')+'">'+toShort+'</span>'+badge+' '+pendingTag+'</div>'
         +'</div>'
-        +'<div class="bm-tx-amt '+(isTreasury?'transfer':tp)+'" style="'+(isTreasury?'color:var(--go)':'')+'">'+amt.toFixed(2)+' Q</div>'
+        +'<div class="bm-tx-amt '+(isTreasury?'transfer':tp)+'" style="'+amtColor+'">'+amt.toFixed(2)+' Q</div>'
         +'<div class="bm-copy-hint">CLICK TO COPY</div>'
         +'</div>';
     }).join('');
@@ -941,14 +951,17 @@ function renderTxRow(tx,isNew){
   if(amt>1000) amt=amt/100;
   var blk=tx.height||tx.block_height||'—';
   var st=tx.status||'confirmed';
-  var typeLabel=isTreasury?'🏛 TREASURY':cb?'⛏ COINBASE':'⇄ TRANSFER';
-  var typeClass=isTreasury?'treasury':cb?'coinbase':'transfer';
-  return '<tr class="'+(isNew?'tx-new ':'')+( cb?'tx-cb':'tx-tr')+'" title="'+hash+'">'
+  var isPending=isTreasury&&st==='pending';
+  var typeLabel=isPending?'⏳ PENDING':isTreasury?'🏛 TREASURY':cb?'⛏ COINBASE':'⇄ TRANSFER';
+  var typeClass=isPending?'pending':isTreasury?'treasury':cb?'coinbase':'transfer';
+  var rowOpacity=isPending?'opacity:.6;':'';
+  var amtStyle=isPending?'color:rgba(212,160,32,.45)':isTreasury?'color:var(--go)':'';
+  return '<tr class="'+(isNew?'tx-new ':'')+( cb?'tx-cb':'tx-tr')+'" title="'+(isPending?'Treasury pending — confirms when next block is mined':hash)+'" style="'+rowOpacity+'">'
     +'<td><span class="tba '+typeClass+'">'+typeLabel+'</span></td>'
-    +'<td style="font-family:var(--mono);font-size:10px;cursor:pointer;color:var(--cy)" title="'+hash+'" onclick="_bmCopy(this.title);this.style.color=\'var(--go)\';var _c=this;setTimeout(function(){_c.style.color=\'var(--cy)\';},900)">'+_shortHash(hash,18)+' <span style="font-size:7px;opacity:.5">⧉</span></td>'
+    +'<td style="font-family:var(--mono);font-size:10px;cursor:pointer;color:'+(isPending?'rgba(0,220,255,.35)':'var(--cy)')+'" title="'+hash+'" onclick="_bmCopy(this.title);this.style.color=\'var(--go)\';var _c=this;setTimeout(function(){_c.style.color=\''+(isPending?'rgba(0,220,255,.35)':'var(--cy)')+'\';},900)">'+_shortHash(hash,18)+' <span style="font-size:7px;opacity:.5">⧉</span></td>'
     +'<td style="font-family:var(--mono);font-size:9px;color:var(--dim)" title="'+from+'">'+_shortHash(from,14)+'</td>'
     +'<td style="font-family:var(--mono);font-size:9px;color:'+(isTreasury?'var(--go)':'var(--gr)')+'" title="'+to+'">'+_shortHash(to,14)+'</td>'
-    +'<td style="font-size:11px;'+(isTreasury?'color:var(--go)':'')+'">'+amt.toFixed(2)+' Q</td>'
+    +'<td style="font-size:11px;'+amtStyle+'">'+amt.toFixed(2)+' Q</td>'
     +'<td style="color:var(--dim);font-size:10px">'+blk+'</td>'
     +'<td><span class="tba '+st+'">'+st.toUpperCase()+'</span></td>'
     +'</tr>';
