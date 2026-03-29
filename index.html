@@ -978,6 +978,9 @@ function _drawPqOverlay(t, fid, isQ, isStrong, blkPulse){
 
 function onBlock(){
   blockFlashT=performance.now()*0.001;
+  // Snap pq anim state to current values so overlay moves immediately
+  _pqCurrAnim = S.pq_curr || 0;
+  _pqLastAnim = S.pq_last || 0;
 }
 function animate(){
   rafId=requestAnimationFrame(animate);
@@ -1566,20 +1569,24 @@ function stamp() {
           _lastFetchedHeight = toH;
 
           // Derive chain metrics from block range
-          if (rng.blocks.length >= 2) {
-            var sorted = rng.blocks.slice().sort(function(a,b){return a.height-b.height;});
-            var first = sorted[0], last = sorted[sorted.length-1];
-            if (last.timestamp_s && first.timestamp_s && last.height > first.height) {
-              S.avg_block_time_s = (last.timestamp_s - first.timestamp_s) / (last.height - first.height);
+          var sorted = rng.blocks.slice().sort(function(a,b){return a.height-b.height;});
+          var tipBlock = sorted[sorted.length-1];
+          if (sorted.length >= 2) {
+            var first = sorted[0];
+            if (tipBlock.timestamp_s && first.timestamp_s && tipBlock.height > first.height) {
+              S.avg_block_time_s = (tipBlock.timestamp_s - first.timestamp_s) / (tipBlock.height - first.height);
             }
-            // Difficulty from latest block
-            if (last.difficulty_bits) S.difficulty_bits = last.difficulty_bits;
-            if (last.pq_curr != null) S.pq_curr = last.pq_curr;
-            if (last.pq_last != null) S.pq_last = last.pq_last;
-            if (last.w_state_fidelity) S.fidelity = Math.max(S.fidelity, last.w_state_fidelity);
-            // Total tx count from blocks
-            S.total_transactions = blocks.reduce(function(acc,b){return acc+(b.tx_count||0);},0);
           }
+          // Always update from tip block regardless of range size
+          if (tipBlock) {
+            if (tipBlock.difficulty_bits) S.difficulty_bits = tipBlock.difficulty_bits;
+            // pq values: use modulo 8 if server returned raw height as fallback
+            var _pqc = tipBlock.pq_curr, _pql = tipBlock.pq_last;
+            if (_pqc != null) S.pq_curr = (_pqc > 7) ? (_pqc % 8) : _pqc;
+            if (_pql != null) S.pq_last = (_pql > 7) ? (_pql % 8) : _pql;
+            if (tipBlock.w_state_fidelity) S.fidelity = Math.max(S.fidelity, tipBlock.w_state_fidelity);
+          }
+          S.total_transactions = blocks.reduce(function(acc,b){return acc+(b.tx_count||0);},0);
           renderChain();
           // Flash 3D on new tip
           if (tip > 0 && tip !== window._lastKnownHeight) {
@@ -1628,8 +1635,9 @@ function stamp() {
     if (blocks.length) {
       var last = blocks[blocks.length-1];
       if (last.difficulty_bits) S.difficulty_bits = last.difficulty_bits;
-      if (last.pq_curr != null) S.pq_curr = last.pq_curr;
-      if (last.pq_last != null) S.pq_last = last.pq_last;
+      var _pqc = last.pq_curr, _pql = last.pq_last;
+      if (_pqc != null) S.pq_curr = (_pqc > 7) ? (_pqc % 8) : _pqc;
+      if (_pql != null) S.pq_last = (_pql > 7) ? (_pql % 8) : _pql;
       S.total_transactions = blocks.reduce(function(acc,b){return acc+(b.tx_count||0);},0);
     }
     _lastFetchedHeight = tip;
@@ -1718,11 +1726,15 @@ function stamp() {
               var nb = {height: h, block_hash: ev.block_hash||'', hash: ev.block_hash||'',
                 tx_count: ev.tx_count || 0, w_state_fidelity: ev.w_state_fidelity || S.fidelity,
                 difficulty_bits: ev.difficulty_bits || S.difficulty_bits, _fr: true};
+              // pq fields from event if present, normalized to 0-7
+              if (ev.pq_curr != null) { nb.pq_curr = ev.pq_curr > 7 ? ev.pq_curr % 8 : ev.pq_curr; S.pq_curr = nb.pq_curr; }
+              if (ev.pq_last != null) { nb.pq_last = ev.pq_last > 7 ? ev.pq_last % 8 : ev.pq_last; S.pq_last = nb.pq_last; }
               _blocksById[h] = nb; blocks.push(nb);
               blocks.sort(function(a,b){return a.height-b.height;});
               renderChain();
             }
             if (typeof _H !== 'undefined') _H.onBlock();
+            window._lastKnownHeight = h; // keep loop2 flash in sync
             if (!txLoading) setTimeout(loadTxPage, 400);
           }
         }

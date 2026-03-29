@@ -3141,8 +3141,17 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
             _bh = 0
         result['block_height'] = _bh
         result['height']       = _bh
+        # pq_curr / pq_last from tip block — needed by visualization overlay
+        if _db_tip:
+            _pq_c = _db_tip.get('pq_curr')
+            _pq_l = _db_tip.get('pq_last')
+            result['pq_curr'] = int(_pq_c) if _pq_c is not None else (_bh % 8)
+            result['pq_last'] = int(_pq_l) if _pq_l is not None else ((_bh - 1) % 8)
+        else:
+            result['pq_curr'] = _bh % 8
+            result['pq_last'] = max(0, (_bh - 1)) % 8
 
-        logger.debug(f"[RPC-QM] ✅ h={_bh} oracle={'up' if w_snap else 'down'}")
+        logger.debug(f"[RPC-QM] ✅ h={_bh} pq_curr={result['pq_curr']} pq_last={result['pq_last']} oracle={'up' if w_snap else 'down'}")
         return _rpc_ok(result, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-QM] outer exception: {e}")
