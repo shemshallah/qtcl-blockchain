@@ -1360,6 +1360,28 @@ def db_ready() -> bool:
 # Called at ~line 462/486 inside get_oracle_address() / get_consensus_oracle_address()
 # but was NEVER DEFINED anywhere — same silent-NameError failure path as above.
 # Caller owns the connection: must call db_pool.put_connection(conn) when done.
+
+# ── pq0 column existence cache — checked once, never inside a live cursor ────
+_HAS_PQ0: Optional[bool] = None  # None = not yet checked
+
+def _check_has_pq0() -> bool:
+    """Check if blocks.pq0 column exists. Cached after first call."""
+    global _HAS_PQ0
+    if _HAS_PQ0 is not None:
+        return _HAS_PQ0
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='blocks' AND column_name='pq0'
+                LIMIT 1
+            """)
+            _HAS_PQ0 = cur.fetchone() is not None
+    except Exception:
+        _HAS_PQ0 = False
+    logger.info(f"[DB] blocks.pq0 column: {'EXISTS' if _HAS_PQ0 else 'MISSING — using 0'}")
+    return _HAS_PQ0
+
 def get_db_connection():
     """Return a raw psycopg2 connection from the pool (lazy init on first call)."""
     if not db_pool._initialized:
@@ -1539,9 +1561,9 @@ def query_latest_block() -> Optional[Dict[str, Any]]:
     
     for attempt in range(max_retries):
         try:
+            _has_pq0 = _check_has_pq0()
             with get_db_cursor() as cur:
-                # pq0 column may not exist on older deployments — check first
-                try:
+                if _has_pq0:
                     cur.execute("""
                         SELECT height, block_hash,
                                COALESCE(timestamp, EXTRACT(EPOCH FROM NOW())::bigint) as timestamp,
@@ -1550,9 +1572,7 @@ def query_latest_block() -> Optional[Dict[str, Any]]:
                         ORDER BY height DESC
                         LIMIT 1
                     """)
-                    row = cur.fetchone()
-                    has_pq0 = True
-                except Exception:
+                else:
                     cur.execute("""
                         SELECT height, block_hash,
                                COALESCE(timestamp, EXTRACT(EPOCH FROM NOW())::bigint) as timestamp,
@@ -1561,8 +1581,8 @@ def query_latest_block() -> Optional[Dict[str, Any]]:
                         ORDER BY height DESC
                         LIMIT 1
                     """)
-                    row = cur.fetchone()
-                    has_pq0 = False
+                row = cur.fetchone()
+                has_pq0 = _has_pq0
                 if row:
                     timestamp = row[2]
                     if timestamp is None:
@@ -2861,25 +2881,23 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
         def _query_block_at_height(h: int) -> Optional[dict]:
             """Full block query from DB — mirrors /api/blocks/height/<int>."""
             try:
+                _pq0_col = 12 if _check_has_pq0() else None
                 with get_db_cursor() as cur:
-                    try:
+                    if _pq0_col is not None:
                         cur.execute("""
                             SELECT height, block_hash, timestamp, oracle_w_state_hash,
                                    previous_hash, validator_public_key, nonce, difficulty,
                                    entropy_score, transactions_root, pq_curr, pq_last, pq0
                             FROM blocks WHERE height = %s LIMIT 1
                         """, (h,))
-                        row = cur.fetchone()
-                        _pq0_col = 12
-                    except Exception:
+                    else:
                         cur.execute("""
                             SELECT height, block_hash, timestamp, oracle_w_state_hash,
                                    previous_hash, validator_public_key, nonce, difficulty,
                                    entropy_score, transactions_root, pq_curr, pq_last
                             FROM blocks WHERE height = %s LIMIT 1
                         """, (h,))
-                        row = cur.fetchone()
-                        _pq0_col = None
+                    row = cur.fetchone()
                     if not row:
                         return None
                     block = {
@@ -2968,8 +2986,9 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
         if from_h < 0:
             from_h = 0
 
+        _pq0_col = 13 if _check_has_pq0() else None
         with get_db_cursor() as cur:
-            try:
+            if _pq0_col is not None:
                 cur.execute("""
                     SELECT b.height, b.block_hash, b.timestamp, b.oracle_w_state_hash,
                            b.previous_hash, b.validator_public_key, b.nonce, b.difficulty,
@@ -2983,9 +3002,7 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
                              b.entropy_score, b.transactions_root, b.pq_curr, b.pq_last, b.pq0
                     ORDER BY b.height ASC
                 """, (from_h, to_h))
-                rows = cur.fetchall()
-                _pq0_col = 13
-            except Exception:
+            else:
                 cur.execute("""
                     SELECT b.height, b.block_hash, b.timestamp, b.oracle_w_state_hash,
                            b.previous_hash, b.validator_public_key, b.nonce, b.difficulty,
@@ -2999,8 +3016,7 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
                              b.entropy_score, b.transactions_root, b.pq_curr, b.pq_last
                     ORDER BY b.height ASC
                 """, (from_h, to_h))
-                rows = cur.fetchall()
-                _pq0_col = None
+            rows = cur.fetchall()
 
         blocks = []
         for row in rows:
