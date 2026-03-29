@@ -1540,30 +1540,55 @@ def query_latest_block() -> Optional[Dict[str, Any]]:
     for attempt in range(max_retries):
         try:
             with get_db_cursor() as cur:
-                cur.execute("""
-                    SELECT height, block_hash, 
-                           COALESCE(timestamp, EXTRACT(EPOCH FROM NOW())::bigint) as timestamp,
-                           oracle_w_state_hash, pq0, pq_curr, pq_last
-                    FROM blocks
-                    ORDER BY height DESC
-                    LIMIT 1
-                """)
-                row = cur.fetchone()
+                # pq0 column may not exist on older deployments — check first
+                try:
+                    cur.execute("""
+                        SELECT height, block_hash,
+                               COALESCE(timestamp, EXTRACT(EPOCH FROM NOW())::bigint) as timestamp,
+                               oracle_w_state_hash, pq0, pq_curr, pq_last
+                        FROM blocks
+                        ORDER BY height DESC
+                        LIMIT 1
+                    """)
+                    row = cur.fetchone()
+                    has_pq0 = True
+                except Exception:
+                    cur.execute("""
+                        SELECT height, block_hash,
+                               COALESCE(timestamp, EXTRACT(EPOCH FROM NOW())::bigint) as timestamp,
+                               oracle_w_state_hash, pq_curr, pq_last
+                        FROM blocks
+                        ORDER BY height DESC
+                        LIMIT 1
+                    """)
+                    row = cur.fetchone()
+                    has_pq0 = False
                 if row:
                     timestamp = row[2]
                     if timestamp is None:
                         timestamp = int(time.time())
-                    
-                    return {
-                        'height':     row[0],
-                        'hash':       row[1],
-                        'block_hash': row[1],
-                        'timestamp':  timestamp,
-                        'w_state_hash': row[3],
-                        'pq0':        int(row[4]) if row[4] is not None else 0,
-                        'pq_curr':    int(row[5]) if row[5] is not None else 0,
-                        'pq_last':    int(row[6]) if row[6] is not None else 0,
-                    }
+                    if has_pq0:
+                        return {
+                            'height':     row[0],
+                            'hash':       row[1],
+                            'block_hash': row[1],
+                            'timestamp':  timestamp,
+                            'w_state_hash': row[3],
+                            'pq0':        int(row[4]) if row[4] is not None else 0,
+                            'pq_curr':    int(row[5]) if row[5] is not None else 0,
+                            'pq_last':    int(row[6]) if row[6] is not None else 0,
+                        }
+                    else:
+                        return {
+                            'height':     row[0],
+                            'hash':       row[1],
+                            'block_hash': row[1],
+                            'timestamp':  timestamp,
+                            'w_state_hash': row[3],
+                            'pq0':        0,
+                            'pq_curr':    int(row[4]) if row[4] is not None else 0,
+                            'pq_last':    int(row[5]) if row[5] is not None else 0,
+                        }
                 return None  # No blocks found
         except Exception as e:
             if attempt < max_retries - 1:
@@ -2837,13 +2862,24 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
             """Full block query from DB — mirrors /api/blocks/height/<int>."""
             try:
                 with get_db_cursor() as cur:
-                    cur.execute("""
-                        SELECT height, block_hash, timestamp, oracle_w_state_hash,
-                               previous_hash, validator_public_key, nonce, difficulty,
-                               entropy_score, transactions_root, pq_curr, pq_last, pq0
-                        FROM blocks WHERE height = %s LIMIT 1
-                    """, (h,))
-                    row = cur.fetchone()
+                    try:
+                        cur.execute("""
+                            SELECT height, block_hash, timestamp, oracle_w_state_hash,
+                                   previous_hash, validator_public_key, nonce, difficulty,
+                                   entropy_score, transactions_root, pq_curr, pq_last, pq0
+                            FROM blocks WHERE height = %s LIMIT 1
+                        """, (h,))
+                        row = cur.fetchone()
+                        _pq0_col = 12
+                    except Exception:
+                        cur.execute("""
+                            SELECT height, block_hash, timestamp, oracle_w_state_hash,
+                                   previous_hash, validator_public_key, nonce, difficulty,
+                                   entropy_score, transactions_root, pq_curr, pq_last
+                            FROM blocks WHERE height = %s LIMIT 1
+                        """, (h,))
+                        row = cur.fetchone()
+                        _pq0_col = None
                     if not row:
                         return None
                     block = {
@@ -2862,7 +2898,7 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                         'miner_address':    row[5] or '',
                         'w_state_fidelity': float(row[8]) if row[8] is not None else 0.0,
                         'w_entropy_hash':   row[3] or '',
-                        'pq0':              int(row[12]) if row[12] is not None else 0,
+                        'pq0':              int(row[_pq0_col]) if _pq0_col and row[_pq0_col] is not None else 0,
                         'pq_curr':          int(row[10]) if row[10] is not None else 0,
                         'pq_last':          int(row[11]) if row[11] is not None else 0,
                     }
@@ -2933,20 +2969,38 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
             from_h = 0
 
         with get_db_cursor() as cur:
-            cur.execute("""
-                SELECT b.height, b.block_hash, b.timestamp, b.oracle_w_state_hash,
-                       b.previous_hash, b.validator_public_key, b.nonce, b.difficulty,
-                       b.entropy_score, b.transactions_root, b.pq_curr, b.pq_last,
-                       COUNT(t.tx_hash) AS tx_count, b.pq0
-                FROM blocks b
-                LEFT JOIN transactions t ON t.height = b.height
-                WHERE b.height BETWEEN %s AND %s
-                GROUP BY b.height, b.block_hash, b.timestamp, b.oracle_w_state_hash,
-                         b.previous_hash, b.validator_public_key, b.nonce, b.difficulty,
-                         b.entropy_score, b.transactions_root, b.pq_curr, b.pq_last, b.pq0
-                ORDER BY b.height ASC
-            """, (from_h, to_h))
-            rows = cur.fetchall()
+            try:
+                cur.execute("""
+                    SELECT b.height, b.block_hash, b.timestamp, b.oracle_w_state_hash,
+                           b.previous_hash, b.validator_public_key, b.nonce, b.difficulty,
+                           b.entropy_score, b.transactions_root, b.pq_curr, b.pq_last,
+                           COUNT(t.tx_hash) AS tx_count, b.pq0
+                    FROM blocks b
+                    LEFT JOIN transactions t ON t.height = b.height
+                    WHERE b.height BETWEEN %s AND %s
+                    GROUP BY b.height, b.block_hash, b.timestamp, b.oracle_w_state_hash,
+                             b.previous_hash, b.validator_public_key, b.nonce, b.difficulty,
+                             b.entropy_score, b.transactions_root, b.pq_curr, b.pq_last, b.pq0
+                    ORDER BY b.height ASC
+                """, (from_h, to_h))
+                rows = cur.fetchall()
+                _pq0_col = 13
+            except Exception:
+                cur.execute("""
+                    SELECT b.height, b.block_hash, b.timestamp, b.oracle_w_state_hash,
+                           b.previous_hash, b.validator_public_key, b.nonce, b.difficulty,
+                           b.entropy_score, b.transactions_root, b.pq_curr, b.pq_last,
+                           COUNT(t.tx_hash) AS tx_count
+                    FROM blocks b
+                    LEFT JOIN transactions t ON t.height = b.height
+                    WHERE b.height BETWEEN %s AND %s
+                    GROUP BY b.height, b.block_hash, b.timestamp, b.oracle_w_state_hash,
+                             b.previous_hash, b.validator_public_key, b.nonce, b.difficulty,
+                             b.entropy_score, b.transactions_root, b.pq_curr, b.pq_last
+                    ORDER BY b.height ASC
+                """, (from_h, to_h))
+                rows = cur.fetchall()
+                _pq0_col = None
 
         blocks = []
         for row in rows:
@@ -2966,7 +3020,7 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
                 'miner_address':    row[5] or '',
                 'w_state_fidelity': float(row[8]) if row[8] is not None else 0.0,
                 'w_entropy_hash':   row[3] or '',
-                'pq0':              int(row[13]) if row[13] is not None else 0,
+                'pq0':              int(row[_pq0_col]) if _pq0_col and row[_pq0_col] is not None else 0,
                 'pq_curr':          int(row[10]) if row[10] is not None else 0,
                 'pq_last':          int(row[11]) if row[11] is not None else 0,
                 'tx_count':         int(row[12]) if row[12] is not None else 0,
