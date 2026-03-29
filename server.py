@@ -591,7 +591,13 @@ import queue as _queue_mod2
 _TX_JOB_Q: '_queue_mod2.Queue' = _queue_mod2.Queue(maxsize=8)
 
 def _build_tx_dsn() -> str:
-    """Always return a DSN pointed at port 6543 (Supabase transaction mode)."""
+    """Always return a DSN pointed at port 6543 (Supabase transaction mode).
+
+    PATCH-TX1: Injects connect_timeout=8 as a DSN keyword argument so the OS
+    TCP stack honours it even on kernels that ignore psycopg2's connect_timeout
+    kwarg (a known issue on some Linux kernels / Koyeb runtimes where a silently
+    dropped SYN retries for the full OS default ~127s).
+    """
     dsn = DB_URL or ''
     if not dsn or _USE_HTTP_DB:
         return ''
@@ -599,13 +605,27 @@ def _build_tx_dsn() -> str:
     if ':5432/' in dsn:
         dsn = dsn.replace(':5432/', ':6543/')
     if ':6543/' not in dsn and dsn.startswith('postgresql://'):
-        # No port in URL — inject 6543 before the DB path
         import re as _re
         dsn = _re.sub(r'(@[^/]+)(/.+)', r'\g<1>:6543\g<2>', dsn)
+    # Inject connect_timeout into the DSN query-string so libpq respects it
+    if 'connect_timeout' not in dsn:
+        sep = '&' if '?' in dsn else '?'
+        dsn = dsn + sep + 'connect_timeout=8'
     return dsn
 
 def _tx_worker_thread():
-    """Dedicated TX query thread — owns one private psycopg2 connection."""
+    """Dedicated TX query thread — owns one private psycopg2 connection.
+
+    PATCH-TX2: Removed the eager _connect() call that previously ran before the
+    while-loop started.  On Koyeb cold-deploy, Supabase's TCP pooler can take
+    30-240 s to accept a connection (or the kernel silently retries a dropped SYN
+    for the full OS default).  The eager connect stalled gunicorn's module import,
+    cascading into Koyeb's health-check window and triggering repeated SIGTERM +
+    restart loops until the 4-minute mark when the connect finally timed out and
+    the server declared itself healthy.
+
+    Now the thread starts immediately and connects lazily on the first job.
+    """
     import psycopg2 as _pg
     _tx_log = logging.getLogger('tx_worker')
     dsn = _build_tx_dsn()
@@ -620,14 +640,21 @@ def _tx_worker_thread():
         return
 
     conn = None
+    _last_connect_attempt: float = 0.0
+    _RECONNECT_BACKOFF: float = 5.0   # minimum seconds between reconnect attempts
 
     def _connect():
-        nonlocal conn
+        nonlocal conn, _last_connect_attempt
+        now = time.monotonic()
+        if now - _last_connect_attempt < _RECONNECT_BACKOFF:
+            return   # respect backoff — don't hammer Supabase
+        _last_connect_attempt = now
         try:
             if conn:
                 try: conn.close()
                 except Exception: pass
-            conn = _pg.connect(dsn, connect_timeout=10,
+            # connect_timeout also set in DSN string (PATCH-TX1) for kernel compliance
+            conn = _pg.connect(dsn, connect_timeout=8,
                                options='-c statement_timeout=9000')
             conn.autocommit = True
             _tx_log.info("[TX-WORKER] ✅ Connected to Supabase :6543 (transaction mode)")
@@ -635,13 +662,13 @@ def _tx_worker_thread():
             conn = None
             _tx_log.error(f"[TX-WORKER] Connect failed: {_ce}")
 
-    _connect()
+    # ── NO eager _connect() here — connect on first job ──────────────────────
 
     while True:
         try:
             job = _TX_JOB_Q.get(timeout=30)
         except _queue_mod2.Empty:
-            # Keepalive ping on idle
+            # Keepalive ping on idle — only if already connected
             if conn:
                 try: conn.cursor().execute("SELECT 1")
                 except Exception: _connect()
@@ -649,11 +676,11 @@ def _tx_worker_thread():
 
         result_q = job.get('result_q')
         try:
-            # Reconnect if connection dropped
+            # Connect if not yet connected or connection dropped
             if conn is None or conn.closed:
                 _connect()
             if conn is None:
-                if result_q: result_q.put({'error': 'DB connection unavailable'})
+                if result_q: result_q.put({'error': 'DB connection unavailable — retry shortly'})
                 continue
 
             cur = conn.cursor()
@@ -1264,8 +1291,13 @@ class DatabasePool:
                 max_connections = int(os.getenv('DB_POOL_MAX', '10'))
                 logger.info(f"[DB] Initializing app-level pooling: min={min_connections}, max={max_connections}")
                 logger.info(f"[DB] Connecting to Supabase pooler (aws-0-us-west-2.pooler.supabase.com)")
+                # PATCH-TX4: inject connect_timeout into DSN so libpq/kernel honours it
+                _pool_dsn = DB_URL
+                if _pool_dsn and 'connect_timeout' not in _pool_dsn:
+                    _sep = '&' if '?' in _pool_dsn else '?'
+                    _pool_dsn = _pool_dsn + _sep + 'connect_timeout=8'
                 self.pool = psycopg2_pool.ThreadedConnectionPool(
-                    min_connections, max_connections, DB_URL, connect_timeout=10)
+                    min_connections, max_connections, _pool_dsn, connect_timeout=8)
                 self._initialized = True
                 self.use_pooling  = True
                 self._next_retry_at   = 0.0         # reset backoff on success
@@ -1306,9 +1338,9 @@ class DatabasePool:
                 conn = self.pool.getconn()
                 if conn is None:
                     logger.debug("[DB] Pool exhausted, creating direct connection via pooler")
-                    conn = psycopg2.connect(DB_URL, connect_timeout=10)
+                    conn = psycopg2.connect(DB_URL, connect_timeout=8)
                 return conn
-            return psycopg2.connect(DB_URL, connect_timeout=10)
+            return psycopg2.connect(DB_URL, connect_timeout=8)
         except psycopg2.OperationalError as e:
             logger.error(f"[DB] ❌ Cannot connect to Supabase pooler: {e}")
             logger.error(f"[DB] Check POOLER_URL: {DB_URL[:50]}...")
@@ -3372,6 +3404,66 @@ def _rpc_getHealth(params: Any, rpc_id: Any) -> dict:
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getHealth exception: {e}")
         return _rpc_error(-32603, f"Health check failed: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ORACLE REGISTRY TABLE BOOTSTRAP
+# ═══════════════════════════════════════════════════════════════════════════════
+# PATCH-TX3: _lazy_ensure_oracle_registry was called in two RPC handlers but
+# never defined anywhere in the file — a latent NameError that exploded the
+# first time qtcl_getOracleRegistry or qtcl_getOracleRecord was called.
+# The function ensures the oracle_registry table exists (idempotent CREATE IF
+# NOT EXISTS), then sets a module-level flag so subsequent calls are free.
+
+_ora_registry_ensured: bool = False
+_ora_registry_ensure_lock = threading.Lock()
+
+def _lazy_ensure_oracle_registry() -> None:
+    """Ensure oracle_registry table exists in Supabase.  Idempotent, thread-safe,
+    called at most once per process lifetime (flag short-circuits all future calls).
+
+    Schema mirrors the columns accessed by _rpc_getOracleRegistry and
+    _rpc_getOracleRecord:
+      oracle_id, oracle_url, oracle_address, is_primary, last_seen,
+      block_height, peer_count, wallet_address, oracle_pub_key, cert_sig,
+      cert_auth_tag, mode, ip_hint, reg_tx_hash, registered_at, created_at
+    """
+    global _ora_registry_ensured
+    if _ora_registry_ensured:
+        return
+    with _ora_registry_ensure_lock:
+        if _ora_registry_ensured:
+            return
+        if not db_ready():
+            logger.warning("[ORACLE-REGISTRY] DB not ready — skipping table ensure")
+            return
+        try:
+            with get_db_cursor() as _cur:
+                _cur.execute("""
+                    CREATE TABLE IF NOT EXISTS oracle_registry (
+                        oracle_id        TEXT PRIMARY KEY,
+                        oracle_url       TEXT,
+                        oracle_address   TEXT,
+                        is_primary       BOOLEAN      DEFAULT FALSE,
+                        last_seen        TIMESTAMPTZ,
+                        block_height     BIGINT       DEFAULT 0,
+                        peer_count       INT          DEFAULT 0,
+                        wallet_address   TEXT,
+                        oracle_pub_key   TEXT,
+                        cert_sig         TEXT,
+                        cert_auth_tag    TEXT,
+                        mode             TEXT         DEFAULT 'full',
+                        ip_hint          TEXT,
+                        reg_tx_hash      TEXT         DEFAULT 'gossip_pending',
+                        registered_at    TIMESTAMPTZ  DEFAULT NOW(),
+                        created_at       TIMESTAMPTZ  DEFAULT NOW()
+                    )
+                """)
+            _ora_registry_ensured = True
+            logger.info("[ORACLE-REGISTRY] ✅ oracle_registry table ensured")
+        except Exception as _e:
+            logger.warning(f"[ORACLE-REGISTRY] Table ensure failed (non-fatal): {_e}")
+            # Don't set _ora_registry_ensured — allow retry on next call
 
 
 def _rpc_getOracleRegistry(params: Any, rpc_id: Any) -> dict:
