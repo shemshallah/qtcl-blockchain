@@ -1508,15 +1508,16 @@ def _ensure_genesis_block_in_db() -> bool:
             try:
                 _treasury_addr = TessellationRewardSchedule.TREASURY_ADDRESS if TessellationRewardSchedule else _COINBASE_ADDR
                 with get_db_cursor() as _wcur:
+                    _t_fp = hashlib.sha256(_treasury_addr.encode()).hexdigest()[:64]
                     _wcur.execute("""
                         INSERT INTO wallet_addresses
-                            (address, wallet_fingerprint, balance, transaction_count, updated_at)
-                        VALUES (%s, 'treasury', %s, 1, NOW())
+                            (address, wallet_fingerprint, public_key,
+                             balance, transaction_count, address_type)
+                        VALUES (%s, %s, %s, %s, 1, 'treasury')
                         ON CONFLICT (address) DO UPDATE SET
                             balance           = wallet_addresses.balance + EXCLUDED.balance,
-                            transaction_count = wallet_addresses.transaction_count + 1,
-                            updated_at        = NOW()
-                    """, (_treasury_addr, _COINBASE_AMOUNT))
+                            transaction_count = wallet_addresses.transaction_count + 1
+                    """, (_treasury_addr, _t_fp, _t_fp, _COINBASE_AMOUNT))
                 logger.info(
                     f"[GENESIS-BOOTSTRAP] 💰 Treasury wallet credited: {_COINBASE_AMOUNT} base units → {_treasury_addr[:22]}…"
                 )
@@ -3740,15 +3741,16 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
                 with get_db_cursor() as cur:
                     # ── Miner wallet balance ─────────────────────────────────────
+                    _miner_fp = hashlib.sha256(miner_address.encode()).hexdigest()[:64]
                     cur.execute("""
                         INSERT INTO wallet_addresses
-                            (address, wallet_fingerprint, balance, transaction_count, updated_at)
-                        VALUES (%s, 'miner', %s, 1, NOW())
+                            (address, wallet_fingerprint, public_key,
+                             balance, transaction_count, address_type)
+                        VALUES (%s, %s, %s, %s, 1, 'miner')
                         ON CONFLICT (address) DO UPDATE SET
                             balance           = wallet_addresses.balance + EXCLUDED.balance,
-                            transaction_count = wallet_addresses.transaction_count + 1,
-                            updated_at        = NOW()
-                    """, (miner_address, miner_reward))
+                            transaction_count = wallet_addresses.transaction_count + 1
+                    """, (miner_address, _miner_fp, _miner_fp, miner_reward))
                     logger.info(
                         f"[RPC-submitBlock] ⛏  Miner credited: {miner_reward} base units "
                         f"({miner_reward/100:.2f} QTCL) → {miner_address[:22]}…"
@@ -3756,15 +3758,16 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
                     # ── Treasury wallet balance ──────────────────────────────────
                     if treasury_address and treasury_reward > 0:
+                        _treas_fp = hashlib.sha256(treasury_address.encode()).hexdigest()[:64]
                         cur.execute("""
                             INSERT INTO wallet_addresses
-                                (address, wallet_fingerprint, balance, transaction_count, updated_at)
-                            VALUES (%s, 'treasury', %s, 1, NOW())
+                                (address, wallet_fingerprint, public_key,
+                                 balance, transaction_count, address_type)
+                            VALUES (%s, %s, %s, %s, 1, 'treasury')
                             ON CONFLICT (address) DO UPDATE SET
                                 balance           = wallet_addresses.balance + EXCLUDED.balance,
-                                transaction_count = wallet_addresses.transaction_count + 1,
-                                updated_at        = NOW()
-                        """, (treasury_address, treasury_reward))
+                                transaction_count = wallet_addresses.transaction_count + 1
+                        """, (treasury_address, _treas_fp, _treas_fp, treasury_reward))
                         logger.info(
                             f"[RPC-submitBlock] 💰 Treasury credited: {treasury_reward} base units "
                             f"({treasury_reward/100:.2f} QTCL) → {treasury_address[:22]}…"
