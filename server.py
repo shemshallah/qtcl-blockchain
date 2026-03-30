@@ -442,8 +442,10 @@ ORACLE_AVAILABLE = False
 ORACLE = None
 ORACLE_W_STATE_MANAGER = None
 LATTICE = None
-_ORACLE_INIT_EVENT = threading.Event()   # set once oracle is ready (or failed)
-_LATTICE_INIT_EVENT = threading.Event()  # set once lattice is ready (or failed)
+MEMPOOL = None
+_ORACLE_INIT_EVENT  = threading.Event()   # set once oracle is ready (or failed)
+_LATTICE_INIT_EVENT = threading.Event()   # set once lattice is ready (or failed)
+_MEMPOOL_INIT_EVENT = threading.Event()   # set once mempool is ready (or failed)
 
 def _deferred_lattice_init() -> None:
     """Import and initialise lattice_controller.py in a background thread.
@@ -522,6 +524,32 @@ threading.Thread(
     name="OracleDeferred",
 ).start()
 logger.info("[ORACLE] 🔄 Oracle init deferred to background thread — gunicorn will serve /health immediately")
+
+def _deferred_mempool_init() -> None:
+    """Import and initialise mempool.py in a background thread.
+
+    Mempool requires a live DB connection (Supabase pooler) which may not be
+    ready at import time.  Running in a daemon thread lets gunicorn bind
+    immediately; mempool becomes available within ~2-4 s of first DB success.
+    """
+    global MEMPOOL
+    try:
+        from mempool import get_mempool as _gmp
+        MEMPOOL = _gmp()
+        logger.info("[MEMPOOL-INIT] ✅ Mempool singleton started — TX pool live")
+    except ImportError as _ie:
+        logger.error(f"[MEMPOOL-INIT] ❌ mempool import failed: {_ie}")
+    except Exception as _ex:
+        logger.error(f"[MEMPOOL-INIT] ❌ Mempool deferred init error: {_ex}", exc_info=True)
+    finally:
+        _MEMPOOL_INIT_EVENT.set()
+
+threading.Thread(
+    target=_deferred_mempool_init,
+    daemon=True,
+    name="MempoolDeferred",
+).start()
+logger.info("[MEMPOOL] 🔄 Mempool init deferred to background thread — gunicorn will serve /health immediately")
 
 # ═════════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION & CONSTANTS
@@ -3309,23 +3337,17 @@ def _rpc_getMempoolStats(params: Any, rpc_id: Any) -> dict:
     """qtcl_getMempoolStats — mempool depth and fee percentiles."""
     try:
         logger.debug(f"[RPC-METHOD] qtcl_getMempoolStats called with params={params}, id={rpc_id}")
-        # Walk resolution chain: module-level MEMPOOL → globals.get_mempool() → mempool module singleton
-        mp = None
-        _srv_globals = sys.modules[__name__].__dict__
-        mp = _srv_globals.get("MEMPOOL") or _srv_globals.get("_MEMPOOL")
+        # Resolution chain: module-level MEMPOOL (wired by MempoolDeferred thread) → mempool._MEMPOOL fallback
+        mp = MEMPOOL  # primary: set by _deferred_mempool_init()
         if mp is None:
-            try:
-                import globals as _g
-                _gf = getattr(_g, "get_mempool", None)
-                if callable(_gf): mp = _gf()
-            except Exception: pass
-        if mp is None:
-            try:
+            try:  # fallback: read directly from mempool module singleton
                 import mempool as _mp_mod
-                mp = getattr(_mp_mod, "MEMPOOL", None) or getattr(_mp_mod, "_MEMPOOL_INSTANCE", None)
+                mp = getattr(_mp_mod, "_MEMPOOL", None) or getattr(_mp_mod, "_MEMPOOL_INSTANCE", None)
+                if mp is None and hasattr(_mp_mod, "get_mempool"):
+                    mp = _mp_mod.get_mempool()  # will create+start if not yet done
             except Exception: pass
         if mp is None:
-            logger.warning("[RPC-METHOD] qtcl_getMempoolStats: mempool not available")
+            logger.debug("[RPC-METHOD] qtcl_getMempoolStats: still initializing")
             return _rpc_ok({"depth": 0, "pending": 0, "note": "mempool initializing"}, rpc_id)
         try:
             stats = mp.get_stats() if hasattr(mp, "get_stats") else {"depth": getattr(mp, "size", lambda: 0)()}
