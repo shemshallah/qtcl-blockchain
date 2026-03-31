@@ -4464,11 +4464,21 @@ def _broadcast_snapshot_to_database(snapshot: dict) -> None:
                 'w_state_fidelity': snapshot.get('w_state_fidelity'),
                 'von_neumann_entropy': snapshot.get('von_neumann_entropy'),
                 'coherence_l1': snapshot.get('coherence_l1'),
+                'coherence_renyi': snapshot.get('coherence_renyi'),
+                'coherence_geometric': snapshot.get('coherence_geometric'),
+                'quantum_discord': snapshot.get('quantum_discord'),
+                'w_state_strength': snapshot.get('w_state_strength'),
+                'phase_coherence': snapshot.get('phase_coherence'),
+                'entanglement_witness': snapshot.get('entanglement_witness'),
+                'trace_purity': snapshot.get('trace_purity'),
                 'hlwe_signature': snapshot.get('hlwe_signature'),
                 'signature_valid': snapshot.get('signature_valid', False),
                 'oracle_address': snapshot.get('oracle_address'),
                 'aer_noise_state': snapshot.get('aer_noise_state', {}),
                 'measurement_counts': snapshot.get('measurement_counts', {}),
+                'mermin_test': snapshot.get('mermin_test') or snapshot.get('bell_test'),  # Client expects mermin_test
+                'bell_test': snapshot.get('bell_test'),  # Backward compatibility
+                'lattice_refresh_counter': snapshot.get('lattice_refresh_counter'),
             }
             with _DM_SNAPSHOT_LOCK:
                 _DM_SNAPSHOT_RING.append(dm_snap)
