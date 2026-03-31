@@ -2188,6 +2188,43 @@ def load_known_peers() -> List[Tuple[str, int]]:
     return []
 
 
+# ── Peer registry helpers ─────────────────────────────────────────────────────
+_PEER_STALE_SECS = 300  # 5 min without heartbeat → considered offline
+
+def _upsert_peer(peer_id: str, data: Dict[str, Any]) -> bool:
+    """Register or refresh a peer in peer_registry."""
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                INSERT INTO peer_registry
+                    (peer_id, ip_address, port, peer_type,
+                     block_height, miner_address, gossip_url,
+                     last_seen, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                ON CONFLICT (peer_id) DO UPDATE SET
+                    ip_address      = COALESCE(NULLIF(EXCLUDED.ip_address,''), peer_registry.ip_address),
+                    port            = CASE WHEN EXCLUDED.port > 0 THEN EXCLUDED.port ELSE peer_registry.port END,
+                    block_height    = EXCLUDED.block_height,
+                    miner_address   = COALESCE(NULLIF(EXCLUDED.miner_address,''), peer_registry.miner_address),
+                    gossip_url      = COALESCE(NULLIF(EXCLUDED.gossip_url,''), peer_registry.gossip_url),
+                    last_seen       = NOW(),
+                    updated_at      = NOW()
+            """, (
+                peer_id,
+                data.get('ip_address', ''),
+                int(data.get('port') or 9091),
+                data.get('peer_type', 'miner'),
+                int(data.get('block_height', 0)),
+                data.get('miner_address', ''),
+                data.get('gossip_url', '') or data.get('external_addr', ''),
+            ))
+        logger.info(f"[DB] _upsert_peer: registered peer {peer_id[:20]}...")
+        return True
+    except Exception as e:
+        logger.error(f"[GOSSIP] _upsert_peer({peer_id[:16]}): {e}")
+        return False
+
+
 # ═════════════════════════════════════════════════════════════════════════════════
 # MEASUREMENT SERVICE: Enterprise-Grade Async Metric Aggregation (Thread Pool + Queue)
 # Sharded node measurement with RLock-protected shared state
@@ -3751,16 +3788,20 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
     '''Register a peer on the Koyeb server for P2P discovery.'''
     try:
         p = params[0] if isinstance(params, list) and len(params) > 0 else params if isinstance(params, dict) else {}
-        node_id = str(p.get('node_id', ''))
-        external_addr = str(p.get('external_addr', ''))
-        pubkey = str(p.get('pubkey', ''))
-        chain_height = int(p.get('chain_height', 0))
+        # Accept both node_id and peer_id (miner uses peer_id)
+        node_id = str(p.get('node_id') or p.get('peer_id') or '')
+        external_addr = str(p.get('external_addr') or p.get('gossip_url') or p.get('address') or '')
+        pubkey = str(p.get('pubkey') or p.get('miner_address') or '')
+        chain_height = int(p.get('chain_height') or p.get('block_height') or 0)
         
         if not node_id or not external_addr:
+            logger.warning(f"[RPC] registerPeer: missing node_id ({node_id}) or external_addr ({external_addr})")
             return _rpc_error(-32602, "Missing node_id or external_addr", rpc_id)
             
         ip_addr = external_addr.split(':')[0] if ':' in external_addr else external_addr
         port = int(external_addr.split(':')[1]) if ':' in external_addr else 9091
+        
+        logger.info(f"[RPC] registerPeer: registering peer_id={node_id[:20]} addr={ip_addr}:{port}")
         
         _upsert_peer(node_id, {
             'peer_id': node_id,
