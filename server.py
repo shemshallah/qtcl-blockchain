@@ -1439,8 +1439,8 @@ class DatabasePool:
                 from psycopg2 import pool as psycopg2_pool
                 # min=1: open only ONE connection on pool creation — avoids
                 # exhausting Supabase session-mode slots during retry storms.
-                min_connections = 1
-                max_connections = int(os.getenv('DB_POOL_MAX', '10'))
+                min_connections = 5  # Increased from 1 for faster recovery
+                max_connections = int(os.getenv('DB_POOL_MAX', '50'))  # Increased for 1000+ miners
                 logger.info(f"[DB] Initializing app-level pooling: min={min_connections}, max={max_connections}")
                 logger.info(f"[DB] Connecting to Supabase pooler (aws-0-us-west-2.pooler.supabase.com)")
                 # PATCH-TX4: inject connect_timeout into DSN so libpq/kernel honours it
@@ -1448,6 +1448,10 @@ class DatabasePool:
                 if _pool_dsn and 'connect_timeout' not in _pool_dsn:
                     _sep = '&' if '?' in _pool_dsn else '?'
                     _pool_dsn = _pool_dsn + _sep + 'connect_timeout=8'
+                # Add statement_timeout to kill long queries
+                if 'statement_timeout' not in _pool_dsn:
+                    _sep = '&' if '?' in _pool_dsn else '?'
+                    _pool_dsn = _pool_dsn + _sep + 'statement_timeout=10000'
                 self.pool = psycopg2_pool.ThreadedConnectionPool(
                     min_connections, max_connections, _pool_dsn, connect_timeout=8)
                 self._initialized = True
@@ -1502,11 +1506,24 @@ class DatabasePool:
             raise
 
     def put_connection(self, conn):
+        """Return connection to pool with automatic cleanup."""
         try:
-            if self._http_mode and self.pool and conn:
-                self.pool.putconn(conn)
-            elif self.use_pooling and self.pool and conn:
-                self.pool.putconn(conn)
+            if conn is None:
+                return
+            # Always reset connection state before returning to pool
+            if self.use_pooling and self.pool:
+                try:
+                    # Rollback any uncommitted transaction
+                    if not conn.closed:
+                        conn.rollback()
+                    self.pool.putconn(conn)
+                except Exception:
+                    # If pool is full or connection is bad, close it
+                    try:
+                        if not conn.closed:
+                            conn.close()
+                    except:
+                        pass
             elif conn:
                 conn.close()
         except Exception as e:
@@ -3797,9 +3814,25 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
         if not node_id or not external_addr:
             logger.warning(f"[RPC] registerPeer: missing node_id ({node_id}) or external_addr ({external_addr})")
             return _rpc_error(-32602, "Missing node_id or external_addr", rpc_id)
-            
-        ip_addr = external_addr.split(':')[0] if ':' in external_addr else external_addr
-        port = int(external_addr.split(':')[1]) if ':' in external_addr else 9091
+        
+        # Parse URL properly - handle http://host:port, host:port, or just host
+        addr = external_addr
+        if '://' in addr:
+            addr = addr.split('://', 1)[1]  # Remove http://
+        if '/' in addr:
+            addr = addr.split('/')[0]  # Remove path
+        
+        if ':' in addr:
+            parts = addr.split(':')
+            ip_addr = parts[0]
+            try:
+                port = int(parts[1])
+            except ValueError:
+                logger.warning(f"[RPC] registerPeer: invalid port in '{external_addr}', using 9091")
+                port = 9091
+        else:
+            ip_addr = addr
+            port = 9091
         
         logger.info(f"[RPC] registerPeer: registering peer_id={node_id[:20]} addr={ip_addr}:{port}")
         
@@ -3811,7 +3844,7 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
             'block_height': chain_height
         })
         
-        return _rpc_ok({'registered': True, 'external_addr': external_addr, 'node_id': node_id}, rpc_id)
+        return _rpc_ok({'registered': True, 'external_addr': f'{ip_addr}:{port}', 'node_id': node_id}, rpc_id)
     except Exception as e:
         logger.error(f"[RPC] registerPeer error: {e}")
         return _rpc_error(-32603, str(e), rpc_id)
@@ -3935,6 +3968,39 @@ def _rpc_getHealth(params: Any, rpc_id: Any) -> dict:
 
 _ora_registry_ensured: bool = False
 _ora_registry_ensure_lock = threading.Lock()
+_chain_state_ensured: bool = False
+_chain_state_lock = threading.Lock()
+
+def _ensure_chain_state_table() -> None:
+    """Create chain_state table if it doesn't exist. Idempotent."""
+    global _chain_state_ensured
+    if _chain_state_ensured:
+        return
+    if not db_ready():
+        return
+    with _chain_state_lock:
+        if _chain_state_ensured:
+            return
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS chain_state (
+                        state_id INTEGER PRIMARY KEY,
+                        chain_height BIGINT DEFAULT 0,
+                        head_block_hash TEXT DEFAULT '',
+                        latest_coherence REAL DEFAULT 0.0,
+                        updated_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                cur.execute("""
+                    INSERT INTO chain_state (state_id, chain_height, head_block_hash, updated_at)
+                    VALUES (1, 0, '', NOW())
+                    ON CONFLICT (state_id) DO NOTHING
+                """)
+            _chain_state_ensured = True
+            logger.info("[DB] ✅ chain_state table ensured")
+        except Exception as e:
+            logger.warning(f"[DB] chain_state table creation failed (non-fatal): {e}")
 
 def _lazy_ensure_oracle_registry() -> None:
     """Ensure oracle_registry table exists in Supabase.  Idempotent, thread-safe,
@@ -4614,6 +4680,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
         # ── Update chain state ──────────────────────────────────────────────
         try:
+            _ensure_chain_state_table()
             with get_db_cursor() as cur:
                 cur.execute("""
                     INSERT INTO chain_state (state_id, chain_height, head_block_hash, latest_coherence, updated_at)
