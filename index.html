@@ -520,11 +520,13 @@ async function rpc(method, params) {
       body: JSON.stringify({jsonrpc:'2.0', id: _rpcId++, method: method, params: params || []}),
       signal: AbortSignal.timeout(6000)
     });
-    if (!r.ok) return null;
+    if (!r.ok) { console.error('[RPC] HTTP error:', method, r.status, r.statusText); return null; }
     var j = await r.json();
-    if (j.error) { console.warn('[RPC]', method, j.error.code, j.error.message); return null; }
+    if (j.error) { console.error('[RPC] JSON-RPC error:', method, j.error.code, j.error.message); return null; }
+    if (!j.result) { console.warn('[RPC] no result:', method); return null; }
+    console.debug('[RPC] success:', method);
     return j.result;
-  } catch(e) { return null; }
+  } catch(e) { console.error('[RPC] fetch error:', method, e.message || e); return null; }
 }
 
 // True JSON-RPC 2.0 batch — single HTTP round-trip
@@ -541,17 +543,18 @@ async function rpcBatch(calls) {
       body: JSON.stringify(batch),
       signal: AbortSignal.timeout(8000)
     });
-    if (!r.ok) return calls.map(function() { return null; });
+    if (!r.ok) { console.error('[RPC-BATCH] HTTP error:', r.status, r.statusText); return calls.map(function() { return null; }); }
     var arr = await r.json();
-    // Server may return single object on error or batch array
-    if (!Array.isArray(arr)) {
-      return calls.map(function(_, i) { return i === 0 && arr && !arr.error ? arr.result : null; });
-    }
-    return calls.map(function(_, i) {
+    if (!Array.isArray(arr)) { console.error('[RPC-BATCH] Expected array response, got:', typeof arr); return calls.map(function(_, i) { return i === 0 && arr && !arr.error ? arr.result : null; }); }
+    var results = calls.map(function(_, i) {
       var res = arr.find(function(a) { return a && a.id === (base + i); });
-      return (res && !res.error) ? res.result : null;
+      if (res && res.error) { console.error('[RPC-BATCH]', calls[i][0], '—', res.error.message); return null; }
+      if (!res) { console.warn('[RPC-BATCH] No response for', calls[i][0]); return null; }
+      return res.result || null;
     });
-  } catch(e) { return calls.map(function() { return null; }); }
+    console.debug('[RPC-BATCH] ' + calls.length + ' calls, ' + results.filter(Boolean).length + ' succeeded');
+    return results;
+  } catch(e) { console.error('[RPC-BATCH] fetch error:', e.message || e); return calls.map(function() { return null; }); }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1411,11 +1414,25 @@ function setOnline(ok) {
   t.textContent=ok?'LIVE':'OFFLINE';
 }
 
+var _lastMetricUpdate = 0;
+function isMetricsStale() {
+  var ageMs = Date.now() - _lastMetricUpdate;
+  return ageMs > 8000;
+}
+
+function renderStaleness() {
+  var stale = isMetricsStale();
+  var cp = document.getElementById('cp');
+  if (!cp) return;
+  if (stale) { cp.classList.add('stale'); } else { cp.classList.remove('stale'); }
+}
+
 var _lu = 0;
 function stamp() {
   _lu=Date.now();
+  _lastMetricUpdate = Date.now();
   var bu=document.getElementById('bu');
-  if(bu) bu.textContent='Updated '+new Date().toTimeString().slice(0,8);
+  if(bu) bu.textContent='Updated '+new Date().toTimeString().slice(0,8)+(isMetricsStale()?' [stale]':'');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1425,7 +1442,7 @@ function stamp() {
 // ── LOOP 1: Quantum Metrics — 2.5s — feeds lattice, oracle, mermin, noise bath
 // Sources: qtcl_getQuantumMetrics + qtcl_getLatestDMSnapshots
 (function loopQuantum() {
-  var _t = null;
+  var _t = null, _failureCount = 0;
   async function poll() {
     clearTimeout(_t);
     var results = await rpcBatch([
@@ -1433,6 +1450,20 @@ function stamp() {
       ['qtcl_getLatestDMSnapshots', [{limit: 5}]],
     ]);
     var qm = results[0], dms = results[1];
+    var hasData = !!(qm || dms);
+
+    if (!hasData) {
+      _failureCount++;
+      console.warn('[LOOP-QUANTUM] No data from RPC (attempt ' + _failureCount + ')');
+      if (_failureCount > 3) {
+        setOnline(false);
+        console.error('[LOOP-QUANTUM] Quantum loop offline (>3 failures)');
+      }
+      _t = setTimeout(poll, 2500);
+      return;
+    }
+    
+    _failureCount = 0;
 
     if (qm) {
       // w_state layer
@@ -1450,10 +1481,10 @@ function stamp() {
       // lattice_refresh_counter from oracle snapshot is also the cycle count
       var _lrc = (qm.w_state && qm.w_state.lattice_refresh_counter) || qm.lattice_refresh_counter || 0;
       if (_lrc > S.cycle) S.cycle = _lrc;
-      // pq plane
-      if (qm.pq0    != null && S.pq0    === 0) S.pq0    = qm.pq0;
-      if (qm.pq_curr != null && S.pq_curr === 0) S.pq_curr = qm.pq_curr;
-      if (qm.pq_last != null && S.pq_last === 0) S.pq_last = qm.pq_last;
+      // pq plane — always update (server is authoritative)
+      if (qm.pq0    != null) S.pq0    = qm.pq0;
+      if (qm.pq_curr != null) S.pq_curr = qm.pq_curr;
+      if (qm.pq_last != null) S.pq_last = qm.pq_last;
       // block height from metrics (supplemental — loop2 is authoritative)
       if (qm.height != null && qm.height > S.height) {
         S.height = qm.height;
@@ -1469,11 +1500,37 @@ function stamp() {
       // ── Flat DM fields from getQuantumMetrics → oracle_1 state ──────────────
       var _oid1 = 'oracle_1';
       if (!S.oracle_data[_oid1]) S.oracle_data[_oid1] = {};
-      if (qm.w_state_fidelity   != null) { S.oracle_data[_oid1].w_state_fidelity = qm.w_state_fidelity; S.fidelity = qm.w_state_fidelity; }
-      if (qm.coherence_l1       != null) { S.oracle_data[_oid1].coherence        = qm.coherence_l1;     S.coherence = qm.coherence_l1; }
-      if (qm.purity             != null) { S.oracle_data[_oid1].purity           = qm.purity;            S.purity = qm.purity; }
-      if (qm.von_neumann_entropy!= null) { S.oracle_data[_oid1].entropy          = qm.von_neumann_entropy; S.entropy = qm.von_neumann_entropy; }
-      S.oracle_data[_oid1].in_consensus = (qm.w_state_fidelity || 0) > 0.5;
+      // Try nested w_state first (preferred), then flat fields (fallback)
+      var ws2 = qm.w_state || {};
+      if (ws2.fidelity != null) {
+        S.oracle_data[_oid1].w_state_fidelity = ws2.fidelity;
+        S.fidelity = ws2.fidelity;
+      } else if (qm.w_state_fidelity != null) {
+        S.oracle_data[_oid1].w_state_fidelity = qm.w_state_fidelity;
+        S.fidelity = qm.w_state_fidelity;
+      }
+      if (ws2.coherence != null) {
+        S.oracle_data[_oid1].coherence = ws2.coherence;
+        S.coherence = ws2.coherence;
+      } else if (qm.coherence_l1 != null) {
+        S.oracle_data[_oid1].coherence = qm.coherence_l1;
+        S.coherence = qm.coherence_l1;
+      }
+      if (ws2.purity != null) {
+        S.oracle_data[_oid1].purity = ws2.purity;
+        S.purity = ws2.purity;
+      } else if (qm.purity != null) {
+        S.oracle_data[_oid1].purity = qm.purity;
+        S.purity = qm.purity;
+      }
+      if (ws2.entropy != null) {
+        S.oracle_data[_oid1].entropy = ws2.entropy;
+        S.entropy = ws2.entropy;
+      } else if (qm.von_neumann_entropy != null) {
+        S.oracle_data[_oid1].entropy = qm.von_neumann_entropy;
+        S.entropy = qm.von_neumann_entropy;
+      }
+      S.oracle_data[_oid1].in_consensus = (S.fidelity || 0) > 0.5;
     }
 
     // DM Snapshots (ring buffer — flat single-oracle entries) → noise bath + Mermin only
@@ -1500,6 +1557,7 @@ function stamp() {
     }
 
     updateDOM();
+    renderStaleness();
     setOnline(true);
     stamp();
     _t = setTimeout(poll, 2500);
@@ -1511,7 +1569,7 @@ function stamp() {
 // Authoritative for height, difficulty, avg block time, pq fields
 // Uses getBlockRange to backfill chain stream efficiently
 (function loopBlocks() {
-  var _t = null, _lastFetchedHeight = 0, _loading = false;
+  var _t = null, _lastFetchedHeight = 0, _loading = false, _blockFailCount = 0;
 
   async function poll() {
     clearTimeout(_t);
@@ -1519,8 +1577,15 @@ function stamp() {
     _loading = true;
     try {
       var hr = await rpc('qtcl_getBlockHeight');
-      if (!hr) { setOnline(false); return; }
+      if (!hr) {
+        console.warn('[LOOP-BLOCKS] getBlockHeight failed');
+        setOnline(false);
+        _blockFailCount++;
+        _t = setTimeout(poll, 3000);
+        return;
+      }
 
+      _blockFailCount = 0;
       var tip = parseInt(hr.height || 0);
       S.height = tip;
       S.tip_hash = hr.tip_hash || S.tip_hash;
@@ -1584,6 +1649,8 @@ function stamp() {
             // Reload txs when new block arrives
             if (!txLoading) setTimeout(loadTxPage, 300);
           }
+        } else {
+          console.warn('[LOOP-BLOCKS] getBlockRange failed for [' + fromH + ', ' + toH + ']');
         }
       }
       // Update bottom bar difficulty
@@ -1592,6 +1659,10 @@ function stamp() {
       st('mbt', S.avg_block_time_s > 0 ? S.avg_block_time_s.toFixed(1)+'s' : '--');
       st('mtx', S.total_transactions);
       setOnline(true);
+    } catch (e) {
+      console.error('[LOOP-BLOCKS] exception:', e.message);
+      _blockFailCount++;
+      if (_blockFailCount > 3) setOnline(false);
     } finally {
       _loading = false;
       _t = setTimeout(poll, 3000);
@@ -1633,6 +1704,7 @@ function stamp() {
     _lastFetchedHeight = tip;
     renderChain();
     updateDOM();
+    renderStaleness();
     poll(); // hand off to steady-state polling
   }
 
