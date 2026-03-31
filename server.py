@@ -2211,6 +2211,7 @@ _PEER_STALE_SECS = 300  # 5 min without heartbeat → considered offline
 def _upsert_peer(peer_id: str, data: Dict[str, Any]) -> bool:
     """Register or refresh a peer in peer_registry."""
     try:
+        _ensure_peer_registry_table()  # Ensure table exists
         with get_db_cursor() as cur:
             cur.execute("""
                 INSERT INTO peer_registry
@@ -2831,6 +2832,25 @@ def qtcl_pow_verify(
 # ═════════════════════════════════════════════════════════════════════════════════
 
 app = Flask(__name__)
+
+# ═════════════════════════════════════════════════════════════════════════════════
+# Ensure database tables exist on startup
+# ═════════════════════════════════════════════════════════════════════════════════
+def _ensure_db_tables():
+    """Create all required tables on startup."""
+    import threading
+    def _init_tables():
+        import time
+        time.sleep(2)  # Wait for DB pool to initialize
+        try:
+            _ensure_peer_registry_table()
+            _ensure_chain_state_table()
+            logger.info("[DB] ✅ All tables ensured on startup")
+        except Exception as e:
+            logger.warning(f"[DB] Table init on startup failed: {e}")
+    threading.Thread(target=_init_tables, daemon=True, name='DB-TableInit').start()
+
+_ensure_db_tables()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ❌ SHUTDOWN CODE COMPLETELY DELETED ❌
@@ -3899,10 +3919,11 @@ def _rpc_getPeers(params: Any, rpc_id: Any) -> dict:
         # This is the authoritative source for registered miners/peers
         if not peers:
             try:
+                _ensure_peer_registry_table()  # Ensure table exists
                 with get_db_cursor() as cur:
                     cur.execute("""
                         SELECT peer_id, ip_address, port, miner_address, block_height,
-                               last_seen, gossip_url, total_earned_qtcl, block_count
+                               last_seen, gossip_url
                         FROM peer_registry
                         WHERE last_seen > NOW() - INTERVAL '7 days'
                         ORDER BY last_seen DESC
@@ -3919,8 +3940,6 @@ def _rpc_getPeers(params: Any, rpc_id: Any) -> dict:
                             "block_height": row[4] or 0,
                             "last_seen": str(row[5]) if row[5] else "",
                             "gossip_url": row[6] or "",
-                            "total_earned_qtcl": float(row[7]) if row[7] else 0.0,
-                            "block_count": row[8] or 0,
                         })
                     logger.debug(f"[RPC-METHOD] qtcl_getPeers: DB returned {len(peers)} peers")
             except Exception as e:
@@ -3931,6 +3950,56 @@ def _rpc_getPeers(params: Any, rpc_id: Any) -> dict:
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getPeers outer exception: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": type(e).__name__})
+
+
+def _rpc_heartbeat(params: Any, rpc_id: Any) -> dict:
+    """qtcl_heartbeat — Keep peer alive in registry. Updates last_seen timestamp."""
+    try:
+        p = params[0] if isinstance(params, list) and len(params) > 0 else params if isinstance(params, dict) else {}
+        node_id = str(p.get('node_id') or p.get('peer_id') or '')
+        block_height = int(p.get('block_height') or p.get('height') or 0)
+        
+        if not node_id:
+            return _rpc_error(-32602, "Missing node_id", rpc_id)
+        
+        # Update last_seen and block_height
+        _upsert_peer(node_id, {
+            'peer_id': node_id,
+            'block_height': block_height,
+            'gossip_url': p.get('gossip_url', p.get('external_addr', ''))
+        })
+        
+        # Return list of other active peers for this node to connect to
+        peers = []
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    SELECT peer_id, ip_address, port, gossip_url
+                    FROM peer_registry
+                    WHERE peer_id != %s 
+                      AND last_seen > NOW() - INTERVAL '10 minutes'
+                      AND ip_address NOT IN ('127.0.0.1', 'localhost', '')
+                    ORDER BY last_seen DESC
+                    LIMIT 50
+                """, (node_id,))
+                for row in cur.fetchall():
+                    peers.append({
+                        'peer_id': row[0] or '',
+                        'ip_address': row[1] or '',
+                        'port': row[2] or 9091,
+                        'gossip_url': row[3] or f"{row[1]}:{row[2]}" if row[1] else ''
+                    })
+        except Exception as e:
+            logger.debug(f"[HEARTBEAT] Failed to fetch peers: {e}")
+        
+        return _rpc_ok({
+            'status': 'ok',
+            'peer_count': len(peers),
+            'peers': peers
+        }, rpc_id)
+    except Exception as e:
+        logger.error(f"[RPC] heartbeat error: {e}")
+        return _rpc_error(-32603, str(e), rpc_id)
 
 
 def _rpc_getHealth(params: Any, rpc_id: Any) -> dict:
@@ -3970,6 +4039,50 @@ _ora_registry_ensured: bool = False
 _ora_registry_ensure_lock = threading.Lock()
 _chain_state_ensured: bool = False
 _chain_state_lock = threading.Lock()
+_peer_registry_ensured: bool = False
+_peer_registry_lock = threading.Lock()
+
+def _ensure_peer_registry_table() -> None:
+    """Create peer_registry table if it doesn't exist. Idempotent."""
+    global _peer_registry_ensured
+    if _peer_registry_ensured:
+        return
+    if not db_ready():
+        return
+    with _peer_registry_lock:
+        if _peer_registry_ensured:
+            return
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS peer_registry (
+                        peer_id TEXT PRIMARY KEY,
+                        ip_address TEXT NOT NULL,
+                        port INTEGER DEFAULT 9091,
+                        peer_type TEXT DEFAULT 'miner',
+                        block_height BIGINT DEFAULT 0,
+                        miner_address TEXT DEFAULT '',
+                        gossip_url TEXT DEFAULT '',
+                        total_earned_qtcl REAL DEFAULT 0.0,
+                        block_count INTEGER DEFAULT 0,
+                        last_seen TIMESTAMPTZ DEFAULT NOW(),
+                        created_at TIMESTAMPTZ DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                # Create index for fast peer lookups
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_peer_registry_last_seen 
+                    ON peer_registry(last_seen DESC)
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_peer_registry_height 
+                    ON peer_registry(block_height DESC)
+                """)
+            _peer_registry_ensured = True
+            logger.info("[DB] ✅ peer_registry table ensured")
+        except Exception as e:
+            logger.warning(f"[DB] peer_registry table creation failed: {e}")
 
 def _ensure_chain_state_table() -> None:
     """Create chain_state table if it doesn't exist. Idempotent."""
@@ -4928,6 +5041,7 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getMempool":        _rpc_getMempool,
     "qtcl_getPeers":          _rpc_getPeers,
     "qtcl_registerPeer":      _rpc_registerPeer,
+    "qtcl_heartbeat":         _rpc_heartbeat,
     "qtcl_getMyAddr":         _rpc_getMyAddr,
     "qtcl_getHealth":         _rpc_getHealth,
     "qtcl_getEvents":         _rpc_getEvents,
