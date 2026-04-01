@@ -3421,7 +3421,6 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
                 "ban_score":     0,
                 "is_relay":      _is_node
             }
-            }
         logger.info(f"[P2P] ✅ Peer registered: node={node_id[:16]}… addr={external_addr} h={chain_height}")
         return _rpc_ok({"registered": True, "node_id": node_id, "external_addr": external_addr, "caller_ip": caller_ip}, rpc_id)
     except Exception as e:
