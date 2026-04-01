@@ -3223,9 +3223,21 @@ def _rpc_getPythPrice(params: Any, rpc_id: Any) -> dict:
 
 def _rpc_getMempoolStats(params: Any, rpc_id: Any) -> dict:
     """qtcl_getMempoolStats — mempool depth and fee percentiles."""
+
+
+def _rpc_getMempool(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getMempool — pending transaction list for block building."""
     try:
-        logger.debug(f"[RPC-METHOD] qtcl_getMempoolStats called with params={params}, id={rpc_id}")
-        # Walk resolution chain: module-level MEMPOOL → globals.get_mempool() → mempool module singleton
+        limit = 1000
+        if isinstance(params, list) and params:
+            try: limit = int(params[0])
+            except (ValueError, TypeError): limit = 1000
+        elif isinstance(params, dict):
+            try: limit = int(params.get("limit", 1000))
+            except (ValueError, TypeError): limit = 1000
+        limit = min(max(int(limit), 1), 2000)
+        
+        # Walk resolution chain for mempool
         mp = None
         _srv_globals = sys.modules[__name__].__dict__
         mp = _srv_globals.get("MEMPOOL") or _srv_globals.get("_MEMPOOL")
@@ -3240,19 +3252,39 @@ def _rpc_getMempoolStats(params: Any, rpc_id: Any) -> dict:
                 import mempool as _mp_mod
                 mp = getattr(_mp_mod, "MEMPOOL", None) or getattr(_mp_mod, "_MEMPOOL_INSTANCE", None)
             except Exception: pass
+        
         if mp is None:
-            logger.warning("[RPC-METHOD] qtcl_getMempoolStats: mempool not available")
-            return _rpc_ok({"depth": 0, "pending": 0, "note": "mempool initializing"}, rpc_id)
+            return _rpc_ok({"transactions": [], "count": 0, "note": "mempool initializing"}, rpc_id)
+        
+        # Get pending transactions
         try:
-            stats = mp.get_stats() if hasattr(mp, "get_stats") else {"depth": getattr(mp, "size", lambda: 0)()}
-            logger.debug(f"[RPC-METHOD] qtcl_getMempoolStats success")
-            return _rpc_ok(stats, rpc_id)
+            pending = mp.get_block_transactions(max_txs=limit) if hasattr(mp, 'get_block_transactions') else []
+            if isinstance(pending, tuple):
+                txs = pending[0] if pending else []
+            else:
+                txs = pending or []
+            
+            tx_list = []
+            for tx in txs:
+                tx_list.append({
+                    'tx_hash': getattr(tx, 'tx_hash', str(tx)),
+                    'from': getattr(tx, 'from_address', getattr(tx, 'sender', '')),
+                    'to': getattr(tx, 'to_address', getattr(tx, 'recipient', '')),
+                    'amount': float(getattr(tx, 'amount', 0) or 0),
+                    'fee': float(getattr(tx, 'fee', 0.001) or 0.001),
+                    'nonce': getattr(tx, 'nonce', 0),
+                })
+            
+            return _rpc_ok({
+                "transactions": tx_list,
+                "count": len(tx_list),
+            }, rpc_id)
         except Exception as me:
-            logger.exception(f"[RPC-METHOD] qtcl_getMempoolStats: get_stats error: {me}")
-            return _rpc_error(-32603, f"Mempool stats failed: {str(me)}", rpc_id, {"exception": type(me).__name__})
+            logger.debug(f"[RPC-METHOD] qtcl_getMempool: error: {me}")
+            return _rpc_ok({"transactions": [], "count": 0, "error": str(me)}, rpc_id)
     except Exception as e:
-        logger.exception(f"[RPC-METHOD] qtcl_getMempoolStats outer exception: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": type(e).__name__})
+        logger.exception(f"[RPC-METHOD] qtcl_getMempool outer exception: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
 def _rpc_getPeers(params: Any, rpc_id: Any) -> dict:
