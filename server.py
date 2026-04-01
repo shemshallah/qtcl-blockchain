@@ -3644,6 +3644,141 @@ def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"Oracle reg submission failed: {e}", rpc_id)
 
 
+def _rpc_submitTransaction(params: Any, rpc_id: Any) -> dict:
+    """qtcl_submitTransaction — validate and submit a user transaction to the mempool.
+    Params (object):
+      from_address    string  required — sender QTCL address
+      to_address      string  required — recipient QTCL address  
+      amount          float   required — amount in QTCL
+      fee             float   optional — transaction fee (default 0.001)
+      tx_hash         string  optional — client-computed tx hash (server computes if omitted)
+      timestamp_ns    int     optional — nanosecond timestamp
+      nonce           int     optional — transaction sequence number
+      signature       object  optional — HLWE signature over tx_hash
+      pubkey          string  optional — sender's HLWE public key hex
+    Returns: {status, tx_hash, accepted, message} or error
+    """
+    import hashlib
+    
+    try:
+        # Parse params
+        p = params if isinstance(params, dict) else (params[0] if isinstance(params, list) and params and isinstance(params[0], dict) else {})
+        
+        from_addr   = str(p.get('from_address', p.get('from', '')))
+        to_addr     = str(p.get('to_address', p.get('to', '')))
+        amount      = float(p.get('amount', 0.0) or 0.0)
+        fee         = float(p.get('fee', 0.001) or 0.001)
+        tx_hash     = str(p.get('tx_hash', p.get('txid', '')))
+        timestamp_ns = int(p.get('timestamp_ns', 0) or 0)
+        nonce       = int(p.get('nonce', 0) or 0)
+        signature   = p.get('signature')
+        pubkey      = str(p.get('pubkey', p.get('public_key', '')))
+        
+        # Validation
+        if not from_addr or not to_addr:
+            return _rpc_error(-32602, "from_address and to_address are required", rpc_id)
+        
+        if amount <= 0:
+            return _rpc_error(-32602, "amount must be positive", rpc_id)
+        
+        if fee < 0:
+            return _rpc_error(-32602, "fee cannot be negative", rpc_id)
+        
+        # Validate address format (qtcl1...)
+        if not from_addr.startswith('qtcl1') or not to_addr.startswith('qtcl1'):
+            return _rpc_error(-32602, "Invalid address format - must start with qtcl1", rpc_id)
+        
+        # Generate tx_hash if not provided
+        if not tx_hash:
+            ts = timestamp_ns or int(time.time() * 1e9)
+            tx_data = f"{from_addr}:{to_addr}:{amount}:{fee}:{nonce}:{ts}"
+            tx_hash = hashlib.sha256(tx_data.encode()).hexdigest()
+        
+        # Ensure timestamp_ns
+        if not timestamp_ns:
+            timestamp_ns = int(time.time() * 1e9)
+        
+        # Build raw transaction
+        raw_tx = {
+            'tx_hash':      tx_hash,
+            'from_address': from_addr,
+            'to_address':   to_addr,
+            'amount':       amount,
+            'fee':          fee,
+            'nonce':        nonce,
+            'timestamp_ns': timestamp_ns,
+            'type':         'transfer',
+        }
+        
+        if pubkey:
+            raw_tx['public_key'] = pubkey
+        if signature:
+            raw_tx['signature'] = signature
+        
+        logger.info(f"[RPC-submitTransaction] 📝 TX {tx_hash[:16]}... from={from_addr[:16]}... to={to_addr[:16]}... amount={amount} fee={fee}")
+        
+        # Try mempool submission
+        try:
+            from mempool import add_transaction
+            accepted, msg = add_transaction(raw_tx)
+            
+            if accepted:
+                logger.info(f"[RPC-submitTransaction] ✅ ACCEPTED {tx_hash[:16]}...: {msg}")
+                return _rpc_ok({
+                    'status':   'accepted',
+                    'tx_hash':  tx_hash,
+                    'accepted': True,
+                    'message':  msg,
+                    'from':     from_addr,
+                    'to':       to_addr,
+                    'amount':   amount,
+                    'fee':      fee,
+                }, rpc_id)
+            else:
+                logger.warning(f"[RPC-submitTransaction] ❌ REJECTED {tx_hash[:16]}...: {msg}")
+                return _rpc_ok({
+                    'status':   'rejected',
+                    'tx_hash':  tx_hash,
+                    'accepted': False,
+                    'message':  msg,
+                }, rpc_id)
+                
+        except ImportError as ie:
+            logger.warning(f"[RPC-submitTransaction] mempool unavailable, using direct DB: {ie}")
+            # Fallback: direct DB insert
+            try:
+                from_db = query_address_balance(from_addr)
+                balance = float(from_db.get('balance', 0.0) or 0.0) if from_db else 0.0
+                
+                if balance < amount + fee:
+                    return _rpc_error(-32002, f"Insufficient balance: {balance} QTCL", rpc_id)
+                
+                # Insert transaction directly (unconfirmed)
+                tx_id = insert_transaction(from_addr, to_addr, int(amount * 100000000))
+                
+                if tx_id:
+                    return _rpc_ok({
+                        'status':   'accepted',
+                        'tx_hash':  tx_hash,
+                        'accepted': True,
+                        'message':  'Transaction accepted (unconfirmed)',
+                        'from':     from_addr,
+                        'to':       to_addr,
+                        'amount':   amount,
+                        'fee':      fee,
+                    }, rpc_id)
+                else:
+                    return _rpc_error(-32000, "Failed to insert transaction", rpc_id)
+                    
+            except Exception as db_err:
+                logger.error(f"[RPC-submitTransaction] DB error: {db_err}")
+                return _rpc_error(-32000, f"Transaction failed: {db_err}", rpc_id)
+                
+    except Exception as e:
+        logger.exception(f"[RPC-submitTransaction] Unhandled error: {e}")
+        return _rpc_error(-32603, f"Transaction submission failed: {str(e)}", rpc_id)
+
+
 def _rpc_getEvents(params: Any, rpc_id: Any) -> dict:
     """qtcl_getEvents — poll recent RPC events (tx, block, oracle_snapshot, oracle_dm, oracle_measurements)."""
     try:
@@ -4174,68 +4309,26 @@ def _rpc_getLatestDMSnapshot(params: Any, rpc_id: Any) -> dict:
         von_neumann_entropy, coherence_l1, hlwe_signature, signature_valid, oracle_address
     }
     """
-    try:
-        with _DM_SNAPSHOT_LOCK:
-            if not _DM_SNAPSHOT_RING:
-                return _rpc_error(-32000, "No DM snapshots available yet", rpc_id)
-            latest = list(_DM_SNAPSHOT_RING)[-1]
-        logger.debug(f"[RPC-METHOD] qtcl_getLatestDMSnapshot: returned snapshot ts={latest.get('timestamp_ns')}")
-        return _rpc_ok(latest, rpc_id)
-    except Exception as e:
-        logger.exception(f"[RPC-METHOD] qtcl_getLatestDMSnapshot: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+    from globals import get_latest_dm_snapshot
+    snap = get_latest_dm_snapshot()
+    if not snap:
+        return _rpc_ok({}, rpc_id)
+    return _rpc_ok(snap, rpc_id)
 
 
-def _rpc_getLatestDMSnapshots(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getLatestDMSnapshots — fetch last N DM snapshots (default 10, max 100)."""
-    try:
-        limit = 10
-        if isinstance(params, list) and params:
-            try:
-                limit = min(int(params[0]), 100)
-            except (ValueError, TypeError):
-                pass
-        elif isinstance(params, dict):
-            try:
-                limit = min(int(params.get("limit", 10)), 100)
-            except (ValueError, TypeError):
-                pass
-        
-        with _DM_SNAPSHOT_LOCK:
-            snaps = list(_DM_SNAPSHOT_RING)[-limit:] if _DM_SNAPSHOT_RING else []
-        
-        logger.debug(f"[RPC-METHOD] qtcl_getLatestDMSnapshots: returned {len(snaps)} snapshots")
-        return _rpc_ok({"snapshots": snaps, "count": len(snaps)}, rpc_id)
-    except Exception as e:
-        logger.exception(f"[RPC-METHOD] qtcl_getLatestDMSnapshots: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
-
-
-
-def _rpc_getMempool(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getMempool — pending transaction list for block building."""
-    try:
-        from mempool import get_pending_transactions as _get_pending
-        max_count = 500
-        if isinstance(params, list) and params:
-            try: max_count = min(int(params[0]), 2000)
-            except (ValueError, TypeError): pass
-        txs = _get_pending(max_count=max_count)
-        serialized = []
-        for tx in txs:
-            if hasattr(tx, '__dict__'):
-                serialized.append({k: v for k, v in tx.__dict__.items() if not k.startswith('_')})
-            elif isinstance(tx, dict):
-                serialized.append(tx)
-        logger.debug(f"[RPC-METHOD] qtcl_getMempool: returning {len(serialized)} txs")
-        return _rpc_ok(serialized, rpc_id)
-    except Exception as e:
-        logger.exception(f"[RPC-METHOD] qtcl_getMempool: {e}")
-        return _rpc_ok([], rpc_id)
+def _rpc_listMethods(params: Any, rpc_id: Any) -> dict:
+    """system.listMethods — introspection: list all available RPC methods."""
+    methods = list(_RPC_METHODS.keys())
+    return _rpc_ok({
+        'methods': sorted(methods),
+        'count': len(methods),
+    }, rpc_id)
 
 
 _RPC_METHODS: Dict[str, Any] = {
+    "system.listMethods":    _rpc_listMethods,  # ← NEW: introspection
     "qtcl_submitBlock":       _rpc_submitBlock,
+    "qtcl_submitTransaction": _rpc_submitTransaction,  # ← NEW: user transaction submission
     "qtcl_getBlockHeight":    _rpc_getBlockHeight,
     "qtcl_getBalance":        _rpc_getBalance,
     "qtcl_getTransaction":    _rpc_getTransaction,
