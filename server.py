@@ -3304,11 +3304,11 @@ def _rpc_getPeers(params: Any, rpc_id: Any) -> dict:
             with get_db_cursor() as cur:
                 cur.execute("""
                     SELECT node_id, external_addr, pubkey_hash, chain_height,
-                           last_seen, capabilities, ban_score
+                           last_seen, capabilities, ban_score, is_relay
                     FROM   peer_registry
                     WHERE  last_seen > NOW() - INTERVAL '5 minutes'
                       AND  ban_score < 100
-                    ORDER  BY chain_height DESC, last_seen DESC
+                    ORDER  BY is_relay DESC, chain_height DESC, last_seen DESC
                     LIMIT  %s
                 """, (limit,))
                 rows = cur.fetchall()
@@ -3382,23 +3382,32 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
                         first_seen    TIMESTAMPTZ DEFAULT NOW(),
                         capabilities  JSONB       DEFAULT '[]',
                         ban_score     INTEGER     DEFAULT 0,
-                        caller_ip     TEXT        DEFAULT ''
+                        caller_ip     TEXT        DEFAULT '',
+                        is_relay      BOOLEAN     DEFAULT FALSE
                     )
                 """)
+                # Migration: add is_relay if missing
+                try: cur.execute("ALTER TABLE peer_registry ADD COLUMN is_relay BOOLEAN DEFAULT FALSE")
+                except Exception: pass
+
+                _is_node = bool(params.get("is_node") or params.get("is_relay") or False)
+
                 cur.execute("""
                     INSERT INTO peer_registry
-                        (node_id, external_addr, pubkey_hash, chain_height, last_seen, caller_ip)
-                    VALUES (%s, %s, %s, %s, NOW(), %s)
+                        (node_id, external_addr, pubkey_hash, chain_height, last_seen, caller_ip, is_relay)
+                    VALUES (%s, %s, %s, %s, NOW(), %s, %s)
                     ON CONFLICT (node_id) DO UPDATE SET
                         external_addr = EXCLUDED.external_addr,
                         pubkey_hash   = EXCLUDED.pubkey_hash,
                         chain_height  = EXCLUDED.chain_height,
                         last_seen     = NOW(),
-                        caller_ip     = EXCLUDED.caller_ip
-                """, (node_id, external_addr, pubkey_hash, chain_height, caller_ip))
+                        caller_ip     = EXCLUDED.caller_ip,
+                        is_relay      = EXCLUDED.is_relay
+                """, (node_id, external_addr, pubkey_hash, chain_height, caller_ip, _is_node))
         except Exception as _dbe:
             # Non-fatal: fall through to in-process cache so peer can still be served
             logger.warning(f"[RPC-METHOD] qtcl_registerPeer DB upsert failed: {_dbe}")
+            _is_node = bool(params.get("is_node") or False)
 
         # Always update in-process cache for immediate availability
         with _LIVE_PEERS_LOCK:
@@ -3410,6 +3419,8 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
                 "last_seen":     time.time(),
                 "caller_ip":     caller_ip,
                 "ban_score":     0,
+                "is_relay":      _is_node
+            }
             }
         logger.info(f"[P2P] ✅ Peer registered: node={node_id[:16]}… addr={external_addr} h={chain_height}")
         return _rpc_ok({"registered": True, "node_id": node_id, "external_addr": external_addr, "caller_ip": caller_ip}, rpc_id)
