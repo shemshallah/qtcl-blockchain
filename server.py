@@ -4358,6 +4358,31 @@ def _rpc_getLatestDMSnapshot(params: Any, rpc_id: Any) -> dict:
     return _rpc_ok(snap, rpc_id)
 
 
+def _rpc_getLatestDMSnapshots(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getLatestDMSnapshots — retrieve N most recent density matrix snapshots from the ring buffer."""
+    try:
+        limit = 10
+        if isinstance(params, list) and params:
+            try: limit = int(params[0])
+            except: pass
+        elif isinstance(params, dict):
+            try: limit = int(params.get("limit", 10))
+            except: pass
+            
+        limit = min(max(int(limit), 1), 100)
+        
+        with _DM_SNAPSHOT_LOCK:
+            snapshots = list(_DM_SNAPSHOT_RING)[-limit:]
+            
+        return _rpc_ok({
+            "snapshots": snapshots,
+            "count": len(snapshots),
+            "ring_size": len(_DM_SNAPSHOT_RING)
+        }, rpc_id)
+    except Exception as e:
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
+
 def _rpc_listMethods(params: Any, rpc_id: Any) -> dict:
     """system.listMethods — introspection: list all available RPC methods."""
     methods = list(_RPC_METHODS.keys())
