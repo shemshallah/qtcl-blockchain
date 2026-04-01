@@ -1551,23 +1551,30 @@ class QueryCache:
         self.ttl = ttl_sec
         self.cache = OrderedDict()
         self.lock = threading.RLock()
-    
+
     def set(self, key: str, value: Any) -> None:
         with self.lock:
             self.cache[key] = (time.time(), value)
             if len(self.cache) > 10000:
                 self.cache.popitem(last=False)
-    
+
     def get(self, key: str) -> Optional[Any]:
         with self.lock:
             if key not in self.cache:
                 return None
             ts, val = self.cache[key]
             if time.time() - ts > self.ttl:
-                del self.cache[key]
-                return None
+                return None  # expired but NOT deleted — keep for stale fallback
             return val
-    
+
+    def get_stale(self, key: str) -> Optional[Any]:
+        """Return cached value even if expired (for degraded mode fallback)."""
+        with self.lock:
+            if key not in self.cache:
+                return None
+            _, val = self.cache[key]
+            return val
+
     def stats(self):
         with self.lock:
             return {'size': len(self.cache), 'ttl': self.ttl}
@@ -1618,21 +1625,21 @@ class AdaptivePoolManager:
         Read query with cache-first strategy.
         - Check cache first (no DB access)
         - On miss, acquire connection with timeout
-        - On exhaustion, return degraded response (stale cache or empty)
+        - On exhaustion, return stale cache (NOT empty)
         """
         with self.lock:
             self.stats['total_requests'] += 1
-        
-        # Try cache first
+
+        # Try cache first (fresh)
         cached = self.cache.get(query_id)
         if cached is not None:
             with self.lock:
                 self.stats['cache_hits'] += 1
             return cached, True
-        
+
         with self.lock:
             self.stats['cache_misses'] += 1
-        
+
         # Cache miss: try to execute
         start = time.time()
         try:
@@ -1641,7 +1648,13 @@ class AdaptivePoolManager:
             self._record_latency(time.time() - start)
             return result, False
         except Exception as e:
-            # Degraded: return empty response
+            # Degraded: return stale cache if available, NOT empty
+            stale = self.cache.get_stale(query_id)
+            if stale is not None:
+                logger.warning(f"[POOL] Stale cache fallback for {query_id}: {e}")
+                with self.lock:
+                    self.stats['degraded_responses'] += 1
+                return stale, True
             logger.warning(f"[POOL] Degraded query {query_id}: {e}")
             with self.lock:
                 self.stats['degraded_responses'] += 1
@@ -1668,23 +1681,23 @@ class AdaptivePoolManager:
         """
         start = time.time()
         attempt = 0
-        max_attempts = 3
-        
+        max_attempts = 5
+
         while attempt < max_attempts:
             try:
                 # Check queue length (backpressure)
                 with self.lock:
-                    if self.queued_requests > self.max_queue * 0.8:
-                        # Queue near full, signal backoff
+                    if self.queued_requests > self.max_queue * 0.9:
+                        # Queue near full, signal backpressure
                         raise Exception("Request queue near capacity (backpressure)")
                     self.queued_requests += 1
-                
+
                 # Acquire with timeout
-                conn = self.pool.getconn()
+                conn = self.pool.getconn(timeout=timeout_sec)
                 with self.lock:
                     self.active_conns += 1
                     self.stats['peak_active'] = max(self.stats['peak_active'], self.active_conns)
-                
+
                 try:
                     # Execute query
                     result = execute_fn(conn)
@@ -1698,18 +1711,18 @@ class AdaptivePoolManager:
                     with self.lock:
                         self.active_conns = max(0, self.active_conns - 1)
                         self.queued_requests = max(0, self.queued_requests - 1)
-            
+
             except Exception as e:
                 elapsed = time.time() - start
                 if elapsed > timeout_sec:
                     with self.lock:
                         self.stats['exhaustions'] += 1
                     raise Exception(f"Pool exhausted after {elapsed:.2f}s: {e}") from e
-                
+
                 attempt += 1
-                backoff = min(0.05 * (attempt ** 2), 0.5)
+                backoff = min(0.1 * attempt, 1.0)
                 time.sleep(backoff)
-        
+
         raise Exception("Max attempts exceeded")
     
     def _record_latency(self, latency_sec: float):
@@ -1752,9 +1765,9 @@ class AdaptivePoolManager:
 try:
     _pool_mgr = AdaptivePoolManager(
         db_pool.pool,
-        min_size=2,
-        max_size=10,
-        max_queue=1000
+        min_size=3,
+        max_size=20,
+        max_queue=2000
     )
     
     # Log pool stats every 30s
@@ -2216,13 +2229,13 @@ def _upsert_peer(peer_id: str, data: Dict[str, Any]) -> bool:
             cur.execute("""
                 INSERT INTO peer_registry
                     (peer_id, ip_address, port, peer_type,
-                     block_height, miner_address, gossip_url,
+                     public_key, block_height, miner_address, gossip_url,
                      last_seen, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
                 ON CONFLICT (peer_id) DO UPDATE SET
                     ip_address      = COALESCE(NULLIF(EXCLUDED.ip_address,''), peer_registry.ip_address),
                     port            = CASE WHEN EXCLUDED.port > 0 THEN EXCLUDED.port ELSE peer_registry.port END,
-                    block_height    = EXCLUDED.block_height,
+                    block_height    = GREATEST(peer_registry.block_height, EXCLUDED.block_height),
                     miner_address   = COALESCE(NULLIF(EXCLUDED.miner_address,''), peer_registry.miner_address),
                     gossip_url      = COALESCE(NULLIF(EXCLUDED.gossip_url,''), peer_registry.gossip_url),
                     last_seen       = NOW(),
@@ -2232,11 +2245,12 @@ def _upsert_peer(peer_id: str, data: Dict[str, Any]) -> bool:
                 data.get('ip_address', ''),
                 int(data.get('port') or 9091),
                 data.get('peer_type', 'miner'),
+                data.get('public_key', '') or '',
                 int(data.get('block_height', 0)),
                 data.get('miner_address', ''),
                 data.get('gossip_url', '') or data.get('external_addr', ''),
             ))
-        logger.info(f"[DB] _upsert_peer: registered peer {peer_id[:20]}...")
+        logger.debug(f"[DB] _upsert_peer: registered peer {peer_id[:20]}")
         return True
     except Exception as e:
         logger.error(f"[GOSSIP] _upsert_peer({peer_id[:16]}): {e}")
@@ -3263,8 +3277,8 @@ def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
             cached_result, from_cache = _pool_mgr.query_read(
                 "block_height:tip",
                 execute_fn=lambda conn: query_latest_block(),
-                cache_ttl=2.0,
-                timeout_sec=1.0
+                cache_ttl=5.0,
+                timeout_sec=2.0
             )
             if cached_result:
                 height = int(cached_result['height'])
@@ -4060,6 +4074,7 @@ def _ensure_peer_registry_table() -> None:
                         ip_address TEXT NOT NULL,
                         port INTEGER DEFAULT 9091,
                         peer_type TEXT DEFAULT 'miner',
+                        public_key TEXT DEFAULT '',
                         block_height BIGINT DEFAULT 0,
                         miner_address TEXT DEFAULT '',
                         gossip_url TEXT DEFAULT '',
@@ -4070,13 +4085,23 @@ def _ensure_peer_registry_table() -> None:
                         updated_at TIMESTAMPTZ DEFAULT NOW()
                     )
                 """)
+                # Migrate: add public_key column if missing (existing tables)
+                try:
+                    cur.execute("ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS public_key TEXT DEFAULT ''")
+                except Exception:
+                    pass
+                # Migrate: add gossip_url column if missing
+                try:
+                    cur.execute("ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS gossip_url TEXT DEFAULT ''")
+                except Exception:
+                    pass
                 # Create index for fast peer lookups
                 cur.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_peer_registry_last_seen 
+                    CREATE INDEX IF NOT EXISTS idx_peer_registry_last_seen
                     ON peer_registry(last_seen DESC)
                 """)
                 cur.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_peer_registry_height 
+                    CREATE INDEX IF NOT EXISTS idx_peer_registry_height
                     ON peer_registry(block_height DESC)
                 """)
             _peer_registry_ensured = True
