@@ -153,6 +153,25 @@ try:
     except Exception as e:
         logger.warning(f"[WSGI] ⚠️  P2P startup failed: {e}")
     
+    # Register bootstrap server (ts4.zocomputer.io:10206) as a known peer
+    try:
+        from server import _p2p_dht_table, _p2p_dht_lock, P2PPeer
+        with _p2p_dht_lock:
+            _p2p_dht_table["bootstrap-zocomputer"] = P2PPeer(
+                peer_id="bootstrap-zocomputer",
+                wallet_address="",
+                external_addr="ts4.zocomputer.io",
+                port=10206,
+                public_key="",
+                chain_height=0,
+                last_seen=time.time(),
+                first_seen=time.time(),
+                is_alive=True
+            )
+        logger.info("[WSGI] ✅ Bootstrap server registered: ts4.zocomputer.io:10206")
+    except Exception as e:
+        logger.warning(f"[WSGI] ⚠️  Bootstrap registration failed: {e}")
+    
 except ImportError as e:
     logger.error(f"[WSGI] ❌ CRITICAL: Failed to import app from server.py")
     logger.error(f"[WSGI] ImportError: {e}")
