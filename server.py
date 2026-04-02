@@ -3826,6 +3826,15 @@ def _rpc_getHealth(params: Any, rpc_id: Any) -> dict:
         logger.debug(f"[RPC-METHOD] qtcl_getHealth called with params={params}, id={rpc_id}")
         po = _get_pyth()
         logger.debug(f"[RPC-METHOD] qtcl_getHealth: oracle_ready={ORACLE_AVAILABLE}, lattice_ready={LATTICE is not None}, pyth_ready={po is not None}")
+        
+        # Safely get pyth_stats - handle case where OracleEngine may not have stats method
+        pyth_stats = {}
+        try:
+            if po and hasattr(po, 'stats') and callable(getattr(po, 'stats', None)):
+                pyth_stats = po.stats()
+        except Exception as ps_err:
+            logger.warning(f"[RPC-METHOD] qtcl_getHealth: pyth_stats failed: {ps_err}")
+        
         result = {
             "status":           "ok",
             "ts":               time.time(),
@@ -3833,7 +3842,7 @@ def _rpc_getHealth(params: Any, rpc_id: Any) -> dict:
             "oracle_ready":     ORACLE_AVAILABLE,
             "lattice_ready":    LATTICE is not None,
             "pyth_ready":       po is not None,
-            "pyth_stats":       po.stats() if po else {},
+            "pyth_stats":       pyth_stats,
             "jsonrpc_version":  _JSONRPC_VERSION,
             "qtcl_server":      "v6",
         }
@@ -3975,6 +3984,11 @@ def _rpc_getOracleRecord(params: Any, rpc_id: Any) -> dict:
 
 def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
     """qtcl_submitOracleReg — build and submit an oracle_reg TX through the mempool.
+    
+    Info-only null transaction: Uses qtcl0null... address for from/to to inject 
+    oracle registration info on-chain without transferring any QTCL value.
+    Amount is always 0, fee is always 0.
+    
     Params (object):
       wallet_address  string  required — HLWE wallet signing the TX
       oracle_addr     string  required — oracle identity address
@@ -3986,7 +4000,8 @@ def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
       action          string  optional — register|deregister (default: register)
       nonce           int     optional
       timestamp_ns    int     optional
-      signature       object  required for mempool — HLWE sig over tx_hash
+      signature       object  optional — HLWE sig over tx_hash
+    
     Returns: {status, tx_hash, oracle_addr, check_url} or {status: tx_template_issued, tx_template}
     """
     logger.info(f"[ORACLE-REG-SERVER] === START qtcl_submitOracleReg ===")
@@ -4014,13 +4029,19 @@ def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
 
     logger.info(f"[ORACLE-REG-SERVER] cert_sig={cert_sig_hex[:16]}..., cert_tag={cert_auth_tag[:16]}...")
 
-    _ora_registry_addr = "qtcl1oracle_registry_000000000000000000000000"
+    # Generate null address for info-only transaction
+    # Format: qtcl0null + SHA256(info_hash)[:56] = 64 char address
+    info_hash = _hh.sha256(f"{oracle_addr}|{ts_ns}".encode()).hexdigest()
+    _null_from_addr = f"qtcl0null{info_hash[:56]}"
+    _null_to_addr = "qtcl0nullinfo0000000000000000000000000000000000000000000000"
+
+    # Info-only transaction: amount=0, fee=0, using null addresses
     tx_payload = {
         'tx_type'     : 'oracle_reg',
-        'from_address': wallet_addr,
-        'to_address'  : _ora_registry_addr,
-        'amount'      : 1,
-        'fee'         : 0.01,
+        'from_address': _null_from_addr,
+        'to_address'  : _null_to_addr,
+        'amount'      : 0,  # INFO-ONLY: no QTCL value transfer
+        'fee'         : 0,  # NO FEES
         'nonce'       : nonce_val,
         'timestamp_ns': ts_ns,
         'signature'   : signature,
@@ -4032,15 +4053,17 @@ def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
             'mode'          : mode,
             'ip_hint'       : ip_hint,
             'action'        : action,
+            'wallet_addr'   : wallet_addr,  # Original wallet for verification
         },
         'metadata': {
             'oracle_addr': oracle_addr,
             'wallet_addr': wallet_addr,
             'cert_valid' : True,
             'action'     : action,
+            'tx_type'    : 'oracle_reg_info',
         },
     }
-    logger.info(f"[ORACLE-REG-SERVER] TX payload built: tx_type={tx_payload['tx_type']}")
+    logger.info(f"[ORACLE-REG-SERVER] TX payload built: tx_type={tx_payload['tx_type']}, from={_null_from_addr[:20]}..., amount=0 (info-only)")
 
     # If no signature provided — return template for client to sign
     if not signature:
@@ -4114,19 +4137,30 @@ def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
 
 def _rpc_submitTransaction(params: Any, rpc_id: Any) -> dict:
     """qtcl_submitTransaction — validate and submit a user transaction to the mempool.
+    
     Params (object):
-      from_address    string  required — sender QTCL address
+      from_address    string  required — sender QTCL address (or qtcl0null... for info-only)
       to_address      string  required — recipient QTCL address  
-      amount          float   required — amount in QTCL
-      fee             float   optional — transaction fee (default 0.001)
+      amount          float   required — amount in QTCL (0 for info-only null tx)
+      fee             float  optional — transaction fee (ignored, no fees)
       tx_hash         string  optional — client-computed tx hash (server computes if omitted)
       timestamp_ns    int     optional — nanosecond timestamp
       nonce           int     optional — transaction sequence number
       signature       object  optional — HLWE signature over tx_hash
       pubkey          string  optional — sender's HLWE public key hex
+    
+    Info-only null transactions (qtcl0null...):
+      - from_address = qtcl0null followed by info hash
+      - amount MUST be 0 (no QTCL value can be transferred)
+      - to_address can be qtcl0null... or regular address
+      - Used for on-chain information injection (oracle registration, attestations)
+    
     Returns: {status, tx_hash, accepted, message} or error
     """
     import hashlib
+    
+    # Null address prefix for info-only transactions
+    NULL_ADDR_PREFIX = "qtcl0null"
     
     try:
         # Parse params
@@ -4135,31 +4169,42 @@ def _rpc_submitTransaction(params: Any, rpc_id: Any) -> dict:
         from_addr   = str(p.get('from_address', p.get('from', '')))
         to_addr     = str(p.get('to_address', p.get('to', '')))
         amount      = float(p.get('amount', 0.0) or 0.0)
-        fee         = float(p.get('fee', 0.001) or 0.001)
+        fee         = 0.0  # Transaction fees removed - info-only system
         tx_hash     = str(p.get('tx_hash', p.get('txid', '')))
         timestamp_ns = int(p.get('timestamp_ns', 0) or 0)
         nonce       = int(p.get('nonce', 0) or 0)
         signature   = p.get('signature')
         pubkey      = str(p.get('pubkey', p.get('public_key', '')))
         
+        # Check if this is a null address info-only transaction
+        is_null_tx = from_addr.startswith(NULL_ADDR_PREFIX) or to_addr.startswith(NULL_ADDR_PREFIX)
+        
         # Validation
         if not from_addr or not to_addr:
             return _rpc_error(-32602, "from_address and to_address are required", rpc_id)
         
-        if amount <= 0:
-            return _rpc_error(-32602, "amount must be positive", rpc_id)
+        # Info-only null transactions MUST have amount = 0
+        if is_null_tx and amount > 0:
+            return _rpc_error(-32602, "Null address transactions cannot transfer QTCL value (amount must be 0)", rpc_id)
         
-        if fee < 0:
-            return _rpc_error(-32602, "fee cannot be negative", rpc_id)
+        if amount < 0:
+            return _rpc_error(-32602, "amount cannot be negative", rpc_id)
         
-        # Validate address format (qtcl1...)
-        if not from_addr.startswith('qtcl1') or not to_addr.startswith('qtcl1'):
-            return _rpc_error(-32602, "Invalid address format - must start with qtcl1", rpc_id)
+        # Validate address format
+        if not is_null_tx:
+            if not from_addr.startswith('qtcl1') or not to_addr.startswith('qtcl1'):
+                return _rpc_error(-32602, "Invalid address format - must start with qtcl1 or qtcl0null", rpc_id)
+        else:
+            # Null tx can have qtcl0null prefix on either side
+            if not (from_addr.startswith('qtcl0null') or from_addr.startswith('qtcl1')):
+                return _rpc_error(-32602, "Invalid from_address format", rpc_id)
+            if not (to_addr.startswith('qtcl0null') or to_addr.startswith('qtcl1')):
+                return _rpc_error(-32602, "Invalid to_address format", rpc_id)
         
         # Generate tx_hash if not provided
         if not tx_hash:
             ts = timestamp_ns or int(time.time() * 1e9)
-            tx_data = f"{from_addr}:{to_addr}:{amount}:{fee}:{nonce}:{ts}"
+            tx_data = f"{from_addr}:{to_addr}:{amount}:{nonce}:{ts}"
             tx_hash = hashlib.sha256(tx_data.encode()).hexdigest()
         
         # Ensure timestamp_ns
@@ -4172,10 +4217,10 @@ def _rpc_submitTransaction(params: Any, rpc_id: Any) -> dict:
             'from_address': from_addr,
             'to_address':   to_addr,
             'amount':       amount,
-            'fee':          fee,
+            'fee':          fee,  # Always 0 now
             'nonce':        nonce,
             'timestamp_ns': timestamp_ns,
-            'type':         'transfer',
+            'type':         'info_null' if is_null_tx else 'transfer',
         }
         
         if pubkey:
@@ -4183,7 +4228,7 @@ def _rpc_submitTransaction(params: Any, rpc_id: Any) -> dict:
         if signature:
             raw_tx['signature'] = signature
         
-        logger.info(f"[RPC-submitTransaction] 📝 TX {tx_hash[:16]}... from={from_addr[:16]}... to={to_addr[:16]}... amount={amount} fee={fee}")
+        logger.info(f"[RPC-submitTransaction] 📝 TX {tx_hash[:16]}... from={from_addr[:20]}... to={to_addr[:20]}... amount={amount} (fee=0, info_only={is_null_tx})")
         
         # Try mempool submission
         try:

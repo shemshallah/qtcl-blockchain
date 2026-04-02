@@ -1017,9 +1017,10 @@ class Mempool:
                 sig_raw      = norm['signature']
                 metadata     = norm.get('metadata', {})
                 input_data   = norm.get('input_data', {})
-                # oracle_reg: special tx_type that commits oracle identity on-chain
-                # bypasses dust + balance (Sybil tax = 1 base unit, always valid)
-                _is_oracle_reg = (tx_type == 'oracle_reg')
+                # oracle_reg / info_null: special tx_type for on-chain info injection
+                # bypasses dust + balance + fees (no QTCL value transfer allowed)
+                _is_oracle_reg = (tx_type == 'oracle_reg' or tx_type == 'oracle_reg_info')
+                _is_info_null = tx_type == 'info_null' or from_addr.startswith('qtcl0null')
 
                 # ── CANONICAL HASH ─────────────────────────────────────────
                 tx_hash = MempoolTx.canonical_hash(
@@ -1039,14 +1040,17 @@ class Mempool:
                     return AcceptResult.DUPLICATE, f"tx already in mempool: {tx_hash[:16]}", _existing_tx
 
                 # ── [D] DUST ───────────────────────────────────────────────
-                # oracle_reg exempt: amount=1 base unit is intentional Sybil tax
-                if amount_base < DUST_THRESHOLD and not _is_oracle_reg:
+                # oracle_reg / info_null exempt: no fees, amount can be 0
+                if amount_base < DUST_THRESHOLD and not _is_oracle_reg and not _is_info_null:
                     self._stats['total_rejected'] += 1
                     return AcceptResult.DUST, f"amount {amount_base} < dust threshold {DUST_THRESHOLD}", None
 
-                # ── [R] FEE RATE ───────────────────────────────────────────
-                fee_rate = fee_base / TX_VSIZE_BYTES
-                if fee_rate < MIN_RELAY_FEE_RATE or fee_base < MIN_RELAY_FEE_ABS:
+                # ── [R] FEE RATE ───────────────────────────────────────────────
+                # Info-null transactions have no fees (fee = 0 always)
+                fee_rate = fee_base / TX_VSIZE_BYTES if TX_VSIZE_BYTES > 0 else 0
+                if (_is_info_null or _is_oracle_reg):
+                    pass  # No fee check for info-only transactions
+                elif fee_rate < MIN_RELAY_FEE_RATE or fee_base < MIN_RELAY_FEE_ABS:
                     self._stats['total_rejected'] += 1
                     return AcceptResult.LOW_FEE, (
                         f"fee_rate {fee_rate:.4f} < min {MIN_RELAY_FEE_RATE} sat/vbyte"
@@ -1077,13 +1081,14 @@ class Mempool:
                     return AcceptResult.NONCE_REUSE, nonce_reason, None
 
                 # ── [B] BALANCE ────────────────────────────────────────────
-                # oracle_reg exempt: Sybil tax burns 1 base unit to null-sink addr;
-                # oracle node may be pre-wallet-funded but must still be chain-visible.
-                # balance=0 allowed ONLY when tx_type=='oracle_reg' AND to==ORACLE_REGISTRY.
+                # oracle_reg / info_null exempt: no QTCL value transfer, no balance needed
+                # These are info-only transactions that just record data on-chain
                 total_cost = amount_base + fee_base
                 replaced_cost = (replaced_tx.amount_base + replaced_tx.fee_base) if replaced_tx else 0
                 net_cost = total_cost - replaced_cost
-                if net_cost > 0 and not _is_oracle_reg:
+                
+                # Info-null and oracle_reg transactions: no balance check needed (amount=0, fee=0)
+                if net_cost > 0 and not _is_oracle_reg and not _is_info_null:
                     spendable = self._balances.spendable(from_addr)
                     # In DEV_MODE, allow 0-balance TXs for testing
                     if spendable < net_cost and not DEV_MODE:
@@ -1091,16 +1096,12 @@ class Mempool:
                         return AcceptResult.INSUFFICIENT_BAL, (
                             f"need {net_cost} base units, spendable={spendable}"
                         ), None
-                elif _is_oracle_reg:
-                    # Validate target address is canonical registry null-sink
-                    try:
-                        from globals import ORACLE_REGISTRY_ADDRESS as _ORA
-                    except ImportError:
-                        _ORA = "qtcl1oracle_registry_000000000000000000000000"
-                    if to_addr != _ORA:
+                elif _is_oracle_reg or _is_info_null:
+                    # Info-only transactions: verify amount is 0 (no value transfer)
+                    if amount_base > 0:
                         self._stats['total_rejected'] += 1
                         return AcceptResult.INVALID_FORMAT, (
-                            f"oracle_reg to_address must be {_ORA}, got {to_addr}"
+                            f"info-only transaction cannot transfer QTCL value (amount must be 0)"
                         ), None
 
                 # ── [S] SIGNATURE ──────────────────────────────────────────
