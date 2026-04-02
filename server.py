@@ -2489,13 +2489,13 @@ def get_dht_manager() -> DHTManager:
     """Get or create global DHT manager. Uses P2P_PORT (9091) — not gunicorn HTTP PORT."""
     global _dht_manager
     if _dht_manager is None:
-        # Public hostname so remote peers can reach this node.
-        # Falls back to 0.0.0.0 for local/dev use.
-        host = (os.getenv('KOYEB_PUBLIC_DOMAIN') or
-                os.getenv('RAILWAY_PUBLIC_DOMAIN') or
-                os.getenv('FLASK_HOST') or '0.0.0.0')
-        port = P2P_PORT  # 9091 — never gunicorn's HTTP port
-        _dht_manager = DHTManager(local_address=host, local_port=port)
+        with _dht_lock:
+            if _dht_manager is None:
+                host = (os.getenv('KOYEB_PUBLIC_DOMAIN') or
+                        os.getenv('RAILWAY_PUBLIC_DOMAIN') or
+                        os.getenv('FLASK_HOST') or '0.0.0.0')
+                port = P2P_PORT
+                _dht_manager = DHTManager(local_address=host, local_port=port)
     return _dht_manager
 
 
@@ -2757,12 +2757,19 @@ def _get_canonical_node() -> Optional[dict]:
 
 def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
     """qtcl_getBlockHeight — current chain tip height.
-    
+
+    Params: None (params may be omitted, empty list [], or empty object {})
+    Returns: {"height": int, "tip_hash": str (64-char hex), "ts": float}
+    Format: list [] or object {} — no required fields.
+
     DB-AUTHORITATIVE: reads from PostgreSQL blocks table via query_latest_block().
     In-memory _get_canonical_node() is stale across gunicorn workers.
     Falls back to in-memory only if DB query fails.
     """
     try:
+        if params is not None and not isinstance(params, (list, dict)):
+            logger.warning(f"[RPC-METHOD] qtcl_getBlockHeight: invalid params type={type(params).__name__}")
+            return _rpc_error(-32602, "params must be list or object", rpc_id)
         logger.debug(f"[RPC-METHOD] qtcl_getBlockHeight called with params={params}, id={rpc_id}")
         
         # PRIMARY: DB is authoritative (survives worker restarts, multi-worker consistent)
@@ -2805,12 +2812,29 @@ def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
 
 
 def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getBalance — address QTCL balance via direct DB query."""
+    """qtcl_getBalance — address QTCL balance via direct DB query.
+
+    Params: [address] (list) or {"address": str}
+    Returns: {"address": str, "balance": float, "symbol": str}
+    Format: list ["qtcl1..."] or object {"address": "qtcl1..."}
+
+    Returns 0.0 balance for addresses not yet in the DB (not an error).
+    """
     try:
         if not isinstance(params, (list, dict)):
+            logger.warning(f"[RPC-METHOD] qtcl_getBalance: invalid params type={type(params).__name__}")
             return _rpc_error(-32602, "params must be list or object", rpc_id)
-        address = (params[0] if isinstance(params, list) else params.get("address", "")) if params else ""
+        if not params:
+            logger.warning(f"[RPC-METHOD] qtcl_getBalance: params empty")
+            return _rpc_error(-32602, "address required", rpc_id)
+        # Parse address from list or dict style
+        try:
+            address = str(params[0] if isinstance(params, list) else params.get("address", ""))
+        except (TypeError, ValueError) as e:
+            logger.warning(f"[RPC-METHOD] qtcl_getBalance: address cast failed: {e}")
+            return _rpc_error(-32602, "address must be a string", rpc_id)
         if not address:
+            logger.warning(f"[RPC-METHOD] qtcl_getBalance: address missing or empty")
             return _rpc_error(-32602, "address required", rpc_id)
         try:
             wallet = query_wallet_info(address)
@@ -2839,13 +2863,34 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
 
 
 def _rpc_getTransaction(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getTransaction — tx details by hash."""
+    """qtcl_getTransaction — tx details by hash.
+
+    Params: [tx_hash] (list) or {"tx_hash": str}
+    Returns: dict containing transaction fields (tx_id, from, to, amount, etc.)
+    Format: list ["0xabc..."] or object {"tx_hash": "0xabc..."}
+
+    Error codes: -32602 (missing tx_hash), -32000 (not found),
+                 -32003 (blockchain not synced), -32603 (internal error).
+    """
     try:
         logger.debug(f"[RPC-METHOD] qtcl_getTransaction called with params={params}, id={rpc_id}")
-        tx_hash = (params[0] if isinstance(params, list) else params.get("tx_hash", "")) if params else ""
-        if not tx_hash:
-            logger.debug(f"[RPC-METHOD] qtcl_getTransaction: tx_hash missing or empty")
+
+        if not isinstance(params, (list, dict)):
+            logger.warning(f"[RPC-METHOD] qtcl_getTransaction: invalid params type={type(params).__name__}")
+            return _rpc_error(-32602, "params must be list or object", rpc_id)
+        if not params:
+            logger.warning(f"[RPC-METHOD] qtcl_getTransaction: params empty")
             return _rpc_error(-32602, "tx_hash required", rpc_id)
+
+        try:
+            tx_hash = str(params[0] if isinstance(params, list) else params.get("tx_hash", ""))
+        except (TypeError, ValueError) as e:
+            logger.warning(f"[RPC-METHOD] qtcl_getTransaction: tx_hash cast failed: {e}")
+            return _rpc_error(-32602, "tx_hash must be a string", rpc_id)
+        if not tx_hash:
+            logger.warning(f"[RPC-METHOD] qtcl_getTransaction: tx_hash missing or empty")
+            return _rpc_error(-32602, "tx_hash required", rpc_id)
+
         try:
             from globals import get_blockchain
             bc = get_blockchain()
@@ -2854,7 +2899,7 @@ def _rpc_getTransaction(params: Any, rpc_id: Any) -> dict:
                 return _rpc_error(-32003, "Blockchain not synced", rpc_id)
             tx = bc.get_transaction(tx_hash)
             if tx is None:
-                logger.debug(f"[RPC-METHOD] qtcl_getTransaction: tx not found (hash={tx_hash})")
+                logger.warning(f"[RPC-METHOD] qtcl_getTransaction: tx not found (hash={tx_hash})")
                 return _rpc_error(-32000, "Transaction not found", rpc_id, {"tx_hash": tx_hash})
             logger.debug(f"[RPC-METHOD] qtcl_getTransaction success: tx_hash={tx_hash}")
             return _rpc_ok(tx, rpc_id)
@@ -2870,19 +2915,47 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
     """qtcl_getBlock — block by height or hash.
 
     DB-AUTHORITATIVE: queries PostgreSQL blocks table directly.
-    params: [height] (list) or {height: int} or {hash: str}
-    Returns full block header + transaction list for chain sync.
+    
+    Params: "height" (int) or "hash" (str) — at least one required
+    Returns: dict — full block header + transaction list
+    Format: list [<height>] or object {"height": <int>} or {"hash": "<hex>"}
+    
+    Error codes:
+      -32602: Invalid params (neither height nor hash provided)
+      -32000: Block not found
+      -32603: Internal error (DB query failed)
     """
     try:
+        if not isinstance(params, (list, dict)):
+            logger.warning(f"[RPC] _rpc_getBlock: invalid params type={type(params).__name__}")
+            return _rpc_error(-32602, "params must be list or object", rpc_id)
         height = None
         block_hash = None
         if isinstance(params, list) and len(params) >= 1:
-            height = int(params[0])
+            try:
+                height = int(params[0])
+            except (TypeError, ValueError) as e:
+                logger.warning(f"[RPC] _rpc_getBlock: height cast failed: {e}")
+                return _rpc_error(-32602, "height must be an integer", rpc_id)
         elif isinstance(params, dict):
-            height = params.get("height")
+            raw_height = params.get("height")
             block_hash = params.get("hash")
-            if height is not None:
-                height = int(height)
+            if raw_height is not None:
+                try:
+                    height = int(raw_height)
+                except (TypeError, ValueError) as e:
+                    logger.warning(f"[RPC] _rpc_getBlock: height cast failed: {e}")
+                    return _rpc_error(-32602, "height must be an integer", rpc_id)
+            if block_hash is not None:
+                try:
+                    block_hash = str(block_hash)
+                except (TypeError, ValueError):
+                    logger.warning(f"[RPC] _rpc_getBlock: hash cast failed")
+                    return _rpc_error(-32602, "hash must be a string", rpc_id)
+        if height is None and not block_hash:
+            logger.warning(f"[RPC] _rpc_getBlock: neither height nor hash provided in params={params}")
+            return _rpc_error(-32602, "height or hash required", rpc_id)
+        logger.debug(f"[RPC] _rpc_getBlock called with height={height}, hash={block_hash}, id={rpc_id}")
 
         def _query_block_at_height(h: int) -> Optional[dict]:
             """Full block query from DB — mirrors /api/blocks/height/<int>."""
@@ -2955,8 +3028,11 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                 block = _query_block_at_height(row['height'])
 
         if block is None:
-            return _rpc_error(-32000, "Block not found", rpc_id)
+            lookup = f"height={height}" if height is not None else f"hash={block_hash}"
+            logger.warning(f"[RPC] _rpc_getBlock: block not found ({lookup})")
+            return _rpc_error(-32000, "Block not found", rpc_id, {"height": height, "hash": block_hash})
 
+        logger.debug(f"[RPC] _rpc_getBlock success: height={block.get('height')}, tx_count={block.get('tx_count', 0)}")
         return _rpc_ok(block, rpc_id)
 
     except Exception as e:
@@ -2967,20 +3043,41 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
 def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
     """qtcl_getBlockRange — batch fetch blocks by height range.
 
-    params: [from_height, to_height] — inclusive, max 100 blocks per call.
-    Returns list of block headers (no transactions for efficiency).
+    Params: "from_height" (int), "to_height" (int) — inclusive range, max 100 blocks
+    Returns: {"blocks": [dict, ...], "count": int, "from": int, "to": int}
+    Format: list [<from_height>, <to_height>] or object {"from_height": <int>, "to_height": <int>}
+    
     Used by miners for Initial Block Download (IBD) chain sync.
+    Block headers only (no transactions) for efficiency.
+    
+    Error codes:
+      -32602: Invalid params (missing or non-integer heights)
+      -32603: Internal error (DB query failed)
     """
     try:
-        if not isinstance(params, (list, tuple)) or len(params) < 2:
-            return _rpc_error(-32602, "params: [from_height, to_height]", rpc_id)
-        from_h = int(params[0])
-        to_h = int(params[1])
+        if not isinstance(params, (list, dict)):
+            logger.warning(f"[RPC] _rpc_getBlockRange: invalid params type={type(params).__name__}")
+            return _rpc_error(-32602, "params must be list or object", rpc_id)
+        # Parse from list or dict style
+        try:
+            if isinstance(params, list):
+                if len(params) < 2:
+                    logger.warning(f"[RPC] _rpc_getBlockRange: list params need 2 elements, got {len(params)}")
+                    return _rpc_error(-32602, "params: [from_height, to_height]", rpc_id)
+                from_h = int(params[0])
+                to_h = int(params[1])
+            else:
+                from_h = int(params.get("from_height", params.get("from", "")))
+                to_h = int(params.get("to_height", params.get("to", "")))
+        except (TypeError, ValueError) as e:
+            logger.warning(f"[RPC] _rpc_getBlockRange: height cast failed: {e}")
+            return _rpc_error(-32602, "from_height and to_height must be integers", rpc_id)
         # Cap at 100 blocks per request
         if to_h - from_h > 99:
             to_h = from_h + 99
         if from_h < 0:
             from_h = 0
+        logger.debug(f"[RPC] _rpc_getBlockRange called with from={from_h}, to={to_h}, id={rpc_id}")
 
         with get_db_cursor() as cur:
             cur.execute("""
@@ -3015,6 +3112,7 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
                 'pq_last':          int(row[11]) if row[11] is not None else max(0, row[0] - 1),
             })
 
+        logger.debug(f"[RPC] _rpc_getBlockRange success: from={from_h}, to={to_h}, count={len(blocks)}")
         return _rpc_ok({
             'blocks': blocks,
             'count':  len(blocks),
@@ -3054,8 +3152,27 @@ def _call_with_timeout(func, timeout_sec=_RPC_TIMEOUT_SEC, default=None):
 
 def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
     """qtcl_getQuantumMetrics — live W-state oracle + lattice metrics + density matrix snapshot.
-    
-    All reads protected with 5s timeouts to prevent RPC hangs.
+
+    Params:
+      null  — no parameters required
+      list  — ignored (no params needed)
+      dict  — ignored (no params needed)
+
+    Returns:
+      {
+        "oracle_available": bool,
+        "ts": float (epoch seconds),
+        "w_state": { "purity": float, "entropy": float, "coherence": float, "fidelity": float, "snapshot_id": str } | null,
+        "lattice": { "fidelity": float, "coherence": float, "w_state_strength": float, "cycle": int, "avg_fidelity_100": float, "avg_coherence_100": float } | null,
+        "density_matrix_hex": str | null,
+        "block_height": int,
+        "height": int,
+        "client_fused_fidelity": float,
+        "client_oracle_count": int,
+        "client_consensus_dm_hex": str | null
+      }
+
+    Format: JSON-RPC 2.0 success/error. All subsystem reads protected with 5s timeouts.
     """
     try:
         logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics called with params={params}, id={rpc_id}")
@@ -3222,11 +3339,67 @@ def _rpc_getPythPrice(params: Any, rpc_id: Any) -> dict:
 
 
 def _rpc_getMempoolStats(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getMempoolStats — mempool depth and fee percentiles."""
+    """qtcl_getMempoolStats — mempool depth and fee percentiles.
+
+    Params:
+      null  — no parameters required
+      object: {} — empty object accepted
+
+    Returns:
+      { depth: int, pending: int, fee_percentiles: object, total_fees: float, avg_fee: float }
+      or { depth: 0, pending: 0, note: "mempool initializing" } if mempool unavailable
+
+    Format: JSON-RPC 2.0 success/error response.
+    """
+    try:
+        logger.debug(f"[RPC-METHOD] qtcl_getMempoolStats called with params={params}, id={rpc_id}")
+        mp = None
+        _srv_globals = sys.modules[__name__].__dict__
+        mp = _srv_globals.get("MEMPOOL") or _srv_globals.get("_MEMPOOL")
+        if mp is None:
+            try:
+                import globals as _g
+                _gf = getattr(_g, "get_mempool", None)
+                if callable(_gf): mp = _gf()
+            except Exception: pass
+        if mp is None:
+            try:
+                import mempool as _mp_mod
+                mp = getattr(_mp_mod, "MEMPOOL", None) or getattr(_mp_mod, "_MEMPOOL_INSTANCE", None)
+            except Exception: pass
+        if mp is None:
+            logger.warning("[RPC-METHOD] qtcl_getMempoolStats: mempool not available")
+            return _rpc_ok({"depth": 0, "pending": 0, "note": "mempool initializing"}, rpc_id)
+        try:
+            stats = mp.get_stats() if hasattr(mp, "get_stats") else {"depth": getattr(mp, "size", lambda: 0)()}
+            logger.debug(f"[RPC-METHOD] qtcl_getMempoolStats success")
+            return _rpc_ok(stats, rpc_id)
+        except Exception as me:
+            logger.exception(f"[RPC-METHOD] qtcl_getMempoolStats: get_stats error: {me}")
+            return _rpc_error(-32603, f"Mempool stats failed: {str(me)}", rpc_id, {"exception": type(me).__name__})
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_getMempoolStats outer exception: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": type(e).__name__})
 
 
 def _rpc_getMempool(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getMempool — pending transaction list for block building."""
+    """qtcl_getMempool — pending transaction list for block building.
+
+    Params:
+      null  — no parameters required
+      list:   [100]          — max transactions to return (default 1000)
+      object: {"limit": 100} — named parameter
+
+    Returns:
+      {
+        transactions: [
+          { tx_hash: str, from: str, to: str, amount: float, fee: float, nonce: int }
+        ],
+        count: int
+      }
+
+    Format: JSON-RPC 2.0 success/error response. Limit clamped to [1, 2000].
+    """
     try:
         limit = 1000
         if isinstance(params, list) and params:
@@ -3288,7 +3461,24 @@ def _rpc_getMempool(params: Any, rpc_id: Any) -> dict:
 
 
 def _rpc_getPeers(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getPeers — active P2P peer list from peer_registry (5-min freshness window)."""
+    """qtcl_getPeers — active P2P peer list from peer_registry (5-min freshness window).
+
+    Params:
+      null  — no parameters required
+      list:   [50]          — max peers to return (default 50)
+      object: {"limit": 50} — named parameter
+
+    Returns:
+      {
+        peers: [
+          { node_id: str, external_addr: str, pubkey_hash: str, chain_height: int,
+            last_seen: float, capabilities: array, ban_score: int, is_relay: bool }
+        ],
+        count: int
+      }
+
+    Format: JSON-RPC 2.0 success/error response. Only peers seen within 5 minutes and ban_score < 100.
+    """
     try:
         limit = 50
         if isinstance(params, list) and params:
@@ -3337,13 +3527,28 @@ _LIVE_PEERS_LOCK  = threading.Lock()
 
 
 def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
-    """qtcl_registerPeer — miner announces itself to Koyeb bootstrap registry.
+    """SINGLE REGISTRATION PATH — all peer/oracle registrations flow through this method.
 
-    Params (dict):
-        external_addr  str   "ip:port" of miner's P2P listener (required)
-        node_id        str   64-hex SHA-256(hlwe_pubkey) (required)
-        pubkey         str   base64 HLWE public key
-        chain_height   int   miner's current chain height
+    qtcl_registerPeer — miner announces itself to Koyeb bootstrap registry.
+
+    Params:
+      list:   [{"external_addr": "host:port", "node_id": "64hex", "pubkey": "base64", "chain_height": 0}]
+      object: {"external_addr": "host:port", "node_id": "64hex", "pubkey": "base64", "chain_height": 0}
+
+    Required:
+      external_addr  str   "host:port" of miner's P2P listener (must contain ':')
+      node_id        str   64 lowercase hex chars (SHA-256 of HLWE pubkey)
+      pubkey         str   base64-encoded HLWE public key
+
+    Optional:
+      chain_height   int   miner's current chain height (default 0)
+      is_relay       bool  whether this peer acts as relay (default false)
+
+    Returns:
+      { registered: true, node_id: str, external_addr: str, caller_ip: str }
+
+    Format: JSON-RPC 2.0 success/error response. Upserts into peer_registry DB + in-process cache.
+            Spawns daemon thread for DHT fan-out to existing peers.
     """
     try:
         if isinstance(params, list):
@@ -3422,6 +3627,45 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
                 "is_relay":      _is_node
             }
         logger.info(f"[P2P] ✅ Peer registered: node={node_id[:16]}… addr={external_addr} h={chain_height}")
+
+        # ── DHT Registration Fan-out (daemon thread) ────────────────────────
+        def _fanout_discovery():
+            """Notify existing peers about this new registration via dhtPing."""
+            try:
+                with _LIVE_PEERS_LOCK:
+                    peers_snapshot = list(_LIVE_PEERS_CACHE.values())
+                notified = 0
+                for peer in peers_snapshot:
+                    if peer['node_id'] == node_id:
+                        continue
+                    target_addr = peer.get('external_addr', '')
+                    if not target_addr or ':' not in target_addr:
+                        continue
+                    try:
+                        _send_dht_notification(target_addr, node_id, external_addr)
+                        notified += 1
+                    except Exception:
+                        logger.debug(f"[P2P] dhtPing to {target_addr} failed (non-fatal)")
+                logger.debug(f"[P2P] Fan-out complete: notified {notified}/{len(peers_snapshot)} peers")
+            except Exception:
+                logger.exception("[P2P] Fan-out discovery failed (non-fatal)")
+
+        def _send_dht_notification(addr: str, nid: str, eaddr: str) -> None:
+            """Send a single dhtPing to a peer. Raises on failure."""
+            host, port_str = addr.rsplit(':', 1)
+            port = int(port_str)
+            payload = {
+                "jsonrpc": "2.0",
+                "method": "qtcl_dhtPing",
+                "params": {"node_id": nid, "external_addr": eaddr},
+                "id": 1
+            }
+            resp = requests.post(f"http://{host}:{port}/rpc", json=payload, timeout=2)
+            resp.raise_for_status()
+
+        threading.Thread(target=_fanout_discovery, daemon=True).start()
+        # ───────────────────────────────────────────────────────────────────
+
         return _rpc_ok({"registered": True, "node_id": node_id, "external_addr": external_addr, "caller_ip": caller_ip}, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_registerPeer exception: {e}")
@@ -3430,13 +3674,23 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
 
 def _rpc_broadcastPeerTable(params: Any, rpc_id: Any) -> dict:
     """qtcl_broadcastPeerTable — return full peer registry with canonical addressing for P2P gossip.
-    
-    Each peer is enriched with:
-      - host, port split from external_addr
-      - caller_ip as the canonical observed WAN IP (Koyeb's view of peer)
-      - is_relay, chain_height, last_seen, pubkey_hash, ban_score
-    
-    Used by client P2P nodes to discover & gossip peer table across mesh.
+
+    Params:
+      null  — no parameters required
+      list:   [64]          — max peers to return (default 64)
+      object: {"limit": 64} — named parameter
+
+    Returns:
+      {
+        peers: [
+          { node_id, external_addr, pubkey_hash, chain_height, last_seen,
+            capabilities, ban_score, is_relay, caller_ip, host: str, port: int }
+        ],
+        count: int
+      }
+
+    Format: JSON-RPC 2.0 success/error response. Each peer enriched with host/port split
+    from external_addr and caller_ip as canonical observed WAN IP.
     """
     try:
         limit = 64
@@ -3510,30 +3764,64 @@ def _rpc_broadcastPeerTable(params: Any, rpc_id: Any) -> dict:
 def _rpc_getMyAddr(params: Any, rpc_id: Any) -> dict:
     """qtcl_getMyAddr — STUN: return the caller's observed source IP so miners can discover their external addr.
 
+    Params:
+      null  — no parameters required
+      object: {} — empty object accepted
+
     Returns:
-        external_addr  str   "observed_ip:suggested_port"
-        ip             str   raw observed source IP
-        port           int   suggested P2P port (from P2P_PORT env or 9091)
+      {
+        ip: str (observed source IP),
+        port: int (suggested P2P port from P2P_PORT env or 9091),
+        external_addr: str ("ip:port")
+      }
+
+    Format: JSON-RPC 2.0 success/error response. Reads X-Forwarded-For header for proxied clients.
     """
     try:
+        logger.debug(f"[RPC-METHOD] qtcl_getMyAddr called with params={params}, id={rpc_id}")
         try:
             forwarded = request.headers.get("X-Forwarded-For", "")
             observed_ip = forwarded.split(",")[0].strip() if forwarded else request.remote_addr or "unknown"
         except Exception:
             observed_ip = "unknown"
-        p2p_port = int(os.environ.get("P2P_PORT", "9091"))
-        return _rpc_ok({
+        try:
+            p2p_port = int(os.environ.get("P2P_PORT", "9091"))
+        except (ValueError, TypeError):
+            p2p_port = 9091
+        result = {
             "ip":            observed_ip,
             "port":          p2p_port,
             "external_addr": f"{observed_ip}:{p2p_port}",
-        }, rpc_id)
+        }
+        logger.debug(f"[RPC-METHOD] qtcl_getMyAddr success: {observed_ip}:{p2p_port}")
+        return _rpc_ok(result, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getMyAddr exception: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": type(e).__name__})
 
 
 def _rpc_getHealth(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getHealth — full system health vector."""
+    """qtcl_getHealth — full system health vector.
+
+    Params:
+      null  — no parameters required
+      object: {} — empty object accepted
+
+    Returns:
+      {
+        status: "ok" | "degraded",
+        ts: float (epoch seconds),
+        uptime_s: float,
+        oracle_ready: bool,
+        lattice_ready: bool,
+        pyth_ready: bool,
+        pyth_stats: object,
+        jsonrpc_version: str,
+        qtcl_server: str
+      }
+
+    Format: JSON-RPC 2.0 success/error response. All subsystem probes are non-blocking.
+    """
     try:
         logger.debug(f"[RPC-METHOD] qtcl_getHealth called with params={params}, id={rpc_id}")
         po = _get_pyth()
@@ -3627,17 +3915,30 @@ def _rpc_getOracleRegistry(params: Any, rpc_id: Any) -> dict:
 
 def _rpc_getOracleRecord(params: Any, rpc_id: Any) -> dict:
     """qtcl_getOracleRecord — single oracle record by oracle_addr or oracle_id.
-    Params: [oracle_addr] or {oracle_addr: string}
-    Returns: full oracle_registry row or {registered: false} if unknown.
+
+    Params:
+      list:   ["oracle_addr_or_id"]
+      object: {"oracle_addr": "qtcl1..."} or {"oracle_id": "hex..."}
+
+    Returns:
+      { registered: true, on_chain: bool, oracle_id: str, oracle_url: str, ... }
+      or { registered: false, oracle_addr: str } if not found
+
+    Format: JSON-RPC 2.0 success/error. Searches both oracle_id and oracle_address columns.
     """
-    oracle_addr = ''
-    if isinstance(params, list) and params:
-        oracle_addr = str(params[0])
-    elif isinstance(params, dict):
-        oracle_addr = str(params.get('oracle_addr', params.get('address', '')))
-    if not oracle_addr:
-        return _rpc_error(-32602, "oracle_addr required", rpc_id)
     try:
+        oracle_addr = ''
+        if isinstance(params, list) and params:
+            oracle_addr = str(params[0])
+        elif isinstance(params, dict):
+            oracle_addr = str(params.get('oracle_addr', params.get('address', params.get('oracle_id', ''))))
+        elif params is not None:
+            logger.warning(f"[RPC-METHOD] qtcl_getOracleRecord: invalid params type={type(params).__name__}")
+            return _rpc_error(-32602, "params must be list or object", rpc_id)
+        if not oracle_addr:
+            logger.warning(f"[RPC-METHOD] qtcl_getOracleRecord: oracle_addr missing")
+            return _rpc_error(-32602, "oracle_addr required", rpc_id)
+        logger.debug(f"[RPC-METHOD] qtcl_getOracleRecord called with oracle_addr={oracle_addr[:16]}…")
         _lazy_ensure_oracle_registry()
         with get_db_cursor() as cur:
             cur.execute("""
@@ -3651,8 +3952,10 @@ def _rpc_getOracleRecord(params: Any, rpc_id: Any) -> dict:
             """, (oracle_addr, oracle_addr))
             r = cur.fetchone()
         if not r:
+            logger.debug(f"[RPC-METHOD] qtcl_getOracleRecord: not found for {oracle_addr[:16]}…")
             return _rpc_ok({'registered': False, 'oracle_addr': oracle_addr}, rpc_id)
         on_chain = bool(r[13] and r[13] not in ('', 'gossip_pending'))
+        logger.debug(f"[RPC-METHOD] qtcl_getOracleRecord success: oracle={r[0][:16]}… on_chain={on_chain}")
         return _rpc_ok({
             'registered'    : True,
             'on_chain'      : on_chain,
@@ -3666,7 +3969,8 @@ def _rpc_getOracleRecord(params: Any, rpc_id: Any) -> dict:
             'registered_at' : _iso(r[14]), 'created_at': _iso(r[15]),
         }, rpc_id)
     except Exception as e:
-        return _rpc_error(-32603, f"Oracle record lookup failed: {e}", rpc_id)
+        logger.exception(f"[RPC-METHOD] qtcl_getOracleRecord exception: {e}")
+        return _rpc_error(-32603, f"Oracle record lookup failed: {str(e)}", rpc_id)
 
 
 def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
@@ -3901,8 +4205,22 @@ def _rpc_submitTransaction(params: Any, rpc_id: Any) -> dict:
 
 
 def _rpc_getEvents(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getEvents — poll recent RPC events (tx, block, oracle_snapshot, oracle_dm, oracle_measurements)."""
+    """qtcl_getEvents — poll recent RPC events (tx, block, oracle_snapshot, oracle_dm, oracle_measurements).
+
+    Params:
+      list:   [{"since": 1234567890.0, "types": "tx,block", "limit": 100}]
+      object: {"since": 1234567890.0, "types": "tx,block", "limit": 100}
+      null:   defaults to last 100 events from 1 hour ago
+
+    Returns:
+      { events: [{ts: float, type: str, data: object}, ...], count: int }
+
+    Format: JSON-RPC 2.0 success/error. Events stored in ring buffer (max 1000).
+    """
     try:
+        if not isinstance(params, (list, dict, type(None))):
+            logger.warning(f"[RPC-METHOD] qtcl_getEvents: invalid params type={type(params).__name__}")
+            return _rpc_error(-32602, "params must be list, object, or null", rpc_id)
         # Normalise params → always a dict regardless of what the client sent
         if isinstance(params, dict):
             p = params
@@ -3910,9 +4228,13 @@ def _rpc_getEvents(params: Any, rpc_id: Any) -> dict:
             p = params[0]
         else:
             p = {}
-        since       = float(p.get('since', time.time() - 3600))
-        event_types = str(p.get('types', 'all'))
-        limit       = int(p.get('limit', 100))
+        try:
+            since       = float(p.get('since', time.time() - 3600))
+            event_types = str(p.get('types', 'all'))
+            limit       = min(max(int(p.get('limit', 100)), 1), 1000)
+        except (TypeError, ValueError) as e:
+            logger.warning(f"[RPC-METHOD] qtcl_getEvents: param cast failed: {e}")
+            return _rpc_error(-32602, "since/limit must be numeric, types must be string", rpc_id)
         want_types  = set(event_types.split(',')) if event_types != 'all' else {'all'}
         events = []
         with _rpc_event_lock:
@@ -3921,6 +4243,7 @@ def _rpc_getEvents(params: Any, rpc_id: Any) -> dict:
                     events.append(e)
                     if len(events) >= limit:
                         break
+        logger.debug(f"[RPC-METHOD] qtcl_getEvents success: returned {len(events)} events")
         return _rpc_ok({'events': events, 'count': len(events)}, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getEvents exception: {e}")
@@ -3934,50 +4257,49 @@ def _rpc_getEvents(params: Any, rpc_id: Any) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _rpc_registerMeasurementSubscriber(params: Any, rpc_id: Any) -> dict:
-    """
-    Subscribe to oracle measurement broadcasts via RPC push (WebSocket-ready).
-    
-    Request:
-        {
-            "jsonrpc": "2.0",
-            "method": "qtcl_registerMeasurementSubscriber",
-            "params": {
-                "client_id": "miner_abc123",
-                "callback_url": "http://localhost:9999/quantum/measurement",
-                "burst_mode": true
-            },
-            "id": 1
-        }
-    
-    Response (success):
-        {
-            "jsonrpc": "2.0",
-            "result": {
-                "registered": true,
-                "subscriber_id": "miner_abc123",
-                "measurement_frequency": "burst" | "throttled",
-                "broadcast_url": "https://qtcl-blockchain.koyeb.app/rpc/_internal/measurement"
-            },
-            "id": 1
-        }
+    """qtcl_registerMeasurementSubscriber — subscribe to oracle measurement broadcasts via RPC push.
+
+    Params:
+      list:   [{"client_id": "miner_abc", "callback_url": "http://...", "burst_mode": true}]
+      object: {"client_id": "miner_abc", "callback_url": "http://...", "burst_mode": true}
+
+    Required:
+      client_id      str   unique subscriber identifier
+      callback_url   str   HTTP endpoint to receive measurement pushes
+
+    Optional:
+      burst_mode     bool  receive every measurement (default: false/throttled)
+
+    Returns:
+      { registered: true, subscriber_id: str, measurement_frequency: str, broadcast_url: str }
+
+    Format: JSON-RPC 2.0 success/error. Registers with oracle measurement broadcaster.
     """
     try:
-        if not isinstance(params, dict):
-            return _rpc_error(-32602, "params must be object", rpc_id)
-        
-        client_id = params.get('client_id')
-        callback_url = params.get('callback_url')
-        burst_mode = params.get('burst_mode', False)
-        
+        if isinstance(params, list) and params and isinstance(params[0], dict):
+            p = params[0]
+        elif isinstance(params, dict):
+            p = params
+        else:
+            logger.warning(f"[RPC-METHOD] qtcl_registerMeasurementSubscriber: invalid params type={type(params).__name__}")
+            return _rpc_error(-32602, "params must be list or object", rpc_id)
+
+        client_id = str(p.get('client_id', ''))
+        callback_url = str(p.get('callback_url', ''))
+        burst_mode = bool(p.get('burst_mode', False))
+
         if not client_id or not callback_url:
+            logger.warning(f"[RPC-METHOD] qtcl_registerMeasurementSubscriber: missing client_id or callback_url")
             return _rpc_error(-32602, "client_id and callback_url required", rpc_id)
-        
+
+        logger.debug(f"[RPC-METHOD] qtcl_registerMeasurementSubscriber: client={client_id} url={callback_url} burst={burst_mode}")
         try:
             from oracle import get_oracle_measurement_broadcaster
             broadcaster = get_oracle_measurement_broadcaster()
             success = broadcaster.register_subscriber(client_id, callback_url, burst_mode)
-            
+
             if success:
+                logger.debug(f"[RPC-METHOD] qtcl_registerMeasurementSubscriber: registered {client_id}")
                 return _rpc_ok({
                     'registered': True,
                     'subscriber_id': client_id,
@@ -3985,57 +4307,88 @@ def _rpc_registerMeasurementSubscriber(params: Any, rpc_id: Any) -> dict:
                     'broadcast_url': "https://qtcl-blockchain.koyeb.app/rpc/_internal/measurement",
                 }, rpc_id)
             else:
+                logger.warning(f"[RPC-METHOD] qtcl_registerMeasurementSubscriber: already subscribed {client_id}")
                 return _rpc_error(-32000, "client already subscribed", rpc_id)
         except ImportError:
+            logger.warning(f"[RPC-METHOD] qtcl_registerMeasurementSubscriber: broadcast system not initialized")
             return _rpc_error(-32603, "broadcast system not initialized", rpc_id)
-    
     except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_registerMeasurementSubscriber exception: {e}")
         return _rpc_error(-32603, f"Subscription failed: {str(e)}", rpc_id)
 
 
 def _rpc_unregisterMeasurementSubscriber(params: Any, rpc_id: Any) -> dict:
-    """Unsubscribe from oracle measurement broadcasts."""
+    """qtcl_unregisterMeasurementSubscriber — unsubscribe from oracle measurement broadcasts.
+
+    Params:
+      list:   [{"client_id": "miner_abc"}]
+      object: {"client_id": "miner_abc"}
+
+    Required:
+      client_id   str   subscriber identifier to remove
+
+    Returns:
+      { unregistered: true } or { unregistered: false } if not found
+
+    Format: JSON-RPC 2.0 success/error.
+    """
     try:
-        if not isinstance(params, dict):
-            return _rpc_error(-32602, "params must be object", rpc_id)
-        
-        client_id = params.get('client_id')
+        if isinstance(params, list) and params and isinstance(params[0], dict):
+            p = params[0]
+        elif isinstance(params, dict):
+            p = params
+        else:
+            logger.warning(f"[RPC-METHOD] qtcl_unregisterMeasurementSubscriber: invalid params type={type(params).__name__}")
+            return _rpc_error(-32602, "params must be list or object", rpc_id)
+
+        client_id = str(p.get('client_id', ''))
         if not client_id:
+            logger.warning(f"[RPC-METHOD] qtcl_unregisterMeasurementSubscriber: client_id missing")
             return _rpc_error(-32602, "client_id required", rpc_id)
-        
+
+        logger.debug(f"[RPC-METHOD] qtcl_unregisterMeasurementSubscriber: client={client_id}")
         try:
             from oracle import get_oracle_measurement_broadcaster
             broadcaster = get_oracle_measurement_broadcaster()
             success = broadcaster.unregister_subscriber(client_id)
-            
+            logger.debug(f"[RPC-METHOD] qtcl_unregisterMeasurementSubscriber: unregistered={success}")
             return _rpc_ok({'unregistered': success}, rpc_id)
         except ImportError:
+            logger.warning(f"[RPC-METHOD] qtcl_unregisterMeasurementSubscriber: broadcast system not initialized")
             return _rpc_error(-32603, "broadcast system not initialized", rpc_id)
-    
     except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_unregisterMeasurementSubscriber exception: {e}")
         return _rpc_error(-32603, f"Unsubscribe failed: {str(e)}", rpc_id)
 
 
 def _rpc_listMeasurementSubscribers(params: Any, rpc_id: Any) -> dict:
-    """
-    List all active measurement subscribers (operator introspection).
-    Returns active subscriber count, per-subscriber metrics, and broadcast controller status.
+    """qtcl_listMeasurementSubscribers — list all active measurement subscribers (operator introspection).
+
+    Params: None (ignored)
+
+    Returns:
+      { active_count: int, is_running: bool, metrics: object, subscribers: [object, ...] }
+
+    Format: JSON-RPC 2.0 success/error. Returns broadcaster status and subscriber list.
     """
     try:
-        from oracle import get_oracle_measurement_broadcaster
-        broadcaster = get_oracle_measurement_broadcaster()
-        status = broadcaster.get_status()
-        
-        return _rpc_ok({
-            'active_count': status.get('active_subscribers', 0),
-            'is_running': status.get('is_running', False),
-            'metrics': status.get('metrics', {}),
-            'subscribers': status.get('subscribers', []),
-        }, rpc_id)
-    
-    except ImportError:
-        return _rpc_error(-32603, "broadcast system not initialized", rpc_id)
+        logger.debug(f"[RPC-METHOD] qtcl_listMeasurementSubscribers called with id={rpc_id}")
+        try:
+            from oracle import get_oracle_measurement_broadcaster
+            broadcaster = get_oracle_measurement_broadcaster()
+            status = broadcaster.get_status()
+            logger.debug(f"[RPC-METHOD] qtcl_listMeasurementSubscribers: {status.get('active_subscribers', 0)} active")
+            return _rpc_ok({
+                'active_count': status.get('active_subscribers', 0),
+                'is_running': status.get('is_running', False),
+                'metrics': status.get('metrics', {}),
+                'subscribers': status.get('subscribers', []),
+            }, rpc_id)
+        except ImportError:
+            logger.warning(f"[RPC-METHOD] qtcl_listMeasurementSubscribers: broadcast system not initialized")
+            return _rpc_error(-32603, "broadcast system not initialized", rpc_id)
     except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_listMeasurementSubscribers exception: {e}")
         return _rpc_error(-32603, f"List failed: {str(e)}", rpc_id)
 
 
@@ -4424,51 +4777,207 @@ def _rpc_pushOracleDM(params: Any, rpc_id: Any) -> dict:
 
 def _rpc_getLatestDMSnapshot(params: Any, rpc_id: Any) -> dict:
     """qtcl_getLatestDMSnapshot — fetch latest density matrix snapshot from oracle ring buffer.
-    
-    Returns: {
+
+    Params:
+      list:   [] or omitted          — no params needed
+      object: {} or omitted          — no params needed
+
+    Returns:
+      {} if no snapshot available, otherwise:
         timestamp_ns, oracle_id, density_matrix_hex, purity, w_state_fidelity,
         von_neumann_entropy, coherence_l1, hlwe_signature, signature_valid, oracle_address
-    }
+
+    Format:
+      Success: _rpc_ok({snapshot fields}, rpc_id)
+      Empty:   _rpc_ok({}, rpc_id)
     """
-    from globals import get_latest_dm_snapshot
-    snap = get_latest_dm_snapshot()
-    if not snap:
-        return _rpc_ok({}, rpc_id)
-    return _rpc_ok(snap, rpc_id)
+    try:
+        logger.debug(f"[RPC-METHOD] qtcl_getLatestDMSnapshot called with id={rpc_id}")
+        from globals import get_latest_dm_snapshot
+        snap = get_latest_dm_snapshot()
+        if not snap:
+            logger.debug(f"[RPC-METHOD] qtcl_getLatestDMSnapshot: no snapshot available")
+            return _rpc_ok({}, rpc_id)
+        logger.debug(f"[RPC-METHOD] qtcl_getLatestDMSnapshot: snapshot returned, ts={snap.get('timestamp_ns', '?')}")
+        return _rpc_ok(snap, rpc_id)
+    except ImportError:
+        logger.warning("[RPC-METHOD] qtcl_getLatestDMSnapshot: globals.get_latest_dm_snapshot not available")
+        return _rpc_error(-32000, "snapshot service not initialized", rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_getLatestDMSnapshot: {e}")
+        return _rpc_error(-32603, f"Internal error: {e}", rpc_id)
 
 
 def _rpc_getLatestDMSnapshots(params: Any, rpc_id: Any) -> dict:
-    """qtcl_getLatestDMSnapshots — retrieve N most recent density matrix snapshots from the ring buffer."""
+    """qtcl_getLatestDMSnapshots — retrieve N most recent density matrix snapshots from the ring buffer.
+
+    Params:
+      list:   [limit]                — limit (int, 1-100, default 10)
+      object: {"limit": 10}          — named limit parameter
+
+    Returns:
+      {
+        snapshots: [{...}, ...],    — array of snapshot objects
+        count: int,                 — number of snapshots returned
+        ring_size: int              — total snapshots in ring buffer
+      }
+
+    Format:
+      Success: _rpc_ok({snapshots, count, ring_size}, rpc_id)
+      Error:   _rpc_error(-32602, msg, rpc_id) for invalid limit
+               _rpc_error(-32603, msg, rpc_id) for internal errors
+    """
     try:
+        logger.debug(f"[RPC-METHOD] qtcl_getLatestDMSnapshots called with params={params}, id={rpc_id}")
         limit = 10
-        if isinstance(params, list) and params:
-            try: limit = int(params[0])
-            except: pass
+        if isinstance(params, list):
+            if params:
+                try:
+                    limit = int(params[0])
+                except (ValueError, TypeError):
+                    logger.warning(f"[RPC-METHOD] qtcl_getLatestDMSnapshots: invalid limit value {params[0]}, using default 10")
+                    limit = 10
         elif isinstance(params, dict):
-            try: limit = int(params.get("limit", 10))
-            except: pass
-            
-        limit = min(max(int(limit), 1), 100)
-        
+            try:
+                limit = int(params.get("limit", 10))
+            except (ValueError, TypeError):
+                logger.warning(f"[RPC-METHOD] qtcl_getLatestDMSnapshots: invalid limit value {params.get('limit')}, using default 10")
+                limit = 10
+        elif params is not None:
+            logger.warning(f"[RPC-METHOD] qtcl_getLatestDMSnapshots: unexpected params type {type(params)}, using default limit")
+
+        limit = min(max(limit, 1), 100)
+
         with _DM_SNAPSHOT_LOCK:
             snapshots = list(_DM_SNAPSHOT_RING)[-limit:]
-            
+
+        logger.debug(f"[RPC-METHOD] qtcl_getLatestDMSnapshots: returned {len(snapshots)} snapshots, ring_size={len(_DM_SNAPSHOT_RING)}")
         return _rpc_ok({
             "snapshots": snapshots,
             "count": len(snapshots),
             "ring_size": len(_DM_SNAPSHOT_RING)
         }, rpc_id)
     except Exception as e:
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+        logger.exception(f"[RPC-METHOD] qtcl_getLatestDMSnapshots: {e}")
+        return _rpc_error(-32603, f"Internal error: {e}", rpc_id)
 
 
 def _rpc_listMethods(params: Any, rpc_id: Any) -> dict:
-    """system.listMethods — introspection: list all available RPC methods."""
-    methods = list(_RPC_METHODS.keys())
-    return _rpc_ok({
-        'methods': sorted(methods),
-        'count': len(methods),
-    }, rpc_id)
+    """system.listMethods — introspection: list all available RPC methods.
+
+    Params:
+      list:   [] or omitted          — no params needed
+      object: {} or omitted          — no params needed
+
+    Returns:
+      {
+        methods: [str, ...],        — sorted list of available method names
+        count: int                  — total number of methods
+      }
+
+    Format:
+      Success: _rpc_ok({methods, count}, rpc_id)
+    """
+    try:
+        logger.debug(f"[RPC-METHOD] system.listMethods called with id={rpc_id}")
+        methods = list(_RPC_METHODS.keys())
+        logger.debug(f"[RPC-METHOD] system.listMethods: returning {len(methods)} methods")
+        return _rpc_ok({
+            'methods': sorted(methods),
+            'count': len(methods),
+        }, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] system.listMethods: {e}")
+        return _rpc_error(-32603, f"Internal error: {e}", rpc_id)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# DHT / KADEMLIA RPC METHODS
+# ═══════════════════════════════════════════════════════════════════════
+
+def _rpc_dhtPing(params: Any, rpc_id: Any) -> dict:
+    """qtcl_dhtPing — Kademlia PING: update routing table with sender info.
+
+    Params:
+      list:   [{"node_id": "...", "external_addr": "host:port"}]
+      object: {"node_id": "...", "external_addr": "host:port"}
+
+    Returns:
+      {
+        pinged: bool,               — True if node was added/updated
+        node_id: str                — local node ID prefix (16 chars)
+      }
+
+    Format:
+      Success: _rpc_ok({pinged, node_id}, rpc_id)
+      Missing: _rpc_ok({pinged: false, reason: str}, rpc_id)
+      Error:   _rpc_error(-32603, msg, rpc_id) for internal errors
+    """
+    try:
+        logger.debug(f"[RPC-METHOD] qtcl_dhtPing called with params={params}, id={rpc_id}")
+        p = params if isinstance(params, dict) else (params[0] if isinstance(params, list) and params else {})
+        if not isinstance(p, dict):
+            return _rpc_error(-32602, "params must be object or [object]", rpc_id)
+
+        node_id = str(p.get("node_id", ""))
+        ext_addr = str(p.get("external_addr", ""))
+        if not node_id or not ext_addr:
+            logger.warning(f"[RPC-METHOD] qtcl_dhtPing: missing node_id or external_addr")
+            return _rpc_ok({"pinged": False, "reason": "missing node_id or external_addr"}, rpc_id)
+
+        dm = get_dht_manager()
+        host, port = (ext_addr.rsplit(":", 1) + ["9091"])[:2]
+        try:
+            port = int(port)
+        except (ValueError, TypeError):
+            port = 9091
+        dm.routing_table.add_node(DHTNode(node_id=node_id, address=host, port=port))
+        with _LIVE_PEERS_LOCK:
+            _LIVE_PEERS_CACHE.setdefault(node_id, {
+                "node_id": node_id, "external_addr": ext_addr,
+                "last_seen": time.time(), "ban_score": 0, "is_relay": False,
+            })
+            _LIVE_PEERS_CACHE[node_id]["last_seen"] = time.time()
+            _LIVE_PEERS_CACHE[node_id]["external_addr"] = ext_addr
+
+        logger.debug(f"[RPC-METHOD] qtcl_dhtPing: node_id={node_id[:16]} pinged successfully")
+        return _rpc_ok({"pinged": True, "node_id": dm.local_node.node_id[:16]}, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_dhtPing: {e}")
+        return _rpc_error(-32603, f"Internal error: {e}", rpc_id)
+
+
+def _rpc_dhtFindNode(params: Any, rpc_id: Any) -> dict:
+    """qtcl_dhtFindNode — return k closest nodes to target_id."""
+    try:
+        p = params if isinstance(params, dict) else (params[0] if isinstance(params, list) and params else {})
+        target_id = str(p.get("target_id", ""))
+        count = int(p.get("count", 20))
+        if not target_id:
+            return _rpc_ok({"nodes": []}, rpc_id)
+        dm = get_dht_manager()
+        closest = dm.routing_table.get_closest_nodes(target_id, count=min(count, 20))
+        nodes = [n.to_dict() for n in closest]
+        return _rpc_ok({"nodes": nodes, "count": len(nodes)}, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_dhtFindNode exception: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
+
+def _rpc_dhtAnnounce(params: Any, rpc_id: Any) -> dict:
+    """qtcl_dhtAnnounce — store a value in the DHT state store."""
+    try:
+        p = params if isinstance(params, dict) else (params[0] if isinstance(params, list) and params else {})
+        key = str(p.get("key", ""))
+        value = p.get("value")
+        if not key:
+            return _rpc_error(-32602, "key required", rpc_id)
+        dm = get_dht_manager()
+        dm.store_state(key, value or {})
+        return _rpc_ok({"stored": True, "key": key[:32]}, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_dhtAnnounce exception: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
 _RPC_METHODS: Dict[str, Any] = {
@@ -4501,6 +5010,10 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getLatestDMSnapshots": _rpc_getLatestDMSnapshots,
     # ── NEW: Client Tripartite Oracle Push ──────────────────────────────────────
     "qtcl_pushOracleDM": _rpc_pushOracleDM,
+    # ── NEW: DHT / Kademlia RPC ─────────────────────────────────────────────────
+    "qtcl_dhtPing":       _rpc_dhtPing,
+    "qtcl_dhtFindNode":   _rpc_dhtFindNode,
+    "qtcl_dhtAnnounce":   _rpc_dhtAnnounce,
 }
 
 
