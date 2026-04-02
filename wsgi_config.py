@@ -145,6 +145,14 @@ try:
     # a second _maintenance_loop thread producing interleaved revival cycle counts.
     logger.info("[WSGI] ✅ All subsystems initialized (lattice, P2P, database, oracle)")
     
+    # Start P2P broadcast daemon (runs independently of mining)
+    try:
+        from server import _start_p2p_broadcast
+        _start_p2p_broadcast()
+        logger.info("[WSGI] ✅ P2P broadcast daemon started")
+    except Exception as e:
+        logger.warning(f"[WSGI] ⚠️  P2P startup failed: {e}")
+    
 except ImportError as e:
     logger.error(f"[WSGI] ❌ CRITICAL: Failed to import app from server.py")
     logger.error(f"[WSGI] ImportError: {e}")

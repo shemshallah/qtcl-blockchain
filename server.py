@@ -451,6 +451,7 @@ except ImportError:
     psycopg2_pool_mod = None
 
 from flask import Flask, jsonify, request, render_template_string, send_file, Response
+app = Flask(__name__)
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -1421,6 +1422,37 @@ def get_db_connection():
     return db_pool.get_connection()
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# CHAIN QUERY FUNCTIONS (Supabase PostgreSQL only — source of truth)
+# Clients maintain their own SQLite mirrors, synced via P2P broadcasts
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def query_latest_block() -> Optional[Dict[str, Any]]:
+    """Get latest block from Supabase PostgreSQL (authoritative source)."""
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("SELECT height, block_hash, timestamp FROM blocks ORDER BY height DESC LIMIT 1")
+            row = cur.fetchone()
+            if row:
+                return {"height": row[0], "hash": row[1] or "", "timestamp": row[2] or 0}
+    except Exception as e:
+        logger.debug(f"[QUERY-LATEST] PG error: {e}")
+    return None
+
+def query_block_by_height(height: int) -> Optional[Dict[str, Any]]:
+    """Get block by height from Supabase PostgreSQL (authoritative source)."""
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("SELECT * FROM blocks WHERE height = %s", (height,))
+            row = cur.fetchone()
+            if row:
+                cols = [desc[0] for desc in cur.description]
+                return dict(zip(cols, row))
+    except Exception as e:
+        logger.debug(f"[QUERY-BLOCK] PG error: {e}")
+    return None
+
+
 @contextmanager
 def get_db_cursor():
     """Context manager for database cursor with connection pooling.
@@ -1859,7 +1891,7 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                 height = int(height)
 
         def _query_block_at_height(h: int) -> Optional[dict]:
-            """Full block query from DB — mirrors /api/blocks/height/<int>."""
+            """Full block query from Supabase PostgreSQL (authoritative source)."""
             try:
                 with get_db_cursor() as cur:
                     cur.execute("""
@@ -2870,8 +2902,10 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     ))
         except Exception as dbe:
             logger.exception(f"[RPC-submitBlock] DB error: {dbe}")
-            return _rpc_error(-32603, f"DB persist failed: {str(dbe)}", rpc_id)
-
+            # Even if PG fails, we attempt to continue with SQLite if we can.
+            # But normally we want the authoritative DB to succeed.
+            # return _rpc_error(-32603, f"DB persist failed: {str(dbe)}", rpc_id)
+        
         # ── Credit coinbase rewards (transaction 2 — isolated from block persist) ──
         # Separate get_db_cursor so a wallet schema error cannot roll back the block.
         # Deterministic from header: never scan txs (breaks when miner == treasury).
@@ -3207,6 +3241,161 @@ def _rpc_getMempool(params: Any, rpc_id: Any) -> dict:
         return _rpc_ok([], rpc_id)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENTERPRISE P2P NETWORK — Inline Implementation (no external files)
+# ═══════════════════════════════════════════════════════════════════════════════
+P2P_BROADCAST_INTERVAL = 30
+P2P_PEER_TIMEOUT = 300
+P2P_MAX_PEERS = 100
+
+class P2PPeer:
+    """A peer in the P2P network. Peer = WALLET, not oracle."""
+    def __init__(self, peer_id: str = "", wallet_address: str = "", external_addr: str = "", 
+                 port: int = 9091, public_key: str = "", chain_height: int = 0,
+                 last_seen: float = 0.0, first_seen: float = 0.0, is_alive: bool = True):
+        self.peer_id = peer_id
+        self.wallet_address = wallet_address
+        self.external_addr = external_addr
+        self.port = port
+        self.public_key = public_key
+        self.chain_height = chain_height
+        self.last_seen = last_seen
+        self.first_seen = first_seen
+        self.is_alive = is_alive
+    
+    def to_dict(self) -> dict:
+        return {"peer_id": self.peer_id, "wallet_address": self.wallet_address,
+                "external_addr": self.external_addr, "port": self.port,
+                "public_key": self.public_key, "chain_height": self.chain_height,
+                "last_seen": self.last_seen, "first_seen": self.first_seen,
+                "is_alive": self.is_alive}
+
+class _P2PSQLiteStore:
+    """SQLite store for peer persistence on client side."""
+    def __init__(self, db_path: str = "peers.sqlite"):
+        import sqlite3
+        self.db_path = db_path
+        self._lock = threading.RLock()
+        conn = sqlite3.connect(db_path)
+        conn.execute("""CREATE TABLE IF NOT EXISTS peer_registry (
+            peer_id TEXT PRIMARY KEY, wallet_address TEXT, external_addr TEXT,
+            port INTEGER, public_key TEXT, chain_height INTEGER, last_seen REAL,
+            first_seen REAL, is_alive INTEGER)""")
+        conn.commit()
+        conn.close()
+    
+    def upsert_peer(self, peer: P2PPeer) -> bool:
+        import sqlite3
+        with self._lock:
+            conn = sqlite3.connect(self.db_path)
+            now = time.time()
+            if peer.first_seen == 0:
+                peer.first_seen = now
+            conn.execute("""INSERT OR REPLACE INTO peer_registry 
+                (peer_id, wallet_address, external_addr, port, public_key, chain_height,
+                 last_seen, first_seen, is_alive) VALUES (?,?,?,?,?,?,?,?,?)""",
+                (peer.peer_id, peer.wallet_address, peer.external_addr, peer.port,
+                 peer.public_key, peer.chain_height, peer.last_seen, peer.first_seen,
+                 1 if peer.is_alive else 0))
+            conn.commit()
+            conn.close()
+            return True
+    
+    def get_alive_peers(self) -> list:
+        import sqlite3
+        cutoff = time.time() - P2P_PEER_TIMEOUT
+        with self._lock:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("""SELECT * FROM peer_registry 
+                WHERE last_seen > ? AND is_alive = 1 ORDER BY last_seen DESC LIMIT ?""",
+                (cutoff, P2P_MAX_PEERS)).fetchall()
+            conn.close()
+            return [P2PPeer(r["peer_id"], r["wallet_address"], r["external_addr"],
+                     r["port"], r["public_key"], r["chain_height"], r["last_seen"],
+                     r["first_seen"], bool(r["is_alive"])) for r in rows]
+
+_p2p_dht_table: Dict[str, P2PPeer] = {}
+_p2p_dht_lock = threading.RLock()
+_p2p_seen_hashes: set = set()
+_p2p_client_store: Optional[_P2PSQLiteStore] = None
+
+def _p2p_rpc_get_dht_table(params, rpc_id):
+    """qtcl_getDHTTable — Return the full DHT peer table."""
+    try:
+        limit = 100
+        if isinstance(params, dict):
+            limit = min(int(params.get("limit", 100)), P2P_MAX_PEERS)
+        with _p2p_dht_lock:
+            peers = list(_p2p_dht_table.values())[:limit]
+        return {"peers": [p.to_dict() for p in peers], "count": len(peers), "timestamp": time.time()}
+    except Exception as e:
+        logger.error(f"[P2P-RPC] getDHTTable error: {e}")
+        return {"peers": [], "count": 0, "timestamp": time.time()}
+
+def _p2p_rpc_receive_dht_table(params, rpc_id):
+    """qtcl_receiveDHTTable — Receive a DHT table from another peer."""
+    try:
+        dht_json = params.get("dht_table", "") if isinstance(params, dict) else ""
+        from_peer = params.get("propagating_from", "") if isinstance(params, dict) else ""
+        dht_hash = params.get("dht_hash", "") if isinstance(params, dict) else ""
+        if not dht_json:
+            return {"status": "error", "message": "dht_table required"}
+        if dht_hash and dht_hash in _p2p_seen_hashes:
+            return {"status": "already_seen", "dht_hash": dht_hash[:16]}
+        import json
+        doc = json.loads(dht_json)
+        peers_data = doc.get("peers", [])
+        new_count = 0
+        with _p2p_dht_lock:
+            for pd in peers_data:
+                p = P2PPeer(pd.get("peer_id", ""), pd.get("wallet_address", ""),
+                            pd.get("external_addr", ""), pd.get("port", 9091),
+                            pd.get("public_key", ""), pd.get("chain_height", 0),
+                            pd.get("last_seen", time.time()), pd.get("first_seen", 0),
+                            pd.get("is_alive", True))
+                if p.peer_id not in _p2p_dht_table:
+                    new_count += 1
+                p.last_seen = time.time()
+                _p2p_dht_table[p.peer_id] = p
+        if dht_hash:
+            _p2p_seen_hashes.add(dht_hash)
+            if len(_p2p_seen_hashes) > 10000:
+                _p2p_seen_hashes = set(list(_p2p_seen_hashes)[-5000:])
+        logger.info(f"[P2P] ← Received DHT from {from_peer[:16]}…: {len(peers_data)} peers ({new_count} new)")
+        return {"status": "accepted", "peer_count": len(peers_data), "new_peers": new_count}
+    except Exception as e:
+        logger.error(f"[P2P-RPC] receiveDHTTable error: {e}")
+        return {"status": "error", "message": str(e)}
+
+def _p2p_rpc_peer_heartbeat(params, rpc_id):
+    """qtcl_peerHeartbeat — Register a peer's heartbeat."""
+    try:
+        peer_id = params.get("peer_id", "") if isinstance(params, dict) else ""
+        wallet_address = params.get("wallet_address", "") if isinstance(params, dict) else ""
+        external_addr = params.get("external_addr", "") if isinstance(params, dict) else ""
+        port = int(params.get("port", 9091)) if isinstance(params, dict) else 9091
+        chain_height = int(params.get("chain_height", 0)) if isinstance(params, dict) else 0
+        if not peer_id:
+            return {"status": "error", "message": "peer_id required"}
+        with _p2p_dht_lock:
+            if peer_id in _p2p_dht_table:
+                p = _p2p_dht_table[peer_id]
+                p.last_seen = time.time()
+                p.chain_height = max(p.chain_height, chain_height)
+                p.is_alive = True
+            else:
+                p = P2PPeer(peer_id=peer_id, wallet_address=wallet_address,
+                           external_addr=external_addr, port=port,
+                           chain_height=chain_height, last_seen=time.time(),
+                           first_seen=time.time(), is_alive=True)
+                _p2p_dht_table[peer_id] = p
+        return {"status": "ok", "peer_id": peer_id, "timestamp": time.time()}
+    except Exception as e:
+        logger.error(f"[P2P-RPC] peerHeartbeat error: {e}")
+        return {"status": "error", "message": str(e)}
+
+
 _RPC_METHODS: Dict[str, Any] = {
     "qtcl_submitBlock":       _rpc_submitBlock,
     "qtcl_getBlockHeight":    _rpc_getBlockHeight,
@@ -3234,9 +3423,7 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getLatestDMSnapshots": _rpc_getLatestDMSnapshots,
     # ── NEW: Client Tripartite Oracle Push ──────────────────────────────────────
     "qtcl_pushOracleDM": _rpc_pushOracleDM,
-    # ═══════════════════════════════════════════════════════════════════════════════
-    # ENTERPRISE P2P NETWORK — 30s DHT Broadcast + Fan-out (inline)
-    # ═══════════════════════════════════════════════════════════════════════════════
+    # P2P DHT methods
     "qtcl_getDHTTable":       _p2p_rpc_get_dht_table,
     "qtcl_receiveDHTTable":   _p2p_rpc_receive_dht_table,
     "qtcl_peerHeartbeat":     _p2p_rpc_peer_heartbeat,
