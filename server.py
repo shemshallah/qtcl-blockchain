@@ -3428,6 +3428,85 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": type(e).__name__})
 
 
+def _rpc_broadcastPeerTable(params: Any, rpc_id: Any) -> dict:
+    """qtcl_broadcastPeerTable — return full peer registry with canonical addressing for P2P gossip.
+    
+    Each peer is enriched with:
+      - host, port split from external_addr
+      - caller_ip as the canonical observed WAN IP (Koyeb's view of peer)
+      - is_relay, chain_height, last_seen, pubkey_hash, ban_score
+    
+    Used by client P2P nodes to discover & gossip peer table across mesh.
+    """
+    try:
+        limit = 64
+        if isinstance(params, dict):
+            try: limit = int(params.get("limit", 64))
+            except (ValueError, TypeError): limit = 64
+        limit = min(max(int(limit), 1), 200)
+        
+        enriched_peers = []
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    SELECT node_id, external_addr, pubkey_hash, chain_height,
+                           last_seen, capabilities, ban_score, is_relay, caller_ip
+                    FROM   peer_registry
+                    WHERE  last_seen > NOW() - INTERVAL '5 minutes'
+                      AND  ban_score < 100
+                    ORDER  BY is_relay DESC, chain_height DESC, last_seen DESC
+                    LIMIT  %s
+                """, (limit,))
+                rows = cur.fetchall()
+                if rows:
+                    cols = [d[0] for d in cur.description]
+                    for row in rows:
+                        peer_dict = dict(zip(cols, row))
+                        # Enrich: split external_addr → host, port
+                        ext_addr = peer_dict.get("external_addr") or ""
+                        if ':' in ext_addr:
+                            try:
+                                host, port_str = ext_addr.rsplit(':', 1)
+                                peer_dict["host"] = host.strip()
+                                peer_dict["port"] = int(port_str)
+                            except Exception:
+                                peer_dict["host"] = ext_addr
+                                peer_dict["port"] = 9091
+                        else:
+                            peer_dict["host"] = ext_addr or ""
+                            peer_dict["port"] = 9091
+                        # Normalize timestamp
+                        peer_dict["last_seen"] = peer_dict["last_seen"].timestamp() if hasattr(peer_dict.get("last_seen"), "timestamp") else peer_dict.get("last_seen")
+                        enriched_peers.append(peer_dict)
+        except Exception as _dbe:
+            logger.debug(f"[RPC-METHOD] qtcl_broadcastPeerTable DB query: {_dbe}")
+        
+        # Fallback to in-process cache
+        if not enriched_peers:
+            with _LIVE_PEERS_LOCK:
+                for v in list(_LIVE_PEERS_CACHE.values())[:limit]:
+                    p = dict(v)
+                    ext_addr = p.get("external_addr") or ""
+                    if ':' in ext_addr:
+                        try:
+                            host, port_str = ext_addr.rsplit(':', 1)
+                            p["host"] = host.strip()
+                            p["port"] = int(port_str)
+                        except Exception:
+                            p["host"] = ext_addr
+                            p["port"] = 9091
+                    else:
+                        p["host"] = ext_addr or ""
+                        p["port"] = 9091
+                    enriched_peers.append(p)
+        
+        logger.debug(f"[RPC-METHOD] qtcl_broadcastPeerTable: returning {len(enriched_peers)} enriched peers")
+        return _rpc_ok({"peers": enriched_peers, "count": len(enriched_peers)}, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_broadcastPeerTable exception: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": type(e).__name__})
+
+
 def _rpc_getMyAddr(params: Any, rpc_id: Any) -> dict:
     """qtcl_getMyAddr — STUN: return the caller's observed source IP so miners can discover their external addr.
 
@@ -4406,6 +4485,7 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getMempoolStats":   _rpc_getMempoolStats,
     "qtcl_getMempool":        _rpc_getMempool,
     "qtcl_getPeers":          _rpc_getPeers,
+    "qtcl_broadcastPeerTable":_rpc_broadcastPeerTable,  # ← enriched peer table w/ host/port split
     "qtcl_registerPeer":      _rpc_registerPeer,      # ← NEW: miner bootstrap registration
     "qtcl_getMyAddr":         _rpc_getMyAddr,          # ← NEW: STUN — return caller's observed IP
     "qtcl_getHealth":         _rpc_getHealth,
