@@ -4006,6 +4006,10 @@ def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
     """
     logger.info(f"[ORACLE-REG-SERVER] === START qtcl_submitOracleReg ===")
     p = params if isinstance(params, dict) else (params[0] if isinstance(params, list) and params and isinstance(params[0], dict) else {})
+    
+    logger.info(f"[ORACLE-REG-SERVER] Raw params: {p}")
+    logger.info(f"[ORACLE-REG-SERVER] Params type: {type(p)}")
+    
     wallet_addr = str(p.get('wallet_address', p.get('from_address', '')))
     oracle_addr = str(p.get('oracle_addr', wallet_addr))
     oracle_pub  = str(p.get('oracle_pub',  p.get('public_key', '')))
@@ -4073,8 +4077,17 @@ def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
 
     try:
         logger.info(f"[ORACLE-REG-SERVER] Submitting to mempool...")
-        if MEMPOOL:
-            result, reason, accepted_tx = MEMPOOL.accept(tx_payload)
+        
+        # Get mempool reference similar to other RPC methods
+        mp = None
+        try:
+            import mempool as _mp_mod
+            mp = getattr(_mp_mod, "MEMPOOL", None) or getattr(_mp_mod, "_MEMPOOL_INSTANCE", None)
+        except Exception as _mp_err:
+            logger.warning(f"[ORACLE-REG-SERVER] Mempool import failed: {_mp_err}")
+        
+        if mp:
+            result, reason, accepted_tx = mp.accept(tx_payload)
             logger.info(f"[ORACLE-REG-SERVER] Mempool result: {result.value}, reason={reason}")
             if result.value not in ('accepted', 'duplicate'):
                 return _rpc_error(-32001, f"Mempool rejected: {reason} [{result.value}]", rpc_id,
@@ -4085,6 +4098,7 @@ def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
             tx_hash = _hh.sha3_256(
                 f"oracle_reg:{wallet_addr}:{oracle_addr}:{ts_ns}".encode()
             ).hexdigest()
+            logger.info(f"[ORACLE-REG-SERVER] ✅ Accepted (no mempool): tx_hash={tx_hash[:16]}...")
 
         logger.info(f"[ORACLE-REG-SERVER] === COMPLETE tx_hash={tx_hash[:16]}... ===")
         
