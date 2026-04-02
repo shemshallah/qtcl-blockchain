@@ -4632,6 +4632,86 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
+def _rpc_gossipBlockAnnounce(params: Any, rpc_id: Any) -> dict:
+    """qtcl_gossipBlockAnnounce — propagate block announcement through the network.
+
+    Params:
+      list:   [{"height": int, "hash": "hex", "miner": "qtcl1...", "timestamp": float}]
+      object: {"height": int, "hash": "hex", "miner": "qtcl1...", "timestamp": float}
+
+    Required:
+      height     int   block height
+      hash       str   block hash (64-char hex)
+      miner      str   miner address (qtcl1...)
+      timestamp  float block timestamp
+
+    Returns:
+      {announced: true, height: int, hash: str, propagated_to: int}
+
+    Server action:
+      1. Validate params
+      2. Store block announcement in memory cache
+      3. Fan-out to connected peers via DHT/broadcast
+      4. Return success with propagation count
+    """
+    try:
+        p = params if isinstance(params, dict) else (params[0] if params else {})
+        
+        height = int(p.get("height", 0))
+        block_hash = str(p.get("hash", "")).lower()
+        miner = str(p.get("miner", ""))
+        timestamp = float(p.get("timestamp", 0))
+        
+        if not height or not block_hash:
+            return _rpc_error(-32602, "height and hash required", rpc_id)
+        
+        now = time.time()
+        
+        # Store in block announcement cache for peer polling
+        with _LIVE_PEERS_LOCK:
+            if not hasattr(_LIVE_PEERS_CACHE, '_block_announce_cache'):
+                _LIVE_PEERS_CACHE._block_announce_cache = {}
+            _LIVE_PEERS_CACHE._block_announce_cache[height] = {
+                "hash": block_hash,
+                "miner": miner,
+                "timestamp": timestamp,
+                "received_at": now,
+            }
+        
+        # Fan-out to known peers
+        propagated = 0
+        try:
+            with _LIVE_PEERS_LOCK:
+                peers_snapshot = list(_LIVE_PEERS_CACHE.values())
+            for peer in peers_snapshot:
+                target_addr = peer.get('external_addr', '')
+                if not target_addr or ':' not in target_addr:
+                    continue
+                try:
+                    host, port_str = target_addr.rsplit(':', 1)
+                    port = int(port_str)
+                    payload = {
+                        "jsonrpc": "2.0",
+                        "method": "qtcl_gossipBlockAnnounce",
+                        "params": {"height": height, "hash": block_hash, "miner": miner, "timestamp": timestamp},
+                        "id": 1
+                    }
+                    import requests
+                    requests.post(f"http://{host}:{port}/rpc", json=payload, timeout=1)
+                    propagated += 1
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        
+        logger.debug(f"[RPC-gossipBlockAnnounce] h={height} hash={block_hash[:16]}… propagated to {propagated} peers")
+        return _rpc_ok({"announced": True, "height": height, "hash": block_hash, "propagated_to": propagated}, rpc_id)
+    
+    except Exception as e:
+        logger.exception(f"[RPC] _rpc_gossipBlockAnnounce: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
+
 def _rpc_pushOracleDM(params: Any, rpc_id: Any) -> dict:
     """
     qtcl_pushOracleDM — accept a fused tripartite DM frame from a client oracle node.
@@ -5014,6 +5094,8 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_dhtPing":       _rpc_dhtPing,
     "qtcl_dhtFindNode":   _rpc_dhtFindNode,
     "qtcl_dhtAnnounce":   _rpc_dhtAnnounce,
+    # ── NEW: Block Gossip RPC ───────────────────────────────────────────────────
+    "qtcl_gossipBlockAnnounce": _rpc_gossipBlockAnnounce,
 }
 
 
