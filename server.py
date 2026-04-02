@@ -3989,6 +3989,7 @@ def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
       signature       object  required for mempool — HLWE sig over tx_hash
     Returns: {status, tx_hash, oracle_addr, check_url} or {status: tx_template_issued, tx_template}
     """
+    logger.info(f"[ORACLE-REG-SERVER] === START qtcl_submitOracleReg ===")
     p = params if isinstance(params, dict) else (params[0] if isinstance(params, list) and params and isinstance(params[0], dict) else {})
     wallet_addr = str(p.get('wallet_address', p.get('from_address', '')))
     oracle_addr = str(p.get('oracle_addr', wallet_addr))
@@ -4000,13 +4001,18 @@ def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
     nonce_val   = int(p.get('nonce', int(time.time_ns() // 1_000_000) % 2**31))
     ts_ns       = int(p.get('timestamp_ns', time.time_ns()))
 
+    logger.info(f"[ORACLE-REG-SERVER] wallet_addr={wallet_addr}, oracle_addr={oracle_addr}, action={action}")
+
     if not wallet_addr or not oracle_addr:
+        logger.error(f"[ORACLE-REG-SERVER] Missing required params: wallet={wallet_addr}, oracle={oracle_addr}")
         return _rpc_error(-32602, "wallet_address and oracle_addr required", rpc_id)
 
     import hashlib as _hh
     cert_preimage = f"{oracle_addr}|{wallet_addr}|{oracle_pub}"
     cert_sig_hex  = str(p.get('cert_sig',      _hh.sha256(cert_preimage.encode()).hexdigest()))
     cert_auth_tag = str(p.get('cert_auth_tag', _hh.sha3_256(cert_preimage.encode()).hexdigest()[:32]))
+
+    logger.info(f"[ORACLE-REG-SERVER] cert_sig={cert_sig_hex[:16]}..., cert_tag={cert_auth_tag[:16]}...")
 
     _ora_registry_addr = "qtcl1oracle_registry_000000000000000000000000"
     tx_payload = {
@@ -4034,9 +4040,11 @@ def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
             'action'     : action,
         },
     }
+    logger.info(f"[ORACLE-REG-SERVER] TX payload built: tx_type={tx_payload['tx_type']}")
 
     # If no signature provided — return template for client to sign
     if not signature:
+        logger.info(f"[ORACLE-REG-SERVER] No signature provided, returning tx_template")
         return _rpc_ok({
             'status'     : 'tx_template_issued',
             'tx_template': tx_payload,
@@ -4045,17 +4053,51 @@ def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
         }, rpc_id)
 
     try:
+        logger.info(f"[ORACLE-REG-SERVER] Submitting to mempool...")
         if MEMPOOL:
             result, reason, accepted_tx = MEMPOOL.accept(tx_payload)
+            logger.info(f"[ORACLE-REG-SERVER] Mempool result: {result.value}, reason={reason}")
             if result.value not in ('accepted', 'duplicate'):
                 return _rpc_error(-32001, f"Mempool rejected: {reason} [{result.value}]", rpc_id,
                                   {"result_code": result.value, "tx_template": tx_payload})
             tx_hash = accepted_tx.tx_hash if accepted_tx else ''
         else:
+            logger.warning(f"[ORACLE-REG-SERVER] MEMPOOL is None, computing hash manually")
             tx_hash = _hh.sha3_256(
                 f"oracle_reg:{wallet_addr}:{oracle_addr}:{ts_ns}".encode()
             ).hexdigest()
 
+        logger.info(f"[ORACLE-REG-SERVER] === COMPLETE tx_hash={tx_hash[:16]}... ===")
+        
+        # ── BROADCAST: Fan-out oracle registration to peers ─────────────────────
+        def _broadcast_oracle_reg(oracle_addr: str, wallet_addr: str, tx_hash: str):
+            try:
+                with _LIVE_PEERS_LOCK:
+                    peers_snapshot = list(_LIVE_PEERS_CACHE.values())
+                logger.info(f"[ORACLE-REG-SERVER] Broadcasting to {len(peers_snapshot)} peers")
+                for peer in peers_snapshot:
+                    target_addr = peer.get('external_addr', '')
+                    if not target_addr or ':' not in target_addr:
+                        continue
+                    try:
+                        host, port_str = target_addr.rsplit(':', 1)
+                        port = int(port_str)
+                        payload = {
+                            "jsonrpc": "2.0",
+                            "method": "qtcl_dhtPing",
+                            "params": {"node_id": oracle_addr, "external_addr": target_addr},
+                            "id": 1
+                        }
+                        requests.post(f"http://{host}:{port}/rpc", json=payload, timeout=2)
+                        logger.info(f"[ORACLE-REG-SERVER] Broadcast to {target_addr}")
+                    except Exception as e:
+                        logger.debug(f"[ORACLE-REG-SERVER] Broadcast to {target_addr} failed: {e}")
+            except Exception as e:
+                logger.exception(f"[ORACLE-REG-SERVER] Broadcast failed: {e}")
+        
+        threading.Thread(target=_broadcast_oracle_reg, args=(oracle_addr, wallet_addr, tx_hash), daemon=True).start()
+        # ───────────────────────────────────────────────────────────────────────
+        
         return _rpc_ok({
             'status'    : 'submitted',
             'tx_hash'   : tx_hash,
@@ -4066,6 +4108,7 @@ def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
             'note'      : 'TX in mempool — confirmed on next block seal.',
         }, rpc_id)
     except Exception as e:
+        logger.exception(f"[ORACLE-REG-SERVER] Exception: {e}")
         return _rpc_error(-32603, f"Oracle reg submission failed: {e}", rpc_id)
 
 
