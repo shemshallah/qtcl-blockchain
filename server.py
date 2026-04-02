@@ -3629,14 +3629,18 @@ def _p2p_broadcast_loop():
                     new_count = 0
                     with _p2p_dht_lock:
                         for row in rows:
-                            node_id, addr, pubk, height, last_seen = row
-                            if node_id not in _p2p_dht_table:
+                            nid, addr, pubk, height, last_seen = row
+                            if nid not in _p2p_dht_table:
                                 new_count += 1
                             ts = last_seen.timestamp() if hasattr(last_seen, "timestamp") else last_seen
-                            _p2p_dht_table[node_id] = P2PPeer(node_id, "", addr, 9091, pubk or "", int(height or 0), ts)
+                            _p2p_dht_table[nid] = P2PPeer(nid, "", addr or "", 9091, pubk or "", int(height or 0), ts)
                     logger.debug(f"[P2P] Cycle {_p2p_broadcast_count}: {len(rows)} peers from DB ({new_count} new)")
             except Exception as e:
-                logger.warning(f"[P2P] DB fetch: {e}")
+                # Log but don't crash - use in-memory cache
+                if "does not exist" in str(e):
+                    logger.warning(f"[P2P] DB table missing - waiting for peer_registry to be created")
+                else:
+                    logger.warning(f"[P2P] DB fetch: {e}")
             # Fan-out broadcast
             _p2p_fanout_broadcast()
         except Exception as e:
