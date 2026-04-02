@@ -3624,7 +3624,7 @@ def _p2p_broadcast_loop():
                 with get_db_cursor() as cur:
                     cur.execute("""SELECT node_id, external_addr, pubkey_hash, chain_height, last_seen
                         FROM peer_registry WHERE last_seen > NOW() - INTERVAL '10 minutes' 
-                        AND ban_score < 100 LIMIT ?""", (P2P_MAX_PEERS,))
+                        AND ban_score < 100 LIMIT %s""", (P2P_MAX_PEERS,))
                     rows = cur.fetchall()
                     new_count = 0
                     with _p2p_dht_lock:
@@ -3656,6 +3656,27 @@ def _start_p2p_broadcast():
     _p2p_broadcast_thread = threading.Thread(target=_p2p_broadcast_loop, daemon=True, name="P2PBroadcast")
     _p2p_broadcast_thread.start()
     logger.info(f"[P2P] ✅ DHT broadcaster started (30s interval)")
+
+@app.route("/rpc", methods=["POST"])
+def rpc_endpoint():
+    """POST /rpc — JSON-RPC 2.0 endpoint for all P2P and blockchain operations."""
+    try:
+        body = request.get_data()
+        if not body:
+            return jsonify(_rpc_error(-32600, "Empty request", None)), 400
+        
+        result, status_code = _dispatch(body)
+        
+        if status_code >= 400:
+            return jsonify(result), status_code
+        if result is None:
+            return "", 204
+        return jsonify(result), 200
+    except Exception as e:
+        logger.exception(f"[RPC] Endpoint error: {e}")
+        return jsonify(_rpc_error(-32603, str(e), None)), 500
+
+
 
 # ═══════════════════════════════════════════════════════════════════════════════════
 # DISTRIBUTED HASH TABLE (DHT) INITIALIZATION
