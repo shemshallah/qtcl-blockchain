@@ -1456,1032 +1456,6 @@ def get_db_cursor():
                 except Exception:
                     pass
 
-# ═══════════════════════════════════════════════════════════════════════════════════════
-# GENESIS BOOTSTRAP: Ensure canonical genesis block exists on fresh deploy
-# ═══════════════════════════════════════════════════════════════════════════════════════
-def _ensure_genesis_block_in_db() -> bool:
-    """
-    CRITICAL BOOTSTRAP FIX: Auto-create genesis block if missing from DB.
-    
-    On fresh server deploy, the blocks table is empty.  /api/blocks/tip returns
-    a fallback {height: 0} but no actual genesis record exists.  Clients then
-    try to mine h=1 on a non-existent h=0 parent, causing mining to fail silently.
-    
-    Solution: Check if genesis (height=0) exists; create it deterministically if missing.
-    Returns True if genesis exists OR was created successfully.
-    """
-    try:
-        with get_db_cursor() as cur:
-            # Check if height=0 exists
-            cur.execute("SELECT height, block_hash FROM blocks WHERE height = 0 LIMIT 1")
-            genesis_row = cur.fetchone()
-            
-            if genesis_row:
-                logger.info(
-                    f"[GENESIS-BOOTSTRAP] ✅ Genesis already exists: "
-                    f"h=0 hash={genesis_row[1][:24] if genesis_row[1] else '?'}…"
-                )
-                return True
-            
-            # Genesis missing — create deterministically
-            logger.warning(
-                "[GENESIS-BOOTSTRAP] ⚠️  Genesis missing from DB! Creating canonical genesis block…"
-            )
-            
-            # Deterministic canonical coinbase (matches client-side forge)
-            _GENESIS_TS = 1_700_000_000  # Fixed epoch
-            _COINBASE_ADDR = "0" * 64    # NULL address
-            _COINBASE_AMOUNT = 5_000_000_000  # 50 QTCL
-            
-            coinbase_body = {
-                "version": 1, "height": 0, "type": "coinbase", "inputs": [],
-                "outputs": [{"address": _COINBASE_ADDR, "amount": _COINBASE_AMOUNT}],
-                "timestamp": _GENESIS_TS, "memo": "In the beginning was the qubit.",
-                "fee": 0, "from_address": _COINBASE_ADDR,
-                "to_address": _COINBASE_ADDR, "amount": _COINBASE_AMOUNT,
-            }
-            coinbase_body["tx_hash"] = hashlib.sha3_256(
-                json.dumps(coinbase_body, sort_keys=True, separators=(',', ':')).encode()
-            ).hexdigest()
-            
-            # Build genesis block with all required fields
-            genesis_canonical = {
-                "height": 0,
-                "previous_hash": "0" * 64,
-                "timestamp": _GENESIS_TS,
-                "oracle_w_state_hash": "0" * 64,
-                "validator_public_key": _COINBASE_ADDR,
-                "nonce": 0,
-                "difficulty": 1,
-                "entropy_score": 0.9,
-                "transactions_root": "0" * 64,
-            }
-            
-            # Canonical deterministic hash
-            genesis_hash = hashlib.sha3_256(
-                json.dumps(genesis_canonical, sort_keys=True, separators=(',', ':')).encode()
-            ).hexdigest()
-            
-            # ── Transaction 1: block + genesis coinbase tx row ───────────────
-            _genesis_inserted = False
-            try:
-                with get_db_cursor() as _gcur:
-                    _gcur.execute("""
-                        INSERT INTO blocks
-                        (height, block_number, block_hash, previous_hash, timestamp,
-                         oracle_w_state_hash, validator_public_key, nonce,
-                         difficulty, entropy_score, transactions_root)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (height) DO NOTHING
-                    """, (
-                        0, 0, genesis_hash, "0" * 64, _GENESIS_TS,
-                        "0" * 64, _COINBASE_ADDR, 0,
-                        1, 0.9, coinbase_body["tx_hash"]
-                    ))
-                    _genesis_inserted = _gcur.rowcount > 0
-                    _gcur.execute("""
-                        INSERT INTO transactions
-                        (tx_hash, from_address, to_address,
-                         amount, tx_type, status, height, updated_at)
-                        VALUES (%s, %s, %s, %s, %s, 'confirmed', %s, NOW())
-                        ON CONFLICT (tx_hash) DO NOTHING
-                    """, (
-                        coinbase_body["tx_hash"],
-                        _COINBASE_ADDR, _COINBASE_ADDR,
-                        float(_COINBASE_AMOUNT), "coinbase",
-                        0,
-                    ))
-                logger.info(
-                    f"[GENESIS-BOOTSTRAP] ✅ Genesis block+tx committed: h=0 hash={genesis_hash[:24]}… "
-                    f"coinbase={coinbase_body['tx_hash'][:24]}…"
-                )
-            except Exception as _insert_err:
-                logger.warning(f"[GENESIS-BOOTSTRAP] Genesis block insert error: {_insert_err}")
-
-            # ── Transaction 2: treasury wallet credit (isolated) ─────────────
-            try:
-                _treasury_addr = TessellationRewardSchedule.TREASURY_ADDRESS if TessellationRewardSchedule else _COINBASE_ADDR
-                with get_db_cursor() as _wcur:
-                    _t_fp = hashlib.sha256(_treasury_addr.encode()).hexdigest()[:64]
-                    _wcur.execute("""
-                        INSERT INTO wallet_addresses
-                            (address, wallet_fingerprint, public_key,
-                             balance, transaction_count, address_type)
-                        VALUES (%s, %s, %s, %s, 1, 'treasury')
-                        ON CONFLICT (address) DO UPDATE SET
-                            balance           = wallet_addresses.balance + EXCLUDED.balance,
-                            transaction_count = wallet_addresses.transaction_count + 1
-                    """, (_treasury_addr, _t_fp, _t_fp, _COINBASE_AMOUNT))
-                logger.info(
-                    f"[GENESIS-BOOTSTRAP] 💰 Treasury wallet credited: {_COINBASE_AMOUNT} base units → {_treasury_addr[:22]}…"
-                )
-            except Exception as _wcredit_err:
-                logger.error(
-                    f"[GENESIS-BOOTSTRAP] ❌ Treasury wallet credit FAILED: {_wcredit_err}",
-                    exc_info=True
-                )
-            return True
-                
-    except Exception as _ex:
-        logger.warning(f"[GENESIS-BOOTSTRAP] Non-fatal error: {_ex}")
-        return True  # Continue even if bootstrap fails
-
-def query_latest_block() -> Optional[Dict[str, Any]]:
-    """Get latest block from database with retry logic for pool timeouts"""
-    max_retries = 3
-    retry_delay = 0.1
-    
-    for attempt in range(max_retries):
-        try:
-            with get_db_cursor() as cur:
-                cur.execute("""
-                    SELECT height, block_hash, 
-                           COALESCE(timestamp, EXTRACT(EPOCH FROM NOW())::bigint) as timestamp,
-                           oracle_w_state_hash
-                    FROM blocks
-                    ORDER BY height DESC
-                    LIMIT 1
-                """)
-                row = cur.fetchone()
-                if row:
-                    timestamp = row[2]
-                    if timestamp is None:
-                        timestamp = int(time.time())
-                    
-                    return {
-                        'height':     row[0],
-                        'hash':       row[1],
-                        'block_hash': row[1],   # ❤️  alias
-                        'timestamp':  timestamp,
-                        'w_state_hash': row[3],
-                    }
-                return None  # No blocks found
-        except Exception as e:
-            if attempt < max_retries - 1:
-                logger.debug(f"[DB] query_latest_block retry {attempt+1}/{max_retries-1}: {e}")
-                time.sleep(retry_delay * (2 ** attempt))  # Exponential backoff: 0.1s, 0.2s, 0.4s
-            else:
-                logger.error(f"[DB] Failed to query blocks after {max_retries} retries: {e}")
-    return None
-
-
-def query_block_by_hash(block_hash: str) -> Optional[Dict[str, Any]]:
-    """Get block by hash"""
-    try:
-        with get_db_cursor() as cur:
-            cur.execute("""
-                SELECT height, block_hash, timestamp, oracle_w_state_hash,
-                       previous_hash, validator_public_key, nonce, difficulty, entropy_score
-                FROM blocks
-                WHERE block_hash = %s
-                LIMIT 1
-            """, (block_hash,))
-            row = cur.fetchone()
-            if row:
-                return {
-                    'height': row[0],
-                    'hash': row[1],
-                    'timestamp': row[2],
-                    'w_state_hash': row[3],
-                    'previous_hash': row[4],
-                    'miner_address': row[5],
-                    'nonce': row[6],
-                    'difficulty': row[7],
-                    'w_state_fidelity': float(row[8]) if row[8] is not None else 0.0,
-                }
-    except Exception as e:
-        logger.error(f"[DB] Failed to query block: {e}")
-    return None
-
-
-def query_blocks_range(from_height: int, to_height: int) -> List[Dict[str, Any]]:
-    """Get blocks in height range"""
-    try:
-        with get_db_cursor() as cur:
-            cur.execute("""
-                SELECT height, block_hash, timestamp, oracle_w_state_hash
-                FROM blocks
-                WHERE height BETWEEN %s AND %s
-                ORDER BY height ASC
-            """, (from_height, to_height))
-            rows = cur.fetchall()
-            return [
-                {
-                    'height': row[0],
-                    'hash': row[1],
-                    'timestamp': row[2],
-                    'w_state_hash': row[3],
-                }
-                for row in rows
-            ]
-    except Exception as e:
-        logger.error(f"[DB] Failed to query block range: {e}")
-    return []
-
-
-def query_pseudoqubit_range() -> Tuple[int, int]:
-    """Get min/max pq_id in database"""
-    try:
-        with get_db_cursor() as cur:
-            cur.execute("SELECT MIN(pq_id), MAX(pq_id) FROM pseudoqubits")
-            row = cur.fetchone()
-            if row and row[0] is not None:
-                return (row[0], row[1])
-    except Exception as e:
-        logger.error(f"[DB] Failed to query pseudoqubits: {e}")
-    return (0, 0)
-
-
-def query_wallet_info(address: str) -> Optional[Dict[str, Any]]:
-    """Get wallet info"""
-    try:
-        with get_db_cursor() as cur:
-            cur.execute("""
-                SELECT balance, transaction_count
-                FROM wallet_addresses
-                WHERE address = %s
-            """, (address,))
-            row = cur.fetchone()
-            if row:
-                return {
-                    'address': address,
-                    'balance': row[0],
-                    'tx_count': row[1],
-                }
-    except Exception as e:
-        logger.error(f"[DB] Failed to query wallet: {e}")
-    return None
-
-
-def query_transaction(tx_hash: str) -> Optional[Dict[str, Any]]:
-    """Get transaction by hash"""
-    try:
-        with get_db_cursor() as cur:
-            cur.execute("""
-                SELECT tx_hash, from_address, to_address, amount, status, timestamp
-                FROM transactions
-                WHERE tx_hash = %s
-            """, (tx_hash,))
-            row = cur.fetchone()
-            if row:
-                return {
-                    'tx_hash': row[0],
-                    'from': row[1],
-                    'to': row[2],
-                    'amount': row[3],
-                    'status': row[4],
-                    'timestamp': row[5],
-                }
-    except Exception as e:
-        logger.error(f"[DB] Failed to query transaction: {e}")
-    return None
-
-
-def insert_transaction(from_addr: str, to_addr: str, amount: int) -> Optional[str]:
-    """Insert transaction into database"""
-    try:
-        with get_db_cursor() as cur:
-            tx_hash = f"tx_{int(time.time() * 1000)}"
-            cur.execute("""
-                INSERT INTO transactions (tx_hash, from_address, to_address, amount, status)
-                VALUES (%s, %s, %s, %s, 'pending')
-                RETURNING tx_hash
-            """, (tx_hash, from_addr, to_addr, amount))
-            result = cur.fetchone()
-            return result[0] if result else None
-    except Exception as e:
-        logger.error(f"[DB] Failed to insert transaction: {e}")
-    return None
-
-
-
-def load_known_peers() -> List[Tuple[str, int]]:
-    """Load known peers from database"""
-    try:
-        with get_db_cursor() as cur:
-            cur.execute("""
-                SELECT ip_address, port FROM peer_registry
-                WHERE last_seen > NOW() - INTERVAL '7 days'
-                ORDER BY last_seen DESC
-                LIMIT 100
-            """)
-            return [(row[0], row[1]) for row in cur.fetchall()]
-    except Exception as e:
-        logger.error(f"[DB] Failed to load known peers: {e}")
-    return []
-
-
-# ═════════════════════════════════════════════════════════════════════════════════
-# MEASUREMENT SERVICE: Enterprise-Grade Async Metric Aggregation (Thread Pool + Queue)
-# Sharded node measurement with RLock-protected shared state
-# ═════════════════════════════════════════════════════════════════════════════════
-
-import queue as _measurement_queue_mod
-
-class MeasurementService:
-    """
-    Enterprise measurement service: thread pool for sharded node measurement.
-    
-    Scales to 1000s of nodes without blocking HTTP handlers.
-    Features:
-    - Sharded thread pool (N threads, each measures independent shard)
-    - RLock-protected metrics dict (thread-safe read/write)
-    - RPC polling (stateless)
-    - Graceful shutdown with cleanup
-    - Museum-grade error handling
-    
-    Architecture:
-      Thread 0: Measure nodes 0-999
-      Thread 1: Measure nodes 1000-1999
-      ...
-      Thread N: Measure nodes N*1000...
-      
-      All threads write to: metrics_dict (RLock-protected)
-      HTTP handlers read from: metrics_dict (instant, no contention)
-      RPC polling
-    """
-    
-    def __init__(self, num_threads: int = 8, nodes_per_shard: int = 1000):
-        """Initialize measurement service with thread pool."""
-        self.num_threads = num_threads
-        self.nodes_per_shard = nodes_per_shard
-        self.total_nodes = num_threads * nodes_per_shard
-        
-        # Thread-safe shared state
-        self.metrics_lock = threading.RLock()
-        self.metrics_dict = {}  # node_id -> {fidelity, coherence, entropy, timestamp}
-        
-        # Thread management
-        self.threads = []
-        self.running = False
-        self._shutdown_event = threading.Event()
-        
-        logger.info(f"[MEASURE] Initialized: {num_threads} threads, {nodes_per_shard} nodes/shard, {self.total_nodes} total")
-    
-    def _measure_shard(self, shard_id: int):
-        """
-        Thread worker: measure a shard of nodes independently.
-        
-        Shard 0: nodes 0-999
-        Shard 1: nodes 1000-1999
-        ...
-        """
-        start_node = shard_id * self.nodes_per_shard
-        end_node = start_node + self.nodes_per_shard
-        node_list = list(range(start_node, end_node))
-        
-        logger.debug(f"[MEASURE-{shard_id}] Shard started: nodes {start_node}-{end_node-1}")
-        
-        measurement_cycle = 0
-        while self.running and not self._shutdown_event.is_set():
-            try:
-                measurement_cycle += 1
-                
-                for node_id in node_list:
-                    if not self.running:
-                        break
-                    
-                    try:
-                        # Measure this node (simplified: based on node_id)
-                        fidelity = 0.93 + (node_id % 100) * 0.001
-                        coherence = 0.89 + (node_id % 100) * 0.0005
-                        entropy = 2.1 + (node_id % 10) * 0.01
-                        
-                        metric = {
-                            'node_id': node_id,
-                            'fidelity': round(fidelity, 6),
-                            'coherence': round(coherence, 6),
-                            'entropy': round(entropy, 4),
-                            'timestamp': time.time(),
-                        }
-                        
-                        # Write to shared dict (with lock)
-                        with self.metrics_lock:
-                            self.metrics_dict[node_id] = metric
-                        
-                        # Yield to other threads
-                        time.sleep(0.001)  # 1ms per node
-                    
-                    except Exception as e:
-                        logger.debug(f"[MEASURE-{shard_id}] Node {node_id} measurement error: {e}")
-                        continue
-                
-                # Shard cycle complete
-                if measurement_cycle % 10 == 0:
-                    if _should_log_shard(shard_id):
-                        logger.debug(f"[MEASURE-{shard_id}] Cycle {measurement_cycle}: {len(node_list)} nodes measured")
-                
-                # Wait before re-measuring
-                if self.running:
-                    time.sleep(1.0)
-            
-            except Exception as e:
-                logger.error(f"[MEASURE-{shard_id}] Unexpected error: {e}", exc_info=True)
-                time.sleep(2)
-        
-        logger.debug(f"[MEASURE-{shard_id}] Shard stopped after {measurement_cycle} cycles")
-    
-    def get_metrics(self, node_id: int = None) -> dict:
-        """Get metrics (thread-safe read, no blocking)."""
-        with self.metrics_lock:
-            if node_id is None:
-                return dict(self.metrics_dict)
-            return self.metrics_dict.get(node_id, {})
-    
-    def get_metrics_batch(self, node_ids: List[int]) -> dict:
-        """Get metrics for multiple nodes (thread-safe batch read)."""
-        with self.metrics_lock:
-            return {nid: self.metrics_dict.get(nid, {}) for nid in node_ids}
-    
-    def get_metrics_summary(self) -> dict:
-        """Get aggregated summary statistics."""
-        with self.metrics_lock:
-            if not self.metrics_dict:
-                return {'total_nodes': 0, 'avg_fidelity': 0, 'avg_coherence': 0}
-            
-            values = list(self.metrics_dict.values())
-            fidelities = [m.get('fidelity', 0) for m in values]
-            coherences = [m.get('coherence', 0) for m in values]
-            entropies = [m.get('entropy', 0) for m in values]
-            
-            return {
-                'total_nodes': len(values),
-                'avg_fidelity': round(sum(fidelities) / len(fidelities), 6) if fidelities else 0,
-                'avg_coherence': round(sum(coherences) / len(coherences), 6) if coherences else 0,
-                'avg_entropy': round(sum(entropies) / len(entropies), 4) if entropies else 0,
-                'timestamp': time.time(),
-            }
-    
-    def start(self):
-        """Start all measurement threads (non-blocking)."""
-        if self.running:
-            logger.warning("[MEASURE] Already running, ignoring start()")
-            return
-        
-        self.running = True
-        self._shutdown_event.clear()
-        
-        for shard_id in range(self.num_threads):
-            try:
-                t = threading.Thread(
-                    target=self._measure_shard,
-                    args=(shard_id,),
-                    daemon=True,
-                    name=f"MeasureShard-{shard_id}"
-                )
-                t.start()
-                self.threads.append(t)
-            except Exception as e:
-                logger.error(f"[MEASURE] Failed to start shard {shard_id}: {e}")
-        
-        logger.info(f"[MEASURE] ✓ Started {len(self.threads)} measurement threads")
-    
-    def stop(self):
-        """Stop all measurement threads gracefully with cleanup."""
-        if not self.running:
-            logger.debug("[MEASURE] Not running, ignoring stop()")
-            return
-        
-        logger.info("[MEASURE] Shutting down...")
-        self.running = False
-        self._shutdown_event.set()
-        
-        # Wait for threads to finish (max 10s)
-        for t in self.threads:
-            try:
-                t.join(timeout=5)
-            except Exception as e:
-                logger.warning(f"[MEASURE] Thread join error: {e}")
-        
-        # Clear state
-        with self.metrics_lock:
-            self.metrics_dict.clear()
-        
-        self.threads.clear()
-        logger.info("[MEASURE] ✓ Shutdown complete")
-
-# Global measurement service (singleton)
-_measurement_service = None
-
-def get_measurement_service() -> MeasurementService:
-    """Get or create the global measurement service."""
-    global _measurement_service
-    if _measurement_service is None:
-        _measurement_service = MeasurementService(
-            num_threads=int(os.getenv('MEASURE_THREADS', 8)),
-            nodes_per_shard=int(os.getenv('MEASURE_NODES_PER_SHARD', 1000))
-        )
-    return _measurement_service
-
-# ═════════════════════════════════════════════════════════════════════════════════
-# DIFFICULTY MANAGER (Independent of Entropy)
-# ═════════════════════════════════════════════════════════════════════════════════
-
-class DifficultyManager:
-    """
-    Adaptive difficulty targeting for QTCL.
-
-    Algorithm (per-block EWMA, wall-clock based)
-    ─────────────────────────────────────────────
-    On every ACCEPTED block we measure the wall-clock elapsed time since the
-    previous accepted block (not the block header timestamp — miners control
-    that and can set it to anything).  We update a EWMA of block intervals
-    and retarget to keep actual solve time near TARGET_BLOCK_TIME_S.
-
-    Bug history — do not revert these fixes:
-      • Bug 1: used header timestamp_s, not wall time → miner controls timestamp,
-               sub-second solve appeared as TARGET_BLOCK_TIME_S gap → no retarget.
-      • Bug 2: _last_accept = 0 on restart → first gap = unix epoch ≈ 1.7 billion s
-               → EWMA blows up → _retarget logs(~0) → difficulty dropped to FLOOR.
-      • Bug 3: legacy batch retarget fired AFTER record_block on the same block,
-               corrupting the EWMA with old slow-block averages from DB.
-
-    Difficulty ↔ hash-rate (hex leading-zero model):
-        diff=4 →  ~4.4k H/s for 30s blocks  (Python miner)
-        diff=5 →   ~70k H/s for 30s blocks  (single-thread C)
-        diff=6 →  ~1.1M H/s for 30s blocks  (multi-thread C)
-        diff=7 →   ~18M H/s for 30s blocks  (GPU territory)
-    """
-
-    ABS_MIN = 1
-    ABS_MAX = 8
-
-    TARGET_BLOCK_TIME_S = 30    # target inter-block interval in seconds
-    EWMA_ALPHA          = 0.40  # weight on newest sample — higher = faster reaction
-    MAX_STEP_PER_BLOCK  = 1     # max ±1 per block — prevents oscillation
-    WARMUP_BLOCKS       = 2     # blocks before first retarget (needs 1 gap sample)
-    FLOOR               = 4     # ❤️  floor=4 ARM64 ~15s blocks
-    CEILING             = ABS_MAX
-
-    def __init__(self, initial_difficulty: float = 4,
-                 seed_ewma: float = None, seed_last_wall: float = None):
-        import math as _m
-        self._math = _m
-        self.current_difficulty = max(float(self.FLOOR), min(float(self.CEILING), float(initial_difficulty)))
-        self.min_difficulty     = self.FLOOR
-        self.max_difficulty     = self.CEILING
-        self.target_block_time_s  = self.TARGET_BLOCK_TIME_S
-        self.adjustment_interval  = 1   # kept for legacy DB-query compat
-        # Seed from DB-measured recent block times when available.
-        # If no seed: start EWMA at TARGET so we don't retarget on the first block.
-        self._ewma_block_time: float = (
-            float(seed_ewma) if seed_ewma and seed_ewma > 0 else float(self.TARGET_BLOCK_TIME_S)
-        )
-        # Wall-clock time of the last ACCEPTED block.
-        # Must NOT be 0 — zero causes a billion-second gap on first record_block call.
-        self._last_accept_wall: float = (
-            float(seed_last_wall) if seed_last_wall and seed_last_wall > 1e9
-            else time.time()
-        )
-        self._block_count: int = 0
-        logger.info(
-            f"[DIFFICULTY] Adaptive manager ready: diff={self.current_difficulty} | "
-            f"target={self.TARGET_BLOCK_TIME_S}s | EWMA α={self.EWMA_ALPHA} | "
-            f"step≤±{self.MAX_STEP_PER_BLOCK} | floor={self.FLOOR} | "
-            f"seed_ewma={self._ewma_block_time:.1f}s"
-        )
-
-    def get_difficulty(self) -> float:
-        return self.current_difficulty
-
-    def set_difficulty(self, difficulty: float) -> bool:
-        """Manual override — clamps to [floor, ceiling]."""
-        clamped = max(float(self.FLOOR), min(float(self.CEILING), float(difficulty)))
-        if clamped != difficulty:
-            logger.warning(f"[DIFFICULTY] Requested {difficulty} clamped to {clamped}")
-        old = self.current_difficulty
-        self.current_difficulty = clamped
-        logger.info(f"[DIFFICULTY] Manual set: {old} → {self.current_difficulty}")
-        return True
-
-    def record_block(self, _ignored_header_ts: float = None) -> int:
-        """
-        Called immediately after each accepted block.
-        Measures wall-clock elapsed time since previous acceptance — NOT the
-        block header timestamp (which the miner controls and may be stale).
-        """
-        now = time.time()
-        self._block_count += 1
-
-        gap = now - self._last_accept_wall
-        # Floor: 1s minimum to ignore clock skew / same-second double-accepts.
-        # No ceiling: genuinely slow blocks (network outage etc.) should drive diff down.
-        gap = max(1.0, gap)
-
-        α = self.EWMA_ALPHA
-        self._ewma_block_time = α * gap + (1.0 - α) * self._ewma_block_time
-        self._last_accept_wall = now
-
-        if self._block_count >= self.WARMUP_BLOCKS:
-            self._retarget()
-
-        return self.current_difficulty
-
-    def auto_adjust(self, blocks: list) -> int:
-        """Legacy interface — no-op. EWMA is driven by record_block only."""
-        return self.current_difficulty
-
-    def _retarget(self) -> None:
-        """
-        Solve for the difficulty that would produce TARGET_BLOCK_TIME_S
-        given the implied hash rate from the EWMA block time.
-
-            implied_H/s = 16^current_diff / ewma_time
-            ideal_diff  = log16(implied_H/s × target_time)
-
-        Steps in 0.25 increments to support fractional difficulty (e.g. 5.25, 5.50).
-        """
-        t = max(1.0, self._ewma_block_time)
-        m = self._math
-        try:
-            implied_rate = (16.0 ** self.current_difficulty) / t
-            ideal        = m.log(max(1.0, implied_rate * self.TARGET_BLOCK_TIME_S)) / m.log(16.0)
-        except (ValueError, ZeroDivisionError, OverflowError):
-            return   # skip retarget on numeric edge cases
-
-        # Round ideal to nearest 0.25 step for smooth fractional targeting
-        ideal_q     = round(ideal * 4) / 4.0
-        # Cap step size at ±MAX_STEP_PER_BLOCK but allow fractional steps
-        raw_delta   = ideal_q - self.current_difficulty
-        delta       = max(-float(self.MAX_STEP_PER_BLOCK),
-                          min(float(self.MAX_STEP_PER_BLOCK), raw_delta))
-        # Snap to nearest 0.25
-        delta       = round(delta * 4) / 4.0
-        new_diff    = max(float(self.FLOOR), min(float(self.CEILING), self.current_difficulty + delta))
-        # Snap result to 0.25 grid
-        new_diff    = round(new_diff * 4) / 4.0
-
-        if abs(new_diff - self.current_difficulty) >= 0.01:
-            old = self.current_difficulty
-            self.current_difficulty = new_diff
-            logger.info(
-                f"[DIFFICULTY] ⚡ {old:.2f} → {new_diff:.2f} "
-                f"| EWMA={t:.1f}s target={self.TARGET_BLOCK_TIME_S}s "
-                f"| implied={implied_rate:.0f} H/s ideal={ideal:.3f}"
-            )
-        else:
-            logger.debug(
-                f"[DIFFICULTY] hold={self.current_difficulty:.2f} "
-                f"EWMA={t:.1f}s ideal={ideal:.3f}"
-            )
-
-
-_difficulty_manager = None
-
-def get_difficulty_manager() -> DifficultyManager:
-    """
-    Get or create the global DifficultyManager.
-    SINGLE AUTHORITY: always starts at FLOOR=4. No DB difficulty restore —
-    stored block difficulty values are historical records only, never used to
-    seed current difficulty. EWMA block-time is seeded from DB for smooth
-    restart continuity without affecting the starting difficulty level.
-    """
-    global _difficulty_manager
-    if _difficulty_manager is not None:
-        return _difficulty_manager
-
-    seed_ewma      = None
-    seed_last_wall = None
-    try:
-        with get_db_cursor() as _bc:
-            # Seed wall-clock anchor from latest block timestamp (prevents
-            # billion-second gap on first record_block call after restart).
-            _bc.execute("""
-                SELECT timestamp FROM blocks
-                WHERE timestamp IS NOT NULL
-                ORDER BY height DESC LIMIT 1
-            """)
-            tip_row = _bc.fetchone()
-            if tip_row and tip_row[0] is not None:
-                seed_last_wall = float(tip_row[0])
-
-            # Seed EWMA from average inter-block time of last 10 blocks.
-            _bc.execute("""
-                SELECT timestamp FROM blocks
-                WHERE timestamp IS NOT NULL
-                ORDER BY height DESC LIMIT 10
-            """)
-            ts_rows = [float(r[0]) for r in _bc.fetchall() if r[0] is not None]
-            if len(ts_rows) >= 2:
-                gaps = [ts_rows[i] - ts_rows[i+1] for i in range(len(ts_rows)-1)
-                        if ts_rows[i] > ts_rows[i+1]]
-                if gaps:
-                    seed_ewma = sum(gaps) / len(gaps)
-    except Exception as _de:
-        logger.debug(f"[DIFFICULTY] DB bootstrap: {_de}")
-
-    # ALWAYS start at FLOOR=4. No DB difficulty restore. Single pathway.
-    _difficulty_manager = DifficultyManager(
-        initial_difficulty = DifficultyManager.FLOOR,
-        seed_ewma          = seed_ewma,
-        seed_last_wall     = seed_last_wall,
-    )
-    logger.info(
-        f"[DIFFICULTY] Bootstrap: diff={DifficultyManager.FLOOR} (FLOOR — authoritative) "
-        + (f"seed_ewma={seed_ewma:.1f}s" if seed_ewma else "no EWMA seed")
-    )
-    return _difficulty_manager
-
-
-# ═════════════════════════════════════════════════════════════════════════════════
-
-# ─── QTCL-PoW: server-side verification constants ───────────────────────────
-# Mining is fully C-accelerated on the client (qtcl_pow_search).
-# Server uses these only in qtcl_pow_verify() called from submit_block.
-# Algorithm: SHAKE-256 512KB scratchpad + 64 sequential SHA3-256 mix rounds.
-# Entropy TTL: oracle seed expires after 120s — prevents stale pre-mining.
-QTCL_POW_SCRATCHPAD_BYTES = 512 * 1024   # 512 KB SHAKE-256 scratchpad
-QTCL_POW_MIX_ROUNDS       = 64           # sequential read windows per hash
-QTCL_POW_WINDOW_BYTES      = 64          # bytes per window
-QTCL_POW_ENTROPY_TTL_S     = 300         # oracle seed TTL (seconds)
-
-def qtcl_pow_build_scratchpad(w_entropy_seed: bytes) -> bytes:
-    """
-    Expand a 32-byte oracle seed into a 512KB memory scratchpad via SHAKE-256 XOF.
-    Deterministic from the seed — client and server produce identical scratchpads.
-    The quantum randomness lives IN the seed (injected via QRNG at seed generation time).
-    Generation cost: ~1.7ms on CPU.
-    """
-    xof = hashlib.shake_256(b"QTCL_SCRATCHPAD_v1:" + w_entropy_seed)
-    return xof.digest(QTCL_POW_SCRATCHPAD_BYTES)
-
-
-def qtcl_pow_build_seed(density_matrix_bytes: bytes) -> bytes:
-    """
-    Derive the QTCL-PoW oracle seed by mixing the W-state density matrix with
-    live QRNG entropy (5-source ensemble: ANU quantum vacuum, random.org atmospheric
-    noise, HU Berlin public QRNG, Outshift, QBICK Quantis hardware).
-
-    Why QRNG here and not in the window indices:
-        • Window indices must be deterministic (server re-derives to verify)
-        • The SEED is published in the block header — both sides start from it
-        • Injecting QRNG into the seed means even an attacker who has fully
-          captured the oracle's density matrix cannot predict the scratchpad
-          contents without also knowing the QRNG output at that instant
-
-    Seed formula:
-        raw     = density_matrix_bytes[:256]   (oracle W-state, evolves via GKSL)
-        qrng_32 = QRNG_ENSEMBLE.get_random_bytes(32)   (quantum true random)
-        local   = SHA3-256(timestamp_ns || block_height)  (timing salt)
-        seed    = SHA3-256( raw XOR qrng_32_padded || local )
-
-    XOR hedging: if QRNG is unavailable or degraded, output is still secure
-    because SHA3(density_matrix || local_salt) remains unpredictable.
-    """
-    raw = density_matrix_bytes[:256].ljust(256, b'\x00')
-
-    # Pull 32 bytes from the 5-source QRNG ensemble (XOR-hedged, system fallback)
-    try:
-        qrng_32 = _init_qrng_ensemble().get_random_bytes(32)
-    except Exception:
-        qrng_32 = hashlib.sha3_256(
-            b"QRNG_FALLBACK:" + density_matrix_bytes + struct.pack('>Q', _pow_time_ns())
-        ).digest()
-
-    # XOR the QRNG bytes into the first 32 bytes of the density matrix
-    # (XOR hedging: output secure if ≥1 of {oracle_state, QRNG} is unpredictable)
-    xored = bytes(a ^ b for a, b in zip(raw[:32], qrng_32)) + raw[32:]
-
-    # Final SHA3-256 compression with nanosecond timestamp salt
-    ts_bytes = struct.pack('>Q', _pow_time_ns())
-    seed = hashlib.sha3_256(b"QTCL_SEED_v1:" + xored + ts_bytes).digest()
-    return seed
-
-
-def _pow_time_ns() -> int:
-    import time as _tt
-    return _tt.time_ns()
-
-
-def qtcl_pow_hash(
-    height: int,
-    parent_hash: str,
-    merkle_root: str,
-    timestamp_s: int,
-    difficulty_bits: int,
-    nonce: int,
-    miner_address: str,
-    w_entropy_seed: bytes,   # raw 32 bytes, NOT hex — from oracle density matrix hash
-    scratchpad: bytes,       # pre-built 512KB buffer, shared across all nonces
-) -> str:
-    """
-    QTCL-PoW: memory-hard, oracle-bound, sequential hash.
-
-    Algorithm per nonce:
-        1. Pack canonical header fields into 160 bytes (struct, no JSON overhead)
-        2. SHA3-256(header_bytes) → initial 32-byte state
-        3. For round in 0..MIX_ROUNDS:
-             window_idx = interpret first 4 bytes of state as uint32 mod (scratchpad_size / window_size)
-             window     = scratchpad[window_idx * 64 : window_idx * 64 + 64]
-             state      = SHA3-256(state || window || round_bytes)
-        4. Return state.hex()
-
-    The sequential dependency (state feeds next window_idx) prevents GPU parallelism.
-    The scratchpad read (random-access 512KB) prevents pure-compute ASIC advantage.
-    """
-    # Step 1: pack header — fixed-width, deterministic, no JSON parse overhead
-    header = struct.pack(
-        '>Q I 32s 32s I I 40s 32s',
-        height,
-        timestamp_s,
-        bytes.fromhex(parent_hash.zfill(64))[:32],
-        bytes.fromhex(merkle_root.zfill(64))[:32],
-        difficulty_bits,
-        nonce,
-        miner_address.encode()[:40].ljust(40, b'\x00'),
-        w_entropy_seed[:32],
-    )
-
-    # Step 2: initial state
-    state = hashlib.sha3_256(b"QTCL_POW_v1:" + header).digest()
-
-    # Step 3: sequential scratchpad mix
-    n_windows = QTCL_POW_SCRATCHPAD_BYTES // QTCL_POW_WINDOW_BYTES
-    for rnd in range(QTCL_POW_MIX_ROUNDS):
-        # Derive window index from current state (sequential dependency)
-        window_idx = struct.unpack_from('>I', state, 0)[0] % n_windows
-        window_start = window_idx * QTCL_POW_WINDOW_BYTES
-        window = scratchpad[window_start : window_start + QTCL_POW_WINDOW_BYTES]
-        # Mix: absorb window + round counter into state
-        state = hashlib.sha3_256(state + window + struct.pack('>I', rnd)).digest()
-
-    return state.hex()
-
-
-def qtcl_pow_verify(
-    height: int,
-    parent_hash: str,
-    merkle_root: str,
-    timestamp_s: int,
-    difficulty_bits: int,
-    nonce: int,
-    miner_address: str,
-    w_entropy_seed: bytes,
-    claimed_hash: str,
-    block_timestamp_s: int,
-    current_time: float = None,
-) -> tuple:
-    """
-    Verify a QTCL-PoW solution.
-
-    Returns (valid: bool, reason: str).
-    Builds the scratchpad fresh (deterministic) and runs one hash pass.
-    """
-    import time as _vt
-    if current_time is None:
-        current_time = _vt.time()
-
-    # Entropy freshness check
-    seed_age = current_time - block_timestamp_s
-    if seed_age > QTCL_POW_ENTROPY_TTL_S:
-        return False, f"entropy_expired: seed is {seed_age:.0f}s old (max {QTCL_POW_ENTROPY_TTL_S}s)"
-
-    # Rebuild scratchpad from seed (deterministic)
-    scratchpad = qtcl_pow_build_scratchpad(w_entropy_seed)
-
-    # Compute expected hash
-    expected = qtcl_pow_hash(
-        height, parent_hash, merkle_root, timestamp_s,
-        difficulty_bits, nonce, miner_address, w_entropy_seed, scratchpad,
-    )
-
-    if expected != claimed_hash.lower():
-        return False, f"hash_mismatch: expected={expected[:16]}… got={claimed_hash[:16]}…"
-
-    if not expected.startswith('0' * difficulty_bits):
-        have = len(expected) - len(expected.lstrip('0'))
-        return False, f"difficulty_not_met: need {difficulty_bits} zeros, got {have}"
-
-    return True, "valid"
-
-
-# ═════════════════════════════════════════════════════════════════════════════════
-# FLASK APP SETUP
-# ═════════════════════════════════════════════════════════════════════════════════
-
-app = Flask(__name__)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# ❌ SHUTDOWN CODE COMPLETELY DELETED ❌
-# ═══════════════════════════════════════════════════════════════════════════════
-# The Oracle cluster and Lattice controller are DAEMON THREADS.
-# They will keep running regardless of what signals are sent.
-# On Koyeb, if the main worker process receives SIGTERM, the kernel will eventually
-# SIGKILL the entire container, and all daemon threads die with it.
-# We do NOT want to explicitly shutdown — that would stop the quantum engines mid-cycle.
-#
-# NEW BEHAVIOR:
-#   • Health checks (GET /health) return 200 OK — server is ALWAYS healthy
-#   • SIGTERM signals are IGNORED — let Koyeb handle process termination
-#   • Oracle cluster runs FOREVER (until container killed)
-#   • Lattice controller runs FOREVER (until container killed)
-#   • No "executor pool shut down" warnings
-#   • Mermin violation measurements continue uninterrupted
-#
-# This is the correct model for quantum blockchain infrastructure.
-# ═══════════════════════════════════════════════════════════════════════════════
-
-import signal
-import sys
-
-def _signal_handler_noop(signum, frame):
-    """Ignore all signals — let gunicorn/Koyeb handle process lifecycle."""
-    logger.warning(f"[SIGHANDLER] Received signal {signum} — ignoring (keeping daemon threads alive)")
-
-# IGNORE SIGTERM and SIGINT — don't exit, don't shutdown anything
-signal.signal(signal.SIGTERM, _signal_handler_noop)
-signal.signal(signal.SIGINT, _signal_handler_noop)
-
-# NO atexit handler — oracle and lattice are daemon threads; they follow process lifecycle
-
-# ─── Bulletproof JSON encoder: kills every numpy/datetime/Decimal/bytes 500 ────
-import json as _json_mod
-from flask.json.provider import DefaultJSONProvider
-
-class _QTCLJSONProvider(DefaultJSONProvider):
-    """Flask 3.0+ JSON provider that handles numpy scalars, datetime, Decimal, bytes, sets."""
-    def default(self, o):
-        # numpy scalars (float32/float64/int64/bool_ etc.)
-        try:
-            import numpy as _np
-            if isinstance(o, _np.integer):  return int(o)
-            if isinstance(o, _np.floating): return float(o)
-            if isinstance(o, _np.bool_):    return bool(o)
-            if isinstance(o, _np.ndarray):  return o.tolist()
-        except ImportError:
-            pass
-        if isinstance(o, datetime):         return o.isoformat()
-        if isinstance(o, _decimal.Decimal): return float(o)
-        if isinstance(o, (bytes, bytearray)):return o.hex()
-        if isinstance(o, set):              return sorted(o)
-        # Fallback: stringify rather than explode with 500
-        try:
-            return super().default(o)
-        except TypeError:
-            return str(o)
-
-app.json = _QTCLJSONProvider(app)
-app.config['JSON_SORT_KEYS'] = False
-
-# ─── Lazy Metrics Initialization (after all classes defined) ──────────────────
-_metrics_initialized = False
-_metrics_init_lock = threading.RLock()
-
-def _lazy_initialize_metrics_agents():
-    """Stub for lazy metrics initialization (actual init deferred to daemon threads)
-    
-    The real metrics agents (oracle_collector, lattice_metrics, etc.) are initialized
-    in background daemons to avoid blocking WSGI startup. This function exists to
-    prevent NameError if called during early WSGI phase, but does nothing since the
-    agents are already initialized to None in _METRICS_AGENTS dict.
-    """
-    pass
-
-@app.before_request
-def _init_metrics_on_first_request():
-    """Initialize metrics agents on first request (WSGI-compatible, avoids circular imports)"""
-    global _metrics_initialized
-    if not _metrics_initialized:
-        with _metrics_init_lock:
-            if not _metrics_initialized:
-                try:
-                    _lazy_initialize_metrics_agents()
-                    _metrics_initialized = True
-                except NameError:
-                    # Expected: agents not yet available during early WSGI phase
-                    pass
-                except Exception as e:
-                    logger.debug(f"[METRICS] Delayed initialization deferred: {e}")
-
-
-# ═════════════════════════════════════════════════════════════════════════════════════════
-# PRODUCTION DEPLOYMENT HEADERS & MIDDLEWARE
-# ═════════════════════════════════════════════════════════════════════════════════════════
-
-@app.before_request
-def add_cors_headers():
-    """Add CORS headers for Koyeb/cloud deployment cross-origin requests."""
-    if request.method == 'OPTIONS':
-        response = jsonify({'status': 'ok'})
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-        response.headers.add('Access-Control-Max-Age', '3600')
-        return response, 200
-
-@app.after_request
-def set_response_headers(response):
-    """Ensure CORS headers on all responses."""
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-    response.headers.add('X-Content-Type-Options', 'nosniff')
-    # X-Frame-Options removed — blocks Koyeb preview and iframes
-    return response
-
-# ═════════════════════════════════════════════════════════════════════════════════════════
-# DISTRIBUTED HASH TABLE (DHT) INITIALIZATION
-# ═════════════════════════════════════════════════════════════════════════════════════════
 _dht_manager: Optional[DHTManager] = None
 _dht_lock = threading.RLock()
 
@@ -4260,39 +3234,239 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getLatestDMSnapshots": _rpc_getLatestDMSnapshots,
     # ── NEW: Client Tripartite Oracle Push ──────────────────────────────────────
     "qtcl_pushOracleDM": _rpc_pushOracleDM,
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # ENTERPRISE P2P NETWORK — 30s DHT Broadcast + Fan-out (inline)
+    # ═══════════════════════════════════════════════════════════════════════════════
+    "qtcl_getDHTTable":       _p2p_rpc_get_dht_table,
+    "qtcl_receiveDHTTable":   _p2p_rpc_receive_dht_table,
+    "qtcl_peerHeartbeat":     _p2p_rpc_peer_heartbeat,
 }
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ENTERPRISE P2P NETWORK — Inline Implementation (no external files)
+# ═══════════════════════════════════════════════════════════════════════════════
+P2P_BROADCAST_INTERVAL = 30
+P2P_PEER_TIMEOUT = 300
+P2P_MAX_PEERS = 100
 
+class P2PPeer:
+    """A peer in the P2P network. Peer = WALLET, not oracle."""
+    def __init__(self, peer_id: str = "", wallet_address: str = "", external_addr: str = "", 
+                 port: int = 9091, public_key: str = "", chain_height: int = 0,
+                 last_seen: float = 0.0, first_seen: float = 0.0, is_alive: bool = True):
+        self.peer_id = peer_id
+        self.wallet_address = wallet_address
+        self.external_addr = external_addr
+        self.port = port
+        self.public_key = public_key
+        self.chain_height = chain_height
+        self.last_seen = last_seen
+        self.first_seen = first_seen
+        self.is_alive = is_alive
+    
+    def to_dict(self) -> dict:
+        return {"peer_id": self.peer_id, "wallet_address": self.wallet_address,
+                "external_addr": self.external_addr, "port": self.port,
+                "public_key": self.public_key, "chain_height": self.chain_height,
+                "last_seen": self.last_seen, "first_seen": self.first_seen,
+                "is_alive": self.is_alive}
 
-@app.route("/rpc", methods=["POST", "OPTIONS"])
-def rpc_dispatch():
-    """
-    POST /rpc — JSON-RPC 2.0 dispatch endpoint.
+class _P2PSQLiteStore:
+    """SQLite store for peer persistence on client side."""
+    def __init__(self, db_path: str = "peers.sqlite"):
+        import sqlite3
+        self.db_path = db_path
+        self._lock = threading.RLock()
+        conn = sqlite3.connect(db_path)
+        conn.execute("""CREATE TABLE IF NOT EXISTS peer_registry (
+            peer_id TEXT PRIMARY KEY, wallet_address TEXT, external_addr TEXT,
+            port INTEGER, public_key TEXT, chain_height INTEGER, last_seen REAL,
+            first_seen REAL, is_alive INTEGER)""")
+        conn.commit()
+        conn.close()
+    
+    def upsert_peer(self, peer: P2PPeer) -> bool:
+        import sqlite3
+        with self._lock:
+            conn = sqlite3.connect(self.db_path)
+            now = time.time()
+            if peer.first_seen == 0:
+                peer.first_seen = now
+            conn.execute("""INSERT OR REPLACE INTO peer_registry 
+                (peer_id, wallet_address, external_addr, port, public_key, chain_height,
+                 last_seen, first_seen, is_alive) VALUES (?,?,?,?,?,?,?,?,?)""",
+                (peer.peer_id, peer.wallet_address, peer.external_addr, peer.port,
+                 peer.public_key, peer.chain_height, peer.last_seen, peer.first_seen,
+                 1 if peer.is_alive else 0))
+            conn.commit()
+            conn.close()
+            return True
+    
+    def get_alive_peers(self) -> list:
+        import sqlite3
+        cutoff = time.time() - P2P_PEER_TIMEOUT
+        with self._lock:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("""SELECT * FROM peer_registry 
+                WHERE last_seen > ? AND is_alive = 1 ORDER BY last_seen DESC LIMIT ?""",
+                (cutoff, P2P_MAX_PEERS)).fetchall()
+            conn.close()
+            return [P2PPeer(r["peer_id"], r["wallet_address"], r["external_addr"],
+                     r["port"], r["public_key"], r["chain_height"], r["last_seen"],
+                     r["first_seen"], bool(r["is_alive"])) for r in rows]
 
-    Accepts single requests and batches.
-    Content-Type: application/json
-    """
-    if request.method == "OPTIONS":
-        resp = jsonify({"status": "ok"})
-        resp.headers.add("Access-Control-Allow-Origin", "*")
-        resp.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
-        resp.headers.add("Access-Control-Allow-Headers", "Content-Type")
-        return resp, 200
+_p2p_dht_table: Dict[str, P2PPeer] = {}
+_p2p_dht_lock = threading.RLock()
+_p2p_seen_hashes: set = set()
+_p2p_client_store: Optional[_P2PSQLiteStore] = None
 
-    body = request.get_data()
-    if not body:
-        r = jsonify(_rpc_error(-32700, "Empty request body"))
-        r.headers["Access-Control-Allow-Origin"] = "*"
-        return r, 400
+def _p2p_rpc_get_dht_table(params, rpc_id):
+    """qtcl_getDHTTable — Return the full DHT peer table."""
+    try:
+        limit = 100
+        if isinstance(params, dict):
+            limit = min(int(params.get("limit", 100)), P2P_MAX_PEERS)
+        with _p2p_dht_lock:
+            peers = list(_p2p_dht_table.values())[:limit]
+        return {"peers": [p.to_dict() for p in peers], "count": len(peers), "timestamp": time.time()}
+    except Exception as e:
+        logger.error(f"[P2P-RPC] getDHTTable error: {e}")
+        return {"peers": [], "count": 0, "timestamp": time.time()}
 
-    result, status = _dispatch(body)
-    resp = jsonify(result)
-    resp.headers["Content-Type"]             = "application/json"
-    resp.headers["X-QTCL-JSONRPC"]          = _JSONRPC_VERSION
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    return resp, status
+def _p2p_rpc_receive_dht_table(params, rpc_id):
+    """qtcl_receiveDHTTable — Receive a DHT table from another peer."""
+    try:
+        dht_json = params.get("dht_table", "") if isinstance(params, dict) else ""
+        from_peer = params.get("propagating_from", "") if isinstance(params, dict) else ""
+        dht_hash = params.get("dht_hash", "") if isinstance(params, dict) else ""
+        if not dht_json:
+            return {"status": "error", "message": "dht_table required"}
+        if dht_hash and dht_hash in _p2p_seen_hashes:
+            return {"status": "already_seen", "dht_hash": dht_hash[:16]}
+        import json
+        doc = json.loads(dht_json)
+        peers_data = doc.get("peers", [])
+        new_count = 0
+        with _p2p_dht_lock:
+            for pd in peers_data:
+                p = P2PPeer(pd.get("peer_id", ""), pd.get("wallet_address", ""),
+                            pd.get("external_addr", ""), pd.get("port", 9091),
+                            pd.get("public_key", ""), pd.get("chain_height", 0),
+                            pd.get("last_seen", time.time()), pd.get("first_seen", 0),
+                            pd.get("is_alive", True))
+                if p.peer_id not in _p2p_dht_table:
+                    new_count += 1
+                p.last_seen = time.time()
+                _p2p_dht_table[p.peer_id] = p
+        if dht_hash:
+            _p2p_seen_hashes.add(dht_hash)
+            if len(_p2p_seen_hashes) > 10000:
+                _p2p_seen_hashes = set(list(_p2p_seen_hashes)[-5000:])
+        logger.info(f"[P2P] ← Received DHT from {from_peer[:16]}…: {len(peers_data)} peers ({new_count} new)")
+        return {"status": "accepted", "peer_count": len(peers_data), "new_peers": new_count}
+    except Exception as e:
+        logger.error(f"[P2P-RPC] receiveDHTTable error: {e}")
+        return {"status": "error", "message": str(e)}
 
+def _p2p_rpc_peer_heartbeat(params, rpc_id):
+    """qtcl_peerHeartbeat — Receive heartbeat from a peer."""
+    try:
+        peer_id = params.get("peer_id", "") if isinstance(params, dict) else ""
+        if peer_id:
+            with _p2p_dht_lock:
+                if peer_id in _p2p_dht_table:
+                    _p2p_dht_table[peer_id].last_seen = time.time()
+        return {"status": "ok", "timestamp": time.time()}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
+def _p2p_fanout_broadcast():
+    """Fan-out broadcast DHT table to all known peers."""
+    import json
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError, HTTPError
+    with _p2p_dht_lock:
+        peers = list(_p2p_dht_table.values())
+    if len(peers) < 2:
+        return
+    dht_json = json.dumps({"version": 1, "timestamp": time.time(), "peer_count": len(peers),
+                          "peers": [p.to_dict() for p in peers]}, separators=(',', ':'))
+    dht_hash = hashlib.sha256(dht_json.encode()).hexdigest()
+    if dht_hash in _p2p_seen_hashes:
+        return
+    _p2p_seen_hashes.add(dht_hash)
+    sent = failed = 0
+    for peer in peers:
+        if peer.peer_id == ORACLE_ID:
+            continue
+        try:
+            url = f"http://{peer.external_addr}/rpc"
+            payload = json.dumps({"jsonrpc": "2.0", "method": "qtcl_receiveDHTTable",
+                                  "params": {"dht_table": dht_json, "propagating_from": ORACLE_ID, "dht_hash": dht_hash},
+                                  "id": 1}).encode()
+            req = Request(url, data=payload, headers={"Content-Type": "application/json"})
+            with urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    sent += 1
+        except Exception:
+            failed += 1
+        time.sleep(0.05)
+    if sent > 0 or failed > 0:
+        logger.info(f"[P2P] Fan-out: sent to {sent}, failed {failed}")
+
+_p2p_broadcast_count = 0
+_p2p_running = False
+_p2p_broadcast_thread: Optional[threading.Thread] = None
+
+def _p2p_broadcast_loop():
+    """30-second DHT broadcast loop."""
+    global _p2p_broadcast_count, _p2p_running
+    logger.info("[P2P] Broadcast loop started")
+    while _p2p_running:
+        try:
+            _p2p_broadcast_count += 1
+            # Fetch peers from DB
+            try:
+                with get_db_cursor() as cur:
+                    cur.execute("""SELECT node_id, external_addr, pubkey_hash, chain_height, last_seen
+                        FROM peer_registry WHERE last_seen > NOW() - INTERVAL '10 minutes' 
+                        AND ban_score < 100 LIMIT ?""", (P2P_MAX_PEERS,))
+                    rows = cur.fetchall()
+                    new_count = 0
+                    with _p2p_dht_lock:
+                        for row in rows:
+                            node_id, addr, pubk, height, last_seen = row
+                            if node_id not in _p2p_dht_table:
+                                new_count += 1
+                            ts = last_seen.timestamp() if hasattr(last_seen, "timestamp") else last_seen
+                            _p2p_dht_table[node_id] = P2PPeer(node_id, "", addr, 9091, pubk or "", int(height or 0), ts)
+                    logger.debug(f"[P2P] Cycle {_p2p_broadcast_count}: {len(rows)} peers from DB ({new_count} new)")
+            except Exception as e:
+                logger.warning(f"[P2P] DB fetch: {e}")
+            # Fan-out broadcast
+            _p2p_fanout_broadcast()
+        except Exception as e:
+            logger.error(f"[P2P] Broadcast cycle error: {e}")
+        for _ in range(P2P_BROADCAST_INTERVAL * 2):
+            if not _p2p_running:
+                break
+            time.sleep(0.5)
+    logger.info("[P2P] Broadcast loop exited")
+
+def _start_p2p_broadcast():
+    """Start the P2P broadcast daemon."""
+    global _p2p_running, _p2p_broadcast_thread
+    if _p2p_running:
+        return
+    _p2p_running = True
+    _p2p_broadcast_thread = threading.Thread(target=_p2p_broadcast_loop, daemon=True, name="P2PBroadcast")
+    _p2p_broadcast_thread.start()
+    logger.info(f"[P2P] ✅ DHT broadcaster started (30s interval)")
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# DISTRIBUTED HASH TABLE (DHT) INITIALIZATION
+# ═══════════════════════════════════════════════════════════════════════════════════
 @app.route("/rpc/methods", methods=["GET"])
 def rpc_methods():
     """GET /rpc/methods — introspection: list all available RPC methods."""
