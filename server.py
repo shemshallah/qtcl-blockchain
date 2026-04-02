@@ -3588,7 +3588,13 @@ def _p2p_fanout_broadcast():
         if peer.peer_id == ORACLE_ID:
             continue
         try:
-            url = f"http://{peer.external_addr}/rpc"
+            # Construct URL with port - external_addr may or may not include port
+            if ':' in peer.external_addr:
+                # Already has port in external_addr (e.g., "192.168.1.100:9091")
+                url = f"http://{peer.external_addr}/rpc"
+            else:
+                # Use port from peer object
+                url = f"http://{peer.external_addr}:{peer.port}/rpc"
             payload = json.dumps({"jsonrpc": "2.0", "method": "qtcl_receiveDHTTable",
                                   "params": {"dht_table": dht_json, "propagating_from": ORACLE_ID, "dht_hash": dht_hash},
                                   "id": 1}).encode()
