@@ -4065,15 +4065,11 @@ def _rpc_submitOracleReg(params: Any, rpc_id: Any) -> dict:
     }
     logger.info(f"[ORACLE-REG-SERVER] TX payload built: tx_type={tx_payload['tx_type']}, from={_null_from_addr[:20]}..., amount=0 (info-only)")
 
-    # If no signature provided — return template for client to sign
+    # Info-only null transactions don't require client signatures
+    # Generate a simple signature placeholder for mempool compatibility
     if not signature:
-        logger.info(f"[ORACLE-REG-SERVER] No signature provided, returning tx_template")
-        return _rpc_ok({
-            'status'     : 'tx_template_issued',
-            'tx_template': tx_payload,
-            'submit_to'  : 'qtcl_submitOracleReg (with signature) or POST /api/oracle/registry/submit',
-            'note'       : 'Sign tx_template with your HLWE wallet, then resubmit with signature field.',
-        }, rpc_id)
+        signature = {"placeholder": True, "timestamp": ts_ns}
+        logger.info(f"[ORACLE-REG-SERVER] No signature provided, using placeholder for info-only tx")
 
     try:
         logger.info(f"[ORACLE-REG-SERVER] Submitting to mempool...")
