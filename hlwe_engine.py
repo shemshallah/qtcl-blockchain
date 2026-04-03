@@ -1397,7 +1397,35 @@ class HLWEEngine:
             except Exception as e:
                 logger.debug(f"[HLWE] Verification failed: {e}")
                 return False
-    
+
+    def verify_block(self, block_dict: Dict[str, Any], signature_dict: Dict[str, str], public_key_hex: str) -> Tuple[bool, str]:
+        """
+        Verify HLWE block signature.
+
+        Canonical implementation — must match client's HLWEIntegrationAdapter.verify_block.
+
+        Construction:
+          block_json = json.dumps(block_dict, sort_keys=True, default=str)
+          block_hash = SHA-256(block_json)
+          return verify_signature(block_hash, signature_dict, public_key_hex)
+        """
+        with self.lock:
+            try:
+                block_json = json.dumps(block_dict, sort_keys=True, default=str)
+                block_hash = hashlib.sha256(block_json.encode('utf-8')).digest()
+                is_valid = self.verify_signature(block_hash, signature_dict, public_key_hex)
+
+                if is_valid:
+                    logger.debug(f"[HLWE] ✓ Block signature verified")
+                    return True, "OK"
+                else:
+                    logger.warning(f"[HLWE] ✗ Block signature verification failed")
+                    return False, "Invalid signature"
+
+            except Exception as e:
+                logger.error(f"[HLWE] Block verification failed: {e}")
+                return False, f"Verification error: {str(e)}"
+
     def _encode_vector_to_hex(self, vector: List[int]) -> str:
         """Encode vector to hex string"""
         return ''.join(x.to_bytes(4, byteorder='big').hex() for x in vector)
