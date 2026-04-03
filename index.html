@@ -27,66 +27,58 @@
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 :root{
-  --bg:#010409;--bg2:#040810;--bg3:#070d1a;--card:#050a14;
-  --b:rgba(0,210,255,.09);--b2:rgba(0,210,255,.20);
-  --cy:#00e5ff;--cy2:rgba(0,229,255,.11);
-  --go:#f0b429;--go2:rgba(240,180,41,.13);
-  --vi:#9b5de5;--vi2:rgba(155,93,229,.13);
-  --gr:#05ffa1;--gr2:rgba(5,255,161,.09);
-  --re:#ff2d55;--dim:#344060;--tx:#c8d8f0;--br:#eef4ff;
-  --cb:#ff6ec7;--cb2:rgba(255,110,199,.12); /* coinbase pink */
+  --bg:#030610;--bg2:#060c1c;--bg3:#0a1228;--card:#080e20;
+  --b:rgba(0,220,255,.10);--b2:rgba(0,220,255,.18);
+  --cy:#00dcff;--cy2:rgba(0,220,255,.12);
+  --go:#d4a020;--go2:rgba(212,160,32,.12);
+  --vi:#8040ff;--vi2:rgba(128,64,255,.12);
+  --gr:#00ff9d;--gr2:rgba(0,255,157,.10);
+  --re:#ff3355;--dim:#3a4a68;--tx:#bbc8e0;--br:#e8f0ff;
   --mono:'JetBrains Mono',monospace;--disp:'Orbitron',sans-serif;--body:'DM Sans',sans-serif;
-  --glow-cy:0 0 20px rgba(0,229,255,.35);
-  --glow-go:0 0 20px rgba(240,180,41,.35);
-  --glow-vi:0 0 20px rgba(155,93,229,.35);
-  --glow-gr:0 0 20px rgba(5,255,161,.35);
 }
 html{font-size:14px;background:var(--bg)}
 body{font-family:var(--body);color:var(--tx);background:var(--bg);min-height:100vh;display:flex;flex-direction:column}
-body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;background:repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,.04) 3px,rgba(0,0,0,.04) 4px)}
-body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;background:radial-gradient(ellipse 80% 60% at 50% 0%,rgba(0,229,255,.04) 0%,transparent 70%),radial-gradient(ellipse 60% 40% at 100% 100%,rgba(155,93,229,.04) 0%,transparent 60%)}
-#hdr{display:flex;align-items:center;justify-content:space-between;padding:0 20px;height:54px;background:rgba(1,4,9,.98);border-bottom:1px solid var(--b2);position:sticky;top:0;z-index:100;flex-shrink:0}
-#hdr::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent 0%,var(--cy) 30%,var(--gr) 55%,var(--vi) 80%,transparent 100%);opacity:.65}
+body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:9000;background:repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,.05) 3px,rgba(0,0,0,.05) 4px)}
+#hdr{display:flex;align-items:center;justify-content:space-between;padding:0 20px;height:52px;background:rgba(3,6,16,.97);border-bottom:1px solid var(--b2);position:sticky;top:0;z-index:100;flex-shrink:0}
+#hdr::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--cy) 40%,var(--vi) 70%,transparent);opacity:.5}
 .hb{display:flex;align-items:center;gap:12px}
 #lc{display:block;flex-shrink:0}
-.ht{font-family:var(--disp);font-size:15px;font-weight:900;letter-spacing:4px;color:var(--cy);text-shadow:var(--glow-cy)}
+.ht{font-family:var(--disp);font-size:15px;font-weight:900;letter-spacing:4px;color:var(--cy);text-shadow:0 0 18px rgba(0,220,255,.5)}
 .hs{font-size:9px;color:var(--dim);letter-spacing:2px;text-transform:uppercase;margin-top:2px}
 .hr{display:flex;align-items:center;gap:20px}
 .hst{text-align:right}
 .hstl{font-size:8px;color:var(--dim);letter-spacing:1px;text-transform:uppercase}
 .hstv{font-family:var(--mono);font-size:13px;color:var(--go);margin-top:2px}
-#cp{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:9px;letter-spacing:1px;padding:4px 10px;border-radius:20px;background:var(--gr2);border:1px solid rgba(5,255,161,.25);color:var(--gr);transition:all .3s}
-#cp.off{background:rgba(255,45,85,.1);border-color:rgba(255,45,85,.25);color:var(--re)}
-.cd{width:6px;height:6px;border-radius:50%;background:var(--gr);animation:pl 2s infinite;flex-shrink:0;box-shadow:0 0 6px var(--gr)}
-#cp.off .cd{background:var(--re);animation:none;box-shadow:0 0 6px var(--re)}
-@keyframes pl{0%,100%{opacity:1;box-shadow:0 0 8px var(--gr)}50%{opacity:.4;box-shadow:none}}
+#cp{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:9px;letter-spacing:1px;padding:4px 10px;border-radius:20px;background:var(--gr2);border:1px solid rgba(0,255,157,.25);color:var(--gr);transition:all .3s}
+#cp.off{background:rgba(255,51,85,.1);border-color:rgba(255,51,85,.25);color:var(--re)}
+.cd{width:6px;height:6px;border-radius:50%;background:var(--gr);animation:pl 2s infinite;flex-shrink:0}
+#cp.off .cd{background:var(--re);animation:none}
+@keyframes pl{0%,100%{opacity:1;box-shadow:0 0 6px var(--gr)}50%{opacity:.4;box-shadow:none}}
 #hck{font-family:var(--mono);font-size:10px;color:var(--dim)}
 #page{flex:1;padding:16px 20px 32px;display:flex;flex-direction:column;gap:16px;max-width:1600px;width:100%;margin:0 auto}
 .st{font-family:var(--disp);font-size:8px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:var(--dim);margin-bottom:10px}
 .mg{display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:10px}
-.mc{background:var(--card);border:1px solid var(--b);border-radius:8px;padding:14px 16px;position:relative;overflow:hidden;transition:border-color .25s,box-shadow .25s}
-.mc:hover{border-color:var(--b2);box-shadow:0 0 16px rgba(0,229,255,.06)}
-.mc::after{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--cy),var(--vi));opacity:.65}
-.mc.go::after{background:linear-gradient(90deg,var(--go),#ffd560)}
+.mc{background:var(--card);border:1px solid var(--b);border-radius:8px;padding:14px 16px;position:relative;overflow:hidden;transition:border-color .2s}
+.mc:hover{border-color:var(--b2)}
+.mc::after{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--cy),var(--vi));opacity:.6}
+.mc.go::after{background:linear-gradient(90deg,var(--go),#ffcf60)}
 .mc.vi::after{background:linear-gradient(90deg,var(--vi),var(--cy))}
 .mc.gr::after{background:var(--gr)}
-.mc.cb::after{background:linear-gradient(90deg,var(--cb),var(--vi))}
 .ml{font-size:9px;color:var(--dim);letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px}
 .mv{font-family:var(--mono);font-size:22px;font-weight:600;color:var(--cy);line-height:1;min-height:26px;transition:color .3s}
-.mv.go{color:var(--go)}.mv.vi{color:var(--vi)}.mv.gr{color:var(--gr)}.mv.dm{color:var(--dim)}.mv.cb{color:var(--cb)}
+.mv.go{color:var(--go)}.mv.vi{color:var(--vi)}.mv.gr{color:var(--gr)}.mv.dm{color:var(--dim)}
 .ms{font-size:9px;color:var(--dim);margin-top:5px;font-family:var(--mono)}
 .mb{height:2px;background:var(--bg3);border-radius:2px;margin-top:8px;overflow:hidden}
 .mbf{height:100%;border-radius:2px;background:linear-gradient(90deg,var(--cy),var(--vi));transition:width .8s ease}
 .tc{display:grid;grid-template-columns:1fr 1fr;gap:16px}
 @media(max-width:900px){.tc{grid-template-columns:1fr}}
 .pn{background:var(--card);border:1px solid var(--b);border-radius:8px;overflow:hidden}
-.ph{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--b);background:rgba(0,0,0,.25);gap:8px;flex-wrap:wrap}
+.ph{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--b);background:rgba(0,0,0,.2)}
 .pht{font-family:var(--disp);font-size:8px;letter-spacing:2px;text-transform:uppercase;color:var(--dim)}
-.pb{font-family:var(--mono);font-size:8px;letter-spacing:1px;padding:2px 8px;border-radius:3px;background:var(--cy2);color:var(--cy);border:1px solid rgba(0,229,255,.2);flex-shrink:0}
-.pb.go{background:var(--go2);color:var(--go);border-color:rgba(240,180,41,.2)}
-.pb.vi{background:var(--vi2);color:var(--vi);border-color:rgba(155,93,229,.2)}
-.pb.gr{background:var(--gr2);color:var(--gr);border-color:rgba(5,255,161,.2)}
-.pb.cb{background:var(--cb2);color:var(--cb);border-color:rgba(255,110,199,.2)}
+.pb{font-family:var(--mono);font-size:8px;letter-spacing:1px;padding:2px 8px;border-radius:3px;background:var(--cy2);color:var(--cy);border:1px solid rgba(0,220,255,.2)}
+.pb.go{background:var(--go2);color:var(--go);border-color:rgba(212,160,32,.2)}
+.pb.vi{background:var(--vi2);color:var(--vi);border-color:rgba(128,64,255,.2)}
+.pb.gr{background:var(--gr2);color:var(--gr);border-color:rgba(0,255,157,.2)}
 #dc,#qc{display:block;width:100%}
 #cs{overflow-x:auto;padding:12px 16px;display:flex;align-items:center;gap:0;min-height:96px;scrollbar-width:thin;scrollbar-color:var(--b) transparent}
 #cs::-webkit-scrollbar{height:3px}
@@ -104,37 +96,30 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;back
 @keyframes bfr{0%{transform:scale(0);opacity:0}100%{transform:scale(1);opacity:1}}
 .tt{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11px}
 .tt th{font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--dim);padding:8px 14px;border-bottom:1px solid var(--b);text-align:left;background:rgba(0,0,0,.15);font-family:var(--disp);font-weight:700}
-.tt td{padding:8px 14px;border-bottom:1px solid rgba(0,229,255,.04);color:var(--tx)}
-.tt tr:hover td{background:rgba(0,229,255,.05)}
+.tt td{padding:8px 14px;border-bottom:1px solid rgba(0,220,255,.04);color:var(--tx)}
+.tt tr:hover td{background:var(--cy2)}
 .tt tr.fr td{animation:tfr .5s ease-out}
-@keyframes tfr{0%{background:rgba(0,229,255,.14)}100%{background:transparent}}
+@keyframes tfr{0%{background:rgba(0,220,255,.15)}100%{background:transparent}}
 .tba{display:inline-block;font-size:8px;padding:2px 7px;border-radius:3px;letter-spacing:.5px;font-family:var(--disp)}
 .tba.pending{background:var(--go2);color:var(--go)}
 .tba.confirmed{background:var(--gr2);color:var(--gr)}
-.tba.coinbase{background:var(--cb2);color:var(--cb);border:1px solid rgba(255,110,199,.25);text-shadow:0 0 8px rgba(255,110,199,.5)}
-.tba.treasury{background:var(--go2);color:var(--go);border:1px solid rgba(240,180,41,.3);text-shadow:0 0 8px rgba(240,180,41,.4)}
+.tba.coinbase{background:var(--vi2);color:var(--vi)}
+.tba.treasury{background:var(--go2);color:var(--go);border:1px solid rgba(212,160,32,.3)}
 .tba.transfer{background:var(--cy2);color:var(--cy)}
-.tba.miner{background:rgba(5,255,161,.1);color:var(--gr);border:1px solid rgba(5,255,161,.2)}
-.txfbtn{background:rgba(0,229,255,.06);border:1px solid rgba(0,229,255,.15);color:var(--dim);font-size:9px;
+.txfbtn{background:rgba(0,220,255,.06);border:1px solid rgba(0,220,255,.15);color:var(--dim);font-size:9px;
   padding:3px 8px;border-radius:3px;cursor:pointer;font-family:var(--disp);letter-spacing:.5px;transition:all .2s}
-.txfbtn:hover,.txfbtn.active{background:rgba(0,229,255,.18);color:var(--cy);border-color:var(--cy)}
-.txfbtn.active.cb{background:rgba(255,110,199,.15);color:var(--cb);border-color:var(--cb);box-shadow:0 0 10px rgba(255,110,199,.2)}
-.txfbtn.active.tr{background:rgba(0,229,255,.15);color:var(--cy);border-color:var(--cy)}
-.txfbtn.active.go{background:rgba(240,180,41,.15);color:var(--go);border-color:var(--go)}
+.txfbtn:hover,.txfbtn.active{background:rgba(0,220,255,.18);color:var(--cy);border-color:var(--cy)}
+.txfbtn.active.cb{background:rgba(255,0,200,.15);color:var(--vi);border-color:var(--vi)}
+.txfbtn.active.tr{background:rgba(0,220,255,.15);color:var(--cy);border-color:var(--cy)}
 .txpbtn{background:rgba(0,220,255,.06);border:1px solid rgba(0,220,255,.12);color:var(--dim);font-size:10px;
   padding:3px 12px;border-radius:3px;cursor:pointer;font-family:var(--mono);transition:all .2s}
 .txpbtn:hover:not(:disabled){color:var(--cy);border-color:var(--cy)}
 .txpbtn:disabled{opacity:.3;cursor:default}
-.miner-row{display:flex;flex-direction:column;padding:10px 14px;border-bottom:1px solid rgba(0,229,255,.05);transition:background .15s;position:relative}
-.miner-row:hover{background:rgba(0,229,255,.03)}
-.miner-row.live{border-left:2px solid var(--gr)}
-.miner-row.live .miner-dot{background:var(--gr);box-shadow:0 0 6px var(--gr),0 0 12px rgba(5,255,161,.4);animation:p2ppulse 1.8s infinite}
-.miner-row.seen{border-left:2px solid rgba(240,180,41,.4)}
+.miner-row{display:flex;flex-direction:column;padding:8px 14px;border-bottom:1px solid rgba(0,220,255,.05);transition:background .15s}
+.miner-row:hover{background:rgba(0,220,255,.04)}
+.miner-row.live .miner-dot{background:var(--gr);box-shadow:0 0 5px var(--gr);animation:pl 1.8s infinite}
 .miner-row.seen .miner-dot{background:var(--go)}
-.miner-row.historic{border-left:2px solid rgba(255,255,255,.04)}
 .miner-row.historic .miner-dot{background:var(--dim)}
-.miner-row.is-mining::before{content:'⛏';position:absolute;right:10px;top:50%;transform:translateY(-50%);font-size:14px;opacity:.6;animation:minePulse 1.2s infinite}
-@keyframes minePulse{0%,100%{opacity:.6;transform:translateY(-50%) scale(1)}50%{opacity:1;transform:translateY(-50%) scale(1.1)}}
 @keyframes p2ppulse{0%,100%{opacity:1;box-shadow:0 0 8px var(--gr),0 0 16px rgba(0,255,157,.3)}50%{opacity:.5;box-shadow:none}}
 .miner-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;margin-top:3px}
 .miner-addr{font-family:var(--mono);font-size:10px;color:var(--cy);cursor:pointer;user-select:all}
@@ -145,9 +130,8 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;back
 .miner-badge.live{background:rgba(0,255,157,.12);color:var(--gr)}
 .miner-badge.seen{background:rgba(255,165,0,.12);color:var(--go)}
 .miner-badge.historic{background:rgba(255,255,255,.06);color:var(--dim)}
-.tx-cb td:first-child{border-left:2px solid var(--cb)}
-.tx-cb{background:rgba(255,110,199,.02)}
-.tx-tr td:first-child{border-left:2px solid rgba(0,229,255,.3)}
+.tx-cb td:first-child{border-left:2px solid var(--vi)}
+.tx-tr td:first-child{border-left:2px solid rgba(0,220,255,.3)}
 .tx-new{animation:tfr .8s ease}
 .or{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--b);transition:background .2s}
 .or:hover{background:var(--vi2)}
@@ -162,9 +146,9 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;back
 .nr:last-child{border-bottom:none}
 .nk{font-size:9px;color:var(--dim)}.nv{font-family:var(--mono);font-size:10px;color:var(--vi)}
 .md{padding:16px;display:flex;align-items:center;gap:20px}
-.mb2{font-family:var(--disp);font-size:48px;font-weight:900;line-height:1;flex-shrink:0;transition:color .5s,text-shadow .5s}
-.mb2.q{color:var(--cy);text-shadow:var(--glow-cy),0 0 60px rgba(0,229,255,.3)}
-.mb2.c{color:var(--re);text-shadow:0 0 20px rgba(255,45,85,.3)}
+.mb2{font-family:var(--disp);font-size:48px;font-weight:900;line-height:1;flex-shrink:0;transition:color .5s}
+.mb2.q{color:var(--cy);text-shadow:0 0 30px rgba(0,220,255,.4)}
+.mb2.c{color:var(--re);text-shadow:0 0 20px rgba(255,51,85,.3)}
 .mi{flex:1;min-width:0}
 .mv2{font-size:11px;color:var(--br);font-weight:500;margin-bottom:6px}
 .ms2{font-family:var(--mono);font-size:9px;color:var(--dim);margin-bottom:4px}
@@ -178,9 +162,9 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;back
 .bv:last-child{border-right:none}
 .bvl{font-size:8px;color:var(--dim);letter-spacing:1px;text-transform:uppercase;margin-bottom:4px}
 .bvn{font-family:var(--mono);font-size:13px;color:var(--vi)}
-#bb{position:sticky;bottom:0;display:flex;align-items:center;height:30px;background:rgba(1,4,9,.99);border-top:1px solid rgba(0,229,255,.20);font-family:var(--mono);font-size:10px;overflow:hidden;flex-shrink:0;gap:0}
-.bi{display:flex;align-items:center;gap:6px;padding:0 14px;white-space:nowrap;border-right:1px solid rgba(0,229,255,.10);height:100%}
-.bl2{color:rgba(80,110,150,.9);font-size:8.5px;letter-spacing:.8px;text-transform:uppercase}.bv2{color:var(--cy);font-size:10.5px}.bvg{color:var(--gr);font-size:10.5px}.bvy{color:var(--go);font-size:10.5px}
+#bb{position:sticky;bottom:0;display:flex;align-items:center;height:30px;background:rgba(3,6,16,.99);border-top:1px solid rgba(0,220,255,.22);font-family:var(--mono);font-size:10px;overflow:hidden;flex-shrink:0;gap:0}
+.bi{display:flex;align-items:center;gap:6px;padding:0 14px;white-space:nowrap;border-right:1px solid rgba(0,220,255,.12);height:100%}
+.bl2{color:rgba(90,120,160,.9);font-size:8.5px;letter-spacing:.8px;text-transform:uppercase}.bv2{color:var(--cy);font-size:10.5px}.bvg{color:var(--gr);font-size:10.5px}.bvy{color:var(--go);font-size:10.5px}
 #bt{flex:1;overflow:hidden}
 #bts{display:inline-block;animation:tk 42s linear infinite;white-space:nowrap;color:rgba(150,180,220,.7);font-size:9.5px;letter-spacing:.3px;padding-left:100%}
 @keyframes tk{0%{transform:translateX(0)}100%{transform:translateX(-100%)}}
@@ -325,12 +309,11 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;back
     <div class="pn">
       <div class="ph">
         <span class="pht">Transaction Explorer</span>
-        <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <span style="display:flex;gap:8px;align-items:center">
           <span class="pb vi" id="txb">0 txs</span>
-          <span class="pb cb" id="txb-cb" style="display:none">0 coinbase</span>
           <button class="txfbtn active" id="txf-all" onclick="txFilter('all')">ALL</button>
-          <button class="txfbtn" id="txf-coinbase" onclick="txFilter('coinbase')">⛏ COINBASE</button>
-          <button class="txfbtn" id="txf-transfer" onclick="txFilter('transfer')">⇄ TRANSFER</button>
+          <button class="txfbtn" id="txf-coinbase" onclick="txFilter('coinbase')">COINBASE</button>
+          <button class="txfbtn" id="txf-transfer" onclick="txFilter('transfer')">TRANSFER</button>
           <button class="txfbtn" id="txf-treasury" onclick="txFilter('treasury')">🏛 TREASURY</button>
         </span>
       </div>
@@ -386,167 +369,51 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;back
     </div>
   </div>
 
-  <!-- ── System Architecture ───────────────────────────────────────── -->
-  <div class="pn" style="border:1px solid rgba(0,229,255,.12);border-radius:8px;overflow:hidden">
-    <div class="ph" style="background:rgba(155,93,229,.07)"><span class="pht" style="color:var(--vi)">⬡ System Architecture</span><span class="pb vi">QTCL-1 Production</span></div>
+  <!-- ── System Description ─────────────────────────────────────── -->
+  <div class="pn" style="border:1px solid rgba(0,220,255,.12);border-radius:8px;overflow:hidden">
+    <div class="ph" style="background:rgba(128,64,255,.07)"><span class="pht" style="color:var(--vi)">⬡ System Architecture</span><span class="pb vi">QTCL-1 Production</span></div>
     <div style="padding:18px 20px;display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px">
       <div>
         <div class="ml" style="color:var(--cy);margin-bottom:8px;font-size:9px;letter-spacing:2px">CONSENSUS LAYER</div>
-        <p style="font-size:11.5px;line-height:1.75;color:var(--tx)">QTCL runs a <span style="color:var(--cy)">five-node Byzantine-fault-tolerant oracle cluster</span> whose block finality is certified by the <span style="color:var(--vi)">Mermin M₃ inequality</span> — a tripartite Bell test with classical bound 2.0 and W-state maximum ≈ 3.046. A block is considered quantum-final only when M₃ &gt; 2.0, giving cryptographic proof that the oracle's entropy derives from genuine quantum entanglement rather than any classical simulation. 3-of-5 nodes must agree (Byzantine threshold) before a block hash is published.</p>
+        <p style="font-size:11.5px;line-height:1.75;color:var(--tx)">QTCL deploys a <span style="color:var(--cy)">five-node Byzantine-fault-tolerant oracle network</span> whose consensus is certified by the <span style="color:var(--vi)">Mermin M₃ inequality</span> — a tripartite extension of Bell's theorem with classical bound 2.0 and W-state maximum ≈ 3.046. Block finality requires M₃ &gt; 2.0, providing information-theoretic proof of genuine quantum entanglement at the consensus layer rather than classical simulation.</p>
       </div>
       <div>
         <div class="ml" style="color:var(--go);margin-bottom:8px;font-size:9px;letter-spacing:2px">SPATIAL STRUCTURE</div>
-        <p style="font-size:11.5px;line-height:1.75;color:var(--tx)">Blocks tile a <span style="color:var(--go)">{8,3} hyperbolic tessellation</span> — 8 octagons meeting at every vertex in H³ (Poincaré ball model, curvature κ = −1). Ball volume grows as V(R) ∼ e<sup>2R</sup>, so the network can accommodate exponentially many participants without topological congestion. Each block occupies a unique tessellation tile; the chain is a geodesic path, not a linear list. The current tile boundaries are tracked live as <em>pq_curr / pq_last</em> (visible in the lattice visualizer above).</p>
+        <p style="font-size:11.5px;line-height:1.75;color:var(--tx)">Blocks tile a <span style="color:var(--go)">{8,3} hyperbolic tessellation</span> (Poincaré ball model, H³) — 8 octagons meeting at every vertex, curvature κ = −1. Exponential volume growth V(R) ~ e^R supports a node density that scales with network participation without topology collapse. Each spatial tile is a block; the chain is a geodesic path through hyperbolic space, not a linear sequence.</p>
       </div>
       <div>
         <div class="ml" style="color:var(--gr);margin-bottom:8px;font-size:9px;letter-spacing:2px">CRYPTOGRAPHIC BACKBONE</div>
-        <p style="font-size:11.5px;line-height:1.75;color:var(--tx)">All block and transaction signatures use <span style="color:var(--gr)">HLWE-256</span> — an original post-quantum scheme built entirely from Python stdlib (no external crypto). Block entropy flows from a <span style="color:var(--cy)">5-source QRNG ensemble</span> (ANU vacuum fluctuations, QBICK Quantis hardware, Outshift, Random.org atmospheric noise, Pyth Network confidence intervals) XOR-mixed via RFC 5869 HKDF. Mining is memory-hard: a 4 MB SHAKE-256 + SHA3-256 scratchpad matrix ties proof-of-work cost to RAM bandwidth, defeating ASIC acceleration. Block reward is set by tessellation depth and halves at each {8,3} boundary.</p>
+        <p style="font-size:11.5px;line-height:1.75;color:var(--tx)">All signatures use <span style="color:var(--gr)">HLWE — Hyperbolic Learning With Errors</span> post-quantum cryptography, hardened over PSL(2,ℝ) lattices. Block entropy is seeded by a <span style="color:var(--cy)">QRNG ensemble</span> — four independent quantum sources XOR-hedged for information-theoretic security: <span style="color:var(--cy)">ANU QRNG</span> (quantum vacuum fluctuations, Australian National University), <span style="color:var(--cy)">QBICK</span> (ID Quantique Quantis hardware, Quantum Blockchains Inc.), <span style="color:var(--cy)">Outshift</span> (PaloAlto), and <span style="color:var(--cy)">Random.org</span> (atmospheric noise) — then mixed via RFC 5869 HKDF. Mining is memory-hard (4 MB SHA3-256 matrix) defeating ASICs while the tessellation depth parameter scales block reward with network-proven work.</p>
       </div>
     </div>
   </div>
 
-  <!-- ── HLWE Whitepaper ────────────────────────────────────────────── -->
-  <div class="pn" style="border:1px solid rgba(240,180,41,.18);border-radius:8px;overflow:hidden">
-    <div class="ph" style="background:rgba(240,180,41,.05)">
-      <span class="pht" style="color:var(--go)">◈ HLWE-256 · Hyperbolic Learning With Errors — Technical Overview</span>
-      <span style="display:flex;gap:8px;align-items:center">
-        <span class="pb go">v2.0 · hlwe_engine.py</span>
-        <span style="font-family:var(--mono);font-size:8px;color:var(--dim);letter-spacing:.5px">Full whitepaper coming soon</span>
-      </span>
+  <!-- ── HLWE Micro-Whitepaper ────────────────────────────────────── -->
+  <div class="pn" style="border:1px solid rgba(212,160,32,.15);border-radius:8px;overflow:hidden">
+    <div class="ph" style="background:rgba(212,160,32,.06)"><span class="pht" style="color:var(--go)">◈ HLWE · Hyperbolic Learning With Errors</span><span class="pb go">Micro-Whitepaper</span></div>
+    <div style="padding:18px 20px;display:grid;grid-template-columns:1fr 1fr;gap:24px">
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <div>
+          <div style="font-family:var(--mono);font-size:9px;color:var(--go);letter-spacing:2px;margin-bottom:6px;text-transform:uppercase">§1 · Hardness Foundation</div>
+          <p style="font-size:11px;line-height:1.8;color:var(--tx)">HLWE is a post-quantum lattice scheme whose security reduces to the hardness of the <em style="color:var(--cy)">Learning With Errors (LWE)</em> problem instantiated over the isometry group PSL(2,ℝ) acting on the hyperbolic plane H². Standard LWE asks: given (A, b = As + e) over Z_q^n, recover secret vector <strong style="color:var(--go)">s</strong>, where <strong>e</strong> is Gaussian noise. HLWE replaces the Euclidean lattice Z^n with a <span style="color:var(--vi)">hyperbolic lattice Λ_H</span> whose shortest-vector problem (SVP) is strictly harder due to the exponential volume growth of H² balls: |B(r)| ~ sinh(r) ≫ e^{n/2} for large r, collapsing the approximation ratio that lattice sieving algorithms exploit.</p>
+        </div>
+        <div>
+          <div style="font-family:var(--mono);font-size:9px;color:var(--go);letter-spacing:2px;margin-bottom:6px;text-transform:uppercase">§2 · Key Generation</div>
+          <p style="font-size:11px;line-height:1.8;color:var(--tx)">A keypair is a pair (pk, sk) = (A·s + e mod q, s) where <strong style="color:var(--go)">A ∈ Λ_H^{n×m}</strong> is a public H²-lattice basis sampled from the <span style="color:var(--cy)">QRNG ensemble</span>, <strong>s</strong> is the secret drawn from a hyperbolic Gaussian centered at the Poincaré origin, and <strong>e</strong> is sub-Gaussian noise with variance bounded by the injectivity radius of the tessellation tile. In QTCL, oracle keypairs are delegated from wallet keys via <code style="color:var(--vi);font-family:var(--mono);font-size:10px">oracle_priv = SHA3-256(wallet_priv ‖ "QTCL_ORACLE_DELEGATE_v1")</code>, chaining on-chain accountability without exposing the root key.</p>
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:14px">
+        <div>
+          <div style="font-family:var(--mono);font-size:9px;color:var(--go);letter-spacing:2px;margin-bottom:6px;text-transform:uppercase">§3 · Sign &amp; Verify</div>
+          <p style="font-size:11px;line-height:1.8;color:var(--tx)">Signing a message <em>m</em>: sample a masking vector <strong>y</strong> ~ D_Λ (discrete Gaussian over Λ_H), compute commitment <strong>c</strong> = H(A·y mod q, m) ∈ {0,1}^κ, then release <strong>z</strong> = y + c·s if z passes a <span style="color:var(--gr)">rejection-sampling gate</span> that guarantees z is statistically independent of s (Lyubashevsky's technique, adapted to H² geometry). Verification checks A·z − c·pk mod q is short in the hyperbolic metric. No random oracle strength is lost; security tightness is O(1/q) under HLWE assumption.</p>
+        </div>
+        <div>
+          <div style="font-family:var(--mono);font-size:9px;color:var(--go);letter-spacing:2px;margin-bottom:6px;text-transform:uppercase">§4 · Quantum Resistance &amp; NIST Alignment</div>
+          <p style="font-size:11px;line-height:1.8;color:var(--tx)">Shor's algorithm provides no advantage against LWE variants — no hidden subgroup structure exists to exploit. Grover's search applies only to the pre-image search over H², which the hyperbolic SVP hardness elevates to <span style="color:var(--re)">superpolynomial</span> even for a fault-tolerant quantum computer. HLWE targets NIST security category III (≥ 2^192 classical / 2^128 quantum). The PSL(2,ℝ) symmetry further provides <em style="color:var(--cy)">algebraic noise amplification</em>: small errors grow exponentially under the group action, making lattice-reduction attacks require exponentially many oracle queries as the hyperbolic radius increases.</p>
+        </div>
+      </div>
     </div>
-
-    <!-- Intro paragraph -->
-    <div style="padding:18px 20px 6px">
-      <p style="font-size:12px;line-height:1.85;color:var(--tx);max-width:900px">
-        <span style="color:var(--go);font-weight:600">HLWE-256</span> is an original post-quantum cryptographic scheme designed and implemented by <span style="color:var(--cy)">Justin Howard-Stanley (Shemshallah)</span> for the QTCL blockchain. It is built entirely from Python's standard library — no external crypto packages — and secures every block signature, transaction, and oracle attestation on the network. The scheme's security rests on the hardness of the <em>Learning With Errors</em> (LWE) problem, hardened further by instantiation over a <em>hyperbolic lattice</em>. Think of LWE this way: you publish a scrambled version of a secret number, with a tiny amount of intentional noise mixed in. Recovering the original secret from the scrambled output is believed to be computationally infeasible — even for a quantum computer — because the noise destroys all the algebraic structure that quantum algorithms need to find shortcuts.
-      </p>
-    </div>
-
-    <!-- Sections grid -->
-    <div style="padding:6px 20px 18px;display:grid;grid-template-columns:1fr 1fr;gap:28px 32px">
-
-      <!-- §1 Hardness Foundation -->
-      <div style="display:flex;flex-direction:column;gap:8px">
-        <div style="font-family:var(--mono);font-size:9px;color:var(--go);letter-spacing:2px;text-transform:uppercase;padding-bottom:4px;border-bottom:1px solid rgba(240,180,41,.15)">§1 · Hardness Foundation</div>
-        <p style="font-size:11px;line-height:1.85;color:var(--tx)">
-          Standard LWE is defined over <span style="color:var(--cy)">ℤ<sub>q</sub><sup>n</sup></span> — a flat integer grid modulo a prime <em>q</em>. Given a random matrix <strong style="color:var(--go)">A</strong> and the vector <strong>b = As + e mod q</strong>, where <strong style="color:var(--go)">s</strong> is a secret and <strong>e</strong> is small noise, it is hard to recover <strong>s</strong>. HLWE instantiates this over a <span style="color:var(--vi)">hyperbolic lattice Λ<sub>H</sub></span> embedded in the {8,3}-tessellation of H² (the hyperbolic plane under the isometry group PSL(2,ℝ)). The key advantage: ball volume in H² grows as |B(r)| ∼ sinh(r), whereas in Euclidean space it grows as r<sup>n</sup>. This exponential volume growth means lattice sieving algorithms — the best known classical attacks on LWE — require exponentially more vectors to cover the same search radius, fundamentally inflating the cost of any lattice-reduction attack. The Shortest Vector Problem (SVP) on Λ<sub>H</sub> is therefore strictly harder than SVP on ℤ<sup>n</sup> at the same dimension.
-        </p>
-        <div style="background:rgba(240,180,41,.05);border:1px solid rgba(240,180,41,.12);border-radius:5px;padding:10px 12px;font-family:var(--mono);font-size:10px;color:var(--cy);line-height:1.7">
-          <span style="color:var(--go)">Params (LatticeParams):</span><br>
-          n = 256 &nbsp;·&nbsp; q = 2<sup>32</sup> − 5 (prime) &nbsp;·&nbsp; χ bound = 256<br>
-          <span style="color:var(--dim)">Security target: 256-bit classical / 128-bit quantum</span>
-        </div>
-      </div>
-
-      <!-- §2 Key Generation -->
-      <div style="display:flex;flex-direction:column;gap:8px">
-        <div style="font-family:var(--mono);font-size:9px;color:var(--go);letter-spacing:2px;text-transform:uppercase;padding-bottom:4px;border-bottom:1px solid rgba(240,180,41,.15)">§2 · Key Generation</div>
-        <p style="font-size:11px;line-height:1.85;color:var(--tx)">
-          A keypair starts from <span style="color:var(--cy)">block-field entropy</span> — bytes drawn from the live QRNG ensemble (quantum vacuum, hardware RNG, and Pyth price-oracle confidence intervals). From this entropy, three objects are derived:
-        </p>
-        <ol style="font-size:11px;line-height:1.9;color:var(--tx);padding-left:18px;margin:0">
-          <li><strong style="color:var(--go)">Public matrix A</strong> — an n×n basis over ℤ<sub>q</sub> seeded deterministically via SHA-256(entropy ‖ [i,j]) for each entry (i,j). A is unique per keypair and constitutes the public lattice scaffold.</li>
-          <li><strong style="color:var(--go)">Secret vector s</strong> — drawn from a <em>ternary distribution</em> {−1, 0, 1} via HKDF-Extract(salt=<code style="color:var(--vi)">"HLWE_SECRET_v1"</code>, ikm=entropy) → SHAKE-256 XOF. Each output byte maps: bits 00→−1, 01→0, 10→0, 11→+1, giving P(0)=½ and L∞(s)=1. This <em>small-secret</em> construction is a known hardness-preserving optimisation — using a uniform s over ℤ<sub>q</sub> would destroy LWE hardness entirely.</li>
-          <li><strong style="color:var(--go)">Error vector e</strong> — each component is drawn uniformly from [−256, 256] via <code style="color:var(--vi)">secrets.randbelow</code>, bounding ||e||<sub>∞</sub> ≤ 256 ≪ q/2.</li>
-        </ol>
-        <p style="font-size:11px;line-height:1.85;color:var(--tx)">
-          The <strong style="color:var(--cy)">public key</strong> is <strong>b = A·s + e mod q</strong> ∈ ℤ<sub>q</sub><sup>n</sup>. The <strong style="color:var(--cy)">private key</strong> is <strong>s</strong>. The <strong style="color:var(--go)">wallet address</strong> is then SHA3-256(SHA3-256(pack(b))), a 256-bit double-hash binding — SHA3 (Keccak) is used rather than SHA2 because it carries an independent structural hardness assumption and has no length-extension vulnerability.
-        </p>
-        <div style="background:rgba(0,229,255,.04);border:1px solid rgba(0,229,255,.10);border-radius:5px;padding:10px 12px;font-family:var(--mono);font-size:10px;color:var(--cy);line-height:1.7">
-          pk = A·s + e mod q &nbsp;·&nbsp; sk = s<br>
-          addr = SHA3-256(SHA3-256(pack<sub>BE32</sub>(pk)))
-        </div>
-      </div>
-
-      <!-- §3 Signing -->
-      <div style="display:flex;flex-direction:column;gap:8px">
-        <div style="font-family:var(--mono);font-size:9px;color:var(--go);letter-spacing:2px;text-transform:uppercase;padding-bottom:4px;border-bottom:1px solid rgba(240,180,41,.15)">§3 · Signing (EUF-CMA)</div>
-        <p style="font-size:11px;line-height:1.85;color:var(--tx)">
-          Signing a message hash <em>m</em> (32 bytes) with private key <strong>s</strong> proceeds in four steps, all deterministic:
-        </p>
-        <ol style="font-size:11px;line-height:1.9;color:var(--tx);padding-left:18px;margin:0">
-          <li><strong style="color:var(--go)">Derive signing key:</strong> <code style="color:var(--vi)">K = HMAC-SHA256("HLWE_SIGN_KEY_v1", sk_bytes)</code>. This 32-byte PRF key is never transmitted and cannot be reconstructed without the private key.</li>
-          <li><strong style="color:var(--go)">Deterministic nonce:</strong> <code style="color:var(--vi)">η = HMAC-SHA256(K, m)</code>. Using K rather than raw sk prevents fault-injection leakage. Because η is fully determined by (K, m), the same message always produces the same signature — making the scheme hedged against weak entropy at signing time.</li>
-          <li><strong style="color:var(--go)">Signature vector:</strong> <code style="color:var(--vi)">σ = SHAKE-256("HLWE_SIG_VEC_v1:" ‖ η ‖ m)</code> expanded to 64 × 4 = 256 bytes, then parsed as 64 elements of ℤ<sub>q</sub>. The domain separator ensures σ is structurally independent of all key material.</li>
-          <li><strong style="color:var(--go)">Auth tag:</strong> <code style="color:var(--vi)">τ = HMAC-SHA256(K, m ‖ pack(σ))</code>. This tag is a <em>keyed commitment</em> over both the message and the signature vector. It cannot be forged without K, and K cannot be derived without the private key.</li>
-        </ol>
-        <p style="font-size:11px;line-height:1.85;color:var(--tx)">
-          The output signature is the pair <strong style="color:var(--cy)">(σ, τ)</strong>. Security model: EUF-CMA under HMAC-SHA256. An adversary who sees arbitrarily many (message, signature) pairs cannot produce a valid τ for a new message without holding K, and K is computationally bound to the private key via HKDF.
-        </p>
-      </div>
-
-      <!-- §4 Verification -->
-      <div style="display:flex;flex-direction:column;gap:8px">
-        <div style="font-family:var(--mono);font-size:9px;color:var(--go);letter-spacing:2px;text-transform:uppercase;padding-bottom:4px;border-bottom:1px solid rgba(240,180,41,.15)">§4 · Verification</div>
-        <p style="font-size:11px;line-height:1.85;color:var(--tx)">
-          A verifier holds only the <strong style="color:var(--cy)">public key b</strong> (the LWE sample), the message hash <em>m</em>, and the signature <strong>(σ, τ)</strong>. Verification re-derives the signing key from the public key bytes:
-        </p>
-        <div style="background:rgba(155,93,229,.06);border:1px solid rgba(155,93,229,.15);border-radius:5px;padding:10px 12px;font-family:var(--mono);font-size:10px;color:var(--cy);line-height:1.9">
-          K' = HMAC-SHA256(<span style="color:var(--go)">"HLWE_SIGN_KEY_v1"</span>, pk_bytes)<br>
-          τ' = HMAC-SHA256(K', m ‖ pack(σ))<br>
-          valid ⟺ <span style="color:var(--gr)">HMAC.compare_digest(τ', τ)</span>
-        </div>
-        <p style="font-size:11px;line-height:1.85;color:var(--tx)">
-          This works because <strong>pk = As + e</strong> is uniquely and deterministically bound to <strong>sk = s</strong> — anyone in possession of pk computes the same K' as the signer computed from sk, because HKDF is a deterministic function. The binding is information-theoretically tight: two distinct secret keys <strong>s ≠ s'</strong> produce public keys <strong>b ≠ b'</strong> with overwhelming probability (since <strong>A</strong> is a full-rank random matrix). Time-constant comparison via <code style="color:var(--vi)">hmac.compare_digest</code> prevents timing side-channels. For QTCL's server-side verification of miner-submitted blocks, the miner sends (σ, τ, pk); the server re-derives K' in O(1) and verifies in constant time.
-        </p>
-      </div>
-
-      <!-- §5 Wallet Infrastructure -->
-      <div style="display:flex;flex-direction:column;gap:8px">
-        <div style="font-family:var(--mono);font-size:9px;color:var(--go);letter-spacing:2px;text-transform:uppercase;padding-bottom:4px;border-bottom:1px solid rgba(240,180,41,.15)">§5 · Wallet Infrastructure — BIP32 / BIP38 / BIP39</div>
-        <p style="font-size:11px;line-height:1.85;color:var(--tx)">
-          HLWE-256 sits atop a full BIP-standard wallet stack, all implemented in pure Python stdlib:
-        </p>
-        <ul style="font-size:11px;line-height:1.9;color:var(--tx);padding-left:18px;margin:0">
-          <li><strong style="color:var(--cy)">BIP39 Mnemonics</strong> — 2048-word embedded wordlist. Entropy (128–256 bits) → mnemonic via standard 11-bit word indexing with SHA-256 checksum. Mnemonic → 64-byte seed via PBKDF2-HMAC-SHA512 with 2048 iterations, salt = <code style="color:var(--vi)">"mnemonic" ‖ passphrase</code>. Supports 12 / 15 / 18 / 21 / 24-word phrases.</li>
-          <li><strong style="color:var(--cy)">BIP32 HD Derivation</strong> — master key from seed via HMAC-SHA512(key=<code style="color:var(--vi)">"QTCL HD seed v1"</code>, data=seed). Child keys via HMAC-SHA512(parent_chain_code, [0x00 ‖ key ‖ index] for hardened, [0x01 ‖ key ‖ index] for normal). Full BIP44 path: <code style="color:var(--vi)">m/44'/0'/0'/0/index</code>.</li>
-          <li><strong style="color:var(--cy)">BIP38 Encryption</strong> — password-protected private key storage. PBKDF2 with 100,000 iterations derives an AES-like XOR mask over the private key bytes, with a salt and confirmation hash, ensuring brute-force cost exceeds 10<sup>10</sup> guesses at modern hardware speeds.</li>
-        </ul>
-        <p style="font-size:11px;line-height:1.85;color:var(--tx)">
-          All wallet metadata is persisted to Supabase (PostgreSQL) via a pure-stdlib REST client — <em>no psycopg2 required</em>. Wallet addresses are 256-bit SHA3 double-hashes, consistent with block hash formatting throughout the protocol.
-        </p>
-      </div>
-
-      <!-- §6 Quantum Resistance -->
-      <div style="display:flex;flex-direction:column;gap:8px">
-        <div style="font-family:var(--mono);font-size:9px;color:var(--go);letter-spacing:2px;text-transform:uppercase;padding-bottom:4px;border-bottom:1px solid rgba(240,180,41,.15)">§6 · Quantum Resistance &amp; Security Analysis</div>
-        <p style="font-size:11px;line-height:1.85;color:var(--tx)">
-          <strong style="color:var(--re)">Shor's algorithm</strong> breaks RSA and ECC by exploiting hidden periodic structure in multiplicative groups. LWE has no such structure — it is a random linear system with noise, and no quantum period-finding or hidden subgroup algorithm is known to help. <strong style="color:var(--re)">Grover's algorithm</strong> provides a quadratic speedup for unstructured search; for a 256-bit hash preimage this reduces the quantum work from 2<sup>256</sup> to 2<sup>128</sup> — still intractable. The hyperbolic geometry amplifies this further: SVP on Λ<sub>H</sub> requires the attacker to search an exponentially larger ball volume, inflating the effective security parameter beyond n=256 Euclidean bits.
-        </p>
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:4px">
-          <div style="background:rgba(5,255,161,.05);border:1px solid rgba(5,255,161,.15);border-radius:5px;padding:9px 10px;text-align:center">
-            <div style="font-family:var(--mono);font-size:9px;color:var(--gr);letter-spacing:1px;margin-bottom:4px">CLASSICAL</div>
-            <div style="font-family:var(--mono);font-size:13px;color:var(--br);font-weight:600">2<sup>256</sup></div>
-            <div style="font-size:9px;color:var(--dim);margin-top:2px">ops to break</div>
-          </div>
-          <div style="background:rgba(0,229,255,.05);border:1px solid rgba(0,229,255,.12);border-radius:5px;padding:9px 10px;text-align:center">
-            <div style="font-family:var(--mono);font-size:9px;color:var(--cy);letter-spacing:1px;margin-bottom:4px">QUANTUM</div>
-            <div style="font-family:var(--mono);font-size:13px;color:var(--br);font-weight:600">2<sup>128</sup></div>
-            <div style="font-size:9px;color:var(--dim);margin-top:2px">Grover lower bound</div>
-          </div>
-          <div style="background:rgba(240,180,41,.05);border:1px solid rgba(240,180,41,.12);border-radius:5px;padding:9px 10px;text-align:center">
-            <div style="font-family:var(--mono);font-size:9px;color:var(--go);letter-spacing:1px;margin-bottom:4px">NIST LEVEL</div>
-            <div style="font-family:var(--mono);font-size:13px;color:var(--br);font-weight:600">V</div>
-            <div style="font-size:9px;color:var(--dim);margin-top:2px">target category</div>
-          </div>
-        </div>
-        <p style="font-size:11px;line-height:1.85;color:var(--tx)">
-          The PSL(2,ℝ) symmetry group acting on the hyperbolic lattice provides an additional property: <em style="color:var(--cy)">algebraic noise amplification</em>. Small perturbations to a lattice point grow exponentially under the group action as the hyperbolic radius increases, making the signal-to-noise ratio of any approximate-SVP solver collapse faster than in the Euclidean case. This is why HLWE-256 can use a modest dimension n=256 while achieving security equivalent to n≫512 in standard LWE.
-        </p>
-      </div>
-
-    </div><!-- /sections grid -->
-
-    <div style="padding:10px 20px 14px;border-top:1px solid rgba(240,180,41,.10);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
-      <div style="font-family:var(--mono);font-size:9px;color:var(--dim);letter-spacing:.5px">
-        HLWE-256 is original research by <span style="color:var(--cy)">Justin Howard-Stanley (Shemshallah)</span> &nbsp;·&nbsp;
-        Implementation: <span style="color:var(--cy)">hlwe_engine.py</span> v2.0 &nbsp;·&nbsp;
-        Pure Python stdlib &nbsp;·&nbsp; No external crypto deps &nbsp;·&nbsp;
-        BIP32 / BIP38 / BIP39 wallet stack &nbsp;·&nbsp;
-        In-DB verification via Supabase triggers
-      </div>
-      <span style="font-family:var(--mono);font-size:9px;color:var(--dim);border:1px solid rgba(240,180,41,.2);padding:2px 10px;border-radius:3px;white-space:nowrap">Full whitepaper link coming soon</span>
-    </div>
+    <div style="padding:10px 20px 14px;border-top:1px solid rgba(212,160,32,.1);font-family:var(--mono);font-size:9px;color:var(--dim);letter-spacing:.5px">HLWE is original research by Shemshallah@gmail.com. Implementation: <span style="color:var(--cy)">hlwe_engine.py</span> · Pure stdlib, no external crypto deps · BIP32/BIP38/BIP39 wallet infrastructure · In-database HLWE verification via Supabase triggers</div>
   </div>
 
 </div>
@@ -556,8 +423,6 @@ body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;back
   <div class="bi"><span class="bl2">PEERS</span><span class="bvg" id="bbp">&mdash;</span></div>
   <div class="bi"><span class="bl2">N_PEERS</span><span class="bv2" id="bbn">&mdash;</span></div>
   <div class="bi"><span class="bl2">QRNG</span><span class="bv2" id="bbq">&mdash;</span></div>
-  <div class="bi"><span class="bl2">MINERS</span><span class="bvg" id="bb-miners">&mdash;</span></div>
-  <div class="bi"><span class="bl2">MEMPOOL</span><span class="bvy" id="bb-mp">&mdash;</span></div>
   <div id="bt"><span id="bts">QTCL &middot; Post-quantum blockchain &middot; HLWE cryptography &middot; W-state entangled mining &middot; 5-oracle Byzantine consensus &middot; Mermin inequality certified &middot; Poincare disk topology &middot; Memory-hard QTCL-PoW &middot; QRNG-seeded oracles</span></div>
   <div id="bu">Updated &mdash;</div>
 </div>
@@ -603,7 +468,7 @@ var S = {
   // block chain metrics (computed from getBlockRange)
   total_transactions: 0, avg_block_time_s: 0, difficulty_bits: 4,
   // pq plane
-  pq_curr: 0, pq_last: 0, pq0: 0,
+  pq_curr: 0, pq_last: 0, pq0: 0, _pqAuthoritative: false,
   // oracle network (per-node from DM snapshots)
   oracle_data: {}, // oracle_N → {w_state_fidelity, coherence, purity, pq0_*}
   // mermin (from DM snapshots)
@@ -655,13 +520,11 @@ async function rpc(method, params) {
       body: JSON.stringify({jsonrpc:'2.0', id: _rpcId++, method: method, params: params || []}),
       signal: AbortSignal.timeout(6000)
     });
-    if (!r.ok) { console.error('[RPC] HTTP error:', method, r.status, r.statusText); return null; }
+    if (!r.ok) return null;
     var j = await r.json();
-    if (j.error) { console.error('[RPC] JSON-RPC error:', method, j.error.code, j.error.message); return null; }
-    if (!j.result) { console.warn('[RPC] no result:', method); return null; }
-    console.debug('[RPC] success:', method);
+    if (j.error) { console.warn('[RPC]', method, j.error.code, j.error.message); return null; }
     return j.result;
-  } catch(e) { console.error('[RPC] fetch error:', method, e.message || e); return null; }
+  } catch(e) { return null; }
 }
 
 // True JSON-RPC 2.0 batch — single HTTP round-trip
@@ -678,18 +541,17 @@ async function rpcBatch(calls) {
       body: JSON.stringify(batch),
       signal: AbortSignal.timeout(8000)
     });
-    if (!r.ok) { console.error('[RPC-BATCH] HTTP error:', r.status, r.statusText); return calls.map(function() { return null; }); }
+    if (!r.ok) return calls.map(function() { return null; });
     var arr = await r.json();
-    if (!Array.isArray(arr)) { console.error('[RPC-BATCH] Expected array response, got:', typeof arr); return calls.map(function(_, i) { return i === 0 && arr && !arr.error ? arr.result : null; }); }
-    var results = calls.map(function(_, i) {
+    // Server may return single object on error or batch array
+    if (!Array.isArray(arr)) {
+      return calls.map(function(_, i) { return i === 0 && arr && !arr.error ? arr.result : null; });
+    }
+    return calls.map(function(_, i) {
       var res = arr.find(function(a) { return a && a.id === (base + i); });
-      if (res && res.error) { console.error('[RPC-BATCH]', calls[i][0], '—', res.error.message); return null; }
-      if (!res) { console.warn('[RPC-BATCH] No response for', calls[i][0]); return null; }
-      return res.result || null;
+      return (res && !res.error) ? res.result : null;
     });
-    console.debug('[RPC-BATCH] ' + calls.length + ' calls, ' + results.filter(Boolean).length + ' succeeded');
-    return results;
-  } catch(e) { console.error('[RPC-BATCH] fetch error:', e.message || e); return calls.map(function() { return null; }); }
+  } catch(e) { return calls.map(function() { return null; }); }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1201,7 +1063,7 @@ function renderChain() {
 // ═══════════════════════════════════════════════════════════════════════════════
 // BLOCK MODAL
 // ═══════════════════════════════════════════════════════════════════════════════
-var _TREASURY_ADDR = 'qtcl110fc58e3c441106cc1e54ae41da5d15868525a87';
+var _TREASURY_ADDR = 'qtcl1d1ae7c762036f3731a16d84c8ec4be75912edb9d';
 var _bmCopiedTimer = null;
 
 function _bmCopy(text) {
@@ -1231,43 +1093,35 @@ function openBlockModal(blk) {
     }
     var txList=d.transactions.slice().sort(function(a,b){
       var at=a.tx_type||a.type||'';var bt=b.tx_type||b.type||'';
-      var aCb=(at==='coinbase'||at==='miner_reward'||at==='block_reward')?1:0;
-      var bCb=(bt==='coinbase'||bt==='miner_reward'||bt==='block_reward')?1:0;
-      return bCb-aCb;
+      return at==='coinbase'?-1:bt==='coinbase'?1:0;
     });
     body.innerHTML=txList.map(function(tx){
-      var tp=tx.tx_type||tx.type||'transfer';
-      var cb=(tp==='coinbase'||tp==='miner_reward'||tp==='block_reward');
+      var tp=tx.tx_type||tx.type||'transfer',cb=tp==='coinbase';
       var hash=tx.tx_id||tx.tx_hash||tx.hash||'';
       var from=tx.from_addr||tx.from_address||tx.sender||'';
       var to=tx.to_addr||tx.to_address||tx.receiver||'';
-      var amt=parseFloat(tx.amount||0)/100;
+      var amt=parseFloat(tx.amount||0)/100; // base units → QTCL
       var txStatus=tx.status||'confirmed';
-      var isTreasury=(to===_TREASURY_ADDR||from===_TREASURY_ADDR)||(tp==='treasury'||tp==='treasury_reward');
-      var isMinerReward=cb&&!isTreasury;
+      var isTreasury=cb&&(to===_TREASURY_ADDR||from===_TREASURY_ADDR);
       var isPending=isTreasury&&txStatus==='pending';
-      var icon=isPending?'⏳':isTreasury?'🏛':isMinerReward?'⛏':'⇄';
+      // pending treasury: clock icon, dimmed, striped bg — confirmed on next block
+      var icon=isPending?'⏳':isTreasury?'🏛':cb?'⛏':'⇄';
       var fromShort=from.length>20?from.slice(0,10)+'…'+from.slice(-8):from||'—';
       var toShort=to.length>20?to.slice(0,10)+'…'+to.slice(-8):to||'—';
-      var label=isPending?'⏳ PENDING':isTreasury?'🏛 TREASURY':isMinerReward?'⛏ MINER':'⇄ TRANSFER';
-      var amtColor=isPending?'color:rgba(240,180,41,.45)':isTreasury?'color:var(--go)':isMinerReward?'color:var(--cb)':'color:var(--go)';
-      var hashColor=isMinerReward?'var(--cb)':'var(--cy)';
-      var rowBg=isMinerReward?'background:rgba(255,110,199,.03);border-left:2px solid rgba(255,110,199,.3)':isTreasury?'background:rgba(240,180,41,.03);border-left:2px solid rgba(240,180,41,.3)':'';
-      var rowStyle=(isPending?'opacity:.62;background:repeating-linear-gradient(135deg,transparent,transparent 4px,rgba(240,180,41,.03) 4px,rgba(240,180,41,.03) 8px);':rowBg)+';';
-      var badgeStyle=isMinerReward
-        ?'background:var(--cb2);color:var(--cb);padding:1px 6px;border-radius:3px;font-family:var(--disp);font-size:8px;border:1px solid rgba(255,110,199,.3)'
-        :isTreasury
-        ?'background:var(--go2);color:'+(isPending?'rgba(240,180,41,.45)':'var(--go)')+';padding:1px 6px;border-radius:3px;font-family:var(--disp);font-size:8px;border:1px solid rgba(240,180,41,.3)'
-        :'background:var(--cy2);color:var(--cy);padding:1px 6px;border-radius:3px;font-family:var(--disp);font-size:8px';
-      return '<div class="bm-tx" onclick="_bmCopy(\''+hash+'\')" title="'+(isPending?'Treasury pending':'Click to copy TX ID')+'" style="'+rowStyle+'">'
-        +'<div class="bm-tx-icon '+(isTreasury?'treasury':tp)+'" style="'+(isPending?'opacity:.5':'')+(isMinerReward?'background:rgba(255,110,199,.12);border:1px solid rgba(255,110,199,.25)':'')+'">'+icon+'</div>'
+      var pendingTag=isPending
+        ?'<span style="background:rgba(212,160,32,.08);color:rgba(212,160,32,.55);padding:1px 6px;border-radius:3px;font-family:var(--disp);font-size:8px;border:1px solid rgba(212,160,32,.18);letter-spacing:.4px">⏳ NEXT BLOCK</span>'
+        :'';
+      var badge=isTreasury
+        ?'<span style="background:var(--go2);color:'+(isPending?'rgba(212,160,32,.45)':'var(--go)')+';padding:1px 6px;border-radius:3px;font-family:var(--disp);font-size:8px;border:1px solid rgba(212,160,32,.3)">🏛 TREASURY</span>'
+        :cb?'<span style="background:var(--vi2);color:var(--vi);padding:1px 6px;border-radius:3px;font-family:var(--disp);font-size:8px">⛏ COINBASE</span>':'';
+      var rowStyle=isPending?'opacity:.62;background:repeating-linear-gradient(135deg,transparent,transparent 4px,rgba(212,160,32,.03) 4px,rgba(212,160,32,.03) 8px);':'';
+      var amtColor=isPending?'color:rgba(212,160,32,.45)':isTreasury?'color:var(--go)':'';
+      return '<div class="bm-tx" onclick="_bmCopy(\''+hash+'\')" title="'+(isPending?'Treasury pending — confirms when next block is mined':'Click to copy TX ID')+'" style="'+rowStyle+'">'
+        +'<div class="bm-tx-icon '+(isTreasury?'treasury':tp)+'" style="'+(isPending?'opacity:.5':'')+'">'+icon+'</div>'
         +'<div class="bm-tx-info">'
-        +'<div class="bm-tx-hash" style="color:'+hashColor+'">'+hash+'</div>'
+        +'<div class="bm-tx-hash" style="'+(isPending?'color:rgba(0,220,255,.4)':'')+'">'+hash+'</div>'
         +'<div class="bm-tx-sub"><span style="color:var(--dim)">from:</span> <span style="color:var(--tx)">'+fromShort+'</span>'
-        +'<span style="color:var(--dim)">→</span><span style="color:'+(isTreasury?'var(--go)':isMinerReward?'var(--cb)':'var(--gr)')+'">'+toShort+'</span>'
-        +'<span style="'+badgeStyle+'">'+label+'</span>'
-        +(isPending?'<span style="background:rgba(240,180,41,.08);color:rgba(240,180,41,.55);padding:1px 6px;border-radius:3px;font-family:var(--disp);font-size:8px;border:1px solid rgba(240,180,41,.18)">⏳ NEXT BLOCK</span>':'')
-        +'</div>'
+        +'<span style="color:var(--dim)">→</span><span style="color:'+(isTreasury?'var(--go)':'var(--gr)')+'">'+toShort+'</span>'+badge+' '+pendingTag+'</div>'
         +'</div>'
         +'<div class="bm-tx-amt '+(isTreasury?'transfer':tp)+'" style="'+amtColor+'">'+amt.toFixed(2)+' Q</div>'
         +'<div class="bm-copy-hint">CLICK TO COPY</div>'
@@ -1297,8 +1151,7 @@ function txFilter(mode){
   ['all','coinbase','transfer','treasury'].forEach(function(m){
     var b=document.getElementById('txf-'+m);if(!b) return;
     var act=mode===m;
-    var extra=act?(m==='coinbase'?' cb':m==='transfer'?' tr':m==='treasury'?' go':''):'';
-    b.className='txfbtn'+(act?' active'+extra:'');
+    b.className='txfbtn'+(act?' active'+(m==='coinbase'?' cb':m==='transfer'?' tr':m==='treasury'?' go':''):'');
   });
   loadTxPage();
 }
@@ -1307,40 +1160,29 @@ function txPage(d){txPage_n=Math.max(0,Math.min(txPages-1,txPage_n+d));loadTxPag
 function _shortHash(h,n){h=h||'';return h.length>n?h.slice(0,n>>1)+'…'+h.slice(-(n>>1)):h;}
 
 function renderTxRow(tx,isNew){
-  var tp=tx.tx_type||tx.type||'transfer';
-  var cb=(tp==='coinbase'||tp==='miner_reward'||tp==='block_reward');
+  var tp=tx.tx_type||tx.type||'transfer',cb=tp==='coinbase';
   var hash=tx.tx_hash||tx.tx_id||tx.hash||'';
   var from=tx.from_address||tx.from_addr||tx.sender||'';
   var to=tx.to_address||tx.to_addr||tx.receiver||'';
-  var isTreasury=(to===_TREASURY_ADDR||from===_TREASURY_ADDR)||(tp==='treasury'||tp==='treasury_reward');
-  var isMinerReward=cb&&!isTreasury;
+  var isTreasury=cb&&(to===_TREASURY_ADDR||from===_TREASURY_ADDR);
   var amt=parseFloat(tx.amount||0);
+  // Server stores base units (int); display as QTCL (/100)
   if(amt>1000) amt=amt/100;
   var blk=tx.height||tx.block_height||'—';
-  var txStatus=tx.status||'confirmed';
-  var isPending=isTreasury&&txStatus==='pending';
-
-  var typeLabel,typeClass,rowClass;
-  if(isPending){typeLabel='⏳ PENDING';typeClass='pending';rowClass='tx-cb';}
-  else if(isTreasury){typeLabel='🏛 TREASURY';typeClass='treasury';rowClass='tx-cb';}
-  else if(isMinerReward){typeLabel='⛏ MINER';typeClass='coinbase';rowClass='tx-cb';}
-  else if(cb){typeLabel='⛏ COINBASE';typeClass='coinbase';rowClass='tx-cb';}
-  else{typeLabel='⇄ TRANSFER';typeClass='transfer';rowClass='tx-tr';}
-
+  var st=tx.status||'confirmed';
+  var isPending=isTreasury&&st==='pending';
+  var typeLabel=isPending?'⏳ PENDING':isTreasury?'🏛 TREASURY':cb?'⛏ COINBASE':'⇄ TRANSFER';
+  var typeClass=isPending?'pending':isTreasury?'treasury':cb?'coinbase':'transfer';
   var rowOpacity=isPending?'opacity:.6;':'';
-  var amtColor=isPending?'color:rgba(240,180,41,.45)':isTreasury?'color:var(--go)':isMinerReward?'color:var(--cb)':'';
-  var fromColor=isMinerReward?'var(--gr)':'var(--tx)';
-  var toColor=isTreasury?'var(--go)':isMinerReward?'var(--cb)':'var(--gr)';
-  var hashColor=isPending?'rgba(0,229,255,.35)':isMinerReward?'var(--cb)':'var(--cy)';
-
-  return '<tr class="'+(isNew?'tx-new ':'')+rowClass+'" title="'+(isPending?'Treasury pending — confirms when next block is mined':hash)+'" style="'+rowOpacity+'">'
+  var amtStyle=isPending?'color:rgba(212,160,32,.45)':isTreasury?'color:var(--go)':'';
+  return '<tr class="'+(isNew?'tx-new ':'')+( cb?'tx-cb':'tx-tr')+'" title="'+(isPending?'Treasury pending — confirms when next block is mined':hash)+'" style="'+rowOpacity+'">'
     +'<td><span class="tba '+typeClass+'">'+typeLabel+'</span></td>'
-    +'<td style="font-family:var(--mono);font-size:10px;cursor:pointer;color:'+hashColor+'" title="'+hash+'" onclick="_bmCopy(this.title);this.style.color=\'var(--go)\';var _c=this;setTimeout(function(){_c.style.color=\''+hashColor+'\';},900)">'+_shortHash(hash,18)+' <span style="font-size:7px;opacity:.5">⧉</span></td>'
-    +'<td style="font-family:var(--mono);font-size:9px;color:'+fromColor+'" title="'+from+'">'+_shortHash(from,14)+'</td>'
-    +'<td style="font-family:var(--mono);font-size:9px;color:'+toColor+'" title="'+to+'">'+_shortHash(to,14)+'</td>'
-    +'<td style="font-size:11px;font-weight:600;'+amtColor+'">'+amt.toFixed(2)+' Q</td>'
+    +'<td style="font-family:var(--mono);font-size:10px;cursor:pointer;color:'+(isPending?'rgba(0,220,255,.35)':'var(--cy)')+'" title="'+hash+'" onclick="_bmCopy(this.title);this.style.color=\'var(--go)\';var _c=this;setTimeout(function(){_c.style.color=\''+(isPending?'rgba(0,220,255,.35)':'var(--cy)')+'\';},900)">'+_shortHash(hash,18)+' <span style="font-size:7px;opacity:.5">⧉</span></td>'
+    +'<td style="font-family:var(--mono);font-size:9px;color:var(--dim)" title="'+from+'">'+_shortHash(from,14)+'</td>'
+    +'<td style="font-family:var(--mono);font-size:9px;color:'+(isTreasury?'var(--go)':'var(--gr)')+'" title="'+to+'">'+_shortHash(to,14)+'</td>'
+    +'<td style="font-size:11px;'+amtStyle+'">'+amt.toFixed(2)+' Q</td>'
     +'<td style="color:var(--dim);font-size:10px">'+blk+'</td>'
-    +'<td><span class="tba '+txStatus+'">'+txStatus.toUpperCase()+'</span></td>'
+    +'<td><span class="tba '+st+'">'+st.toUpperCase()+'</span></td>'
     +'</tr>';
 }
 
@@ -1372,27 +1214,12 @@ async function loadTxPage(){
 function renderTxs(){
   var tb=document.getElementById('ttb');
   var txb=document.getElementById('txb');if(txb) txb.textContent=txTotal+' txs';
-  // Count coinbase in current page
-  var cbCount=txs.filter(function(tx){
-    var tp=tx.tx_type||tx.type||'';
-    return tp==='coinbase'||tp==='miner_reward'||tp==='block_reward';
-  }).length;
-  var txbcb=document.getElementById('txb-cb');
-  if(txbcb){txbcb.textContent=cbCount+' coinbase';txbcb.style.display=cbCount>0?'':'none';}
   var pi=document.getElementById('txpageinfo');if(pi) pi.textContent='Page '+(txPage_n+1)+' / '+txPages+' ('+txTotal+' total)';
   var prev=document.getElementById('txprev'),next=document.getElementById('txnext');
   if(prev) prev.disabled=txPage_n===0;
   if(next) next.disabled=txPage_n>=txPages-1;
   if(!txs.length){if(tb) tb.innerHTML='<tr><td colspan="7" class="es">No transactions found</td></tr>';return;}
-  // Sort: coinbase/miner first, then by block height desc
-  var sorted=txs.slice().sort(function(a,b){
-    var at=a.tx_type||a.type||'',bt=b.tx_type||b.type||'';
-    var aCb=(at==='coinbase'||at==='miner_reward'||at==='block_reward')?1:0;
-    var bCb=(bt==='coinbase'||bt==='miner_reward'||bt==='block_reward')?1:0;
-    if(bCb!==aCb) return bCb-aCb;
-    return (b.height||0)-(a.height||0);
-  });
-  if(tb) tb.innerHTML=sorted.map(function(tx){return renderTxRow(tx,tx._fresh);}).join('');
+  if(tb) tb.innerHTML=txs.map(function(tx){return renderTxRow(tx,tx._fresh);}).join('');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1473,7 +1300,6 @@ function renderMiners(miners){
       +'<div style="font-size:9px;color:var(--dim);font-family:var(--mono)">qtcl_getPeers → 0 entries</div></div>';
     ['pcb','p2plc','p2psc','p2ptc'].forEach(function(id){var e=document.getElementById(id);if(e)e.textContent='0';});
     var dot=document.getElementById('p2p-live-dot');if(dot){dot.style.background='var(--dim)';dot.style.animation='none';}
-    var bbm=document.getElementById('bb-miners');if(bbm)bbm.textContent='0';
     return;
   }
   _miners=miners;
@@ -1485,43 +1311,31 @@ function renderMiners(miners){
   var p2plc=document.getElementById('p2plc');if(p2plc)p2plc.textContent=live.length;
   var p2psc=document.getElementById('p2psc');if(p2psc)p2psc.textContent=seen.length;
   var p2ptc=document.getElementById('p2ptc');if(p2ptc)p2ptc.textContent=hist.length;
-  var bbm=document.getElementById('bb-miners');if(bbm)bbm.textContent=live.length||miners.length;
   var dot=document.getElementById('p2p-live-dot');
-  if(dot){dot.style.background=live.length?'var(--gr)':'var(--dim)';dot.style.animation=live.length?'p2ppulse 1.6s infinite':'none';dot.style.boxShadow=live.length?'0 0 8px var(--gr)':'none';}
+  if(dot){dot.style.background=live.length?'var(--gr)':'var(--dim)';dot.style.animation=live.length?'p2ppulse 1.6s infinite':'none';dot.style.boxShadow=live.length?'0 0 6px var(--gr)':'none';}
   var visible=_p2pShowHist?miners:miners.filter(function(m){return m.status!=='historic';});
   if(!visible.length&&miners.length) visible=miners.slice(0,5);
   el.innerHTML=visible.map(function(m){
     var addr=m.miner_address||m.address||'';
-    var short=addr.length>28?addr.slice(0,12)+'…'+addr.slice(-10):addr||'(no address)';
-    var bks=m.block_count||0;
-    var earned=parseFloat(m.total_earned_qtcl||0);
-    var earnedStr=earned>0?(earned).toFixed(2)+' Q':'—';
-    var h=m.last_height||0;
-    var age=_age(m.last_seen_age_s);
-    var st=m.status||'historic';
-    var pid=(m.peer_id||'').slice(0,12);
-    var gurl=m.gossip_url||'';
-    var isLive=st==='live';
-    // Hash rate: if available, else estimate from block_count and time
-    var hrStr=m.hash_rate?(m.hash_rate>1e6?(m.hash_rate/1e6).toFixed(1)+' MH/s':(m.hash_rate/1e3).toFixed(1)+' KH/s'):'';
-    var isMining=isLive;
-    return '<div class="miner-row '+st+(isMining?' is-mining':'')+'">'
+    var short=addr.length>20?addr.slice(0,10)+'…'+addr.slice(-10):addr||'(no address)';
+    var bks=m.block_count||0,earned=parseFloat(m.total_earned_qtcl||0).toFixed(2);
+    var h=m.last_height||0,age=_age(m.last_seen_age_s),st=m.status||'historic';
+    var pid=(m.peer_id||'').slice(0,12),gurl=m.gossip_url||'';
+    return '<div class="miner-row '+st+'">'
       +'<div style="display:flex;align-items:flex-start;gap:8px">'
       +'<div class="miner-dot" style="margin-top:4px"></div>'
-      +'<div style="flex:1;min-width:0;padding-right:'+(isMining?'28px':'0')+'px">'
+      +'<div style="flex:1;min-width:0">'
       +'<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">'
       +'<span class="miner-addr" title="'+addr+'" onclick="try{navigator.clipboard.writeText(\''+addr+'\');}catch(e){}">'+short+'</span>'
-      +'<span class="miner-badge '+st+'" style="'+(isLive?'box-shadow:0 0 6px rgba(5,255,161,.3)':'')+'">'+st.toUpperCase()+'</span>'
-      +(gurl?'<span style="font-size:8px;color:var(--dim)" title="'+gurl+'">📡 P2P</span>':'')
-      +(isLive?'<span style="font-size:8px;color:var(--gr);letter-spacing:.5px;font-family:var(--mono)">MINING</span>':'')
+      +'<span class="miner-badge '+st+'">'+st.toUpperCase()+'</span>'
+      +(gurl?'<span style="font-size:8px;color:var(--dim)">📡 P2P</span>':'')
       +'</div>'
-      +'<div class="miner-stats" style="margin-top:4px">'
-      +(bks?'<span>⛏ <span class="miner-stat-val" style="color:var(--cy)">'+bks+'</span> blk</span>':'')
-      +(earned>0?'<span>💰 <span class="miner-stat-val" style="color:var(--go)">'+earnedStr+'</span></span>':'')
-      +(h?'<span style="color:var(--dim)">h=<span class="miner-stat-val">'+h+'</span></span>':'')
-      +(hrStr?'<span style="color:var(--dim)">⚡<span class="miner-stat-val" style="color:var(--vi)">'+hrStr+'</span></span>':'')
-      +(age!=='—'?'<span style="color:var(--dim)">'+age+'</span>':'')
-      +(pid?'<span style="color:var(--dim);font-size:8px">id:'+pid+'…</span>':'')
+      +'<div class="miner-stats">'
+      +(bks?'<span>⛏ <span class="miner-stat-val">'+bks+'</span> blocks</span>':'')
+      +(parseFloat(earned)>0?'<span>💰 <span class="miner-stat-val">'+earned+'</span> QTCL</span>':'')
+      +(h?'<span>h=<span class="miner-stat-val">'+h+'</span></span>':'')
+      +(age!=='—'?'<span class="miner-stat-val">'+age+'</span>':'')
+      +(pid?'<span style="color:var(--dim)">id:'+pid+'…</span>':'')
       +'</div></div></div></div>';
   }).join('');
 }
@@ -1585,7 +1399,6 @@ function updateDOM() {
   st('bbd',S.difficulty_bits);
   st('bbn',S.n_peers||'—');
   st('bbq',S.qrng_health.toFixed(3));
-  var bbmp=document.getElementById('bb-mp');if(bbmp) bbmp.textContent=S.mempool_size+' tx';
   // ── Oracle + Mermin ──
   renderOracles();
   if(S.mermin) renderMermin(S.mermin);
@@ -1598,25 +1411,11 @@ function setOnline(ok) {
   t.textContent=ok?'LIVE':'OFFLINE';
 }
 
-var _lastMetricUpdate = 0;
-function isMetricsStale() {
-  var ageMs = Date.now() - _lastMetricUpdate;
-  return ageMs > 8000;
-}
-
-function renderStaleness() {
-  var stale = isMetricsStale();
-  var cp = document.getElementById('cp');
-  if (!cp) return;
-  if (stale) { cp.classList.add('stale'); } else { cp.classList.remove('stale'); }
-}
-
 var _lu = 0;
 function stamp() {
   _lu=Date.now();
-  _lastMetricUpdate = Date.now();
   var bu=document.getElementById('bu');
-  if(bu) bu.textContent='Updated '+new Date().toTimeString().slice(0,8)+(isMetricsStale()?' [stale]':'');
+  if(bu) bu.textContent='Updated '+new Date().toTimeString().slice(0,8);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1626,7 +1425,7 @@ function stamp() {
 // ── LOOP 1: Quantum Metrics — 2.5s — feeds lattice, oracle, mermin, noise bath
 // Sources: qtcl_getQuantumMetrics + qtcl_getLatestDMSnapshots
 (function loopQuantum() {
-  var _t = null, _failureCount = 0;
+  var _t = null;
   async function poll() {
     clearTimeout(_t);
     var results = await rpcBatch([
@@ -1634,20 +1433,6 @@ function stamp() {
       ['qtcl_getLatestDMSnapshots', [{limit: 5}]],
     ]);
     var qm = results[0], dms = results[1];
-    var hasData = !!(qm || dms);
-
-    if (!hasData) {
-      _failureCount++;
-      console.warn('[LOOP-QUANTUM] No data from RPC (attempt ' + _failureCount + ')');
-      if (_failureCount > 3) {
-        setOnline(false);
-        console.error('[LOOP-QUANTUM] Quantum loop offline (>3 failures)');
-      }
-      _t = setTimeout(poll, 2500);
-      return;
-    }
-    
-    _failureCount = 0;
 
     if (qm) {
       // w_state layer
@@ -1665,7 +1450,7 @@ function stamp() {
       // lattice_refresh_counter from oracle snapshot is also the cycle count
       var _lrc = (qm.w_state && qm.w_state.lattice_refresh_counter) || qm.lattice_refresh_counter || 0;
       if (_lrc > S.cycle) S.cycle = _lrc;
-      // pq plane — always update (server is authoritative)
+      // pq plane — always update from authoritative quantum metrics
       if (qm.pq0    != null) S.pq0    = qm.pq0;
       if (qm.pq_curr != null) S.pq_curr = qm.pq_curr;
       if (qm.pq_last != null) S.pq_last = qm.pq_last;
@@ -1684,37 +1469,11 @@ function stamp() {
       // ── Flat DM fields from getQuantumMetrics → oracle_1 state ──────────────
       var _oid1 = 'oracle_1';
       if (!S.oracle_data[_oid1]) S.oracle_data[_oid1] = {};
-      // Try nested w_state first (preferred), then flat fields (fallback)
-      var ws2 = qm.w_state || {};
-      if (ws2.fidelity != null) {
-        S.oracle_data[_oid1].w_state_fidelity = ws2.fidelity;
-        S.fidelity = ws2.fidelity;
-      } else if (qm.w_state_fidelity != null) {
-        S.oracle_data[_oid1].w_state_fidelity = qm.w_state_fidelity;
-        S.fidelity = qm.w_state_fidelity;
-      }
-      if (ws2.coherence != null) {
-        S.oracle_data[_oid1].coherence = ws2.coherence;
-        S.coherence = ws2.coherence;
-      } else if (qm.coherence_l1 != null) {
-        S.oracle_data[_oid1].coherence = qm.coherence_l1;
-        S.coherence = qm.coherence_l1;
-      }
-      if (ws2.purity != null) {
-        S.oracle_data[_oid1].purity = ws2.purity;
-        S.purity = ws2.purity;
-      } else if (qm.purity != null) {
-        S.oracle_data[_oid1].purity = qm.purity;
-        S.purity = qm.purity;
-      }
-      if (ws2.entropy != null) {
-        S.oracle_data[_oid1].entropy = ws2.entropy;
-        S.entropy = ws2.entropy;
-      } else if (qm.von_neumann_entropy != null) {
-        S.oracle_data[_oid1].entropy = qm.von_neumann_entropy;
-        S.entropy = qm.von_neumann_entropy;
-      }
-      S.oracle_data[_oid1].in_consensus = (S.fidelity || 0) > 0.5;
+      if (qm.w_state_fidelity   != null) { S.oracle_data[_oid1].w_state_fidelity = qm.w_state_fidelity; S.fidelity = qm.w_state_fidelity; }
+      if (qm.coherence_l1       != null) { S.oracle_data[_oid1].coherence        = qm.coherence_l1;     S.coherence = qm.coherence_l1; }
+      if (qm.purity             != null) { S.oracle_data[_oid1].purity           = qm.purity;            S.purity = qm.purity; }
+      if (qm.von_neumann_entropy!= null) { S.oracle_data[_oid1].entropy          = qm.von_neumann_entropy; S.entropy = qm.von_neumann_entropy; }
+      S.oracle_data[_oid1].in_consensus = (qm.w_state_fidelity || 0) > 0.5;
     }
 
     // DM Snapshots (ring buffer — flat single-oracle entries) → noise bath + Mermin only
@@ -1741,7 +1500,6 @@ function stamp() {
     }
 
     updateDOM();
-    renderStaleness();
     setOnline(true);
     stamp();
     _t = setTimeout(poll, 2500);
@@ -1753,7 +1511,7 @@ function stamp() {
 // Authoritative for height, difficulty, avg block time, pq fields
 // Uses getBlockRange to backfill chain stream efficiently
 (function loopBlocks() {
-  var _t = null, _lastFetchedHeight = 0, _loading = false, _blockFailCount = 0;
+  var _t = null, _lastFetchedHeight = 0, _loading = false;
 
   async function poll() {
     clearTimeout(_t);
@@ -1761,15 +1519,8 @@ function stamp() {
     _loading = true;
     try {
       var hr = await rpc('qtcl_getBlockHeight');
-      if (!hr) {
-        console.warn('[LOOP-BLOCKS] getBlockHeight failed');
-        setOnline(false);
-        _blockFailCount++;
-        _t = setTimeout(poll, 3000);
-        return;
-      }
+      if (!hr) { setOnline(false); return; }
 
-      _blockFailCount = 0;
       var tip = parseInt(hr.height || 0);
       S.height = tip;
       S.tip_hash = hr.tip_hash || S.tip_hash;
@@ -1818,10 +1569,12 @@ function stamp() {
             // pq0 is the oracle ground anchor — take directly from tip
             if (tipBlock.pq0 != null) S.pq0 = tipBlock.pq0;
             // Project the NEXT block's boundaries from tip's pq_curr
-            // so the visualization shows the live evolving blockfield, not stale stored state
-            var _tipPqC = tipBlock.pq_curr != null ? tipBlock.pq_curr : 0;
-            S.pq_last = _tipPqC % 8;                 // rear boundary = tip's forward boundary
-            S.pq_curr = (_tipPqC + 1) % 8;           // forward boundary = next face on {8,3}
+            // FALLBACK only — DM snapshot (loopMermin) is authoritative
+            if (!S._pqAuthoritative) {
+              var _tipPqC = tipBlock.pq_curr != null ? tipBlock.pq_curr : 0;
+              S.pq_last = _tipPqC % 8;                 // rear boundary = tip's forward boundary
+              S.pq_curr = (_tipPqC + 1) % 8;           // forward boundary = next face on {8,3}
+            }
             if (tipBlock.w_state_fidelity) S.fidelity = Math.max(S.fidelity, tipBlock.w_state_fidelity);
           }
           S.total_transactions = blocks.reduce(function(acc,b){return acc+(b.tx_count||0);},0);
@@ -1833,8 +1586,6 @@ function stamp() {
             // Reload txs when new block arrives
             if (!txLoading) setTimeout(loadTxPage, 300);
           }
-        } else {
-          console.warn('[LOOP-BLOCKS] getBlockRange failed for [' + fromH + ', ' + toH + ']');
         }
       }
       // Update bottom bar difficulty
@@ -1843,10 +1594,6 @@ function stamp() {
       st('mbt', S.avg_block_time_s > 0 ? S.avg_block_time_s.toFixed(1)+'s' : '--');
       st('mtx', S.total_transactions);
       setOnline(true);
-    } catch (e) {
-      console.error('[LOOP-BLOCKS] exception:', e.message);
-      _blockFailCount++;
-      if (_blockFailCount > 3) setOnline(false);
     } finally {
       _loading = false;
       _t = setTimeout(poll, 3000);
@@ -1880,15 +1627,17 @@ function stamp() {
       var last = blocks[blocks.length-1];
       if (last.difficulty_bits) S.difficulty_bits = last.difficulty_bits;
       if (last.pq0 != null) S.pq0 = last.pq0;
-      var _lastPqC = last.pq_curr != null ? last.pq_curr : 0;
-      S.pq_last = _lastPqC % 8;
-      S.pq_curr = (_lastPqC + 1) % 8;
+      // FALLBACK only — DM snapshot (loopMermin) is authoritative
+      if (!S._pqAuthoritative) {
+        var _lastPqC = last.pq_curr != null ? last.pq_curr : 0;
+        S.pq_last = _lastPqC % 8;
+        S.pq_curr = (_lastPqC + 1) % 8;
+      }
       S.total_transactions = blocks.reduce(function(acc,b){return acc+(b.tx_count||0);},0);
     }
     _lastFetchedHeight = tip;
     renderChain();
     updateDOM();
-    renderStaleness();
     poll(); // hand off to steady-state polling
   }
 
@@ -1904,7 +1653,6 @@ function stamp() {
     if (d) {
       S.mempool_size = d.depth != null ? d.depth : (d.pending != null ? d.pending : S.mempool_size);
       st('hm', S.mempool_size + ' tx');
-      var bbmp=document.getElementById('bb-mp');if(bbmp) bbmp.textContent=S.mempool_size+' tx';
     }
     _t = setTimeout(poll, 5000);
   }
@@ -2050,9 +1798,9 @@ function stamp() {
         S.quantum_validation_status = S.oracle_consensus_reached ? 'VALIDATED' : 'PENDING';
         S.pq_validation_status      = S.oracle_consensus_reached ? 'HLWE_OK'   : 'PENDING';
       }
-      // pq block field boundaries
-      if (bf.pq_curr != null) S.pq_curr = bf.pq_curr;
-      if (bf.pq_last != null) S.pq_last = bf.pq_last;
+      // pq block field boundaries — AUTHORITATIVE source (oracle DM snapshot)
+      if (bf.pq_curr != null) { S.pq_curr = bf.pq_curr; S._pqAuthoritative = true; }
+      if (bf.pq_last != null) { S.pq_last = bf.pq_last; S._pqAuthoritative = true; }
       if (aer.pq0_oracle_fidelity != null) {
         // also store consensus pq0 components on oracle_1 if not already per-node
         if (!S.oracle_data['oracle_1']) S.oracle_data['oracle_1'] = {};
