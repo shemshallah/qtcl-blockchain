@@ -1554,7 +1554,7 @@ class Mempool:
                     sig_dict = {"signature_hex": sig_raw, "method": "sha3_256_plain"}
                 else:
                     return False, "invalid_signature_format"
-        elif isinstance(sig_dict, dict):
+        elif isinstance(sig_raw, dict):
             sig_dict = sig_raw
         else:
             return False, "invalid_signature_type"

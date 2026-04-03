@@ -1561,8 +1561,8 @@ class QuantumTemporalCoherenceLedgerServer:
             current_level = build_octagon_decomposition()
             for tri in current_level:
                 triangles[tri.triangle_id] = tri
-            for level in range(1, self.tessellation_depth + 1):
-                logger.info(f"{CLR.C}[RECURSIVE] Level {level-1}→{level} ({len(current_level)} → {len(current_level)*4} triangles){CLR.E}")
+            total_levels = self.tessellation_depth
+            for level in range(1, total_levels + 1):
                 next_level = []
                 for parent_tri in current_level:
                     children = subdivide_triangle(parent_tri)
@@ -1570,12 +1570,19 @@ class QuantumTemporalCoherenceLedgerServer:
                         triangles[child.triangle_id] = child
                         next_level.append(child)
                 current_level = next_level
-            logger.info(f"{CLR.OK}[RECURSIVE] Complete: {len(triangles)} triangles{CLR.E}")
+                pct = (level / total_levels) * 100
+                bar_len = 40
+                filled = int(bar_len * level / total_levels)
+                bar = "█" * filled + "░" * (bar_len - filled)
+                logger.info(f"{CLR.C}[Tessellation] [{bar}] {pct:5.1f}% | Level {level}/{total_levels} | {len(triangles):,} triangles{CLR.E}")
+            logger.info(f"{CLR.OK}[RECURSIVE] ✅ Complete: {len(triangles):,} triangles{CLR.E}")
         
         def place_pseudoqubits():
             logger.info(f"{CLR.QUANTUM}[QUBITS] Placing pseudoqubits...{CLR.E}")
             qubit_id = 0
-            for tri_id, triangle in triangles.items():
+            total_triangles = len(triangles)
+            log_interval = max(1, total_triangles // 20)
+            for idx, (tri_id, triangle) in enumerate(triangles.items()):
                 for i, vertex in enumerate([triangle.v0, triangle.v1, triangle.v2]):
                     qubit = Pseudoqubit(pseudoqubit_id=qubit_id, triangle_id=tri_id, x=vertex.x, y=vertex.y, placement_type="vertex")
                     qubits[qubit_id] = qubit
@@ -1597,9 +1604,15 @@ class QuantumTemporalCoherenceLedgerServer:
                     qubit = Pseudoqubit(pseudoqubit_id=qubit_id, triangle_id=tri_id, x=gp.x, y=gp.y, placement_type="geodesic")
                     qubits[qubit_id] = qubit
                     qubit_id += 1
+                if (idx + 1) % log_interval == 0 or idx == total_triangles - 1:
+                    pct = ((idx + 1) / total_triangles) * 100
+                    bar_len = 40
+                    filled = int(bar_len * (idx + 1) / total_triangles)
+                    bar = "█" * filled + "░" * (bar_len - filled)
+                    logger.info(f"{CLR.C}[Geometry IDs] [{bar}] {pct:5.1f}% | {idx+1:,}/{total_triangles:,} triangles | {qubit_id:,} IDs placed{CLR.E}")
                 if tri_id % 1000 == 0:
                     gc.collect()
-            logger.info(f"{CLR.OK}[QUBITS] All {qubit_id} pseudoqubits placed{CLR.E}")
+            logger.info(f"{CLR.OK}[QUBITS] ✅ All {qubit_id:,} pseudoqubits placed{CLR.E}")
         
         # ✅ ACTUALLY CALL THE FUNCTIONS
         build_recursive_tessellation()

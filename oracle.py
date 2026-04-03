@@ -34,7 +34,10 @@ import secrets
 import traceback
 import threading
 import numpy as np
-import psycopg2
+try:
+    import psycopg2
+except ImportError:
+    psycopg2 = None  # type: ignore
 import queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any, Optional, List, Tuple
@@ -2566,10 +2569,10 @@ class PythPriceOracle:
         hlwe_sig: Optional[str] = None
         try:
             from oracle import ORACLE as _eng
-            if _eng is not None:
-                sig_bytes = _eng.sign(snap_id.encode())
-                if sig_bytes:
-                    hlwe_sig = sig_bytes.hex() if isinstance(sig_bytes, bytes) else str(sig_bytes)
+            if _eng is not None and hasattr(_eng, 'sign_block'):
+                sig = _eng.sign_block(snap_id, 0)
+                if sig:
+                    hlwe_sig = json.dumps(sig.to_dict()) if hasattr(sig, 'to_dict') else str(sig)
         except Exception:
             pass  # Signature is advisory — never block price delivery
 

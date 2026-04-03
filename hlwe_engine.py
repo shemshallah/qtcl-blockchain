@@ -648,11 +648,17 @@ def _hyp_build_tessellation(depth: int = 5) -> list:
     """
     mpmath.mp.dps = 150
     triangles = _hyp_build_octagon_triangles()
-    for _ in range(depth):
+    total_expected = 8 * (4 ** depth)
+    logger.info(f"[GeodesicLWE] 🧱 Building {{8,3}} tessellation depth={depth} → {total_expected:,} triangles")
+    for level in range(1, depth + 1):
         next_level = []
         for (z1, z2, z3) in triangles:
             next_level.extend(_hyp_subdivide(z1, z2, z3))
         triangles = next_level
+        pct = (level / depth) * 100
+        bar = "█" * (level * 4) + "░" * ((depth - level) * 4)
+        logger.info(f"[GeodesicLWE] {''.join(bar)} {pct:5.1f}% | Level {level}/{depth} | {len(triangles):,} triangles")
+    logger.info(f"[GeodesicLWE] ✅ Tessellation complete — {len(triangles):,} triangles")
     return triangles
 
 
@@ -689,6 +695,7 @@ def _pq_cache_fetch_from_supabase() -> Dict[int, "mpmath.mpc"]:
         'Authorization': f'Bearer {sb_key}',
         'Accept': 'application/json',
     }
+    logger.info("[GeodesicLWE] 📡 Fetching pseudoqubit geometry from Supabase...")
     req = Request(endpoint, headers=headers, method='GET')
     try:
         with urlopen(req, timeout=60) as resp:
@@ -696,6 +703,7 @@ def _pq_cache_fetch_from_supabase() -> Dict[int, "mpmath.mpc"]:
     except (HTTPError, URLError) as exc:
         raise RuntimeError(f"[GeodesicLWE] Supabase pseudoqubits fetch failed: {exc}") from exc
 
+    logger.info("[GeodesicLWE] 📦 Parsing geometry coordinates (mp.dps=150)...")
     rows = json.loads(raw)
     if not isinstance(rows, list) or len(rows) == 0:
         raise RuntimeError(
@@ -705,14 +713,22 @@ def _pq_cache_fetch_from_supabase() -> Dict[int, "mpmath.mpc"]:
         )
 
     cache: Dict[int, "mpmath.mpc"] = {}
-    for row in rows:
+    total = len(rows)
+    log_interval = max(1, total // 20)  # 20 progress ticks
+    for i, row in enumerate(rows):
         pq_id  = int(row['id'])
         # NUMERIC(200,150) arrives as string — parse directly into mpf for full precision
         cx = mpmath.mpf(str(row['coord_x']))
         cy = mpmath.mpf(str(row['coord_y']))
         cache[pq_id] = mpmath.mpc(cx, cy)
+        if (i + 1) % log_interval == 0 or i == total - 1:
+            pct = ((i + 1) / total) * 100
+            bar_len = 40
+            filled = int(bar_len * (i + 1) / total)
+            bar = "█" * filled + "░" * (bar_len - filled)
+            logger.info(f"[GeodesicLWE] [{bar}] {pct:5.1f}% | {i+1:,}/{total:,} geometry IDs")
 
-    logger.info(f"[GeodesicLWE] Loaded {len(cache):,} pseudoqubit coords from Supabase (mp.dps=150)")
+    logger.info(f"[GeodesicLWE] ✅ Loaded {len(cache):,} pseudoqubit coords from Supabase (mp.dps=150)")
     return cache
 
 

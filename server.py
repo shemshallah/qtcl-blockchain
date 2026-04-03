@@ -219,6 +219,16 @@ def _init_hlwe_engine():
             from hlwe_engine import HLWEEngine
             HLWE_ENGINE = HLWEEngine()
             logger.info("[INIT-HLWE] ✅ HLWE Post-Quantum Cryptography initialized on first use")
+            # FLAG 3 FIX — Warm PQ coordinate cache in background so first signing
+            # request does not incur a cold Supabase REST fetch.
+            def _warm_pq_cache():
+                try:
+                    from hlwe_engine import _ensure_pq_cache
+                    _ensure_pq_cache()
+                    logger.info("[INIT-HLWE] ✅ PQ coordinate cache pre-warmed")
+                except Exception as _pq_err:
+                    logger.warning(f"[INIT-HLWE] PQ cache warm failed (non-fatal): {_pq_err}")
+            threading.Thread(target=_warm_pq_cache, daemon=True, name="PQCacheWarm").start()
             return HLWE_ENGINE
         except Exception as e:
             logger.critical(f"[INIT-HLWE] ❌ FATAL: Cannot initialize HLWE_ENGINE: {e}")
@@ -1525,7 +1535,7 @@ def get_dht_manager() -> DHTManager:
 # ═════════════════════════════════════════════════════════════════════════════════════════
 
 # RPC snapshot cache + event log (no SSE infrastructure)
-_rpc_event_log: Deque = Deque(maxlen=1000)           # Ring buffer of recent RPC events
+_rpc_event_log: deque = deque(maxlen=1000)           # Ring buffer of recent RPC events
 _rpc_event_lock = threading.RLock()                  # Guards _rpc_event_log writes
 _latest_snapshot: Optional[dict] = None              # Last cached snapshot (poll endpoint)
 _latest_snapshot_ts: int = 0                         # Timestamp of latest snapshot
@@ -3076,6 +3086,74 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 return _rpc_error(-32001,
                     f"Invalid parent_hash: expected {expected_parent[:16]}… got {parent_hash[:16]}…",
                     rpc_id)
+
+        # ── HLWE Block Verification (FLAG 1 FIX — cryptographically verify submitted blocks) ──
+        hlwe_verified = False
+        hlwe_verify_msg = "skipped"
+        try:
+            engine = _init_hlwe_engine()
+            block_dict = {
+                "height": height, "block_hash": block_hash,
+                "parent_hash": parent_hash, "merkle_root": merkle_root,
+                "timestamp_s": timestamp_s, "nonce": nonce,
+                "miner_address": miner_address, "difficulty_bits": difficulty_bits,
+                "w_entropy_hex": w_entropy_hex, "w_state_fidelity": w_state_fidelity,
+            }
+            # Check if block carries an HLWE signature from the miner
+            block_sig = data.get("hlwe_signature") or hdr.get("hlwe_signature")
+            miner_pubkey = data.get("miner_public_key_hex") or hdr.get("miner_public_key_hex")
+            if block_sig and miner_pubkey:
+                hlwe_verified, hlwe_verify_msg = engine.verify_block(
+                    block_dict, block_sig, miner_pubkey
+                )
+                if not hlwe_verified:
+                    logger.warning(
+                        f"[RPC-submitBlock] ⚠️  HLWE verification FAILED h={height}: {hlwe_verify_msg}"
+                    )
+                else:
+                    logger.info(
+                        f"[RPC-submitBlock] ✅ HLWE verified h={height} pubkey={miner_pubkey[:16]}…"
+                    )
+            else:
+                logger.debug(
+                    f"[RPC-submitBlock] ℹ️  No HLWE signature in block h={height} — verification skipped"
+                )
+        except Exception as _hlwe_err:
+            logger.warning(f"[RPC-submitBlock] HLWE verify path error (non-fatal): {_hlwe_err}")
+
+        # ── HLWE Block Verification (FLAG 1 FIX — cryptographically verify submitted blocks) ──
+        hlwe_verified = False
+        hlwe_verify_msg = "skipped"
+        try:
+            engine = _init_hlwe_engine()
+            block_dict = {
+                "height": height, "block_hash": block_hash,
+                "parent_hash": parent_hash, "merkle_root": merkle_root,
+                "timestamp_s": timestamp_s, "nonce": nonce,
+                "miner_address": miner_address, "difficulty_bits": difficulty_bits,
+                "w_entropy_hex": w_entropy_hex, "w_state_fidelity": w_state_fidelity,
+            }
+            # Check if block carries an HLWE signature from the miner
+            block_sig = data.get("hlwe_signature") or hdr.get("hlwe_signature")
+            miner_pubkey = data.get("miner_public_key_hex") or hdr.get("miner_public_key_hex")
+            if block_sig and miner_pubkey:
+                hlwe_verified, hlwe_verify_msg = engine.verify_block(
+                    block_dict, block_sig, miner_pubkey
+                )
+                if not hlwe_verified:
+                    logger.warning(
+                        f"[RPC-submitBlock] ⚠️  HLWE verification FAILED h={height}: {hlwe_verify_msg}"
+                    )
+                else:
+                    logger.info(
+                        f"[RPC-submitBlock] ✅ HLWE verified h={height} pubkey={miner_pubkey[:16]}…"
+                    )
+            else:
+                logger.debug(
+                    f"[RPC-submitBlock] ℹ️  No HLWE signature in block h={height} — verification skipped"
+                )
+        except Exception as _hlwe_err:
+            logger.warning(f"[RPC-submitBlock] HLWE verify path error (non-fatal): {_hlwe_err}")
 
         # ── PoW verification ─────────────────────────────────────────────────
         try:
