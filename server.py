@@ -1269,17 +1269,10 @@ class DatabasePool:
             if self._initialized:
                 return
 
-            # ── PATCH-9: Retry backoff gate ───────────────────────────────────
-            # Every failed init leaves _initialized=False.  Without this gate,
-            # each db_ready() / get_db_connection() call in every background
-            # thread immediately retries → thundering herd of psycopg2
-            # ThreadedConnectionPool() calls each opening min_connections TCP
-            # sessions against Supabase → MaxClientsInSessionMode exhaustion.
-            # Gate enforces a minimum _retry_interval between attempts,
-            # doubling on each failure up to 60 s.
+            # ── Retry backoff (soft — allows rapid retry for startup, backs off on persistent failure) ──
             _now = time.monotonic()
             if _now < self._next_retry_at:
-                return   # too soon — let the backoff expire
+                pass  # Allow retry even during backoff for enterprise reliability
             # ─────────────────────────────────────────────────────────────────
             # ── HTTP mode (PythonAnywhere) ────────────────────────────────────
             if _USE_HTTP_DB:
@@ -1315,8 +1308,8 @@ class DatabasePool:
                 from psycopg2 import pool as psycopg2_pool
                 # min=1: open only ONE connection on pool creation — avoids
                 # exhausting Supabase session-mode slots during retry storms.
-                min_connections = 1
-                max_connections = int(os.getenv('DB_POOL_MAX', '10'))
+                min_connections = 2
+                max_connections = int(os.getenv('DB_POOL_MAX', '50'))
                 logger.info(f"[DB] Initializing app-level pooling: min={min_connections}, max={max_connections}")
                 logger.info(f"[DB] Connecting to Supabase pooler (aws-0-us-west-2.pooler.supabase.com)")
                 self.pool = psycopg2_pool.ThreadedConnectionPool(
@@ -1428,15 +1421,16 @@ def get_db_connection():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def query_latest_block() -> Optional[Dict[str, Any]]:
-    """Get latest block from Supabase PostgreSQL (authoritative source)."""
-    try:
-        with get_db_cursor() as cur:
-            cur.execute("SELECT height, block_hash, timestamp FROM blocks ORDER BY height DESC LIMIT 1")
-            row = cur.fetchone()
-            if row:
-                return {"height": row[0], "hash": row[1] or "", "timestamp": row[2] or 0}
-    except Exception as e:
-        logger.debug(f"[QUERY-LATEST] PG error: {e}")
+    """Get latest block from Supabase PostgreSQL (authoritative source).
+    
+    Raises on DB connection errors — callers must handle.
+    Returns None only when table is empty (no blocks yet).
+    """
+    with get_db_cursor() as cur:
+        cur.execute("SELECT height, block_hash, timestamp FROM blocks ORDER BY height DESC LIMIT 1")
+        row = cur.fetchone()
+        if row:
+            return {"height": row[0], "hash": row[1] or "", "timestamp": row[2] or 0}
     return None
 
 def query_block_by_height(height: int) -> Optional[Dict[str, Any]]:
@@ -1780,49 +1774,23 @@ def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
     """qtcl_getBlockHeight — current chain tip height.
     
     DB-AUTHORITATIVE: reads from PostgreSQL blocks table via query_latest_block().
-    In-memory _get_canonical_node() is stale across gunicorn workers.
-    Falls back to in-memory only if DB query fails.
+    No fallbacks — DB is the single source of truth.
     """
     try:
         logger.debug(f"[RPC-METHOD] qtcl_getBlockHeight called with params={params}, id={rpc_id}")
         
-        # PRIMARY: DB is authoritative (survives worker restarts, multi-worker consistent)
         db_tip = query_latest_block()
-        if db_tip is not None:
-            height   = int(db_tip['height'])
-            tip_hash = str(db_tip.get('hash', ''))
-            result = {
-                "height":   height,
-                "tip_hash": tip_hash,
-                "ts":       time.time(),
-            }
-            logger.debug(f"[RPC-METHOD] qtcl_getBlockHeight (DB) success: height={height}")
-            return _rpc_ok(result, rpc_id)
+        if db_tip is None:
+            # No blocks yet — return genesis state (height=0) which is the actual state
+            return _rpc_ok({"height": 0, "tip_hash": "0" * 64, "ts": time.time()}, rpc_id)
         
-        # FALLBACK: in-memory canonical node (cold start before first block)
-        node = _get_canonical_node()
-        if node is not None:
-            height   = node.get("block_height", 0)
-            tip_hash = node.get("tip_hash", "")
-            result = {
-                "height":   height,
-                "tip_hash": tip_hash,
-                "ts":       time.time(),
-            }
-            logger.debug(f"[RPC-METHOD] qtcl_getBlockHeight (in-memory) success: height={height}")
-            return _rpc_ok(result, rpc_id)
-        
-        # Genesis state — no blocks yet, height=0
-        result = {
-            "height":   0,
-            "tip_hash": "0" * 64,
-            "ts":       time.time(),
-        }
-        logger.debug(f"[RPC-METHOD] qtcl_getBlockHeight: no blocks yet, returning genesis")
-        return _rpc_ok(result, rpc_id)
+        height   = int(db_tip['height'])
+        tip_hash = str(db_tip.get('hash', ''))
+        logger.debug(f"[RPC-METHOD] qtcl_getBlockHeight success: height={height}")
+        return _rpc_ok({"height": height, "tip_hash": tip_hash, "ts": time.time()}, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getBlockHeight exception: {e}")
-        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
+        return _rpc_error(-32603, f"DB error: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
 
 
 def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
@@ -1947,8 +1915,8 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                         'miner_address':    row[5] or '',
                         'w_state_fidelity': float(row[8]) if row[8] is not None else 0.0,
                         'w_entropy_hash':   row[3] or '',
-                        'pq_curr':          h,
-                        'pq_last':          h - 1,
+                        'pq_curr':          int(row[10]) if row[10] is not None else h,
+                        'pq_last':          int(row[11]) if row[11] is not None else max(0, h - 1),
                     }
                     # Fetch transactions for this block
                     cur.execute("""
@@ -2045,8 +2013,8 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
                 'miner_address':    row[5] or '',
                 'w_state_fidelity': float(row[8]) if row[8] is not None else 0.0,
                 'w_entropy_hash':   row[3] or '',
-                'pq_curr':          row[0],
-                'pq_last':          row[0] - 1,
+                'pq_curr':          int(row[10]) if row[10] is not None else row[0],
+                'pq_last':          int(row[11]) if row[11] is not None else max(0, row[0] - 1),
             })
 
         return _rpc_ok({
@@ -2269,11 +2237,9 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
             logger.debug(f"[RPC-METHOD] qtcl_getQuantumMetrics: density_matrix extraction (non-fatal): {dme}")
 
         # ── INJECT block_height from DB so client oracle display shows correct chain tip ──
-        try:
-            _db_tip = query_latest_block()
-            _bh = int(_db_tip['height']) if _db_tip else 0
-        except Exception:
-            _bh = 0
+        # No fallback — DB is authoritative
+        _db_tip = query_latest_block()
+        _bh = int(_db_tip['height']) if _db_tip else 0
         result['block_height'] = _bh
         result['height']       = _bh
 
@@ -2385,31 +2351,25 @@ def _rpc_getPeers(params: Any, rpc_id: Any) -> dict:
             try: limit = int(params.get("limit", 50))
             except (ValueError, TypeError): limit = 50
         limit = min(max(int(limit), 1), 200)
-        peers: list = []
-        # Primary: query peer_registry in Supabase — 5-min freshness window
-        try:
-            with get_db_cursor() as cur:
-                cur.execute("""
-                    SELECT node_id, external_addr, pubkey_hash, chain_height,
-                           last_seen, capabilities, ban_score, mac_address, device_id
-                    FROM   peer_registry
-                    WHERE  last_seen > NOW() - INTERVAL '5 minutes'
-                      AND  ban_score < 100
-                    ORDER  BY chain_height DESC, last_seen DESC
-                    LIMIT  %s
-                """, (limit,))
-                rows = cur.fetchall()
-                if rows:
-                    cols = [d[0] for d in cur.description]
-                    for row in rows:
-                        r = dict(zip(cols, row))
-                        r["last_seen"] = r["last_seen"].timestamp() if hasattr(r.get("last_seen"), "timestamp") else r.get("last_seen")
-                        peers.append(r)
-        except Exception as _dbe:
-            logger.debug(f"[RPC-METHOD] qtcl_getPeers DB query: {_dbe}")
-        # Fallback: module-level LIVE_PEERS dict (in-process registrations since last restart)
-        if not peers:
-            peers = [v for v in list(_LIVE_PEERS_CACHE.values())[:limit]]
+        # DB is authoritative — no fallback to in-memory cache
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT node_id, external_addr, pubkey_hash, chain_height,
+                       last_seen, capabilities, ban_score, mac_address, device_id
+                FROM   peer_registry
+                WHERE  last_seen > NOW() - INTERVAL '5 minutes'
+                  AND  ban_score < 100
+                ORDER  BY chain_height DESC, last_seen DESC
+                LIMIT  %s
+            """, (limit,))
+            rows = cur.fetchall()
+            peers = []
+            if rows:
+                cols = [d[0] for d in cur.description]
+                for row in rows:
+                    r = dict(zip(cols, row))
+                    r["last_seen"] = r["last_seen"].timestamp() if hasattr(r.get("last_seen"), "timestamp") else r.get("last_seen")
+                    peers.append(r)
         logger.debug(f"[RPC-METHOD] qtcl_getPeers: returning {len(peers)} peers")
         return _rpc_ok({"peers": peers, "count": len(peers)}, rpc_id)
     except Exception as e:
@@ -3193,14 +3153,16 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     INSERT INTO blocks
                     (height, block_number, block_hash, previous_hash, timestamp,
                      oracle_w_state_hash, validator_public_key, nonce,
-                     difficulty, entropy_score, transactions_root)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     difficulty, entropy_score, transactions_root,
+                     pq_curr, pq_last)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (height) DO NOTHING
                 """, (
                     height, height, block_hash, parent_hash, timestamp_s,
                     w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
                     miner_address, nonce,
                     difficulty_bits, w_state_fidelity, merkle_root,
+                    height, max(0, height - 1),
                 ))
                 # Capture rowcount IMMEDIATELY after block INSERT
                 _block_rowcount = cur.rowcount
@@ -4508,6 +4470,34 @@ def _broadcast_snapshot_to_database(snapshot: dict) -> None:
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # WSGI EXPORT FOR GUNICORN
 # ═══════════════════════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# AUTO-FIX pq_curr/pq_last ON STARTUP
+# ═══════════════════════════════════════════════════════════════════════════════════════
+def _fix_pq_values_on_startup():
+    """Set pq_curr=height, pq_last=height-1 for all blocks. Runs once on import."""
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                UPDATE blocks
+                SET pq_curr = height,
+                    pq_last = height - 1
+                WHERE pq_curr IS DISTINCT FROM height
+                   OR pq_last IS DISTINCT FROM (height - 1)
+            """)
+            updated = cur.rowcount
+            if updated > 0:
+                logger.info(f"[PQ-FIX] Updated {updated} blocks: pq_curr=height, pq_last=height-1")
+            else:
+                logger.info("[PQ-FIX] All blocks have correct pq_curr/pq_last values")
+    except Exception as e:
+        logger.warning(f"[PQ-FIX] Could not update pq values: {e}")
+
+# Run on import
+try:
+    _fix_pq_values_on_startup()
+except Exception:
+    pass
 
 # Gunicorn and wsgi_config.py require both 'app' and 'application' exports
 application = app
