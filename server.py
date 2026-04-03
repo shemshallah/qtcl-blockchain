@@ -258,6 +258,15 @@ if not logging.getLogger().hasHandlers():
 
 logger = logging.getLogger(__name__)
 
+# ── Suppress Qiskit transpiler spam (UnrollCustomDefinitions, BasisTranslator, etc) ──
+for _qiskit_logger_name in ('qiskit.transpiler.passmanager', 'qiskit.transpiler.passes',
+                             'qiskit.transpiler.passmanager.RunPassManager',
+                             'qiskit.transpiler', 'qiskit',
+                             'qiskit_aer', 'qiskit_aer.noise'):
+    _ql = logging.getLogger(_qiskit_logger_name)
+    _ql.setLevel(logging.WARNING)
+    _ql.propagate = True
+
 # ═════════════════════════════════════════════════════════════════════════════════════════
 # DISTRIBUTED HASH TABLE (DHT) — KADEMLIA-BASED PEER DISCOVERY
 # ═════════════════════════════════════════════════════════════════════════════════════════
@@ -1326,7 +1335,7 @@ class DatabasePool:
                 # min=1: open only ONE connection on pool creation — avoids
                 # exhausting Supabase session-mode slots during retry storms.
                 min_connections = 1
-                max_connections = int(os.getenv('DB_POOL_MAX', '10'))
+                max_connections = int(os.getenv('DB_POOL_MAX', '25'))
                 logger.info(f"[DB] Initializing app-level pooling: min={min_connections}, max={max_connections}")
                 logger.info(f"[DB] Connecting to Supabase pooler (aws-0-us-west-2.pooler.supabase.com)")
                 self.pool = psycopg2_pool.ThreadedConnectionPool(
@@ -2469,8 +2478,16 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
                     )
                 """)
                 try:
+                    cur.execute("ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS node_id TEXT DEFAULT ''")
                     cur.execute("ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS mac_address TEXT DEFAULT ''")
                     cur.execute("ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS device_id TEXT DEFAULT ''")
+                    cur.execute("ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS caller_ip TEXT DEFAULT ''")
+                    cur.execute("ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS ban_score INTEGER DEFAULT 0")
+                    cur.execute("ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS pubkey_hash TEXT DEFAULT ''")
+                    cur.execute("ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS chain_height BIGINT DEFAULT 0")
+                    cur.execute("ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ DEFAULT NOW()")
+                    cur.execute("ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS first_seen TIMESTAMPTZ DEFAULT NOW()")
+                    cur.execute("ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS capabilities JSONB DEFAULT '[]'")
                 except Exception:
                     pass
                 cur.execute("""
@@ -3182,18 +3199,23 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         _block_rowcount = 0
         try:
             with get_db_cursor() as cur:
+                # Compute pq_curr/pq_last from height — forward boundary number and read boundary
+                _pq_curr = height
+                _pq_last = height - 1 if height > 0 else 0
                 cur.execute("""
                     INSERT INTO blocks
                     (height, block_number, block_hash, previous_hash, timestamp,
                      oracle_w_state_hash, validator_public_key, nonce,
-                     difficulty, entropy_score, transactions_root)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     difficulty, entropy_score, transactions_root,
+                     pq_curr, pq_last)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (height) DO NOTHING
                 """, (
                     height, height, block_hash, parent_hash, timestamp_s,
                     w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
                     miner_address, nonce,
                     difficulty_bits, w_state_fidelity, merkle_root,
+                    _pq_curr, _pq_last,
                 ))
                 # Capture rowcount IMMEDIATELY after block INSERT
                 _block_rowcount = cur.rowcount
