@@ -225,7 +225,7 @@ def _init_hlwe_engine():
                 try:
                     from hlwe_engine import _ensure_pq_cache
                     _ensure_pq_cache()
-                    logger.info("[INIT-HLWE] ✅ PQ coordinate cache pre-warmed")
+                    logger.debug("[INIT-HLWE] PQ coordinate cache pre-warmed")
                 except Exception as _pq_err:
                     logger.warning(f"[INIT-HLWE] PQ cache warm failed (non-fatal): {_pq_err}")
             threading.Thread(target=_warm_pq_cache, daemon=True, name="PQCacheWarm").start()

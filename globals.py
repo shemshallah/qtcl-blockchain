@@ -123,8 +123,11 @@ class TessellationRewardSchedule:
     TOTAL_SUPPLY_BASE: int = 62_300_160 * 800
     TOTAL_SUPPLY_QTCL: int = 498_401_280
 
-    TREASURY_ADDRESS: str = 'qtcl110fc58e3c441106cc1e54ae41da5d15868525a87'
-    TREASURY_PUBKEY: str = '627944e93fd7f406175393da145524cf73eb7b2ed12505cd81810a69b0c4d7ac'
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # TREASURY — hardcoded, easily changeable at top of class
+    # ═══════════════════════════════════════════════════════════════════════════════
+    TREASURY_ADDRESS: str = 'qtcl1d1ae7c762036f3731a16d84c8ec4be75912edb9d'
+    TREASURY_PUBKEY: str = 'c206a4895c7110bca6d877e7f104fd0cfb62a339299a7d1cf311b6ce0c3533e1'
 
     @classmethod
     def get_depth_for_height(cls, height: int) -> int:
