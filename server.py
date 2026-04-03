@@ -3250,12 +3250,24 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         hlwe_verify_msg = "missing"
         try:
             engine = _init_hlwe_engine()
+            # Reconstruct the EXACT block_dict that the client signed
+            # Must match client's submit_payload["header"] keys exactly
             block_dict = {
-                "height": height, "block_hash": block_hash,
-                "parent_hash": parent_hash, "merkle_root": merkle_root,
-                "timestamp_s": timestamp_s, "nonce": nonce,
-                "miner_address": miner_address, "difficulty_bits": difficulty_bits,
-                "w_entropy_hex": w_entropy_hex, "w_state_fidelity": w_state_fidelity,
+                "height": height,
+                "block_hash": block_hash,
+                "parent_hash": parent_hash,
+                "merkle_root": merkle_root,
+                "timestamp_s": timestamp_s,
+                "nonce": nonce,
+                "miner_address": miner_address,
+                "difficulty_bits": difficulty_bits,
+                "w_entropy_hash": w_entropy_hex,  # Client uses 'w_entropy_hash'
+                "w_state_fidelity": w_state_fidelity,
+                "pq0": int(hdr.get("pq0", 0)),
+                "pq_curr": int(hdr.get("pq_curr", 0)),
+                "pq_last": int(hdr.get("pq_last", 0)),
+                "mermin_value": float(hdr.get("mermin_value", 0.0) or 0.0),
+                "mermin_violated": bool(hdr.get("mermin_violated", False)),
             }
             # Check if block carries an HLWE signature from the miner
             block_sig = data.get("hlwe_signature") or hdr.get("hlwe_signature")
