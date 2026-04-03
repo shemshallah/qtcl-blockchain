@@ -2061,6 +2061,90 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
+def _rpc_getTransactions(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getTransactions — paginated transaction list.
+    
+    params: {page: int, per_page: int, type: str, address: str}
+    Returns: {transactions: [...], total: int, pages: int, page: int}
+    """
+    try:
+        page = 0
+        per_page = 50
+        tx_type = None
+        address = None
+        
+        if isinstance(params, dict):
+            page = int(params.get("page", 0))
+            per_page = min(int(params.get("per_page", 50)), 200)
+            tx_type = params.get("type")
+            address = params.get("address")
+        elif isinstance(params, list) and params:
+            if isinstance(params[0], dict):
+                page = int(params[0].get("page", 0))
+                per_page = min(int(params[0].get("per_page", 50)), 200)
+                tx_type = params[0].get("type")
+                address = params[0].get("address")
+        
+        offset = page * per_page
+        
+        with get_db_cursor() as cur:
+            where_clauses = []
+            params_list = []
+            if tx_type and tx_type != 'all':
+                where_clauses.append("tx_type = %s")
+                params_list.append(tx_type)
+            if address:
+                where_clauses.append("(from_address = %s OR to_address = %s)")
+                params_list.extend([address, address])
+            
+            where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+            
+            count_sql = f"SELECT COUNT(*) FROM transactions WHERE {where_sql}"
+            cur.execute(count_sql, params_list)
+            total = cur.fetchone()[0] if cur.fetchone() else 0
+            
+            tx_sql = f"""
+                SELECT tx_hash, from_address, to_address, amount,
+                       transaction_index, tx_type, status, height,
+                       quantum_state_hash, metadata, created_at
+                FROM transactions
+                WHERE {where_sql}
+                ORDER BY height DESC, transaction_index ASC
+                LIMIT %s OFFSET %s
+            """
+            cur.execute(tx_sql, params_list + [per_page, offset])
+            rows = cur.fetchall()
+            
+            txs = []
+            for r in rows:
+                txs.append({
+                    'tx_id': r[0],
+                    'from_addr': r[1] or '',
+                    'to_addr': r[2] or '',
+                    'amount': int(r[3]) if r[3] is not None else 0,
+                    'tx_index': int(r[4]) if r[4] is not None else 0,
+                    'tx_type': r[5] or 'transfer',
+                    'status': r[6] or 'confirmed',
+                    'height': r[7],
+                    'w_proof': r[8] or '',
+                    'metadata': r[9],
+                })
+            
+            pages = max(1, (total + per_page - 1) // per_page) if total > 0 else 1
+            
+            logger.debug(f"[RPC] _rpc_getTransactions: page={page}, per_page={per_page}, total={total}")
+            return _rpc_ok({
+                'transactions': txs,
+                'total': total,
+                'pages': pages,
+                'page': page
+            }, rpc_id)
+            
+    except Exception as e:
+        logger.exception(f"[RPC] _rpc_getTransactions error: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
+
+
 # ═══ RPC TIMEOUT PROTECTION ═══
 _RPC_TIMEOUT_SEC = 5.0
 
@@ -3666,6 +3750,8 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getLatestDMSnapshots": _rpc_getLatestDMSnapshots,
     # ── NEW: Client Tripartite Oracle Push ──────────────────────────────────────
     "qtcl_pushOracleDM": _rpc_pushOracleDM,
+    # ── NEW: Transaction Explorer ─────────────────────────────────────────────────
+    "qtcl_getTransactions":   _rpc_getTransactions,
     # P2P DHT methods
     "qtcl_getDHTTable":       _p2p_rpc_get_dht_table,
     "qtcl_receiveDHTTable":   _p2p_rpc_receive_dht_table,
@@ -4300,17 +4386,26 @@ def rpc_oracle_snapshot():
 
 @app.route("/rpc/oracle/snapshots", methods=["GET", "POST", "OPTIONS"])
 def rpc_oracle_snapshots():
-    """GET/POST /rpc/oracle/snapshots — Ring buffer of last N snapshots."""
+    """GET/POST /rpc/oracle/snapshots — Ring buffer of last N DM snapshots.
+    
+    Returns snapshots from _DM_SNAPSHOT_RING which contains authoritative oracle data
+    including per_node measurements from all 5 oracle nodes.
+    """
     if request.method == "OPTIONS":
         return "", 204
     try:
-        limit=int(request.args.get('limit',10))
-        with _rpc_event_lock:
-            snaps=[e for e in list(_rpc_event_log) if e.get('type')=='snapshot'][-limit:]
-        return jsonify({"jsonrpc":"2.0","result":{"snapshots":snaps,"count":len(snaps)},"id":request.args.get('id',1)}), 200
+        limit = int(request.args.get('limit', 10))
+        limit = min(limit, 100)  # cap at 100
+        
+        # Read from DM snapshot ring buffer (authoritative oracle data with per_node)
+        with _DM_SNAPSHOT_LOCK:
+            snaps = list(_DM_SNAPSHOT_RING)[-limit:] if _DM_SNAPSHOT_RING else []
+        
+        logger.debug(f"[RPC-ORACLE] /rpc/oracle/snapshots: returning {len(snaps)} snapshots")
+        return jsonify({"jsonrpc": "2.0", "result": {"snapshots": snaps, "count": len(snaps)}, "id": request.args.get('id', 1)}), 200
     except Exception as e:
         logger.error(f"[RPC-ORACLE] /rpc/oracle/snapshots error: {e}", exc_info=False)
-        return jsonify({"jsonrpc":"2.0","error":{"code":-32603,"message":str(e)},"id":None}), 500
+        return jsonify({"jsonrpc": "2.0", "error": {"code": -32603, "message": str(e)}, "id": None}), 500
 
 logger.info("[JSONRPC] ✅ JSON-RPC 2.0 engine mounted — /rpc, /rpc/methods, /rpc/health")
 logger.info("[RPC-ORACLE] ✅ Oracle RPC routes mounted — /rpc/oracle/{snapshot,snapshots}")

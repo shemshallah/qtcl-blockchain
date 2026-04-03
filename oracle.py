@@ -34,10 +34,7 @@ import secrets
 import traceback
 import threading
 import numpy as np
-try:
-    import psycopg2
-except ImportError:
-    psycopg2 = None  # type: ignore
+import psycopg2
 import queue
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any, Optional, List, Tuple
@@ -1752,7 +1749,42 @@ class OracleWStateManager:
             self.current_density_matrix = snapshot
             self.density_matrix_buffer.append(snapshot)
 
-        # ── Step 9: Sign ──────────────────────────────────────────────────────
+        # ── Step 9: Broadcast authoritative snapshot with per_node data ──────────
+        # This ensures the DM ring buffer has oracle-specific per_node readings
+        # which the frontend needs to display individual oracle status
+        try:
+            import sys
+            _mod = sys.modules.get('server')
+            if _mod and hasattr(_mod, '_broadcast_snapshot_to_database'):
+                snapshot_dict = {
+                    'timestamp_ns': snapshot.timestamp_ns,
+                    'oracle_id': snapshot.oracle_id,
+                    'density_matrix_hex': snapshot.density_matrix_hex,
+                    'purity': snapshot.purity,
+                    'w_state_fidelity': snapshot.w_state_fidelity,
+                    'von_neumann_entropy': snapshot.von_neumann_entropy,
+                    'coherence_l1': snapshot.coherence_l1,
+                    'coherence_renyi': getattr(snapshot, 'coherence_renyi', None),
+                    'coherence_geometric': getattr(snapshot, 'coherence_geometric', None),
+                    'quantum_discord': getattr(snapshot, 'quantum_discord', None),
+                    'w_state_strength': snapshot.w_state_strength,
+                    'phase_coherence': snapshot.phase_coherence,
+                    'entanglement_witness': snapshot.entanglement_witness,
+                    'trace_purity': snapshot.trace_purity,
+                    'hlwe_signature': getattr(snapshot, 'hlwe_signature', None),
+                    'signature_valid': getattr(snapshot, 'signature_valid', False),
+                    'oracle_address': getattr(snapshot, 'oracle_address', None),
+                    'aer_noise_state': snapshot.aer_noise_state,
+                    'measurement_counts': snapshot.measurement_counts,
+                    'mermin_test': getattr(snapshot, 'bell_test', None),
+                    'lattice_refresh_counter': snapshot.lattice_refresh_counter,
+                }
+                _mod._broadcast_snapshot_to_database(snapshot_dict)
+                logger.debug(f"[ORACLE] ✅ Broadcasted authoritative snapshot with per_node")
+        except Exception as _bc_err:
+            logger.debug(f"[ORACLE] Broadcast skip: {_bc_err}")
+
+        # ── Step 10: Sign ──────────────────────────────────────────────────────
         if self.oracle_signer:
             try:
                 sig = self.oracle_signer.sign_w_state_snapshot(snapshot)
@@ -2569,10 +2601,10 @@ class PythPriceOracle:
         hlwe_sig: Optional[str] = None
         try:
             from oracle import ORACLE as _eng
-            if _eng is not None and hasattr(_eng, 'sign_block'):
-                sig = _eng.sign_block(snap_id, 0)
-                if sig:
-                    hlwe_sig = json.dumps(sig.to_dict()) if hasattr(sig, 'to_dict') else str(sig)
+            if _eng is not None:
+                sig_bytes = _eng.sign(snap_id.encode())
+                if sig_bytes:
+                    hlwe_sig = sig_bytes.hex() if isinstance(sig_bytes, bytes) else str(sig_bytes)
         except Exception:
             pass  # Signature is advisory — never block price delivery
 
