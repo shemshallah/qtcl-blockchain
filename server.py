@@ -1947,8 +1947,8 @@ def _rpc_getBlock(params: Any, rpc_id: Any) -> dict:
                         'miner_address':    row[5] or '',
                         'w_state_fidelity': float(row[8]) if row[8] is not None else 0.0,
                         'w_entropy_hash':   row[3] or '',
-                        'pq_curr':          ((h % 8) + 1),
-                        'pq_last':          ((h % 8) + 1) - 1,
+                        'pq_curr':          h,
+                        'pq_last':          h - 1,
                     }
                     # Fetch transactions for this block
                     cur.execute("""
@@ -2045,8 +2045,8 @@ def _rpc_getBlockRange(params: Any, rpc_id: Any) -> dict:
                 'miner_address':    row[5] or '',
                 'w_state_fidelity': float(row[8]) if row[8] is not None else 0.0,
                 'w_entropy_hash':   row[3] or '',
-                'pq_curr':          ((row[0] % 8) + 1),
-                'pq_last':          ((row[0] % 8) + 1) - 1,
+                'pq_curr':          row[0],
+                'pq_last':          row[0] - 1,
             })
 
         return _rpc_ok({
@@ -2101,7 +2101,8 @@ def _rpc_getTransactions(params: Any, rpc_id: Any) -> dict:
             
             count_sql = f"SELECT COUNT(*) FROM transactions WHERE {where_sql}"
             cur.execute(count_sql, params_list)
-            total = cur.fetchone()[0] if cur.fetchone() else 0
+            row = cur.fetchone()
+            total = row[0] if row else 0
             
             tx_sql = f"""
                 SELECT tx_hash, from_address, to_address, amount,
@@ -2359,7 +2360,7 @@ def _rpc_getMempoolStats(params: Any, rpc_id: Any) -> dict:
                 mp = getattr(_mp_mod, "MEMPOOL", None) or getattr(_mp_mod, "_MEMPOOL_INSTANCE", None)
             except Exception: pass
         if mp is None:
-            logger.warning("[RPC-METHOD] qtcl_getMempoolStats: mempool not available")
+            logger.debug("[RPC-METHOD] qtcl_getMempoolStats: mempool not available yet")
             return _rpc_ok({"depth": 0, "pending": 0, "note": "mempool initializing"}, rpc_id)
         try:
             stats = mp.get_stats() if hasattr(mp, "get_stats") else {"depth": getattr(mp, "size", lambda: 0)()}
