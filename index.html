@@ -1447,6 +1447,7 @@ var _lastBlockHeight = 0;
 
 async function unifiedPoll(){
   // ── STEP 1: Batch fetch ALL data in single round-trip
+  var fromH = Math.max(0, S.height - 20);
   var results = await rpcBatch([
     ['qtcl_getBlockHeight', []],
     ['qtcl_getQuantumMetrics', []],
@@ -1454,9 +1455,10 @@ async function unifiedPoll(){
     ['qtcl_getMempoolStats', []],
     ['qtcl_getPeers', []],
     ['qtcl_getEvents', [{since: _lastEventTs, types: 'new_block', limit: 10}]],
+    ['qtcl_getBlockRange', [fromH, S.height]],
   ]);
   
-  var [hr, qm, dm, mp, peers, events] = results;
+  var [hr, qm, dm, mp, peers, events, blockRange] = results;
   
   // ── STEP 2: Process each metric ONCE with clear priority
   // Priority: DM Snapshot > Quantum Metrics > Block Data > Fallback
@@ -1562,14 +1564,20 @@ async function unifiedPoll(){
       S.oracle_consensus_reached = consensusCount >= 3;
       S.quantum_validation_status = S.oracle_consensus_reached ? 'VALIDATED' : 'PENDING';
       S.pq_validation_status = S.oracle_consensus_reached ? 'HLWE_OK' : 'PENDING';
-    }else{
-      // Fallback: single oracle fidelity
-      if(!S.oracle_data['oracle_1']) S.oracle_data['oracle_1'] = {};
-      if(dm.w_state_fidelity != null){
-        S.oracle_data['oracle_1'].w_state_fidelity = dm.w_state_fidelity;
-        S.oracle_data['oracle_1'].in_consensus = dm.w_state_fidelity > 0.5;
+    }else if(dm.w_state_fidelity != null && dm.w_state_fidelity > 0){
+      // Fallback: use consensus values for all 5 oracles when per_node not available
+      var cf = dm.w_state_fidelity;
+      var cc = dm.coherence_l1;
+      var ce = dm.von_neumann_entropy;
+      for(var oi=1; oi<=5; oi++){
+        var ok = 'oracle_' + oi;
+        if(!S.oracle_data[ok]) S.oracle_data[ok] = {};
+        S.oracle_data[ok].w_state_fidelity = cf;
+        S.oracle_data[ok].coherence = cc;
+        S.oracle_data[ok].entropy = ce;
+        S.oracle_data[ok].in_consensus = (cf || 0) > 0.5;
       }
-      S.oracle_consensus_reached = (dm.w_state_fidelity || 0) > 0.5;
+      S.oracle_consensus_reached = cf > 0.5;
       S.quantum_validation_status = S.oracle_consensus_reached ? 'VALIDATED' : 'PENDING';
       S.pq_validation_status = S.oracle_consensus_reached ? 'HLWE_OK' : 'PENDING';
     }
@@ -1654,11 +1662,11 @@ async function unifiedPoll(){
               _fr: true
             };
             if(ev.pq_curr != null){
-              nb.pq_curr = ev.pq_curr > 7 ? ev.pq_curr % 8 : ev.pq_curr;
+              nb.pq_curr = ev.pq_curr;
               S.pq_curr = nb.pq_curr;
             }
             if(ev.pq_last != null){
-              nb.pq_last = ev.pq_last > 7 ? ev.pq_last % 8 : ev.pq_last;
+              nb.pq_last = ev.pq_last;
               S.pq_last = nb.pq_last;
             }
             _blocksById[h] = nb;
@@ -1672,6 +1680,36 @@ async function unifiedPoll(){
         }
       }
     });
+  }
+  
+  // 2g. Block Range (fetch recent blocks if events didn't populate enough)
+  if(blockRange && Array.isArray(blockRange.blocks) && blockRange.blocks.length){
+    blockRange.blocks.forEach(function(b){
+      var bh = parseInt(b.height || 0);
+      if(bh > 0 && !_blocksById[bh]){
+        var nb = {
+          height: bh,
+          block_hash: b.block_hash || b.hash || '',
+          hash: b.block_hash || b.hash || '',
+          tx_count: b.tx_count || b.transaction_count || 0,
+          w_state_fidelity: b.w_state_fidelity || S.fidelity,
+          difficulty_bits: b.difficulty || b.difficulty_bits || S.difficulty_bits,
+          _fr: false
+        };
+        nb.pq_curr = b.pq_curr || bh;
+        nb.pq_last = b.pq_last || (bh - 1);
+        _blocksById[bh] = nb;
+        blocks.push(nb);
+      }
+    });
+    if(blocks.length > 0){
+      blocks.sort(function(a,b){ return a.height - b.height; });
+      // Keep only last 30 blocks
+      if(blocks.length > 30){
+        blocks = blocks.slice(-30);
+      }
+      renderChain();
+    }
   }
   
   // ── STEP 3: Single DOM update
