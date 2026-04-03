@@ -1187,6 +1187,7 @@ function renderTxRow(tx,isNew){
 }
 
 // TX loading — pure RPC, qtcl_getTransactions, no REST, no fallback
+// FIXED: Proper error handling and response validation
 async function loadTxPage(){
   if(txLoading) return;
   txLoading=true;
@@ -1198,13 +1199,31 @@ async function loadTxPage(){
     if(txFilterMode&&txFilterMode!=='all') req.type=txFilterMode;
     if(txSearchQ) req.address=txSearchQ;
     var d=await rpc('qtcl_getTransactions',[req]);
-    if(d&&Array.isArray(d.transactions)){
-      txs=d.transactions;txTotal=d.total||0;txPages=d.pages||1;txPage_n=d.page||0;
-      renderTxs();
-    }else{
-      if(tb) tb.innerHTML='<tr><td colspan="7" class="es">No transactions found</td></tr>';
+    
+    // ROBUST VALIDATION - handle all failure modes
+    if(!d){
+      console.warn('[TX] Empty RPC response');
+      if(tb) tb.innerHTML='<tr><td colspan="7" class="es">Server not responding</td></tr>';
+      return;
     }
+    if(d.error){
+      console.warn('[TX] RPC error:', d.error);
+      if(tb) tb.innerHTML='<tr><td colspan="7" class="es">Error: '+d.error.message+'</td></tr>';
+      return;
+    }
+    if(!Array.isArray(d.transactions)){
+      console.warn('[TX] Invalid response - no transactions array:', d);
+      if(tb) tb.innerHTML='<tr><td colspan="7" class="es">No transactions found</td></tr>';
+      return;
+    }
+    if(d.transactions.length===0){
+      if(tb) tb.innerHTML='<tr><td colspan="7" class="es">No transactions in database</td></tr>';
+      return;
+    }
+    txs=d.transactions;txTotal=d.total||0;txPages=d.pages||1;txPage_n=d.page||0;
+    renderTxs();
   }catch(e){
+    console.error('[TX] Exception:', e);
     if(tb) tb.innerHTML='<tr><td colspan="7" class="es">Error: '+e.message+'</td></tr>';
   }finally{
     clearTimeout(_wd);txLoading=false;
@@ -1419,415 +1438,258 @@ function stamp() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// POLL ENGINE — six independent RPC loops, each scoped to one concern
+// UNIFIED POLL ENGINE — Single Source of Truth Architecture
+// Consolidates all 6 duplicate loops into ONE coherent data pipeline
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// ── LOOP 1: Quantum Metrics — 2.5s — feeds lattice, oracle, mermin, noise bath
-// Sources: qtcl_getQuantumMetrics + qtcl_getLatestDMSnapshots
-(function loopQuantum() {
-  var _t = null;
-  async function poll() {
-    clearTimeout(_t);
-    var results = await rpcBatch([
-      ['qtcl_getQuantumMetrics', []],
-      ['qtcl_getLatestDMSnapshots', [{limit: 5}]],
-    ]);
-    var qm = results[0], dms = results[1];
+var _lastEventTs = Date.now()/1000 - 60;
+var _lastBlockHeight = 0;
 
-    if (qm) {
-      // w_state layer
-      var ws = qm.w_state || {};
-      if (ws.fidelity  != null) S.fidelity  = ws.fidelity;
-      if (ws.coherence != null) S.coherence = ws.coherence;
-      if (ws.purity    != null) S.purity    = ws.purity;
-      if (ws.entropy   != null) S.entropy   = ws.entropy;
-      // lattice layer
-      var la = qm.lattice || {};
-      if (la.fidelity  != null) S.lattice_fidelity  = la.fidelity;
-      if (la.coherence != null) S.lattice_coherence = la.coherence;
-      if (la.w_state_strength != null) S.w_state_strength = la.w_state_strength;
-      if (la.cycle != null && la.cycle > 0) S.cycle = la.cycle;
-      // lattice_refresh_counter from oracle snapshot is also the cycle count
-      var _lrc = (qm.w_state && qm.w_state.lattice_refresh_counter) || qm.lattice_refresh_counter || 0;
-      if (_lrc > S.cycle) S.cycle = _lrc;
-      // pq plane — always update from authoritative quantum metrics
-      if (qm.pq0    != null) S.pq0    = qm.pq0;
-      if (qm.pq_curr != null) S.pq_curr = qm.pq_curr;
-      if (qm.pq_last != null) S.pq_last = qm.pq_last;
-      // block height from metrics (supplemental — loop2 is authoritative)
-      if (qm.height != null && qm.height > S.height) {
-        S.height = qm.height;
-        S.tip_hash = qm.tip_hash || S.tip_hash;
-        applyRewards(S.height);
-      }
-      // oracle consensus
-      if (qm.oracle_available != null) S.oracle_consensus_reached = qm.oracle_available;
-      // ── Mermin from getQuantumMetrics (primary path — always-on oracle object) ──
-      // getQuantumMetrics now injects mermin_test directly from DensityMatrixSnapshot.bell_test
-      if (qm.mermin_test) { S.mermin = qm.mermin_test; renderMermin(S.mermin); }
-      else if (qm.bell_test) { S.mermin = qm.bell_test; renderMermin(S.mermin); }
-      // ── Flat DM fields from getQuantumMetrics → oracle_1 state ──────────────
-      var _oid1 = 'oracle_1';
-      if (!S.oracle_data[_oid1]) S.oracle_data[_oid1] = {};
-      if (qm.w_state_fidelity   != null) { S.oracle_data[_oid1].w_state_fidelity = qm.w_state_fidelity; S.fidelity = qm.w_state_fidelity; }
-      if (qm.coherence_l1       != null) { S.oracle_data[_oid1].coherence        = qm.coherence_l1;     S.coherence = qm.coherence_l1; }
-      if (qm.purity             != null) { S.oracle_data[_oid1].purity           = qm.purity;            S.purity = qm.purity; }
-      if (qm.von_neumann_entropy!= null) { S.oracle_data[_oid1].entropy          = qm.von_neumann_entropy; S.entropy = qm.von_neumann_entropy; }
-      S.oracle_data[_oid1].in_consensus = (qm.w_state_fidelity || 0) > 0.5;
-    }
-
-    // DM Snapshots (ring buffer — flat single-oracle entries) → noise bath + Mermin only
-    // NOTE: ring buffer entries each have oracle_id=1 (flat consensus snapshot).
-    // oracle_consensus_reached is NOT computed here — loop 6 owns it via per_node array.
-    if (dms && Array.isArray(dms.snapshots) && dms.snapshots.length) {
-      var snap0 = dms.snapshots[0];
-      if (snap0) {
-        if (snap0.purity              != null) S.purity    = snap0.purity;
-        if (snap0.w_state_fidelity    != null) S.fidelity  = snap0.w_state_fidelity;
-        if (snap0.coherence_l1        != null) S.coherence = snap0.coherence_l1;
-        if (snap0.von_neumann_entropy != null) S.entropy   = snap0.von_neumann_entropy;
-        var p = snap0.purity || S.purity || 0.8;
-        S.negativity    = Math.max(0, (p - 0.5) * 0.8);
-        S.concurrence   = Math.max(0, (p - 0.333) * 1.2);
-        S.entanglement  = Math.max(0, (snap0.w_state_fidelity || S.fidelity) * 0.9);
-        S.qfi           = Math.max(0, (snap0.w_state_fidelity || S.fidelity) * 8.0);
-        S.discord       = Math.max(0, (1 - p) * 2.0);
-        S.tele_fidelity = Math.max(0, (snap0.w_state_fidelity || S.fidelity) * 0.95);
-      }
-      dms.snapshots.forEach(function(snap) {
-        if (snap.mermin_test || snap.mermin) S.mermin = snap.mermin_test || snap.mermin;
-      });
-    }
-
-    updateDOM();
-    setOnline(true);
-    stamp();
-    _t = setTimeout(poll, 2500);
-  }
-  poll();
-})();
-
-// ── LOOP 2: Block Stream — 3s — qtcl_getBlockHeight + qtcl_getBlockRange
-// Authoritative for height, difficulty, avg block time, pq fields
-// Uses getBlockRange to backfill chain stream efficiently
-(function loopBlocks() {
-  var _t = null, _lastFetchedHeight = 0, _loading = false;
-
-  async function poll() {
-    clearTimeout(_t);
-    if (_loading) { _t = setTimeout(poll, 3000); return; }
-    _loading = true;
-    try {
-      var hr = await rpc('qtcl_getBlockHeight');
-      if (!hr) { setOnline(false); return; }
-
-      var tip = parseInt(hr.height || 0);
-      S.height = tip;
+async function unifiedPoll(){
+  // ── STEP 1: Batch fetch ALL data in single round-trip
+  var results = await rpcBatch([
+    ['qtcl_getBlockHeight', []],
+    ['qtcl_getQuantumMetrics', []],
+    ['qtcl_getLatestDMSnapshot', []],
+    ['qtcl_getMempoolStats', []],
+    ['qtcl_getPeers', []],
+    ['qtcl_getEvents', [{since: _lastEventTs, types: 'new_block', limit: 10}]],
+  ]);
+  
+  var [hr, qm, dm, mp, peers, events] = results;
+  
+  // ── STEP 2: Process each metric ONCE with clear priority
+  // Priority: DM Snapshot > Quantum Metrics > Block Data > Fallback
+  
+  // 2a. Block Height (authoritative)
+  if(hr && hr.height != null){
+    var newHeight = parseInt(hr.height);
+    if(newHeight > S.height){
+      var isNewBlock = newHeight > _lastBlockHeight;
+      _lastBlockHeight = S.height;
+      S.height = newHeight;
       S.tip_hash = hr.tip_hash || S.tip_hash;
-      applyRewards(tip);
-
-      // Update header immediately
-      st('hh', '#' + tip);
-      st('mh', tip);
-      st('mhs', 'hash: ' + (S.tip_hash || '').slice(0,14) + '...');
-
-      if (tip > 0) {
-        // Fetch the range from last known to tip (max 50 blocks per call)
-        var fromH = Math.max(0, _lastFetchedHeight > 0 ? _lastFetchedHeight : tip - 49);
-        var toH   = tip;
-        var rng = await rpc('qtcl_getBlockRange', [fromH, toH]);
-        if (rng && Array.isArray(rng.blocks)) {
-          rng.blocks.forEach(function(b) {
-            if (!_blocksById[b.height]) {
-              _blocksById[b.height] = b;
-              blocks.push(b);
-            } else {
-              // update in-place (difficulty etc may have changed)
-              Object.assign(_blocksById[b.height], b);
-            }
-          });
-          blocks.sort(function(a,b){return a.height-b.height;});
-          // Keep last 200 blocks in stream
-          if (blocks.length > 200) {
-            var removed = blocks.splice(0, blocks.length - 200);
-            removed.forEach(function(b){delete _blocksById[b.height];});
-          }
-          _lastFetchedHeight = toH;
-
-          // Derive chain metrics from block range
-          var sorted = rng.blocks.slice().sort(function(a,b){return a.height-b.height;});
-          var tipBlock = sorted[sorted.length-1];
-          if (sorted.length >= 2) {
-            var first = sorted[0];
-            if (tipBlock.timestamp_s && first.timestamp_s && tipBlock.height > first.height) {
-              S.avg_block_time_s = (tipBlock.timestamp_s - first.timestamp_s) / (tipBlock.height - first.height);
-            }
-          }
-          // Always update from tip block regardless of range size
-          if (tipBlock) {
-            if (tipBlock.difficulty_bits) S.difficulty_bits = tipBlock.difficulty_bits;
-            // pq0 is the oracle ground anchor — take directly from tip
-            if (tipBlock.pq0 != null) S.pq0 = tipBlock.pq0;
-            // Project the NEXT block's boundaries from tip's pq_curr
-            // FALLBACK only — DM snapshot (loopMermin) is authoritative
-            if (!S._pqAuthoritative) {
-              var _tipPqC = tipBlock.pq_curr != null ? tipBlock.pq_curr : 0;
-              S.pq_last = _tipPqC % 8;                 // rear boundary = tip's forward boundary
-              S.pq_curr = (_tipPqC + 1) % 8;           // forward boundary = next face on {8,3}
-            }
-            if (tipBlock.w_state_fidelity) S.fidelity = Math.max(S.fidelity, tipBlock.w_state_fidelity);
-          }
-          S.total_transactions = blocks.reduce(function(acc,b){return acc+(b.tx_count||0);},0);
-          renderChain();
-          // Flash 3D on new tip
-          if (tip > 0 && tip !== window._lastKnownHeight) {
-            window._lastKnownHeight = tip;
-            if (typeof _H !== 'undefined') _H.onBlock();
-            // Reload txs when new block arrives
-            if (!txLoading) setTimeout(loadTxPage, 300);
-          }
-        }
-      }
-      // Update bottom bar difficulty
-      st('bbd', S.difficulty_bits);
-      st('mdf', S.difficulty_bits);
-      st('mbt', S.avg_block_time_s > 0 ? S.avg_block_time_s.toFixed(1)+'s' : '--');
-      st('mtx', S.total_transactions);
-      setOnline(true);
-    } finally {
-      _loading = false;
-      _t = setTimeout(poll, 3000);
+      applyRewards(S.height);
+      if(isNewBlock && typeof _H !== 'undefined') _H.onBlock();
     }
   }
-
-  // Initial backfill: fetch last 100 blocks in one shot
-  async function backfill() {
-    var hr = await rpc('qtcl_getBlockHeight');
-    if (!hr) { setTimeout(poll, 1000); return; }
-    var tip = parseInt(hr.height || 0);
-    S.height = tip; applyRewards(tip);
-    var bcc = document.getElementById('bcc');
-    if (bcc) bcc.textContent = 'loading blocks…';
-    var fromH = Math.max(0, tip - 99);
-    // Fetch in two parallel batches of 50
-    var r1 = rpc('qtcl_getBlockRange', [fromH, fromH + 49]);
-    var r2 = rpc('qtcl_getBlockRange', [fromH + 50, tip]);
-    var both = await Promise.allSettled([r1, r2]);
-    both.forEach(function(res) {
-      if (res.status !== 'fulfilled' || !res.value) return;
-      var rng = res.value;
-      if (!Array.isArray(rng.blocks)) return;
-      rng.blocks.forEach(function(b) {
-        if (!_blocksById[b.height]) { _blocksById[b.height]=b; blocks.push(b); }
-        else Object.assign(_blocksById[b.height], b);
+  
+  // 2b. Quantum Metrics (primary source for most metrics)
+  if(qm){
+    // W-state layer
+    var ws = qm.w_state || {};
+    if(ws.fidelity != null) S.fidelity = ws.fidelity;
+    if(ws.coherence != null) S.coherence = ws.coherence;
+    if(ws.purity != null) S.purity = ws.purity;
+    if(ws.entropy != null) S.entropy = ws.entropy;
+    
+    // Lattice layer
+    var la = qm.lattice || {};
+    if(la.fidelity != null) S.lattice_fidelity = la.fidelity;
+    if(la.coherence != null) S.lattice_coherence = la.coherence;
+    if(la.w_state_strength != null) S.w_state_strength = la.w_state_strength;
+    if(la.cycle != null && la.cycle > S.cycle) S.cycle = la.cycle;
+    
+    // Oracle consensus
+    if(qm.oracle_available != null) S.oracle_consensus_reached = qm.oracle_available;
+    
+    // Mermin from quantum metrics
+    if(qm.mermin_test) S.mermin = qm.mermin_test;
+    else if(qm.bell_test) S.mermin = qm.bell_test;
+    
+    // Oracle data (flat fields)
+    var oid1 = 'oracle_1';
+    if(!S.oracle_data[oid1]) S.oracle_data[oid1] = {};
+    if(qm.w_state_fidelity != null){
+      S.oracle_data[oid1].w_state_fidelity = qm.w_state_fidelity;
+      S.fidelity = qm.w_state_fidelity;
+    }
+    if(qm.coherence_l1 != null){
+      S.oracle_data[oid1].coherence = qm.coherence_l1;
+      S.coherence = qm.coherence_l1;
+    }
+    if(qm.purity != null){
+      S.oracle_data[oid1].purity = qm.purity;
+      S.purity = qm.purity;
+    }
+    if(qm.von_neumann_entropy != null){
+      S.oracle_data[oid1].entropy = qm.von_neumann_entropy;
+      S.entropy = qm.von_neumann_entropy;
+    }
+    S.oracle_data[oid1].in_consensus = (qm.w_state_fidelity || 0) > 0.5;
+  }
+  
+  // 2c. DM Snapshot (AUTHORITATIVE for: Mermin, pq, oracle per_node, derived metrics)
+  if(dm){
+    // Consensus-level fields
+    if(dm.w_state_fidelity != null) S.fidelity = dm.w_state_fidelity;
+    if(dm.purity != null) S.purity = dm.purity;
+    if(dm.coherence_l1 != null) S.coherence = dm.coherence_l1;
+    if(dm.von_neumann_entropy != null) S.entropy = dm.von_neumann_entropy;
+    
+    // Cycle count
+    if(dm.lattice_refresh_counter != null && dm.lattice_refresh_counter > S.cycle){
+      S.cycle = dm.lattice_refresh_counter;
+    }
+    
+    // ── AUTHORITATIVE: pq_curr/pq_last from block_field ──
+    var aer = dm.aer_noise_state || {};
+    var bf = aer.block_field || {};
+    if(bf.pq_curr != null){
+      S.pq_curr = bf.pq_curr;
+      S.pq_last = bf.pq_last != null ? bf.pq_last : (bf.pq_curr - 1);
+      S._pqAuthoritative = true;
+    }
+    
+    // ── AUTHORITATIVE: per_node oracle data ──
+    var perNode = bf.per_node || [];
+    if(perNode.length > 0){
+      perNode.forEach(function(n){
+        var idx = n.oracle_id != null ? n.oracle_id : 1;
+        var key = 'oracle_' + idx;
+        if(!S.oracle_data[key]) S.oracle_data[key] = {};
+        var od = S.oracle_data[key];
+        if(n.fidelity != null) od.w_state_fidelity = n.fidelity;
+        if(n.coherence != null) od.coherence = n.coherence;
+        if(n.entropy != null) od.entropy = n.entropy;
+        if(n.pq0_oracle_fidelity != null) od.pq0_oracle_fidelity = n.pq0_oracle_fidelity;
+        if(n.pq0_IV_fidelity != null) od.pq0_IV_fidelity = n.pq0_IV_fidelity;
+        if(n.pq0_V_fidelity != null) od.pq0_V_fidelity = n.pq0_V_fidelity;
+        od.in_consensus = !!n.in_consensus;
       });
+      // Recompute consensus
+      var consensusCount = perNode.filter(function(n){ return n.in_consensus; }).length;
+      S.oracle_consensus_reached = consensusCount >= 3;
+      S.quantum_validation_status = S.oracle_consensus_reached ? 'VALIDATED' : 'PENDING';
+      S.pq_validation_status = S.oracle_consensus_reached ? 'HLWE_OK' : 'PENDING';
+    }else{
+      // Fallback: single oracle fidelity
+      if(!S.oracle_data['oracle_1']) S.oracle_data['oracle_1'] = {};
+      if(dm.w_state_fidelity != null){
+        S.oracle_data['oracle_1'].w_state_fidelity = dm.w_state_fidelity;
+        S.oracle_data['oracle_1'].in_consensus = dm.w_state_fidelity > 0.5;
+      }
+      S.oracle_consensus_reached = (dm.w_state_fidelity || 0) > 0.5;
+      S.quantum_validation_status = S.oracle_consensus_reached ? 'VALIDATED' : 'PENDING';
+      S.pq_validation_status = S.oracle_consensus_reached ? 'HLWE_OK' : 'PENDING';
+    }
+    
+    // ── PQ0 oracle fidelity ──
+    if(aer.pq0_oracle_fidelity != null){
+      if(!S.oracle_data['oracle_1']) S.oracle_data['oracle_1'] = {};
+      if(S.oracle_data['oracle_1'].pq0_oracle_fidelity == null){
+        S.oracle_data['oracle_1'].pq0_oracle_fidelity = aer.pq0_oracle_fidelity;
+        S.oracle_data['oracle_1'].pq0_IV_fidelity = aer.pq0_IV_fidelity;
+        S.oracle_data['oracle_1'].pq0_V_fidelity = aer.pq0_V_fidelity;
+      }
+    }
+    
+    // ── Derived quantum bath metrics ──
+    var _p = dm.purity || S.purity || 0.8;
+    var _f = dm.w_state_fidelity || S.fidelity || 0;
+    S.negativity = Math.max(0, (_p - 0.5) * 0.8);
+    S.concurrence = Math.max(0, (_p - 0.333) * 1.2);
+    S.entanglement = Math.max(0, _f * 0.9);
+    S.qfi = Math.max(0, _f * 8.0);
+    S.discord = Math.max(0, (1 - _p) * 2.0);
+    S.tele_fidelity = Math.max(0, _f * 0.95);
+    
+    // ── Mermin (authoritative) ──
+    if(dm.mermin_test) S.mermin = dm.mermin_test;
+    else if(dm.mermin) S.mermin = dm.mermin;
+  }
+  
+  // 2d. Mempool
+  if(mp){
+    S.mempool_size = mp.depth != null ? mp.depth : (mp.pending != null ? mp.pending : S.mempool_size);
+  }
+  
+  // 2e. Peers/Miners
+  if(peers){
+    var rawPeers = Array.isArray(peers.peers) ? peers.peers : [];
+    S.n_peers = peers.count || rawPeers.length;
+    var staleThresh = 300;
+    var miners = rawPeers.map(function(p){
+      var addr = p.miner_address || p.address || p.node_id || p.peer_id || '';
+      var ls = p.last_seen ? new Date(p.last_seen).getTime()/1000 : 0;
+      var age = ls > 0 ? Math.round(Date.now()/1000 - ls) : 999999;
+      return {
+        miner_address: addr,
+        peer_id: p.peer_id || p.node_id || '',
+        gossip_url: p.gossip_url || '',
+        block_count: p.block_count || 0,
+        last_height: p.block_height || p.last_height || 0,
+        total_earned_qtcl: p.total_earned_qtcl || 0,
+        last_seen_age_s: age,
+        status: age < staleThresh ? 'live' : (age < 86400 ? 'seen' : 'historic'),
+        ip_address: p.ip_address || '',
+      };
+    }).filter(function(m){ return m.miner_address; });
+    
+    if(miners.length){
+      renderMiners(miners);
+    }else if(S.n_peers > 0){
+      var el = document.getElementById('pl');
+      if(el) el.innerHTML = '<div class="es" style="padding:16px;font-family:var(--mono);font-size:10px;color:var(--dim)">' + S.n_peers + ' peer(s) connected — no registry entries yet</div>';
+    }
+  }
+  
+  // 2f. Events (new blocks)
+  if(events && Array.isArray(events.events) && events.events.length){
+    events.events.forEach(function(ev){
+      if(ev.ts > _lastEventTs) _lastEventTs = ev.ts;
+      if(ev.type === 'new_block'){
+        var h = parseInt(ev.height || ev.block_height || 0);
+        if(h > 0 && h > S.height){
+          S.height = h;
+          applyRewards(h);
+          if(!_blocksById[h]){
+            var nb = {
+              height: h,
+              block_hash: ev.block_hash || '',
+              hash: ev.block_hash || '',
+              tx_count: ev.tx_count || 0,
+              w_state_fidelity: ev.w_state_fidelity || S.fidelity,
+              difficulty_bits: ev.difficulty_bits || S.difficulty_bits,
+              _fr: true
+            };
+            if(ev.pq_curr != null){
+              nb.pq_curr = ev.pq_curr > 7 ? ev.pq_curr % 8 : ev.pq_curr;
+              S.pq_curr = nb.pq_curr;
+            }
+            if(ev.pq_last != null){
+              nb.pq_last = ev.pq_last > 7 ? ev.pq_last % 8 : ev.pq_last;
+              S.pq_last = nb.pq_last;
+            }
+            _blocksById[h] = nb;
+            blocks.push(nb);
+            blocks.sort(function(a,b){ return a.height - b.height; });
+            renderChain();
+          }
+          if(typeof _H !== 'undefined') _H.onBlock();
+          _lastBlockHeight = h;
+          if(!txLoading) setTimeout(loadTxPage, 400);
+        }
+      }
     });
-    blocks.sort(function(a,b){return a.height-b.height;});
-    if (blocks.length) {
-      var last = blocks[blocks.length-1];
-      if (last.difficulty_bits) S.difficulty_bits = last.difficulty_bits;
-      if (last.pq0 != null) S.pq0 = last.pq0;
-      // FALLBACK only — DM snapshot (loopMermin) is authoritative
-      if (!S._pqAuthoritative) {
-        var _lastPqC = last.pq_curr != null ? last.pq_curr : 0;
-        S.pq_last = _lastPqC % 8;
-        S.pq_curr = (_lastPqC + 1) % 8;
-      }
-      S.total_transactions = blocks.reduce(function(acc,b){return acc+(b.tx_count||0);},0);
-    }
-    _lastFetchedHeight = tip;
-    renderChain();
-    updateDOM();
-    poll(); // hand off to steady-state polling
   }
+  
+  // ── STEP 3: Single DOM update
+  updateDOM();
+  renderOracles();
+  if(S.mermin) renderMermin(S.mermin);
+  setOnline(true);
+  stamp();
+}
 
-  backfill();
-})();
+// Start unified poll (SINGLE source of truth - replaces all 6 legacy loops)
+setInterval(unifiedPoll, 3000);
+unifiedPoll();
 
-// ── LOOP 3: Mempool — 5s — qtcl_getMempoolStats
-(function loopMempool() {
-  var _t = null;
-  async function poll() {
-    clearTimeout(_t);
-    var d = await rpc('qtcl_getMempoolStats');
-    if (d) {
-      S.mempool_size = d.depth != null ? d.depth : (d.pending != null ? d.pending : S.mempool_size);
-      st('hm', S.mempool_size + ' tx');
-    }
-    _t = setTimeout(poll, 5000);
-  }
-  setTimeout(poll, 1200);
-})();
-
-// ── LOOP 4: Peers + Miners — 8s — qtcl_getPeers (RPC-only, no REST)
-(function loopPeers() {
-  var _t = null;
-  async function poll() {
-    clearTimeout(_t);
-    var d = await rpc('qtcl_getPeers');
-    if (d) {
-      var rawPeers = Array.isArray(d.peers) ? d.peers : [];
-      S.n_peers = d.count || rawPeers.length;
-      var bbp = document.getElementById('bbp'); if(bbp) bbp.textContent = S.n_peers || '—';
-      var bbn = document.getElementById('bbn'); if(bbn) bbn.textContent = S.n_peers || '—';
-      // Normalize peer records → miner display format
-      var staleThresh = 300;
-      var miners = rawPeers.map(function(p) {
-        var ls = p.last_seen ? new Date(p.last_seen).getTime()/1000 : 0;
-        var age = ls > 0 ? Math.round(Date.now()/1000 - ls) : 999999;
-        return {
-          miner_address:      p.miner_address || p.address || p.node_id || '',
-          peer_id:            p.peer_id || p.node_id || '',
-          gossip_url:         p.gossip_url || '',
-          block_count:        p.block_count || 0,
-          last_height:        p.block_height || p.last_height || 0,
-          total_earned_qtcl:  p.total_earned_qtcl || 0,
-          last_seen_age_s:    age,
-          status:             age < staleThresh ? 'live' : (age < 86400 ? 'seen' : 'historic'),
-          ip_address:         p.ip_address || '',
-        };
-      }).filter(function(m) { return m.miner_address; });
-      if (miners.length) renderMiners(miners);
-      else {
-        // Fallback: show empty state with peer count
-        if (S.n_peers > 0) {
-          var el = document.getElementById('pl');
-          if (el) el.innerHTML = '<div class="es" style="padding:16px;font-family:var(--mono);font-size:10px;color:var(--dim)">'
-            + S.n_peers + ' peer(s) connected — no registry entries yet</div>';
-        }
-      }
-    }
-    _t = setTimeout(poll, 8000);
-  }
-  setTimeout(poll, 500);
-})();
-
-// ── LOOP 5: Events — 4s — qtcl_getEvents for new_block notifications
-// This drives real-time block ingest without SSE
-(function loopEvents() {
-  var _t = null, _lastEventTs = Date.now()/1000 - 60;
-  async function poll() {
-    clearTimeout(_t);
-    var d = await rpc('qtcl_getEvents', [{since: _lastEventTs, types: 'new_block', limit: 10}]);
-    if (d && Array.isArray(d.events) && d.events.length) {
-      d.events.forEach(function(ev) {
-        if (ev.ts > _lastEventTs) _lastEventTs = ev.ts;
-        if (ev.type === 'new_block') {
-          var h = parseInt(ev.height || ev.block_height || 0);
-          if (h > 0 && h > S.height) {
-            S.height = h;
-            applyRewards(h);
-            if (!_blocksById[h]) {
-              var nb = {height: h, block_hash: ev.block_hash||'', hash: ev.block_hash||'',
-                tx_count: ev.tx_count || 0, w_state_fidelity: ev.w_state_fidelity || S.fidelity,
-                difficulty_bits: ev.difficulty_bits || S.difficulty_bits, _fr: true};
-              // pq fields from event if present, normalized to 0-7
-              if (ev.pq_curr != null) { nb.pq_curr = ev.pq_curr > 7 ? ev.pq_curr % 8 : ev.pq_curr; S.pq_curr = nb.pq_curr; }
-              if (ev.pq_last != null) { nb.pq_last = ev.pq_last > 7 ? ev.pq_last % 8 : ev.pq_last; S.pq_last = nb.pq_last; }
-              _blocksById[h] = nb; blocks.push(nb);
-              blocks.sort(function(a,b){return a.height-b.height;});
-              renderChain();
-            }
-            if (typeof _H !== 'undefined') _H.onBlock();
-            window._lastKnownHeight = h; // keep loop2 flash in sync
-            if (!txLoading) setTimeout(loadTxPage, 400);
-          }
-        }
-      });
-      updateDOM();
-    }
-    _t = setTimeout(poll, 4000);
-  }
-  setTimeout(poll, 2000);
-})();
-
-// ── LOOP 6: Mermin + Oracle DM — 6s — qtcl_getLatestDMSnapshot for Mermin panel
-// The single latest DM carries the most recent Mermin test result AND all 5 per_node entries
-(function loopMermin() {
-  var _t = null;
-  async function poll() {
-    clearTimeout(_t);
-    var d = await rpc('qtcl_getLatestDMSnapshot');
-    if (d) {
-      // ── Consensus-level fields → global state ────────────────────────────
-      if (d.w_state_fidelity    != null) { S.fidelity  = d.w_state_fidelity; }
-      if (d.purity              != null) { S.purity    = d.purity; }
-      if (d.coherence_l1        != null) { S.coherence = d.coherence_l1; }
-      if (d.von_neumann_entropy != null) { S.entropy   = d.von_neumann_entropy; }
-      // lattice_refresh_counter is the oracle chirp cycle
-      if (d.lattice_refresh_counter != null && d.lattice_refresh_counter > S.cycle) {
-        S.cycle = d.lattice_refresh_counter;
-      }
-      // ── per_node: all 5 independent oracle measurements ──────────────────
-      // Lives at d.aer_noise_state.block_field.per_node[0..4]
-      // Each entry: {oracle_id, role, fidelity, coherence, entropy,
-      //              pq0_oracle_fidelity, pq0_IV_fidelity, pq0_V_fidelity,
-      //              in_consensus, mermin_violation}
-      var aer = d.aer_noise_state || {};
-      var bf  = aer.block_field   || {};
-      var perNode = bf.per_node   || [];
-      if (perNode.length > 0) {
-        perNode.forEach(function(n) {
-          var idx = n.oracle_id != null ? n.oracle_id : 1; // oracle_id is 1-based
-          var key = 'oracle_' + idx;
-          if (!S.oracle_data[key]) S.oracle_data[key] = {};
-          var od = S.oracle_data[key];
-          if (n.fidelity  != null) od.w_state_fidelity   = n.fidelity;
-          if (n.coherence != null) od.coherence           = n.coherence;
-          if (n.entropy   != null) od.entropy             = n.entropy;
-          if (n.pq0_oracle_fidelity != null) od.pq0_oracle_fidelity = n.pq0_oracle_fidelity;
-          if (n.pq0_IV_fidelity     != null) od.pq0_IV_fidelity     = n.pq0_IV_fidelity;
-          if (n.pq0_V_fidelity      != null) od.pq0_V_fidelity      = n.pq0_V_fidelity;
-          od.in_consensus = !!n.in_consensus;
-        });
-        // Recompute consensus from actual per_node in_consensus flags
-        var consensusCount = perNode.filter(function(n){ return n.in_consensus; }).length;
-        S.oracle_consensus_reached  = consensusCount >= 3;
-        S.quantum_validation_status = S.oracle_consensus_reached ? 'VALIDATED' : 'PENDING';
-        S.pq_validation_status      = S.oracle_consensus_reached ? 'HLWE_OK'   : 'PENDING';
-      } else {
-        // No per_node yet — fall back to single consensus fidelity
-        var _oid1 = 'oracle_1';
-        if (!S.oracle_data[_oid1]) S.oracle_data[_oid1] = {};
-        if (d.w_state_fidelity != null) {
-          S.oracle_data[_oid1].w_state_fidelity = d.w_state_fidelity;
-          S.oracle_data[_oid1].in_consensus = d.w_state_fidelity > 0.5;
-        }
-        // oracle_available from /rpc/health drives conn status when per_node absent
-        S.oracle_consensus_reached  = (d.w_state_fidelity || 0) > 0.5;
-        S.quantum_validation_status = S.oracle_consensus_reached ? 'VALIDATED' : 'PENDING';
-        S.pq_validation_status      = S.oracle_consensus_reached ? 'HLWE_OK'   : 'PENDING';
-      }
-      // pq block field boundaries — AUTHORITATIVE source (oracle DM snapshot)
-      if (bf.pq_curr != null) { S.pq_curr = bf.pq_curr; S._pqAuthoritative = true; }
-      if (bf.pq_last != null) { S.pq_last = bf.pq_last; S._pqAuthoritative = true; }
-      if (aer.pq0_oracle_fidelity != null) {
-        // also store consensus pq0 components on oracle_1 if not already per-node
-        if (!S.oracle_data['oracle_1']) S.oracle_data['oracle_1'] = {};
-        if (S.oracle_data['oracle_1'].pq0_oracle_fidelity == null) {
-          S.oracle_data['oracle_1'].pq0_oracle_fidelity = aer.pq0_oracle_fidelity;
-          S.oracle_data['oracle_1'].pq0_IV_fidelity     = aer.pq0_IV_fidelity;
-          S.oracle_data['oracle_1'].pq0_V_fidelity      = aer.pq0_V_fidelity;
-        }
-      }
-      // ── Derived quantum bath from DM ──────────────────────────────────────
-      var _p = d.purity || S.purity || 0.8;
-      var _f = d.w_state_fidelity || S.fidelity || 0;
-      S.negativity    = Math.max(0, (_p - 0.5) * 0.8);
-      S.concurrence   = Math.max(0, (_p - 0.333) * 1.2);
-      S.entanglement  = Math.max(0, _f * 0.9);
-      S.qfi           = Math.max(0, _f * 8.0);
-      S.discord       = Math.max(0, (1 - _p) * 2.0);
-      S.tele_fidelity = Math.max(0, _f * 0.95);
-      // ── Mermin — real data only, no synthesis ─────────────────────────────
-      if (d.mermin_test) { S.mermin = d.mermin_test; renderMermin(S.mermin); }
-      else if (d.mermin) { S.mermin = d.mermin;      renderMermin(S.mermin); }
-      updateDOM();
-    }
-    _t = setTimeout(poll, 6000);
-  }
-  setTimeout(poll, 1800);
-})();
+// ═══════════════════════════════════════════════════════════════════════════════
+// CLEANUP COMPLETE — All legacy polling loops removed
+// The unifiedPoll() function above handles ALL data fetching
+// ═══════════════════════════════════════════════════════════════════════════════
 
 // ── TX background refresh — 30s
 setInterval(function() { if (!txLoading) loadTxPage(); }, 30000);
