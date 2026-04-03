@@ -1452,6 +1452,21 @@ def query_block_by_height(height: int) -> Optional[Dict[str, Any]]:
         logger.debug(f"[QUERY-BLOCK] PG error: {e}")
     return None
 
+def query_block_by_hash(block_hash: str) -> Optional[Dict[str, Any]]:
+    """Get block by hash from Supabase PostgreSQL (authoritative source)."""
+    if not block_hash:
+        return None
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("SELECT * FROM blocks WHERE block_hash = %s LIMIT 1", (block_hash,))
+            row = cur.fetchone()
+            if row:
+                cols = [desc[0] for desc in cur.description]
+                return dict(zip(cols, row))
+    except Exception as e:
+        logger.debug(f"[QUERY-BLOCK-HASH] PG error: {e}")
+    return None
+
 
 @contextmanager
 def get_db_cursor():
