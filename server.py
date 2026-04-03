@@ -1810,12 +1810,19 @@ def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
         if db_tip is not None:
             height   = int(db_tip['height'])
             tip_hash = str(db_tip.get('hash', ''))
+            # Get current difficulty from DifficultyManager
+            try:
+                _dm = get_difficulty_manager()
+                _current_diff = int(_dm.get_difficulty())
+            except Exception:
+                _current_diff = 4
             result = {
                 "height":   height,
                 "tip_hash": tip_hash,
+                "difficulty": _current_diff,
                 "ts":       time.time(),
             }
-            logger.debug(f"[RPC-METHOD] qtcl_getBlockHeight (DB) success: height={height}")
+            logger.debug(f"[RPC-METHOD] qtcl_getBlockHeight (DB) success: height={height} diff={_current_diff}")
             return _rpc_ok(result, rpc_id)
         
         # FALLBACK: in-memory canonical node (cold start before first block)
@@ -1842,6 +1849,21 @@ def _rpc_getBlockHeight(params: Any, rpc_id: Any) -> dict:
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getBlockHeight exception: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": str(e).__class__.__name__})
+
+
+def _rpc_getDifficulty(params: Any, rpc_id: Any) -> dict:
+    """qtcl_getDifficulty — current adaptive difficulty from DifficultyManager."""
+    try:
+        dm = get_difficulty_manager()
+        return _rpc_ok({
+            "difficulty": int(dm.get_difficulty()),
+            "floor": dm.FLOOR,
+            "ceiling": dm.CEILING,
+            "target_block_time_s": dm.TARGET_BLOCK_TIME_S,
+        }, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_getDifficulty exception: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
 
 
 def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
@@ -2103,6 +2125,125 @@ def _call_with_timeout(func, timeout_sec=_RPC_TIMEOUT_SEC, default=None):
         return value if status == "ok" else default
     except:
         return default
+
+
+class DifficultyManager:
+    """Adaptive difficulty targeting for QTCL.
+    
+    Algorithm (per-block EWMA, wall-clock based):
+    On every ACCEPTED block we measure wall-clock elapsed time since the
+    previous accepted block. We update a EWMA of block intervals and retarget
+    to keep actual solve time near TARGET_BLOCK_TIME_S.
+    
+    Difficulty ↔ hash-rate (hex leading-zero model):
+        diff=4  →  ~4.4k H/s for 30s blocks  (Python miner)
+        diff=5  →   ~70k H/s for 30s blocks  (single-thread C)
+        diff=6  →  ~1.1M H/s for 30s blocks  (multi-thread C)
+        diff=7  →   ~18M H/s for 30s blocks  (GPU territory)
+    """
+    ABS_MIN = 1
+    ABS_MAX = 8
+    TARGET_BLOCK_TIME_S = 30
+    EWMA_ALPHA = 0.40
+    MAX_STEP_PER_BLOCK = 1
+    WARMUP_BLOCKS = 2
+    FLOOR = 5
+    CEILING = ABS_MAX
+
+    def __init__(self, initial_difficulty: float = 5, seed_ewma: float = None, seed_last_wall: float = None):
+        import math as _m
+        self._math = _m
+        self.current_difficulty = max(float(self.FLOOR), min(float(self.CEILING), float(initial_difficulty)))
+        self.min_difficulty = self.FLOOR
+        self.max_difficulty = self.CEILING
+        self.target_block_time_s = self.TARGET_BLOCK_TIME_S
+        self.adjustment_interval = 1
+        self._ewma_block_time = float(seed_ewma) if seed_ewma and seed_ewma > 0 else float(self.TARGET_BLOCK_TIME_S)
+        self._last_accept_wall = float(seed_last_wall) if seed_last_wall and seed_last_wall > 1e9 else time.time()
+        self._block_count = 0
+        logger.info(f"[DIFFICULTY] Manager ready: diff={self.current_difficulty:.2f} | target={self.TARGET_BLOCK_TIME_S}s | floor={self.FLOOR}")
+
+    def get_difficulty(self) -> float:
+        return self.current_difficulty
+
+    def set_difficulty(self, difficulty: float) -> bool:
+        clamped = max(float(self.FLOOR), min(float(self.CEILING), float(difficulty)))
+        old = self.current_difficulty
+        self.current_difficulty = clamped
+        logger.info(f"[DIFFICULTY] Manual set: {old} → {self.current_difficulty}")
+        return True
+
+    def record_block(self, _ignored_header_ts: float = None) -> int:
+        now = time.time()
+        self._block_count += 1
+        gap = max(1.0, now - self._last_accept_wall)
+        alpha = self.EWMA_ALPHA
+        self._ewma_block_time = alpha * gap + (1.0 - alpha) * self._ewma_block_time
+        self._last_accept_wall = now
+        if self._block_count >= self.WARMUP_BLOCKS:
+            self._retarget()
+        return int(self.current_difficulty)
+
+    def auto_adjust(self, blocks: list) -> int:
+        return int(self.current_difficulty)
+
+    def _retarget(self) -> None:
+        t = max(1.0, self._ewma_block_time)
+        m = self._math
+        try:
+            implied_rate = (16.0 ** self.current_difficulty) / t
+            ideal = m.log(max(1.0, implied_rate * self.TARGET_BLOCK_TIME_S)) / m.log(16.0)
+        except (ValueError, ZeroDivisionError, OverflowError):
+            return
+        ideal_q = round(ideal * 4) / 4.0
+        raw_delta = ideal_q - self.current_difficulty
+        delta = max(-float(self.MAX_STEP_PER_BLOCK), min(float(self.MAX_STEP_PER_BLOCK), raw_delta))
+        delta = round(delta * 4) / 4.0
+        new_diff = max(float(self.FLOOR), min(float(self.CEILING), self.current_difficulty + delta))
+        new_diff = round(new_diff * 4) / 4.0
+        if abs(new_diff - self.current_difficulty) >= 0.01:
+            old = self.current_difficulty
+            self.current_difficulty = new_diff
+            logger.info(f"[DIFFICULTY] ⚡ {old:.2f} → {new_diff:.2f} | EWMA={t:.1f}s target={self.TARGET_BLOCK_TIME_S}s")
+
+
+_difficulty_manager = None
+
+def get_difficulty_manager() -> DifficultyManager:
+    """Get or create the global DifficultyManager."""
+    global _difficulty_manager
+    if _difficulty_manager is not None:
+        return _difficulty_manager
+
+    db_difficulty = None
+    seed_ewma = None
+    seed_last_wall = None
+    try:
+        with get_db_cursor() as _bc:
+            _bc.execute("SELECT difficulty, timestamp FROM blocks ORDER BY height DESC LIMIT 1")
+            tip_row = _bc.fetchone()
+            if tip_row:
+                raw = tip_row[0]
+                if raw is not None:
+                    db_difficulty = max(DifficultyManager.FLOOR, min(DifficultyManager.CEILING, int(float(raw))))
+                if tip_row[1] is not None:
+                    seed_last_wall = float(tip_row[1])
+            # Compute average inter-block time from last 10 blocks to seed EWMA
+            _bc.execute("SELECT timestamp FROM blocks WHERE timestamp IS NOT NULL ORDER BY height DESC LIMIT 10")
+            ts_rows = [float(r[0]) for r in _bc.fetchall() if r[0] is not None]
+            if len(ts_rows) >= 2:
+                gaps = [ts_rows[i] - ts_rows[i+1] for i in range(len(ts_rows)-1) if ts_rows[i] > ts_rows[i+1]]
+                if gaps:
+                    seed_ewma = sum(gaps) / len(gaps)
+    except Exception as _de:
+        logger.debug(f"[DIFFICULTY] DB bootstrap: {_de}")
+
+    initial = max(DifficultyManager.FLOOR, db_difficulty if db_difficulty is not None else 5)
+    _difficulty_manager = DifficultyManager(
+        initial_difficulty=initial, seed_ewma=seed_ewma, seed_last_wall=seed_last_wall,
+    )
+    logger.info(f"[DIFFICULTY] Bootstrap: diff={initial} seed_ewma={seed_ewma:.1f}s" if seed_ewma else f"[DIFFICULTY] Bootstrap: diff={initial} (no EWMA seed)")
+    return _difficulty_manager
 
 
 def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
@@ -3104,9 +3245,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     f"Invalid parent_hash: expected {expected_parent[:16]}… got {parent_hash[:16]}…",
                     rpc_id)
 
-        # ── HLWE Block Verification (FLAG 1 FIX — cryptographically verify submitted blocks) ──
+        # ── HLWE Block Verification (REQUIRED — cryptographically verify submitted blocks) ──
         hlwe_verified = False
-        hlwe_verify_msg = "skipped"
+        hlwe_verify_msg = "missing"
         try:
             engine = _init_hlwe_engine()
             block_dict = {
@@ -3127,52 +3268,43 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     logger.warning(
                         f"[RPC-submitBlock] ⚠️  HLWE verification FAILED h={height}: {hlwe_verify_msg}"
                     )
+                    return _rpc_error(-32004, f"HLWE signature invalid: {hlwe_verify_msg}", rpc_id)
                 else:
                     logger.info(
                         f"[RPC-submitBlock] ✅ HLWE verified h={height} pubkey={miner_pubkey[:16]}…"
                     )
             else:
-                logger.debug(
-                    f"[RPC-submitBlock] ℹ️  No HLWE signature in block h={height} — verification skipped"
+                logger.warning(
+                    f"[RPC-submitBlock] ❌ REJECTED h={height}: HLWE signature REQUIRED but missing"
                 )
+                return _rpc_error(-32004, "HLWE signature required but missing from block", rpc_id)
         except Exception as _hlwe_err:
-            logger.warning(f"[RPC-submitBlock] HLWE verify path error (non-fatal): {_hlwe_err}")
+            logger.error(f"[RPC-submitBlock] HLWE verify error: {_hlwe_err}")
+            return _rpc_error(-32004, f"HLWE verification error: {_hlwe_err}", rpc_id)
 
-        # ── HLWE Block Verification (FLAG 1 FIX — cryptographically verify submitted blocks) ──
-        hlwe_verified = False
-        hlwe_verify_msg = "skipped"
-        try:
-            engine = _init_hlwe_engine()
-            block_dict = {
-                "height": height, "block_hash": block_hash,
-                "parent_hash": parent_hash, "merkle_root": merkle_root,
-                "timestamp_s": timestamp_s, "nonce": nonce,
-                "miner_address": miner_address, "difficulty_bits": difficulty_bits,
-                "w_entropy_hex": w_entropy_hex, "w_state_fidelity": w_state_fidelity,
-            }
-            # Check if block carries an HLWE signature from the miner
-            block_sig = data.get("hlwe_signature") or hdr.get("hlwe_signature")
-            miner_pubkey = data.get("miner_public_key_hex") or hdr.get("miner_public_key_hex")
-            if block_sig and miner_pubkey:
-                hlwe_verified, hlwe_verify_msg = engine.verify_block(
-                    block_dict, block_sig, miner_pubkey
-                )
-                if not hlwe_verified:
-                    logger.warning(
-                        f"[RPC-submitBlock] ⚠️  HLWE verification FAILED h={height}: {hlwe_verify_msg}"
-                    )
-                else:
-                    logger.info(
-                        f"[RPC-submitBlock] ✅ HLWE verified h={height} pubkey={miner_pubkey[:16]}…"
-                    )
+        # ── Mermin quantum proof verification ──
+        mermin_value = float(hdr.get("mermin_value", 0.0) or 0.0)
+        mermin_violated = bool(hdr.get("mermin_violated", False))
+        if mermin_value != 0.0:
+            # Verify Mermin inequality: |M| > 2 proves quantumness
+            if abs(mermin_value) > 2.0:
+                logger.info(f"[RPC-submitBlock] ✅ Mermin quantum proof: M={mermin_value:.4f} > 2 (quantum)")
             else:
-                logger.debug(
-                    f"[RPC-submitBlock] ℹ️  No HLWE signature in block h={height} — verification skipped"
-                )
-        except Exception as _hlwe_err:
-            logger.warning(f"[RPC-submitBlock] HLWE verify path error (non-fatal): {_hlwe_err}")
+                logger.warning(f"[RPC-submitBlock] ⚠️  Mermin M={mermin_value:.4f} ≤ 2 (classical) — warning only")
+        else:
+            logger.debug(f"[RPC-submitBlock] ℹ️  No Mermin proof in block h={height}")
 
         # ── PoW verification ─────────────────────────────────────────────────
+        # Use SERVER's actual difficulty, not miner's reported value
+        try:
+            _srv_dm = get_difficulty_manager()
+            _server_difficulty = int(_srv_dm.get_difficulty())
+        except Exception:
+            _server_difficulty = 4  # fallback if DifficultyManager broken
+        # Miner's reported difficulty (for DB storage only)
+        _miner_difficulty = difficulty_bits
+        # Use the HIGHER of server/miner difficulty for verification
+        _verify_difficulty = max(_server_difficulty, _miner_difficulty)
         try:
             w_seed = bytes.fromhex(w_entropy_hex) if w_entropy_hex else b'\x00' * 32
             valid, reason = qtcl_pow_verify(
@@ -3180,7 +3312,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 parent_hash=parent_hash,
                 merkle_root=merkle_root,
                 timestamp_s=timestamp_s,
-                difficulty_bits=difficulty_bits,
+                difficulty_bits=_verify_difficulty,
                 nonce=nonce,
                 miner_address=miner_address,
                 w_entropy_seed=w_seed,
@@ -3188,12 +3320,17 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 block_timestamp_s=timestamp_s,
             )
             if not valid:
+                logger.warning(f"[RPC-submitBlock] ❌ PoW failed: server_diff={_server_difficulty} miner_diff={_miner_difficulty} verify_diff={_verify_difficulty} reason={reason}")
                 return _rpc_error(-32003, f"PoW invalid: {reason}", rpc_id)
+            logger.info(f"[RPC-submitBlock] ✅ PoW verified: server_diff={_server_difficulty} miner_diff={_miner_difficulty} verify_diff={_verify_difficulty}")
         except Exception as pe:
             logger.warning(f"[RPC-submitBlock] PoW verify error (non-fatal): {pe}")
-            # Fall through — verify hash prefix at minimum
-            if not block_hash.startswith('0' * difficulty_bits):
-                return _rpc_error(-32003, f"Difficulty not met: {block_hash[:8]}", rpc_id)
+            # Fall through — verify hash prefix at minimum using server difficulty
+            if not block_hash.startswith('0' * _server_difficulty):
+                return _rpc_error(-32003, f"Difficulty not met: need {_server_difficulty} leading zeros, got {block_hash[:8]}", rpc_id)
+
+        # Store the miner's reported difficulty in DB (historical record)
+        difficulty_bits = _miner_difficulty
 
         # ── Persist block + transactions (transaction 1 — no wallet writes) ──
         _block_rowcount = 0
@@ -3333,9 +3470,10 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         # ── Difficulty retarget ──────────────────────────────────────────────
         try:
             dm = get_difficulty_manager()
-            dm.on_block_accepted(timestamp_s)
-        except Exception:
-            pass
+            dm.record_block(timestamp_s)
+            logger.info(f"[DIFFICULTY] After block h={height}: current_difficulty={dm.get_difficulty():.2f}")
+        except Exception as diff_err:
+            logger.warning(f"[DIFFICULTY] Retarget error: {diff_err}")
 
         # ── Update chain state ──────────────────────────────────────────────
         try:
@@ -3741,6 +3879,7 @@ def _p2p_rpc_peer_heartbeat(params, rpc_id):
 _RPC_METHODS: Dict[str, Any] = {
     "qtcl_submitBlock":       _rpc_submitBlock,
     "qtcl_getBlockHeight":    _rpc_getBlockHeight,
+    "qtcl_getDifficulty":     _rpc_getDifficulty,
     "qtcl_getBalance":        _rpc_getBalance,
     "qtcl_getTransaction":    _rpc_getTransaction,
     "qtcl_getBlock":          _rpc_getBlock,
