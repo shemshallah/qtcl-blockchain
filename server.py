@@ -2897,6 +2897,139 @@ def _rpc_listMeasurementSubscribers(params: Any, rpc_id: Any) -> dict:
         return _rpc_error(-32603, f"List failed: {str(e)}", rpc_id)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# QTCL-PoW VERIFIER  — canonical SHAKE-256 scratchpad + SHA3-256 64-round chain
+#
+# Must stay byte-for-byte identical to the client's _pow_worker inner loop in
+# qtcl_client.py (_mine_inline, STAGE 4).  Any divergence here = invalid rejects.
+#
+# Algorithm:
+#   scratchpad  = SHAKE-256("QTCL_SCRATCHPAD_v1:" + w_entropy_seed)[0:512 KiB]
+#   header      = struct.pack('>Q I 32s 32s I I 40s 32s',
+#                             height, timestamp_s,
+#                             parent_hash_bytes[:32], merkle_root_bytes[:32],
+#                             difficulty_bits, nonce,
+#                             miner_address_bytes[:40], w_entropy_seed[:32])
+#   state       = SHA3-256("QTCL_POW_v1:" + header)
+#   for rnd in range(64):
+#       wi      = uint32_be(state[0:4]) % N_WINDOWS      # N_WINDOWS = 8192
+#       window  = scratchpad[wi*64 : wi*64+64]
+#       state   = SHA3-256(state + window + struct.pack('>I', rnd))
+#   return state.hex()
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+_POW_SCRATCHPAD_BYTES = 512 * 1024
+_POW_WINDOW_BYTES     = 64
+_POW_MIX_ROUNDS       = 64
+_POW_N_WINDOWS        = _POW_SCRATCHPAD_BYTES // _POW_WINDOW_BYTES   # 8192
+_POW_HDR_FMT          = '>Q I 32s 32s I I 40s 32s'
+_POW_PREFIX           = b"QTCL_POW_v1:"
+_POW_SCRATCHPAD_PFX   = b"QTCL_SCRATCHPAD_v1:"
+_POW_RND_PACKED       = [struct.pack('>I', r) for r in range(_POW_MIX_ROUNDS)]
+
+
+def qtcl_pow_hash(
+    height: int,
+    timestamp_s: int,
+    parent_hash: str,
+    merkle_root: str,
+    difficulty_bits: int,
+    nonce: int,
+    miner_address: str,
+    w_entropy_seed: bytes,
+) -> str:
+    """
+    Compute the QTCL-PoW hash for a single nonce.  Pure Python mirror of the
+    client's hot-path inner loop.  Returns the final state as a 64-char hex string.
+    """
+    import struct as _st
+    _ph_parent = bytes.fromhex(parent_hash.zfill(64))[:32]
+    _ph_merkle = bytes.fromhex(merkle_root.zfill(64))[:32]
+    _ph_miner  = miner_address.encode()[:40].ljust(40, b'\x00')
+    _ph_seed   = w_entropy_seed[:32]
+
+    scratchpad = hashlib.shake_256(
+        _POW_SCRATCHPAD_PFX + w_entropy_seed
+    ).digest(_POW_SCRATCHPAD_BYTES)
+    sp_mv = memoryview(scratchpad)
+
+    WIN_OFFSETS = [i * _POW_WINDOW_BYTES for i in range(_POW_N_WINDOWS)]
+
+    hdr = _st.pack(_POW_HDR_FMT,
+                   height, timestamp_s,
+                   _ph_parent, _ph_merkle,
+                   difficulty_bits, nonce,
+                   _ph_miner, _ph_seed)
+    h0 = hashlib.sha3_256()
+    h0.update(_POW_PREFIX)
+    h0.update(hdr)
+    state = h0.digest()
+
+    for rnd in range(_POW_MIX_ROUNDS):
+        wi = struct.unpack_from('>I', state, 0)[0] % _POW_N_WINDOWS
+        o  = WIN_OFFSETS[wi]
+        h  = hashlib.sha3_256()
+        h.update(state)
+        h.update(sp_mv[o : o + _POW_WINDOW_BYTES])
+        h.update(_POW_RND_PACKED[rnd])
+        state = h.digest()
+
+    return state.hex()
+
+
+def qtcl_pow_verify(
+    height: int,
+    parent_hash: str,
+    merkle_root: str,
+    timestamp_s: int,
+    difficulty_bits: int,
+    nonce: int,
+    miner_address: str,
+    w_entropy_seed: bytes,
+    claimed_hash: str,
+    block_timestamp_s: int = 0,   # alias accepted for compatibility
+) -> tuple:
+    """
+    Verify a submitted block's PoW.
+
+    Returns (True, "") on success or (False, reason_string) on failure.
+    Raises nothing — all exceptions are caught and returned as failures.
+    """
+    try:
+        if not claimed_hash or len(claimed_hash) != 64:
+            return False, f"claimed_hash malformed (len={len(claimed_hash) if claimed_hash else 0})"
+
+        _ts = timestamp_s or block_timestamp_s
+        computed = qtcl_pow_hash(
+            height=height,
+            timestamp_s=_ts,
+            parent_hash=parent_hash,
+            merkle_root=merkle_root,
+            difficulty_bits=difficulty_bits,
+            nonce=nonce,
+            miner_address=miner_address,
+            w_entropy_seed=w_entropy_seed,
+        )
+
+        if computed != claimed_hash.lower():
+            return False, (
+                f"hash mismatch: computed={computed[:16]}… "
+                f"claimed={claimed_hash[:16]}…"
+            )
+
+        prefix = '0' * difficulty_bits
+        if not computed.startswith(prefix):
+            return False, (
+                f"difficulty not met: need {difficulty_bits} leading zeros, "
+                f"got hash={computed[:difficulty_bits+4]}…"
+            )
+
+        return True, ""
+
+    except Exception as e:
+        return False, f"verifier exception: {type(e).__name__}: {e}"
+
+
 def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
     """qtcl_submitBlock — validate and persist a mined block directly (no Flask route needed)."""
     try:
