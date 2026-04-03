@@ -2278,7 +2278,7 @@ def _rpc_getPeers(params: Any, rpc_id: Any) -> dict:
             with get_db_cursor() as cur:
                 cur.execute("""
                     SELECT node_id, external_addr, pubkey_hash, chain_height,
-                           last_seen, capabilities, ban_score
+                           last_seen, capabilities, ban_score, mac_address, device_id
                     FROM   peer_registry
                     WHERE  last_seen > NOW() - INTERVAL '5 minutes'
                       AND  ban_score < 100
@@ -2301,6 +2301,50 @@ def _rpc_getPeers(params: Any, rpc_id: Any) -> dict:
         return _rpc_ok({"peers": peers, "count": len(peers)}, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getPeers outer exception: {e}")
+        return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": type(e).__name__})
+
+
+def _rpc_getPeersByNatGroup(params: Any, rpc_id: Any) -> dict:
+    try:
+        if isinstance(params, list):
+            params = params[0] if params else {}
+        if not isinstance(params, dict):
+            return _rpc_error(-32602, "Invalid params: object expected", rpc_id)
+        caller_ip = str(params.get("caller_ip") or "").strip()
+        my_mac = str(params.get("mac_address") or "").strip().lower()
+        if not caller_ip:
+            return _rpc_error(-32602, "caller_ip required", rpc_id)
+        peers = []
+        try:
+            with get_db_cursor() as cur:
+                cur.execute("""
+                    SELECT node_id, external_addr, pubkey_hash, chain_height,
+                           last_seen, capabilities, ban_score, mac_address, device_id, caller_ip
+                    FROM   peer_registry
+                    WHERE  caller_ip = %s
+                      AND  last_seen > NOW() - INTERVAL '5 minutes'
+                      AND  ban_score < 100
+                    ORDER  BY chain_height DESC, last_seen DESC
+                    LIMIT  50
+                """, (caller_ip,))
+                rows = cur.fetchall()
+                if rows:
+                    cols = [d[0] for d in cur.description]
+                    for row in rows:
+                        r = dict(zip(cols, row))
+                        r["last_seen"] = r["last_seen"].timestamp() if hasattr(r.get("last_seen"), "timestamp") else r.get("last_seen")
+                        if r.get("mac_address", "").lower() != my_mac:
+                            peers.append(r)
+        except Exception as _dbe:
+            logger.debug(f"[RPC-METHOD] qtcl_getPeersByNatGroup DB query: {_dbe}")
+        if not peers:
+            with _LIVE_PEERS_LOCK:
+                for nid, p in _LIVE_PEERS_CACHE.items():
+                    if p.get("caller_ip") == caller_ip and p.get("mac_address", "").lower() != my_mac:
+                        peers.append(p)
+        return _rpc_ok({"peers": peers, "count": len(peers), "nat_group": caller_ip}, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_getPeersByNatGroup exception: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": type(e).__name__})
 
 
@@ -2328,6 +2372,8 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
         node_id       = str(params.get("node_id") or "").strip().lower()
         pubkey_b64    = str(params.get("pubkey") or "").strip()
         chain_height  = int(params.get("chain_height") or 0)
+        mac_address   = str(params.get("mac_address") or "").strip().lower()
+        device_id     = str(params.get("device_id") or "").strip().lower()
 
         if not external_addr:
             return _rpc_error(-32602, "external_addr required", rpc_id)
@@ -2355,20 +2401,29 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
                         first_seen    TIMESTAMPTZ DEFAULT NOW(),
                         capabilities  JSONB       DEFAULT '[]',
                         ban_score     INTEGER     DEFAULT 0,
-                        caller_ip     TEXT        DEFAULT ''
+                        caller_ip     TEXT        DEFAULT '',
+                        mac_address   TEXT        DEFAULT '',
+                        device_id     TEXT        DEFAULT ''
                     )
                 """)
+                try:
+                    cur.execute("ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS mac_address TEXT DEFAULT ''")
+                    cur.execute("ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS device_id TEXT DEFAULT ''")
+                except Exception:
+                    pass
                 cur.execute("""
                     INSERT INTO peer_registry
-                        (node_id, external_addr, pubkey_hash, chain_height, last_seen, caller_ip)
-                    VALUES (%s, %s, %s, %s, NOW(), %s)
+                        (node_id, external_addr, pubkey_hash, chain_height, last_seen, caller_ip, mac_address, device_id)
+                    VALUES (%s, %s, %s, %s, NOW(), %s, %s, %s)
                     ON CONFLICT (node_id) DO UPDATE SET
                         external_addr = EXCLUDED.external_addr,
                         pubkey_hash   = EXCLUDED.pubkey_hash,
                         chain_height  = EXCLUDED.chain_height,
                         last_seen     = NOW(),
-                        caller_ip     = EXCLUDED.caller_ip
-                """, (node_id, external_addr, pubkey_hash, chain_height, caller_ip))
+                        caller_ip     = EXCLUDED.caller_ip,
+                        mac_address   = EXCLUDED.mac_address,
+                        device_id     = EXCLUDED.device_id
+                """, (node_id, external_addr, pubkey_hash, chain_height, caller_ip, mac_address, device_id))
         except Exception as _dbe:
             # Non-fatal: fall through to in-process cache so peer can still be served
             logger.warning(f"[RPC-METHOD] qtcl_registerPeer DB upsert failed: {_dbe}")
@@ -2382,6 +2437,8 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
                 "chain_height":  chain_height,
                 "last_seen":     time.time(),
                 "caller_ip":     caller_ip,
+                "mac_address":   mac_address,
+                "device_id":     device_id,
                 "ban_score":     0,
             }
         logger.info(f"[P2P] ✅ Peer registered: node={node_id[:16]}… addr={external_addr} h={chain_height}")
@@ -3408,6 +3465,7 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getMempoolStats":   _rpc_getMempoolStats,
     "qtcl_getMempool":        _rpc_getMempool,
     "qtcl_getPeers":          _rpc_getPeers,
+    "qtcl_getPeersByNatGroup": _rpc_getPeersByNatGroup,
     "qtcl_registerPeer":      _rpc_registerPeer,      # ← NEW: miner bootstrap registration
     "qtcl_getMyAddr":         _rpc_getMyAddr,          # ← NEW: STUN — return caller's observed IP
     "qtcl_getHealth":         _rpc_getHealth,
