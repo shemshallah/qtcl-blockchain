@@ -2345,6 +2345,22 @@ def _rpc_getPeersByNatGroup(params: Any, rpc_id: Any) -> dict:
         peers = []
         try:
             with get_db_cursor() as cur:
+                # Ensure table exists — first boot before any registerPeer call
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS peer_registry (
+                        node_id       TEXT        PRIMARY KEY,
+                        external_addr TEXT        NOT NULL,
+                        pubkey_hash   TEXT        NOT NULL DEFAULT '',
+                        chain_height  BIGINT      DEFAULT 0,
+                        last_seen     TIMESTAMPTZ DEFAULT NOW(),
+                        first_seen    TIMESTAMPTZ DEFAULT NOW(),
+                        capabilities  JSONB       DEFAULT '[]',
+                        ban_score     INTEGER     DEFAULT 0,
+                        caller_ip     TEXT        DEFAULT '',
+                        mac_address   TEXT        DEFAULT '',
+                        device_id     TEXT        DEFAULT ''
+                    )
+                """)
                 cur.execute("""
                     SELECT node_id, external_addr, pubkey_hash, chain_height,
                            last_seen, capabilities, ban_score, mac_address, device_id, caller_ip
@@ -2360,7 +2376,8 @@ def _rpc_getPeersByNatGroup(params: Any, rpc_id: Any) -> dict:
                     cols = [d[0] for d in cur.description]
                     for row in rows:
                         r = dict(zip(cols, row))
-                        r["last_seen"] = r["last_seen"].timestamp() if hasattr(r.get("last_seen"), "timestamp") else r.get("last_seen")
+                        _ls = r.get("last_seen")
+                        r["last_seen"] = _ls.timestamp() if hasattr(_ls, "timestamp") else (float(_ls) if _ls else 0.0)
                         if r.get("mac_address", "").lower() != my_mac:
                             peers.append(r)
         except Exception as _dbe:
@@ -2369,7 +2386,14 @@ def _rpc_getPeersByNatGroup(params: Any, rpc_id: Any) -> dict:
             with _LIVE_PEERS_LOCK:
                 for nid, p in _LIVE_PEERS_CACHE.items():
                     if p.get("caller_ip") == caller_ip and p.get("mac_address", "").lower() != my_mac:
-                        peers.append(p)
+                        _pc = dict(p)
+                        # Normalise last_seen to float timestamp for consistent client parsing
+                        _ls = _pc.get("last_seen", 0)
+                        if hasattr(_ls, "timestamp"):
+                            _pc["last_seen"] = _ls.timestamp()
+                        elif not isinstance(_ls, (int, float)):
+                            _pc["last_seen"] = 0.0
+                        peers.append(_pc)
         return _rpc_ok({"peers": peers, "count": len(peers), "nat_group": caller_ip}, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getPeersByNatGroup exception: {e}")
