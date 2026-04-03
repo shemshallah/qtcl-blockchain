@@ -1834,26 +1834,39 @@ def _rpc_getBalance(params: Any, rpc_id: Any) -> dict:
         if not address:
             return _rpc_error(-32602, "address required", rpc_id)
         try:
-            wallet = query_wallet_info(address)
-            if wallet is None:
-                # Address not yet in DB — return 0 balance, not an error
-                result = {
-                    "address": address,
-                    "balance": 0.0,
-                    "symbol":  "QTCL",
-                }
-            else:
-                raw_balance = int(wallet.get('balance') or 0)
-                result = {
-                    "address": address,
-                    "balance": raw_balance / 100.0,
-                    "symbol":  "QTCL",
-                }
-            logger.debug(f"[RPC-METHOD] qtcl_getBalance success: address={address}, balance={result['balance']}")
-            return _rpc_ok(result, rpc_id)
-        except Exception as be:
-            logger.exception(f"[RPC-METHOD] qtcl_getBalance: DB error: {be}")
-            return _rpc_error(-32603, f"Balance lookup failed: {str(be)}", rpc_id)
+            with get_db_cursor() as cur:
+                cur.execute(
+                    "SELECT balance, transaction_count FROM wallet_addresses WHERE address = %s",
+                    (address,)
+                )
+                row = cur.fetchone()
+                if row:
+                    wallet = {
+                        'address': address,
+                        'balance': row[0],
+                        'tx_count': row[1],
+                    }
+                else:
+                    wallet = None
+        except Exception as _wqe:
+            logger.debug(f"[RPC] query_wallet_info DB error: {_wqe}")
+            wallet = None
+        if wallet is None:
+            # Address not yet in DB — return 0 balance, not an error
+            result = {
+                "address": address,
+                "balance": 0.0,
+                "symbol":  "QTCL",
+            }
+        else:
+            raw_balance = int(wallet.get('balance') or 0)
+            result = {
+                "address": address,
+                "balance": raw_balance / 100.0,
+                "symbol":  "QTCL",
+            }
+        logger.debug(f"[RPC-METHOD] qtcl_getBalance success: address={address}, balance={result['balance']}")
+        return _rpc_ok(result, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_getBalance outer exception: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id)
