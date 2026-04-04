@@ -936,7 +936,7 @@ class HLWEEngine:
 
         private_key  = 32-byte random seed (64 hex chars)
         public_key   = b = As + e (mod q) packed as hex (n × 8 hex chars)
-        address      = SHA3-256(SHA3-256(public_key_bytes))
+        address      = "qtcl1" + SHA3-256(pubkey_bytes)[:20].hex()
         """
         private_key_hex = secrets.token_bytes(32).hex()
         public_key_hex = self.derive_public_key(private_key_hex)
