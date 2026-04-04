@@ -3421,6 +3421,35 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
         # ── Persist block + transactions (transaction 1 — no wallet writes) ──
         _block_rowcount = 0
+        hlwe_block_sig = ""
+        hlwe_pubkey = ""
+        try:
+            # 🔐 HLWE POST-QUANTUM BLOCK SIGNING — chain blocks with cryptographic signatures
+            # Sign canonical block representation: hash(height|block_hash|parent_hash|timestamp)
+            hlwe_engine = _get_hlwe_engine()
+            if hlwe_engine:
+                try:
+                    # Deterministic block message: (height || block_hash || parent || timestamp)
+                    # This creates a chain where each block's signature depends on its parent
+                    _block_msg = f"{height}|{block_hash}|{parent_hash}|{timestamp_s}".encode()
+                    _block_hash_obj = hashlib.sha3_256(_block_msg)
+                    
+                    # Sign with HLWE engine (returns {signature, public_key_hex})
+                    _sig_dict = hlwe_engine.sign_hash(_block_hash_obj.digest(), hlwe_engine.private_key_hex)
+                    hlwe_block_sig = _sig_dict.get("signature", "")
+                    hlwe_pubkey = _sig_dict.get("public_key_hex", "")
+                    
+                    if hlwe_block_sig:
+                        logger.info(f"[RPC-submitBlock] 🔐 HLWE signed block h={height}: sig={hlwe_block_sig[:32]}… pk={hlwe_pubkey[:32]}…")
+                    else:
+                        logger.warning(f"[RPC-submitBlock] ⚠️  HLWE signing failed for h={height}")
+                except Exception as hse:
+                    logger.warning(f"[RPC-submitBlock] HLWE sign error (non-fatal): {hse}")
+            else:
+                logger.debug(f"[RPC-submitBlock] HLWE engine not available for h={height}")
+        except Exception as hse:
+            logger.warning(f"[RPC-submitBlock] HLWE initialization error: {hse}")
+        
         try:
             with get_db_cursor() as cur:
                 cur.execute("""
@@ -3428,8 +3457,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     (height, block_number, block_hash, previous_hash, timestamp,
                      oracle_w_state_hash, validator_public_key, nonce,
                      difficulty, entropy_score, transactions_root,
-                     pq_curr, pq_last, mermin_value, mermin_violated)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     pq_curr, pq_last, mermin_value, mermin_violated,
+                     hlwe_block_signature, hlwe_pubkey_hex, block_signature_valid)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (height) DO NOTHING
                 """, (
                     height, height, block_hash, parent_hash, timestamp_s,
@@ -3438,15 +3468,28 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     difficulty_bits, w_state_fidelity, merkle_root,
                     height, max(0, height - 1),
                     mermin_value, mermin_violated,
+                    hlwe_block_sig, hlwe_pubkey, bool(hlwe_block_sig),
                 ))
                 # Capture rowcount IMMEDIATELY after block INSERT
                 _block_rowcount = cur.rowcount
 
                 # Persist user-supplied transactions
+                _tx_persisted = 0
+                _coinbase_count = 0
                 for tx in (txs or []):
                     tx_id = tx.get("tx_id") or tx.get("tx_hash", "")
                     if not tx_id:
                         continue
+                    tx_type = tx.get("tx_type", "transfer")
+                    tx_to = tx.get("to_addr", "")
+                    tx_amount = float(tx.get("amount", 0))
+                    
+                    # 🔐 Log coinbase transactions explicitly
+                    if tx_type == "coinbase":
+                        _coinbase_count += 1
+                        logger.critical(f"[RPC-submitBlock] 💰 Persisting coinbase tx #{_coinbase_count} h={height}: "
+                                       f"to={tx_to[:16]}… amount={tx_amount/100:.8f} QTCL type={tx_type}")
+                    
                     cur.execute("""
                         INSERT INTO transactions
                         (tx_hash, from_address, to_address, amount,
@@ -3464,6 +3507,10 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                         tx.get("tx_type", "transfer"),
                         height,
                     ))
+                    _tx_persisted += 1
+                
+                if _coinbase_count > 0:
+                    logger.critical(f"[RPC-submitBlock] ✅ Persisted {_tx_persisted} transactions ({_coinbase_count} coinbases) for h={height}")
         except Exception as dbe:
             logger.exception(f"[RPC-submitBlock] DB error: {dbe}")
             # Even if PG fails, we attempt to continue with SQLite if we can.
@@ -3492,6 +3539,15 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                 
                 treasury_reward  = base_treasury_reward + total_donations
                 treasury_address = TessellationRewardSchedule.TREASURY_ADDRESS
+                
+                # 🔐 Log the complete block reward split
+                _miner_qtcl = miner_reward / 100.0
+                _treasury_qtcl = treasury_reward / 100.0
+                _total_qtcl = _miner_qtcl + _treasury_qtcl
+                logger.critical(
+                    f"[RPC-submitBlock] 🎯 BLOCK REWARD SPLIT h={height}: "
+                    f"miner={_miner_qtcl:.2f} QTCL + treasury={_treasury_qtcl:.2f} QTCL = total={_total_qtcl:.2f} QTCL"
+                )
 
                 # Canonical deterministic coinbase tx hashes for ledger
                 _cb_miner_hash = hashlib.sha3_256(
@@ -3517,9 +3573,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                             balance           = wallet_addresses.balance + EXCLUDED.balance,
                             transaction_count = wallet_addresses.transaction_count + 1
                     """, (miner_address, _miner_fp, _miner_fp, miner_reward))
-                    logger.info(
-                        f"[RPC-submitBlock] ⛏  Miner credited: {miner_reward} base units "
-                        f"({miner_reward/100:.2f} QTCL) → {miner_address[:22]}…"
+                    logger.critical(
+                        f"[RPC-submitBlock] ⛏  MINER COINBASE: {_miner_qtcl:.8f} QTCL ({miner_reward} base) "
+                        f"→ {miner_address[:22]}…  [tx={_cb_miner_hash[:16]}…]"
                     )
 
                     # ── Treasury wallet balance ──────────────────────────────────
@@ -3534,9 +3590,9 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                                 balance           = wallet_addresses.balance + EXCLUDED.balance,
                                 transaction_count = wallet_addresses.transaction_count + 1
                         """, (treasury_address, _treas_fp, _treas_fp, treasury_reward))
-                        logger.info(
-                            f"[RPC-submitBlock] 💰 Treasury credited: {treasury_reward} base units "
-                            f"({treasury_reward/100:.2f} QTCL) → {treasury_address[:22]}…"
+                        logger.critical(
+                            f"[RPC-submitBlock] 💰 TREASURY COINBASE: {_treasury_qtcl:.8f} QTCL ({treasury_reward} base) "
+                            f"→ {treasury_address[:22]}…  [tx={_cb_treasury_hash[:16]}…]"
                         )
 
                     # ── Canonical coinbase transaction rows ──────────────────────
@@ -4022,7 +4078,7 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_registerPeer":      _rpc_registerPeer,      # ← NEW: miner bootstrap registration
     "qtcl_getMyAddr":         _rpc_getMyAddr,          # ← NEW: STUN — return caller's observed IP
     "qtcl_getHealth":         _rpc_getHealth,
-    "qtcl_getTreasuryAddress": lambda p, rid: _rpc_ok({"treasury_address": getattr(TessellationRewardSchedule, "TREASURY_ADDRESS", "qtcl1f5080131c276070d09bd2cd8c4bea99d046663b1")}, rid),
+    "qtcl_getTreasuryAddress": lambda p, rid: _rpc_ok({"treasury_address": getattr(TessellationRewardSchedule, "TREASURY_ADDRESS", "qtcl1d1ae7c762036f3731a16d84c8ec4be75912edb9d")}, rid),
     "qtcl_getEvents":         _rpc_getEvents,
     "qtcl_getOracleRegistry": _rpc_getOracleRegistry,
     "qtcl_getOracleRecord":   _rpc_getOracleRecord,
