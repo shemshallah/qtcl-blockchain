@@ -740,10 +740,6 @@ class HLWEEngine:
             "address": address
         }
 
-            except Exception as e:
-                logger.error(f"[HLWE] Signing failed: {e}")
-                raise
-
     def verify_signature(self, message_hash: bytes, signature_dict: Dict[str, str], public_key_hex: str) -> bool:
         """
         Verify HLWE signature.
