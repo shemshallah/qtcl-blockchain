@@ -1156,7 +1156,11 @@ class _SupHTTPCursor:
             if not rows_dicts: self._rows=[]; self._pos=0; self._rowcount=0; self._description=None; return
             keys = list(rows_dicts[0].keys())
             self._description = [(k,None,None,None,None,None,None) for k in keys]
-            self._rows = [tuple(r.get(k) for k in keys) for r in rows_dicts]
+            # Support both dict and tuple results based on cursor_factory simulation
+            if getattr(self, '_as_dict', False):
+                self._rows = rows_dicts
+            else:
+                self._rows = [tuple(r.get(k) for k in keys) for r in rows_dicts]
             self._pos = 0; self._rowcount = len(self._rows)
         else:
             self._rowcount = _suphttp_exec_write(final)
@@ -1182,9 +1186,12 @@ class _SupHTTPConn:
     commit()/rollback() are no-ops — PostgREST RPC is auto-committed per call.
     .closed mirrors psycopg2 int semantics: 0=open, 1=closed, 2=lost."""
     def __init__(self): self.closed = 0; self.autocommit = True   # 0 = open (psycopg2 int semantics)
-    def cursor(self, *_, **__):
+    def cursor(self, cursor_factory=None, **__):
         if self.closed: raise RuntimeError("connection closed")
-        return _SupHTTPCursor()
+        c = _SupHTTPCursor()
+        # If any factory is provided (like RealDictCursor), return rows as dicts
+        c._as_dict = (cursor_factory is not None)
+        return c
     def commit(self): pass   # no-op: stateless HTTPS
     def rollback(self):
         logger.debug("[SUPHTTP] rollback() — HTTP connections are auto-committed; no-op")
@@ -4795,6 +4802,16 @@ try:
     _fix_pq_values_on_startup()
 except Exception:
     pass
+
+# Synchronize mempool database pool with server pool
+try:
+    import mempool as _mp_sync
+    # ⚛️ CRITICAL: Share the server's db_pool with the mempool module
+    # ensures both use the same (possibly HTTP-mode) connection logic.
+    _mp_sync._db = db_pool
+    logger.info("[DB] Mempool database pool synchronized with server (museum-grade sync)")
+except Exception as _sync_err:
+    logger.debug(f"[DB] Mempool sync failed: {_sync_err}")
 
 # Gunicorn and wsgi_config.py require both 'app' and 'application' exports
 application = app

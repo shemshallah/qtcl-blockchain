@@ -786,7 +786,10 @@ class NonceOracle:
                       AND status IN ('confirmed', 'included')
                 """, (address,))
                 row = cur.fetchone()
-                return int(row['max_nonce']) if row else -1
+                if not row: return -1
+                if isinstance(row, dict):
+                    return int(row.get('max_nonce', -1))
+                return int(row[0])
         except Exception as exc:
             logger.debug(f"[NONCE] DB load failed for {address[:12]}: {exc}")
             return -1
@@ -875,7 +878,11 @@ class BalanceOracle:
                     WHERE address = %s
                 """, (address,))
                 row = cur.fetchone()
-                return int(row['balance']) if row else 0
+                if not row: return 0
+                # Robustly handle both dict-style (RealDictCursor) and tuple-style results
+                if isinstance(row, dict):
+                    return int(row.get('balance', 0))
+                return int(row[0])
         except Exception as exc:
             logger.debug(f"[BALANCE] DB read failed for {address[:12]}: {exc}")
             return 0
@@ -1987,9 +1994,10 @@ class Mempool:
                         meta = json.loads(meta)
                     fee_base    = int(meta.get('fee_base', MIN_RELAY_FEE_ABS))
                     # Prefer stored timestamp_ns; fall back to created_at conversion
+                    _created_at = row.get('created_at') if isinstance(row, dict) else row[8]
                     ts_ns       = int(meta.get('timestamp_ns', 0)) or (
-                                  int(row['created_at'].timestamp() * 1e9)
-                                  if row['created_at'] else time.time_ns())
+                                  int(_created_at.timestamp() * 1e9)
+                                  if _created_at else time.time_ns())
                     # signature stored in metadata by _persist_tx; fall back to quantum_state_hash
                     recovered_sig = (meta.get('signature')
                                      or row.get('quantum_state_hash')
