@@ -2172,6 +2172,10 @@ def _resolve_dsn() -> Optional[str]:
     pw   = os.getenv('POOLER_PASSWORD')
     db   = os.getenv('POOLER_DB', 'postgres')
     port = os.getenv('POOLER_PORT', '5432')
+    try:
+        port = int(port)
+    except (ValueError, TypeError):
+        port = 5432
     if host and user and pw:
         return f"postgresql://{quote_plus(user)}:{quote_plus(pw)}@{host}:{port}/{db}"
     return None

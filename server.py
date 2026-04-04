@@ -594,6 +594,13 @@ if not POOLER_URL:
     POOLER_PASSWORD = os.getenv('POOLER_PASSWORD')
     POOLER_DB       = os.getenv('POOLER_DB', 'postgres')
     POOLER_PORT     = os.getenv('POOLER_PORT', '6543')
+    
+    # Robust integer parsing for POOLER_PORT
+    try:
+        _port_int = int(POOLER_PORT)
+    except (ValueError, TypeError):
+        # If it's literally the string "POOLER_PORT" or invalid, fallback
+        POOLER_PORT = '6543'
 
     if POOLER_HOST and POOLER_USER and POOLER_PASSWORD:
         POOLER_URL = f"postgresql://{POOLER_USER}:{POOLER_PASSWORD}@{POOLER_HOST}:{POOLER_PORT}/{POOLER_DB}"
@@ -1569,6 +1576,19 @@ def _lazy_ensure_peer_registry():
         return
     try:
         with get_db_cursor() as cur:
+            # Check for legacy peer_id column and rename to node_id
+            try:
+                cur.execute("""
+                    DO $$ 
+                    BEGIN 
+                        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='peer_registry' AND column_name='peer_id') THEN
+                            ALTER TABLE peer_registry RENAME COLUMN peer_id TO node_id;
+                        END IF;
+                    END $$;
+                """)
+            except Exception:
+                pass
+
             # Create table with node_id as PRIMARY KEY
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS peer_registry (
@@ -2617,17 +2637,34 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
 
         # Derive caller IP from Flask request context (STUN: what address does Koyeb see?)
         try:
-            caller_ip = request.headers.get("X-Forwarded-For", request.remote_addr or "").split(",")[0].strip()
+            # Check standard proxy headers first
+            forwarded = request.headers.get("X-Forwarded-For", "")
+            real_ip = request.headers.get("X-Real-IP", "")
+            cf_ip = request.headers.get("CF-Connecting-IP", "")
+            
+            if cf_ip:
+                caller_ip = cf_ip
+            elif real_ip:
+                caller_ip = real_ip
+            elif forwarded:
+                caller_ip = forwarded.split(",")[0].strip()
+            else:
+                caller_ip = request.remote_addr or "127.0.0.1"
         except Exception:
-            caller_ip = ""
+            caller_ip = "127.0.0.1"
 
         pubkey_hash = hashlib.sha256(pubkey_b64.encode()).hexdigest()[:32] if pubkey_b64 else node_id[:32]
 
         # ── Device fingerprinting (NAT:MAC:Fingerprint chain) ───────────────────
-        # Pair NAT (caller_ip) with reported MAC and DeviceID to identify unique hardware
-        # even if node_id (wallet key) rotates.
-        fp_payload = f"NAT:{caller_ip}|MAC:{mac_address}|DEV:{device_id}"
+        # Pair NAT (caller_ip) with reported external IP, reported MAC and DeviceID 
+        # to identify unique hardware even if node_id (wallet key) rotates.
+        # Reported IP helps distinguish multiple nodes behind the same NAT.
+        reported_ip = external_addr.split(":")[0] if ":" in external_addr else external_addr
+        fp_payload = f"NAT:{caller_ip}|REP:{reported_ip}|MAC:{mac_address}|DEV:{device_id}"
         fingerprint = hashlib.sha256(fp_payload.encode()).hexdigest()
+
+        # Debug pairing details
+        logger.debug(f"[P2P] Fingerprint details — NAT: {caller_ip}, REP: {reported_ip}, MAC: {mac_address}, DEV: {device_id}")
 
         # Upsert into peer_registry — CREATE TABLE IF NOT EXISTS guard in case migration pending
         try:
@@ -2737,7 +2774,17 @@ def _rpc_getMyAddr(params: Any, rpc_id: Any) -> dict:
     try:
         try:
             forwarded = request.headers.get("X-Forwarded-For", "")
-            observed_ip = forwarded.split(",")[0].strip() if forwarded else request.remote_addr or "unknown"
+            real_ip = request.headers.get("X-Real-IP", "")
+            cf_ip = request.headers.get("CF-Connecting-IP", "")
+            
+            if cf_ip:
+                observed_ip = cf_ip
+            elif real_ip:
+                observed_ip = real_ip
+            elif forwarded:
+                observed_ip = forwarded.split(",")[0].strip()
+            else:
+                observed_ip = request.remote_addr or "unknown"
         except Exception:
             observed_ip = "unknown"
         p2p_port = int(os.environ.get("P2P_PORT", "9091"))
@@ -2755,16 +2802,16 @@ def _rpc_getHealth(params: Any, rpc_id: Any) -> dict:
     """qtcl_getHealth — full system health vector."""
     try:
         logger.debug(f"[RPC-METHOD] qtcl_getHealth called with params={params}, id={rpc_id}")
-        po = _get_pyth()
-        logger.debug(f"[RPC-METHOD] qtcl_getHealth: oracle_ready={ORACLE_AVAILABLE}, lattice_ready={LATTICE is not None}, pyth_ready={po is not None}")
+        from oracle import PYTH_ORACLE as _po
+        logger.debug(f"[RPC-METHOD] qtcl_getHealth: oracle_ready={ORACLE_AVAILABLE}, lattice_ready={LATTICE is not None}, pyth_ready={_po is not None}")
         result = {
             "status":           "ok",
             "ts":               time.time(),
             "uptime_s":         round(time.time() - _SERVER_START_TIME, 1),
             "oracle_ready":     ORACLE_AVAILABLE,
             "lattice_ready":    LATTICE is not None,
-            "pyth_ready":       po is not None,
-            "pyth_stats":       po.stats() if po else {},
+            "pyth_ready":       _po is not None,
+            "pyth_stats":       _po.stats() if _po else {},
             "jsonrpc_version":  _JSONRPC_VERSION,
             "qtcl_server":      "v6",
         }
@@ -4193,18 +4240,16 @@ def _get_pyth():
 @app.route("/rpc/health", methods=["GET"])
 def rpc_health():
     """GET /rpc/health — JSON-RPC engine and Pyth oracle health."""
-    po = _get_pyth()
+    from oracle import PYTH_ORACLE as _po
     return jsonify({
         "rpc_engine":       "ok",
         "jsonrpc_version":  _JSONRPC_VERSION,
         "method_count":     len(_RPC_METHODS),
-        "pyth_ready":       po is not None,
-        "pyth_stats":       po.stats() if po else {},
-        "oracle_ready":     ORACLE_AVAILABLE,
-        "lattice_ready":    LATTICE is not None,
-        "uptime_s":         round(time.time() - _SERVER_START_TIME, 1),
-        "ts":               time.time(),
+        "pyth_ready":       _po is not None,
+        "pyth_stats":       _po.stats() if _po else {},
+        "uptime_s":         time.time() - _SERVER_START_TIME,
     }), 200
+
 
 
 @app.route("/health", methods=["GET"])

@@ -1592,15 +1592,23 @@ class OracleWStateManager:
                 return None
             raise
         readings: List[BlockFieldReading] = []
-        for fut in as_completed(bf_futures, timeout=MEASUREMENT_TIMEOUT):
-            try:
-                r = fut.result()
-                if r is not None:
-                    readings.append(r)
-                    with self._bf_lock:
-                        self.block_field_readings[r.oracle_id] = r
-            except Exception as exc:
-                logger.error(f"[ORACLE CLUSTER] Oracle-{bf_futures[fut].oracle_id+1} BF exception: {exc}")
+        try:
+            for fut in as_completed(bf_futures, timeout=MEASUREMENT_TIMEOUT):
+                try:
+                    r = fut.result()
+                    if r is not None:
+                        readings.append(r)
+                        with self._bf_lock:
+                            self.block_field_readings[r.oracle_id] = r
+                except Exception as exc:
+                    logger.error(f"[ORACLE CLUSTER] Oracle-{bf_futures[fut].oracle_id+1} BF exception: {exc}")
+        except concurrent.futures.TimeoutError:
+            unfinished = [f for f in bf_futures if not f.done()]
+            logger.error(f"[ORACLE CLUSTER] Stream error: {len(unfinished)} (of 5) futures unfinished (timeout={MEASUREMENT_TIMEOUT}s)")
+            # Attempt to cancel unfinished futures to free resources
+            for f in unfinished:
+                f.cancel()
+        
         bf_ms = (time.time_ns() - bf_start_ns) / 1e6
 
         if len(readings) < 3:
