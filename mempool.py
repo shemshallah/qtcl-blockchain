@@ -85,8 +85,8 @@ logger = logging.getLogger(__name__)
 
 MAX_MEMPOOL_SIZE          = 100_000          # maximum accepted transactions
 TX_VSIZE_BYTES            = 1                # QTCL TX unit size — fee_rate = fee_base directly (not Bitcoin vbyte model)
-MIN_RELAY_FEE_RATE        = 1                # minimum fee_rate to relay (= 1 base unit minimum)
-MIN_RELAY_FEE_ABS         = 1               # absolute minimum fee in base units
+MIN_RELAY_FEE_RATE        = 0                # minimum fee_rate to relay (fees removed)
+MIN_RELAY_FEE_ABS         = 0               # absolute minimum fee in base units
 MEMPOOL_TTL_HOURS         = 72              # purge TXs older than this
 RBF_FEE_BUMP_PCT          = 10             # replace-by-fee requires +10% fee_rate
 EVICTION_BATCH            = 500            # how many low-fee TXs to drop when full
@@ -107,14 +107,17 @@ ADDRESS_PREFIX            = "qtcl1"       # canonical address prefix
 # Oracle (HLWE verification + W-state entropy)
 try:
     from oracle import ORACLE, HLWESignature, HLWEVerifier, ADDRESS_PREFIX as _ORACLE_PREFIX
+    from hlwe_engine import HLWEEngine
     ADDRESS_PREFIX = _ORACLE_PREFIX
     _ORACLE_AVAILABLE = True
     _VERIFIER = HLWEVerifier()
-    logger.info("[MEMPOOL] ✅ Oracle / HLWE verifier loaded")
+    _HLWE_ENGINE = HLWEEngine()
+    logger.info("[MEMPOOL] ✅ Oracle / HLWE engine loaded")
 except ImportError:
     _ORACLE_AVAILABLE = False
     _VERIFIER = None
-    logger.warning("[MEMPOOL] ⚠️  oracle.py not found — HLWE verification in advisory mode")
+    _HLWE_ENGINE = None
+    logger.warning("[MEMPOOL] ⚠️  oracle.py or hlwe_engine.py not found — HLWE verification in advisory mode")
 
 # Block field entropy (W-state quantum entropy pool)
 try:
@@ -317,18 +320,32 @@ class MempoolTx:
         timestamp_ns: int,
     ) -> str:
         """
-        Deterministic TX hash — identical computation must be possible client-side.
-        All numeric fields are stringified to avoid floating-point divergence.
+        Deterministic TX hash — identical to qtcl_client.py submit_transaction.
+        Uses colon-separated format for the public tx_hash.
         """
-        payload = json.dumps({
-            'from_address': from_address,
-            'to_address'  : to_address,
-            'amount'      : str(amount_base),
-            'nonce'       : str(nonce),
-            'fee'         : str(fee_base),
-            'timestamp_ns': str(timestamp_ns),
-        }, sort_keys=True)
-        return hashlib.sha3_256(payload.encode()).hexdigest()
+        # Convert base units back to QTCL (float) to match client-side calculation
+        # Important: maintain exact string representation as float
+        amount_qtcl = float(amount_base / 100.0)
+        fee_qtcl = float(fee_base / 100.0)
+        
+        # Format: from_addr:to_addr:amount:fee:nonce:ts
+        tx_data = f"{from_address}:{to_address}:{amount_qtcl}:{fee_qtcl}:{nonce}:{timestamp_ns}"
+        return hashlib.sha256(tx_data.encode()).hexdigest()
+
+    def get_signing_hash(self) -> bytes:
+        """
+        Calculate binary hash used for HLWE signing (must match client _integrate_wallet_send).
+        Uses JSON-serialized payload with keys: sender, recipient, amount, nonce.
+        """
+        # Mapping mempool fields back to client-side signing fields
+        tx_data = {
+            'sender': self.from_address,
+            'recipient': self.to_address,
+            'amount': self.amount_base / 100.0,
+            'nonce': self.nonce
+        }
+        tx_json = json.dumps(tx_data, sort_keys=True, default=str)
+        return hashlib.sha256(tx_json.encode('utf-8')).digest()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # FEE HISTOGRAM — Bitcoin-style estimatesmartfee
@@ -1105,7 +1122,7 @@ class Mempool:
                         ), None
 
                 # ── [S] SIGNATURE ──────────────────────────────────────────
-                sig_valid, sig_reason = self._verify_signature(tx_hash, sig_raw, from_addr)
+                sig_valid, sig_reason = self._verify_signature(tx_hash, sig_raw, from_addr, norm)
                 if not sig_valid:
                     self._stats['total_rejected'] += 1
                     return AcceptResult.INVALID_SIG, f"HLWE verification failed: {sig_reason}", None
@@ -1277,9 +1294,12 @@ class Mempool:
             _treasury_addr = _TRS_mp.TREASURY_ADDRESS
         except Exception:
             _treasury_base = 800 - block_reward_base   # fallback: remainder
-            _treasury_addr = 'qtcl110fc58e3c441106cc1e54ae41da5d15868525a87'
+            _treasury_addr = 'qtcl1d1ae7c762036f3731a16d84c8ec4be75912edb9d'
+        # Collect all donations (formerly fees) for the treasury
+        total_donations = sum(tx.fee_base for tx in selected)
+        
         treasury_coinbase = self._build_treasury_coinbase(
-            block_height, _treasury_base, _treasury_addr
+            block_height, _treasury_base + total_donations, _treasury_addr
         )
         return selected, coinbase, treasury_coinbase
 
@@ -1520,122 +1540,61 @@ class Mempool:
         return sorted(txs, key=lambda t: boosted.get(t.tx_hash, t.fee_rate), reverse=True)
 
     def _verify_signature(
-        self, tx_hash: str, sig_raw: Any, from_address: str
+        self, tx_hash: str, sig_raw: Any, from_address: str, norm: Dict[str, Any]
     ) -> Tuple[bool, str]:
         """
-        Verify HLWE signature with format conversion.
-
-        CRITICAL FIX: Handles both formats:
-        1. Simple format (client sends): {signature_hex, public_key, ...}
-        2. HLWE format (server expects): {commitment, witness, proof, public_key_hex}
-
-        This method converts simple → HLWE format automatically.
+        Verify HLWE signature using canonical HLWE engine.
+        Matches client-side _integrate_wallet_send exactly.
         """
-        import hashlib
-        import hmac
-        from hashlib import sha3_256, shake_256
-        
         if sig_raw is None or sig_raw == '' or sig_raw == '{}':
-            logger.debug(f"[MEMPOOL-SIG] No signature for {tx_hash[:12]}… — advisory pass")
-            return True, "no_signature_advisory"
+            logger.debug(f"[MEMPOOL-SIG] No signature for {tx_hash[:12]}… — rejecting")
+            return False, "missing_signature"
 
-        # Parse signature format
+        # Parse signature
         sig_dict = None
         if isinstance(sig_raw, str):
-            if sig_raw.strip().startswith('{'):
-                try:
-                    sig_dict = json.loads(sig_raw)
-                except (json.JSONDecodeError, ValueError):
-                    logger.warning(f"[MEMPOOL-SIG] Failed to parse signature JSON")
-                    return False, "invalid_signature_json"
-            else:
-                # Plain hex - wrap it
-                if len(sig_raw) == 64 and all(c in '0123456789abcdefABCDEF' for c in sig_raw):
-                    sig_dict = {"signature_hex": sig_raw, "method": "sha3_256_plain"}
-                else:
-                    return False, "invalid_signature_format"
-        elif isinstance(sig_dict, dict):
+            try:
+                sig_dict = json.loads(sig_raw)
+            except:
+                return False, "invalid_signature_json"
+        elif isinstance(sig_raw, dict):
             sig_dict = sig_raw
         else:
             return False, "invalid_signature_type"
 
-        # ── SIGNATURE FORMAT CONVERSION ──────────────────────────────────
-        # If we have simple format, convert to HLWE format
-        if sig_dict and 'signature_hex' in sig_dict:
-            # Simple format detected - convert to HLWE
-            logger.debug(f"[MEMPOOL-SIX] Converting simple signature to HLWE format")
-            
-            sig_hex = sig_dict.get('signature_hex')
-            pub_key = sig_dict.get('public_key') or sig_dict.get('public_key_hex', '')
-            
-            try:
-                # Derive HLWE fields from simple signature
-                # These are synthetic fields that allow verification to proceed
-                
-                # Get public key bytes
-                if isinstance(pub_key, str) and len(pub_key) > 10:
-                    pub_bytes = bytes.fromhex(pub_key[:128])  # First 64 hex chars = 32 bytes
-                else:
-                    pub_bytes = bytes.fromhex('00' * 32)  # Fallback: zero key
-                
-                # Generate witness from public key
-                witness_hash = sha3_256(pub_bytes + sig_hex.encode()).digest()
-                witness_hex = witness_hash.hex()
-                
-                # Generate commitment from tx_hash, witness, public key
-                commitment_source = pub_bytes + bytes.fromhex(witness_hex[:64]) + bytes.fromhex(tx_hash[:64])
-                commitment_hash = sha3_256(commitment_source).digest()
-                commitment_hex = commitment_hash.hex()
-                
-                # Generate proof using HMAC-SHA3
-                proof_source = witness_hex.encode() + tx_hash.encode()
-                proof_hash = hmac.new(pub_bytes, proof_source, hashlib.sha3_256).digest()
-                proof_hex = proof_hash.hex()
-                
-                # Reconstruct as proper HLWE signature
-                hlwe_sig_dict = {
-                    'commitment': commitment_hex,
-                    'witness': witness_hex,
-                    'proof': proof_hex,
-                    'public_key_hex': pub_key if pub_key else '',
-                    'w_entropy_hash': sig_hex,  # Store original sig as entropy hash
-                    'derivation_path': sig_dict.get('derivation_path', 'm/0/0/0'),
-                    'timestamp_ns': sig_dict.get('timestamp_ns', str(int(time.time_ns())))
-                }
-                
-                sig_dict = hlwe_sig_dict
-                logger.debug(f"[MEMPOOL-SIG] ✅ Converted to HLWE format for {tx_hash[:12]}…")
-            
-            except Exception as e:
-                logger.warning(f"[MEMPOOL-SIG] Failed to convert signature: {e}")
-                # Fall through to verification with original dict
-                pass
-
-        # ── VERIFICATION ─────────────────────────────────────────────────
-        # Try Oracle first
-        if _ORACLE_AVAILABLE:
-            try:
-                ok, reason = ORACLE.verify_transaction(tx_hash, sig_dict, from_address)
-                if ok:
-                    logger.debug(f"[MEMPOOL-SIG] ✅ Oracle verified signature for {tx_hash[:12]}…")
-                else:
-                    logger.debug(f"[MEMPOOL-SIG] ❌ Oracle rejected: {reason}")
-                return ok, reason
-            except Exception as exc:
-                logger.debug(f"[MEMPOOL-SIG] Oracle verification failed ({exc}), falling back to standalone")
-
-        # Standalone HLWE verifier
+        # ── CANONICAL VERIFICATION ──────────────────────────────────────
         try:
-            sig_json = json.dumps(sig_dict) if isinstance(sig_dict, dict) else sig_dict
-            ok, reason = _hlwe_verifier.verify(tx_hash, sig_json, from_address)
-            if ok:
-                logger.debug(f"[MEMPOOL-SIG] ✅ Standalone verifier approved for {tx_hash[:12]}…")
-            else:
-                logger.debug(f"[MEMPOOL-SIG] ❌ Standalone verifier rejected: {reason}")
-            return ok, reason
+            pub_key_hex = sig_dict.get('public_key_hex') or sig_dict.get('public_key', '')
+            if not pub_key_hex:
+                return False, "missing_public_key_in_signature"
+
+            # 1. Reconstruct signing hash (the actual bytes signed by client)
+            # Client signs: sha256(json.dumps({'sender':..., 'recipient':..., 'amount':..., 'nonce':...}))
+            tx_data = {
+                'sender': norm['from_address'],
+                'recipient': norm['to_address'],
+                'amount': norm['amount_base'] / 100.0,
+                'nonce': norm['nonce']
+            }
+            tx_json = json.dumps(tx_data, sort_keys=True, default=str)
+            logger.debug(f"[MEMPOOL-SIG] Reconstructed JSON: {tx_json}")
+            signing_hash_bytes = hashlib.sha256(tx_json.encode('utf-8')).digest()
+            signing_hash_hex = signing_hash_bytes.hex()
+            logger.debug(f"[MEMPOOL-SIG] Signing hash: {signing_hash_hex}")
+
+            # 2. Verify via Oracle
+            if _ORACLE_AVAILABLE:
+                # Pass the ACTUAL signing hash to the oracle
+                ok, reason = ORACLE.verify_transaction(signing_hash_hex, sig_dict, from_address)
+                if ok:
+                    return True, "valid"
+                return False, reason
+            
+            return False, "oracle_unavailable"
+
         except Exception as e:
-            logger.error(f"[MEMPOOL-SIG] Standalone verifier crashed: {e}")
-            return False, f"verification_error: {str(e)[:50]}"
+            logger.error(f"[MEMPOOL-SIG] Verification error: {e}")
+            return False, f"verification_error: {str(e)}"
 
     def _validate_format(
         self, raw: Dict[str, Any]
@@ -1843,12 +1802,12 @@ class Mempool:
         self,
         block_height      : int,
         treasury_reward   : int,
-        treasury_address  : str = 'qtcl110fc58e3c441106cc1e54ae41da5d15868525a87',
+        treasury_address  : str = 'qtcl1d1ae7c762036f3731a16d84c8ec4be75912edb9d',
         w_entropy_hash    : str = '',
     ) -> 'MempoolTx':
         """
         Build treasury coinbase (slot 1) - always paid on-chain regardless of miner.
-        Treasury address: qtcl110fc58e3c441106cc1e54ae41da5d15868525a87 (hardcoded)
+        Treasury address: qtcl1d1ae7c762036f3731a16d84c8ec4be75912edb9d (hardcoded)
         """
         import hashlib as _hl
         raw_input = f"TREASURY_COINBASE:{block_height}:{treasury_address}:{treasury_reward}:{w_entropy_hash}".encode()

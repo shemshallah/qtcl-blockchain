@@ -3442,7 +3442,20 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
             try:
                 rewards          = TessellationRewardSchedule.get_rewards_for_height(height)
                 miner_reward     = rewards.get('miner', 720)
-                treasury_reward  = rewards.get('treasury', 80)
+                
+                # Base treasury reward + all transaction donations (formerly fees)
+                base_treasury_reward = rewards.get('treasury', 80)
+                total_donations = 0
+                for tx in (txs or []):
+                    # Accept 'fee' (float QTCL) or 'fee_base' (int base units)
+                    f = tx.get('fee', tx.get('fee_base', 0))
+                    if isinstance(f, (float, str)):
+                        try: total_donations += int(round(float(f) * 100))
+                        except: pass
+                    else:
+                        total_donations += int(f)
+                
+                treasury_reward  = base_treasury_reward + total_donations
                 treasury_address = TessellationRewardSchedule.TREASURY_ADDRESS
 
                 # Canonical deterministic coinbase tx hashes for ledger
@@ -3749,6 +3762,34 @@ def _rpc_getLatestDMSnapshots(params: Any, rpc_id: Any) -> dict:
 
 
 
+def _rpc_submitTransaction(params: Any, rpc_id: Any) -> dict:
+    """qtcl_submitTransaction — validate and accept a transaction into the mempool."""
+    try:
+        if not params or not isinstance(params, (list, tuple)) or len(params) < 1:
+            return _rpc_error(-32602, "params[0] must be the transaction object", rpc_id)
+        
+        tx_data = params[0]
+        if not isinstance(tx_data, dict):
+            return _rpc_error(-32602, "transaction must be a JSON object", rpc_id)
+            
+        from mempool import get_mempool
+        result_code, message, tx = get_mempool().accept(tx_data)
+        
+        if tx:
+            return _rpc_ok({
+                "status": "accepted",
+                "tx_hash": tx.tx_hash,
+                "message": message,
+                "accepted": True
+            }, rpc_id)
+        else:
+            return _rpc_error(-32000, f"Transaction rejected: {message}", rpc_id, {"code": result_code})
+            
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_submitTransaction error: {e}")
+        return _rpc_error(-32603, f"Internal error during submission: {str(e)}", rpc_id)
+
+
 def _rpc_getMempool(params: Any, rpc_id: Any) -> dict:
     """qtcl_getMempool — pending transaction list for block building."""
     try:
@@ -3937,11 +3978,13 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getPythPrice":      _rpc_getPythPrice,
     "qtcl_getMempoolStats":   _rpc_getMempoolStats,
     "qtcl_getMempool":        _rpc_getMempool,
+    "qtcl_submitTransaction": _rpc_submitTransaction,
     "qtcl_getPeers":          _rpc_getPeers,
     "qtcl_getPeersByNatGroup": _rpc_getPeersByNatGroup,
     "qtcl_registerPeer":      _rpc_registerPeer,      # ← NEW: miner bootstrap registration
     "qtcl_getMyAddr":         _rpc_getMyAddr,          # ← NEW: STUN — return caller's observed IP
     "qtcl_getHealth":         _rpc_getHealth,
+    "qtcl_getTreasuryAddress": lambda p, rid: _rpc_ok({"treasury_address": TessellationRewardSchedule.TREASURY_ADDRESS}, rid),
     "qtcl_getEvents":         _rpc_getEvents,
     "qtcl_getOracleRegistry": _rpc_getOracleRegistry,
     "qtcl_getOracleRecord":   _rpc_getOracleRecord,
