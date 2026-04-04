@@ -1301,7 +1301,7 @@ class Mempool:
             _treasury_addr = _TRS_mp.TREASURY_ADDRESS
         except Exception:
             _treasury_base = 800 - block_reward_base   # fallback: remainder
-            _treasury_addr = 'qtcl1d1ae7c762036f3731a16d84c8ec4be75912edb9d'
+            _treasury_addr = 'qtcl1f5080131c276070d09bd2cd8c4bea99d046663b1'
         # Collect all donations (formerly fees) for the treasury
         total_donations = sum(tx.fee_base for tx in selected)
         
@@ -1809,12 +1809,12 @@ class Mempool:
         self,
         block_height      : int,
         treasury_reward   : int,
-        treasury_address  : str = 'qtcl1d1ae7c762036f3731a16d84c8ec4be75912edb9d',
+        treasury_address  : str = 'qtcl1f5080131c276070d09bd2cd8c4bea99d046663b1',
         w_entropy_hash    : str = '',
     ) -> 'MempoolTx':
         """
         Build treasury coinbase (slot 1) - always paid on-chain regardless of miner.
-        Treasury address: qtcl1d1ae7c762036f3731a16d84c8ec4be75912edb9d (hardcoded)
+        Treasury address: qtcl1f5080131c276070d09bd2cd8c4bea99d046663b1 (hardcoded)
         """
         import hashlib as _hl
         raw_input = f"TREASURY_COINBASE:{block_height}:{treasury_address}:{treasury_reward}:{w_entropy_hash}".encode()
