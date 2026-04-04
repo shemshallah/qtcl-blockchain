@@ -1492,6 +1492,113 @@ def get_db_cursor():
                     conn.close()
             except Exception as e:
                 logger.debug(f"[DB-CURSOR] putconn error: {e}")
+
+# ── DATABASE SCHEMA ENSURE: Lazy creation of tables missing from migration ─────
+_SCHEMA_ENSURED_PEER_REGISTRY = False
+_SCHEMA_ENSURED_ORACLE_REGISTRY = False
+_SCHEMA_ENSURED_CHAIN_STATE = False
+
+def _lazy_ensure_oracle_registry():
+    """Ensure oracle_registry table exists in Supabase."""
+    global _SCHEMA_ENSURED_ORACLE_REGISTRY
+    if _SCHEMA_ENSURED_ORACLE_REGISTRY:
+        return
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS oracle_registry (
+                    oracle_id       VARCHAR(128)  PRIMARY KEY,
+                    oracle_url      VARCHAR(512)  NOT NULL DEFAULT '',
+                    oracle_address  VARCHAR(128)  NOT NULL DEFAULT '',
+                    is_primary      BOOLEAN       NOT NULL DEFAULT FALSE,
+                    last_seen       TIMESTAMPTZ   DEFAULT NOW(),
+                    block_height    BIGINT        NOT NULL DEFAULT 0,
+                    peer_count      INTEGER       NOT NULL DEFAULT 0,
+                    wallet_address  VARCHAR(128)  NOT NULL DEFAULT '',
+                    oracle_pub_key  TEXT          NOT NULL DEFAULT '',
+                    cert_sig        VARCHAR(128)  NOT NULL DEFAULT '',
+                    mode            VARCHAR(32)   NOT NULL DEFAULT 'full',
+                    ip_hint         VARCHAR(256)  NOT NULL DEFAULT '',
+                    reg_tx_hash     VARCHAR(64)   NOT NULL DEFAULT '',
+                    registered_at   TIMESTAMPTZ   DEFAULT NOW(),
+                    created_at      TIMESTAMPTZ   DEFAULT NOW()
+                )
+            """)
+            # Ensure all columns exist for legacy tables
+            for col, dtype in [
+                ("wallet_address", "VARCHAR(128) DEFAULT ''"),
+                ("oracle_pub_key", "TEXT DEFAULT ''"),
+                ("cert_sig", "VARCHAR(128) DEFAULT ''"),
+                ("mode", "VARCHAR(32) DEFAULT 'full'"),
+                ("ip_hint", "VARCHAR(256) DEFAULT ''"),
+                ("reg_tx_hash", "VARCHAR(64) DEFAULT ''"),
+                ("registered_at", "TIMESTAMPTZ DEFAULT NOW()")
+            ]:
+                try:
+                    cur.execute(f"ALTER TABLE oracle_registry ADD COLUMN IF NOT EXISTS {col} {dtype}")
+                except Exception:
+                    pass
+        _SCHEMA_ENSURED_ORACLE_REGISTRY = True
+    except Exception as e:
+        logger.warning(f"[SCHEMA] _lazy_ensure_oracle_registry failed: {e}")
+
+def _lazy_ensure_chain_state():
+    """Ensure chain_state table exists in Supabase."""
+    global _SCHEMA_ENSURED_CHAIN_STATE
+    if _SCHEMA_ENSURED_CHAIN_STATE:
+        return
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS chain_state (
+                    state_id         INTEGER PRIMARY KEY,
+                    chain_height     BIGINT      DEFAULT 0,
+                    head_block_hash  TEXT        DEFAULT '',
+                    latest_coherence NUMERIC(5,4) DEFAULT 0.9,
+                    updated_at       TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+        _SCHEMA_ENSURED_CHAIN_STATE = True
+    except Exception as e:
+        logger.warning(f"[SCHEMA] _lazy_ensure_chain_state failed: {e}")
+
+def _lazy_ensure_peer_registry():
+    """Ensure peer_registry table exists in Supabase."""
+    global _SCHEMA_ENSURED_PEER_REGISTRY
+    if _SCHEMA_ENSURED_PEER_REGISTRY:
+        return
+    try:
+        with get_db_cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS peer_registry (
+                    node_id       TEXT PRIMARY KEY,
+                    external_addr TEXT NOT NULL,
+                    pubkey_hash   TEXT NOT NULL DEFAULT '',
+                    chain_height  BIGINT      DEFAULT 0,
+                    last_seen     TIMESTAMPTZ DEFAULT NOW(),
+                    first_seen    TIMESTAMPTZ DEFAULT NOW(),
+                    capabilities  JSONB       DEFAULT '[]',
+                    ban_score     INTEGER     DEFAULT 0,
+                    caller_ip     TEXT        DEFAULT '',
+                    mac_address   TEXT        DEFAULT '',
+                    device_id     TEXT        DEFAULT ''
+                )
+            """)
+            for col, dtype in [
+                ("first_seen", "TIMESTAMPTZ DEFAULT NOW()"),
+                ("capabilities", "JSONB DEFAULT '[]'"),
+                ("ban_score", "INTEGER DEFAULT 0"),
+                ("caller_ip", "TEXT DEFAULT ''"),
+                ("mac_address", "TEXT DEFAULT ''"),
+                ("device_id", "TEXT DEFAULT ''")
+            ]:
+                try:
+                    cur.execute(f"ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS {col} {dtype}")
+                except Exception:
+                    pass
+        _SCHEMA_ENSURED_PEER_REGISTRY = True
+    except Exception as e:
+        logger.warning(f"[SCHEMA] _lazy_ensure_peer_registry failed: {e}")
                 try:
                     conn.close()
                 except Exception:
@@ -2504,6 +2611,7 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
                     )
                 """)
                 try:
+                    cur.execute("ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS caller_ip TEXT DEFAULT ''")
                     cur.execute("ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS mac_address TEXT DEFAULT ''")
                     cur.execute("ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS device_id TEXT DEFAULT ''")
                 except Exception:
@@ -3289,6 +3397,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
 
         # ── Update chain state ──────────────────────────────────────────────
         try:
+            _lazy_ensure_chain_state()
             with get_db_cursor() as cur:
                 cur.execute("""
                     INSERT INTO chain_state (state_id, chain_height, head_block_hash, latest_coherence, updated_at)
@@ -3916,6 +4025,7 @@ def _p2p_broadcast_loop():
             _p2p_broadcast_count += 1
             # Fetch peers from DB
             try:
+                _lazy_ensure_peer_registry()
                 with get_db_cursor() as cur:
                     cur.execute("""SELECT node_id, external_addr, pubkey_hash, chain_height, last_seen
                         FROM peer_registry WHERE last_seen > NOW() - INTERVAL '10 minutes' 
