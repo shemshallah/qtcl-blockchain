@@ -2107,34 +2107,62 @@ def get_mempool() -> Mempool:
     Thread-safe double-checked locking.
     """
     global _MEMPOOL
-    if _MEMPOOL is not None:
+    
+    # If already fully initialized with DB, return early
+    if _MEMPOOL is not None and _db.available:
         return _MEMPOOL
+        
     with _MEMPOOL_LOCK:
         if _MEMPOOL is None:
-            # Initialise DB pool from server environment
+            # First time initialization
             dsn = _resolve_dsn()
             if dsn:
                 _db.init(dsn)
             m = Mempool()
             m.start()
             _MEMPOOL = m
+        elif not _db.available:
+            # Singleton exists but DB failed — retry connection
+            dsn = _resolve_dsn()
+            if dsn:
+                _db.init(dsn)
+                
     return _MEMPOOL
 
 def _resolve_dsn() -> Optional[str]:
     """Resolve database URL from environment variables (server.py convention)."""
     from urllib.parse import quote_plus
-    direct = os.getenv('DATABASE_URL') or os.getenv('POOLER_URL')
-    if direct:
-        return direct
-    host = os.getenv('POOLER_HOST')
-    user = os.getenv('POOLER_USER')
-    pw   = os.getenv('POOLER_PASSWORD')
-    db   = os.getenv('POOLER_DB', 'postgres')
-    port_raw = os.getenv('POOLER_PORT', '5432')
-    if not port_raw or not str(port_raw).isdigit():
-        port = 5432
-    else:
-        port = int(port_raw)
+    
+    # 1. Try POOLER_URL first (matches server.py precedence)
+    dsn = os.getenv('POOLER_URL') or os.getenv('DATABASE_URL')
+    
+    # Robust check: ignore literal placeholders like "DATABASE_URL" or "POOLER_URL"
+    if dsn and not dsn.startswith('postgres'):
+        dsn = None
+        
+    if dsn:
+        # PATCH-10: Auto-correct session-mode port 5432 → transaction-mode port 6543
+        if ':5432/' in dsn:
+            dsn = dsn.replace(':5432/', ':6543/')
+        return dsn
+
+    # 2. Build from components
+    host     = os.getenv('POOLER_HOST')
+    user     = os.getenv('POOLER_USER')
+    pw       = os.getenv('POOLER_PASSWORD')
+    db       = os.getenv('POOLER_DB', 'postgres')
+    port_raw = os.getenv('POOLER_PORT', '6543')
+    
+    # Robust integer parsing for POOLER_PORT
+    try:
+        port = int(port_raw) if port_raw and str(port_raw).isdigit() else 6543
+    except:
+        port = 6543
+        
+    # Sanitize components against literal placeholders
+    if host == 'POOLER_HOST': host = None
+    if user == 'POOLER_USER': user = None
+    
     if host and user and pw:
         return f"postgresql://{quote_plus(user)}:{quote_plus(pw)}@{host}:{port}/{db}"
     return None

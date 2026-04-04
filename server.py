@@ -3987,7 +3987,7 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_registerPeer":      _rpc_registerPeer,      # ← NEW: miner bootstrap registration
     "qtcl_getMyAddr":         _rpc_getMyAddr,          # ← NEW: STUN — return caller's observed IP
     "qtcl_getHealth":         _rpc_getHealth,
-    "qtcl_getTreasuryAddress": lambda p, rid: _rpc_ok({"treasury_address": TessellationRewardSchedule.TREASURY_ADDRESS}, rid),
+    "qtcl_getTreasuryAddress": lambda p, rid: _rpc_ok({"treasury_address": getattr(TessellationRewardSchedule, "TREASURY_ADDRESS", "qtcl1d1ae7c762036f3731a16d84c8ec4be75912edb9d")}, rid),
     "qtcl_getEvents":         _rpc_getEvents,
     "qtcl_getOracleRegistry": _rpc_getOracleRegistry,
     "qtcl_getOracleRecord":   _rpc_getOracleRecord,
