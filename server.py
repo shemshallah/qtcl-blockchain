@@ -1276,6 +1276,34 @@ class DatabasePool:
                     cls._instance._retry_interval = 5.0  # PATCH-9: seconds between init attempts
         return cls._instance
 
+    def init(self, dsn: Optional[str] = None):
+        """psycopg2-style init for compatibility with mempool.py."""
+        self._initialize_pool()
+
+    @property
+    def available(self) -> bool:
+        """mempool-style check for DB availability."""
+        return self._initialized
+
+    @contextmanager
+    def cursor(self, cursor_factory=None):
+        """mempool-style context manager for database cursor."""
+        conn = None
+        try:
+            conn = self.get_connection()
+            # Support cursor_factory (e.g. RealDictCursor) used by mempool.py
+            cur = conn.cursor(cursor_factory=cursor_factory) if cursor_factory else conn.cursor()
+            yield cur
+            conn.commit()
+        except Exception:
+            if conn: conn.rollback()
+            raise
+        finally:
+            if conn: self.put_connection(conn)
+
+    def getconn(self): return self.get_connection()
+    def putconn(self, conn, **kwargs): self.put_connection(conn)
+
     def _initialize_pool(self):
         if self._initialized:
             return
