@@ -122,38 +122,52 @@ CREATE TABLE IF NOT EXISTS peer_registry (
 -- Ensure node_id and others exist if table was legacy
 DO $$
 BEGIN
-    -- 1. Rename peer_id to node_id if peer_id exists and node_id doesn't
-    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='peer_registry' AND column_name='peer_id') 
-       AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='peer_registry' AND column_name='node_id') THEN
-        ALTER TABLE peer_registry RENAME COLUMN peer_id TO node_id;
+    -- 1. Aggressive schema cleanup: if peer_id exists, we migrate and rebuild
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='peer_registry' AND column_name='peer_id') THEN
+        -- Create a temporary table to hold data
+        CREATE TEMP TABLE peer_registry_backup AS SELECT * FROM peer_registry;
+        
+        -- Drop the old table completely to clear all constraints
+        DROP TABLE peer_registry CASCADE;
+        
+        -- Recreate correctly
+        CREATE TABLE peer_registry (
+            node_id       TEXT PRIMARY KEY,
+            external_addr TEXT NOT NULL,
+            pubkey_hash   TEXT NOT NULL DEFAULT '',
+            chain_height  BIGINT      DEFAULT 0,
+            last_seen     TIMESTAMPTZ DEFAULT NOW(),
+            first_seen    TIMESTAMPTZ DEFAULT NOW(),
+            capabilities  JSONB       DEFAULT '[]',
+            ban_score     INTEGER     DEFAULT 0,
+            caller_ip     TEXT        DEFAULT '',
+            mac_address   TEXT        DEFAULT '',
+            device_id     TEXT        DEFAULT '',
+            fingerprint   TEXT        DEFAULT ''
+        );
+        
+        -- Restore data (mapping peer_id to node_id)
+        INSERT INTO peer_registry (node_id, external_addr, pubkey_hash, chain_height, last_seen, first_seen)
+        SELECT peer_id, COALESCE(ip_address, '') || ':' || COALESCE(port::text, '9091'), public_key, block_height, last_seen, created_at
+        FROM peer_registry_backup;
+        
+        RAISE NOTICE 'peer_registry migrated and rebuilt successfully';
+    ELSE
+        -- Just ensure columns exist if already in node_id format
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='peer_registry' AND column_name='node_id') THEN
+            ALTER TABLE peer_registry ADD COLUMN node_id TEXT;
+        END IF;
     END IF;
 
-    -- 2. Ensure node_id exists
-    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='peer_registry' AND column_name='node_id') THEN
-        ALTER TABLE peer_registry ADD COLUMN node_id TEXT;
-    END IF;
-
-    -- 3. Make ALL legacy columns nullable to prevent NOT NULL violations on partial inserts
-    -- This is critical for compatibility with older qtcl_db_builder versions.
-    DECLARE
-        col_name TEXT;
-    BEGIN
-        FOR col_name IN 
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name = 'peer_registry' 
-              AND column_name != 'node_id' 
-              AND is_nullable = 'NO'
-        LOOP
-            EXECUTE format('ALTER TABLE peer_registry ALTER COLUMN %I DROP NOT NULL', col_name);
-        END LOOP;
-    END;
-
-    -- 4. Ensure node_id is unique for ON CONFLICT logic
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'peer_registry_node_id_key') THEN
+    -- Ensure node_id is the primary key (in case it was added later)
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'peer_registry'::regclass AND contype = 'p') THEN
         BEGIN
-            ALTER TABLE peer_registry ADD CONSTRAINT peer_registry_node_id_key UNIQUE (node_id);
-        EXCEPTION WHEN OTHERS THEN NULL;
+            ALTER TABLE peer_registry ADD PRIMARY KEY (node_id);
+        EXCEPTION WHEN OTHERS THEN 
+            -- If primary key already exists on another column, just add unique constraint
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'peer_registry_node_id_key') THEN
+                ALTER TABLE peer_registry ADD CONSTRAINT peer_registry_node_id_key UNIQUE (node_id);
+            END IF;
         END;
     END IF;
 END $$;

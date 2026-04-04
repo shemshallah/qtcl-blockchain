@@ -48,11 +48,8 @@ from dataclasses import dataclass, field, asdict
 from functools import wraps, lru_cache, partial
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, getcontext
-try:
-    from pydantic import BaseModel, Field, ValidationError  # noqa: F401 — optional, used by external integrations
-except ImportError:
-    pass
-import traceback, random, struct, copy
+from pydantic import BaseModel, Field, ValidationError
+import traceback, random, struct, sqlite3, copy
 
 # NumPy 2.0 compatibility
 if hasattr(np, 'trapezoid'):
@@ -1568,8 +1565,12 @@ class WStateConstructor:
                 counts = results.get('counts', {})
                 
                 # Compute W-state strength
+                # W-state for 3 qubits has exactly one '1' in binary string ('001', '010', '100')
                 w_state_counts = {k: v for k, v in counts.items() if k.count('1') == 1}
                 w_strength = sum(w_state_counts.values()) / 1000.0
+                
+                if w_strength == 0 and counts:
+                    logger.debug(f"[QUANTUM-W] Zero strength detected. Counts keys: {list(counts.keys())}")
                 
                 return {
                     'counts': counts,
@@ -2199,12 +2200,9 @@ class QuantumLatticeController:
         # 🔬 FORCE FRESH QRNG ENTROPY per oracle call
         # This ensures each oracle's noise realization differs, avoiding profiling stuckness.
         try:
-            from qrng_ensemble import get_qrng_ensemble
-            _ens = get_qrng_ensemble()
-            fresh_entropy = _ens.get_random_bytes(32) if _ens else os.urandom(32)
+            fresh_entropy = globals.QRNG_ENSEMBLE.read(32)  # 32 bytes fresh entropy
             qrng_seed = int.from_bytes(fresh_entropy[:8], 'little') & 0xFFFFFFFF
-        except Exception:
-            fresh_entropy = os.urandom(32)
+        except:
             qrng_seed = None
         
         F = float(max(0.0, min(1.0, self.fidelity)))
@@ -2377,8 +2375,6 @@ class QuantumLatticeController:
             f"[LATTICE-ORACLE-SYNC] ✅ Measurement alignment verified at cycle {self.cycle_count}"
         )
         return True
-    
-    def get_state(self):
         """Get comprehensive lattice state"""
         try:
             return {
@@ -2540,41 +2536,9 @@ class IndividualValidator:
         except Exception as e:
             return False, str(e)
     
-    def _compute_merkle_root(self, tx_hashes: List[str]) -> str:
-        """Compute Merkle root from list of transaction hashes."""
-        if not tx_hashes:
-            return '0' * 64
-        if len(tx_hashes) == 1:
-            return tx_hashes[0]
-        level = list(tx_hashes)
-        while len(level) > 1:
-            next_level = []
-            for i in range(0, len(level), 2):
-                left = level[i]
-                right = level[i + 1] if i + 1 < len(level) else level[i]
-                combined = hashlib.sha256((left + right).encode()).hexdigest()
-                next_level.append(combined)
-            level = next_level
-        return level[0]
-
-    def _compute_block_hash(self, block) -> str:
-        """Compute deterministic block hash covering all fields."""
-        block_data = {
-            'height': block.block_height,
-            'parent': getattr(block, 'parent_hash', ''),
-            'merkle': block.merkle_root,
-            'timestamp': block.timestamp_s,
-            'tx_count': block.tx_count,
-            'coherence': getattr(block, 'coherence_snapshot', 0),
-            'fidelity': getattr(block, 'fidelity_snapshot', 0),
-        }
-        return hashlib.sha256(
-            json.dumps(block_data, sort_keys=True).encode()
-        ).hexdigest()
-
-    # _compute_merkle_root and _compute_block_hash restored above.
-    # They were removed but _seal_current_block still calls them — 
-    # without these methods the block sealing path crashes.
+    # _compute_merkle_root and _compute_block_hash removed.
+    # Merkle: use qtcl_merkle_root() from qtcl_client C layer (qtcl_accel.so).
+    # Block hash: computed in server.py submit_block with full canonical fields.
 
 class BlockManager:
     """Manages transaction pool and block creation (IF/THEN sealing logic)"""

@@ -1570,25 +1570,27 @@ def _lazy_ensure_chain_state():
         logger.warning(f"[SCHEMA] _lazy_ensure_chain_state failed: {e}")
 
 def _lazy_ensure_peer_registry():
-    """Ensure peer_registry and peer_devices tables exist in Supabase."""
+    """Ensure peer_registry and peer_devices tables exist in Supabase with correct schema."""
     global _SCHEMA_ENSURED_PEER_REGISTRY
     if _SCHEMA_ENSURED_PEER_REGISTRY:
         return
     try:
+        # Step 1: Aggressive Rebuild if legacy schema detected
+        # We do this in a separate cursor to ensure it doesn't pollute the main one
         with get_db_cursor() as cur:
-            # Check for legacy peer_id column and rename to node_id
-            try:
-                cur.execute("""
-                    DO $$ 
-                    BEGIN 
-                        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='peer_registry' AND column_name='peer_id') THEN
-                            ALTER TABLE peer_registry RENAME COLUMN peer_id TO node_id;
-                        END IF;
-                    END $$;
-                """)
-            except Exception:
-                pass
+            cur.execute("""
+                DO $$ 
+                BEGIN 
+                    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='peer_registry' AND column_name='peer_id') THEN
+                        -- If we have peer_id, we are on the legacy schema. 
+                        -- We drop it completely to ensure all constraints/NOT NULLs are cleared.
+                        DROP TABLE IF EXISTS peer_registry CASCADE;
+                    END IF;
+                END $$;
+            """)
 
+        # Step 2: Create/Update to the definitive schema
+        with get_db_cursor() as cur:
             # Create table with node_id as PRIMARY KEY
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS peer_registry (
@@ -1607,20 +1609,7 @@ def _lazy_ensure_peer_registry():
                 )
             """)
             
-            # Ensure UNIQUE constraint on node_id for ON CONFLICT (if not PRIMARY KEY)
-            # This is critical for PostgreSQL upserts
-            try:
-                cur.execute("""
-                    DO $$ 
-                    BEGIN 
-                        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'peer_registry_node_id_key') THEN
-                            ALTER TABLE peer_registry ADD CONSTRAINT peer_registry_node_id_key UNIQUE (node_id);
-                        END IF;
-                    END $$;
-                """)
-            except Exception:
-                pass
-
+            # Ensure all columns exist for existing node_id-based tables (idempotency)
             for col, dtype in [
                 ("first_seen", "TIMESTAMPTZ DEFAULT NOW()"),
                 ("capabilities", "JSONB DEFAULT '[]'"),
@@ -1635,6 +1624,19 @@ def _lazy_ensure_peer_registry():
                 except Exception:
                     pass
             
+            # Ensure node_id is unique for ON CONFLICT (if not already PK)
+            try:
+                cur.execute("""
+                    DO $$ 
+                    BEGIN 
+                        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'peer_registry_node_id_key') THEN
+                            ALTER TABLE peer_registry ADD CONSTRAINT peer_registry_node_id_key UNIQUE (node_id);
+                        END IF; 
+                    END $$;
+                """)
+            except Exception:
+                pass
+
             # ── 3.1 DEVICE FINGERPRINTING TABLE ─────────────────────────────────
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS peer_devices (
@@ -1654,6 +1656,8 @@ def _lazy_ensure_peer_registry():
         _SCHEMA_ENSURED_PEER_REGISTRY = True
     except Exception as e:
         logger.warning(f"[SCHEMA] _lazy_ensure_peer_registry failed: {e}")
+
+
 
 _dht_manager: Optional[DHTManager] = None
 _dht_lock = threading.RLock()
@@ -2666,9 +2670,10 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
         # Debug pairing details
         logger.debug(f"[P2P] Fingerprint details — NAT: {caller_ip}, REP: {reported_ip}, MAC: {mac_address}, DEV: {device_id}")
 
-        # Upsert into peer_registry — CREATE TABLE IF NOT EXISTS guard in case migration pending
+        # Upsert into peer_registry — uses separate cursors to ensure one failure doesn't abort the entire registration
         try:
             _lazy_ensure_peer_registry()
+            # 1. Main Registry Update
             with get_db_cursor() as cur:
                 cur.execute("""
                     INSERT INTO peer_registry
@@ -2684,19 +2689,23 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
                         device_id     = EXCLUDED.device_id,
                         fingerprint   = EXCLUDED.fingerprint
                 """, (node_id, external_addr, pubkey_hash, chain_height, caller_ip, mac_address, device_id, fingerprint))
-                
-                # Link device to node_id in persistent chain
-                cur.execute("""
-                    INSERT INTO peer_devices
-                        (fingerprint, node_id, last_caller_ip, mac_address, device_id, last_seen)
-                    VALUES (%s, %s, %s, %s, %s, NOW())
-                    ON CONFLICT (fingerprint) DO UPDATE SET
-                        node_id        = EXCLUDED.node_id,
-                        last_caller_ip = EXCLUDED.last_caller_ip,
-                        mac_address    = EXCLUDED.mac_address,
-                        device_id      = EXCLUDED.device_id,
-                        last_seen      = NOW()
-                """, (fingerprint, node_id, caller_ip, mac_address, device_id))
+            
+            # 2. Device Chain Update (Isolated)
+            try:
+                with get_db_cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO peer_devices
+                            (fingerprint, node_id, last_caller_ip, mac_address, device_id, last_seen)
+                        VALUES (%s, %s, %s, %s, %s, NOW())
+                        ON CONFLICT (fingerprint) DO UPDATE SET
+                            node_id        = EXCLUDED.node_id,
+                            last_caller_ip = EXCLUDED.last_caller_ip,
+                            mac_address    = EXCLUDED.mac_address,
+                            device_id      = EXCLUDED.device_id,
+                            last_seen      = NOW()
+                    """, (fingerprint, node_id, caller_ip, mac_address, device_id))
+            except Exception as _fpe:
+                logger.debug(f"[P2P] peer_devices update skipped: {_fpe}")
         except Exception as _dbe:
             # Non-fatal: fall through to in-process cache so peer can still be served
             logger.warning(f"[RPC-METHOD] qtcl_registerPeer DB upsert failed: {_dbe}")
@@ -4193,8 +4202,15 @@ def rpc_endpoint():
     try:
         body = request.get_data()
         if not body:
-            return jsonify(_rpc_error(-32600, "Empty request", None)), 400
+            return Response(json.dumps(_rpc_error(-32600, "Empty request", None)), status=400, mimetype='application/json')
         
+        # Log incoming method if possible
+        try:
+            peek = json.loads(body)
+            method = peek.get("method") if isinstance(peek, dict) else "batch"
+            logger.debug(f"[RPC] Method: {method}")
+        except: pass
+
         result, status_code = _dispatch(body)
         
         if status_code >= 400:
