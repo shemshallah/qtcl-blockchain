@@ -588,6 +588,10 @@ class HLWESignature:
                 from datetime import datetime, timezone
                 d["timestamp"] = datetime.now(timezone.utc).isoformat()
         
+        # Map various public key field aliases to public_key_hex
+        if "public_key" in d and not d.get("public_key_hex"):
+            d["public_key_hex"] = d["public_key"]
+        
         # Ensure all required fields for dataclass are present
         # Use a list to avoid "dictionary changed size during iteration" if needed, 
         # but here we are creating a new dict.
