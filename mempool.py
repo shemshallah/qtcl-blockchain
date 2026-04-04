@@ -1554,7 +1554,7 @@ class Mempool:
                     sig_dict = {"signature_hex": sig_raw, "method": "sha3_256_plain"}
                 else:
                     return False, "invalid_signature_format"
-        elif isinstance(sig_raw, dict):
+        elif isinstance(sig_dict, dict):
             sig_dict = sig_raw
         else:
             return False, "invalid_signature_type"
@@ -1843,15 +1843,12 @@ class Mempool:
         self,
         block_height      : int,
         treasury_reward   : int,
-        treasury_address  : str = 'qtcl1d1ae7c762036f3731a16d84c8ec4be75912edb9d',
+        treasury_address  : str = 'qtcl110fc58e3c441106cc1e54ae41da5d15868525a87',
         w_entropy_hash    : str = '',
     ) -> 'MempoolTx':
         """
-        Build treasury coinbase (slot 1) — always paid on-chain regardless of miner.
-        Treasury address: qtcl1d1ae7c762036f3731a16d84c8ec4be75912edb9d (hardcoded)
-        """
-        Build treasury coinbase (slot 1) — always paid on-chain regardless of miner.
-        Treasury address: qtcl1d1ae7c762036f3731a16d84c8ec4be75912edb9d (hardcoded)
+        Build treasury coinbase (slot 1) - always paid on-chain regardless of miner.
+        Treasury address: qtcl110fc58e3c441106cc1e54ae41da5d15868525a87 (hardcoded)
         """
         import hashlib as _hl
         raw_input = f"TREASURY_COINBASE:{block_height}:{treasury_address}:{treasury_reward}:{w_entropy_hash}".encode()

@@ -3097,22 +3097,8 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         difficulty_bits = int(hdr.get("difficulty_bits", hdr.get("difficulty", 4)))
         w_entropy_hex   = str(hdr.get("w_entropy_hash", hdr.get("w_entropy_seed", "")))
         w_state_fidelity = float(hdr.get("w_state_fidelity", 0.0) or 0.0)
-
-        # ── 🎯 FIX-A: Extract quantum state indices (NOW REQUIRED) ───────────────
-        # These are sealed in the PoW and attestation — use client values, not defaults
-        pq0           = int(hdr.get("pq0", 0))                    # Ground state (0-7)
-        pq_curr       = int(hdr.get("pq_curr", height))           # Current block PQ
-        pq_last       = int(hdr.get("pq_last", max(0, height - 1)))  # Parent block PQ
-        
-        # ── Optional quantum proof metrics ─────────────────────────────────────────
-        mermin_value  = float(hdr.get("mermin_value", 0.0) or 0.0)
+        mermin_value    = float(hdr.get("mermin_value", 0.0) or 0.0)
         mermin_violated = bool(hdr.get("mermin_violated", False))
-        
-        logger.info(
-            f"[RPC-submitBlock] 📡 RECEIVED h={height} "
-            f"hash={block_hash[:16]}… nonce={nonce:,} "
-            f"pq0={pq0} pq_curr={pq_curr} pq_last={pq_last}"
-        )
 
         # ── Duplicate check ──────────────────────────────────────────────────
         existing = query_block_by_hash(block_hash)
@@ -3170,17 +3156,16 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     (height, block_number, block_hash, previous_hash, timestamp,
                      oracle_w_state_hash, validator_public_key, nonce,
                      difficulty, entropy_score, transactions_root,
-                     pq0, pq_curr, pq_last,
-                     mermin_value, mermin_violated)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     pq_curr, pq_last, mermin_value, mermin_violated)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (height) DO NOTHING
                 """, (
                     height, height, block_hash, parent_hash, timestamp_s,
                     w_entropy_hex[:64] if w_entropy_hex else "0" * 64,
                     miner_address, nonce,
                     difficulty_bits, w_state_fidelity, merkle_root,
-                    pq0, pq_curr, pq_last,                  # ← FIX-B: Client-provided PQ values
-                    mermin_value, mermin_violated,           # ← FIX-B: Quantum proof metrics
+                    height, max(0, height - 1),
+                    mermin_value, mermin_violated,
                 ))
                 # Capture rowcount IMMEDIATELY after block INSERT
                 _block_rowcount = cur.rowcount
