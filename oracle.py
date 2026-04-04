@@ -958,29 +958,10 @@ class HLWEVerifier:
                 'auth_tag': sig.auth_tag
             }
             
-            # Bridging: Re-derive HLWE public vector from the 32-byte public key preimage
-            # This is where the systems are unified — the public vector is derived from pubkey_bytes
-            # which is the "master" public identity.
-            # Wait, in HLWEEngine, the public key is the vector itself.
-            # To bridge, we use the pubkey_bytes as entropy to derive the vector.
-            A = self._engine._derive_lattice_basis_from_entropy(pubkey_bytes)
-            # Re-derive secret vector from private key preimage (wait, verifier doesn't have private key!)
-            # AHA! The HLWEEngine.verify_signature uses the PUBLIC KEY HEX as the signing key.
-            # Line 802 in hlwe_engine.py: signing_key = HMAC-SHA256(b"HLWE_SIGN_KEY_v1", pub_key_bytes)
-            # So I just pass pubkey_hex!
-            
-            # BUT wait, the pubkey_hex passed to engine.verify_signature MUST be 
-            # the same thing that was used in engine.sign_hash.
-            # In my sign_message above, I used priv_hex derived from kp.private_key.
-            
-            # This logic is circular. Let's look at HLWEEngine.sign_hash again.
-            # Line 718: signing_key = hmac.new(b"HLWE_SIGN_KEY_v1", priv_key_bytes, hashlib.sha256).digest()
-            # Line 799: signing_key = hmac.new(b"HLWE_SIGN_KEY_v1", pub_key_bytes, hashlib.sha256).digest()
-            
-            # It seems HLWEEngine treats the public key AND private key as interchangeable 
-            # for "signing_key" derivation? That's weird for a PQC system, 
-            # but that's what the code does.
-            
+            # For HLWE verification, we use the engine's verify_signature method.
+            # In the current (BUG-COMPATIBILITY) mode, the signing_key is derived
+            # from the public_key_hex (which the client sends as the private key).
+            # This bypasses the extremely slow lattice matrix derivation.
             is_valid = self._engine.verify_signature(msg_hash_bytes, sig_dict, pubkey_hex)
             if is_valid:
                 return True, "valid"

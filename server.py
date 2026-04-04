@@ -3766,13 +3766,16 @@ def _rpc_submitTransaction(params: Any, rpc_id: Any) -> dict:
     """qtcl_submitTransaction — validate and accept a transaction into the mempool."""
     try:
         if not params or not isinstance(params, (list, tuple)) or len(params) < 1:
+            logger.debug(f"[RPC] submitTransaction: invalid params")
             return _rpc_error(-32602, "params[0] must be the transaction object", rpc_id)
         
         tx_data = params[0]
         if not isinstance(tx_data, dict):
+            logger.debug(f"[RPC] submitTransaction: not a dict")
             return _rpc_error(-32602, "transaction must be a JSON object", rpc_id)
             
         from mempool import get_mempool
+        logger.info(f"[RPC] 📥 Received transaction from {tx_data.get('from_address', 'unknown')[:16]}…")
         result_code, message, tx = get_mempool().accept(tx_data)
         
         if tx:
