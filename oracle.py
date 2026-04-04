@@ -1692,7 +1692,7 @@ class OracleWStateManager:
                             self.block_field_readings[r.oracle_id] = r
                 except Exception as exc:
                     logger.error(f"[ORACLE CLUSTER] Oracle-{bf_futures[fut].oracle_id+1} BF exception: {exc}")
-        except concurrent.futures.TimeoutError:
+        except TimeoutError:
             unfinished = [f for f in bf_futures if not f.done()]
             logger.error(f"[ORACLE CLUSTER] Stream error: {len(unfinished)} (of 5) futures unfinished (timeout={MEASUREMENT_TIMEOUT}s)")
             # Attempt to cancel unfinished futures to free resources
