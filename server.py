@@ -1599,10 +1599,6 @@ def _lazy_ensure_peer_registry():
         _SCHEMA_ENSURED_PEER_REGISTRY = True
     except Exception as e:
         logger.warning(f"[SCHEMA] _lazy_ensure_peer_registry failed: {e}")
-                try:
-                    conn.close()
-                except Exception:
-                    pass
 
 _dht_manager: Optional[DHTManager] = None
 _dht_lock = threading.RLock()
