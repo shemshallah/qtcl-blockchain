@@ -546,35 +546,21 @@ class LatticeMath:
         """Hash bytes to lattice vector in Z_q^n using rejection sampling"""
         vector = []
         offset = 0
-
+        
         while len(vector) < n:
             hash_input = data + bytes([offset])
             h = hashlib.sha256(hash_input).digest()
-
+            
             for i in range(0, 32, 4):
                 if len(vector) >= n:
                     break
                 val = int.from_bytes(h[i:i+4], byteorder='big')
                 reduced = val % q
                 vector.append(reduced)
-
+            
             offset += 1
-
+        
         return vector[:n]
-
-    @staticmethod
-    def vector_inner_product(v1: List[int], v2: List[int], q: int) -> int:
-        """Inner product mod q: Σ v1[i]·v2[i] mod q"""
-        if len(v1) != len(v2):
-            raise ValueError("Vector dimensions must match")
-        return sum(a * b for a, b in zip(v1, v2)) % q
-
-    @staticmethod
-    def vector_scalar_mult_add(s: int, v1: List[int], v2: List[int], q: int) -> List[int]:
-        """Compute z = s·v1 + v2 (mod q) for each coefficient."""
-        if len(v1) != len(v2):
-            raise ValueError("Vector dimensions must match")
-        return [(s * a + b) % q for a, b in zip(v1, v2)]
 
 # ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 # HLWE CRYPTOGRAPHIC ENGINE
@@ -589,53 +575,29 @@ class HLWEEngine:
         self.lock = threading.RLock()
         logger.info("[HLWE] Engine initialized (DIMENSION={}, MODULUS={})".format(
             self.params.DIMENSION, self.params.MODULUS))
-
-    def _encode_vector_to_hex(self, vector: List[int]) -> str:
-        """Encode integer vector to hex string (4 bytes per coefficient, big-endian)."""
-        return ''.join(x.to_bytes(4, byteorder='big').hex() for x in vector)
-
-    def _decode_vector_from_hex(self, hex_str: str) -> List[int]:
-        """Decode integer vector from hex string (4 bytes per coefficient, big-endian)."""
-        vector = []
-        for i in range(0, len(hex_str), 8):
-            chunk = hex_str[i:i+8]
-            if len(chunk) == 8:
-                vector.append(int(chunk, 16))
-        return vector
     
     def generate_keypair_from_entropy(self) -> HLWEKeyPair:
-        """
-        Generate HLWE keypair seeded from block field entropy.
-
-        Uses TRUE lattice keygen:
-          private_key = 32-byte entropy seed (64 hex chars)
-          public_key  = b = As + e (mod q) packed as hex
-          address     = SHA3-256(SHA3-256(public_key_bytes))
-        """
+        """Generate HLWE keypair seeded from block field entropy"""
         with self.lock:
             try:
                 entropy = get_block_field_entropy()
-                # Use entropy as private key seed (padded/truncated to 32 bytes)
-                if len(entropy) < 32:
-                    entropy = entropy + secrets.token_bytes(32 - len(entropy))
-                priv_seed = entropy[:32]
-
-                private_key_hex = priv_seed.hex()
-                public_key_hex = self.derive_public_key(private_key_hex)
-
-                pub_bytes = bytes.fromhex(public_key_hex)
-                pub_vector = [int.from_bytes(pub_bytes[i:i+4], 'big')
-                              for i in range(0, len(pub_bytes), 4)]
-                address = self.derive_address_from_public_key(pub_vector)
-
-                logger.info(f"[HLWE] Generated keypair: {address[:16]}... (lattice, entropy-seeded)")
-
+                A = self._derive_lattice_basis_from_entropy(entropy)
+                s = self._derive_secret_vector(entropy, self.params.DIMENSION)
+                e = self._sample_error_vector(self.params.DIMENSION)
+                b = LatticeMath.matrix_vector_mult(A, s, self.params.MODULUS)
+                b = LatticeMath.vector_add(b, e, self.params.MODULUS)
+                address = self.derive_address_from_public_key(b)
+                public_key_hex = self._encode_vector_to_hex(b)
+                private_key_hex = self._encode_vector_to_hex(s)
+                
+                logger.info(f"[HLWE] Generated keypair: {address[:16]}... (entropy-seeded)")
+                
                 return HLWEKeyPair(
                     public_key=public_key_hex,
                     private_key=private_key_hex,
                     address=address
                 )
-
+            
             except Exception as e:
                 logger.error(f"[HLWE] Keypair generation failed: {e}")
                 raise
@@ -696,327 +658,205 @@ class HLWEEngine:
                 s.append(0)       # nibble ∈ {1,2} both map to 0 → P(0)=1/2
         return s
     
-    def _sample_error_vector(self, dimension: int, seed: bytes = None) -> List[int]:
-        """
-        Deterministic error vector e from seed.
-
-        CANONICAL — identical to qtcl_client.py.
-
-        Construction:
-          prk  = HKDF-Extract(salt=b"HLWE_ERROR_v1", ikm=seed)
-          xof  = SHAKE-256(prk ‖ b"error" ‖ dimension_be32)
-          Each component: (xof_byte mod (2·B+1)) − B  → uniform in [−B, B]
-        """
-        q = self.params.MODULUS
-        B = self.params.ERROR_BOUND
-        if seed is None:
-            seed = os.urandom(32)
-        prk = hmac.new(b"HLWE_ERROR_v1", seed, hashlib.sha256).digest()
-        xof_input = prk + b"error" + dimension.to_bytes(4, 'big')
-        xof_bytes = hashlib.shake_256(xof_input).digest(dimension)
+    def _sample_error_vector(self, dimension: int) -> List[int]:
+        """Sample small error vector e from discrete Gaussian-like distribution"""
         e = []
-        for byte in xof_bytes:
-            val = (byte % (2 * B + 1)) - B
-            e.append(val % q)
+        for _ in range(dimension):
+            val = secrets.randbelow(2 * self.params.ERROR_BOUND) - self.params.ERROR_BOUND
+            e.append(val)
+        
         return e
     
+    def _encode_vector_to_hex(self, vector: List[int]) -> str:
+        """Pack integer vector to hex string (4 bytes big-endian per element)."""
+        return ''.join(x.to_bytes(4, byteorder='big').hex() for x in vector)
+
+    def _decode_vector_from_hex(self, hex_str: str) -> List[int]:
+        """Unpack hex string to integer vector (4 bytes big-endian per element)."""
+        return [int(hex_str[i:i+8], 16) for i in range(0, len(hex_str) - 7, 8)]
+
     def derive_address_from_public_key(self, public_key) -> str:
         """
-        Derive QTCL wallet address from HLWE public key.
+        CANONICAL address derivation — identical across hlwe_engine.py, qtcl_client.py, oracle.py.
 
-        CANONICAL — must match oracle.py, mempool.py, qtcl_client.py exactly.
+        Construction: "qtcl1" + SHA3-256(packed_pubkey_bytes)[:20].hex()
+          - Accepts List[int] (lattice vector) or bytes (already packed).
+          - Truncation to 20 bytes (160 bits) matches oracle ADDRESS_PREFIX derivation.
+          - Single SHA3-256 — no double-hash (double-hash produced 64-char raw hex addresses
+            which are incompatible with the qtcl1… prefix scheme used everywhere else).
 
-        Construction: "qtcl1" + SHA3-256(pubkey_bytes)[:20].hex()
-          - hash: SHA3-256 (Keccak), applied ONCE
-          - truncation: 20 bytes (160 bits) — same as Ethereum
-          - prefix: "qtcl1" — QTCL canonical address prefix
-
-        Accepts both List[int] (vector) and bytes (packed) input.
-        Output: 45 chars ("qtcl1" + 40 hex chars).
+        Output: 45 chars — "qtcl1" (5) + 40 hex chars (20 bytes).
         """
-        if isinstance(public_key, bytes):
-            pub_bytes = public_key
+        if isinstance(public_key, (bytes, bytearray)):
+            pub_bytes = bytes(public_key)
         else:
             pub_bytes = b''.join(x.to_bytes(4, byteorder='big') for x in public_key)
         return "qtcl1" + hashlib.sha3_256(pub_bytes).digest()[:20].hex()
     
     def sign_hash(self, message_hash: bytes, private_key_hex: str) -> Dict[str, str]:
         """
-        Sign a 32-byte message hash using TRUE HLWE Fiat-Shamir lattice signature.
+        CANONICAL Fiat-Shamir HLWE signature — identical to qtcl_client.py HLWEEngine.sign_hash.
 
-        Construction (Fiat-Shamir over LWE):
-          1. s   = HKDF-expand(seed, ...) → ternary secret
-          2. A   = SHAKE-256(b"QTCL_HLWE_BASIS_v1" ‖ pub_key) → lattice basis
-          3. y   = random ternary masking vector
-          4. w   = A·y  (mod q) — commitment
-          5. c   = SHA-256(msg ‖ w) mapped to {−1, 0, 1} — challenge scalar
-          6. z   = c·s + y  (mod q) — response
-          7. sig = (z, c_hash, w)
-
-        Verification: recover w' = A·z − b·c, then check f(msg, w') = c.
-        Soundness: without knowledge of s, finding valid (z, w') requires
-        solving LWE (hard problem, ≥2^128 classical security).
+        Protocol:
+          priv_seed  = bytes.fromhex(private_key_hex)
+          pub_bytes  = _compute_public_key_bytes(priv_seed)   # b = As+e mod q
+          A          = SHAKE-256(b"QTCL_HLWE_BASIS_FIXED_v1") expanded to n×n
+          s          = _derive_secret_vector(priv_seed, n)     # ternary {q-1,0,1}
+          y          = random ternary masking vector            # commitment blinding
+          w          = A·y mod q                               # commitment
+          c          = (SHA-256(b"HLWE_CHALLENGE_v1"||msg||w)[0] % 3) - 1  ∈ {-1,0,1}
+          z          = (c·s + y) mod q                         # response
+          auth_tag   = SHA-256(c.to_bytes(4,'big',signed=True))
+          signature  = hex(z)
+          w          = hex(w)
         """
         with self.lock:
-            try:
-                n = self.params.DIMENSION
-                q = self.params.MODULUS
-
-                priv_seed = bytes.fromhex(private_key_hex)
-                pub_key_bytes = self._compute_public_key_bytes(priv_seed)
-                A = self._derive_lattice_basis_from_pubkey(pub_key_bytes)
-                s = self._derive_secret_vector_from_key(priv_seed, n)
-
-                # Random masking vector (fresh per signature for security)
-                y = [secrets.randbelow(3) - 1 for _ in range(n)]
-
-                # Commitment: w = A·y (mod q)
-                w = LatticeMath.matrix_vector_mult(A, y, q)
-
-                # Challenge: c = f(msg, w) ∈ {-1, 0, 1}
-                w_bytes = b''.join(x.to_bytes(4, 'big') for x in w)
-                c_scalar = self._hash_to_challenge_scalar(message_hash, w_bytes)
-
-                # Response: z = c·s + y (mod q)
-                z = [(c_scalar * s[i] + y[i]) % q for i in range(n)]
-
-                # Build signature
-                address = self.derive_address_from_public_key(
-                    [int.from_bytes(pub_key_bytes[i:i+4], 'big')
-                     for i in range(0, len(pub_key_bytes), 4)]
-                )
-                c_bytes = c_scalar.to_bytes(4, 'big', signed=True)
-                c_hash = hashlib.sha256(c_bytes).digest()
-
-                return {
-                    "signature": self._encode_vector_to_hex(z),
-                    "auth_tag": c_hash.hex(),
-                    "w": self._encode_vector_to_hex(w),
-                    "nonce": secrets.token_bytes(16).hex(),
-                    "public_key_hex": pub_key_bytes.hex(),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "address": address,
-                }
-
-            except Exception as e:
-                logger.error(f"[HLWE] Signing failed: {e}")
-                raise
-
-    def _hash_to_challenge_scalar(self, msg_hash: bytes, w_bytes: bytes) -> int:
-        """
-        Deterministic challenge scalar c ∈ {-1, 0, 1} from message + commitment.
-
-        CANONICAL — identical to qtcl_client.py.
-
-        Construction:
-          h = SHA-256(b"HLWE_CHALLENGE_v1" ‖ msg ‖ w)
-          c = (h[0] mod 3) − 1  → {-1, 0, 1} with uniform probability.
-        """
-        h = hashlib.sha256(b"HLWE_CHALLENGE_v1" + msg_hash + w_bytes).digest()
-        return (h[0] % 3) - 1
-
-    def _derive_secret_vector_from_key(self, key_seed: bytes, dimension: int) -> List[int]:
-        """
-        Derive ternary secret vector s from private key seed.
-
-        CANONICAL — identical to qtcl_client.py HLWEEngine._derive_secret_vector_from_key.
-
-        Construction:
-          prk  = HKDF-Extract(salt=b"HLWE_SECRET_v1", ikm=key_seed)
-          xof  = SHAKE-256(prk ‖ b"secret_vector" ‖ dimension_be32)
-          For each byte b from XOF:
-            b & 0x03 == 0 → s_i = q−1  (i.e. −1 mod q)
-            b & 0x03 == 1 → s_i = 0
-            b & 0x03 == 2 → s_i = 0    (double-zero → P(0)=½)
-            b & 0x03 == 3 → s_i = 1
-        Result: s_i ∈ {q−1, 0, 1} ⊂ Z_q with L∞-norm = 1.
-        """
-        q = self.params.MODULUS
-        prk = hmac.new(b"HLWE_SECRET_v1", key_seed, hashlib.sha256).digest()
-        xof_input = prk + b"secret_vector" + dimension.to_bytes(4, 'big')
-        xof_bytes = hashlib.shake_256(xof_input).digest(dimension)
-        s = []
-        for byte in xof_bytes:
-            nibble = byte & 0x03
-            if nibble == 0:
-                s.append(q - 1)
-            elif nibble == 3:
-                s.append(1)
-            else:
-                s.append(0)
-        return s
-
-    def _sample_masking_vector(self, msg_hash: bytes, key_seed: bytes, dimension: int) -> List[int]:
-        """
-        Deterministic short masking vector y (ternary distribution).
-
-        CANONICAL — identical to qtcl_client.py HLWEEngine._sample_masking_vector.
-
-        Construction:
-          prk  = HKDF-Extract(salt=b"HLWE_MASK_v1", ikm=msg_hash ‖ key_seed)
-          xof  = SHAKE-256(prk ‖ b"masking" ‖ dimension_be32)
-          Same ternary mapping as secret vector.
-        """
-        q = self.params.MODULUS
-        prk = hmac.new(b"HLWE_MASK_v1", msg_hash + key_seed, hashlib.sha256).digest()
-        xof_input = prk + b"masking" + dimension.to_bytes(4, 'big')
-        xof_bytes = hashlib.shake_256(xof_input).digest(dimension)
-        y = []
-        for byte in xof_bytes:
-            nibble = byte & 0x03
-            if nibble == 0:
-                y.append(q - 1)
-            elif nibble == 3:
-                y.append(1)
-            else:
-                y.append(0)
-        return y
-
-    def _compute_public_key_bytes(self, priv_seed: bytes) -> bytes:
-        """
-        Compute HLWE public key b = A·s + e (mod q) from private seed.
-
-        Uses the FIXED protocol-constant A (same for all keypairs).
-        Error vector e is deterministic from seed.
-
-        Returns packed bytes: n × 4 bytes (big-endian uint32 per coefficient).
-        """
-        n = self.params.DIMENSION
-        q = self.params.MODULUS
-        A = self._derive_lattice_basis_from_pubkey(None)
-        s = self._derive_secret_vector_from_key(priv_seed, n)
-        e = self._sample_error_vector(n, priv_seed)
-        b = LatticeMath.matrix_vector_mult(A, s, q)
-        b = LatticeMath.vector_add(b, e, q)
-        return b''.join(x.to_bytes(4, 'big') for x in b)
-
-    def _derive_lattice_basis_from_pubkey(self, pub_key_bytes: bytes) -> List[List[int]]:
-        """
-        Derive n×n lattice basis A from a fixed protocol constant.
-
-        CANONICAL — identical to qtcl_client.py.
-
-        A is a PUBLIC SYSTEM PARAMETER (like an elliptic curve), not derived
-        from per-key material.  This ensures all parties compute the same A
-        regardless of which key pair they're using.
-
-        Construction:
-          xof = SHAKE-256(b"QTCL_HLWE_BASIS_FIXED_v1")
-          Read n×n uint32 values from XOF output, each mod q.
-        """
-        n = self.params.DIMENSION
-        q = self.params.MODULUS
-
-        xof = hashlib.shake_256(b"QTCL_HLWE_BASIS_FIXED_v1")
-        xof_bytes = xof.digest(n * n * 4)
-
-        A = []
-        for i in range(n):
-            row = []
-            for j in range(n):
-                offset = (i * n + j) * 4
-                val = int.from_bytes(xof_bytes[offset:offset+4], 'big') % q
-                row.append(val)
-            A.append(row)
-        return A
-
-    def derive_public_key(self, private_key_hex: str) -> str:
-        """
-        Derive full HLWE public key (b = As + e) from private key seed.
-
-        Returns hex of packed public key vector (n × 4 bytes).
-        """
-        priv_seed = bytes.fromhex(private_key_hex)
-        pub_bytes = self._compute_public_key_bytes(priv_seed)
-        return pub_bytes.hex()
-
-    def generate_keypair(self) -> Dict[str, str]:
-        """
-        Generate a new HLWE keypair with TRUE lattice structure.
-
-        private_key  = 32-byte random seed (64 hex chars)
-        public_key   = b = As + e (mod q) packed as hex (n × 8 hex chars)
-        address      = "qtcl1" + SHA3-256(pubkey_bytes)[:20].hex()
-        """
-        private_key_hex = secrets.token_bytes(32).hex()
-        public_key_hex = self.derive_public_key(private_key_hex)
-        pub_bytes = bytes.fromhex(public_key_hex)
-        pub_vector = [int.from_bytes(pub_bytes[i:i+4], 'big')
-                      for i in range(0, len(pub_bytes), 4)]
-        address = self.derive_address_from_public_key(pub_vector)
-        return {
-            "private_key": private_key_hex,
-            "public_key": public_key_hex,
-            "address": address,
-        }
+            n = self.params.DIMENSION
+            q = self.params.MODULUS
+            priv_seed  = bytes.fromhex(private_key_hex)
+            pub_bytes  = self._compute_public_key_bytes(priv_seed)
+            A          = self._derive_lattice_basis()
+            s          = self._derive_secret_vector(priv_seed, n)
+            y          = [secrets.randbelow(3) - 1 for _ in range(n)]
+            w          = LatticeMath.matrix_vector_mult(A, y, q)
+            w_bytes    = b''.join(x.to_bytes(4, 'big') for x in w)
+            c_scalar   = self._hash_to_challenge_scalar(message_hash, w_bytes)
+            z          = [(c_scalar * s[i] + y[i]) % q for i in range(n)]
+            c_bytes    = c_scalar.to_bytes(4, 'big', signed=True)
+            address    = self.derive_address_from_public_key(pub_bytes)
+            return {
+                "signature":      self._encode_vector_to_hex(z),
+                "auth_tag":       hashlib.sha256(c_bytes).hexdigest(),
+                "w":              self._encode_vector_to_hex(w),
+                "nonce":          secrets.token_bytes(16).hex(),
+                "public_key_hex": pub_bytes.hex(),
+                "timestamp":      datetime.now(timezone.utc).isoformat(),
+                "address":        address,
+            }
 
     def verify_signature(self, message_hash: bytes, signature_dict: Dict[str, str], public_key_hex: str) -> bool:
         """
-        Verify TRUE HLWE Fiat-Shamir lattice signature.
+        CANONICAL Fiat-Shamir HLWE verification — identical to qtcl_client.py HLWEEngine.verify_signature.
 
-        Verification:
-          1. Parse (z, w, c) from signature
-          2. Verify c = f(msg, w) — Fiat-Shamir hash binding
-          3. Verify w' = A·z − b·c is close to w — lattice relation
-             (w' = w − e·c, so ‖w' − w‖∞ ≤ ERROR_BOUND · |c|)
+        Protocol:
+          Parse z (signature), w (commitment), c_hash (auth_tag) from signature_dict.
+          Re-derive c_scalar from (msg, w) — Fiat-Shamir binding.
+          Check: SHA-256(c.to_bytes) == auth_tag.
+          Check: A·z - b·c ≈ w  (mod q, within ERROR_BOUND slack).
         """
         with self.lock:
             try:
                 n = self.params.DIMENSION
                 q = self.params.MODULUS
-
-                # ── Parse signature ──────────────────────────────────────
                 z_hex = signature_dict.get('signature', '')
                 c_hex = signature_dict.get('auth_tag', '')
                 w_hex = signature_dict.get('w', '')
                 if not z_hex or not c_hex or not w_hex:
                     return False
-
                 z = self._decode_vector_from_hex(z_hex)
                 w = self._decode_vector_from_hex(w_hex)
                 if len(z) != n or len(w) != n:
                     return False
-
-                # ── Parse public key b ───────────────────────────────────
-                if len(public_key_hex) < n * 8:
+                if not public_key_hex or len(public_key_hex) < n * 8:
                     return False
-                b = self._decode_vector_from_hex(public_key_hex)
-                if len(b) != n:
+                b_vec = self._decode_vector_from_hex(public_key_hex)
+                if len(b_vec) != n:
                     return False
-
-                # ── Derive lattice basis A from public key ───────────────
-                pub_key_bytes = bytes.fromhex(public_key_hex)
-                A = self._derive_lattice_basis_from_pubkey(pub_key_bytes)
-
-                # ── Fiat-Shamir challenge verification ───────────────────
-                # Check: c = f(msg, w) using the w from the signature
-                w_bytes = b''.join(x.to_bytes(4, 'big') for x in w)
-                c_scalar = self._hash_to_challenge_scalar(message_hash, w_bytes)
-                c_bytes = c_scalar.to_bytes(4, 'big', signed=True)
-                expected_c_hash = hashlib.sha256(c_bytes).digest()
-                if not hmac.compare_digest(expected_c_hash.hex(), c_hex):
+                # Re-derive challenge scalar from (msg, w) — must match signer
+                w_bytes    = b''.join(x.to_bytes(4, 'big') for x in w)
+                c_scalar   = self._hash_to_challenge_scalar(message_hash, w_bytes)
+                c_bytes    = c_scalar.to_bytes(4, 'big', signed=True)
+                expected_c = hashlib.sha256(c_bytes).hexdigest()
+                if not hmac.compare_digest(expected_c, c_hex):
                     return False
-
-                # ── Lattice relation check ───────────────────────────────
-                # w' = A·z − b·c  (mod q)
-                # For honest sig: w' = A(c·s+y) − (As+e)·c = Ay − e·c = w − e·c
-                # So ‖w' − w‖∞ ≤ ERROR_BOUND · |c| (since ‖e‖∞ ≤ ERROR_BOUND)
-                Az = LatticeMath.matrix_vector_mult(A, z, q)
-                bc = [(c_scalar * bi) % q for bi in b]
+                # Lattice relation: A·z - b·c ≈ w  (mod q)
+                A      = self._derive_lattice_basis()
+                Az     = LatticeMath.matrix_vector_mult(A, z, q)
+                bc     = [(c_scalar * bi) % q for bi in b_vec]
                 w_prime = [(Az[i] - bc[i]) % q for i in range(n)]
-
-                bound = self.params.ERROR_BOUND * max(abs(c_scalar), 1)
+                bound  = self.params.ERROR_BOUND * max(abs(c_scalar), 1)
                 for i in range(n):
-                    diff = (w_prime[i] - w[i]) % q
+                    diff     = (w_prime[i] - w[i]) % q
                     centered = diff if diff <= q // 2 else q - diff
-                    if centered > bound + 1:  # +1 for rounding
+                    if centered > bound + 1:
                         return False
-
                 return True
-
             except Exception as e:
-                logger.debug(f"[HLWE] Verification error: {e}")
+                logger.error(f"[HLWE] verify_signature error: {e}")
                 return False
+
+    def _compute_public_key_bytes(self, priv_seed: bytes) -> bytes:
+        """b = A·s + e mod q from private seed — deterministic, canonical."""
+        n  = self.params.DIMENSION
+        q  = self.params.MODULUS
+        A  = self._derive_lattice_basis()
+        s  = self._derive_secret_vector(priv_seed, n)
+        e  = self._derive_error_vector(priv_seed, n)
+        b  = LatticeMath.matrix_vector_mult(A, s, q)
+        b  = LatticeMath.vector_add(b, e, q)
+        return b''.join(x.to_bytes(4, 'big') for x in b)
+
+    def _derive_lattice_basis(self) -> List[List[int]]:
+        """
+        CANONICAL fixed public lattice basis A — identical to qtcl_client.py.
+
+        A is a SYSTEM-WIDE PUBLIC PARAMETER derived from a protocol constant via
+        SHAKE-256.  All nodes derive the same A regardless of key material.
+        Domain: b"QTCL_HLWE_BASIS_FIXED_v1"
+        """
+        n        = self.params.DIMENSION
+        q        = self.params.MODULUS
+        xof_len  = n * n * 4
+        xof_bytes = hashlib.shake_256(b"QTCL_HLWE_BASIS_FIXED_v1").digest(xof_len)
+        A = []
+        for i in range(n):
+            row = []
+            for j in range(n):
+                offset = (i * n + j) * 4
+                val    = int.from_bytes(xof_bytes[offset:offset+4], 'big') % q
+                row.append(val)
+            A.append(row)
+        return A
+
+    def _derive_error_vector(self, seed: bytes, dimension: int) -> List[int]:
+        """
+        CANONICAL deterministic error vector e from seed — identical to qtcl_client.py.
+
+        Construction:
+          prk  = HKDF-Extract(salt=b"HLWE_ERROR_v1", ikm=seed)
+          xof  = SHAKE-256(prk || b"error" || dimension_be32)
+          e_i  = (xof_byte % (2·B+1)) − B  → uniform in [−B, B], stored mod q
+        """
+        q   = self.params.MODULUS
+        B   = self.params.ERROR_BOUND
+        prk = hmac.new(b"HLWE_ERROR_v1", seed, hashlib.sha256).digest()
+        xof_input = prk + b"error" + dimension.to_bytes(4, 'big')
+        xof_bytes = hashlib.shake_256(xof_input).digest(dimension)
+        return [(((b % (2 * B + 1)) - B) % q) for b in xof_bytes]
+
+    def _hash_to_challenge_scalar(self, msg_hash: bytes, w_bytes: bytes) -> int:
+        """
+        CANONICAL Fiat-Shamir challenge c ∈ {-1, 0, 1} — identical to qtcl_client.py.
+
+        h = SHA-256(b"HLWE_CHALLENGE_v1" || msg_hash || w_bytes)
+        c = (h[0] % 3) - 1
+        """
+        h = hashlib.sha256(b"HLWE_CHALLENGE_v1" + msg_hash + w_bytes).digest()
+        return (h[0] % 3) - 1
+
+    def derive_public_key(self, private_key_hex: str) -> str:
+        """
+        CANONICAL public key derivation — b = A·s+e packed as hex.
+        Identical to qtcl_client.py HLWEEngine.derive_public_key.
+        """
+        return self._compute_public_key_bytes(bytes.fromhex(private_key_hex)).hex()
+
+    def generate_keypair(self) -> Dict[str, str]:
+        """Generate HLWE keypair via Fiat-Shamir canonical scheme."""
+        private_key_hex = secrets.token_bytes(32).hex()
+        public_key_hex  = self.derive_public_key(private_key_hex)
+        address         = self.derive_address_from_public_key(bytes.fromhex(public_key_hex))
+        return {"private_key": private_key_hex, "public_key": public_key_hex, "address": address}
     
     def save_address(self, address: StoredAddress) -> bool:
         """Save wallet address to Supabase"""
@@ -1365,10 +1205,8 @@ def get_hlwe_adapter() -> HLWEIntegrationAdapter:
 def hlwe_sign_block(block_dict: Dict[str, Any], private_key_hex: str) -> Dict[str, str]:
     """Sign block (backward compatible) — USE IN blockchain_entropy_mining.py"""
     try:
-        block_json = json.dumps(block_dict, sort_keys=True, default=str)
-        block_hash = hashlib.sha256(block_json.encode('utf-8')).digest()
-        engine = HLWEEngine()
-        return engine.sign_hash(block_hash, private_key_hex)
+        adapter = get_hlwe_adapter()
+        return adapter.sign_block(block_dict, private_key_hex)
     except Exception as e:
         logger.error(f"[HLWE-API] Block signing failed: {e}")
         return {'signature': '', 'auth_tag': '', 'error': str(e)}
@@ -1376,11 +1214,8 @@ def hlwe_sign_block(block_dict: Dict[str, Any], private_key_hex: str) -> Dict[st
 def hlwe_verify_block(block_dict: Dict[str, Any], signature_dict: Dict[str, str], public_key_hex: str) -> Tuple[bool, str]:
     """Verify block signature (backward compatible) — USE IN server.py"""
     try:
-        block_json = json.dumps(block_dict, sort_keys=True, default=str)
-        block_hash = hashlib.sha256(block_json.encode('utf-8')).digest()
-        engine = HLWEEngine()
-        is_valid = engine.verify_signature(block_hash, signature_dict, public_key_hex)
-        return (True, "OK") if is_valid else (False, "Invalid signature")
+        adapter = get_hlwe_adapter()
+        return adapter.verify_block(block_dict, signature_dict, public_key_hex)
     except Exception as e:
         logger.error(f"[HLWE-API] Block verification failed: {e}")
         return False, f"Error: {str(e)}"
@@ -1388,10 +1223,8 @@ def hlwe_verify_block(block_dict: Dict[str, Any], signature_dict: Dict[str, str]
 def hlwe_sign_transaction(tx_data: Dict[str, Any], private_key_hex: str) -> Dict[str, str]:
     """Sign transaction (backward compatible) — USE IN mempool.py"""
     try:
-        tx_json = json.dumps(tx_data, sort_keys=True, default=str)
-        tx_hash = hashlib.sha256(tx_json.encode('utf-8')).digest()
-        engine = HLWEEngine()
-        return engine.sign_hash(tx_hash, private_key_hex)
+        adapter = get_hlwe_adapter()
+        return adapter.sign_transaction(tx_data, private_key_hex)
     except Exception as e:
         logger.error(f"[HLWE-API] TX signing failed: {e}")
         return {'signature': '', 'auth_tag': '', 'error': str(e)}
@@ -1399,11 +1232,8 @@ def hlwe_sign_transaction(tx_data: Dict[str, Any], private_key_hex: str) -> Dict
 def hlwe_verify_transaction(tx_data: Dict[str, Any], signature_dict: Dict[str, str], public_key_hex: str) -> Tuple[bool, str]:
     """Verify transaction signature (backward compatible) — USE IN mempool.py/server.py"""
     try:
-        tx_json = json.dumps(tx_data, sort_keys=True, default=str)
-        tx_hash = hashlib.sha256(tx_json.encode('utf-8')).digest()
-        engine = HLWEEngine()
-        is_valid = engine.verify_signature(tx_hash, signature_dict, public_key_hex)
-        return (True, "OK") if is_valid else (False, "Invalid signature")
+        adapter = get_hlwe_adapter()
+        return adapter.verify_transaction(tx_data, signature_dict, public_key_hex)
     except Exception as e:
         logger.error(f"[HLWE-API] TX verification failed: {e}")
         return False, f"Error: {str(e)}"
@@ -1411,11 +1241,8 @@ def hlwe_verify_transaction(tx_data: Dict[str, Any], signature_dict: Dict[str, s
 def hlwe_derive_address(public_key_hex: str) -> str:
     """Derive address from public key (backward compatible)"""
     try:
-        engine = HLWEEngine()
-        pub_bytes = bytes.fromhex(public_key_hex)
-        pub_vector = [int.from_bytes(pub_bytes[i:i+4], 'big')
-                      for i in range(0, len(pub_bytes), 4)]
-        return engine.derive_address_from_public_key(pub_vector)
+        adapter = get_hlwe_adapter()
+        return adapter.derive_address(public_key_hex)
     except Exception as e:
         logger.error(f"[HLWE-API] Address derivation failed: {e}")
         return ''
@@ -1448,11 +1275,8 @@ def hlwe_get_wallet_status(wallet_fingerprint: str) -> Dict[str, Any]:
 def hlwe_health_check() -> bool:
     """Health check (backward compatible) — USE IN server.py /health endpoint"""
     try:
-        engine = HLWEEngine()
-        kp = engine.generate_keypair()
-        mh = hashlib.sha256(b"health_check").digest()
-        sig = engine.sign_hash(mh, kp["private_key"])
-        return engine.verify_signature(mh, sig, kp["public_key"])
+        adapter = get_hlwe_adapter()
+        return adapter.health_check()
     except Exception as e:
         logger.error(f"[HLWE-API] Health check failed: {e}")
         return False
@@ -1460,17 +1284,8 @@ def hlwe_health_check() -> bool:
 def hlwe_system_info() -> Dict[str, Any]:
     """Get system information — USE IN server.py /info endpoint"""
     try:
-        return {
-            'engine': 'HLWE v3.0',
-            'cryptography': 'Post-quantum (Fiat-Shamir over Learning With Errors)',
-            'lattice_dimension': LatticeParams.DIMENSION,
-            'modulus': LatticeParams.MODULUS,
-            'signing': 'True HLWE lattice signature (z = c·s + y)',
-            'verification': 'Fiat-Shamir hash binding + lattice relation',
-            'basis': 'Fixed protocol constant (SHAKE-256)',
-            'initialized': True,
-            'timestamp': datetime.now(timezone.utc).isoformat()
-        }
+        adapter = get_hlwe_adapter()
+        return adapter.get_system_info()
     except Exception as e:
         logger.error(f"[HLWE-API] System info failed: {e}")
         return {'error': str(e), 'status': 'unavailable'}
