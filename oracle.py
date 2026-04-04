@@ -566,13 +566,14 @@ class OracleKeyPair:
 
 @dataclass
 class HLWESignature:
-    signature       : str           # Hex-encoded HLWE signature vector
-    auth_tag        : str           # HMAC-SHA256 authentication tag
+    signature       : str           # Hex-encoded HLWE signature vector z
+    auth_tag        : str           # SHA-256(c_scalar.to_bytes) — Fiat-Shamir challenge hash
     timestamp       : str           # ISO format timestamp
-    public_key_hex  : str = ""      # Public key used for signing
+    public_key_hex  : str = ""      # Public key b = As+e packed as hex
     w_entropy_hash  : str = ""      # Quantum entropy commitment
     derivation_path : str = "m/0/0/0"
     timestamp_ns    : int = 0
+    w               : str = ""      # Fiat-Shamir commitment vector A·y (hex); required by verifier
 
     def to_dict(self) -> Dict[str, Any]: return asdict(self)
 
@@ -580,31 +581,26 @@ class HLWESignature:
     def from_dict(d: Dict[str, Any]) -> "HLWESignature":
         # Handle backward compatibility with commitment/witness/proof format
         if "commitment" in d and "signature" not in d:
-            # Map old fields to new ones for advisory verification
             d["signature"] = d.get("witness", "")
             d["auth_tag"] = d.get("proof", "")
             if "timestamp" not in d:
-                import time as _t
                 from datetime import datetime, timezone
                 d["timestamp"] = datetime.now(timezone.utc).isoformat()
-        
+
         # Map various public key field aliases to public_key_hex
         if "public_key" in d and not d.get("public_key_hex"):
             d["public_key_hex"] = d["public_key"]
-        
-        # Ensure all required fields for dataclass are present
-        # Use a list to avoid "dictionary changed size during iteration" if needed, 
-        # but here we are creating a new dict.
-        fields = ["signature", "auth_tag", "timestamp", "public_key_hex", "w_entropy_hash", "derivation_path", "timestamp_ns"]
+
+        fields = ["signature", "auth_tag", "timestamp", "public_key_hex",
+                  "w_entropy_hash", "derivation_path", "timestamp_ns", "w"]
         filtered_d = {k: v for k, v in d.items() if k in fields}
-        
-        # Add defaults for missing fields
-        if "signature" not in filtered_d: filtered_d["signature"] = ""
-        if "auth_tag" not in filtered_d: filtered_d["auth_tag"] = ""
-        if "timestamp" not in filtered_d: 
+
+        if "signature" not in filtered_d:  filtered_d["signature"] = ""
+        if "auth_tag"  not in filtered_d:  filtered_d["auth_tag"]  = ""
+        if "timestamp" not in filtered_d:
             from datetime import datetime, timezone
             filtered_d["timestamp"] = datetime.now(timezone.utc).isoformat()
-            
+
         return HLWESignature(**filtered_d)
 
 
@@ -957,15 +953,14 @@ class HLWEVerifier:
                 return True, "valid_advisory(no_engine)"
 
             msg_hash_bytes = bytes.fromhex(msg_hash)
+            # Forward ALL fields the Fiat-Shamir verifier needs: signature (z),
+            # auth_tag (c_hash), and w (commitment vector).  Stripping w caused
+            # verify_signature to always return False → "invalid_hlwe_signature".
             sig_dict = {
                 'signature': sig.signature,
-                'auth_tag': sig.auth_tag
+                'auth_tag':  sig.auth_tag,
+                'w':         sig.to_dict().get('w', ''),
             }
-            
-            # For HLWE verification, we use the engine's verify_signature method.
-            # In the current (BUG-COMPATIBILITY) mode, the signing_key is derived
-            # from the public_key_hex (which the client sends as the private key).
-            # This bypasses the extremely slow lattice matrix derivation.
             is_valid = self._engine.verify_signature(msg_hash_bytes, sig_dict, pubkey_hex)
             if is_valid:
                 return True, "valid"
@@ -1692,7 +1687,7 @@ class OracleWStateManager:
                             self.block_field_readings[r.oracle_id] = r
                 except Exception as exc:
                     logger.error(f"[ORACLE CLUSTER] Oracle-{bf_futures[fut].oracle_id+1} BF exception: {exc}")
-        except TimeoutError:
+        except concurrent.futures.TimeoutError:
             unfinished = [f for f in bf_futures if not f.done()]
             logger.error(f"[ORACLE CLUSTER] Stream error: {len(unfinished)} (of 5) futures unfinished (timeout={MEASUREMENT_TIMEOUT}s)")
             # Attempt to cancel unfinished futures to free resources
