@@ -696,33 +696,49 @@ class HLWEEngine:
                 s.append(0)       # nibble ∈ {1,2} both map to 0 → P(0)=1/2
         return s
     
-    def _sample_error_vector(self, dimension: int) -> List[int]:
-        """Sample small error vector e from discrete Gaussian-like distribution"""
+    def _sample_error_vector(self, dimension: int, seed: bytes = None) -> List[int]:
+        """
+        Deterministic error vector e from seed.
+
+        CANONICAL — identical to qtcl_client.py.
+
+        Construction:
+          prk  = HKDF-Extract(salt=b"HLWE_ERROR_v1", ikm=seed)
+          xof  = SHAKE-256(prk ‖ b"error" ‖ dimension_be32)
+          Each component: (xof_byte mod (2·B+1)) − B  → uniform in [−B, B]
+        """
+        q = self.params.MODULUS
+        B = self.params.ERROR_BOUND
+        if seed is None:
+            seed = os.urandom(32)
+        prk = hmac.new(b"HLWE_ERROR_v1", seed, hashlib.sha256).digest()
+        xof_input = prk + b"error" + dimension.to_bytes(4, 'big')
+        xof_bytes = hashlib.shake_256(xof_input).digest(dimension)
         e = []
-        for _ in range(dimension):
-            val = secrets.randbelow(2 * self.params.ERROR_BOUND) - self.params.ERROR_BOUND
-            e.append(val)
-        
+        for byte in xof_bytes:
+            val = (byte % (2 * B + 1)) - B
+            e.append(val % q)
         return e
     
     def derive_address_from_public_key(self, public_key) -> str:
         """
-        Derive QTCL wallet address from HLWE public key vector.
+        Derive QTCL wallet address from HLWE public key.
 
-        Construction: SHA3-256(SHA3-256(packed_public_key_bytes))  — full 32 bytes (256 bits).
+        CANONICAL — must match oracle.py, mempool.py, qtcl_client.py exactly.
 
-        CANONICAL — must be identical to qtcl_client.py HLWEEngine.derive_address_from_public_key.
+        Construction: "qtcl1" + SHA3-256(pubkey_bytes)[:20].hex()
+          - hash: SHA3-256 (Keccak), applied ONCE
+          - truncation: 20 bytes (160 bits) — same as Ethereum
+          - prefix: "qtcl1" — QTCL canonical address prefix
 
         Accepts both List[int] (vector) and bytes (packed) input.
-        Output: 64 hex chars (32 bytes = 256 bits).
+        Output: 45 chars ("qtcl1" + 40 hex chars).
         """
         if isinstance(public_key, bytes):
             pub_bytes = public_key
         else:
             pub_bytes = b''.join(x.to_bytes(4, byteorder='big') for x in public_key)
-        h1 = hashlib.sha3_256(pub_bytes).digest()
-        h2 = hashlib.sha3_256(h1).digest()
-        return h2.hex()   # 256-bit address, 64 hex chars
+        return "qtcl1" + hashlib.sha3_256(pub_bytes).digest()[:20].hex()
     
     def sign_hash(self, message_hash: bytes, private_key_hex: str) -> Dict[str, str]:
         """
@@ -861,14 +877,15 @@ class HLWEEngine:
         Compute HLWE public key b = A·s + e (mod q) from private seed.
 
         Uses the FIXED protocol-constant A (same for all keypairs).
+        Error vector e is deterministic from seed.
 
         Returns packed bytes: n × 4 bytes (big-endian uint32 per coefficient).
         """
         n = self.params.DIMENSION
         q = self.params.MODULUS
-        A = self._derive_lattice_basis_from_pubkey(None)  # fixed A, ignores argument
+        A = self._derive_lattice_basis_from_pubkey(None)
         s = self._derive_secret_vector_from_key(priv_seed, n)
-        e = self._sample_error_vector(n)
+        e = self._sample_error_vector(n, priv_seed)
         b = LatticeMath.matrix_vector_mult(A, s, q)
         b = LatticeMath.vector_add(b, e, q)
         return b''.join(x.to_bytes(4, 'big') for x in b)
