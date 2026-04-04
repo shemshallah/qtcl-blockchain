@@ -1563,12 +1563,13 @@ def _lazy_ensure_chain_state():
         logger.warning(f"[SCHEMA] _lazy_ensure_chain_state failed: {e}")
 
 def _lazy_ensure_peer_registry():
-    """Ensure peer_registry table exists in Supabase."""
+    """Ensure peer_registry and peer_devices tables exist in Supabase."""
     global _SCHEMA_ENSURED_PEER_REGISTRY
     if _SCHEMA_ENSURED_PEER_REGISTRY:
         return
     try:
         with get_db_cursor() as cur:
+            # Create table with node_id as PRIMARY KEY
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS peer_registry (
                     node_id       TEXT PRIMARY KEY,
@@ -1581,21 +1582,55 @@ def _lazy_ensure_peer_registry():
                     ban_score     INTEGER     DEFAULT 0,
                     caller_ip     TEXT        DEFAULT '',
                     mac_address   TEXT        DEFAULT '',
-                    device_id     TEXT        DEFAULT ''
+                    device_id     TEXT        DEFAULT '',
+                    fingerprint   TEXT        DEFAULT ''
                 )
             """)
+            
+            # Ensure UNIQUE constraint on node_id for ON CONFLICT (if not PRIMARY KEY)
+            # This is critical for PostgreSQL upserts
+            try:
+                cur.execute("""
+                    DO $$ 
+                    BEGIN 
+                        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'peer_registry_node_id_key') THEN
+                            ALTER TABLE peer_registry ADD CONSTRAINT peer_registry_node_id_key UNIQUE (node_id);
+                        END IF;
+                    END $$;
+                """)
+            except Exception:
+                pass
+
             for col, dtype in [
                 ("first_seen", "TIMESTAMPTZ DEFAULT NOW()"),
                 ("capabilities", "JSONB DEFAULT '[]'"),
                 ("ban_score", "INTEGER DEFAULT 0"),
                 ("caller_ip", "TEXT DEFAULT ''"),
                 ("mac_address", "TEXT DEFAULT ''"),
-                ("device_id", "TEXT DEFAULT ''")
+                ("device_id", "TEXT DEFAULT ''"),
+                ("fingerprint", "TEXT DEFAULT ''")
             ]:
                 try:
                     cur.execute(f"ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS {col} {dtype}")
                 except Exception:
                     pass
+            
+            # ── 3.1 DEVICE FINGERPRINTING TABLE ─────────────────────────────────
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS peer_devices (
+                    fingerprint    TEXT PRIMARY KEY,
+                    node_id        TEXT NOT NULL,
+                    last_caller_ip TEXT,
+                    mac_address    TEXT,
+                    device_id      TEXT,
+                    first_seen     TIMESTAMPTZ DEFAULT NOW(),
+                    last_seen      TIMESTAMPTZ DEFAULT NOW(),
+                    trust_score    FLOAT DEFAULT 1.0
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_peer_devices_node ON peer_devices(node_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_peer_devices_ip ON peer_devices(last_caller_ip)")
+
         _SCHEMA_ENSURED_PEER_REGISTRY = True
     except Exception as e:
         logger.warning(f"[SCHEMA] _lazy_ensure_peer_registry failed: {e}")
@@ -2588,34 +2623,20 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
 
         pubkey_hash = hashlib.sha256(pubkey_b64.encode()).hexdigest()[:32] if pubkey_b64 else node_id[:32]
 
+        # ── Device fingerprinting (NAT:MAC:Fingerprint chain) ───────────────────
+        # Pair NAT (caller_ip) with reported MAC and DeviceID to identify unique hardware
+        # even if node_id (wallet key) rotates.
+        fp_payload = f"NAT:{caller_ip}|MAC:{mac_address}|DEV:{device_id}"
+        fingerprint = hashlib.sha256(fp_payload.encode()).hexdigest()
+
         # Upsert into peer_registry — CREATE TABLE IF NOT EXISTS guard in case migration pending
         try:
+            _lazy_ensure_peer_registry()
             with get_db_cursor() as cur:
                 cur.execute("""
-                    CREATE TABLE IF NOT EXISTS peer_registry (
-                        node_id       TEXT        PRIMARY KEY,
-                        external_addr TEXT        NOT NULL,
-                        pubkey_hash   TEXT        NOT NULL DEFAULT '',
-                        chain_height  BIGINT      DEFAULT 0,
-                        last_seen     TIMESTAMPTZ DEFAULT NOW(),
-                        first_seen    TIMESTAMPTZ DEFAULT NOW(),
-                        capabilities  JSONB       DEFAULT '[]',
-                        ban_score     INTEGER     DEFAULT 0,
-                        caller_ip     TEXT        DEFAULT '',
-                        mac_address   TEXT        DEFAULT '',
-                        device_id     TEXT        DEFAULT ''
-                    )
-                """)
-                try:
-                    cur.execute("ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS caller_ip TEXT DEFAULT ''")
-                    cur.execute("ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS mac_address TEXT DEFAULT ''")
-                    cur.execute("ALTER TABLE peer_registry ADD COLUMN IF NOT EXISTS device_id TEXT DEFAULT ''")
-                except Exception:
-                    pass
-                cur.execute("""
                     INSERT INTO peer_registry
-                        (node_id, external_addr, pubkey_hash, chain_height, last_seen, caller_ip, mac_address, device_id)
-                    VALUES (%s, %s, %s, %s, NOW(), %s, %s, %s)
+                        (node_id, external_addr, pubkey_hash, chain_height, last_seen, caller_ip, mac_address, device_id, fingerprint)
+                    VALUES (%s, %s, %s, %s, NOW(), %s, %s, %s, %s)
                     ON CONFLICT (node_id) DO UPDATE SET
                         external_addr = EXCLUDED.external_addr,
                         pubkey_hash   = EXCLUDED.pubkey_hash,
@@ -2623,8 +2644,22 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
                         last_seen     = NOW(),
                         caller_ip     = EXCLUDED.caller_ip,
                         mac_address   = EXCLUDED.mac_address,
-                        device_id     = EXCLUDED.device_id
-                """, (node_id, external_addr, pubkey_hash, chain_height, caller_ip, mac_address, device_id))
+                        device_id     = EXCLUDED.device_id,
+                        fingerprint   = EXCLUDED.fingerprint
+                """, (node_id, external_addr, pubkey_hash, chain_height, caller_ip, mac_address, device_id, fingerprint))
+                
+                # Link device to node_id in persistent chain
+                cur.execute("""
+                    INSERT INTO peer_devices
+                        (fingerprint, node_id, last_caller_ip, mac_address, device_id, last_seen)
+                    VALUES (%s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (fingerprint) DO UPDATE SET
+                        node_id        = EXCLUDED.node_id,
+                        last_caller_ip = EXCLUDED.last_caller_ip,
+                        mac_address    = EXCLUDED.mac_address,
+                        device_id      = EXCLUDED.device_id,
+                        last_seen      = NOW()
+                """, (fingerprint, node_id, caller_ip, mac_address, device_id))
         except Exception as _dbe:
             # Non-fatal: fall through to in-process cache so peer can still be served
             logger.warning(f"[RPC-METHOD] qtcl_registerPeer DB upsert failed: {_dbe}")
@@ -2640,13 +2675,55 @@ def _rpc_registerPeer(params: Any, rpc_id: Any) -> dict:
                 "caller_ip":     caller_ip,
                 "mac_address":   mac_address,
                 "device_id":     device_id,
+                "fingerprint":   fingerprint,
                 "ban_score":     0,
             }
-        logger.info(f"[P2P] ✅ Peer registered: node={node_id[:16]}… addr={external_addr} h={chain_height}")
-        return _rpc_ok({"registered": True, "node_id": node_id, "external_addr": external_addr, "caller_ip": caller_ip}, rpc_id)
+        logger.info(f"[P2P] ✅ Peer registered: node={node_id[:16]}… addr={external_addr} h={chain_height} fp={fingerprint[:12]}…")
+        return _rpc_ok({
+            "registered": True, 
+            "node_id": node_id, 
+            "external_addr": external_addr, 
+            "caller_ip": caller_ip,
+            "fingerprint": fingerprint,
+            "nat_paired": True
+        }, rpc_id)
     except Exception as e:
         logger.exception(f"[RPC-METHOD] qtcl_registerPeer exception: {e}")
         return _rpc_error(-32603, f"Internal error: {str(e)}", rpc_id, {"exception": type(e).__name__})
+
+
+def _rpc_getDeviceChain(params: Any, rpc_id: Any) -> dict:
+    """Return the NAT:MAC:Fingerprint chain for a given node_id or fingerprint."""
+    try:
+        if isinstance(params, list) and params:
+            params = params[0]
+        search = str(params.get("search") or "").strip()
+        if not search:
+            return _rpc_error(-32602, "search (node_id or fingerprint) required", rpc_id)
+        
+        devices = []
+        with get_db_cursor() as cur:
+            cur.execute("""
+                SELECT fingerprint, node_id, last_caller_ip, mac_address, device_id, first_seen, last_seen, trust_score
+                FROM   peer_devices
+                WHERE  node_id = %s OR fingerprint = %s
+                ORDER  BY last_seen DESC
+            """, (search, search))
+            rows = cur.fetchall()
+            if rows:
+                cols = [d[0] for d in cur.description]
+                for row in rows:
+                    r = dict(zip(cols, row))
+                    # Normalise datetimes
+                    for k in ["first_seen", "last_seen"]:
+                        if hasattr(r[k], "isoformat"):
+                            r[k] = r[k].isoformat()
+                    devices.append(r)
+        
+        return _rpc_ok({"devices": devices, "count": len(devices)}, rpc_id)
+    except Exception as e:
+        logger.exception(f"[RPC-METHOD] qtcl_getDeviceChain exception: {e}")
+        return _rpc_error(-32603, str(e), rpc_id)
 
 
 def _rpc_getMyAddr(params: Any, rpc_id: Any) -> dict:
@@ -3812,6 +3889,7 @@ _RPC_METHODS: Dict[str, Any] = {
     "qtcl_getEvents":         _rpc_getEvents,
     "qtcl_getOracleRegistry": _rpc_getOracleRegistry,
     "qtcl_getOracleRecord":   _rpc_getOracleRecord,
+    "qtcl_getDeviceChain":    _rpc_getDeviceChain,
     "qtcl_submitOracleReg":   _rpc_submitOracleReg,
     "qtcl_registerMeasurementSubscriber": _rpc_registerMeasurementSubscriber,
     "qtcl_unregisterMeasurementSubscriber": _rpc_unregisterMeasurementSubscriber,
@@ -4073,10 +4151,13 @@ def rpc_endpoint():
         result, status_code = _dispatch(body)
         
         if status_code >= 400:
-            return jsonify(result), status_code
+            return Response(json.dumps(result), status=status_code, mimetype='application/json')
         if result is None:
             return "", 204
-        return jsonify(result), 200
+            
+        # Standard JSON-RPC response via Flask Response to ensure correct content-length
+        json_payload = json.dumps(result)
+        return Response(json_payload, status=200, mimetype='application/json')
     except Exception as e:
         logger.exception(f"[RPC] Endpoint error: {e}")
         return jsonify(_rpc_error(-32603, str(e), None)), 500
