@@ -86,6 +86,10 @@ class HyperbolicGeometry:
         self._use_supabase = False
         self._supabase_conn = None
         self.db_path = None
+        # Initialize geometry hash cache and lock early (so they exist even if init fails)
+        self._geometry_hash_cache = None
+        self._cache_timestamp = 0.0
+        self._lock = threading.Lock()
         
         # Check ALL env vars for debugging
         all_env = {k: ('***' if 'PASS' in k.upper() else v) for k, v in os.environ.items() if 'POOLER' in k.upper() or 'DATABASE' in k.upper()}
@@ -122,12 +126,9 @@ class HyperbolicGeometry:
                 self._init_failed = True
                 return
         
-        self._geometry_hash_cache = None
-        self._cache_timestamp = 0.0
         self._init_failed = False
-        self._lock = threading.Lock()
         logger.info(f"[HyperbolicGeometry] ✅ Initialized successfully (supabase={self._use_supabase})")
-    
+
     def _get_connection(self):
         """Get DB connection — Supabase on server, SQLite on client."""
         if self._use_supabase:
@@ -181,13 +182,6 @@ class HyperbolicGeometry:
         conn.row_factory = sqlite3.Row
         return conn
     
-    def _get_connection(self) -> sqlite3.Connection:
-        """Return a connection to the SQLite database."""
-        if not Path(self.db_path).exists():
-            raise FileNotFoundError(f"Hyperbolic geometry database not found: {self.db_path}")
-        conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30)
-        conn.row_factory = sqlite3.Row
-        return conn
     
     def fetch_all_triangles(self, max_depth: int = 5) -> List[Dict[str, Any]]:
         """Fetch hyperbolic triangles up to max_depth."""
@@ -271,24 +265,6 @@ class HyperbolicGeometry:
         with self._lock:
             self._geometry_hash_cache = None
             self._cache_timestamp = 0.0
-            triangles = self.fetch_all_triangles(max_depth)
-            encoded = b''
-            for tri in triangles:
-                encoded += struct.pack('>Q', tri['id'])
-                encoded += struct.pack('>I', tri['depth'])
-                for vx, vy in (tri['v0'], tri['v1'], tri['v2']):
-                    encoded += struct.pack('>d', vx)
-                    encoded += struct.pack('>d', vy)
-            self._geometry_hash_cache = hashlib.sha3_256(encoded).digest()
-            self._cache_timestamp = now
-            logger.info(f"[HyperbolicGeometry] Computed geometry hash from {len(triangles)} triangles")
-            return self._geometry_hash_cache
-    
-    def invalidate_cache(self):
-        """Force geometry hash recomputation on next call."""
-        with self._lock:
-            self._geometry_hash_cache = None
-            self._cache_timestamp = 0.0
     
     def hyperbolic_hash(self, msg: bytes) -> bytes:
         """Return SHA3-256(domain ‖ msg ‖ geometry_hash). Uses hyperbolic geometry as salt."""
@@ -317,7 +293,7 @@ _hyperbolic_geometry = None
 
 def get_hyperbolic_geometry() -> HyperbolicGeometry:
     global _hyperbolic_geometry
-    if _hyperbolic_geometry is None:
+    if _hyperbolic_geometry is None or _hyperbolic_geometry._init_failed:
         _hyperbolic_geometry = HyperbolicGeometry()
     return _hyperbolic_geometry
 
