@@ -2443,6 +2443,23 @@ def _rpc_getQuantumMetrics(params: Any, rpc_id: Any) -> dict:
                 logger.exception(f"[RPC-METHOD] qtcl_getQuantumMetrics: lattice error: {le}")
                 result["lattice_error"] = str(le)
 
+
+        # ── MERMIN FALLBACK ──
+        if "mermin_test" not in result:
+            try:
+                with get_db_cursor() as cur:
+                    cur.execute("SELECT mermin_violation, mermin_angles FROM oracle_measurements ORDER BY id DESC LIMIT 1")
+                    row = cur.fetchone()
+                    if row and row[0] is not None:
+                        import json
+                        m_val = float(row[0])
+                        result["mermin_test"] = {
+                            'M_value': m_val, 'M': m_val, 'is_quantum': m_val > 2.0,
+                            'angles': json.loads(row[1]) if row[1] else []
+                        }
+            except Exception as e:
+                logger.debug(f"Mermin fallback error: {e}")
+
         # ── WIRE DENSITY_MATRIX_HEX ──────────────────────────────────────────────
         # Extract DM from oracle snapshot if available
         try:
@@ -3859,6 +3876,23 @@ def _rpc_getLatestDMSnapshot(params: Any, rpc_id: Any) -> dict:
             if not _DM_SNAPSHOT_RING:
                 return _rpc_error(-32000, "No DM snapshots available yet", rpc_id)
             latest = list(_DM_SNAPSHOT_RING)[-1]
+        
+        # ── MERMIN FALLBACK ──
+        if latest and "mermin_test" not in latest:
+            try:
+                with get_db_cursor() as cur:
+                    cur.execute("SELECT mermin_violation, mermin_angles FROM oracle_measurements ORDER BY id DESC LIMIT 1")
+                    row = cur.fetchone()
+                    if row and row[0] is not None:
+                        import json
+                        m_val = float(row[0])
+                        latest["mermin_test"] = {
+                            'M_value': m_val, 'M': m_val, 'is_quantum': m_val > 2.0,
+                            'angles': json.loads(row[1]) if row[1] else []
+                        }
+            except Exception as e:
+                pass
+
         logger.debug(f"[RPC-METHOD] qtcl_getLatestDMSnapshot: returned snapshot ts={latest.get('timestamp_ns')}")
         return _rpc_ok(latest, rpc_id)
     except Exception as e:

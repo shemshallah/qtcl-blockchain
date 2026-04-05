@@ -1703,7 +1703,7 @@ async function unifiedPoll(){
   if(blockRange && Array.isArray(blockRange.blocks) && blockRange.blocks.length){
     blockRange.blocks.forEach(function(b){
       var bh = parseInt(b.height || 0);
-      if(bh > 0 && !_blocksById[bh]){
+      if(bh >= 0 && !_blocksById[bh]){
         var nb = {
           height: bh,
           block_hash: b.block_hash || b.hash || '',
@@ -1740,6 +1740,7 @@ async function unifiedPoll(){
 // Start unified poll (SINGLE source of truth - replaces all 6 legacy loops)
 setInterval(unifiedPoll, 3000);
 unifiedPoll();
+loadTxPage();
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CLEANUP COMPLETE — All legacy polling loops removed
