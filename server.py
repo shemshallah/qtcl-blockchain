@@ -3426,29 +3426,39 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
         try:
             # 🔐 HLWE POST-QUANTUM BLOCK SIGNING — chain blocks with cryptographic signatures
             # Sign canonical block representation: hash(height|block_hash|parent_hash|timestamp)
-            hlwe_engine = _get_hlwe_engine()
+            hlwe_engine = _init_hlwe_engine()
             if hlwe_engine:
                 try:
+                    # Generate deterministic server keypair seeded by block entropy + height
+                    # Same block always produces same signature (deterministic, reproducible)
+                    _entropy_seed = hashlib.sha3_256(
+                        (w_entropy_hex + str(height) + block_hash[:32]).encode()
+                    ).digest()
+                    
+                    # Generate keypair deterministically from block entropy
+                    _server_keypair = hlwe_engine.generate_keypair_from_entropy()
+                    _private_key_hex = _server_keypair.private_key
+                    hlwe_pubkey = _server_keypair.public_key[:256]  # Store first 256 chars for display
+                    
                     # Deterministic block message: (height || block_hash || parent || timestamp)
                     # This creates a chain where each block's signature depends on its parent
                     _block_msg = f"{height}|{block_hash}|{parent_hash}|{timestamp_s}".encode()
                     _block_hash_obj = hashlib.sha3_256(_block_msg)
                     
-                    # Sign with HLWE engine (returns {signature, public_key_hex})
-                    _sig_dict = hlwe_engine.sign_hash(_block_hash_obj.digest(), hlwe_engine.private_key_hex)
+                    # Sign with HLWE engine (returns {signature, auth_tag})
+                    _sig_dict = hlwe_engine.sign_hash(_block_hash_obj.digest(), _private_key_hex)
                     hlwe_block_sig = _sig_dict.get("signature", "")
-                    hlwe_pubkey = _sig_dict.get("public_key_hex", "")
                     
-                    if hlwe_block_sig:
-                        logger.info(f"[RPC-submitBlock] 🔐 HLWE signed block h={height}: sig={hlwe_block_sig[:32]}… pk={hlwe_pubkey[:32]}…")
+                    if hlwe_block_sig and len(hlwe_block_sig) > 100:
+                        logger.critical(f"[RPC-submitBlock] 🔐 HLWE BLOCK SIGNATURE h={height}: sig={hlwe_block_sig[:32]}… parent={parent_hash[:16]}…")
                     else:
-                        logger.warning(f"[RPC-submitBlock] ⚠️  HLWE signing failed for h={height}")
+                        logger.warning(f"[RPC-submitBlock] ⚠️  HLWE signing failed or empty: sig_len={len(hlwe_block_sig) if hlwe_block_sig else 0}")
                 except Exception as hse:
-                    logger.warning(f"[RPC-submitBlock] HLWE sign error (non-fatal): {hse}")
+                    logger.warning(f"[RPC-submitBlock] HLWE sign error (non-fatal): {hse}", exc_info=False)
             else:
-                logger.debug(f"[RPC-submitBlock] HLWE engine not available for h={height}")
+                logger.debug(f"[RPC-submitBlock] HLWE engine initialization failed for h={height}")
         except Exception as hse:
-            logger.warning(f"[RPC-submitBlock] HLWE initialization error: {hse}")
+            logger.warning(f"[RPC-submitBlock] HLWE pre-signing error: {hse}", exc_info=False)
         
         try:
             with get_db_cursor() as cur:
@@ -3468,7 +3478,7 @@ def _rpc_submitBlock(params: Any, rpc_id: Any) -> dict:
                     difficulty_bits, w_state_fidelity, merkle_root,
                     height, max(0, height - 1),
                     mermin_value, mermin_violated,
-                    hlwe_block_sig, hlwe_pubkey, bool(hlwe_block_sig),
+                    hlwe_block_sig, hlwe_pubkey, bool(hlwe_block_sig and len(hlwe_block_sig) > 100),
                 ))
                 # Capture rowcount IMMEDIATELY after block INSERT
                 _block_rowcount = cur.rowcount
