@@ -76,27 +76,33 @@ class HyperbolicGeometry:
     @classmethod
     def get_instance(cls):
         with cls._lock:
-            if cls._instance is None:
+            # Reinitialize if previous instance failed or doesn't have a valid connection
+            if cls._instance is None or cls._instance._init_failed:
                 cls._instance = HyperbolicGeometry()
             return cls._instance
     
     def __init__(self, db_path: Optional[str] = None):
-        # Server (Koyeb) → Supabase via POOLER_* env vars
-        # Client → local SQLite DB
-        pooler_host = os.environ.get('POOLER_HOST', '').strip()
-        self._use_supabase = len(pooler_host) > 0
+        self._init_failed = True  # set to False only after successful init
+        self._use_supabase = False
         self._supabase_conn = None
         self.db_path = None
         
-        # Debug: log all POOLER_* env vars
-        all_pooler = {k: ('***' if 'PASS' in k else v) for k, v in os.environ.items() if k.startswith('POOLER_')}
-        logger.info(f"[HyperbolicGeometry] POOLER_* env vars: {all_pooler}")
+        # Check ALL env vars for debugging
+        all_env = {k: ('***' if 'PASS' in k.upper() else v) for k, v in os.environ.items() if 'POOLER' in k.upper() or 'DATABASE' in k.upper()}
+        logger.info(f"[HyperbolicGeometry] DB-related env vars: {all_env}")
+        
+        # Try Supabase first (server mode)
+        pooler_host = os.environ.get('POOLER_HOST', '').strip()
+        if not pooler_host:
+            pooler_host = os.environ.get('DATABASE_HOST', '').strip()
+        
+        self._use_supabase = len(pooler_host) > 0
         logger.info(f"[HyperbolicGeometry] pooler_host='{pooler_host}' → use_supabase={self._use_supabase}")
         
         if self._use_supabase:
             logger.info(f"[HyperbolicGeometry] Server mode: Supabase at {pooler_host}")
         else:
-            # Try explicit path, then env var, then common locations
+            # Try SQLite (client mode)
             candidates = [db_path] if db_path else []
             env_path = os.environ.get('QTCL_DB_PATH', '').strip()
             if env_path:
@@ -111,14 +117,16 @@ class HyperbolicGeometry:
             if self.db_path:
                 logger.info(f"[HyperbolicGeometry] Client mode: SQLite at {self.db_path}")
             else:
-                raise RuntimeError(
-                    f"[HyperbolicGeometry] No geometry DB found. "
-                    f"POOLER_HOST='{pooler_host}'. Candidates checked: {candidates}"
-                )
+                logger.error(f"[HyperbolicGeometry] No geometry DB found. POOLER_HOST='{pooler_host}'. Candidates: {candidates}")
+                # Don't raise here — let it fail on first use with a clear error
+                self._init_failed = True
+                return
         
         self._geometry_hash_cache = None
         self._cache_timestamp = 0.0
+        self._init_failed = False
         self._lock = threading.Lock()
+        logger.info(f"[HyperbolicGeometry] ✅ Initialized successfully (supabase={self._use_supabase})")
     
     def _get_connection(self):
         """Get DB connection — Supabase on server, SQLite on client."""
