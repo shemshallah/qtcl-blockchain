@@ -667,6 +667,14 @@ class HLWEEngine:
         
         return e
     
+    def _encode_vector_to_hex(self, vector: List[int]) -> str:
+        """Encode a vector of integers to hex string for storage/transmission"""
+        hex_str = ""
+        for val in vector:
+            # Encode as 4-byte (32-bit) big-endian
+            hex_str += format(val & 0xFFFFFFFF, '08x')
+        return hex_str
+    
     def derive_address_from_public_key(self, public_key: List[int]) -> str:
         """
         Derive QTCL wallet address from HLWE public key vector.
@@ -858,17 +866,23 @@ class HLWEWalletManager:
     
     def __init__(self):
         self.hlwe = HLWEEngine()
-        # BIP32KeyDerivation is optional — many operations don't need full HD wallet
+        # All BIP components are optional — block signing doesn't need wallet management
         try:
             self.bip32 = BIP32KeyDerivation(self.hlwe)
         except NameError:
-            self.bip32 = None  # HD wallet derivation not available
-        self.bip39 = BIP39Mnemonics()
-        self.bip38 = BIP38Encryption()
+            self.bip32 = None
+        try:
+            self.bip39 = BIP39Mnemonics()
+        except NameError:
+            self.bip39 = None
+        try:
+            self.bip38 = BIP38Encryption()
+        except NameError:
+            self.bip38 = None
         self.supabase = SupabaseAPI()
         self.lock = threading.RLock()
         
-        logger.info("[WalletManager] Initialized (HLWE + BIP32/38/39 + Supabase)")
+        logger.info("[WalletManager] Initialized (HLWE + optional BIP32/38/39 + Supabase)")
     
     def create_wallet(
         self,
