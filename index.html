@@ -581,9 +581,10 @@ var _H = (function(){
 var _cvs = null, _ctx = null;
 var _rafId = null, _lastT = 0;
 var _blkFlash = -99, _animT = 0;
-var _dmCache = null;          // Float32Array(128) — real[i], imag[i] interleaved
-var _dmMag   = null;          // Float32Array(64) — magnitudes
-var _dmPhase = null;          // Float32Array(64) — phases
+var _dmCache = null;
+var _dmMag   = null;
+var _dmPhase = null;
+var _dmSize  = 0;
 var _pqCurrAnim = 0, _pqLastAnim = 0;
 
 // ── Palette: cyan(0,220,255) → mid-violet(128,64,255) → bright-gold(212,160,32)
@@ -600,13 +601,12 @@ function _palette(v) {
 }
 
 // ── Parse dm_hex → complex amplitudes ────────────────────────────────────────
-// Server sends hex-encoded little-endian float32 pairs (re, im) × 64 = 512 bytes
+// Server sends hex-encoded little-endian float32 pairs (re, im)
+// Can be 8×8 (64 complex = 512 bytes = 1024 hex chars) or 16×16 (256 complex = 2048 hex chars)
+// or 48×48 from oracle (2304 complex = 18432 hex chars)
 function _parseDmHex(hex) {
   if (!hex || hex.length < 32) return null;
-  // Strip whitespace
   hex = hex.replace(/\s/g, '');
-  // Expected: 64 complex × 2 floats × 4 bytes × 2 hex chars = 1024 chars
-  // But server may send 8×8 magnitude-only (256 chars) or full complex (1024 chars)
   var byteLen = hex.length / 2;
   if (byteLen < 32) return null;
   var buf = new Uint8Array(byteLen);
@@ -614,39 +614,71 @@ function _parseDmHex(hex) {
     buf[i] = parseInt(hex.slice(i*2, i*2+2), 16);
   }
   var dv = new DataView(buf.buffer);
-  var n = Math.min(64, Math.floor(byteLen / 4));
-  var isComplex = byteLen >= 512; // 64 complex pairs
-  var out = new Float32Array(128); // always store as (re,im) pairs
+  var nComplex = Math.floor(byteLen / 8); // pairs of floats
+  var isComplex = byteLen >= 512;
+  var size = Math.round(Math.sqrt(nComplex));
+  var n = size * size;
+  var out = new Float32Array(n * 2);
   if (isComplex) {
-    for (var i = 0; i < 64; i++) {
-      out[i*2]   = dv.getFloat32(i*8,     true); // re
-      out[i*2+1] = dv.getFloat32(i*8 + 4, true); // im
+    for (var i = 0; i < n; i++) {
+      out[i*2]   = dv.getFloat32(i*8,     true);
+      out[i*2+1] = dv.getFloat32(i*8 + 4, true);
     }
   } else {
-    // magnitude-only: treat as real diagonal
     for (var i = 0; i < n; i++) {
       out[i*2]   = dv.getFloat32(i*4, true);
       out[i*2+1] = 0;
     }
   }
-  return out;
+  return { data: out, size: size };
+}
+
+// ── Quantum heatmap palette ─────────────────────────────────────────────────
+// Proper QM colormap: black → blue → cyan → white (diagonal elements are ~1)
+function _quantumPalette(v) {
+  v = Math.max(0, Math.min(1, v));
+  var r, g, b;
+  if (v < 0.25) {
+    var t = v * 4;
+    r = Math.round(t * 20);
+    g = Math.round(t * 40);
+    b = Math.round(30 + t * 80);
+  } else if (v < 0.5) {
+    var t = (v - 0.25) * 4;
+    r = Math.round(20 + t * 80);
+    g = Math.round(40 + t * 180);
+    b = Math.round(110 + t * 145);
+  } else if (v < 0.75) {
+    var t = (v - 0.5) * 4;
+    r = Math.round(100 + t * 155);
+    g = Math.round(220 + t * 35);
+    b = Math.round(255 - t * 100);
+  } else {
+    var t = (v - 0.75) * 4;
+    r = Math.round(255);
+    g = Math.round(255 - t * 50);
+    b = Math.round(155 + t * 100);
+  }
+  return [r, g, b];
 }
 
 // ── Build magnitude + phase arrays ───────────────────────────────────────────
-function _buildMagPhase(cx) {
-  if (!cx) return;
-  _dmMag   = new Float32Array(64);
-  _dmPhase = new Float32Array(64);
+function _buildMagPhase(dm) {
+  if (!dm || !dm.data) return;
+  var size = dm.size;
+  var n = size * size;
+  _dmMag = new Float32Array(n);
+  _dmPhase = new Float32Array(n);
+  _dmSize = size;
   var maxMag = 0;
-  for (var i = 0; i < 64; i++) {
-    var re = cx[i*2], im = cx[i*2+1];
+  for (var i = 0; i < n; i++) {
+    var re = dm.data[i*2], im = dm.data[i*2+1];
     var m = Math.sqrt(re*re + im*im);
-    _dmMag[i]   = m;
+    _dmMag[i] = m;
     _dmPhase[i] = Math.atan2(im, re);
     if (m > maxMag) maxMag = m;
   }
-  // Normalize
-  if (maxMag > 1e-9) for (var i = 0; i < 64; i++) _dmMag[i] /= maxMag;
+  if (maxMag > 1e-9) for (var i = 0; i < n; i++) _dmMag[i] /= maxMag;
 }
 
 // Synthetic fallback removed - no fallbacks allowed
@@ -678,22 +710,21 @@ function _draw(t) {
         _dmCache = parsed;
         _buildMagPhase(parsed);
       } else {
-        // Invalid hex - clear cache
         _dmCache = null;
         _dmMag = null;
         _dmPhase = null;
+        _dmSize = 0;
       }
     }
   } else {
-    // No hex data - clear cache
     _H._lastHex = '';
     _dmCache = null;
     _dmMag = null;
     _dmPhase = null;
+    _dmSize = 0;
   }
   var cx = _dmCache;
-  if (!_dmMag) {
-    // Draw NO DATA text
+  if (!_dmMag || _dmSize === 0) {
     _ctx.save();
     _ctx.fillStyle = 'rgba(0,220,255,0.5)';
     _ctx.font = '14px "JetBrains Mono", monospace';
@@ -708,14 +739,14 @@ function _draw(t) {
   var isQ = S.mermin ? (parseFloat(S.mermin.M_value || S.mermin.M || 0) > 2.0) : false;
   var isStrong = S.mermin ? (parseFloat(S.mermin.M_value || S.mermin.M || 0) > 2.8) : false;
 
+  var size = _dmSize || 8;
+
   // ── Layout ────────────────────────────────────────────────────────────────
-  // Left 52%: DM heatmap  |  Right 48%: pq-phase disk (hybridized)
   var splitX = Math.floor(W * 0.54);
   var HM_X   = 12, HM_Y = 36, HM_W = splitX - 20, HM_H = H - 70;
-  var cell   = Math.min(Math.floor(HM_W / 8), Math.floor(HM_H / 8));
-  HM_W = cell * 8; HM_H = cell * 8;
+  var cell   = Math.min(Math.floor(HM_W / size), Math.floor(HM_H / size));
+  HM_W = cell * size; HM_H = cell * size;
 
-  // Disk geometry
   var DK_CX = splitX + Math.floor((W - splitX) / 2);
   var DK_CY = Math.floor(H / 2) + 4;
   var DK_R  = Math.min((W - splitX) / 2 - 18, H / 2 - 24);
@@ -725,61 +756,56 @@ function _draw(t) {
   _ctx.fillStyle = '#000508';
   _ctx.fillRect(0, 0, W, H);
 
-  // Scanline overlay
   _ctx.fillStyle = 'rgba(0,0,0,0.04)';
   for (var y = 0; y < H; y += 4) { _ctx.fillRect(0, y, W, 1); }
 
   // ── SECTION A: DM Heatmap ─────────────────────────────────────────────────
-  // Title
   _ctx.font = '7px JetBrains Mono,monospace';
   _ctx.fillStyle = 'rgba(0,180,220,0.55)';
   _ctx.textAlign = 'left';
   _ctx.textBaseline = 'top';
-  _ctx.fillText('DENSITY MATRIX ρ  8×8', HM_X, 6);
+  _ctx.fillText('DENSITY MATRIX ρ  ' + size + '×' + size, HM_X, 6);
 
-  // Source indicator
   var src = _dmCache && S.dm_hex ? 'LIVE DM' : 'SYN-ψ';
   _ctx.fillStyle = _dmCache && S.dm_hex ? 'rgba(0,255,157,0.6)' : 'rgba(212,160,32,0.5)';
   _ctx.textAlign = 'right';
   _ctx.fillText(src, splitX - 4, 6);
 
-  // Row / col axis labels
+  // Row / col axis labels (only for smaller matrices)
   _ctx.font = '6.5px JetBrains Mono,monospace';
   _ctx.fillStyle = 'rgba(0,150,190,0.35)';
   _ctx.textAlign = 'center';
-  for (var i = 0; i < 8; i++) {
-    _ctx.fillText(i, HM_X + cell * i + cell / 2, HM_Y - 9);
-    _ctx.textAlign = 'right';
-    _ctx.textBaseline = 'middle';
-    _ctx.fillText(i, HM_X - 3, HM_Y + cell * i + cell / 2);
-    _ctx.textAlign = 'center';
-    _ctx.textBaseline = 'top';
+  if (size <= 16) {
+    for (var i = 0; i < size; i++) {
+      _ctx.fillText(i, HM_X + cell * i + cell / 2, HM_Y - 9);
+      _ctx.textAlign = 'right';
+      _ctx.textBaseline = 'middle';
+      _ctx.fillText(i, HM_X - 3, HM_Y + cell * i + cell / 2);
+      _ctx.textAlign = 'center';
+      _ctx.textBaseline = 'top';
+    }
   }
 
-  // Cells
-  for (var row = 0; row < 8; row++) {
-    for (var col = 0; col < 8; col++) {
-      var idx = row * 8 + col;
+  // Cells - dynamic size
+  for (var row = 0; row < size; row++) {
+    for (var col = 0; col < size; col++) {
+      var idx = row * size + col;
       var mag = _dmMag[idx];
       var phase = _dmPhase[idx];
-      var rgb = _palette(mag);
-      var alpha = 0.18 + mag * 0.82;
-      // Phase-modulated brightness shimmer
+      var rgb = _quantumPalette(mag);
+      var alpha = 0.25 + mag * 0.75;
       var shimmer = 0.85 + 0.15 * Math.cos(phase + t * 1.1 + (row + col) * 0.4);
-      // Block-flash wash
       var bwash = blkPulse * 0.35 * mag;
       var cx2 = HM_X + col * cell;
       var cy2 = HM_Y + row * cell;
-      // Cell fill
       _ctx.fillStyle = 'rgba(' + Math.round(rgb[0] * shimmer + bwash * 255) + ',' +
                                   Math.round(rgb[1] * shimmer) + ',' +
                                   Math.round(Math.min(255, rgb[2] * shimmer + bwash * 80)) + ',' + alpha.toFixed(2) + ')';
-      _ctx.fillRect(cx2, cy2, cell - 1, cell - 1);
-      // Diagonal indicator — gold glow
-      if (row === col) {
-        _ctx.strokeStyle = 'rgba(212,160,32,' + (0.25 + mag * 0.55) + ')';
-        _ctx.lineWidth = 0.8;
-        _ctx.strokeRect(cx2 + 0.5, cy2 + 0.5, cell - 2, cell - 2);
+      _ctx.fillRect(cx2, cy2, cell - 0.5, cell - 0.5);
+      if (row === col && size <= 16) {
+        _ctx.strokeStyle = 'rgba(212,160,32,' + (0.3 + mag * 0.5) + ')';
+        _ctx.lineWidth = 0.6;
+        _ctx.strokeRect(cx2 + 0.25, cy2 + 0.25, cell - 1, cell - 1);
       }
     }
   }
@@ -790,26 +816,27 @@ function _draw(t) {
   _ctx.strokeRect(HM_X - 1, HM_Y - 1, HM_W + 2, HM_H + 2);
 
   // ── Phase-relations bar (below heatmap) ───────────────────────────────────
-  var barY = HM_Y + HM_H + 8;
-  _ctx.font = '6.5px JetBrains Mono,monospace';
-  _ctx.fillStyle = 'rgba(0,150,180,0.4)';
-  _ctx.textAlign = 'left';
-  _ctx.textBaseline = 'top';
-  _ctx.fillText('PHASE MAP  arg(ρᵢⱼ)', HM_X, barY);
-  barY += 10;
-  var bW = HM_W / 8, bH = 12;
-  for (var i = 0; i < 8; i++) {
-    // Use diagonal phase
-    var ph = _dmPhase[i * 8 + i]; // (i,i) diagonal phase
-    var normPh = (ph + Math.PI) / (2 * Math.PI); // 0→1
-    var rgb2 = _palette(normPh);
-    _ctx.fillStyle = 'rgba(' + rgb2[0] + ',' + rgb2[1] + ',' + rgb2[2] + ',0.75)';
-    _ctx.fillRect(HM_X + i * bW, barY, bW - 1, bH);
-    _ctx.fillStyle = 'rgba(0,180,220,0.5)';
-    _ctx.font = '6px JetBrains Mono,monospace';
-    _ctx.textAlign = 'center';
-    _ctx.textBaseline = 'middle';
-    _ctx.fillText((ph * 180 / Math.PI).toFixed(0) + '°', HM_X + i * bW + bW / 2, barY + bH / 2);
+  if (size <= 16) {
+    var barY = HM_Y + HM_H + 8;
+    _ctx.font = '6.5px JetBrains Mono,monospace';
+    _ctx.fillStyle = 'rgba(0,150,180,0.4)';
+    _ctx.textAlign = 'left';
+    _ctx.textBaseline = 'top';
+    _ctx.fillText('PHASE MAP  arg(ρᵢⱼ)', HM_X, barY);
+    barY += 10;
+    var bW = HM_W / size, bH = 12;
+    for (var i = 0; i < size; i++) {
+      var ph = _dmPhase[i * size + i];
+      var normPh = (ph + Math.PI) / (2 * Math.PI);
+      var rgb2 = _quantumPalette(normPh);
+      _ctx.fillStyle = 'rgba(' + rgb2[0] + ',' + rgb2[1] + ',' + rgb2[2] + ',0.75)';
+      _ctx.fillRect(HM_X + i * bW, barY, bW - 1, bH);
+      _ctx.fillStyle = 'rgba(0,180,220,0.5)';
+      _ctx.font = '6px JetBrains Mono,monospace';
+      _ctx.textAlign = 'center';
+      _ctx.textBaseline = 'middle';
+      _ctx.fillText((ph * 180 / Math.PI).toFixed(0) + '°', HM_X + i * bW + bW / 2, barY + bH / 2);
+    }
   }
 
   // ── Vertical divider ──────────────────────────────────────────────────────
@@ -822,7 +849,240 @@ function _draw(t) {
   _ctx.lineWidth = 1;
   _ctx.beginPath(); _ctx.moveTo(splitX, 10); _ctx.lineTo(splitX, H - 10); _ctx.stroke();
 
-  // ── SECTION B: pq Phase-Relations Disk (right half) ──────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// 3D BLOCH SPHERE VISUALIZATION — Canvas 2D with 3D projection
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var _blochRotation = { x: 0.4, y: 0.2 };
+var _blochMouseDown = false;
+var _blochLastMouse = { x: 0, y: 0 };
+
+function _project3D(x, y, z, cx, cy, scale) {
+  var rotY = y * Math.cos(_blochRotation.x) - z * Math.sin(_blochRotation.x);
+  var rotZ = y * Math.sin(_blochRotation.x) + z * Math.cos(_blochRotation.x);
+  var rotX = x * Math.cos(_blochRotation.y) - rotZ * Math.sin(_blochRotation.y);
+  var rotZ2 = x * Math.sin(_blochRotation.y) + rotZ * Math.cos(_blochRotation.y);
+  return { x: cx + rotX * scale, y: cy - rotZ2 * scale, z: rotZ };
+}
+
+function _drawBlochSphere(t) {
+  if (!_ctx) return;
+  var W = _cvs.width, H = _cvs.height;
+  var splitX = Math.floor(W * 0.54);
+  var cx = splitX + Math.floor((W - splitX) / 2);
+  var cy = Math.floor(H / 2) + 4;
+  var r = Math.min((W - splitX) / 2 - 18, H / 2 - 24);
+  var scale = r * 0.85;
+  
+  // Clear right side
+  _ctx.save();
+  _ctx.beginPath();
+  _ctx.rect(splitX, 0, W - splitX, H);
+  _ctx.clip();
+  
+  // Background
+  var bgGrad = _ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+  bgGrad.addColorStop(0, 'rgba(0,20,40,0.95)');
+  bgGrad.addColorStop(1, 'rgba(5,10,25,0.98)');
+  _ctx.fillStyle = bgGrad;
+  _ctx.fillRect(splitX, 0, W - splitX, H);
+  
+  // Title
+  _ctx.font = '7px JetBrains Mono,monospace';
+  _ctx.fillStyle = 'rgba(128,64,255,0.7)';
+  _ctx.textAlign = 'left';
+  _ctx.textBaseline = 'top';
+  _ctx.fillText('BLOCH SPHERE | QUANTUM STATE', splitX + 12, 6);
+  
+  // Sphere wireframe
+  var spherePts = [];
+  for (var lat = -8; lat <= 8; lat++) {
+    var theta = lat * Math.PI / 10;
+    for (var lon = 0; lon < 16; lon++) {
+      var phi = lon * Math.PI / 8;
+      var x = Math.sin(theta) * Math.cos(phi);
+      var y = Math.cos(theta);
+      var z = Math.sin(theta) * Math.sin(phi);
+      spherePts.push(_project3D(x, y, z, cx, cy, scale));
+    }
+  }
+  
+  // Draw latitude rings
+  _ctx.strokeStyle = 'rgba(0,180,220,0.12)';
+  _ctx.lineWidth = 0.5;
+  for (var lat = -8; lat <= 8; lat += 2) {
+    _ctx.beginPath();
+    for (var lon = 0; lon <= 16; lon++) {
+      var phi = lon * Math.PI / 8;
+      var theta = lat * Math.PI / 10;
+      var x = Math.sin(theta) * Math.cos(phi);
+      var y = Math.cos(theta);
+      var z = Math.sin(theta) * Math.sin(phi);
+      var p = _project3D(x, y, z, cx, cy, scale);
+      if (lon === 0) _ctx.moveTo(p.x, p.y);
+      else _ctx.lineTo(p.x, p.y);
+    }
+    _ctx.stroke();
+  }
+  
+  // Draw longitude rings
+  for (var lon = 0; lon < 16; lon += 2) {
+    _ctx.beginPath();
+    for (var lat = -8; lat <= 8; lat++) {
+      var phi = lon * Math.PI / 8;
+      var theta = lat * Math.PI / 10;
+      var x = Math.sin(theta) * Math.cos(phi);
+      var y = Math.cos(theta);
+      var z = Math.sin(theta) * Math.sin(phi);
+      var p = _project3D(x, y, z, cx, cy, scale);
+      if (lat === -8) _ctx.moveTo(p.x, p.y);
+      else _ctx.lineTo(p.x, p.y);
+    }
+    _ctx.stroke();
+  }
+  
+  // Axes
+  var axes = [
+    { from: [0, -1.1, 0], to: [0, 1.1, 0], color: 'rgba(255,100,100,0.6)', label: '|0⟩' },
+    { from: [0, -1.1, 0], to: [0, 1.1, 0], color: 'rgba(100,100,255,0.6)', label: '|1⟩' },
+    { from: [-1.1, 0, 0], to: [1.1, 0, 0], color: 'rgba(255,255,100,0.4)', label: 'X' },
+    { from: [0, 0, -1.1], to: [0, 0, 1.1], color: 'rgba(100,255,255,0.4)', label: 'Y' },
+  ];
+  
+  // Draw main axes
+  _ctx.lineWidth = 1;
+  ['rgba(255,100,100,0.5)', 'rgba(100,100,255,0.5)'].forEach(function(col, i) {
+    var from = _project3D(0, i === 0 ? -1 : 1, 0, cx, cy, scale);
+    var to = _project3D(0, i === 0 ? 1 : -1, 0, cx, cy, scale);
+    _ctx.strokeStyle = col;
+    _ctx.beginPath(); _ctx.moveTo(from.x, from.y); _ctx.lineTo(to.x, to.y); _ctx.stroke();
+  });
+  
+  // Quantum state vector from dm_hex
+  if (_dmMag && _dmSize > 0) {
+    // Compute Bloch sphere coordinates from density matrix
+    var traceRho2 = 0;
+    var sx = 0, sy = 0, sz = 0;
+    var n = _dmSize * _dmSize;
+    
+    for (var i = 0; i < n; i++) {
+      var re = _dmCache.data[i*2], im = _dmCache.data[i*2+1];
+      var mag2 = re*re + im*im;
+      traceRho2 += mag2;
+    }
+    traceRho2 = Math.sqrt(traceRho2) || 1;
+    
+    // Pauli expectation values (simplified for 8x8)
+    var diag0 = _dmMag[0] || 0.5;
+    var diag1 = _dmMag[_dmSize * _dmSize - 1] || 0.5;
+    var szVal = diag0 - diag1;
+    
+    // Off-diagonal sums for sx, sy
+    var sxVal = 0, syVal = 0;
+    if (_dmSize >= 2) {
+      var off01 = _dmMag[1] || 0;
+      var off10 = _dmMag[_dmSize] || 0;
+      sxVal = 2 * (off01 + off10);
+      var im01 = _dmPhase[1] || 0;
+      var im10 = _dmPhase[_dmSize] || 0;
+      syVal = 2 * Math.sin(im01 - im10);
+    }
+    
+    var blochX = sxVal * 0.8;
+    var blochY = szVal;
+    var blochZ = syVal * 0.8;
+    
+    // Normalize
+    var bMag = Math.sqrt(blochX*blochX + blochY*blochY + blochZ*blochZ);
+    if (bMag > 0.01) {
+      blochX /= bMag; blochY /= bMag; blochZ /= bMag;
+    } else {
+      blochY = 1;
+    }
+    
+    // Draw state vector
+    var origin = _project3D(0, 0, 0, cx, cy, scale);
+    var tip = _project3D(blochX, blochY, blochZ, cx, cy, scale);
+    
+    // Vector glow
+    var vecGrad = _ctx.createLinearGradient(origin.x, origin.y, tip.x, tip.y);
+    vecGrad.addColorStop(0, 'rgba(0,255,157,0)');
+    vecGrad.addColorStop(0.7, 'rgba(0,255,157,0.8)');
+    vecGrad.addColorStop(1, 'rgba(255,255,100,1)');
+    _ctx.strokeStyle = vecGrad;
+    _ctx.lineWidth = 3;
+    _ctx.beginPath(); _ctx.moveTo(origin.x, origin.y); _ctx.lineTo(tip.x, tip.y); _ctx.stroke();
+    
+    // Arrow head
+    var ah = 8;
+    var angle = Math.atan2(tip.y - origin.y, tip.x - origin.x);
+    _ctx.fillStyle = 'rgba(255,255,100,0.9)';
+    _ctx.beginPath();
+    _ctx.moveTo(tip.x, tip.y);
+    _ctx.lineTo(tip.x - ah * Math.cos(angle - 0.4), tip.y - ah * Math.sin(angle - 0.4));
+    _ctx.lineTo(tip.x - ah * Math.cos(angle + 0.4), tip.y - ah * Math.sin(angle + 0.4));
+    _ctx.closePath();
+    _ctx.fill();
+    
+      // State label
+    var purity = (_dmMag && _dmMag[0]) ? (_dmMag[0] / (_dmMag[0] + (_dmMag[n-1]||0))) : 0.5;
+    _ctx.font = 'bold 9px JetBrains Mono,monospace';
+    _ctx.fillStyle = 'rgba(0,255,157,0.9)';
+    _ctx.textAlign = 'left';
+    _ctx.fillText('|ψ⟩', tip.x + 8, tip.y);
+    
+    // Probability bar
+    _ctx.fillStyle = 'rgba(0,150,180,0.5)';
+    _ctx.fillText('P(|0⟩)=' + (purity * 100).toFixed(1) + '%', splitX + 12, H - 30);
+    
+    // Phase info
+    var phase = _dmPhase[0] || 0;
+    _ctx.fillText('φ=' + (phase * 180 / Math.PI).toFixed(0) + '°', splitX + 12, H - 18);
+  }
+  
+  // Equator highlight
+  _ctx.strokeStyle = 'rgba(0,255,157,0.25)';
+  _ctx.lineWidth = 1.5;
+  _ctx.beginPath();
+  for (var lon = 0; lon <= 32; lon++) {
+    var phi = lon * Math.PI / 16;
+    var x = Math.cos(phi);
+    var y = 0;
+    var z = Math.sin(phi);
+    var p = _project3D(x, y, z, cx, cy, scale);
+    if (lon === 0) _ctx.moveTo(p.x, p.y);
+    else _ctx.lineTo(p.x, p.y);
+  }
+  _ctx.stroke();
+  
+  // |0⟩ and |1⟩ labels
+  var label0 = _project3D(0, 1.15, 0, cx, cy, scale);
+  var label1 = _project3D(0, -1.15, 0, cx, cy, scale);
+  _ctx.font = 'bold 10px JetBrains Mono,monospace';
+  _ctx.fillStyle = 'rgba(255,100,100,0.8)';
+  _ctx.textAlign = 'center';
+  _ctx.fillText('|0⟩', label0.x, label0.y);
+  _ctx.fillStyle = 'rgba(100,100,255,0.8)';
+  _ctx.fillText('|1⟩', label1.x, label1.y);
+  
+  _ctx.restore();
+  
+  // Mouse drag for rotation
+  _cvs.onmousedown = function(e) {
+    _blochMouseDown = true;
+    _blochLastMouse = { x: e.clientX, y: e.clientY };
+  };
+  _cvs.onmousemove = function(e) {
+    if (!_blochMouseDown) return;
+    var dx = e.clientX - _blochLastMouse.x;
+    var dy = e.clientY - _blochLastMouse.y;
+    _blochRotation.y += dx * 0.01;
+    _blochRotation.x += dy * 0.01;
+    _blochLastMouse = { x: e.clientX, y: e.clientY };
+  };
+  _cvs.onmouseup = function() { _blochMouseDown = false; };
+  _cvs.onmouseleave = function() { _blochMouseDown = false; };
+}
   // Outer boundary circle
   _ctx.beginPath();
   _ctx.arc(DK_CX, DK_CY, DK_R, 0, Math.PI * 2);
@@ -986,6 +1246,9 @@ function _draw(t) {
   var cycStr = 'ψ cyc=' + cyc + (cyc % 8 === 0 && cyc > 0 ? ' ↑REV' : cyc % 8 === 4 ? ' ↓ANTI' : '');
   _ctx.fillStyle = 'rgba(128,64,255,0.45)'; _ctx.textAlign = 'right';
   _ctx.fillText(cycStr, W - 8, hudY);
+  
+  // ── 3D BLOCH SPHERE ─────────────────────────────────────────────────────────
+  _drawBlochSphere(_animT);
 }
 
 // ── Animation loop ────────────────────────────────────────────────────────────
@@ -1748,10 +2011,48 @@ async function unifiedPoll(){
   stamp();
 }
 
-// Start unified poll (SINGLE source of truth - replaces all 6 legacy loops)
-setInterval(unifiedPoll, 3000);
+// Start unified poll - FAST 200ms for real-time snapshot capture
+setInterval(unifiedPoll, 200);
 unifiedPoll();
 loadTxPage();
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// REAL-TIME DENSITY MATRIX POLL — 100ms for instant DM updates
+// Direct RPC call to match server broadcast rate
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var _dmLastHex = '';
+
+async function pollDensityMatrix() {
+  try {
+    var r = await fetch(BASE + '/rpc', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({jsonrpc:'2.0', id: _rpcId++, method: 'qtcl_getQuantumMetrics', params: []}),
+      signal: AbortSignal.timeout(200)
+    });
+    if (!r.ok) return;
+    var j = await r.json();
+    var qm = j && j.result;
+    if (!qm) return;
+    
+    var dmHex = qm.density_matrix_hex;
+    if (dmHex && dmHex !== _dmLastHex) {
+      _dmLastHex = dmHex;
+      S.dm_hex = dmHex;
+      S.fidelity = qm.w_state_fidelity || qm.lattice && qm.lattice.fidelity || S.fidelity;
+      S.coherence = qm.coherence_l1 || qm.lattice && qm.lattice.coherence || S.coherence;
+      S.purity = qm.purity || qm.lattice && qm.lattice.avg_fidelity_100 || S.purity;
+      S.cycle = qm.lattice && qm.lattice.cycle || S.cycle;
+      
+      // Trigger DM re-parse in animation
+      _H._lastHex = '';
+    }
+  } catch(e) {}
+}
+
+// Poll DM at 100ms (matches oracle 50ms + some margin)
+setInterval(pollDensityMatrix, 100);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ORACLE SNAPSHOT POLLING THREAD — Separate thread for DM/Mermin data
@@ -1775,8 +2076,8 @@ async function pollOracleSnapshots() {
   } catch(e) {}
 }
 
-// Poll oracle snapshots every 2.5s (offset from main poll for parallelism)
-setInterval(pollOracleSnapshots, 2500);
+// Poll oracle snapshots FAST (50ms to match oracle refresh rate)
+setInterval(pollOracleSnapshots, 50);
 pollOracleSnapshots();
 
 // ═══════════════════════════════════════════════════════════════════════════════
